@@ -1,7 +1,12 @@
 [project]
 name = "myla"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.0.1"
+description = "Myla: a very simple custom language with an interpreter and a native compiler (bootstrapped in Python)."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
+
+# No third-party dependencies, by design (see README "Visions / Short Term").
+# Tests use the standard-library `unittest`, so there are no dev dependencies
+# either. Run the toolchain with `uv run myla.py <cmd>` and the tests with
+# `uv run python -m unittest discover -s tests` (or plain `python3`).

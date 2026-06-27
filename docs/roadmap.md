@@ -8,7 +8,7 @@ Related docs: [language-spec.md](language-spec.md) · [grammar.md](grammar.md) �
 [architecture.md](architecture.md) · [future-features.md](future-features.md) ·
 open questions in [clarification_needed.md](clarification_needed.md).
 
-_Last updated: 2026-06-27._
+_Last updated: 2026-06-27 (x86-64 compiler landed; `myla build` works, native output matches interpreter)._
 
 ---
 
@@ -30,8 +30,49 @@ _Last updated: 2026-06-27._
 
 ## Where we are now
 
-**Current milestone: v0.0.0 — architecture & design.** No toolchain code exists
-yet; the deliverables so far are the design documents and example programs.
+**Current milestone: v0.0.3 — native compiler.** The full v0.0 front end
+(lexer, parser, type checker), the tree-walking interpreter, **and the x86-64
+compiler** are implemented and tested: `myla run`, `myla test`, and
+**`myla build`** all work end-to-end, and every example program produces
+identical output under the interpreter and the compiled native binary.
+
+Implementation progress:
+- Package layout under `src/myla/` with `myla.py` entry point and a
+  `unittest`-based harness under `tests/` (no third-party deps).
+- `errors.py` (positioned diagnostics with caret rendering), `tokens.py`
+  (`TokenKind`, `Token`, keyword table), and `lexer.py` (full v0.0 lexical
+  grammar: identifiers/keywords, sized-type keywords, integer literals with
+  `iN`/`uN` suffixes, strings with escapes, all operators incl. `#`/`[`/`]`,
+  line and block comments, newline handling, line/column tracking).
+- `ast.py` (one dataclass per construct, positions excluded from equality) and
+  `parser.py` (recursive descent + precedence climbing: declarations with
+  attributes, statements, full expression precedence, struct-literal gating in
+  control-flow headers, `else`/`else if`, lvalue validation).
+- `types.py` — type representations (sized ints, `bool`, `str`, structs) and the
+  type checker: global struct/function/alias tables (order independent), `int`
+  alias + `typealias` resolution with cycle detection, flexible integer-literal
+  typing + width fitting, no implicit int mixing, lvalue/mutability checks,
+  `#main`/`#test` validation, and single-entry-point resolution. Annotates each
+  expression with a `resolved_type`.
+- `interpreter.py` — tree-walking evaluator: per-width integer wrapping,
+  truncating division/modulo (toward zero), struct **value semantics** (copy on
+  bind/assign/arg/return/construct), `print`, and a `#test` runner.
+- `compiler/codegen_x86.py` — single-pass x86-64 GAS/AT&T code generator (no
+  libc): stack-based calling convention, 8-byte canonical scalar slots with
+  width-aware wrapping, signed/unsigned arithmetic + comparisons, truncating
+  division with a divide-by-zero trap, structs by value (pointer-passed params,
+  sret returns, `rep movsq` copies), short-circuit `&&`/`||`, and emitted
+  `write`/`exit` syscall helpers for `print` (int/uint/bool/str) + string
+  equality. `compiler/__init__.py` drives `as`/`ld` to produce a native ELF.
+- `cli.py` with working `tokenize`/`parse` debug commands and end-to-end
+  `run`/`test`/`build` (`--keep-asm` to inspect output); `repl` remains a stub.
+- 151 passing tests: lexer/parser/type-checker/interpreter/codegen units
+  (`tests/unit/`), parse-every-example integration (`tests/integration/`), and
+  **burn tests** that run every example under the interpreter *and* the native
+  binary, asserting identical stdout plus codegen corner cases (`tests/burn/`).
+
+Next up: v0.1 self-hosting — begin re-implementing the v0.0 toolchain in Myla
+itself.
 
 ```mermaid
 flowchart LR
@@ -47,11 +88,11 @@ flowchart LR
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
-| v0.0.0 | Architecture & design (spec, grammar, architecture, examples) | In progress (90%) |
-| v0.0.1 | Scaffolding: Python package layout + burn/unit/integration test harness | Planned |
-| v0.0.2 | Working tree-walking interpreter; `myla run`; all burn-tests pass | Planned |
-| v0.0.3 | Working x86-64 compiler; `myla build`; output matches interpreter | Planned |
-| (in v0.0.1/0.0.2) | `#main` / `#test` attributes + `myla test` runner | Planned (pulled into v0.0 per D10) |
+| v0.0.0 | Architecture & design (spec, grammar, architecture, examples) | Done |
+| v0.0.1 | Scaffolding: Python package layout + unit/integration/burn test harness | Done |
+| v0.0.2 | Front end + tree-walking interpreter; `myla run`/`test`; burn-tests pass | Done |
+| v0.0.3 | Working x86-64 compiler; `myla build`; output matches interpreter | Done |
+| (in v0.0.2) | `#main` / `#test` attributes + `myla test` runner | Done (pulled into v0.0 per D10) |
 | v0.1 | Re-implement v0.0 in Myla; self-host interpreter then compiler | Planned |
 | v0.2+ | Data modeling, collections, first-class functions, ergonomics | Proposed (see future-features.md) |
 
@@ -70,24 +111,24 @@ flowchart LR
 
 | Feature | Designed | Implemented | Target |
 |---------|----------|-------------|--------|
-| `fun` function declarations | Done | Planned | v0.0.2 |
-| `let` / `var` bindings + mutability | Done | Planned | v0.0.2 |
-| Explicitly sized integers (`int8`..`uint64`) | Done | Planned | v0.0.2 |
-| Integer literal type suffixes (`255u8`, `123i64`) | Done | Planned | v0.0.2 |
-| `int` as alias of `int32` | Done | Planned | v0.0.2 |
-| `typealias` declarations | Done | Planned | v0.0.2 |
-| `#main` / `#test(...)[...]` attributes | Done | Planned | v0.0.1 |
-| `bool`, `str` (length-prefixed, immutable, literals + `print`) | Done | Planned | v0.0.2 |
-| Arithmetic / comparison / logical operators | Done | Planned | v0.0.2 |
-| `if` / `else if` / `else` | Done | Planned | v0.0.2 |
-| `while` | Done | Planned | v0.0.2 |
-| `for ... in` ranges | Done | Planned | v0.0.2 |
-| `struct` decl / construction / field access | Done | Planned | v0.0.2 |
-| `print` builtin | Done | Planned | v0.0.2 |
-| `return` (incl. exhaustiveness) | Done | Planned | v0.0.2 |
-| Native codegen (x86-64, GAS, `as`/`ld`) | Done (design) | Planned | v0.0.3 |
-| REPL (`myla repl`) | Partially | Planned | v0.0.2 |
-| Test runner (`myla test` via `#test`) | Done (design) | Planned | v0.0.2 |
+| `fun` function declarations | Done | Done (interp+native) | v0.0.2 |
+| `let` / `var` bindings + mutability | Done | Done (interp+native) | v0.0.2 |
+| Explicitly sized integers (`int8`..`uint64`) | Done | Done (interp+native) | v0.0.2 |
+| Integer literal type suffixes (`255u8`, `123i64`) | Done | Done (interp+native) | v0.0.2 |
+| `int` as alias of `int32` | Done | Done (interp+native) | v0.0.2 |
+| `typealias` declarations | Done | Done (interp+native) | v0.0.2 |
+| `#main` / `#test(...)[...]` attributes | Done | Done (interp+native) | v0.0.2 |
+| `bool`, `str` (length-prefixed, immutable, literals + `print`) | Done | Done (interp+native) | v0.0.2 |
+| Arithmetic / comparison / logical operators | Done | Done (interp+native) | v0.0.2 |
+| `if` / `else if` / `else` | Done | Done (interp+native) | v0.0.2 |
+| `while` | Done | Done (interp+native) | v0.0.2 |
+| `for ... in` ranges | Done | Done (interp+native) | v0.0.2 |
+| `struct` decl / construction / field access | Done | Done (interp+native) | v0.0.2 |
+| `print` builtin | Done | Done (interp+native) | v0.0.2 |
+| `return` (incl. exhaustiveness) | Done | Done (interp+native) | v0.0.2 |
+| Native codegen (x86-64, GAS, `as`/`ld`) | Done | Done (compiler) | v0.0.3 |
+| REPL (`myla repl`) | Partially | Planned | later |
+| Test runner (`myla test` via `#test`) | Done (design) | Done (interpreter) | v0.0.2 |
 
 ### Post-v0.0 features
 
