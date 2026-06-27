@@ -1,0 +1,7 @@
+//~ type error: duplicate top-level declaration
+fun f() {
+}
+fun f() {
+}
+fun main() {
+}

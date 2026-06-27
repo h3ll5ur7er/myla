@@ -1,0 +1,4 @@
+//~ type error: unknown attribute
+#bogus
+fun main() {
+}

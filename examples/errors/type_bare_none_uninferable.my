@@ -1,0 +1,5 @@
+//~ type error: cannot infer type argument
+// A bare `None` with no expected type can't fix `Option<T>`'s parameter.
+fun main() {
+    let x = None
+}

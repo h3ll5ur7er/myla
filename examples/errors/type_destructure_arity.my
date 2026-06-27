@@ -1,0 +1,4 @@
+//~ type error: tuple pattern expects
+fun main() {
+    let (a, b, c) = (1, 2)
+}

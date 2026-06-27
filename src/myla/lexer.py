@@ -17,6 +17,7 @@ from .tokens import INT_SUFFIXES, KEYWORDS, Token, TokenKind
 # Multi-character operators, longest first so the scanner matches greedily.
 _TWO_CHAR_OPS: dict[str, TokenKind] = {
     "->": TokenKind.ARROW,
+    "=>": TokenKind.FATARROW,
     "..": TokenKind.DOTDOT,
     "==": TokenKind.EQ,
     "!=": TokenKind.NE,
@@ -36,6 +37,7 @@ _ONE_CHAR_OPS: dict[str, TokenKind] = {
     ">": TokenKind.GT,
     "!": TokenKind.BANG,
     "=": TokenKind.ASSIGN,
+    "|": TokenKind.PIPE,
     "(": TokenKind.LPAREN,
     ")": TokenKind.RPAREN,
     "{": TokenKind.LBRACE,
@@ -46,6 +48,7 @@ _ONE_CHAR_OPS: dict[str, TokenKind] = {
     ":": TokenKind.COLON,
     ".": TokenKind.DOT,
     "#": TokenKind.HASH,
+    "?": TokenKind.QUESTION,
 }
 
 _STRING_ESCAPES: dict[str, str] = {

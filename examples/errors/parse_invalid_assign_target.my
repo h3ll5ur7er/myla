@@ -1,0 +1,5 @@
+//~ parse error: invalid assignment target
+// Only names and field/element places can be assigned to.
+fun main() {
+    1 = 2
+}

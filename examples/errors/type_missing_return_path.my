@@ -1,0 +1,10 @@
+//~ type error: may finish without returning
+// Every path of a value-returning function must return.
+fun f(n: int) -> int {
+    if n > 0 {
+        return 1
+    }
+}
+fun main() {
+    print(f(1))
+}

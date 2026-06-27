@@ -1,0 +1,81 @@
+// Option / Result and the `?` operator (v0.2.4c, D16).
+//
+// `Option<T>` and `Result<T, E>` are prelude enums — always in scope, and the
+// only enums whose variants may be built *unqualified*: `Some(x)`, `None`,
+// `Ok(x)`, `Err(e)` (every other enum still needs `Enum.Variant`).
+//
+// `expr?` is postfix early-return propagation. On a `Result`, `Ok(v)` evaluates
+// to `v` while `Err(e)` does `return Err(e)`; on an `Option`, `Some(v)` yields
+// `v` while `None` does `return None`. The enclosing function must return the
+// *same carrier* (D36) — there is no error conversion in v0.2. `?` desugars to a
+// `match`, so it needs nothing the checker doesn't already have.
+//
+// `#test` compares the returned value structurally, so a carrier value like
+// `Ok(5)` or `None` is a perfectly good expectation.
+
+#test(10, 2)[Ok(5)]
+#test(1, 0)[Err("divide by zero")]
+fun safe_div(a: int, b: int) -> Result<int, str> {
+    if b == 0 {
+        return Err("divide by zero")
+    }
+    return Ok(a / b)
+}
+
+// `?` unwraps each Ok or short-circuits the first Err out of `chain`.
+#test(100, 5, 2)[Ok(11)]
+#test(100, 0, 2)[Err("divide by zero")]
+#test(100, 5, 0)[Err("divide by zero")]
+fun chain(a: int, b: int, c: int) -> Result<int, str> {
+    let x = safe_div(a, b)?
+    let y = safe_div(x, c)?
+    return Ok(y + 1)
+}
+
+#test(5, -3)[Some(5)]
+#test(-3, 9)[Some(9)]
+#test(-1, -1)[None]
+fun first_positive(a: int, b: int) -> Option<int> {
+    if a > 0 {
+        return Some(a)
+    }
+    if b > 0 {
+        return Some(b)
+    }
+    return None
+}
+
+// `?` on an Option returns `None` early.
+#test(-1, 7)[Some(107)]
+#test(-1, -1)[None]
+fun bumped(a: int, b: int) -> Option<int> {
+    let v = first_positive(a, b)?
+    return Some(v + 100)
+}
+
+#test(Ok(7))["ok"]
+#test(Err("boom"))["boom"]
+fun describe(r: Result<int, str>) -> str {
+    return match r {
+        Ok(v) => "ok",
+        Err(e) => e,
+    }
+}
+
+#test(Some(8), 0)[8]
+#test(None, 42)[42]
+fun or_else(o: Option<int>, fallback: int) -> int {
+    return match o {
+        Some(v) => v,
+        None => fallback,
+    }
+}
+
+#main
+fun main() {
+    print(describe(chain(100, 5, 2)))   // ok
+    print(describe(chain(100, 0, 2)))   // divide by zero
+    print(or_else(bumped(-1, 7), -1))   // 107
+    print(or_else(bumped(-1, -1), -1))  // -1
+    print(or_else(first_positive(0, 0), 42))  // 42
+}

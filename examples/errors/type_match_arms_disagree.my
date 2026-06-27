@@ -1,0 +1,11 @@
+//~ type error: incompatible types
+enum Shape { Circle(int), Rect(int, int), Empty }
+fun f(s: Shape) {
+    let x = match s {
+        Shape.Circle(r)  => r,
+        Shape.Rect(w, h) => true,
+        Shape.Empty      => 0,
+    }
+}
+fun main() {
+}

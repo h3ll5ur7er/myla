@@ -1,0 +1,10 @@
+//~ type error: has no field
+struct P {
+    x: int,
+    y: int,
+}
+fun f(p: P) -> int {
+    return p.z
+}
+fun main() {
+}

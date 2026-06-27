@@ -1,0 +1,4 @@
+//~ type error: does not fit in 'uint8'
+fun main() {
+    let x: uint8 = 999
+}

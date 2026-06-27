@@ -1,0 +1,9 @@
+//~ type error: cannot print a value of type 'T'
+// `print` only accepts primitives; a generic `T` could be anything.
+fun show<T>(x: T) -> T {
+    print(x)
+    return x
+}
+fun main() {
+    print(show(1))
+}

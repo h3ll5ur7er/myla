@@ -1,0 +1,7 @@
+//~ type error: expects
+enum Shape { Circle(int), Rect(int, int), Empty }
+fun f() -> Shape {
+    return Shape.Rect(1)
+}
+fun main() {
+}

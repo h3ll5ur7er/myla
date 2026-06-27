@@ -16,6 +16,7 @@ op), defaulting to `int` (`int32`).
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 
 from . import ast
@@ -47,6 +48,29 @@ class StrType(Type):
 
 @dataclass(frozen=True)
 class StructType(Type):
+    name: str
+    args: tuple[Type, ...] = ()   # type arguments for a generic instantiation
+
+
+@dataclass(frozen=True)
+class TupleType(Type):
+    elems: tuple[Type, ...]
+
+
+@dataclass(frozen=True)
+class EnumType(Type):
+    name: str
+    args: tuple[Type, ...] = ()   # type arguments for a generic instantiation
+
+
+@dataclass(frozen=True)
+class TypeParam(Type):
+    """A generic type parameter (`T`) inside a generic declaration's body.
+
+    It is opaque: the only operations allowed on a `T` value are the ones that
+    work for any type (bind, pass, store, return, pattern-bind). Concrete
+    instances are produced by monomorphization (D13); the interpreter erases it.
+    """
     name: str
 
 
@@ -87,8 +111,16 @@ def type_name(t: Type | None) -> str:
         return "bool"
     if isinstance(t, StrType):
         return "str"
-    if isinstance(t, StructType):
+    if isinstance(t, (StructType, EnumType)):
+        if t.args:
+            return f"{t.name}<{', '.join(type_name(a) for a in t.args)}>"
         return t.name
+    if isinstance(t, TypeParam):
+        return t.name
+    if isinstance(t, TupleType):
+        if len(t.elems) == 1:
+            return f"({type_name(t.elems[0])},)"
+        return "(" + ", ".join(type_name(e) for e in t.elems) + ")"
     return str(t)
 
 
@@ -109,6 +141,11 @@ class FuncSig:
     params: list[Type]
     ret: Type | None
     decl: ast.FunDecl
+    type_params: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.type_params is None:
+            self.type_params = []
 
 
 @dataclass
@@ -140,16 +177,42 @@ class _Scope:
 # names that may not be used as user declarations
 _BUILTIN_FUNCS = {"print"}
 
+# sentinel for a match arm whose body diverges (definitely returns)
+_DIVERGE = object()
+
+# The prelude (D16): `Option`/`Result` are injected into every program so they
+# are always in scope, and their variants may be constructed *unqualified*
+# (`Some(x)`, `None`, `Ok(x)`, `Err(e)`) — the only enums exempt from the
+# `Enum.Variant` form until modules/`use` arrive (v0.5).
+_PRELUDE_SRC = (
+    "enum Option<T> { Some(T), None }\n"
+    "enum Result<T, E> { Ok(T), Err(E) }\n"
+)
+# bare variant name -> the prelude enum that owns it
+_PRELUDE_VARIANTS = {
+    "Some": "Option", "None": "Option", "Ok": "Result", "Err": "Result",
+}
+
 
 class Checker:
     def __init__(self, program: ast.Program):
         self.program = program
         self.structs: dict[str, dict[str, Type]] = {}
         self.struct_decls: dict[str, ast.StructDecl] = {}
+        # enum name -> ordered {variant_name: [payload Types]}; order defines tags
+        self.enums: dict[str, dict[str, list[Type]]] = {}
+        self.enum_decls: dict[str, ast.EnumDecl] = {}
+        # enums that take part in a by-value type cycle; the compiler boxes these
+        # behind a heap pointer wherever they appear as an aggregate member (v0.2.3).
+        self.recursive_enums: set[str] = set()
         self.functions: dict[str, FuncSig] = {}
         self._aliases_raw: dict[str, ast.TypeRef] = {}
         self._alias_cache: dict[str, Type] = {}
         self.entry: ast.FunDecl | None = None
+        self._current_ret: Type | None = None
+        self._try_counter = 0
+        # type parameters in scope while resolving/checking a generic decl
+        self._type_params: frozenset[str] = frozenset()
 
     # -- public entry --------------------------------------------------------
 
@@ -180,6 +243,9 @@ class Checker:
             if isinstance(decl, ast.StructDecl):
                 self.struct_decls[name] = decl
                 self.structs[name] = {}  # filled during resolution
+            elif isinstance(decl, ast.EnumDecl):
+                self.enum_decls[name] = decl
+                self.enums[name] = {}  # filled during resolution
             elif isinstance(decl, ast.TypeAliasDecl):
                 self._aliases_raw[name] = decl.target
             elif isinstance(decl, ast.FunDecl):
@@ -190,25 +256,98 @@ class Checker:
         # when the alias is never referenced
         for name, ref in self._aliases_raw.items():
             self._resolve(ref, frozenset({name}))
-        # struct fields
+        # struct fields (resolved under the struct's own type parameters)
         for name, decl in self.struct_decls.items():
-            fields: dict[str, Type] = {}
-            for f in decl.fields:
-                if f.name in fields:
-                    raise TypeCheckError(
-                        f"duplicate field '{f.name}' in struct '{name}'", f.line, f.column
-                    )
-                fields[f.name] = self._resolve(f.type)
+            self._check_type_params(decl)
+            self._type_params = frozenset(decl.type_params)
+            try:
+                fields: dict[str, Type] = {}
+                for f in decl.fields:
+                    if f.name in fields:
+                        raise TypeCheckError(
+                            f"duplicate field '{f.name}' in struct '{name}'", f.line, f.column
+                        )
+                    fields[f.name] = self._resolve(f.type)
+            finally:
+                self._type_params = frozenset()
             self.structs[name] = fields
-        # function signatures
+        # enum variants & payloads (resolved under the enum's type parameters)
+        for name, decl in self.enum_decls.items():
+            self._check_type_params(decl)
+            self._type_params = frozenset(decl.type_params)
+            try:
+                variants: dict[str, list[Type]] = {}
+                for v in decl.variants:
+                    if v.name in variants:
+                        raise TypeCheckError(
+                            f"duplicate variant '{v.name}' in enum '{name}'", v.line, v.column
+                        )
+                    variants[v.name] = [self._resolve(p) for p in v.payload]
+            finally:
+                self._type_params = frozenset()
+            self.enums[name] = variants
+        self._resolve_recursion()
+        # function signatures (resolved under the function's own type parameters)
         for name, sig in self.functions.items():
             decl = sig.decl
-            params = [self._resolve(p.type) for p in decl.params]
-            ret = self._resolve(decl.ret_type) if decl.ret_type is not None else None
-            self.functions[name] = FuncSig(params, ret, decl)
+            self._check_type_params(decl)
+            self._type_params = frozenset(decl.type_params)
+            try:
+                params = [self._resolve(p.type) for p in decl.params]
+                ret = self._resolve(decl.ret_type) if decl.ret_type is not None else None
+            finally:
+                self._type_params = frozenset()
+            self.functions[name] = FuncSig(params, ret, decl, list(decl.type_params))
 
-    def _resolve(self, ref: ast.TypeRef, visiting: frozenset[str] = frozenset()) -> Type:
+    def _check_type_params(self, decl) -> None:
+        seen: set[str] = set()
+        for tp in decl.type_params:
+            if tp in _PRIMITIVES or tp == "int":
+                raise TypeCheckError(
+                    f"type parameter '{tp}' shadows a built-in type name",
+                    decl.line, decl.column,
+                )
+            # A type parameter may shadow a user type name (standard lexical
+            # scoping — and the prelude's `Result<T, E>` must coexist with a user
+            # type happening to be named `E`).
+            if tp in seen:
+                raise TypeCheckError(
+                    f"duplicate type parameter '{tp}'", decl.line, decl.column
+                )
+            seen.add(tp)
+
+    def _resolve(self, ref, visiting: frozenset[str] = frozenset()) -> Type:
+        if isinstance(ref, ast.TupleTypeRef):
+            return TupleType(tuple(self._resolve(e, visiting) for e in ref.elems))
         name = ref.name
+        args = getattr(ref, "args", []) or []
+        if name in self._type_params:
+            if args:
+                raise TypeCheckError(
+                    f"type parameter '{name}' cannot take type arguments",
+                    ref.line, ref.column,
+                )
+            return TypeParam(name)
+        # generic struct/enum instantiation: `Box<int>`, `Result<int, str>`
+        if name in self.struct_decls or name in self.enum_decls:
+            params = (self.struct_decls.get(name) or self.enum_decls[name]).type_params
+            if params or args:
+                if len(args) != len(params):
+                    raise TypeCheckError(
+                        f"type '{name}' expects {len(params)} type argument(s), "
+                        f"got {len(args)}",
+                        ref.line, ref.column,
+                    )
+                resolved_args = tuple(self._resolve(a, visiting) for a in args)
+                if name in self.struct_decls:
+                    return StructType(name, resolved_args)
+                return EnumType(name, resolved_args)
+            return StructType(name) if name in self.struct_decls else EnumType(name)
+        if args:
+            raise TypeCheckError(
+                f"type '{name}' is not generic (it takes no type arguments)",
+                ref.line, ref.column,
+            )
         if name in _PRIMITIVES:
             return _PRIMITIVES[name]
         if name in self._aliases_raw:
@@ -221,9 +360,83 @@ class Checker:
             return resolved
         if name == "int":
             return INT
-        if name in self.structs:
-            return StructType(name)
         raise TypeCheckError(f"unknown type '{name}'", ref.line, ref.column)
+
+    def _resolve_recursion(self) -> None:
+        """Classify by-value type cycles (e.g. a recursive `enum Expr`).
+
+        An enum that takes part in a cycle is *boxed*: wherever it appears as an
+        aggregate member the compiler stores an 8-byte heap pointer instead of an
+        inline value, which breaks the otherwise-infinite size. So every cycle
+        that runs through an enum is representable (v0.2.3).
+
+        A cycle that runs purely through structs/tuples has no place to insert
+        that indirection, so it stays an error — it would have infinite size.
+        """
+        # Recursion is a property of a *template* (List<int> and List<str> are
+        # both recursive), so this works on aggregate names. We follow inline
+        # members and the names appearing in their type arguments (a generic
+        # member like `Box<E>` inlines an `E`), treating type parameters as
+        # opaque leaves. The precise per-instantiation boxing/size decision is
+        # re-derived on the fully concrete program after monomorphization.
+        def member_types(name: str) -> list[Type]:
+            if name in self.structs:
+                return list(self.structs[name].values())
+            out: list[Type] = []
+            for payload in self.enums[name].values():
+                out.extend(payload)
+            return out
+
+        def agg_refs(t: Type) -> list[tuple[str, bool]]:
+            """Aggregate (name, is_enum) references appearing inline within `t`."""
+            if isinstance(t, StructType):
+                out = [(t.name, False)]
+                for a in t.args:
+                    out += agg_refs(a)
+                return out
+            if isinstance(t, EnumType):
+                out = [(t.name, True)]
+                for a in t.args:
+                    out += agg_refs(a)
+                return out
+            if isinstance(t, TupleType):
+                out = []
+                for e in t.elems:
+                    out += agg_refs(e)
+                return out
+            return []
+
+        def find_cycle(root: str, current: str, seen: frozenset[str],
+                       stop_at_boxed: bool) -> bool:
+            for m in member_types(current):
+                for nm, is_enum in agg_refs(m):
+                    # A boxed enum member is a pointer — a leaf that breaks the cycle.
+                    if stop_at_boxed and is_enum and nm in self.recursive_enums:
+                        continue
+                    if nm == root:
+                        return True
+                    if nm in seen:
+                        continue
+                    if find_cycle(root, nm, seen | {nm}, stop_at_boxed):
+                        return True
+            return False
+
+        # 1) every enum that lies on a cycle becomes boxed.
+        for name in self.enums:
+            if find_cycle(name, name, frozenset({name}), stop_at_boxed=False):
+                self.recursive_enums.add(name)
+
+        # 2) any cycle that survives once boxed edges are cut is unrepresentable.
+        for name in list(self.enums) + list(self.structs):
+            if find_cycle(name, name, frozenset({name}), stop_at_boxed=True):
+                kind = "enum" if name in self.enums else "struct"
+                decl = self.enum_decls.get(name) or self.struct_decls.get(name)
+                raise TypeCheckError(
+                    f"recursive {kind} '{name}' would have infinite size; "
+                    "only enums can be recursive (they are boxed) — wrap the "
+                    "cycle in an enum to introduce indirection",
+                    decl.line, decl.column,
+                )
 
     # -- attributes & entry point -------------------------------------------
 
@@ -238,6 +451,12 @@ class Checker:
                 if not isinstance(decl, ast.FunDecl):
                     raise TypeCheckError(
                         f"attribute '#{attr.name}' may only be applied to functions",
+                        attr.line, attr.column,
+                    )
+                if decl.type_params:
+                    raise TypeCheckError(
+                        f"attribute '#{attr.name}' cannot be applied to a generic "
+                        "function (it has no single concrete instantiation)",
                         attr.line, attr.column,
                     )
                 if attr.name == "main":
@@ -295,16 +514,21 @@ class Checker:
 
     def _check_function(self, decl: ast.FunDecl) -> None:
         sig = self.functions[decl.name]
-        scope = _Scope()
-        for param, ptype in zip(decl.params, sig.params):
-            scope.define(param.name, _Binding(ptype, mutable=False))
-        self._check_block(decl.body, scope, sig.ret)
-        if sig.ret is not None and not _block_returns(decl.body):
-            raise TypeCheckError(
-                f"function '{decl.name}' may finish without returning a "
-                f"'{type_name(sig.ret)}'",
-                decl.line, decl.column,
-            )
+        self._current_ret = sig.ret
+        self._type_params = frozenset(decl.type_params)
+        try:
+            scope = _Scope()
+            for param, ptype in zip(decl.params, sig.params):
+                scope.define(param.name, _Binding(ptype, mutable=False))
+            self._check_block(decl.body, scope, sig.ret)
+            if sig.ret is not None and not _block_returns(decl.body):
+                raise TypeCheckError(
+                    f"function '{decl.name}' may finish without returning a "
+                    f"'{type_name(sig.ret)}'",
+                    decl.line, decl.column,
+                )
+        finally:
+            self._type_params = frozenset()
 
     def _check_block(self, block: ast.Block, parent: _Scope, ret: Type | None) -> None:
         scope = _Scope(parent)
@@ -326,6 +550,23 @@ class Checker:
                 raise TypeCheckError(
                     f"'{stmt.name}' is already declared in this scope", stmt.line, stmt.column
                 )
+
+        elif isinstance(stmt, ast.DestructDecl):
+            declared = self._resolve(stmt.declared_type) if stmt.declared_type else None
+            value_type = self._expect_value(stmt.init, scope, declared)
+            if declared is not None and value_type != declared:
+                raise TypeCheckError(
+                    f"cannot assign value of type '{type_name(value_type)}' to "
+                    f"binding of type '{type_name(declared)}'",
+                    stmt.line, stmt.column,
+                )
+            if not isinstance(value_type, TupleType):
+                raise TypeCheckError(
+                    f"cannot destructure non-tuple value of type '{type_name(value_type)}'",
+                    stmt.line, stmt.column,
+                )
+            self._bind_pattern(stmt.binding, value_type, scope,
+                               mutable=(stmt.kind == "var"))
 
         elif isinstance(stmt, ast.Assign):
             target_type, mutable = self._check_lvalue(stmt.target, scope)
@@ -385,11 +626,43 @@ class Checker:
                     )
 
         elif isinstance(stmt, ast.ExprStmt):
+            if isinstance(stmt.expr, ast.Match):
+                stmt.expr.is_statement = True
             self._infer(stmt.expr, scope, None)  # void calls allowed here
 
         else:  # pragma: no cover - defensive
             raise TypeCheckError(f"unsupported statement {type(stmt).__name__}",
                                  stmt.line, stmt.column)
+
+    def _bind_pattern(self, binding, t: Type, scope: _Scope, mutable: bool) -> None:
+        if isinstance(binding, ast.BindWildcard):
+            return
+        if isinstance(binding, ast.BindName):
+            binding.resolved_type = t
+            if not scope.define(binding.name, _Binding(t, mutable)):
+                raise TypeCheckError(
+                    f"'{binding.name}' is already declared in this scope",
+                    binding.line, binding.column,
+                )
+            return
+        if isinstance(binding, ast.BindTuple):
+            if not isinstance(t, TupleType):
+                raise TypeCheckError(
+                    f"cannot destructure non-tuple value of type '{type_name(t)}'",
+                    binding.line, binding.column,
+                )
+            if len(binding.elems) != len(t.elems):
+                raise TypeCheckError(
+                    f"tuple pattern expects {len(binding.elems)} element(s), "
+                    f"but value has {len(t.elems)}",
+                    binding.line, binding.column,
+                )
+            for elem, et in zip(binding.elems, t.elems):
+                self._bind_pattern(elem, et, scope, mutable)
+            return
+        raise TypeCheckError(  # pragma: no cover - defensive
+            "invalid destructuring binding", binding.line, binding.column
+        )
 
     def _check_lvalue(self, expr: ast.Expr, scope: _Scope) -> tuple[Type, bool]:
         if isinstance(expr, ast.Name):
@@ -404,7 +677,7 @@ class Checker:
                 raise TypeCheckError(
                     f"type '{type_name(base_type)}' has no fields", expr.line, expr.column
                 )
-            fields = self.structs[base_type.name]
+            fields = self._struct_field_types(base_type)
             if expr.field_name not in fields:
                 raise TypeCheckError(
                     f"struct '{base_type.name}' has no field '{expr.field_name}'",
@@ -441,20 +714,457 @@ class Checker:
             expr.resolved_type = BOOL
             return BOOL
         if isinstance(expr, ast.Name):
-            return self._infer_name(expr, scope)
+            return self._infer_name(expr, scope, expected)
         if isinstance(expr, ast.Unary):
             return self._infer_unary(expr, scope, expected)
         if isinstance(expr, ast.Binary):
             return self._infer_binary(expr, scope, expected)
         if isinstance(expr, ast.Call):
-            return self._infer_call(expr, scope)
+            return self._infer_call(expr, scope, expected)
         if isinstance(expr, ast.FieldAccess):
-            return self._infer_field(expr, scope)
+            return self._infer_field(expr, scope, expected)
         if isinstance(expr, ast.StructLit):
-            return self._infer_struct_lit(expr, scope)
+            return self._infer_struct_lit(expr, scope, expected)
+        if isinstance(expr, ast.TupleLit):
+            return self._infer_tuple_lit(expr, scope, expected)
+        if isinstance(expr, ast.TupleIndex):
+            return self._infer_tuple_index(expr, scope)
+        if isinstance(expr, ast.Match):
+            return self._infer_match(expr, scope, expected)
+        if isinstance(expr, ast.Try):
+            return self._infer_try(expr, scope)
         raise TypeCheckError(  # pragma: no cover - defensive
             f"unsupported expression {type(expr).__name__}", expr.line, expr.column
         )
+
+    def _infer_tuple_lit(self, expr: ast.TupleLit, scope: _Scope,
+                         expected: Type | None) -> Type:
+        exp_elems: tuple[Type, ...] | None = None
+        if isinstance(expected, TupleType) and len(expected.elems) == len(expr.elems):
+            exp_elems = expected.elems
+        elem_types: list[Type] = []
+        for i, e in enumerate(expr.elems):
+            want = exp_elems[i] if exp_elems is not None else None
+            elem_types.append(self._expect_value(e, scope, want))
+        t = TupleType(tuple(elem_types))
+        expr.resolved_type = t
+        return t
+
+    def _infer_tuple_index(self, expr: ast.TupleIndex, scope: _Scope) -> Type:
+        base = self._expect_value(expr.target, scope, None)
+        if not isinstance(base, TupleType):
+            raise TypeCheckError(
+                f"type '{type_name(base)}' is not a tuple and cannot be indexed with '.{expr.index}'",
+                expr.line, expr.column,
+            )
+        if not (0 <= expr.index < len(base.elems)):
+            raise TypeCheckError(
+                f"tuple index {expr.index} out of range for '{type_name(base)}'",
+                expr.line, expr.column,
+            )
+        ft = base.elems[expr.index]
+        expr.resolved_type = ft
+        return ft
+
+    # -- match ---------------------------------------------------------------
+
+    def _infer_match(self, expr: ast.Match, scope: _Scope,
+                     expected: Type | None) -> Type | None:
+        st = self._expect_value(expr.scrutinee, scope, None)
+        is_stmt = getattr(expr, "is_statement", False)
+
+        bodies: list[tuple[Type | None, ast.Expr | None]] = []
+        for arm in expr.arms:
+            arm_scope = _Scope(scope)
+            self._check_pattern(arm.pattern, st, arm_scope)
+            if arm.guard is not None:
+                self._expect_type(arm.guard, arm_scope, BOOL, "match guard")
+            bodies.append(self._check_arm_body(arm.body, arm_scope, expected))
+
+        self._check_exhaustive(expr, st)
+        self._check_redundant(expr, st)
+
+        if is_stmt:
+            expr.resolved_type = None
+            return None
+        # Arms that definitely return (`=> { return ... }`) diverge — they yield
+        # no value and so don't constrain the match's result type. This is what
+        # makes `?` desugaring work, but it is a general rule.
+        value_bodies = [(t, n) for (t, n) in bodies if t is not _DIVERGE]
+        for vtype, vnode in value_bodies:
+            if vtype is None:
+                raise TypeCheckError(
+                    "this match is used as a value, so every arm must produce one",
+                    expr.line, expr.column,
+                )
+        if not value_bodies:
+            raise TypeCheckError(
+                "this match is used as a value, but every arm diverges",
+                expr.line, expr.column,
+            )
+        result = self._unify_match_result(value_bodies)
+        expr.resolved_type = result
+        return result
+
+    def _infer_try(self, expr: ast.Try, scope: _Scope) -> Type:
+        ot = self._expect_value(expr.operand, scope, None)
+        ret = self._current_ret
+        if isinstance(ot, EnumType) and ot.name == "Result" and len(ot.args) == 2:
+            ok_t, err_t = ot.args
+            if not (isinstance(ret, EnumType) and ret.name == "Result"
+                    and len(ret.args) == 2):
+                raise TypeCheckError(
+                    "'?' on a Result requires the enclosing function to return a "
+                    "Result", expr.line, expr.column,
+                )
+            if ret.args[1] != err_t:
+                raise TypeCheckError(
+                    f"'?' propagates an error of type '{type_name(err_t)}', but the "
+                    f"function returns 'Result<_, {type_name(ret.args[1])}>' "
+                    "(there is no error conversion in v0.2)",
+                    expr.line, expr.column,
+                )
+            result_t, succ, fail, fail_payload = ok_t, "Ok", "Err", True
+        elif isinstance(ot, EnumType) and ot.name == "Option" and len(ot.args) == 1:
+            if not (isinstance(ret, EnumType) and ret.name == "Option"
+                    and len(ret.args) == 1):
+                raise TypeCheckError(
+                    "'?' on an Option requires the enclosing function to return an "
+                    "Option", expr.line, expr.column,
+                )
+            result_t, succ, fail, fail_payload = ot.args[0], "Some", "None", False
+        else:
+            raise TypeCheckError(
+                f"'?' can only be applied to an Option or Result, not "
+                f"'{type_name(ot)}'", expr.line, expr.column,
+            )
+        expr.desugared = self._build_try_match(expr, succ, fail, fail_payload)
+        self._infer_match(expr.desugared, scope, result_t)
+        expr.resolved_type = result_t
+        return result_t
+
+    def _build_try_match(self, expr: ast.Try, succ: str, fail: str,
+                         fail_payload: bool) -> ast.Match:
+        """Synthesize the `match operand { Succ(v) => v, Fail(..) => { return
+        Fail(..) } }` that `expr?` is equivalent to (carrier now known)."""
+        ln, col = expr.line, expr.column
+        n = self._try_counter
+        self._try_counter += 1
+        vname = f"__try_v{n}"
+
+        def at(node):
+            return node.at(ln, col)
+
+        succ_arm = at(ast.MatchArm(
+            at(ast.PatEnum(None, succ, [at(ast.PatBinding(vname))], True)),
+            None, at(ast.Name(vname)),
+        ))
+        carrier = "Result" if fail_payload else "Option"
+        if fail_payload:
+            ename = f"__try_e{n}"
+            fail_pat = at(ast.PatEnum(None, fail, [at(ast.PatBinding(ename))], True))
+            fail_value: ast.Expr = at(ast.Call(
+                at(ast.FieldAccess(at(ast.Name(carrier)), fail)),
+                [at(ast.Name(ename))],
+            ))
+        else:
+            fail_pat = at(ast.PatEnum(None, fail, [], False))
+            fail_value = at(ast.FieldAccess(at(ast.Name(carrier)), fail))
+        fail_arm = at(ast.MatchArm(
+            fail_pat, None, at(ast.Block([at(ast.Return(fail_value))])),
+        ))
+        return at(ast.Match(expr.operand, [succ_arm, fail_arm]))
+
+    def _check_arm_body(self, body, scope: _Scope,
+                        expected: Type | None) -> tuple[object, ast.Expr | None]:
+        if isinstance(body, ast.Block):
+            bscope = _Scope(scope)
+            stmts = body.statements
+            for i, s in enumerate(stmts):
+                if i == len(stmts) - 1 and isinstance(s, ast.ExprStmt):
+                    t = self._infer(s.expr, bscope, expected)
+                    return (t, s.expr)
+                self._check_stmt(s, bscope, self._current_ret)
+            if _block_returns(body):
+                return (_DIVERGE, None)
+            return (None, None)
+        t = self._infer(body, scope, expected)
+        return (t, body)
+
+    def _unify_match_result(self, bodies) -> Type:
+        types = [t for t, _ in bodies]
+        first = types[0]
+        if all(t == first for t in types):
+            return first
+        if all(isinstance(t, IntType) for t in types):
+            target = None
+            for t, n in bodies:
+                if not _is_flexible_int_lit(n):
+                    target = t
+                    break
+            if target is None:
+                target = INT
+            for t, n in bodies:
+                if t != target:
+                    if _is_flexible_int_lit(n):
+                        self._infer_int_lit(n, target)
+                    else:
+                        raise TypeCheckError(
+                            f"match arms have incompatible types '{type_name(target)}' "
+                            f"and '{type_name(t)}'",
+                            n.line, n.column,
+                        )
+            return target
+        for t, n in bodies:
+            if t != first and n is not None:
+                raise TypeCheckError(
+                    f"match arms have incompatible types '{type_name(first)}' "
+                    f"and '{type_name(t)}'",
+                    n.line, n.column,
+                )
+        return first  # pragma: no cover
+
+    # -- patterns ------------------------------------------------------------
+
+    def _check_pattern(self, pat, t: Type, scope: _Scope) -> None:
+        if isinstance(pat, ast.PatWildcard):
+            return
+        if isinstance(pat, ast.PatBinding):
+            # a bare name equal to a no-payload variant of the scrutinee enum is
+            # a variant test, not a binding (Rust-like).
+            if isinstance(t, EnumType) and pat.name in self.enums[t.name]:
+                payload = self.enums[t.name][pat.name]
+                if payload:
+                    raise TypeCheckError(
+                        f"variant '{t.name}.{pat.name}' carries a payload; "
+                        f"write '{pat.name}(...)' to match it",
+                        pat.line, pat.column,
+                    )
+                pat.as_variant = (t.name, pat.name)
+                return
+            pat.resolved_type = t
+            if not scope.define(pat.name, _Binding(t, mutable=False)):
+                raise TypeCheckError(
+                    f"'{pat.name}' is bound more than once in this pattern",
+                    pat.line, pat.column,
+                )
+            return
+        if isinstance(pat, ast.PatLiteral):
+            lt = self._expect_value(pat.literal, scope, t if isinstance(t, IntType) else None)
+            if not isinstance(t, (IntType, BoolType, StrType)):
+                raise TypeCheckError(
+                    f"cannot match a literal against '{type_name(t)}'",
+                    pat.line, pat.column,
+                )
+            if lt != t:
+                raise TypeCheckError(
+                    f"literal pattern of type '{type_name(lt)}' cannot match "
+                    f"value of type '{type_name(t)}'",
+                    pat.line, pat.column,
+                )
+            return
+        if isinstance(pat, ast.PatEnum):
+            self._check_enum_pattern(pat, t, scope)
+            return
+        if isinstance(pat, ast.PatTuple):
+            if not isinstance(t, TupleType):
+                raise TypeCheckError(
+                    f"tuple pattern cannot match value of type '{type_name(t)}'",
+                    pat.line, pat.column,
+                )
+            if len(pat.elems) != len(t.elems):
+                raise TypeCheckError(
+                    f"tuple pattern expects {len(t.elems)} element(s), "
+                    f"got {len(pat.elems)}",
+                    pat.line, pat.column,
+                )
+            for sub, et in zip(pat.elems, t.elems):
+                self._check_pattern(sub, et, scope)
+            return
+        if isinstance(pat, ast.PatStruct):
+            self._check_struct_pattern(pat, t, scope)
+            return
+        if isinstance(pat, ast.PatOr):
+            self._check_or_pattern(pat, t, scope)
+            return
+        raise TypeCheckError(  # pragma: no cover - defensive
+            "unsupported pattern", pat.line, pat.column
+        )
+
+    def _check_enum_pattern(self, pat: ast.PatEnum, t: Type, scope: _Scope) -> None:
+        if not isinstance(t, EnumType):
+            raise TypeCheckError(
+                f"enum pattern cannot match value of type '{type_name(t)}'",
+                pat.line, pat.column,
+            )
+        if pat.enum_name is not None and pat.enum_name != t.name:
+            raise TypeCheckError(
+                f"pattern names enum '{pat.enum_name}' but the value is '{t.name}'",
+                pat.line, pat.column,
+            )
+        variants = self._enum_variant_types(t)
+        if pat.variant not in variants:
+            raise TypeCheckError(
+                f"enum '{t.name}' has no variant '{pat.variant}'",
+                pat.line, pat.column,
+            )
+        payload = variants[pat.variant]
+        if pat.has_payload_syntax or pat.elems:
+            if len(pat.elems) != len(payload):
+                raise TypeCheckError(
+                    f"variant '{t.name}.{pat.variant}' has {len(payload)} "
+                    f"field(s), but the pattern binds {len(pat.elems)}",
+                    pat.line, pat.column,
+                )
+            for sub, ft in zip(pat.elems, payload):
+                self._check_pattern(sub, ft, scope)
+        elif payload:
+            raise TypeCheckError(
+                f"variant '{t.name}.{pat.variant}' carries a payload; "
+                f"write '{pat.variant}(...)' to match it",
+                pat.line, pat.column,
+            )
+        pat.resolved_enum = t.name
+
+    def _check_struct_pattern(self, pat: ast.PatStruct, t: Type, scope: _Scope) -> None:
+        if not isinstance(t, StructType):
+            raise TypeCheckError(
+                f"struct pattern cannot match value of type '{type_name(t)}'",
+                pat.line, pat.column,
+            )
+        if pat.type_name != t.name:
+            raise TypeCheckError(
+                f"pattern names struct '{pat.type_name}' but the value is '{t.name}'",
+                pat.line, pat.column,
+            )
+        fields = self._struct_field_types(t)
+        seen: set[str] = set()
+        for fp in pat.fields:
+            if fp.name in seen:
+                raise TypeCheckError(
+                    f"field '{fp.name}' bound more than once in struct pattern",
+                    fp.line, fp.column,
+                )
+            seen.add(fp.name)
+            if fp.name not in fields:
+                raise TypeCheckError(
+                    f"struct '{t.name}' has no field '{fp.name}'",
+                    fp.line, fp.column,
+                )
+            self._check_pattern(fp.pattern, fields[fp.name], scope)
+
+    def _check_or_pattern(self, pat: ast.PatOr, t: Type, scope: _Scope) -> None:
+        name_maps: list[dict[str, Type]] = []
+        for alt in pat.alts:
+            tmp = _Scope()
+            self._check_pattern(alt, t, tmp)
+            name_maps.append({n: b.type for n, b in tmp.names.items()})
+        base = name_maps[0]
+        for m in name_maps[1:]:
+            if m != base:
+                raise TypeCheckError(
+                    "all alternatives of an or-pattern must bind the same names "
+                    "with the same types",
+                    pat.line, pat.column,
+                )
+        for n, ty in base.items():
+            if not scope.define(n, _Binding(ty, mutable=False)):
+                raise TypeCheckError(
+                    f"'{n}' is bound more than once in this pattern",
+                    pat.line, pat.column,
+                )
+
+    # -- exhaustiveness & redundancy -----------------------------------------
+
+    def _check_exhaustive(self, expr: ast.Match, st: Type) -> None:
+        arms = [a for a in expr.arms if a.guard is None]
+        if any(self._irrefutable(a.pattern, st) for a in arms):
+            return
+        if isinstance(st, EnumType):
+            covered: set[str] = set()
+            for a in arms:
+                covered |= self._covered_variants(a.pattern, st)
+            missing = [v for v in self.enums[st.name] if v not in covered]
+            if missing:
+                raise TypeCheckError(
+                    f"non-exhaustive match on '{st.name}': missing variant(s) "
+                    f"{', '.join(missing)} (add them or a '_' arm)",
+                    expr.line, expr.column,
+                )
+            return
+        if isinstance(st, BoolType):
+            seen: set[bool] = set()
+            for a in arms:
+                if isinstance(a.pattern, ast.PatLiteral):
+                    seen.add(bool(_const_bool(a.pattern.literal)))
+            if {True, False} <= seen:
+                return
+            raise TypeCheckError(
+                "non-exhaustive match on 'bool': cover both true and false "
+                "(or add a '_' arm)",
+                expr.line, expr.column,
+            )
+        raise TypeCheckError(
+            f"non-exhaustive match on '{type_name(st)}': add a '_' arm",
+            expr.line, expr.column,
+        )
+
+    def _covered_variants(self, pat, st: "EnumType") -> set[str]:
+        if self._irrefutable(pat, st):
+            return set(self.enums[st.name])
+        if isinstance(pat, ast.PatOr):
+            out: set[str] = set()
+            for alt in pat.alts:
+                out |= self._covered_variants(alt, st)
+            return out
+        if isinstance(pat, ast.PatBinding) and getattr(pat, "as_variant", None):
+            return {pat.as_variant[1]}
+        if isinstance(pat, ast.PatEnum):
+            payload = self._enum_variant_types(st)[pat.variant]
+            if all(self._irrefutable(sub, ft) for sub, ft in zip(pat.elems, payload)):
+                return {pat.variant}
+        return set()
+
+    def _irrefutable(self, pat, t: Type) -> bool:
+        if isinstance(pat, ast.PatWildcard):
+            return True
+        if isinstance(pat, ast.PatBinding):
+            return getattr(pat, "as_variant", None) is None
+        if isinstance(pat, ast.PatTuple) and isinstance(t, TupleType):
+            return all(self._irrefutable(s, et) for s, et in zip(pat.elems, t.elems))
+        if isinstance(pat, ast.PatStruct) and isinstance(t, StructType):
+            fields = self._struct_field_types(t)
+            return all(self._irrefutable(fp.pattern, fields[fp.name]) for fp in pat.fields)
+        if isinstance(pat, ast.PatEnum) and isinstance(t, EnumType):
+            if len(self.enums[t.name]) == 1:
+                payload = self._enum_variant_types(t)[pat.variant]
+                return all(self._irrefutable(s, ft) for s, ft in zip(pat.elems, payload))
+        if isinstance(pat, ast.PatOr):
+            return any(self._irrefutable(a, t) for a in pat.alts)
+        return False
+
+    def _check_redundant(self, expr: ast.Match, st: Type) -> None:
+        saw_irrefutable = False
+        covered: set[str] = set()
+        for arm in expr.arms:
+            if saw_irrefutable:
+                raise TypeCheckError(
+                    "unreachable match arm (a previous arm already matches "
+                    "everything)",
+                    arm.line, arm.column,
+                )
+            if arm.guard is not None:
+                continue
+            if isinstance(st, EnumType):
+                vs = self._covered_variants(arm.pattern, st)
+                if vs and vs <= covered:
+                    raise TypeCheckError(
+                        "unreachable match arm (its variant(s) are already covered)",
+                        arm.line, arm.column,
+                    )
+                covered |= vs
+            if self._irrefutable(arm.pattern, st):
+                saw_irrefutable = True
 
     def _infer_int_lit(self, expr: ast.IntLit, expected: Type | None) -> Type:
         if expr.suffix is not None:
@@ -472,9 +1182,13 @@ class Checker:
         expr.resolved_type = t
         return t
 
-    def _infer_name(self, expr: ast.Name, scope: _Scope) -> Type:
+    def _infer_name(self, expr: ast.Name, scope: _Scope,
+                    expected: Type | None = None) -> Type:
         binding = scope.lookup(expr.ident)
         if binding is None:
+            enum_name = _PRELUDE_VARIANTS.get(expr.ident)
+            if enum_name is not None:
+                return self._infer_bare_variant(expr, enum_name, expr.ident, expected)
             if expr.ident in self.functions or expr.ident in _BUILTIN_FUNCS:
                 raise TypeCheckError(
                     f"'{expr.ident}' is a function and cannot be used as a value in v0.0",
@@ -483,6 +1197,30 @@ class Checker:
             raise TypeCheckError(f"unknown name '{expr.ident}'", expr.line, expr.column)
         expr.resolved_type = binding.type
         return binding.type
+
+    def _infer_bare_variant(self, expr: ast.Expr, enum_name: str, variant: str,
+                            expected: Type | None) -> Type:
+        """A bare prelude variant used as a value (`None`). Variants with a
+        payload must be *called* (`Some(x)`), so reject them here."""
+        payload = self.enums[enum_name][variant]
+        if payload:
+            raise TypeCheckError(
+                f"variant '{variant}' carries a payload; call it like '{variant}(...)'",
+                expr.line, expr.column,
+            )
+        params = self.enum_decls[enum_name].type_params
+        if (isinstance(expected, EnumType) and expected.name == enum_name
+                and len(expected.args) == len(params)):
+            et: Type = expected
+        else:
+            raise TypeCheckError(
+                f"cannot infer type argument(s) for '{variant}'; annotate the "
+                f"binding (e.g. ': {enum_name}<...>')",
+                expr.line, expr.column,
+            )
+        expr.enum_ctor = (enum_name, variant)
+        expr.resolved_type = et
+        return et
 
     def _infer_unary(self, expr: ast.Unary, scope: _Scope, expected: Type | None) -> Type:
         if expr.op == "-":
@@ -554,8 +1292,15 @@ class Checker:
             ln.line, ln.column,
         )
 
-    def _infer_call(self, expr: ast.Call, scope: _Scope) -> Type | None:
+    def _infer_call(self, expr: ast.Call, scope: _Scope,
+                    expected: Type | None = None) -> Type | None:
         callee = expr.callee
+        # `Enum.Variant(args...)` variant construction
+        if isinstance(callee, ast.FieldAccess):
+            enum_name = self._enum_name_ref(callee.target, scope)
+            if enum_name is not None:
+                return self._infer_variant_ctor(expr, enum_name, callee.field_name,
+                                                scope, expected)
         if not isinstance(callee, ast.Name):
             raise TypeCheckError("only named functions can be called in v0.0",
                                  expr.line, expr.column)
@@ -574,7 +1319,12 @@ class Checker:
             return None
         sig = self.functions.get(name)
         if sig is None:
+            enum_name = _PRELUDE_VARIANTS.get(name)
+            if enum_name is not None and scope.lookup(name) is None:
+                return self._infer_variant_ctor(expr, enum_name, name, scope, expected)
             raise TypeCheckError(f"unknown function '{name}'", expr.line, expr.column)
+        if sig.type_params:
+            return self._infer_generic_call(expr, name, sig, scope)
         if len(expr.args) != len(sig.params):
             raise TypeCheckError(
                 f"function '{name}' expects {len(sig.params)} argument(s), "
@@ -592,13 +1342,235 @@ class Checker:
         expr.resolved_type = sig.ret
         return sig.ret
 
-    def _infer_field(self, expr: ast.FieldAccess, scope: _Scope) -> Type:
+    # -- generic call inference (D34) ----------------------------------------
+
+    def _infer_generic_call(self, expr: ast.Call, name: str, sig: FuncSig,
+                            scope: _Scope) -> Type | None:
+        if len(expr.args) != len(sig.params):
+            raise TypeCheckError(
+                f"function '{name}' expects {len(sig.params)} argument(s), "
+                f"got {len(expr.args)}",
+                expr.line, expr.column,
+            )
+        # Solve left-to-right, growing the substitution as we go: each argument
+        # is typed with its parameter type as a hint once that type is fully
+        # concrete (so e.g. `prepend(x, List.Nil)` solves `T` from `x` first,
+        # then types the otherwise-ambiguous `List.Nil` as `List<T>`).
+        subst: dict[str, Type] = {}
+        arg_types: list[Type] = []
+        for arg, ptype in zip(expr.args, sig.params):
+            want = self._subst_type(ptype, subst)
+            hint = want if not self._contains_type_param(want) else None
+            at = self._expect_value(arg, scope, hint)
+            arg_types.append(at)
+            self._unify_param(ptype, at, subst)
+        missing = [tp for tp in sig.type_params if tp not in subst]
+        if missing:
+            raise TypeCheckError(
+                f"cannot infer type parameter(s) {', '.join(missing)} for '{name}' "
+                "from the arguments; add a type annotation to guide inference",
+                expr.line, expr.column,
+            )
+        # Verify each argument against its now-concrete parameter type, allowing
+        # an unsuffixed integer literal to adopt the solved type.
+        for arg, ptype, at in zip(expr.args, sig.params, arg_types):
+            want = self._subst_type(ptype, subst)
+            if at != want:
+                if isinstance(want, IntType) and _is_flexible_int_lit(arg):
+                    self._infer_int_lit(arg, want)
+                else:
+                    raise TypeCheckError(
+                        f"argument type mismatch in call to '{name}': expected "
+                        f"'{type_name(want)}', found '{type_name(at)}'",
+                        arg.line, arg.column,
+                    )
+        expr.type_args = tuple(subst[tp] for tp in sig.type_params)
+        ret = self._subst_type(sig.ret, subst) if sig.ret is not None else None
+        expr.resolved_type = ret
+        return ret
+
+    def _contains_type_param(self, t: Type | None) -> bool:
+        if isinstance(t, TypeParam):
+            return True
+        if isinstance(t, TupleType):
+            return any(self._contains_type_param(e) for e in t.elems)
+        if isinstance(t, (StructType, EnumType)):
+            return any(self._contains_type_param(a) for a in t.args)
+        return False
+
+    def _subst_type(self, t: Type | None, subst: dict[str, Type]) -> Type | None:
+        if isinstance(t, TypeParam):
+            return subst.get(t.name, t)
+        if isinstance(t, TupleType):
+            return TupleType(tuple(self._subst_type(e, subst) for e in t.elems))
+        if isinstance(t, StructType) and t.args:
+            return StructType(t.name, tuple(self._subst_type(a, subst) for a in t.args))
+        if isinstance(t, EnumType) and t.args:
+            return EnumType(t.name, tuple(self._subst_type(a, subst) for a in t.args))
+        return t
+
+    def _unify_param(self, ptype: Type, at: Type, subst: dict[str, Type]) -> bool:
+        if isinstance(ptype, TypeParam):
+            if ptype.name in subst:
+                return subst[ptype.name] == at
+            subst[ptype.name] = at
+            return True
+        if isinstance(ptype, TupleType):
+            if not isinstance(at, TupleType) or len(ptype.elems) != len(at.elems):
+                return False
+            return all(self._unify_param(p, a, subst)
+                       for p, a in zip(ptype.elems, at.elems))
+        if isinstance(ptype, StructType) and ptype.args:
+            if not isinstance(at, StructType) or at.name != ptype.name \
+                    or len(at.args) != len(ptype.args):
+                return False
+            return all(self._unify_param(p, a, subst)
+                       for p, a in zip(ptype.args, at.args))
+        if isinstance(ptype, EnumType) and ptype.args:
+            if not isinstance(at, EnumType) or at.name != ptype.name \
+                    or len(at.args) != len(ptype.args):
+                return False
+            return all(self._unify_param(p, a, subst)
+                       for p, a in zip(ptype.args, at.args))
+        return ptype == at
+
+    # -- generic aggregate instantiation -------------------------------------
+
+    def _struct_field_types(self, t: StructType) -> dict[str, Type]:
+        """Field types of struct instance `t`, with type arguments substituted."""
+        fields = self.structs[t.name]
+        params = self.struct_decls[t.name].type_params
+        if not params:
+            return fields
+        sub = dict(zip(params, t.args))
+        return {n: self._subst_type(ft, sub) for n, ft in fields.items()}
+
+    def _enum_variant_types(self, t: EnumType) -> dict[str, list[Type]]:
+        """Variant payloads of enum instance `t`, with type arguments substituted."""
+        variants = self.enums[t.name]
+        params = self.enum_decls[t.name].type_params
+        if not params:
+            return variants
+        sub = dict(zip(params, t.args))
+        return {v: [self._subst_type(pt, sub) for pt in payload]
+                for v, payload in variants.items()}
+
+    def _enum_name_ref(self, expr: ast.Expr, scope: _Scope) -> str | None:
+        """If `expr` names an enum type (not shadowed by a binding), return it."""
+        if isinstance(expr, ast.Name) and expr.ident in self.enums:
+            if scope.lookup(expr.ident) is None:
+                return expr.ident
+        return None
+
+    def _infer_type_args(self, params, template_types, nodes, scope,
+                         expected_args, expr, label) -> tuple[Type, ...]:
+        """Solve `params` by unifying each template type against the inferred
+        type of the matching value node (seeding from an expected instance's
+        args). Mirrors generic-call inference; returns the solved argument
+        tuple in `params` order."""
+        subst: dict[str, Type] = {}
+        if expected_args is not None and len(expected_args) == len(params):
+            subst.update(zip(params, expected_args))
+        value_types: list[Type] = []
+        for node, tt in zip(nodes, template_types):
+            hint_t = self._subst_type(tt, subst)
+            hint = hint_t if not self._contains_type_param(hint_t) else None
+            vt = self._expect_value(node, scope, hint)
+            value_types.append(vt)
+            self._unify_param(tt, vt, subst)
+        missing = [p for p in params if p not in subst]
+        if missing:
+            raise TypeCheckError(
+                f"cannot infer type parameter(s) {', '.join(missing)}; "
+                "add a type annotation to guide inference", expr.line, expr.column)
+        for node, tt, vt in zip(nodes, template_types, value_types):
+            want = self._subst_type(tt, subst)
+            if vt != want:
+                if isinstance(want, IntType) and _is_flexible_int_lit(node):
+                    self._infer_int_lit(node, want)
+                else:
+                    raise TypeCheckError(
+                        f"{label}: expected '{type_name(want)}', found '{type_name(vt)}'",
+                        node.line, node.column)
+        return tuple(subst[p] for p in params)
+
+    def _infer_variant_ctor(self, expr: ast.Call, enum_name: str, variant: str,
+                            scope: _Scope, expected: Type | None = None) -> Type:
+        variants = self.enums[enum_name]
+        if variant not in variants:
+            raise TypeCheckError(
+                f"enum '{enum_name}' has no variant '{variant}'",
+                expr.line, expr.column,
+            )
+        payload = variants[variant]
+        if len(expr.args) != len(payload):
+            raise TypeCheckError(
+                f"variant '{enum_name}.{variant}' expects {len(payload)} "
+                f"argument(s), got {len(expr.args)}",
+                expr.line, expr.column,
+            )
+        params = self.enum_decls[enum_name].type_params
+        if not params:
+            for arg, pt in zip(expr.args, payload):
+                at = self._expect_value(arg, scope, pt)
+                if at != pt:
+                    raise TypeCheckError(
+                        f"variant '{enum_name}.{variant}': expected "
+                        f"'{type_name(pt)}', found '{type_name(at)}'",
+                        arg.line, arg.column,
+                    )
+            et: Type = EnumType(enum_name)
+        else:
+            exp_args = (expected.args if isinstance(expected, EnumType)
+                        and expected.name == enum_name else None)
+            args_t = self._infer_type_args(
+                params, payload, expr.args, scope, exp_args, expr,
+                f"variant '{enum_name}.{variant}'")
+            et = EnumType(enum_name, args_t)
+        expr.enum_ctor = (enum_name, variant)
+        expr.resolved_type = et
+        return et
+
+    def _infer_field(self, expr: ast.FieldAccess, scope: _Scope,
+                     expected: Type | None = None) -> Type:
+        enum_name = self._enum_name_ref(expr.target, scope)
+        if enum_name is not None:
+            variants = self.enums[enum_name]
+            if expr.field_name not in variants:
+                raise TypeCheckError(
+                    f"enum '{enum_name}' has no variant '{expr.field_name}'",
+                    expr.line, expr.column,
+                )
+            payload = variants[expr.field_name]
+            if payload:
+                raise TypeCheckError(
+                    f"variant '{enum_name}.{expr.field_name}' takes "
+                    f"{len(payload)} argument(s); call it like "
+                    f"'{enum_name}.{expr.field_name}(...)'",
+                    expr.line, expr.column,
+                )
+            params = self.enum_decls[enum_name].type_params
+            if not params:
+                et: Type = EnumType(enum_name)
+            elif (isinstance(expected, EnumType) and expected.name == enum_name
+                  and len(expected.args) == len(params)):
+                et = expected
+            else:
+                raise TypeCheckError(
+                    f"cannot infer type argument(s) for '{enum_name}.{expr.field_name}'; "
+                    f"annotate the binding (e.g. ': {enum_name}<...>')",
+                    expr.line, expr.column,
+                )
+            expr.enum_ctor = (enum_name, expr.field_name)
+            expr.resolved_type = et
+            return et
+
         base = self._expect_value(expr.target, scope, None)
         if not isinstance(base, StructType):
             raise TypeCheckError(
                 f"type '{type_name(base)}' has no fields", expr.line, expr.column
             )
-        fields = self.structs[base.name]
+        fields = self._struct_field_types(base)
         if expr.field_name not in fields:
             raise TypeCheckError(
                 f"struct '{base.name}' has no field '{expr.field_name}'",
@@ -608,36 +1580,50 @@ class Checker:
         expr.resolved_type = ft
         return ft
 
-    def _infer_struct_lit(self, expr: ast.StructLit, scope: _Scope) -> Type:
+    def _infer_struct_lit(self, expr: ast.StructLit, scope: _Scope,
+                          expected: Type | None = None) -> Type:
         if expr.type_name not in self.structs:
             raise TypeCheckError(f"unknown struct '{expr.type_name}'", expr.line, expr.column)
-        fields = self.structs[expr.type_name]
+        template = self.structs[expr.type_name]
         provided: dict[str, ast.FieldInit] = {}
         for init in expr.fields:
             if init.name in provided:
                 raise TypeCheckError(
                     f"duplicate field '{init.name}' in struct literal", init.line, init.column
                 )
-            if init.name not in fields:
+            if init.name not in template:
                 raise TypeCheckError(
                     f"struct '{expr.type_name}' has no field '{init.name}'",
                     init.line, init.column,
                 )
             provided[init.name] = init
-            vt = self._expect_value(init.value, scope, fields[init.name])
-            if vt != fields[init.name]:
-                raise TypeCheckError(
-                    f"field '{init.name}': expected '{type_name(fields[init.name])}', "
-                    f"found '{type_name(vt)}'",
-                    init.line, init.column,
-                )
-        missing = [n for n in fields if n not in provided]
+        missing = [n for n in template if n not in provided]
         if missing:
             raise TypeCheckError(
                 f"missing field(s) in '{expr.type_name}' literal: {', '.join(missing)}",
                 expr.line, expr.column,
             )
-        st = StructType(expr.type_name)
+        params = self.struct_decls[expr.type_name].type_params
+        if not params:
+            for init in expr.fields:
+                vt = self._expect_value(init.value, scope, template[init.name])
+                if vt != template[init.name]:
+                    raise TypeCheckError(
+                        f"field '{init.name}': expected '{type_name(template[init.name])}', "
+                        f"found '{type_name(vt)}'",
+                        init.line, init.column,
+                    )
+            st: Type = StructType(expr.type_name)
+        else:
+            ordered = list(template.keys())
+            nodes = [provided[n].value for n in ordered]
+            ttypes = [template[n] for n in ordered]
+            exp_args = (expected.args if isinstance(expected, StructType)
+                        and expected.name == expr.type_name else None)
+            args_t = self._infer_type_args(
+                params, ttypes, nodes, scope, exp_args, expr,
+                f"struct '{expr.type_name}'")
+            st = StructType(expr.type_name, args_t)
         expr.resolved_type = st
         return st
 
@@ -671,6 +1657,56 @@ def _is_flexible_int_lit(node: ast.Expr) -> bool:
     return isinstance(node, ast.IntLit) and node.suffix is None
 
 
-def check(program: ast.Program) -> Checker:
-    """Type-check `program`, returning the populated Checker (raises on error)."""
-    return Checker(program).check()
+def _const_bool(literal: ast.Expr) -> bool:
+    """The boolean value of a `bool` literal pattern."""
+    return bool(getattr(literal, "value", False))
+
+
+def _prelude_decls() -> list[ast.Decl]:
+    # Parsed fresh each call so the returned nodes are never shared between
+    # programs (the checker annotates nodes in place). Lazy imports avoid a
+    # lexer/parser <-> types import cycle.
+    from .lexer import tokenize
+    from .parser import parse
+    return parse(tokenize(_PRELUDE_SRC)).decls
+
+
+def check(program: ast.Program, with_prelude: bool = True) -> Checker:
+    """Type-check `program`, returning the populated Checker (raises on error).
+
+    With `with_prelude` (the default), the `Option`/`Result` prelude (D16) is
+    injected first. After checking, `?` (`ast.Try`) nodes are rewritten to their
+    desugared `match`, so the interpreter and compiler only ever see `match`.
+    The monomorphizer re-checks an already-desugared, prelude-free program with
+    `with_prelude=False`.
+    """
+    if with_prelude:
+        program = ast.Program(_prelude_decls() + list(program.decls))
+    checker = Checker(program).check()
+    _desugar_try(program)
+    return checker
+
+
+def _desugar_try(program: ast.Program) -> None:
+    """Replace every `ast.Try` in the tree with the `match` the checker built."""
+    for decl in program.decls:
+        if isinstance(decl, ast.FunDecl):
+            _desugar_node(decl.body)
+
+
+def _desugar_node(node: ast.Node) -> None:
+    for f in dataclasses.fields(node):
+        setattr(node, f.name, _desugar_value(getattr(node, f.name)))
+
+
+def _desugar_value(val):
+    if isinstance(val, ast.Try):
+        match = val.desugared
+        _desugar_node(match)
+        return match
+    if isinstance(val, ast.Node):
+        _desugar_node(val)
+        return val
+    if isinstance(val, list):
+        return [_desugar_value(v) for v in val]
+    return val

@@ -5,6 +5,9 @@ struct Point {
     y: int,
 }
 
+#test(Point { x: 0, y: 0 }, Point { x: 3, y: 4 })[7]
+#test(Point { x: 1, y: 1 }, Point { x: 1, y: 1 })[0]
+#test(Point { x: 2, y: 5 }, Point { x: -3, y: 1 })[9]
 fun manhattan(a: Point, b: Point) -> int {
     var dx = a.x - b.x
     var dy = a.y - b.y

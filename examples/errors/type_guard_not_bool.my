@@ -1,0 +1,10 @@
+//~ type error: match guard must be 'bool'
+enum Shape { Circle(int), Rect(int, int), Empty }
+fun f(s: Shape) -> int {
+    return match s {
+        Shape.Circle(r) if r => r,
+        _                    => 0,
+    }
+}
+fun main() {
+}

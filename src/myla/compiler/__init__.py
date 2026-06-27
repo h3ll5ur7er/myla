@@ -11,6 +11,7 @@ import subprocess
 
 from ..types import Checker
 from .codegen_x86 import generate as _generate
+from .monomorphize import monomorphize
 
 
 class BuildError(Exception):
@@ -18,8 +19,12 @@ class BuildError(Exception):
 
 
 def compile_to_asm(checker: Checker) -> str:
-    """Return GAS/AT&T x86-64 assembly for a type-checked program."""
-    return _generate(checker)
+    """Return GAS/AT&T x86-64 assembly for a type-checked program.
+
+    Generics are monomorphized away first (D13), so codegen only ever sees
+    concrete types.
+    """
+    return _generate(monomorphize(checker))
 
 
 def build(checker: Checker, output: str, keep_asm: bool = False) -> str:

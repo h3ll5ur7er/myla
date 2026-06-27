@@ -1,0 +1,6 @@
+//~ type error: cannot assign to an immutable binding
+// `let` bindings are immutable; use `var` to reassign.
+fun main() {
+    let x = 1
+    x = 2
+}

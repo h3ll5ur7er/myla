@@ -44,8 +44,56 @@ class StructValue:
         return f"{self.name} {{ {inner} }}"
 
 
+class TupleValue:
+    """A runtime tuple instance with value semantics."""
+
+    __slots__ = ("elems",)
+
+    def __init__(self, elems: list):
+        self.elems = elems
+
+    def copy(self) -> "TupleValue":
+        return TupleValue([_copy(v) for v in self.elems])
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, TupleValue) and self.elems == other.elems
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "(" + ", ".join(repr(v) for v in self.elems) + ")"
+
+
+class EnumValue:
+    """A runtime enum instance: a variant tag plus its (copied) payload."""
+
+    __slots__ = ("enum_name", "variant", "payload")
+
+    def __init__(self, enum_name: str, variant: str, payload: list):
+        self.enum_name = enum_name
+        self.variant = variant
+        self.payload = payload
+
+    def copy(self) -> "EnumValue":
+        return EnumValue(self.enum_name, self.variant, [_copy(v) for v in self.payload])
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, EnumValue)
+            and self.enum_name == other.enum_name
+            and self.variant == other.variant
+            and self.payload == other.payload
+        )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        if not self.payload:
+            return f"{self.enum_name}.{self.variant}"
+        inner = ", ".join(repr(v) for v in self.payload)
+        return f"{self.enum_name}.{self.variant}({inner})"
+
+
 def _copy(value):
-    return value.copy() if isinstance(value, StructValue) else value
+    if isinstance(value, (StructValue, TupleValue, EnumValue)):
+        return value.copy()
+    return value
 
 
 class _Env:
@@ -143,6 +191,10 @@ class Interpreter:
         if isinstance(stmt, ast.VarDecl):
             env.define(stmt.name, _copy(self._eval(stmt.init, env)))
 
+        elif isinstance(stmt, ast.DestructDecl):
+            value = self._eval(stmt.init, env)
+            self._bind_pattern(stmt.binding, value, env)
+
         elif isinstance(stmt, ast.Assign):
             value = _copy(self._eval(stmt.value, env))
             target = stmt.target
@@ -184,6 +236,85 @@ class Interpreter:
         else:  # pragma: no cover - defensive
             raise MylaRuntimeError(f"cannot execute {type(stmt).__name__}", stmt.line, stmt.column)
 
+    def _eval_match(self, expr: ast.Match, env: _Env):
+        scrut = self._eval(expr.scrutinee, env)
+        for arm in expr.arms:
+            binds: dict[str, object] = {}
+            if not self._match_pattern(arm.pattern, scrut, binds):
+                continue
+            arm_env = _Env(env)
+            for name, val in binds.items():
+                arm_env.define(name, val)
+            if arm.guard is not None and not self._eval(arm.guard, arm_env):
+                continue
+            return self._eval_arm_body(arm.body, arm_env)
+        raise MylaRuntimeError(  # pragma: no cover - checker enforces exhaustiveness
+            "no match arm matched", expr.line, expr.column
+        )
+
+    def _eval_arm_body(self, body, env: _Env):
+        if isinstance(body, ast.Block):
+            inner = _Env(env)
+            stmts = body.statements
+            for i, s in enumerate(stmts):
+                if i == len(stmts) - 1 and isinstance(s, ast.ExprStmt):
+                    return self._eval(s.expr, inner)
+                self._exec_stmt(s, inner)
+            return None
+        return self._eval(body, env)
+
+    def _match_pattern(self, pat, value, binds: dict) -> bool:
+        if isinstance(pat, ast.PatWildcard):
+            return True
+        if isinstance(pat, ast.PatBinding):
+            variant = getattr(pat, "as_variant", None)
+            if variant is not None:
+                return isinstance(value, EnumValue) and value.variant == variant[1]
+            binds[pat.name] = _copy(value)
+            return True
+        if isinstance(pat, ast.PatLiteral):
+            return self._eval(pat.literal, _Env()) == value
+        if isinstance(pat, ast.PatEnum):
+            if not isinstance(value, EnumValue) or value.variant != pat.variant:
+                return False
+            for sub, item in zip(pat.elems, value.payload):
+                if not self._match_pattern(sub, item, binds):
+                    return False
+            return True
+        if isinstance(pat, ast.PatTuple):
+            assert isinstance(value, TupleValue)
+            for sub, item in zip(pat.elems, value.elems):
+                if not self._match_pattern(sub, item, binds):
+                    return False
+            return True
+        if isinstance(pat, ast.PatStruct):
+            assert isinstance(value, StructValue)
+            for fp in pat.fields:
+                if not self._match_pattern(fp.pattern, value.fields[fp.name], binds):
+                    return False
+            return True
+        if isinstance(pat, ast.PatOr):
+            for alt in pat.alts:
+                trial: dict[str, object] = {}
+                if self._match_pattern(alt, value, trial):
+                    binds.update(trial)
+                    return True
+            return False
+        raise MylaRuntimeError(  # pragma: no cover - defensive
+            "unsupported pattern", pat.line, pat.column
+        )
+
+    def _bind_pattern(self, binding, value, env: _Env) -> None:
+        if isinstance(binding, ast.BindWildcard):
+            return
+        if isinstance(binding, ast.BindName):
+            env.define(binding.name, _copy(value))
+            return
+        assert isinstance(binding, ast.BindTuple)
+        assert isinstance(value, TupleValue)
+        for elem, v in zip(binding.elems, value.elems):
+            self._bind_pattern(elem, v, env)
+
     def _resolve_struct(self, expr: ast.Expr, env: _Env) -> StructValue:
         """Return the actual (non-copied) StructValue an lvalue chain refers to."""
         if isinstance(expr, ast.Name):
@@ -203,6 +334,9 @@ class Interpreter:
         if isinstance(expr, ast.StrLit):
             return expr.value
         if isinstance(expr, ast.Name):
+            ctor = getattr(expr, "enum_ctor", None)
+            if ctor is not None:  # bare no-payload prelude variant, e.g. `None`
+                return EnumValue(ctor[0], ctor[1], [])
             return env.get(expr.ident)
         if isinstance(expr, ast.Unary):
             return self._eval_unary(expr, env)
@@ -211,11 +345,21 @@ class Interpreter:
         if isinstance(expr, ast.Call):
             return self._eval_call(expr, env)
         if isinstance(expr, ast.FieldAccess):
+            ctor = getattr(expr, "enum_ctor", None)
+            if ctor is not None:  # no-payload variant, e.g. `Color.Red`
+                return EnumValue(ctor[0], ctor[1], [])
             container = self._eval(expr.target, env)
             return container.fields[expr.field_name]
         if isinstance(expr, ast.StructLit):
             fields = {fi.name: _copy(self._eval(fi.value, env)) for fi in expr.fields}
             return StructValue(expr.type_name, fields)
+        if isinstance(expr, ast.TupleLit):
+            return TupleValue([_copy(self._eval(e, env)) for e in expr.elems])
+        if isinstance(expr, ast.TupleIndex):
+            container = self._eval(expr.target, env)
+            return container.elems[expr.index]
+        if isinstance(expr, ast.Match):
+            return self._eval_match(expr, env)
         raise MylaRuntimeError(  # pragma: no cover
             f"cannot evaluate {type(expr).__name__}", expr.line, expr.column
         )
@@ -265,6 +409,10 @@ class Interpreter:
         raise MylaRuntimeError(f"unknown operator '{op}'", expr.line, expr.column)  # pragma: no cover
 
     def _eval_call(self, expr: ast.Call, env: _Env):
+        ctor = getattr(expr, "enum_ctor", None)
+        if ctor is not None:  # `Enum.Variant(args...)`
+            payload = [_copy(self._eval(a, env)) for a in expr.args]
+            return EnumValue(ctor[0], ctor[1], payload)
         callee = expr.callee
         assert isinstance(callee, ast.Name)
         if callee.ident == "print":

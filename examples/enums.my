@@ -1,0 +1,56 @@
+// enums.my — algebraic data types and `match` (v0.2).
+// Variants can carry positional payloads; `match` is an expression with
+// exhaustiveness checking, guards, or-patterns, and nested patterns.
+
+enum Shape {
+    Circle(int)            // radius
+    Rect(int, int)         // width, height
+    Empty
+}
+
+enum Color { Red, Green, Blue }
+
+#test(Shape.Circle(2))[12]
+#test(Shape.Rect(3, 4))[12]
+#test(Shape.Empty)[0]
+fun area(s: Shape) -> int {
+    return match s {
+        Shape.Circle(r)  => 3 * r * r,
+        Shape.Rect(w, h) => w * h,
+        Shape.Empty      => 0,
+    }
+}
+
+#test(Color.Red)["warm"]
+#test(Color.Green)["cool"]
+#test(Color.Blue)["cool"]
+fun temperature(c: Color) -> str {
+    return match c {
+        Red          => "warm",
+        Green | Blue => "cool",      // or-pattern
+    }
+}
+
+#test(Shape.Circle(20))["big circle"]
+#test(Shape.Circle(1))["small circle"]
+#test(Shape.Empty)["other"]
+fun classify(s: Shape) -> str {
+    return match s {
+        Shape.Circle(r) if r > 10 => "big circle",   // guard
+        Shape.Circle(_)           => "small circle",
+        _                         => "other",
+    }
+}
+
+fun main() {
+    print(area(Shape.Circle(2)))     // 12
+    print(area(Shape.Rect(3, 4)))    // 12
+    print(area(Shape.Empty))         // 0
+
+    print(temperature(Color.Red))    // warm
+    print(temperature(Color.Blue))   // cool
+
+    print(classify(Shape.Circle(20))) // big circle
+    print(classify(Shape.Circle(1)))  // small circle
+    print(classify(Shape.Empty))      // other
+}

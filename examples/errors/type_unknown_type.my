@@ -1,0 +1,5 @@
+//~ type error: unknown type 'Nope'
+fun f(x: Nope) {
+}
+fun main() {
+}

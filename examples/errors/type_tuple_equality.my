@@ -1,0 +1,5 @@
+//~ type error: cannot compare
+// D37: `==` is primitives-only in v0.2; compare composites via `match`.
+fun main() {
+    let b = (1, 2) == (1, 2)
+}

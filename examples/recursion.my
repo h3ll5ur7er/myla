@@ -1,0 +1,109 @@
+// recursion.my — recursive enums: self-referential algebraic data types (v0.2.3).
+//
+// An enum is *recursive* when a variant payload refers back to the enum (a list's
+// tail, a tree's children). The compiler boxes those self-referential edges behind
+// a heap pointer, so values are built on the heap while keeping value semantics;
+// non-recursive enums stay inline. Heap cells are reference counted (v0.2.3b):
+// they are retained when shared and freed the moment the last owner is dropped, so
+// programs that build and discard structures in a loop run in bounded memory.
+
+enum List {
+    Cons(int, List)
+    Nil
+}
+
+enum Tree {
+    Leaf(int)
+    Node(Tree, Tree)
+}
+
+#test(List.Cons(1, List.Cons(2, List.Cons(3, List.Nil))))[6]
+#test(List.Nil)[0]
+fun sum(xs: List) -> int {
+    return match xs {
+        List.Cons(h, t) => h + sum(t),
+        List.Nil        => 0,
+    }
+}
+
+#test(List.Cons(1, List.Cons(2, List.Nil)))[2]
+#test(List.Nil)[0]
+fun length(xs: List) -> int {
+    return match xs {
+        List.Cons(_, t) => 1 + length(t),
+        List.Nil        => 0,
+    }
+}
+
+// Rebuilding a list from a `match`: each arm result is boxed on the heap.
+#test(List.Cons(2, List.Cons(5, List.Nil)))[List.Cons(4, List.Cons(10, List.Nil))]
+#test(List.Nil)[List.Nil]
+fun map_double(xs: List) -> List {
+    return match xs {
+        List.Cons(h, t) => List.Cons(h * 2, map_double(t)),
+        List.Nil        => List.Nil,
+    }
+}
+
+#test(Tree.Node(Tree.Leaf(3), Tree.Leaf(4)))[7]
+#test(Tree.Leaf(9))[9]
+fun total(t: Tree) -> int {
+    return match t {
+        Tree.Leaf(n)    => n,
+        Tree.Node(l, r) => total(l) + total(r),
+    }
+}
+
+// Nested patterns reach through several boxed edges; guards still apply.
+#test(Tree.Node(Tree.Leaf(4), Tree.Leaf(4)))["balanced pair"]
+#test(Tree.Node(Tree.Leaf(4), Tree.Leaf(5)))["pair"]
+#test(Tree.Node(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)), Tree.Leaf(7)))["branch"]
+#test(Tree.Leaf(1))["leaf"]
+fun shape(t: Tree) -> str {
+    return match t {
+        Tree.Node(Tree.Leaf(a), Tree.Leaf(b)) if a == b => "balanced pair",
+        Tree.Node(Tree.Leaf(_), Tree.Leaf(_))           => "pair",
+        Tree.Node(_, _)                                  => "branch",
+        Tree.Leaf(_)                                     => "leaf",
+    }
+}
+
+// Reassigning a recursive-enum variable while reading its old value: the old
+// list is dropped only after the new one (which retains the shared tail) is built.
+#test(4)[10]
+#test(0)[0]
+fun prepend_range(n: int) -> int {
+    var acc = List.Nil
+    var i = 1
+    while i <= n {
+        acc = List.Cons(i, acc)
+        i = i + 1
+    }
+    return sum(acc)
+}
+
+// Nested temporaries: `concat` and `map_double` build intermediate lists that are
+// reference counted and freed once consumed.
+#test(List.Cons(1, List.Nil), List.Cons(2, List.Cons(3, List.Nil)))[6]
+#test(List.Nil, List.Cons(7, List.Nil))[7]
+fun concat(a: List, b: List) -> int {
+    return match a {
+        List.Cons(h, t) => sum(List.Cons(h, t)) + sum(b),
+        List.Nil        => sum(b),
+    }
+}
+
+fun main() {
+    let xs = List.Cons(1, List.Cons(2, List.Cons(3, List.Nil)))
+    let ys = xs                 // shares xs's spine (a retain), value semantics hold
+    print(sum(xs))              // 6
+    print(sum(ys))             // 6
+    print(length(xs))          // 3
+    print(sum(map_double(xs)))  // 12
+    print(prepend_range(4))    // 10
+
+    let t = Tree.Node(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)), Tree.Leaf(7))
+    print(total(t))            // 10
+    print(shape(Tree.Node(Tree.Leaf(4), Tree.Leaf(4))))  // balanced pair
+    print(shape(t))            // branch
+}

@@ -1,0 +1,5 @@
+//~ lex error: invalid integer literal suffix
+// Only the sized-integer suffixes (i8..i64 / u8..u64) are valid.
+fun main() {
+    let x = 10i9
+}

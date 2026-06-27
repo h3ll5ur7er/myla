@@ -1,0 +1,10 @@
+//~ type error: unreachable match arm
+enum C { A, B }
+fun f(c: C) -> int {
+    return match c {
+        _ => 0,
+        A => 1,
+    }
+}
+fun main() {
+}

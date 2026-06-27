@@ -25,6 +25,8 @@ class TokenKind(Enum):
     FUN = auto()
     RETURN = auto()
     STRUCT = auto()
+    ENUM = auto()
+    MATCH = auto()
     TYPEALIAS = auto()
     IF = auto()
     ELSE = auto()
@@ -46,6 +48,8 @@ class TokenKind(Enum):
 
     # operators & punctuation
     ARROW = auto()        # ->
+    FATARROW = auto()     # =>
+    PIPE = auto()         # |
     DOTDOT = auto()       # ..
     EQ = auto()           # ==
     NE = auto()           # !=
@@ -72,6 +76,7 @@ class TokenKind(Enum):
     COLON = auto()        # :
     DOT = auto()          # .
     HASH = auto()         # #
+    QUESTION = auto()     # ?
 
     # structural
     NEWLINE = auto()      # statement separator
@@ -85,6 +90,8 @@ KEYWORDS: dict[str, TokenKind] = {
     "fun": TokenKind.FUN,
     "return": TokenKind.RETURN,
     "struct": TokenKind.STRUCT,
+    "enum": TokenKind.ENUM,
+    "match": TokenKind.MATCH,
     "typealias": TokenKind.TYPEALIAS,
     "if": TokenKind.IF,
     "else": TokenKind.ELSE,

@@ -1,0 +1,5 @@
+//~ type error: out of range
+fun main() {
+    let a = (1, 2)
+    print(a.2)
+}

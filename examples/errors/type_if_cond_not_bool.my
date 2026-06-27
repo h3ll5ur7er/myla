@@ -1,0 +1,6 @@
+//~ type error: if condition must be 'bool'
+fun main() {
+    if 1 {
+        print(1)
+    }
+}

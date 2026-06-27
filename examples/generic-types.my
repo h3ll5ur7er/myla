@@ -1,0 +1,113 @@
+// Generic structs & enums (v0.2.4b): parametric aggregates, monomorphized (D13).
+//
+// A `struct`/`enum` may take type parameters in `<...>` after its name; a use
+// site supplies concrete type arguments (`Box<int>`, `List<str>`). Each distinct
+// instantiation reached by the program is stamped out as its own concrete layout
+// before native codegen, so the backend never sees a type parameter — `Box<int>`
+// and `Box<str>` are simply two different fixed-size structs.
+//
+// Type arguments in *value* position are inferred: `Box { value: 5 }` solves
+// `T = int`, and a payload-free variant like `List.Nil` takes its type from the
+// surrounding annotation or the other arguments of its call. Recursive generic
+// enums (`List<T>`) are boxed exactly like non-generic recursive enums, so they
+// participate in reference counting per instantiation.
+//
+// Generic declarations can't carry `#test` (they have no single concrete
+// instantiation), so each is exercised through a concrete, tested wrapper.
+
+struct Box<T> {
+    value: T,
+}
+
+struct Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+enum Maybe<T> {
+    Just(T)
+    Nothing
+}
+
+// A recursive generic enum: `Cons` stores a `List<T>` inline, so the compiler
+// boxes it behind a heap pointer (the cycle would otherwise be infinite size).
+enum List<T> {
+    Cons(T, List<T>)
+    Nil
+}
+
+fun unwrap_or<T>(m: Maybe<T>, fallback: T) -> T {
+    return match m {
+        Maybe.Just(v) => v,
+        Maybe.Nothing => fallback,
+    }
+}
+
+fun prepend<T>(x: T, xs: List<T>) -> List<T> {
+    return List.Cons(x, xs)
+}
+
+fun length<T>(xs: List<T>) -> int {
+    return match xs {
+        List.Cons(_, rest) => 1 + length(rest),
+        List.Nil => 0,
+    }
+}
+
+#test(List.Cons(10, List.Cons(20, List.Cons(30, List.Nil))))[60]
+#test(List.Nil)[0]
+fun sum_list(xs: List<int>) -> int {
+    return match xs {
+        List.Cons(head, rest) => head + sum_list(rest),
+        List.Nil => 0,
+    }
+}
+
+// --- tested concrete wrappers ---------------------------------------------
+
+#test[42]
+fun box_roundtrip() -> int {
+    let b = Box { value: 42 }
+    return b.value
+}
+
+#test[1]
+fun pair_first() -> int {
+    let p = Pair { first: 1, second: true }
+    return p.first
+}
+
+#test[9]
+fun maybe_just() -> int {
+    return unwrap_or(Maybe.Just(9), 0)
+}
+
+#test[-1]
+fun maybe_nothing() -> int {
+    let n: Maybe<int> = Maybe.Nothing
+    return unwrap_or(n, -1)
+}
+
+#test[60]
+fun list_sum() -> int {
+    let xs: List<int> = List.Cons(10, List.Cons(20, List.Cons(30, List.Nil)))
+    return sum_list(xs)
+}
+
+// `List.Nil` here is typed via the other argument of `prepend` (which fixes
+// `T = str`), not via an annotation — exercises left-to-right inference.
+#test[2]
+fun list_len_str() -> int {
+    let ss: List<str> = prepend("a", prepend("b", List.Nil))
+    return length(ss)
+}
+
+#main
+fun main() {
+    print(box_roundtrip())
+    print(pair_first())
+    print(maybe_just())
+    print(maybe_nothing())
+    print(list_sum())
+    print(length(prepend("x", prepend("y", prepend("z", List.Nil)))))
+}

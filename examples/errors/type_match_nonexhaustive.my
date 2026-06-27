@@ -1,0 +1,10 @@
+//~ type error: non-exhaustive match
+enum Shape { Circle(int), Rect(int, int), Empty }
+fun f(s: Shape) -> int {
+    return match s {
+        Shape.Circle(r) => r,
+        Shape.Empty     => 0,
+    }
+}
+fun main() {
+}

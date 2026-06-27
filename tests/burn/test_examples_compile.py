@@ -14,8 +14,23 @@ EXAMPLES_DIR = os.path.abspath(
 
 EXAMPLES = [
     "hello.my", "variables.my", "functions.my", "loops.my",
-    "control_flow.my", "structs.my", "attributes.my",
+    "control_flow.my", "structs.my", "attributes.my", "tuples.my", "enums.my",
+    "types_and_aliases.my", "recursion.my", "regressions.my", "generics.my",
+    "generic-types.my", "option-result.my",
 ]
+
+
+class TestExamplesCompileCoverage(unittest.TestCase):
+    """Platform-independent: the compile list must track the examples dir."""
+
+    def test_compile_list_matches_examples(self):
+        on_disk = {f for f in os.listdir(EXAMPLES_DIR) if f.endswith(".my")}
+        listed = set(EXAMPLES)
+        self.assertEqual(
+            listed, on_disk,
+            f"compile coverage out of sync: missing {sorted(on_disk - listed)}, "
+            f"stale {sorted(listed - on_disk)}",
+        )
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)

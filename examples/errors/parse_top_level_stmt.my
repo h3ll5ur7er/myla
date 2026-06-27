@@ -1,0 +1,3 @@
+//~ parse error: expected a declaration
+// Only declarations (fun/struct/enum/typealias) live at the top level.
+let x = 1

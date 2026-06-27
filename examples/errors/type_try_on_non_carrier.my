@@ -1,0 +1,8 @@
+//~ type error: can only be applied to an Option or Result
+// `?` is meaningless on a plain value.
+fun bad() -> Result<int, str> {
+    let x = 5?
+    return Ok(x)
+}
+fun main() {
+}

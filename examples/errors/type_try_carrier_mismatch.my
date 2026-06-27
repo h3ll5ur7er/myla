@@ -1,0 +1,11 @@
+//~ type error: requires the enclosing function to return an Option
+// Same-carrier rule (D36): `?` on an Option cannot propagate out of a Result.
+fun maybe() -> Option<int> {
+    return Some(1)
+}
+fun bad() -> Result<int, str> {
+    let x = maybe()?
+    return Ok(x)
+}
+fun main() {
+}

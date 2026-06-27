@@ -1,0 +1,7 @@
+//~ type error: cannot return a value from a function with no return type
+fun f() {
+    return 1
+}
+fun main() {
+    f()
+}

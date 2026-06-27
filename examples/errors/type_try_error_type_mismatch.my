@@ -1,0 +1,11 @@
+//~ type error: no error conversion
+// `?` performs no error-type coercion in v0.2: the error types must match.
+fun get() -> Result<int, str> {
+    return Ok(1)
+}
+fun bad() -> Result<int, bool> {
+    let x = get()?
+    return Ok(x)
+}
+fun main() {
+}

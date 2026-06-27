@@ -1,0 +1,5 @@
+//~ type error: is not a tuple and cannot be indexed
+fun main() {
+    let a = 5
+    print(a.0)
+}

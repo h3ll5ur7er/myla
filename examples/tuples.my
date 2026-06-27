@@ -1,0 +1,44 @@
+// tuples.my — fixed-size products: literals, indexing, destructuring,
+// multiple return, and value semantics (v0.2).
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+// Multiple return is sugar for returning a tuple.
+#test(17, 5)[(3, 2)]
+#test(10, 2)[(5, 0)]
+fun divmod(a: int, b: int) -> (int, int) {
+    return a / b, a % b
+}
+
+// Tuples nest, and can carry aggregates like structs.
+#test(Point { x: 10, y: 20 }, 5)[(Point { x: 15, y: 25 }, 5)]
+fun shift(p: Point, by: int) -> (Point, int) {
+    return Point { x: p.x + by, y: p.y + by }, by
+}
+
+fun main() {
+    let pair: (int, str) = (7, "seven")
+    print(pair.0)                       // 7
+    print(pair.1)                       // seven
+
+    let single: (int,) = (42,)          // 1-tuple needs the trailing comma
+    print(single.0)                     // 42
+
+    let (q, r) = divmod(17, 5)
+    print(q)                            // 3
+    print(r)                            // 2
+
+    let ((a, b), c) = ((1, 2), 3)       // nested destructuring
+    print(a + b + c)                    // 6
+
+    let (_, only) = (99, 100)           // `_` ignores a component
+    print(only)                         // 100
+
+    let (moved, amount) = shift(Point { x: 10, y: 20 }, 5)
+    print(moved.x)                      // 15
+    print(moved.y)                      // 25
+    print(amount)                       // 5
+}

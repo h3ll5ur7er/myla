@@ -1,0 +1,5 @@
+//~ lex error: unexpected character
+// The lexer rejects characters that can't begin any token.
+fun main() {
+    let x = $foo
+}

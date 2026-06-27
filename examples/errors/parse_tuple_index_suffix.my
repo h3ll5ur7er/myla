@@ -1,0 +1,6 @@
+//~ parse error: tuple index may not have a type suffix
+// `.0` is a field selector, not an integer literal — no `u8`/`i64` suffix.
+fun main() {
+    let a = (1, 2)
+    let b = a.0u8
+}

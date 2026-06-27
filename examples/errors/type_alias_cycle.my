@@ -1,0 +1,5 @@
+//~ type error: type alias cycle
+typealias A = B
+typealias B = A
+fun main() {
+}

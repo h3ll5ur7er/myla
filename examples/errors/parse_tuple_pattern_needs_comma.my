@@ -1,0 +1,5 @@
+//~ parse error: expected ',' in tuple pattern
+// A parenthesized pattern needs a comma to be a tuple pattern: `(p,)`.
+fun f(t: (int, int)) -> int {
+    return match t { (a) => a }
+}

@@ -1,0 +1,7 @@
+//~ type error: has no variant
+enum Shape { Circle(int), Rect(int, int), Empty }
+fun f() -> Shape {
+    return Shape.Oval(1)
+}
+fun main() {
+}

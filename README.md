@@ -40,6 +40,7 @@ Design docs:
 - [docs/architecture.md](docs/architecture.md) — toolchain architecture (interpreter + x86-64 compiler)
 - [docs/future-features.md](docs/future-features.md) — proposals for post-v0.0 features
 - [docs/self-hosting.md](docs/self-hosting.md) — the road to v1.0: feature gap analysis + milestone plan
+- [docs/v0.2-data-modeling.md](docs/v0.2-data-modeling.md) — detailed v0.2 design: enums, `match`, tuples, generics
 - [docs/roadmap.md](docs/roadmap.md) — live implementation status, progress, and decision log
 - [docs/clarification_needed.md](docs/clarification_needed.md) — open decisions awaiting input
 
@@ -66,6 +67,51 @@ myla build myscript.my -o myscript
 # run inline #test cases
 myla test myscript.my
 ```
+
+### Testing convention
+
+Every `.my` example (and, once we self-host, the compiler source itself) attaches
+`#test(inputs)[expected]` cases to **every value-returning function**, turning each
+file into its own regression suite runnable with `myla test`. Entry points and
+void helpers are exempt since they cannot be unit-tested.
+
+This is deliberately redundant with the Python test suite today, but it is what
+keeps a self-hosted Myla honest: when the toolchain is written in Myla, these
+in-language tests are how we detect that a change broke something. The
+[examples burn test](tests/burn/test_examples_tests.py) enforces both halves of
+the convention (all `#test` cases pass, and no value-returning function is left
+untested).
+
+### Regression corpus
+
+Every language feature must appear in at least one runnable example, and every
+known edge case, past bug, and intentional error must be captured by a program
+the toolchain handles in a pinned way. Concretely:
+
+- **Positive cases** live in `examples/*.my` — runnable programs with `#test`
+  cases. Each is pinned to its stdout in
+  [`test_examples_run.py`](tests/burn/test_examples_run.py) and compiled to
+  native code and diffed against the interpreter in
+  [`test_examples_compile.py`](tests/burn/test_examples_compile.py). A coverage
+  check fails if an example lands without being registered in both.
+- **Negative cases** live in `examples/errors/*.my` — programs that *must* be
+  rejected. Each declares the diagnostic it expects with a directive comment:
+
+```
+//~ type error: cannot assign to an immutable binding
+fun main() {
+    let x = 1
+    x = 2
+}
+```
+
+The leading `<lex|parse|type|runtime> error` selects the pipeline stage that must
+fail and the trailing text is a substring of the expected message.
+[`test_error_corpus.py`](tests/burn/test_error_corpus.py) runs each through the
+toolchain and asserts it fails in the right stage with the right message — so a
+feature can neither silently *stop* rejecting bad input nor start failing for the
+wrong reason. When a bug is fixed, add the program that triggered it: an accepted
+program to `examples/regressions.my`, or a rejected one to `examples/errors/`.
 
 ## Roadmap
 

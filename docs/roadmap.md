@@ -7,9 +7,10 @@ progresses.
 Related docs: [language-spec.md](language-spec.md) · [grammar.md](grammar.md) ·
 [architecture.md](architecture.md) · [future-features.md](future-features.md) ·
 [self-hosting.md](self-hosting.md) ·
+[v0.2 data modeling](v0.2-data-modeling.md) ·
 open questions in [clarification_needed.md](clarification_needed.md).
 
-_Last updated: 2026-06-27 (v0.0 complete; self-hosting feature scoping added)._
+_Last updated: 2026-06-27 (v0.2 in progress — tuples, enums/`match`, **recursive enums (heap-boxed)**, **reference counting**, **generics (monomorphized): functions (v0.2.4a) + structs/enums (v0.2.4b)**, and the **`Option`/`Result` prelude + `?` operator (v0.2.4c)** landed end-to-end with interpreter/native parity)._
 
 ---
 
@@ -103,7 +104,7 @@ flowchart LR
 | v0.0.2 | Front end + tree-walking interpreter; `myla run`/`test`; burn-tests pass | Done |
 | v0.0.3 | Working x86-64 compiler; `myla build`; output matches interpreter | Done |
 | (in v0.0.2) | `#main` / `#test` attributes + `myla test` runner | Done (pulled into v0.0 per D10) |
-| v0.2 | Data modeling: `enum`+`match`, tuples, generics, `Option`/`Result` | Planned (Tier A) |
+| v0.2 | Data modeling: `enum`+`match`, tuples, generics, `Option`/`Result` | In progress — tuples, enums/`match`, recursive enums (heap-boxed), reference counting, **generics** (monomorphized): functions (v0.2.4a) + structs/enums (v0.2.4b), and the **`Option`/`Result` prelude + `?` (v0.2.4c)** done (interpreter+compiler+tests) (see [v0.2-data-modeling.md](v0.2-data-modeling.md)) |
 | v0.3 | Collections, strings & ops: lists/maps/sets, string toolkit, refcounting, bitwise, casts, `break`/`continue`, `const`, `assert` | Planned (Tier B+C) |
 | v0.4 | Abstraction: methods/`impl`/traits, lambdas/closures, pipelines | Planned (Tier D) |
 | v0.5 | Modules & runtime: imports + stdlib, char/byte model, freestanding I/O | Planned (Tier E) |
@@ -155,10 +156,10 @@ Targets follow the [self-hosting](self-hosting.md) dependency ordering (Tier A�
 
 | Feature | Status | Target | Notes |
 |---------|--------|--------|-------|
-| Algebraic data types (`enum`) + `match` | Decided (design) | v0.2 | Highest-leverage for self-hosting (Tier A) |
-| Tuples + multiple return (`return a, b`) | Decided (design) | v0.2 | Tier A |
-| Generics via monomorphization | Decided | v0.2 | Strategy locked (D13); Tier A |
-| Error handling: `Result`/`Option` + `?` | Decided | v0.2 | (D16); Tier A |
+| Algebraic data types (`enum`) + `match` | In progress (v0.2) | v0.2 | Enums + full `match` done (expr value D30; payloads D32; wildcard/binding/literal/enum/tuple/struct/nested/or-patterns + guards D33; exhaustiveness + redundancy). **Recursive enums heap-boxed (v0.2.3)**: self-referential payload edges become 8-byte heap pointers; pure struct/tuple cycles still rejected. **Reference counting (v0.2.3b)**: refcounted heap cells with a free list, retain-on-share / drop-at-scope-exit, freed at zero — build/discard loops run in bounded memory. Interpreter + native parity. |
+| Tuples + multiple return (`return a, b`) | Done (v0.2) | v0.2 | Arity ≥ 1, `(x,)` 1-tuple, no unit type (D35); indexing, destructuring, value semantics — interpreter + native parity |
+| Generics via monomorphization | Done (v0.2) | v0.2 | Strategy locked (D13); inferred at call sites (D34). **Functions (v0.2.4a) + structs/enums (v0.2.4b) done**: `fun id<T>`, `struct Box<T>`, `enum List<T>` (incl. recursive + RC), call-site/value inference, monomorphized per concrete instantiation (functions *and* layouts) before codegen; interpreter runs them by erasure. |
+| Error handling: `Result`/`Option` + `?` | Done (v0.2.4c) | v0.2 | (D16); same-carrier `?` (D36). `Option`/`Result` injected by the prelude (variants constructible unqualified: `Some`/`None`/`Ok`/`Err`); `?` desugars to a `match` once its carrier is known (success → value, failure → `return`). Monomorphized like any generic enum; interpreter + native parity. |
 | Collections: `[T]` list, `[K: V]` map, sets | Decided (design) | v0.3 | Deep immutability (D14); Tier B |
 | Memory model: reference counting | Decided | v0.3 | (D12); Tier B |
 | `str`: builder + views + byte-indexing + `format` | Decided (design) | v0.3 | v0.0 `str` is length-prefixed immutable (D21); Tier B |
@@ -189,6 +190,14 @@ Newest first. These are settled; revisiting requires a deliberate new decision.
 
 | # | Date | Decision | Rationale |
 |---|------|----------|-----------|
+| D37 | 2026-06-27 | Structural equality is deferred: `==`/`!=` stay **primitives-only** (int/bool/str/char) in v0.2; structs/enums/tuples are compared via `match`. A derivable `Eq` / structural `==` arrives with traits (v0.4). (V8) | Avoids committing equality semantics before traits exist |
+| D36 | 2026-06-27 | `?` requires the enclosing function to return the **same carrier** as the operand (Result→Result, Option→Option); no cross-carrier / error-type coercion in v0.2 — traits may generalize it later. (V7) | Simple and explicit; cleaner once traits land |
+| D35 | 2026-06-27 | Tuples have **arity ≥ 1**; the 1-tuple is written `(x,)` (type `(T,)`), the trailing comma disambiguating from grouping. **No unit `()` type** yet (void stays "no return type"). (V6) | 1-tuples may be needed; a unit type can come later |
+| D34 | 2026-06-27 | Generic type arguments are explicit only in **type positions** (`Option<int>`); at call sites they are **inferred** (no `f<int>(x)` expression syntax, to dodge the `<` ambiguity); annotate the binding if inference is insufficient. (V5) | Avoids turbofish ambiguity; keeps expressions clean |
+| D33 | 2026-06-27 | v0.2 `match` pattern set: wildcard `_`, binding, literal (int/bool/str/char), enum variant, tuple, struct, nested, **or-patterns `\|`**, and **guards `if`**; redundant arms are an error. `@`-bindings and range patterns deferred. (V4) | Covers AST-walking needs; room to grow |
+| D32 | 2026-06-27 | Enum variant payloads are **positional only** in v0.2 (`Add(Expr, Expr)`); struct-style named-field variants come later. (V3) | Smaller first cut; wrap a struct if names are needed |
+| D31 | 2026-06-27 | Variant qualification: construct as **`Enum.Variant(...)`**; `match` patterns may use bare / `.Variant` (scrutinee type is known); the **prelude** exports `Option`/`Result` variants unqualified. (V2) | Explicit construction, ergonomic patterns + common types |
+| D30 | 2026-06-27 | **`match` is an expression** (arms are an expression or a block-with-value; also usable as a statement when discarded) — the first value-producing block construct, relaxing the statement-orientation of D1. (V1) | Pattern matching that yields a value is essential for AST-walking code |
 | D29 | 2026-06-27 | Freestanding (no-libc) runtime: `std.fs`/`std.io`/`std.process` are thin syscall wrappers (`open`/`read`/`write`/`close`/`exit`, `argv` from `_start`). Process-spawning (driving `as`/`ld` via `fork`/`execve`) is **deferred until after a self-hosted code generator works** — the compiler emits asm and a shell wrapper links it first. (C7) | Honors D2; keeps the hard part (`exec`) off the critical path |
 | D28 | 2026-06-27 | Module-level `const NAME: T = <const expr>` only (compile-time constant, file-scoped); **no** top-level mutable/runtime bindings. (C6) | Gives keyword/precedence tables a home without global init-order issues |
 | D27 | 2026-06-27 | Mutating methods take a **`var self`** receiver (mirrors `let`/`var`); `recv.method(args)` desugars to `Method(recv, args)` with static dispatch. (C5) | Consistent with the binding-mutability spelling |

@@ -93,6 +93,10 @@ is self-hosting tractable. See §11–§18 below for the newly-scoped features.
 
 ## 1. Standard library of default datatypes
 
+> **Tuples + generics now have a detailed design** in
+> [v0.2-data-modeling.md](v0.2-data-modeling.md); `list`/`map`/`set` + the stdlib
+> remain v0.3 sketches below.
+
 ### Sketch
 
 Built-in generic collection types with literal syntax:
@@ -140,6 +144,9 @@ Tuples: v0.2. Generics: v0.2. List/map + stdlib: v0.3.
 ---
 
 ## 2. Easy tuple returns
+
+> **Detailed design** (tuple types/literals, destructuring, `return a, b`) in
+> [v0.2-data-modeling.md](v0.2-data-modeling.md) §2.
 
 ### Sketch
 
@@ -446,6 +453,11 @@ Strong agreement — this is the highest-leverage feature for self-hosting, beca
 the compiler's own AST is naturally a sum type. Swift/Rust enums + `match` are
 the model.
 
+> **Detailed, decision-complete design:**
+> [v0.2-data-modeling.md](v0.2-data-modeling.md) (this section is the original
+> sketch; the v0.2 doc has the full syntax, grammar, exhaustiveness, and
+> implementation plan).
+
 ### Sketch
 
 ```my
@@ -584,6 +596,9 @@ let c: float = 1.5    // float = float32
 ```
 
 ### Error handling: `Result`/`Option` + `?` (D16)
+
+> **Detailed design** (prelude definitions, `?` semantics & desugaring, carrier
+> rules) in [v0.2-data-modeling.md](v0.2-data-modeling.md) §5.
 
 Generic ADTs (no exceptions). The `?` operator propagates the error variant:
 

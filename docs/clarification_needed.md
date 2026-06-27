@@ -4,15 +4,15 @@ Open decisions that need your input before (or during) implementation. When you
 decide one, it moves to the **Decision log** in [roadmap.md](roadmap.md) and is
 removed here.
 
-_Last updated: 2026-06-27 (C1–C7 resolved → D23–D29)._
+_Last updated: 2026-06-27 (V1–V8 resolved → D30–D37; v0.2 design locked)._
 
 ---
 
 ## Still open
 
-**None currently blocking.** The self-hosting scoping questions C1–C7 have been
-answered and recorded as decisions **D23–D29** in [roadmap.md](roadmap.md) (see
-the "Recently resolved" summary below).
+**None currently blocking.** The v0.2 data-modeling sub-decisions V1–V8 have been
+answered and recorded as **D30–D37** in [roadmap.md](roadmap.md) (summary below).
+v0.2 is now design-locked and ready to implement.
 
 ### Likely later batches (not yet detailed)
 
@@ -42,3 +42,10 @@ destination (D23) · C2 `>>` does both shift & compose, resolved by operand type
 (D24) · C3 dedicated `char` type for UTF-8 (D25) · C4 `x as T` casts + wrap/extend
 semantics (D26) · C5 `var self` mutating receiver (D27) · C6 module-level `const`
 only (D28) · C7 freestanding no-libc syscall runtime, defer `exec` (D29).
+
+**v0.2 data modeling:** V1 `match` is an expression (D30) · V2 `Enum.Variant`
+construction + prelude shorthand (D31) · V3 positional payloads only (D32) · V4
+pattern set incl. or-patterns + guards (D33) · V5 generic args inferred at call
+sites (D34) · V6 arity ≥ 1 with `(x,)` 1-tuples, no unit type (D35) · V7
+same-carrier `?` (D36) · V8 `==` primitives-only, structural eq via traits later
+(D37).

@@ -1,0 +1,10 @@
+//~ type error: expected 'int32', found 'str'
+// Once a generic struct's type argument is fixed, its fields are concrete: here
+// `T = int` is fixed by the annotation, so a `str` initializer is rejected.
+struct Box<T> {
+    value: T,
+}
+fun main() {
+    let b: Box<int> = Box { value: "nope" }
+    print(0)
+}

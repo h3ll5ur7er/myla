@@ -1,0 +1,4 @@
+//~ type error: print() takes exactly one argument
+fun main() {
+    print(1, 2)
+}

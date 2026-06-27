@@ -1,0 +1,4 @@
+//~ type error: cannot redefine builtin
+// `print` is a builtin and cannot be shadowed by a user function.
+fun print() {
+}

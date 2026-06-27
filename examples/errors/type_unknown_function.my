@@ -1,0 +1,4 @@
+//~ type error: unknown function
+fun main() {
+    let x = nope(1)
+}

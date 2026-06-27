@@ -1,0 +1,10 @@
+//~ type error: requires the enclosing function to return a Result
+// `?` on a Result needs the enclosing function to return a Result (D36).
+fun get() -> Result<int, str> {
+    return Ok(1)
+}
+fun bad() {
+    let x = get()?
+}
+fun main() {
+}

@@ -1,0 +1,5 @@
+//~ parse error: expected ',' in destructuring binding
+// `(a)` is not a destructuring binding; use `(a,)` to unpack a 1-tuple.
+fun main() {
+    let (a) = (1,)
+}

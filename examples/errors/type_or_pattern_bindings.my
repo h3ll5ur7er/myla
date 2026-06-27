@@ -1,0 +1,10 @@
+//~ type error: bind the same names
+// Every alternative of an or-pattern must bind identical names.
+enum E { A(int), B(int) }
+fun f(e: E) -> int {
+    return match e {
+        A(x) | B(y) => x,
+    }
+}
+fun main() {
+}

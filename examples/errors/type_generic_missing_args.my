@@ -1,0 +1,12 @@
+//~ type error: expects 1 type argument(s), got 0
+// A generic type can't be named bare in a type position; supply its arguments.
+enum Maybe<T> {
+    Just(T)
+    Nothing
+}
+fun f(m: Maybe) -> int {
+    return 0
+}
+fun main() {
+    print(0)
+}

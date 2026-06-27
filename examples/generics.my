@@ -1,0 +1,76 @@
+// Generics (v0.2.4a): parametric functions, monomorphized (D13).
+//
+// Type parameters are declared in `<...>` after the function name. Type
+// arguments are *inferred* at the call site (D34) — there is no `f<int>(x)`
+// call syntax, because `<` would be ambiguous with comparison in an
+// expression. Each concrete instantiation reached from the program is stamped
+// out as its own specialized function before native codegen, so a `T` never
+// survives to the backend.
+//
+// Generic functions can't carry `#test` (they have no single concrete
+// instantiation), so every generic below is exercised through a concrete,
+// tested wrapper — keeping the example honest under the project's test
+// convention.
+
+fun id<T>(x: T) -> T {
+    return x
+}
+
+fun firstof<T>(pair: (T, T)) -> T {
+    let (a, _) = pair
+    return a
+}
+
+fun swap<A, B>(p: (A, B)) -> (B, A) {
+    let (a, b) = p
+    return (b, a)
+}
+
+// A type parameter used inside a tuple result, and a generic that calls
+// another generic (`id`) — the inner call is monomorphized per instantiation.
+fun dup<T>(x: T) -> (T, T) {
+    let a = id(x)
+    return (a, a)
+}
+
+// --- tested concrete wrappers ---------------------------------------------
+
+#test(7)[7]
+#test(-3)[-3]
+fun id_int(n: int) -> int {
+    return id(n)
+}
+
+#test[true]
+fun id_bool_roundtrip() -> bool {
+    return id(true)
+}
+
+#test[5]
+fun first_pair() -> int {
+    return firstof((5, 9))
+}
+
+#test[2]
+fun swap_then_first() -> int {
+    let (a, _) = swap((1, 2))   // (2, 1)
+    return a
+}
+
+#test[16]
+fun dup_sum() -> int {
+    let (a, b) = dup(8)
+    return a + b
+}
+
+#main
+fun main() {
+    print(id(42))
+    print(id("myla"))
+    print(firstof((10, 20)))
+    let (x, y) = swap((1, 2))   // (2, 1)
+    print(x)
+    print(y)
+    let (p, q) = dup(8)
+    print(p + q)
+}

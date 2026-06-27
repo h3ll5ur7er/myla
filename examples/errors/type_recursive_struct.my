@@ -1,0 +1,9 @@
+//~ type error: infinite size
+// Recursive *enums* are allowed (boxed), but a struct/tuple cycle has no place
+// to insert indirection, so it would have infinite size and is rejected.
+struct Node {
+    value: int,
+    next: Node,
+}
+fun main() {
+}

@@ -1,0 +1,4 @@
+//~ parse error: expected ',' in tuple type
+// `(int)` is just a parenthesized type; the 1-tuple type is `(int,)`.
+fun f(x: (int)) {
+}

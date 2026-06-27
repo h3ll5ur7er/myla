@@ -1,0 +1,7 @@
+//~ type error: carries a payload
+// `Some` carries a payload, so it must be called: `Some(x)`, not bare `Some`.
+fun bad() -> Option<int> {
+    return Some
+}
+fun main() {
+}

@@ -1,0 +1,12 @@
+//~ type error: cannot infer type argument(s)
+// A payload-free variant of a generic enum gives inference nothing to go on,
+// so without an annotation (or another argument that fixes the type) the type
+// arguments are ambiguous.
+enum Maybe<T> {
+    Just(T)
+    Nothing
+}
+fun main() {
+    let n = Maybe.Nothing
+    print(0)
+}

@@ -1,0 +1,4 @@
+//~ type error: unknown name
+fun main() {
+    let x = y
+}
