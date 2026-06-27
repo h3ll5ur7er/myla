@@ -1,0 +1,17 @@
+// functions.my — declarations, parameters, return values, recursion.
+
+fun add(a: int, b: int) -> int {
+    return a + b
+}
+
+fun factorial(n: int) -> int {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fun main() {
+    print(add(2, 3))        // 5
+    print(factorial(5))     // 120
+}

@@ -1,0 +1,23 @@
+// attributes.my — built-in v0.0 attributes: #main and #test.
+
+// #test cases are checked by `myla test`: call the function with the inputs in
+// (...) and assert the result equals the value in [...].
+#test(1, 2)[3]
+#test(4, 2)[6]
+#test(0, 0)[0]
+fun add(a: int, b: int) -> int {
+    return a + b
+}
+
+// Literal type suffixes disambiguate sized integers without an annotation.
+#test(255u8)[0u8]      // 255 + 1 wraps to 0 in a uint8
+fun inc_byte(b: uint8) -> uint8 {
+    return b + 1u8
+}
+
+// #main marks the entry point, so it need not be named `main`.
+#main
+fun run() {
+    print(add(2, 3))       // 5
+    print(inc_byte(255u8)) // 0
+}

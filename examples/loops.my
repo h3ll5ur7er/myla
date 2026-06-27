@@ -1,0 +1,18 @@
+// loops.my — for-in ranges (half-open) and while loops.
+
+fun main() {
+    // for over a half-open range: 0,1,2,3,4
+    var sum = 0
+    for i in 0..5 {
+        sum = sum + i
+    }
+    print(sum)          // 10
+
+    // while loop counting down
+    var n = 3
+    while n > 0 {
+        print(n)        // 3, 2, 1
+        n = n - 1
+    }
+    print(n == 0)       // true
+}

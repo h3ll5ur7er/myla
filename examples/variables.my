@@ -1,0 +1,22 @@
+// variables.my — let/var, type inference, explicit annotations, mutation.
+
+fun main() {
+    // immutable binding, type inferred as int
+    let x = 10
+
+    // explicit type annotation
+    let name: str = "Ann"
+
+    // inferred bool
+    let ready = true
+
+    // mutable binding can be reassigned
+    var count = 0
+    count = count + 1
+    count = count + 1
+
+    print(x)        // 10
+    print(name)     // Ann
+    print(ready)    // true
+    print(count)    // 2
+}

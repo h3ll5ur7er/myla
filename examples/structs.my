@@ -1,0 +1,29 @@
+// structs.my — declaration, construction, field access, value semantics.
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+fun manhattan(a: Point, b: Point) -> int {
+    var dx = a.x - b.x
+    var dy = a.y - b.y
+    if dx < 0 { dx = -dx }
+    if dy < 0 { dy = -dy }
+    return dx + dy
+}
+
+fun main() {
+    let origin = Point { x: 0, y: 0 }
+    let here = Point { x: 3, y: 4 }
+
+    print(here.x)                       // 3
+    print(here.y)                       // 4
+    print(manhattan(origin, here))      // 7
+
+    // value semantics: mutating a copy leaves the original untouched
+    var moved = here
+    moved.x = 100
+    print(moved.x)                      // 100
+    print(here.x)                       // 3
+}

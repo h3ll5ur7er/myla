@@ -1,0 +1,5 @@
+// hello.my — the smallest runnable Myla program.
+
+fun main() {
+    print("Hello from Myla!")
+}
