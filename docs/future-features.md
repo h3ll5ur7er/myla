@@ -69,20 +69,25 @@ flowchart TD
     lambdas --> attrs
 ```
 
-My recommended rollout:
+My recommended rollout (now reconciled with the self-hosting dependency analysis
+in [self-hosting.md](self-hosting.md) §6 — self-hosting is the **destination**
+(v1.0), reached *through* the feature milestones, not before them):
 
 | Version | Theme | Features |
 |---------|-------|----------|
-| v0.0 | bootstrap core | current spec: `fun`, explicitly sized integers + `int` alias, `typealias` |
-| v0.0.x | testing ergonomics | `#main`, `#test(...)[...]` attributes (worth pulling in early) |
-| v0.2 | data modeling | tuples, algebraic data types (`enum`) + `match`, basic generics |
-| v0.3 | collections + stdlib | `[T]` lists, `[K: V]` maps, growable stdlib |
-| v0.4 | first-class functions | lambdas, closures, function types, pipelines |
-| v0.5 | ergonomics | operator overloading, custom operators, compound-assign sugar |
+| v0.0 | bootstrap core | current spec: `fun`, explicitly sized integers + `int` alias, `typealias`, `#main`/`#test` |
+| v0.2 | data modeling | tuples + multiple return, algebraic data types (`enum`) + `match`, generics, `Option`/`Result` |
+| v0.3 | collections, strings & ops | `[T]` lists, `[K: V]` maps, sets, string toolkit (`StringBuilder`/slices/`format`), refcounting, **bitwise ops (§11)**, **numeric casts (§12)**, **`break`/`continue` (§13)**, **module-level `const` (§15)**, **`assert`/`panic` (§16)** |
+| v0.4 | abstraction | **methods + `impl` + traits (§14)**, lambdas/closures + function types, pipelines, operator overloading |
+| v0.5 | modules & runtime | modules/imports + stdlib layout, **chars/bytes string model (§17)**, **freestanding I/O runtime: file read/write, `argv`, `stderr`, `exit` (§18)** |
+| v0.6–v0.9 | self-hosting bring-up | port lexer → parser → checker → interpreter → codegen to Myla, differentially tested against the Python reference |
+| v1.0 | self-hosted | Myla compiles Myla (three-stage fixed point) |
+| post-1.0 | ergonomics & meta | custom operators, compound-assign/`**` sugar, user-defined macros |
 
 Rationale for the order: ADTs/tuples/generics unblock writing the compiler's own
-AST in Myla; collections + stdlib follow naturally; functional and operator
-features are quality-of-life on top.
+AST in Myla; collections + the string toolkit + bit/cast operations unblock the
+lexer/parser/codegen; abstraction and modules make the port ergonomic; only then
+is self-hosting tractable. See §11–§18 below for the newly-scoped features.
 
 ---
 
@@ -304,7 +309,7 @@ compiler exists. Don't build the general macro system before self-hosting.
 > section is retained as the design rationale; see [roadmap.md](roadmap.md) for
 > status.
 
-The request's `examples/functional.my` explores application/composition by
+The request's `proposals/functional.my` explores application/composition by
 **juxtaposition** (`add1 add2`, `pickNeighbors add print (5)`). I want to push
 back on that specific syntax and propose explicit operators instead.
 
@@ -361,8 +366,13 @@ print(add1(3))               // 4
 Adopt `|>` and `>>` plus `_`-placeholder partial application. **Skip
 juxtaposition-composition and implicit auto-currying.** This delivers the same
 expressiveness as the sketch with an unambiguous grammar. (I've left
-`examples/functional.my` as your original visualization; the pipeline/composition
+`proposals/functional.my` as your original visualization; the pipeline/composition
 sketch above is the agreed rewrite of it.)
+
+> **Note (composition vs. right-shift) — DECIDED (D24).** `>>` is used for
+> **both** function composition *and* right-shift; the two are disambiguated **by
+> operand type** at type-check time (integer operands → shift; function operands
+> → compose). No separate composition token is introduced.
 
 ### Target
 
@@ -655,3 +665,316 @@ toolkit lands with the stdlib (v0.3) and is designed to avoid rework:
 Length-prefixed + immutable is chosen so length is O(1), embedded NULs are
 allowed, slices can alias existing buffers later, and sharing is safe under
 reference counting (D12) and deep immutability (D14).
+
+---
+
+# Features surfaced by the self-hosting gap analysis (§11–§18)
+
+The sections above were the original forward-looking catalog. The following were
+identified by working backwards from the existing toolchain in
+[self-hosting.md](self-hosting.md) §2 — they are concrete prerequisites for
+writing the compiler in Myla, not speculative extras.
+
+---
+
+## 11. Bitwise & shift operators
+
+### Sketch
+
+```my
+let mask  = value & 0xFFu32        // and
+let flags = a | b                  // or
+let parity = a ^ b                 // xor
+let hi    = ~low                   // bitwise not
+let wide  = byte << 8u32           // left shift
+let narrow = value >> 4u32         // right shift (see clash note)
+```
+
+### Semantics
+
+- Defined on integer types only; operands must share a type (consistent with D4,
+  no implicit mixing). Shift amount is an integer; shifting by ≥ width is an
+  **error** (per D26).
+- Right shift is **arithmetic** for signed types, **logical** for unsigned —
+  matching the canonical-value representation the codegen already uses.
+
+### Implications
+
+- Lexer: add `&`, `|`, `^`, `~`, `<<`, `>>` tokens (`&`/`|` are visually close to
+  `&&`/`||`, but longest-match already handles that). Per **D24**, `>>` is the
+  same token as function composition; the **type checker** picks shift vs.
+  compose from the operand types (integers → shift, functions → compose).
+- Codegen: direct `and`/`or`/`xor`/`not`/`shl`/`sar`/`shr` — trivial, and in fact
+  the wrapping logic already emits shifts/masks internally.
+
+### Recommendation — DECIDED (D24)
+
+Add all six in v0.3. `>>`/`<<` are shifts on integer operands; `>>` also means
+composition on function operands (resolved by operand type, no new token).
+
+### Target
+
+v0.3.
+
+---
+
+## 12. Explicit numeric conversions / casts
+
+### Sketch
+
+```my
+let b: uint8  = 300 as uint8       // truncates to 44 (wraps, like assignment)
+let w: int32  = b as int32         // widening, zero-extend (unsigned source)
+let n: int64  = ch as int64        // byte/char code -> integer
+```
+
+### Semantics
+
+- D4 forbids *implicit* width/sign mixing; a compiler nonetheless converts
+  constantly (offsets, widths, char codes). An explicit `as` cast makes the
+  conversion visible and intentional.
+- Narrowing wraps (mod 2^width); widening zero-extends from unsigned and
+  sign-extends from signed; sign reinterpretation at equal width is a bit-level
+  no-op. These mirror the interpreter/codegen wrapping already implemented.
+
+### Implications
+
+- Lexer: `as` becomes a keyword. Parser: a postfix/`as`-expression at low
+  precedence. Checker: source and target must both be numeric (later: enum↔int).
+  Codegen: a `movzx`/`movsx`/mask — cheap.
+
+### Recommendation — DECIDED (D26)
+
+Adopt `x as T` (reads well, Rust/Swift-familiar) with the wrap/extend semantics
+above; shifting by ≥ width is an error.
+
+### Target
+
+v0.3.
+
+---
+
+## 13. Loop control: `break` / `continue`
+
+### Sketch
+
+```my
+for i in 0..n {
+    if done(i) { break }
+    if skip(i) { continue }
+    process(i)
+}
+```
+
+### Semantics
+
+- `break` exits the nearest enclosing `while`/`for`; `continue` jumps to its next
+  iteration (the `for` step still runs). Both are statements; using them outside
+  a loop is a compile error. (Labeled break is a possible later addition.)
+
+### Implications
+
+- Parser: two trivial statements. Checker: track loop nesting depth. Codegen:
+  `jmp` to the loop's end/continue label — the labels already exist in the
+  emitted `while`/`for`.
+
+### Recommendation
+
+Add both in v0.3; they are needed by the lexer/parser scan loops. No real
+downside.
+
+### Target
+
+v0.3.
+
+---
+
+## 14. Methods & `impl` blocks
+
+### Sketch
+
+```my
+struct Lexer { src: str, pos: int }
+
+impl Lexer {
+    fun peek(self) -> uint8 { return self.src[self.pos] }
+    fun advance(var self) { self.pos = self.pos + 1 }   // mutating method
+}
+
+let c = lexer.peek()
+```
+
+### Semantics
+
+- An `impl T { ... }` block attaches methods to a type; the first parameter is
+  `self` (by-value/read-only) or `var self` (mutating, requires a `var`
+  receiver). Call syntax is `receiver.method(args)`, sugar for
+  `Method(receiver, args)`.
+- Traits (§6) build on this: a trait is a set of method signatures, an
+  `impl Trait for T` provides them, and built-in operators desugar to trait
+  methods.
+
+### Implications
+
+- Parser: `impl` blocks, `self`/`var self`. Checker: method resolution by
+  receiver type, mutability of `self`. Codegen: static dispatch (just a call) —
+  monomorphized, no vtables in v0.x.
+- This is what makes the Python `class Lexer: def peek(self): …` port cleanly.
+
+### Recommendation — DECIDED (D27)
+
+Introduce plain methods + `impl` in v0.4 (before/with traits). Keep dispatch
+static; defer trait objects/dynamic dispatch. A mutating method's receiver is
+spelled **`var self`** (mirrors `let`/`var`) and requires a `var` receiver.
+
+### Target
+
+v0.4.
+
+---
+
+## 15. Module-level constants (`const`)
+
+### Sketch
+
+```my
+const KEYWORDS_COUNT: int = 16
+const NEWLINE: uint8 = 10u8
+```
+
+### Semantics
+
+- A compile-time-constant, file-scoped binding (immutable, no runtime
+  initialization order issues). Distinct from a function. v0.0 currently has **no
+  top-level bindings at all** — everything is inside `fun` bodies — so the
+  keyword/precedence tables a compiler needs have no home yet.
+- **DECIDED (D28):** `const` only — there are **no** top-level mutable/runtime
+  bindings (no top-level `let`).
+
+### Implications
+
+- Parser: a top-level `const` declaration. Checker: the initializer must be a
+  constant expression. Codegen: emit into `.rodata` or inline the value.
+
+### Recommendation — DECIDED (D28)
+
+Add `const NAME: T = <const expr>` in v0.3 (pairs with the table-heavy lexer
+port); no global mutable state.
+
+### Target
+
+v0.3.
+
+---
+
+## 16. `assert` / `panic` / `unreachable`
+
+### Sketch
+
+```my
+assert(pos < len)               // abort (nonzero exit) if false
+panic("internal error: " + msg) // unconditional abort with a message
+unreachable()                   // mark a branch the checker should never reach
+```
+
+### Semantics
+
+- For **internal invariants**, distinct from user-facing recoverable errors
+  (which use `Result`/`?`, D16). On failure they write a message to stderr and
+  exit nonzero — the same trap mechanism the codegen already uses for
+  divide-by-zero.
+
+### Implications
+
+- Built-in intrinsics (not user functions). Codegen reuses the existing `__trap`
+  path plus a stderr `write`. `unreachable()` can also inform exhaustiveness.
+
+### Recommendation
+
+Add in v0.3 alongside the runtime/trap work. Cheap and valuable for a compiler.
+
+### Target
+
+v0.3.
+
+---
+
+## 17. Characters & bytes (the lexing model)
+
+### Sketch
+
+```my
+let c: uint8 = s[i]              // byte at index (option A: byte-oriented)
+if c == 'a' { ... }              // char literal -> its code
+
+let ch: char = s.char_at(i)     // option B: a dedicated Unicode-scalar `char`
+```
+
+### Semantics
+
+- The lexer must read and compare the units of a string. Two models:
+  - **Byte-oriented** (option A, recommended): indexing yields `uint8`; char
+    literals `'a'` are sugar for their byte/codepoint value; ASCII source keeps
+    this simple, with UTF-8 decoding via library helpers when needed.
+  - **`char` type** (option B): a distinct Unicode-scalar type with its own
+    literal and conversions to/from integers.
+- Either way we likely want **char literals** (`'a'`, `'\n'`) and `str` indexing.
+
+### Implications
+
+- Lexer: char-literal token. Parser/checker: indexing expression `s[i]` and its
+  result type. This ties into the string toolkit (§10 / D21) and casts (§12).
+
+### Recommendation — DECIDED (D25)
+
+Add a dedicated **`char`** type (a Unicode scalar value, option B) with char
+literals (`'a'`, `'\n'`). String iteration/indexing is **UTF-8 codepoint-aware**
+and yields `char`; raw byte access stays available via a bytes view for the cases
+that need it. `char` converts to/from integers via the `as` casts (D26).
+
+### Target
+
+v0.5 (with the string toolkit + UTF-8 handling).
+
+---
+
+## 18. Freestanding I/O & runtime
+
+### Sketch
+
+A tiny syscall-based runtime (honoring D2 — no libc):
+
+```my
+let src  = fs.read_to_string(path)   // open/read/close
+let args = process.args()            // argv
+io.eprintln("error: " + msg)         // write to stderr (fd 2)
+process.exit(1)                       // exit syscall
+```
+
+### Semantics
+
+- The self-hosted compiler needs to **read a source file**, **see `argv`**, write
+  to **stdout/stderr**, and **exit** with a status — none of which v0.0 has
+  beyond `print`. All are thin wrappers over `open`/`read`/`write`/`close`/`exit`
+  syscalls; `argv`/`envp` are read from the stack at `_start`.
+- The **build driver** (running `as`/`ld`) needs process spawning
+  (`fork`/`execve`). Per [self-hosting.md](self-hosting.md) §4 this is staged
+  last: the compiler first just emits assembly, a shell wrapper links it, and a
+  `process.exec` wrapper comes later so Myla can drive the toolchain itself.
+
+### Implications
+
+- Stdlib modules (`std.fs`, `std.io`, `std.process`) — depends on modules (D17)
+  and collections/strings. Codegen already emits raw `write`/`exit`; this
+  generalizes that to more syscalls.
+
+### Recommendation — DECIDED (D29)
+
+Freestanding, no-libc: land file read + `argv` + stderr + exit in v0.5 (with
+modules) as thin syscall wrappers. **Defer process spawning (`as`/`ld` driving)
+until after a self-hosted code generator works** — emit asm + link via a shell
+wrapper first.
+
+### Target
+
+v0.5; process spawning post-self-hosted-codegen.

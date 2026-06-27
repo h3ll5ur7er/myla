@@ -194,9 +194,21 @@ These appear in the roadmap but are intentionally absent from the v0.0 grammar:
 algebraic data types (`enum`) + `match`, tuples and multiple return, lambdas /
 closures + function types, user-defined macros, functional pipelines (`|>`,
 `>>`) + `_`-placeholder partial application, operator overloading + custom
-operators, traits, generics, collections (`[T]`, `[K: V]`), modules/imports,
-floats (`float32`/`float64` with `f32`/`f64` literal suffixes), string
-interpolation, and compound-assignment / `**` sugar.
+operators, traits, generics, collections (`[T]`, `[K: V]`, sets),
+modules/imports, floats (`float32`/`float64` with `f32`/`f64` literal suffixes),
+string interpolation, and compound-assignment / `**` sugar.
+
+The self-hosting scoping ([self-hosting.md](self-hosting.md)) adds these
+future-grammar items as well: bitwise & shift operators (`&`, `|`, `^`, `~`,
+`<<`, `>>` — where `>>` doubles as function composition, resolved by operand
+type, D24), numeric cast expressions (`expr "as" type`, D26), `break` /
+`continue` statements, methods + `impl` blocks with a `self` / `var self`
+receiver (D27), module-level `const` declarations (D28), a `char` type with
+character literals (`'a'`, D25) + string indexing (`s[i]`), and `assert` /
+`panic` / `unreachable` intrinsics. New keywords these will reserve include
+`enum`, `match`, `impl`, `trait`, `as`, `const`, `char`, `break`, `continue`, and
+`pub`. Concrete syntax and semantics are in
+[future-features.md](future-features.md) §§7, 11–18.
 
 (The `#main` and `#test` attributes ARE part of v0.0 — see the `attribute`
 production above — but general user-defined macros are not.)

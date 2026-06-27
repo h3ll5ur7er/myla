@@ -6,9 +6,10 @@ progresses.
 
 Related docs: [language-spec.md](language-spec.md) · [grammar.md](grammar.md) ·
 [architecture.md](architecture.md) · [future-features.md](future-features.md) ·
+[self-hosting.md](self-hosting.md) ·
 open questions in [clarification_needed.md](clarification_needed.md).
 
-_Last updated: 2026-06-27 (x86-64 compiler landed; `myla build` works, native output matches interpreter)._
+_Last updated: 2026-06-27 (v0.0 complete; self-hosting feature scoping added)._
 
 ---
 
@@ -71,15 +72,24 @@ Implementation progress:
   **burn tests** that run every example under the interpreter *and* the native
   binary, asserting identical stdout plus codegen corner cases (`tests/burn/`).
 
-Next up: v0.1 self-hosting — begin re-implementing the v0.0 toolchain in Myla
-itself.
+**Next up: the post-v0.0 feature build-out that leads to self-hosting.** The
+[self-hosting plan](self-hosting.md) works backwards from the existing toolchain
+to show that re-implementing Myla in Myla **depends on** the v0.2–v0.5 features
+(enums/match, generics, collections, strings, bitwise/casts, methods, modules,
+a freestanding I/O runtime). Self-hosting is therefore the **destination (v1.0)**,
+not the immediate next step — superseding the old "v0.1 = self-host" framing
+(locked, D23). Newly-scoped prerequisites (bitwise ops, numeric
+casts, `break`/`continue`, methods/`impl`, `const`, char/byte lexing, I/O) are in
+[future-features.md](future-features.md) §11–§18.
 
 ```mermaid
 flowchart LR
-    d000["v0.0.0 design"] --> d001["v0.0.1 scaffolding"]
-    d001 --> d002["v0.0.2 interpreter"]
-    d002 --> d003["v0.0.3 compiler"]
-    d003 --> v01["v0.1 self-hosting"]
+    d003["v0.0.3 compiler (done)"] --> v02["v0.2 data modeling"]
+    v02 --> v03["v0.3 collections + strings + ops"]
+    v03 --> v04["v0.4 abstraction"]
+    v04 --> v05["v0.5 modules + runtime"]
+    v05 --> bringup["v0.6–v0.9 self-hosting bring-up"]
+    bringup --> v10["v1.0 self-hosted"]
 ```
 
 ---
@@ -93,8 +103,16 @@ flowchart LR
 | v0.0.2 | Front end + tree-walking interpreter; `myla run`/`test`; burn-tests pass | Done |
 | v0.0.3 | Working x86-64 compiler; `myla build`; output matches interpreter | Done |
 | (in v0.0.2) | `#main` / `#test` attributes + `myla test` runner | Done (pulled into v0.0 per D10) |
-| v0.1 | Re-implement v0.0 in Myla; self-host interpreter then compiler | Planned |
-| v0.2+ | Data modeling, collections, first-class functions, ergonomics | Proposed (see future-features.md) |
+| v0.2 | Data modeling: `enum`+`match`, tuples, generics, `Option`/`Result` | Planned (Tier A) |
+| v0.3 | Collections, strings & ops: lists/maps/sets, string toolkit, refcounting, bitwise, casts, `break`/`continue`, `const`, `assert` | Planned (Tier B+C) |
+| v0.4 | Abstraction: methods/`impl`/traits, lambdas/closures, pipelines | Planned (Tier D) |
+| v0.5 | Modules & runtime: imports + stdlib, char/byte model, freestanding I/O | Planned (Tier E) |
+| v0.6–v0.9 | Self-hosting bring-up: port the toolchain to Myla, differentially tested | Planned (Tier F) |
+| v1.0 | Self-hosted: Myla compiles Myla (three-stage fixed point) | Planned (destination) |
+| post-1.0 | Custom operators, compound-assign/`**` sugar, user-defined macros | Proposed |
+
+> See [self-hosting.md](self-hosting.md) for the dependency analysis behind this
+> ordering and the differential-testing strategy. Numbering is locked (D23).
 
 ### v0.0.0 remaining work
 - Done: language spec, formal grammar, architecture doc, per-feature examples,
@@ -132,26 +150,36 @@ flowchart LR
 
 ### Post-v0.0 features
 
+Targets follow the [self-hosting](self-hosting.md) dependency ordering (Tier A–E
+→ §3). "§N" points at [future-features.md](future-features.md).
+
 | Feature | Status | Target | Notes |
 |---------|--------|--------|-------|
-| Functional pipelines `|>`, `>>`, `_` partial application | Decided | v0.4 | Juxtaposition/auto-currying rejected (D8) |
-| Algebraic data types (`enum`) + `match` | Decided (design) | v0.2 | Highest-leverage for self-hosting |
-| Tuples + multiple return (`return a, b`) | Decided (design) | v0.2 | |
-| Generics via monomorphization | Decided | v0.2/v0.3 | Strategy locked (D13) |
-| Collections: `[T]` list, `[K: V]` map | Decided (design) | v0.3 | Deep immutability (D14) |
-| Memory model: reference counting | Decided | v0.3 | (D12) |
-| Standard library | Planned | v0.3+ | Needs modules/imports |
-| Lambdas / closures + function types | Decided (design) | v0.4 | By-value capture first; `ref` later (D15) |
-| Error handling: `Result`/`Option` + `?` | Decided | v0.2+ | (D16) |
-| Modules / imports (explicit, Python-like) | Decided | v0.3 | Resolution rules set (D17, D22); fine details at impl time |
-| Operator overloading (via traits) | Decided | v0.5 | Needs traits (D18) |
-| Custom operators | Postponed | post-1.0 | Beyond 1.0 (D18) |
+| Algebraic data types (`enum`) + `match` | Decided (design) | v0.2 | Highest-leverage for self-hosting (Tier A) |
+| Tuples + multiple return (`return a, b`) | Decided (design) | v0.2 | Tier A |
+| Generics via monomorphization | Decided | v0.2 | Strategy locked (D13); Tier A |
+| Error handling: `Result`/`Option` + `?` | Decided | v0.2 | (D16); Tier A |
+| Collections: `[T]` list, `[K: V]` map, sets | Decided (design) | v0.3 | Deep immutability (D14); Tier B |
+| Memory model: reference counting | Decided | v0.3 | (D12); Tier B |
+| `str`: builder + views + byte-indexing + `format` | Decided (design) | v0.3 | v0.0 `str` is length-prefixed immutable (D21); Tier B |
+| Bitwise & shift operators `& \| ^ ~ << >>` | Decided | v0.3 | §11; `>>` shares with compose, by-type (D24); Tier C |
+| Explicit numeric casts (`x as T`) | Decided | v0.3 | §12; no implicit mixing (D4); semantics in D26; Tier C |
+| `break` / `continue` | Planned | v0.3 | §13; Tier C |
+| Module-level `const` | Decided | v0.3 | §15; `const` only, no top-level mutable (D28); Tier C |
+| `assert` / `panic` / `unreachable` | Planned | v0.3 | §16; reuses the trap path; Tier C |
+| Methods + `impl` (static dispatch) | Decided | v0.4 | §14; `var self` for mutation (D27); Tier D |
+| Traits (incl. operator overloading) | Decided (overloading) | v0.4 | (D18); Tier D |
+| Lambdas / closures + function types | Decided (design) | v0.4 | By-value capture first; `ref` later (D15); Tier D |
+| Functional pipelines `|>` / composition / `_` partial app | Decided | v0.4 | (D8); `>>` compose by-type (D24); Tier D |
+| Modules / imports (explicit, Python-like) | Decided | v0.5 | Resolution rules set (D17, D22); Tier E |
+| Standard library (`std`) | Planned | v0.5 | Needs modules; Tier E |
+| `char` type (Unicode scalar) + UTF-8 lexing | Decided | v0.5 | §17; dedicated `char` (D25); Tier E |
+| Freestanding I/O runtime (file/`argv`/stderr/exit) | Decided | v0.5 | §18; no-libc syscalls, defer `exec` (D29); Tier E |
 | Floats (`float32`/`float64`, `float` alias, `fN` suffixes) | Decided (design) | TBD | Excluded from v0.0 (D19) |
-| Compound assignment `+= -= *= /= %=`, `**`, `**=` | Proposed | v0.5 | Recommended |
+| Custom operators | Postponed | post-1.0 | Beyond 1.0 (D18) |
+| Compound assignment `+= -= *= /= %=`, `**`, `**=` | Proposed | post-1.0 | Pure sugar; not needed for self-hosting |
 | `++` / `--` | Dropped | — | Possible user-defined custom operator post-1.0 (D9) |
-| User-defined macros / metaprogramming | Proposed | v1.x | After self-hosting |
-| Traits | Proposed | v0.5 | README long-term vision |
-| `str`: builder + views + byte-indexing + `format` | Decided (design) | v0.3 | v0.0 `str` is length-prefixed immutable (D21) |
+| User-defined macros / metaprogramming | Proposed | post-1.0 | After self-hosting |
 
 ---
 
@@ -161,6 +189,13 @@ Newest first. These are settled; revisiting requires a deliberate new decision.
 
 | # | Date | Decision | Rationale |
 |---|------|----------|-----------|
+| D29 | 2026-06-27 | Freestanding (no-libc) runtime: `std.fs`/`std.io`/`std.process` are thin syscall wrappers (`open`/`read`/`write`/`close`/`exit`, `argv` from `_start`). Process-spawning (driving `as`/`ld` via `fork`/`execve`) is **deferred until after a self-hosted code generator works** — the compiler emits asm and a shell wrapper links it first. (C7) | Honors D2; keeps the hard part (`exec`) off the critical path |
+| D28 | 2026-06-27 | Module-level `const NAME: T = <const expr>` only (compile-time constant, file-scoped); **no** top-level mutable/runtime bindings. (C6) | Gives keyword/precedence tables a home without global init-order issues |
+| D27 | 2026-06-27 | Mutating methods take a **`var self`** receiver (mirrors `let`/`var`); `recv.method(args)` desugars to `Method(recv, args)` with static dispatch. (C5) | Consistent with the binding-mutability spelling |
+| D26 | 2026-06-27 | Explicit numeric conversions via **`x as T`**; narrowing wraps (mod 2^width), widening sign/zero-extends by source signedness, equal-width sign reinterpret is a no-op; shifting by ≥ width is an error. (C4) | Visible, intentional conversions given no implicit mixing (D4) |
+| D25 | 2026-06-27 | Add a dedicated **`char`** type (Unicode scalar value) with char literals (`'a'`, `'\n'`); the lexer / string iteration is UTF-8 codepoint-aware; raw byte access stays available via a bytes view. (C3) | UTF-8 correctness in the self-hosted lexer |
+| D24 | 2026-06-27 | **`>>` serves both** right-shift and function composition, disambiguated **by operand type** at type-check time (integer operands → shift; function operands → compose); `<<` is left-shift. (C2, refines D8) | Avoids inventing a token; operand context makes intent unambiguous |
+| D23 | 2026-06-27 | Self-hosting is the **destination (v1.0)**, reached through feature milestones v0.2–v0.5 + bring-up v0.6–v0.9; retires the old "v0.1 = self-host" framing. (C1) | Self-hosting depends on the post-v0.0 features (see self-hosting.md §2) |
 | D22 | 2026-06-27 | Import resolution: leading-dot count selects the search base (no dot = builtins like `std` or project root; `.` = current file's directory; `..` = parent; `...` = grandparent; etc.). Any granularity importable (package/dir, module/file, function, const, struct, trait, ...). `import a.b.c` binds the **full path** `a.b.c`; use `import a.b.c as c` to rebind. `pub` marks exports (private by default). Name collisions are **errors** — resolve with aliases, no automatic resolution. | Explicit and predictable; avoids the footgun of magically binding the last path segment |
 | D21 | 2026-06-27 | `str` in v0.0 is **length-prefixed, immutable, UTF-8** (pointer+length), supporting only literals + `print`. `StringBuilder`, string interpolation, views/slices, byte-indexing, and `format` come later (v0.3) | Keeps the bootstrap minimal while guaranteeing a performant, ergonomic string story before self-hosting |
 | D20 | 2026-06-27 | Type names use full `intN`/`uintN`/`floatN`; literal suffixes use short `iN`/`uN`/`fN` (e.g. `255u8`, `123i64`, `3f32`) | Readable type names, terse literal disambiguation |

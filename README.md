@@ -39,6 +39,7 @@ Design docs:
 - [docs/grammar.md](docs/grammar.md) — v0.0 formal EBNF grammar
 - [docs/architecture.md](docs/architecture.md) — toolchain architecture (interpreter + x86-64 compiler)
 - [docs/future-features.md](docs/future-features.md) — proposals for post-v0.0 features
+- [docs/self-hosting.md](docs/self-hosting.md) — the road to v1.0: feature gap analysis + milestone plan
 - [docs/roadmap.md](docs/roadmap.md) — live implementation status, progress, and decision log
 - [docs/clarification_needed.md](docs/clarification_needed.md) — open decisions awaiting input
 

@@ -1,0 +1,26 @@
+// functional.my
+
+fun add(a: int, b: int) -> int {
+    return a + b
+}
+// Partial function application
+let add1 = add(1) // parameter a will be set to 1 and a function with one argument will be returned
+let add2 = add(2) // parameter a will be set to 2 and a function with one argument will be returned
+
+let add3 = add1 add2 // this will return a function with one argument that will first be passed into add1, the result of which will be passed into add2. the result of add2 will be the return value
+
+fun pickNeighbors(a: int) -> (int, int) {
+    return a-1, a+1
+}
+
+fun main() {
+    print(add1(3))              // 4
+    print(add2(3))              // 5
+    print(add3(3))              // 6
+    pickNeighbors add print (5) // 10
+
+
+    // enother practical example
+    // let fetchData = readCSV filter((row) => row[0] == "hello") map((row) => row[1]) concat("\n") print
+    // fetchData("path/to/file.csv")
+}
