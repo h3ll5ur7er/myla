@@ -18,7 +18,8 @@ EXAMPLES = [
     "types_and_aliases.my", "recursion.my", "regressions.my", "generics.my",
     "generic-types.my", "option-result.my", "operators.my", "constants.my",
     "lists.my", "maps.my", "strings.my", "methods.my", "closures.my",
-    "pipelines.my", "traits.my",
+    "pipelines.my", "traits.my", "floats.my", "chars.my",
+    "generic_traits.my", "interpolation.my",
 ]
 
 

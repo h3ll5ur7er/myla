@@ -21,6 +21,7 @@ from .compiler import BuildError, build as build_program
 from .errors import MylaError
 from .interpreter import Interpreter
 from .lexer import tokenize as lex_source
+from .loader import default_stdlib_root, link as link_program
 from .parser import parse as parse_tokens
 from .types import check as check_program
 
@@ -54,28 +55,29 @@ def _cmd_parse(args: argparse.Namespace) -> int:
     return 0
 
 
-def _front_end(source: str, filename: str):
-    """Lex -> parse -> type-check. Returns the populated Checker."""
-    tokens = lex_source(source)
-    program = parse_tokens(tokens)
-    return check_program(program)
+def _front_end(path: str):
+    """Resolve the module graph rooted at `path`, then lex -> parse -> type-check
+    the merged program. Returns the populated Checker."""
+    return check_program(link_program(path, stdlib_root=default_stdlib_root()))
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
+    # argv[0] is the program as invoked; the rest are its arguments (parity with
+    # the native binary, where the kernel supplies argv at `_start`).
+    argv = [args.file, *args.args]
     try:
-        checker = _front_end(source, args.file)
-        Interpreter(checker).run()
+        checker = _front_end(args.file)
+        return Interpreter(checker, argv=argv).run()
     except MylaError as err:
         print(err.render(source, args.file), file=sys.stderr)
         return 1
-    return 0
 
 
 def _cmd_test(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     try:
-        checker = _front_end(source, args.file)
+        checker = _front_end(args.file)
         results = Interpreter(checker).run_tests()
     except MylaError as err:
         print(err.render(source, args.file), file=sys.stderr)
@@ -100,7 +102,7 @@ def _cmd_test(args: argparse.Namespace) -> int:
 def _cmd_build(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     try:
-        checker = _front_end(source, args.file)
+        checker = _front_end(args.file)
         path = build_program(checker, args.output, keep_asm=args.keep_asm)
     except MylaError as err:
         print(err.render(source, args.file), file=sys.stderr)
@@ -130,6 +132,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="interpret a .my file")
     p_run.add_argument("file")
+    p_run.add_argument("args", nargs=argparse.REMAINDER,
+                       help="arguments passed to the program (std.process.args)")
     p_run.set_defaults(func=_cmd_run)
 
     p_build = sub.add_parser("build", help="compile a .my file to a native binary")

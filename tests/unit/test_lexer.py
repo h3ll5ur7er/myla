@@ -156,9 +156,22 @@ class TestCharLiterals(unittest.TestCase):
         with self.assertRaises(LexError):
             tokenize("'ab'")
 
-    def test_non_ascii_char_is_error(self):
-        with self.assertRaises(LexError):
-            tokenize("'é'")
+    def test_non_ascii_char_is_scalar(self):
+        # v0.5.3: char literals are Unicode scalars, not bytes.
+        self.assertEqual(tokenize("'é'")[0].value, 0xE9)
+        self.assertEqual(tokenize("'λ'")[0].value, 0x3BB)
+        self.assertEqual(tokenize("'😀'")[0].value, 0x1F600)
+
+    def test_unicode_escape(self):
+        self.assertEqual(tokenize(r"'\u{1F600}'")[0].value, 0x1F600)
+        self.assertEqual(tokenize(r"'\u{0}'")[0].value, 0)
+        self.assertEqual(tokenize(r"'\u{a5}'")[0].value, 0xA5)
+
+    def test_invalid_unicode_escape(self):
+        for bad in [r"'\u{110000}'", r"'\u{D800}'", r"'\u{}'", r"'\uABCD'",
+                    r"'\u{ZZ}'"]:
+            with self.assertRaises(LexError):
+                tokenize(bad)
 
     def test_invalid_char_escape(self):
         with self.assertRaises(LexError):

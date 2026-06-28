@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import math
+import struct
 from dataclasses import dataclass
 
 from . import ast
@@ -35,6 +37,19 @@ class Type:
 class IntType(Type):
     width: int   # 8, 16, 32, 64
     signed: bool
+
+
+@dataclass(frozen=True)
+class FloatType(Type):
+    width: int   # 32 or 64 (IEEE-754 single / double)
+
+
+@dataclass(frozen=True)
+class CharType(Type):
+    """A Unicode scalar value (D25): a 32-bit codepoint distinct from the integer
+    types. Char literals default to `char` but an ASCII literal stays flexible to
+    the integer types so byte comparisons like `s[i] == 'a'` keep working (D42)."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -138,6 +153,9 @@ _PRIMITIVES: dict[str, Type] = {
     "uint16": IntType(16, False),
     "uint32": IntType(32, False),
     "uint64": IntType(64, False),
+    "float32": FloatType(32),
+    "float64": FloatType(64),
+    "char": CharType(),
 }
 
 # integer literal suffix -> Type
@@ -148,8 +166,15 @@ _SUFFIX_TYPES: dict[str, Type] = {
     "u32": IntType(32, False), "u64": IntType(64, False),
 }
 
+# float literal suffix -> Type
+_FLOAT_SUFFIX_TYPES: dict[str, Type] = {
+    "f32": FloatType(32), "f64": FloatType(64),
+}
+
 INT = IntType(32, True)  # what `int` aliases
 BYTE = IntType(8, False)  # `uint8`: the element type of byte indexing `s[i]`
+FLOAT = FloatType(32)  # what `float` aliases (D19/D56)
+CHAR = CharType()  # the Unicode-scalar `char` type (D25)
 
 
 def type_name(t: Type | None) -> str:
@@ -157,6 +182,10 @@ def type_name(t: Type | None) -> str:
         return "()"
     if isinstance(t, IntType):
         return f"{'int' if t.signed else 'uint'}{t.width}"
+    if isinstance(t, FloatType):
+        return f"float{t.width}"
+    if isinstance(t, CharType):
+        return "char"
     if isinstance(t, BoolType):
         return "bool"
     if isinstance(t, StrType):
@@ -192,7 +221,8 @@ def _type_to_typeexpr(t: Type | None) -> "ast.TypeExpr":
     application) self-describing parameter annotations, so the monomorphizer's
     re-check resolves them without relying on contextual hints (the expected
     type that was available during the first check is gone by then)."""
-    if isinstance(t, (IntType, BoolType, StrType, StringBuilderType)):
+    if isinstance(t, (IntType, FloatType, CharType, BoolType, StrType,
+                      StringBuilderType)):
         return ast.TypeRef(type_name(t))
     if isinstance(t, ListType):
         return ast.ListTypeRef(_type_to_typeexpr(t.elem))
@@ -234,8 +264,10 @@ def _primitive_default_trait(t: Type, trait: str) -> bool:
     `trait` (D52) — the hardwired v0.0–v0.3 semantics that a user `impl` may
     override. Integers get the full arithmetic/compare set; `bool` and `str`
     get equality (and `str` gets `Add` for concatenation)."""
-    if isinstance(t, IntType):
+    if isinstance(t, (IntType, FloatType)):
         return trait in ("Add", "Sub", "Mul", "Div", "Rem", "Eq", "Ord")
+    if isinstance(t, CharType):
+        return trait in ("Eq", "Ord")   # chars compare; no arithmetic (cast to int)
     if isinstance(t, BoolType):
         return trait == "Eq"
     if isinstance(t, StrType):
@@ -245,8 +277,8 @@ def _primitive_default_trait(t: Type, trait: str) -> bool:
 
 def _is_map_key(t: Type) -> bool:
     """Whether `t` is a valid map key: a primitive comparable type — an integer
-    type (incl. the byte `uint8`), `bool`, or `str` (D37)."""
-    return isinstance(t, (IntType, BoolType, StrType))
+    type (incl. the byte `uint8`), `char`, `bool`, or `str` (D37)."""
+    return isinstance(t, (IntType, CharType, BoolType, StrType))
 
 
 def int_fits(value: int, t: IntType) -> bool:
@@ -291,6 +323,183 @@ def _const_idiv(a: int, b: int) -> int:
     return -q if (a < 0) != (b < 0) else q
 
 
+def round_float(value: float, t: Type) -> float:
+    """Round `value` to the precision of float type `t`.
+
+    Python floats are IEEE-754 `float64`; for `float32` we narrow to single
+    precision (round to nearest) so the interpreter and native backend agree —
+    the float analogue of integer `_wrap_int` (D56 parity discipline)."""
+    if isinstance(t, FloatType) and t.width == 32:
+        return struct.unpack("f", struct.pack("f", value))[0]
+    return value
+
+
+def float_div(a: float, b: float) -> float:
+    """IEEE-754 division: by zero yields ±inf (or NaN for 0/0), never traps."""
+    if b == 0.0:
+        if a == 0.0 or a != a:
+            return float("nan")
+        return math.copysign(math.inf, a) * math.copysign(1.0, b)
+    return a / b
+
+
+def float_rem(a: float, b: float) -> float:
+    """IEEE-754 remainder (`fmod`): an undefined remainder yields NaN."""
+    if b == 0.0 or a in (math.inf, -math.inf):
+        return float("nan")
+    return math.fmod(a, b)
+
+
+# Float formatting (D56). Myla renders a float as round-trippable *plain decimal*
+# (no scientific notation): the magnitude is scaled to a P-significant-digit
+# integer (P = 9 for `float32`, 17 for `float64` — the round-trip digit counts),
+# trailing zeros are trimmed, and the digits are laid out positionally.
+#
+# A 17-digit integer exceeds 2**53, so a single f64 multiply cannot carry it; the
+# scaling therefore uses double-double (two-double) extended precision — Dekker's
+# branch-free `two_prod` plus a high/low power-of-ten table. The algorithm uses
+# only f64 +,-,* (identical IEEE ops in CPython and SSE2), int64, and a shared
+# constant table, so the interpreter and the native x86-64 backend (which emits
+# the *same* table and instruction sequence) produce byte-identical output.
+_FF_MINK = -323
+_FF_MAXK = 308
+_FF_SPLIT = 134217729.0   # 2**27 + 1, Dekker's splitting constant
+
+
+def _ff_build_pow10_dd() -> list[tuple[float, float]]:
+    from decimal import Decimal, getcontext
+    getcontext().prec = 80
+    table: list[tuple[float, float]] = []
+    for k in range(_FF_MINK, _FF_MAXK + 1):
+        hi = float(f"1e{k}")
+        lo = float(Decimal(10) ** k - Decimal(hi))
+        table.append((hi, lo))
+    return table
+
+
+# (hi, lo) for 10**k, k in [_FF_MINK, _FF_MAXK]; `hi` alone is the plain f64 table.
+_FF_POW10_DD = _ff_build_pow10_dd()
+
+
+def _ff_pow10_hi(k: int) -> float:
+    return _FF_POW10_DD[k - _FF_MINK][0]
+
+
+def _ff_two_prod(a: float, b: float) -> tuple[float, float]:
+    """Dekker's exact product: returns (p, e) with p + e == a*b exactly."""
+    p = a * b
+    ca = _FF_SPLIT * a
+    ahi = ca - (ca - a)
+    alo = a - ahi
+    cb = _FF_SPLIT * b
+    bhi = cb - (cb - b)
+    blo = b - bhi
+    e = ((ahi * bhi - p) + ahi * blo + alo * bhi) + alo * blo
+    return p, e
+
+
+def _ff_llrint(x: float) -> int:
+    """Round to nearest int64, ties to even (matches SSE `cvtsd2si`)."""
+    if x != x or x in (math.inf, -math.inf):
+        return 0
+    return int(round(x))
+
+
+def _ff_scaled_int(m: float, idx: int) -> int:
+    """round(m * 10**idx) as an exact integer, via double-double scaling."""
+    k, lo_k = (idx - 200, 200) if idx > _FF_MAXK else (idx, None)
+    if lo_k is not None:
+        # Tiny magnitudes: split the scale so neither constant overflows.
+        hi, lo = _FF_POW10_DD[lo_k - _FF_MINK]
+        p, e = _ff_two_prod(m, hi)
+        m = p + e + m * lo
+    hi, lo = _FF_POW10_DD[k - _FF_MINK]
+    p, e = _ff_two_prod(m, hi)
+    e = e + m * lo
+    return _ff_llrint(p) + _ff_llrint(e)
+
+
+def _ff_positional(digits: str, e10: int) -> str:
+    """Lay `digits` out in positional decimal; the leading digit has place
+    value `10**e10`."""
+    n = len(digits)
+    if e10 >= n - 1:
+        return digits + "0" * (e10 - (n - 1))   # integer with trailing zeros
+    if e10 >= 0:
+        return digits[:e10 + 1] + "." + digits[e10 + 1:]
+    return "0." + "0" * (-e10 - 1) + digits
+
+
+def format_float(value: float, t: Type) -> str:
+    """Render a float as Myla's canonical round-trippable decimal text (D56)."""
+    if value != value:
+        return "nan"
+    if value == math.inf:
+        return "inf"
+    if value == -math.inf:
+        return "-inf"
+    neg = math.copysign(1.0, value) < 0.0
+    sign = "-" if neg else ""
+    m = -value if neg else value
+    if m == 0.0:
+        return sign + "0"
+    width = 32 if (isinstance(t, FloatType) and t.width == 32) else 64
+    P = 9 if width == 32 else 17
+    # e10 = the largest exponent with 10**e10 <= m (binary search the table).
+    lo, hi, e10 = _FF_MINK, _FF_MAXK, _FF_MINK - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if _ff_pow10_hi(mid) <= m:
+            e10 = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    idx = (P - 1) - e10
+    d = _ff_scaled_int(m, idx)
+    if d >= 10 ** P:                       # rounding carried into an extra digit
+        d //= 10
+        e10 += 1
+    elif d < 10 ** (P - 1):                # underflow guard (extreme exponents)
+        d = 10 ** (P - 1)
+    digits = str(d).rstrip("0") or "0"
+    return sign + _ff_positional(digits, e10)
+
+
+def _cast_const_value(v, src: Type, target: Type):
+    """Compile-time numeric cast used by const folding (mirrors backends)."""
+    if isinstance(target, CharType):
+        return int(v)                      # int -> char: the codepoint (unchecked)
+    if isinstance(src, CharType):
+        return _wrap_int(int(v), target)   # char -> int: wrap to width
+    if isinstance(target, FloatType):
+        return round_float(float(v), target)
+    if isinstance(src, FloatType):
+        return _wrap_int(int(v), target)   # float -> int: truncate toward zero
+    return _wrap_int(v, target)
+
+
+def char_utf8_bytes(cp: int) -> bytes:
+    """Encode a Unicode scalar as UTF-8 (mirrors the native `__char_to_str`).
+
+    Used to render a `char` for `print`/`format` as its glyph. The same range
+    branches and bit masks are emitted in assembly, so the interpreter and the
+    native backend produce byte-identical output (D25)."""
+    cp &= 0xFFFFFFFF
+    if cp < 0x80:
+        return bytes((cp,))
+    if cp < 0x800:
+        return bytes((0xC0 | (cp >> 6), 0x80 | (cp & 0x3F)))
+    if cp < 0x10000:
+        return bytes((0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3F),
+                      0x80 | (cp & 0x3F)))
+    return bytes((
+        0xF0 | ((cp >> 18) & 0x07),
+        0x80 | ((cp >> 12) & 0x3F),
+        0x80 | ((cp >> 6) & 0x3F),
+        0x80 | (cp & 0x3F),
+    ))
+
+
 @dataclass
 class FuncSig:
     params: list[Type]
@@ -324,6 +533,9 @@ class TraitSig:
     methods: dict[str, TraitMethodSig]
     decl: ast.TraitDecl
     builtin: bool = False  # a built-in operator trait (Add/Eq/…) vs a user trait
+    # the trait's own type parameters (v0.5.5, D55); method signatures may mention
+    # them as `TypeParam`s, substituted by an impl's `trait_args`.
+    type_params: list = dataclasses.field(default_factory=list)
 
 
 @dataclass
@@ -387,11 +599,14 @@ class _LambdaCtx:
 
 # names that may not be used as user declarations
 _BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop",
-                  "contains", "remove", "keys", "format",
-                  "StringBuilder", "append", "append_byte", "build"}
+                  "contains", "remove", "keys", "format", "chars",
+                  "StringBuilder", "append", "append_byte", "build",
+                  # low-level std runtime primitives (D29); the public surface
+                  # lives in `std.io` / `std.process` / `std.fs` and wraps these.
+                  "__write", "__exit", "__args", "__read_file", "__io_errno"}
 
 # builtin calls that never return (the checker treats them like a `return`)
-_DIVERGING_BUILTINS = {"panic", "unreachable"}
+_DIVERGING_BUILTINS = {"panic", "unreachable", "__exit"}
 
 # sentinel for a match arm whose body diverges (definitely returns)
 _DIVERGE = object()
@@ -520,12 +735,6 @@ class Checker:
                     raise TypeCheckError(
                         f"duplicate trait '{decl.name}'", decl.line, decl.column
                     )
-                if decl.type_params:
-                    raise TypeCheckError(
-                        "generic traits are not supported yet (v0.4.4 ships the "
-                        "non-generic built-in operator traits and user traits)",
-                        decl.line, decl.column,
-                    )
                 self._trait_decls.append(decl)
                 continue
             name = decl.name
@@ -636,6 +845,7 @@ class Checker:
         """Resolve each user `trait`'s method signatures, with `Self` allowed."""
         self._register_builtin_op_traits()
         for decl in self._trait_decls:
+            self._check_trait_type_params(decl)
             methods: dict[str, TraitMethodSig] = {}
             for m in decl.methods:
                 if m.name in methods:
@@ -643,48 +853,79 @@ class Checker:
                         f"duplicate method '{m.name}' in trait '{decl.name}'",
                         m.line, m.column,
                     )
+                # `Self` and the trait's own type parameters are both in scope
+                # for the signatures (v0.5.5); the latter resolve to `TypeParam`s.
                 self._allow_self = True
+                self._type_params = frozenset(decl.type_params)
                 try:
                     params = [SELF] + [self._resolve(p.type) for p in m.params]
                     ret = (self._resolve(m.ret_type)
                            if m.ret_type is not None else None)
                 finally:
                     self._allow_self = False
+                    self._type_params = frozenset()
                 methods[m.name] = TraitMethodSig(m.name, params, ret, m.receiver)
-            self.traits[decl.name] = TraitSig(decl.name, methods, decl)
+            self.traits[decl.name] = TraitSig(decl.name, methods, decl,
+                                              type_params=list(decl.type_params))
 
-    def _subst_self(self, t: Type | None, target: Type) -> Type | None:
-        """Replace `SelfType` with the implementing `target` type, recursively."""
+    def _check_trait_type_params(self, decl: ast.TraitDecl) -> None:
+        seen: set[str] = set()
+        for p in decl.type_params:
+            if p == "Self":
+                raise TypeCheckError(
+                    f"trait '{decl.name}' cannot use 'Self' as a type parameter",
+                    decl.line, decl.column,
+                )
+            if p in seen:
+                raise TypeCheckError(
+                    f"duplicate type parameter '{p}' on trait '{decl.name}'",
+                    decl.line, decl.column,
+                )
+            seen.add(p)
+
+    def _subst_self(self, t: Type | None, target: Type,
+                    param_map: dict | None = None) -> Type | None:
+        """Replace `SelfType` with the implementing `target` type, and (for a
+        generic trait, v0.5.5) each trait `TypeParam` with its `impl` argument
+        via `param_map`. Recursive."""
         if t is None or isinstance(t, (IntType, BoolType, StrType,
-                                       StringBuilderType, TypeParam)):
+                                       StringBuilderType, CharType, FloatType)):
             return t
         if isinstance(t, SelfType):
             return target
+        if isinstance(t, TypeParam):
+            if param_map is not None and t.name in param_map:
+                return param_map[t.name]
+            return t
         if isinstance(t, ListType):
-            return ListType(self._subst_self(t.elem, target))
+            return ListType(self._subst_self(t.elem, target, param_map))
         if isinstance(t, MapType):
-            return MapType(self._subst_self(t.key, target),
-                           self._subst_self(t.value, target))
+            return MapType(self._subst_self(t.key, target, param_map),
+                           self._subst_self(t.value, target, param_map))
         if isinstance(t, TupleType):
-            return TupleType(tuple(self._subst_self(e, target) for e in t.elems))
+            return TupleType(tuple(self._subst_self(e, target, param_map)
+                                   for e in t.elems))
         if isinstance(t, FuncType):
             return FuncType(
-                tuple(self._subst_self(p, target) for p in t.params),
-                self._subst_self(t.ret, target) if t.ret is not None else None,
+                tuple(self._subst_self(p, target, param_map) for p in t.params),
+                self._subst_self(t.ret, target, param_map)
+                if t.ret is not None else None,
             )
         if isinstance(t, StructType):
-            return StructType(t.name, tuple(self._subst_self(a, target)
+            return StructType(t.name, tuple(self._subst_self(a, target, param_map)
                                             for a in t.args))
         if isinstance(t, EnumType):
-            return EnumType(t.name, tuple(self._subst_self(a, target)
+            return EnumType(t.name, tuple(self._subst_self(a, target, param_map)
                                           for a in t.args))
         return t
 
     def _check_trait_conformance(self, impl: ast.ImplDecl, key: str,
-                                 target: Type, trait: TraitSig) -> None:
+                                 target: Type, trait: TraitSig,
+                                 param_map: dict | None = None) -> None:
         """Verify `impl Trait for T` covers exactly the trait's signatures with
         matching receiver mutability and `Self`-substituted parameter/return
-        types (D52)."""
+        types (D52). For a generic trait, `param_map` substitutes the trait's
+        type parameters with this impl's `trait_args` (v0.5.5, D55)."""
         impl_methods = {m.name: m for m in impl.methods}
         missing = set(trait.methods) - set(impl_methods)
         if missing:
@@ -709,8 +950,9 @@ class Checker:
                     f"declares '{tmsig.receiver}'",
                     sig.decl.line, sig.decl.column,
                 )
-            exp_params = [self._subst_self(p, target) for p in tmsig.params]
-            exp_ret = self._subst_self(tmsig.ret, target)
+            exp_params = [self._subst_self(p, target, param_map)
+                          for p in tmsig.params]
+            exp_ret = self._subst_self(tmsig.ret, target, param_map)
             if sig.params != exp_params or sig.ret != exp_ret:
                 exp = (f"({', '.join(type_name(p) for p in exp_params[1:])}) -> "
                        f"{type_name(exp_ret)}")
@@ -954,6 +1196,7 @@ class Checker:
             self._type_params = frozenset(impl.type_params)
             try:
                 target = self._resolve(impl.target)
+                trait_args = [self._resolve(a) for a in impl.trait_args]
             finally:
                 self._type_params = frozenset()
             key = self._method_key(target)
@@ -997,6 +1240,7 @@ class Checker:
                     impl.line, impl.column,
                 )
             trait = None
+            param_map: dict | None = None
             if impl.trait_name is not None:
                 trait = self.traits.get(impl.trait_name)
                 if trait is None:
@@ -1005,6 +1249,21 @@ class Checker:
                         f"'impl {impl.trait_name} for {key}'",
                         impl.line, impl.column,
                     )
+                # Match the trait's arity and bind its type parameters to this
+                # impl's arguments (v0.5.5, D55). Coherence (below) ignores the
+                # arguments, so a type implements a trait at most once.
+                if len(trait_args) != len(trait.type_params):
+                    expected = (f"{impl.trait_name}<"
+                                f"{', '.join(trait.type_params)}>"
+                                if trait.type_params else impl.trait_name)
+                    raise TypeCheckError(
+                        f"trait '{impl.trait_name}' expects "
+                        f"{len(trait.type_params)} type argument(s), got "
+                        f"{len(trait_args)} (use 'impl {expected} for {key}')",
+                        impl.line, impl.column,
+                    )
+                if trait.type_params:
+                    param_map = dict(zip(trait.type_params, trait_args))
                 pair = (impl.trait_name, key)
                 if pair in self._user_trait_impls:
                     raise TypeCheckError(
@@ -1028,7 +1287,7 @@ class Checker:
                     )
                 self._register_method(impl, key, m)
             if trait is not None:
-                self._check_trait_conformance(impl, key, target, trait)
+                self._check_trait_conformance(impl, key, target, trait, param_map)
                 self.trait_impls.setdefault(key, set()).add(impl.trait_name)
 
     def _register_method(self, impl: ast.ImplDecl, key: str,
@@ -1078,8 +1337,8 @@ class Checker:
             # the function is instantiated with a concrete key type.
             if not _is_map_key(kt) and not self._contains_type_param(kt):
                 raise TypeCheckError(
-                    f"map key type must be a primitive (integer, bool, or str), "
-                    f"found '{type_name(kt)}'",
+                    f"map key type must be a primitive (integer, char, bool, or "
+                    f"str), found '{type_name(kt)}'",
                     ref.line, ref.column,
                 )
             return MapType(kt, vt)
@@ -1139,6 +1398,8 @@ class Checker:
             return resolved
         if name == "int":
             return INT
+        if name == "float":
+            return FLOAT
         raise TypeCheckError(f"unknown type '{name}'", ref.line, ref.column)
 
     def _resolve_recursion(self) -> None:
@@ -1259,7 +1520,11 @@ class Checker:
 
     def _fold_const_expr(self, expr: ast.Expr):
         if isinstance(expr, ast.IntLit):
+            if isinstance(expr.resolved_type, CharType):
+                return expr.value          # a char const folds to its codepoint
             return _wrap_int(expr.value, expr.resolved_type)
+        if isinstance(expr, ast.FloatLit):
+            return round_float(expr.value, expr.resolved_type)
         if isinstance(expr, ast.BoolLit):
             return expr.value
         if isinstance(expr, ast.StrLit):
@@ -1276,12 +1541,16 @@ class Checker:
         if isinstance(expr, ast.Unary):
             v = self._fold_const_expr(expr.operand)
             if expr.op == "-":
+                if isinstance(expr.resolved_type, FloatType):
+                    return round_float(-v, expr.resolved_type)
                 return _wrap_int(-v, expr.resolved_type)
             if expr.op == "~":
                 return _wrap_int(~v, expr.resolved_type)
             return not v  # "!"
         if isinstance(expr, ast.Cast):
-            return _wrap_int(self._fold_const_expr(expr.operand), expr.resolved_type)
+            return _cast_const_value(
+                self._fold_const_expr(expr.operand),
+                expr.operand.resolved_type, expr.resolved_type)
         if isinstance(expr, ast.Binary):
             return self._fold_const_binary(expr)
         raise TypeCheckError(
@@ -1301,6 +1570,17 @@ class Checker:
         left = self._fold_const_expr(expr.left)
         right = self._fold_const_expr(expr.right)
         t = expr.resolved_type
+        if isinstance(t, FloatType):
+            if op == "+":
+                return round_float(left + right, t)
+            if op == "-":
+                return round_float(left - right, t)
+            if op == "*":
+                return round_float(left * right, t)
+            if op == "/":
+                return round_float(float_div(left, right), t)  # IEEE (D56)
+            if op == "%":
+                return round_float(float_rem(left, right), t)
         if op == "+":
             return _wrap_int(left + right, t)
         if op == "-":
@@ -1678,6 +1958,8 @@ class Checker:
     def _infer(self, expr: ast.Expr, scope: _Scope, expected: Type | None) -> Type | None:
         if isinstance(expr, ast.IntLit):
             return self._infer_int_lit(expr, expected)
+        if isinstance(expr, ast.FloatLit):
+            return self._infer_float_lit(expr, expected)
         if isinstance(expr, ast.StrLit):
             expr.resolved_type = STR
             return STR
@@ -1906,7 +2188,7 @@ class Checker:
         key_t = self._expect_value(k0, scope, exp_k)
         if not _is_map_key(key_t):
             raise TypeCheckError(
-                f"map key type must be a primitive (integer, bool, or str), "
+                f"map key type must be a primitive (integer, char, bool, or str), "
                 f"found '{type_name(key_t)}'",
                 k0.line, k0.column,
             )
@@ -2108,8 +2390,9 @@ class Checker:
                 )
             return
         if isinstance(pat, ast.PatLiteral):
-            lt = self._expect_value(pat.literal, scope, t if isinstance(t, IntType) else None)
-            if not isinstance(t, (IntType, BoolType, StrType)):
+            hint = t if isinstance(t, (IntType, CharType)) else None
+            lt = self._expect_value(pat.literal, scope, hint)
+            if not isinstance(t, (IntType, CharType, BoolType, StrType)):
                 raise TypeCheckError(
                     f"cannot match a literal against '{type_name(t)}'",
                     pat.line, pat.column,
@@ -2325,12 +2608,18 @@ class Checker:
                 saw_irrefutable = True
 
     def _infer_int_lit(self, expr: ast.IntLit, expected: Type | None) -> Type:
-        if expr.suffix is not None:
+        if expr.is_char:
+            # A char literal defaults to `char` (D25), but an ASCII scalar stays
+            # flexible to an integer type when one is expected (D42 byte compat).
+            if isinstance(expected, IntType) and expr.value <= 0x7F:
+                t = expected
+            else:
+                expr.resolved_type = CHAR
+                return CHAR
+        elif expr.suffix is not None:
             t = _SUFFIX_TYPES[expr.suffix]
         elif isinstance(expected, IntType):
             t = expected
-        elif expr.is_char:
-            t = IntType(8, False)   # a char literal is a `uint8` byte by default
         else:
             t = INT
         assert isinstance(t, IntType)
@@ -2339,6 +2628,17 @@ class Checker:
                 f"integer literal {expr.value} does not fit in '{type_name(t)}'",
                 expr.line, expr.column,
             )
+        expr.resolved_type = t
+        return t
+
+    def _infer_float_lit(self, expr: ast.FloatLit, expected: Type | None) -> Type:
+        if expr.suffix is not None:
+            t = _FLOAT_SUFFIX_TYPES[expr.suffix]
+        elif isinstance(expected, FloatType):
+            t = expected
+        else:
+            t = FLOAT   # unsuffixed default: float32 (= `float`), D19/D56
+        assert isinstance(t, FloatType)
         expr.resolved_type = t
         return t
 
@@ -2425,9 +2725,12 @@ class Checker:
 
     def _infer_unary(self, expr: ast.Unary, scope: _Scope, expected: Type | None) -> Type:
         if expr.op == "-":
-            t = self._expect_value(expr.operand, scope, expected if isinstance(expected, IntType) else None)
-            if not isinstance(t, IntType):
-                raise TypeCheckError("unary '-' requires an integer", expr.line, expr.column)
+            t = self._expect_value(
+                expr.operand, scope,
+                expected if isinstance(expected, (IntType, FloatType)) else None)
+            if not isinstance(t, (IntType, FloatType)):
+                raise TypeCheckError(
+                    "unary '-' requires a numeric operand", expr.line, expr.column)
             expr.resolved_type = t
             return t
         if expr.op == "!":
@@ -2458,9 +2761,11 @@ class Checker:
                 return self._infer_operator_overload(expr, scope, op, lt)
             if isinstance(lt, TypeParam):
                 return self._infer_bounded_op(expr, scope, op, lt)
-            rt = self._expect_value(expr.right, scope, lt if isinstance(lt, IntType) else None)
+            rt = self._expect_value(
+                expr.right, scope,
+                lt if isinstance(lt, (IntType, FloatType)) else None)
             common = self._unify(expr.left, lt, expr.right, rt)
-            if not isinstance(common, (IntType, BoolType, StrType)):
+            if not isinstance(common, (IntType, FloatType, CharType, BoolType, StrType)):
                 raise TypeCheckError(
                     f"cannot compare values of type '{type_name(common)}'",
                     expr.line, expr.column,
@@ -2474,10 +2779,14 @@ class Checker:
                 return self._infer_operator_overload(expr, scope, op, lt)
             if isinstance(lt, TypeParam):
                 return self._infer_bounded_op(expr, scope, op, lt)
-            rt = self._expect_value(expr.right, scope, lt if isinstance(lt, IntType) else None)
+            rt = self._expect_value(
+                expr.right, scope,
+                lt if isinstance(lt, (IntType, FloatType)) else None)
             common = self._unify(expr.left, lt, expr.right, rt)
-            if not isinstance(common, IntType):
-                raise TypeCheckError("comparison requires integers", expr.line, expr.column)
+            if not isinstance(common, (IntType, FloatType, CharType)):
+                raise TypeCheckError(
+                    "comparison requires numeric or char operands",
+                    expr.line, expr.column)
             expr.resolved_type = BOOL
             return BOOL
 
@@ -2514,8 +2823,9 @@ class Checker:
         # string concatenation: `str + str -> str` (D41). Allocates a fresh,
         # immutable string; checked before the integer-arithmetic path below.
         if op == "+":
-            lt = self._expect_value(expr.left, scope,
-                                    expected if isinstance(expected, IntType) else None)
+            lt = self._expect_value(
+                expr.left, scope,
+                expected if isinstance(expected, (IntType, FloatType)) else None)
             if isinstance(lt, (StructType, EnumType)):
                 return self._infer_operator_overload(expr, scope, op, lt)
             if isinstance(lt, TypeParam):
@@ -2529,27 +2839,38 @@ class Checker:
                     )
                 expr.resolved_type = STR
                 return STR
-            rt = self._expect_value(expr.right, scope,
-                                    lt if isinstance(lt, IntType) else None)
+            rt = self._expect_value(
+                expr.right, scope,
+                lt if isinstance(lt, (IntType, FloatType)) else None)
             common = self._unify(expr.left, lt, expr.right, rt)
-            if not isinstance(common, IntType):
+            if not isinstance(common, (IntType, FloatType)):
                 raise TypeCheckError(
-                    f"operator '+' requires integer or string operands",
+                    f"operator '+' requires numeric or string operands",
                     expr.line, expr.column,
                 )
             expr.resolved_type = common
             return common
 
         # arithmetic & bitwise: - * / %  and  & | ^
-        hint = expected if isinstance(expected, IntType) else None
+        hint = expected if isinstance(expected, (IntType, FloatType)) else None
         lt = self._expect_value(expr.left, scope, hint)
         # `- * / %` overload on user types (the bitwise `& | ^` do not, D52).
         if op in _ARITH_OP_TRAITS and isinstance(lt, (StructType, EnumType)):
             return self._infer_operator_overload(expr, scope, op, lt)
         if op in _ARITH_OP_TRAITS and isinstance(lt, TypeParam):
             return self._infer_bounded_op(expr, scope, op, lt)
-        rt = self._expect_value(expr.right, scope, lt if isinstance(lt, IntType) else hint)
+        rt = self._expect_value(
+            expr.right, scope,
+            lt if isinstance(lt, (IntType, FloatType)) else hint)
         common = self._unify(expr.left, lt, expr.right, rt)
+        if isinstance(common, FloatType):
+            # Floats support `+ - * / %` (D56) but not the bitwise operators.
+            if op not in _ARITH_OP_TRAITS:
+                raise TypeCheckError(
+                    f"operator '{op}' is not defined for floats", expr.line, expr.column
+                )
+            expr.resolved_type = common
+            return common
         if not isinstance(common, IntType):
             raise TypeCheckError(
                 f"operator '{op}' requires integer operands", expr.line, expr.column
@@ -2690,16 +3011,35 @@ class Checker:
         # Don't hint the operand with the target: `300 as uint8` should infer the
         # source as its natural type (int32) and then wrap, not reject 300.
         src = self._expect_value(expr.operand, scope, None)
-        if not isinstance(src, IntType) or not isinstance(target, IntType):
+        # `as` converts between numeric scalars: int↔int (wrap), int↔float (round /
+        # truncate-toward-zero), float↔float (widen / round) — D26/D56 — plus
+        # `char`↔integer (codepoint), but not `char`↔float directly (D25).
+        scalar = (IntType, FloatType, CharType)
+        if not isinstance(src, scalar) or not isinstance(target, scalar):
             raise TypeCheckError(
                 f"cannot cast from '{type_name(src)}' to '{type_name(target)}' "
-                "('as' converts between numeric types only)",
+                "('as' converts between numeric and char types only)",
+                expr.line, expr.column,
+            )
+        if ((isinstance(src, CharType) and isinstance(target, FloatType))
+                or (isinstance(src, FloatType) and isinstance(target, CharType))):
+            raise TypeCheckError(
+                "cannot cast directly between 'char' and a float "
+                "(go through an integer type)",
                 expr.line, expr.column,
             )
         expr.resolved_type = target
         return target
 
     def _unify(self, ln: ast.Expr, lt: Type, rn: ast.Expr, rt: Type) -> Type:
+        if lt == rt:
+            return lt
+        # An ASCII char literal that defaulted to `char` can still adopt an
+        # integer type for byte comparisons like `'a' == s[i]` (D42).
+        if isinstance(rt, IntType) and _is_flexible_char_lit(ln) and ln.value <= 0x7F:
+            lt = self._infer_int_lit(ln, rt)
+        elif isinstance(lt, IntType) and _is_flexible_char_lit(rn) and rn.value <= 0x7F:
+            rt = self._infer_int_lit(rn, lt)
         if lt == rt:
             return lt
         if isinstance(lt, IntType) and isinstance(rt, IntType):
@@ -2709,9 +3049,16 @@ class Checker:
                 rt = self._infer_int_lit(rn, lt)  # adopt lt
             if lt == rt:
                 return lt
+        if isinstance(lt, FloatType) and isinstance(rt, FloatType):
+            if _is_flexible_float_lit(ln):
+                lt = self._infer_float_lit(ln, rt)  # adopt rt
+            elif _is_flexible_float_lit(rn):
+                rt = self._infer_float_lit(rn, lt)  # adopt lt
+            if lt == rt:
+                return lt
         raise TypeCheckError(
             f"type mismatch: '{type_name(lt)}' vs '{type_name(rt)}' "
-            "(no implicit conversion between integer types)",
+            "(no implicit conversion between numeric types)",
             ln.line, ln.column,
         )
 
@@ -2828,7 +3175,7 @@ class Checker:
             )
         for arg in rest:
             at = self._expect_value(arg, scope, None)
-            if not isinstance(at, (IntType, BoolType, StrType)):
+            if not isinstance(at, (IntType, FloatType, CharType, BoolType, StrType)):
                 raise TypeCheckError(
                     f"format() cannot render a value of type '{type_name(at)}'",
                     arg.line, arg.column,
@@ -3012,13 +3359,70 @@ class Checker:
                 raise TypeCheckError("print() takes exactly one argument",
                                      expr.line, expr.column)
             at = self._expect_value(expr.args[0], scope, None)
-            if not isinstance(at, (IntType, BoolType, StrType)):
+            if not isinstance(at, (IntType, FloatType, CharType, BoolType, StrType)):
                 raise TypeCheckError(
                     f"print() cannot print a value of type '{type_name(at)}'",
                     expr.line, expr.column,
                 )
             expr.resolved_type = None
             return None
+        if name == "__write":
+            if len(expr.args) != 2:
+                raise TypeCheckError("__write() takes (fd: int32, s: str)",
+                                     expr.line, expr.column)
+            fd_t = self._expect_value(expr.args[0], scope, INT)
+            if not isinstance(fd_t, IntType):
+                raise TypeCheckError(
+                    f"__write() fd must be an integer, found '{type_name(fd_t)}'",
+                    expr.line, expr.column,
+                )
+            s_t = self._expect_value(expr.args[1], scope, STR)
+            if not isinstance(s_t, StrType):
+                raise TypeCheckError(
+                    f"__write() expects a string, found '{type_name(s_t)}'",
+                    expr.line, expr.column,
+                )
+            expr.resolved_type = None
+            return None
+        if name == "__exit":
+            if len(expr.args) != 1:
+                raise TypeCheckError("__exit() takes exactly one argument",
+                                     expr.line, expr.column)
+            code_t = self._expect_value(expr.args[0], scope, INT)
+            if not isinstance(code_t, IntType):
+                raise TypeCheckError(
+                    f"__exit() code must be an integer, found "
+                    f"'{type_name(code_t)}'",
+                    expr.line, expr.column,
+                )
+            expr.resolved_type = None
+            return None
+        if name == "__args":
+            if expr.args:
+                raise TypeCheckError("__args() takes no arguments",
+                                     expr.line, expr.column)
+            t = ListType(STR)
+            expr.resolved_type = t
+            return t
+        if name == "__read_file":
+            if len(expr.args) != 1:
+                raise TypeCheckError("__read_file() takes exactly one argument",
+                                     expr.line, expr.column)
+            p_t = self._expect_value(expr.args[0], scope, STR)
+            if not isinstance(p_t, StrType):
+                raise TypeCheckError(
+                    f"__read_file() expects a string path, found "
+                    f"'{type_name(p_t)}'",
+                    expr.line, expr.column,
+                )
+            expr.resolved_type = STR
+            return STR
+        if name == "__io_errno":
+            if expr.args:
+                raise TypeCheckError("__io_errno() takes no arguments",
+                                     expr.line, expr.column)
+            expr.resolved_type = INT
+            return INT
         if name == "len":
             if len(expr.args) != 1:
                 raise TypeCheckError("len() takes exactly one argument",
@@ -3032,6 +3436,19 @@ class Checker:
                 )
             expr.resolved_type = INT
             return INT
+        if name == "chars":
+            if len(expr.args) != 1:
+                raise TypeCheckError("chars() takes exactly one argument",
+                                     expr.line, expr.column)
+            at = self._expect_value(expr.args[0], scope, None)
+            if not isinstance(at, StrType):
+                raise TypeCheckError(
+                    f"chars() requires a string, found '{type_name(at)}'",
+                    expr.line, expr.column,
+                )
+            t = ListType(CHAR)
+            expr.resolved_type = t
+            return t
         if name in ("push", "pop"):
             return self._infer_list_mutation(expr, name, scope)
         if name in ("contains", "remove", "keys"):
@@ -3554,8 +3971,22 @@ def _stmt_returns(stmt: ast.Stmt) -> bool:
 
 
 def _is_flexible_int_lit(node: ast.Expr) -> bool:
-    """An unsuffixed integer literal can still adopt another integer type."""
-    return isinstance(node, ast.IntLit) and node.suffix is None
+    """An unsuffixed integer literal can still adopt another integer type. An
+    ASCII char literal counts too (it may stand in for a byte/integer, D42); a
+    multi-byte char literal is `char`-only."""
+    if not isinstance(node, ast.IntLit) or node.suffix is not None:
+        return False
+    return (not node.is_char) or node.value <= 0x7F
+
+
+def _is_flexible_char_lit(node: ast.Expr) -> bool:
+    """A char literal `'a'` that may still adopt an integer type when ASCII."""
+    return isinstance(node, ast.IntLit) and node.is_char
+
+
+def _is_flexible_float_lit(node: ast.Expr) -> bool:
+    """An unsuffixed float literal can still adopt another float type."""
+    return isinstance(node, ast.FloatLit) and node.suffix is None
 
 
 def _is_lvalue_shape(expr: ast.Expr) -> bool:

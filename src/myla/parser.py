@@ -316,15 +316,19 @@ class Parser:
         type_params, bounds = self._generics()
         first = self._type()
         trait_name = None
+        trait_args: list = []
         target = first
-        # `impl Trait for T { … }` (v0.4.4): the first type names the trait.
+        # `impl Trait for T { … }` (v0.4.4) and the generic `impl Trait<Args> for
+        # T { … }` (v0.5.5): the first type names the trait (plus its arguments).
         if self._match(T.FOR):
-            if not isinstance(first, ast.TypeRef) or first.args:
+            if not isinstance(first, ast.TypeRef):
                 raise ParseError(
-                    "the trait in 'impl Trait for T' must be a plain trait name",
+                    "the trait in 'impl Trait for T' must be a (possibly generic) "
+                    "trait name",
                     kw.line, kw.column,
                 )
             trait_name = first.name
+            trait_args = first.args
             target = self._type()
         self._expect(T.LBRACE, "'{' to begin impl block")
         self._skip_newlines()
@@ -344,6 +348,7 @@ class Parser:
         return ast.ImplDecl(
             target, methods, type_params=type_params,
             type_param_bounds=bounds, trait_name=trait_name,
+            trait_args=trait_args,
         ).at(kw.line, kw.column)
 
     def _trait_decl(self) -> ast.TraitDecl:
@@ -795,6 +800,9 @@ class Parser:
         if tok.kind is T.INT:
             self._advance()
             return ast.IntLit(tok.value, tok.suffix).at(tok.line, tok.column)
+        if tok.kind is T.FLOAT:
+            self._advance()
+            return ast.FloatLit(tok.value, tok.suffix).at(tok.line, tok.column)
         if tok.kind is T.CHAR:
             self._advance()
             return ast.IntLit(tok.value, None, is_char=True).at(tok.line, tok.column)

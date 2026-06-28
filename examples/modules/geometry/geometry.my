@@ -1,0 +1,16 @@
+// A package: the directory `geometry/` is reached via its root module
+// `geometry/geometry.my` (D57). Only `pub` items are importable; `abs` is
+// private to this module.
+
+pub struct Point { x: int32, y: int32 }
+
+fun abs(n: int32) -> int32 {
+    if n < 0 {
+        return -n
+    }
+    return n
+}
+
+pub fun manhattan(p: Point) -> int32 {
+    return abs(p.x) + abs(p.y)
+}

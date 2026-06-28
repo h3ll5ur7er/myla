@@ -1,0 +1,7 @@
+//~ lex error: empty '{}' hole in f-string
+// An interpolation hole must contain an expression; write `{{}}` for a literal
+// pair of braces (v0.5.6, D58).
+#main
+fun main() {
+    let s = f"value = {}"
+}

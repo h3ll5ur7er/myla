@@ -45,6 +45,12 @@ EXPECTED = {
                     "6\n100\n42\n"),
     "pipelines.my": "11\n8\n21\n14\n15\n42\n18\n11\n12\n20\n",
     "traits.my": "4\n6\ntrue\ntrue\nvec\ntrue\nfalse\ntrue\n60\n3\n4\n8\n3\n",
+    "floats.my": ("0.5\n3.1415926535897931\n3.75\n3.5\n1.5\n-3.1415926535897931\n"
+                  "0.30000000000000004\n0.300000012\ninf\ntrue\nfalse\n9\n3\n3\n"),
+    "chars.my": "a\nλ\n😀\ntrue\nfalse\n65\nλ\ntrue\n2\n1\n5\n3\n104\n233\n955\n",
+    "generic_traits.my": "0\n1\n-1\n0\n1\n-1\n",
+    "interpolation.my": ("myla scored 42\n2 + 3 = 5\nset is { 1, 2 }\n"
+                         "main.my:3:12: error\n"),
 }
 
 

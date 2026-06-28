@@ -1,0 +1,36 @@
+// interpolation.my — string interpolation (v0.5.6, D58).
+//
+// `f"…{expr}…"` is pure front-end sugar for the existing `format` intrinsic:
+// each `{ … }` hole becomes a trailing argument, so the printable-type rule is
+// exactly `format`'s. `{{` / `}}` are literal braces; holes hold arbitrary
+// expressions. The lexer lowers `f"a {x}"` straight to `format("a {}", x)`.
+
+#test("myla", 42)["myla scored 42"]
+fun scoreline(name: str, score: int32) -> str {
+    return f"{name} scored {score}"
+}
+
+// Holes may contain arbitrary expressions, evaluated left-to-right.
+#test(2, 3)["2 + 3 = 5"]
+fun sum_line(a: int32, b: int32) -> str {
+    return f"{a} + {b} = {a + b}"
+}
+
+// `{{` / `}}` render as single literal braces.
+#test(1, 2)["set is { 1, 2 }"]
+fun braces(x: int32, y: int32) -> str {
+    return f"set is {{ {x}, {y} }}"
+}
+
+// A diagnostic-style line: several holes packed against literal punctuation.
+#test("main.my", 3, 12)["main.my:3:12: error"]
+fun diagnostic(path: str, row: int32, col: int32) -> str {
+    return f"{path}:{row}:{col}: error"
+}
+
+fun main() {
+    print(scoreline("myla", 42))
+    print(sum_line(2, 3))
+    print(braces(1, 2))
+    print(diagnostic("main.my", 3, 12))
+}

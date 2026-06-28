@@ -1,0 +1,22 @@
+// Freestanding I/O runtime (v0.5.4): the std.io output streams and
+// std.process.exit. A tiny no-libc runtime backs these with raw Linux
+// syscalls natively and with Python's os/sys in the interpreter, so both
+// agree byte-for-byte.
+//
+// Run with:  myla run examples/stdio/main.my
+from std.io import println, write, eprint, eprintln
+from std.process import exit
+
+fun greet(name: str) -> str {
+    return "hello, " + name
+}
+
+fun main() {
+    println(greet("myla"))            // line to stdout (fd 1)
+    write(1, "no newline here; ")      // raw bytes, no trailing newline
+    println("then a full line")
+    eprintln("diagnostics go to stderr")   // fd 2
+    eprint("warn: ")
+    eprintln("done")
+    exit(0)                            // explicit success status
+}

@@ -1,0 +1,28 @@
+// std.io — freestanding console/stream output (v0.5.4, D29).
+//
+// Thin wrappers over the runtime's raw `write` primitive (the Linux `write`
+// syscall natively; Python `os.write` in the interpreter). String bytes are
+// written verbatim (UTF-8), so `print`/`println` are byte-for-byte identical
+// across the interpreter and the native backend.
+
+// Write `s`'s bytes to file descriptor `fd` (1 = stdout, 2 = stderr).
+pub fun write(fd: int32, s: str) {
+    __write(fd, s)
+}
+
+// Write `s` to stdout, followed by a newline.
+pub fun println(s: str) {
+    __write(1, s)
+    __write(1, "\n")
+}
+
+// Write `s` to stderr (no newline).
+pub fun eprint(s: str) {
+    __write(2, s)
+}
+
+// Write `s` to stderr, followed by a newline.
+pub fun eprintln(s: str) {
+    __write(2, s)
+    __write(2, "\n")
+}

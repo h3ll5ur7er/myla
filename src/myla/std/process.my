@@ -1,0 +1,15 @@
+// std.process — process control (v0.5.4, D29).
+//
+// The file-backed `std.fs` surface arrives in a later v0.5.4 slice; for now
+// this exposes the command-line arguments and process termination.
+
+// The process command-line arguments, captured at startup. `args()[0]` is the
+// program name as invoked; the remainder are its arguments.
+pub fun args() -> [str] {
+    return __args()
+}
+
+// Terminate the process with `code` (the low 8 bits become the exit status).
+pub fun exit(code: int32) {
+    __exit(code)
+}

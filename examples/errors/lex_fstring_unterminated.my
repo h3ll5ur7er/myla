@@ -1,0 +1,7 @@
+//~ lex error: unterminated f-string literal
+// An f-string is single-line: a newline before the closing quote is an error
+// (v0.5.6, D58).
+#main
+fun main() {
+    let s = f"missing close
+}

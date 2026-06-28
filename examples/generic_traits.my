@@ -1,0 +1,65 @@
+// generic_traits.my — restricted generic traits (v0.5.5, D55).
+//
+// A `trait` may take type parameters. A type implements such a trait *at most
+// once* (for a single argument T), so a call like `x.compare(y)` needs no
+// overload resolution — the one impl fixes T. Different types may pick
+// different T: `Money` compares against `int32`, `Name` against `str`.
+
+trait Comparable<T> {
+    fun compare(self, other: T) -> int32     // <0 / 0 / >0
+}
+
+struct Money { cents: int32 }
+
+impl Comparable<int32> for Money {
+    fun compare(self, other: int32) -> int32 {
+        if self.cents < other {
+            return -1
+        }
+        if self.cents > other {
+            return 1
+        }
+        return 0
+    }
+}
+
+struct Name { text: str }
+
+// A second type implements the same trait with a *different* T (here `str`),
+// comparing by length for the sake of a small example.
+impl Comparable<str> for Name {
+    fun compare(self, other: str) -> int32 {
+        if len(self.text) < len(other) {
+            return -1
+        }
+        if len(self.text) > len(other) {
+            return 1
+        }
+        return 0
+    }
+}
+
+#test(100, 100)[0]
+#test(100, 50)[1]
+#test(100, 200)[-1]
+fun money_cmp(cents: int32, other: int32) -> int32 {
+    let m = Money { cents: cents }
+    return m.compare(other)
+}
+
+#test("bob", "amy")[0]
+#test("bob", "al")[1]
+#test("al", "bob")[-1]
+fun name_cmp(a: str, b: str) -> int32 {
+    let n = Name { text: a }
+    return n.compare(b)
+}
+
+fun main() {
+    print(money_cmp(100, 100))      // 0
+    print(money_cmp(100, 50))       // 1
+    print(money_cmp(100, 200))      // -1
+    print(name_cmp("bob", "amy"))   // 0  (equal length)
+    print(name_cmp("bob", "al"))    // 1
+    print(name_cmp("al", "bob"))    // -1
+}

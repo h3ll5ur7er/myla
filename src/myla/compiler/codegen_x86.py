@@ -21,11 +21,20 @@ Conventions chosen for v0.0 (internal; we never call into C):
 """
 from __future__ import annotations
 
+import struct
+
 from .. import ast
 from ..types import (
-    BoolType, Checker, EnumType, FuncSig, FuncType, IntType, ListType, MapType,
-    StrType, StringBuilderType, StructType, TupleType, Type, type_name,
+    BoolType, CharType, Checker, EnumType, FloatType, FuncSig, FuncType, IntType,
+    ListType, MapType, StrType, StringBuilderType, StructType, TupleType, Type,
+    type_name,
+    _FF_MINK, _FF_MAXK, _FF_POW10_DD, _FF_SPLIT, round_float,
 )
+
+
+def _f64_bits(x: float) -> int:
+    """The unsigned 64-bit pattern of `x` as an IEEE-754 double."""
+    return struct.unpack("<Q", struct.pack("<d", x))[0]
 
 
 # Size of the heap arena reserved on first allocation (256 MiB). Generous for a
@@ -70,6 +79,23 @@ class CodeGen:
         # top-level `fun`s referenced as values: each needs an env-ignoring thunk
         # so it shares the closure calling convention (v0.4.2)
         self._fnval_thunks: set[str] = set()
+        # set once any float operation is emitted, so the SSE2 float runtime
+        # (helpers + power-of-ten tables) is only appended when actually needed.
+        self._uses_float = False
+        # set once any `char` is printed/formatted, so the UTF-8 encoder helper
+        # (__char_to_str) is only appended when actually needed.
+        self._uses_char = False
+        # set once `chars()` is used, gating the UTF-8 decode helper (__str_chars).
+        self._uses_str_chars = False
+        # set once `std.io.__write` is used, gating the raw `write` helper.
+        self._uses_write = False
+        # set once `std.process.args` (`__args`) is used, gating the argv->[str]
+        # builder helper. (`_start` always stashes argc/argv; only the builder is
+        # conditional.)
+        self._uses_args = False
+        # set once `std.fs.read_to_string` (`__read_file`/`__io_errno`) is used,
+        # gating the file-read helper + its errno global.
+        self._uses_read_file = False
 
     # -- type layout ---------------------------------------------------------
 
@@ -319,6 +345,18 @@ class CodeGen:
         # env-ignoring thunks for plain `fun`s referenced as values
         for name in sorted(self._fnval_thunks):
             self._emit_fnval_thunk(name)
+        if self._uses_float:
+            self._emit_float_runtime()
+        if self._uses_char:
+            self._emit_char_runtime()
+        if self._uses_str_chars:
+            self._emit_str_chars_runtime()
+        if self._uses_write:
+            self._emit_write_runtime()
+        if self._uses_args:
+            self._emit_args_runtime()
+        if self._uses_read_file:
+            self._emit_read_file_runtime()
         return self._assemble_source()
 
     def _assemble_source(self) -> str:
@@ -333,6 +371,8 @@ class CodeGen:
         out.append('.Lstr_true:\n\t.quad 4\n\t.ascii "true"')
         out.append('.Lstr_false:\n\t.quad 5\n\t.ascii "false"')
         out.append('.Lstr_minus:\n\t.quad 1\n\t.ascii "-"')
+        if self._uses_float:
+            out.extend(self._float_rodata())
         out.extend(self.rodata)
         out.append("")
         # heap bookkeeping for __alloc (zero-initialized)
@@ -344,6 +384,15 @@ class CodeGen:
         out.append("\t.skip 8")
         out.append("__free_list:")
         out.append("\t.skip 8")
+        # argc/argv captured at `_start` for `std.process.args` (D29)
+        out.append("__argc:")
+        out.append("\t.skip 8")
+        out.append("__argv:")
+        out.append("\t.skip 8")
+        if self._uses_read_file:
+            # errno of the last `__read_file` (0 on success), read by `__io_errno`
+            out.append("__io_errno_val:")
+            out.append("\t.skip 8")
         out.append("")
         # mark the stack non-executable to silence the linker
         out.append('\t.section .note.GNU-stack,"",@progbits')
@@ -356,6 +405,11 @@ class CodeGen:
         e = self.text.append
         e("\t.global _start")
         e("_start:")
+        # capture argc/argv from the entry stack (D29) for `std.process.args`.
+        e("\tmovq (%rsp), %rax")        # argc
+        e("\tmovq %rax, __argc(%rip)")
+        e("\tleaq 8(%rsp), %rax")       # &argv[0]
+        e("\tmovq %rax, __argv(%rip)")
         e(f"\tcall myla_{entry_name}")
         e("\tmovq $60, %rax")          # exit
         e("\txorq %rdi, %rdi")
@@ -3037,7 +3091,12 @@ class CodeGen:
         """Evaluate a scalar expression, leaving its value in %rax."""
         if isinstance(expr, ast.IntLit):
             self._emit(f"movabsq ${expr.value}, %rax")
-            self._wrap(expr.resolved_type)
+            if not isinstance(expr.resolved_type, CharType):
+                self._wrap(expr.resolved_type)   # a char codepoint needs no wrapping
+        elif isinstance(expr, ast.FloatLit):
+            self._uses_float = True
+            image = round_float(expr.value, expr.resolved_type)
+            self._emit(f"movabsq ${_f64_bits(image)}, %rax")  # f64 image of {image}
         elif isinstance(expr, ast.BoolLit):
             self._emit(f"movq ${1 if expr.value else 0}, %rax")
         elif isinstance(expr, ast.StrLit):
@@ -3092,12 +3151,73 @@ class CodeGen:
                 off = self._locals[f"matchres:{id(expr)}"]
                 self._emit(f"movq {off}(%rbp), %rax")
         elif isinstance(expr, ast.Cast):
-            self._eval(expr.operand)
-            self._wrap(expr.resolved_type)
+            self._gen_cast(expr)
         else:  # pragma: no cover
             raise ValueError(f"cannot evaluate {type(expr).__name__}")
 
+    def _round_xmm0(self, t: Type) -> None:
+        """Narrow %xmm0 to single precision when `t` is `float32` (round to
+        nearest), then widen back to the f64 image we carry at runtime."""
+        if isinstance(t, FloatType) and t.width == 32:
+            self._emit("cvtsd2ss %xmm0, %xmm0")
+            self._emit("cvtss2sd %xmm0, %xmm0")
+
+    def _gen_cast(self, expr: ast.Cast) -> None:
+        src = expr.operand.resolved_type
+        target = expr.resolved_type
+        self._eval(expr.operand)
+        if isinstance(target, CharType):
+            # int -> char: keep the codepoint value in %rax unchanged (unchecked).
+            return
+        if isinstance(src, CharType):
+            # char -> int: the codepoint is already in %rax; wrap to the width.
+            self._wrap(target)
+            return
+        if isinstance(target, FloatType):
+            self._uses_float = True
+            if isinstance(src, FloatType):
+                # float -> float: the runtime image is already f64; only an
+                # f64 -> f32 narrowing changes anything.
+                self._emit("movq %rax, %xmm0")
+                self._round_xmm0(target)
+                self._emit("movq %xmm0, %rax")
+            else:  # int -> float
+                if not src.signed and src.width == 64:
+                    # unsigned 64-bit with the high bit set can't go through the
+                    # signed cvtsi2sd; use the round-to-odd halving trick.
+                    direct = self._label()
+                    done = self._label()
+                    self._emit("testq %rax, %rax")
+                    self._emit(f"jns {direct}")
+                    self._emit("movq %rax, %rcx")
+                    self._emit("shrq $1, %rcx")          # u >> 1
+                    self._emit("andq $1, %rax")          # u & 1 (sticky bit)
+                    self._emit("orq %rax, %rcx")         # round-to-odd of u/2
+                    self._emit("cvtsi2sdq %rcx, %xmm0")
+                    self._emit("addsd %xmm0, %xmm0")     # * 2
+                    self._emit(f"jmp {done}")
+                    self._emit(f"{direct}:")
+                    self._emit("cvtsi2sdq %rax, %xmm0")
+                    self._emit(f"{done}:")
+                else:
+                    self._emit("cvtsi2sdq %rax, %xmm0")
+                self._round_xmm0(target)
+                self._emit("movq %xmm0, %rax")
+        elif isinstance(src, FloatType):  # float -> int (truncate toward zero)
+            self._uses_float = True
+            self._emit("movq %rax, %xmm0")
+            self._emit("cvttsd2si %xmm0, %rax")
+            self._wrap(target)
+        else:  # int -> int
+            self._wrap(target)
+
     def _eval_unary(self, expr: ast.Unary) -> None:
+        if expr.op == "-" and isinstance(expr.resolved_type, FloatType):
+            self._uses_float = True
+            self._eval(expr.operand)
+            self._emit("movabsq $-9223372036854775808, %rcx")  # 0x8000…0 sign bit
+            self._emit("xorq %rcx, %rax")
+            return
         self._eval(expr.operand)
         if expr.op == "-":
             self._emit("negq %rax")
@@ -3118,6 +3238,10 @@ class CodeGen:
 
         # operand type drives signedness / str handling
         ltype = expr.left.resolved_type
+
+        if isinstance(ltype, FloatType):
+            self._eval_binary_float(expr)
+            return
 
         if op in ("==", "!=") and isinstance(ltype, StrType):
             self._eval(expr.right)
@@ -3170,8 +3294,10 @@ class CodeGen:
             self._wrap(expr.resolved_type)
         elif op in _SET_MNEMONIC:
             signed_set, unsigned_set = _SET_MNEMONIC[op]
+            # `char` compares as an unsigned codepoint; only IntType carries sign.
+            signed = isinstance(ltype, IntType) and ltype.signed
             self._emit("cmpq %rcx, %rax")
-            self._emit(f"{signed_set if ltype.signed else unsigned_set} %al")
+            self._emit(f"{signed_set if signed else unsigned_set} %al")
             self._emit("movzbq %al, %rax")
         elif op in ("==", "!="):
             self._emit("cmpq %rcx, %rax")
@@ -3200,6 +3326,45 @@ class CodeGen:
             self._wrap(expr.resolved_type)
         else:  # pragma: no cover
             raise ValueError(f"unknown operator {op}")
+
+    # set/and/or sequences for float comparisons via `ucomisd` (NaN-aware).
+    # `<`/`<=`/`==` must additionally exclude the unordered (NaN) case (PF=1);
+    # `>`/`>=` use seta/setae which are already false when unordered.
+    _FCMP = {
+        ">": [("seta", "%al")],
+        ">=": [("setae", "%al")],
+        "<": [("setb", "%al"), ("setnp", "%cl"), ("andb", "%cl, %al")],
+        "<=": [("setbe", "%al"), ("setnp", "%cl"), ("andb", "%cl, %al")],
+        "==": [("sete", "%al"), ("setnp", "%cl"), ("andb", "%cl, %al")],
+        "!=": [("setne", "%al"), ("setp", "%cl"), ("orb", "%cl, %al")],
+    }
+    _FARITH = {"+": "addsd", "-": "subsd", "*": "mulsd", "/": "divsd"}
+
+    def _eval_binary_float(self, expr: ast.Binary) -> None:
+        """Float arithmetic/comparison (D56): operands are carried as f64 images
+        in %rax; compute in XMM, then narrow `float32` results."""
+        self._uses_float = True
+        op = expr.op
+        # right -> push; left -> rax; pop right -> rcx (same shape as the int path)
+        self._eval(expr.right)
+        self._emit("pushq %rax")
+        self._eval(expr.left)
+        self._emit("popq %rcx")
+        self._emit("movq %rax, %xmm0")        # left
+        self._emit("movq %rcx, %xmm1")        # right
+        if op in self._FARITH:
+            self._emit(f"{self._FARITH[op]} %xmm1, %xmm0")
+            self._round_xmm0(expr.resolved_type)
+            self._emit("movq %xmm0, %rax")
+        elif op == "%":
+            self._emit("call __fmod")          # fmod(xmm0, xmm1) -> xmm0
+            self._round_xmm0(expr.resolved_type)
+            self._emit("movq %xmm0, %rax")
+        else:  # comparison -> 0/1 in %rax
+            self._emit("ucomisd %xmm1, %xmm0")
+            for mnem, ops in self._FCMP[op]:
+                self._emit(f"{mnem} {ops}")
+            self._emit("movzbq %al, %rax")
 
     def _eval_logical(self, expr: ast.Binary) -> None:
         short = self._label()
@@ -3429,6 +3594,36 @@ class CodeGen:
             self._gen_print(expr.args[0])
             return
 
+        if name == "__write":
+            self._uses_write = True
+            self._eval(expr.args[1])             # str cell pointer -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[0])             # fd -> rax
+            self._emit("movl %eax, %edi")        # fd (int32, zero-extended)
+            self._emit("popq %rsi")              # str cell pointer
+            self._emit("call __write")
+            return
+        if name == "__exit":
+            self._eval(expr.args[0])             # exit code -> rax
+            self._emit("movl %eax, %edi")        # status (int32)
+            self._emit("movq $60, %rax")         # exit syscall
+            self._emit("syscall")
+            return
+        if name == "__args":
+            self._uses_args = True
+            self._emit("call __args")            # rax = fresh [str] list cell
+            return
+        if name == "__read_file":
+            self._uses_read_file = True
+            self._eval(expr.args[0])             # path str cell -> rax
+            self._emit("movq %rax, %rdi")
+            self._emit("call __read_file")       # rax = contents str (errno -> global)
+            return
+        if name == "__io_errno":
+            self._uses_read_file = True
+            self._emit("movq __io_errno_val(%rip), %rax")
+            return
+
         if name == "len":
             self._eval(expr.args[0])             # list cell pointer -> rax
             self._emit("movq (%rax), %rax")      # length at offset 0
@@ -3450,6 +3645,12 @@ class CodeGen:
             self._eval(expr.args[0])             # map cell -> rax
             self._emit("movq %rax, %rdi")
             self._emit(f"call {self._map_keys_name(expr.args[0].resolved_type)}")
+            return
+        if name == "chars":
+            self._uses_str_chars = True
+            self._eval(expr.args[0])             # str cell -> rax
+            self._emit("movq %rax, %rdi")
+            self._emit("call __str_chars")       # rax = fresh [char] list cell
             return
 
         if name == "format":
@@ -3536,6 +3737,9 @@ class CodeGen:
             self._emit(f"leaq {label}(%rip), %rax")
         elif isinstance(t, BoolType):
             self._emit(f"movq ${1 if value else 0}, %rax")
+        elif isinstance(t, FloatType):
+            self._uses_float = True
+            self._emit(f"movabsq ${_f64_bits(value)}, %rax")  # f64 image of {value}
         else:  # IntType
             self._emit(f"movabsq ${value}, %rax")
 
@@ -3549,6 +3753,17 @@ class CodeGen:
             self._emit("call __print_str")
         elif isinstance(t, IntType):
             self._emit("call __print_int" if t.signed else "call __print_uint")
+        elif isinstance(t, FloatType):
+            self._uses_float = True
+            self._emit(f"movq ${9 if t.width == 32 else 17}, %rsi")  # sig digits
+            self._emit("call __float_to_str")
+            self._emit("movq %rax, %rdi")
+            self._emit("call __print_str")
+        elif isinstance(t, CharType):
+            self._uses_char = True
+            self._emit("call __char_to_str")     # rdi = codepoint -> rax = str
+            self._emit("movq %rax, %rdi")
+            self._emit("call __print_str")
         else:  # pragma: no cover - checker restricts print()
             raise ValueError("unprintable type")
 
@@ -3558,6 +3773,17 @@ class CodeGen:
         self._eval(arg)
         t = arg.resolved_type
         if isinstance(t, StrType):
+            return
+        if isinstance(t, FloatType):
+            self._uses_float = True
+            self._emit("movq %rax, %rdi")
+            self._emit(f"movq ${9 if t.width == 32 else 17}, %rsi")
+            self._emit("call __float_to_str")
+            return
+        if isinstance(t, CharType):
+            self._uses_char = True
+            self._emit("movq %rax, %rdi")
+            self._emit("call __char_to_str")
             return
         self._emit("movq %rax, %rdi")
         if isinstance(t, BoolType):
@@ -3603,6 +3829,702 @@ class CodeGen:
             self._emit("movl %eax, %eax")        # zero-extend low 32 bits
         else:
             self._emit(f"andq ${(1 << t.width) - 1}, %rax")
+
+    # -- SSE2 float runtime (D56) -------------------------------------------
+    # Emitted only when the program uses floats. The number→text routine mirrors
+    # `types.format_float` exactly (same constants, same op order) so the native
+    # output is byte-identical to the interpreter's.
+
+    def _float_rodata(self) -> list[str]:
+        out: list[str] = ["\t.align 8"]
+        # 10**k high parts (k = _FF_MINK.._FF_MAXK) — also the plain f64 table.
+        out.append("__pow10_hi:")
+        out += [f"\t.quad {_f64_bits(hi)}" for hi, _lo in _FF_POW10_DD]
+        out.append("__pow10_lo:")          # the double-double low corrections
+        out += [f"\t.quad {_f64_bits(lo)}" for _hi, lo in _FF_POW10_DD]
+        out.append(f"__fsplit:\n\t.quad {_f64_bits(_FF_SPLIT)}")  # 2**27 + 1
+        out.append('.Lstr_nan:\n\t.quad 3\n\t.ascii "nan"')
+        out.append('.Lstr_inf:\n\t.quad 3\n\t.ascii "inf"')
+        out.append('.Lstr_ninf:\n\t.quad 4\n\t.ascii "-inf"')
+        out.append('.Lstr_fzero:\n\t.quad 1\n\t.ascii "0"')
+        out.append('.Lstr_fnzero:\n\t.quad 2\n\t.ascii "-0"')
+        return out
+
+    def _emit_float_runtime(self) -> None:
+        e = self.text.append
+        e("")
+        # __fmod: xmm0 = a, xmm1 = b -> xmm0 = fmod(a, b) via x87 `fprem`
+        # (exact remainder, truncated toward zero — matches Python math.fmod).
+        e("__fmod:")
+        e("\tsubq $16, %rsp")
+        e("\tmovsd %xmm1, (%rsp)")
+        e("\tmovsd %xmm0, 8(%rsp)")
+        e("\tfldl (%rsp)")                 # st0 = b
+        e("\tfldl 8(%rsp)")                # st0 = a, st1 = b
+        e(".Lfm_loop:")
+        e("\tfprem")
+        e("\tfnstsw %ax")
+        e("\ttestb $0x04, %ah")            # C2 set => reduction incomplete
+        e("\tjnz .Lfm_loop")
+        e("\tfstpl 8(%rsp)")               # store result, pop -> st0 = b
+        e("\tfstp %st(0)")                 # pop b
+        e("\tmovsd 8(%rsp), %xmm0")
+        e("\taddq $16, %rsp")
+        e("\tret")
+        e("")
+        # __two_prod: xmm0=a, xmm1=b -> xmm0=p, xmm1=e with p+e == a*b exactly
+        # (Dekker). Clobbers xmm2..xmm7; preserves xmm8.
+        e("__two_prod:")
+        e("\tmovsd __fsplit(%rip), %xmm7")  # S
+        e("\tmovsd %xmm0, %xmm2")           # split a
+        e("\tmulsd %xmm7, %xmm2")           # ca = S*a
+        e("\tmovsd %xmm2, %xmm3")
+        e("\tsubsd %xmm0, %xmm3")           # ca - a
+        e("\tsubsd %xmm3, %xmm2")           # ahi = ca-(ca-a)
+        e("\tmovsd %xmm0, %xmm3")
+        e("\tsubsd %xmm2, %xmm3")           # alo = a - ahi
+        e("\tmovsd %xmm1, %xmm4")           # split b
+        e("\tmulsd %xmm7, %xmm4")           # cb = S*b
+        e("\tmovsd %xmm4, %xmm5")
+        e("\tsubsd %xmm1, %xmm5")           # cb - b
+        e("\tsubsd %xmm5, %xmm4")           # bhi = cb-(cb-b)
+        e("\tmovsd %xmm1, %xmm5")
+        e("\tsubsd %xmm4, %xmm5")           # blo = b - bhi
+        e("\tmulsd %xmm1, %xmm0")           # p = a*b
+        e("\tmovsd %xmm2, %xmm6")           # ahi
+        e("\tmulsd %xmm4, %xmm6")           # ahi*bhi
+        e("\tsubsd %xmm0, %xmm6")           # ahi*bhi - p
+        e("\tmovsd %xmm2, %xmm7")           # ahi
+        e("\tmulsd %xmm5, %xmm7")           # ahi*blo
+        e("\taddsd %xmm7, %xmm6")
+        e("\tmovsd %xmm3, %xmm7")           # alo
+        e("\tmulsd %xmm4, %xmm7")           # alo*bhi
+        e("\taddsd %xmm7, %xmm6")
+        e("\tmovsd %xmm3, %xmm7")           # alo
+        e("\tmulsd %xmm5, %xmm7")           # alo*blo
+        e("\taddsd %xmm7, %xmm6")
+        e("\tmovsd %xmm6, %xmm1")           # e
+        e("\tret")
+        e("")
+        # __fscale: xmm8 = m (magnitude), r12 = idx -> rax = round(m * 10**idx)
+        # as an int64, using double-double scaling (split for very small m).
+        e("__fscale:")
+        e("\tcmpq $308, %r12")              # idx > _FF_MAXK ?
+        e("\tjle .Lfsc_direct")
+        e("\tmovsd %xmm8, %xmm0")           # a = m
+        e("\tleaq __pow10_hi(%rip), %rax")
+        e("\tmovsd 4184(%rax), %xmm1")      # hi(10**200), index 523
+        e("\tcall __two_prod")
+        e("\taddsd %xmm1, %xmm0")           # p + e
+        e("\tleaq __pow10_lo(%rip), %rax")
+        e("\tmovsd 4184(%rax), %xmm2")      # lo(10**200)
+        e("\tmovsd %xmm8, %xmm3")
+        e("\tmulsd %xmm2, %xmm3")           # m * lo
+        e("\taddsd %xmm3, %xmm0")           # m2 = p+e + m*lo
+        e("\tmovsd %xmm0, %xmm8")           # m <- m2
+        e("\tsubq $200, %r12")              # idx -= 200
+        e(".Lfsc_direct:")
+        e("\tleaq 323(%r12), %r11")         # table index = idx - _FF_MINK
+        e("\tmovsd %xmm8, %xmm0")           # a = m
+        e("\tleaq __pow10_hi(%rip), %rax")
+        e("\tmovsd (%rax,%r11,8), %xmm1")   # hi(10**idx)
+        e("\tcall __two_prod")
+        e("\tleaq __pow10_lo(%rip), %rax")
+        e("\tmovsd (%rax,%r11,8), %xmm2")   # lo(10**idx)
+        e("\tmovsd %xmm8, %xmm3")
+        e("\tmulsd %xmm2, %xmm3")           # m * lo
+        e("\taddsd %xmm3, %xmm1")           # e += m*lo
+        e("\tcvtsd2si %xmm0, %rax")         # llrint(p)
+        e("\tcvtsd2si %xmm1, %rcx")         # llrint(e)
+        e("\taddq %rcx, %rax")              # D = llrint(p) + llrint(e)
+        e("\tret")
+        e("")
+        # __float_to_str: rdi = f64 image bits, rsi = P (sig digits) -> rax = heap
+        # str [len:8][bytes], plain round-trippable decimal (mirrors format_float).
+        e("__float_to_str:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tpushq %r14")
+        e("\tpushq %r15")
+        e("\tsubq $1088, %rsp")             # scratch: DIGBUF/OUTBUF below rbp
+        e("\tmovq %rdi, %rbx")              # raw bits
+        e("\tmovq %rsi, %r15")              # P
+        e("\tmovq %rbx, %rax")
+        e("\tmovabsq $0x7fffffffffffffff, %rcx")
+        e("\tandq %rcx, %rax")              # absbits = bits & ~sign
+        e("\tmovabsq $0x7ff0000000000000, %rcx")
+        e("\tcmpq %rcx, %rax")
+        e("\tja .Lf_nan")                   # absbits > inf bits -> NaN
+        e("\tje .Lf_inf")                   # == inf bits -> +/- inf
+        e("\ttestq %rax, %rax")
+        e("\tjz .Lf_zero")                  # +/- 0
+        e("\txorq %r14, %r14")              # neg flag
+        e("\ttestq %rbx, %rbx")
+        e("\tjns .Lf_pos")
+        e("\tmovq $1, %r14")
+        e(".Lf_pos:")
+        e("\tmovq %rax, %xmm8")             # m = magnitude (f64 image)
+        # e10 = max k in [MINK,MAXK] with pow10_hi[k] <= m (binary search).
+        e("\txorq %r8, %r8")                # lo index = 0
+        e("\tmovq $631, %r9")               # hi index = N-1
+        e("\tmovq $-1, %r10")               # ridx (relative result), -1 = none
+        e("\tleaq __pow10_hi(%rip), %r13")
+        e(".Lf_bs:")
+        e("\tcmpq %r9, %r8")
+        e("\tjg .Lf_bsd")
+        e("\tleaq (%r8,%r9), %r11")
+        e("\tsarq $1, %r11")                # mid = (lo+hi)/2
+        e("\tmovsd (%r13,%r11,8), %xmm0")   # pow10_hi[mid]
+        e("\tucomisd %xmm0, %xmm8")         # m vs pow10_hi[mid]
+        e("\tjb .Lf_bs_lo")                 # m < pow10[mid]
+        e("\tmovq %r11, %r10")              # m >= : ridx = mid; lo = mid+1
+        e("\tleaq 1(%r11), %r8")
+        e("\tjmp .Lf_bs")
+        e(".Lf_bs_lo:")
+        e("\tleaq -1(%r11), %r9")           # hi = mid-1
+        e("\tjmp .Lf_bs")
+        e(".Lf_bsd:")
+        # idx = (P-1) - _FF_MINK - ridx = (P-1) + 323 - ridx
+        e("\tmovq %r15, %r12")
+        e("\tdecq %r12")                    # P-1
+        e("\taddq $323, %r12")              # (P-1) - MINK
+        e("\tsubq %r10, %r12")              # idx
+        e("\tcall __fscale")               # rax = D
+        # renormalize against 10**(P-1) and 10**P
+        e("\tmovq $1, %r8")                 # r8 = 10**(P-1)
+        e("\tmovq %r15, %rcx")
+        e("\tdecq %rcx")
+        e(".Lf_p10:")
+        e("\ttestq %rcx, %rcx")
+        e("\tjz .Lf_p10d")
+        e("\timulq $10, %r8")
+        e("\tdecq %rcx")
+        e("\tjmp .Lf_p10")
+        e(".Lf_p10d:")
+        e("\tleaq (%r8,%r8,4), %r9")
+        e("\taddq %r9, %r9")                # r9 = 10**P
+        e("\tcmpq %r9, %rax")               # D >= 10**P ?
+        e("\tjb .Lf_norm2")
+        e("\txorq %rdx, %rdx")
+        e("\tmovq $10, %rcx")
+        e("\tdivq %rcx")                    # D /= 10
+        e("\tincq %r10")                    # e10 += 1
+        e(".Lf_norm2:")
+        e("\tcmpq %r8, %rax")               # D < 10**(P-1) ?
+        e("\tjae .Lf_digits")
+        e("\tmovq %r8, %rax")               # D = 10**(P-1)
+        e(".Lf_digits:")
+        # write P decimal digits of D, MSB-first, into DIGBUF (rbp-1088)
+        e("\tleaq -1088(%rbp), %rdi")       # DIGBUF
+        e("\tmovq %r15, %rcx")              # P
+        e("\tleaq -1(%rdi,%rcx), %rsi")     # &DIGBUF[P-1]
+        e("\tmovq $10, %r11")
+        e(".Lf_dg:")
+        e("\txorq %rdx, %rdx")
+        e("\tdivq %r11")
+        e("\taddb $48, %dl")
+        e("\tmovb %dl, (%rsi)")
+        e("\tdecq %rsi")
+        e("\tdecq %rcx")
+        e("\tjnz .Lf_dg")
+        # nsig = P - trailing zeros (at least 1)
+        e("\tmovq %r15, %rcx")              # nsig = P
+        e("\tleaq -1088(%rbp), %rdi")       # DIGBUF
+        e(".Lf_trim:")
+        e("\tcmpq $1, %rcx")
+        e("\tjle .Lf_trimd")
+        e("\tmovzbl -1(%rdi,%rcx), %eax")
+        e("\tcmpb $48, %al")
+        e("\tjne .Lf_trimd")
+        e("\tdecq %rcx")
+        e("\tjmp .Lf_trim")
+        e(".Lf_trimd:")
+        e("\tmovq %rcx, %r8")               # r8 = nsig (n)
+        e("\tleaq -323(%r10), %r13")        # r13 = e10 (absolute)
+        # positional layout into OUTBUF (rbp-512); r12 = start, rdi = write ptr
+        e("\tleaq -512(%rbp), %r12")        # OUTBUF
+        e("\tmovq %r12, %rdi")
+        e("\ttestq %r14, %r14")
+        e("\tjz .Lf_nosign")
+        e("\tmovb $45, (%rdi)")             # '-'
+        e("\tincq %rdi")
+        e(".Lf_nosign:")
+        e("\tleaq -1088(%rbp), %rsi")       # src = DIGBUF
+        e("\tcld")
+        e("\tmovq %r8, %rax")
+        e("\tdecq %rax")                    # n-1
+        e("\tcmpq %rax, %r13")              # e10 vs n-1
+        e("\tjge .Lf_brA")
+        e("\ttestq %r13, %r13")
+        e("\tjs .Lf_brC")
+        # branch B: 0 <= e10 < n-1  ->  d[0:e10+1] '.' d[e10+1:]
+        e("\tleaq 1(%r13), %rcx")           # e10+1 digits
+        e("\trep movsb")
+        e("\tmovb $46, (%rdi)")             # '.'
+        e("\tincq %rdi")
+        e("\tmovq %r8, %rcx")
+        e("\tsubq %r13, %rcx")
+        e("\tdecq %rcx")                    # n - e10 - 1
+        e("\trep movsb")
+        e("\tjmp .Lf_emit")
+        e(".Lf_brA:")
+        # integer with trailing zeros: copy n digits then (e10-n+1) zeros
+        e("\tmovq %r8, %rcx")
+        e("\trep movsb")
+        e("\tmovq %r13, %rcx")
+        e("\tsubq %r8, %rcx")
+        e("\tincq %rcx")                    # e10 - n + 1
+        e(".Lf_zA:")
+        e("\ttestq %rcx, %rcx")
+        e("\tjz .Lf_emit")
+        e("\tmovb $48, (%rdi)")
+        e("\tincq %rdi")
+        e("\tdecq %rcx")
+        e("\tjmp .Lf_zA")
+        e(".Lf_brC:")
+        # e10 < 0: "0." then (-e10-1) zeros then n digits
+        e("\tmovb $48, (%rdi)")             # '0'
+        e("\tincq %rdi")
+        e("\tmovb $46, (%rdi)")             # '.'
+        e("\tincq %rdi")
+        e("\tmovq %r13, %rcx")
+        e("\tnegq %rcx")
+        e("\tdecq %rcx")                    # -e10-1
+        e(".Lf_zC:")
+        e("\ttestq %rcx, %rcx")
+        e("\tjz .Lf_cC")
+        e("\tmovb $48, (%rdi)")
+        e("\tincq %rdi")
+        e("\tdecq %rcx")
+        e("\tjmp .Lf_zC")
+        e(".Lf_cC:")
+        e("\tmovq %r8, %rcx")               # copy n digits
+        e("\trep movsb")
+        e(".Lf_emit:")
+        e("\tmovq %rdi, %r8")
+        e("\tsubq %r12, %r8")               # len = end - start
+        e("\tleaq 8(%r8), %rdi")            # alloc size = 8 + len
+        e("\tpushq %r8")
+        e("\tpushq %r12")
+        e("\tcall __alloc")               # rax = heap cell
+        e("\tpopq %r12")
+        e("\tpopq %r8")
+        e("\tmovq %r8, (%rax)")            # length
+        e("\tleaq 8(%rax), %rdi")          # dst
+        e("\tmovq %r12, %rsi")             # src = OUTBUF
+        e("\tmovq %r8, %rcx")
+        e("\tcld")
+        e("\tpushq %rax")
+        e("\trep movsb")
+        e("\tpopq %rax")
+        e("\tjmp .Lf_ret")
+        e(".Lf_nan:")
+        e("\tleaq .Lstr_nan(%rip), %rax")
+        e("\tjmp .Lf_ret")
+        e(".Lf_inf:")
+        e("\ttestq %rbx, %rbx")
+        e("\tjs .Lf_ninf")
+        e("\tleaq .Lstr_inf(%rip), %rax")
+        e("\tjmp .Lf_ret")
+        e(".Lf_ninf:")
+        e("\tleaq .Lstr_ninf(%rip), %rax")
+        e("\tjmp .Lf_ret")
+        e(".Lf_zero:")
+        e("\ttestq %rbx, %rbx")
+        e("\tjs .Lf_nzero")
+        e("\tleaq .Lstr_fzero(%rip), %rax")
+        e("\tjmp .Lf_ret")
+        e(".Lf_nzero:")
+        e("\tleaq .Lstr_fnzero(%rip), %rax")
+        e(".Lf_ret:")
+        e("\tleaq -40(%rbp), %rsp")
+        e("\tpopq %r15")
+        e("\tpopq %r14")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_char_runtime(self) -> None:
+        """`__char_to_str`: rdi = Unicode scalar -> rax = a fresh heap str holding
+        its UTF-8 bytes. Mirrors `types.char_utf8_bytes` exactly (same range
+        thresholds and bit masks) so the interpreter and native output agree."""
+        e = self.text.append
+        e("")
+        e("__char_to_str:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tsubq $16, %rsp")               # scratch for up to 4 UTF-8 bytes
+        e("\tmovq %rdi, %rax")              # rax = codepoint
+        e("\tcmpq $0x80, %rax")
+        e("\tjae .Lc2s_2")
+        # 1 byte: [cp]
+        e("\tmovb %al, -8(%rbp)")
+        e("\tmovq $1, %r8")
+        e("\tjmp .Lc2s_emit")
+        e(".Lc2s_2:")
+        e("\tcmpq $0x800, %rax")
+        e("\tjae .Lc2s_3")
+        # 2 bytes: C0|(cp>>6), 80|(cp&3F)
+        e("\tmovq %rax, %rcx")
+        e("\tshrq $6, %rcx")
+        e("\torq $0xC0, %rcx")
+        e("\tmovb %cl, -8(%rbp)")
+        e("\tmovq %rax, %rcx")
+        e("\tandq $0x3F, %rcx")
+        e("\torq $0x80, %rcx")
+        e("\tmovb %cl, -7(%rbp)")
+        e("\tmovq $2, %r8")
+        e("\tjmp .Lc2s_emit")
+        e(".Lc2s_3:")
+        e("\tcmpq $0x10000, %rax")
+        e("\tjae .Lc2s_4")
+        # 3 bytes: E0|(cp>>12), 80|((cp>>6)&3F), 80|(cp&3F)
+        e("\tmovq %rax, %rcx")
+        e("\tshrq $12, %rcx")
+        e("\torq $0xE0, %rcx")
+        e("\tmovb %cl, -8(%rbp)")
+        e("\tmovq %rax, %rcx")
+        e("\tshrq $6, %rcx")
+        e("\tandq $0x3F, %rcx")
+        e("\torq $0x80, %rcx")
+        e("\tmovb %cl, -7(%rbp)")
+        e("\tmovq %rax, %rcx")
+        e("\tandq $0x3F, %rcx")
+        e("\torq $0x80, %rcx")
+        e("\tmovb %cl, -6(%rbp)")
+        e("\tmovq $3, %r8")
+        e("\tjmp .Lc2s_emit")
+        e(".Lc2s_4:")
+        # 4 bytes: F0|((cp>>18)&07), 80|((cp>>12)&3F), 80|((cp>>6)&3F), 80|(cp&3F)
+        e("\tmovq %rax, %rcx")
+        e("\tshrq $18, %rcx")
+        e("\tandq $0x07, %rcx")
+        e("\torq $0xF0, %rcx")
+        e("\tmovb %cl, -8(%rbp)")
+        e("\tmovq %rax, %rcx")
+        e("\tshrq $12, %rcx")
+        e("\tandq $0x3F, %rcx")
+        e("\torq $0x80, %rcx")
+        e("\tmovb %cl, -7(%rbp)")
+        e("\tmovq %rax, %rcx")
+        e("\tshrq $6, %rcx")
+        e("\tandq $0x3F, %rcx")
+        e("\torq $0x80, %rcx")
+        e("\tmovb %cl, -6(%rbp)")
+        e("\tmovq %rax, %rcx")
+        e("\tandq $0x3F, %rcx")
+        e("\torq $0x80, %rcx")
+        e("\tmovb %cl, -5(%rbp)")
+        e("\tmovq $4, %r8")
+        e(".Lc2s_emit:")
+        e("\tleaq 8(%r8), %rdi")            # value size = 8 + len
+        e("\tpushq %r8")
+        e("\tcall __alloc")                 # rax = cell (rc=1)
+        e("\tpopq %r8")
+        e("\tmovq %r8, (%rax)")             # store length
+        e("\tleaq 8(%rax), %rdi")           # dst = bytes region
+        e("\tleaq -8(%rbp), %rsi")          # src = scratch
+        e("\tmovq %r8, %rcx")
+        e("\tcld")
+        e("\tpushq %rax")
+        e("\trep movsb")
+        e("\tpopq %rax")
+        e("\tleave")
+        e("\tret")
+        e("")
+
+    def _emit_str_chars_runtime(self) -> None:
+        """`__str_chars`: rdi = str cell [len:8][bytes] -> rax = a fresh `[char]`
+        list cell [len:8][cap:8][cp:8 …], one element per UTF-8 scalar. Assumes
+        well-formed UTF-8 (every Myla `str` is). Capacity is the byte length (an
+        upper bound on the scalar count); length is the exact scalar count."""
+        e = self.text.append
+        e("")
+        e("__str_chars:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tpushq %r14")
+        e("\tpushq %r15")
+        e("\tmovq (%rdi), %r12")            # byte length
+        e("\tleaq 8(%rdi), %rbx")           # src bytes
+        e("\tmovq %r12, %rax")
+        e("\tshlq $3, %rax")                # byte_len * 8
+        e("\taddq $16, %rax")               # + header
+        e("\tmovq %rax, %rdi")
+        e("\tcall __alloc")                 # rax = list cell (rc=1)
+        e("\tmovq %rax, %r13")
+        e("\tmovq %r12, 8(%r13)")           # capacity = byte length
+        e("\tleaq 16(%r13), %r15")          # dst element pointer
+        e("\txorq %r14, %r14")              # byte index i = 0
+        e(".Lsc_loop:")
+        e("\tcmpq %r12, %r14")
+        e("\tjae .Lsc_done")
+        e("\tmovzbq (%rbx,%r14), %rax")     # b0
+        e("\tcmpq $0x80, %rax")
+        e("\tjb .Lsc_1")
+        e("\tcmpq $0xE0, %rax")
+        e("\tjb .Lsc_2")
+        e("\tcmpq $0xF0, %rax")
+        e("\tjb .Lsc_3")
+        # 4-byte: cp = (b0&07)<<18 | (b1&3F)<<12 | (b2&3F)<<6 | (b3&3F)
+        e("\tandq $0x07, %rax")
+        e("\tshlq $18, %rax")
+        e("\tmovq %rax, %rcx")
+        e("\tmovzbq 1(%rbx,%r14), %rax")
+        e("\tandq $0x3F, %rax")
+        e("\tshlq $12, %rax")
+        e("\torq %rax, %rcx")
+        e("\tmovzbq 2(%rbx,%r14), %rax")
+        e("\tandq $0x3F, %rax")
+        e("\tshlq $6, %rax")
+        e("\torq %rax, %rcx")
+        e("\tmovzbq 3(%rbx,%r14), %rax")
+        e("\tandq $0x3F, %rax")
+        e("\torq %rax, %rcx")
+        e("\taddq $4, %r14")
+        e("\tjmp .Lsc_store")
+        e(".Lsc_3:")
+        # 3-byte: cp = (b0&0F)<<12 | (b1&3F)<<6 | (b2&3F)
+        e("\tandq $0x0F, %rax")
+        e("\tshlq $12, %rax")
+        e("\tmovq %rax, %rcx")
+        e("\tmovzbq 1(%rbx,%r14), %rax")
+        e("\tandq $0x3F, %rax")
+        e("\tshlq $6, %rax")
+        e("\torq %rax, %rcx")
+        e("\tmovzbq 2(%rbx,%r14), %rax")
+        e("\tandq $0x3F, %rax")
+        e("\torq %rax, %rcx")
+        e("\taddq $3, %r14")
+        e("\tjmp .Lsc_store")
+        e(".Lsc_2:")
+        # 2-byte: cp = (b0&1F)<<6 | (b1&3F)
+        e("\tandq $0x1F, %rax")
+        e("\tshlq $6, %rax")
+        e("\tmovq %rax, %rcx")
+        e("\tmovzbq 1(%rbx,%r14), %rax")
+        e("\tandq $0x3F, %rax")
+        e("\torq %rax, %rcx")
+        e("\taddq $2, %r14")
+        e("\tjmp .Lsc_store")
+        e(".Lsc_1:")
+        e("\tmovq %rax, %rcx")              # cp = b0
+        e("\tincq %r14")
+        e(".Lsc_store:")
+        e("\tmovq %rcx, (%r15)")
+        e("\taddq $8, %r15")
+        e("\tjmp .Lsc_loop")
+        e(".Lsc_done:")
+        e("\tmovq %r15, %rax")              # len = (dst - base - 16) / 8
+        e("\tsubq %r13, %rax")
+        e("\tsubq $16, %rax")
+        e("\tshrq $3, %rax")
+        e("\tmovq %rax, (%r13)")            # length = scalar count
+        e("\tmovq %r13, %rax")              # return the list cell
+        e("\tpopq %r15")
+        e("\tpopq %r14")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_write_runtime(self) -> None:
+        """`__write`: rdi = fd, rsi = str cell [len:8][bytes]; write the bytes to
+        `fd` via the Linux `write` syscall (no trailing newline). Backs
+        `std.io.write`/`println`/`eprint`/`eprintln` (D29)."""
+        e = self.text.append
+        e("__write:")
+        e("\tmovq (%rsi), %rdx")        # len
+        e("\tleaq 8(%rsi), %rsi")       # data pointer
+        e("\tmovq $1, %rax")            # write syscall, rdi = fd already set
+        e("\tsyscall")
+        e("\tret")
+        e("")
+
+    def _emit_args_runtime(self) -> None:
+        """`__args`: build a fresh `[str]` list cell from the argc/argv captured
+        at `_start`. Each C string `argv[i]` is measured (strlen) and copied into
+        a heap `str` cell [len:8][bytes]; the list holds the str pointers. Backs
+        `std.process.args` (D29). Assumes well-formed (NUL-terminated) argv."""
+        e = self.text.append
+        e("__args:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")                  # argc
+        e("\tpushq %r12")                  # argv base
+        e("\tpushq %r13")                  # list cell
+        e("\tpushq %r14")                  # i
+        e("\tpushq %r15")                  # dst element pointer
+        e("\tmovq __argc(%rip), %rbx")
+        e("\tmovq __argv(%rip), %r12")
+        e("\tmovq %rbx, %rdi")
+        e("\tshlq $3, %rdi")               # argc * 8
+        e("\taddq $16, %rdi")              # + [len][cap] header
+        e("\tcall __alloc")                # rax = list cell (rc=1)
+        e("\tmovq %rax, %r13")
+        e("\tmovq %rbx, (%r13)")           # length = argc
+        e("\tmovq %rbx, 8(%r13)")          # capacity = argc
+        e("\tleaq 16(%r13), %r15")         # dst element pointer
+        e("\txorq %r14, %r14")             # i = 0
+        e(".La_loop:")
+        e("\tcmpq %rbx, %r14")
+        e("\tjae .La_done")
+        e("\tmovq (%r12,%r14,8), %rsi")    # argv[i] (C string pointer)
+        e("\txorq %rcx, %rcx")             # strlen
+        e(".La_strlen:")
+        e("\tmovb (%rsi,%rcx), %al")
+        e("\ttestb %al, %al")
+        e("\tjz .La_haslen")
+        e("\tincq %rcx")
+        e("\tjmp .La_strlen")
+        e(".La_haslen:")
+        e("\tpushq %rsi")                  # save src pointer
+        e("\tpushq %rcx")                  # save length
+        e("\tleaq 8(%rcx), %rdi")          # str cell size = 8 + len
+        e("\tcall __alloc")                # rax = str cell (rc=1)
+        e("\tpopq %rcx")                   # length
+        e("\tpopq %rsi")                   # src pointer
+        e("\tmovq %rcx, (%rax)")           # str length
+        e("\tleaq 8(%rax), %rdi")          # dst bytes
+        e(".La_copy:")
+        e("\ttestq %rcx, %rcx")
+        e("\tjz .La_stored")
+        e("\tmovb (%rsi), %dl")
+        e("\tmovb %dl, (%rdi)")
+        e("\tincq %rsi")
+        e("\tincq %rdi")
+        e("\tdecq %rcx")
+        e("\tjmp .La_copy")
+        e(".La_stored:")
+        e("\tmovq %rax, (%r15)")           # list element = str cell pointer
+        e("\taddq $8, %r15")
+        e("\tincq %r14")
+        e("\tjmp .La_loop")
+        e(".La_done:")
+        e("\tmovq %r13, %rax")             # return the list cell
+        e("\tpopq %r15")
+        e("\tpopq %r14")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_read_file_runtime(self) -> None:
+        """`__read_file`: rdi = path str cell -> rax = a fresh `str` cell with the
+        whole file's bytes (rc=1); `__io_errno_val` is set to 0 on success or the
+        positive errno on failure (open/read). Uses open(2)/fstat(5)/read(0)/
+        close(3); the path is NUL-terminated on the stack first. Backs
+        `std.fs.read_to_string` (D29). On any error a valid (possibly empty) str
+        is still returned so the Myla wrapper can branch on the errno."""
+        e = self.text.append
+        e("__read_file:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tpushq %r14")
+        e("\tpushq %r15")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        # build a NUL-terminated copy of the path on the stack
+        e("\tmovq (%rdi), %r12")               # path length
+        e("\tleaq 8(%rdi), %r13")              # path bytes (src)
+        e("\tleaq 16(%r12), %rax")             # >= len + 1, with slack
+        e("\tandq $-16, %rax")                 # 16-byte aligned size
+        e("\tsubq %rax, %rsp")                 # carve stack
+        e("\tmovq %rsp, %r14")                 # dst path buffer
+        e("\txorq %rcx, %rcx")
+        e(".Lrf_pcopy:")
+        e("\tcmpq %r12, %rcx")
+        e("\tjae .Lrf_pdone")
+        e("\tmovb (%r13,%rcx), %dl")
+        e("\tmovb %dl, (%r14,%rcx)")
+        e("\tincq %rcx")
+        e("\tjmp .Lrf_pcopy")
+        e(".Lrf_pdone:")
+        e("\tmovb $0, (%r14,%r12)")            # NUL terminator
+        # open(path, O_RDONLY, 0)
+        e("\tmovq $2, %rax")                   # sys_open
+        e("\tmovq %r14, %rdi")
+        e("\txorq %rsi, %rsi")                 # O_RDONLY
+        e("\txorq %rdx, %rdx")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lrf_open_err")                # rax < 0 -> -errno
+        e("\tmovq %rax, %rbx")                 # fd
+        # fstat(fd, statbuf) -> st_size at offset 48
+        e("\tsubq $144, %rsp")                 # statbuf
+        e("\tmovq %rsp, %rsi")
+        e("\tmovq $5, %rax")                   # sys_fstat
+        e("\tmovq %rbx, %rdi")
+        e("\tsyscall")
+        e("\tmovq 48(%rsp), %r15")             # total size
+        e("\taddq $144, %rsp")                 # discard statbuf
+        # allocate the contents str cell: 8 (len) + size
+        e("\tleaq 8(%r15), %rdi")
+        e("\tcall __alloc")                    # rax = cell (rc=1)
+        e("\tmovq %rax, %r13")
+        e("\tmovq %r15, (%r13)")               # len = size (corrected below)
+        e("\txorq %r14, %r14")                 # bytes read = 0
+        e(".Lrf_read:")
+        e("\tcmpq %r15, %r14")
+        e("\tjae .Lrf_read_done")
+        e("\tmovq $0, %rax")                   # sys_read
+        e("\tmovq %rbx, %rdi")
+        e("\tleaq 8(%r13), %rsi")
+        e("\taddq %r14, %rsi")                 # dst + done
+        e("\tmovq %r15, %rdx")
+        e("\tsubq %r14, %rdx")                 # remaining
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lrf_read_err")                # < 0 -> error
+        e("\tjz .Lrf_read_done")               # 0 -> EOF
+        e("\taddq %rax, %r14")
+        e("\tjmp .Lrf_read")
+        e(".Lrf_read_done:")
+        e("\tmovq %r14, (%r13)")               # actual length = bytes read
+        e("\tmovq $3, %rax")                   # close(fd)
+        e("\tmovq %rbx, %rdi")
+        e("\tsyscall")
+        e("\tmovq %r13, %rax")                 # return contents
+        e("\tjmp .Lrf_ret")
+        e(".Lrf_read_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e("\tmovq $3, %rax")                   # close(fd)
+        e("\tmovq %rbx, %rdi")
+        e("\tsyscall")
+        e("\tmovq %r13, %rax")                 # partial contents (ignored on err)
+        e("\tjmp .Lrf_ret")
+        e(".Lrf_open_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e("\tmovq $8, %rdi")                   # empty str cell
+        e("\tcall __alloc")
+        e("\tmovq $0, (%rax)")                 # len = 0
+        e(".Lrf_ret:")
+        e("\tleaq -40(%rbp), %rsp")            # discard path buffer/statbuf
+        e("\tpopq %r15")
+        e("\tpopq %r14")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
 
 
 def _format_pieces(fmt: str) -> list:

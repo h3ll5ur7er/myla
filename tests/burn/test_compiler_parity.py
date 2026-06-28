@@ -719,6 +719,92 @@ PROGRAMS = {
         "    print(max_of(3, 9))\n"                               # 9
         "    print(max_of(V { x: 5 }, V { x: 2 }).x)\n}\n"        # 5
     ),
+    # --- v0.5.2 floats (D56): arithmetic, casts, comparisons, printing ---
+    "float_arithmetic": (
+        "#main\nfun main() {\n"
+        "    print(1.5 + 2.25)\n    print(1.5 - 2.25)\n    print(1.5 * 2.25)\n"
+        "    print(7.0 / 2.0)\n    print(5.5 % 2.0)\n    print(-3.5)\n"
+        "    print(0.1f64 + 0.2f64)\n    print(0.1f32 + 0.2f32)\n"
+        "    print(2.0)\n    print(100000.0f64)\n    print(123.456)\n"
+        "    print(0.0009765625f64)\n}\n"
+    ),
+    "float_nonfinite": (
+        "#main\nfun main() {\n"
+        "    print(1.0 / 0.0)\n    print(-1.0 / 0.0)\n    print(0.0 / 0.0)\n"
+        "    print(-0.0f64)\n    print(0.0f64)\n}\n"
+    ),
+    "float_casts": (
+        "#main\nfun main() {\n"
+        "    print(3.9 as int32)\n    print(-3.9 as int32)\n"
+        "    print(5 as float64)\n    print(5 as float32)\n"
+        "    print(300.0f64 as int8)\n"                            # truncate + wrap
+        "    let big: uint64 = 18446744073709551615u64\n"
+        "    print(big as float64)\n"
+        "    print(1.5f64 as float32)\n    print(1.5f32 as float64)\n}\n"
+    ),
+    "float_compare_and_control": (
+        "#main\nfun main() {\n"
+        "    print(1.5 < 2.0)\n    print(2.0 <= 2.0)\n    print(3.0 > 2.0)\n"
+        "    print(2.0 >= 3.0)\n    print(2.0 == 2.0)\n    print(2.0 != 2.0)\n"
+        "    let nan = 0.0 / 0.0\n    print(nan == nan)\n    print(nan != nan)\n"
+        "    print(nan < 1.0)\n"
+        "    var sum = 0.0f64\n    var i = 0\n"
+        "    while i < 5 { sum = sum + 1.5f64\n i = i + 1 }\n    print(sum)\n}\n"
+    ),
+    "float_functions_and_const": (
+        "const TAU: float64 = 6.283185307179586f64\n"
+        "fun area(r: float64) -> float64 { return TAU / 2.0 * r * r }\n"
+        "#main\nfun main() {\n"
+        "    print(TAU)\n    print(area(2.0f64))\n"
+        "    let xs = [1.5f64, 2.5f64, 3.0f64]\n"
+        "    var acc = 0.0f64\n    for x in xs { acc = acc + x }\n    print(acc)\n"
+        "    print(format(\"r={} area={}\", 2.0f64, area(2.0f64)))\n}\n"
+    ),
+    # --- v0.5.3a chars (D25): Unicode-scalar literals, UTF-8 glyphs, casts ---
+    "char_print_utf8": (
+        "#main\nfun main() {\n"
+        "    print('a')\n"                                  # 1-byte
+        "    print('\\u{A5}')\n"                            # 2-byte (¥)
+        "    print('\\u{3BB}')\n"                           # 2-byte (λ)
+        "    print('\\u{20AC}')\n"                          # 3-byte (€)
+        "    print('\\u{1F600}')\n"                         # 4-byte (😀)
+        "    print('\\n')\n    print('\\u{0}' as uint32)\n}\n"
+    ),
+    "char_compare_cast": (
+        "#main\nfun main() {\n"
+        "    print('a' < 'b')\n    print('b' <= 'b')\n    print('z' > 'a')\n"
+        "    print('a' == 'a')\n    print('a' != 'b')\n"
+        "    print('A' as uint32)\n    print('\\u{1F600}' as uint32)\n"
+        "    print(65 as char)\n    print(955 as char)\n"
+        "    let s = \"hello\"\n    print(s[0] == 'h')\n"
+        "    print(format(\"{}-{}\", 'x', '\\u{3BB}'))\n}\n"
+    ),
+    "char_classify_and_map": (
+        "fun is_vowel(c: char) -> bool {\n"
+        "    return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u'\n}\n"
+        "#main\nfun main() {\n"
+        "    print(is_vowel('e'))\n    print(is_vowel('x'))\n"
+        "    var m: [char: int] = [:]\n"
+        "    m['a'] = 1\n    m['\\u{3BB}'] = 2\n"
+        "    print(m['a'])\n    print(m['\\u{3BB}'])\n"
+        "    let c: char = 'b'\n"
+        "    print(match c { 'a' => 10, 'b' => 20, _ => 0 })\n}\n"
+    ),
+    # --- v0.5.3b chars(): UTF-8 codepoint iteration + bytes view (s[i]/len) ---
+    "char_chars_iteration": (
+        "fun vowels(s: str) -> int {\n"
+        "    var n = 0\n"
+        "    for c in chars(s) {\n"
+        "        if c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u' {\n"
+        "            n = n + 1\n        }\n    }\n    return n\n}\n"
+        "#main\nfun main() {\n"
+        "    let s = \"h\u00e9\u03bb\U0001f600w\u00f6\"\n"  # raw multibyte UTF-8
+        "    print(len(s))\n"                  # 1+2+2+4+1+2 = 12 bytes
+        "    print(len(chars(s)))\n"           # 6 scalars
+        "    for c in chars(s) { print(c as uint32) }\n"
+        "    print(vowels(\"education\"))\n"   # 5
+        "    print(len(chars(\"\")))\n}\n"     # 0
+    ),
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap

@@ -92,6 +92,12 @@ class IntLit(Node):
 
 
 @dataclass
+class FloatLit(Node):
+    value: float
+    suffix: Optional[str] = None  # "f32" / "f64" / None (unsuffixed)
+
+
+@dataclass
 class StrLit(Node):
     value: str
 
@@ -236,8 +242,9 @@ class Hole(Node):
 
 
 Expr = Union[
-    IntLit, StrLit, BoolLit, Name, Unary, Binary, Call, FieldAccess, StructLit,
-    TupleLit, TupleIndex, ListLit, MapLit, Index, Match, Try, Cast, Lambda, Hole,
+    IntLit, FloatLit, StrLit, BoolLit, Name, Unary, Binary, Call, FieldAccess,
+    StructLit, TupleLit, TupleIndex, ListLit, MapLit, Index, Match, Try, Cast,
+    Lambda, Hole,
 ]
 
 
@@ -492,6 +499,9 @@ class ImplDecl(Node):
     type_params: list[str] = field(default_factory=list)
     type_param_bounds: dict = field(default_factory=dict)
     trait_name: Optional[str] = None
+    # trait type arguments for `impl Comparable<int32> for T` (v0.5.5, D55);
+    # empty for inherent impls and for non-generic traits.
+    trait_args: list = field(default_factory=list)
     # impl blocks carry no attributes (the parser rejects them); this field
     # exists so passes that iterate every decl's `.attributes` need no special
     # case.

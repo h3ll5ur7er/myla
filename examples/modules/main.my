@@ -1,0 +1,13 @@
+// Multi-module example (v0.5.1): `from … import …`, `pub` visibility, packages,
+// and a `pub from …` re-export. Run with `myla run examples/modules/main.my`.
+
+from .geometry import Point, manhattan
+from .text import shout
+import .geometry as geo            // whole-module import: access via `geo.member`
+
+fun main() {
+    let p = Point { x: 3, y: -4 }
+    print(manhattan(p))            // 7
+    print(shout("done"))           // done!
+    print(geo.manhattan(p))        // 7 — same function, via module-member access
+}

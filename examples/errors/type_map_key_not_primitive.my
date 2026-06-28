@@ -1,4 +1,4 @@
-//~ type error: map key type must be a primitive (integer, bool, or str)
+//~ type error: map key type must be a primitive (integer, char, bool, or str)
 // Map keys must be a primitive comparable type; a list `[int]` cannot be a key.
 #main
 fun main() {

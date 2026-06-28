@@ -1,0 +1,45 @@
+// floats.my — float32/float64 literals, arithmetic, comparisons, and casts.
+
+#test([2.0f64, 4.0f64])[3.0f64]
+#test([1.0f64, 2.0f64, 6.0f64])[3.0f64]
+fun average(xs: [float64]) -> float64 {
+    var sum = 0.0f64
+    for x in xs {
+        sum = sum + x
+    }
+    return sum / (len(xs) as float64)
+}
+
+fun main() {
+    // unsuffixed float literals default to float32 (the `float` alias)
+    let half = 0.5
+    print(half)              // 0.5
+
+    // float64 needs the f64 suffix or a type annotation
+    let pi: float64 = 3.141592653589793f64
+    print(pi)                // 3.1415926535897931 (round-trippable f64 decimal)
+
+    // arithmetic: + - * / %  (/ is true division, % is fmod)
+    print(1.5f64 + 2.25f64)  // 3.75
+    print(7.0f64 / 2.0f64)   // 3.5
+    print(5.5f64 % 2.0f64)   // 1.5
+    print(-pi)               // -3.1415926535897931
+
+    // precision is per type: the same sum rounds differently
+    print(0.1f64 + 0.2f64)   // 0.30000000000000004
+    print(0.1f32 + 0.2f32)   // 0.300000012
+
+    // division by zero follows IEEE-754: never traps
+    print(1.0f64 / 0.0f64)   // inf
+
+    // comparisons yield bool; NaN is unordered (never equal, never less)
+    let nan = 0.0f64 / 0.0f64
+    print(2.0f64 < 3.0f64)   // true
+    print(nan == nan)        // false
+
+    // explicit conversions with `as` (no implicit int<->float mixing)
+    print(9 as float64)      // 9
+    print(3.9f64 as int32)   // 3   (truncates toward zero)
+
+    print(average([1.0f64, 2.0f64, 6.0f64]))  // 3
+}

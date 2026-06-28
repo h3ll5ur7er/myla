@@ -31,8 +31,9 @@ import dataclasses
 
 from .. import ast
 from ..types import (
-    BoolType, Checker, EnumType, FuncType, IntType, ListType, MapType, StrType,
-    StringBuilderType, StructType, TupleType, Type, TypeParam, check, type_name,
+    BoolType, CharType, Checker, EnumType, FloatType, FuncType, IntType, ListType,
+    MapType, StrType, StringBuilderType, StructType, TupleType, Type, TypeParam,
+    check, type_name,
 )
 
 # Overloadable operators → operator-trait method (v0.4.4). Concrete-type uses
@@ -345,7 +346,8 @@ class _Monomorphizer:
         return self._subst_type(t, subst)
 
     def _type_to_typeexpr(self, t: Type):
-        if isinstance(t, (IntType, BoolType, StrType, StringBuilderType)):
+        if isinstance(t, (IntType, FloatType, CharType, BoolType, StrType,
+                          StringBuilderType)):
             return ast.TypeRef(type_name(t))
         if isinstance(t, TupleType):
             return ast.TupleTypeRef([self._type_to_typeexpr(e) for e in t.elems])
@@ -395,7 +397,8 @@ class _Monomorphizer:
         return t.name + "__" + "_".join(self._mono_token(a) for a in t.args)
 
     def _mono_token(self, t: Type) -> str:
-        if isinstance(t, (IntType, BoolType, StrType, StringBuilderType)):
+        if isinstance(t, (IntType, FloatType, CharType, BoolType, StrType,
+                          StringBuilderType)):
             return type_name(t)
         if isinstance(t, (StructType, EnumType)):
             return self._mangle_type(t) if t.args else t.name

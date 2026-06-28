@@ -1,0 +1,14 @@
+// Command-line arguments (v0.5.4b): std.process.args returns the program's
+// argv as a [str]. args()[0] is the program name; the rest are its arguments.
+//
+// Run with:  myla run examples/args/main.my one two three
+from std.io import println
+from std.process import args
+
+fun main() {
+    let argv = args()
+    print(len(argv))             // argc, including the program name
+    for arg in argv {
+        println(arg)
+    }
+}

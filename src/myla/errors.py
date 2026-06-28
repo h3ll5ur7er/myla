@@ -83,5 +83,12 @@ class TypeCheckError(MylaError):
     kind = "type error"
 
 
+class ModuleError(MylaError):
+    """Import/module resolution failures (v0.5): unresolved paths, ambiguous
+    file/package names, visibility violations, import collisions, etc."""
+
+    kind = "module error"
+
+
 class MylaRuntimeError(MylaError):
     kind = "runtime error"

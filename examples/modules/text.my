@@ -1,0 +1,4 @@
+// A façade module that re-exports a helper from its implementation module so
+// callers can `from .text import shout` without knowing where it lives (D54).
+
+pub from .text_impl import shout

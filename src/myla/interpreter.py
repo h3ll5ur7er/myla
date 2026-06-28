@@ -12,7 +12,10 @@ from dataclasses import dataclass
 
 from . import ast
 from .errors import MylaRuntimeError
-from .types import BoolType, Checker, IntType, StrType, Type
+from .types import (
+    BoolType, CharType, Checker, FloatType, IntType, StrType, Type,
+    char_utf8_bytes, float_div, float_rem, format_float, round_float,
+)
 
 # Overloadable binary operators → the operator-trait method dispatched on a
 # user value (v0.4.4). `==`/`!=` use `eq`; the comparisons use `cmp`.
@@ -33,6 +36,15 @@ class _BreakSignal(Exception):
 
 class _ContinueSignal(Exception):
     """Raised by `continue`; caught by the innermost enclosing loop."""
+
+
+class _ExitSignal(Exception):
+    """Raised by `std.process.exit` (`__exit`); caught at the program entry to
+    yield the process exit status (the low 8 bits, matching the native backend's
+    `exit` syscall)."""
+
+    def __init__(self, code: int):
+        self.code = code & 0xFF
 
 
 class StructValue:
@@ -230,19 +242,30 @@ class TestResult:
 
 
 class Interpreter:
-    def __init__(self, checker: Checker, out=None):
+    def __init__(self, checker: Checker, out=None, err=None, argv=None):
         self.checker = checker
         self.functions = checker.functions  # name -> FuncSig
         self._consts = {name: info.value for name, info in checker.consts.items()}
         import sys
         self._out = out if out is not None else sys.stdout
+        self._err = err if err is not None else sys.stderr
+        # process command-line arguments handed back by `std.process.args`.
+        self._argv = list(argv) if argv is not None else []
+        # errno of the last `__read_file` (0 on success); read by `__io_errno`.
+        self._io_errno = 0
 
     # -- program entry -------------------------------------------------------
 
-    def run(self) -> None:
+    def run(self) -> int:
+        """Execute the program, returning its exit status (0 on normal
+        completion, or the code passed to `std.process.exit`)."""
         if self.checker.entry is None:
             raise MylaRuntimeError("no entry point: define '#main' or a function named 'main'")
-        self._call(self.checker.entry, [])
+        try:
+            self._call(self.checker.entry, [])
+        except _ExitSignal as sig:
+            return sig.code
+        return 0
 
     def run_tests(self) -> list[TestResult]:
         results: list[TestResult] = []
@@ -477,6 +500,8 @@ class Interpreter:
     def _eval(self, expr: ast.Expr, env: _Env):
         if isinstance(expr, ast.IntLit):
             return _wrap(expr.value, expr.resolved_type)
+        if isinstance(expr, ast.FloatLit):
+            return round_float(expr.value, expr.resolved_type)
         if isinstance(expr, ast.BoolLit):
             return expr.value
         if isinstance(expr, ast.StrLit):
@@ -525,7 +550,8 @@ class Interpreter:
         if isinstance(expr, ast.Match):
             return self._eval_match(expr, env)
         if isinstance(expr, ast.Cast):
-            return _wrap(self._eval(expr.operand, env), expr.resolved_type)
+            return _cast_value(self._eval(expr.operand, env),
+                               expr.operand.resolved_type, expr.resolved_type)
         if isinstance(expr, ast.Lambda):
             captured = {name: _copy(env.get(name)) for name, _t in expr.captures}
             return ClosureValue(expr.params, expr.body, captured,
@@ -606,10 +632,15 @@ class Interpreter:
         if op == "*":
             return _wrap(left * right, expr.resolved_type)
         if op == "/":
+            if isinstance(expr.resolved_type, FloatType):
+                # IEEE-754 true division: by zero yields ±inf/NaN, never traps.
+                return _wrap(float_div(left, right), expr.resolved_type)
             if right == 0:
                 raise MylaRuntimeError("division by zero", expr.line, expr.column)
             return _wrap(_idiv(left, right), expr.resolved_type)
         if op == "%":
+            if isinstance(expr.resolved_type, FloatType):
+                return _wrap(float_rem(left, right), expr.resolved_type)
             if right == 0:
                 raise MylaRuntimeError("modulo by zero", expr.line, expr.column)
             return _wrap(_imod(left, right), expr.resolved_type)
@@ -699,6 +730,35 @@ class Interpreter:
             return None
         if callee.ident in ("assert", "panic", "unreachable"):
             return self._eval_intrinsic(expr, env)
+        if callee.ident == "__write":
+            fd = self._eval(expr.args[0], env)
+            s = self._eval(expr.args[1], env)
+            if fd == 1:
+                self._out.write(s)
+            elif fd == 2:
+                self._err.write(s)
+            else:
+                import os
+                os.write(fd, s.encode("utf-8"))
+            return None
+        if callee.ident == "__exit":
+            raise _ExitSignal(self._eval(expr.args[0], env))
+        if callee.ident == "__args":
+            return ListValue(list(self._argv))
+        if callee.ident == "__read_file":
+            path = self._eval(expr.args[0], env)
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+                self._io_errno = 0
+                # decode like the native backend treats the bytes as UTF-8; the
+                # byte length (what `len` reports) is preserved for valid UTF-8.
+                return data.decode("utf-8", errors="surrogateescape")
+            except OSError as err:
+                self._io_errno = err.errno or 0
+                return ""
+        if callee.ident == "__io_errno":
+            return self._io_errno
         if callee.ident == "len":
             target = self._eval(expr.args[0], env)
             if isinstance(target, str):
@@ -718,6 +778,10 @@ class Interpreter:
                 raise MylaRuntimeError("pop from an empty list",
                                        expr.line, expr.column)
             return lst.elems.pop()
+        if callee.ident == "chars":
+            s = self._eval(expr.args[0], env)
+            return ListValue([ord(c) for c in s])   # one codepoint per scalar
+
         if callee.ident == "contains":
             m = self._eval(expr.args[0], env)
             return self._eval(expr.args[1], env) in m.entries
@@ -790,11 +854,15 @@ class Interpreter:
 # --- helpers ---------------------------------------------------------------
 
 
-def _wrap(value: int, t: Type) -> int:
+def _wrap(value, t: Type):
     # In an erased generic body a numeric operator's result type can be a bare
     # type parameter (v0.4.4 `T: Add`); the interpreter has no concrete width to
-    # wrap to, so it keeps the exact Python integer (the native backend wraps the
-    # monomorphized concrete type). Every other caller passes an `IntType`.
+    # wrap to, so it keeps the exact Python value (the native backend wraps the
+    # monomorphized concrete type). Every other caller passes an `IntType`/`FloatType`.
+    if isinstance(t, FloatType):
+        return round_float(value, t)   # narrow to single precision for `float32`
+    if isinstance(t, CharType):
+        return value                   # a char is its raw codepoint (no wrapping)
     if not isinstance(t, IntType):
         return value
     mask = (1 << t.width) - 1
@@ -802,6 +870,21 @@ def _wrap(value: int, t: Type) -> int:
     if t.signed and (m >> (t.width - 1)) & 1:
         m -= 1 << t.width
     return m
+
+
+def _cast_value(v, src: Type, target: Type):
+    """Apply an `as` numeric conversion at runtime (mirrors the native backend
+    and const folding): int↔int wrap, int→float round, float→int truncate
+    toward zero, float→float widen/round."""
+    if isinstance(target, CharType):
+        return int(v)                  # int -> char: the codepoint (unchecked)
+    if isinstance(src, CharType):
+        return _wrap(int(v), target)   # char -> int: wrap to width
+    if isinstance(target, FloatType):
+        return round_float(float(v), target)
+    if isinstance(src, FloatType):
+        return _wrap(int(v), target)   # float -> int: truncate toward zero
+    return _wrap(v, target)
 
 
 def _idiv(a: int, b: int) -> int:
@@ -821,6 +904,10 @@ def _format_value(value, t: Type | None) -> str:
         return value
     if isinstance(t, IntType):
         return str(value)
+    if isinstance(t, FloatType):
+        return format_float(value, t)
+    if isinstance(t, CharType):
+        return char_utf8_bytes(value).decode("utf-8")   # render as its glyph
     return str(value)  # pragma: no cover - print() is restricted by the checker
 
 

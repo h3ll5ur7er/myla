@@ -14,6 +14,7 @@ from typing import Any
 class TokenKind(Enum):
     # literals
     INT = auto()
+    FLOAT = auto()
     STRING = auto()
     CHAR = auto()
 
@@ -142,6 +143,9 @@ INT_SUFFIXES: frozenset[str] = frozenset(
     {"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
 )
 
+# Valid float-literal type suffixes (docs/grammar.md: float_suffix).
+FLOAT_SUFFIXES: frozenset[str] = frozenset({"f32", "f64"})
+
 
 @dataclass(frozen=True)
 class Token:
@@ -153,9 +157,10 @@ class Token:
         line:    1-based line number of the token's first character.
         column:  1-based column number of the token's first character.
         value:   parsed literal value (int for INT and the byte value for CHAR,
-                 str for STRING/IDENT and keywords, bool for TRUE/FALSE); None
-                 otherwise.
-        suffix:  for INT tokens, the type suffix (e.g. "u8") or None.
+                 float for FLOAT, str for STRING/IDENT and keywords, bool for
+                 TRUE/FALSE); None otherwise.
+        suffix:  for INT tokens, the type suffix (e.g. "u8"); for FLOAT tokens,
+                 the float suffix (e.g. "f64"); otherwise None.
     """
 
     kind: TokenKind
