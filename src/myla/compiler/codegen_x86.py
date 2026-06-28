@@ -23,8 +23,8 @@ from __future__ import annotations
 
 from .. import ast
 from ..types import (
-    BoolType, Checker, EnumType, FuncSig, IntType, ListType, MapType, StrType,
-    StringBuilderType, StructType, TupleType, Type, type_name,
+    BoolType, Checker, EnumType, FuncSig, FuncType, IntType, ListType, MapType,
+    StrType, StringBuilderType, StructType, TupleType, Type, type_name,
 )
 
 
@@ -39,9 +39,10 @@ def _is_struct(t: Type | None) -> bool:
 
 
 def _is_aggregate(t: Type | None) -> bool:
-    """Aggregates (structs, tuples, enums) have value semantics and live in
-    multi-slot storage, passed by address rather than in a register."""
-    return isinstance(t, (StructType, TupleType, EnumType))
+    """Aggregates (structs, tuples, enums, function values) have value semantics
+    and live in multi-slot storage, passed by address rather than in a register.
+    A function value is a 16-byte `(code_ptr, env_ptr)` fat value (v0.4.2)."""
+    return isinstance(t, (StructType, TupleType, EnumType, FuncType))
 
 
 # signed / unsigned `set` mnemonics for the relational operators
@@ -66,6 +67,9 @@ class CodeGen:
         self._scopes: list[dict[str, tuple]] = []
         self._epilogue = ""
         self._struct_ret = False
+        # top-level `fun`s referenced as values: each needs an env-ignoring thunk
+        # so it shares the closure calling convention (v0.4.2)
+        self._fnval_thunks: set[str] = set()
 
     # -- type layout ---------------------------------------------------------
 
@@ -85,6 +89,8 @@ class CodeGen:
         if self._is_boxed(t):
             return True
         if isinstance(t, (ListType, MapType, StringBuilderType)):  # refcounted cell
+            return True
+        if isinstance(t, FuncType):  # owns a (possibly null) refcounted env cell
             return True
         if isinstance(t, StructType):
             if t.name in seen:
@@ -109,6 +115,8 @@ class CodeGen:
             return sum(self._stored_size(e) for e in t.elems)
         if isinstance(t, EnumType):
             return 8 + self._enum_payload_size(t.name)
+        if isinstance(t, FuncType):
+            return 16                       # (code_ptr, env_ptr) fat value
         return 8
 
     def _field_offset(self, struct_name: str, field: str) -> int:
@@ -151,6 +159,10 @@ class CodeGen:
                 "_" + self._type_mangle(e) for e in t.elems)
         if isinstance(t, StringBuilderType):
             return "SB"
+        if isinstance(t, FuncType):
+            params = "_".join(self._type_mangle(p) for p in t.params)
+            ret = self._type_mangle(t.ret) if t.ret is not None else "void"
+            return "Fn" + str(len(t.params)) + "_" + params + "_R_" + ret
         return type_name(t)  # int32 / bool / str
 
     def _list_drop_name(self, t: ListType) -> str:
@@ -226,6 +238,10 @@ class CodeGen:
         elif isinstance(t, TupleType):
             for e in t.elems:
                 self._gather_list_types(e, into, seen)
+        elif isinstance(t, FuncType):
+            for p in t.params:
+                self._gather_list_types(p, into, seen)
+            self._gather_list_types(t.ret, into, seen)
 
     def _collect_list_types(self) -> dict:
         """Every concrete list type used anywhere in the program (keyed by mangle),
@@ -297,6 +313,12 @@ class CodeGen:
         for decl in self.checker.program.decls:
             if isinstance(decl, ast.FunDecl):
                 self._gen_function(decl)
+        # lifted lambda bodies + their per-lambda env-drop helpers (v0.4.2)
+        for lam in self.checker._lambdas:
+            self._gen_lambda_function(lam)
+        # env-ignoring thunks for plain `fun`s referenced as values
+        for name in sorted(self._fnval_thunks):
+            self._emit_fnval_thunk(name)
         return self._assemble_source()
 
     def _assemble_source(self) -> str:
@@ -674,6 +696,29 @@ class CodeGen:
         e("\tmovq %rdi, __free_list(%rip)")
         e("\tret")
         e("")
+        # __func_retain: in %rdi = a closure env pointer (may be null). Bumps the
+        # env cell's refcount. Clobbers only flags, so it is safe to call from a
+        # retain walk. (v0.4.2)
+        e("__func_retain:")
+        e("\ttestq %rdi, %rdi")
+        e("\tjz .Lfret_done")
+        e("\tincq -8(%rdi)")
+        e(".Lfret_done:")
+        e("\tret")
+        e("")
+        # __func_drop: in %rdi = a closure env pointer (may be null). Decrements
+        # the env cell's refcount and, at zero, tail-calls its stored drop fn
+        # (env[0]), which drops the captures and frees the cell. (v0.4.2)
+        e("__func_drop:")
+        e("\ttestq %rdi, %rdi")
+        e("\tjz .Lfdrop_done")
+        e("\tdecq -8(%rdi)")
+        e("\tjnz .Lfdrop_done")
+        e("\tmovq (%rdi), %rax")        # drop_fn
+        e("\tjmp *%rax")                # tail-call: returns to our caller
+        e(".Lfdrop_done:")
+        e("\tret")
+        e("")
 
     # -- functions -----------------------------------------------------------
 
@@ -808,6 +853,10 @@ class CodeGen:
             if isinstance(expr, ast.Name):
                 if getattr(expr, "enum_ctor", None) is not None:
                     alloc(expr, self._size(expr.resolved_type))  # bare `None`
+                elif getattr(expr, "func_ref", None) is not None:
+                    alloc(expr, 16)            # `fun` as value: a fat-value temp
+            elif isinstance(expr, ast.Lambda):
+                alloc(expr, 16)                # the closure's fat-value temp
             elif isinstance(expr, ast.Unary):
                 visit_expr(expr.operand)
             elif isinstance(expr, ast.Cast):
@@ -816,11 +865,18 @@ class CodeGen:
                 visit_expr(expr.left)
                 visit_expr(expr.right)
             elif isinstance(expr, ast.Call):
+                if getattr(expr, "indirect_call", False):
+                    visit_expr(expr.callee)
                 for a in expr.args:
                     visit_expr(a)
                 rt = expr.resolved_type
                 if _is_aggregate(rt) or self._owns_heap(rt):
                     alloc(expr, self._size(rt))
+                if getattr(expr, "indirect_call", False):
+                    cursor[0] += 8       # saved code_ptr across argument evaluation
+                    self._locals[f"indcode:{id(expr)}"] = -cursor[0]
+                    cursor[0] += 8       # saved env_ptr
+                    self._locals[f"indenv:{id(expr)}"] = -cursor[0]
                 if (isinstance(expr.callee, ast.Name)
                         and expr.callee.ident in ("push", "remove",
                                                   "append", "append_byte")):
@@ -1240,12 +1296,30 @@ class CodeGen:
             self._gen_enum_ctor(expr)
             off = self._locals[id(expr)]
             self._emit(f"leaq {off}(%rbp), %rax")
+        elif isinstance(expr, ast.Lambda):
+            self._gen_lambda_value(expr)
+            off = self._locals[id(expr)]
+            self._emit(f"leaq {off}(%rbp), %rax")
+        elif isinstance(expr, ast.Name) and getattr(expr, "func_ref", None) is not None:
+            # a top-level `fun` used as a value: a fat value with a null env whose
+            # code pointer is an env-ignoring thunk (shared calling convention)
+            self._fnval_thunks.add(expr.func_ref)
+            off = self._locals[id(expr)]
+            self._emit(f"leaq myla_{expr.func_ref}__fnval(%rip), %rax")
+            self._emit(f"movq %rax, {off}(%rbp)")
+            self._emit(f"movq $0, {off + 8}(%rbp)")
+            self._emit(f"leaq {off}(%rbp), %rax")
         elif isinstance(expr, ast.Name):
-            kind, off, _ = self._lookup(expr.ident)
-            if kind == "local":
-                self._emit(f"leaq {off}(%rbp), %rax")
+            entry = self._lookup(expr.ident)
+            if entry[0] == "capture":
+                _, env_off, cap_off, _ = entry
+                self._emit(f"movq {env_off}(%rbp), %rax")
+                if cap_off:
+                    self._emit(f"addq ${cap_off}, %rax")
+            elif entry[0] == "local":
+                self._emit(f"leaq {entry[1]}(%rbp), %rax")
             else:  # aggregate param: slot holds a pointer
-                self._emit(f"movq {off}(%rbp), %rax")
+                self._emit(f"movq {entry[1]}(%rbp), %rax")
         elif isinstance(expr, ast.FieldAccess):
             self._addr_of_aggregate(expr.target)
             foff = self._field_offset(expr.target.resolved_type.name, expr.field_name)
@@ -1543,8 +1617,12 @@ class CodeGen:
         """Leave the address of inline-struct lvalue `expr` in %rax (CoW-ing any
         list/map cell on the path)."""
         if isinstance(expr, ast.Name):
-            _, off, _ = self._lookup(expr.ident)
-            self._emit(f"leaq {off}(%rbp), %rax")
+            kind, off, _ = self._lookup(expr.ident)
+            if kind == "local":
+                self._emit(f"leaq {off}(%rbp), %rax")
+            else:  # a `var self` aggregate param: the slot holds a pointer to
+                # the caller's storage, so mutations write straight back to it.
+                self._emit(f"movq {off}(%rbp), %rax")
         elif isinstance(expr, ast.FieldAccess):
             self._mut_addr_of_struct(expr.target)
             foff = self._field_offset(expr.target.resolved_type.name, expr.field_name)
@@ -1626,7 +1704,9 @@ class CodeGen:
         self._emit("leaq 16(%rax,%rdx), %rax")    # &elem (the fresh slot)
         self._emit("pushq %rax")
         self._store_into_elem(expr.args[1], et, drop_old=False)
-        self._drop_expr_temps(expr.args[1])
+        # The value temp (if any) is released by the enclosing statement's
+        # `_drop_expr_temps`, which recurses into call arguments; dropping it
+        # here too would double-free an owning temp (e.g. a closure or list).
 
     def _gen_sb_append_byte(self, expr: ast.Call) -> None:
         """`append_byte(sb, b)`: make `sb` unique (CoW), grow if full, store one
@@ -1654,7 +1734,7 @@ class CodeGen:
         self._eval(expr.args[1])                  # byte value -> rax
         self._emit("popq %rcx")                   # &byte
         self._emit("movb %al, (%rcx)")
-        self._drop_expr_temps(expr.args[1])
+        # Arg temp released by the enclosing statement (see _gen_push).
 
     def _gen_sb_append(self, expr: ast.Call) -> None:
         """`append(sb, s)`: make `sb` unique (CoW), then append the string's bytes
@@ -1671,7 +1751,7 @@ class CodeGen:
         self._emit("call __sb_extend")            # rax = (maybe reallocated) cell
         self._emit(f"movq {holder}(%rbp), %rcx")
         self._emit("movq %rax, (%rcx)")           # publish the cell
-        self._drop_expr_temps(expr.args[1])
+        # Arg temp released by the enclosing statement (see _gen_push).
 
     def _gen_pop(self, expr: ast.Call) -> None:
         arg0 = expr.args[0]
@@ -1723,7 +1803,7 @@ class CodeGen:
         self._emit(f"call {self._map_remove_name(mt)}")  # rax = rebuilt cell
         self._emit(f"movq {holder}(%rbp), %rcx")
         self._emit("movq %rax, (%rcx)")       # publish the rebuilt cell
-        self._drop_expr_temps(expr.args[1])
+        # Arg temp released by the enclosing statement (see _gen_push).
 
     def _gen_map_set(self, stmt: ast.Assign) -> None:
         """`m[key] = value` (insert or update): make the map unique (CoW), grow it
@@ -2001,11 +2081,21 @@ class CodeGen:
     def _inc_box(self, ptr_off: int, base: str, t: Type) -> None:
         """Retain a heap-pointer leaf (boxed enum or list): just bump its
         refcount. Sharing is shallow — children are not touched."""
+        if isinstance(t, FuncType):
+            # a function value's env pointer may be null (non-capturing); the
+            # null-safe helper bumps the env cell's refcount.
+            self._emit(f"movq {ptr_off}(%{base}), %rdi")
+            self._emit("call __func_retain")
+            return
         self._emit(f"movq {ptr_off}(%{base}), %rax")
         self._emit("incq -8(%rax)")
 
     def _drop_box(self, ptr_off: int, base: str, t: Type) -> None:
         """Release a heap-pointer leaf via its type-specific drop routine."""
+        if isinstance(t, FuncType):
+            self._emit(f"movq {ptr_off}(%{base}), %rdi")
+            self._emit("call __func_drop")
+            return
         self._emit(f"movq {ptr_off}(%{base}), %rdi")
         if isinstance(t, ListType):
             self._emit(f"call {self._list_drop_name(t)}")
@@ -2052,18 +2142,25 @@ class CodeGen:
         # so it can pick the right routine; inline aggregates recurse.
         if self._is_boxed(ft) or isinstance(ft, (ListType, MapType, StringBuilderType)):
             on_box(off, base, ft)
+        elif isinstance(ft, FuncType):
+            # the refcounted env pointer is the second word of the fat value
+            on_box(off + 8, base, ft)
         elif self._owns_heap(ft):
             self._emit_owned_walk(base, off, ft, on_box)
 
     def _retain(self, base: str, off: int, t: Type) -> None:
         if isinstance(t, (ListType, MapType, StringBuilderType)):  # cell ptr at off
             self._inc_box(off, base, t)
+        elif isinstance(t, FuncType):
+            self._inc_box(off + 8, base, t)
         elif self._owns_heap(t):
             self._emit_owned_walk(base, off, t, self._inc_box)
 
     def _drop_value(self, base: str, off: int, t: Type) -> None:
         if isinstance(t, (ListType, MapType, StringBuilderType)):
             self._drop_box(off, base, t)
+        elif isinstance(t, FuncType):
+            self._drop_box(off + 8, base, t)
         elif self._owns_heap(t):
             self._emit_owned_walk(base, off, t, self._drop_box)
 
@@ -2112,6 +2209,8 @@ class CodeGen:
             self._collect_expr_temps(expr.left, out)
             self._collect_expr_temps(expr.right, out)
         elif isinstance(expr, ast.Call):
+            if getattr(expr, "indirect_call", False):
+                self._collect_expr_temps(expr.callee, out)
             for a in expr.args:
                 self._collect_expr_temps(a, out)
         elif isinstance(expr, ast.FieldAccess):
@@ -2949,8 +3048,13 @@ class CodeGen:
             if cref is not None:
                 self._eval_const(cref, expr.resolved_type)
             else:
-                _, off, _ = self._lookup(expr.ident)
-                self._emit(f"movq {off}(%rbp), %rax")
+                entry = self._lookup(expr.ident)
+                if entry[0] == "capture":     # captured scalar: load via env
+                    _, env_off, cap_off, _ = entry
+                    self._emit(f"movq {env_off}(%rbp), %r10")
+                    self._emit(f"movq {cap_off}(%r10), %rax")
+                else:
+                    self._emit(f"movq {entry[1]}(%rbp), %rax")
         elif isinstance(expr, ast.Unary):
             self._eval_unary(expr)
         elif isinstance(expr, ast.Binary):
@@ -3125,7 +3229,198 @@ class CodeGen:
             self._emit("movq $1, %rax")
             self._emit(f"{end}:")
 
+    # -- function values, closures & indirect calls (v0.4.2) ----------------
+
+    def _capture_layout(self, lam: ast.Lambda):
+        """Env-cell layout for a lambda: returns (offsets, env_size, owns_any).
+        Slot 0 (8 bytes) holds the drop fn; captures follow."""
+        offsets: list[int] = []
+        cur = 8
+        owns = False
+        for _name, t in lam.captures:
+            offsets.append(cur)
+            cur += self._stored_size(t)
+            if self._owns_heap(t):
+                owns = True
+        return offsets, cur, owns
+
+    def _gen_lambda_value(self, lam: ast.Lambda) -> None:
+        """Materialize a lambda's `(code_ptr, env_ptr)` fat value into its temp
+        slot. A non-capturing lambda uses a null env; a capturing one allocates a
+        refcounted env cell and copies/retains each captured value (D15)."""
+        off = self._locals[id(lam)]
+        code_label = "myla_" + lam.lifted_name
+        if not lam.captures:
+            self._emit(f"leaq {code_label}(%rip), %rax")
+            self._emit(f"movq %rax, {off}(%rbp)")
+            self._emit(f"movq $0, {off + 8}(%rbp)")
+            return
+        offsets, env_size, owns = self._capture_layout(lam)
+        self._emit(f"movq ${env_size}, %rdi")
+        self._emit("call __alloc")                    # rax = env cell (rc=1)
+        self._emit(f"movq %rax, {off + 8}(%rbp)")     # env_ptr
+        self._emit(f"leaq {code_label}(%rip), %rcx")
+        self._emit(f"movq %rcx, {off}(%rbp)")         # code_ptr
+        drop_fn = ("myla_" + lam.lifted_name + "_env_drop") if owns else "__free"
+        self._emit(f"leaq {drop_fn}(%rip), %rcx")
+        self._emit("movq %rcx, (%rax)")               # env[0] = drop fn
+        for (name, t), capoff in zip(lam.captures, offsets):
+            self._store_capture(name, t, off, capoff)
+
+    def _store_capture(self, name: str, t: Type, fat_off: int, capoff: int) -> None:
+        """Copy the enclosing variable `name` into the env cell at `capoff`,
+        becoming a new owner of any heap references it holds."""
+        src = ast.Name(name)
+        if _is_aggregate(t):
+            self._addr_of_aggregate(src)              # rax = src address
+            self._emit("movq %rax, %rsi")
+            self._emit(f"movq {fat_off + 8}(%rbp), %rdi")
+            if capoff:
+                self._emit(f"addq ${capoff}, %rdi")
+            self._emit_copy(self._size(t))
+            self._emit(f"movq {fat_off + 8}(%rbp), %r8")
+            self._retain("r8", capoff, t)
+        else:
+            self._eval(src)                           # value -> rax
+            self._emit(f"movq {fat_off + 8}(%rbp), %rcx")
+            self._emit(f"movq %rax, {capoff}(%rcx)")
+            if self._owns_heap(t):
+                self._emit(f"movq {fat_off + 8}(%rbp), %r8")
+                self._retain("r8", capoff, t)
+
+    def _gen_lambda_function(self, lam: ast.Lambda) -> None:
+        """Emit a lambda's lifted top-level function `myla_<lifted>` whose hidden
+        first argument is the env pointer; captured variables are read through it
+        (v0.4.2). Mirrors `_gen_function`'s prologue/epilogue."""
+        ft = lam.resolved_type
+        ret = ft.ret
+        self._locals = {}
+        self._scopes = []
+        self._drop_scopes = []
+        self._loops = []
+        self._struct_ret = _is_aggregate(ret)
+        self._ret_type = ret
+
+        if isinstance(lam.body, ast.Block):
+            body = lam.body
+        else:
+            body = ast.Block([ast.Return(lam.body).at(lam.line, lam.column)])
+        synth = ast.FunDecl(lam.lifted_name, list(lam.params), None, body)
+        frame = self._layout_frame(synth)
+        self._epilogue = f".Lret_{lam.lifted_name}"
+
+        self._emit(f"myla_{lam.lifted_name}:")
+        self._emit("pushq %rbp")
+        self._emit("movq %rsp, %rbp")
+        if frame:
+            self._emit(f"subq ${frame}, %rsp")
+
+        self._scopes.append({})
+        self._drop_scopes.append([])
+        param_base = 1 if self._struct_ret else 0
+        env_off = 16 + 8 * param_base          # the hidden env pointer
+        for i, (param, ptype) in enumerate(zip(lam.params, ft.params)):
+            offset = 16 + 8 * (param_base + 1 + i)
+            self._scopes[-1][param.name] = ("param", offset, ptype)
+        offsets, _env_size, owns = self._capture_layout(lam)
+        for (cname, ctype), capoff in zip(lam.captures, offsets):
+            self._scopes[-1][cname] = ("capture", env_off, capoff, ctype)
+
+        self._gen_block(body)
+
+        self._emit(f"{self._epilogue}:")
+        self._emit("leave")
+        self._emit("ret")
+        self._emit("")
+        self._drop_scopes.pop()
+        self._scopes.pop()
+
+        if owns:
+            self._emit_lambda_env_drop(lam, offsets)
+
+    def _emit_fnval_thunk(self, name: str) -> None:
+        """`myla_<fn>__fnval(env, args…)`: an adapter so a plain `fun` can be
+        called through the closure convention. Drops the (ignored) env argument
+        and forwards the rest to `myla_<fn>` (v0.4.2)."""
+        sig = self._sig(name)
+        struct_ret = _is_aggregate(sig.ret)
+        nargs = len(sig.params)
+        self._emit(f"myla_{name}__fnval:")
+        self._emit("pushq %rbp")
+        self._emit("movq %rsp, %rbp")
+        # incoming (from 16(%rbp)): [sret?], env, arg0, arg1, …
+        arg0_off = 16 + 8 * ((1 if struct_ret else 0) + 1)
+        for i in reversed(range(nargs)):
+            self._emit(f"movq {arg0_off + 8 * i}(%rbp), %rax")
+            self._emit("pushq %rax")
+        if struct_ret:
+            self._emit("movq 16(%rbp), %rax")     # sret pointer
+            self._emit("pushq %rax")
+        self._emit(f"call myla_{name}")
+        cleanup = 8 * (nargs + (1 if struct_ret else 0))
+        if cleanup:
+            self._emit(f"addq ${cleanup}, %rsp")
+        self._emit("leave")
+        self._emit("ret")
+        self._emit("")
+
+    def _emit_lambda_env_drop(self, lam: ast.Lambda, offsets: list) -> None:
+        """`myla_<lifted>_env_drop(%rdi = env)`: drop each owned capture, then
+        tail-call `__free` on the cell."""
+        self._emit(f"myla_{lam.lifted_name}_env_drop:")
+        self._emit("pushq %rbp")
+        self._emit("movq %rsp, %rbp")
+        self._emit("pushq %rbx")
+        self._emit("movq %rdi, %rbx")
+        for (cname, ctype), capoff in zip(lam.captures, offsets):
+            if self._owns_heap(ctype):
+                self._drop_value("rbx", capoff, ctype)
+        self._emit("movq %rbx, %rdi")
+        self._emit("popq %rbx")
+        self._emit("leave")
+        self._emit("jmp __free")
+        self._emit("")
+
+    def _gen_indirect_call(self, expr: ast.Call) -> None:
+        """Call a function value `f(args)`: load `(code_ptr, env_ptr)` from the
+        fat value and call `code_ptr(env_ptr, args…)` (env first, then the usual
+        sret/argument convention)."""
+        ft = expr.callee.resolved_type
+        struct_ret = _is_aggregate(ft.ret)
+        code_off = self._locals[f"indcode:{id(expr)}"]
+        env_off = self._locals[f"indenv:{id(expr)}"]
+        self._addr_of_aggregate(expr.callee)          # rax = &fat value
+        self._emit("movq (%rax), %rcx")
+        self._emit(f"movq %rcx, {code_off}(%rbp)")    # save code_ptr
+        self._emit("movq 8(%rax), %rcx")
+        self._emit(f"movq %rcx, {env_off}(%rbp)")     # save env_ptr
+
+        logical: list = []
+        if struct_ret:
+            logical.append(("sret", self._locals[id(expr)]))
+        logical.append(("env", env_off))
+        for i, arg in enumerate(expr.args):
+            logical.append(("arg", arg, ft.params[i]))
+
+        for item in reversed(logical):
+            if item[0] == "sret":
+                self._emit(f"leaq {item[1]}(%rbp), %rax")
+            elif item[0] == "env":
+                self._emit(f"movq {item[1]}(%rbp), %rax")
+            else:
+                _, arg, ptype = item
+                if _is_aggregate(ptype):
+                    self._addr_of_aggregate(arg)
+                else:
+                    self._eval(arg)
+            self._emit("pushq %rax")
+        self._emit(f"call *{code_off}(%rbp)")
+        self._emit(f"addq ${8 * len(logical)}, %rsp")
+
     def _gen_call(self, expr: ast.Call) -> None:
+        if getattr(expr, "indirect_call", False):
+            self._gen_indirect_call(expr)
+            return
         callee = expr.callee
         assert isinstance(callee, ast.Name)
         name = callee.ident

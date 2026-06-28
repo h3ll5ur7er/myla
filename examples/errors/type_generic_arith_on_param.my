@@ -1,6 +1,6 @@
-//~ type error: requires integer or string operands
-// A type parameter is opaque: you can move/pass/store it, but not do arithmetic
-// on it (that needs trait bounds, which arrive in v0.4).
+//~ type error: requires the bound 'T: Add'
+// A type parameter is opaque without a trait bound: arithmetic on it needs a
+// built-in-trait bound like `<T: Add>` (v0.4.4, X9).
 fun twice<T>(x: T) -> T {
     return x + x
 }

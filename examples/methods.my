@@ -1,0 +1,91 @@
+// methods.my — methods & `impl` blocks (v0.4.1): `self` / `var self`, method
+// chaining, value semantics, generic impls, enum methods, and methods on
+// built-in types (no orphan rule, D45–D47).
+
+struct Counter {
+    n: int,
+}
+
+impl Counter {
+    fun get(self) -> int { return self.n }            // read-only receiver
+    fun bumped(self) -> Counter { return Counter { n: self.n + 1 } }
+    fun bump(var self) { self.n = self.n + 1 }         // mutating receiver
+    fun add(var self, k: int) { self.n = self.n + k }
+}
+
+// A generic impl: one body covers every `Box<T>` instantiation (monomorphized).
+struct Box<T> {
+    value: T,
+}
+
+impl<T> Box<T> {
+    fun get(self) -> T { return self.value }
+    fun set(var self, v: T) { self.value = v }
+}
+
+enum Shape {
+    Circle(int),
+    Rect(int, int),
+}
+
+impl Shape {
+    fun area(self) -> int {
+        return match self {
+            Circle(r) => 3 * r * r
+            Rect(w, h) => w * h
+        }
+    }
+}
+
+// Methods on a built-in type — Myla has no orphan rule (D45).
+impl int {
+    fun is_even(self) -> bool { return self % 2 == 0 }
+    fun double(self) -> int { return self * 2 }
+}
+
+#test(0)[3]
+fun three_steps(start: int) -> int {
+    var c = Counter { n: start }
+    c.bump()
+    c.add(2)
+    return c.get()
+}
+
+#test(Shape.Rect(3, 4))[12]
+#test(Shape.Circle(2))[12]
+fun area_of(s: Shape) -> int {
+    return s.area()
+}
+
+#test(5)[10]
+#test(4)[8]
+fun doubled(n: int) -> int {
+    return n.double()
+}
+
+#test(7)[8]
+fun boxed_roundtrip(v: int) -> int {
+    var b = Box { value: v }
+    b.set(v + 1)
+    return b.get()
+}
+
+fun main() {
+    var c = Counter { n: 0 }
+    c.bump()
+    let c2 = c.bumped()                  // value semantics: `c` is untouched
+    print(c.get())                       // 1
+    print(c2.get())                      // 2
+
+    print(area_of(Shape.Rect(3, 4)))     // 12
+    print(Shape.Circle(2).area())        // 12 (method call on a temporary)
+
+    let n = 5
+    print(n.is_even())                   // false
+    print(n.double())                    // 10
+    print(n.double().is_even())          // true  (method chaining)
+
+    var b = Box { value: 41 }
+    b.set(b.get() + 1)
+    print(b.get())                       // 42
+}

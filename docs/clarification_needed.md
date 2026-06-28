@@ -4,21 +4,19 @@ Open decisions that need your input before (or during) implementation. When you
 decide one, it moves to the **Decision log** in [roadmap.md](roadmap.md) and is
 removed here.
 
-_Last updated: 2026-06-27 (V1–V8 → D30–D37 (v0.2 locked); W1–W6 → D38–D43 (v0.3 collections/strings/ops locked))._
+_Last updated: 2026-06-28 (V1–V8 → D30–D37 (v0.2 locked); W1–W6 → D38–D43 (v0.3 locked); **X1–X9 → D45–D53** (v0.4 abstraction locked))._
 
 ---
 
 ## Still open
 
-**None currently blocking.** v0.2 (V1–V8 → **D30–D37**) and the v0.3 collections/
-strings/ops decisions (W1–W6 → **D38–D43**) are answered and recorded in
-[roadmap.md](roadmap.md); the full v0.3 design is locked in
-[v0.3-collections-and-ops.md](v0.3-collections-and-ops.md).
+**None currently blocking.** v0.2 (V1–V8 → **D30–D37**), v0.3 collections/strings/
+ops (W1–W6 → **D38–D43**), and v0.4 abstraction (X1–X9 → **D45–D53**) are all
+answered and recorded in [roadmap.md](roadmap.md); the full v0.4 design is locked
+in [v0.4-abstraction.md](v0.4-abstraction.md).
 
-### Likely later batches (not yet detailed)
+### Later batches (not yet detailed)
 
-- v0.4 abstraction: method resolution / `impl` coherence, trait/operator-
-  overloading surface, closure capture (`ref` vs by-value, D15) edge cases.
 - v0.5 stdlib/modules: package vs. module resolution corner cases, `pub use`
   re-exports, and string interpolation as sugar over `format`.
 - Deferred within v0.3: **sets** (revisit when a concrete need appears, D39).
@@ -49,3 +47,10 @@ pattern set incl. or-patterns + guards (D33) · V5 generic args inferred at call
 sites (D34) · V6 arity ≥ 1 with `(x,)` 1-tuples, no unit type (D35) · V7
 same-carrier `?` (D36) · V8 `==` primitives-only, structural eq via traits later
 (D37).
+
+**v0.4 abstraction:** X1 no orphan rule / impls freely mixed (D45) · X2 no UFCS,
+per-type method namespace (D46) · X3 `self`/`var self` needs mutable lvalue
+receiver (D47) · X4 by-value capture, `ref` later (D48) · X5 16-byte
+`(code_ptr, env_ptr)` fat value + refcounted env (D49) · X6 `|>` + `>>`
+compose-by-type (D50) · X7 `_` partial app, no currying (D51) · X8 fixed
+operator-trait set + `#derive(Eq)` (D52) · X9 limited built-in-trait bounds (D53).

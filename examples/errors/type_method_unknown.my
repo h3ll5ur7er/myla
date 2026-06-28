@@ -1,0 +1,8 @@
+//~ type error: has no method
+// Calling a method that no `impl` defines for the receiver type is rejected.
+struct P { x: int }
+
+fun main() {
+    let p = P { x: 1 }
+    print(p.nope())
+}

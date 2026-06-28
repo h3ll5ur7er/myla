@@ -1,0 +1,10 @@
+//~ type error: does not satisfy the bound 'T: Add'
+// A generic call's concrete type argument must implement every declared bound,
+// checked at the call site (X9).
+struct P { x: int }
+fun twice<T: Add>(v: T) -> T {
+    return v + v
+}
+fun main() {
+    let p = twice(P { x: 1 })
+}

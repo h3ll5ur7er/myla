@@ -1,0 +1,6 @@
+//~ type error: unknown trait 'Nope' in bound 'T: Nope'
+// A type-parameter bound must name a real trait (built-in or user) (X9).
+fun pick<T: Nope>(a: T, b: T) -> T {
+    return a
+}
+fun main() {}

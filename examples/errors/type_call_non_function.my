@@ -1,0 +1,5 @@
+//~ type error: cannot call a value of type
+fun main() {
+    let x = 5
+    print(x(1))
+}

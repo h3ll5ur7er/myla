@@ -42,6 +42,7 @@ Design docs:
 - [docs/self-hosting.md](docs/self-hosting.md) — the road to v1.0: feature gap analysis + milestone plan
 - [docs/v0.2-data-modeling.md](docs/v0.2-data-modeling.md) — detailed v0.2 design: enums, `match`, tuples, generics, `Option`/`Result` + `?`
 - [docs/v0.3-collections-and-ops.md](docs/v0.3-collections-and-ops.md) — detailed v0.3 design: collections, strings, bitwise/shift, casts, literal bases, `break`/`continue`, `const`, `assert`/`panic`/`unreachable` (**v0.3 complete**: operators & literals, const/intrinsics, lists `[T]`, maps `[K: V]`, and the string toolkit — char literals, byte indexing, `+` concat, `format`, `StringBuilder`)
+- [docs/v0.4-abstraction.md](docs/v0.4-abstraction.md) — detailed v0.4 design (locked): methods/`impl`, lambdas/closures + function types, pipelines (`|>`/`>>`/`_`), traits + operator overloading + derivable `Eq`
 - [docs/roadmap.md](docs/roadmap.md) — live implementation status, progress, and decision log
 - [docs/clarification_needed.md](docs/clarification_needed.md) — open decisions awaiting input
 

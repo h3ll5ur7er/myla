@@ -1,0 +1,7 @@
+//~ type error: cannot reassign 'self'
+// `var self` may mutate the receiver's fields/elements, but not rebind `self`.
+struct P { x: int }
+
+impl P {
+    fun reset(var self) { self = P { x: 0 } }
+}

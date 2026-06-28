@@ -31,9 +31,26 @@ import dataclasses
 
 from .. import ast
 from ..types import (
-    BoolType, Checker, EnumType, IntType, ListType, MapType, StrType,
+    BoolType, Checker, EnumType, FuncType, IntType, ListType, MapType, StrType,
     StringBuilderType, StructType, TupleType, Type, TypeParam, check, type_name,
 )
+
+# Overloadable operators → operator-trait method (v0.4.4). Concrete-type uses
+# were already desugared by the checker; a `Binary` on a struct/enum here is a
+# bounded-generic operator (`T: Add`) that only became concrete after type
+# substitution, so it is lowered to the method call now.
+_OP_METHOD_NAME = {
+    "+": "add", "-": "sub", "*": "mul", "/": "div", "%": "rem",
+    "==": "eq", "!=": "eq", "<": "cmp", "<=": "cmp", ">": "cmp", ">=": "cmp",
+}
+
+
+def _without_derive(attrs: list) -> list:
+    """Drop `#derive(…)` attributes from a re-emitted struct/enum: the derive
+    was already lowered to a concrete `impl` (emitted as a plain function), so
+    the re-check must not synthesize it again — its user-impl dependencies may
+    have been dropped during monomorphization (v0.4.4)."""
+    return [a for a in attrs if a.name != "derive"]
 
 
 class _Monomorphizer:
@@ -56,11 +73,13 @@ class _Monomorphizer:
         for d in self.checker.program.decls:
             if isinstance(d, ast.StructDecl) and not d.type_params:
                 c = copy.deepcopy(d)
+                c.attributes = _without_derive(c.attributes)
                 for f in c.fields:
                     f.type = self._rewrite_typeexpr(f.type, {})
                 out.append(c)
             elif isinstance(d, ast.EnumDecl) and not d.type_params:
                 c = copy.deepcopy(d)
+                c.attributes = _without_derive(c.attributes)
                 for v in c.variants:
                     v.payload = [self._rewrite_typeexpr(p, {}) for p in v.payload]
                 out.append(c)
@@ -102,6 +121,10 @@ class _Monomorphizer:
         clone = copy.deepcopy(self.funcs[orig].decl)
         clone.name = mangled
         clone.type_params = []
+        # The specialization is concrete: drop the now-meaningless trait bounds
+        # so the re-check doesn't see a bound on a non-existent type parameter
+        # (v0.4.4). The call-site bound check already ran during the first check.
+        clone.type_param_bounds = {}
         for p in clone.params:
             p.type = self._rewrite_typeexpr(p.type, subst)
         if clone.ret_type is not None:
@@ -122,6 +145,15 @@ class _Monomorphizer:
         # concrete enum so the re-check resolves the right (mangled) layout.
         if getattr(node, "enum_ctor", None) is not None:
             return self._rewrite_enum_ctor(node, subst)
+        # method calls (v0.4.1): lower `recv.m(args)` to a plain call of the
+        # lowered method function with the receiver spliced in as `self`, so
+        # codegen needs no method-specific handling.
+        if isinstance(node, ast.Call) and getattr(node, "method_func", None) is not None:
+            return self._rewrite_method_call(node, subst)
+        if isinstance(node, ast.Binary):
+            lowered = self._rewrite_operator(node, subst)
+            if lowered is not None:
+                return lowered
         if isinstance(node, ast.Call):
             self._rewrite_fn_call(node, subst)
         elif isinstance(node, ast.StructLit):
@@ -135,6 +167,15 @@ class _Monomorphizer:
                 self._rewrite_pattern(arm.pattern, scrut_t, subst)
         if isinstance(node, (ast.VarDecl, ast.DestructDecl)) and node.declared_type is not None:
             node.declared_type = self._rewrite_typeexpr(node.declared_type, subst)
+        if isinstance(node, ast.Lambda):
+            # A lambda's own parameter/return annotations may name a type
+            # parameter of the enclosing generic function (e.g. `(x: T) => …`);
+            # rewrite them concretely so the re-check can resolve them.
+            for p in node.params:
+                if p.type is not None:
+                    p.type = self._rewrite_typeexpr(p.type, subst)
+            if node.ret_type is not None:
+                node.ret_type = self._rewrite_typeexpr(node.ret_type, subst)
         self._rewrite_kids(node, subst)
         return node
 
@@ -163,6 +204,47 @@ class _Monomorphizer:
         node.callee = ast.Name(self._request_fn(callee.ident, concrete)).at(
             callee.line, callee.column
         )
+
+    def _rewrite_method_call(self, node: ast.Call, subst: dict[str, Type]):
+        """Lower `recv.m(args)` to `m_lowered(recv, args)`. For a generic impl the
+        method function is requested at the concrete type arguments."""
+        base = node.method_func
+        recv = self._rewrite_child(node.callee.target, subst)
+        args = [self._rewrite_child(a, subst) for a in node.args]
+        sig = self.funcs[base]
+        if sig.type_params:
+            concrete = tuple(self._subst_type(a, subst)
+                             for a in getattr(node, "type_args", ()))
+            name = self._request_fn(base, concrete)
+        else:
+            name = base
+        ln, col = node.line, node.column
+        return ast.Call(ast.Name(name).at(ln, col), [recv] + args).at(ln, col)
+
+    def _rewrite_operator(self, node: ast.Binary, subst: dict[str, Type]):
+        """Lower a bounded-generic operator (`acc + x` with `T: Add`) to the
+        operand type's trait method, once `T` is concrete. Returns `None` for
+        ordinary primitive operators (left to the re-check)."""
+        method = _OP_METHOD_NAME.get(node.op)
+        if method is None:
+            return None
+        lt = self._subst_type(getattr(node.left, "resolved_type", None), subst)
+        if not isinstance(lt, (StructType, EnumType)):
+            return None
+        left = self._rewrite_child(node.left, subst)
+        right = self._rewrite_child(node.right, subst)
+        base = f"{lt.name}.{method}"
+        sig = self.funcs[base]
+        # a generic impl's method takes the receiver's type args (`impl<T> .. for
+        # Box<T>` -> the method is requested at `Box`'s concrete args).
+        name = self._request_fn(base, tuple(lt.args)) if sig.type_params else base
+        ln, col = node.line, node.column
+        call = ast.Call(ast.Name(name).at(ln, col), [left, right]).at(ln, col)
+        if node.op == "!=":
+            return ast.Unary("!", call).at(ln, col)
+        if node.op in ("<", "<=", ">", ">="):
+            return ast.Binary(node.op, call, ast.IntLit(0).at(ln, col)).at(ln, col)
+        return call
 
     def _rewrite_enum_ctor(self, node, subst: dict[str, Type]):
         """Rewrite any enum constructor (`Enum.Variant(..)`, `Color.Red`, bare
@@ -272,6 +354,11 @@ class _Monomorphizer:
         if isinstance(t, MapType):
             return ast.MapTypeRef(self._type_to_typeexpr(t.key),
                                   self._type_to_typeexpr(t.value))
+        if isinstance(t, FuncType):
+            return ast.FnTypeRef(
+                [self._type_to_typeexpr(p) for p in t.params],
+                self._type_to_typeexpr(t.ret) if t.ret is not None else None,
+            )
         if isinstance(t, (StructType, EnumType)):
             return ast.TypeRef(self._aggregate_name(t))
         raise AssertionError(  # pragma: no cover - unresolved type parameter
@@ -292,6 +379,11 @@ class _Monomorphizer:
             return StructType(t.name, tuple(self._subst_type(a, subst) for a in t.args))
         if isinstance(t, EnumType) and t.args:
             return EnumType(t.name, tuple(self._subst_type(a, subst) for a in t.args))
+        if isinstance(t, FuncType):
+            return FuncType(
+                tuple(self._subst_type(p, subst) for p in t.params),
+                self._subst_type(t.ret, subst),
+            )
         return t
 
     # -- name mangling -------------------------------------------------------
@@ -315,6 +407,10 @@ class _Monomorphizer:
             return "L_" + self._mono_token(t.elem)
         if isinstance(t, MapType):
             return "M_" + self._mono_token(t.key) + "_" + self._mono_token(t.value)
+        if isinstance(t, FuncType):
+            params = "_".join(self._mono_token(p) for p in t.params)
+            ret = self._mono_token(t.ret) if t.ret is not None else "void"
+            return "Fn" + str(len(t.params)) + "_" + params + "_R_" + ret
         return "X"  # pragma: no cover - defensive
 
 

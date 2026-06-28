@@ -16,6 +16,7 @@ op), defaulting to `int` (`int32`).
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
 from dataclasses import dataclass
 
@@ -88,6 +89,19 @@ class EnumType(Type):
 
 
 @dataclass(frozen=True)
+class FuncType(Type):
+    """A function value type `(T0, T1, …) -> R` (v0.4.2, D48/D49).
+
+    `params` are the parameter types and `ret` the result (None for a void
+    result). At runtime a function value is a 16-byte fat value
+    `(code_ptr, env_ptr)`; the type itself carries no capture information (a
+    closure and a plain `fun` reference share one type and calling convention).
+    """
+    params: tuple[Type, ...]
+    ret: Type | None = None
+
+
+@dataclass(frozen=True)
 class TypeParam(Type):
     """A generic type parameter (`T`) inside a generic declaration's body.
 
@@ -98,9 +112,18 @@ class TypeParam(Type):
     name: str
 
 
+@dataclass(frozen=True)
+class SelfType(Type):
+    """The `Self` type inside a `trait` signature (v0.4.4): a placeholder for the
+    implementing type. Substituted by the concrete target when checking an
+    `impl Trait for T` for conformance; never appears in a checked value."""
+    pass
+
+
 BOOL = BoolType()
 STR = StrType()
 STRING_BUILDER = StringBuilderType()
+SELF = SelfType()
 
 # primitive type-name keyword -> Type
 _PRIMITIVES: dict[str, Type] = {
@@ -146,6 +169,8 @@ def type_name(t: Type | None) -> str:
         return t.name
     if isinstance(t, TypeParam):
         return t.name
+    if isinstance(t, SelfType):
+        return "Self"
     if isinstance(t, TupleType):
         if len(t.elems) == 1:
             return f"({type_name(t.elems[0])},)"
@@ -154,7 +179,68 @@ def type_name(t: Type | None) -> str:
         return f"[{type_name(t.elem)}]"
     if isinstance(t, MapType):
         return f"[{type_name(t.key)}: {type_name(t.value)}]"
+    if isinstance(t, FuncType):
+        params = ", ".join(type_name(p) for p in t.params)
+        return f"({params}) -> {type_name(t.ret)}"
     return str(t)
+
+
+def _type_to_typeexpr(t: Type | None) -> "ast.TypeExpr":
+    """Render a resolved `Type` back as a source-level type annotation.
+
+    Used to give checker-synthesized lambdas (`>>` composition, `_` partial
+    application) self-describing parameter annotations, so the monomorphizer's
+    re-check resolves them without relying on contextual hints (the expected
+    type that was available during the first check is gone by then)."""
+    if isinstance(t, (IntType, BoolType, StrType, StringBuilderType)):
+        return ast.TypeRef(type_name(t))
+    if isinstance(t, ListType):
+        return ast.ListTypeRef(_type_to_typeexpr(t.elem))
+    if isinstance(t, MapType):
+        return ast.MapTypeRef(_type_to_typeexpr(t.key), _type_to_typeexpr(t.value))
+    if isinstance(t, TupleType):
+        return ast.TupleTypeRef([_type_to_typeexpr(e) for e in t.elems])
+    if isinstance(t, FuncType):
+        return ast.FnTypeRef(
+            [_type_to_typeexpr(p) for p in t.params],
+            _type_to_typeexpr(t.ret) if t.ret is not None else None,
+        )
+    if isinstance(t, (StructType, EnumType)):
+        return ast.TypeRef(t.name, [_type_to_typeexpr(a) for a in t.args])
+    if isinstance(t, TypeParam):
+        return ast.TypeRef(t.name)
+    raise TypeCheckError(
+        f"cannot render type '{type_name(t)}' as an annotation", 0, 0
+    )
+
+
+# The built-in operator traits (D52, X8) and the operators that desugar to each.
+# Arithmetic operators map to a same-typed method returning `Self`; `Eq`/`Ord`
+# back the comparison operators.
+_ARITH_OP_TRAITS: dict[str, tuple[str, str]] = {
+    "+": ("Add", "add"),
+    "-": ("Sub", "sub"),
+    "*": ("Mul", "mul"),
+    "/": ("Div", "div"),
+    "%": ("Rem", "rem"),
+}
+_BUILTIN_OP_TRAIT_NAMES = frozenset(
+    {"Add", "Sub", "Mul", "Div", "Rem", "Eq", "Ord"}
+)
+
+
+def _primitive_default_trait(t: Type, trait: str) -> bool:
+    """Whether primitive type `t` ships an *implicit default* impl of operator
+    `trait` (D52) — the hardwired v0.0–v0.3 semantics that a user `impl` may
+    override. Integers get the full arithmetic/compare set; `bool` and `str`
+    get equality (and `str` gets `Add` for concatenation)."""
+    if isinstance(t, IntType):
+        return trait in ("Add", "Sub", "Mul", "Div", "Rem", "Eq", "Ord")
+    if isinstance(t, BoolType):
+        return trait == "Eq"
+    if isinstance(t, StrType):
+        return trait in ("Add", "Eq")
+    return False
 
 
 def _is_map_key(t: Type) -> bool:
@@ -211,10 +297,33 @@ class FuncSig:
     ret: Type | None
     decl: ast.FunDecl
     type_params: list[str] = None  # type: ignore[assignment]
+    # v0.4.4 (X9): {type-param name: [trait, …]} built-in-trait bounds.
+    bounds: dict[str, list[str]] = None  # type: ignore[assignment]
 
     def __post_init__(self):
         if self.type_params is None:
             self.type_params = []
+        if self.bounds is None:
+            self.bounds = {}
+
+
+@dataclass
+class TraitMethodSig:
+    """A trait method signature (v0.4.4). `params[0]` is the receiver (`Self`);
+    parameter/return types may mention `SelfType`, substituted by the concrete
+    target when an `impl` is checked for conformance."""
+    name: str
+    params: list[Type]
+    ret: Type | None
+    receiver: str  # "self" or "var self"
+
+
+@dataclass
+class TraitSig:
+    name: str
+    methods: dict[str, TraitMethodSig]
+    decl: ast.TraitDecl
+    builtin: bool = False  # a built-in operator trait (Add/Eq/…) vs a user trait
 
 
 @dataclass
@@ -248,6 +357,32 @@ class _Scope:
                 return scope.names[name]
             scope = scope.parent
         return None
+
+    def lookup_scope(self, name: str) -> "_Scope | None":
+        """The scope where `name` is defined (for closure-capture analysis)."""
+        scope: _Scope | None = self
+        while scope is not None:
+            if name in scope.names:
+                return scope
+            scope = scope.parent
+        return None
+
+
+class _LambdaCtx:
+    """Tracks the free (captured) outer variables referenced by a lambda body
+    while it is being type-checked (v0.4.2). `boundary` is the lambda's own
+    parameter scope; any binding resolved in a *strict ancestor* of `boundary`
+    is captured by value (D15)."""
+    def __init__(self, boundary: "_Scope"):
+        self.boundary = boundary
+        self._captures: dict[str, Type] = {}
+
+    def add(self, name: str, t: Type) -> None:
+        if name not in self._captures:
+            self._captures[name] = t
+
+    def ordered(self) -> list[tuple[str, Type]]:
+        return list(self._captures.items())
 
 
 # names that may not be used as user declarations
@@ -295,6 +430,23 @@ class Checker:
         # behind a heap pointer wherever they appear as an aggregate member (v0.2.3).
         self.recursive_enums: set[str] = set()
         self.functions: dict[str, FuncSig] = {}
+        # methods (v0.4.1): type-key -> {method_name: FuncSig}. Each method is
+        # also registered in `functions` under a mangled `"<TypeKey>.<method>"`
+        # name (the dot keeps it distinct from any user identifier), with the
+        # receiver synthesized as `params[0]`.
+        self.methods: dict[str, dict[str, FuncSig]] = {}
+        self._impl_decls: list[ast.ImplDecl] = []
+        self._method_decls: list[ast.FunDecl] = []
+        # traits (v0.4.4): name -> TraitSig (signatures only, `Self`-typed)
+        self.traits: dict[str, TraitSig] = {}
+        self._trait_decls: list[ast.TraitDecl] = []
+        # which traits each type implements via a *user* `impl Trait for T`
+        # (type-key -> {trait name}); primitive built-in operator-trait defaults
+        # are handled by `_type_implements` rather than stored here.
+        self.trait_impls: dict[str, set[str]] = {}
+        self._user_trait_impls: set[tuple[str, str]] = set()  # (trait, key)
+        # `Self` is only resolvable while a trait signature is being resolved
+        self._allow_self = False
         # module-level constants (D28): name -> folded ConstInfo
         self.consts: dict[str, ConstInfo] = {}
         self._const_decls: dict[str, ast.ConstDecl] = {}
@@ -307,17 +459,37 @@ class Checker:
         self._loop_depth = 0
         # type parameters in scope while resolving/checking a generic decl
         self._type_params: frozenset[str] = frozenset()
+        # {type-param name: frozenset(trait)} bounds in scope while checking a
+        # bounded generic body (v0.4.4, X9)
+        self._type_param_bounds: dict[str, frozenset[str]] = {}
+        # stack of lambdas currently being checked (innermost last), for
+        # by-value capture analysis (v0.4.2)
+        self._lambda_stack: list[_LambdaCtx] = []
+        # when not None, value-returning `return`s in a void context append
+        # their (stmt, type) here instead of erroring — used to infer the result
+        # type of a block-bodied lambda with no expected function type
+        self._lambda_infer: list[tuple[ast.Return, Type]] | None = None
+        # lambdas collected across the program (for the native lambda-lifting
+        # pass); each is assigned a unique `lifted_name`
+        self._lambdas: list[ast.Lambda] = []
+        self._lambda_ids: set[int] = set()
 
     # -- public entry --------------------------------------------------------
 
     def check(self) -> "Checker":
         self._collect_globals()
         self._resolve_signatures()
+        self._resolve_traits()
+        self._synthesize_derives()
+        self._resolve_impls()
+        self._validate_bounds()
         self._fold_consts()
         self._check_attributes_and_entry()
         for decl in self.program.decls:
             if isinstance(decl, ast.FunDecl):
                 self._check_function(decl)
+        for mdecl in self._method_decls:
+            self._check_function(mdecl)
         return self
 
     # -- global collection ---------------------------------------------------
@@ -325,6 +497,28 @@ class Checker:
     def _collect_globals(self) -> None:
         seen: dict[str, ast.Node] = {}
         for decl in self.program.decls:
+            if isinstance(decl, ast.ImplDecl):
+                self._impl_decls.append(decl)
+                continue
+            if isinstance(decl, ast.TraitDecl):
+                if decl.name in _BUILTIN_OP_TRAIT_NAMES:
+                    raise TypeCheckError(
+                        f"'{decl.name}' is a built-in operator trait and cannot "
+                        "be redeclared",
+                        decl.line, decl.column,
+                    )
+                if any(t.name == decl.name for t in self._trait_decls):
+                    raise TypeCheckError(
+                        f"duplicate trait '{decl.name}'", decl.line, decl.column
+                    )
+                if decl.type_params:
+                    raise TypeCheckError(
+                        "generic traits are not supported yet (v0.4.4 ships the "
+                        "non-generic built-in operator traits and user traits)",
+                        decl.line, decl.column,
+                    )
+                self._trait_decls.append(decl)
+                continue
             name = decl.name
             if name in _BUILTIN_FUNCS:
                 raise TypeCheckError(
@@ -394,7 +588,8 @@ class Checker:
                 ret = self._resolve(decl.ret_type) if decl.ret_type is not None else None
             finally:
                 self._type_params = frozenset()
-            self.functions[name] = FuncSig(params, ret, decl, list(decl.type_params))
+            self.functions[name] = FuncSig(params, ret, decl, list(decl.type_params),
+                                           dict(decl.type_param_bounds))
 
     def _check_type_params(self, decl) -> None:
         seen: set[str] = set()
@@ -413,6 +608,455 @@ class Checker:
                 )
             seen.add(tp)
 
+    # -- traits (v0.4.4) -----------------------------------------------------
+
+    def _register_builtin_op_traits(self) -> None:
+        """Seed the fixed set of built-in operator traits (D52). Their method
+        signatures are `Self`-typed; primitives carry implicit defaults
+        (`_primitive_default_trait`) and user types provide an `impl`."""
+        specs = [
+            ("Add", "add", SELF), ("Sub", "sub", SELF), ("Mul", "mul", SELF),
+            ("Div", "div", SELF), ("Rem", "rem", SELF),
+            ("Eq", "eq", BOOL), ("Ord", "cmp", INT),
+        ]
+        for name, method, ret in specs:
+            msig = TraitMethodSig(method, [SELF, SELF], ret, "self")
+            self.traits[name] = TraitSig(name, {method: msig}, None, builtin=True)
+
+    def _resolve_traits(self) -> None:
+        """Resolve each user `trait`'s method signatures, with `Self` allowed."""
+        self._register_builtin_op_traits()
+        for decl in self._trait_decls:
+            methods: dict[str, TraitMethodSig] = {}
+            for m in decl.methods:
+                if m.name in methods:
+                    raise TypeCheckError(
+                        f"duplicate method '{m.name}' in trait '{decl.name}'",
+                        m.line, m.column,
+                    )
+                self._allow_self = True
+                try:
+                    params = [SELF] + [self._resolve(p.type) for p in m.params]
+                    ret = (self._resolve(m.ret_type)
+                           if m.ret_type is not None else None)
+                finally:
+                    self._allow_self = False
+                methods[m.name] = TraitMethodSig(m.name, params, ret, m.receiver)
+            self.traits[decl.name] = TraitSig(decl.name, methods, decl)
+
+    def _subst_self(self, t: Type | None, target: Type) -> Type | None:
+        """Replace `SelfType` with the implementing `target` type, recursively."""
+        if t is None or isinstance(t, (IntType, BoolType, StrType,
+                                       StringBuilderType, TypeParam)):
+            return t
+        if isinstance(t, SelfType):
+            return target
+        if isinstance(t, ListType):
+            return ListType(self._subst_self(t.elem, target))
+        if isinstance(t, MapType):
+            return MapType(self._subst_self(t.key, target),
+                           self._subst_self(t.value, target))
+        if isinstance(t, TupleType):
+            return TupleType(tuple(self._subst_self(e, target) for e in t.elems))
+        if isinstance(t, FuncType):
+            return FuncType(
+                tuple(self._subst_self(p, target) for p in t.params),
+                self._subst_self(t.ret, target) if t.ret is not None else None,
+            )
+        if isinstance(t, StructType):
+            return StructType(t.name, tuple(self._subst_self(a, target)
+                                            for a in t.args))
+        if isinstance(t, EnumType):
+            return EnumType(t.name, tuple(self._subst_self(a, target)
+                                          for a in t.args))
+        return t
+
+    def _check_trait_conformance(self, impl: ast.ImplDecl, key: str,
+                                 target: Type, trait: TraitSig) -> None:
+        """Verify `impl Trait for T` covers exactly the trait's signatures with
+        matching receiver mutability and `Self`-substituted parameter/return
+        types (D52)."""
+        impl_methods = {m.name: m for m in impl.methods}
+        missing = set(trait.methods) - set(impl_methods)
+        if missing:
+            raise TypeCheckError(
+                f"impl of trait '{trait.name}' for '{key}' is missing method(s): "
+                f"{', '.join(sorted(missing))}",
+                impl.line, impl.column,
+            )
+        extra = set(impl_methods) - set(trait.methods)
+        if extra:
+            raise TypeCheckError(
+                f"impl of trait '{trait.name}' for '{key}' declares method(s) not "
+                f"in the trait: {', '.join(sorted(extra))}",
+                impl.line, impl.column,
+            )
+        for mname, tmsig in trait.methods.items():
+            sig = self.methods[key][mname]
+            if sig.decl.receiver != tmsig.receiver:
+                raise TypeCheckError(
+                    f"method '{mname}' in impl of trait '{trait.name}' for "
+                    f"'{key}' has receiver '{sig.decl.receiver}' but the trait "
+                    f"declares '{tmsig.receiver}'",
+                    sig.decl.line, sig.decl.column,
+                )
+            exp_params = [self._subst_self(p, target) for p in tmsig.params]
+            exp_ret = self._subst_self(tmsig.ret, target)
+            if sig.params != exp_params or sig.ret != exp_ret:
+                exp = (f"({', '.join(type_name(p) for p in exp_params[1:])}) -> "
+                       f"{type_name(exp_ret)}")
+                raise TypeCheckError(
+                    f"method '{mname}' in impl of trait '{trait.name}' for "
+                    f"'{key}' does not match the trait signature (expected "
+                    f"'{exp}')",
+                    sig.decl.line, sig.decl.column,
+                )
+
+    def _validate_bounds(self) -> None:
+        """Check every generic signature's bounds name a real type parameter and
+        a known trait (built-in or user); reject unknown bounds early (X9)."""
+        for sig in self.functions.values():
+            for tp, traits in sig.bounds.items():
+                if tp not in sig.type_params:
+                    raise TypeCheckError(
+                        f"bound on unknown type parameter '{tp}'",
+                        sig.decl.line, sig.decl.column,
+                    )
+                for tr in traits:
+                    if tr not in self.traits:
+                        raise TypeCheckError(
+                            f"unknown trait '{tr}' in bound '{tp}: {tr}'",
+                            sig.decl.line, sig.decl.column,
+                        )
+
+    def _check_call_bounds(self, sig: FuncSig, subst: dict[str, Type],
+                           expr: ast.Call) -> None:
+        """At a generic call site, verify each concrete type argument satisfies
+        its declared bound (X9). A type parameter argument (calling one bounded
+        generic from another) is satisfied when the caller's own bound covers
+        the trait."""
+        for tp, traits in sig.bounds.items():
+            concrete = subst.get(tp)
+            if concrete is None:
+                continue
+            for tr in traits:
+                if isinstance(concrete, TypeParam):
+                    ok = tr in self._type_param_bounds.get(concrete.name, frozenset())
+                else:
+                    ok = self._type_implements(concrete, tr)
+                if not ok:
+                    raise TypeCheckError(
+                        f"type '{type_name(concrete)}' does not satisfy the bound "
+                        f"'{tp}: {tr}' required by '{sig.decl.name}'",
+                        expr.line, expr.column,
+                    )
+
+    def _type_implements(self, t: Type, trait: str) -> bool:
+        """Whether type `t` provides `trait` — a user `impl Trait for t`, or a
+        built-in implicit default on a primitive (D52). Used by operator
+        resolution and generic-bound checking (v0.4.4)."""
+        key = self._method_key(t)
+        if key is not None and trait in self.trait_impls.get(key, set()):
+            return True
+        return _primitive_default_trait(t, trait)
+
+    # -- #derive (v0.4.4) ----------------------------------------------------
+
+    def _synthesize_derives(self) -> None:
+        """Lower `#derive(Eq)` on a struct/enum into a synthesized structural
+        `impl Eq for T` (D52, X8). The synthesized `eq` is written in terms of
+        `==` on the components, so nested user types must themselves be `Eq`;
+        the allow-list is `Eq` only (Ord is the planned next addition)."""
+        targets: list[ast.StructDecl | ast.EnumDecl] = []
+        for decl in self.program.decls:
+            for attr in getattr(decl, "attributes", []):
+                if attr.name != "derive":
+                    continue
+                if not isinstance(decl, (ast.StructDecl, ast.EnumDecl)):
+                    raise TypeCheckError(
+                        "'#derive' may only be applied to a struct or enum",
+                        attr.line, attr.column,
+                    )
+                if decl.type_params:
+                    raise TypeCheckError(
+                        "deriving on generic types is not supported yet (v0.4.4 "
+                        "derives Eq for concrete structs/enums)",
+                        attr.line, attr.column,
+                    )
+                self._validate_derive_attr(attr)
+                if decl not in targets:
+                    targets.append(decl)
+        if not targets:
+            return
+        # The set of named types that will be `Eq` — user `impl Eq for T` plus
+        # every type being derived — used for the structural derivability check.
+        eq_types = {decl.name for decl in targets}
+        for impl in self._impl_decls:
+            if impl.trait_name == "Eq" and isinstance(impl.target, ast.TypeRef):
+                eq_types.add(impl.target.name)
+        for decl in targets:
+            if any(i.trait_name == "Eq" and isinstance(i.target, ast.TypeRef)
+                   and i.target.name == decl.name for i in self._impl_decls):
+                raise TypeCheckError(
+                    f"type '{decl.name}' both derives Eq and has an explicit "
+                    f"'impl Eq for {decl.name}'",
+                    decl.line, decl.column,
+                )
+            self._check_derivable_eq(decl, eq_types)
+            impl = self._make_eq_impl(decl)
+            self._impl_decls.append(impl)
+            self.program.decls.append(impl)
+
+    def _validate_derive_attr(self, attr: ast.Attribute) -> None:
+        if attr.outputs is not None:
+            raise TypeCheckError(
+                "'#derive' takes trait names in parentheses, e.g. #derive(Eq)",
+                attr.line, attr.column,
+            )
+        if not attr.args:
+            raise TypeCheckError(
+                "'#derive' needs at least one trait, e.g. #derive(Eq)",
+                attr.line, attr.column,
+            )
+        for a in attr.args:
+            if not isinstance(a, ast.Name):
+                raise TypeCheckError(
+                    "'#derive' arguments must be trait names", a.line, a.column
+                )
+            if a.ident != "Eq":
+                raise TypeCheckError(
+                    f"cannot derive '{a.ident}'; only 'Eq' is derivable in "
+                    "v0.4.4 (Ord is the planned next addition)",
+                    a.line, a.column,
+                )
+
+    def _check_derivable_eq(self, decl, eq_types: set[str]) -> None:
+        def is_eq(t: Type) -> bool:
+            if isinstance(t, (IntType, BoolType, StrType)):
+                return True
+            if isinstance(t, (StructType, EnumType)):
+                return t.name in eq_types
+            return False
+
+        if isinstance(decl, ast.StructDecl):
+            for fname, ftype in self.structs[decl.name].items():
+                if not is_eq(ftype):
+                    raise TypeCheckError(
+                        f"cannot derive Eq for struct '{decl.name}': field "
+                        f"'{fname}' has type '{type_name(ftype)}', which is "
+                        "not Eq",
+                        decl.line, decl.column,
+                    )
+        else:
+            for vname, payload in self.enums[decl.name].items():
+                for i, pt in enumerate(payload):
+                    if not is_eq(pt):
+                        raise TypeCheckError(
+                            f"cannot derive Eq for enum '{decl.name}': payload "
+                            f"#{i} of variant '{vname}' has type "
+                            f"'{type_name(pt)}', which is not Eq",
+                            decl.line, decl.column,
+                        )
+
+    def _make_eq_impl(self, decl) -> ast.ImplDecl:
+        ln, col = decl.line, decl.column
+        target = ast.TypeRef(decl.name).at(ln, col)
+        other = ast.Param("other", ast.TypeRef(decl.name).at(ln, col)).at(ln, col)
+        eq = ast.FunDecl(
+            "eq", [other], ast.TypeRef("bool").at(ln, col),
+            self._make_eq_body(decl), receiver="self",
+        ).at(ln, col)
+        return ast.ImplDecl(target, [eq], trait_name="Eq").at(ln, col)
+
+    def _make_eq_body(self, decl) -> ast.Block:
+        ln, col = decl.line, decl.column
+
+        def conj(parts: list[ast.Expr]) -> ast.Expr:
+            if not parts:
+                return ast.BoolLit(True).at(ln, col)
+            acc = parts[0]
+            for p in parts[1:]:
+                acc = ast.Binary("&&", acc, p).at(ln, col)
+            return acc
+
+        if isinstance(decl, ast.StructDecl):
+            comps = [
+                ast.Binary(
+                    "==",
+                    ast.FieldAccess(ast.Name("self").at(ln, col), f.name).at(ln, col),
+                    ast.FieldAccess(ast.Name("other").at(ln, col), f.name).at(ln, col),
+                ).at(ln, col)
+                for f in decl.fields
+            ]
+            return ast.Block([ast.Return(conj(comps)).at(ln, col)]).at(ln, col)
+
+        # enum: match on (self, other); equal variants compare payloads, a
+        # mismatched pair falls through to `false`.
+        arms: list[ast.MatchArm] = []
+        for v in decl.variants:
+            n = len(v.payload)
+            self_pat = ast.PatEnum(
+                decl.name, v.name,
+                [ast.PatBinding(f"__a{i}").at(ln, col) for i in range(n)],
+                has_payload_syntax=n > 0,
+            ).at(ln, col)
+            other_pat = ast.PatEnum(
+                decl.name, v.name,
+                [ast.PatBinding(f"__b{i}").at(ln, col) for i in range(n)],
+                has_payload_syntax=n > 0,
+            ).at(ln, col)
+            tup = ast.PatTuple([self_pat, other_pat]).at(ln, col)
+            body = conj([
+                ast.Binary(
+                    "==",
+                    ast.Name(f"__a{i}").at(ln, col),
+                    ast.Name(f"__b{i}").at(ln, col),
+                ).at(ln, col)
+                for i in range(n)
+            ])
+            arms.append(ast.MatchArm(tup, None, body).at(ln, col))
+        # With a single variant the same-variant arm is already exhaustive; a
+        # `_ => false` would be unreachable. With several, mismatched pairs fall
+        # through to it.
+        if len(decl.variants) > 1:
+            arms.append(
+                ast.MatchArm(ast.PatWildcard().at(ln, col), None,
+                             ast.BoolLit(False).at(ln, col)).at(ln, col)
+            )
+        scrut = ast.TupleLit(
+            [ast.Name("self").at(ln, col), ast.Name("other").at(ln, col)]
+        ).at(ln, col)
+        match = ast.Match(scrut, arms).at(ln, col)
+        return ast.Block([ast.Return(match).at(ln, col)]).at(ln, col)
+
+    # -- impl blocks & methods (v0.4.1) -------------------------------------
+
+    def _resolve_impls(self) -> None:
+        """Resolve every `impl` block into method signatures (D45/D46/D47).
+
+        Each method is lowered to a top-level function with a synthesized `self`
+        first parameter, registered both in `self.functions` (under a mangled
+        `"<TypeKey>.<method>"` name) and in `self.methods` (for `recv.m(...)`
+        resolution). Coherence: method names are unique per type and may not
+        collide with a field; multiple `impl` blocks on one type are allowed.
+        """
+        for impl in self._impl_decls:
+            self._check_type_params(impl)
+            self._type_params = frozenset(impl.type_params)
+            try:
+                target = self._resolve(impl.target)
+            finally:
+                self._type_params = frozenset()
+            key = self._method_key(target)
+            if isinstance(target, (StructType, EnumType)):
+                if impl.type_params:
+                    want = tuple(TypeParam(p) for p in impl.type_params)
+                    if target.args != want:
+                        raise TypeCheckError(
+                            f"a generic impl must apply to "
+                            f"'{key}<{', '.join(impl.type_params)}>' with its type "
+                            "parameters in order",
+                            impl.line, impl.column,
+                        )
+                elif target.args:
+                    raise TypeCheckError(
+                        "cannot 'impl' on a concrete generic instantiation; write "
+                        "'impl<T> " + key + "<T> { ... }' to cover every instance",
+                        impl.line, impl.column,
+                    )
+            elif key is not None:
+                # A built-in receiver type (no orphan rule, D45). v0.4.1c covers
+                # read-only `self` on scalars / `str` / `StringBuilder`.
+                if impl.type_params:
+                    raise TypeCheckError(
+                        "generic impls on built-in types are not supported yet "
+                        "(v0.4.1 covers concrete built-in receivers)",
+                        impl.line, impl.column,
+                    )
+                for m in impl.methods:
+                    if m.receiver == "var self":
+                        raise TypeCheckError(
+                            "'var self' methods on built-in types are not "
+                            "supported yet; use a read-only 'self' receiver",
+                            m.line, m.column,
+                        )
+            else:
+                raise TypeCheckError(
+                    f"cannot 'impl' on type '{type_name(target)}'; v0.4.1 supports "
+                    "structs, enums, and concrete scalar / str / StringBuilder "
+                    "receivers",
+                    impl.line, impl.column,
+                )
+            trait = None
+            if impl.trait_name is not None:
+                trait = self.traits.get(impl.trait_name)
+                if trait is None:
+                    raise TypeCheckError(
+                        f"unknown trait '{impl.trait_name}' in "
+                        f"'impl {impl.trait_name} for {key}'",
+                        impl.line, impl.column,
+                    )
+                pair = (impl.trait_name, key)
+                if pair in self._user_trait_impls:
+                    raise TypeCheckError(
+                        f"duplicate impl of trait '{impl.trait_name}' for type "
+                        f"'{key}' (at most one user impl per trait/type pair)",
+                        impl.line, impl.column,
+                    )
+                self._user_trait_impls.add(pair)
+            table = self.methods.setdefault(key, {})
+            field_names = set(self.structs.get(key, {}).keys())
+            for m in impl.methods:
+                if m.name in table:
+                    raise TypeCheckError(
+                        f"duplicate method '{m.name}' for type '{key}'",
+                        m.line, m.column,
+                    )
+                if m.name in field_names:
+                    raise TypeCheckError(
+                        f"method '{m.name}' collides with a field of '{key}'",
+                        m.line, m.column,
+                    )
+                self._register_method(impl, key, m)
+            if trait is not None:
+                self._check_trait_conformance(impl, key, target, trait)
+                self.trait_impls.setdefault(key, set()).add(impl.trait_name)
+
+    def _register_method(self, impl: ast.ImplDecl, key: str,
+                         m: ast.FunDecl) -> None:
+        mangled = f"{key}.{m.name}"
+        self_param = ast.Param("self", copy.deepcopy(impl.target)).at(m.line, m.column)
+        combined_tps = list(impl.type_params) + list(m.type_params)
+        combined_bounds = {**impl.type_param_bounds, **m.type_param_bounds}
+        fdecl = ast.FunDecl(
+            mangled, [self_param] + list(m.params), m.ret_type, m.body,
+            type_params=combined_tps, type_param_bounds=combined_bounds,
+            receiver=m.receiver,
+        ).at(m.line, m.column)
+        self._check_type_params(fdecl)
+        self._type_params = frozenset(combined_tps)
+        try:
+            params = [self._resolve(p.type) for p in fdecl.params]
+            ret = self._resolve(fdecl.ret_type) if fdecl.ret_type is not None else None
+        finally:
+            self._type_params = frozenset()
+        sig = FuncSig(params, ret, fdecl, combined_tps, combined_bounds)
+        self.functions[mangled] = sig
+        self.methods[key][m.name] = sig
+        self._method_decls.append(fdecl)
+
+    def _method_key(self, t: Type) -> str | None:
+        """The method-table key for a receiver type.
+
+        Structs/enums key on their (template) name; built-in receivers key on
+        their canonical type name (e.g. `int32`, `bool`, `str`). Containers
+        (list/map/tuple) are not yet supported as receivers (return None)."""
+        if isinstance(t, (StructType, EnumType)):
+            return t.name
+        if isinstance(t, (IntType, BoolType, StrType, StringBuilderType)):
+            return type_name(t)
+        return None
+
     def _resolve(self, ref, visiting: frozenset[str] = frozenset()) -> Type:
         if isinstance(ref, ast.TupleTypeRef):
             return TupleType(tuple(self._resolve(e, visiting) for e in ref.elems))
@@ -430,8 +1074,23 @@ class Checker:
                     ref.line, ref.column,
                 )
             return MapType(kt, vt)
+        if isinstance(ref, ast.FnTypeRef):
+            params = tuple(self._resolve(p, visiting) for p in ref.params)
+            ret = self._resolve(ref.ret, visiting) if ref.ret is not None else None
+            return FuncType(params, ret)
         name = ref.name
         args = getattr(ref, "args", []) or []
+        if name == "Self":
+            if not self._allow_self:
+                raise TypeCheckError(
+                    "'Self' is only valid inside a trait declaration",
+                    ref.line, ref.column,
+                )
+            if args:
+                raise TypeCheckError(
+                    "'Self' cannot take type arguments", ref.line, ref.column
+                )
+            return SELF
         if name in self._type_params:
             if args:
                 raise TypeCheckError(
@@ -677,6 +1336,10 @@ class Checker:
         main_decls: list[ast.FunDecl] = []
         for decl in self.program.decls:
             for attr in decl.attributes:
+                # `#derive` (v0.4.4) is validated and lowered by
+                # `_synthesize_derives`; skip it here.
+                if attr.name == "derive":
+                    continue
                 if attr.name not in ("main", "test"):
                     raise TypeCheckError(
                         f"unknown attribute '#{attr.name}'", attr.line, attr.column
@@ -749,10 +1412,17 @@ class Checker:
         sig = self.functions[decl.name]
         self._current_ret = sig.ret
         self._type_params = frozenset(decl.type_params)
+        self._type_param_bounds = {
+            tp: frozenset(traits) for tp, traits in sig.bounds.items()
+        }
         try:
             scope = _Scope()
-            for param, ptype in zip(decl.params, sig.params):
-                scope.define(param.name, _Binding(ptype, mutable=False))
+            for i, (param, ptype) in enumerate(zip(decl.params, sig.params)):
+                # A `var self` receiver (params[0] of a method) is mutable so the
+                # body can write `self.field = ...`; every other param is borrowed
+                # and immutable.
+                mutable = (i == 0 and decl.receiver == "var self")
+                scope.define(param.name, _Binding(ptype, mutable=mutable))
             self._check_block(decl.body, scope, sig.ret)
             if sig.ret is not None and not _block_returns(decl.body):
                 raise TypeCheckError(
@@ -762,6 +1432,7 @@ class Checker:
                 )
         finally:
             self._type_params = frozenset()
+            self._type_param_bounds = {}
 
     def _check_block(self, block: ast.Block, parent: _Scope, ret: Type | None) -> None:
         scope = _Scope(parent)
@@ -802,6 +1473,11 @@ class Checker:
                                mutable=(stmt.kind == "var"))
 
         elif isinstance(stmt, ast.Assign):
+            if isinstance(stmt.target, ast.Name) and stmt.target.ident == "self":
+                raise TypeCheckError(
+                    "cannot reassign 'self'; mutate its fields or elements instead",
+                    stmt.line, stmt.column,
+                )
             target_type, mutable = self._check_lvalue(stmt.target, scope)
             if not mutable:
                 raise TypeCheckError(
@@ -864,10 +1540,14 @@ class Checker:
         elif isinstance(stmt, ast.Return):
             if ret is None:
                 if stmt.value is not None:
-                    raise TypeCheckError(
-                        "cannot return a value from a function with no return type",
-                        stmt.line, stmt.column,
-                    )
+                    if self._lambda_infer is not None:
+                        vt = self._expect_value(stmt.value, scope, None)
+                        self._lambda_infer.append((stmt, vt))
+                    else:
+                        raise TypeCheckError(
+                            "cannot return a value from a function with no return type",
+                            stmt.line, stmt.column,
+                        )
             else:
                 if stmt.value is None:
                     raise TypeCheckError(
@@ -1023,9 +1703,98 @@ class Checker:
             return self._infer_try(expr, scope)
         if isinstance(expr, ast.Cast):
             return self._infer_cast(expr, scope)
+        if isinstance(expr, ast.Lambda):
+            return self._infer_lambda(expr, scope, expected)
+        if isinstance(expr, ast.Hole):
+            raise TypeCheckError(
+                "'_' placeholder is only valid as a call argument",
+                expr.line, expr.column,
+            )
         raise TypeCheckError(  # pragma: no cover - defensive
             f"unsupported expression {type(expr).__name__}", expr.line, expr.column
         )
+
+    def _infer_lambda(self, expr: ast.Lambda, scope: _Scope,
+                      expected: Type | None) -> Type:
+        """Type a lambda `(params) => body` (v0.4.2).
+
+        Parameter types come from their annotations, or — when the lambda is
+        checked against an expected function type (a parameter/annotation) — from
+        the matching expected parameter. The body is checked in a child scope;
+        free outer variables are recorded as by-value captures (D15)."""
+        exp = expected if isinstance(expected, FuncType) else None
+        if exp is not None and len(exp.params) != len(expr.params):
+            exp = None
+        ptypes: list[Type] = []
+        for i, p in enumerate(expr.params):
+            if p.type is not None:
+                pt = self._resolve(p.type)
+            elif exp is not None:
+                pt = exp.params[i]
+            else:
+                raise TypeCheckError(
+                    f"cannot infer the type of lambda parameter '{p.name}'; "
+                    f"annotate it (e.g. '{p.name}: int')",
+                    p.line, p.column,
+                )
+            ptypes.append(pt)
+
+        lam_scope = _Scope(scope)
+        for p, pt in zip(expr.params, ptypes):
+            if not lam_scope.define(p.name, _Binding(pt, mutable=False)):
+                raise TypeCheckError(
+                    f"duplicate lambda parameter '{p.name}'", p.line, p.column
+                )
+        want_ret = exp.ret if exp is not None else None
+        ctx = _LambdaCtx(lam_scope)
+        self._lambda_stack.append(ctx)
+        saved_ret = self._current_ret
+        try:
+            if isinstance(expr.body, ast.Block):
+                if want_ret is not None:
+                    self._current_ret = want_ret
+                    self._check_block(expr.body, lam_scope, want_ret)
+                    if not _block_returns(expr.body):
+                        raise TypeCheckError(
+                            f"lambda may finish without returning a "
+                            f"'{type_name(want_ret)}'",
+                            expr.line, expr.column,
+                        )
+                    ret_t = want_ret
+                else:
+                    # No expected type: infer the result from the `return`s.
+                    collector: list[tuple[ast.Return, Type]] = []
+                    saved_infer = self._lambda_infer
+                    self._lambda_infer = collector
+                    self._current_ret = None
+                    try:
+                        self._check_block(expr.body, lam_scope, None)
+                    finally:
+                        self._lambda_infer = saved_infer
+                    ret_t = collector[0][1] if collector else None
+                    for stmt, vt in collector[1:]:
+                        if vt != ret_t:
+                            raise TypeCheckError(
+                                f"inconsistent lambda return types: '{type_name(ret_t)}' "
+                                f"vs '{type_name(vt)}'",
+                                stmt.line, stmt.column,
+                            )
+            else:
+                ret_t = self._infer(expr.body, lam_scope, want_ret)
+        finally:
+            self._current_ret = saved_ret
+            self._lambda_stack.pop()
+
+        ft = FuncType(tuple(ptypes), ret_t)
+        expr.captures = ctx.ordered()
+        # Assign a lifted name once per checker (the monomorphizer re-checks a
+        # deep-copied program, so a stale name carried by the copy is replaced).
+        if id(expr) not in self._lambda_ids:
+            expr.lifted_name = f"__lambda_{len(self._lambdas)}"
+            self._lambdas.append(expr)
+            self._lambda_ids.add(id(expr))
+        expr.resolved_type = ft
+        return ft
 
     def _infer_tuple_lit(self, expr: ast.TupleLit, scope: _Scope,
                          expected: Type | None) -> Type:
@@ -1566,6 +2335,11 @@ class Checker:
 
     def _infer_name(self, expr: ast.Name, scope: _Scope,
                     expected: Type | None = None) -> Type:
+        if expr.ident == "_":
+            raise TypeCheckError(
+                "'_' placeholder is only valid as a call argument",
+                expr.line, expr.column,
+            )
         binding = scope.lookup(expr.ident)
         if binding is None:
             if expr.ident in self._const_decls:
@@ -1576,14 +2350,45 @@ class Checker:
             enum_name = _PRELUDE_VARIANTS.get(expr.ident)
             if enum_name is not None:
                 return self._infer_bare_variant(expr, enum_name, expr.ident, expected)
+            if expr.ident in self.functions and "." not in expr.ident:
+                return self._infer_fun_value(expr, expected)
             if expr.ident in self.functions or expr.ident in _BUILTIN_FUNCS:
                 raise TypeCheckError(
-                    f"'{expr.ident}' is a function and cannot be used as a value in v0.0",
+                    f"'{expr.ident}' cannot be used as a value here",
                     expr.line, expr.column,
                 )
             raise TypeCheckError(f"unknown name '{expr.ident}'", expr.line, expr.column)
+        self._record_capture(expr.ident, binding.type, scope)
         expr.resolved_type = binding.type
         return binding.type
+
+    def _infer_fun_value(self, expr: ast.Name, expected: Type | None) -> Type:
+        """A top-level `fun` referenced as a value becomes a function value with
+        an empty environment (v0.4.2). Generic functions have no single concrete
+        type, so they cannot be referenced this way."""
+        sig = self.functions[expr.ident]
+        if sig.type_params:
+            raise TypeCheckError(
+                f"generic function '{expr.ident}' cannot be used as a value "
+                f"(its type parameters are unresolved)",
+                expr.line, expr.column,
+            )
+        ft = FuncType(tuple(sig.params), sig.ret)
+        expr.func_ref = expr.ident
+        expr.resolved_type = ft
+        return ft
+
+    def _record_capture(self, name: str, t: Type, scope: _Scope) -> None:
+        """If `name` resolves to a binding outside one or more enclosing lambdas,
+        record it as a by-value capture for each such lambda (v0.4.2)."""
+        if not self._lambda_stack:
+            return
+        def_scope = scope.lookup_scope(name)
+        if def_scope is None:
+            return
+        for ctx in self._lambda_stack:
+            if _is_strict_ancestor(def_scope, ctx.boundary):
+                ctx.add(name, t)
 
     def _infer_bare_variant(self, expr: ast.Expr, enum_name: str, variant: str,
                             expected: Type | None) -> Type:
@@ -1638,6 +2443,12 @@ class Checker:
 
         if op in ("==", "!="):
             lt = self._expect_value(expr.left, scope, None)
+            # A struct/enum equality desugars to its `Eq::eq` method (D52, lifting
+            # the v0.2 D37 restriction for types that implement `Eq`).
+            if isinstance(lt, (StructType, EnumType)):
+                return self._infer_operator_overload(expr, scope, op, lt)
+            if isinstance(lt, TypeParam):
+                return self._infer_bounded_op(expr, scope, op, lt)
             rt = self._expect_value(expr.right, scope, lt if isinstance(lt, IntType) else None)
             common = self._unify(expr.left, lt, expr.right, rt)
             if not isinstance(common, (IntType, BoolType, StrType)):
@@ -1650,6 +2461,10 @@ class Checker:
 
         if op in ("<", "<=", ">", ">="):
             lt = self._expect_value(expr.left, scope, None)
+            if isinstance(lt, (StructType, EnumType)):
+                return self._infer_operator_overload(expr, scope, op, lt)
+            if isinstance(lt, TypeParam):
+                return self._infer_bounded_op(expr, scope, op, lt)
             rt = self._expect_value(expr.right, scope, lt if isinstance(lt, IntType) else None)
             common = self._unify(expr.left, lt, expr.right, rt)
             if not isinstance(common, IntType):
@@ -1662,6 +2477,10 @@ class Checker:
             # independent integer (any width), so the operands are not unified.
             hint = expected if isinstance(expected, IntType) else None
             lt = self._expect_value(expr.left, scope, hint)
+            # `>>` is operand-typed (D24): two function values compose; otherwise
+            # it is the integer right shift.
+            if op == ">>" and isinstance(lt, FuncType):
+                return self._infer_compose(expr, scope, lt)
             if not isinstance(lt, IntType):
                 raise TypeCheckError(
                     f"operator '{op}' requires an integer left operand",
@@ -1688,6 +2507,10 @@ class Checker:
         if op == "+":
             lt = self._expect_value(expr.left, scope,
                                     expected if isinstance(expected, IntType) else None)
+            if isinstance(lt, (StructType, EnumType)):
+                return self._infer_operator_overload(expr, scope, op, lt)
+            if isinstance(lt, TypeParam):
+                return self._infer_bounded_op(expr, scope, op, lt)
             if isinstance(lt, StrType):
                 rt = self._expect_value(expr.right, scope, None)
                 if not isinstance(rt, StrType):
@@ -1711,6 +2534,11 @@ class Checker:
         # arithmetic & bitwise: - * / %  and  & | ^
         hint = expected if isinstance(expected, IntType) else None
         lt = self._expect_value(expr.left, scope, hint)
+        # `- * / %` overload on user types (the bitwise `& | ^` do not, D52).
+        if op in _ARITH_OP_TRAITS and isinstance(lt, (StructType, EnumType)):
+            return self._infer_operator_overload(expr, scope, op, lt)
+        if op in _ARITH_OP_TRAITS and isinstance(lt, TypeParam):
+            return self._infer_bounded_op(expr, scope, op, lt)
         rt = self._expect_value(expr.right, scope, lt if isinstance(lt, IntType) else hint)
         common = self._unify(expr.left, lt, expr.right, rt)
         if not isinstance(common, IntType):
@@ -1719,6 +2547,134 @@ class Checker:
             )
         expr.resolved_type = common
         return common
+
+    def _infer_compose(self, expr: ast.Binary, scope: _Scope,
+                       lt: "FuncType") -> Type:
+        """`a >> b` composes two one-argument function values left-to-right
+        (D24): it desugars to `(x) => b(a(x))`. With `a: (A) -> B` and
+        `b: (B) -> C` the result is `(A) -> C`; `a` and `b` are captured by
+        value (inlined into the lambda body)."""
+        if len(lt.params) != 1:
+            raise TypeCheckError(
+                f"composition with '>>' needs a one-argument function on the "
+                f"left, found '{type_name(lt)}'",
+                expr.line, expr.column,
+            )
+        rt = self._expect_value(expr.right, scope, None)
+        if not isinstance(rt, FuncType):
+            raise TypeCheckError(
+                f"cannot compose a function with a value of type "
+                f"'{type_name(rt)}' (both operands of '>>' must be functions, or "
+                f"both integers)",
+                expr.line, expr.column,
+            )
+        if len(rt.params) != 1:
+            raise TypeCheckError(
+                f"composition with '>>' needs a one-argument function on the "
+                f"right, found '{type_name(rt)}'",
+                expr.line, expr.column,
+            )
+        if lt.ret != rt.params[0]:
+            raise TypeCheckError(
+                f"cannot compose '{type_name(lt)}' with '{type_name(rt)}': the "
+                f"left result '{type_name(lt.ret)}' must match the right "
+                f"parameter '{type_name(rt.params[0])}'",
+                expr.line, expr.column,
+            )
+        ln, col = expr.line, expr.column
+        x = ast.Name("__x").at(ln, col)
+        inner = ast.Call(expr.left, [x]).at(ln, col)
+        body = ast.Call(expr.right, [inner]).at(ln, col)
+        ann = _type_to_typeexpr(lt.params[0])
+        lam = ast.Lambda([ast.Param("__x", ann).at(ln, col)], body).at(ln, col)
+        ft = self._infer_lambda(lam, scope, None)
+        expr.desugared = lam
+        expr.resolved_type = ft
+        return ft
+
+    def _infer_operator_overload(self, expr: ast.Binary, scope: _Scope,
+                                 op: str, lt: Type) -> Type:
+        """Desugar `a OP b` on a user type `lt` to its operator-trait method
+        (D52). `+ - * / %` → `a.add(b)` etc. (result `Self`); `== !=` →
+        `a.eq(b)` (negated for `!=`); `< <= > >=` → `a.cmp(b) OP 0`. The
+        operand type must implement the backing trait and both operands must
+        share the type (D4)."""
+        if op in ("==", "!="):
+            trait, method, kind = "Eq", "eq", "eq"
+        elif op in ("<", "<=", ">", ">="):
+            trait, method, kind = "Ord", "cmp", "ord"
+        else:
+            trait, method = _ARITH_OP_TRAITS[op]
+            kind = "arith"
+        if not self._type_implements(lt, trait):
+            hint = " (or '#derive(Eq)')" if trait == "Eq" else ""
+            raise TypeCheckError(
+                f"operator '{op}' is not defined for '{type_name(lt)}': it needs "
+                f"'impl {trait} for {type_name(lt)}'{hint}",
+                expr.line, expr.column,
+            )
+        rt = self._expect_value(expr.right, scope, None)
+        if lt != rt:
+            raise TypeCheckError(
+                f"operator '{op}' requires both operands to have the same type, "
+                f"found '{type_name(lt)}' and '{type_name(rt)}'",
+                expr.line, expr.column,
+            )
+        ln, col = expr.line, expr.column
+        call = ast.Call(
+            ast.FieldAccess(expr.left, method).at(ln, col), [expr.right]
+        ).at(ln, col)
+        if kind == "arith":
+            ret = self._infer_call(call, scope)
+            expr.desugared = call
+            expr.resolved_type = ret
+            return ret
+        if kind == "eq":
+            self._infer_call(call, scope)  # `eq` returns bool
+            if op == "==":
+                node: ast.Expr = call
+            else:
+                node = ast.Unary("!", call).at(ln, col)
+                node.resolved_type = BOOL
+            expr.desugared = node
+            expr.resolved_type = BOOL
+            return BOOL
+        # ord: compare the sign of `a.cmp(b)` against 0 with the same operator
+        self._infer_call(call, scope)  # `cmp` returns int
+        node = ast.Binary(op, call, ast.IntLit(0).at(ln, col)).at(ln, col)
+        self._infer_binary(node, scope, None)
+        expr.desugared = node
+        expr.resolved_type = BOOL
+        return BOOL
+
+    def _infer_bounded_op(self, expr: ast.Binary, scope: _Scope,
+                          op: str, lt: TypeParam) -> Type:
+        """An overloadable operator on a type-parameter value (X9): allowed only
+        if the parameter carries the backing trait bound. The node is *not*
+        desugared — the interpreter dispatches at runtime on the erased value,
+        and monomorphization re-checks the concrete body (where the operand is a
+        real type and the operator desugars normally)."""
+        if op in ("==", "!="):
+            trait, result = "Eq", BOOL
+        elif op in ("<", "<=", ">", ">="):
+            trait, result = "Ord", BOOL
+        else:
+            trait, result = _ARITH_OP_TRAITS[op][0], lt
+        if trait not in self._type_param_bounds.get(lt.name, frozenset()):
+            raise TypeCheckError(
+                f"operator '{op}' on a value of type parameter '{lt.name}' "
+                f"requires the bound '{lt.name}: {trait}'",
+                expr.line, expr.column,
+            )
+        rt = self._expect_value(expr.right, scope, None)
+        if lt != rt:
+            raise TypeCheckError(
+                f"operator '{op}' requires both operands to have the same type, "
+                f"found '{type_name(lt)}' and '{type_name(rt)}'",
+                expr.line, expr.column,
+            )
+        expr.resolved_type = result
+        return result
 
     def _infer_cast(self, expr: ast.Cast, scope: _Scope) -> Type:
         target = self._resolve(expr.target)
@@ -1917,18 +2873,130 @@ class Checker:
         expr.resolved_type = None
         return None
 
+    def _infer_method_call(self, expr: ast.Call, scope: _Scope,
+                           expected: Type | None = None) -> Type | None:
+        """Resolve `recv.method(args)` (v0.4.1). The receiver becomes the hidden
+        `self` argument; the call node is annotated with the lowered function name
+        and the receiver mutability so the backends can dispatch it."""
+        callee = expr.callee
+        recv = callee.target
+        recv_type = self._expect_value(recv, scope, None)
+        key = self._method_key(recv_type)
+        table = self.methods.get(key) if key is not None else None
+        sig = table.get(callee.field_name) if table else None
+        if sig is None:
+            # Fallback: a struct field holding a function value, called directly
+            # (`obj.callback(x)`); treat it as an indirect call (v0.4.2).
+            if (isinstance(recv_type, StructType)
+                    and callee.field_name in self.structs.get(recv_type.name, {})):
+                field_t = self._struct_field_types(recv_type).get(callee.field_name)
+                if isinstance(field_t, FuncType):
+                    return self._infer_indirect_call(expr, scope)
+            raise TypeCheckError(
+                f"type '{type_name(recv_type)}' has no method "
+                f"'{callee.field_name}'",
+                expr.line, expr.column,
+            )
+        is_var_self = (sig.decl.receiver == "var self")
+        if is_var_self:
+            if not _is_lvalue_shape(recv):
+                raise TypeCheckError(
+                    f"method '{callee.field_name}' mutates its receiver ('var "
+                    "self'); it needs a mutable variable (or one of its "
+                    "fields/elements), not a temporary",
+                    expr.line, expr.column,
+                )
+            _, mutable = self._check_lvalue(recv, scope)
+            if not mutable:
+                raise TypeCheckError(
+                    f"cannot call the mutating method '{callee.field_name}' on an "
+                    "immutable receiver (declare it with 'var')",
+                    expr.line, expr.column,
+                )
+        nargs = len(sig.params) - 1
+        if len(expr.args) != nargs:
+            raise TypeCheckError(
+                f"method '{callee.field_name}' expects {nargs} argument(s), "
+                f"got {len(expr.args)}",
+                expr.line, expr.column,
+            )
+        expr.method_func = f"{key}.{callee.field_name}"
+        expr.method_is_var_self = is_var_self
+        if sig.type_params:
+            return self._infer_generic_method(expr, sig, recv_type, scope)
+        for arg, ptype in zip(expr.args, sig.params[1:]):
+            at = self._expect_value(arg, scope, ptype)
+            if at != ptype:
+                raise TypeCheckError(
+                    f"argument type mismatch in call to '{callee.field_name}': "
+                    f"expected '{type_name(ptype)}', found '{type_name(at)}'",
+                    arg.line, arg.column,
+                )
+        expr.resolved_type = sig.ret
+        return sig.ret
+
+    def _infer_generic_method(self, expr: ast.Call, sig: FuncSig,
+                              recv_type: Type, scope: _Scope) -> Type | None:
+        """Infer a generic method's type arguments (D45 + D34): solve the impl's
+        (and method's) type parameters from the receiver type and the arguments,
+        then record them in `expr.type_args` for monomorphization."""
+        method = expr.callee.field_name
+        subst: dict[str, Type] = {}
+        # The receiver pins the impl's type parameters (e.g. `Box<int>` → T=int).
+        self._unify_param(sig.params[0], recv_type, subst)
+        arg_types: list[Type] = []
+        for arg, ptype in zip(expr.args, sig.params[1:]):
+            want = self._subst_type(ptype, subst)
+            hint = want if not self._contains_type_param(want) else None
+            at = self._expect_value(arg, scope, hint)
+            arg_types.append(at)
+            self._unify_param(ptype, at, subst)
+        missing = [tp for tp in sig.type_params if tp not in subst]
+        if missing:
+            raise TypeCheckError(
+                f"cannot infer type parameter(s) {', '.join(missing)} for method "
+                f"'{method}'; add a type annotation to guide inference",
+                expr.line, expr.column,
+            )
+        for arg, ptype, at in zip(expr.args, sig.params[1:], arg_types):
+            want = self._subst_type(ptype, subst)
+            if at != want:
+                if isinstance(want, IntType) and _is_flexible_int_lit(arg):
+                    self._infer_int_lit(arg, want)
+                else:
+                    raise TypeCheckError(
+                        f"argument type mismatch in call to '{method}': expected "
+                        f"'{type_name(want)}', found '{type_name(at)}'",
+                        arg.line, arg.column,
+                    )
+        expr.type_args = tuple(subst[tp] for tp in sig.type_params)
+        self._check_call_bounds(sig, subst, expr)
+        ret = self._subst_type(sig.ret, subst) if sig.ret is not None else None
+        expr.resolved_type = ret
+        return ret
+
     def _infer_call(self, expr: ast.Call, scope: _Scope,
                     expected: Type | None = None) -> Type | None:
+        # A call carrying `_` holes is a partial application (X7): it desugars to
+        # a lambda over the holes, with the filled arguments captured by value.
+        if any(isinstance(a, ast.Hole) for a in expr.args):
+            return self._infer_partial(expr, scope)
         callee = expr.callee
-        # `Enum.Variant(args...)` variant construction
+        # A local binding shadows any global function and is called as a value.
+        if isinstance(callee, ast.Name) and scope.lookup(callee.ident) is not None:
+            return self._infer_indirect_call(expr, scope)
+        # `Enum.Variant(args...)` variant construction, else a method call (with
+        # a fallback to calling a function-typed field as a value).
         if isinstance(callee, ast.FieldAccess):
             enum_name = self._enum_name_ref(callee.target, scope)
             if enum_name is not None:
                 return self._infer_variant_ctor(expr, enum_name, callee.field_name,
                                                 scope, expected)
+            return self._infer_method_call(expr, scope, expected)
+        # Any other expression callee (`get_fn()(x)`, `fns[0](x)`, a lambda
+        # applied in place) is an indirect call through a function value.
         if not isinstance(callee, ast.Name):
-            raise TypeCheckError("only named functions can be called in v0.0",
-                                 expr.line, expr.column)
+            return self._infer_indirect_call(expr, scope)
         name = callee.ident
         if name == "print":
             if len(expr.args) != 1:
@@ -1990,6 +3058,128 @@ class Checker:
         expr.resolved_type = sig.ret
         return sig.ret
 
+    def _infer_indirect_call(self, expr: ast.Call, scope: _Scope) -> Type | None:
+        """Call a function value `f(args)` (v0.4.2): `f` is any expression of a
+        function type (a `let`-bound lambda, a `fun` reference, a parameter, a
+        returned function value, …)."""
+        ft = self._expect_value(expr.callee, scope, None)
+        if not isinstance(ft, FuncType):
+            raise TypeCheckError(
+                f"cannot call a value of type '{type_name(ft)}'",
+                expr.line, expr.column,
+            )
+        if len(expr.args) != len(ft.params):
+            raise TypeCheckError(
+                f"this function value expects {len(ft.params)} argument(s), "
+                f"got {len(expr.args)}",
+                expr.line, expr.column,
+            )
+        for arg, ptype in zip(expr.args, ft.params):
+            at = self._expect_value(arg, scope, ptype)
+            if at != ptype:
+                raise TypeCheckError(
+                    f"argument type mismatch: expected '{type_name(ptype)}', "
+                    f"found '{type_name(at)}'",
+                    arg.line, arg.column,
+                )
+        expr.indirect_call = True
+        expr.resolved_type = ft.ret
+        return ft.ret
+
+    # -- partial application (`_` holes, X7) ---------------------------------
+
+    def _infer_partial(self, expr: ast.Call, scope: _Scope) -> Type:
+        """Desugar a call with `_` holes into a lambda over the holes (X7).
+
+        `f(a, _, c, _)` becomes `(h0, h1) => f(a, h0, c, h1)`; the hole
+        parameters take the callee's parameter types at those positions, and the
+        filled arguments are captured by value (they are inlined into the lambda
+        body, which the capture analysis snapshots, D48). Works for free
+        functions, function values, and methods (the receiver is captured)."""
+        param_types, _ret_t = self._partial_target(expr, scope)
+        if len(expr.args) != len(param_types):
+            raise TypeCheckError(
+                f"partial application must list every argument position "
+                f"({len(param_types)} expected, found {len(expr.args)}); write "
+                f"'_' for each one to leave open (no implicit currying)",
+                expr.line, expr.column,
+            )
+        lam_params: list[ast.Param] = []
+        new_args: list[ast.Expr] = []
+        for i, a in enumerate(expr.args):
+            if isinstance(a, ast.Hole):
+                pname = f"__hole{len(lam_params)}"
+                ann = _type_to_typeexpr(param_types[i])
+                lam_params.append(ast.Param(pname, ann).at(a.line, a.column))
+                new_args.append(ast.Name(pname).at(a.line, a.column))
+            else:
+                new_args.append(a)
+        body = ast.Call(expr.callee, new_args).at(expr.line, expr.column)
+        lam = ast.Lambda(lam_params, body).at(expr.line, expr.column)
+        ft = self._infer_lambda(lam, scope, None)
+        expr.desugared = lam
+        expr.resolved_type = ft
+        return ft
+
+    def _partial_target(self, expr: ast.Call,
+                        scope: _Scope) -> tuple[list[Type], Type | None]:
+        """The (argument parameter types, return type) of a partial-application
+        callee — for a function value, a named function, or a method."""
+        callee = expr.callee
+        # function value through a local binding (`f(_, 2)` where `f` is local)
+        if isinstance(callee, ast.Name) and scope.lookup(callee.ident) is not None:
+            ft = scope.lookup(callee.ident).type
+            if not isinstance(ft, FuncType):
+                raise TypeCheckError(
+                    f"cannot partially apply a value of type '{type_name(ft)}'",
+                    expr.line, expr.column,
+                )
+            return list(ft.params), ft.ret
+        # method `recv.m(_, …)` (or a function-typed field), receiver captured
+        if isinstance(callee, ast.FieldAccess):
+            recv_type = self._expect_value(callee.target, scope, None)
+            key = self._method_key(recv_type)
+            table = self.methods.get(key) if key is not None else None
+            sig = table.get(callee.field_name) if table else None
+            if sig is not None:
+                if sig.type_params:
+                    raise TypeCheckError(
+                        f"cannot partially apply the generic method "
+                        f"'{callee.field_name}'",
+                        expr.line, expr.column,
+                    )
+                return list(sig.params[1:]), sig.ret
+            if (isinstance(recv_type, StructType)
+                    and callee.field_name in self.structs.get(recv_type.name, {})):
+                field_t = self._struct_field_types(recv_type).get(callee.field_name)
+                if isinstance(field_t, FuncType):
+                    return list(field_t.params), field_t.ret
+            raise TypeCheckError(
+                f"type '{type_name(recv_type)}' has no method "
+                f"'{callee.field_name}'",
+                expr.line, expr.column,
+            )
+        # named free function
+        if isinstance(callee, ast.Name):
+            sig = self.functions.get(callee.ident)
+            if sig is None or "." in callee.ident:
+                raise TypeCheckError(
+                    f"cannot partially apply '{callee.ident}' with '_' "
+                    f"(only functions, methods, and function values are supported)",
+                    expr.line, expr.column,
+                )
+            if sig.type_params:
+                raise TypeCheckError(
+                    f"cannot partially apply the generic function "
+                    f"'{callee.ident}'",
+                    expr.line, expr.column,
+                )
+            return list(sig.params), sig.ret
+        raise TypeCheckError(
+            "'_' partial application requires a function, method, or function "
+            "value", expr.line, expr.column,
+        )
+
     # -- generic call inference (D34) ----------------------------------------
 
     def _infer_generic_call(self, expr: ast.Call, name: str, sig: FuncSig,
@@ -2033,6 +3223,7 @@ class Checker:
                         arg.line, arg.column,
                     )
         expr.type_args = tuple(subst[tp] for tp in sig.type_params)
+        self._check_call_bounds(sig, subst, expr)
         ret = self._subst_type(sig.ret, subst) if sig.ret is not None else None
         expr.resolved_type = ret
         return ret
@@ -2049,6 +3240,9 @@ class Checker:
                     or self._contains_type_param(t.value))
         if isinstance(t, (StructType, EnumType)):
             return any(self._contains_type_param(a) for a in t.args)
+        if isinstance(t, FuncType):
+            return (any(self._contains_type_param(p) for p in t.params)
+                    or self._contains_type_param(t.ret))
         return False
 
     def _subst_type(self, t: Type | None, subst: dict[str, Type]) -> Type | None:
@@ -2065,6 +3259,11 @@ class Checker:
             return StructType(t.name, tuple(self._subst_type(a, subst) for a in t.args))
         if isinstance(t, EnumType) and t.args:
             return EnumType(t.name, tuple(self._subst_type(a, subst) for a in t.args))
+        if isinstance(t, FuncType):
+            return FuncType(
+                tuple(self._subst_type(p, subst) for p in t.params),
+                self._subst_type(t.ret, subst),
+            )
         return t
 
     def _unify_param(self, ptype: Type, at: Type, subst: dict[str, Type]) -> bool:
@@ -2097,6 +3296,15 @@ class Checker:
                 return False
             return all(self._unify_param(p, a, subst)
                        for p, a in zip(ptype.args, at.args))
+        if isinstance(ptype, FuncType):
+            if not isinstance(at, FuncType) or len(ptype.params) != len(at.params):
+                return False
+            if not all(self._unify_param(p, a, subst)
+                       for p, a in zip(ptype.params, at.params)):
+                return False
+            if ptype.ret is None or at.ret is None:
+                return ptype.ret is None and at.ret is None
+            return self._unify_param(ptype.ret, at.ret, subst)
         return ptype == at
 
     # -- generic aggregate instantiation -------------------------------------
@@ -2293,6 +3501,16 @@ class Checker:
         return st
 
 
+def _is_strict_ancestor(anc: "_Scope", node: "_Scope") -> bool:
+    """Whether scope `anc` strictly encloses scope `node` (for capture analysis)."""
+    s = node.parent
+    while s is not None:
+        if s is anc:
+            return True
+        s = s.parent
+    return False
+
+
 def _block_returns(block: ast.Block) -> bool:
     """Whether `block` is guaranteed to return on every path.
 
@@ -2329,6 +3547,16 @@ def _stmt_returns(stmt: ast.Stmt) -> bool:
 def _is_flexible_int_lit(node: ast.Expr) -> bool:
     """An unsuffixed integer literal can still adopt another integer type."""
     return isinstance(node, ast.IntLit) and node.suffix is None
+
+
+def _is_lvalue_shape(expr: ast.Expr) -> bool:
+    """Whether `expr` is a place expression (a variable or one of its
+    fields/elements) — the receiver shape a `var self` method requires."""
+    if isinstance(expr, ast.Name):
+        return True
+    if isinstance(expr, (ast.FieldAccess, ast.Index)):
+        return _is_lvalue_shape(expr.target)
+    return False
 
 
 def _count_format_holes(fmt: str, line: int, col: int) -> int:
@@ -2392,15 +3620,23 @@ def check(program: ast.Program, with_prelude: bool = True) -> Checker:
     if with_prelude:
         program = ast.Program(_prelude_decls() + list(program.decls))
     checker = Checker(program).check()
-    _desugar_try(program)
+    _desugar(program)
     return checker
 
 
-def _desugar_try(program: ast.Program) -> None:
-    """Replace every `ast.Try` in the tree with the `match` the checker built."""
+def _desugar(program: ast.Program) -> None:
+    """Rewrite every node the checker desugared (its replacement recorded on a
+    `desugared` attribute) out of the tree, so the interpreter and compiler see
+    only the lowered form: `?` (`ast.Try`) becomes a `match`, `a >> b`
+    composition and `f(_, …)` partial application become lambdas (v0.4.3)."""
     for decl in program.decls:
         if isinstance(decl, ast.FunDecl):
             _desugar_node(decl.body)
+        elif isinstance(decl, ast.ImplDecl):
+            for m in decl.methods:
+                _desugar_node(m.body)
+        elif isinstance(decl, ast.ConstDecl):
+            decl.value = _desugar_value(decl.value)
 
 
 def _desugar_node(node: ast.Node) -> None:
@@ -2409,13 +3645,15 @@ def _desugar_node(node: ast.Node) -> None:
 
 
 def _desugar_value(val):
-    if isinstance(val, ast.Try):
-        match = val.desugared
-        _desugar_node(match)
-        return match
     if isinstance(val, ast.Node):
+        repl = getattr(val, "desugared", None)
+        if repl is not None:
+            _desugar_node(repl)
+            return repl
         _desugar_node(val)
         return val
     if isinstance(val, list):
         return [_desugar_value(v) for v in val]
+    if isinstance(val, tuple):
+        return tuple(_desugar_value(v) for v in val)
     return val

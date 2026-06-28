@@ -1,0 +1,137 @@
+// closures.my — function types, lambdas & closures (v0.4.2).
+//
+// A function value is a 16-byte *fat value*: a code pointer plus a pointer to a
+// refcounted environment of captured variables. Lambdas are written
+// `(p: T, …) => expr` or `(p: T, …) => { … }` and have function types written
+// `(T0, T1, …) -> R`. Capture is **by value** with deep immutability (D14/D48):
+// mutating a captured variable inside a lambda never affects the original, and
+// captured heap values (lists/maps/strings/builders) are retained by the
+// closure's environment. Plain top-level `fun` names are first-class values too.
+
+struct Adder {
+    f: (int) -> int,
+}
+
+// --- generic higher-order helpers ---------------------------------------
+// Generic functions can't carry a `#test` (they have no single concrete
+// instantiation), so they're exercised through the tested wrappers below.
+
+fun apply_n<T>(f: (T) -> T, x: T, n: int) -> T {
+    var acc = x
+    var i = 0
+    while i < n {
+        acc = f(acc)
+        i = i + 1
+    }
+    return acc
+}
+
+fun map_list<T>(xs: [T], f: (T) -> T) -> [T] {
+    var out: [T] = []
+    for x in xs {
+        push(out, f(x))
+    }
+    return out
+}
+
+// Returns a closure that captures `f` and `g` by value (closure-valued return).
+fun compose<T>(f: (T) -> T, g: (T) -> T) -> (T) -> T {
+    return (x: T) => f(g(x))
+}
+
+// A plain top-level function — used below as a first-class value.
+#test(4)[5]
+fun inc(n: int) -> int {
+    return n + 1
+}
+
+#test(6)[36]
+fun square(n: int) -> int {
+    let sq = (x: int) => x * x          // non-capturing lambda (env_ptr = 0)
+    return sq(n)
+}
+
+#test(0)[5]
+#test(10)[15]
+fun add_k(n: int) -> int {
+    let k = 5                           // captured local scalar (by value)
+    let f = (x: int) => x + k
+    return f(n)
+}
+
+#test("world")["hi, world"]
+#test("myla")["hi, myla"]
+fun greet(name: str) -> str {
+    let prefix = "hi, "                 // captured heap string (retained by env)
+    let f = (s: str) => prefix + s
+    return f(name)
+}
+
+#test(3)[24]
+fun triple_double(n: int) -> int {
+    let dbl = (x: int) => x * 2
+    return apply_n(dbl, n, 3)           // 3 -> 6 -> 12 -> 24
+}
+
+#test(3)[16]
+fun inc_then_square(n: int) -> int {
+    let sq = (x: int) => x * x
+    let h = compose(sq, inc)            // sq(inc(x)); passes plain `inc` as a value
+    return h(n)                         // inc(3)=4, sq(4)=16
+}
+
+#test(2)[18]
+fun sum_doubled(n: int) -> int {
+    var xs: [int] = []
+    push(xs, n)
+    push(xs, n + 1)
+    push(xs, n + 2)
+    let doubled = map_list(xs, (x: int) => x * 2)
+    var total = 0
+    for v in doubled {
+        total = total + v
+    }
+    return total                        // (n + n+1 + n+2) * 2
+}
+
+#test(7)[107]
+fun via_struct(n: int) -> int {
+    let a = Adder { f: (x: int) => x + 100 }   // closure stored in a struct field
+    return a.f(n)                               // called through the field
+}
+
+#test(0)[60]
+#test(100)[360]
+fun list_of_closures(base: int) -> int {
+    var fns: [(int) -> int] = []
+    var k = 1
+    while k <= 3 {
+        let cap = base + k * 10                 // a distinct value per iteration
+        push(fns, (n: int) => n + cap)          // each closure keeps its own `cap`
+        k = k + 1
+    }
+    return fns[0](0) + fns[1](0) + fns[2](0)
+}
+
+fun main() {
+    print(square(6))            // 36
+    print(add_k(10))            // 15
+    print(greet("world"))       // hi, world
+    print(triple_double(3))     // 24
+    print(inc_then_square(3))   // 16
+    print(sum_doubled(2))       // 18
+    print(via_struct(7))        // 107
+    print(list_of_closures(0))  // 60
+
+    // By-value capture: the lambda copies `x` at creation, so later mutation of
+    // `x` is invisible to it (deep immutability, D14/D48).
+    var x = 1
+    let bump = (d: int) => x + d
+    x = 100
+    print(bump(5))              // 6   (captured x was 1)
+    print(x)                    // 100
+
+    // A plain function name bound and called as a first-class value.
+    let g = inc
+    print(g(41))                // 42
+}

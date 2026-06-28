@@ -40,6 +40,11 @@ EXPECTED = {
     "strings.my": ("4\n77\n97\n5\n98\n3\n198\n10\n1\n1\n0\n"
                    "Hello, world!\nabc\n2 + 3 = 5\nlen: 5\ntrue and false\n"
                    "Hello, world!\n0123456789\na-b-c\n"),
+    "methods.my": "1\n2\n12\n12\nfalse\n10\ntrue\n42\n",
+    "closures.my": ("36\n15\nhi, world\n24\n16\n18\n107\n60\n"
+                    "6\n100\n42\n"),
+    "pipelines.my": "11\n8\n21\n14\n15\n42\n18\n11\n12\n20\n",
+    "traits.my": "4\n6\ntrue\ntrue\nvec\ntrue\nfalse\ntrue\n60\n3\n4\n8\n3\n",
 }
 
 

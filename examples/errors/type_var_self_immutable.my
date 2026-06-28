@@ -1,0 +1,12 @@
+//~ type error: immutable receiver
+// A `var self` method needs a mutable (`var`) receiver; a `let` binding is not.
+struct C { n: int }
+
+impl C {
+    fun bump(var self) { self.n = self.n + 1 }
+}
+
+fun main() {
+    let c = C { n: 0 }
+    c.bump()
+}

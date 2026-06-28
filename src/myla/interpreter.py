@@ -14,6 +14,13 @@ from . import ast
 from .errors import MylaRuntimeError
 from .types import BoolType, Checker, IntType, StrType, Type
 
+# Overloadable binary operators → the operator-trait method dispatched on a
+# user value (v0.4.4). `==`/`!=` use `eq`; the comparisons use `cmp`.
+_OP_METHODS = {
+    "+": "add", "-": "sub", "*": "mul", "/": "div", "%": "rem",
+    "==": "eq", "!=": "eq", "<": "cmp", "<=": "cmp", ">": "cmp", ">=": "cmp",
+}
+
 
 class _ReturnSignal(Exception):
     def __init__(self, value):
@@ -158,6 +165,27 @@ class StringBuilderValue:
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"StringBuilder({bytes(self.buf)!r})"
+
+
+class ClosureValue:
+    """A runtime function value (v0.4.2): a callable body plus a snapshot of its
+    captured environment.
+
+    Mirrors the native `(code_ptr, env_ptr)` fat value. `params` are the lambda
+    (or referenced `fun`) parameters, `body` is an expression or a `Block`, and
+    `env` maps each captured name to its by-value snapshot taken at creation
+    (D15). A plain `fun` reference has an empty `env`."""
+
+    __slots__ = ("params", "body", "env", "is_block")
+
+    def __init__(self, params, body, env: dict, is_block: bool):
+        self.params = params
+        self.body = body
+        self.env = env
+        self.is_block = is_block
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<closure {len(self.params)} param(s), {len(self.env)} capture(s)>"
 
 
 def _copy(value):
@@ -460,6 +488,10 @@ class Interpreter:
             ref = getattr(expr, "const_ref", None)
             if ref is not None:  # module-level const
                 return self._consts[ref]
+            fref = getattr(expr, "func_ref", None)
+            if fref is not None:  # a top-level `fun` used as a value (v0.4.2)
+                decl = self.functions[fref].decl
+                return ClosureValue(decl.params, decl.body, {}, True)
             return env.get(expr.ident)
         if isinstance(expr, ast.Unary):
             return self._eval_unary(expr, env)
@@ -494,9 +526,27 @@ class Interpreter:
             return self._eval_match(expr, env)
         if isinstance(expr, ast.Cast):
             return _wrap(self._eval(expr.operand, env), expr.resolved_type)
+        if isinstance(expr, ast.Lambda):
+            captured = {name: _copy(env.get(name)) for name, _t in expr.captures}
+            return ClosureValue(expr.params, expr.body, captured,
+                                isinstance(expr.body, ast.Block))
         raise MylaRuntimeError(  # pragma: no cover
             f"cannot evaluate {type(expr).__name__}", expr.line, expr.column
         )
+
+    def _call_closure(self, clo: "ClosureValue", args: list):
+        frame = _Env()
+        for name, value in clo.env.items():
+            frame.define(name, value)
+        for param, value in zip(clo.params, args):
+            frame.define(param.name, _copy(value))
+        if not clo.is_block:
+            return self._eval(clo.body, frame)
+        try:
+            self._exec_block(clo.body, frame)
+        except _ReturnSignal as ret:
+            return ret.value
+        return None
 
     def _index_read(self, expr: ast.Index, env: _Env):
         target = self._eval(expr.target, env)
@@ -540,6 +590,13 @@ class Interpreter:
         left = self._eval(expr.left, env)
         right = self._eval(expr.right, env)
 
+        # Operator overloading on user values (v0.4.4). Non-generic uses were
+        # desugared to method calls at check time, so a struct/enum operand here
+        # only arises inside a bounded generic body (erased `T`, X9): dispatch
+        # at runtime to the operand type's operator-trait method.
+        if op in _OP_METHODS and isinstance(left, (StructValue, EnumValue)):
+            return self._dispatch_operator(op, left, right, expr)
+
         if op == "+":
             if isinstance(expr.resolved_type, StrType):
                 return left + right          # string concatenation (D41)
@@ -580,6 +637,39 @@ class Interpreter:
             return self._eval_shr(left, right, expr.resolved_type)
         raise MylaRuntimeError(f"unknown operator '{op}'", expr.line, expr.column)  # pragma: no cover
 
+    def _dispatch_operator(self, op: str, left, right, expr: ast.Binary):
+        key = left.name if isinstance(left, StructValue) else left.enum_name
+        if op in ("==", "!="):
+            same = self._call_op_method(key, "eq", left, right, expr)
+            return same if op == "==" else not same
+        if op in ("<", "<=", ">", ">="):
+            c = self._call_op_method(key, "cmp", left, right, expr)
+            if op == "<":
+                return c < 0
+            if op == "<=":
+                return c <= 0
+            if op == ">":
+                return c > 0
+            return c >= 0
+        return self._call_op_method(key, _OP_METHODS[op], left, right, expr)
+
+    def _call_op_method(self, key: str, method: str, left, right,
+                        expr: ast.Binary):
+        sig = self.functions.get(f"{key}.{method}")
+        if sig is None:  # pragma: no cover - guaranteed by the checker/bounds
+            raise MylaRuntimeError(
+                f"type '{key}' has no '{method}' method for operator dispatch",
+                expr.line, expr.column,
+            )
+        frame = _Env()
+        frame.define("self", _copy(left))
+        frame.define(sig.decl.params[1].name, _copy(right))
+        try:
+            self._exec_block(sig.decl.body, frame)
+        except _ReturnSignal as ret:
+            return ret.value
+        return None
+
     @staticmethod
     def _eval_shr(left: int, right: int, t: Type) -> int:
         # Mask the shift count to the operand width (matching the hardware shift
@@ -593,6 +683,13 @@ class Interpreter:
         if ctor is not None:  # `Enum.Variant(args...)`
             payload = [_copy(self._eval(a, env)) for a in expr.args]
             return EnumValue(ctor[0], ctor[1], payload)
+        mfunc = getattr(expr, "method_func", None)
+        if mfunc is not None:  # `recv.method(args)` (v0.4.1)
+            return self._eval_method_call(expr, env, mfunc)
+        if getattr(expr, "indirect_call", False):  # `f(args)` value call (v0.4.2)
+            clo = self._eval(expr.callee, env)
+            args = [self._eval(a, env) for a in expr.args]
+            return self._call_closure(clo, args)
         callee = expr.callee
         assert isinstance(callee, ast.Name)
         if callee.ident == "print":
@@ -653,6 +750,28 @@ class Interpreter:
         args = [self._eval(a, env) for a in expr.args]
         return self._call(sig.decl, args)
 
+    def _eval_method_call(self, expr: ast.Call, env: _Env, mfunc: str):
+        decl = self.functions[mfunc].decl
+        recv_expr = expr.callee.target
+        is_var_self = getattr(expr, "method_is_var_self", False)
+        # For `var self`, bind `self` to the *actual* receiver object (no copy)
+        # so in-place field/element mutations write back to the caller. For a
+        # read-only `self`, bind a copy (value semantics).
+        if is_var_self:
+            recv = self._resolve_struct(recv_expr, env)
+        else:
+            recv = _copy(self._eval(recv_expr, env))
+        args = [_copy(self._eval(a, env)) for a in expr.args]
+        frame = _Env()
+        frame.define("self", recv)
+        for param, value in zip(decl.params[1:], args):
+            frame.define(param.name, value)
+        try:
+            self._exec_block(decl.body, frame)
+        except _ReturnSignal as ret:
+            return ret.value
+        return None
+
     def _eval_intrinsic(self, expr: ast.Call, env: _Env):
         name = expr.callee.ident
         if name == "assert":
@@ -672,7 +791,12 @@ class Interpreter:
 
 
 def _wrap(value: int, t: Type) -> int:
-    assert isinstance(t, IntType)
+    # In an erased generic body a numeric operator's result type can be a bare
+    # type parameter (v0.4.4 `T: Add`); the interpreter has no concrete width to
+    # wrap to, so it keeps the exact Python integer (the native backend wraps the
+    # monomorphized concrete type). Every other caller passes an `IntType`.
+    if not isinstance(t, IntType):
+        return value
     mask = (1 << t.width) - 1
     m = value & mask
     if t.signed and (m >> (t.width - 1)) & 1:

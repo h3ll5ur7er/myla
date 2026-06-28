@@ -1,0 +1,6 @@
+//~ type error: 'Self' is only valid inside a trait declaration
+// `Self` is a trait-signature placeholder; it has no meaning elsewhere (v0.4.4).
+fun identity(x: Self) -> Self {
+    return x
+}
+fun main() {}

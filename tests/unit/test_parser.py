@@ -98,6 +98,34 @@ class TestExpressions(unittest.TestCase):
             ]),
         )
 
+    def test_pipeline_desugars_to_call(self):
+        # `x |> f` ≡ `f(x)` — the parser lowers `|>` straight to a call (X6).
+        self.assertEqual(
+            parse_expr("5 |> f"),
+            ast.Call(ast.Name("f"), [ast.IntLit(5)]),
+        )
+
+    def test_pipeline_splices_as_first_argument(self):
+        # `x |> f(a, b)` ≡ `f(x, a, b)`.
+        self.assertEqual(
+            parse_expr("5 |> f(1, 2)"),
+            ast.Call(ast.Name("f"), [ast.IntLit(5), ast.IntLit(1), ast.IntLit(2)]),
+        )
+
+    def test_pipeline_is_left_associative(self):
+        # `x |> f |> g` ≡ `g(f(x))`.
+        self.assertEqual(
+            parse_expr("5 |> f |> g"),
+            ast.Call(ast.Name("g"), [ast.Call(ast.Name("f"), [ast.IntLit(5)])]),
+        )
+
+    def test_partial_application_hole(self):
+        # A bare `_` in argument position parses as a hole node.
+        call = parse_expr("f(1, _)")
+        self.assertIsInstance(call, ast.Call)
+        self.assertEqual(call.args[0], ast.IntLit(1))
+        self.assertIsInstance(call.args[1], ast.Hole)
+
 
 class TestStatements(unittest.TestCase):
     def test_let_inferred(self):

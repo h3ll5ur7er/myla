@@ -1,0 +1,5 @@
+//~ type error: to binding of type '(str) -> str'
+fun main() {
+    let f = (x: int) => x + 1
+    let g: (str) -> str = f
+}

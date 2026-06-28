@@ -17,7 +17,8 @@ EXAMPLES = [
     "control_flow.my", "structs.my", "attributes.my", "tuples.my", "enums.my",
     "types_and_aliases.my", "recursion.my", "regressions.my", "generics.my",
     "generic-types.my", "option-result.my", "operators.my", "constants.my",
-    "lists.my", "maps.my", "strings.my",
+    "lists.my", "maps.my", "strings.my", "methods.my", "closures.my",
+    "pipelines.my", "traits.my",
 ]
 
 

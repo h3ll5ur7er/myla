@@ -138,8 +138,94 @@ class TestCalls(unittest.TestCase):
             check_fn("print(1, 2)")
 
     def test_function_name_as_value(self):
+        # v0.4.2: a top-level function name used as a value takes its function
+        # type, and may be called indirectly through the binding.
+        check_src(
+            self.PRE
+            + "fun f() -> int {\n    let g = add\n    return g(1, 2)\n}\n"
+        )
+
+    def test_function_value_call_arg_mismatch(self):
         with self.assertRaises(TypeCheckError):
-            check_src(self.PRE + "fun f() -> int {\n    let g = add\n    return 1\n}\n")
+            check_src(
+                self.PRE
+                + 'fun f() -> int {\n    let g = add\n    return g(1, "x")\n}\n'
+            )
+
+
+class TestPipelinesCompositionPartial(unittest.TestCase):
+    """v0.4.3 — `|>` pipeline, `>>` composition, `_` partial application."""
+
+    PRE = (
+        "fun add(a: int, b: int) -> int {\n    return a + b\n}\n"
+        "fun double(n: int) -> int {\n    return n * 2\n}\n"
+        "fun inc(n: int) -> int {\n    return n + 1\n}\n"
+    )
+
+    def test_pipeline_simple_and_with_args(self):
+        check_src(
+            self.PRE
+            + "fun f() -> int {\n    return 5 |> double |> inc\n}\n"
+        )
+        check_src(
+            self.PRE
+            + "fun g() -> int {\n    return 5 |> add(3)\n}\n"
+        )
+
+    def test_pipeline_non_callable_rejected(self):
+        with self.assertRaises(TypeCheckError):
+            check_src("fun f() -> int {\n    return 5 |> 3\n}\n")
+
+    def test_composition_of_functions(self):
+        check_src(
+            self.PRE
+            + "fun f() -> int {\n    let h = double >> inc\n    return h(10)\n}\n"
+        )
+
+    def test_composition_type_mismatch_rejected(self):
+        with self.assertRaises(TypeCheckError):
+            check_src(
+                "fun ts(n: int) -> str {\n    return \"x\"\n}\n"
+                "fun double(n: int) -> int {\n    return n * 2\n}\n"
+                "fun f() {\n    let h = ts >> double\n}\n"
+            )
+
+    def test_composition_non_function_rejected(self):
+        with self.assertRaises(TypeCheckError):
+            check_src(
+                self.PRE + "fun f() {\n    let h = double >> 5\n}\n"
+            )
+
+    def test_integer_shift_still_works(self):
+        # `>>` between integers is unaffected by composition (operand-typed, D24).
+        check_src("fun f() -> int {\n    return 256 >> 2\n}\n")
+
+    def test_partial_application_holes(self):
+        check_src(
+            self.PRE
+            + "fun f() -> int {\n    let g = add(5, _)\n    return g(10)\n}\n"
+        )
+        check_src(
+            self.PRE
+            + "fun f() -> int {\n    let g = add(_, 2)\n    return g(40)\n}\n"
+        )
+
+    def test_partial_application_arity_error(self):
+        with self.assertRaises(TypeCheckError):
+            check_src(
+                self.PRE + "fun f() {\n    let g = add(_)\n}\n"
+            )
+
+    def test_partial_application_generic_rejected(self):
+        with self.assertRaises(TypeCheckError):
+            check_src(
+                "fun id<T>(x: T) -> T {\n    return x\n}\n"
+                "fun f() {\n    let g = id(_)\n}\n"
+            )
+
+    def test_bare_underscore_rejected(self):
+        with self.assertRaises(TypeCheckError):
+            check_src("fun f() {\n    let x = _\n}\n")
 
 
 class TestTypesAndAliases(unittest.TestCase):

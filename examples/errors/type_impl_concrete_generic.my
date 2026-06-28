@@ -1,0 +1,7 @@
+//~ type error: concrete generic instantiation
+// Impl a generic type with `impl<T> Box<T>`, not a single instantiation.
+struct Box<T> { value: T }
+
+impl Box<int> {
+    fun get(self) -> int { return self.value }
+}

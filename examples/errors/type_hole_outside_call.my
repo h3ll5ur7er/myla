@@ -1,0 +1,4 @@
+//~ type error: '_' placeholder is only valid as a call argument
+fun main() {
+    let x = _
+}

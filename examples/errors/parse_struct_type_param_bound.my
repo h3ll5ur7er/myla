@@ -1,0 +1,4 @@
+//~ parse error: type-parameter bounds are not supported on a struct
+// Bounds (X9) attach to functions/methods/impls, not to a struct's parameters.
+struct Wrap<T: Add> { value: T }
+fun main() {}

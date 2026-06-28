@@ -105,6 +105,10 @@ class Parser:
             decl = self._fun_decl()
         elif tok.kind is T.ENUM:
             decl = self._enum_decl()
+        elif tok.kind is T.IMPL:
+            decl = self._impl_decl()
+        elif tok.kind is T.TRAIT:
+            decl = self._trait_decl()
         elif tok.kind is T.TYPEALIAS:
             decl = self._typealias_decl()
         elif tok.kind is T.CONST:
@@ -114,7 +118,14 @@ class Parser:
                 f"expected a declaration (struct/fun/enum/typealias/const), found '{tok.lexeme}'",
                 tok.line, tok.column,
             )
-        decl.attributes = attrs
+        if isinstance(decl, ast.ImplDecl):
+            if attrs:
+                raise ParseError(
+                    "attributes are not allowed on an 'impl' block",
+                    tok.line, tok.column,
+                )
+        else:
+            decl.attributes = attrs
         return decl
 
     def _attributes(self) -> list[ast.Attribute]:
@@ -136,26 +147,43 @@ class Parser:
             self._skip_newlines()
         return attrs
 
-    def _generics(self) -> list[str]:
-        """Parse an optional `<T, U, ...>` type-parameter list after a name."""
+    def _generics(self) -> tuple[list[str], dict[str, list[str]]]:
+        """Parse an optional `<T, U: Bound, V: A + B>` type-parameter list. Each
+        parameter may carry built-in-trait bounds after a `:` (v0.4.4, X9).
+        Returns the ordered names and a {name: [trait, …]} bound map."""
         if not self._check(T.LT):
-            return []
+            return [], {}
         self._advance()  # <
         params: list[str] = []
+        bounds: dict[str, list[str]] = {}
         while True:
             tok = self._expect(T.IDENT, "type parameter name")
             params.append(tok.value)
+            if self._match(T.COLON):
+                bs = [self._expect(T.IDENT, "trait name in type-parameter bound").value]
+                while self._match(T.PLUS):
+                    bs.append(self._expect(T.IDENT, "trait name after '+'").value)
+                bounds[tok.value] = bs
             if not self._match(T.COMMA):
                 break
         self._expect(T.GT, "'>' to close type parameters")
         if not params:
             raise ParseError("empty type-parameter list", tok.line, tok.column)
-        return params
+        return params, bounds
+
+    def _generics_no_bounds(self, where: str) -> list[str]:
+        names, bounds = self._generics()
+        if bounds:
+            tok = self._peek()
+            raise ParseError(
+                f"type-parameter bounds are not supported on {where}", tok.line, tok.column
+            )
+        return names
 
     def _struct_decl(self) -> ast.StructDecl:
         kw = self._advance()  # struct
         name = self._expect(T.IDENT, "struct name")
-        type_params = self._generics()
+        type_params = self._generics_no_bounds("a struct")
         self._expect(T.LBRACE, "'{'")
         self._skip_newlines()
         fields: list[ast.Field] = []
@@ -174,7 +202,7 @@ class Parser:
     def _enum_decl(self) -> ast.EnumDecl:
         kw = self._advance()  # enum
         name = self._expect(T.IDENT, "enum name")
-        type_params = self._generics()
+        type_params = self._generics_no_bounds("an enum")
         self._expect(T.LBRACE, "'{'")
         self._skip_newlines()
         variants: list[ast.Variant] = []
@@ -200,7 +228,7 @@ class Parser:
     def _fun_decl(self) -> ast.FunDecl:
         kw = self._advance()  # fun
         name = self._expect(T.IDENT, "function name")
-        type_params = self._generics()
+        type_params, bounds = self._generics()
         self._expect(T.LPAREN, "'('")
         params: list[ast.Param] = []
         if not self._check(T.RPAREN):
@@ -217,7 +245,113 @@ class Parser:
             ret_type = self._type()
         body = self._block()
         return ast.FunDecl(name.value, params, ret_type, body,
-                           type_params=type_params).at(kw.line, kw.column)
+                           type_params=type_params,
+                           type_param_bounds=bounds).at(kw.line, kw.column)
+
+    def _impl_decl(self) -> ast.ImplDecl:
+        kw = self._advance()  # impl
+        type_params, bounds = self._generics()
+        first = self._type()
+        trait_name = None
+        target = first
+        # `impl Trait for T { … }` (v0.4.4): the first type names the trait.
+        if self._match(T.FOR):
+            if not isinstance(first, ast.TypeRef) or first.args:
+                raise ParseError(
+                    "the trait in 'impl Trait for T' must be a plain trait name",
+                    kw.line, kw.column,
+                )
+            trait_name = first.name
+            target = self._type()
+        self._expect(T.LBRACE, "'{' to begin impl block")
+        self._skip_newlines()
+        methods: list[ast.FunDecl] = []
+        while not self._check(T.RBRACE) and not self._at_end():
+            if not self._check(T.FUN):
+                tok = self._peek()
+                raise ParseError(
+                    f"expected a method ('fun ...') in impl block, found '{tok.lexeme}'",
+                    tok.line, tok.column,
+                )
+            methods.append(self._method_decl())
+            # a method always ends in `}`, so the next method's `fun` (or the
+            # impl's closing `}`) may follow on the same or a later line.
+            self._skip_newlines()
+        self._expect(T.RBRACE, "'}' to close impl block")
+        return ast.ImplDecl(
+            target, methods, type_params=type_params,
+            type_param_bounds=bounds, trait_name=trait_name,
+        ).at(kw.line, kw.column)
+
+    def _trait_decl(self) -> ast.TraitDecl:
+        kw = self._advance()  # trait
+        name = self._expect(T.IDENT, "trait name")
+        type_params = self._generics_no_bounds("a trait")
+        self._expect(T.LBRACE, "'{' to begin trait body")
+        self._skip_newlines()
+        methods: list[ast.FunDecl] = []
+        while not self._check(T.RBRACE) and not self._at_end():
+            if not self._check(T.FUN):
+                tok = self._peek()
+                raise ParseError(
+                    f"expected a method signature ('fun ...') in trait body, "
+                    f"found '{tok.lexeme}'",
+                    tok.line, tok.column,
+                )
+            methods.append(self._method_sig())
+            self._skip_newlines()
+        self._expect(T.RBRACE, "'}' to close trait body")
+        return ast.TraitDecl(
+            name.value, methods, type_params=type_params
+        ).at(kw.line, kw.column)
+
+    def _method_header(self):
+        """Parse a method header `fun name<…>(self|var self, params…) -> ret`,
+        shared by `impl` methods and `trait` signatures. Returns the parts; the
+        caller appends a body (or leaves it `None` for a signature)."""
+        kw = self._advance()  # fun
+        name = self._expect(T.IDENT, "method name")
+        type_params, bounds = self._generics()
+        self._expect(T.LPAREN, "'('")
+        # The receiver is the first parameter: `self` or `var self`.
+        receiver = None
+        if self._match(T.VAR):
+            self._expect(T.SELF, "'self' after 'var' in method receiver")
+            receiver = "var self"
+        elif self._match(T.SELF):
+            receiver = "self"
+        else:
+            tok = self._peek()
+            raise ParseError(
+                "a method's first parameter must be 'self' or 'var self'",
+                tok.line, tok.column,
+            )
+        params: list[ast.Param] = []
+        while self._match(T.COMMA):
+            if self._check(T.RPAREN):  # trailing comma after self
+                break
+            pname = self._expect(T.IDENT, "parameter name")
+            self._expect(T.COLON, "':'")
+            ptype = self._type()
+            params.append(ast.Param(pname.value, ptype).at(pname.line, pname.column))
+        self._expect(T.RPAREN, "')'")
+        ret_type = None
+        if self._match(T.ARROW):
+            ret_type = self._type()
+        return kw, name, type_params, bounds, receiver, params, ret_type
+
+    def _method_decl(self) -> ast.FunDecl:
+        kw, name, type_params, bounds, receiver, params, ret_type = self._method_header()
+        body = self._block()
+        return ast.FunDecl(name.value, params, ret_type, body,
+                           type_params=type_params, type_param_bounds=bounds,
+                           receiver=receiver).at(kw.line, kw.column)
+
+    def _method_sig(self) -> ast.FunDecl:
+        kw, name, type_params, bounds, receiver, params, ret_type = self._method_header()
+        return ast.FunDecl(name.value, params, ret_type, None,
+                           type_params=type_params, type_param_bounds=bounds,
+                           receiver=receiver).at(kw.line, kw.column)
 
     def _typealias_decl(self) -> ast.TypeAliasDecl:
         kw = self._advance()  # typealias
@@ -238,7 +372,7 @@ class Parser:
     def _type(self):
         tok = self._peek()
         if tok.kind is T.LPAREN:
-            return self._tuple_type()
+            return self._paren_type()
         if tok.kind is T.LBRACKET:
             self._advance()  # [
             first = self._type()
@@ -273,22 +407,38 @@ class Parser:
         self._expect(T.GT, "'>' to close type arguments")
         return args
 
-    def _tuple_type(self) -> ast.TupleTypeRef:
+    def _paren_type(self):
+        """Parse a parenthesized type: either a tuple type `(T,)`/`(T, U)` or a
+        function type `(T0, …) -> R` / `() -> R` (v0.4.2). Both start with `(`;
+        the trailing `->` distinguishes a function type."""
         lp = self._advance()  # (
-        elems = [self._type()]
-        # A tuple type requires at least one comma; `(T,)` is the 1-tuple.
-        if not self._match(T.COMMA):
+        params: list = []
+        saw_comma = False
+        if not self._check(T.RPAREN):
+            params.append(self._type())
+            while self._match(T.COMMA):
+                saw_comma = True
+                if self._check(T.RPAREN):
+                    break
+                params.append(self._type())
+        self._expect(T.RPAREN, "')'")
+        if self._match(T.ARROW):                       # function type
+            ret = self._type()
+            return ast.FnTypeRef(params, ret).at(lp.line, lp.column)
+        # Otherwise a tuple type, which requires at least one comma; `()` alone
+        # is only valid as a function type.
+        if not params:
+            raise ParseError(
+                "'()' is only valid as a function type '() -> R'",
+                lp.line, lp.column,
+            )
+        if not saw_comma:
             tok = self._peek()
             raise ParseError(
                 "expected ',' in tuple type (use '(T,)' for a 1-tuple)",
                 tok.line, tok.column,
             )
-        while not self._check(T.RPAREN):
-            elems.append(self._type())
-            if not self._match(T.COMMA):
-                break
-        self._expect(T.RPAREN, "')'")
-        return ast.TupleTypeRef(elems).at(lp.line, lp.column)
+        return ast.TupleTypeRef(params).at(lp.line, lp.column)
 
     # -- statements ----------------------------------------------------------
 
@@ -446,9 +596,26 @@ class Parser:
         prev = self._allow_struct_lit
         self._allow_struct_lit = allow_struct_lit
         try:
-            return self._logic_or()
+            return self._pipe()
         finally:
             self._allow_struct_lit = prev
+
+    def _pipe(self) -> ast.Expr:
+        # `|>` is the loosest binary level (below `||`), left-associative, and is
+        # pure syntactic sugar: `x |> f` ≡ `f(x)` and `x |> f(a, b)` ≡
+        # `f(x, a, b)` — the left operand is spliced as the call's first argument
+        # (X6). It desugars here so the rest of the toolchain only sees calls.
+        expr = self._logic_or()
+        while self._check(T.PIPEGT):
+            op = self._advance()
+            rhs = self._logic_or()
+            if isinstance(rhs, ast.Call):
+                expr = ast.Call(rhs.callee, [expr] + list(rhs.args)).at(
+                    op.line, op.column
+                )
+            else:
+                expr = ast.Call(rhs, [expr]).at(op.line, op.column)
+        return expr
 
     def _binary_left(self, sub, kinds) -> ast.Expr:
         expr = sub()
@@ -532,7 +699,7 @@ class Parser:
         while True:
             if self._check(T.LPAREN):
                 lp = self._advance()
-                args = self._expr_list(T.RPAREN)
+                args = self._call_args()
                 self._expect(T.RPAREN, "')'")
                 expr = ast.Call(expr, args).at(lp.line, lp.column)
             elif self._check(T.LBRACKET):
@@ -579,9 +746,14 @@ class Parser:
             if self._allow_struct_lit and self._check(T.LBRACE):
                 return self._struct_lit(tok)
             return ast.Name(tok.value).at(tok.line, tok.column)
+        if tok.kind is T.SELF:
+            self._advance()
+            return ast.Name("self").at(tok.line, tok.column)
         if tok.kind is T.MATCH:
             return self._match_expr()
         if tok.kind is T.LPAREN:
+            if self._lambda_ahead():
+                return self._lambda(tok)
             return self._paren_or_tuple(tok)
         if tok.kind is T.LBRACKET:
             return self._list_or_map_lit(tok)
@@ -772,6 +944,49 @@ class Parser:
         self._expect(T.RBRACE, "'}'")
         return ast.PatStruct(name_tok.value, fields).at(name_tok.line, name_tok.column)
 
+    def _lambda_ahead(self) -> bool:
+        """At an `LPAREN`, decide whether this begins a lambda `(params) => …`.
+
+        Scan to the parenthesis that matches the current `(` (balancing nested
+        brackets) and report whether a `=>` immediately follows. A lambda's
+        parameter list is always balanced, so this needs no nesting limits."""
+        depth = 0
+        i = self.pos
+        n = len(self.tokens)
+        while i < n:
+            k = self.tokens[i].kind
+            if k in (T.LPAREN, T.LBRACKET, T.LBRACE):
+                depth += 1
+            elif k in (T.RPAREN, T.RBRACKET, T.RBRACE):
+                depth -= 1
+                if depth == 0:
+                    j = i + 1
+                    return j < n and self.tokens[j].kind is T.FATARROW
+            elif k is T.EOF:
+                return False
+            i += 1
+        return False
+
+    def _lambda(self, lp: Token) -> ast.Lambda:
+        self._advance()  # (
+        params: list[ast.Param] = []
+        if not self._check(T.RPAREN):
+            while True:
+                pname = self._expect(T.IDENT, "lambda parameter name")
+                # The type annotation is optional: when the lambda is checked
+                # against an expected function type the checker fills it in.
+                ptype = self._type() if self._match(T.COLON) else None
+                params.append(ast.Param(pname.value, ptype).at(pname.line, pname.column))
+                if not self._match(T.COMMA):
+                    break
+        self._expect(T.RPAREN, "')'")
+        self._expect(T.FATARROW, "'=>' in lambda")
+        if self._check(T.LBRACE):
+            body: ast.Expr | ast.Block = self._block()
+        else:
+            body = self._expression()
+        return ast.Lambda(params, body).at(lp.line, lp.column)
+
     def _paren_or_tuple(self, lp: Token) -> ast.Expr:
         self._advance()  # (
         # Parentheses reset the struct-literal restriction inside them.
@@ -818,6 +1033,34 @@ class Parser:
                 continue
             break
         return args
+
+    def _call_args(self) -> list[ast.Expr]:
+        """Parse a call's argument list, recognising a bare `_` as a
+        partial-application hole (v0.4.3, X7). A `_` is only a hole when it is
+        the whole argument (immediately followed by ',' or ')'); otherwise it is
+        an ordinary identifier expression."""
+        args: list[ast.Expr] = []
+        self._skip_newlines()
+        if self._check(T.RPAREN):
+            return args
+        while True:
+            if self._hole_ahead():
+                tok = self._advance()
+                args.append(ast.Hole().at(tok.line, tok.column))
+            else:
+                args.append(self._expression(allow_struct_lit=True))
+            self._skip_newlines()
+            if self._match(T.COMMA):
+                self._skip_newlines()
+                continue
+            break
+        return args
+
+    def _hole_ahead(self) -> bool:
+        t = self._peek()
+        if not (t.kind is T.IDENT and t.value == "_"):
+            return False
+        return self._peek(1).kind in (T.COMMA, T.RPAREN)
 
 
 def _is_lvalue(expr: ast.Expr) -> bool:

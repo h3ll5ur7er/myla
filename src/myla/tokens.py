@@ -27,6 +27,9 @@ class TokenKind(Enum):
     RETURN = auto()
     STRUCT = auto()
     ENUM = auto()
+    IMPL = auto()
+    TRAIT = auto()
+    SELF = auto()
     MATCH = auto()
     TYPEALIAS = auto()
     AS = auto()
@@ -54,6 +57,7 @@ class TokenKind(Enum):
     # operators & punctuation
     ARROW = auto()        # ->
     FATARROW = auto()     # =>
+    PIPEGT = auto()       # |>  (pipeline operator, v0.4.3)
     PIPE = auto()         # |
     DOTDOT = auto()       # ..
     EQ = auto()           # ==
@@ -99,6 +103,9 @@ KEYWORDS: dict[str, TokenKind] = {
     "return": TokenKind.RETURN,
     "struct": TokenKind.STRUCT,
     "enum": TokenKind.ENUM,
+    "impl": TokenKind.IMPL,
+    "trait": TokenKind.TRAIT,
+    "self": TokenKind.SELF,
     "match": TokenKind.MATCH,
     "typealias": TokenKind.TYPEALIAS,
     "as": TokenKind.AS,

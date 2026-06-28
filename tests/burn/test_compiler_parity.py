@@ -79,6 +79,65 @@ PROGRAMS = {
         "    for k in 0..50 {\n        if k * k > 40 {\n            found = k\n            break\n        }\n    }\n"
         "    print(found)\n}\n"
     ),
+    # --- v0.4.1 methods & impl (self / var self, generics, builtins) ---
+    "methods_self_and_var_self": (
+        "struct Counter { n: int, log: [int] }\n"
+        "impl Counter {\n"
+        "    fun get(self) -> int { return self.n }\n"
+        "    fun bump(var self) {\n"
+        "        self.n = self.n + 1\n        push(self.log, self.n)\n    }\n"
+        "    fun total(self) -> int {\n"
+        "        var s = 0\n        for v in self.log { s = s + v }\n        return s\n    }\n"
+        "    fun bump_n(var self, k: int) {\n"
+        "        var i = 0\n        while i < k {\n            self.bump()\n            i = i + 1\n        }\n    }\n"
+        "}\n"
+        "#main\nfun main() {\n"
+        "    var c = Counter { n: 0, log: [] }\n"
+        "    c.bump_n(3)\n    c.bump()\n"
+        "    print(c.get())\n    print(c.total())\n}\n"
+    ),
+    "methods_value_semantics": (
+        "struct P { x: int }\n"
+        "impl P {\n"
+        "    fun x_of(self) -> int { return self.x }\n"
+        "    fun with_x(self, v: int) -> P { return P { x: v } }\n"
+        "}\n"
+        "#main\nfun main() {\n"
+        "    let a = P { x: 1 }\n    let b = a.with_x(99)\n"
+        "    print(a.x_of())\n    print(b.x_of())\n}\n"
+    ),
+    "methods_generic_impl": (
+        "struct Box<T> { value: T }\n"
+        "impl<T> Box<T> {\n"
+        "    fun get(self) -> T { return self.value }\n"
+        "    fun set(var self, v: T) { self.value = v }\n"
+        "}\n"
+        "#main\nfun main() {\n"
+        "    var b = Box { value: 7 }\n    b.set(42)\n    print(b.get())\n"
+        "    let t = Box { value: true }\n    print(t.get())\n}\n"
+    ),
+    "methods_enum_and_nested_receiver": (
+        "enum Shape { Circle(int), Rect(int, int) }\n"
+        "impl Shape {\n"
+        "    fun area(self) -> int {\n"
+        "        return match self {\n"
+        "            Circle(r) => 3 * r * r\n            Rect(w, h) => w * h\n        }\n    }\n}\n"
+        "struct Outer { c: Counter }\n"
+        "struct Counter { n: int }\n"
+        "impl Counter { fun bump(var self) { self.n = self.n + 1 } fun get(self) -> int { return self.n } }\n"
+        "impl Outer { fun tick(var self) { self.c.bump() } }\n"
+        "#main\nfun main() {\n"
+        "    print(Shape.Rect(3, 4).area())\n    print(Shape.Circle(2).area())\n"
+        "    var o = Outer { c: Counter { n: 10 } }\n    o.tick()\n    o.tick()\n    print(o.c.get())\n}\n"
+    ),
+    "methods_on_builtins": (
+        "impl int {\n"
+        "    fun is_even(self) -> bool { return self % 2 == 0 }\n"
+        "    fun double(self) -> int { return self * 2 }\n}\n"
+        "#main\nfun main() {\n"
+        "    let n = 5\n    print(n.is_even())\n    print(n.double())\n"
+        "    print(n.double().is_even())\n    print((3).double())\n}\n"
+    ),
     # --- v0.3.2 const + assert/panic/unreachable ---
     "const_folding": (
         "const KIB: int32 = 1 << 10\n"
@@ -555,6 +614,111 @@ PROGRAMS = {
         "#main\nfun main() {\n"
         "    print(show(total(5)))\n    print(show(total(-1)))\n}\n"
     ),
+    # --- v0.4.2 function types, lambdas & closures ---
+    "closures_higher_order": (
+        # capture-by-value, a plain `fun` used as a value, a closure stored in a
+        # struct field, and a generic higher-order helper returning a closure.
+        "struct Adder { f: (int) -> int }\n"
+        "fun inc(n: int) -> int {\n    return n + 1\n}\n"
+        "fun compose(f: (int) -> int, g: (int) -> int) -> (int) -> int {\n"
+        "    return (x: int) => f(g(x))\n}\n"
+        "#main\nfun main() {\n"
+        "    let k = 10\n"
+        "    let bump = (x: int) => x + k\n"            # captures k by value
+        "    print(bump(5))\n"                          # 15
+        "    let g = inc\n    print(g(41))\n"           # 42 (fun as value)
+        "    let a = Adder { f: (x: int) => x * x }\n"
+        "    print(a.f(7))\n"                           # 49 (closure in a field)
+        "    let h = compose((x: int) => x * 2, inc)\n"  # 2*(x+1)
+        "    print(h(20))\n}\n"                         # 42
+    ),
+    "closure_captures_list_deep_immutable": (
+        # A closure captures a list *by value* (D14/D48): later mutation of the
+        # original list (push / element assignment, both copy-on-write) is
+        # invisible to the captured snapshot.
+        "#main\nfun main() {\n"
+        "    var xs: [int] = []\n"
+        "    push(xs, 1)\n    push(xs, 2)\n"
+        "    let snapshot = (i: int) => xs[i]\n"
+        "    push(xs, 3)\n    xs[0] = 99\n"
+        "    print(snapshot(0))\n"                      # 1
+        "    print(snapshot(1))\n"                      # 2
+        "    print(len(xs))\n"                          # 3
+        "    print(xs[0])\n}\n"                         # 99
+    ),
+    # --- v0.4.3 pipelines, composition & partial application ---
+    "pipelines_compose_partial": (
+        # `|>` splices the left value as the first argument; `>>` composes two
+        # function values; `_` partially applies. All desugar to v0.4.2 calls
+        # and lambdas, so the native binary must match the interpreter.
+        "fun double(n: int) -> int {\n    return n * 2\n}\n"
+        "fun inc(n: int) -> int {\n    return n + 1\n}\n"
+        "fun add(a: int, b: int) -> int {\n    return a + b\n}\n"
+        "#main\nfun main() {\n"
+        "    print(5 |> double |> inc)\n"               # inc(double(5)) = 11
+        "    print(5 |> add(3))\n"                       # add(5, 3) = 8
+        "    let f = double >> inc >> double\n"
+        "    print(f(3))\n"                              # double(inc(double(3))) = 14
+        "    let add5 = add(5, _)\n    print(add5(10))\n"   # 15
+        "    let half = add(_, 2)\n    print(half(40))\n}\n"  # 42
+    ),
+    "compose_partial_capture": (
+        # Composition over *local* function values that capture, plus a
+        # partial application whose filled argument is a captured variable —
+        # both build refcounted closure environments at runtime.
+        "fun add(a: int, b: int) -> int {\n    return a + b\n}\n"
+        "#main\nfun main() {\n"
+        "    let k = 100\n"
+        "    let bump = (x: int) => x + k\n"            # captures k
+        "    let twice = (x: int) => x * 2\n"
+        "    let combo = bump >> twice\n"               # (x) => (x + 100) * 2
+        "    print(combo(1))\n"                          # 202
+        "    let base = 7\n"
+        "    let plus_base = add(base, _)\n"            # captures base
+        "    print(plus_base(35))\n}\n"                  # 42
+    ),
+    # --- v0.4.4 traits, operator overloading & derivable Eq ---
+    "traits_operators_derive": (
+        # Operator overloading (`+`/`==`/`<` -> Add/Eq/Ord methods), a user
+        # trait method, and `#derive(Eq)` over a struct with a nested enum.
+        "struct V { x: int, y: int }\n"
+        "impl Add for V {\n"
+        "    fun add(self, o: V) -> V { return V { x: self.x + o.x, y: self.y + o.y } }\n"
+        "}\n"
+        "impl Eq for V { fun eq(self, o: V) -> bool { return self.x == o.x && self.y == o.y } }\n"
+        "impl Ord for V { fun cmp(self, o: V) -> int { return (self.x + self.y) - (o.x + o.y) } }\n"
+        "trait Name { fun name(self) -> str }\n"
+        "impl Name for V { fun name(self) -> str { return \"v\" } }\n"
+        "#derive(Eq)\nenum Tag { A, B(int) }\n"
+        "#derive(Eq)\nstruct Cell { v: V, tag: Tag }\n"
+        "#main\nfun main() {\n"
+        "    let s = V { x: 1, y: 2 } + V { x: 3, y: 4 }\n"
+        "    print(s.x)\n    print(s.y)\n"                       # 4, 6
+        "    print(s == V { x: 4, y: 6 })\n"                     # true
+        "    print(s != V { x: 0, y: 0 })\n"                     # true
+        "    print(V { x: 1, y: 1 } < V { x: 5, y: 5 })\n"       # true
+        "    print(s.name())\n"                                  # v
+        "    print(Tag.B(3) == Tag.B(3))\n"                      # true
+        "    print(Tag.B(3) == Tag.A)\n"                         # false
+        "    let c = Cell { v: V { x: 1, y: 2 }, tag: Tag.A }\n"
+        "    print(c == Cell { v: V { x: 1, y: 2 }, tag: Tag.A })\n}\n"  # true
+    ),
+    "trait_generic_bounds": (
+        # Limited generic bounds (`<T: Add>` / `<T: Ord>`) dispatched over both a
+        # primitive and a user type: the body uses the bound's operators.
+        "struct V { x: int }\n"
+        "impl Add for V { fun add(self, o: V) -> V { return V { x: self.x + o.x } } }\n"
+        "impl Ord for V { fun cmp(self, o: V) -> int { return self.x - o.x } }\n"
+        "fun sum<T: Add>(xs: [T], zero: T) -> T {\n"
+        "    var acc = zero\n    for x in xs { acc = acc + x }\n    return acc\n}\n"
+        "fun max_of<T: Ord>(a: T, b: T) -> T {\n    if a > b { return a }\n    return b\n}\n"
+        "#main\nfun main() {\n"
+        "    print(sum([1, 2, 3, 4], 0))\n"                       # 10
+        "    let v = sum([V { x: 1 }, V { x: 2 }, V { x: 3 }], V { x: 0 })\n"
+        "    print(v.x)\n"                                        # 6
+        "    print(max_of(3, 9))\n"                               # 9
+        "    print(max_of(V { x: 5 }, V { x: 2 }).x)\n}\n"        # 5
+    ),
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -695,8 +859,90 @@ STRESS_SB_SRC = (
 )
 
 
+STRESS_CLOSURE_SRC = (
+    # Each iteration builds a list holding two *capturing* closures (each owning a
+    # refcounted environment) and then drops the list at the end of the loop body.
+    # Far more environment cells are allocated than the arena holds at once, so it
+    # only completes (exit 0) if closure environments are reference-counted and
+    # their cells returned to the free list.
+    "#main\nfun main() {\n"
+    "    var acc = 0\n"
+    "    for r in 0..300000 {\n"
+    "        var fns: [(int) -> int] = []\n"
+    "        let cap = r\n"
+    "        push(fns, (n: int) => n + cap)\n"
+    "        push(fns, (n: int) => n + cap + 1)\n"
+    "        acc = acc + fns[0](0) + fns[1](0) - (2 * r + 1)\n"
+    "    }\n"
+    "    print(acc)\n}\n"
+)
+
+STRESS_PARTIAL_SRC = (
+    # `>>` composition and `_` partial application both desugar to capturing
+    # lambdas (refcounted environments). Each iteration builds a composed
+    # function and a partial application that capture a per-iteration value,
+    # then drops them — far more env cells than the arena holds at once, so it
+    # only finishes (exit 0) if those desugared closures are reference-counted.
+    "fun add(a: int, b: int) -> int {\n    return a + b\n}\n"
+    "#main\nfun main() {\n"
+    "    var acc = 0\n"
+    "    for r in 0..300000 {\n"
+    "        let cap = r\n"
+    "        let bump = (x: int) => x + cap\n"
+    "        let composed = bump >> bump\n"             # (x) => (x + cap) + cap
+    "        let plus_cap = add(cap, _)\n"              # (b) => add(cap, b)
+    "        acc = acc + composed(0) + plus_cap(0) - 3 * r\n"
+    "    }\n"
+    "    print(acc)\n}\n"
+)
+
+
+STRESS_TRAIT_DISPATCH_SRC = (
+    # A generic `T: Add` summed over a heap-owning user type (`Bag` owns a list):
+    # the bounded operator dispatches to `Bag.add`, which copies/concatenates
+    # lists, allocating refcounted list cells. Each iteration builds and drops
+    # several Bags/lists — far more cells than the arena holds at once, so it
+    # only finishes (exit 0) if trait-dispatched results are reference-counted.
+    "struct Bag { items: [int] }\n"
+    "impl Add for Bag {\n"
+    "    fun add(self, other: Bag) -> Bag {\n"
+    "        var r = self.items\n        for x in other.items { push(r, x) }\n"
+    "        return Bag { items: r }\n    }\n}\n"
+    "fun total<T: Add>(xs: [T], zero: T) -> T {\n"
+    "    var acc = zero\n    for x in xs { acc = acc + x }\n    return acc\n}\n"
+    "#main\nfun main() {\n"
+    "    var checksum = 0\n"
+    "    for r in 0..200000 {\n"
+    "        let a = Bag { items: [r, r] }\n"
+    "        let b = Bag { items: [r] }\n"
+    "        let c = total([a, b], Bag { items: [] })\n"
+    "        checksum = checksum + len(c.items)\n"
+    "    }\n    print(checksum)\n}\n"
+)
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
+    def test_trait_dispatch_reference_counting_reclaims_heap(self):
+        # millions of list cells allocated through a bounded-generic operator
+        # that dispatches to a user `Add` impl: the results must be refcounted.
+        out, code = build_and_run(STRESS_TRAIT_DISPATCH_SRC)
+        self.assertEqual(code, 0, "arena exhausted — trait-dispatched results leaked")
+        self.assertEqual(out.strip(), "600000")
+
+    def test_closure_environment_reference_counting_reclaims_heap(self):
+        # millions of capturing-closure environment cells through a finite arena.
+        out, code = build_and_run(STRESS_CLOSURE_SRC)
+        self.assertEqual(code, 0, "arena exhausted — closure environments leaked")
+        self.assertEqual(out.strip(), "0")
+
+    def test_partial_and_compose_reference_counting_reclaims_heap(self):
+        # millions of desugared `>>`/`_` closure environments through a finite
+        # arena: composition and partial application must refcount like lambdas.
+        out, code = build_and_run(STRESS_PARTIAL_SRC)
+        self.assertEqual(code, 0, "arena exhausted — desugared closures leaked")
+        self.assertEqual(out.strip(), "0")
+
     def test_string_builder_reference_counting_reclaims_heap(self):
         # millions of builder cells (build/grow/share/CoW) through a finite arena.
         out, code = build_and_run(STRESS_SB_SRC)

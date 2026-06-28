@@ -1,0 +1,7 @@
+//~ type error: unknown trait 'Nope'
+// `impl Trait for T` must name a declared (or built-in) trait (v0.4.4).
+struct S { x: int }
+impl Nope for S {
+    fun go(self) -> int { return self.x }
+}
+fun main() {}

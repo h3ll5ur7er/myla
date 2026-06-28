@@ -1,0 +1,8 @@
+//~ type error: partial application must list every argument position
+fun add(a: int, b: int) -> int {
+    return a + b
+}
+fun main() {
+    let g = add(_)
+    print(g(1))
+}

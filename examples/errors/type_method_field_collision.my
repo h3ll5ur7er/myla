@@ -1,0 +1,7 @@
+//~ type error: collides with a field
+// A method may not share a name with one of the type's fields.
+struct P { x: int }
+
+impl P {
+    fun x(self) -> int { return self.x }
+}

@@ -1,0 +1,11 @@
+//~ type error: must match the right parameter
+fun to_str(n: int) -> str {
+    return "x"
+}
+fun double(n: int) -> int {
+    return n * 2
+}
+fun main() {
+    let p = to_str >> double
+    print(p(1))
+}

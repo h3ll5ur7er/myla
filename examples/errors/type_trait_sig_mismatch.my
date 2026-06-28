@@ -1,0 +1,11 @@
+//~ type error: does not match the trait signature
+// An impl method's parameter/return types must match the trait's (Self-
+// substituted) signature (v0.4.4).
+trait Take {
+    fun take(self, x: int) -> int
+}
+struct S { x: int }
+impl Take for S {
+    fun take(self, x: str) -> int { return self.x }
+}
+fun main() {}

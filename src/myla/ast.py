@@ -58,8 +58,16 @@ class MapTypeRef(Node):
     value: "TypeExpr"
 
 
+@dataclass
+class FnTypeRef(Node):
+    """A function-type annotation `(T0, T1, …) -> R` (v0.4.2). `params` may be
+    empty (`() -> R`); `ret` is the result type."""
+    params: list["TypeExpr"] = field(default_factory=list)
+    ret: "TypeExpr" = None  # type: ignore[assignment]
+
+
 # A type annotation as written in source (resolved to a `types.Type` later).
-TypeExpr = Union[TypeRef, TupleTypeRef, ListTypeRef, MapTypeRef]
+TypeExpr = Union[TypeRef, TupleTypeRef, ListTypeRef, MapTypeRef, FnTypeRef]
 
 
 # --- attributes ------------------------------------------------------------
@@ -198,9 +206,38 @@ class Cast(Node):
     target: "TypeExpr"
 
 
+@dataclass
+class Lambda(Node):
+    """An anonymous function value `(params) => body` (v0.4.2).
+
+    `body` is either an `Expr` (its value is returned) or a `Block` (returns via
+    `return`). Parameter types are required. The checker computes the set of
+    captured outer variables (`captures`, a list of `(name, Type)` pairs,
+    captured by value, D15) and assigns a unique lifted name used by the native
+    backend's lambda-lifting pass.
+    """
+    params: list["Param"] = field(default_factory=list)
+    body: "Union[Expr, Block]" = None  # type: ignore[assignment]
+    ret_type: "Optional[TypeExpr]" = None
+    # Filled in by the checker:
+    captures: list = field(default_factory=list)  # list[(name, Type)]
+    lifted_name: Optional[str] = None
+
+
+@dataclass
+class Hole(Node):
+    """The `_` partial-application placeholder in a call argument (v0.4.3).
+
+    A call carrying one or more holes desugars (in the checker) to a lambda
+    whose parameters are the holes, left-to-right; the non-hole arguments are
+    captured by value. `_` is only meaningful in call-argument position — the
+    parser produces a `Hole` only there, and a bare `_` elsewhere is rejected.
+    """
+
+
 Expr = Union[
     IntLit, StrLit, BoolLit, Name, Unary, Binary, Call, FieldAccess, StructLit,
-    TupleLit, TupleIndex, ListLit, MapLit, Index, Match, Try, Cast,
+    TupleLit, TupleIndex, ListLit, MapLit, Index, Match, Try, Cast, Lambda, Hole,
 ]
 
 
@@ -397,9 +434,19 @@ class FunDecl(Node):
     name: str
     params: list[Param]
     ret_type: Optional[TypeRef]
-    body: Block
+    # `None` for a trait method *signature* (v0.4.4) — a declaration without a
+    # body; every other `fun`/method has a `Block`.
+    body: Optional[Block]
     attributes: list[Attribute] = field(default_factory=list)
     type_params: list[str] = field(default_factory=list)
+    # v0.4.4 (X9): single built-in-trait bounds per type parameter, e.g.
+    # `<T: Add + Eq>` -> {"T": ["Add", "Eq"]}.
+    type_param_bounds: dict = field(default_factory=dict)
+    # For a method inside an `impl` block (v0.4.1): the receiver form, one of
+    # "self" (read-only) or "var self" (mutating); None for a free function. The
+    # `self` parameter is *not* listed in `params` — the checker synthesizes it
+    # with the impl's target type.
+    receiver: Optional[str] = None
 
 
 @dataclass
@@ -424,6 +471,40 @@ class TypeAliasDecl(Node):
 
 
 @dataclass
+class ImplDecl(Node):
+    """An `impl` block attaching methods to a type (v0.4.1, D45/D46/D47).
+
+    `target` is the type the methods are attached to (`impl Lexer { … }` or, for
+    a generic impl, `impl<T> Box<T> { … }`). `type_params` are the impl's own
+    type parameters. Each method is a `FunDecl` carrying a `receiver` of "self"
+    or "var self". `trait_name` is reserved for `impl Trait for T` (v0.4.4) and
+    is None for an inherent impl.
+    """
+    target: "TypeExpr"
+    methods: list[FunDecl] = field(default_factory=list)
+    type_params: list[str] = field(default_factory=list)
+    type_param_bounds: dict = field(default_factory=dict)
+    trait_name: Optional[str] = None
+    # impl blocks carry no attributes (the parser rejects them); this field
+    # exists so passes that iterate every decl's `.attributes` need no special
+    # case.
+    attributes: list[Attribute] = field(default_factory=list)
+
+
+@dataclass
+class TraitDecl(Node):
+    """A `trait` declaration (v0.4.4, D52): a named set of method *signatures*
+    (no default bodies in v0.4). `Self` denotes the implementing type in the
+    signatures. Methods are `FunDecl`s with `body=None` and a `self`/`var self`
+    receiver. Traits live in their own namespace and are implemented for a type
+    via `impl Trait for T { … }`."""
+    name: str
+    methods: list[FunDecl] = field(default_factory=list)
+    type_params: list[str] = field(default_factory=list)
+    attributes: list[Attribute] = field(default_factory=list)
+
+
+@dataclass
 class ConstDecl(Node):
     """A file-scoped, immutable compile-time constant (D28).
 
@@ -437,7 +518,9 @@ class ConstDecl(Node):
     attributes: list[Attribute] = field(default_factory=list)
 
 
-Decl = Union[StructDecl, FunDecl, EnumDecl, TypeAliasDecl, ConstDecl]
+Decl = Union[
+    StructDecl, FunDecl, EnumDecl, TypeAliasDecl, ConstDecl, ImplDecl, TraitDecl
+]
 
 
 @dataclass

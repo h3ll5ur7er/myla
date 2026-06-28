@@ -1,0 +1,9 @@
+//~ type error: operator '==' is not defined for 'P'
+// `==` on a struct/enum needs an `Eq` impl (or `#derive(Eq)`); D37 stands
+// otherwise (v0.4.4).
+struct P { x: int }
+fun main() {
+    let a = P { x: 1 }
+    let b = P { x: 2 }
+    print(a == b)
+}

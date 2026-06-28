@@ -1,0 +1,7 @@
+//~ type error: cannot derive Eq for struct 'Holder'
+// `#derive(Eq)` requires every field to itself be `Eq`; a plain struct without
+// `Eq` is not derivable (v0.4.4).
+struct Bare { x: int }
+#derive(Eq)
+struct Holder { b: Bare }
+fun main() {}

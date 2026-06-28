@@ -1,0 +1,6 @@
+//~ type error: 'var self' methods on built-in types
+// v0.4.1 allows read-only `self` methods on built-in receivers, but not `var
+// self` mutation yet.
+impl int {
+    fun inc(var self) -> int { return self + 1 }
+}

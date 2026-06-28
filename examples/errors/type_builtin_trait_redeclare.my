@@ -1,0 +1,6 @@
+//~ type error: 'Add' is a built-in operator trait and cannot be redeclared
+// The operator traits (Add/Sub/Mul/Div/Rem/Eq/Ord) are a fixed built-in set (X8).
+trait Add {
+    fun add(self, other: Self) -> Self
+}
+fun main() {}

@@ -1,0 +1,117 @@
+// traits.my — traits, operator overloading & derivable Eq (v0.4.4): a user
+// `trait` + `impl Trait for T`, the built-in operator traits (Add/Eq/Ord),
+// `#derive(Eq)`, and the limited generic bounds `<T: Trait>` (D52/D53, X8/X9).
+
+// A user trait: a named set of method signatures; `Self` is the implementing
+// type. `impl Trait for T { … }` provides them (no orphan rule, §1.2).
+trait Describe {
+    fun describe(self) -> str
+}
+
+// A 2D vector with overloaded `+` (Add), `==`/`!=` (Eq), and ordering (Ord, by
+// manhattan length). `a OP b` desugars uniformly to the trait method.
+struct Vec2 { x: int, y: int }
+
+impl Add for Vec2 {
+    fun add(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y }
+    }
+}
+impl Eq for Vec2 {
+    fun eq(self, other: Vec2) -> bool {
+        return self.x == other.x && self.y == other.y
+    }
+}
+impl Ord for Vec2 {
+    fun cmp(self, other: Vec2) -> int {
+        return (self.x + self.y) - (other.x + other.y)
+    }
+}
+impl Describe for Vec2 {
+    fun describe(self) -> str { return "vec" }
+}
+
+// `#derive(Eq)` synthesizes structural equality, field-by-field / variant-and-
+// payload, in terms of the components' own `Eq` (nested `Vec2`/`Color` here).
+#derive(Eq)
+enum Color { Red, Green, Blue }
+
+#derive(Eq)
+struct Pixel { at: Vec2, color: Color }
+
+// Limited generic bounds (X9): inside the body the operators named by the bound
+// are usable on `T`; the concrete `T` must implement the trait at the call site.
+fun sum<T: Add>(xs: [T], zero: T) -> T {
+    var acc = zero
+    for x in xs { acc = acc + x }
+    return acc
+}
+
+fun max_of<T: Ord>(a: T, b: T) -> T {
+    if a > b { return a }
+    return b
+}
+
+fun count_eq<T: Eq>(xs: [T], probe: T) -> int {
+    var n = 0
+    for x in xs { if x == probe { n = n + 1 } }
+    return n
+}
+
+#test(3)[9]
+fun add_vec_len(k: int) -> int {
+    let v = Vec2 { x: k, y: 0 } + Vec2 { x: 0, y: 2 * k }     // (k, 2k)
+    return v.x + v.y                                          // 3k
+}
+
+#test(2)[true]
+#test(5)[false]
+fun small(n: int) -> bool {
+    return Vec2 { x: n, y: 0 } < Vec2 { x: 3, y: 0 }
+}
+
+#test(0)[true]
+#test(1)[false]
+fun same_pixel(k: int) -> bool {
+    let a = Pixel { at: Vec2 { x: 1, y: 1 }, color: Color.Red }
+    let b = Pixel { at: Vec2 { x: 1, y: 1 }, color: Color.Red }
+    let c = Pixel { at: Vec2 { x: 1, y: 1 }, color: Color.Blue }
+    if k == 0 { return a == b }
+    return a == c
+}
+
+#test(0)[10]
+#test(5)[15]
+fun sum_ints(start: int) -> int {
+    return sum([1, 2, 3, 4], start)
+}
+
+#test(9)[9]
+#test(3)[7]
+fun bigger(n: int) -> int {
+    return max_of(n, 7)
+}
+
+fun main() {
+    // operator overloading on a user type
+    let v = Vec2 { x: 1, y: 2 } + Vec2 { x: 3, y: 4 }
+    print(v.x)                                // 4
+    print(v.y)                                // 6
+    print(v == Vec2 { x: 4, y: 6 })           // true
+    print(v < Vec2 { x: 100, y: 0 })          // true  (10 < 100)
+    print(v.describe())                       // vec   (user trait method)
+
+    // derived structural equality (enum + nested struct)
+    print(Color.Green == Color.Green)         // true
+    print(Color.Green == Color.Blue)          // false
+    let p = Pixel { at: Vec2 { x: 0, y: 0 }, color: Color.Red }
+    print(p == Pixel { at: Vec2 { x: 0, y: 0 }, color: Color.Red })   // true
+
+    // generic bounds over both primitives and user types
+    print(sum([10, 20, 30], 0))               // 60
+    let vs = sum([Vec2 { x: 1, y: 1 }, Vec2 { x: 2, y: 3 }], Vec2 { x: 0, y: 0 })
+    print(vs.x)                               // 3
+    print(vs.y)                               // 4
+    print(max_of(3, 8))                       // 8
+    print(count_eq([1, 2, 1, 1], 1))          // 3
+}

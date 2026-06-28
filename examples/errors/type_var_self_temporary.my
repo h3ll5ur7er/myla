@@ -1,0 +1,12 @@
+//~ type error: mutates its receiver
+// A `var self` method cannot be called on a temporary — it has nowhere to write
+// the mutation back to.
+struct C { n: int }
+
+impl C {
+    fun bump(var self) { self.n = self.n + 1 }
+}
+
+fun main() {
+    C { n: 0 }.bump()
+}

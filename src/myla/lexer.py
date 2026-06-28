@@ -18,6 +18,7 @@ from .tokens import INT_SUFFIXES, KEYWORDS, Token, TokenKind
 _TWO_CHAR_OPS: dict[str, TokenKind] = {
     "->": TokenKind.ARROW,
     "=>": TokenKind.FATARROW,
+    "|>": TokenKind.PIPEGT,
     "..": TokenKind.DOTDOT,
     "==": TokenKind.EQ,
     "!=": TokenKind.NE,

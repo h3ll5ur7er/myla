@@ -1,0 +1,7 @@
+//~ parse error: must be 'self' or 'var self'
+// A method's first parameter must be a `self` / `var self` receiver.
+struct P { x: int }
+
+impl P {
+    fun f(a: int) -> int { return a }
+}

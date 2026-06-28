@@ -1,0 +1,8 @@
+//~ type error: duplicate method
+// Method names must be unique per type (across all of its impl blocks).
+struct P { x: int }
+
+impl P {
+    fun f(self) -> int { return 1 }
+    fun f(self) -> int { return 2 }
+}

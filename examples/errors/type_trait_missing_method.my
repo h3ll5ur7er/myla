@@ -1,0 +1,11 @@
+//~ type error: is missing method(s): b
+// An `impl Trait for T` must cover every signature the trait declares (v0.4.4).
+trait Two {
+    fun a(self) -> int
+    fun b(self) -> int
+}
+struct S { x: int }
+impl Two for S {
+    fun a(self) -> int { return self.x }
+}
+fun main() {}

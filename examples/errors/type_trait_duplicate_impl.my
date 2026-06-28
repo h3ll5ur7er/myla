@@ -1,0 +1,13 @@
+//~ type error: duplicate impl of trait 'Show' for type 'S'
+// At most one user `impl Trait for T` per (trait, type) pair — coherence (X1).
+trait Show {
+    fun show(self) -> int
+}
+struct S { x: int }
+impl Show for S {
+    fun show(self) -> int { return self.x }
+}
+impl Show for S {
+    fun show(self) -> int { return 0 }
+}
+fun main() {}

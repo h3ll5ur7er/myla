@@ -114,7 +114,7 @@ each keyword, each operator/punctuation token, and `EOF`.
 ### 3.3 Attributes
 
 - The parser collects any leading `#name(...)[...]` attributes into the following
-  declaration's `attributes` list (see §4).
+  declaration's `attributes` list (see §§4).
 - A small **built-in attribute registry** validates them after parsing: only
   `#main` and `#test` are known in v0.0; any other name is a compile error.
 - `#main` resolution: the entry point is the single `#main`-annotated function,

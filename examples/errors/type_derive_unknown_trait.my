@@ -1,0 +1,5 @@
+//~ type error: cannot derive 'Ord'
+// The derive allow-list is `Eq` only in v0.4.4 (Ord is the planned next add).
+#derive(Ord)
+struct P { x: int }
+fun main() {}

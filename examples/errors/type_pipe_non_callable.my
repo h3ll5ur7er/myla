@@ -1,0 +1,4 @@
+//~ type error: cannot call a value of type
+fun main() {
+    print(5 |> 3)
+}

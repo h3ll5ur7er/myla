@@ -1,0 +1,7 @@
+//~ type error: expected '(int32) -> int32'
+fun apply(g: (int) -> int) -> int {
+    return g(1)
+}
+fun main() {
+    print(apply((s: str) => 0))
+}
