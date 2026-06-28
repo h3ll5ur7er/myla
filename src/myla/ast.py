@@ -427,6 +427,9 @@ class StructDecl(Node):
     fields: list[Field] = field(default_factory=list)
     attributes: list[Attribute] = field(default_factory=list)
     type_params: list[str] = field(default_factory=list)
+    # `pub` marks the declaration as part of its module's public surface (v0.5,
+    # D22). False = file-local (the default).
+    is_pub: bool = False
 
 
 @dataclass
@@ -447,6 +450,8 @@ class FunDecl(Node):
     # `self` parameter is *not* listed in `params` — the checker synthesizes it
     # with the impl's target type.
     receiver: Optional[str] = None
+    # `pub` export marker (v0.5, D22); ignored for methods inside an `impl`.
+    is_pub: bool = False
 
 
 @dataclass
@@ -461,6 +466,7 @@ class EnumDecl(Node):
     variants: list[Variant] = field(default_factory=list)
     attributes: list[Attribute] = field(default_factory=list)
     type_params: list[str] = field(default_factory=list)
+    is_pub: bool = False
 
 
 @dataclass
@@ -468,6 +474,7 @@ class TypeAliasDecl(Node):
     name: str
     target: "TypeExpr"
     attributes: list[Attribute] = field(default_factory=list)
+    is_pub: bool = False
 
 
 @dataclass
@@ -502,6 +509,7 @@ class TraitDecl(Node):
     methods: list[FunDecl] = field(default_factory=list)
     type_params: list[str] = field(default_factory=list)
     attributes: list[Attribute] = field(default_factory=list)
+    is_pub: bool = False
 
 
 @dataclass
@@ -516,10 +524,54 @@ class ConstDecl(Node):
     declared_type: "TypeExpr"
     value: "Expr"
     attributes: list[Attribute] = field(default_factory=list)
+    is_pub: bool = False
+
+
+@dataclass
+class ImportPath(Node):
+    """A dotted import path with a leading-dot search base (D22).
+
+    `dots` is the leading-dot count selecting the search base: 0 = absolute
+    (builtins / project root), 1 = the current file's directory, 2 = its parent,
+    and so on. `segments` is the dotted path after the dots (always ≥ 1).
+    """
+    dots: int = 0
+    segments: list[str] = field(default_factory=list)
+
+    def dotted(self) -> str:
+        return "." * self.dots + ".".join(self.segments)
+
+
+@dataclass
+class ImportItem(Node):
+    """A single name in a `from … import a, b as c` list."""
+    name: str
+    alias: Optional[str] = None
+
+
+@dataclass
+class ImportDecl(Node):
+    """An import statement (v0.5, D17/D22/D54).
+
+    Two forms:
+      * whole-module — `import a.b.c [as alias]`: `items` is None; `alias`
+        optionally rebinds the full path to a simple name.
+      * selective — `from a.b import x, y as z`: `items` is the non-empty list;
+        `alias` is None.
+
+    `is_pub` marks a `pub`-prefixed re-export (D54). A `pub` whole-module import
+    requires an `as` alias (enforced by the parser).
+    """
+    path: ImportPath
+    items: Optional[list[ImportItem]] = None
+    alias: Optional[str] = None
+    is_pub: bool = False
+    attributes: list[Attribute] = field(default_factory=list)
 
 
 Decl = Union[
-    StructDecl, FunDecl, EnumDecl, TypeAliasDecl, ConstDecl, ImplDecl, TraitDecl
+    StructDecl, FunDecl, EnumDecl, TypeAliasDecl, ConstDecl, ImplDecl, TraitDecl,
+    ImportDecl,
 ]
 
 

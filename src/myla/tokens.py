@@ -33,6 +33,9 @@ class TokenKind(Enum):
     MATCH = auto()
     TYPEALIAS = auto()
     AS = auto()
+    PUB = auto()
+    IMPORT = auto()
+    FROM = auto()
     CONST = auto()
     BREAK = auto()
     CONTINUE = auto()
@@ -109,6 +112,9 @@ KEYWORDS: dict[str, TokenKind] = {
     "match": TokenKind.MATCH,
     "typealias": TokenKind.TYPEALIAS,
     "as": TokenKind.AS,
+    "pub": TokenKind.PUB,
+    "import": TokenKind.IMPORT,
+    "from": TokenKind.FROM,
     "const": TokenKind.CONST,
     "break": TokenKind.BREAK,
     "continue": TokenKind.CONTINUE,

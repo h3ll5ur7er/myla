@@ -98,6 +98,8 @@ class Parser:
 
     def _declaration(self) -> ast.Decl:
         attrs = self._attributes()
+        pub_tok = self._advance() if self._check(T.PUB) else None
+        is_pub = pub_tok is not None
         tok = self._peek()
         if tok.kind is T.STRUCT:
             decl: ast.Decl = self._struct_decl()
@@ -113,9 +115,12 @@ class Parser:
             decl = self._typealias_decl()
         elif tok.kind is T.CONST:
             decl = self._const_decl()
+        elif tok.kind in (T.IMPORT, T.FROM):
+            decl = self._import_decl(is_pub)
         else:
             raise ParseError(
-                f"expected a declaration (struct/fun/enum/typealias/const), found '{tok.lexeme}'",
+                "expected a declaration (struct/fun/enum/typealias/const/trait/"
+                f"impl/import), found '{tok.lexeme}'",
                 tok.line, tok.column,
             )
         if isinstance(decl, ast.ImplDecl):
@@ -124,9 +129,67 @@ class Parser:
                     "attributes are not allowed on an 'impl' block",
                     tok.line, tok.column,
                 )
+            if is_pub:
+                raise ParseError(
+                    "'pub' is not allowed on an 'impl' block (visibility follows "
+                    "the implemented type)",
+                    pub_tok.line, pub_tok.column,
+                )
+        elif isinstance(decl, ast.ImportDecl):
+            if attrs:
+                raise ParseError(
+                    "attributes are not allowed on an import statement",
+                    tok.line, tok.column,
+                )
+            # is_pub was already threaded into _import_decl.
         else:
             decl.attributes = attrs
+            decl.is_pub = is_pub
         return decl
+
+    def _import_decl(self, is_pub: bool) -> ast.ImportDecl:
+        start = self._peek()
+        if self._match(T.FROM):
+            path = self._import_path()
+            self._expect(T.IMPORT, "'import' after the path in a 'from' import")
+            items: list[ast.ImportItem] = [self._import_item()]
+            while self._match(T.COMMA):
+                items.append(self._import_item())
+            return ast.ImportDecl(path, items=items, is_pub=is_pub).at(
+                start.line, start.column
+            )
+        self._expect(T.IMPORT, "'import' or 'from'")
+        path = self._import_path()
+        alias: str | None = None
+        if self._match(T.AS):
+            alias = self._expect(T.IDENT, "an alias name after 'as'").value
+        if is_pub and alias is None:
+            raise ParseError(
+                "a 'pub import' must bind a simple name: add 'as <name>' "
+                "(the full path cannot be re-exported directly)",
+                start.line, start.column,
+            )
+        return ast.ImportDecl(path, alias=alias, is_pub=is_pub).at(
+            start.line, start.column
+        )
+
+    def _import_path(self) -> ast.ImportPath:
+        tok = self._peek()
+        dots = 0
+        while self._check(T.DOT) or self._check(T.DOTDOT):
+            dots += 2 if self._peek().kind is T.DOTDOT else 1
+            self._advance()
+        segments = [self._expect(T.IDENT, "a module path segment").value]
+        while self._match(T.DOT):
+            segments.append(self._expect(T.IDENT, "a path segment after '.'").value)
+        return ast.ImportPath(dots, segments).at(tok.line, tok.column)
+
+    def _import_item(self) -> ast.ImportItem:
+        tok = self._expect(T.IDENT, "an imported name")
+        alias = None
+        if self._match(T.AS):
+            alias = self._expect(T.IDENT, "an alias name after 'as'").value
+        return ast.ImportItem(tok.value, alias).at(tok.line, tok.column)
 
     def _attributes(self) -> list[ast.Attribute]:
         attrs: list[ast.Attribute] = []

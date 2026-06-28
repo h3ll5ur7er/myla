@@ -659,9 +659,21 @@ fun internal() { /* ... */ }         // file-local
 **Collisions:** importing two things under the same name is a **compile-time
 error** — there is no automatic resolution; disambiguate with `as`.
 
-Remaining fine details (package vs. module resolution corner cases, `pub use`
-re-exports, the exact `format`/interpolation surface) are deferred to when the
-stdlib/module work begins (v0.3).
+**Re-exports (D54):** `pub` is a uniform prefix on an import statement, marking
+the binding it introduces as part of *this* module's public surface — there is
+no separate `use` keyword. A `pub import` **requires `as <ident>`** (the export
+must be a simple identifier; the last path segment is not auto-bound, per D22),
+while `pub from … import name` already binds a simple name.
+
+```my
+pub import std.collections.list as list  // re-export under the name `list`
+pub from .utils import helper            // re-export `helper`
+import std.collections.list              // ERROR if used with pub: needs `as`
+```
+
+Remaining fine details (package vs. module resolution corner cases, the exact
+`format`/interpolation surface) are deferred to when the stdlib/module work
+begins (v0.5).
 
 ### Strings (D21)
 

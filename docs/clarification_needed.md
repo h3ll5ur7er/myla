@@ -4,7 +4,7 @@ Open decisions that need your input before (or during) implementation. When you
 decide one, it moves to the **Decision log** in [roadmap.md](roadmap.md) and is
 removed here.
 
-_Last updated: 2026-06-28 (V1–V8 → D30–D37 (v0.2 locked); W1–W6 → D38–D43 (v0.3 locked); **X1–X9 → D45–D53** (v0.4 abstraction locked))._
+_Last updated: 2026-06-28 (V1–V8 → D30–D37 (v0.2 locked); W1–W6 → D38–D43 (v0.3 locked); X1–X9 → D45–D53 (v0.4 abstraction locked); **v0.5 scope: D54–D58 locked, full design in [v0.5-modules-and-runtime.md](v0.5-modules-and-runtime.md)**)._
 
 ---
 
@@ -15,11 +15,22 @@ ops (W1–W6 → **D38–D43**), and v0.4 abstraction (X1–X9 → **D45–D53**
 answered and recorded in [roadmap.md](roadmap.md); the full v0.4 design is locked
 in [v0.4-abstraction.md](v0.4-abstraction.md).
 
+### v0.5 scope (locked, not yet implemented)
+
+- The full v0.5 design is now in
+  [v0.5-modules-and-runtime.md](v0.5-modules-and-runtime.md): modules + imports +
+  `pub` re-exports + resolution rules (D17/D22/D54/D57), the `std` skeleton,
+  floats (D19/D56), the `char` type + UTF-8 string model (D25), the freestanding
+  I/O runtime (D29), restricted generic traits (D55), and string interpolation
+  (D58).
+
 ### Later batches (not yet detailed)
 
-- v0.5 stdlib/modules: package vs. module resolution corner cases, `pub use`
-  re-exports, and string interpolation as sugar over `format`.
+- v0.5 stdlib: the exact module surface grows on demand during self-hosting;
+  format/interpolation **specs** (`{x:04}`) are a later, joint feature.
 - Deferred within v0.3: **sets** (revisit when a concrete need appears, D39).
+- Deferred to post-self-hosted-codegen: process spawning (`fork`/`execve` to
+  drive `as`/`ld`) and a package **manifest** format (D29; §1.4).
 
 ---
 
@@ -54,3 +65,11 @@ receiver (D47) · X4 by-value capture, `ref` later (D48) · X5 16-byte
 `(code_ptr, env_ptr)` fat value + refcounted env (D49) · X6 `|>` + `>>`
 compose-by-type (D50) · X7 `_` partial app, no currying (D51) · X8 fixed
 operator-trait set + `#derive(Eq)` (D52) · X9 limited built-in-trait bounds (D53).
+
+**v0.5 scope:** re-exports via a `pub`-prefixed import, `as` required on
+`pub import` (D54) · restricted generic traits, ≤1 impl per type, no overload
+resolution (D55) · floats scheduled into v0.5 per D19/D20 (D56) · package/module
+resolution corner cases — files=modules/dirs=packages, `foo/foo.my` package
+root, collisions error, entry-dir root, shadow-protected builtins,
+module-before-item, cycles ok (D57) · string interpolation `f"…{expr}…"` as sugar
+over `format` (D58).

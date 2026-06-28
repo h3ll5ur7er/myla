@@ -497,6 +497,15 @@ class Checker:
     def _collect_globals(self) -> None:
         seen: dict[str, ast.Node] = {}
         for decl in self.program.decls:
+            if isinstance(decl, ast.ImportDecl):
+                # v0.5.1a parses imports but the module loader (v0.5.1b) is not
+                # wired yet; reaching the checker with an import means the source
+                # was type-checked directly rather than loaded as a module.
+                raise TypeCheckError(
+                    "module imports are not supported yet (the loader arrives in "
+                    "v0.5.1b)",
+                    decl.line, decl.column,
+                )
             if isinstance(decl, ast.ImplDecl):
                 self._impl_decls.append(decl)
                 continue

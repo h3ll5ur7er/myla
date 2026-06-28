@@ -204,11 +204,13 @@ future-grammar items as well: bitwise & shift operators (`&`, `|`, `^`, `~`,
 type, D24), numeric cast expressions (`expr "as" type`, D26), `break` /
 `continue` statements, methods + `impl` blocks with a `self` / `var self`
 receiver (D27), module-level `const` declarations (D28), a `char` type with
-character literals (`'a'`, D25) + string indexing (`s[i]`), and `assert` /
-`panic` / `unreachable` intrinsics. New keywords these will reserve include
-`enum`, `match`, `impl`, `trait`, `as`, `const`, `char`, `break`, `continue`, and
-`pub`. Concrete syntax and semantics are in
-[future-features.md](future-features.md) §§7, 11–18.
+character literals (`'a'`, D25) + string indexing (`s[i]`), explicit imports
+(`import a.b.c`, `from .m import x`, `pub` re-exports — D17/D22/D54), and
+`assert` / `panic` / `unreachable` intrinsics. New keywords these will reserve
+include `enum`, `match`, `impl`, `trait`, `as`, `const`, `char`, `break`,
+`continue`, `pub`, `import`, and `from`. Concrete syntax and semantics are in
+[future-features.md](future-features.md) §§7, 11–18 (imports:
+[v0.5-modules-and-runtime.md](v0.5-modules-and-runtime.md) §1, §8).
 
 (The `#main` and `#test` attributes ARE part of v0.0 — see the `attribute`
 production above — but general user-defined macros are not.)
