@@ -1,0 +1,7 @@
+//~ type error: out of range
+// A constant shift amount must be in 0..width for the left operand's type.
+fun bad() -> int8 {
+    return 1i8 << 9
+}
+fun main() {
+}

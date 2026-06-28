@@ -1,10 +1,10 @@
 //~ type error: no error conversion
 // `?` performs no error-type coercion in v0.2: the error types must match.
-fun get() -> Result<int, str> {
+fun fetch() -> Result<int, str> {
     return Ok(1)
 }
 fun bad() -> Result<int, bool> {
-    let x = get()?
+    let x = fetch()?
     return Ok(x)
 }
 fun main() {

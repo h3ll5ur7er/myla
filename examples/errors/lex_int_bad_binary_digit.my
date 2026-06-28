@@ -1,0 +1,5 @@
+//~ lex error: after digits
+// A binary literal may only contain 0 and 1; `2` is not a binary digit.
+fun main() {
+    let x = 0b102
+}

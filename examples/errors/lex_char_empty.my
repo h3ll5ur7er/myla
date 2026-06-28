@@ -1,0 +1,6 @@
+//~ lex error: empty or unterminated char literal
+// A char literal must contain exactly one byte; `''` is empty.
+#main
+fun main() {
+    let c = ''
+}

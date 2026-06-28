@@ -1,0 +1,6 @@
+//~ type error: unreachable() takes no arguments
+// unreachable() is a nullary diverging intrinsic.
+#main
+fun main() {
+    unreachable("oops")
+}

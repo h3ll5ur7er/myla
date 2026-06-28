@@ -159,8 +159,8 @@ class TestEnumInterpreter(unittest.TestCase):
         out = run_src(
             "enum Opt { Some(int), None }\n"
             "fun bump(o: Opt) -> Opt { return match o { Opt.Some(n) => Opt.Some(n + 1), Opt.None => Opt.None } }\n"
-            "fun get(o: Opt) -> int { return match o { Opt.Some(n) => n, Opt.None => -1 } }\n"
-            "fun main() {\n    print(get(bump(Opt.Some(41))))\n    print(get(bump(Opt.None)))\n}\n"
+            "fun peel(o: Opt) -> int { return match o { Opt.Some(n) => n, Opt.None => -1 } }\n"
+            "fun main() {\n    print(peel(bump(Opt.Some(41))))\n    print(peel(bump(Opt.None)))\n}\n"
         )
         self.assertEqual(out, "42\n-1\n")
 

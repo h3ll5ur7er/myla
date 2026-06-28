@@ -1,0 +1,7 @@
+//~ type error: type mismatch: 'int32' vs 'str'
+// A map literal's values must all share one type; mixing int and str is rejected.
+#main
+fun main() {
+    let m = [1: 2, 3: "x"]
+    print(len(m))
+}

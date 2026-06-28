@@ -1,0 +1,8 @@
+//~ type error: cannot infer the element type of an empty list
+// A bare `[]` has no element type of its own; without an annotation (or other
+// expected type) the checker cannot pick `T`.
+#main
+fun main() {
+    let xs = []
+    print(len(xs))
+}

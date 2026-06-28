@@ -1,0 +1,6 @@
+//~ type error: assert condition must be 'bool'
+// The first argument to assert() must be a boolean condition.
+#main
+fun main() {
+    assert(5)
+}

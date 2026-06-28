@@ -33,6 +33,13 @@ EXPECTED = {
     "generics.my": "42\nmyla\n10\n2\n1\n16\n",
     "generic-types.my": "42\n1\n9\n-1\n60\n3\n",
     "option-result.my": "ok\ndivide by zero\n107\n-1\n42\n",
+    "operators.my": "255\n8\n14\n6\n255\n16\n-8\n15\n1\n-56\n30\n11\n",
+    "constants.my": "4096\n4096\n255\ntrue\n64\n2\n5\nmyla\n",
+    "lists.my": "3\n1\n6\n6\n10\n3\n99\n4\n20\n5\n6\n16\n16\n4\n",
+    "maps.my": "6\n2\n3\n3\n1\n10\n4\n3\nfalse\ntrue\n3\n17\n100\n2\n",
+    "strings.my": ("4\n77\n97\n5\n98\n3\n198\n10\n1\n1\n0\n"
+                   "Hello, world!\nabc\n2 + 3 = 5\nlen: 5\ntrue and false\n"
+                   "Hello, world!\n0123456789\na-b-c\n"),
 }
 
 

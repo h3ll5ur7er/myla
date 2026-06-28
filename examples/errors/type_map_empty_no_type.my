@@ -1,0 +1,7 @@
+//~ type error: cannot infer the key/value types of an empty map
+// The empty map literal `[:]` carries no element types; it needs an annotation.
+#main
+fun main() {
+    let m = [:]
+    print(len(m))
+}

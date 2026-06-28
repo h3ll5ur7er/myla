@@ -1,0 +1,6 @@
+//~ type error: format() has 2 placeholder(s) but 1 argument(s)
+// The number of `{}` placeholders must match the number of arguments.
+#main
+fun main() {
+    print(format("{} {}", 1))
+}

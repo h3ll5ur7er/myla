@@ -1,0 +1,120 @@
+// Bitwise & shift operators, numeric casts, integer-literal bases, and loop
+// control flow (v0.3.1).
+//
+// Precedence note: the bitwise operators bind *tighter* than the comparisons
+// (and `&` > `^` > `|`), so `a & b == c` parses as `(a & b) == c` — avoiding
+// C's classic footgun. Shifts (`<<`, `>>`) bind tighter still. A cast (`x as T`)
+// binds tighter than every binary operator but looser than the unary ones, so
+// `-x as uint8` is `(-x) as uint8`.
+
+// Integer-literal bases: 0x (hex), 0b (binary), 0o (octal), with `_` separators
+// allowed between digits for readability. All four below denote 255.
+#test()[255]
+fun literal_bases() -> int32 {
+    let hex = 0xFF
+    let bin = 0b1111_1111
+    let oct = 0o377
+    let dec = 2_55
+    if hex == bin && bin == oct && oct == dec {
+        return hex
+    }
+    return -1
+}
+
+// Bitwise AND / OR / XOR and one's-complement (`~`).
+#test(0b1100, 0b1010)[8]
+fun band(a: int32, b: int32) -> int32 {
+    return a & b
+}
+
+#test(0b1100, 0b1010)[14]
+fun bor(a: int32, b: int32) -> int32 {
+    return a | b
+}
+
+#test(0b1100, 0b1010)[6]
+fun bxor(a: int32, b: int32) -> int32 {
+    return a ^ b
+}
+
+// `~x` on a uint8: every bit flips, so ~0 == 255 and ~255 == 0.
+#test(0u8)[255]
+#test(255u8)[0]
+fun bnot(x: uint8) -> uint8 {
+    return ~x
+}
+
+// Left shift is logical; right shift is *arithmetic* on signed operands
+// (sign-preserving) and *logical* on unsigned ones (zero-filling).
+#test(1, 4)[16]
+fun shl(x: int32, by: int32) -> int32 {
+    return x << by
+}
+
+#test(-32, 2)[-8]
+fun shift_right_signed(x: int32, by: int32) -> int32 {
+    return x >> by
+}
+
+#test(240u8, 4u8)[15]
+fun shift_right_unsigned(x: uint8, by: uint8) -> uint8 {
+    return x >> by
+}
+
+// Casts truncate on the way down and sign/zero-extend on the way up.
+#test(257)[1]
+fun to_byte(x: int32) -> uint8 {
+    return x as uint8
+}
+
+#test(200u8)[-56]
+fun byte_as_signed(x: uint8) -> int8 {
+    return x as int8
+}
+
+// `continue` skips the rest of the current iteration; here it sums even numbers
+// in 1..=limit by skipping the odd ones.
+#test(10)[30]
+#test(1)[0]
+fun sum_evens(limit: int32) -> int32 {
+    var total = 0
+    var i = 0
+    while i < limit {
+        i = i + 1
+        if i % 2 == 1 {
+            continue
+        }
+        total = total + i
+    }
+    return total
+}
+
+// `break` exits the loop early: find the smallest i whose square exceeds target.
+#test(100)[11]
+#test(0)[1]
+fun first_square_over(target: int32) -> int32 {
+    var n = 0
+    for i in 1..1000 {
+        if i * i > target {
+            n = i
+            break
+        }
+    }
+    return n
+}
+
+#main
+fun main() {
+    print(literal_bases())                  // 255
+    print(band(0b1100, 0b1010))             // 8
+    print(bor(0b1100, 0b1010))              // 14
+    print(bxor(0b1100, 0b1010))             // 6
+    print(bnot(0u8))                        // 255
+    print(shl(1, 4))                        // 16
+    print(shift_right_signed(-32, 2))       // -8
+    print(shift_right_unsigned(240u8, 4u8)) // 15
+    print(to_byte(257))                     // 1
+    print(byte_as_signed(200u8))            // -56
+    print(sum_evens(10))                    // 30
+    print(first_square_over(100))           // 11
+}

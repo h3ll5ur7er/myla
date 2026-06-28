@@ -1,0 +1,8 @@
+//~ type error: requires a list
+// `pop` only applies to a list value.
+#main
+fun main() {
+    var n = 7
+    let x = pop(n)
+    print(x)
+}

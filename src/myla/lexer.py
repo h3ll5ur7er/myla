@@ -33,6 +33,9 @@ _ONE_CHAR_OPS: dict[str, TokenKind] = {
     "*": TokenKind.STAR,
     "/": TokenKind.SLASH,
     "%": TokenKind.PERCENT,
+    "&": TokenKind.AMP,
+    "^": TokenKind.CARET,
+    "~": TokenKind.TILDE,
     "<": TokenKind.LT,
     ">": TokenKind.GT,
     "!": TokenKind.BANG,
@@ -57,6 +60,27 @@ _STRING_ESCAPES: dict[str, str] = {
     "\\": "\\",
     '"': '"',
 }
+
+# Char-literal escapes -> the single byte they denote (v0.3 is byte-oriented;
+# the Unicode `char` type waits for v0.5). `'\''` and `'\0'` are char-only.
+_CHAR_ESCAPES: dict[str, int] = {
+    "n": 10,
+    "t": 9,
+    "r": 13,
+    "\\": 92,
+    "'": 39,
+    "0": 0,
+}
+
+
+# Digit alphabets per integer base (docs/grammar.md: int_lit).
+_BASE_DIGITS: dict[int, str] = {
+    2: "01",
+    8: "01234567",
+    10: "0123456789",
+    16: "0123456789abcdefABCDEF",
+}
+_BASE_PREFIX: dict[str, int] = {"x": 16, "b": 2, "o": 8}
 
 
 def _is_ident_start(c: str) -> bool:
@@ -124,6 +148,8 @@ class Lexer:
                 self._block_comment()
             elif c == '"':
                 self._string()
+            elif c == "'":
+                self._char()
             elif c.isdigit():
                 self._number()
             elif _is_ident_start(c):
@@ -180,13 +206,93 @@ class Lexer:
         value = "".join(chars)
         self._add(TokenKind.STRING, value, start_line, start_col, value=value)
 
+    def _char(self) -> None:
+        """Scan a single-byte char literal `'a'`, `'\\n'`, `'\\0'`, … producing a
+        CHAR token whose value is the byte (0-255). Only single-byte (ASCII)
+        literals are valid in v0.3; a multi-byte char awaits the v0.5 `char`."""
+        start_line, start_col = self.line, self.column
+        start_pos = self.pos
+        self._advance()  # opening quote
+        if self._at_end() or self._peek() in ("\n", "'"):
+            raise LexError("empty or unterminated char literal", start_line, start_col)
+        c = self._advance()
+        if c == "\\":
+            esc_line, esc_col = self.line, self.column
+            if self._at_end():
+                raise LexError("unterminated char literal", start_line, start_col)
+            esc = self._advance()
+            if esc not in _CHAR_ESCAPES:
+                raise LexError(f"invalid escape sequence '\\{esc}'", esc_line, esc_col)
+            byte = _CHAR_ESCAPES[esc]
+        else:
+            byte = ord(c)
+            if byte > 0x7F:
+                raise LexError(
+                    "char literal must be a single ASCII byte (the Unicode `char` "
+                    "type arrives in v0.5)",
+                    start_line, start_col,
+                )
+        if self._at_end() or self._peek() != "'":
+            raise LexError(
+                "char literal must contain exactly one byte", start_line, start_col
+            )
+        self._advance()  # closing quote
+        lexeme = self.source[start_pos:self.pos]
+        self._add(TokenKind.CHAR, lexeme, start_line, start_col, value=byte)
+
+    def _scan_digits(self, base: int) -> str:
+        """Consume a run of base-`base` digits with optional `_` separators.
+
+        Returns the digits with separators stripped. Underscores may only appear
+        between two digits (no leading, trailing, or doubled `_`).
+        """
+        allowed = _BASE_DIGITS[base]
+        chars: list[str] = []
+        prev_underscore = False
+        while not self._at_end():
+            c = self._peek()
+            if c == "_":
+                if not chars or prev_underscore:
+                    raise LexError(
+                        "'_' separators in an integer literal must sit between "
+                        "digits",
+                        self.line, self.column,
+                    )
+                prev_underscore = True
+                self._advance()
+                continue
+            if c in allowed:
+                chars.append(c)
+                prev_underscore = False
+                self._advance()
+                continue
+            break
+        if prev_underscore:
+            raise LexError(
+                "integer literal cannot end with '_'", self.line, self.column
+            )
+        return "".join(chars)
+
     def _number(self) -> None:
         start_line, start_col = self.line, self.column
         start_pos = self.pos
-        while not self._at_end() and self._peek().isdigit():
-            self._advance()
-        digits = self.source[start_pos:self.pos]
-        value = int(digits)
+
+        base = 10
+        if self._peek() == "0" and self._peek(1).lower() in _BASE_PREFIX:
+            prefix = self._peek(1).lower()
+            base = _BASE_PREFIX[prefix]
+            self._advance()  # 0
+            self._advance()  # x / b / o
+            digits = self._scan_digits(base)
+            if digits == "":
+                raise LexError(
+                    f"integer literal has no digits after '0{prefix}'",
+                    start_line, start_col,
+                )
+            value = int(digits, base)
+        else:
+            digits = self._scan_digits(10)
+            value = int(digits, 10)
 
         suffix: str | None = None
         if not self._at_end() and self._peek() in ("i", "u"):

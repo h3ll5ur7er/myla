@@ -45,8 +45,21 @@ class TupleTypeRef(Node):
     elems: list["TypeExpr"] = field(default_factory=list)
 
 
+@dataclass
+class ListTypeRef(Node):
+    """A list type annotation `[T]` (D39); `elem` is the element type."""
+    elem: "TypeExpr"
+
+
+@dataclass
+class MapTypeRef(Node):
+    """A map type annotation `[K: V]` (D39): `key`/`value` element types."""
+    key: "TypeExpr"
+    value: "TypeExpr"
+
+
 # A type annotation as written in source (resolved to a `types.Type` later).
-TypeExpr = Union[TypeRef, TupleTypeRef]
+TypeExpr = Union[TypeRef, TupleTypeRef, ListTypeRef, MapTypeRef]
 
 
 # --- attributes ------------------------------------------------------------
@@ -67,6 +80,7 @@ class Attribute(Node):
 class IntLit(Node):
     value: int
     suffix: Optional[str] = None
+    is_char: bool = False  # a char literal `'a'`: defaults to uint8, still flexible
 
 
 @dataclass
@@ -133,6 +147,28 @@ class TupleIndex(Node):
 
 
 @dataclass
+class ListLit(Node):
+    """A list literal `[e0, e1, ...]` (D39); empty `[]` takes its element type
+    from the expected type. The checker records the element type."""
+    elems: list["Expr"] = field(default_factory=list)
+
+
+@dataclass
+class Index(Node):
+    """A subscript `target[index]` — list element or map value access (read or
+    lvalue). The checker resolves whether `target` is a list or a map."""
+    target: "Expr"
+    index: "Expr"
+
+
+@dataclass
+class MapLit(Node):
+    """A map literal `[k0: v0, k1: v1, ...]` or the empty map `[:]` (D39); the
+    checker records the key/value types. `entries` pairs key and value exprs."""
+    entries: list[tuple["Expr", "Expr"]] = field(default_factory=list)
+
+
+@dataclass
 class Match(Node):
     scrutinee: "Expr"
     arms: list["MatchArm"] = field(default_factory=list)
@@ -150,9 +186,21 @@ class Try(Node):
     operand: "Expr"
 
 
+@dataclass
+class Cast(Node):
+    """`expr as T` — an explicit numeric conversion (D43).
+
+    Only numeric-to-numeric casts are allowed; the checker validates the target
+    and records it on `resolved_type`. Backends apply the source/target widths to
+    sign- or zero-extend and truncate with wrapping semantics.
+    """
+    operand: "Expr"
+    target: "TypeExpr"
+
+
 Expr = Union[
     IntLit, StrLit, BoolLit, Name, Unary, Binary, Call, FieldAccess, StructLit,
-    TupleLit, TupleIndex, Match, Try,
+    TupleLit, TupleIndex, ListLit, MapLit, Index, Match, Try, Cast,
 ]
 
 
@@ -283,10 +331,16 @@ class While(Node):
 
 @dataclass
 class For(Node):
+    """`for v in start..end { }` (range) or `for v in xs { }` (list iteration).
+
+    Exactly one form is populated: a range has `start`/`end` set and `iterable`
+    None; a list iteration has `iterable` set and `start`/`end` None.
+    """
     var_name: str
-    start: "Expr"
-    end: "Expr"
+    start: Optional["Expr"]
+    end: Optional["Expr"]
     body: Block
+    iterable: Optional["Expr"] = None
 
 
 @dataclass
@@ -295,11 +349,24 @@ class Return(Node):
 
 
 @dataclass
+class Break(Node):
+    """`break` — exit the innermost enclosing loop."""
+
+
+@dataclass
+class Continue(Node):
+    """`continue` — skip to the next iteration of the innermost enclosing loop."""
+
+
+@dataclass
 class ExprStmt(Node):
     expr: "Expr"
 
 
-Stmt = Union[Block, VarDecl, DestructDecl, Assign, If, While, For, Return, ExprStmt]
+Stmt = Union[
+    Block, VarDecl, DestructDecl, Assign, If, While, For, Return, Break,
+    Continue, ExprStmt,
+]
 
 
 # --- declarations ----------------------------------------------------------
@@ -356,7 +423,21 @@ class TypeAliasDecl(Node):
     attributes: list[Attribute] = field(default_factory=list)
 
 
-Decl = Union[StructDecl, FunDecl, EnumDecl, TypeAliasDecl]
+@dataclass
+class ConstDecl(Node):
+    """A file-scoped, immutable compile-time constant (D28).
+
+    The initializer must be a constant expression (literals, references to other
+    `const`s, and arithmetic/bitwise/cast/logical operations over them); the
+    checker folds it to a value and records it on `folded`.
+    """
+    name: str
+    declared_type: "TypeExpr"
+    value: "Expr"
+    attributes: list[Attribute] = field(default_factory=list)
+
+
+Decl = Union[StructDecl, FunDecl, EnumDecl, TypeAliasDecl, ConstDecl]
 
 
 @dataclass

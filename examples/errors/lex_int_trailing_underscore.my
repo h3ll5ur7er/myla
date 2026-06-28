@@ -1,0 +1,5 @@
+//~ lex error: cannot end with '_'
+// `_` separators must sit between digits, never at the end.
+fun main() {
+    let x = 1_000_
+}

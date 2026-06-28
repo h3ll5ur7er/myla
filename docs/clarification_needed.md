@@ -4,24 +4,24 @@ Open decisions that need your input before (or during) implementation. When you
 decide one, it moves to the **Decision log** in [roadmap.md](roadmap.md) and is
 removed here.
 
-_Last updated: 2026-06-27 (V1–V8 resolved → D30–D37; v0.2 design locked)._
+_Last updated: 2026-06-27 (V1–V8 → D30–D37 (v0.2 locked); W1–W6 → D38–D43 (v0.3 collections/strings/ops locked))._
 
 ---
 
 ## Still open
 
-**None currently blocking.** The v0.2 data-modeling sub-decisions V1–V8 have been
-answered and recorded as **D30–D37** in [roadmap.md](roadmap.md) (summary below).
-v0.2 is now design-locked and ready to implement.
+**None currently blocking.** v0.2 (V1–V8 → **D30–D37**) and the v0.3 collections/
+strings/ops decisions (W1–W6 → **D38–D43**) are answered and recorded in
+[roadmap.md](roadmap.md); the full v0.3 design is locked in
+[v0.3-collections-and-ops.md](v0.3-collections-and-ops.md).
 
 ### Likely later batches (not yet detailed)
 
-- v0.2 ADTs/generics: exact `match` pattern syntax (guards, or-patterns, literal
-  & binding sub-patterns) and exhaustiveness edge cases.
-- v0.3 collections: literal syntax for `[T]`/`[K: V]`/sets, and how mutating
-  methods interact with deep immutability (D14) on a `var` binding.
-- v0.3 stdlib/modules: package vs. module resolution corner cases, `pub use`
-  re-exports, and the `format`/interpolation surface.
+- v0.4 abstraction: method resolution / `impl` coherence, trait/operator-
+  overloading surface, closure capture (`ref` vs by-value, D15) edge cases.
+- v0.5 stdlib/modules: package vs. module resolution corner cases, `pub use`
+  re-exports, and string interpolation as sugar over `format`.
+- Deferred within v0.3: **sets** (revisit when a concrete need appears, D39).
 
 ---
 

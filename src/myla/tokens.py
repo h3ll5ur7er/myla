@@ -15,6 +15,7 @@ class TokenKind(Enum):
     # literals
     INT = auto()
     STRING = auto()
+    CHAR = auto()
 
     # identifiers
     IDENT = auto()
@@ -28,6 +29,10 @@ class TokenKind(Enum):
     ENUM = auto()
     MATCH = auto()
     TYPEALIAS = auto()
+    AS = auto()
+    CONST = auto()
+    BREAK = auto()
+    CONTINUE = auto()
     IF = auto()
     ELSE = auto()
     WHILE = auto()
@@ -62,6 +67,9 @@ class TokenKind(Enum):
     STAR = auto()         # *
     SLASH = auto()        # /
     PERCENT = auto()      # %
+    AMP = auto()          # &
+    CARET = auto()        # ^
+    TILDE = auto()        # ~
     LT = auto()           # <
     GT = auto()           # >
     BANG = auto()         # !
@@ -93,6 +101,10 @@ KEYWORDS: dict[str, TokenKind] = {
     "enum": TokenKind.ENUM,
     "match": TokenKind.MATCH,
     "typealias": TokenKind.TYPEALIAS,
+    "as": TokenKind.AS,
+    "const": TokenKind.CONST,
+    "break": TokenKind.BREAK,
+    "continue": TokenKind.CONTINUE,
     "if": TokenKind.IF,
     "else": TokenKind.ELSE,
     "while": TokenKind.WHILE,
@@ -127,8 +139,9 @@ class Token:
         lexeme:  the exact source text of the token.
         line:    1-based line number of the token's first character.
         column:  1-based column number of the token's first character.
-        value:   parsed literal value (int for INT, str for STRING/IDENT and
-                 keywords, bool for TRUE/FALSE); None otherwise.
+        value:   parsed literal value (int for INT and the byte value for CHAR,
+                 str for STRING/IDENT and keywords, bool for TRUE/FALSE); None
+                 otherwise.
         suffix:  for INT tokens, the type suffix (e.g. "u8") or None.
     """
 

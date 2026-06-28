@@ -1,0 +1,7 @@
+//~ type error: format()'s first argument must be a string literal
+// The format string is checked at compile time, so it must be a literal.
+#main
+fun main() {
+    let f = "fmt"
+    print(format(f, 1))
+}

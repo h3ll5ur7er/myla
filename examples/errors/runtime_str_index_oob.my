@@ -1,0 +1,7 @@
+//~ runtime error: string index 5 out of bounds
+// Byte indexing past the end traps at runtime (D40), like a list index.
+#main
+fun main() {
+    let s = "ab"
+    print(s[5] as int)
+}

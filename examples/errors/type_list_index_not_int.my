@@ -1,0 +1,7 @@
+//~ type error: list index must be an integer
+// A list is indexed by an integer position, not a string.
+#main
+fun main() {
+    let xs = [1, 2, 3]
+    print(xs["nope"])
+}

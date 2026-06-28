@@ -1,0 +1,9 @@
+//~ type error: requires a list
+// `for v in <expr>` iterates a list; a range needs the `start..end` form.
+#main
+fun main() {
+    let n = 5
+    for x in n {
+        print(x)
+    }
+}

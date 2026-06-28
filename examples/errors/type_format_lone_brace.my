@@ -1,0 +1,6 @@
+//~ type error: format(): a single '{' must be a '{}' placeholder or an escaped '{{'
+// A bare `{` is rejected; write `{}` for a hole or `{{` for a literal brace.
+#main
+fun main() {
+    print(format("a { b"))
+}

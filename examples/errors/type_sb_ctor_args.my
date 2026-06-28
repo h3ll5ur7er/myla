@@ -1,0 +1,6 @@
+//~ type error: StringBuilder() takes no arguments
+// A StringBuilder starts empty; append to it after construction.
+#main
+fun main() {
+    let sb = StringBuilder(1)
+}

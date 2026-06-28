@@ -8,9 +8,10 @@ Related docs: [language-spec.md](language-spec.md) · [grammar.md](grammar.md) �
 [architecture.md](architecture.md) · [future-features.md](future-features.md) ·
 [self-hosting.md](self-hosting.md) ·
 [v0.2 data modeling](v0.2-data-modeling.md) ·
+[v0.3 collections & ops](v0.3-collections-and-ops.md) ·
 open questions in [clarification_needed.md](clarification_needed.md).
 
-_Last updated: 2026-06-27 (v0.2 in progress — tuples, enums/`match`, **recursive enums (heap-boxed)**, **reference counting**, **generics (monomorphized): functions (v0.2.4a) + structs/enums (v0.2.4b)**, and the **`Option`/`Result` prelude + `?` operator (v0.2.4c)** landed end-to-end with interpreter/native parity)._
+_Last updated: 2026-06-28 (**v0.2 complete**; **v0.3 complete** — all five phases landed: bitwise/shift operators `& | ^ ~ << >>`, numeric casts `x as T`, `0x`/`0b`/`0o` integer literals with `_` separators, `break`/`continue`, module-level `const`, the `assert`/`panic`/`unreachable` intrinsics, **lists `[T]`**, **maps `[K: V]`** (copy-on-write + reference counting, open-addressing hash table, monomorphization), and the **string toolkit** (char literals, byte indexing `s[i] -> uint8`, `len(str)`, `str + str` concat, `format`, and a refcounted CoW `StringBuilder`), all end-to-end with interpreter/native parity. Next: v0.4 — methods/`impl`/traits + lambdas)._
 
 ---
 
@@ -104,8 +105,8 @@ flowchart LR
 | v0.0.2 | Front end + tree-walking interpreter; `myla run`/`test`; burn-tests pass | Done |
 | v0.0.3 | Working x86-64 compiler; `myla build`; output matches interpreter | Done |
 | (in v0.0.2) | `#main` / `#test` attributes + `myla test` runner | Done (pulled into v0.0 per D10) |
-| v0.2 | Data modeling: `enum`+`match`, tuples, generics, `Option`/`Result` | In progress — tuples, enums/`match`, recursive enums (heap-boxed), reference counting, **generics** (monomorphized): functions (v0.2.4a) + structs/enums (v0.2.4b), and the **`Option`/`Result` prelude + `?` (v0.2.4c)** done (interpreter+compiler+tests) (see [v0.2-data-modeling.md](v0.2-data-modeling.md)) |
-| v0.3 | Collections, strings & ops: lists/maps/sets, string toolkit, refcounting, bitwise, casts, `break`/`continue`, `const`, `assert` | Planned (Tier B+C) |
+| v0.2 | Data modeling: `enum`+`match`, tuples, generics, `Option`/`Result` | **Done** — tuples, enums/`match`, recursive enums (heap-boxed), reference counting, **generics** (monomorphized): functions (v0.2.4a) + structs/enums (v0.2.4b), and the **`Option`/`Result` prelude + `?` (v0.2.4c)** complete (interpreter+compiler+tests) (see [v0.2-data-modeling.md](v0.2-data-modeling.md)) |
+| v0.3 | Collections, strings & ops: lists/maps/sets, string toolkit, refcounting, bitwise, casts, `break`/`continue`, `const`, `assert` | **Done** (Tier B+C) — v0.3.1–v0.3.5 all landed: bitwise/shift, `x as T`, `0x`/`0b`/`0o` literals, `break`/`continue`, `const`, `assert`/`panic`/`unreachable`, lists `[T]`, maps `[K: V]`, and the string toolkit (char literals, byte indexing, `len(str)`, `+` concat, `format`, `StringBuilder`). Sets deferred (D39). |
 | v0.4 | Abstraction: methods/`impl`/traits, lambdas/closures, pipelines | Planned (Tier D) |
 | v0.5 | Modules & runtime: imports + stdlib, char/byte model, freestanding I/O | Planned (Tier E) |
 | v0.6–v0.9 | Self-hosting bring-up: port the toolchain to Myla, differentially tested | Planned (Tier F) |
@@ -156,18 +157,21 @@ Targets follow the [self-hosting](self-hosting.md) dependency ordering (Tier A�
 
 | Feature | Status | Target | Notes |
 |---------|--------|--------|-------|
-| Algebraic data types (`enum`) + `match` | In progress (v0.2) | v0.2 | Enums + full `match` done (expr value D30; payloads D32; wildcard/binding/literal/enum/tuple/struct/nested/or-patterns + guards D33; exhaustiveness + redundancy). **Recursive enums heap-boxed (v0.2.3)**: self-referential payload edges become 8-byte heap pointers; pure struct/tuple cycles still rejected. **Reference counting (v0.2.3b)**: refcounted heap cells with a free list, retain-on-share / drop-at-scope-exit, freed at zero — build/discard loops run in bounded memory. Interpreter + native parity. |
+| Algebraic data types (`enum`) + `match` | Done (v0.2) | v0.2 | Enums + full `match` done (expr value D30; payloads D32; wildcard/binding/literal/enum/tuple/struct/nested/or-patterns + guards D33; exhaustiveness + redundancy). **Recursive enums heap-boxed (v0.2.3)**: self-referential payload edges become 8-byte heap pointers; pure struct/tuple cycles still rejected. **Reference counting (v0.2.3b)**: refcounted heap cells with a free list, retain-on-share / drop-at-scope-exit, freed at zero — build/discard loops run in bounded memory. Interpreter + native parity. |
 | Tuples + multiple return (`return a, b`) | Done (v0.2) | v0.2 | Arity ≥ 1, `(x,)` 1-tuple, no unit type (D35); indexing, destructuring, value semantics — interpreter + native parity |
 | Generics via monomorphization | Done (v0.2) | v0.2 | Strategy locked (D13); inferred at call sites (D34). **Functions (v0.2.4a) + structs/enums (v0.2.4b) done**: `fun id<T>`, `struct Box<T>`, `enum List<T>` (incl. recursive + RC), call-site/value inference, monomorphized per concrete instantiation (functions *and* layouts) before codegen; interpreter runs them by erasure. |
 | Error handling: `Result`/`Option` + `?` | Done (v0.2.4c) | v0.2 | (D16); same-carrier `?` (D36). `Option`/`Result` injected by the prelude (variants constructible unqualified: `Some`/`None`/`Ok`/`Err`); `?` desugars to a `match` once its carrier is known (success → value, failure → `return`). Monomorphized like any generic enum; interpreter + native parity. |
-| Collections: `[T]` list, `[K: V]` map, sets | Decided (design) | v0.3 | Deep immutability (D14); Tier B |
+| Collections: `[T]` list | Done (v0.3.3) | v0.3.3 | Literals (`[]` typed by context), `len`/`xs[i]`/`xs[i]=v`/`push`/`pop`/`for…in`; value semantics with copy-on-write under RC; bounds-checked (traps); monomorphized per element type (D14/D38/D39); Tier B |
+| Collections: `[K: V]` map | Done (v0.3.4) | v0.3.4 | Literals (`[k: v]`/`[:]` typed by context), primitive keys (D37), `len`/`m[k]`/`m[k]=v`/`get`/`contains`/`remove`/`keys`/`for k in m`; value semantics with copy-on-write under RC; open-addressing hash table (FNV-1a + linear probing, rebuild deletion); `m[k]` read traps on absent key; monomorphized per `(K,V)` (D14/D38/D39); Tier B |
+| Collections: sets | Deferred | v0.4+ | Sets deferred (D39) — a set can be a thin wrapper over a map later; revisit on concrete need |
 | Memory model: reference counting | Decided | v0.3 | (D12); Tier B |
-| `str`: builder + views + byte-indexing + `format` | Decided (design) | v0.3 | v0.0 `str` is length-prefixed immutable (D21); Tier B |
-| Bitwise & shift operators `& \| ^ ~ << >>` | Decided | v0.3 | §11; `>>` shares with compose, by-type (D24); Tier C |
-| Explicit numeric casts (`x as T`) | Decided | v0.3 | §12; no implicit mixing (D4); semantics in D26; Tier C |
-| `break` / `continue` | Planned | v0.3 | §13; Tier C |
-| Module-level `const` | Decided | v0.3 | §15; `const` only, no top-level mutable (D28); Tier C |
-| `assert` / `panic` / `unreachable` | Planned | v0.3 | §16; reuses the trap path; Tier C |
+| `str`: builder + byte-indexing + `format` + concat | Done (v0.3.5) | v0.3.5 | v0.0 `str` is length-prefixed immutable (D21). Char literals (`'a'`/`'\n'`, default `uint8`), byte indexing `s[i] -> uint8` (traps OOB), `len(str)`, `str + str` concat, `format(fmt, …)` (literal fmt, compile-checked holes); refcounted CoW `StringBuilder` (`append`/`append_byte`/`len`/`build`). Concat/`format` results are non-refcounted heap (arena-resident, by design); slices/views and the Unicode `char` type deferred to v0.5. Tier B |
+| Bitwise & shift operators `& \| ^ ~ << >>` | Done (v0.3.1) | v0.3.1 | Integer-only; bitwise tighter than comparison (`&`>`^`>`\|`), shifts below; signed `>>` arithmetic; const out-of-range shift is an error, runtime amounts masked to width. `<<`/`>>` parsed as adjacent `<`/`>` (D24); Tier C |
+| Explicit numeric casts (`x as T`) | Done (v0.3.1) | v0.3.1 | numeric→numeric only, wrap/extend via shared width logic; no implicit mixing (D4; D26); Tier C |
+| `break` / `continue` | Done (v0.3.1) | v0.3.1 | In `while`/`for`; rejected outside a loop; native backend drops loop-body heap owners on early exit; Tier C |
+| Numeric literal bases `0x`/`0b`/`0o` (+ `_` separators) | Done (v0.3.1) | v0.3.1 | Ordinary integer literals; reuse the `iN`/`uN` suffixes (D43); Tier C |
+| Module-level `const` | Done (v0.3.2) | v0.3.2 | `const NAME: T = <constexpr>`, explicit type; checker folds the value (literals/const-refs/arith/bitwise/cast/logical), rejects cycles + non-const initializers + const div-by-zero; interpreter uses a global env, native inlines the value (D28); Tier C |
+| `assert` / `panic` / `unreachable` | Done (v0.3.2) | v0.3.2 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()`; `panic`/`unreachable` diverge (treated like `return`); native `__panic` writes to stderr + `exit(1)`, interpreter raises a runtime error; reserved builtins; Tier C |
 | Methods + `impl` (static dispatch) | Decided | v0.4 | §14; `var self` for mutation (D27); Tier D |
 | Traits (incl. operator overloading) | Decided (overloading) | v0.4 | (D18); Tier D |
 | Lambdas / closures + function types | Decided (design) | v0.4 | By-value capture first; `ref` later (D15); Tier D |
@@ -190,6 +194,13 @@ Newest first. These are settled; revisiting requires a deliberate new decision.
 
 | # | Date | Decision | Rationale |
 |---|------|----------|-----------|
+| D44 | 2026-06-27 | Out-of-range shift amounts: a **constant** amount `>= width` is a compile error; a **runtime** amount is **masked to the operand width** (`n & (width-1)`) rather than trapping (refines the v0.3 "runtime trap" sketch). `<<`/`>>` are parsed as two column-adjacent `<`/`>` tokens, not lexed as single tokens, so nested generic closers (`Option<List<int>>`) keep working. | Masking keeps the interpreter and native backend trivially in parity and matches the hardware shift instructions; the common (constant) mistake is still caught at compile time |
+| D43 | 2026-06-27 | Add `0x`/`0b`/`0o` integer literals (with `_` separators + type suffixes) in v0.3. (W6) | Bitmasks and byte/char tables read far better in hex; pairs with the new bitwise ops |
+| D42 | 2026-06-27 | v0.3 strings are **byte-oriented**: `s[i] -> uint8`, char literals `'a'`/`'\n'` are their byte code (ASCII only); the dedicated Unicode **`char`** type stays in v0.5. (W5) | What a byte-level lexer needs; keeps Unicode complexity out of v0.3 |
+| D41 | 2026-06-27 | `str` `+` concatenation is **allowed** (produces a new immutable `str`); `StringBuilder` is provided for hot loops to avoid O(n²). (W4) | Ergonomic for the compiler's many small concatenations; builder covers the loop case |
+| D40 | 2026-06-27 | Mutating collection ops are **in-place on a mutable (`var`) lvalue**: `xs[i] = v`, `push(xs, x)`, `pop`, `insert`/`remove`/`m[k] = v` (built-in intrinsics, since methods arrive in v0.4). (W3) | Extends the lvalue assignment we already have for struct fields; ergonomic |
+| D39 | 2026-06-27 | v0.3 ships **list `[T]` + map `[K: V]`**; **sets are deferred** (a set can be a thin map later). (W2) | Lists/maps are what the self-hosted lexer/parser/checker need; sets aren't yet |
+| D38 | 2026-06-27 | Lists & maps have **value semantics with copy-on-write** under RC: a copy shares the cell (refcount bump) and any write through a mutable lvalue clones cells with refcount > 1 first; deep immutability (D14) holds. (W1) | Consistent with struct/enum/tuple value semantics, but avoids O(n) copies when threading collections through the compiler |
 | D37 | 2026-06-27 | Structural equality is deferred: `==`/`!=` stay **primitives-only** (int/bool/str/char) in v0.2; structs/enums/tuples are compared via `match`. A derivable `Eq` / structural `==` arrives with traits (v0.4). (V8) | Avoids committing equality semantics before traits exist |
 | D36 | 2026-06-27 | `?` requires the enclosing function to return the **same carrier** as the operand (Result→Result, Option→Option); no cross-carrier / error-type coercion in v0.2 — traits may generalize it later. (V7) | Simple and explicit; cleaner once traits land |
 | D35 | 2026-06-27 | Tuples have **arity ≥ 1**; the 1-tuple is written `(x,)` (type `(T,)`), the trailing comma disambiguating from grouping. **No unit `()` type** yet (void stays "no return type"). (V6) | 1-tuples may be needed; a unit type can come later |

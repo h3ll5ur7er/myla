@@ -1,0 +1,5 @@
+//~ type error: 'break' outside of a loop
+// `break` is only meaningful inside a `while` or `for` loop.
+fun main() {
+    break
+}

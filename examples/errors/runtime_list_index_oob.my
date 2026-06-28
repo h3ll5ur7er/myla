@@ -1,0 +1,8 @@
+//~ runtime error: out of bounds
+// Indexing past the end traps at runtime (D40); a safe accessor is left to the
+// stdlib (v0.5).
+#main
+fun main() {
+    let xs = [1, 2, 3]
+    print(xs[3])
+}

@@ -47,6 +47,15 @@ class StrType(Type):
 
 
 @dataclass(frozen=True)
+class StringBuilderType(Type):
+    """A `StringBuilder` (D41): a mutable, growable, reference-counted byte buffer
+    with copy-on-write value semantics. Used to assemble strings in a loop
+    without the quadratic cost of repeated `+`. `build(sb)` snapshots it as an
+    immutable `str`."""
+    pass
+
+
+@dataclass(frozen=True)
 class StructType(Type):
     name: str
     args: tuple[Type, ...] = ()   # type arguments for a generic instantiation
@@ -55,6 +64,21 @@ class StructType(Type):
 @dataclass(frozen=True)
 class TupleType(Type):
     elems: tuple[Type, ...]
+
+
+@dataclass(frozen=True)
+class ListType(Type):
+    """A list `[T]` (D39): a reference-counted, copy-on-write heap sequence with
+    value semantics. `elem` is the element type."""
+    elem: Type
+
+
+@dataclass(frozen=True)
+class MapType(Type):
+    """A map `[K: V]` (D39): a reference-counted, copy-on-write hash table with
+    value semantics. `key` must be a primitive comparable type (D37)."""
+    key: Type
+    value: Type
 
 
 @dataclass(frozen=True)
@@ -76,11 +100,13 @@ class TypeParam(Type):
 
 BOOL = BoolType()
 STR = StrType()
+STRING_BUILDER = StringBuilderType()
 
 # primitive type-name keyword -> Type
 _PRIMITIVES: dict[str, Type] = {
     "bool": BOOL,
     "str": STR,
+    "StringBuilder": STRING_BUILDER,
     "int8": IntType(8, True),
     "int16": IntType(16, True),
     "int32": IntType(32, True),
@@ -100,6 +126,7 @@ _SUFFIX_TYPES: dict[str, Type] = {
 }
 
 INT = IntType(32, True)  # what `int` aliases
+BYTE = IntType(8, False)  # `uint8`: the element type of byte indexing `s[i]`
 
 
 def type_name(t: Type | None) -> str:
@@ -111,6 +138,8 @@ def type_name(t: Type | None) -> str:
         return "bool"
     if isinstance(t, StrType):
         return "str"
+    if isinstance(t, StringBuilderType):
+        return "StringBuilder"
     if isinstance(t, (StructType, EnumType)):
         if t.args:
             return f"{t.name}<{', '.join(type_name(a) for a in t.args)}>"
@@ -121,7 +150,17 @@ def type_name(t: Type | None) -> str:
         if len(t.elems) == 1:
             return f"({type_name(t.elems[0])},)"
         return "(" + ", ".join(type_name(e) for e in t.elems) + ")"
+    if isinstance(t, ListType):
+        return f"[{type_name(t.elem)}]"
+    if isinstance(t, MapType):
+        return f"[{type_name(t.key)}: {type_name(t.value)}]"
     return str(t)
+
+
+def _is_map_key(t: Type) -> bool:
+    """Whether `t` is a valid map key: a primitive comparable type — an integer
+    type (incl. the byte `uint8`), `bool`, or `str` (D37)."""
+    return isinstance(t, (IntType, BoolType, StrType))
 
 
 def int_fits(value: int, t: IntType) -> bool:
@@ -134,6 +173,36 @@ def int_fits(value: int, t: IntType) -> bool:
     if t.signed:
         return 0 <= value <= (1 << (t.width - 1))
     return 0 <= value <= (1 << t.width) - 1
+
+
+def _const_int(expr: ast.Expr) -> int | None:
+    """A constant integer value for compile-time checks, or None if not constant.
+
+    Recognises plain integer literals and negated integer literals; everything
+    else is treated as non-constant (checked at runtime instead).
+    """
+    if isinstance(expr, ast.IntLit):
+        return expr.value
+    if (isinstance(expr, ast.Unary) and expr.op == "-"
+            and isinstance(expr.operand, ast.IntLit)):
+        return -expr.operand.value
+    return None
+
+
+def _wrap_int(value: int, t: Type) -> int:
+    """Wrap `value` into the range of integer type `t` (two's complement)."""
+    if not isinstance(t, IntType):
+        return value
+    m = value & ((1 << t.width) - 1)
+    if t.signed and (m >> (t.width - 1)) & 1:
+        m -= 1 << t.width
+    return m
+
+
+def _const_idiv(a: int, b: int) -> int:
+    """Integer division truncated toward zero (matches the interpreter)."""
+    q = abs(a) // abs(b)
+    return -q if (a < 0) != (b < 0) else q
 
 
 @dataclass
@@ -152,6 +221,13 @@ class FuncSig:
 class _Binding:
     type: Type
     mutable: bool
+
+
+@dataclass
+class ConstInfo:
+    """A folded module-level `const`: its type and compile-time value (D28)."""
+    type: Type
+    value: object  # int | bool | str
 
 
 class _Scope:
@@ -175,7 +251,12 @@ class _Scope:
 
 
 # names that may not be used as user declarations
-_BUILTIN_FUNCS = {"print"}
+_BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop",
+                  "contains", "remove", "keys", "format",
+                  "StringBuilder", "append", "append_byte", "build"}
+
+# builtin calls that never return (the checker treats them like a `return`)
+_DIVERGING_BUILTINS = {"panic", "unreachable"}
 
 # sentinel for a match arm whose body diverges (definitely returns)
 _DIVERGE = object()
@@ -187,6 +268,14 @@ _DIVERGE = object()
 _PRELUDE_SRC = (
     "enum Option<T> { Some(T), None }\n"
     "enum Result<T, E> { Ok(T), Err(E) }\n"
+    # `get` is the safe map lookup (§2.3): a thin generic wrapper over the
+    # `contains` builtin and indexing, so it reuses Option's monomorphization.
+    "fun get<K, V>(m: [K: V], k: K) -> Option<V> {\n"
+    "    if contains(m, k) {\n"
+    "        return Some(m[k])\n"
+    "    }\n"
+    "    return None\n"
+    "}\n"
 )
 # bare variant name -> the prelude enum that owns it
 _PRELUDE_VARIANTS = {
@@ -206,11 +295,16 @@ class Checker:
         # behind a heap pointer wherever they appear as an aggregate member (v0.2.3).
         self.recursive_enums: set[str] = set()
         self.functions: dict[str, FuncSig] = {}
+        # module-level constants (D28): name -> folded ConstInfo
+        self.consts: dict[str, ConstInfo] = {}
+        self._const_decls: dict[str, ast.ConstDecl] = {}
+        self._const_folding: set[str] = set()  # in-progress, for cycle detection
         self._aliases_raw: dict[str, ast.TypeRef] = {}
         self._alias_cache: dict[str, Type] = {}
         self.entry: ast.FunDecl | None = None
         self._current_ret: Type | None = None
         self._try_counter = 0
+        self._loop_depth = 0
         # type parameters in scope while resolving/checking a generic decl
         self._type_params: frozenset[str] = frozenset()
 
@@ -219,6 +313,7 @@ class Checker:
     def check(self) -> "Checker":
         self._collect_globals()
         self._resolve_signatures()
+        self._fold_consts()
         self._check_attributes_and_entry()
         for decl in self.program.decls:
             if isinstance(decl, ast.FunDecl):
@@ -248,6 +343,8 @@ class Checker:
                 self.enums[name] = {}  # filled during resolution
             elif isinstance(decl, ast.TypeAliasDecl):
                 self._aliases_raw[name] = decl.target
+            elif isinstance(decl, ast.ConstDecl):
+                self._const_decls[name] = decl
             elif isinstance(decl, ast.FunDecl):
                 self.functions[name] = FuncSig([], None, decl)  # filled later
 
@@ -319,6 +416,20 @@ class Checker:
     def _resolve(self, ref, visiting: frozenset[str] = frozenset()) -> Type:
         if isinstance(ref, ast.TupleTypeRef):
             return TupleType(tuple(self._resolve(e, visiting) for e in ref.elems))
+        if isinstance(ref, ast.ListTypeRef):
+            return ListType(self._resolve(ref.elem, visiting))
+        if isinstance(ref, ast.MapTypeRef):
+            kt = self._resolve(ref.key, visiting)
+            vt = self._resolve(ref.value, visiting)
+            # A type-parameter key (e.g. in a generic function) is validated when
+            # the function is instantiated with a concrete key type.
+            if not _is_map_key(kt) and not self._contains_type_param(kt):
+                raise TypeCheckError(
+                    f"map key type must be a primitive (integer, bool, or str), "
+                    f"found '{type_name(kt)}'",
+                    ref.line, ref.column,
+                )
+            return MapType(kt, vt)
         name = ref.name
         args = getattr(ref, "args", []) or []
         if name in self._type_params:
@@ -439,6 +550,128 @@ class Checker:
                 )
 
     # -- attributes & entry point -------------------------------------------
+
+    # -- module-level constants (D28) ---------------------------------------
+
+    def _fold_consts(self) -> None:
+        """Type-check and constant-fold every `const`, detecting cycles."""
+        for name in self._const_decls:
+            self._ensure_const(name)
+
+    def _ensure_const(self, name: str) -> ConstInfo:
+        """Return the folded value of const `name`, folding it (and any consts it
+        references) on demand. Raises on a cyclic definition."""
+        if name in self.consts:
+            return self.consts[name]
+        decl = self._const_decls[name]
+        if name in self._const_folding:
+            raise TypeCheckError(
+                f"const '{name}' is defined in terms of itself", decl.line, decl.column
+            )
+        self._const_folding.add(name)
+        try:
+            declared = self._resolve(decl.declared_type)
+            if isinstance(declared, TypeParam):
+                raise TypeCheckError(
+                    "a const type must be concrete", decl.line, decl.column
+                )
+            vt = self._expect_value(decl.value, _Scope(), declared)
+            if vt != declared:
+                raise TypeCheckError(
+                    f"const '{name}' is declared '{type_name(declared)}' but its "
+                    f"value has type '{type_name(vt)}'",
+                    decl.value.line, decl.value.column,
+                )
+            value = self._fold_const_expr(decl.value)
+        finally:
+            self._const_folding.discard(name)
+        info = ConstInfo(declared, value)
+        self.consts[name] = info
+        return info
+
+    def _fold_const_expr(self, expr: ast.Expr):
+        if isinstance(expr, ast.IntLit):
+            return _wrap_int(expr.value, expr.resolved_type)
+        if isinstance(expr, ast.BoolLit):
+            return expr.value
+        if isinstance(expr, ast.StrLit):
+            return expr.value
+        if isinstance(expr, ast.Name):
+            ref = getattr(expr, "const_ref", None)
+            if ref is not None:
+                return self._ensure_const(ref).value
+            raise TypeCheckError(
+                f"'{expr.ident}' is not a constant and cannot appear in a const "
+                "initializer",
+                expr.line, expr.column,
+            )
+        if isinstance(expr, ast.Unary):
+            v = self._fold_const_expr(expr.operand)
+            if expr.op == "-":
+                return _wrap_int(-v, expr.resolved_type)
+            if expr.op == "~":
+                return _wrap_int(~v, expr.resolved_type)
+            return not v  # "!"
+        if isinstance(expr, ast.Cast):
+            return _wrap_int(self._fold_const_expr(expr.operand), expr.resolved_type)
+        if isinstance(expr, ast.Binary):
+            return self._fold_const_binary(expr)
+        raise TypeCheckError(
+            "const initializer must be a constant expression (literals, other "
+            "consts, and arithmetic/bitwise/comparison/cast operations over them)",
+            expr.line, expr.column,
+        )
+
+    def _fold_const_binary(self, expr: ast.Binary):
+        op = expr.op
+        if op == "&&":
+            return bool(self._fold_const_expr(expr.left)
+                        and self._fold_const_expr(expr.right))
+        if op == "||":
+            return bool(self._fold_const_expr(expr.left)
+                        or self._fold_const_expr(expr.right))
+        left = self._fold_const_expr(expr.left)
+        right = self._fold_const_expr(expr.right)
+        t = expr.resolved_type
+        if op == "+":
+            return _wrap_int(left + right, t)
+        if op == "-":
+            return _wrap_int(left - right, t)
+        if op == "*":
+            return _wrap_int(left * right, t)
+        if op in ("/", "%"):
+            if right == 0:
+                raise TypeCheckError(
+                    f"const division by zero", expr.line, expr.column
+                )
+            q = _const_idiv(left, right)
+            return _wrap_int(q if op == "/" else left - q * right, t)
+        if op == "&":
+            return _wrap_int(left & right, t)
+        if op == "|":
+            return _wrap_int(left | right, t)
+        if op == "^":
+            return _wrap_int(left ^ right, t)
+        if op == "<<":
+            return _wrap_int(left << (right & (t.width - 1)), t)
+        if op == ">>":
+            return _wrap_int(_wrap_int(left, expr.left.resolved_type)
+                             >> (right & (t.width - 1)), t)
+        if op == "<":
+            return left < right
+        if op == "<=":
+            return left <= right
+        if op == ">":
+            return left > right
+        if op == ">=":
+            return left >= right
+        if op == "==":
+            return left == right
+        if op == "!=":
+            return left != right
+        raise TypeCheckError(  # pragma: no cover - defensive
+            f"unsupported const operator '{op}'", expr.line, expr.column
+        )
 
     def _check_attributes_and_entry(self) -> None:
         main_decls: list[ast.FunDecl] = []
@@ -592,17 +825,41 @@ class Checker:
 
         elif isinstance(stmt, ast.While):
             self._expect_type(stmt.cond, scope, BOOL, "while condition")
+            self._loop_depth += 1
             self._check_block(stmt.body, scope, ret)
+            self._loop_depth -= 1
 
         elif isinstance(stmt, ast.For):
-            start_t = self._expect_value(stmt.start, scope, None)
-            end_t = self._expect_value(stmt.end, scope, None)
-            loop_t = self._unify(stmt.start, start_t, stmt.end, end_t)
-            if not isinstance(loop_t, IntType):
-                raise TypeCheckError("for-range bounds must be integers", stmt.line, stmt.column)
+            if stmt.iterable is not None:  # `for v in xs/m` — list/map iteration
+                it = self._expect_value(stmt.iterable, scope, None)
+                if isinstance(it, ListType):
+                    loop_t: Type = it.elem
+                elif isinstance(it, MapType):   # iterate keys (unspecified order)
+                    loop_t = it.key
+                else:
+                    raise TypeCheckError(
+                        f"`for ... in` requires a list or map, found "
+                        f"'{type_name(it)}'",
+                        stmt.iterable.line, stmt.iterable.column,
+                    )
+            else:  # `for v in start..end` — integer range
+                start_t = self._expect_value(stmt.start, scope, None)
+                end_t = self._expect_value(stmt.end, scope, None)
+                loop_t = self._unify(stmt.start, start_t, stmt.end, end_t)
+                if not isinstance(loop_t, IntType):
+                    raise TypeCheckError("for-range bounds must be integers", stmt.line, stmt.column)
             body_scope = _Scope(scope)
             body_scope.define(stmt.var_name, _Binding(loop_t, mutable=False))
+            self._loop_depth += 1
             self._check_block(stmt.body, body_scope, ret)
+            self._loop_depth -= 1
+
+        elif isinstance(stmt, (ast.Break, ast.Continue)):
+            if self._loop_depth == 0:
+                kw = "break" if isinstance(stmt, ast.Break) else "continue"
+                raise TypeCheckError(
+                    f"'{kw}' outside of a loop", stmt.line, stmt.column
+                )
 
         elif isinstance(stmt, ast.Return):
             if ret is None:
@@ -686,6 +943,31 @@ class Checker:
             ft = fields[expr.field_name]
             expr.resolved_type = ft
             return ft, mutable
+        if isinstance(expr, ast.Index):
+            base_type, mutable = self._check_lvalue(expr.target, scope)
+            if isinstance(base_type, MapType):
+                self._expect_type(expr.index, scope, base_type.key, "map key")
+                expr.resolved_type = base_type.value
+                return base_type.value, mutable
+            if isinstance(base_type, StrType):
+                raise TypeCheckError(
+                    "strings are immutable; `s[i]` cannot be assigned to",
+                    expr.line, expr.column,
+                )
+            if not isinstance(base_type, ListType):
+                raise TypeCheckError(
+                    f"type '{type_name(base_type)}' is not a list and cannot be "
+                    f"indexed with `[...]`",
+                    expr.line, expr.column,
+                )
+            it = self._expect_value(expr.index, scope, INT)
+            if not isinstance(it, IntType):
+                raise TypeCheckError(
+                    f"list index must be an integer, found '{type_name(it)}'",
+                    expr.index.line, expr.index.column,
+                )
+            expr.resolved_type = base_type.elem
+            return base_type.elem, mutable
         raise TypeCheckError("invalid assignment target", expr.line, expr.column)
 
     # -- expression typing ---------------------------------------------------
@@ -729,10 +1011,18 @@ class Checker:
             return self._infer_tuple_lit(expr, scope, expected)
         if isinstance(expr, ast.TupleIndex):
             return self._infer_tuple_index(expr, scope)
+        if isinstance(expr, ast.ListLit):
+            return self._infer_list_lit(expr, scope, expected)
+        if isinstance(expr, ast.MapLit):
+            return self._infer_map_lit(expr, scope, expected)
+        if isinstance(expr, ast.Index):
+            return self._infer_index(expr, scope)
         if isinstance(expr, ast.Match):
             return self._infer_match(expr, scope, expected)
         if isinstance(expr, ast.Try):
             return self._infer_try(expr, scope)
+        if isinstance(expr, ast.Cast):
+            return self._infer_cast(expr, scope)
         raise TypeCheckError(  # pragma: no cover - defensive
             f"unsupported expression {type(expr).__name__}", expr.line, expr.column
         )
@@ -765,6 +1055,92 @@ class Checker:
         ft = base.elems[expr.index]
         expr.resolved_type = ft
         return ft
+
+    def _infer_list_lit(self, expr: ast.ListLit, scope: _Scope,
+                        expected: Type | None) -> Type:
+        exp_elem = expected.elem if isinstance(expected, ListType) else None
+        if not expr.elems:
+            if exp_elem is None:
+                raise TypeCheckError(
+                    "cannot infer the element type of an empty list `[]`; "
+                    "annotate it (e.g. `: [int]`)",
+                    expr.line, expr.column,
+                )
+            t = ListType(exp_elem)
+            expr.resolved_type = t
+            return t
+        # Infer the first element, then require the rest to unify to it. An
+        # element-type hint (annotation/param/return) flows into every element so
+        # `[1, 2, 3]: [uint8]` adopts `uint8` (integer-literal flexibility).
+        elem_t = self._expect_value(expr.elems[0], scope, exp_elem)
+        for e in expr.elems[1:]:
+            et = self._expect_value(e, scope, elem_t)
+            elem_t = self._unify(expr.elems[0], elem_t, e, et)
+        t = ListType(elem_t)
+        expr.resolved_type = t
+        return t
+
+    def _infer_index(self, expr: ast.Index, scope: _Scope) -> Type:
+        base = self._expect_value(expr.target, scope, None)
+        if isinstance(base, MapType):
+            self._expect_type(expr.index, scope, base.key, "map key")
+            expr.resolved_type = base.value
+            return base.value
+        if isinstance(base, StrType):
+            it = self._expect_value(expr.index, scope, INT)
+            if not isinstance(it, IntType):
+                raise TypeCheckError(
+                    f"string index must be an integer, found '{type_name(it)}'",
+                    expr.index.line, expr.index.column,
+                )
+            expr.resolved_type = BYTE      # `s[i]` is the byte at index i
+            return BYTE
+        if not isinstance(base, ListType):
+            raise TypeCheckError(
+                f"type '{type_name(base)}' is not a list and cannot be indexed "
+                f"with `[...]`",
+                expr.line, expr.column,
+            )
+        it = self._expect_value(expr.index, scope, INT)
+        if not isinstance(it, IntType):
+            raise TypeCheckError(
+                f"list index must be an integer, found '{type_name(it)}'",
+                expr.index.line, expr.index.column,
+            )
+        expr.resolved_type = base.elem
+        return base.elem
+
+    def _infer_map_lit(self, expr: ast.MapLit, scope: _Scope,
+                       expected: Type | None) -> Type:
+        exp = expected if isinstance(expected, MapType) else None
+        exp_k = exp.key if exp else None
+        exp_v = exp.value if exp else None
+        if not expr.entries:
+            if exp is None:
+                raise TypeCheckError(
+                    "cannot infer the key/value types of an empty map `[:]`; "
+                    "annotate it (e.g. `: [str: int]`)",
+                    expr.line, expr.column,
+                )
+            expr.resolved_type = exp
+            return exp
+        k0, v0 = expr.entries[0]
+        key_t = self._expect_value(k0, scope, exp_k)
+        if not _is_map_key(key_t):
+            raise TypeCheckError(
+                f"map key type must be a primitive (integer, bool, or str), "
+                f"found '{type_name(key_t)}'",
+                k0.line, k0.column,
+            )
+        val_t = self._expect_value(v0, scope, exp_v)
+        for k, v in expr.entries[1:]:
+            kt = self._expect_value(k, scope, key_t)
+            key_t = self._unify(k0, key_t, k, kt)
+            vt = self._expect_value(v, scope, val_t)
+            val_t = self._unify(v0, val_t, v, vt)
+        t = MapType(key_t, val_t)
+        expr.resolved_type = t
+        return t
 
     # -- match ---------------------------------------------------------------
 
@@ -883,12 +1259,16 @@ class Checker:
             for i, s in enumerate(stmts):
                 if i == len(stmts) - 1 and isinstance(s, ast.ExprStmt):
                     t = self._infer(s.expr, bscope, expected)
+                    if _is_diverging(s.expr):
+                        return (_DIVERGE, None)
                     return (t, s.expr)
                 self._check_stmt(s, bscope, self._current_ret)
             if _block_returns(body):
                 return (_DIVERGE, None)
             return (None, None)
         t = self._infer(body, scope, expected)
+        if _is_diverging(body):
+            return (_DIVERGE, None)
         return (t, body)
 
     def _unify_match_result(self, bodies) -> Type:
@@ -1171,6 +1551,8 @@ class Checker:
             t = _SUFFIX_TYPES[expr.suffix]
         elif isinstance(expected, IntType):
             t = expected
+        elif expr.is_char:
+            t = IntType(8, False)   # a char literal is a `uint8` byte by default
         else:
             t = INT
         assert isinstance(t, IntType)
@@ -1186,6 +1568,11 @@ class Checker:
                     expected: Type | None = None) -> Type:
         binding = scope.lookup(expr.ident)
         if binding is None:
+            if expr.ident in self._const_decls:
+                info = self._ensure_const(expr.ident)
+                expr.const_ref = expr.ident
+                expr.resolved_type = info.type
+                return info.type
             enum_name = _PRELUDE_VARIANTS.get(expr.ident)
             if enum_name is not None:
                 return self._infer_bare_variant(expr, enum_name, expr.ident, expected)
@@ -1233,6 +1620,12 @@ class Checker:
             self._expect_type(expr.operand, scope, BOOL, "operand of '!'")
             expr.resolved_type = BOOL
             return BOOL
+        if expr.op == "~":
+            t = self._expect_value(expr.operand, scope, expected if isinstance(expected, IntType) else None)
+            if not isinstance(t, IntType):
+                raise TypeCheckError("unary '~' requires an integer", expr.line, expr.column)
+            expr.resolved_type = t
+            return t
         raise TypeCheckError(f"unknown unary operator '{expr.op}'", expr.line, expr.column)
 
     def _infer_binary(self, expr: ast.Binary, scope: _Scope, expected: Type | None) -> Type:
@@ -1264,7 +1657,58 @@ class Checker:
             expr.resolved_type = BOOL
             return BOOL
 
-        # arithmetic: + - * / %
+        if op in ("<<", ">>"):
+            # The result takes the left operand's type; the shift amount is an
+            # independent integer (any width), so the operands are not unified.
+            hint = expected if isinstance(expected, IntType) else None
+            lt = self._expect_value(expr.left, scope, hint)
+            if not isinstance(lt, IntType):
+                raise TypeCheckError(
+                    f"operator '{op}' requires an integer left operand",
+                    expr.line, expr.column,
+                )
+            rt = self._expect_value(expr.right, scope, None)
+            if not isinstance(rt, IntType):
+                raise TypeCheckError(
+                    f"shift amount for '{op}' must be an integer",
+                    expr.right.line, expr.right.column,
+                )
+            amount = _const_int(expr.right)
+            if amount is not None and not (0 <= amount < lt.width):
+                raise TypeCheckError(
+                    f"shift amount {amount} is out of range for "
+                    f"'{type_name(lt)}' (valid range is 0..{lt.width - 1})",
+                    expr.right.line, expr.right.column,
+                )
+            expr.resolved_type = lt
+            return lt
+
+        # string concatenation: `str + str -> str` (D41). Allocates a fresh,
+        # immutable string; checked before the integer-arithmetic path below.
+        if op == "+":
+            lt = self._expect_value(expr.left, scope,
+                                    expected if isinstance(expected, IntType) else None)
+            if isinstance(lt, StrType):
+                rt = self._expect_value(expr.right, scope, None)
+                if not isinstance(rt, StrType):
+                    raise TypeCheckError(
+                        f"cannot concatenate 'str' with '{type_name(rt)}'",
+                        expr.line, expr.column,
+                    )
+                expr.resolved_type = STR
+                return STR
+            rt = self._expect_value(expr.right, scope,
+                                    lt if isinstance(lt, IntType) else None)
+            common = self._unify(expr.left, lt, expr.right, rt)
+            if not isinstance(common, IntType):
+                raise TypeCheckError(
+                    f"operator '+' requires integer or string operands",
+                    expr.line, expr.column,
+                )
+            expr.resolved_type = common
+            return common
+
+        # arithmetic & bitwise: - * / %  and  & | ^
         hint = expected if isinstance(expected, IntType) else None
         lt = self._expect_value(expr.left, scope, hint)
         rt = self._expect_value(expr.right, scope, lt if isinstance(lt, IntType) else hint)
@@ -1275,6 +1719,20 @@ class Checker:
             )
         expr.resolved_type = common
         return common
+
+    def _infer_cast(self, expr: ast.Cast, scope: _Scope) -> Type:
+        target = self._resolve(expr.target)
+        # Don't hint the operand with the target: `300 as uint8` should infer the
+        # source as its natural type (int32) and then wrap, not reject 300.
+        src = self._expect_value(expr.operand, scope, None)
+        if not isinstance(src, IntType) or not isinstance(target, IntType):
+            raise TypeCheckError(
+                f"cannot cast from '{type_name(src)}' to '{type_name(target)}' "
+                "('as' converts between numeric types only)",
+                expr.line, expr.column,
+            )
+        expr.resolved_type = target
+        return target
 
     def _unify(self, ln: ast.Expr, lt: Type, rn: ast.Expr, rt: Type) -> Type:
         if lt == rt:
@@ -1291,6 +1749,173 @@ class Checker:
             "(no implicit conversion between integer types)",
             ln.line, ln.column,
         )
+
+    def _infer_intrinsic(self, expr: ast.Call, name: str,
+                         scope: _Scope) -> Type | None:
+        """`assert(cond[, msg])`, `panic(msg)`, `unreachable()` (D-, §7).
+
+        All produce no value; `panic`/`unreachable` additionally diverge (handled
+        by `_is_diverging`, so they satisfy a missing return / match arm)."""
+        if name == "assert":
+            if len(expr.args) not in (1, 2):
+                raise TypeCheckError(
+                    "assert() takes a condition and an optional message",
+                    expr.line, expr.column,
+                )
+            self._expect_type(expr.args[0], scope, BOOL, "assert condition")
+            if len(expr.args) == 2:
+                self._expect_type(expr.args[1], scope, STR, "assert message")
+        elif name == "panic":
+            if len(expr.args) != 1:
+                raise TypeCheckError("panic() takes exactly one message",
+                                     expr.line, expr.column)
+            self._expect_type(expr.args[0], scope, STR, "panic message")
+        else:  # unreachable
+            if expr.args:
+                raise TypeCheckError("unreachable() takes no arguments",
+                                     expr.line, expr.column)
+        expr.resolved_type = None
+        return None
+
+    def _infer_list_mutation(self, expr: ast.Call, name: str,
+                             scope: _Scope) -> Type | None:
+        """`push(xs, v)` / `pop(xs)`: the first argument must be a mutable list
+        lvalue (W3/D40). Returns `()` for push and the element type for pop."""
+        nargs = 2 if name == "push" else 1
+        if len(expr.args) != nargs:
+            raise TypeCheckError(
+                f"{name}() takes {nargs} argument(s)", expr.line, expr.column)
+        lst_t, mutable = self._check_lvalue(expr.args[0], scope)
+        if not isinstance(lst_t, ListType):
+            raise TypeCheckError(
+                f"{name}() requires a list, found '{type_name(lst_t)}'",
+                expr.args[0].line, expr.args[0].column,
+            )
+        if not mutable:
+            raise TypeCheckError(
+                f"{name}() needs a mutable list (declare it with 'var')",
+                expr.args[0].line, expr.args[0].column,
+            )
+        if name == "push":
+            self._expect_type(expr.args[1], scope, lst_t.elem, "push value")
+            expr.resolved_type = None
+            return None
+        expr.resolved_type = lst_t.elem
+        return lst_t.elem
+
+    def _infer_map_builtin(self, expr: ast.Call, name: str,
+                           scope: _Scope) -> Type | None:
+        """`contains(m, k) -> bool`, `keys(m) -> [K]`, `remove(m, k)`. `remove`
+        mutates, so its map must be a mutable lvalue (W3/D40)."""
+        nargs = 1 if name == "keys" else 2
+        if len(expr.args) != nargs:
+            raise TypeCheckError(
+                f"{name}() takes {nargs} argument(s)", expr.line, expr.column)
+        if name == "remove":
+            map_t, mutable = self._check_lvalue(expr.args[0], scope)
+        else:
+            map_t = self._expect_value(expr.args[0], scope, None)
+            mutable = True
+        if not isinstance(map_t, MapType):
+            raise TypeCheckError(
+                f"{name}() requires a map, found '{type_name(map_t)}'",
+                expr.args[0].line, expr.args[0].column,
+            )
+        if name == "keys":
+            t = ListType(map_t.key)
+            expr.resolved_type = t
+            return t
+        self._expect_type(expr.args[1], scope, map_t.key, "map key")
+        if name == "contains":
+            expr.resolved_type = BOOL
+            return BOOL
+        if not mutable:                       # remove
+            raise TypeCheckError(
+                "remove() needs a mutable map (declare it with 'var')",
+                expr.args[0].line, expr.args[0].column,
+            )
+        expr.resolved_type = None
+        return None
+
+    def _infer_format(self, expr: ast.Call, scope: _Scope) -> Type:
+        """`format(fmt, args…) -> str`: `fmt` must be a string literal so the
+        placeholder count is checked at compile time (`{}` is a hole, `{{`/`}}`
+        are literal braces). Each argument is rendered by its type's `print`
+        form, so it must be an int/bool/str."""
+        if not expr.args:
+            raise TypeCheckError(
+                "format() needs a string literal format and its arguments",
+                expr.line, expr.column,
+            )
+        fmt = expr.args[0]
+        if not isinstance(fmt, ast.StrLit):
+            raise TypeCheckError(
+                "format()'s first argument must be a string literal",
+                fmt.line, fmt.column,
+            )
+        holes = _count_format_holes(fmt.value, fmt.line, fmt.column)
+        rest = expr.args[1:]
+        if holes != len(rest):
+            raise TypeCheckError(
+                f"format() has {holes} placeholder(s) but {len(rest)} "
+                f"argument(s)",
+                expr.line, expr.column,
+            )
+        for arg in rest:
+            at = self._expect_value(arg, scope, None)
+            if not isinstance(at, (IntType, BoolType, StrType)):
+                raise TypeCheckError(
+                    f"format() cannot render a value of type '{type_name(at)}'",
+                    arg.line, arg.column,
+                )
+        expr.resolved_type = STR
+        return STR
+
+    def _infer_string_builder(self, expr: ast.Call, name: str,
+                              scope: _Scope) -> Type | None:
+        """The `StringBuilder` toolkit (D41): `StringBuilder()` makes an empty
+        buffer; `append(sb, s)` / `append_byte(sb, b)` mutate it (so `sb` must be
+        a mutable lvalue); `build(sb) -> str` snapshots it as an immutable
+        string."""
+        if name == "StringBuilder":
+            if expr.args:
+                raise TypeCheckError("StringBuilder() takes no arguments",
+                                     expr.line, expr.column)
+            expr.resolved_type = STRING_BUILDER
+            return STRING_BUILDER
+        if name == "build":
+            if len(expr.args) != 1:
+                raise TypeCheckError("build() takes exactly one argument",
+                                     expr.line, expr.column)
+            at = self._expect_value(expr.args[0], scope, None)
+            if not isinstance(at, StringBuilderType):
+                raise TypeCheckError(
+                    f"build() requires a StringBuilder, found '{type_name(at)}'",
+                    expr.args[0].line, expr.args[0].column,
+                )
+            expr.resolved_type = STR
+            return STR
+        # append / append_byte: mutate the builder in place
+        if len(expr.args) != 2:
+            raise TypeCheckError(f"{name}() takes 2 argument(s)",
+                                 expr.line, expr.column)
+        sb_t, mutable = self._check_lvalue(expr.args[0], scope)
+        if not isinstance(sb_t, StringBuilderType):
+            raise TypeCheckError(
+                f"{name}() requires a StringBuilder, found '{type_name(sb_t)}'",
+                expr.args[0].line, expr.args[0].column,
+            )
+        if not mutable:
+            raise TypeCheckError(
+                f"{name}() needs a mutable StringBuilder (declare it with 'var')",
+                expr.args[0].line, expr.args[0].column,
+            )
+        if name == "append":
+            self._expect_type(expr.args[1], scope, STR, "append value")
+        else:  # append_byte
+            self._expect_type(expr.args[1], scope, BYTE, "append_byte value")
+        expr.resolved_type = None
+        return None
 
     def _infer_call(self, expr: ast.Call, scope: _Scope,
                     expected: Type | None = None) -> Type | None:
@@ -1317,6 +1942,29 @@ class Checker:
                 )
             expr.resolved_type = None
             return None
+        if name == "len":
+            if len(expr.args) != 1:
+                raise TypeCheckError("len() takes exactly one argument",
+                                     expr.line, expr.column)
+            at = self._expect_value(expr.args[0], scope, None)
+            if not isinstance(at, (ListType, MapType, StrType, StringBuilderType)):
+                raise TypeCheckError(
+                    f"len() requires a list, map, string, or StringBuilder, found "
+                    f"'{type_name(at)}'",
+                    expr.line, expr.column,
+                )
+            expr.resolved_type = INT
+            return INT
+        if name in ("push", "pop"):
+            return self._infer_list_mutation(expr, name, scope)
+        if name in ("contains", "remove", "keys"):
+            return self._infer_map_builtin(expr, name, scope)
+        if name == "format":
+            return self._infer_format(expr, scope)
+        if name in ("StringBuilder", "append", "append_byte", "build"):
+            return self._infer_string_builder(expr, name, scope)
+        if name in _BUILTIN_FUNCS:  # assert / panic / unreachable
+            return self._infer_intrinsic(expr, name, scope)
         sig = self.functions.get(name)
         if sig is None:
             enum_name = _PRELUDE_VARIANTS.get(name)
@@ -1394,6 +2042,11 @@ class Checker:
             return True
         if isinstance(t, TupleType):
             return any(self._contains_type_param(e) for e in t.elems)
+        if isinstance(t, ListType):
+            return self._contains_type_param(t.elem)
+        if isinstance(t, MapType):
+            return (self._contains_type_param(t.key)
+                    or self._contains_type_param(t.value))
         if isinstance(t, (StructType, EnumType)):
             return any(self._contains_type_param(a) for a in t.args)
         return False
@@ -1403,6 +2056,11 @@ class Checker:
             return subst.get(t.name, t)
         if isinstance(t, TupleType):
             return TupleType(tuple(self._subst_type(e, subst) for e in t.elems))
+        if isinstance(t, ListType):
+            return ListType(self._subst_type(t.elem, subst))
+        if isinstance(t, MapType):
+            return MapType(self._subst_type(t.key, subst),
+                           self._subst_type(t.value, subst))
         if isinstance(t, StructType) and t.args:
             return StructType(t.name, tuple(self._subst_type(a, subst) for a in t.args))
         if isinstance(t, EnumType) and t.args:
@@ -1420,6 +2078,13 @@ class Checker:
                 return False
             return all(self._unify_param(p, a, subst)
                        for p, a in zip(ptype.elems, at.elems))
+        if isinstance(ptype, ListType):
+            return isinstance(at, ListType) \
+                and self._unify_param(ptype.elem, at.elem, subst)
+        if isinstance(ptype, MapType):
+            return isinstance(at, MapType) \
+                and self._unify_param(ptype.key, at.key, subst) \
+                and self._unify_param(ptype.value, at.value, subst)
         if isinstance(ptype, StructType) and ptype.args:
             if not isinstance(at, StructType) or at.name != ptype.name \
                     or len(at.args) != len(ptype.args):
@@ -1638,8 +2303,17 @@ def _block_returns(block: ast.Block) -> bool:
     return any(_stmt_returns(s) for s in block.statements)
 
 
+def _is_diverging(expr: ast.Expr) -> bool:
+    """Whether `expr` is a call to a diverging builtin (`panic`/`unreachable`),
+    which never returns — so the checker treats it like a `return`."""
+    return (isinstance(expr, ast.Call) and isinstance(expr.callee, ast.Name)
+            and expr.callee.ident in _DIVERGING_BUILTINS)
+
+
 def _stmt_returns(stmt: ast.Stmt) -> bool:
     if isinstance(stmt, ast.Return):
+        return True
+    if isinstance(stmt, ast.ExprStmt) and _is_diverging(stmt.expr):
         return True
     if isinstance(stmt, ast.If):
         if not _block_returns(stmt.then):
@@ -1655,6 +2329,41 @@ def _stmt_returns(stmt: ast.Stmt) -> bool:
 def _is_flexible_int_lit(node: ast.Expr) -> bool:
     """An unsuffixed integer literal can still adopt another integer type."""
     return isinstance(node, ast.IntLit) and node.suffix is None
+
+
+def _count_format_holes(fmt: str, line: int, col: int) -> int:
+    """Count `{}` placeholders in a `format` string, validating that every `{`
+    or `}` is either a placeholder or an escaped literal brace (`{{` / `}}`).
+    Shared shape with the interpreter and native renderers."""
+    holes = 0
+    i = 0
+    n = len(fmt)
+    while i < n:
+        c = fmt[i]
+        if c == "{":
+            if i + 1 < n and fmt[i + 1] == "{":
+                i += 2
+                continue
+            if i + 1 < n and fmt[i + 1] == "}":
+                holes += 1
+                i += 2
+                continue
+            raise TypeCheckError(
+                "format(): a single '{' must be a '{}' placeholder or an "
+                "escaped '{{'",
+                line, col,
+            )
+        if c == "}":
+            if i + 1 < n and fmt[i + 1] == "}":
+                i += 2
+                continue
+            raise TypeCheckError(
+                "format(): a single '}' must close a '{}' placeholder or be an "
+                "escaped '}}'",
+                line, col,
+            )
+        i += 1
+    return holes
 
 
 def _const_bool(literal: ast.Expr) -> bool:

@@ -1,0 +1,7 @@
+//~ type error: build() requires a StringBuilder, found 'str'
+// build() snapshots a StringBuilder; it is not an identity on plain strings.
+#main
+fun main() {
+    let s = "hi"
+    print(build(s))
+}

@@ -20,6 +20,14 @@ class _ReturnSignal(Exception):
         self.value = value
 
 
+class _BreakSignal(Exception):
+    """Raised by `break`; caught by the innermost enclosing loop."""
+
+
+class _ContinueSignal(Exception):
+    """Raised by `continue`; caught by the innermost enclosing loop."""
+
+
 class StructValue:
     """A runtime struct instance with value semantics."""
 
@@ -90,8 +98,71 @@ class EnumValue:
         return f"{self.enum_name}.{self.variant}({inner})"
 
 
+class ListValue:
+    """A runtime list `[T]` with value semantics. Copy-on-write is an
+    implementation detail of the native backend; the tree-walking interpreter
+    just deep-copies on every binding/assignment/pass (via `_copy`), which gives
+    the same observable deep immutability (D14/D38)."""
+
+    __slots__ = ("elems",)
+
+    def __init__(self, elems: list):
+        self.elems = elems
+
+    def copy(self) -> "ListValue":
+        return ListValue([_copy(v) for v in self.elems])
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, ListValue) and self.elems == other.elems
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "[" + ", ".join(repr(v) for v in self.elems) + "]"
+
+
+class MapValue:
+    """A runtime map `[K: V]` with value semantics. Like `ListValue`, the
+    interpreter deep-copies on every binding/assignment/pass (via `_copy`),
+    matching the native backend's copy-on-write observable behaviour (D38).
+    Iteration order is insertion order (the language leaves it unspecified)."""
+
+    __slots__ = ("entries",)
+
+    def __init__(self, entries: dict | None = None):
+        self.entries: dict = entries if entries is not None else {}
+
+    def copy(self) -> "MapValue":
+        return MapValue({k: _copy(v) for k, v in self.entries.items()})
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, MapValue) and self.entries == other.entries
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "[" + ", ".join(f"{k!r}: {v!r}" for k, v in self.entries.items()) + "]"
+
+
+class StringBuilderValue:
+    """A runtime `StringBuilder` (D41): a growable byte buffer with value
+    semantics. The interpreter deep-copies on bind/assign/pass (via `_copy`),
+    matching the native backend's copy-on-write behaviour."""
+
+    __slots__ = ("buf",)
+
+    def __init__(self, buf: bytearray | None = None):
+        self.buf: bytearray = buf if buf is not None else bytearray()
+
+    def copy(self) -> "StringBuilderValue":
+        return StringBuilderValue(bytearray(self.buf))
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, StringBuilderValue) and self.buf == other.buf
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"StringBuilder({bytes(self.buf)!r})"
+
+
 def _copy(value):
-    if isinstance(value, (StructValue, TupleValue, EnumValue)):
+    if isinstance(value, (StructValue, TupleValue, EnumValue, ListValue, MapValue,
+                          StringBuilderValue)):
         return value.copy()
     return value
 
@@ -134,6 +205,7 @@ class Interpreter:
     def __init__(self, checker: Checker, out=None):
         self.checker = checker
         self.functions = checker.functions  # name -> FuncSig
+        self._consts = {name: info.value for name, info in checker.consts.items()}
         import sys
         self._out = out if out is not None else sys.stdout
 
@@ -200,6 +272,18 @@ class Interpreter:
             target = stmt.target
             if isinstance(target, ast.Name):
                 env.assign(target.ident, value)
+            elif isinstance(target, ast.Index):
+                container = self._eval(target.target, env)
+                key = self._eval(target.index, env)
+                if isinstance(container, MapValue):
+                    container.entries[key] = value
+                elif key < 0 or key >= len(container.elems):
+                    raise MylaRuntimeError(
+                        f"list index {key} out of bounds (len {len(container.elems)})",
+                        target.line, target.column,
+                    )
+                else:
+                    container.elems[key] = value
             else:  # FieldAccess chain
                 assert isinstance(target, ast.FieldAccess)
                 container = self._resolve_struct(target.target, env)
@@ -215,16 +299,38 @@ class Interpreter:
 
         elif isinstance(stmt, ast.While):
             while self._eval(stmt.cond, env):
-                self._exec_block(stmt.body, env)
+                try:
+                    self._exec_block(stmt.body, env)
+                except _ContinueSignal:
+                    continue
+                except _BreakSignal:
+                    break
 
         elif isinstance(stmt, ast.For):
-            start = self._eval(stmt.start, env)
-            end = self._eval(stmt.end, env)
-            for i in range(start, end):
+            if stmt.iterable is not None:  # `for v in xs/m` — list/map iteration
+                target = self._eval(stmt.iterable, env)
+                if isinstance(target, MapValue):
+                    items = list(target.entries.keys())  # keys snapshot
+                else:
+                    items = list(target.elems)  # snapshot: body can't mutate it
+            else:  # `for v in start..end`
+                items = range(self._eval(stmt.start, env), self._eval(stmt.end, env))
+            for item in items:
                 body_env = _Env(env)
-                body_env.define(stmt.var_name, i)
-                for s in stmt.body.statements:
-                    self._exec_stmt(s, body_env)
+                body_env.define(stmt.var_name, _copy(item))
+                try:
+                    for s in stmt.body.statements:
+                        self._exec_stmt(s, body_env)
+                except _ContinueSignal:
+                    continue
+                except _BreakSignal:
+                    break
+
+        elif isinstance(stmt, ast.Break):
+            raise _BreakSignal()
+
+        elif isinstance(stmt, ast.Continue):
+            raise _ContinueSignal()
 
         elif isinstance(stmt, ast.Return):
             value = self._eval(stmt.value, env) if stmt.value is not None else None
@@ -322,6 +428,20 @@ class Interpreter:
         if isinstance(expr, ast.FieldAccess):
             parent = self._resolve_struct(expr.target, env)
             return parent.fields[expr.field_name]
+        if isinstance(expr, ast.Index):
+            container = self._eval(expr.target, env)
+            key = self._eval(expr.index, env)
+            if isinstance(container, MapValue):
+                if key not in container.entries:
+                    raise MylaRuntimeError(f"map key {key!r} not found",
+                                           expr.line, expr.column)
+                return container.entries[key]
+            if key < 0 or key >= len(container.elems):
+                raise MylaRuntimeError(
+                    f"list index {key} out of bounds (len {len(container.elems)})",
+                    expr.line, expr.column,
+                )
+            return container.elems[key]
         raise MylaRuntimeError("invalid assignment target", expr.line, expr.column)  # pragma: no cover
 
     # -- expression evaluation ----------------------------------------------
@@ -337,6 +457,9 @@ class Interpreter:
             ctor = getattr(expr, "enum_ctor", None)
             if ctor is not None:  # bare no-payload prelude variant, e.g. `None`
                 return EnumValue(ctor[0], ctor[1], [])
+            ref = getattr(expr, "const_ref", None)
+            if ref is not None:  # module-level const
+                return self._consts[ref]
             return env.get(expr.ident)
         if isinstance(expr, ast.Unary):
             return self._eval_unary(expr, env)
@@ -358,16 +481,53 @@ class Interpreter:
         if isinstance(expr, ast.TupleIndex):
             container = self._eval(expr.target, env)
             return container.elems[expr.index]
+        if isinstance(expr, ast.ListLit):
+            return ListValue([_copy(self._eval(e, env)) for e in expr.elems])
+        if isinstance(expr, ast.MapLit):
+            m = MapValue()
+            for k, v in expr.entries:
+                m.entries[self._eval(k, env)] = _copy(self._eval(v, env))
+            return m
+        if isinstance(expr, ast.Index):
+            return self._index_read(expr, env)
         if isinstance(expr, ast.Match):
             return self._eval_match(expr, env)
+        if isinstance(expr, ast.Cast):
+            return _wrap(self._eval(expr.operand, env), expr.resolved_type)
         raise MylaRuntimeError(  # pragma: no cover
             f"cannot evaluate {type(expr).__name__}", expr.line, expr.column
         )
+
+    def _index_read(self, expr: ast.Index, env: _Env):
+        target = self._eval(expr.target, env)
+        key = self._eval(expr.index, env)
+        if isinstance(target, str):
+            data = target.encode("utf-8")
+            if key < 0 or key >= len(data):
+                raise MylaRuntimeError(
+                    f"string index {key} out of bounds (len {len(data)})",
+                    expr.line, expr.column,
+                )
+            return data[key]            # the byte value (uint8)
+        if isinstance(target, MapValue):
+            if key not in target.entries:
+                raise MylaRuntimeError(
+                    f"map key {key!r} not found", expr.line, expr.column,
+                )
+            return target.entries[key]
+        if key < 0 or key >= len(target.elems):
+            raise MylaRuntimeError(
+                f"list index {key} out of bounds (len {len(target.elems)})",
+                expr.line, expr.column,
+            )
+        return target.elems[key]
 
     def _eval_unary(self, expr: ast.Unary, env: _Env):
         v = self._eval(expr.operand, env)
         if expr.op == "-":
             return _wrap(-v, expr.resolved_type)
+        if expr.op == "~":
+            return _wrap(~v, expr.resolved_type)
         return not v  # "!"
 
     def _eval_binary(self, expr: ast.Binary, env: _Env):
@@ -381,6 +541,8 @@ class Interpreter:
         right = self._eval(expr.right, env)
 
         if op == "+":
+            if isinstance(expr.resolved_type, StrType):
+                return left + right          # string concatenation (D41)
             return _wrap(left + right, expr.resolved_type)
         if op == "-":
             return _wrap(left - right, expr.resolved_type)
@@ -406,7 +568,25 @@ class Interpreter:
             return left == right
         if op == "!=":
             return left != right
+        if op == "&":
+            return _wrap(left & right, expr.resolved_type)
+        if op == "|":
+            return _wrap(left | right, expr.resolved_type)
+        if op == "^":
+            return _wrap(left ^ right, expr.resolved_type)
+        if op == "<<":
+            return _wrap(left << (right & (expr.resolved_type.width - 1)), expr.resolved_type)
+        if op == ">>":
+            return self._eval_shr(left, right, expr.resolved_type)
         raise MylaRuntimeError(f"unknown operator '{op}'", expr.line, expr.column)  # pragma: no cover
+
+    @staticmethod
+    def _eval_shr(left: int, right: int, t: Type) -> int:
+        # Mask the shift count to the operand width (matching the hardware shift
+        # instructions the compiler emits) and shift on the wrapped value so the
+        # result is arithmetic for signed types and logical for unsigned ones.
+        count = right & (t.width - 1)
+        return _wrap(_wrap(left, t) >> count, t)
 
     def _eval_call(self, expr: ast.Call, env: _Env):
         ctor = getattr(expr, "enum_ctor", None)
@@ -420,9 +600,72 @@ class Interpreter:
             value = self._eval(arg, env)
             self._out.write(_format_value(value, arg.resolved_type) + "\n")
             return None
+        if callee.ident in ("assert", "panic", "unreachable"):
+            return self._eval_intrinsic(expr, env)
+        if callee.ident == "len":
+            target = self._eval(expr.args[0], env)
+            if isinstance(target, str):
+                return len(target.encode("utf-8"))
+            if isinstance(target, MapValue):
+                return len(target.entries)
+            if isinstance(target, StringBuilderValue):
+                return len(target.buf)
+            return len(target.elems)
+        if callee.ident == "push":
+            lst = self._eval(expr.args[0], env)
+            lst.elems.append(_copy(self._eval(expr.args[1], env)))
+            return None
+        if callee.ident == "pop":
+            lst = self._eval(expr.args[0], env)
+            if not lst.elems:
+                raise MylaRuntimeError("pop from an empty list",
+                                       expr.line, expr.column)
+            return lst.elems.pop()
+        if callee.ident == "contains":
+            m = self._eval(expr.args[0], env)
+            return self._eval(expr.args[1], env) in m.entries
+        if callee.ident == "remove":
+            m = self._eval(expr.args[0], env)
+            m.entries.pop(self._eval(expr.args[1], env), None)
+            return None
+        if callee.ident == "format":
+            fmt = expr.args[0].value          # checked to be a string literal
+            parts = [_format_value(self._eval(a, env), a.resolved_type)
+                     for a in expr.args[1:]]
+            return _render_format(fmt, parts)
+        if callee.ident == "StringBuilder":
+            return StringBuilderValue()
+        if callee.ident == "append":
+            sb = self._eval(expr.args[0], env)
+            sb.buf.extend(self._eval(expr.args[1], env).encode("utf-8"))
+            return None
+        if callee.ident == "append_byte":
+            sb = self._eval(expr.args[0], env)
+            sb.buf.append(self._eval(expr.args[1], env) & 0xFF)
+            return None
+        if callee.ident == "build":
+            sb = self._eval(expr.args[0], env)
+            return bytes(sb.buf).decode("utf-8", errors="surrogateescape")
+        if callee.ident == "keys":
+            m = self._eval(expr.args[0], env)
+            return ListValue([_copy(k) for k in m.entries.keys()])
         sig = self.functions[callee.ident]
         args = [self._eval(a, env) for a in expr.args]
         return self._call(sig.decl, args)
+
+    def _eval_intrinsic(self, expr: ast.Call, env: _Env):
+        name = expr.callee.ident
+        if name == "assert":
+            if not self._eval(expr.args[0], env):
+                msg = (self._eval(expr.args[1], env) if len(expr.args) == 2
+                       else "assertion failed")
+                raise MylaRuntimeError(msg, expr.line, expr.column)
+            return None
+        if name == "panic":
+            raise MylaRuntimeError(self._eval(expr.args[0], env),
+                                   expr.line, expr.column)
+        # unreachable
+        raise MylaRuntimeError("reached unreachable code", expr.line, expr.column)
 
 
 # --- helpers ---------------------------------------------------------------
@@ -455,6 +698,31 @@ def _format_value(value, t: Type | None) -> str:
     if isinstance(t, IntType):
         return str(value)
     return str(value)  # pragma: no cover - print() is restricted by the checker
+
+
+def _render_format(fmt: str, parts: list[str]) -> str:
+    """Substitute already-rendered `parts` into `{}` placeholders of `fmt`
+    (`{{`/`}}` are literal braces). The checker guarantees the counts match."""
+    out: list[str] = []
+    i = 0
+    n = len(fmt)
+    arg = 0
+    while i < n:
+        c = fmt[i]
+        if c == "{" and i + 1 < n and fmt[i + 1] == "{":
+            out.append("{")
+            i += 2
+        elif c == "}" and i + 1 < n and fmt[i + 1] == "}":
+            out.append("}")
+            i += 2
+        elif c == "{" and i + 1 < n and fmt[i + 1] == "}":
+            out.append(parts[arg])
+            arg += 1
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
 
 
 def run(checker: Checker, out=None) -> None:

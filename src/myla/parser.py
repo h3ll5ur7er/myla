@@ -107,9 +107,11 @@ class Parser:
             decl = self._enum_decl()
         elif tok.kind is T.TYPEALIAS:
             decl = self._typealias_decl()
+        elif tok.kind is T.CONST:
+            decl = self._const_decl()
         else:
             raise ParseError(
-                f"expected a declaration (struct/fun/enum/typealias), found '{tok.lexeme}'",
+                f"expected a declaration (struct/fun/enum/typealias/const), found '{tok.lexeme}'",
                 tok.line, tok.column,
             )
         decl.attributes = attrs
@@ -224,10 +226,28 @@ class Parser:
         target = self._type()
         return ast.TypeAliasDecl(name.value, target).at(kw.line, kw.column)
 
+    def _const_decl(self) -> ast.ConstDecl:
+        kw = self._advance()  # const
+        name = self._expect(T.IDENT, "constant name")
+        self._expect(T.COLON, "':' (a const requires an explicit type)")
+        declared_type = self._type()
+        self._expect(T.ASSIGN, "'=' in const declaration")
+        value = self._expression()
+        return ast.ConstDecl(name.value, declared_type, value).at(kw.line, kw.column)
+
     def _type(self):
         tok = self._peek()
         if tok.kind is T.LPAREN:
             return self._tuple_type()
+        if tok.kind is T.LBRACKET:
+            self._advance()  # [
+            first = self._type()
+            if self._match(T.COLON):              # map type `[K: V]`
+                value = self._type()
+                self._expect(T.RBRACKET, "']' to close map type")
+                return ast.MapTypeRef(first, value).at(tok.line, tok.column)
+            self._expect(T.RBRACKET, "']' to close list type")
+            return ast.ListTypeRef(first).at(tok.line, tok.column)
         if tok.kind in _PRIM_TYPE_KINDS:
             self._advance()
             return ast.TypeRef(tok.lexeme).at(tok.line, tok.column)
@@ -302,6 +322,12 @@ class Parser:
             return self._for_stmt()
         if tok.kind is T.RETURN:
             return self._return_stmt()
+        if tok.kind is T.BREAK:
+            self._advance()
+            return ast.Break().at(tok.line, tok.column)
+        if tok.kind is T.CONTINUE:
+            self._advance()
+            return ast.Continue().at(tok.line, tok.column)
         return self._assign_or_expr()
 
     def _var_decl(self) -> ast.Stmt:
@@ -380,11 +406,14 @@ class Parser:
         kw = self._advance()  # for
         var = self._expect(T.IDENT, "loop variable name")
         self._expect(T.IN, "'in'")
-        start = self._expression(allow_struct_lit=False)
-        self._expect(T.DOTDOT, "'..' in for range")
-        end = self._expression(allow_struct_lit=False)
+        first = self._expression(allow_struct_lit=False)
+        if self._match(T.DOTDOT):  # range form: `start..end`
+            end = self._expression(allow_struct_lit=False)
+            body = self._block()
+            return ast.For(var.value, first, end, body).at(kw.line, kw.column)
+        # iterable form: `for v in xs`
         body = self._block()
-        return ast.For(var.value, start, end, body).at(kw.line, kw.column)
+        return ast.For(var.value, None, None, body, iterable=first).at(kw.line, kw.column)
 
     def _return_stmt(self) -> ast.Return:
         kw = self._advance()  # return
@@ -439,16 +468,60 @@ class Parser:
         return self._binary_left(self._comparison, {T.EQ, T.NE})
 
     def _comparison(self) -> ast.Expr:
-        return self._binary_left(self._term, {T.LT, T.LE, T.GT, T.GE})
+        return self._binary_left(self._bit_or, {T.LT, T.LE, T.GT, T.GE})
+
+    # Bitwise operators bind tighter than comparison (so `a & b == c` parses as
+    # `(a & b) == c`, avoiding C's precedence footgun), with `&` > `^` > `|`.
+    def _bit_or(self) -> ast.Expr:
+        return self._binary_left(self._bit_xor, {T.PIPE})
+
+    def _bit_xor(self) -> ast.Expr:
+        return self._binary_left(self._bit_and, {T.CARET})
+
+    def _bit_and(self) -> ast.Expr:
+        return self._binary_left(self._shift, {T.AMP})
+
+    def _shift(self) -> ast.Expr:
+        # `<<` / `>>` are not lexed as single tokens (so nested generic closers
+        # like `Option<List<int>>` keep working); instead we recognise two
+        # column-adjacent `<` or `>` tokens here as a shift operator.
+        expr = self._term()
+        while True:
+            op = self._adjacent_shift()
+            if op is None:
+                return expr
+            line, col = self._peek().line, self._peek().column
+            self._advance()
+            self._advance()
+            right = self._term()
+            expr = ast.Binary(op, expr, right).at(line, col)
+
+    def _adjacent_shift(self) -> str | None:
+        a, b = self._peek(), self._peek(1)
+        if a.line != b.line or b.column != a.column + 1:
+            return None
+        if a.kind is T.LT and b.kind is T.LT:
+            return "<<"
+        if a.kind is T.GT and b.kind is T.GT:
+            return ">>"
+        return None
 
     def _term(self) -> ast.Expr:
         return self._binary_left(self._factor, {T.PLUS, T.MINUS})
 
     def _factor(self) -> ast.Expr:
-        return self._binary_left(self._unary, {T.STAR, T.SLASH, T.PERCENT})
+        return self._binary_left(self._cast, {T.STAR, T.SLASH, T.PERCENT})
+
+    def _cast(self) -> ast.Expr:
+        expr = self._unary()
+        while self._check(T.AS):
+            kw = self._advance()
+            target = self._type()
+            expr = ast.Cast(expr, target).at(kw.line, kw.column)
+        return expr
 
     def _unary(self) -> ast.Expr:
-        if self._peek().kind in (T.MINUS, T.BANG):
+        if self._peek().kind in (T.MINUS, T.BANG, T.TILDE):
             op = self._advance()
             operand = self._unary()
             return ast.Unary(op.lexeme, operand).at(op.line, op.column)
@@ -462,6 +535,11 @@ class Parser:
                 args = self._expr_list(T.RPAREN)
                 self._expect(T.RPAREN, "')'")
                 expr = ast.Call(expr, args).at(lp.line, lp.column)
+            elif self._check(T.LBRACKET):
+                lb = self._advance()
+                index = self._expression()
+                self._expect(T.RBRACKET, "']' to close index")
+                expr = ast.Index(expr, index).at(lb.line, lb.column)
             elif self._check(T.DOT):
                 dot = self._advance()
                 if self._check(T.INT):
@@ -487,6 +565,9 @@ class Parser:
         if tok.kind is T.INT:
             self._advance()
             return ast.IntLit(tok.value, tok.suffix).at(tok.line, tok.column)
+        if tok.kind is T.CHAR:
+            self._advance()
+            return ast.IntLit(tok.value, None, is_char=True).at(tok.line, tok.column)
         if tok.kind is T.STRING:
             self._advance()
             return ast.StrLit(tok.value).at(tok.line, tok.column)
@@ -502,7 +583,52 @@ class Parser:
             return self._match_expr()
         if tok.kind is T.LPAREN:
             return self._paren_or_tuple(tok)
+        if tok.kind is T.LBRACKET:
+            return self._list_or_map_lit(tok)
         raise ParseError(f"expected an expression, found '{tok.lexeme}'", tok.line, tok.column)
+
+    def _list_or_map_lit(self, lb) -> ast.Expr:
+        """Parse `[...]` as a list literal, or `[k: v, ...]` / `[:]` as a map."""
+        self._advance()  # [
+        self._skip_newlines()
+        if self._match(T.COLON):                 # empty map `[:]`
+            self._expect(T.RBRACKET, "']' to close empty map literal")
+            return ast.MapLit([]).at(lb.line, lb.column)
+        if self._check(T.RBRACKET):              # empty list `[]`
+            self._advance()
+            return ast.ListLit([]).at(lb.line, lb.column)
+        first = self._expression(allow_struct_lit=True)
+        if self._match(T.COLON):                 # map literal `[k: v, ...]`
+            return self._map_lit_tail(lb, first)
+        return self._list_lit_tail(lb, first)
+
+    def _list_lit_tail(self, lb, first: ast.Expr) -> ast.ListLit:
+        elems = [first]
+        self._skip_newlines()
+        while self._match(T.COMMA):
+            self._skip_newlines()
+            if self._check(T.RBRACKET):          # trailing comma
+                break
+            elems.append(self._expression(allow_struct_lit=True))
+            self._skip_newlines()
+        self._expect(T.RBRACKET, "']' to close list literal")
+        return ast.ListLit(elems).at(lb.line, lb.column)
+
+    def _map_lit_tail(self, lb, first_key: ast.Expr) -> ast.MapLit:
+        first_val = self._expression(allow_struct_lit=True)
+        entries = [(first_key, first_val)]
+        self._skip_newlines()
+        while self._match(T.COMMA):
+            self._skip_newlines()
+            if self._check(T.RBRACKET):          # trailing comma
+                break
+            key = self._expression(allow_struct_lit=True)
+            self._expect(T.COLON, "':' between map key and value")
+            val = self._expression(allow_struct_lit=True)
+            entries.append((key, val))
+            self._skip_newlines()
+        self._expect(T.RBRACKET, "']' to close map literal")
+        return ast.MapLit(entries).at(lb.line, lb.column)
 
     # -- match expression & patterns -----------------------------------------
 
@@ -555,8 +681,8 @@ class Parser:
 
     def _base_pattern(self) -> ast.Pattern:
         tok = self._peek()
-        # literals (incl. negative integer literals)
-        if tok.kind in (T.INT, T.STRING, T.TRUE, T.FALSE):
+        # literals (incl. negative integer literals and char literals)
+        if tok.kind in (T.INT, T.CHAR, T.STRING, T.TRUE, T.FALSE):
             lit = self._primary()
             return ast.PatLiteral(lit).at(tok.line, tok.column)
         if tok.kind is T.MINUS:
@@ -698,6 +824,8 @@ def _is_lvalue(expr: ast.Expr) -> bool:
     if isinstance(expr, ast.Name):
         return True
     if isinstance(expr, ast.FieldAccess):
+        return _is_lvalue(expr.target)
+    if isinstance(expr, ast.Index):
         return _is_lvalue(expr.target)
     return False
 

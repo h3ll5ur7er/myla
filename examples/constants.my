@@ -1,0 +1,91 @@
+// Module-level `const`s and the abort intrinsics `assert` / `panic` /
+// `unreachable` (v0.3.2).
+//
+// A `const` is a file-scoped, immutable, compile-time value. Its initializer
+// must be a *constant expression*: literals, references to other consts, and
+// arithmetic/bitwise/comparison/cast operations over them. The checker folds it
+// to a single value (and rejects cyclic definitions), so the backends inline it
+// — there is no runtime storage or initialization order to worry about.
+
+const KIB: int32 = 1 << 10        // 1024
+const PAGE: int32 = 4 * KIB       // consts may reference earlier consts
+const PAGE_MASK: int32 = PAGE - 1
+const HIGH_BYTE: uint8 = 0xFFu8
+const BANNER: str = "myla"
+const DEBUG: bool = KIB > 0 && !false
+
+// Consts read just like any other value inside a function body.
+#test()[4096]
+fun page_size() -> int32 {
+    return PAGE
+}
+
+// Align `n` down to a page boundary using the folded PAGE_MASK constant.
+#test(5000)[4096]
+#test(4096)[4096]
+#test(10)[0]
+fun page_align(n: int32) -> int32 {
+    return n & ~PAGE_MASK
+}
+
+#test()[255]
+fun high_byte() -> uint8 {
+    return HIGH_BYTE
+}
+
+#test()[true]
+fun debug_enabled() -> bool {
+    return DEBUG
+}
+
+// `assert(cond[, msg])` aborts (writes the message to stderr and exits nonzero)
+// when the condition is false; otherwise it is a no-op. The happy path returns
+// normally, so this function is still unit-testable.
+#test(8)[64]
+#test(0)[0]
+fun square_small(x: int32) -> int32 {
+    assert(x >= 0, "x must be non-negative")
+    assert(x < 1000)
+    return x * x
+}
+
+enum Direction { North, East, South, West }
+
+// `unreachable()` is a *diverging* expression: the checker treats it like a
+// `return`, so it can stand in for a match arm the programmer knows is dead.
+// Here we only ever call `opposite` with North/South, but the match must still
+// be exhaustive — `unreachable()` discharges the impossible arms.
+#test(Direction.North)[2]
+#test(Direction.South)[0]
+fun opposite_vertical(d: Direction) -> int32 {
+    return match d {
+        Direction.North => 2,
+        Direction.South => 0,
+        Direction.East => unreachable(),
+        Direction.West => unreachable(),
+    }
+}
+
+// `panic(msg)` aborts unconditionally; like `unreachable()` it diverges, so a
+// function can satisfy its return type by panicking on the error path. The
+// success path is unit-testable; the panic path is covered by the burn tests.
+#test(20, 4)[5]
+#test(9, 3)[3]
+fun checked_div(a: int32, b: int32) -> int32 {
+    if b == 0 {
+        panic("division by zero")
+    }
+    return a / b
+}
+
+#main
+fun main() {
+    print(page_size())              // 4096
+    print(page_align(5000))         // 4096
+    print(high_byte())              // 255
+    print(debug_enabled())          // true
+    print(square_small(8))          // 64
+    print(opposite_vertical(Direction.North))  // 2
+    print(checked_div(20, 4))       // 5
+    print(BANNER)                   // myla
+}

@@ -1,0 +1,7 @@
+//~ type error: append value must be 'str'
+// append() takes a string; use append_byte() to add a single byte.
+#main
+fun main() {
+    var sb = StringBuilder()
+    append(sb, 65)
+}

@@ -1,0 +1,10 @@
+//~ type error: cannot redefine builtin 'panic'
+// `panic`, `assert`, and `unreachable` are reserved builtin intrinsics.
+fun panic() -> int32 {
+    return 0
+}
+
+#main
+fun main() {
+    print(panic())
+}

@@ -1,0 +1,7 @@
+//~ type error: push value
+// The pushed value must match the list's element type.
+#main
+fun main() {
+    var xs = [1, 2, 3]
+    push(xs, "four")
+}

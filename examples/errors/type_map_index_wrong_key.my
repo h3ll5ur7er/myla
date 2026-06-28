@@ -1,0 +1,7 @@
+//~ type error: map key must be 'int32', found 'str'
+// Indexing a map uses its key type; a string key into an `[int: int]` is rejected.
+#main
+fun main() {
+    let m: [int: int] = [1: 10]
+    print(m["a"])
+}

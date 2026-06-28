@@ -1,0 +1,8 @@
+//~ type error: 'continue' outside of a loop
+// `continue` is only meaningful inside a `while` or `for` loop. An `if` body
+// alone does not count as a loop.
+fun main() {
+    if true {
+        continue
+    }
+}

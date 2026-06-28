@@ -1,0 +1,5 @@
+//~ type error: cannot redefine builtin
+// `len` is a builtin list/collection operation and cannot be shadowed.
+fun len(xs: [int]) -> int {
+    return 0
+}

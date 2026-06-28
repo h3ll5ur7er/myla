@@ -1,0 +1,7 @@
+//~ type error: requires integer operands
+// Bitwise `&` is integer-only; use `&&` for boolean conjunction.
+fun bad() -> bool {
+    return true & false
+}
+fun main() {
+}

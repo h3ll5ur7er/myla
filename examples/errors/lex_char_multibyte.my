@@ -1,0 +1,7 @@
+//~ lex error: char literal must contain exactly one byte
+// A char literal holds a single byte; multi-character literals are rejected
+// (the Unicode `char` type arrives in v0.5).
+#main
+fun main() {
+    let c = 'ab'
+}

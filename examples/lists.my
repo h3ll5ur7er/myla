@@ -1,0 +1,137 @@
+// Lists `[T]` (v0.3.3): a growable, reference-counted, copy-on-write sequence
+// with value semantics (W1/D38/D39).
+//
+// A list is a *value*: binding, passing, returning, or assigning it produces an
+// independent value, so mutating one binding never affects another. Under the
+// hood the buffer is shared on copy (just a refcount bump) and cloned lazily on
+// the first mutation through a shared binding — cheap to pass around, yet still
+// deeply immutable to the programmer (D14).
+//
+// Operations are built-in (not user-shadowable): `len`, indexing `xs[i]` (read
+// and as an assignment target), `push`, `pop`, and `for x in xs`. Indexing and
+// `pop` are bounds-checked and trap on misuse (see examples/errors/).
+
+#test([1, 2, 3])[6]
+#test([])[0]
+#test([10, 20, 30, 40])[100]
+fun total(xs: [int]) -> int {
+    var t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+#test([1, 2, 3, 4])[4]
+#test([])[0]
+fun count(xs: [int]) -> int {
+    return len(xs)
+}
+
+#test([10, 20, 30], 1)[20]
+#test([7], 0)[7]
+fun nth(xs: [int], i: int) -> int {
+    return xs[i]
+}
+
+// Build a new list with `push` onto an empty list (element type from annotation).
+#test([1, 2, 3])[[2, 4, 6]]
+#test([])[[]]
+fun doubled(xs: [int]) -> [int] {
+    var out: [int] = []
+    for x in xs {
+        push(out, x * 2)
+    }
+    return out
+}
+
+// `pop` removes and returns the last element; we copy first so the argument's
+// own list (the caller's) is untouched — value semantics.
+#test([5, 6, 7])[7]
+fun last(xs: [int]) -> int {
+    var ys = xs
+    return pop(ys)
+}
+
+// Indexed assignment is copy-on-write: `ys` is a copy of `xs`, so writing
+// through `ys` clones the shared buffer and leaves `xs` alone.
+#test([1, 2, 3], 9)[[9, 2, 3]]
+fun set_first(xs: [int], v: int) -> [int] {
+    var ys = xs
+    ys[0] = v
+    return ys
+}
+
+// Demonstrates the value-semantics guarantee directly: mutating `b` must not
+// change `a`, even though `b` started as a copy of `a`.
+#test[1]
+fun copy_is_independent() -> int {
+    var a = [1, 2, 3]
+    var b = a
+    b[0] = 99
+    push(b, 4)
+    return a[0]            // still 1
+}
+
+// Nested lists: `[[int]]` indexed twice.
+#test([[1, 2], [3, 4]], 1, 0)[3]
+fun grid_get(g: [[int]], i: int, j: int) -> int {
+    return g[i][j]
+}
+
+// Nested copy-on-write: cloning the outer list when mutating a nested element.
+#test([[1, 2], [3, 4]], 0, 1)[102]
+fun bump_cell(g: [[int]], i: int, j: int) -> int {
+    var h = g
+    h[i][j] = h[i][j] + 100
+    return h[i][j]
+}
+
+struct Point { x: int, y: int }
+
+// A list of structs (inline aggregate elements).
+#test([])[0]
+fun ysum(ps: [Point]) -> int {
+    var s = 0
+    for p in ps {
+        s = s + p.y
+    }
+    return s
+}
+
+#main
+fun main() {
+    let xs = [1, 2, 3]
+    print(len(xs))                 // 3
+    print(xs[0])                   // 1
+    print(total(xs))               // 6
+
+    let ds = doubled(xs)
+    print(ds[2])                   // 6
+
+    var a = [10, 20, 30]
+    var b = a                      // value copy
+    b[0] = 99
+    push(b, 40)
+    print(a[0])                    // 10  (a untouched)
+    print(len(a))                  // 3
+    print(b[0])                    // 99
+    print(len(b))                  // 4
+
+    var grid = [[1, 2], [3, 4]]
+    grid[0][1] = 20
+    push(grid[1], 5)
+    print(grid[0][1])              // 20
+    print(grid[1][2])              // 5
+
+    let ps = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+    print(ysum(ps))                // 6
+
+    var acc: [int] = []
+    for i in 0..5 {
+        push(acc, i * i)
+    }
+    print(acc[4])                  // 16
+    print(pop(acc))                // 16
+    print(len(acc))                // 4
+}

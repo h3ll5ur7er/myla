@@ -1,0 +1,7 @@
+//~ runtime error: map key 2 not found
+// Reading an absent key traps (D40); use `get` or `contains` to probe safely.
+#main
+fun main() {
+    let m: [int: int] = [1: 10]
+    print(m[2])
+}

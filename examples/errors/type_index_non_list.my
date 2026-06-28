@@ -1,0 +1,7 @@
+//~ type error: is not a list and cannot be indexed
+// Subscripting `[...]` is only valid on a list value.
+#main
+fun main() {
+    let n = 42
+    print(n[0])
+}

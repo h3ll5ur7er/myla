@@ -1,0 +1,7 @@
+//~ type error: string index must be an integer
+// Byte indexing uses an integer position, not a string.
+#main
+fun main() {
+    let s = "ab"
+    print(s["x"] as int)
+}

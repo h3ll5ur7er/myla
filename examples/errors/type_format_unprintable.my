@@ -1,0 +1,8 @@
+//~ type error: format() cannot render a value of type '[int32]'
+// Only int/bool/str arguments can be interpolated (the same types `print`
+// accepts); a list has no textual rendering.
+#main
+fun main() {
+    let xs = [1, 2]
+    print(format("{}", xs))
+}

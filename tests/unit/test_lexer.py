@@ -137,6 +137,34 @@ class TestStrings(unittest.TestCase):
             tokenize(r'"bad \q escape"')
 
 
+class TestCharLiterals(unittest.TestCase):
+    def test_ascii_char(self):
+        toks = tokenize("'a'")
+        self.assertEqual(toks[0].kind, T.CHAR)
+        self.assertEqual(toks[0].value, 97)
+
+    def test_escapes(self):
+        for src, byte in [(r"'\n'", 10), (r"'\t'", 9), (r"'\r'", 13),
+                          (r"'\\'", 92), (r"'\''", 39), (r"'\0'", 0)]:
+            self.assertEqual(tokenize(src)[0].value, byte, src)
+
+    def test_empty_char_is_error(self):
+        with self.assertRaises(LexError):
+            tokenize("''")
+
+    def test_multibyte_char_is_error(self):
+        with self.assertRaises(LexError):
+            tokenize("'ab'")
+
+    def test_non_ascii_char_is_error(self):
+        with self.assertRaises(LexError):
+            tokenize("'é'")
+
+    def test_invalid_char_escape(self):
+        with self.assertRaises(LexError):
+            tokenize(r"'\q'")
+
+
 class TestComments(unittest.TestCase):
     def test_line_comment(self):
         self.assertEqual(kinds("1 // ignored\n2"), [T.INT, T.NEWLINE, T.INT, T.EOF])

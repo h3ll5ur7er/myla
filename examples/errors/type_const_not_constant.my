@@ -1,0 +1,12 @@
+//~ type error: must be a constant expression
+// A const initializer must be foldable at compile time; a function call is not.
+fun runtime_value() -> int32 {
+    return 7
+}
+
+const X: int32 = runtime_value()
+
+#main
+fun main() {
+    print(X)
+}

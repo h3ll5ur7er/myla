@@ -1,0 +1,218 @@
+// Strings (v0.3.5): `str` is an immutable, length-prefixed, UTF-8 byte sequence.
+// v0.3 is **byte-oriented** — the dedicated Unicode `char` type arrives in v0.5.
+//
+// This file covers the v0.3.5a slice: `len(s)` (byte count), byte indexing
+// `s[i] -> uint8` (bounds-checked, traps out of range), and **char literals**
+// (`'a'`, `'\n'`, `'\t'`, `'\r'`, `'\\'`, `'\''`, `'\0'`) whose value is the
+// byte — a `uint8` by default, but integer-literal-flexible so `s[i] == 'a'`
+// checks without a cast.
+
+#test("hello")[5]
+#test("")[0]
+fun blen(s: str) -> int {
+    return len(s)
+}
+
+#test("abc", 0)[97]
+#test("abc", 2)[99]
+fun byte_at(s: str, i: int) -> int {
+    return s[i] as int
+}
+
+// Count occurrences of a byte, comparing against a char literal.
+#test("hello", 'l')[2]
+#test("banana", 'a')[3]
+#test("xyz", 'q')[0]
+fun count_byte(s: str, b: uint8) -> int {
+    var n = 0
+    var i = 0
+    while i < len(s) {
+        if s[i] == b {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Sum the bytes — exercises the full-string byte walk.
+#test("ABC")[198]
+fun byte_sum(s: str) -> int {
+    var total = 0
+    for i in 0..len(s) {
+        total = total + (s[i] as int)
+    }
+    return total
+}
+
+// A char literal is a `uint8` byte by default (no annotation needed).
+#test[10]
+fun newline_code() -> int {
+    let nl = '\n'
+    return nl as int
+}
+
+#test[0]
+fun nul_code() -> int {
+    let z = '\0'
+    return z as int
+}
+
+// `match` on a byte with char-literal patterns.
+#test("a")[1]
+#test("e")[1]
+#test("b")[0]
+fun is_vowel_start(s: str) -> int {
+    return match s[0] {
+        'a' => 1,
+        'e' => 1,
+        'i' => 1,
+        'o' => 1,
+        'u' => 1,
+        _ => 0,
+    }
+}
+
+// Detect an uppercase ASCII first byte using char-literal range bounds.
+#test("Hello")[1]
+#test("hello")[0]
+fun starts_upper(s: str) -> int {
+    let c = s[0]
+    if c >= 'A' && c <= 'Z' {
+        return 1
+    }
+    return 0
+}
+
+// Concatenation `a + b` builds a fresh, immutable string (D41).
+#test("Myla")["Hello, Myla!"]
+#test("")["Hello, !"]
+fun greet(name: str) -> str {
+    return "Hello, " + name + "!"
+}
+
+// `+` chains left-to-right; the result feeds straight into `len`.
+#test["abc"]
+fun joined() -> str {
+    return "a" + "b" + "c"
+}
+
+#test[6]
+fun joined_len() -> int {
+    return len("foo" + "bar")
+}
+
+// `format(fmt, args…)` fills `{}` placeholders (`{{`/`}}` are literal braces);
+// each argument is rendered by its `print` form (int/bool/str).
+#test(1, 1)["1 + 1 = 2"]
+#test(2, 3)["2 + 3 = 5"]
+fun sum_msg(a: int, b: int) -> str {
+    return format("{} + {} = {}", a, b, a + b)
+}
+
+#test(42)["answer: 42"]
+fun labelled(n: int) -> str {
+    return format("answer: {}", n)
+}
+
+#test(true)["flag is true"]
+#test(false)["flag is false"]
+fun flag_msg(b: bool) -> str {
+    return format("flag is {}", b)
+}
+
+#test["braces {} stay literal"]
+fun literal_braces() -> str {
+    return format("braces {{}} stay literal")
+}
+
+// Round-trip: build with format, then read a byte back out.
+#test[97]
+fun first_byte_of_format() -> int {
+    let s = format("{}{}", "abc", "def")
+    return s[0] as int
+}
+
+// A StringBuilder is a growable, copy-on-write byte buffer for assembling a
+// string without the quadratic cost of repeated `+`. `build(sb)` snapshots it.
+#test[5]
+fun sb_len() -> int {
+    var sb = StringBuilder()
+    append(sb, "Hello")
+    return len(sb)
+}
+
+#test["Hello, world!"]
+fun sb_build() -> str {
+    var sb = StringBuilder()
+    append(sb, "Hello")
+    append_byte(sb, ',')
+    append_byte(sb, ' ')
+    append(sb, "world")
+    append_byte(sb, '!')
+    return build(sb)
+}
+
+// The digits 0..n-1, assembled byte by byte.
+#test(5)["01234"]
+#test(0)[""]
+fun digits(n: int) -> str {
+    var sb = StringBuilder()
+    for i in 0..n {
+        append_byte(sb, ('0' as int + i) as uint8)
+    }
+    return build(sb)
+}
+
+// Value semantics: a copy keeps building independently of the original.
+#test["seed"]
+fun sb_cow_original() -> str {
+    var a = StringBuilder()
+    append(a, "seed")
+    var b = a
+    append(b, " and more")
+    return build(a)
+}
+
+// `join` a small list of words with a separator using a builder.
+#test["a-b-c"]
+fun joined_words() -> str {
+    let words = ["a", "b", "c"]
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(words) {
+        if i > 0 {
+            append_byte(sb, '-')
+        }
+        append(sb, words[i])
+        i = i + 1
+    }
+    return build(sb)
+}
+
+#main
+fun main() {
+    let s = "Myla"
+    print(len(s))                 // 4
+    print(s[0] as int)            // 77 ('M')
+    print(s[3] as int)            // 97 ('a')
+
+    print(blen("hello"))          // 5
+    print(byte_at("abc", 1))      // 98
+    print(count_byte("banana", 'a'))  // 3
+    print(byte_sum("ABC"))        // 198
+    print(newline_code())         // 10
+    print(is_vowel_start("apple"))    // 1
+    print(starts_upper("Hi"))     // 1
+    print(starts_upper("hi"))     // 0
+
+    print(greet("world"))         // Hello, world!
+    print(joined())               // abc
+    print(sum_msg(2, 3))          // 2 + 3 = 5
+    print(format("{}: {}", "len", len("hello")))   // len: 5
+    print(format("{} and {}", true, false))        // true and false
+
+    print(sb_build())             // Hello, world!
+    print(digits(10))             // 0123456789
+    print(joined_words())         // a-b-c
+}

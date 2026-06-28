@@ -1,0 +1,9 @@
+//~ type error: is defined in terms of itself
+// A const initializer may reference other consts, but cycles are rejected.
+const A: int32 = B + 1
+const B: int32 = A + 1
+
+#main
+fun main() {
+    print(A)
+}

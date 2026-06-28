@@ -1,0 +1,7 @@
+//~ type error: strings are immutable
+// A `str` is immutable; `s[i]` reads a byte but cannot be an assignment target.
+#main
+fun main() {
+    var s = "ab"
+    s[0] = 99u8
+}

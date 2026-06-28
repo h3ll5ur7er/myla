@@ -1,0 +1,5 @@
+//~ lex error: no digits after '0x'
+// A base prefix must be followed by at least one digit.
+fun main() {
+    let x = 0x
+}

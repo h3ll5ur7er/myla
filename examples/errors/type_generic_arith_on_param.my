@@ -1,4 +1,4 @@
-//~ type error: requires integer operands
+//~ type error: requires integer or string operands
 // A type parameter is opaque: you can move/pass/store it, but not do arithmetic
 // on it (that needs trait bounds, which arrive in v0.4).
 fun twice<T>(x: T) -> T {

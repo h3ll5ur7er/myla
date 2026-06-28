@@ -31,8 +31,8 @@ import dataclasses
 
 from .. import ast
 from ..types import (
-    BoolType, Checker, EnumType, IntType, StrType, StructType, TupleType, Type,
-    TypeParam, check, type_name,
+    BoolType, Checker, EnumType, IntType, ListType, MapType, StrType,
+    StringBuilderType, StructType, TupleType, Type, TypeParam, check, type_name,
 )
 
 
@@ -63,6 +63,13 @@ class _Monomorphizer:
                 c = copy.deepcopy(d)
                 for v in c.variants:
                     v.payload = [self._rewrite_typeexpr(p, {}) for p in v.payload]
+                out.append(c)
+            elif isinstance(d, ast.ConstDecl):
+                # Constants are kept as-is (their types are concrete primitives);
+                # the re-check re-folds the value. Initializers reference only
+                # literals/other consts, so no type rewriting is needed.
+                c = copy.deepcopy(d)
+                c.declared_type = self._rewrite_typeexpr(c.declared_type, {})
                 out.append(c)
             # generic struct/enum templates and typealiases are dropped.
 
@@ -256,10 +263,15 @@ class _Monomorphizer:
         return self._subst_type(t, subst)
 
     def _type_to_typeexpr(self, t: Type):
-        if isinstance(t, (IntType, BoolType, StrType)):
+        if isinstance(t, (IntType, BoolType, StrType, StringBuilderType)):
             return ast.TypeRef(type_name(t))
         if isinstance(t, TupleType):
             return ast.TupleTypeRef([self._type_to_typeexpr(e) for e in t.elems])
+        if isinstance(t, ListType):
+            return ast.ListTypeRef(self._type_to_typeexpr(t.elem))
+        if isinstance(t, MapType):
+            return ast.MapTypeRef(self._type_to_typeexpr(t.key),
+                                  self._type_to_typeexpr(t.value))
         if isinstance(t, (StructType, EnumType)):
             return ast.TypeRef(self._aggregate_name(t))
         raise AssertionError(  # pragma: no cover - unresolved type parameter
@@ -271,6 +283,11 @@ class _Monomorphizer:
             return subst.get(t.name, t)
         if isinstance(t, TupleType):
             return TupleType(tuple(self._subst_type(e, subst) for e in t.elems))
+        if isinstance(t, ListType):
+            return ListType(self._subst_type(t.elem, subst))
+        if isinstance(t, MapType):
+            return MapType(self._subst_type(t.key, subst),
+                           self._subst_type(t.value, subst))
         if isinstance(t, StructType) and t.args:
             return StructType(t.name, tuple(self._subst_type(a, subst) for a in t.args))
         if isinstance(t, EnumType) and t.args:
@@ -286,7 +303,7 @@ class _Monomorphizer:
         return t.name + "__" + "_".join(self._mono_token(a) for a in t.args)
 
     def _mono_token(self, t: Type) -> str:
-        if isinstance(t, (IntType, BoolType, StrType)):
+        if isinstance(t, (IntType, BoolType, StrType, StringBuilderType)):
             return type_name(t)
         if isinstance(t, (StructType, EnumType)):
             return self._mangle_type(t) if t.args else t.name
@@ -294,6 +311,10 @@ class _Monomorphizer:
             return "T" + str(len(t.elems)) + "".join(
                 "_" + self._mono_token(e) for e in t.elems
             )
+        if isinstance(t, ListType):
+            return "L_" + self._mono_token(t.elem)
+        if isinstance(t, MapType):
+            return "M_" + self._mono_token(t.key) + "_" + self._mono_token(t.value)
         return "X"  # pragma: no cover - defensive
 
 

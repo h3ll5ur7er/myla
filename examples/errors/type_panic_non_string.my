@@ -1,0 +1,6 @@
+//~ type error: panic message must be 'str'
+// panic() takes a single string message.
+#main
+fun main() {
+    panic(42)
+}
