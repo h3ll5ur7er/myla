@@ -1,0 +1,154 @@
+// tokens.my — token kinds and the Token record (mirror of src/myla/tokens.py).
+
+#derive(Eq)
+pub enum TokenKind {
+    INT, FLOAT, STRING, CHAR,
+    IDENT,
+    LET, VAR, FUN, RETURN, STRUCT, ENUM, IMPL, TRAIT, SELF, MATCH,
+    TYPEALIAS, AS, PUB, IMPORT, FROM, CONST, BREAK, CONTINUE,
+    IF, ELSE, WHILE, FOR, IN, TRUE, FALSE,
+    BOOL, STR, INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64,
+    ARROW, FATARROW, PIPEGT, PIPE, DOTDOT, EQ, NE, LE, GE, AND, OR,
+    PLUS, MINUS, STAR, SLASH, PERCENT, AMP, CARET, TILDE,
+    LT, GT, BANG, ASSIGN,
+    LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
+    COMMA, COLON, DOT, HASH, QUESTION,
+    NEWLINE, EOF,
+}
+
+pub struct Token {
+    kind: TokenKind,
+    lexeme: str,
+    line: int32,
+    column: int32,
+    ival: int64,     // INT value or CHAR codepoint; 0 otherwise
+    suffix: str,     // "" when there is no suffix
+}
+
+pub fun keyword_kind(text: str) -> TokenKind {
+    if text == "let" { return TokenKind.LET }
+    if text == "var" { return TokenKind.VAR }
+    if text == "fun" { return TokenKind.FUN }
+    if text == "return" { return TokenKind.RETURN }
+    if text == "struct" { return TokenKind.STRUCT }
+    if text == "enum" { return TokenKind.ENUM }
+    if text == "impl" { return TokenKind.IMPL }
+    if text == "trait" { return TokenKind.TRAIT }
+    if text == "self" { return TokenKind.SELF }
+    if text == "match" { return TokenKind.MATCH }
+    if text == "typealias" { return TokenKind.TYPEALIAS }
+    if text == "as" { return TokenKind.AS }
+    if text == "pub" { return TokenKind.PUB }
+    if text == "import" { return TokenKind.IMPORT }
+    if text == "from" { return TokenKind.FROM }
+    if text == "const" { return TokenKind.CONST }
+    if text == "break" { return TokenKind.BREAK }
+    if text == "continue" { return TokenKind.CONTINUE }
+    if text == "if" { return TokenKind.IF }
+    if text == "else" { return TokenKind.ELSE }
+    if text == "while" { return TokenKind.WHILE }
+    if text == "for" { return TokenKind.FOR }
+    if text == "in" { return TokenKind.IN }
+    if text == "true" { return TokenKind.TRUE }
+    if text == "false" { return TokenKind.FALSE }
+    if text == "bool" { return TokenKind.BOOL }
+    if text == "str" { return TokenKind.STR }
+    if text == "int8" { return TokenKind.INT8 }
+    if text == "int16" { return TokenKind.INT16 }
+    if text == "int32" { return TokenKind.INT32 }
+    if text == "int64" { return TokenKind.INT64 }
+    if text == "uint8" { return TokenKind.UINT8 }
+    if text == "uint16" { return TokenKind.UINT16 }
+    if text == "uint32" { return TokenKind.UINT32 }
+    if text == "uint64" { return TokenKind.UINT64 }
+    return TokenKind.IDENT
+}
+
+pub fun is_int_suffix(s: str) -> bool {
+    return s == "i8" || s == "i16" || s == "i32" || s == "i64" || s == "u8" || s == "u16" || s == "u32" || s == "u64"
+}
+
+pub fun is_float_suffix(s: str) -> bool {
+    return s == "f32" || s == "f64"
+}
+
+pub fun kind_name(k: TokenKind) -> str {
+    return match k {
+        TokenKind.INT => "INT",
+        TokenKind.FLOAT => "FLOAT",
+        TokenKind.STRING => "STRING",
+        TokenKind.CHAR => "CHAR",
+        TokenKind.IDENT => "IDENT",
+        TokenKind.LET => "LET",
+        TokenKind.VAR => "VAR",
+        TokenKind.FUN => "FUN",
+        TokenKind.RETURN => "RETURN",
+        TokenKind.STRUCT => "STRUCT",
+        TokenKind.ENUM => "ENUM",
+        TokenKind.IMPL => "IMPL",
+        TokenKind.TRAIT => "TRAIT",
+        TokenKind.SELF => "SELF",
+        TokenKind.MATCH => "MATCH",
+        TokenKind.TYPEALIAS => "TYPEALIAS",
+        TokenKind.AS => "AS",
+        TokenKind.PUB => "PUB",
+        TokenKind.IMPORT => "IMPORT",
+        TokenKind.FROM => "FROM",
+        TokenKind.CONST => "CONST",
+        TokenKind.BREAK => "BREAK",
+        TokenKind.CONTINUE => "CONTINUE",
+        TokenKind.IF => "IF",
+        TokenKind.ELSE => "ELSE",
+        TokenKind.WHILE => "WHILE",
+        TokenKind.FOR => "FOR",
+        TokenKind.IN => "IN",
+        TokenKind.TRUE => "TRUE",
+        TokenKind.FALSE => "FALSE",
+        TokenKind.BOOL => "BOOL",
+        TokenKind.STR => "STR",
+        TokenKind.INT8 => "INT8",
+        TokenKind.INT16 => "INT16",
+        TokenKind.INT32 => "INT32",
+        TokenKind.INT64 => "INT64",
+        TokenKind.UINT8 => "UINT8",
+        TokenKind.UINT16 => "UINT16",
+        TokenKind.UINT32 => "UINT32",
+        TokenKind.UINT64 => "UINT64",
+        TokenKind.ARROW => "ARROW",
+        TokenKind.FATARROW => "FATARROW",
+        TokenKind.PIPEGT => "PIPEGT",
+        TokenKind.PIPE => "PIPE",
+        TokenKind.DOTDOT => "DOTDOT",
+        TokenKind.EQ => "EQ",
+        TokenKind.NE => "NE",
+        TokenKind.LE => "LE",
+        TokenKind.GE => "GE",
+        TokenKind.AND => "AND",
+        TokenKind.OR => "OR",
+        TokenKind.PLUS => "PLUS",
+        TokenKind.MINUS => "MINUS",
+        TokenKind.STAR => "STAR",
+        TokenKind.SLASH => "SLASH",
+        TokenKind.PERCENT => "PERCENT",
+        TokenKind.AMP => "AMP",
+        TokenKind.CARET => "CARET",
+        TokenKind.TILDE => "TILDE",
+        TokenKind.LT => "LT",
+        TokenKind.GT => "GT",
+        TokenKind.BANG => "BANG",
+        TokenKind.ASSIGN => "ASSIGN",
+        TokenKind.LPAREN => "LPAREN",
+        TokenKind.RPAREN => "RPAREN",
+        TokenKind.LBRACE => "LBRACE",
+        TokenKind.RBRACE => "RBRACE",
+        TokenKind.LBRACKET => "LBRACKET",
+        TokenKind.RBRACKET => "RBRACKET",
+        TokenKind.COMMA => "COMMA",
+        TokenKind.COLON => "COLON",
+        TokenKind.DOT => "DOT",
+        TokenKind.HASH => "HASH",
+        TokenKind.QUESTION => "QUESTION",
+        TokenKind.NEWLINE => "NEWLINE",
+        TokenKind.EOF => "EOF",
+    }
+}

@@ -38,6 +38,13 @@ def _cmd_tokenize(args: argparse.Namespace) -> int:
     except MylaError as err:
         print(err.render(source, args.file), file=sys.stderr)
         return 1
+    if getattr(args, "canonical", False):
+        # Stable cross-implementation format for differential self-hosting tests
+        # (docs/self-hosting.md §5); the Myla lexer reproduces it byte-for-byte.
+        from .canon import canonical_token
+        for tok in tokens:
+            print(canonical_token(tok))
+        return 0
     for tok in tokens:
         print(tok)
     return 0
@@ -51,6 +58,10 @@ def _cmd_parse(args: argparse.Namespace) -> int:
     except MylaError as err:
         print(err.render(source, args.file), file=sys.stderr)
         return 1
+    if getattr(args, "canonical", False):
+        from .canon import canonical_ast
+        print(canonical_ast(program))
+        return 0
     print(format_ast(program))
     return 0
 
@@ -114,6 +125,28 @@ def _cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check(args: argparse.Namespace) -> int:
+    """Type-check a program. With --canonical, emit the stable accept/reject +
+    diagnostic-position line for self-hosting differential tests (v0.7): `ok` on
+    success, else `err <line> <col> <kind>` (a missing position is `-`, and
+    `kind` is the first word of the diagnostic class, e.g. `type`/`module`)."""
+    source = _read_source(args.file)
+    canonical = getattr(args, "canonical", False)
+    try:
+        _front_end(args.file)
+    except MylaError as err:
+        if canonical:
+            line = "-" if err.line is None else str(err.line)
+            col = "-" if err.column is None else str(err.column)
+            kind = err.kind.split()[0]
+            print(f"err {line} {col} {kind}")
+            return 0
+        print(err.render(source, args.file), file=sys.stderr)
+        return 1
+    print("ok")
+    return 0
+
+
 def _not_yet(name: str, milestone: str):
     def handler(args: argparse.Namespace) -> int:
         print(
@@ -152,11 +185,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tok = sub.add_parser("tokenize", help="print the lexer's token stream for a .my file")
     p_tok.add_argument("file")
+    p_tok.add_argument("--canonical", action="store_true",
+                       help="emit the stable cross-implementation dump format "
+                            "(for self-hosting differential tests)")
     p_tok.set_defaults(func=_cmd_tokenize)
 
     p_parse = sub.add_parser("parse", help="print the parsed AST for a .my file")
     p_parse.add_argument("file")
+    p_parse.add_argument("--canonical", action="store_true",
+                         help="emit the stable cross-implementation AST dump "
+                              "(for self-hosting differential tests)")
     p_parse.set_defaults(func=_cmd_parse)
+
+    p_check = sub.add_parser("check", help="type-check a .my file (no run/build)")
+    p_check.add_argument("file")
+    p_check.add_argument("--canonical", action="store_true",
+                         help="emit the stable accept/reject + diagnostic-position "
+                              "line (for self-hosting differential tests)")
+    p_check.set_defaults(func=_cmd_check)
 
     return parser
 

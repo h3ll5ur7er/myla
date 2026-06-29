@@ -1,0 +1,621 @@
+// lexer.my — the Myla lexer (mirror of src/myla/lexer.py).
+//
+// The source is decoded to a list of Unicode scalars so column counting matches
+// the Python oracle (which indexes a codepoint string) and multi-byte literals
+// lex correctly. Errors `panic` (the differential gate compares only successful
+// streams); a later pass will switch to Result once the diagnostics are ported.
+
+from .util import cp_utf8, is_digit, is_ident_start, is_ident_continue
+from .util import digit_value, parse_value, is_blank, escape
+from .tokens import TokenKind, Token, keyword_kind, is_int_suffix, is_float_suffix, kind_name
+
+pub struct Lexer {
+    cps: [int32],
+    pos: int32,
+    line: int32,
+    col: int32,
+    n: int32,
+    toks: [Token],
+}
+
+pub fun slice_str(cps: [int32], start: int32, end: int32) -> str {
+    var sb = StringBuilder()
+    var i = start
+    while i < end {
+        append(sb, cp_utf8(cps[i]))
+        i = i + 1
+    }
+    return build(sb)
+}
+
+pub fun new_lexer(src: str) -> Lexer {
+    var cps: [int32] = []
+    for ch in chars(src) {
+        push(cps, ch as int32)
+    }
+    return Lexer { cps: cps, pos: 0, line: 1, col: 1, n: len(cps) as int32, toks: [] }
+}
+
+// One canonical token line (mirror of src/myla/canon.py:canonical_token).
+pub fun canonical_line(t: Token) -> str {
+    var sb = StringBuilder()
+    append(sb, kind_name(t.kind))
+    append(sb, format(" {} {} \"", t.line, t.column))
+    append(sb, escape(t.lexeme))
+    append_byte(sb, '"')
+    if t.kind == TokenKind.INT {
+        append(sb, format(" int={}", t.ival))
+        if t.suffix != "" {
+            append(sb, format(" suf={}", t.suffix))
+        }
+    } else if t.kind == TokenKind.FLOAT {
+        if t.suffix != "" {
+            append(sb, format(" suf={}", t.suffix))
+        }
+    } else if t.kind == TokenKind.CHAR {
+        append(sb, format(" cp={}", t.ival))
+    }
+    return build(sb)
+}
+
+impl Lexer {
+    fun at_end(self) -> bool {
+        return self.pos >= self.n
+    }
+
+    fun peek(self) -> int32 {
+        if self.pos >= self.n { return 0 }
+        return self.cps[self.pos]
+    }
+
+    fun peek1(self) -> int32 {
+        if self.pos + 1 >= self.n { return 0 }
+        return self.cps[self.pos + 1]
+    }
+
+    fun peek2(self) -> int32 {
+        if self.pos + 2 >= self.n { return 0 }
+        return self.cps[self.pos + 2]
+    }
+
+    fun advance(var self) -> int32 {
+        let c = self.cps[self.pos]
+        self.pos = self.pos + 1
+        if c == 10 {
+            self.line = self.line + 1
+            self.col = 1
+        } else {
+            self.col = self.col + 1
+        }
+        return c
+    }
+
+    fun emit(var self, kind: TokenKind, lexeme: str, line: int32, col: int32, ival: int64, suffix: str) {
+        push(self.toks, Token { kind: kind, lexeme: lexeme, line: line, column: col, ival: ival, suffix: suffix })
+    }
+
+    fun emit0(var self, kind: TokenKind, lexeme: str, line: int32, col: int32) {
+        self.emit(kind, lexeme, line, col, 0, "")
+    }
+
+    fun emit_newline(var self) {
+        if len(self.toks) == 0 { return }
+        if self.toks[len(self.toks) - 1].kind == TokenKind.NEWLINE { return }
+        self.emit0(TokenKind.NEWLINE, "\\n", self.line, self.col)
+    }
+
+    fun line_comment(var self) {
+        while !self.at_end() && self.peek() != 10 {
+            self.advance()
+        }
+    }
+
+    fun block_comment(var self) {
+        self.advance()
+        self.advance()
+        while !self.at_end() {
+            if self.peek() == 42 && self.peek1() == 47 {
+                self.advance()
+                self.advance()
+                return
+            }
+            self.advance()
+        }
+        panic("unterminated block comment")
+    }
+
+    fun scan_digits(var self, base: int32) -> str {
+        var sb = StringBuilder()
+        var prev_us = false
+        var any = false
+        while !self.at_end() {
+            let c = self.peek()
+            if c == 95 {
+                if !any || prev_us {
+                    panic("'_' separators must sit between digits")
+                }
+                prev_us = true
+                self.advance()
+            } else {
+                let dv = digit_value(c)
+                if dv >= 0 && dv < base {
+                    append_byte(sb, c as uint8)
+                    any = true
+                    prev_us = false
+                    self.advance()
+                } else {
+                    break
+                }
+            }
+        }
+        if prev_us {
+            panic("integer literal cannot end with '_'")
+        }
+        return build(sb)
+    }
+
+    fun scan_int_suffix(var self) -> str {
+        if self.peek() == 105 || self.peek() == 117 {
+            let sp = self.pos
+            self.advance()
+            while is_digit(self.peek()) {
+                self.advance()
+            }
+            let cand = slice_str(self.cps, sp, self.pos)
+            if !is_int_suffix(cand) {
+                panic(format("invalid integer literal suffix '{}'", cand))
+            }
+            return cand
+        }
+        if is_ident_continue(self.peek()) {
+            panic("invalid integer literal: unexpected character after digits")
+        }
+        return ""
+    }
+
+    fun scan_number(var self) {
+        let sl = self.line
+        let sc = self.col
+        let sp = self.pos
+        let p1 = self.peek1()
+        let is_prefix = p1 == 120 || p1 == 88 || p1 == 98 || p1 == 66 || p1 == 111 || p1 == 79
+        if self.peek() == 48 && is_prefix {
+            var base = 16
+            if p1 == 98 || p1 == 66 {
+                base = 2
+            } else if p1 == 111 || p1 == 79 {
+                base = 8
+            }
+            self.advance()
+            self.advance()
+            let digits = self.scan_digits(base)
+            if len(digits) == 0 {
+                panic("integer literal has no digits after base prefix")
+            }
+            let value = parse_value(digits, base as int64)
+            let suffix = self.scan_int_suffix()
+            let lexeme = slice_str(self.cps, sp, self.pos)
+            self.emit(TokenKind.INT, lexeme, sl, sc, value, suffix)
+            return
+        }
+        let int_digits = self.scan_digits(10)
+        var is_float = false
+        if self.peek() == 46 && is_digit(self.peek1()) {
+            self.advance()
+            self.scan_digits(10)
+            is_float = true
+        }
+        if self.peek() == 101 || self.peek() == 69 {
+            let nx = self.peek1()
+            if is_digit(nx) || ((nx == 43 || nx == 45) && is_digit(self.peek2())) {
+                self.advance()
+                if self.peek() == 43 || self.peek() == 45 {
+                    self.advance()
+                }
+                self.scan_digits(10)
+                is_float = true
+            }
+        }
+        var suffix = ""
+        if self.peek() == 102 {
+            let fsp = self.pos
+            self.advance()
+            while is_digit(self.peek()) {
+                self.advance()
+            }
+            let cand = slice_str(self.cps, fsp, self.pos)
+            if !is_float_suffix(cand) {
+                panic(format("invalid float literal suffix '{}'", cand))
+            }
+            suffix = cand
+            is_float = true
+        } else if !is_float {
+            suffix = self.scan_int_suffix()
+        }
+        if is_float {
+            if is_ident_continue(self.peek()) {
+                panic("invalid float literal: unexpected character after digits")
+            }
+            let lexeme = slice_str(self.cps, sp, self.pos)
+            self.emit(TokenKind.FLOAT, lexeme, sl, sc, 0, suffix)
+            return
+        }
+        let value = parse_value(int_digits, 10)
+        let lexeme = slice_str(self.cps, sp, self.pos)
+        self.emit(TokenKind.INT, lexeme, sl, sc, value, suffix)
+    }
+
+    fun scan_string(var self) {
+        let sl = self.line
+        let sc = self.col
+        self.advance()
+        var sb = StringBuilder()
+        while true {
+            if self.at_end() || self.peek() == 10 {
+                panic("unterminated string literal")
+            }
+            let c = self.advance()
+            if c == 34 {
+                break
+            }
+            if c == 92 {
+                if self.at_end() {
+                    panic("unterminated string literal")
+                }
+                let esc = self.advance()
+                if esc == 110 {
+                    append_byte(sb, 10)
+                } else if esc == 116 {
+                    append_byte(sb, 9)
+                } else if esc == 92 {
+                    append_byte(sb, 92)
+                } else if esc == 34 {
+                    append_byte(sb, 34)
+                } else {
+                    panic("invalid escape sequence in string literal")
+                }
+            } else {
+                append(sb, cp_utf8(c))
+            }
+        }
+        let value = build(sb)
+        self.emit(TokenKind.STRING, value, sl, sc, 0, "")
+    }
+
+    fun scan_unicode_escape(var self) -> int32 {
+        if self.at_end() || self.advance() != 123 {
+            panic("expected '{' after '\\u' in char literal")
+        }
+        var sb = StringBuilder()
+        var cnt = 0
+        while !self.at_end() && self.peek() != 125 {
+            let d = self.advance()
+            if digit_value(d) < 0 {
+                panic("invalid hex digit in '\\u{...}' escape")
+            }
+            append_byte(sb, d as uint8)
+            cnt = cnt + 1
+        }
+        if self.at_end() {
+            panic("unterminated '\\u{...}' escape")
+        }
+        self.advance()
+        if cnt == 0 {
+            panic("empty '\\u{...}' escape")
+        }
+        let cp = parse_value(build(sb), 16)
+        if cp > 1114111 || (cp >= 55296 && cp <= 57343) {
+            panic("invalid Unicode scalar in char literal")
+        }
+        return cp as int32
+    }
+
+    fun scan_char(var self) {
+        let sl = self.line
+        let sc = self.col
+        let sp = self.pos
+        self.advance()
+        if self.at_end() || self.peek() == 10 || self.peek() == 39 {
+            panic("empty or unterminated char literal")
+        }
+        let c = self.advance()
+        var cp = 0
+        if c == 92 {
+            if self.at_end() {
+                panic("unterminated char literal")
+            }
+            let esc = self.advance()
+            if esc == 117 {
+                cp = self.scan_unicode_escape()
+            } else if esc == 110 {
+                cp = 10
+            } else if esc == 116 {
+                cp = 9
+            } else if esc == 114 {
+                cp = 13
+            } else if esc == 92 {
+                cp = 92
+            } else if esc == 39 {
+                cp = 39
+            } else if esc == 48 {
+                cp = 0
+            } else {
+                panic("invalid escape sequence in char literal")
+            }
+        } else {
+            cp = c
+        }
+        if self.at_end() || self.peek() != 39 {
+            panic("char literal must contain exactly one character")
+        }
+        self.advance()
+        let lexeme = slice_str(self.cps, sp, self.pos)
+        self.emit(TokenKind.CHAR, lexeme, sl, sc, cp as int64, "")
+    }
+
+    fun scan_identifier(var self) {
+        let sl = self.line
+        let sc = self.col
+        let sp = self.pos
+        while !self.at_end() && is_ident_continue(self.peek()) {
+            self.advance()
+        }
+        let text = slice_str(self.cps, sp, self.pos)
+        self.emit0(keyword_kind(text), text, sl, sc)
+    }
+
+    fun scan_operator(var self) {
+        let sl = self.line
+        let sc = self.col
+        let c = self.peek()
+        let c1 = self.peek1()
+        if c == 45 && c1 == 62 {
+            self.advance()
+            self.advance()
+            self.emit0(TokenKind.ARROW, "->", sl, sc)
+        } else if c == 61 && c1 == 62 {
+            self.advance()
+            self.advance()
+            self.emit0(TokenKind.FATARROW, "=>", sl, sc)
+        } else if c == 124 && c1 == 62 {
+            self.advance()
+            self.advance()
+            self.emit0(TokenKind.PIPEGT, "|>", sl, sc)
+        } else if c == 46 && c1 == 46 {
+            self.advance()
+            self.advance()
+            self.emit0(TokenKind.DOTDOT, "..", sl, sc)
+        } else if c == 61 && c1 == 61 {
+            self.advance()
+            self.advance()
+            self.emit0(TokenKind.EQ, "==", sl, sc)
+        } else if c == 33 && c1 == 61 {
+            self.advance()
+            self.advance()
+            self.emit0(TokenKind.NE, "!=", sl, sc)
+        } else if c == 60 && c1 == 61 {
+            self.advance()
+            self.advance()
+            self.emit0(TokenKind.LE, "<=", sl, sc)
+        } else if c == 62 && c1 == 61 {
+            self.advance()
+            self.advance()
+            self.emit0(TokenKind.GE, ">=", sl, sc)
+        } else if c == 38 && c1 == 38 {
+            self.advance()
+            self.advance()
+            self.emit0(TokenKind.AND, "&&", sl, sc)
+        } else if c == 124 && c1 == 124 {
+            self.advance()
+            self.advance()
+            self.emit0(TokenKind.OR, "||", sl, sc)
+        } else {
+            self.advance()
+            let lex = cp_utf8(c)
+            let k = self.one_char_kind(c)
+            self.emit0(k, lex, sl, sc)
+        }
+    }
+
+    fun one_char_kind(self, c: int32) -> TokenKind {
+        if c == 43 { return TokenKind.PLUS }
+        if c == 45 { return TokenKind.MINUS }
+        if c == 42 { return TokenKind.STAR }
+        if c == 47 { return TokenKind.SLASH }
+        if c == 37 { return TokenKind.PERCENT }
+        if c == 38 { return TokenKind.AMP }
+        if c == 94 { return TokenKind.CARET }
+        if c == 126 { return TokenKind.TILDE }
+        if c == 60 { return TokenKind.LT }
+        if c == 62 { return TokenKind.GT }
+        if c == 33 { return TokenKind.BANG }
+        if c == 61 { return TokenKind.ASSIGN }
+        if c == 124 { return TokenKind.PIPE }
+        if c == 40 { return TokenKind.LPAREN }
+        if c == 41 { return TokenKind.RPAREN }
+        if c == 123 { return TokenKind.LBRACE }
+        if c == 125 { return TokenKind.RBRACE }
+        if c == 91 { return TokenKind.LBRACKET }
+        if c == 93 { return TokenKind.RBRACKET }
+        if c == 44 { return TokenKind.COMMA }
+        if c == 58 { return TokenKind.COLON }
+        if c == 46 { return TokenKind.DOT }
+        if c == 35 { return TokenKind.HASH }
+        if c == 63 { return TokenKind.QUESTION }
+        panic(format("unexpected character (codepoint {})", c))
+        return TokenKind.EOF
+    }
+
+    fun copy_quoted(var self) -> str {
+        var b = StringBuilder()
+        let q = self.advance()
+        append(b, cp_utf8(q))
+        while true {
+            if self.at_end() || self.peek() == 10 {
+                panic("unterminated string in f-string expression")
+            }
+            let ch = self.advance()
+            append(b, cp_utf8(ch))
+            if ch == 92 {
+                if self.at_end() {
+                    panic("unterminated string in f-string expression")
+                }
+                append(b, cp_utf8(self.advance()))
+            } else if ch == q {
+                return build(b)
+            }
+        }
+        return build(b)
+    }
+
+    fun scan_fstring_hole(var self, fs_line: int32, fs_col: int32) -> [Token] {
+        let slice_line = self.line
+        let slice_col = self.col
+        var buf = StringBuilder()
+        var depth = 1
+        while true {
+            if self.at_end() || self.peek() == 10 {
+                panic("unterminated '{' in f-string")
+            }
+            let c = self.peek()
+            if c == 123 {
+                depth = depth + 1
+                self.advance()
+                append_byte(buf, 123)
+            } else if c == 125 {
+                self.advance()
+                depth = depth - 1
+                if depth == 0 {
+                    break
+                }
+                append_byte(buf, 125)
+            } else if c == 34 || c == 39 {
+                append(buf, self.copy_quoted())
+            } else {
+                let ch = self.advance()
+                append(buf, cp_utf8(ch))
+            }
+        }
+        let src = build(buf)
+        if is_blank(src) {
+            panic("empty '{}' hole in f-string (expected an expression)")
+        }
+        var sub = new_lexer(src)
+        let sub_toks = sub.run()
+        var out: [Token] = []
+        for t in sub_toks {
+            if t.kind != TokenKind.EOF && t.kind != TokenKind.NEWLINE {
+                let col = slice_col + (t.column - 1)
+                push(out, Token { kind: t.kind, lexeme: t.lexeme, line: slice_line, column: col, ival: t.ival, suffix: t.suffix })
+            }
+        }
+        return out
+    }
+
+    fun scan_fstring(var self) {
+        let sl = self.line
+        let sc = self.col
+        self.advance()
+        self.advance()
+        var fmt = StringBuilder()
+        var args: [[Token]] = []
+        while true {
+            if self.at_end() || self.peek() == 10 {
+                panic("unterminated f-string literal")
+            }
+            let c = self.peek()
+            if c == 34 {
+                self.advance()
+                break
+            } else if c == 123 {
+                if self.peek1() == 123 {
+                    self.advance()
+                    self.advance()
+                    append(fmt, "{{")
+                } else {
+                    self.advance()
+                    push(args, self.scan_fstring_hole(sl, sc))
+                    append(fmt, "{}")
+                }
+            } else if c == 125 {
+                if self.peek1() == 125 {
+                    self.advance()
+                    self.advance()
+                    append(fmt, "}}")
+                } else {
+                    panic("single '}' in f-string (use '}}' for a literal '}')")
+                }
+            } else if c == 92 {
+                self.advance()
+                if self.at_end() || self.peek() == 10 {
+                    panic("unterminated f-string literal")
+                }
+                let esc = self.advance()
+                if esc == 110 {
+                    append_byte(fmt, 10)
+                } else if esc == 116 {
+                    append_byte(fmt, 9)
+                } else if esc == 92 {
+                    append_byte(fmt, 92)
+                } else if esc == 34 {
+                    append_byte(fmt, 34)
+                } else {
+                    panic("invalid escape sequence in f-string")
+                }
+            } else {
+                self.advance()
+                append(fmt, cp_utf8(c))
+            }
+        }
+        let fmt_str = build(fmt)
+        self.emit(TokenKind.IDENT, "format", sl, sc, 0, "")
+        self.emit0(TokenKind.LPAREN, "(", sl, sc)
+        self.emit(TokenKind.STRING, fmt_str, sl, sc, 0, "")
+        for toks in args {
+            self.emit0(TokenKind.COMMA, ",", sl, sc)
+            for t in toks {
+                push(self.toks, t)
+            }
+        }
+        self.emit0(TokenKind.RPAREN, ")", sl, sc)
+    }
+
+    fun run(var self) -> [Token] {
+        while !self.at_end() {
+            let c = self.peek()
+            if c == 10 {
+                self.advance()
+                self.emit_newline()
+            } else if c == 32 || c == 9 || c == 13 {
+                self.advance()
+            } else if c == 47 && self.peek1() == 47 {
+                self.line_comment()
+            } else if c == 47 && self.peek1() == 42 {
+                self.block_comment()
+            } else if c == 102 && self.peek1() == 34 {
+                self.scan_fstring()
+            } else if c == 34 {
+                self.scan_string()
+            } else if c == 39 {
+                self.scan_char()
+            } else if is_digit(c) {
+                self.scan_number()
+            } else if is_ident_start(c) {
+                self.scan_identifier()
+            } else {
+                self.scan_operator()
+            }
+        }
+        let has_trailing_nl = len(self.toks) > 0 && self.toks[len(self.toks) - 1].kind == TokenKind.NEWLINE
+        if has_trailing_nl {
+            pop(self.toks)
+        }
+        self.emit0(TokenKind.EOF, "", self.line, self.col)
+        return self.toks
+    }
+}
+
+pub fun lex(src: str) -> [Token] {
+    var lx = new_lexer(src)
+    return lx.run()
+}

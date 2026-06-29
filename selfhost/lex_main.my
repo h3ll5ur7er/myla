@@ -1,0 +1,30 @@
+// lex_main.my — `tokenize --canonical` tool, written in Myla (self-hosting v0.6a).
+//
+// Reads a .my file and prints its canonical token dump (src/myla/canon.py), for
+// byte-for-byte differential comparison against `myla tokenize --canonical`.
+
+from std.process import args, exit
+from std.fs import read_to_string
+from std.io import println, eprintln
+from .lexer import lex, canonical_line
+
+fun lex_and_dump(src: str) {
+    for t in lex(src) {
+        println(canonical_line(t))
+    }
+}
+
+fun main() {
+    let argv = args()
+    if len(argv) < 2 {
+        eprintln("usage: lex_main <file.my>")
+        exit(2)
+    }
+    match read_to_string(argv[1]) {
+        Ok(src) => lex_and_dump(src),
+        Err(e) => {
+            eprintln("lex_main: cannot read input file")
+            exit(1)
+        }
+    }
+}

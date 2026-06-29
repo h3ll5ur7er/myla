@@ -1,0 +1,37 @@
+// check_main.my — `check --canonical` tool, written in Myla (self-hosting v0.7).
+//
+// Reads a .my file, lexes + parses + type-checks it, and prints the stable
+// accept/reject + diagnostic-position line for differential comparison against
+// `myla check --canonical`: `ok` on success, else `err <line> <col> type`.
+// (The checker gate covers single-file programs that lex + parse cleanly; the
+// only diagnostic class it emits is `type`.)
+
+from std.process import args, exit
+from std.fs import read_to_string
+from std.io import println, eprintln
+from .lexer import lex
+from .parser import parse
+from .checker import check_program
+
+fun check_and_report(src: str) {
+    let prog = parse(lex(src))
+    match check_program(prog) {
+        Ok(x) => println("ok"),
+        Err(e) => println(format("err {} {} type", e.line, e.col)),
+    }
+}
+
+fun main() {
+    let argv = args()
+    if len(argv) < 2 {
+        eprintln("usage: check_main <file.my>")
+        exit(2)
+    }
+    match read_to_string(argv[1]) {
+        Ok(src) => check_and_report(src),
+        Err(e) => {
+            eprintln("check_main: cannot read input file")
+            exit(1)
+        }
+    }
+}

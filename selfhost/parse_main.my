@@ -1,0 +1,33 @@
+// parse_main.my — `parse --canonical` tool, written in Myla (self-hosting v0.6b).
+//
+// Reads a .my file, lexes + parses it, and prints the canonical AST dump
+// (src/myla/canon.py:canonical_ast), for byte-for-byte differential comparison
+// against `myla parse --canonical`.
+
+from std.process import args, exit
+from std.fs import read_to_string
+from std.io import println, eprintln
+from .lexer import lex
+from .parser import parse
+from .ast import dump_program
+
+fun parse_and_dump(src: str) {
+    let toks = lex(src)
+    let prog = parse(toks)
+    println(dump_program(prog))
+}
+
+fun main() {
+    let argv = args()
+    if len(argv) < 2 {
+        eprintln("usage: parse_main <file.my>")
+        exit(2)
+    }
+    match read_to_string(argv[1]) {
+        Ok(src) => parse_and_dump(src),
+        Err(e) => {
+            eprintln("parse_main: cannot read input file")
+            exit(1)
+        }
+    }
+}

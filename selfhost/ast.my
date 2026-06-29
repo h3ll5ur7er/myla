@@ -1,0 +1,384 @@
+// ast.my — the Myla AST (mirror of src/myla/ast.py) plus the canonical dump
+// (mirror of src/myla/canon.py:canonical_ast).
+//
+// Node families (Expr/Stmt/Pattern/TypeExpr/Decl) are wrapper structs
+// `{ id, line, col, kind }`: the `*Kind` enum carries the variant data, while
+// the wrapper carries a unique NodeId and 1-based source position. This is the
+// locked AST-metadata model (plan: "NodeId + side tables"): the checker reads
+// `.line`/`.col` for diagnostics, and `.id` will key a resolved-type side table
+// for the interpreter/codegen (v0.8+). The canonical dump is *structural*: it
+// matches on `.kind` and ignores id/position (token parity already pins
+// positions), so the v0.6b AST-dump gate stays byte-identical.
+
+from .util import escape
+
+// --- types ---------------------------------------------------------------
+
+pub struct TypeExpr { id: int32, line: int32, col: int32, kind: TypeKind }
+
+pub enum TypeKind {
+    TRef(str, [TypeExpr]),        // name, type arguments
+    TTuple([TypeExpr]),
+    TList(TypeExpr),
+    TMap(TypeExpr, TypeExpr),
+    TFn([TypeExpr], TypeExpr),    // params, return
+}
+
+// --- expressions ---------------------------------------------------------
+
+pub struct Expr { id: int32, line: int32, col: int32, kind: ExprKind }
+
+pub struct FieldInit { line: int32, col: int32, name: str, value: Expr }
+pub struct MapEntry { key: Expr, value: Expr }
+pub struct Param { line: int32, col: int32, name: str, ty: Option<TypeExpr> }
+
+pub enum ExprOrBlock {
+    EB_Expr(Expr),
+    EB_Block(Block),
+}
+
+pub enum ExprKind {
+    IntLit(int64, Option<str>, bool),   // value, suffix, is_char
+    FloatLit(Option<str>),              // suffix only (digits gated at tokens)
+    StrLit(str),
+    BoolLit(bool),
+    Name(str),
+    Unary(str, Expr),
+    Binary(str, Expr, Expr),
+    Call(Expr, [Expr]),
+    GetField(Expr, str),
+    StructLit(str, [FieldInit]),
+    TupleLit([Expr]),
+    TupleIndex(Expr, int64),
+    ListLit([Expr]),
+    MapLit([MapEntry]),
+    Index(Expr, Expr),
+    MatchE(Expr, [MatchArm]),
+    Try(Expr),
+    Cast(Expr, TypeExpr),
+    Lambda([Param], Option<TypeExpr>, ExprOrBlock),
+    Hole,
+}
+
+// --- patterns ------------------------------------------------------------
+
+pub struct Pattern { id: int32, line: int32, col: int32, kind: PatternKind }
+
+pub struct FieldPat { line: int32, col: int32, name: str, pattern: Pattern }
+
+pub enum PatternKind {
+    PWild,
+    PBind(str),
+    PLit(Expr),
+    PEnum(Option<str>, str, [Pattern], bool),   // enum_name, variant, elems, has_payload
+    PTuple([Pattern]),
+    PStruct(str, [FieldPat]),
+    POr([Pattern]),
+}
+
+pub struct MatchArm { line: int32, col: int32, pattern: Pattern, guard: Option<Expr>, body: ExprOrBlock }
+
+// --- bindings (destructuring) --------------------------------------------
+
+pub enum BindElem {
+    BName(str),
+    BWild,
+    BTuple([BindElem]),
+}
+
+// --- statements ----------------------------------------------------------
+
+pub struct Stmt { id: int32, line: int32, col: int32, kind: StmtKind }
+
+pub struct Block { line: int32, col: int32, stmts: [Stmt] }
+
+pub enum ElseTail {
+    ElseBlock(Block),
+    ElseIf(Stmt),       // always an IfS
+}
+
+pub enum StmtKind {
+    VarDecl(str, str, Option<TypeExpr>, Expr),          // kind, name, type, init
+    DestructDecl(str, [BindElem], Option<TypeExpr>, Expr),
+    Assign(Expr, Expr),
+    IfS(Expr, Block, Option<ElseTail>),
+    WhileS(Expr, Block),
+    ForS(str, Option<Expr>, Option<Expr>, Block, Option<Expr>),  // var,start,end,body,iter
+    ReturnS(Option<Expr>),
+    BreakS,
+    ContinueS,
+    ExprStmt(Expr),
+}
+
+// --- declarations --------------------------------------------------------
+
+pub struct TypeParam { line: int32, col: int32, name: str, bounds: [str] }
+pub struct Field { line: int32, col: int32, name: str, ty: TypeExpr }
+pub struct Variant { line: int32, col: int32, name: str, payload: [TypeExpr] }
+pub struct ImportPath { line: int32, col: int32, dots: int32, segments: [str] }
+pub struct ImportItem { line: int32, col: int32, name: str, alias: Option<str> }
+pub struct Attribute { line: int32, col: int32, name: str, args: [Expr], outputs: Option<[Expr]> }
+
+pub struct FunData {
+    line: int32,
+    col: int32,
+    name: str,
+    params: [Param],
+    ret_type: Option<TypeExpr>,
+    body: Option<Block>,
+    attributes: [Attribute],
+    type_params: [TypeParam],
+    receiver: Option<str>,
+    is_pub: bool,
+}
+
+pub struct Decl { id: int32, line: int32, col: int32, kind: DeclKind }
+
+pub enum DeclKind {
+    StructDecl(str, [Field], [Attribute], [TypeParam], bool),
+    FunDecl(FunData),
+    EnumDecl(str, [Variant], [Attribute], [TypeParam], bool),
+    TypeAliasDecl(str, TypeExpr, [Attribute], bool),
+    ImplDecl(TypeExpr, [FunData], [TypeParam], Option<str>, [TypeExpr]),  // target,methods,typarams,trait,trait_args
+    TraitDecl(str, [FunData], [TypeParam], bool),
+    ConstDecl(str, TypeExpr, Expr, [Attribute], bool),
+    ImportDecl(ImportPath, Option<[ImportItem]>, Option<str>, bool),      // path,items,alias,pub
+}
+
+pub struct Program { decls: [Decl] }
+
+// =========================================================================
+// Canonical dump (mirror of src/myla/canon.py) — structural, ignores id/pos.
+// =========================================================================
+
+fun wrap_list(parts: [str]) -> str {
+    var sb = StringBuilder()
+    append_byte(sb, '[')
+    var i = 0
+    while i < len(parts) {
+        if i > 0 { append_byte(sb, ' ') }
+        append(sb, parts[i])
+        i = i + 1
+    }
+    append_byte(sb, ']')
+    return build(sb)
+}
+
+fun join_map<T>(xs: [T], f: (T) -> str) -> str {
+    var parts: [str] = []
+    for x in xs {
+        push(parts, f(x))
+    }
+    return wrap_list(parts)
+}
+
+fun sstr(s: str) -> str {
+    return format("\"{}\"", escape(s))
+}
+
+fun bstr(b: bool) -> str {
+    if b { return "true" }
+    return "false"
+}
+
+fun opt_sstr(o: Option<str>) -> str {
+    return match o {
+        Some(s) => sstr(s),
+        None => "nil",
+    }
+}
+
+fun opt_type(o: Option<TypeExpr>) -> str {
+    return match o {
+        Some(t) => dump_type(t),
+        None => "nil",
+    }
+}
+
+fun opt_expr(o: Option<Expr>) -> str {
+    return match o {
+        Some(e) => dump_expr(e),
+        None => "nil",
+    }
+}
+
+pub fun dump_type(t: TypeExpr) -> str {
+    return match t.kind {
+        TypeKind.TRef(name, args) => format("(tref {} {})", sstr(name), join_map(args, dump_type)),
+        TypeKind.TTuple(elems) => format("(ttype {})", join_map(elems, dump_type)),
+        TypeKind.TList(elem) => format("(ltype {})", dump_type(elem)),
+        TypeKind.TMap(k, v) => format("(mtype {} {})", dump_type(k), dump_type(v)),
+        TypeKind.TFn(params, ret) => format("(ftype {} {})", join_map(params, dump_type), dump_type(ret)),
+    }
+}
+
+fun dump_finit(f: FieldInit) -> str {
+    return format("(finit {} {})", sstr(f.name), dump_expr(f.value))
+}
+
+fun dump_pair(e: MapEntry) -> str {
+    return format("(pair {} {})", dump_expr(e.key), dump_expr(e.value))
+}
+
+fun dump_param(p: Param) -> str {
+    return format("(param {} {})", sstr(p.name), opt_type(p.ty))
+}
+
+fun dump_eb(b: ExprOrBlock) -> str {
+    return match b {
+        ExprOrBlock.EB_Expr(e) => dump_expr(e),
+        ExprOrBlock.EB_Block(bl) => dump_block(bl),
+    }
+}
+
+fun dump_arm(a: MatchArm) -> str {
+    let g = match a.guard {
+        Some(e) => dump_expr(e),
+        None => "nil",
+    }
+    return format("(arm {} {} {})", dump_pattern(a.pattern), g, dump_eb(a.body))
+}
+
+pub fun dump_expr(e: Expr) -> str {
+    return match e.kind {
+        ExprKind.IntLit(v, suf, isc) => format("(int {} {} {})", v, opt_sstr(suf), bstr(isc)),
+        ExprKind.FloatLit(suf) => format("(float {})", opt_sstr(suf)),
+        ExprKind.StrLit(s) => format("(str {})", sstr(s)),
+        ExprKind.BoolLit(b) => format("(bool {})", bstr(b)),
+        ExprKind.Name(n) => format("(name {})", sstr(n)),
+        ExprKind.Unary(op, x) => format("(unary {} {})", sstr(op), dump_expr(x)),
+        ExprKind.Binary(op, l, r) => format("(binary {} {} {})", sstr(op), dump_expr(l), dump_expr(r)),
+        ExprKind.Call(c, args) => format("(call {} {})", dump_expr(c), join_map(args, dump_expr)),
+        ExprKind.GetField(t, name) => format("(getfield {} {})", dump_expr(t), sstr(name)),
+        ExprKind.StructLit(name, fields) => format("(structlit {} {})", sstr(name), join_map(fields, dump_finit)),
+        ExprKind.TupleLit(elems) => format("(tuple {})", join_map(elems, dump_expr)),
+        ExprKind.TupleIndex(t, idx) => format("(tindex {} {})", dump_expr(t), idx),
+        ExprKind.ListLit(elems) => format("(list {})", join_map(elems, dump_expr)),
+        ExprKind.MapLit(entries) => format("(map {})", join_map(entries, dump_pair)),
+        ExprKind.Index(t, i) => format("(index {} {})", dump_expr(t), dump_expr(i)),
+        ExprKind.MatchE(s, arms) => format("(match {} {})", dump_expr(s), join_map(arms, dump_arm)),
+        ExprKind.Try(x) => format("(try {})", dump_expr(x)),
+        ExprKind.Cast(x, ty) => format("(cast {} {})", dump_expr(x), dump_type(ty)),
+        ExprKind.Lambda(params, ret, body) => format("(lambda {} {} {})", join_map(params, dump_param), opt_type(ret), dump_eb(body)),
+        ExprKind.Hole => "(hole)",
+    }
+}
+
+fun dump_fpat(fp: FieldPat) -> str {
+    return format("(fpat {} {})", sstr(fp.name), dump_pattern(fp.pattern))
+}
+
+pub fun dump_pattern(p: Pattern) -> str {
+    return match p.kind {
+        PatternKind.PWild => "(pwild)",
+        PatternKind.PBind(n) => format("(pbind {})", sstr(n)),
+        PatternKind.PLit(e) => format("(plit {})", dump_expr(e)),
+        PatternKind.PEnum(en, v, elems, hp) => format("(penum {} {} {} {})", opt_sstr(en), sstr(v), join_map(elems, dump_pattern), bstr(hp)),
+        PatternKind.PTuple(elems) => format("(ptuple {})", join_map(elems, dump_pattern)),
+        PatternKind.PStruct(name, fields) => format("(pstruct {} {})", sstr(name), join_map(fields, dump_fpat)),
+        PatternKind.POr(alts) => format("(por {})", join_map(alts, dump_pattern)),
+    }
+}
+
+fun dump_bindelem(b: BindElem) -> str {
+    return match b {
+        BindElem.BName(n) => format("(bname {})", sstr(n)),
+        BindElem.BWild => "(bwild)",
+        BindElem.BTuple(elems) => format("(btuple {})", join_map(elems, dump_bindelem)),
+    }
+}
+
+fun dump_else(t: ElseTail) -> str {
+    return match t {
+        ElseTail.ElseBlock(b) => dump_block(b),
+        ElseTail.ElseIf(s) => dump_stmt(s),
+    }
+}
+
+pub fun dump_block(b: Block) -> str {
+    return format("(block {})", join_map(b.stmts, dump_stmt))
+}
+
+pub fun dump_stmt(s: Stmt) -> str {
+    return match s.kind {
+        StmtKind.VarDecl(kind, name, ty, init) => format("(vardecl {} {} {} {})", sstr(kind), sstr(name), opt_type(ty), dump_expr(init)),
+        StmtKind.DestructDecl(kind, binding, ty, init) => format("(destruct {} (btuple {}) {} {})", sstr(kind), join_map(binding, dump_bindelem), opt_type(ty), dump_expr(init)),
+        StmtKind.Assign(t, v) => format("(assign {} {})", dump_expr(t), dump_expr(v)),
+        StmtKind.IfS(cond, then, otherwise) => {
+            let ot = match otherwise {
+                Some(e) => dump_else(e),
+                None => "nil",
+            }
+            format("(if {} {} {})", dump_expr(cond), dump_block(then), ot)
+        },
+        StmtKind.WhileS(cond, body) => format("(while {} {})", dump_expr(cond), dump_block(body)),
+        StmtKind.ForS(v, start, end, body, iter) => format("(for {} {} {} {} {})", sstr(v), opt_expr(start), opt_expr(end), dump_block(body), opt_expr(iter)),
+        StmtKind.ReturnS(v) => format("(return {})", opt_expr(v)),
+        StmtKind.BreakS => "(break)",
+        StmtKind.ContinueS => "(continue)",
+        StmtKind.ExprStmt(e) => format("(exprstmt {})", dump_expr(e)),
+    }
+}
+
+fun dump_typaram(tp: TypeParam) -> str {
+    return format("(tp {} {})", sstr(tp.name), join_map(tp.bounds, sstr))
+}
+
+fun dump_field(f: Field) -> str {
+    return format("(field {} {})", sstr(f.name), dump_type(f.ty))
+}
+
+fun dump_variant(v: Variant) -> str {
+    return format("(variant {} {})", sstr(v.name), join_map(v.payload, dump_type))
+}
+
+fun dump_attr(a: Attribute) -> str {
+    let outs = match a.outputs {
+        Some(xs) => join_map(xs, dump_expr),
+        None => "nil",
+    }
+    return format("(attr {} {} {})", sstr(a.name), join_map(a.args, dump_expr), outs)
+}
+
+fun dump_importitem(it: ImportItem) -> str {
+    return format("(iitem {} {})", sstr(it.name), opt_sstr(it.alias))
+}
+
+fun dump_fun(f: FunData) -> str {
+    let body = match f.body {
+        Some(b) => dump_block(b),
+        None => "nil",
+    }
+    return format("(fun {} {} {} {} {} {} {} {})", sstr(f.name), join_map(f.params, dump_param), opt_type(f.ret_type), body, join_map(f.attributes, dump_attr), join_map(f.type_params, dump_typaram), opt_sstr(f.receiver), bstr(f.is_pub))
+}
+
+pub fun dump_decl(d: Decl) -> str {
+    return match d.kind {
+        DeclKind.StructDecl(name, fields, attrs, tps, isp) => format("(struct {} {} {} {} {})", sstr(name), join_map(fields, dump_field), join_map(attrs, dump_attr), join_map(tps, dump_typaram), bstr(isp)),
+        DeclKind.FunDecl(f) => dump_fun(f),
+        DeclKind.EnumDecl(name, variants, attrs, tps, isp) => format("(enum {} {} {} {} {})", sstr(name), join_map(variants, dump_variant), join_map(attrs, dump_attr), join_map(tps, dump_typaram), bstr(isp)),
+        DeclKind.TypeAliasDecl(name, target, attrs, isp) => format("(typealias {} {} {} {})", sstr(name), dump_type(target), join_map(attrs, dump_attr), bstr(isp)),
+        DeclKind.ImplDecl(target, methods, tps, trait_name, trait_args) => format("(impl {} {} {} {} {})", dump_type(target), join_map(methods, dump_fun), join_map(tps, dump_typaram), opt_sstr(trait_name), join_map(trait_args, dump_type)),
+        DeclKind.TraitDecl(name, methods, tps, isp) => format("(trait {} {} {} {})", sstr(name), join_map(methods, dump_fun), join_map(tps, dump_typaram), bstr(isp)),
+        DeclKind.ConstDecl(name, ty, value, attrs, isp) => format("(const {} {} {} {} {})", sstr(name), dump_type(ty), dump_expr(value), join_map(attrs, dump_attr), bstr(isp)),
+        DeclKind.ImportDecl(path, items, alias, isp) => {
+            let p = format("(ipath {} {})", path.dots, join_map(path.segments, sstr))
+            let its = match items {
+                Some(xs) => join_map(xs, dump_importitem),
+                None => "nil",
+            }
+            format("(import {} {} {} {})", p, its, opt_sstr(alias), bstr(isp))
+        },
+    }
+}
+
+pub fun dump_program(p: Program) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(p.decls) {
+        if i > 0 { append_byte(sb, 10) }
+        append(sb, dump_decl(p.decls[i]))
+        i = i + 1
+    }
+    return build(sb)
+}
