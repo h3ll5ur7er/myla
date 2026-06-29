@@ -37,10 +37,12 @@ def _f64_bits(x: float) -> int:
     return struct.unpack("<Q", struct.pack("<d", x))[0]
 
 
-# Size of the heap arena reserved on first allocation (256 MiB). Generous for a
+# Size of the heap arena reserved on first allocation (1 GiB). Generous for a
 # bootstrap compiler; exhausting it traps. Reference counting (v0.2.3b) will let
-# this memory be reused instead of only grown.
-_ARENA_BYTES = 1 << 28
+# this memory be reused instead of only grown. (The arena is lazily-faulted
+# anonymous mmap, so an unused tail costs nothing until touched. Kept <2 GiB so
+# the `addq $_ARENA_BYTES` immediate fits a signed imm32.)
+_ARENA_BYTES = 1 << 30
 
 
 def _is_struct(t: Type | None) -> bool:
@@ -1143,14 +1145,28 @@ class CodeGen:
             self._emit("movq %rax, %rdi")
             self._emit_copy(self._size(t))
             self._drop_expr_temps(stmt.value)
-        elif self._owns_heap(t):  # reassigning a list variable (scalar pointer)
-            kind, off, _ = self._lookup(stmt.target.ident)
-            self._eval(stmt.value)                # new cell pointer -> rax
-            self._emit("pushq %rax")
-            self._emit("incq -8(%rax)")           # the variable takes a reference
-            self._drop_value("rbp", off, t)       # release the old list
-            self._emit("popq %rax")
-            self._emit(f"movq %rax, {off}(%rbp)")
+        elif self._owns_heap(t):  # reassigning a heap-owning scalar (list/map/SB)
+            if isinstance(stmt.target, ast.Name):
+                kind, off, _ = self._lookup(stmt.target.ident)
+                self._eval(stmt.value)            # new cell pointer -> rax
+                self._emit("pushq %rax")
+                self._emit("incq -8(%rax)")       # the variable takes a reference
+                self._drop_value("rbp", off, t)   # release the old list
+                self._emit("popq %rax")
+                self._emit(f"movq %rax, {off}(%rbp)")
+            else:
+                # `place.field = list` / `place[i] = map` …: same retain-new /
+                # drop-old / store dance, but against a computed slot address.
+                self._eval(stmt.value)            # new cell pointer -> rax
+                self._emit("pushq %rax")          # save new pointer
+                self._emit("incq -8(%rax)")       # the slot takes a reference
+                self._addr_of_lvalue(stmt.target)  # rax = &slot
+                self._emit("pushq %rax")
+                self._emit("movq %rax, %rcx")
+                self._drop_box(0, "rcx", t)       # release the old cell at the slot
+                self._emit("popq %rcx")           # &slot
+                self._emit("popq %rax")           # new pointer
+                self._emit("movq %rax, (%rcx)")
             self._drop_expr_temps(stmt.value)
         else:
             self._eval(stmt.value)

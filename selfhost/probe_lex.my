@@ -1,0 +1,15 @@
+from std.process import args, exit
+from std.fs import read_to_string
+from std.io import println
+from .lexer import lex
+
+fun main() {
+    let argv = args()
+    match read_to_string(argv[1]) {
+        Ok(src) => {
+            let toks = lex(src)
+            println(format("toks={}", len(toks)))
+        },
+        Err(e) => { exit(1) },
+    }
+}

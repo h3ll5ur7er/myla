@@ -7,20 +7,21 @@
 // process spawning of its own.
 
 from std.process import args, exit
-from std.fs import read_to_string
 from std.io import write, eprintln
 from .checker import build_checker_src
 from .codegen import new_codegen
+from .loader import amalgamate
 
 fun emit_asm(src: str) -> int32 {
     return match build_checker_src(src) {
         Ok(c) => {
             var g = new_codegen(c)
-            write(1, g.generate())
+            let asm = g.generate()
+            write(1, asm)
             0
         },
         Err(e) => {
-            eprintln("gen_main: program failed to type-check")
+            eprintln(format("gen_main: type-check failed at {}:{}", e.line, e.col))
             1
         },
     }
@@ -29,16 +30,20 @@ fun emit_asm(src: str) -> int32 {
 fun main() {
     let argv = args()
     if len(argv) < 2 {
-        eprintln("usage: gen_main <file.my>")
+        eprintln("usage: gen_main <file.my> [stdlib_root]")
         exit(2)
     }
-    match read_to_string(argv[1]) {
+    var stdlib = ""
+    if len(argv) >= 3 {
+        stdlib = argv[2]
+    }
+    match amalgamate(argv[1], stdlib) {
         Ok(src) => {
             let code = emit_asm(src)
             exit(code)
         },
         Err(e) => {
-            eprintln("gen_main: cannot read input file")
+            eprintln("gen_main: " + e)
             exit(1)
         },
     }

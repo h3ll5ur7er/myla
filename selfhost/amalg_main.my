@@ -1,0 +1,28 @@
+// amalg_main.my — temporary driver: print the amalgamated source for an entry
+// module (used to validate selfhost/loader.my).
+
+from std.process import args, exit
+from std.io import write, eprintln
+from .loader import amalgamate
+
+fun main() {
+    let argv = args()
+    if len(argv) < 2 {
+        eprintln("usage: amalg_main <file.my> [stdlib_root]")
+        exit(2)
+    }
+    var stdlib = ""
+    if len(argv) >= 3 {
+        stdlib = argv[2]
+    }
+    match amalgamate(argv[1], stdlib) {
+        Ok(src) => {
+            write(1, src)
+            exit(0)
+        },
+        Err(e) => {
+            eprintln("amalg: " + e)
+            exit(1)
+        },
+    }
+}

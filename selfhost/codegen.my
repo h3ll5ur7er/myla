@@ -15,7 +15,7 @@ from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, Varia
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
 // `capoff` is the byte offset within the closure env for a "capture" binding.
-pub struct Binding { name: str, kind: str, offset: int32, ty: Type, capoff: int32 }
+pub struct CgBinding { name: str, kind: str, offset: int32, ty: Type, capoff: int32 }
 
 // A by-value captured variable in a closure environment cell.
 pub struct Cap { name: str, ty: Type, off: int32 }
@@ -73,7 +73,7 @@ pub struct CodeGen {
     partial_jobs: [PartialJob],
     fnval_set: [str],
     cur_mangled: str,
-    scopes: [[Binding]],
+    scopes: [[CgBinding]],
     loops: [LoopLab],
     cursor: int32,
     epilogue: str,
@@ -202,7 +202,7 @@ impl CodeGen {
                 return list_elem(bt)
             },
             ExprKind.GetField(t, f) => {
-                return self.struct_field_type(struct_name_of(self.place_type(t)), f)
+                return self.struct_field_type_t(self.place_type(t), f)
             },
             ExprKind.TupleIndex(t, i) => {
                 let es = tuple_elems(self.place_type(t))
@@ -216,10 +216,10 @@ impl CodeGen {
 
     fun bind(var self, name: str, kind: str, offset: int32, ty: Type) {
         let top = len(self.scopes) - 1
-        push(self.scopes[top], Binding { name: name, kind: kind, offset: offset, ty: ty, capoff: 0 })
+        push(self.scopes[top], CgBinding { name: name, kind: kind, offset: offset, ty: ty, capoff: 0 })
     }
 
-    fun lookup(self, name: str) -> Binding {
+    fun lookup(self, name: str) -> CgBinding {
         var i = len(self.scopes) - 1
         while i >= 0 {
             var j = len(self.scopes[i]) - 1
@@ -229,7 +229,7 @@ impl CodeGen {
             }
             i = i - 1
         }
-        return Binding { name: name, kind: "local", offset: 0, ty: Type.TInt(32, true), capoff: 0 }
+        return CgBinding { name: name, kind: "local", offset: 0, ty: Type.TInt(32, true), capoff: 0 }
     }
 
     // -- type layout ------------------------------------------------------
@@ -256,19 +256,35 @@ impl CodeGen {
         return self.size(t)
     }
 
+    // A struct/enum is laid out per its concrete type arguments: generic type
+    // parameters are substituted so a generic container instantiated with an
+    // inline aggregate (e.g. `Option<TypeExpr>`) reserves the real payload size,
+    // not a single 8-byte slot. Mirrors the oracle's monomorphized layout.
+    fun type_subst(self, type_params: [str], args: [Type]) -> [Subst] {
+        var sub: [Subst] = []
+        var i = 0
+        while i < len(type_params) && i < len(args) {
+            push(sub, Subst { name: type_params[i], ty: args[i] })
+            i = i + 1
+        }
+        return sub
+    }
+
     fun size(self, t: Type) -> int32 {
         return match t {
-            Type.TStruct(n, a) => self.struct_size(n),
+            Type.TStruct(n, a) => self.struct_size(n, a),
             Type.TTuple(es) => self.tuple_size(es),
-            Type.TEnum(n, a) => 8 + self.enum_payload_size(n),
+            Type.TEnum(n, a) => 8 + self.enum_payload_size(n, a),
             Type.TFunc(ps, r) => 16,
             _ => 8,
         }
     }
 
-    fun struct_size(self, name: str) -> int32 {
+    fun struct_size(self, name: str, args: [Type]) -> int32 {
+        let info = self.struct_info(name)
+        let sub = self.type_subst(info.type_params, args)
         var total = 0
-        for f in self.struct_info(name).fields { total = total + self.stored_size(f.ty) }
+        for f in info.fields { total = total + self.stored_size(subst_type(f.ty, sub)) }
         return total
     }
 
@@ -278,21 +294,26 @@ impl CodeGen {
         return total
     }
 
-    fun enum_payload_size(self, name: str) -> int32 {
+    fun enum_payload_size(self, name: str, args: [Type]) -> int32 {
+        let info = self.enum_info(name)
+        let sub = self.type_subst(info.type_params, args)
         var maxp = 0
-        for v in self.enum_info(name).variants {
+        for v in info.variants {
             var s = 0
-            for ft in v.payload { s = s + self.stored_size(ft) }
+            for ft in v.payload { s = s + self.stored_size(subst_type(ft, sub)) }
             if s > maxp { maxp = s }
         }
         return maxp
     }
 
-    fun field_offset(self, struct_name: str, field: str) -> int32 {
+    fun field_offset(self, st: Type, field: str) -> int32 {
+        let name = struct_name_of(st)
+        let info = self.struct_info(name)
+        let sub = self.type_subst(info.type_params, type_args_of(st))
         var off = 0
-        for f in self.struct_info(struct_name).fields {
+        for f in info.fields {
             if f.name == field { return off }
-            off = off + self.stored_size(f.ty)
+            off = off + self.stored_size(subst_type(f.ty, sub))
         }
         return off
     }
@@ -319,16 +340,29 @@ impl CodeGen {
         return 0
     }
 
-    fun variant_payload(self, enum_name: str, variant: str) -> [Type] {
+    // Declared payload types of `variant` (generic type parameters unsubstituted).
+    fun variant_payload_decl(self, enum_name: str, variant: str) -> [Type] {
         for v in self.enum_info(enum_name).variants {
             if v.name == variant { return v.payload }
         }
         return []
     }
 
-    fun variant_field_offset(self, enum_name: str, variant: str, index: int32) -> int32 {
+    // Payload types of `variant` with the enum value `et`'s concrete type
+    // arguments substituted in (so payloads carrying a type parameter resolve to
+    // their instantiated type, matching this value's layout).
+    fun variant_payload(self, et: Type, variant: str) -> [Type] {
+        let name = enum_name_of(et)
+        let info = self.enum_info(name)
+        let sub = self.type_subst(info.type_params, type_args_of(et))
+        var out: [Type] = []
+        for ft in self.variant_payload_decl(name, variant) { push(out, subst_type(ft, sub)) }
+        return out
+    }
+
+    fun variant_field_offset(self, et: Type, variant: str, index: int32) -> int32 {
         var off = 8
-        let payload = self.variant_payload(enum_name, variant)
+        let payload = self.variant_payload(et, variant)
         var i = 0
         while i < index {
             off = off + self.stored_size(payload[i])
@@ -1114,7 +1148,7 @@ impl CodeGen {
             ExprKind.Call(c, args) => { self.gen_call(e, c, args) },
             ExprKind.GetField(tgt, field) => {
                 self.addr_of_aggregate(tgt)
-                let foff = self.field_offset(struct_name_of(self.place_type(tgt)), field)
+                let foff = self.field_offset(self.place_type(tgt), field)
                 self.emit(format("movq {}(%rax), %rax", foff))
             },
             ExprKind.TupleIndex(tgt, idx) => {
@@ -1270,7 +1304,7 @@ impl CodeGen {
             self.emit("xorq %rcx, %rax")
             self.wrap(rt)
         } else if op == "<<" || op == ">>" {
-            self.emit(format("andq ${}, %rcx", int_width(rt) - 1))
+            self.emit(format("andq ${}, %rcx", int_width_cg(rt) - 1))
             if op == "<<" {
                 self.emit("shlq %cl, %rax")
             } else if int_signed(lt) {
@@ -1405,15 +1439,22 @@ impl CodeGen {
             },
             ExprKind.GetField(tgt, field) => {
                 self.addr_of_aggregate(tgt)
-                let foff = self.field_offset(struct_name_of(self.place_type(tgt)), field)
-                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
+                let foff = self.field_offset(self.place_type(tgt), field)
+                // A boxed (recursive-enum) member holds a heap pointer: load it so
+                // %rax is the address of the inline value, not of the slot.
+                if self.is_boxed(self.type_of(e.id)) { self.emit(format("movq {}(%rax), %rax", foff)) }
+                else if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
             },
             ExprKind.TupleIndex(tgt, idx) => {
                 self.addr_of_aggregate(tgt)
                 let foff = self.elem_offset(self.place_type(tgt), idx as int32)
-                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
+                if self.is_boxed(self.type_of(e.id)) { self.emit(format("movq {}(%rax), %rax", foff)) }
+                else if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
             },
-            ExprKind.Index(base, idx) => { self.gen_index_addr(base, idx) },
+            ExprKind.Index(base, idx) => {
+                self.gen_index_addr(base, idx)
+                if self.is_boxed(self.type_of(e.id)) { self.emit("movq (%rax), %rax") }
+            },
             ExprKind.Lambda(params, ret, body) => {
                 self.gen_lambda_value(e, params, body)
                 self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
@@ -1455,7 +1496,7 @@ impl CodeGen {
             },
             ExprKind.GetField(tgt, field) => {
                 self.addr_of_aggregate(tgt)
-                let foff = self.field_offset(struct_name_of(self.place_type(tgt)), field)
+                let foff = self.field_offset(self.place_type(tgt), field)
                 if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
             },
             ExprKind.TupleIndex(tgt, idx) => {
@@ -1471,8 +1512,8 @@ impl CodeGen {
     fun gen_struct_lit(var self, e: Expr, name: str, fields: [FieldInit]) {
         let base = self.local_of(e.id)
         for fi in fields {
-            let foff = self.field_offset(name, fi.name)
-            self.store_member(fi.value, base + foff, self.struct_field_type(name, fi.name))
+            let foff = self.field_offset(self.type_of(e.id), fi.name)
+            self.store_member(fi.value, base + foff, self.type_of(fi.value.id))
         }
     }
 
@@ -1592,6 +1633,10 @@ impl CodeGen {
             self.emit(format("movq {}(%rbp), %rdi", slot))
             if off != 0 { self.emit(format("addq ${}, %rdi", off)) }
             self.emit_copy(self.size(et))
+        } else if self.is_boxed(et) {
+            self.box_value(value, et)
+            self.emit(format("movq {}(%rbp), %rcx", slot))
+            self.emit(format("movq %rax, {}(%rcx)", off))
         } else {
             self.eval_owned(value)
             self.emit(format("movq {}(%rbp), %rcx", slot))
@@ -1663,7 +1708,14 @@ impl CodeGen {
     fun gen_push(var self, holder: Expr, value: Expr) {
         let et = list_elem(self.place_type(holder))
         let stride = self.elem_stride(et)
-        self.eval_owned(value)
+        // Produce the element in %rax: a boxed/recursive-enum element becomes a
+        // fresh heap pointer; an inline aggregate yields its (frame-temp) address
+        // for a byte-copy; scalars/strings/lists evaluate (and clone) directly.
+        // Using box_value/addr_of_aggregate (rather than eval) is what makes
+        // enum/struct *constructor* operands work as list elements.
+        if self.is_boxed(et) { self.box_value(value, et) }
+        else if is_aggregate(et) { self.addr_of_aggregate(value) }
+        else { self.eval_owned(value) }
         self.emit("pushq %rax")
         self.mut_holder_addr(holder)
         self.emit("pushq %rax")
@@ -1772,6 +1824,10 @@ impl CodeGen {
             self.emit("movq %rax, %rsi")
             self.emit("popq %rdi")
             self.emit_copy(self.size(vt))
+        } else if self.is_boxed(vt) {
+            self.box_value(value, vt)
+            self.emit("popq %rcx")
+            self.emit("movq %rax, (%rcx)")
         } else {
             self.eval_owned(value)
             self.emit("popq %rcx")
@@ -1953,6 +2009,14 @@ impl CodeGen {
         return Type.TInt(32, true)
     }
 
+    // Field type with the struct value `st`'s concrete type arguments substituted.
+    fun struct_field_type_t(self, st: Type, field: str) -> Type {
+        let name = struct_name_of(st)
+        let info = self.struct_info(name)
+        let sub = self.type_subst(info.type_params, type_args_of(st))
+        return subst_type(self.struct_field_type(name, field), sub)
+    }
+
     // -- enum construction ------------------------------------------------
 
     fun gen_enum_ctor(var self, e: Expr, enum_name: str, variant: str, args: [Expr]) {
@@ -1960,7 +2024,7 @@ impl CodeGen {
         self.emit(format("movq ${}, {}(%rbp)", self.variant_tag(enum_name, variant), base))
         var i = 0
         for arg in args {
-            let slot = base + self.variant_field_offset(enum_name, variant, i)
+            let slot = base + self.variant_field_offset(self.type_of(e.id), variant, i)
             self.store_member(arg, slot, self.type_of(arg.id))
             i = i + 1
         }
@@ -2004,11 +2068,11 @@ impl CodeGen {
         self.emit(format("{}:", end))
     }
 
-    fun arm_scope(self, arm: MatchArm, sst: Type) -> [Binding] {
-        var sc: [Binding] = []
+    fun arm_scope(self, arm: MatchArm, sst: Type) -> [CgBinding] {
+        var sc: [CgBinding] = []
         for b in self.pattern_binds(arm.pattern, sst) {
             let slot = self.match_bind[format("{}:{}", arm.pattern.id, b.name)]
-            push(sc, Binding { name: b.name, kind: "local", offset: slot, ty: b.ty, capoff: 0 })
+            push(sc, CgBinding { name: b.name, kind: "local", offset: slot, ty: b.ty, capoff: 0 })
         }
         return sc
     }
@@ -2024,7 +2088,7 @@ impl CodeGen {
             },
             PatternKind.PLit(l) => {},
             PatternKind.PEnum(en, variant, elems, hp) => {
-                let payload = self.variant_payload(enum_name_of(t), variant)
+                let payload = self.variant_payload(t, variant)
                 var i = 0
                 for sub in elems {
                     for b in self.pattern_binds(sub, payload[i]) { push(out, b) }
@@ -2041,7 +2105,7 @@ impl CodeGen {
             },
             PatternKind.PStruct(name, fps) => {
                 for fp in fps {
-                    for b in self.pattern_binds(fp.pattern, self.struct_field_type(name, fp.name)) { push(out, b) }
+                    for b in self.pattern_binds(fp.pattern, self.struct_field_type_t(t, fp.name)) { push(out, b) }
                 }
             },
             PatternKind.POr(alts) => {
@@ -2079,11 +2143,11 @@ impl CodeGen {
                 self.emit(format("movq {}(%rbp), %rax", disp))
                 self.emit(format("cmpq ${}, %rax", tag))
                 self.emit(format("jne {}", fail))
-                let payload = self.variant_payload(enm, variant)
+                let payload = self.variant_payload(t, variant)
                 var i = 0
                 for sub in elems {
                     let ft = payload[i]
-                    let foff = self.variant_field_offset(enm, variant, i)
+                    let foff = self.variant_field_offset(t, variant, i)
                     self.match_pat(sub, self.member_disp(sub, disp + foff, ft), ft, armkey, fail)
                     i = i + 1
                 }
@@ -2099,8 +2163,8 @@ impl CodeGen {
             },
             PatternKind.PStruct(name, fps) => {
                 for fp in fps {
-                    let ft = self.struct_field_type(name, fp.name)
-                    let foff = self.field_offset(name, fp.name)
+                    let ft = self.struct_field_type_t(t, fp.name)
+                    let foff = self.field_offset(t, fp.name)
                     self.match_pat(fp.pattern, self.member_disp(fp.pattern, disp + foff, ft), ft, armkey, fail)
                 }
             },
@@ -2135,7 +2199,7 @@ impl CodeGen {
     fun visit_pattern_unbox(var self, p: Pattern, t: Type) {
         match p.kind {
             PatternKind.PEnum(en, variant, elems, hp) => {
-                let payload = self.variant_payload(enum_name_of(t), variant)
+                let payload = self.variant_payload(t, variant)
                 var i = 0
                 for sub in elems {
                     self.alloc_unbox(sub, payload[i])
@@ -2154,7 +2218,7 @@ impl CodeGen {
             },
             PatternKind.PStruct(name, fps) => {
                 for fp in fps {
-                    let ft = self.struct_field_type(name, fp.name)
+                    let ft = self.struct_field_type_t(t, fp.name)
                     self.alloc_unbox(fp.pattern, ft)
                     self.visit_pattern_unbox(fp.pattern, ft)
                 }
@@ -2232,7 +2296,13 @@ impl CodeGen {
         self.emit(format("jne {}", propagate))
         let rt = self.type_of(e.id)
         let off = self.try_res[e.id]
-        if is_aggregate(rt) {
+        if self.is_boxed(rt) {
+            // A boxed (recursive-enum) success payload is stored as a heap
+            // pointer in the carrier; deref it to copy the inline value out.
+            self.emit("movq 8(%r10), %rsi")
+            self.emit(format("leaq {}(%rbp), %rdi", off))
+            self.emit_copy(self.size(rt))
+        } else if is_aggregate(rt) {
             self.emit("leaq 8(%r10), %rsi")
             self.emit(format("leaq {}(%rbp), %rdi", off))
             self.emit_copy(self.size(rt))
@@ -2271,12 +2341,42 @@ impl CodeGen {
                 else if nm == "contains" { self.gen_map_contains(args[0], args[1]) }
                 else if nm == "remove" { self.gen_map_remove(args[0], args[1]) }
                 else if nm == "keys" { self.gen_map_keys(e, args[0]) }
+                else if nm == "__write" { self.gen_io_write(args) }
+                else if nm == "__exit" { self.gen_io_exit(args) }
+                else if nm == "__args" { self.emit("call __args") }
+                else if nm == "__read_file" { self.gen_io_read_file(args) }
+                else if nm == "__io_errno" { self.emit("movq __io_errno_val(%rip), %rax") }
                 else if self.has_func(nm) { self.gen_user_call(e, nm, args) }
                 else { self.gen_indirect_call(e, callee, args) }
             },
             ExprKind.GetField(recv, field) => { self.gen_method_or_closure_call(e, callee, recv, field, args) },
             _ => { self.gen_indirect_call(e, callee, args) },
         }
+    }
+
+    // `__write(fd, s)`: rdi = fd, rsi = str cell -> write(2) the bytes.
+    fun gen_io_write(var self, args: [Expr]) {
+        self.eval(args[1])
+        self.emit("pushq %rax")
+        self.eval(args[0])
+        self.emit("movl %eax, %edi")
+        self.emit("popq %rsi")
+        self.emit("call __write")
+    }
+
+    // `__exit(code)`: the low 8 bits of `code` become the process status.
+    fun gen_io_exit(var self, args: [Expr]) {
+        self.eval(args[0])
+        self.emit("movl %eax, %edi")
+        self.emit("movq $60, %rax")
+        self.emit("syscall")
+    }
+
+    // `__read_file(path)`: rdi = path str cell -> rax = contents str cell.
+    fun gen_io_read_file(var self, args: [Expr]) {
+        self.eval(args[0])
+        self.emit("movq %rax, %rdi")
+        self.emit("call __read_file")
     }
 
     fun ind_code_of(self, id: int32) -> int32 {
@@ -2457,7 +2557,7 @@ impl CodeGen {
     }
 
     // Leave the address of the value bound by `b` (local/param/capture) in %rax.
-    fun emit_name_addr(var self, b: Binding) {
+    fun emit_name_addr(var self, b: CgBinding) {
         if b.kind == "capture" {
             self.emit(format("movq {}(%rbp), %rax", b.offset))
             if b.capoff != 0 { self.emit(format("addq ${}, %rax", b.capoff)) }
@@ -2469,7 +2569,7 @@ impl CodeGen {
     }
 
     // Load the scalar value bound by `b` into %rax.
-    fun emit_name_scalar(var self, b: Binding) {
+    fun emit_name_scalar(var self, b: CgBinding) {
         if b.kind == "capture" {
             self.emit(format("movq {}(%rbp), %rcx", b.offset))
             self.emit(format("movq {}(%rcx), %rax", b.capoff))
@@ -2529,7 +2629,7 @@ impl CodeGen {
         }
         let top = len(self.scopes) - 1
         for c in job.caps {
-            push(self.scopes[top], Binding { name: c.name, kind: "capture", offset: env_off, ty: c.ty, capoff: c.off })
+            push(self.scopes[top], CgBinding { name: c.name, kind: "capture", offset: env_off, ty: c.ty, capoff: c.off })
         }
 
         match job.body {
@@ -3175,7 +3275,176 @@ impl CodeGen {
         self.emit_map_runtime()
         self.emit_char_runtime()
         self.emit_compose_runtime()
+        self.emit_io_runtime()
         self.emit_derived_eq()
+    }
+
+    // Freestanding I/O runtime backing the `std` intrinsics (D29): `__write`
+    // (write(2)), `__args` (build a [str] from the argc/argv captured at _start)
+    // and `__read_file` (open/fstat/read/close into a fresh str cell, errno ->
+    // __io_errno_val).
+    fun emit_io_runtime(var self) {
+        self.raw("__write:")
+        self.raw("\tmovq (%rsi), %rdx")
+        self.raw("\tleaq 8(%rsi), %rsi")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tsyscall")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__args:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw("\tmovq __argc(%rip), %rbx")
+        self.raw("\tmovq __argv(%rip), %r12")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tshlq $3, %rdi")
+        self.raw("\taddq $16, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tmovq %rbx, (%r13)")
+        self.raw("\tmovq %rbx, 8(%r13)")
+        self.raw("\tleaq 16(%r13), %r15")
+        self.raw("\txorq %r14, %r14")
+        self.raw(".La_loop:")
+        self.raw("\tcmpq %rbx, %r14")
+        self.raw("\tjae .La_done")
+        self.raw("\tmovq (%r12,%r14,8), %rsi")
+        self.raw("\txorq %rcx, %rcx")
+        self.raw(".La_strlen:")
+        self.raw("\tmovb (%rsi,%rcx), %al")
+        self.raw("\ttestb %al, %al")
+        self.raw("\tjz .La_haslen")
+        self.raw("\tincq %rcx")
+        self.raw("\tjmp .La_strlen")
+        self.raw(".La_haslen:")
+        self.raw("\tpushq %rsi")
+        self.raw("\tpushq %rcx")
+        self.raw("\tleaq 8(%rcx), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tpopq %rcx")
+        self.raw("\tpopq %rsi")
+        self.raw("\tmovq %rcx, (%rax)")
+        self.raw("\tleaq 8(%rax), %rdi")
+        self.raw(".La_copy:")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .La_stored")
+        self.raw("\tmovb (%rsi), %dl")
+        self.raw("\tmovb %dl, (%rdi)")
+        self.raw("\tincq %rsi")
+        self.raw("\tincq %rdi")
+        self.raw("\tdecq %rcx")
+        self.raw("\tjmp .La_copy")
+        self.raw(".La_stored:")
+        self.raw("\tmovq %rax, (%r15)")
+        self.raw("\taddq $8, %r15")
+        self.raw("\tincq %r14")
+        self.raw("\tjmp .La_loop")
+        self.raw(".La_done:")
+        self.raw("\tmovq %r13, %rax")
+        self.raw("\tpopq %r15")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__read_file:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw("\tmovq (%rdi), %r12")
+        self.raw("\tleaq 8(%rdi), %r13")
+        self.raw("\tleaq 16(%r12), %rax")
+        self.raw("\tandq $-16, %rax")
+        self.raw("\tsubq %rax, %rsp")
+        self.raw("\tmovq %rsp, %r14")
+        self.raw("\txorq %rcx, %rcx")
+        self.raw(".Lrf_pcopy:")
+        self.raw("\tcmpq %r12, %rcx")
+        self.raw("\tjae .Lrf_pdone")
+        self.raw("\tmovb (%r13,%rcx), %dl")
+        self.raw("\tmovb %dl, (%r14,%rcx)")
+        self.raw("\tincq %rcx")
+        self.raw("\tjmp .Lrf_pcopy")
+        self.raw(".Lrf_pdone:")
+        self.raw("\tmovb $0, (%r14,%r12)")
+        self.raw("\tmovq $2, %rax")
+        self.raw("\tmovq %r14, %rdi")
+        self.raw("\txorq %rsi, %rsi")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lrf_open_err")
+        self.raw("\tmovq %rax, %rbx")
+        self.raw("\tsubq $144, %rsp")
+        self.raw("\tmovq %rsp, %rsi")
+        self.raw("\tmovq $5, %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tmovq 48(%rsp), %r15")
+        self.raw("\taddq $144, %rsp")
+        self.raw("\tleaq 8(%r15), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tmovq %r15, (%r13)")
+        self.raw("\txorq %r14, %r14")
+        self.raw(".Lrf_read:")
+        self.raw("\tcmpq %r15, %r14")
+        self.raw("\tjae .Lrf_read_done")
+        self.raw("\tmovq $0, %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tleaq 8(%r13), %rsi")
+        self.raw("\taddq %r14, %rsi")
+        self.raw("\tmovq %r15, %rdx")
+        self.raw("\tsubq %r14, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lrf_read_err")
+        self.raw("\tjz .Lrf_read_done")
+        self.raw("\taddq %rax, %r14")
+        self.raw("\tjmp .Lrf_read")
+        self.raw(".Lrf_read_done:")
+        self.raw("\tmovq %r14, (%r13)")
+        self.raw("\tmovq $3, %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tmovq %r13, %rax")
+        self.raw("\tjmp .Lrf_ret")
+        self.raw(".Lrf_read_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw("\tmovq $3, %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tmovq %r13, %rax")
+        self.raw("\tjmp .Lrf_ret")
+        self.raw(".Lrf_open_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw("\tmovq $8, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq $0, (%rax)")
+        self.raw(".Lrf_ret:")
+        self.raw("\tleaq -40(%rbp), %rsp")
+        self.raw("\tpopq %r15")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
     }
 
     // __compose_call(env, x): env holds two fat values a (env[0]) and b (env[16]);
@@ -3265,7 +3534,7 @@ impl CodeGen {
                 self.emit(format("jne {}", lskip))
                 var j = 0
                 for pt in v.payload {
-                    self.emit_eq_component(self.variant_field_offset(name, v.name, j), pt, lne)
+                    self.emit_eq_component(self.variant_field_offset(Type.TEnum(name, []), v.name, j), pt, lne)
                     j = j + 1
                 }
                 self.emit(format("{}:", lskip))
@@ -4095,6 +4364,14 @@ fun struct_name_of(t: Type) -> str {
     return match t { Type.TStruct(n, a) => n, _ => "" }
 }
 
+fun type_args_of(t: Type) -> [Type] {
+    return match t {
+        Type.TStruct(n, a) => a,
+        Type.TEnum(n, a) => a,
+        _ => [],
+    }
+}
+
 fun is_struct_or_enum_t(t: Type) -> bool {
     return match t { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, _ => false }
 }
@@ -4163,6 +4440,7 @@ fun is_builtin_call_name(nm: str) -> bool {
     if nm == "len" || nm == "push" || nm == "pop" || nm == "chars" || nm == "format" { return true }
     if nm == "StringBuilder" || nm == "append" || nm == "append_byte" || nm == "build" { return true }
     if nm == "contains" || nm == "remove" || nm == "keys" { return true }
+    if nm == "__write" || nm == "__exit" || nm == "__args" || nm == "__read_file" || nm == "__io_errno" { return true }
     return false
 }
 
@@ -4343,7 +4621,7 @@ fun int_signed(t: Type) -> bool {
     return match t { Type.TInt(w, s) => s, _ => false }
 }
 
-fun int_width(t: Type) -> int32 {
+fun int_width_cg(t: Type) -> int32 {
     return match t { Type.TInt(w, s) => w, _ => 64 }
 }
 

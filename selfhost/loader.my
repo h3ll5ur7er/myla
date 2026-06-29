@@ -1,0 +1,172 @@
+// loader.my — minimal module loader for the self-hosted toolchain (self-hosting
+// v0.10).
+//
+// Resolves a program's `import` / `from … import …` graph and amalgamates every
+// reachable module into one source string (with the import lines removed). The
+// front end then lexes+parses that single stream, so node ids stay globally
+// unique — the property `build_checker_src` relies on (separately-parsed
+// modules would reuse ids and corrupt the per-node type/layout tables).
+//
+// This is deliberately simpler than the Python loader: the compiler's modules
+// all have globally-unique top-level names, so no `$`-qualification or
+// reference rewriting is needed — concatenation is enough. Resolution covers
+// the two shapes the compiler uses: relative imports (`.x`, `..x`, resolved
+// against the importer's directory) and the reserved `std.*` root (resolved
+// against a caller-provided stdlib root).
+
+from std.fs import read_to_string
+from std.io import eprintln
+from .lexer import lex
+from .parser import parse
+from .ast import Program, Decl, DeclKind, ImportPath, ImportItem
+from .util import cp_utf8
+
+struct Loader { stdlib_root: str, visited: [str], parts: [str] }
+
+fun new_loader(stdlib_root: str) -> Loader {
+    return Loader { stdlib_root: stdlib_root, visited: [], parts: [] }
+}
+
+fun has_str(xs: [str], s: str) -> bool {
+    for x in xs {
+        if x == s { return true }
+    }
+    return false
+}
+
+fun has_int(xs: [int32], v: int32) -> bool {
+    for x in xs {
+        if x == v { return true }
+    }
+    return false
+}
+
+// `cs[start..end]` rebuilt as a string (codepoints re-encoded as UTF-8).
+fun substr(cs: [char], start: int32, end: int32) -> str {
+    var sb = StringBuilder()
+    var k = start
+    while k < end {
+        append(sb, cp_utf8(cs[k] as int32))
+        k = k + 1
+    }
+    return build(sb)
+}
+
+// Everything before the last '/', or "." when the path has no directory part.
+fun dirname(p: str) -> str {
+    let cs = chars(p)
+    let n = len(cs)
+    var last = -1
+    var i = 0
+    while i < n {
+        if (cs[i] as int32) == 47 { last = i }
+        i = i + 1
+    }
+    if last < 0 { return "." }
+    return substr(cs, 0, last)
+}
+
+fun split_lines(s: str) -> [str] {
+    let cs = chars(s)
+    let n = len(cs)
+    var lines: [str] = []
+    var start = 0
+    var i = 0
+    while i < n {
+        if (cs[i] as int32) == 10 {
+            push(lines, substr(cs, start, i))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    push(lines, substr(cs, start, n))
+    return lines
+}
+
+// Re-emit `src` with the 1-based line numbers in `skip` (the import lines)
+// dropped, so the concatenated stream carries only real declarations.
+fun strip_lines(src: str, skip: [int32]) -> str {
+    let lines = split_lines(src)
+    let n = len(lines)
+    var sb = StringBuilder()
+    var i = 0
+    while i < n {
+        if !has_int(skip, i + 1) {
+            append(sb, lines[i])
+            append(sb, "\n")
+        }
+        i = i + 1
+    }
+    return build(sb)
+}
+
+fun seg_join(segs: [str]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    let n = len(segs)
+    while i < n {
+        if i > 0 { append(sb, "/") }
+        append(sb, segs[i])
+        i = i + 1
+    }
+    return build(sb)
+}
+
+// Map an import path (relative to `importer`) to a module file path. `std.*`
+// (dots == 0) resolves under `stdlib_root`; `.x` / `..x` climb from the
+// importer's directory.
+fun resolve_path(importer: str, p: ImportPath, stdlib_root: str) -> str {
+    if p.dots == 0 {
+        return stdlib_root + "/" + seg_join(p.segments) + ".my"
+    }
+    var base = dirname(importer)
+    var k = 1
+    while k < p.dots {
+        base = dirname(base)
+        k = k + 1
+    }
+    return base + "/" + seg_join(p.segments) + ".my"
+}
+
+impl Loader {
+    // Load `path` and (depth-first) all of its imports, appending each module's
+    // import-stripped source to `parts`. Dependencies are appended before their
+    // importer; order is otherwise irrelevant (the checker collects all globals
+    // before checking any body).
+    fun load(var self, path: str) -> Result<int32, str> {
+        if has_str(self.visited, path) { return Ok(0) }
+        push(self.visited, path)
+        var src = ""
+        match read_to_string(path) {
+            Ok(s) => { src = s },
+            Err(e) => { return Err("cannot read module: " + path) },
+        }
+        let toks = lex(src)
+        let prog = parse(toks)
+        var skip: [int32] = []
+        for d in prog.decls {
+            match d.kind {
+                DeclKind.ImportDecl(p, items, alias, isp) => {
+                    push(skip, d.line)
+                    self.load(resolve_path(path, p, self.stdlib_root))?
+                },
+                _ => {},
+            }
+        }
+        push(self.parts, strip_lines(src, skip))
+        return Ok(0)
+    }
+}
+
+// Amalgamate the module graph rooted at `entry` into a single source string
+// (imports removed). `std.*` imports resolve under `stdlib_root`.
+pub fun amalgamate(entry: str, stdlib_root: str) -> Result<str, str> {
+    var ld = new_loader(stdlib_root)
+    ld.load(entry)?
+    var sb = StringBuilder()
+    for part in ld.parts {
+        append(sb, part)
+        append(sb, "\n")
+    }
+    return Ok(build(sb))
+}

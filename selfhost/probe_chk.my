@@ -1,0 +1,16 @@
+from std.process import exit
+from std.io import eprintln
+from .checker import build_checker_src
+
+fun main() {
+    match build_checker_src("fun main() { let x = 1 }") {
+        Ok(c) => {
+            eprintln("[p] ok")
+            exit(0)
+        },
+        Err(e) => {
+            eprintln(format("[p] err at {}:{}", e.line, e.col))
+            exit(1)
+        },
+    }
+}

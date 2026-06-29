@@ -18,16 +18,6 @@ pub struct Lexer {
     toks: [Token],
 }
 
-pub fun slice_str(cps: [int32], start: int32, end: int32) -> str {
-    var sb = StringBuilder()
-    var i = start
-    while i < end {
-        append(sb, cp_utf8(cps[i]))
-        i = i + 1
-    }
-    return build(sb)
-}
-
 pub fun new_lexer(src: str) -> Lexer {
     var cps: [int32] = []
     for ch in chars(src) {
@@ -59,6 +49,19 @@ pub fun canonical_line(t: Token) -> str {
 }
 
 impl Lexer {
+    // Build a `str` from the codepoints `cps[start..end]`. A method (not a free
+    // function) so `self.cps` is borrowed through `self` rather than passed —
+    // and cloned — by value on every token (the lexer's dominant allocation).
+    fun slice_str(self, start: int32, end: int32) -> str {
+        var sb = StringBuilder()
+        var i = start
+        while i < end {
+            append(sb, cp_utf8(self.cps[i]))
+            i = i + 1
+        }
+        return build(sb)
+    }
+
     fun at_end(self) -> bool {
         return self.pos >= self.n
     }
@@ -161,7 +164,7 @@ impl Lexer {
             while is_digit(self.peek()) {
                 self.advance()
             }
-            let cand = slice_str(self.cps, sp, self.pos)
+            let cand = self.slice_str(sp, self.pos)
             if !is_int_suffix(cand) {
                 panic(format("invalid integer literal suffix '{}'", cand))
             }
@@ -194,7 +197,7 @@ impl Lexer {
             }
             let value = parse_value(digits, base as int64)
             let suffix = self.scan_int_suffix()
-            let lexeme = slice_str(self.cps, sp, self.pos)
+            let lexeme = self.slice_str(sp, self.pos)
             self.emit(TokenKind.INT, lexeme, sl, sc, value, suffix)
             return
         }
@@ -223,7 +226,7 @@ impl Lexer {
             while is_digit(self.peek()) {
                 self.advance()
             }
-            let cand = slice_str(self.cps, fsp, self.pos)
+            let cand = self.slice_str(fsp, self.pos)
             if !is_float_suffix(cand) {
                 panic(format("invalid float literal suffix '{}'", cand))
             }
@@ -236,12 +239,12 @@ impl Lexer {
             if is_ident_continue(self.peek()) {
                 panic("invalid float literal: unexpected character after digits")
             }
-            let lexeme = slice_str(self.cps, sp, self.pos)
+            let lexeme = self.slice_str(sp, self.pos)
             self.emit(TokenKind.FLOAT, lexeme, sl, sc, 0, suffix)
             return
         }
         let value = parse_value(int_digits, 10)
-        let lexeme = slice_str(self.cps, sp, self.pos)
+        let lexeme = self.slice_str(sp, self.pos)
         self.emit(TokenKind.INT, lexeme, sl, sc, value, suffix)
     }
 
@@ -349,7 +352,7 @@ impl Lexer {
             panic("char literal must contain exactly one character")
         }
         self.advance()
-        let lexeme = slice_str(self.cps, sp, self.pos)
+        let lexeme = self.slice_str(sp, self.pos)
         self.emit(TokenKind.CHAR, lexeme, sl, sc, cp as int64, "")
     }
 
@@ -360,7 +363,7 @@ impl Lexer {
         while !self.at_end() && is_ident_continue(self.peek()) {
             self.advance()
         }
-        let text = slice_str(self.cps, sp, self.pos)
+        let text = self.slice_str(sp, self.pos)
         self.emit0(keyword_kind(text), text, sl, sc)
     }
 
