@@ -390,7 +390,7 @@ fun int_hint(expected: Option<Type>) -> Option<Type> {
 
 pub struct Subst { name: str, ty: Type }
 
-fun subst_get(subst: [Subst], name: str) -> Option<Type> {
+pub fun subst_get(subst: [Subst], name: str) -> Option<Type> {
     for s in subst { if s.name == name { return Some(s.ty) } }
     return None
 }
@@ -417,7 +417,7 @@ fun list_any_tp(xs: [Type]) -> bool {
     return false
 }
 
-fun subst_type(t: Type, subst: [Subst]) -> Type {
+pub fun subst_type(t: Type, subst: [Subst]) -> Type {
     return match t {
         Type.TParam(n) => match subst_get(subst, n) { Some(x) => x, None => t },
         Type.TTuple(es) => Type.TTuple(subst_type_list(es, subst)),
@@ -436,7 +436,7 @@ fun subst_type_list(xs: [Type], subst: [Subst]) -> [Type] {
     return out
 }
 
-fun opt_subst_type(t: Option<Type>, subst: [Subst]) -> Option<Type> {
+pub fun opt_subst_type(t: Option<Type>, subst: [Subst]) -> Option<Type> {
     return match t { Some(x) => Some(subst_type(x, subst)), None => None }
 }
 

@@ -10,14 +10,34 @@
 // prelude, simple frame layout, and scalar `_eval`/calls/`print` -- enough to
 // build and run a `hello`-class program through `as`/`ld` with parity.
 
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute
-from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem
+from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
-pub struct Binding { name: str, kind: str, offset: int32, ty: Type }
+// `capoff` is the byte offset within the closure env for a "capture" binding.
+pub struct Binding { name: str, kind: str, offset: int32, ty: Type, capoff: int32 }
+
+// A by-value captured variable in a closure environment cell.
+pub struct Cap { name: str, ty: Type, off: int32 }
+
+// A lifted lambda body to emit as a top-level function (monomorphized per stamp).
+pub struct LamJob { lifted: str, params: [Param], ftype: Type, body: ExprOrBlock, caps: [Cap], subst: [Subst] }
+
+// A partial-application thunk to emit: `slots[i]` is the env byte offset of a
+// filled argument, or -1 for a hole (filled from the thunk's own parameters).
+pub struct PartialJob { lifted: str, target: str, slots: [int32] }
 
 // Continue/break target labels for the innermost loop.
 pub struct LoopLab { cont: str, brk: str }
+
+// A leaf binding produced by destructuring a tuple pattern.
+pub struct DLeaf { name: str, off: int32, ty: Type }
+
+// Resolved enum-constructor info for an expression (`Shape.Circle(2)`, `None`).
+pub struct CtorInfo { ok: bool, enum_name: str, variant: str, args: [Expr] }
+
+// A pending generic-function instantiation to stamp out (monomorphization, D13).
+pub struct MonoFn { orig: str, mangled: str, subst: [Subst] }
 
 pub struct CodeGen {
     decls: [Decl],
@@ -35,6 +55,24 @@ pub struct CodeGen {
     locals: [int32: int32],
     for_lv: [int32: int32],
     for_end: [int32: int32],
+    destruct_base: [int32: int32],
+    destruct_leaves: [int32: [int32]],
+    match_scrut: [int32: int32],
+    match_res: [int32: int32],
+    match_bind: [str: int32],
+    try_res: [int32: int32],
+    unbox: [int32: int32],
+    for_elem: [int32: int32],
+    ind_code: [int32: int32],
+    ind_env: [int32: int32],
+    subst: [Subst],
+    fn_worklist: [MonoFn],
+    fn_done: [str],
+    lam_jobs: [LamJob],
+    lam_done: [str],
+    partial_jobs: [PartialJob],
+    fnval_set: [str],
+    cur_mangled: str,
     scopes: [[Binding]],
     loops: [LoopLab],
     cursor: int32,
@@ -54,7 +92,14 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         text: [], rodata: [],
         label_n: 0, str_n: 0,
         str_texts: [], str_labels: [],
-        locals: [:], for_lv: [:], for_end: [:], scopes: [], loops: [],
+        locals: [:], for_lv: [:], for_end: [:],
+        destruct_base: [:], destruct_leaves: [:],
+        match_scrut: [:], match_res: [:], match_bind: [:], try_res: [:], unbox: [:],
+        for_elem: [:], ind_code: [:], ind_env: [:],
+        subst: [], fn_worklist: [], fn_done: [],
+        lam_jobs: [], lam_done: [], partial_jobs: [], fnval_set: [],
+        cur_mangled: "",
+        scopes: [], loops: [],
         cursor: 0,
         epilogue: "", struct_ret: false, ret_type: None,
     }
@@ -113,8 +158,29 @@ impl CodeGen {
         return self.funcs[0]
     }
 
+    fun has_func(self, name: str) -> bool {
+        for f in self.funcs { if f.name == name { return true } }
+        return false
+    }
+
+    // The method-table key for a receiver type (mirrors Checker.type_key).
+    fun type_key(self, t: Type) -> str {
+        return match t {
+            Type.TStruct(n, a) => n,
+            Type.TEnum(n, a) => n,
+            Type.TInt(w, s) => int_type_name_cg(w, s),
+            Type.TBool => "bool",
+            Type.TStr => "str",
+            Type.TSB => "StringBuilder",
+            Type.TChar => "char",
+            _ => "",
+        }
+    }
+
+    // The resolved type of a node, with the active generic substitution applied
+    // (identity outside a specialized generic body).
     fun type_of(self, id: int32) -> Type {
-        match get(self.resolved, id) { Some(t) => { return t }, None => {} }
+        match get(self.resolved, id) { Some(t) => { return subst_type(t, self.subst) }, None => {} }
         return Type.TInt(32, true)
     }
 
@@ -123,9 +189,34 @@ impl CodeGen {
         return 0
     }
 
+    // The type of a place expression. The checker leaves lvalue targets untyped,
+    // so derive them from bindings / container structure instead of `resolved`.
+    fun place_type(self, e: Expr) -> Type {
+        match e.kind {
+            ExprKind.Name(n) => {
+                if self.has_binding(n) { return self.lookup(n).ty }
+            },
+            ExprKind.Index(b, i) => {
+                let bt = self.place_type(b)
+                if is_map_t(bt) { return map_val(bt) }
+                return list_elem(bt)
+            },
+            ExprKind.GetField(t, f) => {
+                return self.struct_field_type(struct_name_of(self.place_type(t)), f)
+            },
+            ExprKind.TupleIndex(t, i) => {
+                let es = tuple_elems(self.place_type(t))
+                let ix = i as int32
+                if ix < len(es) { return es[ix] }
+            },
+            _ => {},
+        }
+        return self.type_of(e.id)
+    }
+
     fun bind(var self, name: str, kind: str, offset: int32, ty: Type) {
         let top = len(self.scopes) - 1
-        push(self.scopes[top], Binding { name: name, kind: kind, offset: offset, ty: ty })
+        push(self.scopes[top], Binding { name: name, kind: kind, offset: offset, ty: ty, capoff: 0 })
     }
 
     fun lookup(self, name: str) -> Binding {
@@ -138,7 +229,7 @@ impl CodeGen {
             }
             i = i - 1
         }
-        return Binding { name: name, kind: "local", offset: 0, ty: Type.TInt(32, true) }
+        return Binding { name: name, kind: "local", offset: 0, ty: Type.TInt(32, true), capoff: 0 }
     }
 
     // -- type layout ------------------------------------------------------
@@ -197,20 +288,199 @@ impl CodeGen {
         return maxp
     }
 
+    fun field_offset(self, struct_name: str, field: str) -> int32 {
+        var off = 0
+        for f in self.struct_info(struct_name).fields {
+            if f.name == field { return off }
+            off = off + self.stored_size(f.ty)
+        }
+        return off
+    }
+
+    fun elem_offset(self, t: Type, index: int32) -> int32 {
+        var off = 0
+        var i = 0
+        for e in tuple_elems(t) {
+            if i == index { return off }
+            off = off + self.stored_size(e)
+            i = i + 1
+        }
+        return off
+    }
+
+    // -- enum layout ------------------------------------------------------
+
+    fun variant_tag(self, enum_name: str, variant: str) -> int32 {
+        var i = 0
+        for v in self.enum_info(enum_name).variants {
+            if v.name == variant { return i }
+            i = i + 1
+        }
+        return 0
+    }
+
+    fun variant_payload(self, enum_name: str, variant: str) -> [Type] {
+        for v in self.enum_info(enum_name).variants {
+            if v.name == variant { return v.payload }
+        }
+        return []
+    }
+
+    fun variant_field_offset(self, enum_name: str, variant: str, index: int32) -> int32 {
+        var off = 8
+        let payload = self.variant_payload(enum_name, variant)
+        var i = 0
+        while i < index {
+            off = off + self.stored_size(payload[i])
+            i = i + 1
+        }
+        return off
+    }
+
+    fun is_enum_name(self, n: str) -> bool {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.EnumDecl(en, variants, attrs, tps, isp) => { if en == n { return true } },
+                _ => {},
+            }
+        }
+        return false
+    }
+
+    fun is_nullary_variant(self, n: str) -> bool {
+        for ei in self.enums {
+            for v in ei.variants { if v.name == n && len(v.payload) == 0 { return true } }
+        }
+        return false
+    }
+
+    fun is_variant_name(self, n: str) -> bool {
+        for ei in self.enums {
+            for v in ei.variants { if v.name == n { return true } }
+        }
+        return false
+    }
+
+    fun has_function(self, n: str) -> bool {
+        for f in self.funcs { if f.name == n { return true } }
+        return false
+    }
+
+    // Whether a call through `callee` resolves indirectly (a function value)
+    // rather than to a builtin, a user function, or a method.
+    fun call_is_indirect(self, callee: Expr) -> bool {
+        match callee.kind {
+            ExprKind.Name(nm) => { return !is_builtin_call_name(nm) && !self.has_function(nm) },
+            ExprKind.GetField(recv, field) => {
+                return !self.has_func(format("{}.{}", self.type_key(self.type_of(recv.id)), field))
+            },
+            _ => {},
+        }
+        return true
+    }
+
+    // Classify an expression as an enum constructor (if it is one).
+    fun ctor_info(self, e: Expr) -> CtorInfo {
+        let enm = enum_name_of(self.type_of(e.id))
+        match e.kind {
+            ExprKind.GetField(tgt, field) => {
+                let tn = expr_name(tgt)
+                if tn != "" && self.is_enum_name(tn) {
+                    return CtorInfo { ok: true, enum_name: enm, variant: field, args: [] }
+                }
+            },
+            ExprKind.Name(n) => {
+                if self.is_nullary_variant(n) && enm != "" {
+                    return CtorInfo { ok: true, enum_name: enm, variant: n, args: [] }
+                }
+            },
+            ExprKind.Call(callee, args) => {
+                let qn = expr_name(callee_target(callee))
+                let cfield = getfield_name(callee)
+                if cfield != "" && qn != "" && self.is_enum_name(qn) {
+                    return CtorInfo { ok: true, enum_name: enm, variant: cfield, args: args }
+                }
+                let un = expr_name(callee)
+                if un != "" && !self.has_function(un) && self.is_variant_name(un) && enm != "" {
+                    return CtorInfo { ok: true, enum_name: enm, variant: un, args: args }
+                }
+            },
+            _ => {},
+        }
+        return CtorInfo { ok: false, enum_name: "", variant: "", args: [] }
+    }
+
     // -- top-level --------------------------------------------------------
 
     fun generate(var self) -> str {
         let en = self.entry_name()
         self.emit_runtime_prelude(en)
-        for d in self.decls {
-            match d.kind {
-                DeclKind.FunDecl(fd) => {
-                    if len(fd.type_params) == 0 { self.gen_function(fd) }
-                },
-                _ => {},
+        // Seed the worklist with every non-generic function (each keeps its name);
+        // generic functions are stamped on demand from reached call sites (D13).
+        for f in self.funcs {
+            if f.has_decl && len(f.type_params) == 0 {
+                let m = self.request_fn(f.name, [])
             }
         }
+        while len(self.fn_worklist) > 0 || len(self.lam_jobs) > 0 {
+            if len(self.fn_worklist) > 0 {
+                let job = self.fn_worklist[len(self.fn_worklist) - 1]
+                self.fn_worklist = drop_last(self.fn_worklist)
+                if list_has_str(self.fn_done, job.mangled) { continue }
+                push(self.fn_done, job.mangled)
+                self.subst = job.subst
+                self.gen_function(self.sig_of(job.orig).decl, job.mangled)
+                self.subst = []
+            } else {
+                let lj = self.lam_jobs[len(self.lam_jobs) - 1]
+                self.lam_jobs = drop_last(self.lam_jobs)
+                if list_has_str(self.lam_done, lj.lifted) { continue }
+                push(self.lam_done, lj.lifted)
+                self.gen_lambda_function(lj)
+            }
+        }
+        for pj in self.partial_jobs { self.gen_partial_function(pj) }
+        for n in self.fnval_set { self.emit_fnval_thunk(n) }
         return self.assemble_source()
+    }
+
+    // Register an instantiation (or non-generic function) and return its emitted
+    // (mangled) name, enqueueing it for stamping the first time it is seen.
+    fun request_fn(var self, orig: str, targs: [Type]) -> str {
+        let sig = self.sig_of(orig)
+        if len(sig.type_params) == 0 {
+            if !list_has_str(self.fn_done, orig) && !worklist_has(self.fn_worklist, orig) {
+                push(self.fn_worklist, MonoFn { orig: orig, mangled: orig, subst: [] })
+            }
+            return orig
+        }
+        let mangled = mangle_fn(orig, targs)
+        if !list_has_str(self.fn_done, mangled) && !worklist_has(self.fn_worklist, mangled) {
+            var sub: [Subst] = []
+            var i = 0
+            while i < len(sig.type_params) {
+                push(sub, Subst { name: sig.type_params[i], ty: targs[i] })
+                i = i + 1
+            }
+            push(self.fn_worklist, MonoFn { orig: orig, mangled: mangled, subst: sub })
+        }
+        return mangled
+    }
+
+    // Solve a generic callee's type arguments (in declaration order) by unifying
+    // its declared parameter types against the concrete argument types.
+    fun solve_targs(self, sig: FuncSig, args: [Expr]) -> [Type] {
+        var sub: [Subst] = []
+        var i = 0
+        while i < len(sig.params) && i < len(args) {
+            for b in unify_into(sig.params[i], self.type_of(args[i].id)) { push(sub, b) }
+            i = i + 1
+        }
+        var out: [Type] = []
+        for tp in sig.type_params {
+            match subst_get(sub, tp) { Some(t) => { push(out, t) }, None => { push(out, Type.TInt(32, true)) } }
+        }
+        return out
     }
 
     fun entry_name(self) -> str {
@@ -260,21 +530,33 @@ impl CodeGen {
 
     // -- functions --------------------------------------------------------
 
-    fun gen_function(var self, fd: FunData) {
+    fun gen_function(var self, fd: FunData, mangled: str) {
         let sig = self.sig_of(fd.name)
         self.locals = [:]
         self.for_lv = [:]
         self.for_end = [:]
+        self.destruct_base = [:]
+        self.destruct_leaves = [:]
+        self.match_scrut = [:]
+        self.match_res = [:]
+        self.match_bind = [:]
+        self.try_res = [:]
+        self.unbox = [:]
+        self.for_elem = [:]
+        self.ind_code = [:]
+        self.ind_env = [:]
+        self.cur_mangled = mangled
         self.scopes = []
         self.loops = []
         self.cursor = 0
-        self.struct_ret = is_aggregate_opt(sig.ret)
-        self.ret_type = sig.ret
+        let ret = opt_subst_type(sig.ret, self.subst)
+        self.struct_ret = is_aggregate_opt(ret)
+        self.ret_type = ret
 
         let frame = self.layout_frame(fd)
-        self.epilogue = format(".Lret_{}", fd.name)
+        self.epilogue = format(".Lret_{}", mangled)
 
-        self.emit(format("myla_{}:", fd.name))
+        self.emit(format("myla_{}:", mangled))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
         if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
@@ -285,7 +567,7 @@ impl CodeGen {
         var i = 0
         while i < len(fd.params) {
             let offset = 16 + 8 * (param_base + i)
-            self.bind(fd.params[i].name, "param", offset, sig.params[i])
+            self.bind(fd.params[i].name, "param", offset, subst_type(sig.params[i], self.subst))
             i = i + 1
         }
 
@@ -318,6 +600,17 @@ impl CodeGen {
                 self.visit_expr(init)
                 self.alloc(s.id, self.size(self.type_of(init.id)))
             },
+            StmtKind.DestructDecl(k, binding, ty, init) => {
+                self.visit_expr(init)
+                self.cursor = self.cursor + 8
+                self.destruct_base[s.id] = -self.cursor
+                var slots: [int32] = []
+                for lf in self.collect_leaves(binding, self.type_of(init.id)) {
+                    self.cursor = self.cursor + self.size(lf.ty)
+                    push(slots, -self.cursor)
+                }
+                self.destruct_leaves[s.id] = slots
+            },
             StmtKind.ReturnS(ov) => { self.visit_opt_expr(ov) },
             StmtKind.ExprStmt(e) => { self.visit_expr(e) },
             StmtKind.Assign(target, value) => {
@@ -336,10 +629,20 @@ impl CodeGen {
             StmtKind.ForS(vn, start, end, body, iter) => {
                 self.visit_opt_expr(start)
                 self.visit_opt_expr(end)
+                self.visit_opt_expr(iter)
                 self.cursor = self.cursor + 8
                 self.for_lv[s.id] = -self.cursor
                 self.cursor = self.cursor + 8
                 self.for_end[s.id] = -self.cursor
+                match iter {
+                    Some(it) => {
+                        let itt = self.type_of(it.id)
+                        let elem_t = match itt { Type.TMap(k, v) => k, _ => list_elem(itt) }
+                        self.cursor = self.cursor + self.size(elem_t)
+                        self.for_elem[s.id] = -self.cursor
+                    },
+                    None => {},
+                }
                 self.visit_block_stmts(body)
             },
             _ => {},
@@ -369,19 +672,100 @@ impl CodeGen {
     }
 
     fun visit_expr(var self, e: Expr) {
+        let ci = self.ctor_info(e)
+        if ci.ok {
+            for a in ci.args { self.visit_expr(a) }
+            self.alloc(e.id, self.size(self.type_of(e.id)))
+            return
+        }
         match e.kind {
             ExprKind.Unary(op, x) => { self.visit_expr(x) },
             ExprKind.Cast(x, ty) => { self.visit_expr(x) },
             ExprKind.Binary(op, l, r) => {
                 self.visit_expr(l)
                 self.visit_expr(r)
+                let bt = self.type_of(e.id)
+                if op == ">>" && is_tfunc(bt) {
+                    self.alloc(e.id, 16)
+                } else if is_overloadable_op(op) && is_struct_or_enum_t(self.type_of(l.id)) && is_aggregate(bt) {
+                    self.alloc(e.id, self.size(bt))
+                }
             },
             ExprKind.Call(c, args) => {
+                let indirect = self.call_is_indirect(c)
+                match c.kind {
+                    ExprKind.GetField(rc, fld) => { self.visit_expr(c) },
+                    ExprKind.Name(nm) => { if indirect { self.visit_expr(c) } },
+                    _ => { self.visit_expr(c) },
+                }
                 for a in args { self.visit_expr(a) }
                 let rt = self.type_of(e.id)
                 if is_aggregate(rt) { self.alloc(e.id, self.size(rt)) }
+                if indirect {
+                    self.cursor = self.cursor + 8
+                    self.ind_code[e.id] = -self.cursor
+                    self.cursor = self.cursor + 8
+                    self.ind_env[e.id] = -self.cursor
+                }
+            },
+            ExprKind.Name(n) => {
+                if self.has_function(n) && is_tfunc(self.type_of(e.id)) { self.alloc(e.id, 16) }
+            },
+            ExprKind.Lambda(params, ret, body) => { self.alloc(e.id, 16) },
+            ExprKind.GetField(tgt, field) => { self.visit_expr(tgt) },
+            ExprKind.TupleIndex(tgt, idx) => { self.visit_expr(tgt) },
+            ExprKind.Index(base, idx) => {
+                self.visit_expr(base)
+                self.visit_expr(idx)
+            },
+            ExprKind.ListLit(elems) => {
+                for el in elems { self.visit_expr(el) }
+                self.alloc(e.id, 8)
+            },
+            ExprKind.MapLit(entries) => {
+                for en in entries {
+                    self.visit_expr(en.key)
+                    self.visit_expr(en.value)
+                }
+                self.alloc(e.id, 8)
+            },
+            ExprKind.StructLit(name, fields) => {
+                for fi in fields { self.visit_expr(fi.value) }
+                self.alloc(e.id, self.size(self.type_of(e.id)))
+            },
+            ExprKind.TupleLit(elems) => {
+                for el in elems { self.visit_expr(el) }
+                self.alloc(e.id, self.size(self.type_of(e.id)))
+            },
+            ExprKind.MatchE(scrut, arms) => {
+                self.visit_expr(scrut)
+                self.cursor = self.cursor + self.size(self.type_of(scrut.id))
+                self.match_scrut[e.id] = -self.cursor
+                self.cursor = self.cursor + self.size(self.type_of(e.id))
+                self.match_res[e.id] = -self.cursor
+                for arm in arms {
+                    for b in self.pattern_binds(arm.pattern, self.type_of(scrut.id)) {
+                        self.cursor = self.cursor + self.size(b.ty)
+                        self.match_bind[format("{}:{}", arm.pattern.id, b.name)] = -self.cursor
+                    }
+                    self.visit_pattern_unbox(arm.pattern, self.type_of(scrut.id))
+                    match arm.guard { Some(g) => { self.visit_expr(g) }, None => {} }
+                    self.visit_arm_body(arm.body)
+                }
+            },
+            ExprKind.Try(inner) => {
+                self.visit_expr(inner)
+                self.cursor = self.cursor + self.size(self.type_of(e.id))
+                self.try_res[e.id] = -self.cursor
             },
             _ => {},
+        }
+    }
+
+    fun visit_arm_body(var self, body: ExprOrBlock) {
+        match body {
+            ExprOrBlock.EB_Expr(ex) => { self.visit_expr(ex) },
+            ExprOrBlock.EB_Block(b) => { for s in b.stmts { self.visit_stmt(s) } },
         }
     }
 
@@ -398,34 +782,134 @@ impl CodeGen {
             StmtKind.ExprStmt(e) => { self.eval(e) },
             StmtKind.VarDecl(k, name, ty, init) => {
                 let off = self.local_of(s.id)
-                self.eval(init)
-                self.emit(format("movq %rax, {}(%rbp)", off))
-                self.bind(name, "local", off, self.type_of(init.id))
+                let t = self.type_of(init.id)
+                if is_aggregate(t) {
+                    self.addr_of_aggregate(init)
+                    self.emit("movq %rax, %rsi")
+                    self.emit(format("leaq {}(%rbp), %rdi", off))
+                    self.emit_copy(self.size(t))
+                } else {
+                    self.eval_owned(init)
+                    self.emit(format("movq %rax, {}(%rbp)", off))
+                }
+                self.bind(name, "local", off, t)
             },
+            StmtKind.DestructDecl(k, binding, ty, init) => { self.gen_destruct(s, binding, init) },
             StmtKind.ReturnS(ov) => {
-                match ov { Some(e) => { self.eval(e) }, None => {} }
+                match ov {
+                    Some(e) => {
+                        if self.struct_ret {
+                            self.addr_of_aggregate(e)
+                            self.emit("movq %rax, %rsi")
+                            self.emit("movq 16(%rbp), %rdi")
+                            self.emit_copy(self.size(self.type_of(e.id)))
+                            self.emit("movq 16(%rbp), %rax")
+                        } else {
+                            self.eval_owned(e)
+                        }
+                    },
+                    None => {},
+                }
                 self.emit(format("jmp {}", self.epilogue))
             },
             StmtKind.Assign(target, value) => { self.gen_assign(target, value) },
             StmtKind.IfS(cond, then, otherwise) => { self.gen_if(cond, then, otherwise) },
             StmtKind.WhileS(cond, body) => { self.gen_while(cond, body) },
-            StmtKind.ForS(vn, start, end, body, iter) => { self.gen_for(s, vn, start, end, body) },
+            StmtKind.ForS(vn, start, end, body, iter) => { self.gen_for(s, vn, start, end, body, iter) },
             StmtKind.BreakS => { self.emit(format("jmp {}", self.loops[len(self.loops) - 1].brk)) },
             StmtKind.ContinueS => { self.emit(format("jmp {}", self.loops[len(self.loops) - 1].cont)) },
-            _ => {},
         }
     }
 
-    // C1: scalar/str assignment to a simple variable (`name = value`).
+    // Assignment to an lvalue (`name`, `agg.field`, `tuple.N`), scalar or aggregate.
+    // The checker leaves lvalue targets untyped, so key on the value's type (they
+    // are equal by the assignment's type rule).
     fun gen_assign(var self, target: Expr, value: Expr) {
-        self.eval(value)
         match target.kind {
-            ExprKind.Name(n) => {
-                let b = self.lookup(n)
-                self.emit(format("movq %rax, {}(%rbp)", b.offset))
+            ExprKind.Index(base, idx) => {
+                if is_map_t(self.place_type(base)) { self.gen_map_set(base, idx, value)
+                return }
+                self.gen_list_index_assign(base, idx, value)
+                return
             },
             _ => {},
         }
+        let t = self.type_of(value.id)
+        if is_aggregate(t) {
+            self.addr_of_aggregate(value)
+            self.emit("pushq %rax")
+            self.addr_of_lvalue(target)
+            self.emit("movq %rax, %rdi")
+            self.emit("popq %rsi")
+            self.emit_copy(self.size(t))
+        } else {
+            self.eval_owned(value)
+            self.emit("pushq %rax")
+            self.addr_of_lvalue(target)
+            self.emit("popq %rcx")
+            self.emit("movq %rcx, (%rax)")
+        }
+    }
+
+    fun gen_list_index_assign(var self, base: Expr, idx: Expr, value: Expr) {
+        let et = list_elem(self.place_type(base))
+        self.gen_elem_addr(base, idx)
+        self.emit("pushq %rax")
+        if is_aggregate(et) && !self.is_boxed(et) {
+            self.addr_of_aggregate(value)
+            self.emit("movq %rax, %rsi")
+            self.emit("popq %rdi")
+            self.emit_copy(self.size(et))
+        } else {
+            self.eval_owned(value)
+            self.emit("popq %rcx")
+            self.emit("movq %rax, (%rcx)")
+        }
+    }
+
+    fun gen_destruct(var self, s: Stmt, binding: [BindElem], init: Expr) {
+        self.addr_of_aggregate(init)
+        let base_slot = self.destruct_base[s.id]
+        self.emit(format("movq %rax, {}(%rbp)", base_slot))
+        let leaves = self.collect_leaves(binding, self.type_of(init.id))
+        let slots = self.destruct_leaves[s.id]
+        var i = 0
+        for lf in leaves {
+            let leaf_off = slots[i]
+            self.emit(format("movq {}(%rbp), %rsi", base_slot))
+            if lf.off != 0 { self.emit(format("addq ${}, %rsi", lf.off)) }
+            if is_aggregate(lf.ty) {
+                self.emit(format("leaq {}(%rbp), %rdi", leaf_off))
+                self.emit_copy(self.size(lf.ty))
+            } else {
+                self.emit("movq (%rsi), %rax")
+                self.emit(format("movq %rax, {}(%rbp)", leaf_off))
+            }
+            self.bind(lf.name, "local", leaf_off, lf.ty)
+            i = i + 1
+        }
+    }
+
+    fun collect_leaves(self, elems: [BindElem], t: Type) -> [DLeaf] {
+        var out: [DLeaf] = []
+        let ets = tuple_elems(t)
+        var off = 0
+        var i = 0
+        for be in elems {
+            let et = ets[i]
+            match be {
+                BindElem.BName(n) => { push(out, DLeaf { name: n, off: off, ty: et }) },
+                BindElem.BWild => {},
+                BindElem.BTuple(sub) => {
+                    for lf in self.collect_leaves(sub, et) {
+                        push(out, DLeaf { name: lf.name, off: off + lf.off, ty: lf.ty })
+                    }
+                },
+            }
+            off = off + self.stored_size(et)
+            i = i + 1
+        }
+        return out
     }
 
     fun gen_if(var self, cond: Expr, then: Block, otherwise: Option<ElseTail>) {
@@ -467,7 +951,12 @@ impl CodeGen {
         self.emit(format("{}:", end))
     }
 
-    fun gen_for(var self, s: Stmt, vn: str, start: Option<Expr>, end: Option<Expr>, body: Block) {
+    fun gen_for(var self, s: Stmt, vn: str, start: Option<Expr>, end: Option<Expr>, body: Block, iter: Option<Expr>) {
+        match iter {
+            Some(it) => { self.gen_for_in(s, vn, it, body)
+            return },
+            None => {},
+        }
         let loop_t = match start { Some(e) => self.type_of(e.id), None => Type.TInt(32, true) }
         let lv = self.get_or_zero(self.for_lv, s.id)
         let fe = self.get_or_zero(self.for_end, s.id)
@@ -502,6 +991,100 @@ impl CodeGen {
         self.emit(format("{}:", lend))
     }
 
+    fun gen_for_in(var self, s: Stmt, vn: str, it: Expr, body: Block) {
+        let itt = self.type_of(it.id)
+        if is_map_t(itt) { self.gen_for_in_map(s, vn, it, body)
+        return }
+        let et = list_elem(itt)
+        let stride = self.elem_stride(et)
+        let idx = self.get_or_zero(self.for_lv, s.id)
+        let iptr = self.get_or_zero(self.for_end, s.id)
+        let elem_slot = self.get_or_zero(self.for_elem, s.id)
+        self.eval(it)
+        self.emit(format("movq %rax, {}(%rbp)", iptr))
+        self.emit(format("movq $0, {}(%rbp)", idx))
+        let lstart = self.label()
+        let lcont = self.label()
+        let lend = self.label()
+        self.emit(format("{}:", lstart))
+        self.emit(format("movq {}(%rbp), %rax", idx))
+        self.emit(format("movq {}(%rbp), %rcx", iptr))
+        self.emit("movq (%rcx), %rdx")
+        self.emit("cmpq %rdx, %rax")
+        self.emit(format("jae {}", lend))
+        self.emit("leaq 16(%rcx), %rcx")
+        if stride == 8 { self.emit("leaq (%rcx,%rax,8), %rcx") }
+        else {
+            self.emit(format("imulq ${}, %rax", stride))
+            self.emit("addq %rax, %rcx")
+        }
+        if is_aggregate(et) && !self.is_boxed(et) {
+            self.emit("movq %rcx, %rsi")
+            self.emit(format("leaq {}(%rbp), %rdi", elem_slot))
+            self.emit_copy(self.size(et))
+        } else {
+            self.emit("movq (%rcx), %rax")
+            self.emit(format("movq %rax, {}(%rbp)", elem_slot))
+        }
+        push(self.scopes, [])
+        self.bind(vn, "local", elem_slot, et)
+        push(self.loops, LoopLab { cont: lcont, brk: lend })
+        for st in body.stmts { self.gen_stmt(st) }
+        self.loops = drop_last(self.loops)
+        self.scopes = drop_last(self.scopes)
+        self.emit(format("{}:", lcont))
+        self.emit(format("movq {}(%rbp), %rax", idx))
+        self.emit("addq $1, %rax")
+        self.emit(format("movq %rax, {}(%rbp)", idx))
+        self.emit(format("jmp {}", lstart))
+        self.emit(format("{}:", lend))
+    }
+
+    fun gen_for_in_map(var self, s: Stmt, vn: str, it: Expr, body: Block) {
+        let mt = self.type_of(it.id)
+        let kt = map_key(mt)
+        let stride = self.stored_size(kt)
+        let idx = self.get_or_zero(self.for_lv, s.id)
+        let iptr = self.get_or_zero(self.for_end, s.id)
+        let elem_slot = self.get_or_zero(self.for_elem, s.id)
+        self.eval(it)
+        self.emit("movq %rax, %rdi")
+        self.emit(format("movq ${}, %rsi", self.map_slot_size(mt)))
+        self.emit(format("movq ${}, %rdx", stride))
+        self.emit("call __map_keys")
+        self.emit(format("movq %rax, {}(%rbp)", iptr))
+        self.emit(format("movq $0, {}(%rbp)", idx))
+        let lstart = self.label()
+        let lcont = self.label()
+        let lend = self.label()
+        self.emit(format("{}:", lstart))
+        self.emit(format("movq {}(%rbp), %rax", idx))
+        self.emit(format("movq {}(%rbp), %rcx", iptr))
+        self.emit("movq (%rcx), %rdx")
+        self.emit("cmpq %rdx, %rax")
+        self.emit(format("jae {}", lend))
+        self.emit("leaq 16(%rcx), %rcx")
+        if stride == 8 { self.emit("leaq (%rcx,%rax,8), %rcx") }
+        else {
+            self.emit(format("imulq ${}, %rax", stride))
+            self.emit("addq %rax, %rcx")
+        }
+        self.emit("movq (%rcx), %rax")
+        self.emit(format("movq %rax, {}(%rbp)", elem_slot))
+        push(self.scopes, [])
+        self.bind(vn, "local", elem_slot, kt)
+        push(self.loops, LoopLab { cont: lcont, brk: lend })
+        for st in body.stmts { self.gen_stmt(st) }
+        self.loops = drop_last(self.loops)
+        self.scopes = drop_last(self.scopes)
+        self.emit(format("{}:", lcont))
+        self.emit(format("movq {}(%rbp), %rax", idx))
+        self.emit("addq $1, %rax")
+        self.emit(format("movq %rax, {}(%rbp)", idx))
+        self.emit(format("jmp {}", lstart))
+        self.emit(format("{}:", lend))
+    }
+
     fun get_or_zero(self, m: [int32: int32], id: int32) -> int32 {
         match get(m, id) { Some(o) => { return o }, None => {} }
         return 0
@@ -529,14 +1112,38 @@ impl CodeGen {
             ExprKind.Binary(op, l, r) => { self.eval_binary(e, op, l, r) },
             ExprKind.Cast(x, ty) => { self.gen_cast(e, x) },
             ExprKind.Call(c, args) => { self.gen_call(e, c, args) },
+            ExprKind.GetField(tgt, field) => {
+                self.addr_of_aggregate(tgt)
+                let foff = self.field_offset(struct_name_of(self.place_type(tgt)), field)
+                self.emit(format("movq {}(%rax), %rax", foff))
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                self.addr_of_aggregate(tgt)
+                let foff = self.elem_offset(self.place_type(tgt), idx as int32)
+                self.emit(format("movq {}(%rax), %rax", foff))
+            },
+            ExprKind.Index(base, idx) => { self.gen_index_read(e, base, idx) },
+            ExprKind.Lambda(params, ret, body) => {
+                self.gen_lambda_value(e, params, body)
+                self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
+            },
+            ExprKind.ListLit(elems) => { self.gen_list_lit(e, elems) },
+            ExprKind.MapLit(entries) => { self.gen_map_lit(e, entries) },
+            ExprKind.MatchE(scrut, arms) => {
+                self.gen_match(e, scrut, arms)
+                self.emit(format("movq {}(%rbp), %rax", self.match_res[e.id]))
+            },
+            ExprKind.Try(inner) => {
+                self.gen_try(e, inner)
+                self.emit(format("movq {}(%rbp), %rax", self.try_res[e.id]))
+            },
             _ => {},
         }
     }
 
     fun eval_name(var self, n: str) {
         if self.has_binding(n) {
-            let b = self.lookup(n)
-            self.emit(format("movq {}(%rbp), %rax", b.offset))
+            self.emit_name_scalar(self.lookup(n))
             return
         }
         match self.const_value_expr(n) { Some(ve) => { self.eval(ve) }, None => {} }
@@ -587,7 +1194,15 @@ impl CodeGen {
             self.eval_logical(op, l, r)
             return
         }
+        if op == ">>" && is_tfunc(self.type_of(e.id)) {
+            self.gen_compose(e, l, r)
+            return
+        }
         let lt = self.type_of(l.id)
+        if is_overloadable_op(op) && is_struct_or_enum_t(lt) {
+            self.gen_overloaded_binary(e, op, l, r, lt)
+            return
+        }
         if (op == "==" || op == "!=") && is_tstr(lt) {
             self.eval(r)
             self.emit("pushq %rax")
@@ -667,6 +1282,41 @@ impl CodeGen {
         }
     }
 
+    // `a OP b` on a user type desugars to the corresponding trait method:
+    // arithmetic -> add/sub/..., `==`/`!=` -> Eq.eq, ordering -> Ord.cmp.
+    fun gen_overloaded_binary(var self, e: Expr, op: str, l: Expr, r: Expr, lt: Type) {
+        let key = self.type_key(lt)
+        if op == "==" || op == "!=" {
+            self.gen_scalar_method2(key, "eq", l, r)
+            if op == "!=" {
+                self.emit("testq %rax, %rax")
+                self.emit("sete %al")
+                self.emit("movzbq %al, %rax")
+            }
+            return
+        }
+        if is_cmp(op) {
+            self.gen_scalar_method2(key, "cmp", l, r)
+            self.emit("cmpq $0, %rax")
+            self.emit(format("{} %al", cmp_set(op, true)))
+            self.emit("movzbq %al, %rax")
+            return
+        }
+        // arithmetic: returns Self (an aggregate); use the sret call path.
+        self.gen_callsig(e, self.sig_of(format("{}.{}", key, arith_method_cg(op))), [l, r])
+    }
+
+    // Call a 2-arg method returning a scalar (Eq.eq -> bool, Ord.cmp -> int),
+    // leaving the result in %rax. Both operands are aggregates passed by address.
+    fun gen_scalar_method2(var self, key: str, name: str, l: Expr, r: Expr) {
+        self.addr_of_aggregate(r)
+        self.emit("pushq %rax")
+        self.addr_of_aggregate(l)
+        self.emit("pushq %rax")
+        self.emit(format("call myla_{}.{}", key, name))
+        self.emit("addq $16, %rsp")
+    }
+
     fun eval_logical(var self, op: str, l: Expr, r: Expr) {
         let short = self.label()
         let end = self.label()
@@ -728,15 +1378,1356 @@ impl CodeGen {
         }
     }
 
+    // -- aggregates (structs / tuples) ------------------------------------
+
+    fun emit_copy(var self, size: int32) {
+        self.emit(format("movq ${}, %rcx", size / 8))
+        self.emit("cld")
+        self.emit("rep movsq")
+    }
+
+    // Leave the base address of an aggregate value in %rax.
+    fun addr_of_aggregate(var self, e: Expr) {
+        let ci = self.ctor_info(e)
+        if ci.ok {
+            self.gen_enum_ctor(e, ci.enum_name, ci.variant, ci.args)
+            self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
+            return
+        }
+        match e.kind {
+            ExprKind.Name(n) => {
+                if !self.has_binding(n) && self.has_function(n) {
+                    self.materialize_fnval(n, self.local_of(e.id))
+                    self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
+                } else {
+                    self.emit_name_addr(self.lookup(n))
+                }
+            },
+            ExprKind.GetField(tgt, field) => {
+                self.addr_of_aggregate(tgt)
+                let foff = self.field_offset(struct_name_of(self.place_type(tgt)), field)
+                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                self.addr_of_aggregate(tgt)
+                let foff = self.elem_offset(self.place_type(tgt), idx as int32)
+                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
+            },
+            ExprKind.Index(base, idx) => { self.gen_index_addr(base, idx) },
+            ExprKind.Lambda(params, ret, body) => {
+                self.gen_lambda_value(e, params, body)
+                self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
+            },
+            ExprKind.StructLit(name, fields) => {
+                self.gen_struct_lit(e, name, fields)
+                self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
+            },
+            ExprKind.TupleLit(elems) => {
+                self.gen_tuple_lit(e, elems)
+                self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
+            },
+            ExprKind.Call(c, args) => {
+                self.gen_call(e, c, args)
+                self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
+            },
+            ExprKind.Binary(op, l, r) => {
+                self.eval_binary(e, op, l, r)
+                self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
+            },
+            ExprKind.MatchE(scrut, arms) => {
+                self.gen_match(e, scrut, arms)
+                self.emit(format("leaq {}(%rbp), %rax", self.match_res[e.id]))
+            },
+            ExprKind.Try(inner) => {
+                self.gen_try(e, inner)
+                self.emit(format("leaq {}(%rbp), %rax", self.try_res[e.id]))
+            },
+            _ => {},
+        }
+    }
+
+    // Leave the address of a scalar lvalue (`name` or `agg.field`) in %rax.
+    fun addr_of_lvalue(var self, e: Expr) {
+        match e.kind {
+            ExprKind.Name(n) => {
+                let b = self.lookup(n)
+                self.emit(format("leaq {}(%rbp), %rax", b.offset))
+            },
+            ExprKind.GetField(tgt, field) => {
+                self.addr_of_aggregate(tgt)
+                let foff = self.field_offset(struct_name_of(self.place_type(tgt)), field)
+                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                self.addr_of_aggregate(tgt)
+                let foff = self.elem_offset(self.place_type(tgt), idx as int32)
+                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
+            },
+            ExprKind.Index(base, idx) => { self.gen_index_addr(base, idx) },
+            _ => {},
+        }
+    }
+
+    fun gen_struct_lit(var self, e: Expr, name: str, fields: [FieldInit]) {
+        let base = self.local_of(e.id)
+        for fi in fields {
+            let foff = self.field_offset(name, fi.name)
+            self.store_member(fi.value, base + foff, self.struct_field_type(name, fi.name))
+        }
+    }
+
+    fun gen_tuple_lit(var self, e: Expr, elems: [Expr]) {
+        let base = self.local_of(e.id)
+        let t = self.type_of(e.id)
+        var i = 0
+        for elem in elems {
+            self.store_member(elem, base + self.elem_offset(t, i), self.type_of(elem.id))
+            i = i + 1
+        }
+    }
+
+    // Store `value` into an aggregate member at `slot_off(%rbp)`. A boxed
+    // (recursive-enum) member holds a heap pointer; other aggregates are inline.
+    fun store_member(var self, value: Expr, slot_off: int32, mt: Type) {
+        if self.is_boxed(mt) {
+            self.box_value(value, mt)
+            self.emit(format("movq %rax, {}(%rbp)", slot_off))
+        } else if is_aggregate(mt) {
+            self.addr_of_aggregate(value)
+            self.emit("movq %rax, %rsi")
+            self.emit(format("leaq {}(%rbp), %rdi", slot_off))
+            self.emit_copy(self.size(mt))
+        } else {
+            self.eval(value)
+            self.emit(format("movq %rax, {}(%rbp)", slot_off))
+        }
+    }
+
+    // Store `value` into a standalone destination at `off(%rbp)` (a local/result/
+    // binding): aggregates are copied inline (even boxed enums — only *members*
+    // are stored as pointers).
+    fun store_value(var self, value: Expr, off: int32, t: Type) {
+        if is_aggregate(t) {
+            self.addr_of_aggregate(value)
+            self.emit("movq %rax, %rsi")
+            self.emit(format("leaq {}(%rbp), %rdi", off))
+            self.emit_copy(self.size(t))
+        } else {
+            self.eval_owned(value)
+            self.emit(format("movq %rax, {}(%rbp)", off))
+        }
+    }
+
+    // Heap-allocate a copy of `value`'s inline aggregate and leave the pointer in
+    // %rax (a boxed/recursive-enum edge). No reclamation: cells live for the run.
+    fun box_value(var self, value: Expr, t: Type) {
+        self.addr_of_aggregate(value)
+        self.emit("pushq %rax")
+        self.emit(format("movq ${}, %rdi", self.size(t)))
+        self.emit("call __alloc")
+        self.emit("popq %rsi")
+        self.emit("pushq %rax")
+        self.emit("movq %rax, %rdi")
+        self.emit_copy(self.size(t))
+        self.emit("popq %rax")
+    }
+
+    // -- lists ------------------------------------------------------------
+
+    // Per-element byte stride: scalars/strings/lists/maps are 8; inline
+    // aggregates (struct/tuple) use their stored size.
+    fun elem_stride(self, et: Type) -> int32 {
+        return self.stored_size(et)
+    }
+
+    // Evaluate `e` into %rax, cloning when it is a list/map *place* (value
+    // semantics: moving an owned aggregate into a new location copies it, D38).
+    fun eval_owned(var self, e: Expr) {
+        self.eval(e)
+        let t = self.type_of(e.id)
+        if is_place(e) && (is_list_t(t) || is_map_t(t) || is_sb_t(t)) { self.clone_in_rax(t) }
+    }
+
+    // Clone the list/map/builder cell currently in %rax (shallow), copy in %rax.
+    fun clone_in_rax(var self, t: Type) {
+        self.emit("movq %rax, %rdi")
+        if is_list_t(t) {
+            self.emit(format("movq ${}, %rsi", self.elem_stride(list_elem(t))))
+            self.emit("call __list_clone")
+        } else if is_sb_t(t) {
+            self.emit("movq $1, %rsi")
+            self.emit("call __list_clone")
+        } else {
+            self.emit(format("movq ${}, %rsi", self.map_slot_size(t)))
+            self.emit("call __list_clone")
+        }
+    }
+
+    fun gen_list_lit(var self, e: Expr, elems: [Expr]) {
+        let lt = self.type_of(e.id)
+        let et = list_elem(lt)
+        let stride = self.elem_stride(et)
+        let n = len(elems)
+        self.emit(format("movq ${}, %rdi", 16 + n * stride))
+        self.emit("call __alloc")
+        let slot = self.local_of(e.id)
+        self.emit(format("movq %rax, {}(%rbp)", slot))
+        self.emit(format("movq ${}, (%rax)", n))
+        self.emit(format("movq ${}, 8(%rax)", n))
+        var i = 0
+        for elem in elems {
+            self.store_elem_slot(elem, slot, 16 + i * stride, et)
+            i = i + 1
+        }
+        self.emit(format("movq {}(%rbp), %rax", slot))
+    }
+
+    // Store `value` into a heap element at `off` past the cell pointer held in
+    // `slot(%rbp)`. Scalars/strings/lists are moved (cloned if a place); inline
+    // aggregates are copied byte-for-byte.
+    fun store_elem_slot(var self, value: Expr, slot: int32, off: int32, et: Type) {
+        if is_aggregate(et) && !self.is_boxed(et) {
+            self.addr_of_aggregate(value)
+            self.emit("movq %rax, %rsi")
+            self.emit(format("movq {}(%rbp), %rdi", slot))
+            if off != 0 { self.emit(format("addq ${}, %rdi", off)) }
+            self.emit_copy(self.size(et))
+        } else {
+            self.eval_owned(value)
+            self.emit(format("movq {}(%rbp), %rcx", slot))
+            self.emit(format("movq %rax, {}(%rcx)", off))
+        }
+    }
+
+    // Leave the address of element `base[idx]` in %rax (list or string).
+    fun gen_elem_addr(var self, base: Expr, idx: Expr) {
+        let bt = self.place_type(base)
+        self.eval(base)
+        self.emit("pushq %rax")
+        self.eval(idx)
+        self.emit("movq %rax, %rcx")
+        self.emit("popq %rax")
+        self.emit("movq (%rax), %rdx")
+        self.emit("cmpq %rdx, %rcx")
+        self.emit("jae __trap")
+        if is_str_t(bt) {
+            self.emit("leaq 8(%rax), %rax")
+            self.emit("addq %rcx, %rax")
+        } else {
+            let stride = self.elem_stride(list_elem(bt))
+            self.emit("leaq 16(%rax), %rax")
+            if stride == 8 {
+                self.emit("leaq (%rax,%rcx,8), %rax")
+            } else {
+                self.emit(format("imulq ${}, %rcx", stride))
+                self.emit("addq %rcx, %rax")
+            }
+        }
+    }
+
+    // Address of an indexed lvalue/aggregate element (list/str/map).
+    fun gen_index_addr(var self, base: Expr, idx: Expr) {
+        if is_map_t(self.place_type(base)) { self.gen_map_value_addr(base, idx) }
+        else { self.gen_elem_addr(base, idx) }
+    }
+
+    fun gen_index_read(var self, e: Expr, base: Expr, idx: Expr) {
+        let bt = self.place_type(base)
+        if is_map_t(bt) { self.gen_map_get(base, idx)
+        return }
+        self.gen_elem_addr(base, idx)
+        if is_str_t(bt) { self.emit("movzbl (%rax), %eax") }
+        else { self.emit("movq (%rax), %rax") }
+    }
+
+    fun gen_len(var self, arg: Expr) {
+        self.eval(arg)
+        self.emit("movq (%rax), %rax")
+    }
+
+    // Address where a list-holder's pointer lives (so push/pop can write back a
+    // reallocated buffer): a local/param slot, a nested list element, or a map slot.
+    fun mut_holder_addr(var self, e: Expr) {
+        match e.kind {
+            ExprKind.Name(n) => {
+                let b = self.lookup(n)
+                self.emit(format("leaq {}(%rbp), %rax", b.offset))
+            },
+            ExprKind.Index(base, idx) => { self.gen_index_addr(base, idx) },
+            ExprKind.GetField(tgt, field) => { self.addr_of_lvalue(e) },
+            ExprKind.TupleIndex(tgt, idx) => { self.addr_of_lvalue(e) },
+            _ => {},
+        }
+    }
+
+    fun gen_push(var self, holder: Expr, value: Expr) {
+        let et = list_elem(self.place_type(holder))
+        let stride = self.elem_stride(et)
+        self.eval_owned(value)
+        self.emit("pushq %rax")
+        self.mut_holder_addr(holder)
+        self.emit("pushq %rax")
+        self.emit("movq (%rax), %rax")
+        let nogrow = self.label()
+        self.emit("movq (%rax), %rcx")
+        self.emit("cmpq 8(%rax), %rcx")
+        self.emit(format("jne {}", nogrow))
+        self.emit("movq %rax, %rdi")
+        self.emit(format("movq ${}, %rsi", stride))
+        self.emit("call __list_grow")
+        self.emit("movq (%rsp), %rcx")
+        self.emit("movq %rax, (%rcx)")
+        self.emit(format("{}:", nogrow))
+        self.emit("movq (%rax), %rcx")
+        self.emit("leaq 16(%rax), %rdx")
+        if stride == 8 { self.emit("leaq (%rdx,%rcx,8), %rdx") }
+        else {
+            self.emit("pushq %rax")
+            self.emit("movq %rcx, %rax")
+            self.emit(format("imulq ${}, %rax", stride))
+            self.emit("addq %rax, %rdx")
+            self.emit("popq %rax")
+        }
+        if is_aggregate(et) && !self.is_boxed(et) {
+            self.emit("movq 8(%rsp), %rsi")
+            self.emit("movq %rdx, %rdi")
+            self.emit_copy(self.size(et))
+            self.emit("movq (%rsp), %rcx")
+            self.emit("movq (%rcx), %rax")
+            self.emit("movq (%rax), %rcx")
+        } else {
+            self.emit("movq 8(%rsp), %r8")
+            self.emit("movq %r8, (%rdx)")
+        }
+        self.emit("incq %rcx")
+        self.emit("movq %rcx, (%rax)")
+        self.emit("addq $16, %rsp")
+    }
+
+    fun gen_pop(var self, e: Expr, holder: Expr) {
+        let et = self.type_of(e.id)
+        let stride = self.elem_stride(et)
+        self.mut_holder_addr(holder)
+        self.emit("movq (%rax), %rax")
+        self.emit("movq (%rax), %rcx")
+        self.emit("testq %rcx, %rcx")
+        self.emit("jz __trap")
+        self.emit("decq %rcx")
+        self.emit("movq %rcx, (%rax)")
+        self.emit("leaq 16(%rax), %rdx")
+        if stride == 8 { self.emit("leaq (%rdx,%rcx,8), %rdx") }
+        else {
+            self.emit("movq %rcx, %rax")
+            self.emit(format("imulq ${}, %rax", stride))
+            self.emit("addq %rax, %rdx")
+        }
+        self.emit("movq (%rdx), %rax")
+    }
+
+    // -- maps / strings / chars (filled in later C4 sub-slices) -----------
+
+    fun map_slot_size(self, mt: Type) -> int32 { return 16 + self.stored_size(map_val(mt)) }
+    fun map_is_str(self, mt: Type) -> int32 {
+        if is_str_t(map_key(mt)) { return 1 }
+        return 0
+    }
+
+    fun gen_map_lit(var self, e: Expr, entries: [MapEntry]) {
+        let mt = self.type_of(e.id)
+        let slot = self.local_of(e.id)
+        self.emit("movq $8, %rdi")
+        self.emit(format("movq ${}, %rsi", self.map_slot_size(mt)))
+        self.emit("call __map_new")
+        self.emit(format("movq %rax, {}(%rbp)", slot))
+        for en in entries {
+            self.emit(format("leaq {}(%rbp), %rax", slot))
+            self.emit_map_put(en.key, en.value, mt)
+        }
+        self.emit(format("movq {}(%rbp), %rax", slot))
+    }
+
+    // Insert/overwrite (key -> value); precondition: %rax = &holder (a location
+    // holding the map cell pointer). Leaves the stack as found.
+    fun emit_map_put(var self, key: Expr, value: Expr, mt: Type) {
+        let vt = map_val(mt)
+        let slot_size = self.map_slot_size(mt)
+        let is_str = self.map_is_str(mt)
+        self.emit("pushq %rax")
+        self.emit("movq %rax, %rdi")
+        self.emit(format("movq ${}, %rsi", slot_size))
+        self.emit(format("movq ${}, %rcx", is_str))
+        self.emit("call __map_reserve")
+        self.eval(key)
+        self.emit("pushq %rax")
+        self.emit("movq 8(%rsp), %rdi")
+        self.emit("movq (%rdi), %rdi")
+        self.emit("movq (%rsp), %rsi")
+        self.emit(format("movq ${}, %rdx", slot_size))
+        self.emit(format("movq ${}, %rcx", is_str))
+        self.emit("call __map_set_slot")
+        self.emit("addq $16, %rax")
+        self.emit("pushq %rax")
+        if is_aggregate(vt) && !self.is_boxed(vt) {
+            self.addr_of_aggregate(value)
+            self.emit("movq %rax, %rsi")
+            self.emit("popq %rdi")
+            self.emit_copy(self.size(vt))
+        } else {
+            self.eval_owned(value)
+            self.emit("popq %rcx")
+            self.emit("movq %rax, (%rcx)")
+        }
+        self.emit("addq $16, %rsp")
+    }
+
+    fun gen_map_set(var self, base: Expr, idx: Expr, value: Expr) {
+        self.mut_holder_addr(base)
+        self.emit_map_put(idx, value, self.place_type(base))
+    }
+
+    // Leave the address of map value `base[idx]` in %rax; trap if the key is absent.
+    fun gen_map_value_addr(var self, base: Expr, idx: Expr) {
+        let mt = self.place_type(base)
+        self.eval(base)
+        self.emit("pushq %rax")
+        self.eval(idx)
+        self.emit("movq %rax, %rsi")
+        self.emit("popq %rdi")
+        self.emit(format("movq ${}, %rdx", self.map_slot_size(mt)))
+        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
+        self.emit("call __map_lookup")
+        self.emit("testq %rax, %rax")
+        self.emit("jz __trap")
+        self.emit("addq $16, %rax")
+    }
+
+    fun gen_map_get(var self, base: Expr, idx: Expr) {
+        self.gen_map_value_addr(base, idx)
+        self.emit("movq (%rax), %rax")
+    }
+
+    fun gen_map_contains(var self, m: Expr, k: Expr) {
+        let mt = self.place_type(m)
+        self.eval(m)
+        self.emit("pushq %rax")
+        self.eval(k)
+        self.emit("movq %rax, %rsi")
+        self.emit("popq %rdi")
+        self.emit(format("movq ${}, %rdx", self.map_slot_size(mt)))
+        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
+        self.emit("call __map_lookup")
+        self.emit("testq %rax, %rax")
+        self.emit("setne %al")
+        self.emit("movzbl %al, %eax")
+    }
+
+    fun gen_map_remove(var self, m: Expr, k: Expr) {
+        let mt = self.place_type(m)
+        self.eval(m)
+        self.emit("pushq %rax")
+        self.eval(k)
+        self.emit("movq %rax, %rsi")
+        self.emit("movq (%rsp), %rdi")
+        self.emit(format("movq ${}, %rdx", self.map_slot_size(mt)))
+        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
+        self.emit("call __map_lookup")
+        self.emit("popq %rcx")
+        let done = self.label()
+        self.emit("testq %rax, %rax")
+        self.emit(format("jz {}", done))
+        self.emit("movq $2, (%rax)")
+        self.emit("decq (%rcx)")
+        self.emit(format("{}:", done))
+    }
+
+    fun gen_map_keys(var self, e: Expr, m: Expr) {
+        let mt = self.place_type(m)
+        self.eval(m)
+        self.emit("movq %rax, %rdi")
+        self.emit(format("movq ${}, %rsi", self.map_slot_size(mt)))
+        self.emit(format("movq ${}, %rdx", self.stored_size(map_key(mt))))
+        self.emit("call __map_keys")
+    }
+    fun gen_chars(var self, s: Expr) {
+        self.eval(s)
+        self.emit("movq %rax, %rdi")
+        self.emit("call __str_chars")
+    }
+
+    // -- strings: format + StringBuilder ----------------------------------
+
+    // `format(fmt, args…)`: fmt is a literal; concatenate its segments with each
+    // argument rendered by its print form. Result string cell in %rax.
+    fun gen_format(var self, e: Expr, args: [Expr]) {
+        let fmt = match args[0].kind { ExprKind.StrLit(s) => s, _ => "" }
+        let segs = format_segments(fmt)
+        let s0 = self.string_label(segs[0])
+        self.emit(format("leaq {}(%rip), %rax", s0))
+        var k = 1
+        while k < len(args) {
+            self.emit("pushq %rax")
+            self.render_arg(args[k])
+            self.emit("movq %rax, %rsi")
+            self.emit("popq %rdi")
+            self.emit("call __str_concat")
+            self.emit("pushq %rax")
+            let sl = self.string_label(segs[k])
+            self.emit(format("leaq {}(%rip), %rsi", sl))
+            self.emit("popq %rdi")
+            self.emit("call __str_concat")
+            k = k + 1
+        }
+    }
+
+    // Render a printable value as a fresh str cell in %rax.
+    fun render_arg(var self, arg: Expr) {
+        let at = self.type_of(arg.id)
+        self.eval(arg)
+        match at {
+            Type.TStr => {},
+            Type.TBool => {
+                self.emit("movq %rax, %rdi")
+                self.emit("call __bool_to_str")
+            },
+            Type.TInt(w, s) => {
+                self.emit("movq %rax, %rdi")
+                if s { self.emit("call __int_to_str") }
+                else { self.emit("call __uint_to_str") }
+            },
+            _ => {},
+        }
+    }
+
+    fun gen_sb_new(var self, e: Expr) {
+        self.emit("movq $16, %rdi")
+        self.emit("call __alloc")
+        self.emit("movq $0, (%rax)")
+        self.emit("movq $0, 8(%rax)")
+    }
+
+    fun gen_sb_append(var self, sb: Expr, s: Expr) {
+        self.mut_holder_addr(sb)
+        self.emit("pushq %rax")
+        self.eval(s)
+        self.emit("movq %rax, %rsi")
+        self.emit("movq (%rsi), %rdx")
+        self.emit("addq $8, %rsi")
+        self.emit("popq %rdi")
+        self.emit("call __sb_append_bytes")
+    }
+
+    fun gen_sb_append_byte(var self, sb: Expr, b: Expr) {
+        self.mut_holder_addr(sb)
+        self.emit("pushq %rax")
+        self.eval(b)
+        self.emit("pushq %rax")
+        self.emit("movq %rsp, %rsi")
+        self.emit("movq $1, %rdx")
+        self.emit("movq 8(%rsp), %rdi")
+        self.emit("call __sb_append_bytes")
+        self.emit("addq $16, %rsp")
+    }
+
+    fun gen_sb_build(var self, sb: Expr) {
+        self.eval(sb)
+        self.emit("pushq %rax")
+        self.emit("movq (%rax), %rdx")
+        self.emit("leaq 8(%rdx), %rdi")
+        self.emit("call __alloc")
+        self.emit("popq %rsi")
+        self.emit("movq (%rsi), %rdx")
+        self.emit("movq %rdx, (%rax)")
+        self.emit("pushq %rax")
+        self.emit("leaq 8(%rax), %rdi")
+        self.emit("leaq 16(%rsi), %rsi")
+        self.emit("movq %rdx, %rcx")
+        self.emit("cld")
+        self.emit("rep movsb")
+        self.emit("popq %rax")
+    }
+
+    fun struct_field_type(self, name: str, field: str) -> Type {
+        for f in self.struct_info(name).fields {
+            if f.name == field { return f.ty }
+        }
+        return Type.TInt(32, true)
+    }
+
+    // -- enum construction ------------------------------------------------
+
+    fun gen_enum_ctor(var self, e: Expr, enum_name: str, variant: str, args: [Expr]) {
+        let base = self.local_of(e.id)
+        self.emit(format("movq ${}, {}(%rbp)", self.variant_tag(enum_name, variant), base))
+        var i = 0
+        for arg in args {
+            let slot = base + self.variant_field_offset(enum_name, variant, i)
+            self.store_member(arg, slot, self.type_of(arg.id))
+            i = i + 1
+        }
+    }
+
+    // -- match ------------------------------------------------------------
+
+    fun gen_match(var self, e: Expr, scrut: Expr, arms: [MatchArm]) {
+        let sst = self.type_of(scrut.id)
+        let root = self.match_scrut[e.id]
+        if is_aggregate(sst) {
+            self.addr_of_aggregate(scrut)
+            self.emit("movq %rax, %rsi")
+            self.emit(format("leaq {}(%rbp), %rdi", root))
+            self.emit_copy(self.size(sst))
+        } else {
+            self.eval(scrut)
+            self.emit(format("movq %rax, {}(%rbp)", root))
+        }
+        let result_off = self.match_res[e.id]
+        let result_type = self.type_of(e.id)
+        let end = self.label()
+        for arm in arms {
+            let arm_fail = self.label()
+            self.match_pat(arm.pattern, root, sst, arm.pattern.id, arm_fail)
+            push(self.scopes, self.arm_scope(arm, sst))
+            match arm.guard {
+                Some(g) => {
+                    self.eval(g)
+                    self.emit("testq %rax, %rax")
+                    self.emit(format("jz {}", arm_fail))
+                },
+                None => {},
+            }
+            self.gen_arm_body(arm.body, result_off, result_type)
+            self.emit(format("jmp {}", end))
+            self.scopes = drop_last(self.scopes)
+            self.emit(format("{}:", arm_fail))
+        }
+        self.emit("jmp __trap")
+        self.emit(format("{}:", end))
+    }
+
+    fun arm_scope(self, arm: MatchArm, sst: Type) -> [Binding] {
+        var sc: [Binding] = []
+        for b in self.pattern_binds(arm.pattern, sst) {
+            let slot = self.match_bind[format("{}:{}", arm.pattern.id, b.name)]
+            push(sc, Binding { name: b.name, kind: "local", offset: slot, ty: b.ty, capoff: 0 })
+        }
+        return sc
+    }
+
+    // The bindings a pattern introduces, paired with their (concrete) types,
+    // in a deterministic pre-order shared by layout and codegen.
+    fun pattern_binds(self, p: Pattern, t: Type) -> [DLeaf] {
+        var out: [DLeaf] = []
+        match p.kind {
+            PatternKind.PWild => {},
+            PatternKind.PBind(n) => {
+                if !self.is_nullary_variant(n) { push(out, DLeaf { name: n, off: 0, ty: t }) }
+            },
+            PatternKind.PLit(l) => {},
+            PatternKind.PEnum(en, variant, elems, hp) => {
+                let payload = self.variant_payload(enum_name_of(t), variant)
+                var i = 0
+                for sub in elems {
+                    for b in self.pattern_binds(sub, payload[i]) { push(out, b) }
+                    i = i + 1
+                }
+            },
+            PatternKind.PTuple(elems) => {
+                let ets = tuple_elems(t)
+                var i = 0
+                for sub in elems {
+                    for b in self.pattern_binds(sub, ets[i]) { push(out, b) }
+                    i = i + 1
+                }
+            },
+            PatternKind.PStruct(name, fps) => {
+                for fp in fps {
+                    for b in self.pattern_binds(fp.pattern, self.struct_field_type(name, fp.name)) { push(out, b) }
+                }
+            },
+            PatternKind.POr(alts) => {
+                if len(alts) > 0 { for b in self.pattern_binds(alts[0], t) { push(out, b) } }
+            },
+        }
+        return out
+    }
+
+    fun match_pat(var self, p: Pattern, disp: int32, t: Type, armkey: int32, fail: str) {
+        match p.kind {
+            PatternKind.PWild => {},
+            PatternKind.PBind(n) => {
+                if self.is_nullary_variant(n) {
+                    let tag = self.variant_tag(enum_name_of(t), n)
+                    self.emit(format("movq {}(%rbp), %rax", disp))
+                    self.emit(format("cmpq ${}, %rax", tag))
+                    self.emit(format("jne {}", fail))
+                } else {
+                    let slot = self.match_bind[format("{}:{}", armkey, n)]
+                    if is_aggregate(t) {
+                        self.emit(format("leaq {}(%rbp), %rsi", disp))
+                        self.emit(format("leaq {}(%rbp), %rdi", slot))
+                        self.emit_copy(self.size(t))
+                    } else {
+                        self.emit(format("movq {}(%rbp), %rax", disp))
+                        self.emit(format("movq %rax, {}(%rbp)", slot))
+                    }
+                }
+            },
+            PatternKind.PLit(lit) => { self.match_literal(lit, disp, t, fail) },
+            PatternKind.PEnum(en, variant, elems, hp) => {
+                let enm = enum_name_of(t)
+                let tag = self.variant_tag(enm, variant)
+                self.emit(format("movq {}(%rbp), %rax", disp))
+                self.emit(format("cmpq ${}, %rax", tag))
+                self.emit(format("jne {}", fail))
+                let payload = self.variant_payload(enm, variant)
+                var i = 0
+                for sub in elems {
+                    let ft = payload[i]
+                    let foff = self.variant_field_offset(enm, variant, i)
+                    self.match_pat(sub, self.member_disp(sub, disp + foff, ft), ft, armkey, fail)
+                    i = i + 1
+                }
+            },
+            PatternKind.PTuple(elems) => {
+                var i = 0
+                for sub in elems {
+                    let et = tuple_elems(t)[i]
+                    let doff = disp + self.elem_offset(t, i)
+                    self.match_pat(sub, self.member_disp(sub, doff, et), et, armkey, fail)
+                    i = i + 1
+                }
+            },
+            PatternKind.PStruct(name, fps) => {
+                for fp in fps {
+                    let ft = self.struct_field_type(name, fp.name)
+                    let foff = self.field_offset(name, fp.name)
+                    self.match_pat(fp.pattern, self.member_disp(fp.pattern, disp + foff, ft), ft, armkey, fail)
+                }
+            },
+            PatternKind.POr(alts) => {
+                let matched = self.label()
+                let n = len(alts)
+                var i = 0
+                while i < n - 1 {
+                    let next_alt = self.label()
+                    self.match_pat(alts[i], disp, t, armkey, next_alt)
+                    self.emit(format("jmp {}", matched))
+                    self.emit(format("{}:", next_alt))
+                    i = i + 1
+                }
+                self.match_pat(alts[n - 1], disp, t, armkey, fail)
+                self.emit(format("{}:", matched))
+            },
+        }
+    }
+
+    // Displacement of the value a sub-pattern matches against. A boxed member is
+    // a pointer, so unbox it (deref + copy) into a per-pattern temp.
+    fun member_disp(var self, sub: Pattern, slot_disp: int32, ft: Type) -> int32 {
+        if !self.is_boxed(ft) || is_pwild(sub) { return slot_disp }
+        let utmp = self.unbox[sub.id]
+        self.emit(format("movq {}(%rbp), %rsi", slot_disp))
+        self.emit(format("leaq {}(%rbp), %rdi", utmp))
+        self.emit_copy(self.size(ft))
+        return utmp
+    }
+
+    fun visit_pattern_unbox(var self, p: Pattern, t: Type) {
+        match p.kind {
+            PatternKind.PEnum(en, variant, elems, hp) => {
+                let payload = self.variant_payload(enum_name_of(t), variant)
+                var i = 0
+                for sub in elems {
+                    self.alloc_unbox(sub, payload[i])
+                    self.visit_pattern_unbox(sub, payload[i])
+                    i = i + 1
+                }
+            },
+            PatternKind.PTuple(elems) => {
+                let ets = tuple_elems(t)
+                var i = 0
+                for sub in elems {
+                    self.alloc_unbox(sub, ets[i])
+                    self.visit_pattern_unbox(sub, ets[i])
+                    i = i + 1
+                }
+            },
+            PatternKind.PStruct(name, fps) => {
+                for fp in fps {
+                    let ft = self.struct_field_type(name, fp.name)
+                    self.alloc_unbox(fp.pattern, ft)
+                    self.visit_pattern_unbox(fp.pattern, ft)
+                }
+            },
+            PatternKind.POr(alts) => { for alt in alts { self.visit_pattern_unbox(alt, t) } },
+            _ => {},
+        }
+    }
+
+    fun alloc_unbox(var self, sub: Pattern, ft: Type) {
+        if self.is_boxed(ft) && !is_pwild(sub) {
+            self.cursor = self.cursor + self.size(ft)
+            self.unbox[sub.id] = -self.cursor
+        }
+    }
+
+    fun match_literal(var self, lit: Expr, disp: int32, t: Type, fail: str) {
+        if is_tstr(t) {
+            match lit.kind {
+                ExprKind.StrLit(s) => {
+                    let label = self.string_label(s)
+                    self.emit(format("movq {}(%rbp), %rdi", disp))
+                    self.emit(format("leaq {}(%rip), %rsi", label))
+                    self.emit("call __str_eq")
+                    self.emit("testq %rax, %rax")
+                    self.emit(format("jz {}", fail))
+                },
+                _ => {},
+            }
+        } else {
+            self.eval(lit)
+            self.emit("movq %rax, %rcx")
+            self.emit(format("movq {}(%rbp), %rax", disp))
+            self.emit("cmpq %rcx, %rax")
+            self.emit(format("jne {}", fail))
+        }
+    }
+
+    fun gen_arm_body(var self, body: ExprOrBlock, result_off: int32, result_type: Type) {
+        match body {
+            ExprOrBlock.EB_Block(b) => {
+                push(self.scopes, [])
+                let n = len(b.stmts)
+                var i = 0
+                while i < n {
+                    let s = b.stmts[i]
+                    if i == n - 1 {
+                        match s.kind {
+                            StmtKind.ExprStmt(ex) => { self.store_value(ex, result_off, result_type) },
+                            _ => { self.gen_stmt(s) },
+                        }
+                    } else {
+                        self.gen_stmt(s)
+                    }
+                    i = i + 1
+                }
+                self.scopes = drop_last(self.scopes)
+            },
+            ExprOrBlock.EB_Expr(ex) => { self.store_value(ex, result_off, result_type) },
+        }
+    }
+
+    // -- the `?` operator -------------------------------------------------
+
+    fun gen_try(var self, e: Expr, inner: Expr) {
+        self.addr_of_aggregate(inner)
+        self.emit("movq %rax, %r10")
+        let carrier = self.type_of(inner.id)
+        let en = enum_name_of(carrier)
+        let ok_tag = self.variant_tag(en, success_variant(en))
+        let propagate = self.label()
+        let cont = self.label()
+        self.emit("movq (%r10), %rax")
+        self.emit(format("cmpq ${}, %rax", ok_tag))
+        self.emit(format("jne {}", propagate))
+        let rt = self.type_of(e.id)
+        let off = self.try_res[e.id]
+        if is_aggregate(rt) {
+            self.emit("leaq 8(%r10), %rsi")
+            self.emit(format("leaq {}(%rbp), %rdi", off))
+            self.emit_copy(self.size(rt))
+        } else {
+            self.emit("movq 8(%r10), %rax")
+            self.emit(format("movq %rax, {}(%rbp)", off))
+        }
+        self.emit(format("jmp {}", cont))
+        self.emit(format("{}:", propagate))
+        self.emit("movq %r10, %rsi")
+        self.emit("movq 16(%rbp), %rdi")
+        self.emit_copy(self.size(carrier))
+        self.emit("movq 16(%rbp), %rax")
+        self.emit(format("jmp {}", self.epilogue))
+        self.emit(format("{}:", cont))
+    }
+
     fun gen_call(var self, e: Expr, callee: Expr, args: [Expr]) {
+        if args_have_hole(args) {
+            self.gen_partial(e, callee, args)
+            return
+        }
         match callee.kind {
             ExprKind.Name(nm) => {
                 if nm == "print" { self.gen_print(args[0]) }
                 else if nm == "assert" || nm == "panic" || nm == "unreachable" { self.gen_intrinsic(nm, args) }
-                else { self.gen_user_call(e, nm, args) }
+                else if nm == "len" { self.gen_len(args[0]) }
+                else if nm == "push" { self.gen_push(args[0], args[1]) }
+                else if nm == "pop" { self.gen_pop(e, args[0]) }
+                else if nm == "chars" { self.gen_chars(args[0]) }
+                else if nm == "format" { self.gen_format(e, args) }
+                else if nm == "StringBuilder" { self.gen_sb_new(e) }
+                else if nm == "append" { self.gen_sb_append(args[0], args[1]) }
+                else if nm == "append_byte" { self.gen_sb_append_byte(args[0], args[1]) }
+                else if nm == "build" { self.gen_sb_build(args[0]) }
+                else if nm == "contains" { self.gen_map_contains(args[0], args[1]) }
+                else if nm == "remove" { self.gen_map_remove(args[0], args[1]) }
+                else if nm == "keys" { self.gen_map_keys(e, args[0]) }
+                else if self.has_func(nm) { self.gen_user_call(e, nm, args) }
+                else { self.gen_indirect_call(e, callee, args) }
+            },
+            ExprKind.GetField(recv, field) => { self.gen_method_or_closure_call(e, callee, recv, field, args) },
+            _ => { self.gen_indirect_call(e, callee, args) },
+        }
+    }
+
+    fun ind_code_of(self, id: int32) -> int32 {
+        match get(self.ind_code, id) { Some(o) => { return o }, None => {} }
+        return 0
+    }
+    fun ind_env_of(self, id: int32) -> int32 {
+        match get(self.ind_env, id) { Some(o) => { return o }, None => {} }
+        return 0
+    }
+
+    // Call a function value `f(args)`: load `(code_ptr, env_ptr)` from the fat
+    // value and call `code_ptr(env_ptr, args…)` (env first, then sret/args).
+    fun gen_indirect_call(var self, e: Expr, callee: Expr, args: [Expr]) {
+        let ft = self.place_type(callee)
+        let params = tfunc_params(ft)
+        let struct_ret = is_aggregate_opt(tfunc_ret(ft))
+        let code_off = self.ind_code_of(e.id)
+        let env_off = self.ind_env_of(e.id)
+        self.addr_of_aggregate(callee)
+        self.emit("movq (%rax), %rcx")
+        self.emit(format("movq %rcx, {}(%rbp)", code_off))
+        self.emit("movq 8(%rax), %rcx")
+        self.emit(format("movq %rcx, {}(%rbp)", env_off))
+        var i = len(args) - 1
+        while i >= 0 {
+            if is_aggregate(params[i]) { self.addr_of_aggregate(args[i]) }
+            else { self.eval_owned(args[i]) }
+            self.emit("pushq %rax")
+            i = i - 1
+        }
+        self.emit(format("movq {}(%rbp), %rax", env_off))
+        self.emit("pushq %rax")
+        if struct_ret {
+            self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
+            self.emit("pushq %rax")
+        }
+        self.emit(format("call *{}(%rbp)", code_off))
+        var n = len(args) + 1
+        if struct_ret { n = n + 1 }
+        self.emit(format("addq ${}, %rsp", 8 * n))
+    }
+
+    // `a >> b` composes two function values into `(x) => b(a(x))`: an env holds
+    // the two fat values and `__compose_call` chains the (scalar) calls.
+    fun gen_compose(var self, e: Expr, l: Expr, r: Expr) {
+        let off = self.local_of(e.id)
+        self.emit("movq $32, %rdi")
+        self.emit("call __alloc")
+        self.emit(format("movq %rax, {}(%rbp)", off + 8))
+        self.addr_of_aggregate(l)
+        self.emit("movq %rax, %rsi")
+        self.emit(format("movq {}(%rbp), %rdi", off + 8))
+        self.emit_copy(16)
+        self.addr_of_aggregate(r)
+        self.emit("movq %rax, %rsi")
+        self.emit(format("movq {}(%rbp), %rdi", off + 8))
+        self.emit("addq $16, %rdi")
+        self.emit_copy(16)
+        self.emit("leaq __compose_call(%rip), %rax")
+        self.emit(format("movq %rax, {}(%rbp)", off))
+    }
+
+    // `f(a, _, …)` partial application: capture the filled (scalar) arguments in
+    // an env and emit a thunk that fills the holes from its own parameters.
+    fun gen_partial(var self, e: Expr, callee: Expr, args: [Expr]) {
+        let off = self.local_of(e.id)
+        var slots: [int32] = []
+        var fillexprs: [Expr] = []
+        var filloffs: [int32] = []
+        var envsz = 0
+        for a in args {
+            if is_hole_expr(a) {
+                push(slots, -1)
+            } else {
+                push(slots, envsz)
+                push(fillexprs, a)
+                push(filloffs, envsz)
+                envsz = envsz + 8
+            }
+        }
+        var asz = envsz
+        if asz == 0 { asz = 8 }
+        self.emit(format("movq ${}, %rdi", asz))
+        self.emit("call __alloc")
+        self.emit(format("movq %rax, {}(%rbp)", off + 8))
+        var k = 0
+        while k < len(fillexprs) {
+            self.eval(fillexprs[k])
+            self.emit(format("movq {}(%rbp), %rcx", off + 8))
+            self.emit(format("movq %rax, {}(%rcx)", filloffs[k]))
+            k = k + 1
+        }
+        let nm = expr_name(callee)
+        let lifted = format("{}__partial{}", self.cur_mangled, e.id)
+        push(self.partial_jobs, PartialJob { lifted: lifted, target: nm, slots: slots })
+        self.emit(format("leaq myla_{}(%rip), %rax", lifted))
+        self.emit(format("movq %rax, {}(%rbp)", off))
+    }
+
+    // Emit a partial-application thunk: reconstruct the full (scalar) argument
+    // list from the env (filled) and its own params (holes), then call the target.
+    fun gen_partial_function(var self, job: PartialJob) {
+        let n = len(job.slots)
+        self.emit(format("myla_{}:", job.lifted))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        var pos = n - 1
+        while pos >= 0 {
+            if job.slots[pos] < 0 {
+                var hidx = 0
+                var j = 0
+                while j < pos {
+                    if job.slots[j] < 0 { hidx = hidx + 1 }
+                    j = j + 1
+                }
+                self.emit(format("movq {}(%rbp), %rax", 24 + 8 * hidx))
+            } else {
+                self.emit("movq 16(%rbp), %rcx")
+                self.emit(format("movq {}(%rcx), %rax", job.slots[pos]))
+            }
+            self.emit("pushq %rax")
+            pos = pos - 1
+        }
+        self.emit(format("call myla_{}", job.target))
+        if n > 0 { self.emit(format("addq ${}, %rsp", 8 * n)) }
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // Materialize a top-level `fun` as a fat value `(thunk, null env)`.
+    fun materialize_fnval(var self, n: str, off: int32) {
+        if !list_has_str(self.fnval_set, n) { push(self.fnval_set, n) }
+        self.emit(format("leaq myla_{}__fnval(%rip), %rax", n))
+        self.emit(format("movq %rax, {}(%rbp)", off))
+        self.emit(format("movq $0, {}(%rbp)", off + 8))
+    }
+
+    // Materialize a lambda's `(code_ptr, env_ptr)` fat value into its temp slot,
+    // and queue the lifted body for emission under the current substitution.
+    fun gen_lambda_value(var self, e: Expr, params: [Param], body: ExprOrBlock) {
+        let off = self.local_of(e.id)
+        let caps = self.lambda_captures(params, body)
+        let lifted = format("{}__lam{}", self.cur_mangled, e.id)
+        push(self.lam_jobs, LamJob { lifted: lifted, params: params, ftype: self.type_of(e.id), body: body, caps: caps, subst: self.subst })
+        let code = format("myla_{}", lifted)
+        if len(caps) == 0 {
+            self.emit(format("leaq {}(%rip), %rax", code))
+            self.emit(format("movq %rax, {}(%rbp)", off))
+            self.emit(format("movq $0, {}(%rbp)", off + 8))
+            return
+        }
+        var envsz = 0
+        for c in caps { envsz = envsz + self.stored_size(c.ty) }
+        self.emit(format("movq ${}, %rdi", envsz))
+        self.emit("call __alloc")
+        self.emit(format("movq %rax, {}(%rbp)", off + 8))
+        self.emit(format("leaq {}(%rip), %rcx", code))
+        self.emit(format("movq %rcx, {}(%rbp)", off))
+        for c in caps { self.store_capture(c, off) }
+    }
+
+    // Copy an enclosing variable into the env cell at its capture offset.
+    fun store_capture(var self, c: Cap, fat_off: int32) {
+        let b = self.lookup(c.name)
+        if is_aggregate(c.ty) {
+            self.emit_name_addr(b)
+            self.emit("movq %rax, %rsi")
+            self.emit(format("movq {}(%rbp), %rdi", fat_off + 8))
+            if c.off != 0 { self.emit(format("addq ${}, %rdi", c.off)) }
+            self.emit_copy(self.size(c.ty))
+        } else {
+            self.emit_name_scalar(b)
+            self.emit(format("movq {}(%rbp), %rcx", fat_off + 8))
+            self.emit(format("movq %rax, {}(%rcx)", c.off))
+        }
+    }
+
+    // Leave the address of the value bound by `b` (local/param/capture) in %rax.
+    fun emit_name_addr(var self, b: Binding) {
+        if b.kind == "capture" {
+            self.emit(format("movq {}(%rbp), %rax", b.offset))
+            if b.capoff != 0 { self.emit(format("addq ${}, %rax", b.capoff)) }
+        } else if b.kind == "local" {
+            self.emit(format("leaq {}(%rbp), %rax", b.offset))
+        } else {
+            self.emit(format("movq {}(%rbp), %rax", b.offset))
+        }
+    }
+
+    // Load the scalar value bound by `b` into %rax.
+    fun emit_name_scalar(var self, b: Binding) {
+        if b.kind == "capture" {
+            self.emit(format("movq {}(%rbp), %rcx", b.offset))
+            self.emit(format("movq {}(%rcx), %rax", b.capoff))
+        } else {
+            self.emit(format("movq {}(%rbp), %rax", b.offset))
+        }
+    }
+
+    // Emit a lambda's lifted top-level function: a hidden env pointer precedes
+    // the declared params; captured variables are read through it.
+    fun gen_lambda_function(var self, job: LamJob) {
+        self.locals = [:]
+        self.for_lv = [:]
+        self.for_end = [:]
+        self.destruct_base = [:]
+        self.destruct_leaves = [:]
+        self.match_scrut = [:]
+        self.match_res = [:]
+        self.match_bind = [:]
+        self.try_res = [:]
+        self.unbox = [:]
+        self.for_elem = [:]
+        self.ind_code = [:]
+        self.ind_env = [:]
+        self.cur_mangled = job.lifted
+        self.subst = job.subst
+        self.scopes = []
+        self.loops = []
+        self.cursor = 0
+        let ret = tfunc_ret(job.ftype)
+        self.struct_ret = is_aggregate_opt(ret)
+        self.ret_type = ret
+
+        self.cursor = 0
+        match job.body {
+            ExprOrBlock.EB_Block(b) => { for s in b.stmts { self.visit_stmt(s) } },
+            ExprOrBlock.EB_Expr(ex) => { self.visit_expr(ex) },
+        }
+        let frame = band(self.cursor + 15, bnot(15))
+        self.epilogue = format(".Lret_{}", job.lifted)
+
+        self.emit(format("myla_{}:", job.lifted))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
+
+        push(self.scopes, [])
+        var param_base = 0
+        if self.struct_ret { param_base = 1 }
+        let env_off = 16 + 8 * param_base
+        let ptypes = tfunc_params(job.ftype)
+        var i = 0
+        while i < len(job.params) {
+            let offset = 16 + 8 * (param_base + 1 + i)
+            self.bind(job.params[i].name, "param", offset, ptypes[i])
+            i = i + 1
+        }
+        let top = len(self.scopes) - 1
+        for c in job.caps {
+            push(self.scopes[top], Binding { name: c.name, kind: "capture", offset: env_off, ty: c.ty, capoff: c.off })
+        }
+
+        match job.body {
+            ExprOrBlock.EB_Block(b) => { self.gen_block(b) },
+            ExprOrBlock.EB_Expr(ex) => {
+                if self.struct_ret {
+                    self.addr_of_aggregate(ex)
+                    self.emit("movq %rax, %rsi")
+                    self.emit("movq 16(%rbp), %rdi")
+                    self.emit_copy(self.size(self.type_of(ex.id)))
+                    self.emit("movq 16(%rbp), %rax")
+                } else {
+                    self.eval_owned(ex)
+                }
+            },
+        }
+
+        self.emit(format("{}:", self.epilogue))
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+        self.scopes = drop_last(self.scopes)
+        self.subst = []
+    }
+
+    // `myla_<fn>__fnval(env, args…)`: adapter so a plain `fun` can be called
+    // through the closure convention; drops the env and forwards to `myla_<fn>`.
+    fun emit_fnval_thunk(var self, n: str) {
+        let sig = self.sig_of(n)
+        let struct_ret = is_aggregate_opt(sig.ret)
+        let nargs = len(sig.params)
+        var base = 1
+        if struct_ret { base = 2 }
+        let arg0_off = 16 + 8 * base
+        self.emit(format("myla_{}__fnval:", n))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        var i = nargs - 1
+        while i >= 0 {
+            self.emit(format("movq {}(%rbp), %rax", arg0_off + 8 * i))
+            self.emit("pushq %rax")
+            i = i - 1
+        }
+        if struct_ret {
+            self.emit("movq 16(%rbp), %rax")
+            self.emit("pushq %rax")
+        }
+        self.emit(format("call myla_{}", n))
+        var cleanup = 8 * nargs
+        if struct_ret { cleanup = cleanup + 8 }
+        if cleanup > 0 { self.emit(format("addq ${}, %rsp", cleanup)) }
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // Free outer variables captured by value into a lambda's environment cell.
+    fun lambda_captures(self, params: [Param], body: ExprOrBlock) -> [Cap] {
+        var bound: [str] = []
+        for p in params { push(bound, p.name) }
+        let frees = self.free_eb(body, bound)
+        var caps: [Cap] = []
+        var seen: [str] = []
+        var off = 0
+        for nm in frees {
+            if list_has_str(seen, nm) { continue }
+            if !self.has_binding(nm) { continue }
+            push(seen, nm)
+            let b = self.lookup(nm)
+            push(caps, Cap { name: nm, ty: b.ty, off: off })
+            off = off + self.stored_size(b.ty)
+        }
+        return caps
+    }
+
+    fun free_eb(self, body: ExprOrBlock, bound: [str]) -> [str] {
+        return match body {
+            ExprOrBlock.EB_Expr(ex) => self.free_expr(ex, bound),
+            ExprOrBlock.EB_Block(b) => self.free_block(b, bound),
+        }
+    }
+
+    fun free_block(self, b: Block, bound: [str]) -> [str] {
+        var out: [str] = []
+        var bnd = bound
+        for s in b.stmts {
+            match s.kind {
+                StmtKind.VarDecl(k, name, ty, init) => {
+                    for v in self.free_expr(init, bnd) { push(out, v) }
+                    push(bnd, name)
+                },
+                StmtKind.DestructDecl(k, binding, ty, init) => {
+                    for v in self.free_expr(init, bnd) { push(out, v) }
+                    for nm in bind_names(binding) { push(bnd, nm) }
+                },
+                StmtKind.Assign(target, value) => {
+                    for v in self.free_expr(target, bnd) { push(out, v) }
+                    for v in self.free_expr(value, bnd) { push(out, v) }
+                },
+                StmtKind.IfS(cond, then, otherwise) => {
+                    for v in self.free_expr(cond, bnd) { push(out, v) }
+                    for v in self.free_block(then, bnd) { push(out, v) }
+                    for v in self.free_opt_else(otherwise, bnd) { push(out, v) }
+                },
+                StmtKind.WhileS(cond, body) => {
+                    for v in self.free_expr(cond, bnd) { push(out, v) }
+                    for v in self.free_block(body, bnd) { push(out, v) }
+                },
+                StmtKind.ForS(vn, start, end, body, iter) => {
+                    for v in self.free_opt(start, bnd) { push(out, v) }
+                    for v in self.free_opt(end, bnd) { push(out, v) }
+                    for v in self.free_opt(iter, bnd) { push(out, v) }
+                    var b2 = bnd
+                    push(b2, vn)
+                    for v in self.free_block(body, b2) { push(out, v) }
+                },
+                StmtKind.ReturnS(ov) => { for v in self.free_opt(ov, bnd) { push(out, v) } },
+                StmtKind.ExprStmt(e) => { for v in self.free_expr(e, bnd) { push(out, v) } },
+                _ => {},
+            }
+        }
+        return out
+    }
+
+    fun free_opt_else(self, oe: Option<ElseTail>, bound: [str]) -> [str] {
+        return match oe {
+            Some(et) => self.free_else(et, bound),
+            None => empty_str_list(),
+        }
+    }
+
+    fun free_else(self, et: ElseTail, bound: [str]) -> [str] {
+        return match et {
+            ElseTail.ElseBlock(b) => self.free_block(b, bound),
+            ElseTail.ElseIf(s) => self.free_block(Block { line: 0, col: 0, stmts: [s] }, bound),
+        }
+    }
+
+    fun free_opt(self, oe: Option<Expr>, bound: [str]) -> [str] {
+        return match oe {
+            Some(e) => self.free_expr(e, bound),
+            None => empty_str_list(),
+        }
+    }
+
+    fun free_expr(self, e: Expr, bound: [str]) -> [str] {
+        var out: [str] = []
+        match e.kind {
+            ExprKind.Name(n) => { if !list_has_str(bound, n) { push(out, n) } },
+            ExprKind.Unary(op, x) => { for v in self.free_expr(x, bound) { push(out, v) } },
+            ExprKind.Binary(op, l, r) => {
+                for v in self.free_expr(l, bound) { push(out, v) }
+                for v in self.free_expr(r, bound) { push(out, v) }
+            },
+            ExprKind.Call(c, args) => {
+                for v in self.free_expr(c, bound) { push(out, v) }
+                for a in args { for v in self.free_expr(a, bound) { push(out, v) } }
+            },
+            ExprKind.GetField(t, f) => { for v in self.free_expr(t, bound) { push(out, v) } },
+            ExprKind.TupleIndex(t, i) => { for v in self.free_expr(t, bound) { push(out, v) } },
+            ExprKind.Index(b, i) => {
+                for v in self.free_expr(b, bound) { push(out, v) }
+                for v in self.free_expr(i, bound) { push(out, v) }
+            },
+            ExprKind.Cast(x, ty) => { for v in self.free_expr(x, bound) { push(out, v) } },
+            ExprKind.Try(x) => { for v in self.free_expr(x, bound) { push(out, v) } },
+            ExprKind.StructLit(n, fields) => {
+                for fi in fields { for v in self.free_expr(fi.value, bound) { push(out, v) } }
+            },
+            ExprKind.TupleLit(elems) => {
+                for el in elems { for v in self.free_expr(el, bound) { push(out, v) } }
+            },
+            ExprKind.ListLit(elems) => {
+                for el in elems { for v in self.free_expr(el, bound) { push(out, v) } }
+            },
+            ExprKind.MapLit(entries) => {
+                for en in entries {
+                    for v in self.free_expr(en.key, bound) { push(out, v) }
+                    for v in self.free_expr(en.value, bound) { push(out, v) }
+                }
+            },
+            ExprKind.Lambda(params, ret, body) => {
+                var b2 = bound
+                for p in params { push(b2, p.name) }
+                for v in self.free_eb(body, b2) { push(out, v) }
+            },
+            ExprKind.MatchE(scrut, arms) => {
+                for v in self.free_expr(scrut, bound) { push(out, v) }
+                for arm in arms {
+                    var b2 = bound
+                    for nm in pattern_names(arm.pattern) { push(b2, nm) }
+                    for v in self.free_opt(arm.guard, b2) { push(out, v) }
+                    for v in self.free_eb(arm.body, b2) { push(out, v) }
+                }
             },
             _ => {},
         }
+        return out
     }
 
     // `assert`/`panic`/`unreachable`: write a message to stderr and exit(1).
@@ -769,15 +2760,60 @@ impl CodeGen {
     }
 
     fun gen_user_call(var self, e: Expr, nm: str, args: [Expr]) {
-        var i = len(args) - 1
+        self.gen_callsig(e, self.sig_of(nm), args)
+    }
+
+    // Emit a direct call to `sig` with the already-aligned argument list `argv`
+    // (for a method the receiver is argv[0], matching sig.params[0] = self).
+    fun gen_callsig(var self, e: Expr, sig: FuncSig, argv: [Expr]) {
+        var target = sig.name
+        // Decide the calling convention (aggregate-by-ref / sret) from the
+        // *concrete* parameter and return types, substituting any type params.
+        var params = sig.params
+        var ret = sig.ret
+        if len(sig.type_params) > 0 {
+            let targs = self.solve_targs(sig, argv)
+            target = self.request_fn(sig.name, targs)
+            var sub: [Subst] = []
+            var k = 0
+            while k < len(sig.type_params) {
+                push(sub, Subst { name: sig.type_params[k], ty: targs[k] })
+                k = k + 1
+            }
+            var cp: [Type] = []
+            for p in sig.params { push(cp, subst_type(p, sub)) }
+            params = cp
+            ret = opt_subst_type(sig.ret, sub)
+        }
+        let struct_ret = is_aggregate_opt(ret)
+        var i = len(argv) - 1
         while i >= 0 {
-            self.eval(args[i])
+            if is_aggregate(params[i]) { self.addr_of_aggregate(argv[i]) }
+            else { self.eval_owned(argv[i]) }
             self.emit("pushq %rax")
             i = i - 1
         }
-        self.emit(format("call myla_{}", nm))
-        let n = len(args)
+        if struct_ret {
+            self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
+            self.emit("pushq %rax")
+        }
+        self.emit(format("call myla_{}", target))
+        var n = len(argv)
+        if struct_ret { n = n + 1 }
         if n > 0 { self.emit(format("addq ${}, %rsp", 8 * n)) }
+    }
+
+    // `recv.field(args)` — a method call when `field` names a method of the
+    // receiver's type, otherwise an indirect call through a function-valued field.
+    fun gen_method_or_closure_call(var self, e: Expr, callee: Expr, recv: Expr, field: str, args: [Expr]) {
+        let mname = format("{}.{}", self.type_key(self.type_of(recv.id)), field)
+        if self.has_func(mname) {
+            var argv: [Expr] = [recv]
+            for a in args { push(argv, a) }
+            self.gen_callsig(e, self.sig_of(mname), argv)
+        } else {
+            self.gen_indirect_call(e, callee, args)
+        }
     }
 
     fun gen_print(var self, arg: Expr) {
@@ -786,6 +2822,7 @@ impl CodeGen {
         match self.type_of(arg.id) {
             Type.TBool => { self.emit("call __print_bool") },
             Type.TStr => { self.emit("call __print_str") },
+            Type.TChar => { self.emit("call __print_char") },
             Type.TInt(w, s) => {
                 if s { self.emit("call __print_int") }
                 else { self.emit("call __print_uint") }
@@ -1133,6 +3170,809 @@ impl CodeGen {
         self.raw(".Lfdrop_done:")
         self.raw("\tret")
         self.raw("")
+        self.emit_list_runtime()
+        self.emit_sb_runtime()
+        self.emit_map_runtime()
+        self.emit_char_runtime()
+        self.emit_compose_runtime()
+        self.emit_derived_eq()
+    }
+
+    // __compose_call(env, x): env holds two fat values a (env[0]) and b (env[16]);
+    // computes b(a(x)) for scalar x/result via the closure calling convention.
+    fun emit_compose_runtime(var self) {
+        self.raw("__compose_call:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tmovq 16(%rbp), %rbx")
+        self.raw("\tmovq 24(%rbp), %rcx")
+        self.raw("\tpushq %rcx")
+        self.raw("\tmovq 8(%rbx), %rcx")
+        self.raw("\tpushq %rcx")
+        self.raw("\tmovq 0(%rbx), %rcx")
+        self.raw("\tcall *%rcx")
+        self.raw("\taddq $16, %rsp")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tpushq %rcx")
+        self.raw("\tmovq 24(%rbx), %rcx")
+        self.raw("\tpushq %rcx")
+        self.raw("\tmovq 16(%rbx), %rcx")
+        self.raw("\tcall *%rcx")
+        self.raw("\taddq $16, %rsp")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // Synthesize `{T}.eq(self, other) -> bool` for each `#derive(Eq)` type:
+    // structural equality, field-by-field / tag-and-payload, recursing through
+    // each component's own `eq` (user or derived).
+    fun emit_derived_eq(var self) {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.StructDecl(name, fields, attrs, tps, isp) => {
+                    if len(tps) == 0 && attrs_have_derive_eq(attrs) { self.emit_struct_eq(name) }
+                },
+                DeclKind.EnumDecl(name, variants, attrs, tps, isp) => {
+                    if len(tps) == 0 && attrs_have_derive_eq(attrs) { self.emit_enum_eq(name) }
+                },
+                _ => {},
+            }
+        }
+    }
+
+    fun emit_struct_eq(var self, name: str) {
+        let lne = self.label()
+        let lend = self.label()
+        self.emit(format("myla_{}.eq:", name))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        var off = 0
+        for f in self.struct_info(name).fields {
+            self.emit_eq_component(off, f.ty, lne)
+            off = off + self.stored_size(f.ty)
+        }
+        self.emit("movq $1, %rax")
+        self.emit(format("jmp {}", lend))
+        self.emit(format("{}:", lne))
+        self.emit("movq $0, %rax")
+        self.emit(format("{}:", lend))
+        self.emit("popq %rbp")
+        self.emit("ret")
+    }
+
+    fun emit_enum_eq(var self, name: str) {
+        let lne = self.label()
+        let lend = self.label()
+        self.emit(format("myla_{}.eq:", name))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("movq 16(%rbp), %rax")
+        self.emit("movq 0(%rax), %rax")
+        self.emit("movq 24(%rbp), %rcx")
+        self.emit("movq 0(%rcx), %rcx")
+        self.emit("cmpq %rcx, %rax")
+        self.emit(format("jne {}", lne))
+        var i = 0
+        for v in self.enum_info(name).variants {
+            if len(v.payload) > 0 {
+                let lskip = self.label()
+                self.emit("movq 16(%rbp), %rax")
+                self.emit("movq 0(%rax), %rax")
+                self.emit(format("cmpq ${}, %rax", i))
+                self.emit(format("jne {}", lskip))
+                var j = 0
+                for pt in v.payload {
+                    self.emit_eq_component(self.variant_field_offset(name, v.name, j), pt, lne)
+                    j = j + 1
+                }
+                self.emit(format("{}:", lskip))
+            }
+            i = i + 1
+        }
+        self.emit("movq $1, %rax")
+        self.emit(format("jmp {}", lend))
+        self.emit(format("{}:", lne))
+        self.emit("movq $0, %rax")
+        self.emit(format("{}:", lend))
+        self.emit("popq %rbp")
+        self.emit("ret")
+    }
+
+    // Compare the component of type `ft` at byte offset `off` in the two cells
+    // pointed to by 16(%rbp) (self) and 24(%rbp) (other); jump to `lne` if unequal.
+    fun emit_eq_component(var self, off: int32, ft: Type, lne: str) {
+        if is_struct_or_enum_t(ft) {
+            self.emit("movq 24(%rbp), %rax")
+            self.emit(format("leaq {}(%rax), %rax", off))
+            self.emit("pushq %rax")
+            self.emit("movq 16(%rbp), %rax")
+            self.emit(format("leaq {}(%rax), %rax", off))
+            self.emit("pushq %rax")
+            self.emit(format("call myla_{}.eq", self.type_key(ft)))
+            self.emit("addq $16, %rsp")
+            self.emit("testq %rax, %rax")
+            self.emit(format("jz {}", lne))
+        } else if is_tstr(ft) {
+            self.emit("movq 16(%rbp), %rax")
+            self.emit(format("movq {}(%rax), %rdi", off))
+            self.emit("movq 24(%rbp), %rax")
+            self.emit(format("movq {}(%rax), %rsi", off))
+            self.emit("call __str_eq")
+            self.emit("testq %rax, %rax")
+            self.emit(format("jz {}", lne))
+        } else {
+            self.emit("movq 16(%rbp), %rax")
+            self.emit(format("movq {}(%rax), %rax", off))
+            self.emit("movq 24(%rbp), %rcx")
+            self.emit(format("movq {}(%rcx), %rcx", off))
+            self.emit("cmpq %rcx, %rax")
+            self.emit(format("jne {}", lne))
+        }
+    }
+
+    // char support: UTF-8 encode for printing, UTF-8 decode for `chars`.
+    fun emit_char_runtime(var self) {
+        // __print_char: rdi = Unicode scalar -> write its UTF-8 bytes + newline.
+        self.raw("__print_char:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tsubq $16, %rsp")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tleaq -16(%rbp), %rsi")
+        self.raw("\tcmpq $0x80, %rax")
+        self.raw("\tjb .Lpc1")
+        self.raw("\tcmpq $0x800, %rax")
+        self.raw("\tjb .Lpc2")
+        self.raw("\tcmpq $0x10000, %rax")
+        self.raw("\tjb .Lpc3")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tshrq $18, %rcx")
+        self.raw("\torq $0xF0, %rcx")
+        self.raw("\tmovb %cl, (%rsi)")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tshrq $12, %rcx")
+        self.raw("\tandq $0x3F, %rcx")
+        self.raw("\torq $0x80, %rcx")
+        self.raw("\tmovb %cl, 1(%rsi)")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tshrq $6, %rcx")
+        self.raw("\tandq $0x3F, %rcx")
+        self.raw("\torq $0x80, %rcx")
+        self.raw("\tmovb %cl, 2(%rsi)")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tandq $0x3F, %rcx")
+        self.raw("\torq $0x80, %rcx")
+        self.raw("\tmovb %cl, 3(%rsi)")
+        self.raw("\tmovq $4, %rdx")
+        self.raw("\tjmp .Lpc_write")
+        self.raw(".Lpc3:")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tshrq $12, %rcx")
+        self.raw("\torq $0xE0, %rcx")
+        self.raw("\tmovb %cl, (%rsi)")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tshrq $6, %rcx")
+        self.raw("\tandq $0x3F, %rcx")
+        self.raw("\torq $0x80, %rcx")
+        self.raw("\tmovb %cl, 1(%rsi)")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tandq $0x3F, %rcx")
+        self.raw("\torq $0x80, %rcx")
+        self.raw("\tmovb %cl, 2(%rsi)")
+        self.raw("\tmovq $3, %rdx")
+        self.raw("\tjmp .Lpc_write")
+        self.raw(".Lpc2:")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tshrq $6, %rcx")
+        self.raw("\torq $0xC0, %rcx")
+        self.raw("\tmovb %cl, (%rsi)")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tandq $0x3F, %rcx")
+        self.raw("\torq $0x80, %rcx")
+        self.raw("\tmovb %cl, 1(%rsi)")
+        self.raw("\tmovq $2, %rdx")
+        self.raw("\tjmp .Lpc_write")
+        self.raw(".Lpc1:")
+        self.raw("\tmovb %al, (%rsi)")
+        self.raw("\tmovq $1, %rdx")
+        self.raw(".Lpc_write:")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tcall __print_nl")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        // __str_chars: rdi = str cell -> rax = [char] list of decoded scalars.
+        self.raw("__str_chars:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw("\tsubq $8, %rsp")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq (%rbx), %r12")
+        self.raw("\tleaq 8(%rbx), %r13")
+        self.raw("\tmovq %r12, %rax")
+        self.raw("\tshlq $3, %rax")
+        self.raw("\taddq $16, %rax")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r14")
+        self.raw("\txorq %r15, %r15")
+        self.raw("\tmovq $0, -48(%rbp)")
+        self.raw(".Lsc_loop:")
+        self.raw("\tcmpq %r12, %r15")
+        self.raw("\tjae .Lsc_done")
+        self.raw("\tmovzbq (%r13,%r15), %rax")
+        self.raw("\tcmpq $0x80, %rax")
+        self.raw("\tjb .Lsc_1")
+        self.raw("\tcmpq $0xE0, %rax")
+        self.raw("\tjb .Lsc_2")
+        self.raw("\tcmpq $0xF0, %rax")
+        self.raw("\tjb .Lsc_3")
+        self.raw("\tandq $0x07, %rax")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tmovzbq 1(%r13,%r15), %rax")
+        self.raw("\tandq $0x3F, %rax")
+        self.raw("\tshlq $6, %rcx")
+        self.raw("\torq %rax, %rcx")
+        self.raw("\tmovzbq 2(%r13,%r15), %rax")
+        self.raw("\tandq $0x3F, %rax")
+        self.raw("\tshlq $6, %rcx")
+        self.raw("\torq %rax, %rcx")
+        self.raw("\tmovzbq 3(%r13,%r15), %rax")
+        self.raw("\tandq $0x3F, %rax")
+        self.raw("\tshlq $6, %rcx")
+        self.raw("\torq %rax, %rcx")
+        self.raw("\taddq $4, %r15")
+        self.raw("\tjmp .Lsc_store")
+        self.raw(".Lsc_3:")
+        self.raw("\tandq $0x0F, %rax")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tmovzbq 1(%r13,%r15), %rax")
+        self.raw("\tandq $0x3F, %rax")
+        self.raw("\tshlq $6, %rcx")
+        self.raw("\torq %rax, %rcx")
+        self.raw("\tmovzbq 2(%r13,%r15), %rax")
+        self.raw("\tandq $0x3F, %rax")
+        self.raw("\tshlq $6, %rcx")
+        self.raw("\torq %rax, %rcx")
+        self.raw("\taddq $3, %r15")
+        self.raw("\tjmp .Lsc_store")
+        self.raw(".Lsc_2:")
+        self.raw("\tandq $0x1F, %rax")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tmovzbq 1(%r13,%r15), %rax")
+        self.raw("\tandq $0x3F, %rax")
+        self.raw("\tshlq $6, %rcx")
+        self.raw("\torq %rax, %rcx")
+        self.raw("\taddq $2, %r15")
+        self.raw("\tjmp .Lsc_store")
+        self.raw(".Lsc_1:")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tincq %r15")
+        self.raw(".Lsc_store:")
+        self.raw("\tmovq -48(%rbp), %rax")
+        self.raw("\tleaq 16(%r14,%rax,8), %rdx")
+        self.raw("\tmovq %rcx, (%rdx)")
+        self.raw("\tincq %rax")
+        self.raw("\tmovq %rax, -48(%rbp)")
+        self.raw("\tjmp .Lsc_loop")
+        self.raw(".Lsc_done:")
+        self.raw("\tmovq -48(%rbp), %rax")
+        self.raw("\tmovq %rax, (%r14)")
+        self.raw("\tmovq %r12, 8(%r14)")
+        self.raw("\tmovq %r14, %rax")
+        self.raw("\taddq $8, %rsp")
+        self.raw("\tpopq %r15")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // Map cell: [count:8][cap:8][slot0..]; slot = [state:8][key:8][value…] where
+    // state 0=empty, 1=occupied, 2=tombstone. Open addressing, linear probing,
+    // FNV-1a hashing. cap is a power of two. Clones reuse __list_clone (shallow).
+    fun emit_map_runtime(var self) {
+        // __map_hash: rsi=key (value or str cell), rcx=is_str -> rax=hash.
+        self.raw("__map_hash:")
+        self.raw("\tmovabsq $-3750763034362895579, %rax")
+        self.raw("\tmovabsq $1099511628211, %r8")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjnz .Lhash_str")
+        self.raw("\tmovq %rsi, %r9")
+        self.raw("\tmovq $8, %rcx")
+        self.raw(".Lhash_int_loop:")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Lhash_done")
+        self.raw("\tmovzbq %r9b, %r10")
+        self.raw("\txorq %r10, %rax")
+        self.raw("\timulq %r8, %rax")
+        self.raw("\tshrq $8, %r9")
+        self.raw("\tdecq %rcx")
+        self.raw("\tjmp .Lhash_int_loop")
+        self.raw(".Lhash_str:")
+        self.raw("\tmovq (%rsi), %rcx")
+        self.raw("\tleaq 8(%rsi), %r9")
+        self.raw(".Lhash_str_loop:")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Lhash_done")
+        self.raw("\tmovzbq (%r9), %r10")
+        self.raw("\txorq %r10, %rax")
+        self.raw("\timulq %r8, %rax")
+        self.raw("\tincq %r9")
+        self.raw("\tdecq %rcx")
+        self.raw("\tjmp .Lhash_str_loop")
+        self.raw(".Lhash_done:")
+        self.raw("\tret")
+        self.raw("")
+        // __key_eq: rdi=slot key, rsi=key, rcx=is_str -> rax=1/0.
+        self.raw("__key_eq:")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjnz .Lkeq_str")
+        self.raw("\txorq %rax, %rax")
+        self.raw("\tcmpq %rsi, %rdi")
+        self.raw("\tsete %al")
+        self.raw("\tret")
+        self.raw(".Lkeq_str:")
+        self.raw("\tjmp __str_eq")
+        self.raw("")
+        // __map_new: rdi=cap, rsi=slot_size -> rax=zeroed cell.
+        self.raw("__map_new:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r12")
+        self.raw("\tmovq %rbx, %rax")
+        self.raw("\timulq %r12, %rax")
+        self.raw("\taddq $16, %rax")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tmovq $0, (%r13)")
+        self.raw("\tmovq %rbx, 8(%r13)")
+        self.raw("\tleaq 16(%r13), %rdi")
+        self.raw("\tmovq %rbx, %rcx")
+        self.raw("\timulq %r12, %rcx")
+        self.raw("\txorq %rax, %rax")
+        self.raw("\tcld")
+        self.raw("\trep stosb")
+        self.raw("\tmovq %r13, %rax")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        // __map_lookup: rdi=cell, rsi=key, rdx=slot_size, rcx=is_str
+        //   -> rax = occupied matching slot, or 0.
+        self.raw("__map_lookup:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tsubq $16, %rsp")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r12")
+        self.raw("\tmovq %rdx, %r13")
+        self.raw("\tmovq %rcx, %r14")
+        self.raw("\tmovq %r12, %rsi")
+        self.raw("\tmovq %r14, %rcx")
+        self.raw("\tcall __map_hash")
+        self.raw("\tmovq 8(%rbx), %rcx")
+        self.raw("\tdecq %rcx")
+        self.raw("\tandq %rcx, %rax")
+        self.raw("\tmovq %rax, -40(%rbp)")
+        self.raw(".Llk_loop:")
+        self.raw("\tmovq -40(%rbp), %rax")
+        self.raw("\tmovq %rax, %r9")
+        self.raw("\timulq %r13, %r9")
+        self.raw("\tleaq 16(%rbx,%r9), %r8")
+        self.raw("\tmovq (%r8), %rcx")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Llk_none")
+        self.raw("\tcmpq $2, %rcx")
+        self.raw("\tje .Llk_next")
+        self.raw("\tmovq %r8, -48(%rbp)")
+        self.raw("\tmovq 8(%r8), %rdi")
+        self.raw("\tmovq %r12, %rsi")
+        self.raw("\tmovq %r14, %rcx")
+        self.raw("\tcall __key_eq")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Llk_next")
+        self.raw("\tmovq -48(%rbp), %rax")
+        self.raw("\tjmp .Llk_done")
+        self.raw(".Llk_next:")
+        self.raw("\tmovq -40(%rbp), %rax")
+        self.raw("\tincq %rax")
+        self.raw("\tmovq 8(%rbx), %rcx")
+        self.raw("\tdecq %rcx")
+        self.raw("\tandq %rcx, %rax")
+        self.raw("\tmovq %rax, -40(%rbp)")
+        self.raw("\tjmp .Llk_loop")
+        self.raw(".Llk_none:")
+        self.raw("\txorq %rax, %rax")
+        self.raw(".Llk_done:")
+        self.raw("\taddq $16, %rsp")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        // __map_set_slot: rdi=cell, rsi=key, rdx=slot_size, rcx=is_str -> rax=slot.
+        // Returns an existing match, else claims an empty/tombstone slot (sets
+        // state+key, bumps count). Assumes room exists (caller reserved).
+        self.raw("__map_set_slot:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tsubq $32, %rsp")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r12")
+        self.raw("\tmovq %rdx, %r13")
+        self.raw("\tmovq %rcx, %r14")
+        self.raw("\tmovq %r12, %rsi")
+        self.raw("\tmovq %r14, %rcx")
+        self.raw("\tcall __map_hash")
+        self.raw("\tmovq 8(%rbx), %rcx")
+        self.raw("\tdecq %rcx")
+        self.raw("\tandq %rcx, %rax")
+        self.raw("\tmovq %rax, -40(%rbp)")
+        self.raw("\tmovq $0, -48(%rbp)")
+        self.raw(".Lss_loop:")
+        self.raw("\tmovq -40(%rbp), %rax")
+        self.raw("\tmovq %rax, %r9")
+        self.raw("\timulq %r13, %r9")
+        self.raw("\tleaq 16(%rbx,%r9), %r8")
+        self.raw("\tmovq (%r8), %rcx")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Lss_empty")
+        self.raw("\tcmpq $2, %rcx")
+        self.raw("\tje .Lss_tomb")
+        self.raw("\tmovq %r8, -56(%rbp)")
+        self.raw("\tmovq 8(%r8), %rdi")
+        self.raw("\tmovq %r12, %rsi")
+        self.raw("\tmovq %r14, %rcx")
+        self.raw("\tcall __key_eq")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lss_next")
+        self.raw("\tmovq -56(%rbp), %rax")
+        self.raw("\tjmp .Lss_done")
+        self.raw(".Lss_tomb:")
+        self.raw("\tcmpq $0, -48(%rbp)")
+        self.raw("\tjne .Lss_next")
+        self.raw("\tmovq %r8, -48(%rbp)")
+        self.raw(".Lss_next:")
+        self.raw("\tmovq -40(%rbp), %rax")
+        self.raw("\tincq %rax")
+        self.raw("\tmovq 8(%rbx), %rcx")
+        self.raw("\tdecq %rcx")
+        self.raw("\tandq %rcx, %rax")
+        self.raw("\tmovq %rax, -40(%rbp)")
+        self.raw("\tjmp .Lss_loop")
+        self.raw(".Lss_empty:")
+        self.raw("\tmovq -48(%rbp), %rax")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjnz .Lss_claim")
+        self.raw("\tmovq %r8, %rax")
+        self.raw(".Lss_claim:")
+        self.raw("\tmovq $1, (%rax)")
+        self.raw("\tmovq %r12, 8(%rax)")
+        self.raw("\tincq (%rbx)")
+        self.raw(".Lss_done:")
+        self.raw("\taddq $32, %rsp")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        // __map_grow: rdi=cell, rsi=slot_size, rcx=is_str -> rax=doubled, rehashed cell.
+        self.raw("__map_grow:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw("\tsubq $24, %rsp")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r13")
+        self.raw("\tmovq %rcx, %r14")
+        self.raw("\tmovq 8(%rbx), %rax")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjnz .Lmg_dbl")
+        self.raw("\tmovq $8, %r12")
+        self.raw("\tjmp .Lmg_new")
+        self.raw(".Lmg_dbl:")
+        self.raw("\tmovq %rax, %r12")
+        self.raw("\tshlq $1, %r12")
+        self.raw(".Lmg_new:")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq %r13, %rsi")
+        self.raw("\tcall __map_new")
+        self.raw("\tmovq %rax, %r15")
+        self.raw("\tmovq $0, -48(%rbp)")
+        self.raw(".Lmg_loop:")
+        self.raw("\tmovq -48(%rbp), %rax")
+        self.raw("\tcmpq 8(%rbx), %rax")
+        self.raw("\tjae .Lmg_done")
+        self.raw("\tmovq %rax, %r9")
+        self.raw("\timulq %r13, %r9")
+        self.raw("\tleaq 16(%rbx,%r9), %r8")
+        self.raw("\tmovq (%r8), %rcx")
+        self.raw("\tcmpq $1, %rcx")
+        self.raw("\tjne .Lmg_skip")
+        self.raw("\tmovq %r15, %rdi")
+        self.raw("\tmovq 8(%r8), %rsi")
+        self.raw("\tmovq %r13, %rdx")
+        self.raw("\tmovq %r14, %rcx")
+        self.raw("\tmovq %r8, -56(%rbp)")
+        self.raw("\tcall __map_set_slot")
+        self.raw("\tmovq -56(%rbp), %r8")
+        self.raw("\tleaq 16(%rax), %rdi")
+        self.raw("\tleaq 16(%r8), %rsi")
+        self.raw("\tmovq %r13, %rcx")
+        self.raw("\tsubq $16, %rcx")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw(".Lmg_skip:")
+        self.raw("\tmovq -48(%rbp), %rax")
+        self.raw("\tincq %rax")
+        self.raw("\tmovq %rax, -48(%rbp)")
+        self.raw("\tjmp .Lmg_loop")
+        self.raw(".Lmg_done:")
+        self.raw("\tmovq %r15, %rax")
+        self.raw("\taddq $24, %rsp")
+        self.raw("\tpopq %r15")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        // __map_reserve: rdi=&holder, rsi=slot_size, rcx=is_str. Grows (writing
+        // the new cell back through the holder) when empty or above 0.75 load.
+        self.raw("__map_reserve:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r12")
+        self.raw("\tmovq %rcx, %r13")
+        self.raw("\tmovq (%rbx), %rdi")
+        self.raw("\tmovq 8(%rdi), %rax")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lmr_grow")
+        self.raw("\tmovq (%rdi), %rcx")
+        self.raw("\tincq %rcx")
+        self.raw("\timulq $4, %rcx")
+        self.raw("\tmovq %rax, %rdx")
+        self.raw("\timulq $3, %rdx")
+        self.raw("\tcmpq %rdx, %rcx")
+        self.raw("\tjb .Lmr_done")
+        self.raw(".Lmr_grow:")
+        self.raw("\tmovq (%rbx), %rdi")
+        self.raw("\tmovq %r12, %rsi")
+        self.raw("\tmovq %r13, %rcx")
+        self.raw("\tcall __map_grow")
+        self.raw("\tmovq %rax, (%rbx)")
+        self.raw(".Lmr_done:")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        // __map_keys: rdi=cell, rsi=slot_size, rdx=key_stride -> rax=[K] list cell.
+        self.raw("__map_keys:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw("\tsubq $24, %rsp")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r13")
+        self.raw("\tmovq %rdx, %r14")
+        self.raw("\tmovq (%rbx), %rax")
+        self.raw("\tmovq %rax, %r12")
+        self.raw("\timulq %r14, %rax")
+        self.raw("\taddq $16, %rax")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r15")
+        self.raw("\tmovq %r12, (%r15)")
+        self.raw("\tmovq %r12, 8(%r15)")
+        self.raw("\tmovq $0, -48(%rbp)")
+        self.raw("\tmovq $0, -56(%rbp)")
+        self.raw(".Lmk_loop:")
+        self.raw("\tmovq -48(%rbp), %rax")
+        self.raw("\tcmpq 8(%rbx), %rax")
+        self.raw("\tjae .Lmk_done")
+        self.raw("\tmovq %rax, %r9")
+        self.raw("\timulq %r13, %r9")
+        self.raw("\tleaq 16(%rbx,%r9), %r8")
+        self.raw("\tmovq (%r8), %rcx")
+        self.raw("\tcmpq $1, %rcx")
+        self.raw("\tjne .Lmk_skip")
+        self.raw("\tmovq 8(%r8), %rcx")
+        self.raw("\tmovq -56(%rbp), %rax")
+        self.raw("\tmovq %rax, %r9")
+        self.raw("\timulq %r14, %r9")
+        self.raw("\tleaq 16(%r15,%r9), %r10")
+        self.raw("\tmovq %rcx, (%r10)")
+        self.raw("\tincq %rax")
+        self.raw("\tmovq %rax, -56(%rbp)")
+        self.raw(".Lmk_skip:")
+        self.raw("\tmovq -48(%rbp), %rax")
+        self.raw("\tincq %rax")
+        self.raw("\tmovq %rax, -48(%rbp)")
+        self.raw("\tjmp .Lmk_loop")
+        self.raw(".Lmk_done:")
+        self.raw("\tmovq %r15, %rax")
+        self.raw("\taddq $24, %rsp")
+        self.raw("\tpopq %r15")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // StringBuilder cell: [len:8][cap:8][bytes…] (cap is a byte capacity).
+    fun emit_sb_runtime(var self) {
+        // __sb_append_bytes: rdi=&holder, rsi=src bytes, rdx=count. Grows/reallocs
+        // the builder (writing the new pointer back through the holder) and copies.
+        self.raw("__sb_append_bytes:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r12")
+        self.raw("\tmovq %rdx, %r13")
+        self.raw("\tmovq (%rbx), %r14")
+        self.raw("\tmovq (%r14), %r15")
+        self.raw("\tleaq (%r15,%r13), %rax")
+        self.raw("\tcmpq 8(%r14), %rax")
+        self.raw("\tjbe .Lsba_fit")
+        self.raw("\tleaq 16(%rax), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tmovq %r14, %rsi")
+        self.raw("\tleaq 16(%r15), %rcx")
+        self.raw("\tpushq %rax")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw("\tpopq %rax")
+        self.raw("\tleaq (%r15,%r13), %rcx")
+        self.raw("\tmovq %rcx, 8(%rax)")
+        self.raw("\tmovq %rax, %r14")
+        self.raw("\tmovq %r14, (%rbx)")
+        self.raw(".Lsba_fit:")
+        self.raw("\tleaq 16(%r14), %rdi")
+        self.raw("\taddq %r15, %rdi")
+        self.raw("\tmovq %r12, %rsi")
+        self.raw("\tmovq %r13, %rcx")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw("\tleaq (%r15,%r13), %rax")
+        self.raw("\tmovq %rax, (%r14)")
+        self.raw("\tpopq %r15")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // List cell layout: [len:8][cap:8][elem0..]. The value pointer points at the
+    // length word. Strides are passed in (per element type) so one routine serves
+    // every list. Clones are shallow — sufficient for stdout/exit parity (D38).
+    fun emit_list_runtime(var self) {
+        // __list_clone: rdi=src cell, rsi=stride -> rax=fresh independent cell.
+        self.raw("__list_clone:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r12")
+        self.raw("\tmovq 8(%rbx), %rax")
+        self.raw("\timulq %r12, %rax")
+        self.raw("\taddq $16, %rax")
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tmovq %rbx, %rsi")
+        self.raw("\tmovq %r13, %rcx")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        // __list_grow: rdi=full cell (len==cap), rsi=stride -> rax=larger cell.
+        self.raw("__list_grow:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r12")
+        self.raw("\tmovq 8(%rbx), %r13")
+        self.raw("\ttestq %r13, %r13")
+        self.raw("\tjnz .Lgrow_dbl")
+        self.raw("\tmovq $4, %r14")
+        self.raw("\tjmp .Lgrow_alloc")
+        self.raw(".Lgrow_dbl:")
+        self.raw("\tmovq %r13, %r14")
+        self.raw("\tshlq $1, %r14")
+        self.raw(".Lgrow_alloc:")
+        self.raw("\tmovq %r14, %rax")
+        self.raw("\timulq %r12, %rax")
+        self.raw("\taddq $16, %rax")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tpushq %rax")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tmovq %rbx, %rsi")
+        self.raw("\tmovq %r13, %rcx")
+        self.raw("\timulq %r12, %rcx")
+        self.raw("\taddq $16, %rcx")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw("\tpopq %rax")
+        self.raw("\tmovq %r14, 8(%rax)")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
     }
 }
 
@@ -1177,6 +4017,300 @@ fun is_aggregate(t: Type) -> bool {
 
 fun is_aggregate_opt(ot: Option<Type>) -> bool {
     return match ot { Some(t) => is_aggregate(t), None => false }
+}
+
+fun tuple_elems(t: Type) -> [Type] {
+    return match t { Type.TTuple(es) => es, _ => [] }
+}
+
+fun list_elem(t: Type) -> Type {
+    return match t { Type.TList(e) => e, _ => Type.TInt(32, true) }
+}
+
+// Split a `format` template into literal segments (one more than the number of
+// `{}` holes). `{{`/`}}` collapse to single literal braces.
+fun format_segments(s: str) -> [str] {
+    var segs: [str] = []
+    var cur = ""
+    let n = len(s)
+    var i = 0
+    while i < n {
+        let c = s[i]
+        if c == '{' {
+            if i + 1 < n && s[i + 1] == '{' { cur = cur + "{"
+            i = i + 2
+            continue }
+            push(segs, cur)
+            cur = ""
+            i = i + 2
+            continue
+        }
+        if c == '}' {
+            if i + 1 < n && s[i + 1] == '}' { cur = cur + "}"
+            i = i + 2
+            continue }
+            i = i + 1
+            continue
+        }
+        cur = cur + str_byte(s, i)
+        i = i + 1
+    }
+    push(segs, cur)
+    return segs
+}
+
+// The single-byte substring at index `i` (build a 1-char string).
+fun str_byte(s: str, i: int32) -> str {
+    var sb = StringBuilder()
+    append_byte(sb, s[i])
+    return build(sb)
+}
+
+fun map_key(t: Type) -> Type {
+    return match t { Type.TMap(k, v) => k, _ => Type.TStr }
+}
+
+fun map_val(t: Type) -> Type {
+    return match t { Type.TMap(k, v) => v, _ => Type.TInt(32, true) }
+}
+
+fun is_list_t(t: Type) -> bool { return match t { Type.TList(e) => true, _ => false } }
+fun is_map_t(t: Type) -> bool { return match t { Type.TMap(k, v) => true, _ => false } }
+fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => false } }
+fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
+
+// A place expression denotes storage that already owns its value, so moving it
+// into a new owning location requires a value-semantics clone (lists/maps).
+fun is_place(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Name(n) => true,
+        ExprKind.GetField(t, f) => true,
+        ExprKind.Index(t, i) => true,
+        ExprKind.TupleIndex(t, i) => true,
+        _ => false,
+    }
+}
+
+fun struct_name_of(t: Type) -> str {
+    return match t { Type.TStruct(n, a) => n, _ => "" }
+}
+
+fun is_struct_or_enum_t(t: Type) -> bool {
+    return match t { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, _ => false }
+}
+
+fun is_tfunc(t: Type) -> bool {
+    return match t { Type.TFunc(p, r) => true, _ => false }
+}
+
+fun is_hole_expr(e: Expr) -> bool {
+    return match e.kind { ExprKind.Hole => true, _ => false }
+}
+
+fun args_have_hole(args: [Expr]) -> bool {
+    for a in args { if is_hole_expr(a) { return true } }
+    return false
+}
+
+fun bind_elem_names(be: BindElem) -> [str] {
+    var out: [str] = []
+    match be {
+        BindElem.BName(n) => { push(out, n) },
+        BindElem.BWild => {},
+        BindElem.BTuple(es) => { for e in es { for n in bind_elem_names(e) { push(out, n) } } },
+    }
+    return out
+}
+
+fun bind_names(bs: [BindElem]) -> [str] {
+    var out: [str] = []
+    for b in bs { for n in bind_elem_names(b) { push(out, n) } }
+    return out
+}
+
+fun pattern_names(p: Pattern) -> [str] {
+    var out: [str] = []
+    match p.kind {
+        PatternKind.PBind(n) => { push(out, n) },
+        PatternKind.PEnum(en, v, elems, hp) => { for el in elems { for n in pattern_names(el) { push(out, n) } } },
+        PatternKind.PTuple(elems) => { for el in elems { for n in pattern_names(el) { push(out, n) } } },
+        PatternKind.PStruct(nm, fields) => { for f in fields { for n in pattern_names(f.pattern) { push(out, n) } } },
+        PatternKind.POr(elems) => { for el in elems { for n in pattern_names(el) { push(out, n) } } },
+        _ => {},
+    }
+    return out
+}
+
+fun empty_str_list() -> [str] {
+    var e: [str] = []
+    return e
+}
+
+fun tfunc_params(t: Type) -> [Type] {
+    match t { Type.TFunc(p, r) => { return p }, _ => {} }
+    var empty: [Type] = []
+    return empty
+}
+
+fun tfunc_ret(t: Type) -> Option<Type> {
+    match t { Type.TFunc(p, r) => { return r }, _ => {} }
+    return None
+}
+
+// Names that `gen_call` handles as builtins (i.e. not indirect calls).
+fun is_builtin_call_name(nm: str) -> bool {
+    if nm == "print" || nm == "assert" || nm == "panic" || nm == "unreachable" { return true }
+    if nm == "len" || nm == "push" || nm == "pop" || nm == "chars" || nm == "format" { return true }
+    if nm == "StringBuilder" || nm == "append" || nm == "append_byte" || nm == "build" { return true }
+    if nm == "contains" || nm == "remove" || nm == "keys" { return true }
+    return false
+}
+
+fun attrs_have_derive_eq(attrs: [Attribute]) -> bool {
+    for a in attrs {
+        if a.name == "derive" {
+            for arg in a.args {
+                match arg.kind { ExprKind.Name(n) => { if n == "Eq" { return true } }, _ => {} }
+            }
+        }
+    }
+    return false
+}
+
+fun is_overloadable_op(op: str) -> bool {
+    if op == "==" || op == "!=" { return true }
+    if is_cmp(op) { return true }
+    return op == "+" || op == "-" || op == "*" || op == "/" || op == "%"
+}
+
+fun arith_method_cg(op: str) -> str {
+    if op == "+" { return "add" }
+    if op == "-" { return "sub" }
+    if op == "*" { return "mul" }
+    if op == "/" { return "div" }
+    return "rem"
+}
+
+fun enum_name_of(t: Type) -> str {
+    return match t { Type.TEnum(n, a) => n, _ => "" }
+}
+
+fun expr_name(e: Expr) -> str {
+    return match e.kind { ExprKind.Name(n) => n, _ => "" }
+}
+
+// The receiver of a `EnumName.Variant` callee, or a dummy expr otherwise.
+fun callee_target(callee: Expr) -> Expr {
+    return match callee.kind { ExprKind.GetField(tgt, field) => tgt, _ => callee }
+}
+
+fun getfield_name(callee: Expr) -> str {
+    return match callee.kind { ExprKind.GetField(tgt, field) => field, _ => "" }
+}
+
+fun success_variant(enum_name: str) -> str {
+    if enum_name == "Option" { return "Some" }
+    return "Ok"
+}
+
+fun is_pwild(p: Pattern) -> bool {
+    return match p.kind { PatternKind.PWild => true, _ => false }
+}
+
+// -- monomorphization helpers --------------------------------------------
+
+fun worklist_has(wl: [MonoFn], mangled: str) -> bool {
+    for m in wl { if m.mangled == mangled { return true } }
+    return false
+}
+
+fun int_type_name_cg(w: int32, signed: bool) -> str {
+    if signed { return format("int{}", w) }
+    return format("uint{}", w)
+}
+
+fun mangle_fn(name: str, args: [Type]) -> str {
+    return format("{}__{}", name, join_tokens(args))
+}
+
+fun join_tokens(xs: [Type]) -> str {
+    var s = ""
+    var i = 0
+    for x in xs {
+        if i > 0 { s = s + "_" }
+        s = s + mono_token(x)
+        i = i + 1
+    }
+    return s
+}
+
+fun int_token(w: int32, s: bool) -> str {
+    if s { return format("i{}", w) }
+    return format("u{}", w)
+}
+
+fun agg_token(n: str, args: [Type]) -> str {
+    if len(args) == 0 { return n }
+    return format("{}__{}", n, join_tokens(args))
+}
+
+// A stable identifier fragment for a concrete type (used in mangled names).
+fun mono_token(t: Type) -> str {
+    return match t {
+        Type.TInt(w, s) => int_token(w, s),
+        Type.TBool => "bool",
+        Type.TStr => "str",
+        Type.TChar => "char",
+        Type.TFloat(w) => format("f{}", w),
+        Type.TSB => "sb",
+        Type.TStruct(n, a) => agg_token(n, a),
+        Type.TEnum(n, a) => agg_token(n, a),
+        Type.TTuple(es) => format("T{}_{}", len(es), join_tokens(es)),
+        Type.TList(e) => format("L_{}", mono_token(e)),
+        Type.TMap(k, v) => format("M_{}_{}", mono_token(k), mono_token(v)),
+        Type.TParam(n) => n,
+        _ => "X",
+    }
+}
+
+// The component types of a composite type, in a canonical order, so two types
+// of the same shape line up positionally for unification.
+fun parts_of(t: Type) -> [Type] {
+    return match t {
+        Type.TTuple(es) => es,
+        Type.TStruct(n, a) => a,
+        Type.TEnum(n, a) => a,
+        Type.TList(e) => [e],
+        Type.TMap(k, v) => [k, v],
+        Type.TFunc(ps, r) => func_parts(ps, r),
+        _ => [],
+    }
+}
+
+fun func_parts(ps: [Type], r: Option<Type>) -> [Type] {
+    var out: [Type] = []
+    for p in ps { push(out, p) }
+    match r { Some(rt) => { push(out, rt) }, None => {} }
+    return out
+}
+
+// Solve type-parameter bindings by structurally unifying a declared (possibly
+// type-parametric) type against a concrete type.
+fun unify_into(declared: Type, concrete: Type) -> [Subst] {
+    var out: [Subst] = []
+    match declared {
+        Type.TParam(n) => { push(out, Subst { name: n, ty: concrete }) },
+        _ => {
+            let ds = parts_of(declared)
+            let cs = parts_of(concrete)
+            var i = 0
+            while i < len(ds) && i < len(cs) {
+                for b in unify_into(ds[i], cs[i]) { push(out, b) }
+                i = i + 1
+            }
+        },
+    }
+    return out
 }
 
 fun drop_last<T>(xs: [T]) -> [T] {
