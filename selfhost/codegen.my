@@ -1,0 +1,1235 @@
+// codegen.my -- x86-64 code generator, written in Myla (self-hosting v0.9).
+//
+// Mirrors src/myla/compiler/codegen_x86.py: turns a type-checked program into
+// GAS/AT&T assembly text. The build driver (a thin host wrapper, see §4 of
+// docs/self-hosting.md) runs `as`/`ld` over the emitted assembly. This is the
+// v0.9 milestone, ported incrementally and differentially tested against the
+// Python backend (same stdout/exit for every example).
+//
+// Slice C0: the emitter, label/string interning, the freestanding runtime
+// prelude, simple frame layout, and scalar `_eval`/calls/`print` -- enough to
+// build and run a `hello`-class program through `as`/`ld` with parity.
+
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute
+from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT
+
+// A name binding in scope: a parameter or local at a fixed rbp offset.
+pub struct Binding { name: str, kind: str, offset: int32, ty: Type }
+
+// Continue/break target labels for the innermost loop.
+pub struct LoopLab { cont: str, brk: str }
+
+pub struct CodeGen {
+    decls: [Decl],
+    resolved: [int32: Type],
+    structs: [StructInfo],
+    enums: [EnumInfo],
+    recursive_enums: [str],
+    funcs: [FuncSig],
+    text: [str],
+    rodata: [str],
+    label_n: int32,
+    str_n: int32,
+    str_texts: [str],
+    str_labels: [str],
+    locals: [int32: int32],
+    for_lv: [int32: int32],
+    for_end: [int32: int32],
+    scopes: [[Binding]],
+    loops: [LoopLab],
+    cursor: int32,
+    epilogue: str,
+    struct_ret: bool,
+    ret_type: Option<Type>,
+}
+
+pub fun new_codegen(c: Checker) -> CodeGen {
+    return CodeGen {
+        decls: c.decls,
+        resolved: c.resolved,
+        structs: c.structs,
+        enums: c.enums,
+        recursive_enums: c.recursive_enums,
+        funcs: c.functions,
+        text: [], rodata: [],
+        label_n: 0, str_n: 0,
+        str_texts: [], str_labels: [],
+        locals: [:], for_lv: [:], for_end: [:], scopes: [], loops: [],
+        cursor: 0,
+        epilogue: "", struct_ret: false, ret_type: None,
+    }
+}
+
+impl CodeGen {
+    // -- emit helpers -----------------------------------------------------
+
+    // Append a generated instruction (tab-indented) or a label (flush-left).
+    fun emit(var self, line: str) {
+        if line == "" {
+            push(self.text, "")
+        } else if ends_colon(line) {
+            push(self.text, line)
+        } else {
+            push(self.text, "\t" + line)
+        }
+    }
+
+    // Append a pre-formatted runtime-prelude line verbatim.
+    fun raw(var self, line: str) { push(self.text, line) }
+
+    fun label(var self) -> str {
+        self.label_n = self.label_n + 1
+        return format(".L{}", self.label_n)
+    }
+
+    fun str_index(self, text: str) -> int32 {
+        var i = 0
+        while i < len(self.str_texts) {
+            if self.str_texts[i] == text { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    // Intern a string literal, emitting a length-prefixed `str` cell in rodata.
+    fun string_label(var self, text: str) -> str {
+        let existing = self.str_index(text)
+        if existing >= 0 { return self.str_labels[existing] }
+        let lab = format(".Lstr{}", self.str_n)
+        self.str_n = self.str_n + 1
+        push(self.str_texts, text)
+        push(self.str_labels, lab)
+        push(self.rodata, format("{}:", lab))
+        let n = len(text)
+        push(self.rodata, format("\t.quad {}", n))
+        if n > 0 { push(self.rodata, "\t.byte " + byte_list(text)) }
+        return lab
+    }
+
+    // -- lookups ----------------------------------------------------------
+
+    fun sig_of(self, name: str) -> FuncSig {
+        for f in self.funcs { if f.name == name { return f } }
+        return self.funcs[0]
+    }
+
+    fun type_of(self, id: int32) -> Type {
+        match get(self.resolved, id) { Some(t) => { return t }, None => {} }
+        return Type.TInt(32, true)
+    }
+
+    fun local_of(self, id: int32) -> int32 {
+        match get(self.locals, id) { Some(o) => { return o }, None => {} }
+        return 0
+    }
+
+    fun bind(var self, name: str, kind: str, offset: int32, ty: Type) {
+        let top = len(self.scopes) - 1
+        push(self.scopes[top], Binding { name: name, kind: kind, offset: offset, ty: ty })
+    }
+
+    fun lookup(self, name: str) -> Binding {
+        var i = len(self.scopes) - 1
+        while i >= 0 {
+            var j = len(self.scopes[i]) - 1
+            while j >= 0 {
+                if self.scopes[i][j].name == name { return self.scopes[i][j] }
+                j = j - 1
+            }
+            i = i - 1
+        }
+        return Binding { name: name, kind: "local", offset: 0, ty: Type.TInt(32, true) }
+    }
+
+    // -- type layout ------------------------------------------------------
+
+    fun struct_info(self, name: str) -> StructInfo {
+        for s in self.structs { if s.name == name { return s } }
+        return self.structs[0]
+    }
+
+    fun enum_info(self, name: str) -> EnumInfo {
+        for e in self.enums { if e.name == name { return e } }
+        return self.enums[0]
+    }
+
+    fun is_boxed(self, t: Type) -> bool {
+        return match t {
+            Type.TEnum(n, a) => list_has_str(self.recursive_enums, n),
+            _ => false,
+        }
+    }
+
+    fun stored_size(self, t: Type) -> int32 {
+        if self.is_boxed(t) { return 8 }
+        return self.size(t)
+    }
+
+    fun size(self, t: Type) -> int32 {
+        return match t {
+            Type.TStruct(n, a) => self.struct_size(n),
+            Type.TTuple(es) => self.tuple_size(es),
+            Type.TEnum(n, a) => 8 + self.enum_payload_size(n),
+            Type.TFunc(ps, r) => 16,
+            _ => 8,
+        }
+    }
+
+    fun struct_size(self, name: str) -> int32 {
+        var total = 0
+        for f in self.struct_info(name).fields { total = total + self.stored_size(f.ty) }
+        return total
+    }
+
+    fun tuple_size(self, es: [Type]) -> int32 {
+        var total = 0
+        for e in es { total = total + self.stored_size(e) }
+        return total
+    }
+
+    fun enum_payload_size(self, name: str) -> int32 {
+        var maxp = 0
+        for v in self.enum_info(name).variants {
+            var s = 0
+            for ft in v.payload { s = s + self.stored_size(ft) }
+            if s > maxp { maxp = s }
+        }
+        return maxp
+    }
+
+    // -- top-level --------------------------------------------------------
+
+    fun generate(var self) -> str {
+        let en = self.entry_name()
+        self.emit_runtime_prelude(en)
+        for d in self.decls {
+            match d.kind {
+                DeclKind.FunDecl(fd) => {
+                    if len(fd.type_params) == 0 { self.gen_function(fd) }
+                },
+                _ => {},
+            }
+        }
+        return self.assemble_source()
+    }
+
+    fun entry_name(self) -> str {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.FunDecl(fd) => {
+                    for a in fd.attributes { if a.name == "main" { return fd.name } }
+                },
+                _ => {},
+            }
+        }
+        return "main"
+    }
+
+    fun assemble_source(var self) -> str {
+        var out: [str] = []
+        push(out, "\t.text")
+        for line in self.text { push(out, line) }
+        push(out, "")
+        push(out, "\t.section .rodata")
+        push(out, ".Lbool_true:\n\t.ascii \"true\"")
+        push(out, ".Lbool_false:\n\t.ascii \"false\"")
+        push(out, ".Lstr_true:\n\t.quad 4\n\t.ascii \"true\"")
+        push(out, ".Lstr_false:\n\t.quad 5\n\t.ascii \"false\"")
+        push(out, ".Lstr_minus:\n\t.quad 1\n\t.ascii \"-\"")
+        for line in self.rodata { push(out, line) }
+        push(out, "")
+        push(out, "\t.bss")
+        push(out, "\t.align 8")
+        push(out, "__heap_ptr:")
+        push(out, "\t.skip 8")
+        push(out, "__heap_end:")
+        push(out, "\t.skip 8")
+        push(out, "__free_list:")
+        push(out, "\t.skip 8")
+        push(out, "__argc:")
+        push(out, "\t.skip 8")
+        push(out, "__argv:")
+        push(out, "\t.skip 8")
+        push(out, "__io_errno_val:")
+        push(out, "\t.skip 8")
+        push(out, "")
+        push(out, "\t.section .note.GNU-stack,\"\",@progbits")
+        push(out, "")
+        return join_lines(out)
+    }
+
+    // -- functions --------------------------------------------------------
+
+    fun gen_function(var self, fd: FunData) {
+        let sig = self.sig_of(fd.name)
+        self.locals = [:]
+        self.for_lv = [:]
+        self.for_end = [:]
+        self.scopes = []
+        self.loops = []
+        self.cursor = 0
+        self.struct_ret = is_aggregate_opt(sig.ret)
+        self.ret_type = sig.ret
+
+        let frame = self.layout_frame(fd)
+        self.epilogue = format(".Lret_{}", fd.name)
+
+        self.emit(format("myla_{}:", fd.name))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
+
+        push(self.scopes, [])
+        var param_base = 0
+        if self.struct_ret { param_base = 1 }
+        var i = 0
+        while i < len(fd.params) {
+            let offset = 16 + 8 * (param_base + i)
+            self.bind(fd.params[i].name, "param", offset, sig.params[i])
+            i = i + 1
+        }
+
+        match fd.body { Some(b) => { self.gen_block(b) }, None => {} }
+
+        self.emit(format("{}:", self.epilogue))
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+        self.scopes = drop_last(self.scopes)
+    }
+
+    // Assign every local/temp a unique stack slot; return the frame size.
+    fun layout_frame(var self, fd: FunData) -> int32 {
+        match fd.body {
+            Some(b) => { for s in b.stmts { self.visit_stmt(s) } },
+            None => {},
+        }
+        return band(self.cursor + 15, bnot(15))
+    }
+
+    fun alloc(var self, id: int32, size: int32) {
+        self.cursor = self.cursor + size
+        self.locals[id] = -self.cursor
+    }
+
+    fun visit_stmt(var self, s: Stmt) {
+        match s.kind {
+            StmtKind.VarDecl(k, name, ty, init) => {
+                self.visit_expr(init)
+                self.alloc(s.id, self.size(self.type_of(init.id)))
+            },
+            StmtKind.ReturnS(ov) => { self.visit_opt_expr(ov) },
+            StmtKind.ExprStmt(e) => { self.visit_expr(e) },
+            StmtKind.Assign(target, value) => {
+                self.visit_expr(target)
+                self.visit_expr(value)
+            },
+            StmtKind.IfS(cond, then, otherwise) => {
+                self.visit_expr(cond)
+                self.visit_block_stmts(then)
+                self.visit_else(otherwise)
+            },
+            StmtKind.WhileS(cond, body) => {
+                self.visit_expr(cond)
+                self.visit_block_stmts(body)
+            },
+            StmtKind.ForS(vn, start, end, body, iter) => {
+                self.visit_opt_expr(start)
+                self.visit_opt_expr(end)
+                self.cursor = self.cursor + 8
+                self.for_lv[s.id] = -self.cursor
+                self.cursor = self.cursor + 8
+                self.for_end[s.id] = -self.cursor
+                self.visit_block_stmts(body)
+            },
+            _ => {},
+        }
+    }
+
+    fun visit_block_stmts(var self, b: Block) {
+        for st in b.stmts { self.visit_stmt(st) }
+    }
+
+    fun visit_else(var self, ot: Option<ElseTail>) {
+        match ot {
+            Some(et) => { self.visit_else_tail(et) },
+            None => {},
+        }
+    }
+
+    fun visit_else_tail(var self, et: ElseTail) {
+        match et {
+            ElseTail.ElseBlock(b) => { self.visit_block_stmts(b) },
+            ElseTail.ElseIf(s2) => { self.visit_stmt(s2) },
+        }
+    }
+
+    fun visit_opt_expr(var self, ov: Option<Expr>) {
+        match ov { Some(e) => { self.visit_expr(e) }, None => {} }
+    }
+
+    fun visit_expr(var self, e: Expr) {
+        match e.kind {
+            ExprKind.Unary(op, x) => { self.visit_expr(x) },
+            ExprKind.Cast(x, ty) => { self.visit_expr(x) },
+            ExprKind.Binary(op, l, r) => {
+                self.visit_expr(l)
+                self.visit_expr(r)
+            },
+            ExprKind.Call(c, args) => {
+                for a in args { self.visit_expr(a) }
+                let rt = self.type_of(e.id)
+                if is_aggregate(rt) { self.alloc(e.id, self.size(rt)) }
+            },
+            _ => {},
+        }
+    }
+
+    // -- statements -------------------------------------------------------
+
+    fun gen_block(var self, b: Block) {
+        push(self.scopes, [])
+        for s in b.stmts { self.gen_stmt(s) }
+        self.scopes = drop_last(self.scopes)
+    }
+
+    fun gen_stmt(var self, s: Stmt) {
+        match s.kind {
+            StmtKind.ExprStmt(e) => { self.eval(e) },
+            StmtKind.VarDecl(k, name, ty, init) => {
+                let off = self.local_of(s.id)
+                self.eval(init)
+                self.emit(format("movq %rax, {}(%rbp)", off))
+                self.bind(name, "local", off, self.type_of(init.id))
+            },
+            StmtKind.ReturnS(ov) => {
+                match ov { Some(e) => { self.eval(e) }, None => {} }
+                self.emit(format("jmp {}", self.epilogue))
+            },
+            StmtKind.Assign(target, value) => { self.gen_assign(target, value) },
+            StmtKind.IfS(cond, then, otherwise) => { self.gen_if(cond, then, otherwise) },
+            StmtKind.WhileS(cond, body) => { self.gen_while(cond, body) },
+            StmtKind.ForS(vn, start, end, body, iter) => { self.gen_for(s, vn, start, end, body) },
+            StmtKind.BreakS => { self.emit(format("jmp {}", self.loops[len(self.loops) - 1].brk)) },
+            StmtKind.ContinueS => { self.emit(format("jmp {}", self.loops[len(self.loops) - 1].cont)) },
+            _ => {},
+        }
+    }
+
+    // C1: scalar/str assignment to a simple variable (`name = value`).
+    fun gen_assign(var self, target: Expr, value: Expr) {
+        self.eval(value)
+        match target.kind {
+            ExprKind.Name(n) => {
+                let b = self.lookup(n)
+                self.emit(format("movq %rax, {}(%rbp)", b.offset))
+            },
+            _ => {},
+        }
+    }
+
+    fun gen_if(var self, cond: Expr, then: Block, otherwise: Option<ElseTail>) {
+        let end = self.label()
+        self.eval(cond)
+        self.emit("testq %rax, %rax")
+        match otherwise {
+            None => {
+                self.emit(format("jz {}", end))
+                self.gen_block(then)
+                self.emit(format("{}:", end))
+            },
+            Some(et) => {
+                let els = self.label()
+                self.emit(format("jz {}", els))
+                self.gen_block(then)
+                self.emit(format("jmp {}", end))
+                self.emit(format("{}:", els))
+                match et {
+                    ElseTail.ElseBlock(b) => { self.gen_block(b) },
+                    ElseTail.ElseIf(s2) => { self.gen_stmt(s2) },
+                }
+                self.emit(format("{}:", end))
+            },
+        }
+    }
+
+    fun gen_while(var self, cond: Expr, body: Block) {
+        let start = self.label()
+        let end = self.label()
+        self.emit(format("{}:", start))
+        self.eval(cond)
+        self.emit("testq %rax, %rax")
+        self.emit(format("jz {}", end))
+        push(self.loops, LoopLab { cont: start, brk: end })
+        self.gen_block(body)
+        self.loops = drop_last(self.loops)
+        self.emit(format("jmp {}", start))
+        self.emit(format("{}:", end))
+    }
+
+    fun gen_for(var self, s: Stmt, vn: str, start: Option<Expr>, end: Option<Expr>, body: Block) {
+        let loop_t = match start { Some(e) => self.type_of(e.id), None => Type.TInt(32, true) }
+        let lv = self.get_or_zero(self.for_lv, s.id)
+        let fe = self.get_or_zero(self.for_end, s.id)
+        match start { Some(e) => { self.eval(e) }, None => {} }
+        self.emit(format("movq %rax, {}(%rbp)", lv))
+        match end { Some(e) => { self.eval(e) }, None => {} }
+        self.emit(format("movq %rax, {}(%rbp)", fe))
+
+        let lstart = self.label()
+        let lcont = self.label()
+        let lend = self.label()
+        self.emit(format("{}:", lstart))
+        self.emit(format("movq {}(%rbp), %rax", lv))
+        self.emit(format("movq {}(%rbp), %rcx", fe))
+        self.emit("cmpq %rcx, %rax")
+        if int_signed(loop_t) { self.emit(format("jge {}", lend)) }
+        else { self.emit(format("jae {}", lend)) }
+
+        push(self.scopes, [])
+        self.bind(vn, "local", lv, loop_t)
+        push(self.loops, LoopLab { cont: lcont, brk: lend })
+        for st in body.stmts { self.gen_stmt(st) }
+        self.loops = drop_last(self.loops)
+        self.scopes = drop_last(self.scopes)
+
+        self.emit(format("{}:", lcont))
+        self.emit(format("movq {}(%rbp), %rax", lv))
+        self.emit("addq $1, %rax")
+        self.wrap(loop_t)
+        self.emit(format("movq %rax, {}(%rbp)", lv))
+        self.emit(format("jmp {}", lstart))
+        self.emit(format("{}:", lend))
+    }
+
+    fun get_or_zero(self, m: [int32: int32], id: int32) -> int32 {
+        match get(m, id) { Some(o) => { return o }, None => {} }
+        return 0
+    }
+
+    // -- expressions ------------------------------------------------------
+
+    fun eval(var self, e: Expr) {
+        match e.kind {
+            ExprKind.IntLit(v, suf, isc) => {
+                self.emit(format("movabsq ${}, %rax", v))
+                if !isc { self.wrap(self.type_of(e.id)) }
+            },
+            ExprKind.BoolLit(b) => {
+                var one = 0
+                if b { one = 1 }
+                self.emit(format("movq ${}, %rax", one))
+            },
+            ExprKind.StrLit(s) => {
+                let lab = self.string_label(s)
+                self.emit(format("leaq {}(%rip), %rax", lab))
+            },
+            ExprKind.Name(n) => { self.eval_name(n) },
+            ExprKind.Unary(op, x) => { self.eval_unary(e, op, x) },
+            ExprKind.Binary(op, l, r) => { self.eval_binary(e, op, l, r) },
+            ExprKind.Cast(x, ty) => { self.gen_cast(e, x) },
+            ExprKind.Call(c, args) => { self.gen_call(e, c, args) },
+            _ => {},
+        }
+    }
+
+    fun eval_name(var self, n: str) {
+        if self.has_binding(n) {
+            let b = self.lookup(n)
+            self.emit(format("movq {}(%rbp), %rax", b.offset))
+            return
+        }
+        match self.const_value_expr(n) { Some(ve) => { self.eval(ve) }, None => {} }
+    }
+
+    fun has_binding(self, name: str) -> bool {
+        var i = len(self.scopes) - 1
+        while i >= 0 {
+            var j = 0
+            while j < len(self.scopes[i]) {
+                if self.scopes[i][j].name == name { return true }
+                j = j + 1
+            }
+            i = i - 1
+        }
+        return false
+    }
+
+    fun const_value_expr(self, name: str) -> Option<Expr> {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.ConstDecl(cn, ty, value, attrs, isp) => {
+                    if cn == name { return Some(value) }
+                },
+                _ => {},
+            }
+        }
+        return None
+    }
+
+    fun eval_unary(var self, e: Expr, op: str, x: Expr) {
+        self.eval(x)
+        if op == "-" {
+            self.emit("negq %rax")
+            self.wrap(self.type_of(e.id))
+        } else if op == "~" {
+            self.emit("notq %rax")
+            self.wrap(self.type_of(e.id))
+        } else {
+            self.emit("testq %rax, %rax")
+            self.emit("sete %al")
+            self.emit("movzbq %al, %rax")
+        }
+    }
+
+    fun eval_binary(var self, e: Expr, op: str, l: Expr, r: Expr) {
+        if op == "&&" || op == "||" {
+            self.eval_logical(op, l, r)
+            return
+        }
+        let lt = self.type_of(l.id)
+        if (op == "==" || op == "!=") && is_tstr(lt) {
+            self.eval(r)
+            self.emit("pushq %rax")
+            self.eval(l)
+            self.emit("movq %rax, %rdi")
+            self.emit("popq %rsi")
+            self.emit("call __str_eq")
+            if op == "!=" {
+                self.emit("testq %rax, %rax")
+                self.emit("sete %al")
+                self.emit("movzbq %al, %rax")
+            }
+            return
+        }
+        if op == "+" && is_tstr(lt) {
+            self.eval(r)
+            self.emit("pushq %rax")
+            self.eval(l)
+            self.emit("movq %rax, %rdi")
+            self.emit("popq %rsi")
+            self.emit("call __str_concat")
+            return
+        }
+        self.eval(r)
+        self.emit("pushq %rax")
+        self.eval(l)
+        self.emit("popq %rcx")
+        let rt = self.type_of(e.id)
+        if op == "+" {
+            self.emit("addq %rcx, %rax")
+            self.wrap(rt)
+        } else if op == "-" {
+            self.emit("subq %rcx, %rax")
+            self.wrap(rt)
+        } else if op == "*" {
+            self.emit("imulq %rcx, %rax")
+            self.wrap(rt)
+        } else if op == "/" || op == "%" {
+            self.emit("testq %rcx, %rcx")
+            self.emit("jz __trap")
+            if int_signed(lt) {
+                self.emit("cqo")
+                self.emit("idivq %rcx")
+            } else {
+                self.emit("xorq %rdx, %rdx")
+                self.emit("divq %rcx")
+            }
+            if op == "%" { self.emit("movq %rdx, %rax") }
+            self.wrap(rt)
+        } else if is_cmp(op) {
+            self.emit("cmpq %rcx, %rax")
+            self.emit(format("{} %al", cmp_set(op, int_signed(lt))))
+            self.emit("movzbq %al, %rax")
+        } else if op == "==" || op == "!=" {
+            self.emit("cmpq %rcx, %rax")
+            if op == "==" { self.emit("sete %al") } else { self.emit("setne %al") }
+            self.emit("movzbq %al, %rax")
+        } else if op == "&" {
+            self.emit("andq %rcx, %rax")
+            self.wrap(rt)
+        } else if op == "|" {
+            self.emit("orq %rcx, %rax")
+            self.wrap(rt)
+        } else if op == "^" {
+            self.emit("xorq %rcx, %rax")
+            self.wrap(rt)
+        } else if op == "<<" || op == ">>" {
+            self.emit(format("andq ${}, %rcx", int_width(rt) - 1))
+            if op == "<<" {
+                self.emit("shlq %cl, %rax")
+            } else if int_signed(lt) {
+                self.emit("sarq %cl, %rax")
+            } else {
+                self.emit("shrq %cl, %rax")
+            }
+            self.wrap(rt)
+        }
+    }
+
+    fun eval_logical(var self, op: str, l: Expr, r: Expr) {
+        let short = self.label()
+        let end = self.label()
+        if op == "&&" {
+            self.eval(l)
+            self.emit("testq %rax, %rax")
+            self.emit(format("jz {}", short))
+            self.eval(r)
+            self.emit("testq %rax, %rax")
+            self.emit(format("jz {}", short))
+            self.emit("movq $1, %rax")
+            self.emit(format("jmp {}", end))
+            self.emit(format("{}:", short))
+            self.emit("xorq %rax, %rax")
+            self.emit(format("{}:", end))
+        } else {
+            self.eval(l)
+            self.emit("testq %rax, %rax")
+            self.emit(format("jnz {}", short))
+            self.eval(r)
+            self.emit("testq %rax, %rax")
+            self.emit(format("jnz {}", short))
+            self.emit("xorq %rax, %rax")
+            self.emit(format("jmp {}", end))
+            self.emit(format("{}:", short))
+            self.emit("movq $1, %rax")
+            self.emit(format("{}:", end))
+        }
+    }
+
+    fun gen_cast(var self, e: Expr, x: Expr) {
+        let src = self.type_of(x.id)
+        let tgt = self.type_of(e.id)
+        self.eval(x)
+        if is_tchar(tgt) { return }
+        if is_tchar(src) {
+            self.wrap(tgt)
+            return
+        }
+        self.wrap(tgt)
+    }
+
+    fun wrap(var self, t: Type) {
+        match t {
+            Type.TInt(w, s) => {
+                if w != 64 {
+                    if s {
+                        let shift = 64 - w
+                        self.emit(format("shlq ${}, %rax", shift))
+                        self.emit(format("sarq ${}, %rax", shift))
+                    } else if w == 32 {
+                        self.emit("movl %eax, %eax")
+                    } else {
+                        self.emit(format("andq ${}, %rax", (1 << w) - 1))
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+
+    fun gen_call(var self, e: Expr, callee: Expr, args: [Expr]) {
+        match callee.kind {
+            ExprKind.Name(nm) => {
+                if nm == "print" { self.gen_print(args[0]) }
+                else if nm == "assert" || nm == "panic" || nm == "unreachable" { self.gen_intrinsic(nm, args) }
+                else { self.gen_user_call(e, nm, args) }
+            },
+            _ => {},
+        }
+    }
+
+    // `assert`/`panic`/`unreachable`: write a message to stderr and exit(1).
+    fun gen_intrinsic(var self, nm: str, args: [Expr]) {
+        if nm == "panic" {
+            self.eval(args[0])
+            self.emit("movq %rax, %rdi")
+            self.emit("call __panic")
+            return
+        }
+        if nm == "unreachable" {
+            let lab = self.string_label("reached unreachable code")
+            self.emit(format("leaq {}(%rip), %rdi", lab))
+            self.emit("call __panic")
+            return
+        }
+        let ok = self.label()
+        self.eval(args[0])
+        self.emit("testq %rax, %rax")
+        self.emit(format("jnz {}", ok))
+        if len(args) == 2 {
+            self.eval(args[1])
+            self.emit("movq %rax, %rdi")
+        } else {
+            let lab = self.string_label("assertion failed")
+            self.emit(format("leaq {}(%rip), %rdi", lab))
+        }
+        self.emit("call __panic")
+        self.emit(format("{}:", ok))
+    }
+
+    fun gen_user_call(var self, e: Expr, nm: str, args: [Expr]) {
+        var i = len(args) - 1
+        while i >= 0 {
+            self.eval(args[i])
+            self.emit("pushq %rax")
+            i = i - 1
+        }
+        self.emit(format("call myla_{}", nm))
+        let n = len(args)
+        if n > 0 { self.emit(format("addq ${}, %rsp", 8 * n)) }
+    }
+
+    fun gen_print(var self, arg: Expr) {
+        self.eval(arg)
+        self.emit("movq %rax, %rdi")
+        match self.type_of(arg.id) {
+            Type.TBool => { self.emit("call __print_bool") },
+            Type.TStr => { self.emit("call __print_str") },
+            Type.TInt(w, s) => {
+                if s { self.emit("call __print_int") }
+                else { self.emit("call __print_uint") }
+            },
+            _ => {},
+        }
+    }
+
+    // -- runtime prelude (_start + print/heap helpers) --------------------
+
+    fun emit_runtime_prelude(var self, entry_name: str) {
+        self.raw("\t.global _start")
+        self.raw("_start:")
+        self.raw("\tmovq (%rsp), %rax")
+        self.raw("\tmovq %rax, __argc(%rip)")
+        self.raw("\tleaq 8(%rsp), %rax")
+        self.raw("\tmovq %rax, __argv(%rip)")
+        self.raw(format("\tcall myla_{}", entry_name))
+        self.raw("\tmovq $60, %rax")
+        self.raw("\txorq %rdi, %rdi")
+        self.raw("\tsyscall")
+        self.raw("")
+        self.raw("__trap:")
+        self.raw("\tmovq $60, %rax")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tsyscall")
+        self.raw("")
+        self.raw("__panic:")
+        self.raw("\tmovq (%rdi), %rdx")
+        self.raw("\tleaq 8(%rdi), %rsi")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tmovq $2, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tsubq $16, %rsp")
+        self.raw("\tmovb $10, (%rsp)")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tmovq $2, %rdi")
+        self.raw("\tmovq %rsp, %rsi")
+        self.raw("\tmovq $1, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\taddq $16, %rsp")
+        self.raw("\tmovq $60, %rax")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tsyscall")
+        self.raw("")
+        self.raw("__print_nl:")
+        self.raw("\tsubq $16, %rsp")
+        self.raw("\tmovb $10, (%rsp)")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tmovq %rsp, %rsi")
+        self.raw("\tmovq $1, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\taddq $16, %rsp")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__print_minus:")
+        self.raw("\tsubq $16, %rsp")
+        self.raw("\tmovb $45, (%rsp)")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tmovq %rsp, %rsi")
+        self.raw("\tmovq $1, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\taddq $16, %rsp")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__print_uint:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tsubq $48, %rsp")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tleaq -1(%rbp), %rsi")
+        self.raw("\tmovq $10, %rcx")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjnz .Lpu_loop")
+        self.raw("\tmovb $48, (%rsi)")
+        self.raw("\tdecq %rsi")
+        self.raw("\tjmp .Lpu_done")
+        self.raw(".Lpu_loop:")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lpu_done")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw("\tdivq %rcx")
+        self.raw("\taddb $48, %dl")
+        self.raw("\tmovb %dl, (%rsi)")
+        self.raw("\tdecq %rsi")
+        self.raw("\tjmp .Lpu_loop")
+        self.raw(".Lpu_done:")
+        self.raw("\tincq %rsi")
+        self.raw("\tmovq %rbp, %rdx")
+        self.raw("\tsubq %rsi, %rdx")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tcall __print_nl")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__print_int:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjns .Lpi_pos")
+        self.raw("\tpushq %rdi")
+        self.raw("\tcall __print_minus")
+        self.raw("\tpopq %rdi")
+        self.raw("\tnegq %rdi")
+        self.raw(".Lpi_pos:")
+        self.raw("\tcall __print_uint")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__print_bool:")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lpb_false")
+        self.raw("\tleaq .Lbool_true(%rip), %rsi")
+        self.raw("\tmovq $4, %rdx")
+        self.raw("\tjmp .Lpb_write")
+        self.raw(".Lpb_false:")
+        self.raw("\tleaq .Lbool_false(%rip), %rsi")
+        self.raw("\tmovq $5, %rdx")
+        self.raw(".Lpb_write:")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tcall __print_nl")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__print_str:")
+        self.raw("\tmovq (%rdi), %rdx")
+        self.raw("\tleaq 8(%rdi), %rsi")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tcall __print_nl")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__str_eq:")
+        self.raw("\tmovq (%rdi), %rcx")
+        self.raw("\tmovq (%rsi), %rdx")
+        self.raw("\tcmpq %rdx, %rcx")
+        self.raw("\tjne .Lse_ne")
+        self.raw("\tleaq 8(%rdi), %rdi")
+        self.raw("\tleaq 8(%rsi), %rsi")
+        self.raw(".Lse_loop:")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Lse_eq")
+        self.raw("\tmovb (%rdi), %al")
+        self.raw("\tmovb (%rsi), %dl")
+        self.raw("\tcmpb %dl, %al")
+        self.raw("\tjne .Lse_ne")
+        self.raw("\tincq %rdi")
+        self.raw("\tincq %rsi")
+        self.raw("\tdecq %rcx")
+        self.raw("\tjmp .Lse_loop")
+        self.raw(".Lse_eq:")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tret")
+        self.raw(".Lse_ne:")
+        self.raw("\txorq %rax, %rax")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__str_concat:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r12")
+        self.raw("\tmovq (%rbx), %r13")
+        self.raw("\tmovq (%r12), %r14")
+        self.raw("\tleaq (%r13,%r14), %rdi")
+        self.raw("\taddq $8, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r15")
+        self.raw("\tleaq (%r13,%r14), %rax")
+        self.raw("\tmovq %rax, (%r15)")
+        self.raw("\tleaq 8(%r15), %rdi")
+        self.raw("\tleaq 8(%rbx), %rsi")
+        self.raw("\tmovq %r13, %rcx")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw("\tleaq 8(%r12), %rsi")
+        self.raw("\tmovq %r14, %rcx")
+        self.raw("\trep movsb")
+        self.raw("\tmovq %r15, %rax")
+        self.raw("\tpopq %r15")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__uint_to_str:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tsubq $48, %rsp")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tleaq -17(%rbp), %rbx")
+        self.raw("\tmovq $10, %rcx")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjnz .Lu2s_loop")
+        self.raw("\tmovb $48, (%rbx)")
+        self.raw("\tdecq %rbx")
+        self.raw("\tjmp .Lu2s_done")
+        self.raw(".Lu2s_loop:")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lu2s_done")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw("\tdivq %rcx")
+        self.raw("\taddb $48, %dl")
+        self.raw("\tmovb %dl, (%rbx)")
+        self.raw("\tdecq %rbx")
+        self.raw("\tjmp .Lu2s_loop")
+        self.raw(".Lu2s_done:")
+        self.raw("\tincq %rbx")
+        self.raw("\tleaq -16(%rbp), %r12")
+        self.raw("\tsubq %rbx, %r12")
+        self.raw("\tleaq 8(%r12), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %r12, (%rax)")
+        self.raw("\tleaq 8(%rax), %rdi")
+        self.raw("\tmovq %rbx, %rsi")
+        self.raw("\tmovq %r12, %rcx")
+        self.raw("\tcld")
+        self.raw("\tpushq %rax")
+        self.raw("\trep movsb")
+        self.raw("\tpopq %rax")
+        self.raw("\taddq $48, %rsp")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__int_to_str:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\txorq %rbx, %rbx")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjns .Li2s_go")
+        self.raw("\tmovq $1, %rbx")
+        self.raw("\tnegq %rdi")
+        self.raw(".Li2s_go:")
+        self.raw("\tcall __uint_to_str")
+        self.raw("\ttestq %rbx, %rbx")
+        self.raw("\tjz .Li2s_done")
+        self.raw("\tmovq %rax, %rsi")
+        self.raw("\tleaq .Lstr_minus(%rip), %rdi")
+        self.raw("\tcall __str_concat")
+        self.raw(".Li2s_done:")
+        self.raw("\tpopq %rbx")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__bool_to_str:")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lb2s_false")
+        self.raw("\tleaq .Lstr_true(%rip), %rax")
+        self.raw("\tret")
+        self.raw(".Lb2s_false:")
+        self.raw("\tleaq .Lstr_false(%rip), %rax")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__heap_init:")
+        self.raw("\tpushq %rdi")
+        self.raw("\tmovq $9, %rax")
+        self.raw("\txorq %rdi, %rdi")
+        self.raw("\tmovq $268435456, %rsi")
+        self.raw("\tmovq $3, %rdx")
+        self.raw("\tmovq $34, %r10")
+        self.raw("\tmovq $-1, %r8")
+        self.raw("\txorq %r9, %r9")
+        self.raw("\tsyscall")
+        self.raw("\tcmpq $-4096, %rax")
+        self.raw("\tja __trap")
+        self.raw("\tmovq %rax, __heap_ptr(%rip)")
+        self.raw("\taddq $268435456, %rax")
+        self.raw("\tmovq %rax, __heap_end(%rip)")
+        self.raw("\tpopq %rdi")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__alloc:")
+        self.raw("\taddq $7, %rdi")
+        self.raw("\tandq $-8, %rdi")
+        self.raw("\tmovq __heap_end(%rip), %rax")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjnz .Lalloc_search")
+        self.raw("\tcall __heap_init")
+        self.raw(".Lalloc_search:")
+        self.raw("\tleaq __free_list(%rip), %r8")
+        self.raw("\tmovq __free_list(%rip), %rsi")
+        self.raw(".Lalloc_scan:")
+        self.raw("\ttestq %rsi, %rsi")
+        self.raw("\tjz .Lalloc_bump")
+        self.raw("\tcmpq %rdi, -16(%rsi)")
+        self.raw("\tje .Lalloc_reuse")
+        self.raw("\tmovq %rsi, %r8")
+        self.raw("\tmovq (%rsi), %rsi")
+        self.raw("\tjmp .Lalloc_scan")
+        self.raw(".Lalloc_reuse:")
+        self.raw("\tmovq (%rsi), %rax")
+        self.raw("\tmovq %rax, (%r8)")
+        self.raw("\tmovq $1, -8(%rsi)")
+        self.raw("\tmovq %rsi, %rax")
+        self.raw("\tret")
+        self.raw(".Lalloc_bump:")
+        self.raw("\tmovq __heap_ptr(%rip), %rax")
+        self.raw("\tleaq 16(%rax,%rdi), %rcx")
+        self.raw("\tcmpq __heap_end(%rip), %rcx")
+        self.raw("\tja __trap")
+        self.raw("\tmovq %rcx, __heap_ptr(%rip)")
+        self.raw("\tmovq %rdi, (%rax)")
+        self.raw("\tmovq $1, 8(%rax)")
+        self.raw("\tleaq 16(%rax), %rax")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__free:")
+        self.raw("\tmovq __free_list(%rip), %rax")
+        self.raw("\tmovq %rax, (%rdi)")
+        self.raw("\tmovq %rdi, __free_list(%rip)")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__func_retain:")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lfret_done")
+        self.raw("\tincq -8(%rdi)")
+        self.raw(".Lfret_done:")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__func_drop:")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lfdrop_done")
+        self.raw("\tdecq -8(%rdi)")
+        self.raw("\tjnz .Lfdrop_done")
+        self.raw("\tmovq (%rdi), %rax")
+        self.raw("\tjmp *%rax")
+        self.raw(".Lfdrop_done:")
+        self.raw("\tret")
+        self.raw("")
+    }
+}
+
+// -- free helpers ---------------------------------------------------------
+
+fun ends_colon(s: str) -> bool {
+    let n = len(s)
+    return n > 0 && s[n - 1] == 58
+}
+
+fun byte_list(s: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(s) {
+        if i > 0 { append(sb, ", ") }
+        append(sb, format("{}", s[i]))
+        i = i + 1
+    }
+    return build(sb)
+}
+
+fun join_lines(xs: [str]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(xs) {
+        if i > 0 { append(sb, "\n") }
+        append(sb, xs[i])
+        i = i + 1
+    }
+    return build(sb)
+}
+
+fun is_aggregate(t: Type) -> bool {
+    return match t {
+        Type.TStruct(n, a) => true,
+        Type.TTuple(es) => true,
+        Type.TEnum(n, a) => true,
+        Type.TFunc(ps, r) => true,
+        _ => false,
+    }
+}
+
+fun is_aggregate_opt(ot: Option<Type>) -> bool {
+    return match ot { Some(t) => is_aggregate(t), None => false }
+}
+
+fun drop_last<T>(xs: [T]) -> [T] {
+    var out: [T] = []
+    var i = 0
+    while i < len(xs) - 1 {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun band(a: int32, b: int32) -> int32 { return a & b }
+fun bnot(a: int32) -> int32 { return ~a }
+
+fun list_has_str(xs: [str], target: str) -> bool {
+    for x in xs { if x == target { return true } }
+    return false
+}
+
+fun is_tstr(t: Type) -> bool {
+    return match t { Type.TStr => true, _ => false }
+}
+
+fun is_tchar(t: Type) -> bool {
+    return match t { Type.TChar => true, _ => false }
+}
+
+fun int_signed(t: Type) -> bool {
+    return match t { Type.TInt(w, s) => s, _ => false }
+}
+
+fun int_width(t: Type) -> int32 {
+    return match t { Type.TInt(w, s) => w, _ => 64 }
+}
+
+fun is_cmp(op: str) -> bool {
+    return op == "<" || op == "<=" || op == ">" || op == ">="
+}
+
+fun cmp_set(op: str, signed: bool) -> str {
+    if op == "<" {
+        if signed { return "setl" }
+        return "setb"
+    }
+    if op == "<=" {
+        if signed { return "setle" }
+        return "setbe"
+    }
+    if op == ">" {
+        if signed { return "setg" }
+        return "seta"
+    }
+    if signed { return "setge" }
+    return "setae"
+}

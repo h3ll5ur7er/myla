@@ -1,0 +1,42 @@
+// interp_main.my -- `run` tool, written in Myla (self-hosting v0.8).
+//
+// Reads a .my file, lexes + parses + type-checks it, then interprets it,
+// producing the same stdout/exit status as `myla run` (the Python interpreter)
+// for differential burn testing.
+
+from std.process import args, exit
+from std.fs import read_to_string
+from std.io import eprintln
+from .checker import build_checker_src
+from .interp import new_interp
+
+fun run_src(src: str) -> int32 {
+    return match build_checker_src(src) {
+        Ok(c) => {
+            var it = new_interp(c)
+            it.run()
+        },
+        Err(e) => {
+            eprintln("interp_main: program failed to type-check")
+            1
+        },
+    }
+}
+
+fun main() {
+    let argv = args()
+    if len(argv) < 2 {
+        eprintln("usage: interp_main <file.my>")
+        exit(2)
+    }
+    match read_to_string(argv[1]) {
+        Ok(src) => {
+            let code = run_src(src)
+            exit(code)
+        },
+        Err(e) => {
+            eprintln("interp_main: cannot read input file")
+            exit(1)
+        },
+    }
+}

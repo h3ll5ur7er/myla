@@ -589,6 +589,7 @@ pub struct Checker {
     lambda_infer_active: bool,
     lambda_infer: [MatchVal],
     stmt_match: bool,
+    resolved: [int32: Type],        // expr node id -> resolved type (v0.8 interp side table)
 }
 
 fun new_checker(decls: [Decl]) -> Checker {
@@ -601,6 +602,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, loop_depth: 0, try_counter: 0,
         frames: [], lambda_infer_active: false, lambda_infer: [], stmt_match: false,
+        resolved: [:],
     }
 }
 
@@ -1436,7 +1438,7 @@ impl Checker {
     fun infer(var self, e: Expr, expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         let as_stmt = self.stmt_match
         self.stmt_match = false
-        return match e.kind {
+        let r: Result<Option<Type>, CheckErr> = match e.kind {
             ExprKind.IntLit(v, suf, isc) => Ok(Some(self.infer_int_lit(e, expected)?)),
             ExprKind.FloatLit(suf) => Ok(Some(self.infer_float_lit(e, expected)?)),
             ExprKind.StrLit(s) => Ok(Some(Type.TStr)),
@@ -1458,6 +1460,12 @@ impl Checker {
             ExprKind.Lambda(ps, ret, body) => Ok(Some(self.infer_lambda(e, ps, ret, body, expected)?)),
             ExprKind.Hole => Err(mkerr(e.line, e.col)),
         }
+        match r { Ok(om) => { self.record_type(e.id, om) }, Err(x) => {} }
+        return r
+    }
+
+    fun record_type(var self, id: int32, ot: Option<Type>) {
+        match ot { Some(t) => { self.resolved[id] = t }, None => {} }
     }
 
     fun infer_int_lit(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
@@ -2918,6 +2926,17 @@ pub fun check_program(user: Program) -> Result<int32, CheckErr> {
     for d in user.decls { push(decls, d) }
     var c = new_checker(decls)
     return c.run_all()
+}
+
+// Self-hosting v0.8: type-check `src` (prelude + user parsed as one stream so
+// node ids are globally unique) and return the populated checker, whose
+// `decls`/`resolved`/`functions` tables drive the tree-walking interpreter.
+pub fun build_checker_src(src: str) -> Result<Checker, CheckErr> {
+    let prog = parse(lex(prelude_src() + src))
+    var c = new_checker(prog.decls)
+    let r = c.run_all()
+    match r { Ok(x) => {}, Err(e) => { return Err(e) } }
+    return Ok(c)
 }
 
 fun is_printable(t: Type) -> bool {

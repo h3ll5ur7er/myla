@@ -1,0 +1,1718 @@
+// interp.my -- the Myla tree-walking interpreter (self-hosting v0.8).
+//
+// Mirrors src/myla/interpreter.py: runs a type-checked program produced by
+// `build_checker_src` (checker.my). Integer arithmetic wraps at each type's
+// width; structs/tuples/enums/lists/maps have value semantics (copied on bind,
+// assign, argument passing, return, and construction). Type information the
+// runtime needs (integer widths, print/format rendering, casts) comes from the
+// checker's `resolved` side table, keyed by AST node id.
+
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind
+from .checker import Checker, Type, build_checker_src
+from .util import cp_utf8
+from std.io import write
+
+// =========================================================================
+// Runtime values
+// =========================================================================
+
+pub enum Value {
+    VInt(int64),
+    VFloat(float64),
+    VBool(bool),
+    VStr(str),
+    VChar(int64),
+    VUnit,
+    VStruct(str, [str], [Value]),          // name, field names, field values
+    VTuple([Value]),
+    VEnum(str, str, [Value]),              // enum name, variant, payload
+    VList([Value]),
+    VMap([Value], [Value]),                // parallel key/value arrays
+    VSB([int64]),                          // StringBuilder: raw byte buffer
+    VClosure([Param], ExprOrBlock, [str], [Value], str, bool),  // params, body, capNames, capVals, funcName, isFunc
+    VCompose([Value]),                     // composed functions, applied left-to-right
+    VPartial(Value, [Value], [bool]),      // base callable, arg slots, which slots are holes
+}
+
+// --- signals (control flow) ----------------------------------------------
+// Myla has no exceptions, so block/call execution returns a Flow describing
+// how it finished: normal fallthrough, a `return`, a loop `break`/`continue`,
+// or a process `exit`.
+
+// Pending control-flow signal. Held on the interpreter so it can escape from
+// inside expression evaluation (a `return`/`?` inside a match-arm value, an
+// `exit`/`panic` mid-expression), which a return-value-based scheme cannot.
+pub enum Ctrl {
+    CNone,
+    CReturn,
+    CBreak,
+    CContinue,
+    CExit,
+}
+
+pub struct Frame { names: [str], vals: [Value] }
+
+pub struct MatchRes { ok: bool, names: [str], vals: [Value] }
+
+// =========================================================================
+// Interpreter
+// =========================================================================
+
+pub struct Interp {
+    decls: [Decl],
+    resolved: [int32: Type],
+    func_names: [str],
+    func_decls: [FunData],
+    const_names: [str],
+    const_vals: [Value],
+    enum_names: [str],
+    scopes: [Frame],
+    ctrl: Ctrl,
+    ctrl_val: Value,
+    exit_code: int32,
+}
+
+pub fun new_interp(c: Checker) -> Interp {
+    var it = Interp {
+        decls: c.decls,
+        resolved: c.resolved,
+        func_names: [], func_decls: [],
+        const_names: [], const_vals: [],
+        enum_names: [],
+        scopes: [],
+        ctrl: Ctrl.CNone,
+        ctrl_val: Value.VUnit,
+        exit_code: 0,
+    }
+    return it
+}
+
+impl Interp {
+    // -- table construction ----------------------------------------------
+
+    fun collect(var self) {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.FunDecl(fd) => { self.add_func(fd.name, fd) },
+                DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { push(self.enum_names, n) },
+                DeclKind.ImplDecl(target, methods, tps, trnm, targs) => {
+                    let key = canon_type_name(self.type_name_of(target))
+                    for m in methods { self.add_func(format("{}.{}", key, m.name), m) }
+                },
+                _ => {},
+            }
+        }
+    }
+
+    fun add_func(var self, name: str, fd: FunData) {
+        push(self.func_names, name)
+        push(self.func_decls, fd)
+    }
+
+    fun func_idx(self, name: str) -> int32 {
+        var i = 0
+        while i < len(self.func_names) {
+            if self.func_names[i] == name { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    fun type_name_of(self, te: TypeExpr) -> str {
+        return match te.kind {
+            TypeKind.TRef(name, args) => name,
+            _ => "",
+        }
+    }
+
+    fun is_enum_name(self, n: str) -> bool {
+        for e in self.enum_names { if e == n { return true } }
+        return false
+    }
+
+    fun const_idx(self, name: str) -> int32 {
+        var i = 0
+        while i < len(self.const_names) {
+            if self.const_names[i] == name { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    // -- scopes -----------------------------------------------------------
+
+    fun push_scope(var self) { push(self.scopes, Frame { names: [], vals: [] }) }
+    fun pop_scope(var self) { self.scopes = drop_last_frame(self.scopes) }
+
+    fun define(var self, name: str, v: Value) {
+        let top = len(self.scopes) - 1
+        push(self.scopes[top].names, name)
+        push(self.scopes[top].vals, v)
+    }
+
+    fun lookup(self, name: str) -> Option<Value> {
+        var i = len(self.scopes) - 1
+        while i >= 0 {
+            var j = len(self.scopes[i].names) - 1
+            while j >= 0 {
+                if self.scopes[i].names[j] == name { return Some(self.scopes[i].vals[j]) }
+                j = j - 1
+            }
+            i = i - 1
+        }
+        return None
+    }
+
+    fun assign_name(var self, name: str, v: Value) {
+        var i = len(self.scopes) - 1
+        while i >= 0 {
+            var j = len(self.scopes[i].names) - 1
+            while j >= 0 {
+                if self.scopes[i].names[j] == name { self.scopes[i].vals[j] = v
+                    return }
+                j = j - 1
+            }
+            i = i - 1
+        }
+    }
+
+    // -- program entry ----------------------------------------------------
+
+    fun run(var self) -> int32 {
+        self.collect()
+        self.eval_consts()
+        let ei = self.entry_idx()
+        if ei < 0 { return 0 }
+        self.call_func(ei, [])
+        match self.ctrl { Ctrl.CExit => { return self.exit_code }, _ => {} }
+        return 0
+    }
+
+    fun eval_consts(var self) {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.ConstDecl(n, ty, value, attrs, isp) => {
+                    self.push_scope()
+                    let v = self.eval(value)
+                    self.pop_scope()
+                    push(self.const_names, n)
+                    push(self.const_vals, v)
+                },
+                _ => {},
+            }
+        }
+    }
+
+    fun entry_idx(self) -> int32 {
+        // prefer a function carrying the #main attribute, else one named `main`.
+        var i = 0
+        while i < len(self.func_decls) {
+            for a in self.func_decls[i].attributes { if a.name == "main" { return i } }
+            i = i + 1
+        }
+        return self.func_idx("main")
+    }
+
+    fun stop(self) -> bool {
+        return match self.ctrl { Ctrl.CNone => false, _ => true }
+    }
+
+    fun exec_block_body(var self, body: Option<Block>) {
+        match body {
+            Some(b) => { self.exec_block(b) },
+            None => {},
+        }
+    }
+
+    // -- statements -------------------------------------------------------
+
+    fun exec_block(var self, b: Block) {
+        self.push_scope()
+        var i = 0
+        while i < len(b.stmts) {
+            if self.stop() { i = len(b.stmts) }
+            else {
+                self.exec_stmt(b.stmts[i])
+                i = i + 1
+            }
+        }
+        self.pop_scope()
+    }
+
+    fun exec_stmt(var self, s: Stmt) {
+        match s.kind {
+            StmtKind.ExprStmt(e) => { self.eval(e) },
+            StmtKind.VarDecl(kind, name, ty, init) => {
+                let v = self.eval(init)
+                self.define(name, v)
+            },
+            StmtKind.DestructDecl(kind, binding, ty, init) => {
+                let v = self.eval(init)
+                self.bind_destructure(binding, v)
+            },
+            StmtKind.Assign(target, value) => {
+                let v = self.eval(value)
+                self.assign_lvalue(target, v)
+            },
+            StmtKind.ReturnS(v) => {
+                var rv = Value.VUnit
+                match v { Some(ex) => { rv = self.eval(ex) }, None => {} }
+                if !self.stop() { self.ctrl = Ctrl.CReturn
+                    self.ctrl_val = rv }
+            },
+            StmtKind.IfS(cond, then, otherwise) => { self.exec_if(cond, then, otherwise) },
+            StmtKind.WhileS(cond, body) => { self.exec_while(cond, body) },
+            StmtKind.ForS(var_name, start, end, body, iter) => { self.exec_for(var_name, start, end, body, iter) },
+            StmtKind.BreakS => { self.ctrl = Ctrl.CBreak },
+            StmtKind.ContinueS => { self.ctrl = Ctrl.CContinue },
+        }
+    }
+
+    fun exec_if(var self, cond: Expr, then: Block, otherwise: Option<ElseTail>) {
+        if as_bool(self.eval(cond)) { self.exec_block(then)
+            return }
+        match otherwise {
+            Some(et) => { self.exec_else(et) },
+            None => {},
+        }
+    }
+
+    fun exec_else(var self, et: ElseTail) {
+        match et {
+            ElseTail.ElseBlock(b) => { self.exec_block(b) },
+            ElseTail.ElseIf(s2) => { self.exec_stmt(s2) },
+        }
+    }
+
+    fun exec_while(var self, cond: Expr, body: Block) {
+        while as_bool(self.eval(cond)) {
+            self.exec_block(body)
+            match self.ctrl {
+                Ctrl.CContinue => { self.ctrl = Ctrl.CNone },
+                Ctrl.CBreak => { self.ctrl = Ctrl.CNone
+                    return },
+                Ctrl.CNone => {},
+                _ => { return },
+            }
+        }
+    }
+
+    fun exec_for(var self, var_name: str, start: Option<Expr>, end: Option<Expr>, body: Block, iter: Option<Expr>) {
+        var items: [Value] = []
+        match iter {
+            Some(it) => { items = self.iter_items(self.eval(it)) },
+            None => {
+                var lo = 0
+                var hi = 0
+                match start { Some(s) => { lo = as_int(self.eval(s)) as int32 }, None => {} }
+                match end { Some(e) => { hi = as_int(self.eval(e)) as int32 }, None => {} }
+                var k = lo
+                while k < hi {
+                    push(items, Value.VInt(k as int64))
+                    k = k + 1
+                }
+            },
+        }
+        var i = 0
+        while i < len(items) {
+            if self.stop() { return }
+            self.push_scope()
+            self.define(var_name, items[i])
+            self.exec_block(body)
+            self.pop_scope()
+            match self.ctrl {
+                Ctrl.CContinue => { self.ctrl = Ctrl.CNone },
+                Ctrl.CBreak => { self.ctrl = Ctrl.CNone
+                    return },
+                Ctrl.CNone => {},
+                _ => { return },
+            }
+            i = i + 1
+        }
+    }
+
+    fun iter_items(self, v: Value) -> [Value] {
+        return match v {
+            Value.VList(xs) => xs,
+            Value.VMap(ks, vs) => ks,
+            _ => empty_values(),
+        }
+    }
+
+    // -- lvalues / destructuring -----------------------------------------
+
+    fun assign_lvalue(var self, target: Expr, v: Value) {
+        match target.kind {
+            ExprKind.Name(n) => { self.assign_name(n, v) },
+            ExprKind.Index(cont, idx) => {
+                let c = self.eval(cont)
+                let k = self.eval(idx)
+                self.assign_lvalue(cont, set_index(c, k, v))
+            },
+            ExprKind.GetField(tgt, field) => {
+                let c = self.eval(tgt)
+                self.assign_lvalue(tgt, set_field(c, field, v))
+            },
+            _ => {},
+        }
+    }
+
+    fun bind_destructure(var self, b: [BindElem], v: Value) {
+        let elems = match v { Value.VTuple(es) => es, _ => empty_values() }
+        var i = 0
+        while i < len(b) {
+            self.bind_elem(b[i], elems[i])
+            i = i + 1
+        }
+    }
+
+    fun bind_elem(var self, b: BindElem, v: Value) {
+        match b {
+            BindElem.BName(n) => { self.define(n, v) },
+            BindElem.BWild => {},
+            BindElem.BTuple(sub) => {
+                let elems = match v { Value.VTuple(es) => es, _ => empty_values() }
+                var i = 0
+                while i < len(sub) {
+                    self.bind_elem(sub[i], elems[i])
+                    i = i + 1
+                }
+            },
+        }
+    }
+
+    // -- expressions ------------------------------------------------------
+
+    fun eval(var self, e: Expr) -> Value {
+        if self.stop() { return Value.VUnit }
+        return match e.kind {
+            ExprKind.StrLit(s) => Value.VStr(s),
+            ExprKind.IntLit(v, suf, isc) => self.eval_int_lit(e, v, isc),
+            ExprKind.FloatLit(suf) => Value.VFloat(0.0),
+            ExprKind.BoolLit(b) => Value.VBool(b),
+            ExprKind.Name(n) => self.eval_name(e, n),
+            ExprKind.Unary(op, x) => self.eval_unary(e, op, x),
+            ExprKind.Binary(op, l, r) => self.eval_binary(e, op, l, r),
+            ExprKind.Call(c, args) => self.eval_call(e, c, args),
+            ExprKind.Cast(x, ty) => self.eval_cast(e, x),
+            ExprKind.GetField(tgt, field) => self.eval_getfield(e, tgt, field),
+            ExprKind.TupleLit(elems) => self.eval_tuple_lit(elems),
+            ExprKind.TupleIndex(tgt, idx) => self.eval_tuple_index(tgt, idx),
+            ExprKind.ListLit(elems) => self.eval_list_lit(elems),
+            ExprKind.MapLit(entries) => self.eval_map_lit(entries),
+            ExprKind.Index(tgt, idx) => self.eval_index(e, tgt, idx),
+            ExprKind.StructLit(name, fields) => self.eval_struct_lit(name, fields),
+            ExprKind.MatchE(scrut, arms) => self.eval_match(scrut, arms),
+            ExprKind.Try(inner) => self.eval_try(inner),
+            ExprKind.Lambda(params, ret, body) => self.eval_lambda(params, body),
+            _ => Value.VUnit,
+        }
+    }
+
+    // -- match / patterns -------------------------------------------------
+
+    fun eval_match(var self, scrut: Expr, arms: [MatchArm]) -> Value {
+        let sv = self.eval(scrut)
+        var i = 0
+        while i < len(arms) {
+            let arm = arms[i]
+            let mr = self.match_pattern(arm.pattern, sv)
+            if mr.ok {
+                self.push_scope()
+                var j = 0
+                while j < len(mr.names) {
+                    self.define(mr.names[j], mr.vals[j])
+                    j = j + 1
+                }
+                var guard_ok = true
+                match arm.guard { Some(g) => { guard_ok = as_bool(self.eval(g)) }, None => {} }
+                if guard_ok {
+                    let rv = self.eval_arm_body(arm.body)
+                    self.pop_scope()
+                    return rv
+                }
+                self.pop_scope()
+            }
+            i = i + 1
+        }
+        return Value.VUnit
+    }
+
+    fun eval_arm_body(var self, body: ExprOrBlock) -> Value {
+        return match body {
+            ExprOrBlock.EB_Expr(ex) => self.eval(ex),
+            ExprOrBlock.EB_Block(b) => self.eval_block_value(b),
+        }
+    }
+
+    // A block in value position (match-arm body): execute its statements; the
+    // value is the trailing expression statement (if control didn't escape).
+    fun eval_block_value(var self, b: Block) -> Value {
+        self.push_scope()
+        var result = Value.VUnit
+        let n = len(b.stmts)
+        var i = 0
+        while i < n {
+            if self.stop() { i = n }
+            else {
+                let s = b.stmts[i]
+                if i == n - 1 {
+                    match s.kind {
+                        StmtKind.ExprStmt(e) => { result = self.eval(e) },
+                        _ => { self.exec_stmt(s) },
+                    }
+                } else {
+                    self.exec_stmt(s)
+                }
+                i = i + 1
+            }
+        }
+        self.pop_scope()
+        return result
+    }
+
+    fun match_pattern(var self, p: Pattern, v: Value) -> MatchRes {
+        return match p.kind {
+            PatternKind.PWild => mr_ok(),
+            PatternKind.PBind(n) => self.match_bind_or_variant(n, v),
+            PatternKind.PLit(lit) => mr_bool(value_eq(self.eval(lit), v)),
+            PatternKind.PEnum(en, variant, elems, has_payload) => self.match_enum(variant, elems, v),
+            PatternKind.PTuple(elems) => self.match_seq(elems, tuple_elems(v)),
+            PatternKind.PStruct(name, fps) => self.match_struct(fps, v),
+            PatternKind.POr(alts) => self.match_or(alts, v),
+        }
+    }
+
+    // A bare name pattern is a no-payload variant match if it names a known
+    // nullary variant (the checker reclassifies these); otherwise a binding.
+    fun match_bind_or_variant(var self, n: str, v: Value) -> MatchRes {
+        match self.nullary_variant_enum(n) {
+            Some(en) => {
+                let info = enum_info(v)
+                if info.ok && info.names[0] == n { return mr_ok() }
+                return mr_fail()
+            },
+            None => {},
+        }
+        return mr_bind(n, v)
+    }
+
+    fun match_enum(var self, variant: str, elems: [Pattern], v: Value) -> MatchRes {
+        let info = enum_info(v)
+        if !info.ok { return mr_fail() }
+        if info.names[0] != variant { return mr_fail() }
+        return self.match_seq(elems, info.vals)
+    }
+
+    fun match_struct(var self, fps: [FieldPat], v: Value) -> MatchRes {
+        var res = mr_ok()
+        var i = 0
+        while i < len(fps) {
+            let fv = get_field(v, fps[i].name)
+            let sub = self.match_pattern(fps[i].pattern, fv)
+            if !sub.ok { return mr_fail() }
+            res = mr_merge(res, sub)
+            i = i + 1
+        }
+        return res
+    }
+
+    fun match_seq(var self, pats: [Pattern], vals: [Value]) -> MatchRes {
+        var res = mr_ok()
+        var i = 0
+        while i < len(pats) {
+            let sub = self.match_pattern(pats[i], vals[i])
+            if !sub.ok { return mr_fail() }
+            res = mr_merge(res, sub)
+            i = i + 1
+        }
+        return res
+    }
+
+    fun match_or(var self, alts: [Pattern], v: Value) -> MatchRes {
+        var i = 0
+        while i < len(alts) {
+            let sub = self.match_pattern(alts[i], v)
+            if sub.ok { return sub }
+            i = i + 1
+        }
+        return mr_fail()
+    }
+
+    fun eval_try(var self, inner: Expr) -> Value {
+        let v = self.eval(inner)
+        return match v {
+            Value.VEnum(en, vr, pl) => self.try_unwrap(v, vr, pl),
+            _ => v,
+        }
+    }
+
+    fun try_unwrap(var self, v: Value, vr: str, pl: [Value]) -> Value {
+        if vr == "Some" || vr == "Ok" { return pl[0] }
+        // None / Err: propagate the same carrier as the function's result
+        self.ctrl = Ctrl.CReturn
+        self.ctrl_val = v
+        return Value.VUnit
+    }
+
+    fun eval_int_lit(self, e: Expr, v: int64, isc: bool) -> Value {
+        if isc { return Value.VChar(v) }
+        return Value.VInt(wrap_opt(v, self.resolved_of(e.id)))
+    }
+
+    fun eval_name(var self, e: Expr, n: str) -> Value {
+        match self.lookup(n) {
+            Some(v) => { return v },
+            None => {},
+        }
+        let ci = self.const_idx(n)
+        if ci >= 0 { return self.const_vals[ci] }
+        // a bare no-payload enum variant, e.g. `None` or `North`
+        match self.nullary_variant_enum(n) {
+            Some(en) => { return Value.VEnum(en, n, []) },
+            None => {},
+        }
+        // a top-level function used as a value (fun-as-value)
+        let fi = self.func_idx(n)
+        if fi >= 0 { return Value.VClosure(empty_params(), eb_dummy(), [], [], n, true) }
+        return Value.VUnit
+    }
+
+    fun nullary_variant_enum(self, name: str) -> Option<str> {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.EnumDecl(en, variants, attrs, tps, isp) => {
+                    for v in variants { if v.name == name && len(v.payload) == 0 { return Some(en) } }
+                },
+                _ => {},
+            }
+        }
+        return None
+    }
+
+    fun eval_unary(var self, e: Expr, op: str, x: Expr) -> Value {
+        let v = self.eval(x)
+        if op == "!" { return Value.VBool(!as_bool(v)) }
+        if op == "-" {
+            match v { Value.VFloat(f) => { return Value.VFloat(-f) }, _ => {} }
+            return Value.VInt(wrap_opt(-as_int(v), self.resolved_of(e.id)))
+        }
+        // "~"
+        return Value.VInt(wrap_opt(~as_int(v), self.resolved_of(e.id)))
+    }
+
+    fun eval_binary(var self, e: Expr, op: str, l: Expr, r: Expr) -> Value {
+        if op == "&&" {
+            if !as_bool(self.eval(l)) { return Value.VBool(false) }
+            return Value.VBool(as_bool(self.eval(r)))
+        }
+        if op == "||" {
+            if as_bool(self.eval(l)) { return Value.VBool(true) }
+            return Value.VBool(as_bool(self.eval(r)))
+        }
+        let lv = self.eval(l)
+        let rv = self.eval(r)
+        let rt = self.resolved_of(e.id)
+        // function composition: `f >> g` when the left operand is callable
+        if op == ">>" && is_callable(lv) { return compose_values(lv, rv) }
+        // operator overloading: dispatch to a trait method for user types
+        if is_struct_or_enum(lv) { return self.eval_op_overload(op, lv, rv) }
+        // string concatenation
+        if is_vstr(lv) { return Value.VStr(as_str(lv) + as_str(rv)) }
+        // comparisons -> bool
+        if op == "==" { return Value.VBool(value_eq(lv, rv)) }
+        if op == "!=" { return Value.VBool(!value_eq(lv, rv)) }
+        if is_cmp_op(op) { return Value.VBool(self.compare(op, lv, rv)) }
+        // float arithmetic
+        var is_float_op = false
+        match lv { Value.VFloat(f) => { is_float_op = true }, _ => {} }
+        if is_float_op {
+            let a = as_float(lv)
+            let b = as_float(rv)
+            if op == "+" { return Value.VFloat(a + b) }
+            if op == "-" { return Value.VFloat(a - b) }
+            if op == "*" { return Value.VFloat(a * b) }
+            if op == "/" { return Value.VFloat(a / b) }
+            if op == "%" { return Value.VFloat(a % b) }
+        }
+        // integer arithmetic / bitwise / shift
+        let a = as_int(lv)
+        let b = as_int(rv)
+        var res: int64 = 0
+        if op == "+" { res = a + b }
+        else if op == "-" { res = a - b }
+        else if op == "*" { res = a * b }
+        else if op == "/" { res = idiv(a, b) }
+        else if op == "%" { res = imod(a, b) }
+        else if op == "&" { res = a & b }
+        else if op == "|" { res = a | b }
+        else if op == "^" { res = a ^ b }
+        else if op == "<<" { res = a << shift_count(b, rt) }
+        else if op == ">>" { res = shr_typed(a, b, rt) }
+        return Value.VInt(wrap_opt(res, rt))
+    }
+
+    fun compare(self, op: str, lv: Value, rv: Value) -> bool {
+        var c = 0
+        match lv {
+            Value.VFloat(f) => { c = fcmp(as_float(lv), as_float(rv)) },
+            Value.VStr(s) => { c = scmp(as_str(lv), as_str(rv)) },
+            Value.VChar(ch) => { c = icmp(as_int(lv), as_int(rv)) },
+            _ => { c = icmp(as_int(lv), as_int(rv)) },
+        }
+        if op == "<" { return c < 0 }
+        if op == "<=" { return c <= 0 }
+        if op == ">" { return c > 0 }
+        return c >= 0
+    }
+
+    fun eval_cast(var self, e: Expr, x: Expr) -> Value {
+        let v = self.eval(x)
+        let src = self.resolved_of(x.id)
+        let tgt = self.resolved_of(e.id)
+        return cast_value(v, src, tgt)
+    }
+
+    fun eval_getfield(var self, e: Expr, tgt: Expr, field: str) -> Value {
+        // `Enum.Variant` (no-payload) when the target names an enum type
+        match tgt.kind {
+            ExprKind.Name(tn) => {
+                if self.is_enum_name(tn) {
+                    match self.lookup(tn) { Some(x) => {}, None => { return Value.VEnum(tn, field, []) } }
+                }
+            },
+            _ => {},
+        }
+        let c = self.eval(tgt)
+        return get_field(c, field)
+    }
+
+    fun eval_tuple_lit(var self, elems: [Expr]) -> Value {
+        var vs: [Value] = []
+        for el in elems { push(vs, self.eval(el)) }
+        return Value.VTuple(vs)
+    }
+
+    fun eval_tuple_index(var self, tgt: Expr, idx: int64) -> Value {
+        let c = self.eval(tgt)
+        return match c { Value.VTuple(es) => es[idx as int32], _ => Value.VUnit }
+    }
+
+    fun eval_list_lit(var self, elems: [Expr]) -> Value {
+        var vs: [Value] = []
+        for el in elems { push(vs, self.eval(el)) }
+        return Value.VList(vs)
+    }
+
+    fun eval_struct_lit(var self, name: str, fields: [FieldInit]) -> Value {
+        var names: [str] = []
+        var vals: [Value] = []
+        for f in fields {
+            push(names, f.name)
+            push(vals, self.eval(f.value))
+        }
+        return Value.VStruct(name, names, vals)
+    }
+
+    fun eval_map_lit(var self, entries: [MapEntry]) -> Value {
+        var ks: [Value] = []
+        var vs: [Value] = []
+        for en in entries {
+            push(ks, self.eval(en.key))
+            push(vs, self.eval(en.value))
+        }
+        return Value.VMap(ks, vs)
+    }
+
+    fun eval_index(var self, e: Expr, tgt: Expr, idx: Expr) -> Value {
+        let c = self.eval(tgt)
+        let k = self.eval(idx)
+        return index_get(c, k)
+    }
+
+    fun resolved_of(self, id: int32) -> Option<Type> {
+        return get(self.resolved, id)
+    }
+
+    // -- calls ------------------------------------------------------------
+
+    fun eval_call(var self, e: Expr, callee: Expr, args: [Expr]) -> Value {
+        // partial application: `f(a, _)` builds a closure awaiting the holes
+        if args_have_hole(args) { return self.eval_partial(callee, args) }
+        match callee.kind {
+            ExprKind.Name(nm) => { return self.eval_name_call(e, nm, args) },
+            ExprKind.GetField(tgt, field) => { return self.eval_getfield_call(e, tgt, field, args) },
+            _ => {},
+        }
+        // indirect call on an arbitrary closure-valued expression
+        return self.call_value(self.eval(callee), self.eval_args(args))
+    }
+
+    fun eval_partial(var self, callee: Expr, args: [Expr]) -> Value {
+        let base = self.eval(callee)
+        var slots: [Value] = []
+        var holes: [bool] = []
+        for a in args {
+            match a.kind {
+                ExprKind.Hole => {
+                    push(slots, Value.VUnit)
+                    push(holes, true)
+                },
+                _ => {
+                    push(slots, self.eval(a))
+                    push(holes, false)
+                },
+            }
+        }
+        return Value.VPartial(base, slots, holes)
+    }
+
+    fun eval_getfield_call(var self, e: Expr, tgt: Expr, field: str, args: [Expr]) -> Value {
+        // `Enum.Variant(args)` constructor when the target names an enum type
+        match tgt.kind {
+            ExprKind.Name(tn) => {
+                if self.is_enum_name(tn) && !self.has_local(tn) {
+                    return Value.VEnum(tn, field, self.eval_args(args))
+                }
+            },
+            _ => {},
+        }
+        // otherwise a method call `recv.method(args)`
+        return self.eval_method_call(e, tgt, field, args)
+    }
+
+    fun eval_method_call(var self, e: Expr, recv: Expr, method: str, args: [Expr]) -> Value {
+        let key = self.recv_key(recv)
+        let fi = self.func_idx(format("{}.{}", key, method))
+        if fi >= 0 {
+            let argv = self.eval_args(args)
+            if self.method_is_var_self(fi) {
+                let rv0 = self.eval(recv)
+                let (rv, final_self) = self.call_method(fi, rv0, argv)
+                self.assign_lvalue(recv, final_self)
+                return rv
+            }
+            let (rv, fs) = self.call_method(fi, self.eval(recv), argv)
+            return rv
+        }
+        // not a method: a struct field holding a closure, called indirectly
+        let fv = get_field(self.eval(recv), method)
+        return self.call_value(fv, self.eval_args(args))
+    }
+
+    // The runtime method-dispatch key for a receiver: its checker-resolved type
+    // key when known (needed for builtins like int), else the value's own tag.
+    fun recv_key(self, recv: Expr) -> str {
+        match self.resolved_of(recv.id) {
+            Some(t) => {
+                let k = type_key_of(t)
+                if k != "" { return k }
+            },
+            None => {},
+        }
+        return value_key(self.eval_pure(recv))
+    }
+
+    fun eval_pure(self, recv: Expr) -> Value {
+        // a non-mutating receiver evaluation for key derivation only
+        return match recv.kind {
+            ExprKind.Name(n) => self.lookup_or_unit(n),
+            _ => Value.VUnit,
+        }
+    }
+
+    fun lookup_or_unit(self, n: str) -> Value {
+        match self.lookup(n) { Some(v) => { return v }, None => {} }
+        return Value.VUnit
+    }
+
+    fun method_is_var_self(self, fi: int32) -> bool {
+        return match self.func_decls[fi].receiver { Some(r) => r == "var self", None => false }
+    }
+
+    fun call_method(var self, fi: int32, recv_val: Value, argv: [Value]) -> (Value, Value) {
+        let fd = self.func_decls[fi]
+        let saved = self.scopes
+        self.scopes = []
+        self.push_scope()
+        self.define("self", recv_val)
+        var i = 0
+        while i < len(fd.params) {
+            self.define(fd.params[i].name, argv[i])
+            i = i + 1
+        }
+        self.exec_block_body(fd.body)
+        let rv = self.take_return()
+        let final_self = self.lookup_or_unit("self")
+        self.scopes = saved
+        return rv, final_self
+    }
+
+    fun has_method_body(self, key: str, name: str) -> bool {
+        let fi = self.func_idx(format("{}.{}", key, name))
+        if fi < 0 { return false }
+        return match self.func_decls[fi].body { Some(b) => true, None => false }
+    }
+
+    // Dispatch a binary operator on a user-defined struct/enum to its trait
+    // method. `==`/`!=` fall back to structural equality for `#derive(Eq)`
+    // types, whose synthesized `eq` has no body.
+    fun eval_op_overload(var self, op: str, lv: Value, rv: Value) -> Value {
+        let key = value_key(lv)
+        if op == "==" || op == "!=" {
+            var eq = false
+            if self.has_method_body(key, "eq") {
+                let (rr, fs) = self.call_method(self.func_idx(format("{}.eq", key)), lv, [rv])
+                eq = as_bool(rr)
+            } else {
+                eq = value_eq(lv, rv)
+            }
+            if op == "==" { return Value.VBool(eq) }
+            return Value.VBool(!eq)
+        }
+        if is_cmp_op(op) {
+            let (rr, fs) = self.call_method(self.func_idx(format("{}.cmp", key)), lv, [rv])
+            return Value.VBool(cmp_to_bool(op, as_int(rr)))
+        }
+        let (rr, fs) = self.call_method(self.func_idx(format("{}.{}", key, arith_method(op))), lv, [rv])
+        return rr
+    }
+
+    fun eval_format(var self, args: [Expr]) -> Value {
+        let fmt = as_str(self.eval(args[0]))
+        var parts: [str] = []
+        var i = 1
+        while i < len(args) {
+            push(parts, format_value(self.eval(args[i])))
+            i = i + 1
+        }
+        return Value.VStr(render_format(fmt, parts))
+    }
+
+    fun has_local(self, n: str) -> bool {
+        match self.lookup(n) { Some(x) => { return true }, None => {} }
+        return false
+    }
+
+    fun eval_args(var self, args: [Expr]) -> [Value] {
+        var argv: [Value] = []
+        for a in args { push(argv, self.eval(a)) }
+        return argv
+    }
+
+    fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
+        if nm == "print" {
+            let v = self.eval(args[0])
+            self.emit(format_value(v))
+            self.emit("\n")
+            return Value.VUnit
+        }
+        if nm == "__write" {
+            let fd = as_int(self.eval(args[0])) as int32
+            let s = as_str(self.eval(args[1]))
+            write(fd, s)
+            return Value.VUnit
+        }
+        if nm == "__exit" {
+            let code = as_int(self.eval(args[0])) as int32
+            self.ctrl = Ctrl.CExit
+            self.exit_code = code
+            return Value.VUnit
+        }
+        if nm == "assert" {
+            if !as_bool(self.eval(args[0])) { self.halt_panic() }
+            return Value.VUnit
+        }
+        if nm == "panic" || nm == "unreachable" { self.halt_panic()
+            return Value.VUnit }
+        if nm == "len" { return Value.VInt(value_len(self.eval(args[0]))) }
+        if nm == "push" {
+            let cur = self.eval(args[0])
+            let v = self.eval(args[1])
+            self.assign_lvalue(args[0], list_push(cur, v))
+            return Value.VUnit
+        }
+        if nm == "pop" {
+            let cur = self.eval(args[0])
+            let last = list_last(cur)
+            self.assign_lvalue(args[0], list_drop_last(cur))
+            return last
+        }
+        if nm == "contains" {
+            let m = self.eval(args[0])
+            return Value.VBool(map_has(m, self.eval(args[1])))
+        }
+        if nm == "remove" {
+            let m = self.eval(args[0])
+            self.assign_lvalue(args[0], map_remove(m, self.eval(args[1])))
+            return Value.VUnit
+        }
+        if nm == "keys" { return map_keys(self.eval(args[0])) }
+        if nm == "chars" { return decode_chars(as_str(self.eval(args[0]))) }
+        if nm == "format" { return self.eval_format(args) }
+        if nm == "StringBuilder" { return Value.VSB(empty_bytes()) }
+        if nm == "append" {
+            let cur = self.eval(args[0])
+            self.assign_lvalue(args[0], sb_append_str(cur, as_str(self.eval(args[1]))))
+            return Value.VUnit
+        }
+        if nm == "append_byte" {
+            let cur = self.eval(args[0])
+            self.assign_lvalue(args[0], sb_append_byte(cur, as_int(self.eval(args[1]))))
+            return Value.VUnit
+        }
+        if nm == "build" { return Value.VStr(sb_build(self.eval(args[0]))) }
+        // a bare enum constructor with payload, e.g. `Some(x)`, `Ok(x)`
+        match self.variant_enum(nm) {
+            Some(en) => { return Value.VEnum(en, nm, self.eval_args(args)) },
+            None => {},
+        }
+        let fi = self.func_idx(nm)
+        if fi >= 0 { return self.call_func(fi, self.eval_args(args)) }
+        // indirect call: `f(args)` where f is a closure value
+        match self.lookup(nm) {
+            Some(v) => { return self.call_value(v, self.eval_args(args)) },
+            None => {},
+        }
+        return Value.VUnit
+    }
+
+    fun variant_enum(self, name: str) -> Option<str> {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.EnumDecl(en, variants, attrs, tps, isp) => {
+                    for v in variants { if v.name == name { return Some(en) } }
+                },
+                _ => {},
+            }
+        }
+        return None
+    }
+
+    fun halt_panic(var self) {
+        self.ctrl = Ctrl.CExit
+        self.exit_code = 1
+    }
+
+    fun call_value(var self, v: Value, argv: [Value]) -> Value {
+        return match v {
+            Value.VClosure(ps, body, cnames, cvals, fname, isfunc) => self.call_closure(ps, body, cnames, cvals, fname, isfunc, argv),
+            Value.VCompose(fs) => self.call_compose(fs, argv),
+            Value.VPartial(base, slots, holes) => self.call_partial(base, slots, holes, argv),
+            _ => Value.VUnit,
+        }
+    }
+
+    // Apply a composition `f0 >> f1 >> …` left-to-right to a single argument.
+    fun call_compose(var self, fs: [Value], argv: [Value]) -> Value {
+        var v = argv[0]
+        for f in fs { v = self.call_value(f, [v]) }
+        return v
+    }
+
+    // Fill a partial application's holes with the supplied args, in order.
+    fun call_partial(var self, base: Value, slots: [Value], holes: [bool], argv: [Value]) -> Value {
+        var full: [Value] = []
+        var hi = 0
+        var i = 0
+        while i < len(slots) {
+            if holes[i] {
+                push(full, argv[hi])
+                hi = hi + 1
+            } else {
+                push(full, slots[i])
+            }
+            i = i + 1
+        }
+        return self.call_value(base, full)
+    }
+
+    // A lambda captures every currently-visible local by value (a snapshot).
+    // Over-capturing is harmless: unreferenced names are simply never read, and
+    // by-value copies give the deep-immutability semantics (D14/D48).
+    fun eval_lambda(self, params: [Param], body: ExprOrBlock) -> Value {
+        var cnames: [str] = []
+        var cvals: [Value] = []
+        var i = 0
+        while i < len(self.scopes) {
+            var j = 0
+            while j < len(self.scopes[i].names) {
+                push(cnames, self.scopes[i].names[j])
+                push(cvals, self.scopes[i].vals[j])
+                j = j + 1
+            }
+            i = i + 1
+        }
+        return Value.VClosure(params, body, cnames, cvals, "", false)
+    }
+
+    fun call_closure(var self, ps: [Param], body: ExprOrBlock, cnames: [str], cvals: [Value], fname: str, isfunc: bool, argv: [Value]) -> Value {
+        if isfunc {
+            let fi = self.func_idx(fname)
+            if fi >= 0 { return self.call_func(fi, argv) }
+            return Value.VUnit
+        }
+        let saved = self.scopes
+        self.scopes = []
+        self.push_scope()
+        var i = 0
+        while i < len(cnames) {
+            self.define(cnames[i], cvals[i])
+            i = i + 1
+        }
+        var k = 0
+        while k < len(ps) {
+            self.define(ps[k].name, argv[k])
+            k = k + 1
+        }
+        var rv = Value.VUnit
+        match body {
+            ExprOrBlock.EB_Expr(ex) => { rv = self.eval(ex) },
+            ExprOrBlock.EB_Block(b) => {
+                self.exec_block(b)
+                rv = self.take_return()
+            },
+        }
+        self.scopes = saved
+        return rv
+    }
+
+    fun call_func(var self, fi: int32, argv: [Value]) -> Value {
+        let fd = self.func_decls[fi]
+        let saved = self.scopes
+        self.scopes = []
+        self.push_scope()
+        var i = 0
+        while i < len(fd.params) {
+            self.define(fd.params[i].name, argv[i])
+            i = i + 1
+        }
+        self.exec_block_body(fd.body)
+        let rv = self.take_return()
+        self.scopes = saved
+        return rv
+    }
+
+    // Consume a pending `return`/`?` control signal, yielding its value. Leaves
+    // `exit` pending so it propagates out to `run`; clears stray break/continue.
+    fun take_return(var self) -> Value {
+        return match self.ctrl {
+            Ctrl.CReturn => {
+                self.ctrl = Ctrl.CNone
+                let v = self.ctrl_val
+                self.ctrl_val = Value.VUnit
+                v
+            },
+            Ctrl.CExit => Value.VUnit,
+            _ => {
+                self.ctrl = Ctrl.CNone
+                Value.VUnit
+            },
+        }
+    }
+
+    // -- output -----------------------------------------------------------
+
+    fun emit(self, s: str) {
+        write(1, s)
+    }
+}
+
+// =========================================================================
+// Free helpers (value coercions, arithmetic, formatting)
+// =========================================================================
+
+fun format_value(v: Value) -> str {
+    return match v {
+        Value.VStr(s) => s,
+        Value.VBool(b) => match b { true => "true", false => "false" },
+        Value.VInt(n) => format("{}", n),
+        Value.VFloat(f) => format("{}", f),
+        Value.VChar(c) => cp_utf8(c as int32),
+        _ => "",
+    }
+}
+
+fun as_int(v: Value) -> int64 {
+    return match v {
+        Value.VInt(n) => n,
+        Value.VChar(c) => c,
+        Value.VBool(b) => match b { true => 1, false => 0 },
+        _ => 0,
+    }
+}
+
+fun as_float(v: Value) -> float64 {
+    return match v {
+        Value.VFloat(f) => f,
+        Value.VInt(n) => n as float64,
+        _ => 0.0,
+    }
+}
+
+fun as_bool(v: Value) -> bool {
+    return match v { Value.VBool(b) => b, _ => false }
+}
+
+fun as_str(v: Value) -> str {
+    return match v { Value.VStr(s) => s, _ => "" }
+}
+
+fun is_vstr(v: Value) -> bool {
+    return match v { Value.VStr(s) => true, _ => false }
+}
+
+fun is_callable(v: Value) -> bool {
+    return match v {
+        Value.VClosure(ps, b, cn, cv, fn, isf) => true,
+        Value.VCompose(fs) => true,
+        Value.VPartial(base, slots, holes) => true,
+        _ => false,
+    }
+}
+
+// `f >> g`: chain the right callable after the left, flattening nested chains.
+fun compose_values(lv: Value, rv: Value) -> Value {
+    return match lv {
+        Value.VCompose(fs) => Value.VCompose(append_value(fs, rv)),
+        _ => Value.VCompose([lv, rv]),
+    }
+}
+
+fun append_value(xs: [Value], v: Value) -> [Value] {
+    var out: [Value] = []
+    for x in xs { push(out, x) }
+    push(out, v)
+    return out
+}
+
+fun is_struct_or_enum(v: Value) -> bool {
+    return match v {
+        Value.VStruct(n, fns, fvs) => true,
+        Value.VEnum(en, vt, p) => true,
+        _ => false,
+    }
+}
+
+fun value_key(v: Value) -> str {
+    return match v {
+        Value.VStruct(n, fns, fvs) => n,
+        Value.VEnum(en, vt, p) => en,
+        Value.VStr(s) => "str",
+        Value.VBool(b) => "bool",
+        Value.VSB(b) => "StringBuilder",
+        Value.VChar(c) => "char",
+        Value.VInt(i) => "int32",
+        _ => "",
+    }
+}
+
+fun type_key_of(t: Type) -> str {
+    return match t {
+        Type.TStruct(n, a) => n,
+        Type.TEnum(n, a) => n,
+        Type.TInt(w, s) => int_type_name_i(w, s),
+        Type.TBool => "bool",
+        Type.TStr => "str",
+        Type.TSB => "StringBuilder",
+        _ => "",
+    }
+}
+
+fun int_type_name_i(w: int32, signed: bool) -> str {
+    if signed { return format("int{}", w) }
+    return format("uint{}", w)
+}
+
+// Map a written type name (incl. aliases) to the canonical key `type_key_of`
+// produces, so `impl int { … }` registers under the same key `int` resolves to.
+fun canon_type_name(n: str) -> str {
+    if n == "int" { return "int32" }
+    if n == "uint" { return "uint32" }
+    if n == "byte" { return "uint8" }
+    if n == "float" { return "float32" }
+    return n
+}
+
+fun cmp_to_bool(op: str, c: int64) -> bool {
+    if op == "<" { return c < 0 }
+    if op == "<=" { return c <= 0 }
+    if op == ">" { return c > 0 }
+    return c >= 0
+}
+
+fun arith_method(op: str) -> str {
+    if op == "+" { return "add" }
+    if op == "-" { return "sub" }
+    if op == "*" { return "mul" }
+    if op == "/" { return "div" }
+    return "rem"
+}
+
+fun args_have_hole(args: [Expr]) -> bool {
+    for a in args {
+        match a.kind { ExprKind.Hole => { return true }, _ => {} }
+    }
+    return false
+}
+
+fun str_concat(a: str, b: str) -> str { return a + b }
+
+fun is_cmp_op(op: str) -> bool {
+    return op == "<" || op == "<=" || op == ">" || op == ">="
+}
+
+fun icmp(a: int64, b: int64) -> int32 {
+    if a < b { return -1 }
+    if a > b { return 1 }
+    return 0
+}
+
+fun fcmp(a: float64, b: float64) -> int32 {
+    if a < b { return -1 }
+    if a > b { return 1 }
+    return 0
+}
+
+fun scmp(a: str, b: str) -> int32 {
+    let la = len(a)
+    let lb = len(b)
+    var i = 0
+    while i < la && i < lb {
+        let ca = a[i] as int32
+        let cb = b[i] as int32
+        if ca < cb { return -1 }
+        if ca > cb { return 1 }
+        i = i + 1
+    }
+    if la < lb { return -1 }
+    if la > lb { return 1 }
+    return 0
+}
+
+fun idiv(a: int64, b: int64) -> int64 {
+    if b == 0 { return 0 }
+    var q = iabs(a) / iabs(b)
+    if (a < 0) != (b < 0) { return -q }
+    return q
+}
+
+fun imod(a: int64, b: int64) -> int64 {
+    if b == 0 { return 0 }
+    return a - idiv(a, b) * b
+}
+
+fun iabs(a: int64) -> int64 {
+    if a < 0 { return -a }
+    return a
+}
+
+fun width_of(rt: Option<Type>) -> int32 {
+    return match rt { Some(t) => match t { Type.TInt(w, s) => w, _ => 0 }, None => 0 }
+}
+
+fun shift_count(b: int64, rt: Option<Type>) -> int64 {
+    let w = width_of(rt)
+    if w > 0 { return b & ((w as int64) - 1) }
+    return b
+}
+
+fun shr_typed(a: int64, b: int64, rt: Option<Type>) -> int64 {
+    let count = shift_count(b, rt)
+    let aw = wrap_opt(a, rt)
+    return wrap_opt(aw >> count, rt)
+}
+
+fun wrap_opt(v: int64, rt: Option<Type>) -> int64 {
+    return match rt {
+        Some(t) => match t { Type.TInt(w, s) => wrap_int_w(v, w, s), _ => v },
+        None => v,
+    }
+}
+
+fun wrap_int_w(value: int64, w: int32, signed: bool) -> int64 {
+    if w >= 64 { return value }
+    var mask: int64 = 1
+    mask = (mask << w) - 1
+    var m = value & mask
+    var signbit: int64 = 1
+    signbit = signbit << (w - 1)
+    if signed && (m & signbit) != 0 {
+        var span: int64 = 1
+        span = span << w
+        m = m - span
+    }
+    return m
+}
+
+fun cast_value(v: Value, src: Option<Type>, tgt: Option<Type>) -> Value {
+    var t = Type.TBool
+    var has = false
+    match tgt { Some(tt) => { t = tt
+        has = true }, None => {} }
+    if !has { return v }
+    match t {
+        Type.TChar => { return Value.VChar(as_int(v)) },
+        Type.TFloat(w) => {
+            let f = as_float(v)
+            if w == 32 { return Value.VFloat((f as float32) as float64) }
+            return Value.VFloat(f)
+        },
+        Type.TInt(w, s) => {
+            var iv: int64 = 0
+            match v { Value.VFloat(f) => { iv = f as int64 }, _ => { iv = as_int(v) } }
+            return Value.VInt(wrap_int_w(iv, w, s))
+        },
+        _ => {},
+    }
+    return v
+}
+
+fun empty_values() -> [Value] {
+    let x: [Value] = []
+    return x
+}
+
+fun empty_params() -> [Param] {
+    let x: [Param] = []
+    return x
+}
+
+fun eb_dummy() -> ExprOrBlock {
+    return ExprOrBlock.EB_Block(Block { line: 0, col: 0, stmts: [] })
+}
+
+fun value_len(v: Value) -> int64 {
+    return match v {
+        Value.VList(xs) => len(xs) as int64,
+        Value.VMap(ks, vs) => len(ks) as int64,
+        Value.VStr(s) => len(s) as int64,
+        Value.VSB(b) => len(b) as int64,
+        _ => 0,
+    }
+}
+
+fun list_push(c: Value, v: Value) -> Value {
+    return match c {
+        Value.VList(xs) => list_with_appended(xs, v),
+        _ => c,
+    }
+}
+
+fun list_with_appended(xs: [Value], v: Value) -> Value {
+    var out = xs
+    push(out, v)
+    return Value.VList(out)
+}
+
+fun list_last(c: Value) -> Value {
+    return match c {
+        Value.VList(xs) => xs[len(xs) - 1],
+        _ => Value.VUnit,
+    }
+}
+
+fun list_drop_last(c: Value) -> Value {
+    return match c {
+        Value.VList(xs) => list_without_last(xs),
+        _ => c,
+    }
+}
+
+fun list_without_last(xs: [Value]) -> Value {
+    var out: [Value] = []
+    var i = 0
+    while i < len(xs) - 1 {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return Value.VList(out)
+}
+
+fun map_has(c: Value, k: Value) -> bool {
+    return match c {
+        Value.VMap(ks, vs) => keys_contain(ks, k),
+        _ => false,
+    }
+}
+
+fun keys_contain(ks: [Value], k: Value) -> bool {
+    var i = 0
+    while i < len(ks) {
+        if value_eq(ks[i], k) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fun map_remove(c: Value, k: Value) -> Value {
+    return match c {
+        Value.VMap(ks, vs) => map_without(ks, vs, k),
+        _ => c,
+    }
+}
+
+fun map_without(ks: [Value], vs: [Value], k: Value) -> Value {
+    var nks: [Value] = []
+    var nvs: [Value] = []
+    var i = 0
+    while i < len(ks) {
+        if !value_eq(ks[i], k) {
+            push(nks, ks[i])
+            push(nvs, vs[i])
+        }
+        i = i + 1
+    }
+    return Value.VMap(nks, nvs)
+}
+
+fun map_keys(c: Value) -> Value {
+    return match c {
+        Value.VMap(ks, vs) => Value.VList(ks),
+        _ => Value.VList(empty_values()),
+    }
+}
+
+fun decode_chars(s: str) -> Value {
+    var out: [Value] = []
+    for ch in chars(s) {
+        push(out, Value.VChar(ch as int64))
+    }
+    return Value.VList(out)
+}
+
+fun empty_bytes() -> [int64] {
+    let x: [int64] = []
+    return x
+}
+
+fun sb_append_str(c: Value, s: str) -> Value {
+    return match c {
+        Value.VSB(b) => sb_with_str(b, s),
+        _ => c,
+    }
+}
+
+fun sb_with_str(b: [int64], s: str) -> Value {
+    var out = b
+    var i = 0
+    while i < len(s) {
+        push(out, s[i] as int64)
+        i = i + 1
+    }
+    return Value.VSB(out)
+}
+
+fun sb_append_byte(c: Value, byte: int64) -> Value {
+    return match c {
+        Value.VSB(b) => sb_with_byte(b, byte),
+        _ => c,
+    }
+}
+
+fun sb_with_byte(b: [int64], byte: int64) -> Value {
+    var out = b
+    push(out, byte & 255)
+    return Value.VSB(out)
+}
+
+fun sb_build(c: Value) -> str {
+    return match c {
+        Value.VSB(b) => bytes_to_str(b),
+        _ => "",
+    }
+}
+
+fun bytes_to_str(b: [int64]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(b) {
+        append_byte(sb, b[i] as uint8)
+        i = i + 1
+    }
+    return build(sb)
+}
+
+fun render_format(fmt: str, parts: [str]) -> str {
+    var sb = StringBuilder()
+    let n = len(fmt)
+    var i = 0
+    var arg = 0
+    while i < n {
+        let c = fmt[i] as int32
+        if c == 123 && i + 1 < n && (fmt[i + 1] as int32) == 123 {
+            append_byte(sb, 123)
+            i = i + 2
+        } else if c == 125 && i + 1 < n && (fmt[i + 1] as int32) == 125 {
+            append_byte(sb, 125)
+            i = i + 2
+        } else if c == 123 && i + 1 < n && (fmt[i + 1] as int32) == 125 {
+            append(sb, parts[arg])
+            arg = arg + 1
+            i = i + 2
+        } else {
+            append_byte(sb, fmt[i])
+            i = i + 1
+        }
+    }
+    return build(sb)
+}
+
+fun mr_ok() -> MatchRes { return MatchRes { ok: true, names: [], vals: [] } }
+fun mr_fail() -> MatchRes { return MatchRes { ok: false, names: [], vals: [] } }
+fun mr_bool(b: bool) -> MatchRes { return MatchRes { ok: b, names: [], vals: [] } }
+fun mr_bind(n: str, v: Value) -> MatchRes {
+    var names: [str] = []
+    var vals: [Value] = []
+    push(names, n)
+    push(vals, v)
+    return MatchRes { ok: true, names: names, vals: vals }
+}
+fun mr_merge(a: MatchRes, b: MatchRes) -> MatchRes {
+    var names = a.names
+    var vals = a.vals
+    var i = 0
+    while i < len(b.names) {
+        push(names, b.names[i])
+        push(vals, b.vals[i])
+        i = i + 1
+    }
+    return MatchRes { ok: true, names: names, vals: vals }
+}
+
+struct EnumInfo { ok: bool, names: [str], vals: [Value] }
+
+fun enum_info(v: Value) -> EnumInfo {
+    return match v {
+        Value.VEnum(en, vr, pl) => mk_enum_info(vr, pl),
+        _ => EnumInfo { ok: false, names: [], vals: [] },
+    }
+}
+
+fun mk_enum_info(vr: str, pl: [Value]) -> EnumInfo {
+    var names: [str] = []
+    push(names, vr)
+    return EnumInfo { ok: true, names: names, vals: pl }
+}
+
+fun tuple_elems(v: Value) -> [Value] {
+    return match v { Value.VTuple(es) => es, _ => empty_values() }
+}
+
+fun value_eq(a: Value, b: Value) -> bool {
+    return match a {
+        Value.VInt(x) => icmp(x, as_int(b)) == 0,
+        Value.VChar(x) => match b { Value.VChar(y) => x == y, Value.VInt(y) => x == y, _ => false },
+        Value.VBool(x) => match b { Value.VBool(y) => x == y, _ => false },
+        Value.VStr(x) => match b { Value.VStr(y) => x == y, _ => false },
+        Value.VFloat(x) => match b { Value.VFloat(y) => x == y, _ => false },
+        Value.VUnit => match b { Value.VUnit => true, _ => false },
+        Value.VStruct(n, fns, fvs) => match b { Value.VStruct(n2, fns2, fvs2) => n == n2 && values_eq(fvs, fvs2), _ => false },
+        Value.VTuple(es) => match b { Value.VTuple(es2) => values_eq(es, es2), _ => false },
+        Value.VEnum(en, vr, pl) => match b { Value.VEnum(en2, vr2, pl2) => en == en2 && vr == vr2 && values_eq(pl, pl2), _ => false },
+        Value.VList(xs) => match b { Value.VList(ys) => values_eq(xs, ys), _ => false },
+        _ => false,
+    }
+}
+
+fun values_eq(a: [Value], b: [Value]) -> bool {
+    if len(a) != len(b) { return false }
+    var i = 0
+    while i < len(a) {
+        if !value_eq(a[i], b[i]) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fun get_field(v: Value, field: str) -> Value {
+    match v {
+        Value.VStruct(n, names, vals) => {
+            var i = 0
+            while i < len(names) {
+                if names[i] == field { return vals[i] }
+                i = i + 1
+            }
+        },
+        _ => {},
+    }
+    return Value.VUnit
+}
+
+fun set_field(v: Value, field: str, nv: Value) -> Value {
+    return match v {
+        Value.VStruct(n, names, vals) => {
+            var out: [Value] = []
+            var i = 0
+            while i < len(names) {
+                if names[i] == field { push(out, nv) }
+                else { push(out, vals[i]) }
+                i = i + 1
+            }
+            Value.VStruct(n, names, out)
+        },
+        _ => v,
+    }
+}
+
+fun index_get(c: Value, k: Value) -> Value {
+    return match c {
+        Value.VList(xs) => xs[as_int(k) as int32],
+        Value.VStr(s) => Value.VInt(s[as_int(k) as int32] as int64),
+        Value.VMap(ks, vs) => map_get(ks, vs, k),
+        _ => Value.VUnit,
+    }
+}
+
+fun map_get(ks: [Value], vs: [Value], k: Value) -> Value {
+    var i = 0
+    while i < len(ks) {
+        if value_eq(ks[i], k) { return vs[i] }
+        i = i + 1
+    }
+    return Value.VUnit
+}
+
+fun set_index(c: Value, k: Value, nv: Value) -> Value {
+    return match c {
+        Value.VList(xs) => {
+            var out: [Value] = []
+            var i = 0
+            while i < len(xs) {
+                if (i as int64) == as_int(k) { push(out, nv) }
+                else { push(out, xs[i]) }
+                i = i + 1
+            }
+            Value.VList(out)
+        },
+        Value.VMap(ks, vs) => map_set(ks, vs, k, nv),
+        _ => c,
+    }
+}
+
+fun map_set(ks: [Value], vs: [Value], k: Value, nv: Value) -> Value {
+    var nks: [Value] = []
+    var nvs: [Value] = []
+    var found = false
+    var i = 0
+    while i < len(ks) {
+        push(nks, ks[i])
+        if value_eq(ks[i], k) { push(nvs, nv)
+            found = true }
+        else { push(nvs, vs[i]) }
+        i = i + 1
+    }
+    if !found { push(nks, k)
+        push(nvs, nv) }
+    return Value.VMap(nks, nvs)
+}
+
+fun drop_last_frame(xs: [Frame]) -> [Frame] {
+    var out: [Frame] = []
+    var i = 0
+    while i < len(xs) - 1 {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}
