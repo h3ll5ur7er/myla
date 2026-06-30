@@ -198,7 +198,7 @@ operators, traits, generics, collections (`[T]`, `[K: V]`, sets),
 modules/imports, floats (`float32`/`float64` with `f32`/`f64` literal suffixes),
 string interpolation, and compound-assignment / `**` sugar.
 
-The self-hosting scoping ([self-hosting.md](self-hosting.md)) adds these
+The self-hosting scoping ([self-hosting.md](archive/self-hosting.md)) adds these
 future-grammar items as well: bitwise & shift operators (`&`, `|`, `^`, `~`,
 `<<`, `>>` — where `>>` doubles as function composition, resolved by operand
 type, D24), numeric cast expressions (`expr "as" type`, D26), `break` /
@@ -209,15 +209,15 @@ character literals (`'a'`, D25) + string indexing (`s[i]`), explicit imports
 `assert` / `panic` / `unreachable` intrinsics. New keywords these will reserve
 include `enum`, `match`, `impl`, `trait`, `as`, `const`, `char`, `break`,
 `continue`, `pub`, `import`, and `from`. Concrete syntax and semantics are in
-[future-features.md](future-features.md) §§7, 11–18 (imports:
-[v0.5-modules-and-runtime.md](v0.5-modules-and-runtime.md) §1, §8).
+[future-features.md](archive/future-features.md) §§7, 11–18 (imports:
+[v0.5-modules-and-runtime.md](archive/v0.5-modules-and-runtime.md) §1, §8).
 
 (The `#main` and `#test` attributes ARE part of v0.0 — see the `attribute`
 production above — but general user-defined macros are not.)
 
 They will get their own grammar sections when introduced. Concrete syntax
 proposals, semantics, and a suggested rollout order for all of these live in
-[future-features.md](future-features.md). Note the functional-pipeline design
+[future-features.md](archive/future-features.md). Note the functional-pipeline design
 (`|>`, `>>`, `_`) is now an **accepted** decision (see
 [roadmap.md](roadmap.md)); it is listed here only because it is not yet part of
 the v0.0 surface grammar.

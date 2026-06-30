@@ -34,41 +34,57 @@ optional type suffixes (`255u8`, `123i64`); user-defined `typealias` is
 supported; and declarations may carry built-in attributes (`#main` to mark the
 entry point, `#test(inputs)[expected]` for inline tests run via `myla test`).
 
-Design docs:
-- [docs/language-spec.md](docs/language-spec.md) — v0.0 concrete syntax & semantics
-- [docs/grammar.md](docs/grammar.md) — v0.0 formal EBNF grammar
+Living docs:
+- [docs/roadmap.md](docs/roadmap.md) — live implementation status, progress, and the locked decision log (D1–D58)
+- [docs/language-spec.md](docs/language-spec.md) — concrete syntax & semantics
+- [docs/grammar.md](docs/grammar.md) — formal EBNF grammar
 - [docs/architecture.md](docs/architecture.md) — toolchain architecture (interpreter + x86-64 compiler)
-- [docs/future-features.md](docs/future-features.md) — proposals for post-v0.0 features
-- [docs/self-hosting.md](docs/self-hosting.md) — the road to v1.0: feature gap analysis + milestone plan
-- [docs/v0.2-data-modeling.md](docs/v0.2-data-modeling.md) — detailed v0.2 design: enums, `match`, tuples, generics, `Option`/`Result` + `?`
-- [docs/v0.3-collections-and-ops.md](docs/v0.3-collections-and-ops.md) — detailed v0.3 design: collections, strings, bitwise/shift, casts, literal bases, `break`/`continue`, `const`, `assert`/`panic`/`unreachable` (**v0.3 complete**: operators & literals, const/intrinsics, lists `[T]`, maps `[K: V]`, and the string toolkit — char literals, byte indexing, `+` concat, `format`, `StringBuilder`)
-- [docs/v0.4-abstraction.md](docs/v0.4-abstraction.md) — detailed v0.4 design (locked): methods/`impl`, lambdas/closures + function types, pipelines (`|>`/`>>`/`_`), traits + operator overloading + derivable `Eq`
-- [docs/roadmap.md](docs/roadmap.md) — live implementation status, progress, and decision log
-- [docs/clarification_needed.md](docs/clarification_needed.md) — open decisions awaiting input
+- [docs/known_issues.md](docs/known_issues.md) — known limitations of the self-hosted compiler (e.g. float codegen)
+
+The during-development design notes (the self-hosting plan, the per-version
+v0.2–v0.5 design docs, the post-v0.0 feature catalog, and the open-questions
+tracker) are kept under [docs/archive/](docs/archive/).
 
 
-### CLI
+### CLI (the Python toolchain — bootstrap stage0 + oracle)
 ```bash
-# pre-bootstrapping phase
-uv sync 
-uv run myla.py <cmd>
-
-# bootstrapping phase
-uv sync 
-uv run myla.py build myla.my -o myla-bs
-myla-bs build myla.my -o myla
-myla run <cmd>
+uv sync
+uv run myla.py <cmd>          # or: python3 myla.py <cmd>  (no third-party deps)
 
 ## Example commands:
-# repl
-myla repl
 # interpreter
-myla run myscript.my
-# compiler
-myla build myscript.my -o myscript
+uv run myla.py run myscript.my
+# compiler (native x86-64 ELF via as/ld, no libc)
+uv run myla.py build myscript.my -o myscript
 # run inline #test cases
-myla test myscript.my
+uv run myla.py test myscript.my
+# repl (planned)
+uv run myla.py repl
 ```
+
+### Self-hosting (the Myla-written compiler)
+
+The compiler is now self-hosted: the toolchain under `selfhost/` (lexer →
+parser → checker → x86-64 codegen) compiles its own source to a **byte-identical
+fixed point**. Build it and verify the three-stage fixpoint with:
+
+```bash
+scripts/bootstrap.sh            # outputs to ./build (gitignored)
+# build/gen_tool : selfhost compiler, built by the Python backend (stage1)
+# build/stage2   : selfhost compiler, built by gen_tool
+# build/stage3   : selfhost compiler, built by stage2 (stage2.s == stage3.s)
+```
+
+The self-hosted compiler emits assembly to stdout and takes the stdlib root as
+its second argument; a thin host wrapper (the script above) runs `as`/`ld`:
+
+```bash
+build/stage3 examples/hello.my src/myla > hello.s
+as --64 -o hello.o hello.s && ld -o hello hello.o && ./hello
+```
+
+See [docs/known_issues.md](docs/known_issues.md) for current gaps (notably float
+codegen) and [docs/roadmap.md](docs/roadmap.md) for status.
 
 ### Testing convention
 
@@ -117,67 +133,22 @@ program to `examples/regressions.my`, or a rejected one to `examples/errors/`.
 
 ## Roadmap
 
-> For live status (what is implemented, in progress, planned) and the running
-> log of design decisions, see [docs/roadmap.md](docs/roadmap.md). The section
-> below is the high-level milestone outline.
+For live status (what is implemented, in progress, planned) and the running log
+of design decisions, see [docs/roadmap.md](docs/roadmap.md). High-level
+milestone outline (all milestones below are **done** — the original
+"v0.1 = self-host" framing was superseded by D23, which makes self-hosting the
+v1.0 destination reached through the feature milestones):
 
-### v0.0
+| Milestone | Theme |
+|-----------|-------|
+| v0.0 | Python bootstrap toolchain: front end + tree-walking interpreter + x86-64 compiler (`myla run`/`test`/`build`) |
+| v0.2 | Data modeling: `enum`+`match`, tuples, generics, `Option`/`Result` + `?` |
+| v0.3 | Collections, strings & ops: lists/maps, string toolkit, refcounting, bitwise, casts, `const`, `assert` |
+| v0.4 | Abstraction: methods/`impl`, lambdas/closures, pipelines, traits + operator overloading |
+| v0.5 | Modules & runtime: imports + `std`, floats, `char`/UTF-8, freestanding I/O |
+| v0.6–v0.9 | Self-hosting bring-up: port lexer → parser → checker → codegen to Myla, each differentially tested against the Python oracle |
+| **v1.0** | **Self-hosted: Myla compiles Myla to a byte-identical three-stage fixed point** (`scripts/bootstrap.sh`) |
 
-v0.0 will be implemented in python to support a minimal set of functionality.
-
-- Define v0.0 syntax
-    - variables
-    - loops
-    - flow-control
-    - structs
-    - functions
-- implement tokenization + lexing for v0.0 in python 
-- implement parsing for v0.0 in python 
-- implement interprete for v0.0 in python
-- implement compiler for v0.0 in python that produces native code (e.g. x86 assembly or arm64)
-
-#### Deliverable
-- myla.py (bootstrapping compiler)
-
-#### v0.0 milestones
-##### v0.0.0 architecture and design
-    - clear, simple, well documented software architecture
-    - clear, simple, well documented language grammer
-##### v0.0.1 setup and scaffolding
-    - create a directory structure to hold both our python bootstrapping compiler, test files (burn, unit and integration)
-    - created one .my file per major feature, acting as burn-tests
-##### v0.0.2 working interpreter
-    - can interpret a *.my file in the commandline
-    - interpreter can run all burn-test .my files successfuly
-    - full python unit- and integration test coverage
-    - everything documented
-##### v0.0.3 working compiler
-    - compiler can compile .my files into x86 assembly
-    - compiled my files can be executed and produce the same result as if they were interpreted
-
-
-### v0.1
-
-v0.1 will implement the exact same feature-set in the myla language itself. This is where we will start self-hosting the compiler.
-
-- implement tokenization + lexing for v0.0 in myla 
-- implement parsing for v0.0 in myla 
-- implement interprete for v0.0 in myla
-- implement compiler for v0.0 in myla that produces native code (e.g. x86 assembly or arm64)
-
-#### Deliverable
-- myla.my (self-hosted compiler)
-#### v0.1 milestones
-##### v0.1.0 working interpreter
-    - interpreted bootstrap compiler (v0.0, written in python) can interpret a *.my file in the commandline
-    - interpreter can run all burn-test .my files successfuly
-##### v0.1.1 self-hosted interpreter
-    - interpreted bootstrap compiler (v0.0, written in python) can interpret myla.my, basically self-hosting the interpreter
-    - self-hosted interpreter can run all burn-test .my files successfuly
-##### v0.1.2 working compiler
-    - compiler can compile .my files into x86 assembly
-    - compiled my files can be executed and produce the same result as if they were interpreted
-##### v0.1.3 self-hosted compiler
-    - compiler can compile myla.my into x86 assembly
-    - the self-hosted compiler can build itself.
-
+Post-1.0 ideas (custom operators, user macros, compound-assignment sugar) and the
+known gaps in the self-hosted backend live in [docs/roadmap.md](docs/roadmap.md)
+and [docs/known_issues.md](docs/known_issues.md).

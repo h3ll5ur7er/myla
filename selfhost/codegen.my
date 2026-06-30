@@ -27,8 +27,13 @@ pub struct LamJob { lifted: str, params: [Param], ftype: Type, body: ExprOrBlock
 // filled argument, or -1 for a hole (filled from the thunk's own parameters).
 pub struct PartialJob { lifted: str, target: str, slots: [int32] }
 
-// Continue/break target labels for the innermost loop.
-pub struct LoopLab { cont: str, brk: str }
+// Continue/break target labels for the innermost loop. `depth` is the
+// drop-scope index of the loop body, so break/continue can release the heap
+// owners they jump past.
+pub struct LoopLab { cont: str, brk: str, depth: int32 }
+
+// An owning local/temp at `off(%rbp)` to release when its scope unwinds.
+pub struct DropEntry { off: int32, ty: Type }
 
 // A leaf binding produced by destructuring a tuple pattern.
 pub struct DLeaf { name: str, off: int32, ty: Type }
@@ -74,11 +79,19 @@ pub struct CodeGen {
     fnval_set: [str],
     cur_mangled: str,
     scopes: [[CgBinding]],
+    drop_scopes: [[DropEntry]],
     loops: [LoopLab],
     cursor: int32,
     epilogue: str,
     struct_ret: bool,
     ret_type: Option<Type>,
+    // Reference-counting helper worklists: concrete owning types whose per-type
+    // drop/clone routines must be emitted (deduped by mangled token).
+    need_drop: [Type],
+    drop_emitted: [str],
+    need_clone: [Type],
+    clone_emitted: [str],
+    need_sb: bool,
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -99,9 +112,11 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         subst: [], fn_worklist: [], fn_done: [],
         lam_jobs: [], lam_done: [], partial_jobs: [], fnval_set: [],
         cur_mangled: "",
-        scopes: [], loops: [],
+        scopes: [], drop_scopes: [], loops: [],
         cursor: 0,
         epilogue: "", struct_ret: false, ret_type: None,
+        need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
+        need_sb: false,
     }
 }
 
@@ -232,6 +247,126 @@ impl CodeGen {
         return CgBinding { name: name, kind: "local", offset: 0, ty: Type.TInt(32, true), capoff: 0 }
     }
 
+    // -- ownership scopes & drop sites ------------------------------------
+
+    fun open_scope(var self) {
+        push(self.scopes, [])
+        push(self.drop_scopes, [])
+    }
+
+    // Drop the owning locals declared in the innermost scope (reverse order),
+    // then pop both the binding and drop scopes.
+    fun close_scope(var self) {
+        let top = self.drop_scopes[len(self.drop_scopes) - 1]
+        var i = len(top) - 1
+        while i >= 0 {
+            self.drop_value("rbp", top[i].off, top[i].ty)
+            i = i - 1
+        }
+        self.drop_scopes = drop_last(self.drop_scopes)
+        self.scopes = drop_last(self.scopes)
+    }
+
+    // Record an owning local at `off(%rbp)` so it is released when its scope ends.
+    fun register_owner(var self, off: int32, t: Type) {
+        if self.owns_heap(t) {
+            let top = len(self.drop_scopes) - 1
+            push(self.drop_scopes[top], DropEntry { off: off, ty: t })
+        }
+    }
+
+    // Drop every owning local currently in scope (for an early `return`).
+    fun emit_return_drops(var self) {
+        var s = len(self.drop_scopes) - 1
+        while s >= 0 {
+            let sc = self.drop_scopes[s]
+            var i = len(sc) - 1
+            while i >= 0 {
+                self.drop_value("rbp", sc[i].off, sc[i].ty)
+                i = i - 1
+            }
+            s = s - 1
+        }
+    }
+
+    // Drop owners from the innermost scope down to (and including) `depth`, for a
+    // `break`/`continue` that jumps past them.
+    fun emit_loop_exit_drops(var self, depth: int32) {
+        var s = len(self.drop_scopes) - 1
+        while s >= depth {
+            let sc = self.drop_scopes[s]
+            var i = len(sc) - 1
+            while i >= 0 {
+                self.drop_value("rbp", sc[i].off, sc[i].ty)
+                i = i - 1
+            }
+            s = s - 1
+        }
+    }
+
+    // Drop the owning aggregate temporaries produced while evaluating `e` (values
+    // that live in a frame temp slot and must be released once the statement that
+    // produced them finishes). Does not descend into `match` arm bodies.
+    fun drop_expr_temps(var self, e: Expr) {
+        let temps = self.collect_expr_temps(e)
+        for d in temps { self.drop_value("rbp", d.off, d.ty) }
+    }
+
+    fun drop_opt_temps(var self, oe: Option<Expr>) {
+        match oe { Some(e) => { self.drop_expr_temps(e) }, None => {} }
+    }
+
+    fun collect_expr_temps(var self, e: Expr) -> [DropEntry] {
+        var out: [DropEntry] = []
+        let t = self.type_of(e.id)
+        match get(self.locals, e.id) {
+            Some(off) => { if self.owns_heap(t) { push(out, DropEntry { off: off, ty: t }) } },
+            None => {},
+        }
+        match e.kind {
+            ExprKind.Unary(op, x) => { for d in self.collect_expr_temps(x) { push(out, d) } },
+            ExprKind.Cast(x, ty) => { for d in self.collect_expr_temps(x) { push(out, d) } },
+            ExprKind.Binary(op, a, b) => {
+                for d in self.collect_expr_temps(a) { push(out, d) }
+                for d in self.collect_expr_temps(b) { push(out, d) }
+            },
+            ExprKind.Call(callee, args) => {
+                if self.call_is_indirect(callee) {
+                    for d in self.collect_expr_temps(callee) { push(out, d) }
+                }
+                for a in args { for d in self.collect_expr_temps(a) { push(out, d) } }
+            },
+            ExprKind.GetField(tgt, field) => {
+                if !self.ctor_info(e).ok {
+                    for d in self.collect_expr_temps(tgt) { push(out, d) }
+                }
+            },
+            ExprKind.TupleIndex(tgt, ix) => { for d in self.collect_expr_temps(tgt) { push(out, d) } },
+            ExprKind.Index(tgt, ix) => {
+                for d in self.collect_expr_temps(tgt) { push(out, d) }
+                for d in self.collect_expr_temps(ix) { push(out, d) }
+            },
+            ExprKind.ListLit(elems) => {
+                for x in elems { for d in self.collect_expr_temps(x) { push(out, d) } }
+            },
+            ExprKind.MapLit(entries) => {
+                for en in entries {
+                    for d in self.collect_expr_temps(en.key) { push(out, d) }
+                    for d in self.collect_expr_temps(en.value) { push(out, d) }
+                }
+            },
+            ExprKind.StructLit(name, fields) => {
+                for f in fields { for d in self.collect_expr_temps(f.value) { push(out, d) } }
+            },
+            ExprKind.TupleLit(elems) => {
+                for x in elems { for d in self.collect_expr_temps(x) { push(out, d) } }
+            },
+            ExprKind.MatchE(scrut, arms) => { for d in self.collect_expr_temps(scrut) { push(out, d) } },
+            _ => {},
+        }
+        return out
+    }
+
     // -- type layout ------------------------------------------------------
 
     fun struct_info(self, name: str) -> StructInfo {
@@ -254,6 +389,212 @@ impl CodeGen {
     fun stored_size(self, t: Type) -> int32 {
         if self.is_boxed(t) { return 8 }
         return self.size(t)
+    }
+
+    // -- reference-counting predicates / naming ---------------------------
+
+    // True if an inline value of `t` (transitively) holds a refcounted heap
+    // pointer (a boxed enum, list, map, builder, or closure env), i.e. it
+    // participates in reference counting and must be retained/dropped on
+    // copy/release. Strings and scalars are immortal arena blobs.
+    fun owns_heap(self, t: Type) -> bool {
+        return self.owns_heap_seen(t, [])
+    }
+
+    fun owns_heap_seen(self, t: Type, seen: [str]) -> bool {
+        if self.is_boxed(t) { return true }
+        match t {
+            Type.TList(e) => { return true },
+            Type.TMap(k, v) => { return true },
+            Type.TSB => { return true },
+            Type.TFunc(ps, r) => { return true },
+            Type.TStruct(n, a) => {
+                if list_has_str(seen, n) { return false }
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                for f in info.fields {
+                    if self.owns_heap_seen(subst_type(f.ty, sub), push_str_copy(seen, n)) { return true }
+                }
+                return false
+            },
+            Type.TEnum(n, a) => {
+                if list_has_str(seen, n) { return false }
+                let info = self.enum_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                for v in info.variants {
+                    for ft in v.payload {
+                        if self.owns_heap_seen(subst_type(ft, sub), push_str_copy(seen, n)) { return true }
+                    }
+                }
+                return false
+            },
+            Type.TTuple(es) => {
+                for e in es {
+                    if self.owns_heap_seen(e, seen) { return true }
+                }
+                return false
+            },
+            _ => {},
+        }
+        return false
+    }
+
+    fun owns_heap_opt(self, ot: Option<Type>) -> bool {
+        return match ot { Some(t) => self.owns_heap(t), None => false }
+    }
+
+    // The drop routine for a heap-pointer leaf of type `t`.
+    fun drop_call_name(self, t: Type) -> str {
+        return match t {
+            Type.TList(e) => "__drop_list_" + mono_token(e),
+            Type.TMap(k, v) => format("__drop_map_{}_{}", mono_token(k), mono_token(v)),
+            Type.TSB => "__sb_drop",
+            _ => "__dropb_" + mono_token(t),
+        }
+    }
+
+    // Retain a heap-pointer leaf at `off(base)`: bump its refcount (closures use
+    // the null-safe env helper). Sharing is shallow — children are untouched.
+    fun inc_box(var self, ptr_off: int32, base: str, t: Type) {
+        if is_tfunc(t) {
+            self.emit(format("movq {}(%{}), %rdi", ptr_off, base))
+            self.emit("call __func_retain")
+            return
+        }
+        self.emit(format("movq {}(%{}), %rax", ptr_off, base))
+        self.emit("incq -8(%rax)")
+    }
+
+    // Release a heap-pointer leaf at `off(base)` via its type-specific routine.
+    fun drop_box(var self, ptr_off: int32, base: str, t: Type) {
+        if is_tfunc(t) {
+            self.emit(format("movq {}(%{}), %rdi", ptr_off, base))
+            self.emit("call __func_drop")
+            return
+        }
+        self.register_drop(t)
+        self.emit(format("movq {}(%{}), %rdi", ptr_off, base))
+        self.emit("call " + self.drop_call_name(t))
+    }
+
+    // Record that `t`'s per-type drop routine must be emitted (a list/map/boxed
+    // enum). Builders share one routine; deduped by mangled token.
+    fun register_drop(var self, t: Type) {
+        if is_sb_t(t) {
+            self.need_sb = true
+            return
+        }
+        let tok = mono_token(t)
+        if list_has_str(self.drop_emitted, tok) { return }
+        for p in self.need_drop { if mono_token(p) == tok { return } }
+        push(self.need_drop, t)
+    }
+
+    // Record that `t`'s copy-on-write clone routine must be emitted.
+    fun register_clone(var self, t: Type) {
+        if is_sb_t(t) {
+            self.need_sb = true
+            return
+        }
+        let tok = mono_token(t)
+        if list_has_str(self.clone_emitted, tok) { return }
+        for p in self.need_clone { if mono_token(p) == tok { return } }
+        push(self.need_clone, t)
+    }
+
+    // The clone routine for a list/map/builder cow site.
+    fun clone_call_name(self, t: Type) -> str {
+        return match t {
+            Type.TList(e) => "__clone_list_" + mono_token(e),
+            Type.TMap(k, v) => format("__clone_map_{}_{}", mono_token(k), mono_token(v)),
+            Type.TSB => "__sb_clone",
+            _ => "__sb_clone",
+        }
+    }
+
+    fun variant_owns(self, v: VariantT, sub: [Subst]) -> bool {
+        for ft0 in v.payload {
+            let ft = subst_type(ft0, sub)
+            if self.is_boxed(ft) || self.owns_heap(ft) { return true }
+        }
+        return false
+    }
+
+    // Walk the heap-pointer leaves an inline value of `t` at `off(base)` directly
+    // owns, retaining (incq) or releasing (drop) each. Inline sub-aggregates
+    // recurse; boxed/list/map/builder members are leaves the action follows.
+    fun owned_walk(var self, base: str, off: int32, t: Type, retain: bool) {
+        match t {
+            Type.TStruct(n, a) => {
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                var cur = off
+                for f in info.fields {
+                    let ft = subst_type(f.ty, sub)
+                    self.walk_member(base, cur, ft, retain)
+                    cur = cur + self.stored_size(ft)
+                }
+            },
+            Type.TTuple(es) => {
+                var cur = off
+                for et in es {
+                    self.walk_member(base, cur, et, retain)
+                    cur = cur + self.stored_size(et)
+                }
+            },
+            Type.TEnum(n, a) => {
+                let info = self.enum_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                let done = self.label()
+                self.emit(format("movq {}(%{}), %rax", off, base))
+                var idx = 0
+                for v in info.variants {
+                    if self.variant_owns(v, sub) {
+                        let nxt = self.label()
+                        self.emit(format("cmpq ${}, %rax", idx))
+                        self.emit(format("jne {}", nxt))
+                        var cur = off + 8
+                        for ft0 in v.payload {
+                            let ft = subst_type(ft0, sub)
+                            self.walk_member(base, cur, ft, retain)
+                            cur = cur + self.stored_size(ft)
+                        }
+                        self.emit(format("jmp {}", done))
+                        self.emit(format("{}:", nxt))
+                    }
+                    idx = idx + 1
+                }
+                self.emit(format("{}:", done))
+            },
+            _ => {},
+        }
+    }
+
+    // Apply the retain/drop action to a single member of type `ft` at `off(base)`:
+    // heap-pointer leaves trigger the action directly; inline aggregates recurse.
+    fun walk_member(var self, base: str, off: int32, ft: Type, retain: bool) {
+        if self.is_boxed(ft) || is_list_t(ft) || is_map_t(ft) || is_sb_t(ft) {
+            if retain { self.inc_box(off, base, ft) } else { self.drop_box(off, base, ft) }
+        } else if is_tfunc(ft) {
+            if retain { self.inc_box(off + 8, base, ft) } else { self.drop_box(off + 8, base, ft) }
+        } else if self.owns_heap(ft) {
+            self.owned_walk(base, off, ft, retain)
+        }
+    }
+
+    // Retain every heap reference an inline value of `t` at `off(base)` brings in
+    // (the slot becomes a new co-owner).
+    fun retain(var self, base: str, off: int32, t: Type) {
+        if is_list_t(t) || is_map_t(t) || is_sb_t(t) { self.inc_box(off, base, t) }
+        else if is_tfunc(t) { self.inc_box(off + 8, base, t) }
+        else if self.owns_heap(t) { self.owned_walk(base, off, t, true) }
+    }
+
+    // Release every heap reference an inline value of `t` at `off(base)` holds.
+    fun drop_value(var self, base: str, off: int32, t: Type) {
+        if is_list_t(t) || is_map_t(t) || is_sb_t(t) { self.drop_box(off, base, t) }
+        else if is_tfunc(t) { self.drop_box(off + 8, base, t) }
+        else if self.owns_heap(t) { self.owned_walk(base, off, t, false) }
     }
 
     // A struct/enum is laid out per its concrete type arguments: generic type
@@ -475,6 +816,7 @@ impl CodeGen {
         }
         for pj in self.partial_jobs { self.gen_partial_function(pj) }
         for n in self.fnval_set { self.emit_fnval_thunk(n) }
+        self.emit_drop_helpers()
         return self.assemble_source()
     }
 
@@ -548,8 +890,8 @@ impl CodeGen {
         push(out, "\t.skip 8")
         push(out, "__heap_end:")
         push(out, "\t.skip 8")
-        push(out, "__free_list:")
-        push(out, "\t.skip 8")
+        push(out, "__free_buckets:")
+        push(out, "\t.skip 4616")
         push(out, "__argc:")
         push(out, "\t.skip 8")
         push(out, "__argv:")
@@ -595,7 +937,7 @@ impl CodeGen {
         self.emit("movq %rsp, %rbp")
         if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
 
-        push(self.scopes, [])
+        self.open_scope()
         var param_base = 0
         if self.struct_ret { param_base = 1 }
         var i = 0
@@ -611,7 +953,7 @@ impl CodeGen {
         self.emit("leave")
         self.emit("ret")
         self.emit("")
-        self.scopes = drop_last(self.scopes)
+        self.close_scope()
     }
 
     // Assign every local/temp a unique stack slot; return the frame size.
@@ -734,7 +1076,7 @@ impl CodeGen {
                 }
                 for a in args { self.visit_expr(a) }
                 let rt = self.type_of(e.id)
-                if is_aggregate(rt) { self.alloc(e.id, self.size(rt)) }
+                if is_aggregate(rt) || self.owns_heap(rt) { self.alloc(e.id, self.size(rt)) }
                 if indirect {
                     self.cursor = self.cursor + 8
                     self.ind_code[e.id] = -self.cursor
@@ -806,14 +1148,17 @@ impl CodeGen {
     // -- statements -------------------------------------------------------
 
     fun gen_block(var self, b: Block) {
-        push(self.scopes, [])
+        self.open_scope()
         for s in b.stmts { self.gen_stmt(s) }
-        self.scopes = drop_last(self.scopes)
+        self.close_scope()
     }
 
     fun gen_stmt(var self, s: Stmt) {
         match s.kind {
-            StmtKind.ExprStmt(e) => { self.eval(e) },
+            StmtKind.ExprStmt(e) => {
+                if is_aggregate(self.type_of(e.id)) { self.addr_of_aggregate(e) } else { self.eval(e) }
+                self.drop_expr_temps(e)
+            },
             StmtKind.VarDecl(k, name, ty, init) => {
                 let off = self.local_of(s.id)
                 let t = self.type_of(init.id)
@@ -822,11 +1167,15 @@ impl CodeGen {
                     self.emit("movq %rax, %rsi")
                     self.emit(format("leaq {}(%rbp), %rdi", off))
                     self.emit_copy(self.size(t))
+                    self.retain("rbp", off, t)
                 } else {
-                    self.eval_owned(init)
+                    self.eval(init)
                     self.emit(format("movq %rax, {}(%rbp)", off))
+                    if self.owns_heap(t) { self.retain("rbp", off, t) }
                 }
                 self.bind(name, "local", off, t)
+                self.register_owner(off, t)
+                self.drop_expr_temps(init)
             },
             StmtKind.DestructDecl(k, binding, ty, init) => { self.gen_destruct(s, binding, init) },
             StmtKind.ReturnS(ov) => {
@@ -837,12 +1186,31 @@ impl CodeGen {
                             self.emit("movq %rax, %rsi")
                             self.emit("movq 16(%rbp), %rdi")
                             self.emit_copy(self.size(self.type_of(e.id)))
+                            match self.ret_type {
+                                Some(rt) => {
+                                    if self.owns_heap(rt) {
+                                        self.emit("movq 16(%rbp), %r8")
+                                        self.retain("r8", 0, rt)
+                                    }
+                                },
+                                None => {},
+                            }
+                            self.drop_expr_temps(e)
+                            self.emit_return_drops()
                             self.emit("movq 16(%rbp), %rax")
                         } else {
-                            self.eval_owned(e)
+                            self.eval(e)
+                            self.emit("pushq %rax")
+                            match self.ret_type {
+                                Some(rt) => { if self.owns_heap(rt) { self.emit("incq -8(%rax)") } },
+                                None => {},
+                            }
+                            self.drop_expr_temps(e)
+                            self.emit_return_drops()
+                            self.emit("popq %rax")
                         }
                     },
-                    None => {},
+                    None => { self.emit_return_drops() },
                 }
                 self.emit(format("jmp {}", self.epilogue))
             },
@@ -850,8 +1218,16 @@ impl CodeGen {
             StmtKind.IfS(cond, then, otherwise) => { self.gen_if(cond, then, otherwise) },
             StmtKind.WhileS(cond, body) => { self.gen_while(cond, body) },
             StmtKind.ForS(vn, start, end, body, iter) => { self.gen_for(s, vn, start, end, body, iter) },
-            StmtKind.BreakS => { self.emit(format("jmp {}", self.loops[len(self.loops) - 1].brk)) },
-            StmtKind.ContinueS => { self.emit(format("jmp {}", self.loops[len(self.loops) - 1].cont)) },
+            StmtKind.BreakS => {
+                let lp = self.loops[len(self.loops) - 1]
+                self.emit_loop_exit_drops(lp.depth)
+                self.emit(format("jmp {}", lp.brk))
+            },
+            StmtKind.ContinueS => {
+                let lp = self.loops[len(self.loops) - 1]
+                self.emit_loop_exit_drops(lp.depth)
+                self.emit(format("jmp {}", lp.cont))
+            },
         }
     }
 
@@ -859,45 +1235,101 @@ impl CodeGen {
     // The checker leaves lvalue targets untyped, so key on the value's type (they
     // are equal by the assignment's type rule).
     fun gen_assign(var self, target: Expr, value: Expr) {
+        let t = self.place_type(target)
+        let is_name = match target.kind { ExprKind.Name(n) => true, _ => false }
         match target.kind {
             ExprKind.Index(base, idx) => {
                 if is_map_t(self.place_type(base)) { self.gen_map_set(base, idx, value)
                 return }
-                self.gen_list_index_assign(base, idx, value)
+                let et = list_elem(self.place_type(base))
+                self.mut_elem_addr(target, base, idx)   // &elem (CoW) -> rax
+                self.emit("pushq %rax")
+                self.store_into_elem(value, et, true)
+                self.drop_expr_temps(value)
                 return
             },
             _ => {},
         }
-        let t = self.type_of(value.id)
-        if is_aggregate(t) {
-            self.addr_of_aggregate(value)
+        if self.is_boxed(t) && !is_name {
+            // assigning into a boxed member: drop the old cell, store a fresh one
+            self.box_value(value, t)
             self.emit("pushq %rax")
             self.addr_of_lvalue(target)
+            self.emit("movq %rax, %rcx")
+            self.emit("movq (%rcx), %rsi")
+            self.emit("popq %rax")
+            self.emit("movq %rax, (%rcx)")
+            self.emit("movq %rsi, %rdi")
+            self.register_drop(t)
+            self.emit("call " + self.drop_call_name(t))
+            self.drop_expr_temps(value)
+        } else if is_aggregate(t) && self.owns_heap(t) {
+            if is_name {
+                let b = self.lookup(match target.kind { ExprKind.Name(n) => n, _ => "" })
+                self.addr_of_aggregate(value)
+                self.emit("pushq %rax")
+                self.drop_value("rbp", b.offset, t)
+                self.emit("popq %rsi")
+                self.emit(format("leaq {}(%rbp), %rdi", b.offset))
+                self.emit_copy(self.size(t))
+                self.retain("rbp", b.offset, t)
+                self.drop_expr_temps(value)
+            } else {
+                // A reference-counted aggregate into a member/element place: same
+                // drop-old / copy-new / retain-new dance as the simple-variable
+                // case, but the slot address is computed (not rbp-relative). Hold
+                // it in callee-saved %rbx so it survives the drop/retain helper
+                // calls; the new value is built first (it may read the old one).
+                self.addr_of_aggregate(value)
+                self.emit("pushq %rax")
+                self.addr_of_lvalue(target)
+                self.emit("pushq %rbx")
+                self.emit("movq %rax, %rbx")
+                self.drop_value("rbx", 0, t)
+                self.emit("movq 8(%rsp), %rsi")
+                self.emit("movq %rbx, %rdi")
+                self.emit_copy(self.size(t))
+                self.retain("rbx", 0, t)
+                self.emit("popq %rbx")
+                self.emit("addq $8, %rsp")
+                self.drop_expr_temps(value)
+            }
+        } else if is_aggregate(t) {
+            self.addr_of_aggregate(value)
+            self.emit("movq %rax, %rsi")
+            self.addr_of_lvalue(target)
             self.emit("movq %rax, %rdi")
-            self.emit("popq %rsi")
             self.emit_copy(self.size(t))
+            self.drop_expr_temps(value)
+        } else if self.owns_heap(t) {
+            if is_name {
+                let b = self.lookup(match target.kind { ExprKind.Name(n) => n, _ => "" })
+                self.eval(value)
+                self.emit("pushq %rax")
+                self.emit("incq -8(%rax)")
+                self.drop_value("rbp", b.offset, t)
+                self.emit("popq %rax")
+                self.emit(format("movq %rax, {}(%rbp)", b.offset))
+            } else {
+                self.eval(value)
+                self.emit("pushq %rax")
+                self.emit("incq -8(%rax)")
+                self.addr_of_lvalue(target)
+                self.emit("pushq %rax")
+                self.emit("movq %rax, %rcx")
+                self.drop_box(0, "rcx", t)
+                self.emit("popq %rcx")
+                self.emit("popq %rax")
+                self.emit("movq %rax, (%rcx)")
+            }
+            self.drop_expr_temps(value)
         } else {
-            self.eval_owned(value)
+            self.eval(value)
             self.emit("pushq %rax")
             self.addr_of_lvalue(target)
             self.emit("popq %rcx")
             self.emit("movq %rcx, (%rax)")
-        }
-    }
-
-    fun gen_list_index_assign(var self, base: Expr, idx: Expr, value: Expr) {
-        let et = list_elem(self.place_type(base))
-        self.gen_elem_addr(base, idx)
-        self.emit("pushq %rax")
-        if is_aggregate(et) && !self.is_boxed(et) {
-            self.addr_of_aggregate(value)
-            self.emit("movq %rax, %rsi")
-            self.emit("popq %rdi")
-            self.emit_copy(self.size(et))
-        } else {
-            self.eval_owned(value)
-            self.emit("popq %rcx")
-            self.emit("movq %rax, (%rcx)")
+            self.drop_expr_temps(value)
         }
     }
 
@@ -978,7 +1410,7 @@ impl CodeGen {
         self.eval(cond)
         self.emit("testq %rax, %rax")
         self.emit(format("jz {}", end))
-        push(self.loops, LoopLab { cont: start, brk: end })
+        push(self.loops, LoopLab { cont: start, brk: end, depth: len(self.drop_scopes) })
         self.gen_block(body)
         self.loops = drop_last(self.loops)
         self.emit(format("jmp {}", start))
@@ -1009,12 +1441,12 @@ impl CodeGen {
         if int_signed(loop_t) { self.emit(format("jge {}", lend)) }
         else { self.emit(format("jae {}", lend)) }
 
-        push(self.scopes, [])
+        self.open_scope()
         self.bind(vn, "local", lv, loop_t)
-        push(self.loops, LoopLab { cont: lcont, brk: lend })
+        push(self.loops, LoopLab { cont: lcont, brk: lend, depth: len(self.drop_scopes) - 1 })
         for st in body.stmts { self.gen_stmt(st) }
         self.loops = drop_last(self.loops)
-        self.scopes = drop_last(self.scopes)
+        self.close_scope()
 
         self.emit(format("{}:", lcont))
         self.emit(format("movq {}(%rbp), %rax", lv))
@@ -1036,6 +1468,8 @@ impl CodeGen {
         let elem_slot = self.get_or_zero(self.for_elem, s.id)
         self.eval(it)
         self.emit(format("movq %rax, {}(%rbp)", iptr))
+        self.retain("rbp", iptr, itt)             // hold a reference for the loop
+        self.drop_expr_temps(it)
         self.emit(format("movq $0, {}(%rbp)", idx))
         let lstart = self.label()
         let lcont = self.label()
@@ -1052,26 +1486,33 @@ impl CodeGen {
             self.emit(format("imulq ${}, %rax", stride))
             self.emit("addq %rax, %rcx")
         }
-        if is_aggregate(et) && !self.is_boxed(et) {
-            self.emit("movq %rcx, %rsi")
+        if is_aggregate(et) {
+            // The loop slot holds the inline value. For boxed element types the
+            // list stores a pointer to the heap box, so dereference it first to
+            // copy the inline payload (a borrow: the list keeps ownership).
+            if self.is_boxed(et) { self.emit("movq (%rcx), %rsi") }
+            else { self.emit("movq %rcx, %rsi") }
             self.emit(format("leaq {}(%rbp), %rdi", elem_slot))
             self.emit_copy(self.size(et))
         } else {
             self.emit("movq (%rcx), %rax")
             self.emit(format("movq %rax, {}(%rbp)", elem_slot))
         }
-        push(self.scopes, [])
+        // The loop variable borrows the element (the list keeps ownership), so it
+        // is neither retained nor registered for dropping.
+        self.open_scope()
         self.bind(vn, "local", elem_slot, et)
-        push(self.loops, LoopLab { cont: lcont, brk: lend })
+        push(self.loops, LoopLab { cont: lcont, brk: lend, depth: len(self.drop_scopes) - 1 })
         for st in body.stmts { self.gen_stmt(st) }
         self.loops = drop_last(self.loops)
-        self.scopes = drop_last(self.scopes)
+        self.close_scope()
         self.emit(format("{}:", lcont))
         self.emit(format("movq {}(%rbp), %rax", idx))
         self.emit("addq $1, %rax")
         self.emit(format("movq %rax, {}(%rbp)", idx))
         self.emit(format("jmp {}", lstart))
         self.emit(format("{}:", lend))
+        self.drop_value("rbp", iptr, itt)         // release the loop reference
     }
 
     fun gen_for_in_map(var self, s: Stmt, vn: str, it: Expr, body: Block) {
@@ -1087,6 +1528,7 @@ impl CodeGen {
         self.emit(format("movq ${}, %rdx", stride))
         self.emit("call __map_keys")
         self.emit(format("movq %rax, {}(%rbp)", iptr))
+        self.drop_expr_temps(it)                   // release a temp map (keys copied out)
         self.emit(format("movq $0, {}(%rbp)", idx))
         let lstart = self.label()
         let lcont = self.label()
@@ -1105,18 +1547,19 @@ impl CodeGen {
         }
         self.emit("movq (%rcx), %rax")
         self.emit(format("movq %rax, {}(%rbp)", elem_slot))
-        push(self.scopes, [])
+        self.open_scope()
         self.bind(vn, "local", elem_slot, kt)
-        push(self.loops, LoopLab { cont: lcont, brk: lend })
+        push(self.loops, LoopLab { cont: lcont, brk: lend, depth: len(self.drop_scopes) - 1 })
         for st in body.stmts { self.gen_stmt(st) }
         self.loops = drop_last(self.loops)
-        self.scopes = drop_last(self.scopes)
+        self.close_scope()
         self.emit(format("{}:", lcont))
         self.emit(format("movq {}(%rbp), %rax", idx))
         self.emit("addq $1, %rax")
         self.emit(format("movq %rax, {}(%rbp)", idx))
         self.emit(format("jmp {}", lstart))
         self.emit(format("{}:", lend))
+        self.drop_value("rbp", iptr, Type.TList(kt))   // free the keys list
     }
 
     fun get_or_zero(self, m: [int32: int32], id: int32) -> int32 {
@@ -1145,7 +1588,15 @@ impl CodeGen {
             ExprKind.Unary(op, x) => { self.eval_unary(e, op, x) },
             ExprKind.Binary(op, l, r) => { self.eval_binary(e, op, l, r) },
             ExprKind.Cast(x, ty) => { self.gen_cast(e, x) },
-            ExprKind.Call(c, args) => { self.gen_call(e, c, args) },
+            ExprKind.Call(c, args) => {
+                self.gen_call(e, c, args)
+                let rt = self.type_of(e.id)
+                // A list/map/builder result: stash the escaped pointer in its
+                // temp slot so the temp-drop machinery releases it if unconsumed.
+                if self.owns_heap(rt) && !is_aggregate(rt) {
+                    self.emit(format("movq %rax, {}(%rbp)", self.local_of(e.id)))
+                }
+            },
             ExprKind.GetField(tgt, field) => {
                 self.addr_of_aggregate(tgt)
                 let foff = self.field_offset(self.place_type(tgt), field)
@@ -1538,9 +1989,11 @@ impl CodeGen {
             self.emit("movq %rax, %rsi")
             self.emit(format("leaq {}(%rbp), %rdi", slot_off))
             self.emit_copy(self.size(mt))
+            self.retain("rbp", slot_off, mt)
         } else {
             self.eval(value)
             self.emit(format("movq %rax, {}(%rbp)", slot_off))
+            if self.owns_heap(mt) { self.retain("rbp", slot_off, mt) }
         }
     }
 
@@ -1553,9 +2006,11 @@ impl CodeGen {
             self.emit("movq %rax, %rsi")
             self.emit(format("leaq {}(%rbp), %rdi", off))
             self.emit_copy(self.size(t))
+            self.retain("rbp", off, t)
         } else {
-            self.eval_owned(value)
+            self.eval(value)
             self.emit(format("movq %rax, {}(%rbp)", off))
+            if self.owns_heap(t) { self.retain("rbp", off, t) }
         }
     }
 
@@ -1571,6 +2026,13 @@ impl CodeGen {
         self.emit("movq %rax, %rdi")
         self.emit_copy(self.size(t))
         self.emit("popq %rax")
+        // The fresh cell becomes a new owner of any heap pointers it copied in.
+        if self.owns_heap(t) {
+            self.emit("pushq %rax")
+            self.emit("movq %rax, %r8")
+            self.owned_walk("r8", 0, t, true)
+            self.emit("popq %rax")
+        }
     }
 
     // -- lists ------------------------------------------------------------
@@ -1627,20 +2089,26 @@ impl CodeGen {
     // `slot(%rbp)`. Scalars/strings/lists are moved (cloned if a place); inline
     // aggregates are copied byte-for-byte.
     fun store_elem_slot(var self, value: Expr, slot: int32, off: int32, et: Type) {
-        if is_aggregate(et) && !self.is_boxed(et) {
+        if self.is_boxed(et) {
+            self.box_value(value, et)
+            self.emit(format("movq {}(%rbp), %rcx", slot))
+            self.emit(format("movq %rax, {}(%rcx)", off))
+        } else if is_aggregate(et) {
             self.addr_of_aggregate(value)
             self.emit("movq %rax, %rsi")
             self.emit(format("movq {}(%rbp), %rdi", slot))
             if off != 0 { self.emit(format("addq ${}, %rdi", off)) }
             self.emit_copy(self.size(et))
-        } else if self.is_boxed(et) {
-            self.box_value(value, et)
-            self.emit(format("movq {}(%rbp), %rcx", slot))
-            self.emit(format("movq %rax, {}(%rcx)", off))
+            self.emit(format("movq {}(%rbp), %r8", slot))
+            self.retain("r8", off, et)
         } else {
-            self.eval_owned(value)
+            self.eval(value)
             self.emit(format("movq {}(%rbp), %rcx", slot))
             self.emit(format("movq %rax, {}(%rcx)", off))
+            if self.owns_heap(et) {
+                self.emit(format("movq {}(%rbp), %r8", slot))
+                self.retain("r8", off, et)
+            }
         }
     }
 
@@ -1705,75 +2173,234 @@ impl CodeGen {
         }
     }
 
+    // -- copy-on-write mutation addressing --------------------------------
+
+    // In: %rax = address of the slot holding a list/map/builder pointer. Ensure
+    // the cell is uniquely owned (clone it if refcount > 1, storing the clone
+    // back). Out: %rax = the now-unique cell pointer.
+    fun cow_unique(var self, t: Type) {
+        self.register_clone(t)
+        self.emit("movq %rax, %rcx")
+        self.emit("movq (%rcx), %rdi")
+        let skip = self.label()
+        self.emit("cmpq $1, -8(%rdi)")
+        self.emit(format("jbe {}", skip))
+        self.emit("pushq %rcx")
+        self.emit("call " + self.clone_call_name(t))
+        self.emit("popq %rcx")
+        self.emit("movq %rax, (%rcx)")
+        self.emit("movq %rax, %rdi")
+        self.emit(format("{}:", skip))
+        self.emit("movq %rdi, %rax")
+    }
+
+    // Leave the uniquely-owned cell pointer of list/map lvalue `e` in %rax,
+    // cloning shared cells along the path so the write is private (D38).
+    fun mut_container_cell(var self, e: Expr) {
+        self.mut_addr_of_list_holder(e)
+        self.cow_unique(self.place_type(e))
+    }
+
+    // Leave in %rax the address of the slot that holds list/map lvalue `e`'s
+    // cell pointer (so a CoW clone can be written back).
+    fun mut_addr_of_list_holder(var self, e: Expr) {
+        match e.kind {
+            ExprKind.Name(n) => {
+                let b = self.lookup(n)
+                if b.kind == "capture" {
+                    self.emit(format("movq {}(%rbp), %rax", b.offset))
+                    if b.capoff != 0 { self.emit(format("addq ${}, %rax", b.capoff)) }
+                } else {
+                    self.emit(format("leaq {}(%rbp), %rax", b.offset))
+                }
+            },
+            ExprKind.GetField(tgt, field) => {
+                self.mut_addr_of_struct(tgt)
+                let foff = self.field_offset(self.place_type(tgt), field)
+                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                self.mut_addr_of_struct(tgt)
+                let foff = self.elem_offset(self.place_type(tgt), idx as int32)
+                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
+            },
+            ExprKind.Index(base, idx) => { self.mut_index_addr(e, base, idx) },
+            _ => {},
+        }
+    }
+
+    // Leave the address of inline-struct lvalue `e` in %rax (CoW-ing any
+    // list/map cell on the path).
+    fun mut_addr_of_struct(var self, e: Expr) {
+        match e.kind {
+            ExprKind.Name(n) => {
+                let b = self.lookup(n)
+                if b.kind == "local" {
+                    self.emit(format("leaq {}(%rbp), %rax", b.offset))
+                } else if b.kind == "capture" {
+                    self.emit(format("movq {}(%rbp), %rax", b.offset))
+                    if b.capoff != 0 { self.emit(format("addq ${}, %rax", b.capoff)) }
+                } else {
+                    self.emit(format("movq {}(%rbp), %rax", b.offset))
+                }
+            },
+            ExprKind.GetField(tgt, field) => {
+                self.mut_addr_of_struct(tgt)
+                let foff = self.field_offset(self.place_type(tgt), field)
+                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                self.mut_addr_of_struct(tgt)
+                let foff = self.elem_offset(self.place_type(tgt), idx as int32)
+                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
+            },
+            ExprKind.Index(base, idx) => { self.mut_index_addr(e, base, idx) },
+            _ => {},
+        }
+    }
+
+    // Address of a mutable indexed lvalue `base[idx]` (list element or map value),
+    // CoW-ing the container first.
+    fun mut_index_addr(var self, e: Expr, base: Expr, idx: Expr) {
+        if is_map_t(self.place_type(base)) { self.mut_map_value_addr(e, base, idx) }
+        else { self.mut_elem_addr(e, base, idx) }
+    }
+
+    // Address of mutable list element `base[idx]` in %rax (CoW container,
+    // bounds-checked).
+    fun mut_elem_addr(var self, e: Expr, base: Expr, idx: Expr) {
+        // `e` is an lvalue Index target, which the checker leaves untyped, so the
+        // element stride must come from the container's element type (via
+        // place_type), not `type_of(e.id)` which falls back to a scalar.
+        let stride = self.stored_size(list_elem(self.place_type(base)))
+        self.mut_container_cell(base)
+        self.emit("pushq %rax")
+        self.eval(idx)
+        self.emit("popq %rcx")
+        self.emit("movq (%rcx), %rdx")
+        self.emit("cmpq %rdx, %rax")
+        self.emit("jae __trap")
+        self.emit(format("imulq ${}, %rax", stride))
+        self.emit("leaq 16(%rcx,%rax), %rax")
+    }
+
+    // Address of mutable map value for `base[idx]` in %rax (CoW container);
+    // traps when the key is absent.
+    fun mut_map_value_addr(var self, e: Expr, base: Expr, idx: Expr) {
+        let mt = self.place_type(base)
+        self.mut_container_cell(base)
+        self.emit("pushq %rax")
+        self.eval(idx)
+        self.emit("movq %rax, %rsi")
+        self.emit("popq %rdi")
+        self.emit(format("movq ${}, %rdx", self.map_slot_size(mt)))
+        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
+        self.emit("call __map_lookup")
+        self.emit("testq %rax, %rax")
+        self.emit("jz __trap")
+        self.emit("addq $16, %rax")
+    }
+
+    // Store `value` into the element whose address is on the stack top
+    // (consumed), taking ownership of heap references it brings in and, when
+    // `drop_old`, releasing whatever the slot held before.
+    fun store_into_elem(var self, value: Expr, et: Type, drop_old: bool) {
+        if self.is_boxed(et) {
+            self.box_value(value, et)
+            self.emit("popq %rcx")
+            if drop_old {
+                self.emit("pushq %rax")
+                self.emit("pushq %rcx")
+                self.emit("movq (%rcx), %rdi")
+                self.emit("call " + self.drop_call_name(et))
+                self.emit("popq %rcx")
+                self.emit("popq %rax")
+            }
+            self.emit("movq %rax, (%rcx)")
+        } else if is_aggregate(et) {
+            self.addr_of_aggregate(value)
+            self.emit("popq %rcx")
+            self.emit("pushq %rcx")
+            if drop_old {
+                self.emit("pushq %rax")
+                self.walk_member("rcx", 0, et, false)
+                self.emit("popq %rax")
+            }
+            self.emit("movq %rax, %rsi")
+            self.emit("movq (%rsp), %rdi")
+            self.emit_copy(self.size(et))
+            self.emit("popq %rcx")
+            self.retain("rcx", 0, et)
+        } else if self.owns_heap(et) {
+            self.eval(value)
+            self.emit("popq %rcx")
+            self.emit("incq -8(%rax)")
+            if drop_old {
+                self.emit("pushq %rax")
+                self.emit("pushq %rcx")
+                self.emit("movq (%rcx), %rdi")
+                self.register_drop(et)
+                self.emit("call " + self.drop_call_name(et))
+                self.emit("popq %rcx")
+                self.emit("popq %rax")
+            }
+            self.emit("movq %rax, (%rcx)")
+        } else {
+            self.eval(value)
+            self.emit("popq %rcx")
+            self.emit("movq %rax, (%rcx)")
+        }
+    }
+
     fun gen_push(var self, holder: Expr, value: Expr) {
-        let et = list_elem(self.place_type(holder))
+        let lt = self.place_type(holder)
+        let et = list_elem(lt)
         let stride = self.elem_stride(et)
-        // Produce the element in %rax: a boxed/recursive-enum element becomes a
-        // fresh heap pointer; an inline aggregate yields its (frame-temp) address
-        // for a byte-copy; scalars/strings/lists evaluate (and clone) directly.
-        // Using box_value/addr_of_aggregate (rather than eval) is what makes
-        // enum/struct *constructor* operands work as list elements.
-        if self.is_boxed(et) { self.box_value(value, et) }
-        else if is_aggregate(et) { self.addr_of_aggregate(value) }
-        else { self.eval_owned(value) }
-        self.emit("pushq %rax")
-        self.mut_holder_addr(holder)
-        self.emit("pushq %rax")
-        self.emit("movq (%rax), %rax")
-        let nogrow = self.label()
-        self.emit("movq (%rax), %rcx")
-        self.emit("cmpq 8(%rax), %rcx")
-        self.emit(format("jne {}", nogrow))
+        self.mut_addr_of_list_holder(holder)   // &holder -> rax
+        self.emit("pushq %rax")                // save &holder
+        self.cow_unique(lt)                    // unique cell -> rax
+        let have = self.label()
+        self.emit("movq (%rax), %rdx")         // len
+        self.emit("movq 8(%rax), %rcx")        // cap
+        self.emit("cmpq %rcx, %rdx")
+        self.emit(format("jb {}", have))       // len < cap: room to append
         self.emit("movq %rax, %rdi")
         self.emit(format("movq ${}, %rsi", stride))
         self.emit("call __list_grow")
-        self.emit("movq (%rsp), %rcx")
-        self.emit("movq %rax, (%rcx)")
-        self.emit(format("{}:", nogrow))
-        self.emit("movq (%rax), %rcx")
-        self.emit("leaq 16(%rax), %rdx")
-        if stride == 8 { self.emit("leaq (%rdx,%rcx,8), %rdx") }
-        else {
-            self.emit("pushq %rax")
-            self.emit("movq %rcx, %rax")
-            self.emit(format("imulq ${}, %rax", stride))
-            self.emit("addq %rax, %rdx")
-            self.emit("popq %rax")
-        }
-        if is_aggregate(et) && !self.is_boxed(et) {
-            self.emit("movq 8(%rsp), %rsi")
-            self.emit("movq %rdx, %rdi")
-            self.emit_copy(self.size(et))
-            self.emit("movq (%rsp), %rcx")
-            self.emit("movq (%rcx), %rax")
-            self.emit("movq (%rax), %rcx")
-        } else {
-            self.emit("movq 8(%rsp), %r8")
-            self.emit("movq %r8, (%rdx)")
-        }
-        self.emit("incq %rcx")
-        self.emit("movq %rcx, (%rax)")
-        self.emit("addq $16, %rsp")
+        self.emit("movq (%rsp), %rcx")         // &holder
+        self.emit("movq %rax, (%rcx)")         // publish the grown cell
+        self.emit(format("{}:", have))
+        self.emit("movq (%rax), %rdx")         // current length (append index)
+        self.emit("leaq 1(%rdx), %rcx")
+        self.emit("movq %rcx, (%rax)")         // length += 1
+        self.emit(format("imulq ${}, %rdx", stride))
+        self.emit("leaq 16(%rax,%rdx), %rax")  // &elem (fresh slot)
+        self.emit("addq $8, %rsp")             // discard saved &holder
+        self.emit("pushq %rax")
+        self.store_into_elem(value, et, false)
+        // The value temp (if any) is released by the enclosing statement's
+        // drop_expr_temps; dropping it here too would double-free.
     }
 
     fun gen_pop(var self, e: Expr, holder: Expr) {
         let et = self.type_of(e.id)
         let stride = self.elem_stride(et)
-        self.mut_holder_addr(holder)
-        self.emit("movq (%rax), %rax")
-        self.emit("movq (%rax), %rcx")
+        self.mut_container_cell(holder)        // unique cell -> rax
+        self.emit("movq (%rax), %rcx")         // len
         self.emit("testq %rcx, %rcx")
         self.emit("jz __trap")
         self.emit("decq %rcx")
-        self.emit("movq %rcx, (%rax)")
-        self.emit("leaq 16(%rax), %rdx")
-        if stride == 8 { self.emit("leaq (%rdx,%rcx,8), %rdx") }
-        else {
-            self.emit("movq %rcx, %rax")
-            self.emit(format("imulq ${}, %rax", stride))
-            self.emit("addq %rax, %rdx")
+        self.emit("movq %rcx, (%rax)")         // len -= 1
+        self.emit(format("imulq ${}, %rcx", stride))
+        self.emit("leaq 16(%rax,%rcx), %rdx")  // &elem (removed last element)
+        if is_aggregate(et) && !self.is_boxed(et) {
+            let slot = self.local_of(e.id)
+            self.emit("movq %rdx, %rsi")
+            self.emit(format("leaq {}(%rbp), %rdi", slot))
+            self.emit_copy(self.size(et))
+        } else {
+            self.emit("movq (%rdx), %rax")     // scalar / list pointer (transferred)
         }
-        self.emit("movq (%rdx), %rax")
     }
 
     // -- maps / strings / chars (filled in later C4 sub-slices) -----------
@@ -1823,22 +2450,32 @@ impl CodeGen {
             self.addr_of_aggregate(value)
             self.emit("movq %rax, %rsi")
             self.emit("popq %rdi")
+            self.emit("pushq %rdi")
             self.emit_copy(self.size(vt))
+            self.emit("popq %rcx")
+            self.retain("rcx", 0, vt)
         } else if self.is_boxed(vt) {
             self.box_value(value, vt)
             self.emit("popq %rcx")
             self.emit("movq %rax, (%rcx)")
         } else {
-            self.eval_owned(value)
+            self.eval(value)
             self.emit("popq %rcx")
             self.emit("movq %rax, (%rcx)")
+            if self.owns_heap(vt) { self.emit("incq -8(%rax)") }
         }
         self.emit("addq $16, %rsp")
     }
 
     fun gen_map_set(var self, base: Expr, idx: Expr, value: Expr) {
-        self.mut_holder_addr(base)
-        self.emit_map_put(idx, value, self.place_type(base))
+        let mt = self.place_type(base)
+        self.mut_addr_of_list_holder(base)   // &holder -> rax
+        self.emit("pushq %rax")
+        self.cow_unique(mt)                  // unique cell, written back to holder
+        self.emit("popq %rax")               // &holder
+        self.emit_map_put(idx, value, mt)
+        self.drop_expr_temps(idx)
+        self.drop_expr_temps(value)
     }
 
     // Leave the address of map value `base[idx]` in %rax; trap if the key is absent.
@@ -1962,24 +2599,26 @@ impl CodeGen {
     }
 
     fun gen_sb_append(var self, sb: Expr, s: Expr) {
-        self.mut_holder_addr(sb)
+        self.mut_addr_of_list_holder(sb)   // &holder -> rax
         self.emit("pushq %rax")
+        self.cow_unique(Type.TSB)          // unique cell, written back to holder
         self.eval(s)
         self.emit("movq %rax, %rsi")
         self.emit("movq (%rsi), %rdx")
         self.emit("addq $8, %rsi")
-        self.emit("popq %rdi")
+        self.emit("popq %rdi")             // &holder
         self.emit("call __sb_append_bytes")
     }
 
     fun gen_sb_append_byte(var self, sb: Expr, b: Expr) {
-        self.mut_holder_addr(sb)
+        self.mut_addr_of_list_holder(sb)   // &holder -> rax
         self.emit("pushq %rax")
+        self.cow_unique(Type.TSB)          // unique cell, written back to holder
         self.eval(b)
         self.emit("pushq %rax")
         self.emit("movq %rsp, %rsi")
         self.emit("movq $1, %rdx")
-        self.emit("movq 8(%rsp), %rdi")
+        self.emit("movq 8(%rsp), %rdi")    // &holder
         self.emit("call __sb_append_bytes")
         self.emit("addq $16, %rsp")
     }
@@ -2050,7 +2689,10 @@ impl CodeGen {
         for arm in arms {
             let arm_fail = self.label()
             self.match_pat(arm.pattern, root, sst, arm.pattern.id, arm_fail)
+            // Bindings and the scrutinee copy borrow from the scrutinee (which
+            // outlives the match), so the arm scope owns nothing of its own.
             push(self.scopes, self.arm_scope(arm, sst))
+            push(self.drop_scopes, [])
             match arm.guard {
                 Some(g) => {
                     self.eval(g)
@@ -2061,6 +2703,7 @@ impl CodeGen {
             }
             self.gen_arm_body(arm.body, result_off, result_type)
             self.emit(format("jmp {}", end))
+            self.drop_scopes = drop_last(self.drop_scopes)
             self.scopes = drop_last(self.scopes)
             self.emit(format("{}:", arm_fail))
         }
@@ -2260,14 +2903,17 @@ impl CodeGen {
     fun gen_arm_body(var self, body: ExprOrBlock, result_off: int32, result_type: Type) {
         match body {
             ExprOrBlock.EB_Block(b) => {
-                push(self.scopes, [])
+                self.open_scope()
                 let n = len(b.stmts)
                 var i = 0
                 while i < n {
                     let s = b.stmts[i]
                     if i == n - 1 {
                         match s.kind {
-                            StmtKind.ExprStmt(ex) => { self.store_value(ex, result_off, result_type) },
+                            StmtKind.ExprStmt(ex) => {
+                                self.store_value(ex, result_off, result_type)
+                                self.drop_expr_temps(ex)
+                            },
                             _ => { self.gen_stmt(s) },
                         }
                     } else {
@@ -2275,9 +2921,12 @@ impl CodeGen {
                     }
                     i = i + 1
                 }
-                self.scopes = drop_last(self.scopes)
+                self.close_scope()
             },
-            ExprOrBlock.EB_Expr(ex) => { self.store_value(ex, result_off, result_type) },
+            ExprOrBlock.EB_Expr(ex) => {
+                self.store_value(ex, result_off, result_type)
+                self.drop_expr_temps(ex)
+            },
         }
     }
 
@@ -2404,7 +3053,7 @@ impl CodeGen {
         var i = len(args) - 1
         while i >= 0 {
             if is_aggregate(params[i]) { self.addr_of_aggregate(args[i]) }
-            else { self.eval_owned(args[i]) }
+            else { self.eval(args[i]) }
             self.emit("pushq %rax")
             i = i - 1
         }
@@ -2436,6 +3085,11 @@ impl CodeGen {
         self.emit(format("movq {}(%rbp), %rdi", off + 8))
         self.emit("addq $16, %rdi")
         self.emit_copy(16)
+        // The env co-owns both composed function values; retain their envs so a
+        // nested compose/closure temp isn't freed while still referenced.
+        self.emit(format("movq {}(%rbp), %r8", off + 8))
+        self.retain("r8", 0, self.type_of(l.id))
+        self.retain("r8", 16, self.type_of(r.id))
         self.emit("leaq __compose_call(%rip), %rax")
         self.emit(format("movq %rax, {}(%rbp)", off))
     }
@@ -2597,6 +3251,7 @@ impl CodeGen {
         self.cur_mangled = job.lifted
         self.subst = job.subst
         self.scopes = []
+        self.drop_scopes = []
         self.loops = []
         self.cursor = 0
         let ret = tfunc_ret(job.ftype)
@@ -2616,7 +3271,7 @@ impl CodeGen {
         self.emit("movq %rsp, %rbp")
         if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
 
-        push(self.scopes, [])
+        self.open_scope()
         var param_base = 0
         if self.struct_ret { param_base = 1 }
         let env_off = 16 + 8 * param_base
@@ -2640,9 +3295,25 @@ impl CodeGen {
                     self.emit("movq %rax, %rsi")
                     self.emit("movq 16(%rbp), %rdi")
                     self.emit_copy(self.size(self.type_of(ex.id)))
+                    match ret {
+                        Some(rt) => {
+                            if self.owns_heap(rt) {
+                                self.emit("movq 16(%rbp), %r8")
+                                self.retain("r8", 0, rt)
+                            }
+                        },
+                        None => {},
+                    }
+                    self.drop_expr_temps(ex)
+                    self.emit_return_drops()
                     self.emit("movq 16(%rbp), %rax")
                 } else {
-                    self.eval_owned(ex)
+                    self.eval(ex)
+                    self.emit("pushq %rax")
+                    if self.owns_heap_opt(ret) { self.emit("incq -8(%rax)") }
+                    self.drop_expr_temps(ex)
+                    self.emit_return_drops()
+                    self.emit("popq %rax")
                 }
             },
         }
@@ -2651,7 +3322,7 @@ impl CodeGen {
         self.emit("leave")
         self.emit("ret")
         self.emit("")
-        self.scopes = drop_last(self.scopes)
+        self.close_scope()
         self.subst = []
     }
 
@@ -2889,7 +3560,7 @@ impl CodeGen {
         var i = len(argv) - 1
         while i >= 0 {
             if is_aggregate(params[i]) { self.addr_of_aggregate(argv[i]) }
-            else { self.eval_owned(argv[i]) }
+            else { self.eval(argv[i]) }
             self.emit("pushq %rax")
             i = i - 1
         }
@@ -3198,7 +3869,7 @@ impl CodeGen {
         self.raw("\tpushq %rdi")
         self.raw("\tmovq $9, %rax")
         self.raw("\txorq %rdi, %rdi")
-        self.raw("\tmovq $268435456, %rsi")
+        self.raw("\tmovabsq $4294967296, %rsi")
         self.raw("\tmovq $3, %rdx")
         self.raw("\tmovq $34, %r10")
         self.raw("\tmovq $-1, %r8")
@@ -3207,7 +3878,8 @@ impl CodeGen {
         self.raw("\tcmpq $-4096, %rax")
         self.raw("\tja __trap")
         self.raw("\tmovq %rax, __heap_ptr(%rip)")
-        self.raw("\taddq $268435456, %rax")
+        self.raw("\tmovabsq $4294967296, %rcx")
+        self.raw("\taddq %rcx, %rax")
         self.raw("\tmovq %rax, __heap_end(%rip)")
         self.raw("\tpopq %rdi")
         self.raw("\tret")
@@ -3217,22 +3889,32 @@ impl CodeGen {
         self.raw("\tandq $-8, %rdi")
         self.raw("\tmovq __heap_end(%rip), %rax")
         self.raw("\ttestq %rax, %rax")
-        self.raw("\tjnz .Lalloc_search")
+        self.raw("\tjnz .Lalloc_ready")
         self.raw("\tcall __heap_init")
-        self.raw(".Lalloc_search:")
-        self.raw("\tleaq __free_list(%rip), %r8")
-        self.raw("\tmovq __free_list(%rip), %rsi")
-        self.raw(".Lalloc_scan:")
+        self.raw(".Lalloc_ready:")
+        self.raw("\tcmpq $4096, %rdi")
+        self.raw("\tja .Lalloc_large")
+        self.raw("\tleaq __free_buckets(%rip), %r8")
+        self.raw("\tmovq (%r8,%rdi), %rsi")
         self.raw("\ttestq %rsi, %rsi")
         self.raw("\tjz .Lalloc_bump")
-        self.raw("\tcmpq %rdi, -16(%rsi)")
-        self.raw("\tje .Lalloc_reuse")
-        self.raw("\tmovq %rsi, %r8")
-        self.raw("\tmovq (%rsi), %rsi")
-        self.raw("\tjmp .Lalloc_scan")
-        self.raw(".Lalloc_reuse:")
         self.raw("\tmovq (%rsi), %rax")
-        self.raw("\tmovq %rax, (%r8)")
+        self.raw("\tmovq %rax, (%r8,%rdi)")
+        self.raw("\tmovq $1, -8(%rsi)")
+        self.raw("\tmovq %rsi, %rax")
+        self.raw("\tret")
+        self.raw(".Lalloc_large:")
+        self.raw("\tleaq -1(%rdi), %rcx")
+        self.raw("\tbsrq %rcx, %rcx")
+        self.raw("\taddq $1, %rcx")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tshlq %cl, %rdi")
+        self.raw("\tleaq __free_buckets+4104(%rip), %r8")
+        self.raw("\tmovq (%r8,%rcx,8), %rsi")
+        self.raw("\ttestq %rsi, %rsi")
+        self.raw("\tjz .Lalloc_bump")
+        self.raw("\tmovq (%rsi), %rax")
+        self.raw("\tmovq %rax, (%r8,%rcx,8)")
         self.raw("\tmovq $1, -8(%rsi)")
         self.raw("\tmovq %rsi, %rax")
         self.raw("\tret")
@@ -3248,9 +3930,21 @@ impl CodeGen {
         self.raw("\tret")
         self.raw("")
         self.raw("__free:")
-        self.raw("\tmovq __free_list(%rip), %rax")
+        self.raw("\tret")
+        self.raw("\tmovq -16(%rdi), %rsi")
+        self.raw("\tcmpq $4096, %rsi")
+        self.raw("\tja .Lfree_large")
+        self.raw("\tleaq __free_buckets(%rip), %r8")
+        self.raw("\tmovq (%r8,%rsi), %rax")
         self.raw("\tmovq %rax, (%rdi)")
-        self.raw("\tmovq %rdi, __free_list(%rip)")
+        self.raw("\tmovq %rdi, (%r8,%rsi)")
+        self.raw("\tret")
+        self.raw(".Lfree_large:")
+        self.raw("\tbsrq %rsi, %rcx")
+        self.raw("\tleaq __free_buckets+4104(%rip), %r8")
+        self.raw("\tmovq (%r8,%rcx,8), %rax")
+        self.raw("\tmovq %rax, (%rdi)")
+        self.raw("\tmovq %rdi, (%r8,%rcx,8)")
         self.raw("\tret")
         self.raw("")
         self.raw("__func_retain:")
@@ -3265,8 +3959,7 @@ impl CodeGen {
         self.raw("\tjz .Lfdrop_done")
         self.raw("\tdecq -8(%rdi)")
         self.raw("\tjnz .Lfdrop_done")
-        self.raw("\tmovq (%rdi), %rax")
-        self.raw("\tjmp *%rax")
+        self.raw("\tjmp __free")
         self.raw(".Lfdrop_done:")
         self.raw("\tret")
         self.raw("")
@@ -4014,6 +4707,9 @@ impl CodeGen {
         self.raw("\tmovq %rax, -48(%rbp)")
         self.raw("\tjmp .Lmg_loop")
         self.raw(".Lmg_done:")
+        // Free the old (unique) cell, then return the rehashed one.
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tcall __free")
         self.raw("\tmovq %r15, %rax")
         self.raw("\taddq $24, %rsp")
         self.raw("\tpopq %r15")
@@ -4139,7 +4835,16 @@ impl CodeGen {
         self.raw("\tleaq (%r15,%r13), %rax")
         self.raw("\tcmpq 8(%r14), %rax")
         self.raw("\tjbe .Lsba_fit")
-        self.raw("\tleaq 16(%rax), %rdi")
+        // Grow geometrically (new cap = max(newlen, 2*oldcap)) so building a
+        // large buffer line-by-line stays O(n) rather than O(n^2) realloc churn,
+        // which would otherwise exhaust the heap arena.
+        self.raw("\tmovq 8(%r14), %rdx")
+        self.raw("\taddq %rdx, %rdx")
+        self.raw("\tcmpq %rax, %rdx")
+        self.raw("\tjae .Lsba_capa")
+        self.raw("\tmovq %rax, %rdx")
+        self.raw(".Lsba_capa:")
+        self.raw("\tleaq 16(%rdx), %rdi")
         self.raw("\tcall __alloc")
         self.raw("\tmovq %rax, %rdi")
         self.raw("\tmovq %r14, %rsi")
@@ -4148,8 +4853,20 @@ impl CodeGen {
         self.raw("\tcld")
         self.raw("\trep movsb")
         self.raw("\tpopq %rax")
+        // Recompute new cap (r14 still references the old cell) and store it.
+        self.raw("\tmovq 8(%r14), %rdx")
+        self.raw("\taddq %rdx, %rdx")
         self.raw("\tleaq (%r15,%r13), %rcx")
-        self.raw("\tmovq %rcx, 8(%rax)")
+        self.raw("\tcmpq %rcx, %rdx")
+        self.raw("\tjae .Lsba_capb")
+        self.raw("\tmovq %rcx, %rdx")
+        self.raw(".Lsba_capb:")
+        self.raw("\tmovq %rdx, 8(%rax)")
+        // Free the old (unique) builder cell before publishing the new one.
+        self.raw("\tpushq %rax")
+        self.raw("\tmovq %r14, %rdi")
+        self.raw("\tcall __free")
+        self.raw("\tpopq %rax")
         self.raw("\tmovq %rax, %r14")
         self.raw("\tmovq %r14, (%rbx)")
         self.raw(".Lsba_fit:")
@@ -4169,6 +4886,298 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
+    }
+
+    // -- reference-counting helpers (drop / copy-on-write clone) ----------
+
+    // Emit every per-type drop/clone routine reached during code generation.
+    // Drop helpers recurse (dropping a list element re-registers its own drop),
+    // so we drain `need_drop` as a worklist whose length may grow mid-loop.
+    fun emit_drop_helpers(var self) {
+        if self.need_sb { self.emit_sb_rc_helpers() }
+        var i = 0
+        while i < len(self.need_drop) {
+            let t = self.need_drop[i]
+            i = i + 1
+            let tok = mono_token(t)
+            if list_has_str(self.drop_emitted, tok) { continue }
+            push(self.drop_emitted, tok)
+            match t {
+                Type.TList(e) => { self.emit_list_drop_helper(t) },
+                Type.TMap(k, v) => { self.emit_map_drop_helper(t) },
+                Type.TEnum(n, a) => { self.emit_dropb_helper(t) },
+                _ => {},
+            }
+        }
+        var j = 0
+        while j < len(self.need_clone) {
+            let t = self.need_clone[j]
+            j = j + 1
+            let tok = mono_token(t)
+            if list_has_str(self.clone_emitted, tok) { continue }
+            push(self.clone_emitted, tok)
+            match t {
+                Type.TList(e) => { self.emit_list_clone_helper(t) },
+                Type.TMap(k, v) => { self.emit_map_clone_helper(t) },
+                _ => {},
+            }
+        }
+    }
+
+    // `__drop_list_<elem>`: %rdi = list cell. Decrement the refcount; at zero,
+    // drop each of the `len` elements that own heap, then free the cell.
+    fun emit_list_drop_helper(var self, t: Type) {
+        let et = list_elem(t)
+        let stride = self.stored_size(et)
+        self.emit(format("__drop_list_{}:", mono_token(et)))
+        self.emit("decq -8(%rdi)")
+        let keep = self.label()
+        self.emit(format("jnz {}", keep))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("pushq %r13")
+        self.emit("pushq %r14")
+        self.emit("movq %rdi, %rbx")
+        if self.owns_heap(et) {
+            self.emit("movq (%rbx), %r12")
+            self.emit("xorq %r13, %r13")
+            let loop = self.label()
+            let done = self.label()
+            self.emit(format("{}:", loop))
+            self.emit("cmpq %r12, %r13")
+            self.emit(format("jge {}", done))
+            self.emit("movq %r13, %rax")
+            self.emit(format("imulq ${}, %rax", stride))
+            self.emit("leaq 16(%rbx,%rax), %r14")
+            self.walk_member("r14", 0, et, false)
+            self.emit("incq %r13")
+            self.emit(format("jmp {}", loop))
+            self.emit(format("{}:", done))
+        }
+        self.emit("movq %rbx, %rdi")
+        self.emit("popq %r14")
+        self.emit("popq %r13")
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("jmp __free")
+        self.emit(format("{}:", keep))
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // `__clone_list_<elem>`: %rdi = shared cell. Allocate an independent copy
+    // (rc=1), retain each element it now shares, decrement the original, and
+    // return the copy in %rax (the copy-on-write clone, D38).
+    fun emit_list_clone_helper(var self, t: Type) {
+        let et = list_elem(t)
+        let stride = self.stored_size(et)
+        self.emit(format("__clone_list_{}:", mono_token(et)))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("pushq %r13")
+        self.emit("pushq %r14")
+        self.emit("movq %rdi, %rbx")
+        self.emit("movq -16(%rbx), %r12")
+        self.emit("movq %r12, %rdi")
+        self.emit("call __alloc")
+        self.emit("movq %rax, %r13")
+        self.emit("movq %rbx, %rsi")
+        self.emit("movq %r13, %rdi")
+        self.emit("movq %r12, %rcx")
+        self.emit("cld")
+        self.emit("rep movsb")
+        if self.owns_heap(et) {
+            self.emit("movq (%r13), %r12")
+            self.emit("xorq %r14, %r14")
+            let loop = self.label()
+            let done = self.label()
+            self.emit(format("{}:", loop))
+            self.emit("cmpq %r12, %r14")
+            self.emit(format("jge {}", done))
+            self.emit("movq %r14, %rax")
+            self.emit(format("imulq ${}, %rax", stride))
+            self.emit("leaq 16(%r13,%rax), %rcx")
+            self.walk_member("rcx", 0, et, true)
+            self.emit("incq %r14")
+            self.emit(format("jmp {}", loop))
+            self.emit(format("{}:", done))
+        }
+        self.emit("decq -8(%rbx)")
+        self.emit("movq %r13, %rax")
+        self.emit("popq %r14")
+        self.emit("popq %r13")
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // `__drop_map_<k>_<v>`: %rdi = map cell. Decrement the refcount; at zero,
+    // drop each occupied slot's owning key/value, then free the cell.
+    fun emit_map_drop_helper(var self, t: Type) {
+        let kt = map_key(t)
+        let vt = map_val(t)
+        let ss = self.map_slot_size(t)
+        self.emit(format("__drop_map_{}_{}:", mono_token(kt), mono_token(vt)))
+        self.emit("decq -8(%rdi)")
+        let keep = self.label()
+        self.emit(format("jnz {}", keep))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("pushq %r13")
+        self.emit("pushq %r14")
+        self.emit("movq %rdi, %rbx")
+        if self.owns_heap(kt) || self.owns_heap(vt) {
+            self.emit("movq 8(%rbx), %r12")
+            self.emit("xorq %r13, %r13")
+            let loop = self.label()
+            let done = self.label()
+            self.emit(format("{}:", loop))
+            self.emit("cmpq %r12, %r13")
+            self.emit(format("jge {}", done))
+            self.emit("movq %r13, %rax")
+            self.emit(format("imulq ${}, %rax", ss))
+            self.emit("leaq 16(%rbx,%rax), %r14")
+            self.emit("movq (%r14), %rax")
+            self.emit("cmpq $1, %rax")
+            let cont = self.label()
+            self.emit(format("jne {}", cont))
+            if self.owns_heap(kt) { self.walk_member("r14", 8, kt, false) }
+            if self.owns_heap(vt) { self.walk_member("r14", 16, vt, false) }
+            self.emit(format("{}:", cont))
+            self.emit("incq %r13")
+            self.emit(format("jmp {}", loop))
+            self.emit(format("{}:", done))
+        }
+        self.emit("movq %rbx, %rdi")
+        self.emit("popq %r14")
+        self.emit("popq %r13")
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("jmp __free")
+        self.emit(format("{}:", keep))
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // `__clone_map_<k>_<v>`: %rdi = shared map cell -> rax = independent copy
+    // (rc=1); retain each occupied slot's owning key/value; original decremented.
+    fun emit_map_clone_helper(var self, t: Type) {
+        let kt = map_key(t)
+        let vt = map_val(t)
+        let ss = self.map_slot_size(t)
+        self.emit(format("__clone_map_{}_{}:", mono_token(kt), mono_token(vt)))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("pushq %r13")
+        self.emit("pushq %r14")
+        self.emit("movq %rdi, %rbx")
+        self.emit("movq -16(%rbx), %r12")
+        self.emit("movq %r12, %rdi")
+        self.emit("call __alloc")
+        self.emit("movq %rax, %r13")
+        self.emit("movq %rbx, %rsi")
+        self.emit("movq %r13, %rdi")
+        self.emit("movq %r12, %rcx")
+        self.emit("cld")
+        self.emit("rep movsb")
+        if self.owns_heap(kt) || self.owns_heap(vt) {
+            self.emit("movq 8(%r13), %r12")
+            self.emit("xorq %r14, %r14")
+            let loop = self.label()
+            let done = self.label()
+            self.emit(format("{}:", loop))
+            self.emit("cmpq %r12, %r14")
+            self.emit(format("jge {}", done))
+            self.emit("movq %r14, %rax")
+            self.emit(format("imulq ${}, %rax", ss))
+            self.emit("leaq 16(%r13,%rax), %rcx")
+            self.emit("movq (%rcx), %rax")
+            self.emit("cmpq $1, %rax")
+            let cont = self.label()
+            self.emit(format("jne {}", cont))
+            if self.owns_heap(kt) { self.walk_member("rcx", 8, kt, true) }
+            if self.owns_heap(vt) { self.walk_member("rcx", 16, vt, true) }
+            self.emit(format("{}:", cont))
+            self.emit("incq %r14")
+            self.emit(format("jmp {}", loop))
+            self.emit(format("{}:", done))
+        }
+        self.emit("decq -8(%rbx)")
+        self.emit("movq %r13, %rax")
+        self.emit("popq %r14")
+        self.emit("popq %r13")
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // `__dropb_<E>`: %rdi = boxed-enum cell. Decrement; at zero, drop the
+    // children the inline value owns, then free the cell.
+    fun emit_dropb_helper(var self, t: Type) {
+        self.emit(format("__dropb_{}:", mono_token(t)))
+        self.emit("decq -8(%rdi)")
+        let keep = self.label()
+        self.emit(format("jnz {}", keep))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("movq %rdi, %rbx")
+        self.owned_walk("rbx", 0, t, false)
+        self.emit("movq %rbx, %rdi")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("jmp __free")
+        self.emit(format("{}:", keep))
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // Builder reference-counting helpers (bytes are scalars: drop just frees).
+    fun emit_sb_rc_helpers(var self) {
+        self.emit("__sb_drop:")
+        self.emit("decq -8(%rdi)")
+        let keep = self.label()
+        self.emit(format("jnz {}", keep))
+        self.emit("jmp __free")
+        self.emit(format("{}:", keep))
+        self.emit("ret")
+        self.emit("")
+        self.emit("__sb_clone:")
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("movq %rdi, %rbx")
+        self.emit("movq -16(%rbx), %r12")
+        self.emit("movq %r12, %rdi")
+        self.emit("call __alloc")
+        self.emit("pushq %rax")
+        self.emit("movq %rbx, %rsi")
+        self.emit("movq %rax, %rdi")
+        self.emit("movq %r12, %rcx")
+        self.emit("cld")
+        self.emit("rep movsb")
+        self.emit("popq %rax")
+        self.emit("decq -8(%rbx)")
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
     }
 
     // List cell layout: [len:8][cap:8][elem0..]. The value pointer points at the
@@ -4235,6 +5244,12 @@ impl CodeGen {
         self.raw("\trep movsb")
         self.raw("\tpopq %rax")
         self.raw("\tmovq %r14, 8(%rax)")
+        // The caller made the cell unique (rc==1) before growing, so the old
+        // buffer is now garbage: free it to keep arena usage bounded.
+        self.raw("\tpushq %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tcall __free")
+        self.raw("\tpopq %rax")
         self.raw("\tpopq %r14")
         self.raw("\tpopq %r13")
         self.raw("\tpopq %r12")
@@ -4607,6 +5622,15 @@ fun bnot(a: int32) -> int32 { return ~a }
 fun list_has_str(xs: [str], target: str) -> bool {
     for x in xs { if x == target { return true } }
     return false
+}
+
+// Return a fresh list with `s` appended (non-mutating: callers pass it down a
+// recursion as a cycle-breaking "seen" set without disturbing the caller's).
+fun push_str_copy(xs: [str], s: str) -> [str] {
+    var out: [str] = []
+    for x in xs { push(out, x) }
+    push(out, s)
+    return out
 }
 
 fun is_tstr(t: Type) -> bool {

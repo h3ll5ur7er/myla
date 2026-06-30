@@ -365,6 +365,16 @@ deliberately.
   burn-tests pass.
 - **v0.0.3** implements §7 so `myla build` produces native binaries whose output
   matches the interpreter.
-- **v0.1** re-implements this same architecture in Myla itself, beginning the
-  self-hosting effort; keeping the front end and semantics shared (this doc)
-  is what makes that re-implementation a faithful port.
+- **v0.2–v0.5** grow the language (data modeling, collections/strings/ops,
+  abstraction, modules + runtime) — the feature set self-hosting depends on.
+- **v0.6–v1.0** re-implement this same architecture in Myla itself under
+  `selfhost/` (lexer → parser → checker → x86-64 codegen, sharing a bundled
+  `std/`), ported stage-by-stage and differentially tested against this Python
+  toolchain. **v1.0 reached the three-stage byte-identical fixed point**
+  ([roadmap.md](roadmap.md)); build it with `scripts/bootstrap.sh`. Keeping the
+  front end and semantics shared (this doc) is what made that port faithful.
+
+> This document describes the **Python (stage0) toolchain** under `src/myla/`,
+> which remains the bootstrap compiler and the differential-testing oracle. The
+> self-hosted compiler in `selfhost/` mirrors the same pipeline; its current
+> gaps relative to this oracle are tracked in [known_issues.md](known_issues.md).
