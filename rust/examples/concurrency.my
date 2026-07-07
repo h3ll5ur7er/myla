@@ -1,0 +1,33 @@
+// Bonus: Go/Swift-inspired concurrency — goroutine-style tasks, channels,
+// async/await, and an actor.
+
+actor Counter {
+    count: int
+    fun incr(var self) { self.count = self.count + 1 }
+    fun value(self) -> int { return self.count }
+}
+
+async fun square(n: int) -> int {
+    return n * n
+}
+
+fun main() {
+    // channels + spawned tasks (goroutines)
+    let ch = make_chan()
+    spawn { ch.send(1) }
+    spawn { ch.send(2) }
+    let a = ch.recv()
+    let b = ch.recv()
+    print(a + b)
+
+    // async/await
+    let t = square(9)
+    print(await t)
+
+    // actor with serialized state
+    var c = Counter { count: 0 }
+    c.incr()
+    c.incr()
+    c.incr()
+    print(c.value())
+}

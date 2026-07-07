@@ -1,0 +1,5 @@
+// The classic. Compiles natively and runs under the interpreter.
+#main
+fun main() {
+    print("Hello from Myla (Rust edition)!")
+}

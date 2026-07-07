@@ -1,0 +1,36 @@
+// Algebraic data types, pattern matching, Option/Result + `?`.
+
+enum Shape {
+    Circle(float),
+    Rect(float, float),
+}
+
+fun area(s: Shape) -> float {
+    match s {
+        Shape.Circle(r) => 3.14159 * r * r,
+        Shape.Rect(w, h) => w * h,
+    }
+}
+
+fun safe_div(a: int, b: int) -> Result<int, str> {
+    if b == 0 { return Err("divide by zero") }
+    return Ok(a / b)
+}
+
+fun compute(a: int, b: int) -> Result<int, str> {
+    let q = safe_div(a, b)?
+    return Ok(q + 1)
+}
+
+fun main() {
+    print(area(Shape.Circle(2.0)))
+    print(area(Shape.Rect(3.0, 4.0)))
+    match compute(10, 2) {
+        Ok(v) => print(v),
+        Err(e) => print(e),
+    }
+    match compute(10, 0) {
+        Ok(v) => print(v),
+        Err(e) => print(e),
+    }
+}

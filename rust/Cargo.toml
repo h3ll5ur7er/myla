@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/myla-syntax",
+    "crates/myla-sema",
+    "crates/myla-interp",
+    "crates/myla-runtime",
+    "crates/myla-codegen",
+    "crates/myla-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Myla"]
+repository = "https://github.com/myla-lang/myla"
+
+[workspace.dependencies]
+# Front end
+logos = "0.14"
+# Diagnostics
+ariadne = "0.4"
+thiserror = "1"
+# Float formatting (round-trippable decimals)
+ryu = "1"
+# Hashing for the map runtime (arbitrary key types)
+ahash = "0.8"
+# Concurrency runtime
+crossbeam-channel = "0.5"
+crossbeam-deque = "0.8"
+parking_lot = "0.12"
+# CLI
+clap = { version = "4", features = ["derive"] }
+# Internal crates
+myla-syntax = { path = "crates/myla-syntax" }
+myla-sema = { path = "crates/myla-sema" }
+myla-interp = { path = "crates/myla-interp" }
+myla-runtime = { path = "crates/myla-runtime" }
+myla-codegen = { path = "crates/myla-codegen" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
