@@ -98,6 +98,9 @@ class CodeGen:
         # set once `std.fs.read_to_string` (`__read_file`/`__io_errno`) is used,
         # gating the file-read helper + its errno global.
         self._uses_read_file = False
+        # set once `std.process.run`/`Command` (`__run`/`__run_*`) is used, gating
+        # the subprocess runtime (fork/execve/pipe/poll/wait4) + its result globals.
+        self._uses_run = False
 
     # -- type layout ---------------------------------------------------------
 
@@ -359,6 +362,8 @@ class CodeGen:
             self._emit_args_runtime()
         if self._uses_read_file:
             self._emit_read_file_runtime()
+        if self._uses_run:
+            self._emit_run_runtime()
         return self._assemble_source()
 
     def _assemble_source(self) -> str:
@@ -391,6 +396,20 @@ class CodeGen:
         out.append("\t.skip 8")
         out.append("__argv:")
         out.append("\t.skip 8")
+        # envp captured at `_start`, passed through to `execve` by `__run` (D29)
+        out.append("__envp:")
+        out.append("\t.skip 8")
+        if self._uses_run:
+            # results of the last `__run`, read by the `__run_*` primitives:
+            # the stderr `[uint8]` cell, the exit code, the signal, the errno.
+            out.append("__run_stderr_val:")
+            out.append("\t.skip 8")
+            out.append("__run_exit_val:")
+            out.append("\t.skip 8")
+            out.append("__run_signal_val:")
+            out.append("\t.skip 8")
+            out.append("__run_errno_val:")
+            out.append("\t.skip 8")
         if self._uses_read_file:
             # errno of the last `__read_file` (0 on success), read by `__io_errno`
             out.append("__io_errno_val:")
@@ -410,8 +429,11 @@ class CodeGen:
         # capture argc/argv from the entry stack (D29) for `std.process.args`.
         e("\tmovq (%rsp), %rax")        # argc
         e("\tmovq %rax, __argc(%rip)")
-        e("\tleaq 8(%rsp), %rax")       # &argv[0]
-        e("\tmovq %rax, __argv(%rip)")
+        e("\tleaq 8(%rsp), %rcx")       # &argv[0]
+        e("\tmovq %rcx, __argv(%rip)")
+        # envp = &argv[argc + 1] = rsp + 16 + argc*8 (past argv's NULL terminator)
+        e("\tleaq 16(%rsp,%rax,8), %rcx")
+        e("\tmovq %rcx, __envp(%rip)")
         e(f"\tcall myla_{entry_name}")
         e("\tmovq $60, %rax")          # exit
         e("\txorq %rdi, %rdi")
@@ -3640,6 +3662,32 @@ class CodeGen:
             self._emit("movq __io_errno_val(%rip), %rax")
             return
 
+        if name == "__run":
+            self._uses_run = True
+            self._eval(expr.args[1])             # argv [str] list cell -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[0])             # program str cell -> rax
+            self._emit("movq %rax, %rdi")        # program
+            self._emit("popq %rsi")              # argv list cell
+            self._emit("call __run")             # rax = stdout [uint8] cell
+            return
+        if name == "__run_stderr":
+            self._uses_run = True
+            self._emit("movq __run_stderr_val(%rip), %rax")
+            return
+        if name == "__run_exit_code":
+            self._uses_run = True
+            self._emit("movslq __run_exit_val(%rip), %rax")
+            return
+        if name == "__run_signal":
+            self._uses_run = True
+            self._emit("movslq __run_signal_val(%rip), %rax")
+            return
+        if name == "__run_errno":
+            self._uses_run = True
+            self._emit("movslq __run_errno_val(%rip), %rax")
+            return
+
         if name == "len":
             self._eval(expr.args[0])             # list cell pointer -> rax
             self._emit("movq (%rax), %rax")      # length at offset 0
@@ -4533,6 +4581,438 @@ class CodeGen:
         e("\tmovq $0, (%rax)")                 # len = 0
         e(".Lrf_ret:")
         e("\tleaq -40(%rbp), %rsp")            # discard path buffer/statbuf
+        e("\tpopq %r15")
+        e("\tpopq %r14")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_run_runtime(self) -> None:
+        """`__run`: rdi = program str cell, rsi = argv `[str]` list cell -> rax =
+        a fresh `[uint8]` list cell with the child's captured stdout (rc=1). The
+        stderr `[uint8]` cell, the exit code (or -1 if signaled), the terminating
+        signal (0 if exited), and the spawn errno (0 on success) are stored in
+        `__run_stderr_val`/`__run_exit_val`/`__run_signal_val`/`__run_errno_val`
+        for the `__run_*` primitives. Backs `std.process.run`/`Command` (D29).
+
+        The program is located by the exact path given (no PATH search); the
+        child inherits the parent environment (`__envp`). stdout and stderr are
+        drained concurrently with poll(2) to avoid pipe-buffer deadlock, and an
+        O_CLOEXEC \"exec error\" pipe reports an execve failure's errno precisely
+        (so a missing/again-non-executable program maps to NotFound/EACCES)."""
+        e = self.text.append
+        # ---- growable [uint8] list helpers ---------------------------------
+        # __u8list_new: rdi = capacity (elements) -> rax = empty list cell (rc=1)
+        e("__u8list_new:")
+        e("\tpushq %r12")
+        e("\tmovq %rdi, %r12")             # capacity
+        e("\tshlq $3, %rdi")               # cap * 8
+        e("\taddq $16, %rdi")              # + [len][cap] header
+        e("\tcall __alloc")                # rax = cell (rc=1)
+        e("\tmovq $0, (%rax)")             # length = 0
+        e("\tmovq %r12, 8(%rax)")          # capacity
+        e("\tpopq %r12")
+        e("\tret")
+        e("")
+        # __u8list_append: rdi = list cell, rsi = src bytes, rdx = n
+        #   -> rax = the (possibly reallocated) list cell with n bytes appended,
+        #   each zero-extended into an 8-byte element slot.
+        e("__u8list_append:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tpushq %r14")
+        e("\tpushq %r15")
+        e("\tmovq %rdi, %r12")             # list cell
+        e("\tmovq %rsi, %r13")             # src
+        e("\tmovq %rdx, %r14")             # n
+        e("\tmovq (%r12), %rbx")           # len
+        e("\tmovq 8(%r12), %r15")          # cap
+        e("\tmovq %rbx, %rax")
+        e("\taddq %r14, %rax")             # need = len + n
+        e("\tcmpq %r15, %rax")
+        e("\tjbe .Lap_copy")
+        # grow: newcap = smallest cap*2^k (>= 8) that reaches `need`
+        e("\tmovq %r15, %rcx")
+        e("\ttestq %rcx, %rcx")
+        e("\tjnz .Lap_dbl")
+        e("\tmovq $8, %rcx")
+        e(".Lap_dbl:")
+        e("\tshlq $1, %rcx")
+        e("\tcmpq %rax, %rcx")
+        e("\tjb .Lap_dbl")
+        e("\tpushq %rcx")                  # save newcap
+        e("\tmovq %rcx, %rdi")
+        e("\tshlq $3, %rdi")               # newcap * 8
+        e("\taddq $16, %rdi")              # + header
+        e("\tcall __alloc")                # rax = new cell
+        e("\tpopq %rcx")                   # newcap
+        e("\tmovq %rax, %r15")             # new cell
+        e("\tmovq %rbx, (%r15)")           # len (old)
+        e("\tmovq %rcx, 8(%r15)")          # capacity = newcap
+        e("\tleaq 16(%r12), %rsi")         # old elements
+        e("\tleaq 16(%r15), %rdi")         # new elements
+        e("\tmovq %rbx, %rcx")             # len
+        e("\ttestq %rcx, %rcx")
+        e("\tjz .Lap_freed")
+        e(".Lap_cp:")
+        e("\tmovq (%rsi), %rdx")
+        e("\tmovq %rdx, (%rdi)")
+        e("\taddq $8, %rsi")
+        e("\taddq $8, %rdi")
+        e("\tdecq %rcx")
+        e("\tjnz .Lap_cp")
+        e(".Lap_freed:")
+        e("\tmovq %r12, %rdi")             # free the old cell
+        e("\tcall __free")
+        e("\tmovq %r15, %r12")             # list = new cell
+        e(".Lap_copy:")
+        e("\tleaq 16(%r12), %rdi")
+        e("\tleaq (%rdi,%rbx,8), %rdi")    # dst = elems + len*8
+        e("\txorq %rcx, %rcx")
+        e(".Lap_bcopy:")
+        e("\tcmpq %r14, %rcx")
+        e("\tjae .Lap_bdone")
+        e("\tmovzbq (%r13,%rcx), %rax")    # zero-extend byte -> slot
+        e("\tmovq %rax, (%rdi)")
+        e("\taddq $8, %rdi")
+        e("\tincq %rcx")
+        e("\tjmp .Lap_bcopy")
+        e(".Lap_bdone:")
+        e("\taddq %r14, %rbx")             # len += n
+        e("\tmovq %rbx, (%r12)")
+        e("\tmovq %r12, %rax")
+        e("\tpopq %r15")
+        e("\tpopq %r14")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+        # ---- __run ---------------------------------------------------------
+        # stack frame (offsets from %rbp, below 40 bytes of saved rbx/r12-r15):
+        #   -48 stdout_pipe [rd:-48, wr:-44]   -56 stderr_pipe [rd:-56, wr:-52]
+        #   -64 exec_pipe   [rd:-64, wr:-60]   -72 child_pid    -80 status
+        #   -88 argv C-array ptr               -96 path buffer ptr
+        #   -112 pollfds (entry0 @-112, entry1 @-104)
+        #   -4208 io_buffer (4096 bytes)
+        e("__run:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tpushq %r14")
+        e("\tpushq %r15")
+        e("\tsubq $4176, %rsp")
+        e("\tmovq %rdi, %r12")             # program str cell
+        e("\tmovq %rsi, %r13")             # argv [str] list cell
+        e("\tmovq $0, __run_errno_val(%rip)")
+        e("\tmovq $0, __run_exit_val(%rip)")
+        e("\tmovq $0, __run_signal_val(%rip)")
+        # build the NUL-terminated argv pointer array on the heap
+        e("\tmovq (%r13), %rbx")           # argc
+        e("\tleaq 8(%rbx), %rdi")          # argc + 1
+        e("\tshlq $3, %rdi")               # * 8
+        e("\tcall __alloc")
+        e("\tmovq %rax, -88(%rbp)")        # argv C-array base
+        e("\txorq %r14, %r14")             # i = 0
+        e(".Lrun_av:")
+        e("\tcmpq %rbx, %r14")
+        e("\tjae .Lrun_av_done")
+        e("\tmovq 16(%r13,%r14,8), %r15")  # str cell argv[i]
+        e("\tmovq (%r15), %rcx")           # str length
+        e("\tleaq 1(%rcx), %rdi")          # + NUL
+        e("\tcall __alloc")                # rax = C-string buffer
+        e("\tmovq -88(%rbp), %rdx")
+        e("\tmovq %rax, (%rdx,%r14,8)")    # argv_arr[i] = buffer
+        e("\tmovq (%r15), %rcx")           # length (reload)
+        e("\tleaq 8(%r15), %rsi")          # src bytes
+        e("\tmovq %rax, %rdi")             # dst
+        e("\txorq %rdx, %rdx")
+        e(".Lrun_avc:")
+        e("\tcmpq %rcx, %rdx")
+        e("\tjae .Lrun_avcd")
+        e("\tmovb (%rsi,%rdx), %r8b")
+        e("\tmovb %r8b, (%rdi,%rdx)")
+        e("\tincq %rdx")
+        e("\tjmp .Lrun_avc")
+        e(".Lrun_avcd:")
+        e("\tmovb $0, (%rdi,%rcx)")        # NUL terminator
+        e("\tincq %r14")
+        e("\tjmp .Lrun_av")
+        e(".Lrun_av_done:")
+        e("\tmovq -88(%rbp), %rdx")
+        e("\tmovq $0, (%rdx,%rbx,8)")      # argv[argc] = NULL
+        # build the NUL-terminated program path on the heap
+        e("\tmovq (%r12), %rcx")           # program length
+        e("\tleaq 1(%rcx), %rdi")
+        e("\tcall __alloc")
+        e("\tmovq %rax, -96(%rbp)")        # path buffer
+        e("\tmovq (%r12), %rcx")           # length (reload)
+        e("\tleaq 8(%r12), %rsi")          # src bytes
+        e("\tmovq %rax, %rdi")             # dst
+        e("\txorq %rdx, %rdx")
+        e(".Lrun_pc:")
+        e("\tcmpq %rcx, %rdx")
+        e("\tjae .Lrun_pcd")
+        e("\tmovb (%rsi,%rdx), %r8b")
+        e("\tmovb %r8b, (%rdi,%rdx)")
+        e("\tincq %rdx")
+        e("\tjmp .Lrun_pc")
+        e(".Lrun_pcd:")
+        e("\tmovb $0, (%rdi,%rcx)")        # NUL terminator
+        # pipe(stdout), pipe(stderr), pipe2(exec, O_CLOEXEC)
+        e("\tleaq -48(%rbp), %rdi")
+        e("\tmovq $22, %rax")              # sys_pipe
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lrun_spawn_err")
+        e("\tleaq -56(%rbp), %rdi")
+        e("\tmovq $22, %rax")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lrun_spawn_err")
+        e("\tleaq -64(%rbp), %rdi")
+        e("\tmovq $524288, %rsi")          # O_CLOEXEC
+        e("\tmovq $293, %rax")             # sys_pipe2
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lrun_spawn_err")
+        # fork
+        e("\tmovq $57, %rax")              # sys_fork
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lrun_spawn_err")
+        e("\tjz .Lrun_child")
+        e("\tmovq %rax, -72(%rbp)")        # parent: child pid
+        e("\tjmp .Lrun_parent")
+        # ---- child ----
+        e(".Lrun_child:")
+        e("\tmovl -44(%rbp), %edi")        # dup2(stdout write, 1)
+        e("\tmovl $1, %esi")
+        e("\tmovq $33, %rax")
+        e("\tsyscall")
+        e("\tmovl -52(%rbp), %edi")        # dup2(stderr write, 2)
+        e("\tmovl $2, %esi")
+        e("\tmovq $33, %rax")
+        e("\tsyscall")
+        e("\tmovl -48(%rbp), %edi")        # close stdout read
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl -44(%rbp), %edi")        # close stdout write
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl -56(%rbp), %edi")        # close stderr read
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl -52(%rbp), %edi")        # close stderr write
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl -64(%rbp), %edi")        # close exec read
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovq -96(%rbp), %rdi")        # execve(path, argv, envp)
+        e("\tmovq -88(%rbp), %rsi")
+        e("\tmovq __envp(%rip), %rdx")
+        e("\tmovq $59, %rax")
+        e("\tsyscall")
+        e("\tnegq %rax")                   # execve failed: rax = -errno -> errno
+        e("\tmovl %eax, -80(%rbp)")        # stash errno
+        e("\tmovl -60(%rbp), %edi")        # write errno to exec pipe
+        e("\tleaq -80(%rbp), %rsi")
+        e("\tmovq $4, %rdx")
+        e("\tmovq $1, %rax")
+        e("\tsyscall")
+        e("\tmovq $127, %rdi")             # _exit(127)
+        e("\tmovq $60, %rax")
+        e("\tsyscall")
+        # ---- parent ----
+        e(".Lrun_parent:")
+        e("\tmovl -44(%rbp), %edi")        # close stdout write
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl -52(%rbp), %edi")        # close stderr write
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl -60(%rbp), %edi")        # close exec write
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl -64(%rbp), %edi")        # read exec pipe: errno or EOF
+        e("\tleaq -4208(%rbp), %rsi")
+        e("\tmovq $4, %rdx")
+        e("\tmovq $0, %rax")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjle .Lrun_exec_ok")           # EOF (0) => execve succeeded
+        e("\tmovl -4208(%rbp), %eax")      # execve failed with this errno
+        e("\tmovl %eax, __run_errno_val(%rip)")
+        e("\tmovl -64(%rbp), %edi")        # close exec read
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl -48(%rbp), %edi")        # close stdout read
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl -56(%rbp), %edi")        # close stderr read
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e(".Lrun_reap:")
+        e("\tmovq -72(%rbp), %rdi")        # wait4(pid, &status, 0, 0) to reap
+        e("\tleaq -80(%rbp), %rsi")
+        e("\txorq %rdx, %rdx")
+        e("\txorq %r10, %r10")
+        e("\tmovq $61, %rax")
+        e("\tsyscall")
+        e("\tcmpq $-4, %rax")              # EINTR
+        e("\tje .Lrun_reap")
+        e("\tjmp .Lrun_empty_ret")
+        e(".Lrun_exec_ok:")
+        e("\tmovl -64(%rbp), %edi")        # close exec read
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        # allocate the stdout / stderr accumulator lists
+        e("\tmovq $64, %rdi")
+        e("\tcall __u8list_new")
+        e("\tmovq %rax, %r14")             # stdout list
+        e("\tmovq $64, %rdi")
+        e("\tcall __u8list_new")
+        e("\tmovq %rax, %r15")             # stderr list
+        e("\tmovl -48(%rbp), %r12d")       # stdout read fd
+        e("\tmovl -56(%rbp), %r13d")       # stderr read fd
+        # poll/drain loop
+        e(".Lrun_poll:")
+        e("\tcmpl $-1, %r12d")
+        e("\tjne .Lrun_open")
+        e("\tcmpl $-1, %r13d")
+        e("\tje .Lrun_drain_done")
+        e(".Lrun_open:")
+        e("\tmovl %r12d, -112(%rbp)")      # pollfd[0].fd
+        e("\tmovw $1, -108(%rbp)")         # events = POLLIN
+        e("\tmovw $0, -106(%rbp)")         # revents
+        e("\tmovl %r13d, -104(%rbp)")      # pollfd[1].fd
+        e("\tmovw $1, -100(%rbp)")         # events = POLLIN
+        e("\tmovw $0, -98(%rbp)")          # revents
+        e("\tleaq -112(%rbp), %rdi")
+        e("\tmovq $2, %rsi")
+        e("\tmovq $-1, %rdx")              # infinite timeout
+        e("\tmovq $7, %rax")               # sys_poll
+        e("\tsyscall")
+        e("\tcmpq $-4, %rax")              # EINTR
+        e("\tje .Lrun_poll")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lrun_drain_done")         # poll error: stop draining
+        e("\tmovzwl -106(%rbp), %eax")     # stdout revents
+        e("\ttestl %eax, %eax")
+        e("\tjz .Lrun_do_err")
+        e("\tcmpl $-1, %r12d")
+        e("\tje .Lrun_do_err")
+        e("\tmovl %r12d, %edi")            # read stdout
+        e("\tleaq -4208(%rbp), %rsi")
+        e("\tmovq $4096, %rdx")
+        e("\tmovq $0, %rax")
+        e("\tsyscall")
+        e("\tcmpq $-4, %rax")              # EINTR
+        e("\tje .Lrun_poll")
+        e("\ttestq %rax, %rax")
+        e("\tjg .Lrun_so_data")
+        e("\tmovl %r12d, %edi")            # EOF/error: close stdout read
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl $-1, %r12d")
+        e("\tjmp .Lrun_do_err")
+        e(".Lrun_so_data:")
+        e("\tmovq %r14, %rdi")
+        e("\tleaq -4208(%rbp), %rsi")
+        e("\tmovq %rax, %rdx")
+        e("\tcall __u8list_append")
+        e("\tmovq %rax, %r14")
+        e(".Lrun_do_err:")
+        e("\tmovzwl -98(%rbp), %eax")      # stderr revents
+        e("\ttestl %eax, %eax")
+        e("\tjz .Lrun_poll")
+        e("\tcmpl $-1, %r13d")
+        e("\tje .Lrun_poll")
+        e("\tmovl %r13d, %edi")            # read stderr
+        e("\tleaq -4208(%rbp), %rsi")
+        e("\tmovq $4096, %rdx")
+        e("\tmovq $0, %rax")
+        e("\tsyscall")
+        e("\tcmpq $-4, %rax")              # EINTR
+        e("\tje .Lrun_poll")
+        e("\ttestq %rax, %rax")
+        e("\tjg .Lrun_se_data")
+        e("\tmovl %r13d, %edi")            # EOF/error: close stderr read
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e("\tmovl $-1, %r13d")
+        e("\tjmp .Lrun_poll")
+        e(".Lrun_se_data:")
+        e("\tmovq %r15, %rdi")
+        e("\tleaq -4208(%rbp), %rsi")
+        e("\tmovq %rax, %rdx")
+        e("\tcall __u8list_append")
+        e("\tmovq %rax, %r15")
+        e("\tjmp .Lrun_poll")
+        e(".Lrun_drain_done:")
+        e("\tcmpl $-1, %r12d")             # close any still-open read ends
+        e("\tje .Lrun_dc1")
+        e("\tmovl %r12d, %edi")
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e(".Lrun_dc1:")
+        e("\tcmpl $-1, %r13d")
+        e("\tje .Lrun_dc2")
+        e("\tmovl %r13d, %edi")
+        e("\tmovq $3, %rax")
+        e("\tsyscall")
+        e(".Lrun_dc2:")
+        e(".Lrun_wait:")
+        e("\tmovq -72(%rbp), %rdi")        # wait4(pid, &status, 0, 0)
+        e("\tleaq -80(%rbp), %rsi")
+        e("\txorq %rdx, %rdx")
+        e("\txorq %r10, %r10")
+        e("\tmovq $61, %rax")
+        e("\tsyscall")
+        e("\tcmpq $-4, %rax")              # EINTR
+        e("\tje .Lrun_wait")
+        e("\tmovl -80(%rbp), %eax")        # decode wait status
+        e("\tmovl %eax, %ecx")
+        e("\tandl $127, %ecx")             # low 7 bits = terminating signal
+        e("\ttestl %ecx, %ecx")
+        e("\tjnz .Lrun_signaled")
+        e("\tshrl $8, %eax")               # exited: (status >> 8) & 0xff
+        e("\tandl $255, %eax")
+        e("\tmovl %eax, __run_exit_val(%rip)")
+        e("\tmovl $0, __run_signal_val(%rip)")
+        e("\tjmp .Lrun_finish")
+        e(".Lrun_signaled:")
+        e("\tmovl %ecx, __run_signal_val(%rip)")
+        e("\tmovl $-1, __run_exit_val(%rip)")
+        e(".Lrun_finish:")
+        e("\tmovq %r15, __run_stderr_val(%rip)")  # stash stderr
+        e("\tmovq %r14, %rax")             # return stdout
+        e("\tjmp .Lrun_ret")
+        # spawn failed before/at fork or execve: report errno, return empties
+        e(".Lrun_spawn_err:")
+        e("\tnegq %rax")
+        e("\tmovl %eax, __run_errno_val(%rip)")
+        e(".Lrun_empty_ret:")
+        e("\tmovq $0, %rdi")
+        e("\tcall __u8list_new")
+        e("\tmovq %rax, %r14")
+        e("\tmovq $0, %rdi")
+        e("\tcall __u8list_new")
+        e("\tmovq %rax, %r15")
+        e("\tmovq %r15, __run_stderr_val(%rip)")
+        e("\tmovq %r14, %rax")
+        e(".Lrun_ret:")
+        e("\tleaq -40(%rbp), %rsp")
         e("\tpopq %r15")
         e("\tpopq %r14")
         e("\tpopq %r13")

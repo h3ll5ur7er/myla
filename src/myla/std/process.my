@@ -13,3 +13,107 @@ pub fun args() -> [str] {
 pub fun exit(code: int32) {
     __exit(code)
 }
+
+// --- Subprocess execution (D29 follow-on) ---------------------------------
+//
+// `run` / `Command` spawn an external program, wait for it to finish, and
+// return its captured output. The program is located by the exact path given
+// (no PATH search — pass an explicit path such as "/usr/bin/as"); the child
+// inherits the current process environment. Output is returned as raw bytes
+// (`[uint8]`) so binary output survives intact; decode to text yourself when
+// you know it is UTF-8.
+
+// How a finished child terminated.
+pub enum ExitStatus {
+    // Exited normally with this status code (0 = success).
+    Exited(int32),
+    // Killed by this signal number.
+    Signaled(int32),
+}
+
+// The captured result of a finished subprocess.
+pub struct Output {
+    stdout: [uint8],
+    stderr: [uint8],
+    status: ExitStatus,
+}
+
+// Why a process could not be spawned. `Other` carries the raw OS errno.
+pub enum SpawnError {
+    NotFound,
+    PermissionDenied,
+    Other(int32),
+}
+
+// Map a (nonzero) spawn errno to a `SpawnError`. ENOENT/EACCES on Linux.
+fun spawn_error_from_errno(code: int32) -> SpawnError {
+    if code == 2 {
+        return SpawnError.NotFound
+    }
+    if code == 13 {
+        return SpawnError.PermissionDenied
+    }
+    return SpawnError.Other(code)
+}
+
+// Spawn `program` with the complete argument vector `argv` (argv[0] included),
+// wait for it, and collect its output. Shared by `run` and `Command.output`.
+fun collect(program: str, argv: [str]) -> Result<Output, SpawnError> {
+    let out = __run(program, argv)
+    let err = __run_errno()
+    if err != 0 {
+        return Err(spawn_error_from_errno(err))
+    }
+    let errbuf = __run_stderr()
+    let sig = __run_signal()
+    var status = ExitStatus.Exited(__run_exit_code())
+    if sig != 0 {
+        status = ExitStatus.Signaled(sig)
+    }
+    return Ok(Output { stdout: out, stderr: errbuf, status: status })
+}
+
+// Run `program` with `args` (excluding argv[0], which is set to `program`),
+// wait for it, and return its captured output or a `SpawnError`.
+pub fun run(program: str, args: [str]) -> Result<Output, SpawnError> {
+    var argv = [program]
+    for a in args {
+        push(argv, a)
+    }
+    return collect(program, argv)
+}
+
+// A builder for a subprocess invocation. Start with `command`, chain `arg` /
+// `args`, then call `output`.
+pub struct Command {
+    program: str,
+    argv: [str],
+}
+
+// Begin building a command for `program`. `argv[0]` is seeded with `program`.
+pub fun command(program: str) -> Command {
+    return Command { program: program, argv: [program] }
+}
+
+impl Command {
+    // Append a single argument, returning the extended command.
+    fun arg(self, a: str) -> Command {
+        var argv = self.argv
+        push(argv, a)
+        return Command { program: self.program, argv: argv }
+    }
+
+    // Append several arguments, returning the extended command.
+    fun args(self, extra: [str]) -> Command {
+        var argv = self.argv
+        for a in extra {
+            push(argv, a)
+        }
+        return Command { program: self.program, argv: argv }
+    }
+
+    // Spawn the command, wait for it, and collect its output.
+    fun output(self) -> Result<Output, SpawnError> {
+        return collect(self.program, self.argv)
+    }
+}

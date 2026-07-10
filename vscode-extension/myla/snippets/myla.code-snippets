@@ -1,0 +1,168 @@
+{
+  "Function": {
+    "prefix": "fun",
+    "body": [
+      "fun ${1:name}(${2:params}) -> ${3:Type} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Create a Myla function"
+  },
+  "Function without return type": {
+    "prefix": "funv",
+    "body": [
+      "fun ${1:name}(${2:params}) {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Create a Myla function without an explicit return type"
+  },
+  "Async function": {
+    "prefix": "async fun",
+    "body": [
+      "async fun ${1:name}(${2:params}) -> ${3:Type} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Create an async Myla function"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name} {",
+      "    ${2:field}: ${3:Type}",
+      "}"
+    ],
+    "description": "Create a Myla struct"
+  },
+  "Enum": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "    ${2:Variant},",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Create a Myla enum"
+  },
+  "Trait": {
+    "prefix": "trait",
+    "body": [
+      "trait ${1:Name} {",
+      "    fun ${2:method}(${3:params}) -> ${4:Type} {",
+      "        ${0}",
+      "    }",
+      "}"
+    ],
+    "description": "Create a Myla trait"
+  },
+  "Impl": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Type} {",
+      "    fun ${2:method}(${3:params}) -> ${4:Type} {",
+      "        ${0}",
+      "    }",
+      "}"
+    ],
+    "description": "Create a Myla impl block"
+  },
+  "Impl for trait": {
+    "prefix": "implfor",
+    "body": [
+      "impl ${1:Trait} for ${2:Type} {",
+      "    fun ${3:method}(${4:params}) -> ${5:Type} {",
+      "        ${0}",
+      "    }",
+      "}"
+    ],
+    "description": "Create a Myla trait implementation"
+  },
+  "Actor": {
+    "prefix": "actor",
+    "body": [
+      "actor ${1:Name} {",
+      "    ${2:field}: ${3:Type}",
+      "",
+      "    fun ${4:method}(${5:params}) -> ${6:Type} {",
+      "        ${0}",
+      "    }",
+      "}"
+    ],
+    "description": "Create a Myla actor"
+  },
+  "Type alias": {
+    "prefix": "typealias",
+    "body": "typealias ${1:Name} = ${2:Type}",
+    "description": "Create a Myla type alias"
+  },
+  "Constant": {
+    "prefix": "const",
+    "body": "const ${1:NAME}: ${2:Type} = ${0:value}",
+    "description": "Create a Myla constant"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "    ${2:pattern} => ${3:expr},",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Create a match expression"
+  },
+  "If expression": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "    ${2}",
+      "} else {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Create an if expression"
+  },
+  "While loop": {
+    "prefix": "while",
+    "body": [
+      "while ${1:condition} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Create a while loop"
+  },
+  "For loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:item} in ${2:items} {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Create a for-in loop"
+  },
+  "Lambda": {
+    "prefix": "lambda",
+    "body": "(${1:params}) => ${0:expr}",
+    "description": "Create a lambda expression"
+  },
+  "Import": {
+    "prefix": "import",
+    "body": "import ${1:module.path}",
+    "description": "Import a Myla module"
+  },
+  "From import": {
+    "prefix": "from",
+    "body": "from ${1:module.path} import ${0:name}",
+    "description": "Import names from a Myla module"
+  },
+  "Test attribute": {
+    "prefix": "test",
+    "body": [
+      "#test",
+      "fun ${1:name}() {",
+      "    ${0}",
+      "}"
+    ],
+    "description": "Create a test function"
+  }
+}

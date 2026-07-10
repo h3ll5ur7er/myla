@@ -36,13 +36,13 @@ class TypeRef(Node):
     name: str
     # type arguments for a generic instantiation, e.g. `Box<int>` or
     # `Result<int, str>`; empty for a plain type name or a type parameter.
-    args: list["TypeExpr"] = field(default_factory=list)
+    args: list["TypeExpr"] = field(default_factory=list["TypeExpr"])
 
 
 @dataclass
 class TupleTypeRef(Node):
     """A tuple type annotation, e.g. `(int, str)` or the 1-tuple `(int,)`."""
-    elems: list["TypeExpr"] = field(default_factory=list)
+    elems: list["TypeExpr"] = field(default_factory=list["TypeExpr"])
 
 
 @dataclass
@@ -62,7 +62,7 @@ class MapTypeRef(Node):
 class FnTypeRef(Node):
     """A function-type annotation `(T0, T1, …) -> R` (v0.4.2). `params` may be
     empty (`() -> R`); `ret` is the result type."""
-    params: list["TypeExpr"] = field(default_factory=list)
+    params: list["TypeExpr"] = field(default_factory=list["TypeExpr"])
     ret: "TypeExpr" = None  # type: ignore[assignment]
 
 
@@ -76,7 +76,7 @@ TypeExpr = Union[TypeRef, TupleTypeRef, ListTypeRef, MapTypeRef, FnTypeRef]
 @dataclass
 class Attribute(Node):
     name: str
-    args: list["Expr"] = field(default_factory=list)
+    args: list["Expr"] = field(default_factory=list["Expr"])
     # `outputs` is None when no `[...]` is present, else the bracketed list.
     outputs: Optional[list["Expr"]] = None
 
@@ -128,7 +128,7 @@ class Binary(Node):
 @dataclass
 class Call(Node):
     callee: "Expr"
-    args: list["Expr"] = field(default_factory=list)
+    args: list["Expr"] = field(default_factory=list["Expr"])
 
 
 @dataclass
@@ -146,12 +146,12 @@ class FieldInit(Node):
 @dataclass
 class StructLit(Node):
     type_name: str
-    fields: list[FieldInit] = field(default_factory=list)
+    fields: list[FieldInit] = field(default_factory=list[FieldInit])
 
 
 @dataclass
 class TupleLit(Node):
-    elems: list["Expr"] = field(default_factory=list)
+    elems: list["Expr"] = field(default_factory=list["Expr"])
 
 
 @dataclass
@@ -164,7 +164,7 @@ class TupleIndex(Node):
 class ListLit(Node):
     """A list literal `[e0, e1, ...]` (D39); empty `[]` takes its element type
     from the expected type. The checker records the element type."""
-    elems: list["Expr"] = field(default_factory=list)
+    elems: list["Expr"] = field(default_factory=list["Expr"])
 
 
 @dataclass
@@ -179,13 +179,13 @@ class Index(Node):
 class MapLit(Node):
     """A map literal `[k0: v0, k1: v1, ...]` or the empty map `[:]` (D39); the
     checker records the key/value types. `entries` pairs key and value exprs."""
-    entries: list[tuple["Expr", "Expr"]] = field(default_factory=list)
+    entries: list[tuple["Expr", "Expr"]] = field(default_factory=list[tuple["Expr", "Expr"]])
 
 
 @dataclass
 class Match(Node):
     scrutinee: "Expr"
-    arms: list["MatchArm"] = field(default_factory=list)
+    arms: list["MatchArm"] = field(default_factory=list["MatchArm"])
 
 
 @dataclass
@@ -222,7 +222,7 @@ class Lambda(Node):
     captured by value, D15) and assigns a unique lifted name used by the native
     backend's lambda-lifting pass.
     """
-    params: list["Param"] = field(default_factory=list)
+    params: list["Param"] = field(default_factory=list["Param"])
     body: "Union[Expr, Block]" = None  # type: ignore[assignment]
     ret_type: "Optional[TypeExpr]" = None
     # Filled in by the checker:
@@ -270,13 +270,13 @@ class PatLiteral(Node):
 class PatEnum(Node):
     enum_name: Optional[str]  # `Color` in `Color.Red`; None for bare `.Red`/`Red`
     variant: str
-    elems: list["Pattern"] = field(default_factory=list)
+    elems: list["Pattern"] = field(default_factory=list["Pattern"])
     has_payload_syntax: bool = False  # whether `(...)` was written
 
 
 @dataclass
 class PatTuple(Node):
-    elems: list["Pattern"] = field(default_factory=list)
+    elems: list["Pattern"] = field(default_factory=list["Pattern"])
 
 
 @dataclass
@@ -288,12 +288,12 @@ class FieldPat(Node):
 @dataclass
 class PatStruct(Node):
     type_name: str
-    fields: list[FieldPat] = field(default_factory=list)
+    fields: list[FieldPat] = field(default_factory=list[FieldPat])
 
 
 @dataclass
 class PatOr(Node):
-    alts: list["Pattern"] = field(default_factory=list)
+    alts: list["Pattern"] = field(default_factory=list["Pattern"])
 
 
 Pattern = Union[
@@ -313,7 +313,7 @@ class MatchArm(Node):
 
 @dataclass
 class Block(Node):
-    statements: list["Stmt"] = field(default_factory=list)
+    statements: list["Stmt"] = field(default_factory=list["Stmt"])
 
 
 @dataclass
@@ -339,7 +339,7 @@ class BindWildcard(Node):
 
 @dataclass
 class BindTuple(Node):
-    elems: list["BindElem"] = field(default_factory=list)
+    elems: list["BindElem"] = field(default_factory=list["BindElem"])
 
 
 BindElem = Union[BindName, BindWildcard, BindTuple]
@@ -431,9 +431,9 @@ class Param(Node):
 @dataclass
 class StructDecl(Node):
     name: str
-    fields: list[Field] = field(default_factory=list)
-    attributes: list[Attribute] = field(default_factory=list)
-    type_params: list[str] = field(default_factory=list)
+    fields: list[Field] = field(default_factory=list[Field])
+    attributes: list[Attribute] = field(default_factory=list[Attribute])
+    type_params: list[str] = field(default_factory=list[str])
     # `pub` marks the declaration as part of its module's public surface (v0.5,
     # D22). False = file-local (the default).
     is_pub: bool = False
@@ -447,8 +447,8 @@ class FunDecl(Node):
     # `None` for a trait method *signature* (v0.4.4) — a declaration without a
     # body; every other `fun`/method has a `Block`.
     body: Optional[Block]
-    attributes: list[Attribute] = field(default_factory=list)
-    type_params: list[str] = field(default_factory=list)
+    attributes: list[Attribute] = field(default_factory=list[Attribute])
+    type_params: list[str] = field(default_factory=list[str])
     # v0.4.4 (X9): single built-in-trait bounds per type parameter, e.g.
     # `<T: Add + Eq>` -> {"T": ["Add", "Eq"]}.
     type_param_bounds: dict = field(default_factory=dict)
@@ -464,15 +464,15 @@ class FunDecl(Node):
 @dataclass
 class Variant(Node):
     name: str
-    payload: list["TypeExpr"] = field(default_factory=list)
+    payload: list["TypeExpr"] = field(default_factory=list["TypeExpr"])
 
 
 @dataclass
 class EnumDecl(Node):
     name: str
-    variants: list[Variant] = field(default_factory=list)
-    attributes: list[Attribute] = field(default_factory=list)
-    type_params: list[str] = field(default_factory=list)
+    variants: list[Variant] = field(default_factory=list[Variant])
+    attributes: list[Attribute] = field(default_factory=list[Attribute])
+    type_params: list[str] = field(default_factory=list[str])
     is_pub: bool = False
 
 
@@ -480,7 +480,7 @@ class EnumDecl(Node):
 class TypeAliasDecl(Node):
     name: str
     target: "TypeExpr"
-    attributes: list[Attribute] = field(default_factory=list)
+    attributes: list[Attribute] = field(default_factory=list[Attribute])
     is_pub: bool = False
 
 
@@ -495,8 +495,8 @@ class ImplDecl(Node):
     is None for an inherent impl.
     """
     target: "TypeExpr"
-    methods: list[FunDecl] = field(default_factory=list)
-    type_params: list[str] = field(default_factory=list)
+    methods: list[FunDecl] = field(default_factory=list[FunDecl])
+    type_params: list[str] = field(default_factory=list[str])
     type_param_bounds: dict = field(default_factory=dict)
     trait_name: Optional[str] = None
     # trait type arguments for `impl Comparable<int32> for T` (v0.5.5, D55);
@@ -505,7 +505,7 @@ class ImplDecl(Node):
     # impl blocks carry no attributes (the parser rejects them); this field
     # exists so passes that iterate every decl's `.attributes` need no special
     # case.
-    attributes: list[Attribute] = field(default_factory=list)
+    attributes: list[Attribute] = field(default_factory=list[Attribute])
 
 
 @dataclass
@@ -516,9 +516,9 @@ class TraitDecl(Node):
     receiver. Traits live in their own namespace and are implemented for a type
     via `impl Trait for T { … }`."""
     name: str
-    methods: list[FunDecl] = field(default_factory=list)
-    type_params: list[str] = field(default_factory=list)
-    attributes: list[Attribute] = field(default_factory=list)
+    methods: list[FunDecl] = field(default_factory=list[FunDecl])
+    type_params: list[str] = field(default_factory=list[str])
+    attributes: list[Attribute] = field(default_factory=list[Attribute])
     is_pub: bool = False
 
 
@@ -533,7 +533,7 @@ class ConstDecl(Node):
     name: str
     declared_type: "TypeExpr"
     value: "Expr"
-    attributes: list[Attribute] = field(default_factory=list)
+    attributes: list[Attribute] = field(default_factory=list[Attribute])
     is_pub: bool = False
 
 
@@ -546,7 +546,7 @@ class ImportPath(Node):
     and so on. `segments` is the dotted path after the dots (always ≥ 1).
     """
     dots: int = 0
-    segments: list[str] = field(default_factory=list)
+    segments: list[str] = field(default_factory=list[str])
 
     def dotted(self) -> str:
         return "." * self.dots + ".".join(self.segments)
@@ -576,8 +576,8 @@ class ImportDecl(Node):
     items: Optional[list[ImportItem]] = None
     alias: Optional[str] = None
     is_pub: bool = False
-    attributes: list[Attribute] = field(default_factory=list)
-
+    attributes: list[Attribute] = field(default_factory=list[Attribute])
+""
 
 Decl = Union[
     StructDecl, FunDecl, EnumDecl, TypeAliasDecl, ConstDecl, ImplDecl, TraitDecl,
@@ -587,13 +587,13 @@ Decl = Union[
 
 @dataclass
 class Program(Node):
-    decls: list[Decl] = field(default_factory=list)
+    decls: list[Decl] = field(default_factory=list[Decl])
 
 
 # --- pretty-printer --------------------------------------------------------
 
 
-def format_ast(node, indent: int = 0) -> str:
+def format_ast(node: Node|list[Node], indent: int = 0) -> str:
     """Render an AST node as an indented, human-readable tree (for debugging)."""
     import dataclasses
 

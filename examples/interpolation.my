@@ -23,9 +23,9 @@ fun braces(x: int32, y: int32) -> str {
 }
 
 // A diagnostic-style line: several holes packed against literal punctuation.
-#test("main.my", 3, 12)["main.my:3:12: error"]
+#test("main.my", 3, 12)["main.my:3:12: there is no error, this is just a test"]
 fun diagnostic(path: str, row: int32, col: int32) -> str {
-    return f"{path}:{row}:{col}: error"
+    return f"{path}:{row}:{col}: there is no error, this is just a test"
 }
 
 fun main() {

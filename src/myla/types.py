@@ -603,7 +603,9 @@ _BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop
                   "StringBuilder", "append", "append_byte", "build",
                   # low-level std runtime primitives (D29); the public surface
                   # lives in `std.io` / `std.process` / `std.fs` and wraps these.
-                  "__write", "__exit", "__args", "__read_file", "__io_errno"}
+                  "__write", "__exit", "__args", "__read_file", "__io_errno",
+                  "__run", "__run_stderr", "__run_exit_code", "__run_signal",
+                  "__run_errno"}
 
 # builtin calls that never return (the checker treats them like a `return`)
 _DIVERGING_BUILTINS = {"panic", "unreachable", "__exit"}
@@ -3420,6 +3422,29 @@ class Checker:
         if name == "__io_errno":
             if expr.args:
                 raise TypeCheckError("__io_errno() takes no arguments",
+                                     expr.line, expr.column)
+            expr.resolved_type = INT
+            return INT
+        if name == "__run":
+            if len(expr.args) != 2:
+                raise TypeCheckError(
+                    "__run() takes (program: str, argv: [str])",
+                    expr.line, expr.column)
+            self._expect_value(expr.args[0], scope, STR)
+            self._expect_value(expr.args[1], scope, ListType(STR))
+            t = ListType(BYTE)
+            expr.resolved_type = t
+            return t
+        if name == "__run_stderr":
+            if expr.args:
+                raise TypeCheckError("__run_stderr() takes no arguments",
+                                     expr.line, expr.column)
+            t = ListType(BYTE)
+            expr.resolved_type = t
+            return t
+        if name in ("__run_exit_code", "__run_signal", "__run_errno"):
+            if expr.args:
+                raise TypeCheckError(f"{name}() takes no arguments",
                                      expr.line, expr.column)
             expr.resolved_type = INT
             return INT

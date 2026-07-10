@@ -194,8 +194,8 @@ fun joined_words() -> str {
 fun main() {
     let s = "Myla"
     print(len(s))                 // 4
-    print(s[0] as int)            // 77 ('M')
-    print(s[3] as int)            // 97 ('a')
+    print(s[0] as uint8)            // 77 ('M')
+    print(s[3] as uint8)            // 97 ('a')
 
     print(blen("hello"))          // 5
     print(byte_at("abc", 1))      // 98

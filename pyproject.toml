@@ -6,6 +6,11 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.optional-dependencies]
+lsp = [
+    "pygls>=2.1.1",
+]
+
 # No third-party dependencies, by design (see README "Visions / Short Term").
 # Tests use the standard-library `unittest`, so there are no dev dependencies
 # either. Run the toolchain with `uv run myla.py <cmd>` and the tests with

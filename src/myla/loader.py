@@ -556,11 +556,25 @@ def _pattern_binds(p) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def link(entry_path: str, *, stdlib_root: str | None = None) -> ast.Program:
+def link(
+    entry_path: str,
+    *,
+    stdlib_root: str | None = None,
+    source_overrides: dict[str, str] | None = None,
+) -> ast.Program:
     """Resolve the import graph rooted at `entry_path` and return one flat,
-    name-qualified `ast.Program` ready for `types.check`."""
+    name-qualified `ast.Program` ready for `types.check`.
+
+    `source_overrides` maps a file path to in-memory source text; when a module
+    to be loaded matches one of those paths, its text is used instead of reading
+    from disk. This lets tools (e.g. the language server) type-check unsaved
+    editor buffers without touching the filesystem. Keys are normalized with
+    `os.path.realpath`, matching how modules are keyed internally."""
     entry_abs = os.path.realpath(entry_path)
     project_root = os.path.dirname(entry_abs)
+    overrides = {
+        os.path.realpath(p): text for p, text in (source_overrides or {}).items()
+    }
 
     modules: dict[str, _Module] = {}
     order: list[_Module] = []
@@ -568,11 +582,14 @@ def link(entry_path: str, *, stdlib_root: str | None = None) -> ast.Program:
     def load(abspath: str) -> _Module:
         if abspath in modules:
             return modules[abspath]
-        try:
-            with open(abspath, "r", encoding="utf-8") as fh:
-                source = fh.read()
-        except OSError as exc:
-            raise ModuleError(f"cannot read module '{abspath}': {exc}")
+        if abspath in overrides:
+            source = overrides[abspath]
+        else:
+            try:
+                with open(abspath, "r", encoding="utf-8") as fh:
+                    source = fh.read()
+            except OSError as exc:
+                raise ModuleError(f"cannot read module '{abspath}': {exc}")
         program = parse(tokenize(source))
         mid = _module_id(abspath, entry_abs, project_root)
         m = _Module(mid, abspath, program, source)

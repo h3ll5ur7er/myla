@@ -253,6 +253,13 @@ class Interpreter:
         self._argv = list(argv) if argv is not None else []
         # errno of the last `__read_file` (0 on success); read by `__io_errno`.
         self._io_errno = 0
+        # captured result of the last `__run` (see `std.process.run`): stderr
+        # bytes, the normal exit code, the terminating signal (0 if none), and
+        # the spawn errno (0 on success). Read by the `__run_*` primitives.
+        self._run_stderr: list[int] = []
+        self._run_exit_code = 0
+        self._run_signal = 0
+        self._run_errno = 0
 
     # -- program entry -------------------------------------------------------
 
@@ -709,6 +716,35 @@ class Interpreter:
         count = right & (t.width - 1)
         return _wrap(_wrap(left, t) >> count, t)
 
+    def _run_process(self, program: str, argv: list[str]) -> "ListValue":
+        """Spawn `program` with `argv`, wait for it, and capture its output.
+
+        Mirrors the native `__run` primitive: the program is located by the
+        exact path given (no PATH search) and inherits the current environment.
+        stdout is returned as a `[uint8]` list; stderr, the exit code, the
+        terminating signal, and the spawn errno are stashed for the `__run_*`
+        primitives.
+        """
+        import subprocess
+        try:
+            proc = subprocess.run(argv, executable=program, capture_output=True)
+        except OSError as err:
+            self._run_errno = err.errno or 2
+            self._run_stderr = []
+            self._run_exit_code = -1
+            self._run_signal = 0
+            return ListValue([])
+        self._run_errno = 0
+        self._run_stderr = list(proc.stderr)
+        rc = proc.returncode
+        if rc < 0:  # killed by signal `-rc`
+            self._run_signal = -rc
+            self._run_exit_code = -1
+        else:
+            self._run_signal = 0
+            self._run_exit_code = rc
+        return ListValue(list(proc.stdout))
+
     def _eval_call(self, expr: ast.Call, env: _Env):
         ctor = getattr(expr, "enum_ctor", None)
         if ctor is not None:  # `Enum.Variant(args...)`
@@ -759,6 +795,18 @@ class Interpreter:
                 return ""
         if callee.ident == "__io_errno":
             return self._io_errno
+        if callee.ident == "__run":
+            program = self._eval(expr.args[0], env)
+            argv = [str(a) for a in self._eval(expr.args[1], env).elems]
+            return self._run_process(program, argv)
+        if callee.ident == "__run_stderr":
+            return ListValue(list(self._run_stderr))
+        if callee.ident == "__run_exit_code":
+            return self._run_exit_code
+        if callee.ident == "__run_signal":
+            return self._run_signal
+        if callee.ident == "__run_errno":
+            return self._run_errno
         if callee.ident == "len":
             target = self._eval(expr.args[0], env)
             if isinstance(target, str):
