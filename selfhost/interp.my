@@ -919,6 +919,19 @@ impl Interp {
             self.exit_code = code
             return Value.VUnit
         }
+        if nm == "__run" {
+            let prog = as_str(self.eval(args[0]))
+            var argv: [str] = []
+            match self.eval(args[1]) {
+                Value.VList(xs) => { for x in xs { push(argv, as_str(x)) } },
+                _ => {},
+            }
+            return bytes_to_value(__run(prog, argv))
+        }
+        if nm == "__run_stderr" { return bytes_to_value(__run_stderr()) }
+        if nm == "__run_exit_code" { return Value.VInt(__run_exit_code() as int64) }
+        if nm == "__run_signal" { return Value.VInt(__run_signal() as int64) }
+        if nm == "__run_errno" { return Value.VInt(__run_errno() as int64) }
         if nm == "assert" {
             if !as_bool(self.eval(args[0])) { self.halt_panic() }
             return Value.VUnit
@@ -1156,6 +1169,15 @@ fun as_bool(v: Value) -> bool {
 
 fun as_str(v: Value) -> str {
     return match v { Value.VStr(s) => s, _ => "" }
+}
+
+// Wrap a raw `[uint8]` buffer (e.g. captured subprocess output) as a `VList`
+// of `VInt` byte values, matching the `[uint8]` type the `__run_*` primitives
+// report to the checker.
+fun bytes_to_value(bytes: [uint8]) -> Value {
+    var items: [Value] = []
+    for b in bytes { push(items, Value.VInt(b as int64)) }
+    return Value.VList(items)
 }
 
 fun is_vstr(v: Value) -> bool {

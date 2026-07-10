@@ -188,7 +188,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 }
 
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno"
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno"
 }
 
 fun is_diverging_builtin(name: str) -> bool {
@@ -3027,6 +3027,23 @@ impl Checker {
             return Ok(Some(Type.TStr))
         }
         if name == "__io_errno" {
+            if len(args) > 0 { return Err(mkerr(e.line, e.col)) }
+            return Ok(Some(t_int()))
+        }
+        if name == "__run" {
+            if len(args) != 2 { return Err(mkerr(e.line, e.col)) }
+            let p_t = self.expect_value(args[0], Some(Type.TStr))?
+            if !is_str(p_t) { return Err(mkerr(e.line, e.col)) }
+            let a_t = self.expect_value(args[1], Some(Type.TList(Type.TStr)))?
+            let a_ok = match a_t { Type.TList(el) => is_str(el), _ => false }
+            if !a_ok { return Err(mkerr(e.line, e.col)) }
+            return Ok(Some(Type.TList(t_byte())))
+        }
+        if name == "__run_stderr" {
+            if len(args) > 0 { return Err(mkerr(e.line, e.col)) }
+            return Ok(Some(Type.TList(t_byte())))
+        }
+        if name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" {
             if len(args) > 0 { return Err(mkerr(e.line, e.col)) }
             return Ok(Some(t_int()))
         }

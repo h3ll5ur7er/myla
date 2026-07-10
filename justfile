@@ -26,7 +26,7 @@ bootstrap:
         echo "FAIL: stage2.s and stage3.s differ" >&2;\
         diff "build/stage2.s" "build/stage3.s" | head -40 >&2;\
         exit 1;\
-    fi;\
+    fi
     @echo "==> done"
     cp build/stage3 build/myla
 
@@ -39,7 +39,7 @@ build source output:
 	obj="$(mktemp --suffix=.o)"
 	trap 'rm -f "$obj"' EXIT
 
-	./build/myla "{{source}}" | as --64 -o "$obj" -
+	./build/myla "{{source}}" src/myla | as --64 -o "$obj" -
 	ld -o "{{output}}" "$obj"
 
 

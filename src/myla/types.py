@@ -3430,8 +3430,19 @@ class Checker:
                 raise TypeCheckError(
                     "__run() takes (program: str, argv: [str])",
                     expr.line, expr.column)
-            self._expect_value(expr.args[0], scope, STR)
-            self._expect_value(expr.args[1], scope, ListType(STR))
+            p_t = self._expect_value(expr.args[0], scope, STR)
+            if not isinstance(p_t, StrType):
+                raise TypeCheckError(
+                    f"__run() program must be a string, found "
+                    f"'{type_name(p_t)}'",
+                    expr.line, expr.column,
+                )
+            a_t = self._expect_value(expr.args[1], scope, ListType(STR))
+            if not (isinstance(a_t, ListType) and isinstance(a_t.elem, StrType)):
+                raise TypeCheckError(
+                    f"__run() argv must be a [str], found '{type_name(a_t)}'",
+                    expr.line, expr.column,
+                )
             t = ListType(BYTE)
             expr.resolved_type = t
             return t
