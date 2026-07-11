@@ -119,6 +119,51 @@ class TestReadToStringParity(unittest.TestCase):
         )
         self.assertEqual(out, "not-found\n")
 
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestWriteToFileParity(unittest.TestCase):
+    def test_write_then_read_round_trip_parity(self):
+        # Each backend writes the file then reads it back within its own run, so
+        # a fixed path is safe; both must produce the same round-tripped output.
+        path = os.path.join(tempfile.gettempdir(), "myla_burn_wtf.txt")
+        out, err, code = _run_both(
+            "from std.io import write\n"
+            "from std.fs import write_to_file, read_to_string, IoError\n"
+            "fun main() {\n"
+            f'    match write_to_file("{path}", "abc\\nλ done\\n") {{\n'
+            "        Ok(n) => print(n),\n"
+            "        Err(e) => print(-1),\n"
+            "    }\n"
+            f'    match read_to_string("{path}") {{\n'
+            "        Ok(s) => write(1, s),\n"
+            '        Err(e) => write(2, "read-fail"),\n'
+            "    }\n"
+            "}\n",
+        )
+        # "abc\nλ done\n" is 12 bytes (λ = 2), then the verbatim file content.
+        self.assertEqual((out, err, code), ("12\nabc\nλ done\n", "", 0))
+
+    def test_write_to_missing_dir_errno_parity(self):
+        out, _, _ = _run_both(
+            "from std.io import println\n"
+            "from std.fs import write_to_file, IoError\n"
+            "fun describe(e: IoError) -> str {\n"
+            "    return match e {\n"
+            '        IoError.NotFound => "not-found",\n'
+            '        IoError.PermissionDenied => "denied",\n'
+            '        IoError.Other(c) => "other",\n'
+            "    }\n"
+            "}\n"
+            "fun main() {\n"
+            '    match write_to_file("/no/such/dir/out.txt", "x") {\n'
+            '        Ok(n) => println("?"),\n'
+            "        Err(e) => println(describe(e)),\n"
+            "    }\n"
+            "}\n",
+        )
+        self.assertEqual(out, "not-found\n")
+
+
     def test_directory_read_is_other_errno(self):
         # Opening a directory succeeds but reading it fails with EISDIR (21),
         # which maps to IoError.Other — and both backends must agree on the code.

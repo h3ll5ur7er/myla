@@ -605,7 +605,7 @@ _BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop
                   # lives in `std.io` / `std.process` / `std.fs` and wraps these.
                   "__write", "__exit", "__args", "__read_file", "__io_errno",
                   "__run", "__run_stderr", "__run_exit_code", "__run_signal",
-                  "__run_errno"}
+                  "__run_errno", "__write_file"}
 
 # builtin calls that never return (the checker treats them like a `return`)
 _DIVERGING_BUILTINS = {"panic", "unreachable", "__exit"}
@@ -3425,6 +3425,27 @@ class Checker:
                                      expr.line, expr.column)
             expr.resolved_type = INT
             return INT
+        if name == "__write_file":
+            if len(expr.args) != 2:
+                raise TypeCheckError(
+                    "__write_file() takes (path: str, contents: str)",
+                    expr.line, expr.column)
+            p_t = self._expect_value(expr.args[0], scope, STR)
+            if not isinstance(p_t, StrType):
+                raise TypeCheckError(
+                    f"__write_file() path must be a string, found "
+                    f"'{type_name(p_t)}'",
+                    expr.line, expr.column,
+                )
+            c_t = self._expect_value(expr.args[1], scope, STR)
+            if not isinstance(c_t, StrType):
+                raise TypeCheckError(
+                    f"__write_file() contents must be a string, found "
+                    f"'{type_name(c_t)}'",
+                    expr.line, expr.column,
+                )
+            expr.resolved_type = None
+            return None
         if name == "__run":
             if len(expr.args) != 2:
                 raise TypeCheckError(

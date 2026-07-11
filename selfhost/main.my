@@ -1,0 +1,198 @@
+// main.my -- the unified `myla` command-line tool (self-hosting).
+//
+// Dispatches subcommands, mirroring the Python `myla` CLI:
+//
+//   myla run   <file.my> [stdlib_root]           interpret a program
+//   myla test  <file.my> [stdlib_root]           run its #test cases
+//   myla build <file.my> [-o <out>] [stdlib_root]  compile to a native binary
+//
+// `build` type-checks and generates x86-64 assembly, writes it to `<out>.s`,
+// then shells out to the system assembler and linker (`as`/`ld`, located via
+// `/usr/bin/env` so PATH is honored) to produce the executable `<out>`. The
+// stdlib root defaults to `src/myla` (where `std/` lives in this repo).
+
+from std.process import args, exit, run, Output, ExitStatus, SpawnError
+from std.io import write, eprintln
+from std.fs import write_to_file
+from .loader import amalgamate
+from .checker import build_checker_src, CheckErr
+from .codegen import new_codegen
+from .interp import new_interp
+
+// Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
+fun decode(bytes: [uint8]) -> str {
+    var sb = StringBuilder()
+    for b in bytes { append_byte(sb, b) }
+    return build(sb)
+}
+
+// Amalgamate + type-check `file`, then generate its x86-64 assembly. Errors are
+// carried as a human-readable string.
+fun compile_asm(file: str, stdlib: str) -> Result<str, str> {
+    let src = amalgamate(file, stdlib)?
+    return match build_checker_src(src) {
+        Ok(c) => {
+            var g = new_codegen(c)
+            Ok(g.generate())
+        },
+        Err(e) => Err(format("type-check failed at {}:{}", e.line, e.col)),
+    }
+}
+
+// Inspect a finished child's status; return true on failure (nonzero exit or a
+// terminating signal), echoing its stderr and `label`.
+fun step_failed(out: Output, label: str) -> bool {
+    match out.status {
+        ExitStatus.Exited(code) => {
+            if code != 0 {
+                eprintln(label)
+                write(2, decode(out.stderr))
+                return true
+            }
+            return false
+        },
+        ExitStatus.Signaled(sig) => {
+            eprintln(label)
+            return true
+        },
+    }
+    return false
+}
+
+// Run one build step (`program args…`); return true on failure (nonzero exit,
+// terminating signal, or spawn error), echoing the child's stderr and `label`.
+fun run_step(program: str, argv: [str], label: str) -> bool {
+    var failed = false
+    match run(program, argv) {
+        Ok(out) => {
+            failed = step_failed(out, label)
+        },
+        Err(e) => {
+            eprintln(label)
+            failed = true
+        },
+    }
+    return failed
+}
+
+// `myla run <file> [stdlib]`: interpret the program, returning its exit status.
+fun cmd_run(file: str, stdlib: str) -> int32 {
+    match amalgamate(file, stdlib) {
+        Ok(src) => {
+            return run_interp(src, false)
+        },
+        Err(e) => {
+            eprintln("myla: " + e)
+            return 1
+        },
+    }
+    return 0
+}
+
+// `myla test <file> [stdlib]`: run the program's #test cases.
+fun cmd_test(file: str, stdlib: str) -> int32 {
+    match amalgamate(file, stdlib) {
+        Ok(src) => {
+            return run_interp(src, true)
+        },
+        Err(e) => {
+            eprintln("myla: " + e)
+            return 1
+        },
+    }
+    return 0
+}
+
+// Shared body of run/test: type-check `src`, then either run it or its tests.
+fun run_interp(src: str, tests: bool) -> int32 {
+    match build_checker_src(src) {
+        Ok(c) => {
+            var it = new_interp(c)
+            if tests {
+                return it.run_tests()
+            }
+            return it.run()
+        },
+        Err(e) => {
+            eprintln(format("myla: type-check failed at {}:{}", e.line, e.col))
+            return 1
+        },
+    }
+    return 0
+}
+
+// `myla build <file> -o <out> [stdlib]`: compile to a native binary at `out`.
+fun cmd_build(file: str, output: str, stdlib: str) -> int32 {
+    let asm = match compile_asm(file, stdlib) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln("myla: " + e)
+            return 1
+        },
+    }
+    let asm_path = output + ".s"
+    let obj_path = output + ".o"
+    match write_to_file(asm_path, asm) {
+        Ok(n) => {},
+        Err(e) => {
+            eprintln("myla: cannot write assembly to " + asm_path)
+            return 1
+        },
+    }
+    if run_step("/usr/bin/env", ["as", "--64", "-o", obj_path, asm_path], "myla: assembler failed") {
+        return 1
+    }
+    if run_step("/usr/bin/env", ["ld", "-o", output, obj_path], "myla: linker failed") {
+        return 1
+    }
+    return 0
+}
+
+fun usage() {
+    eprintln("usage: myla <command> <file.my> [options]")
+    eprintln("commands:")
+    eprintln("  run   <file.my> [stdlib_root]              interpret a program")
+    eprintln("  test  <file.my> [stdlib_root]              run its #test cases")
+    eprintln("  build <file.my> [-o <out>] [stdlib_root]   compile to a binary")
+}
+
+fun main() {
+    let argv = args()
+    if len(argv) < 3 {
+        usage()
+        exit(2)
+    }
+    let cmd = argv[1]
+    let file = argv[2]
+
+    if cmd == "run" || cmd == "test" {
+        var stdlib = "src/myla"
+        if len(argv) >= 4 {
+            stdlib = argv[3]
+        }
+        if cmd == "run" {
+            exit(cmd_run(file, stdlib))
+        }
+        exit(cmd_test(file, stdlib))
+    }
+
+    if cmd == "build" {
+        var output = "a.out"
+        var stdlib = "src/myla"
+        var j = 3
+        while j < len(argv) {
+            if argv[j] == "-o" && j + 1 < len(argv) {
+                output = argv[j + 1]
+                j = j + 2
+            } else {
+                stdlib = argv[j]
+                j = j + 1
+            }
+        }
+        exit(cmd_build(file, output, stdlib))
+    }
+
+    eprintln("myla: unknown command '" + cmd + "'")
+    usage()
+    exit(2)
+}

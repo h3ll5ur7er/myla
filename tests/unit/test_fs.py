@@ -54,6 +54,62 @@ class TestRuntimePrimitives(unittest.TestCase):
         with self.assertRaises(TypeCheckError):
             check_src("fun main() { let e = __io_errno(1) }\n")
 
+    def test_write_file_accepts_path_and_contents(self):
+        check_src('fun main() { __write_file("p", "data") }\n')
+
+    def test_write_file_rejects_non_string_path(self):
+        with self.assertRaises(TypeCheckError):
+            check_src('fun main() { __write_file(42, "data") }\n')
+
+    def test_write_file_rejects_non_string_contents(self):
+        with self.assertRaises(TypeCheckError):
+            check_src('fun main() { __write_file("p", 42) }\n')
+
+    def test_write_file_rejects_wrong_arity(self):
+        with self.assertRaises(TypeCheckError):
+            check_src('fun main() { __write_file("p") }\n')
+
+
+class TestWriteToFile(unittest.TestCase):
+    def test_write_then_read_round_trips(self):
+        out, _, code = link_and_run(
+            "from std.io import write\n"
+            "from std.fs import write_to_file, read_to_string, IoError\n"
+            "fun main() {\n"
+            '    match write_to_file("{dir}/out.txt", "héllo\\nλ\\n") {\n'
+            "        Ok(n) => print(n),\n"           # bytes written (byte length)
+            '        Err(e) => print(-1),\n'
+            "    }\n"
+            '    match read_to_string("{dir}/out.txt") {\n'
+            "        Ok(s) => write(1, s),\n"
+            '        Err(e) => write(2, "read-fail"),\n'
+            "    }\n"
+            "}\n",
+        )
+        # "héllo\nλ\n" is 10 bytes (é=2, λ=2), then the file content verbatim.
+        self.assertEqual(out, "10\nhéllo\nλ\n")
+        self.assertEqual(code, 0)
+
+    def test_write_to_missing_dir_is_error(self):
+        out, _, _ = link_and_run(
+            "from std.io import println\n"
+            "from std.fs import write_to_file, IoError\n"
+            "fun describe(e: IoError) -> str {\n"
+            "    return match e {\n"
+            '        IoError.NotFound => "not-found",\n'
+            '        IoError.PermissionDenied => "denied",\n'
+            '        IoError.Other(c) => "other",\n'
+            "    }\n"
+            "}\n"
+            "fun main() {\n"
+            '    match write_to_file("{dir}/nope/out.txt", "x") {\n'
+            '        Ok(n) => println("unexpected"),\n'
+            "        Err(e) => println(describe(e)),\n"
+            "    }\n"
+            "}\n",
+        )
+        self.assertEqual(out, "not-found\n")
+
 
 class TestReadToString(unittest.TestCase):
     def test_reads_whole_file(self):

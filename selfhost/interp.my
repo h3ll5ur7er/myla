@@ -50,7 +50,7 @@ pub enum Ctrl {
     CExit,
 }
 
-pub struct Frame { names: [str], vals: [Value] }
+pub struct RtFrame { names: [str], vals: [Value] }
 
 pub struct MatchRes { ok: bool, names: [str], vals: [Value] }
 
@@ -66,7 +66,7 @@ pub struct Interp {
     const_names: [str],
     const_vals: [Value],
     enum_names: [str],
-    scopes: [Frame],
+    scopes: [RtFrame],
     ctrl: Ctrl,
     ctrl_val: Value,
     exit_code: int32,
@@ -141,7 +141,7 @@ impl Interp {
 
     // -- scopes -----------------------------------------------------------
 
-    fun push_scope(var self) { push(self.scopes, Frame { names: [], vals: [] }) }
+    fun push_scope(var self) { push(self.scopes, RtFrame { names: [], vals: [] }) }
     fun pop_scope(var self) { self.scopes = drop_last_frame(self.scopes) }
 
     fun define(var self, name: str, v: Value) {
@@ -186,6 +186,56 @@ impl Interp {
         self.call_func(ei, [])
         match self.ctrl { Ctrl.CExit => { return self.exit_code }, _ => {} }
         return 0
+    }
+
+    // Run every function's `#test(args…)[expected]` cases, printing a PASS/FAIL
+    // line per case and a summary; returns 0 if all pass (or none exist), else 1.
+    // Mirrors `Interpreter.run_tests` in src/myla/interpreter.py.
+    fun run_tests(var self) -> int32 {
+        self.collect()
+        self.eval_consts()
+        var total = 0
+        var passed = 0
+        var i = 0
+        while i < len(self.func_decls) {
+            let fd = self.func_decls[i]
+            var idx = 0
+            for attr in fd.attributes {
+                if attr.name == "test" {
+                    idx = idx + 1
+                    total = total + 1
+                    self.push_scope()
+                    var argv: [Value] = []
+                    for a in attr.args { push(argv, self.eval(a)) }
+                    var expected = Value.VUnit
+                    match attr.outputs {
+                        Some(outs) => { if len(outs) > 0 { expected = self.eval(outs[0]) } },
+                        None => {},
+                    }
+                    self.pop_scope()
+                    let actual = self.call_func(i, argv)
+                    var ok = false
+                    match self.ctrl {
+                        Ctrl.CExit => { self.ctrl = Ctrl.CNone },
+                        _ => { ok = value_eq(actual, expected) },
+                    }
+                    if ok {
+                        passed = passed + 1
+                        write(1, format("PASS  {} #{}\n", fd.name, idx))
+                    } else {
+                        write(1, format("FAIL  {} #{}\n", fd.name, idx))
+                    }
+                }
+            }
+            i = i + 1
+        }
+        if total == 0 {
+            write(1, "no #test cases found.\n")
+            return 0
+        }
+        write(1, format("\n{}/{} passed.\n", passed, total))
+        if passed == total { return 0 }
+        return 1
     }
 
     fun eval_consts(var self) {
@@ -477,7 +527,7 @@ impl Interp {
             PatternKind.PBind(n) => self.match_bind_or_variant(n, v),
             PatternKind.PLit(lit) => mr_bool(value_eq(self.eval(lit), v)),
             PatternKind.PEnum(en, variant, elems, has_payload) => self.match_enum(variant, elems, v),
-            PatternKind.PTuple(elems) => self.match_seq(elems, tuple_elems(v)),
+            PatternKind.PTuple(elems) => self.match_seq(elems, i_tuple_elems(v)),
             PatternKind.PStruct(name, fps) => self.match_struct(fps, v),
             PatternKind.POr(alts) => self.match_or(alts, v),
         }
@@ -616,7 +666,7 @@ impl Interp {
         // function composition: `f >> g` when the left operand is callable
         if op == ">>" && is_callable(lv) { return compose_values(lv, rv) }
         // operator overloading: dispatch to a trait method for user types
-        if is_struct_or_enum(lv) { return self.eval_op_overload(op, lv, rv) }
+        if i_is_struct_or_enum(lv) { return self.eval_op_overload(op, lv, rv) }
         // string concatenation
         if is_vstr(lv) { return Value.VStr(as_str(lv) + as_str(rv)) }
         // comparisons -> bool
@@ -738,7 +788,7 @@ impl Interp {
 
     fun eval_call(var self, e: Expr, callee: Expr, args: [Expr]) -> Value {
         // partial application: `f(a, _)` builds a closure awaiting the holes
-        if args_have_hole(args) { return self.eval_partial(callee, args) }
+        if i_args_have_hole(args) { return self.eval_partial(callee, args) }
         match callee.kind {
             ExprKind.Name(nm) => { return self.eval_name_call(e, nm, args) },
             ExprKind.GetField(tgt, field) => { return self.eval_getfield_call(e, tgt, field, args) },
@@ -874,7 +924,7 @@ impl Interp {
             let (rr, fs) = self.call_method(self.func_idx(format("{}.cmp", key)), lv, [rv])
             return Value.VBool(cmp_to_bool(op, as_int(rr)))
         }
-        let (rr, fs) = self.call_method(self.func_idx(format("{}.{}", key, arith_method(op))), lv, [rv])
+        let (rr, fs) = self.call_method(self.func_idx(format("{}.{}", key, i_arith_method(op))), lv, [rv])
         return rr
     }
 
@@ -918,6 +968,19 @@ impl Interp {
             self.ctrl = Ctrl.CExit
             self.exit_code = code
             return Value.VUnit
+        }
+        if nm == "__read_file" {
+            return Value.VStr(__read_file(as_str(self.eval(args[0]))))
+        }
+        if nm == "__io_errno" { return Value.VInt(__io_errno() as int64) }
+        if nm == "__write_file" {
+            __write_file(as_str(self.eval(args[0])), as_str(self.eval(args[1])))
+            return Value.VUnit
+        }
+        if nm == "__args" {
+            var out: [Value] = []
+            for a in __args() { push(out, Value.VStr(a)) }
+            return Value.VList(out)
         }
         if nm == "__run" {
             let prog = as_str(self.eval(args[0]))
@@ -1208,7 +1271,7 @@ fun append_value(xs: [Value], v: Value) -> [Value] {
     return out
 }
 
-fun is_struct_or_enum(v: Value) -> bool {
+fun i_is_struct_or_enum(v: Value) -> bool {
     return match v {
         Value.VStruct(n, fns, fvs) => true,
         Value.VEnum(en, vt, p) => true,
@@ -1263,7 +1326,7 @@ fun cmp_to_bool(op: str, c: int64) -> bool {
     return c >= 0
 }
 
-fun arith_method(op: str) -> str {
+fun i_arith_method(op: str) -> str {
     if op == "+" { return "add" }
     if op == "-" { return "sub" }
     if op == "*" { return "mul" }
@@ -1271,7 +1334,7 @@ fun arith_method(op: str) -> str {
     return "rem"
 }
 
-fun args_have_hole(args: [Expr]) -> bool {
+fun i_args_have_hole(args: [Expr]) -> bool {
     for a in args {
         match a.kind { ExprKind.Hole => { return true }, _ => {} }
     }
@@ -1602,22 +1665,22 @@ fun mr_merge(a: MatchRes, b: MatchRes) -> MatchRes {
     return MatchRes { ok: true, names: names, vals: vals }
 }
 
-struct EnumInfo { ok: bool, names: [str], vals: [Value] }
+struct RtEnumInfo { ok: bool, names: [str], vals: [Value] }
 
-fun enum_info(v: Value) -> EnumInfo {
+fun enum_info(v: Value) -> RtEnumInfo {
     return match v {
         Value.VEnum(en, vr, pl) => mk_enum_info(vr, pl),
-        _ => EnumInfo { ok: false, names: [], vals: [] },
+        _ => RtEnumInfo { ok: false, names: [], vals: [] },
     }
 }
 
-fun mk_enum_info(vr: str, pl: [Value]) -> EnumInfo {
+fun mk_enum_info(vr: str, pl: [Value]) -> RtEnumInfo {
     var names: [str] = []
     push(names, vr)
-    return EnumInfo { ok: true, names: names, vals: pl }
+    return RtEnumInfo { ok: true, names: names, vals: pl }
 }
 
-fun tuple_elems(v: Value) -> [Value] {
+fun i_tuple_elems(v: Value) -> [Value] {
     return match v { Value.VTuple(es) => es, _ => empty_values() }
 }
 
@@ -1729,8 +1792,8 @@ fun map_set(ks: [Value], vs: [Value], k: Value, nv: Value) -> Value {
     return Value.VMap(nks, nvs)
 }
 
-fun drop_last_frame(xs: [Frame]) -> [Frame] {
-    var out: [Frame] = []
+fun drop_last_frame(xs: [RtFrame]) -> [RtFrame] {
+    var out: [RtFrame] = []
     var i = 0
     while i < len(xs) - 1 {
         push(out, xs[i])

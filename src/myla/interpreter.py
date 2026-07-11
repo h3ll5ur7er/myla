@@ -795,6 +795,16 @@ class Interpreter:
                 return ""
         if callee.ident == "__io_errno":
             return self._io_errno
+        if callee.ident == "__write_file":
+            path = self._eval(expr.args[0], env)
+            data = self._eval(expr.args[1], env)
+            try:
+                with open(path, "wb") as fh:
+                    fh.write(data.encode("utf-8", errors="surrogateescape"))
+                self._io_errno = 0
+            except OSError as err:
+                self._io_errno = err.errno or 0
+            return None
         if callee.ident == "__run":
             program = self._eval(expr.args[0], env)
             argv = [str(a) for a in self._eval(expr.args[1], env).elems]

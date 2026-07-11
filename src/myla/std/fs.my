@@ -35,3 +35,18 @@ pub fun read_to_string(path: str) -> Result<str, IoError> {
     }
     return Err(from_errno(err))
 }
+
+// Write `contents` to `path`, creating or truncating the file (mode 0644). The
+// bytes are written verbatim (as UTF-8). On success `Ok(n)` is returned, where
+// `n` is the number of bytes written; on failure (open/write) an `IoError`
+// carrying the OS errno is returned. Runs as raw open/write/close syscalls
+// natively and as Python file IO in the interpreter, with identical
+// (errno-keyed) error mapping.
+pub fun write_to_file(path: str, contents: str) -> Result<int32, IoError> {
+    __write_file(path, contents)
+    let err = __io_errno()
+    if err == 0 {
+        return Ok(len(contents))
+    }
+    return Err(from_errno(err))
+}

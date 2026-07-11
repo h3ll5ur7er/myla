@@ -3005,6 +3005,7 @@ impl CodeGen {
                 else if nm == "__args" { self.emit("call __args") }
                 else if nm == "__read_file" { self.gen_io_read_file(args) }
                 else if nm == "__io_errno" { self.emit("movq __io_errno_val(%rip), %rax") }
+                else if nm == "__write_file" { self.gen_io_write_file(args) }
                 else if nm == "__run" { self.gen_io_run(args) }
                 else if nm == "__run_stderr" { self.emit("movq __run_stderr_val(%rip), %rax") }
                 else if nm == "__run_exit_code" { self.emit("movslq __run_exit_val(%rip), %rax") }
@@ -3041,6 +3042,17 @@ impl CodeGen {
         self.eval(args[0])
         self.emit("movq %rax, %rdi")
         self.emit("call __read_file")
+    }
+
+    // `__write_file(path, contents)`: rdi = path str cell, rsi = contents str
+    // cell -> void (errno in __io_errno_val).
+    fun gen_io_write_file(var self, args: [Expr]) {
+        self.eval(args[1])
+        self.emit("pushq %rax")
+        self.eval(args[0])
+        self.emit("movq %rax, %rdi")
+        self.emit("popq %rsi")
+        self.emit("call __write_file")
     }
 
     // `__run(program, argv)`: rdi = program str cell, rsi = argv [str] list cell
@@ -4166,7 +4178,90 @@ impl CodeGen {
         self.raw("\tpopq %rbp")
         self.raw("\tret")
         self.raw("")
+        self.emit_write_file_runtime()
         self.emit_run_runtime()
+    }
+
+    // `__write_file`: rdi = path str cell, rsi = contents str cell -> void;
+    // `__io_errno_val` = 0 on success or the positive errno on failure. Uses
+    // open(2, O_WRONLY|O_CREAT|O_TRUNC, 0644)/write(1)/close(3). Backs
+    // `std.fs.write_to_file`.
+    fun emit_write_file_runtime(var self) {
+        self.raw("__write_file:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw("\tmovq %rsi, %r12")
+        self.raw("\tmovq (%rdi), %r13")
+        self.raw("\tleaq 8(%rdi), %r14")
+        self.raw("\tleaq 16(%r13), %rax")
+        self.raw("\tandq $-16, %rax")
+        self.raw("\tsubq %rax, %rsp")
+        self.raw("\tmovq %rsp, %r15")
+        self.raw("\txorq %rcx, %rcx")
+        self.raw(".Lwf_pcopy:")
+        self.raw("\tcmpq %r13, %rcx")
+        self.raw("\tjae .Lwf_pdone")
+        self.raw("\tmovb (%r14,%rcx), %dl")
+        self.raw("\tmovb %dl, (%r15,%rcx)")
+        self.raw("\tincq %rcx")
+        self.raw("\tjmp .Lwf_pcopy")
+        self.raw(".Lwf_pdone:")
+        self.raw("\tmovb $0, (%r15,%r13)")
+        self.raw("\tmovq $2, %rax")
+        self.raw("\tmovq %r15, %rdi")
+        self.raw("\tmovq $577, %rsi")
+        self.raw("\tmovq $420, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lwf_open_err")
+        self.raw("\tmovq %rax, %rbx")
+        self.raw("\tmovq (%r12), %r15")
+        self.raw("\tleaq 8(%r12), %r14")
+        self.raw("\txorq %r13, %r13")
+        self.raw(".Lwf_write:")
+        self.raw("\tcmpq %r15, %r13")
+        self.raw("\tjae .Lwf_write_done")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tleaq (%r14,%r13), %rsi")
+        self.raw("\tmovq %r15, %rdx")
+        self.raw("\tsubq %r13, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lwf_write_err")
+        self.raw("\taddq %rax, %r13")
+        self.raw("\tjmp .Lwf_write")
+        self.raw(".Lwf_write_done:")
+        self.raw("\tmovq $3, %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tjmp .Lwf_ret")
+        self.raw(".Lwf_write_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw("\tmovq $3, %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tjmp .Lwf_ret")
+        self.raw(".Lwf_open_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(".Lwf_ret:")
+        self.raw("\tleaq -40(%rbp), %rsp")
+        self.raw("\tpopq %r15")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
     }
 
     // Subprocess runtime backing `std.process.run`/`Command` (D29). `__run`

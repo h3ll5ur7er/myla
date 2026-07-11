@@ -98,6 +98,9 @@ class CodeGen:
         # set once `std.fs.read_to_string` (`__read_file`/`__io_errno`) is used,
         # gating the file-read helper + its errno global.
         self._uses_read_file = False
+        # set once `std.fs.write_to_file` (`__write_file`) is used, gating the
+        # file-write helper (shares the `__io_errno_val` global).
+        self._uses_write_file = False
         # set once `std.process.run`/`Command` (`__run`/`__run_*`) is used, gating
         # the subprocess runtime (fork/execve/pipe/poll/wait4) + its result globals.
         self._uses_run = False
@@ -362,6 +365,8 @@ class CodeGen:
             self._emit_args_runtime()
         if self._uses_read_file:
             self._emit_read_file_runtime()
+        if self._uses_write_file:
+            self._emit_write_file_runtime()
         if self._uses_run:
             self._emit_run_runtime()
         return self._assemble_source()
@@ -412,6 +417,11 @@ class CodeGen:
             out.append("\t.skip 8")
         if self._uses_read_file:
             # errno of the last `__read_file` (0 on success), read by `__io_errno`
+            out.append("__io_errno_val:")
+            out.append("\t.skip 8")
+        elif self._uses_write_file:
+            # `__write_file` shares the same errno global when `__read_file` is
+            # itself unused.
             out.append("__io_errno_val:")
             out.append("\t.skip 8")
         out.append("")
@@ -3662,6 +3672,16 @@ class CodeGen:
             self._emit("movq __io_errno_val(%rip), %rax")
             return
 
+        if name == "__write_file":
+            self._uses_write_file = True
+            self._eval(expr.args[1])             # contents str cell -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[0])             # path str cell -> rax
+            self._emit("movq %rax, %rdi")        # path
+            self._emit("popq %rsi")              # contents
+            self._emit("call __write_file")      # errno -> global
+            return
+
         if name == "__run":
             self._uses_run = True
             self._eval(expr.args[1])             # argv [str] list cell -> rax
@@ -4581,6 +4601,90 @@ class CodeGen:
         e("\tmovq $0, (%rax)")                 # len = 0
         e(".Lrf_ret:")
         e("\tleaq -40(%rbp), %rsp")            # discard path buffer/statbuf
+        e("\tpopq %r15")
+        e("\tpopq %r14")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_write_file_runtime(self) -> None:
+        """`__write_file`: rdi = path str cell, rsi = contents str cell -> void;
+        `__io_errno_val` is set to 0 on success or the positive errno on failure.
+        Uses open(2, O_WRONLY|O_CREAT|O_TRUNC, 0644)/write(1)/close(3); the path
+        is NUL-terminated on the stack first. Backs `std.fs.write_to_file`."""
+        e = self.text.append
+        e("__write_file:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tpushq %r14")
+        e("\tpushq %r15")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        e("\tmovq %rsi, %r12")                 # contents str cell (save)
+        # build a NUL-terminated copy of the path on the stack
+        e("\tmovq (%rdi), %r13")               # path length
+        e("\tleaq 8(%rdi), %r14")              # path bytes (src)
+        e("\tleaq 16(%r13), %rax")             # >= len + 1, with slack
+        e("\tandq $-16, %rax")                 # 16-byte aligned size
+        e("\tsubq %rax, %rsp")                 # carve stack
+        e("\tmovq %rsp, %r15")                 # dst path buffer
+        e("\txorq %rcx, %rcx")
+        e(".Lwf_pcopy:")
+        e("\tcmpq %r13, %rcx")
+        e("\tjae .Lwf_pdone")
+        e("\tmovb (%r14,%rcx), %dl")
+        e("\tmovb %dl, (%r15,%rcx)")
+        e("\tincq %rcx")
+        e("\tjmp .Lwf_pcopy")
+        e(".Lwf_pdone:")
+        e("\tmovb $0, (%r15,%r13)")            # NUL terminator
+        # open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
+        e("\tmovq $2, %rax")                   # sys_open
+        e("\tmovq %r15, %rdi")
+        e("\tmovq $577, %rsi")                 # O_WRONLY|O_CREAT|O_TRUNC (0x241)
+        e("\tmovq $420, %rdx")                 # mode 0644
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lwf_open_err")
+        e("\tmovq %rax, %rbx")                 # fd
+        e("\tmovq (%r12), %r15")               # contents length
+        e("\tleaq 8(%r12), %r14")              # contents bytes
+        e("\txorq %r13, %r13")                 # bytes written = 0
+        e(".Lwf_write:")
+        e("\tcmpq %r15, %r13")
+        e("\tjae .Lwf_write_done")
+        e("\tmovq $1, %rax")                   # sys_write
+        e("\tmovq %rbx, %rdi")
+        e("\tleaq (%r14,%r13), %rsi")          # data + written
+        e("\tmovq %r15, %rdx")
+        e("\tsubq %r13, %rdx")                 # remaining
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lwf_write_err")
+        e("\taddq %rax, %r13")
+        e("\tjmp .Lwf_write")
+        e(".Lwf_write_done:")
+        e("\tmovq $3, %rax")                   # close(fd)
+        e("\tmovq %rbx, %rdi")
+        e("\tsyscall")
+        e("\tjmp .Lwf_ret")
+        e(".Lwf_write_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e("\tmovq $3, %rax")                   # close(fd)
+        e("\tmovq %rbx, %rdi")
+        e("\tsyscall")
+        e("\tjmp .Lwf_ret")
+        e(".Lwf_open_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e(".Lwf_ret:")
+        e("\tleaq -40(%rbp), %rsp")            # discard path buffer
         e("\tpopq %r15")
         e("\tpopq %r14")
         e("\tpopq %r13")

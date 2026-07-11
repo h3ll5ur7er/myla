@@ -21,14 +21,15 @@ bootstrap:
     if cmp -s "build/stage2.s" "build/stage3.s"; then \
         bytes="$(wc -c < "build/stage2.s")";\
         echo "OK: byte-identical fixpoint reached (${bytes} bytes)";\
-        echo "Self-hosted compiler: build/stage3";\
     else \
         echo "FAIL: stage2.s and stage3.s differ" >&2;\
         diff "build/stage2.s" "build/stage3.s" | head -40 >&2;\
         exit 1;\
     fi
-    @echo "==> done"
-    cp build/stage3 build/myla
+    @echo "==> stage4: building the myla CLI -> build/myla"
+    ./build/stage3 selfhost/main.my src/myla > build/myla.s
+    just asm2bin build/myla.s build/myla
+    @echo "==> done: build/myla provides run / test / build"
 
 build source output:
 	#!/usr/bin/env bash
@@ -36,11 +37,9 @@ build source output:
 
 	mkdir -p "$(dirname "{{output}}")"
 
-	obj="$(mktemp --suffix=.o)"
-	trap 'rm -f "$obj"' EXIT
-
-	./build/myla "{{source}}" src/myla | as --64 -o "$obj" -
-	ld -o "{{output}}" "$obj"
+	# The self-hosted `myla` CLI type-checks, generates assembly, and drives
+	# `as`/`ld` itself (via subprocess) to produce the binary.
+	./build/myla build "{{source}}" -o "{{output}}"
 
 
 run source *args:
@@ -54,15 +53,8 @@ run source *args:
 	  exit 1
 	fi
 
-	mkdir -p ./build
-
-	base_name="$(basename "$source_file")"
-	exe_name="${base_name%.*}"
-	exe_path="./build/$exe_name"
-
-	just build "$source_file" "$exe_path"
-
-	"$exe_path" {{args}}
+	# `myla run` interprets the program (no compile step).
+	./build/myla run "$source_file"
 
 run-all dir:
 	#!/usr/bin/env bash
