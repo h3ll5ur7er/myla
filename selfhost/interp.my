@@ -33,6 +33,29 @@ pub enum Value {
     VCompose([Value]),                     // composed functions, applied left-to-right
     VPartial(Value, [Value], [bool]),      // base callable, arg slots, which slots are holes
 }
+impl Value {
+    fun to_string(self) -> str {
+        var sb = StringBuilder()
+        return match self {
+            
+            VInt(i) => f"VInt({i})"
+            VFloat(f) => f"VFloat({f})"
+            VBool(b) => f"VBool({b})"
+            VStr(s) => f"VStr({s})"
+            VChar(i) => f"VChar({i})"
+            VUnit => f"VUnit"
+            VStruct(name, fields, values) => f"VStruct({name})"
+            VTuple(t) => f"VTuple()"
+            VEnum(name, variant, fields) => f"VEnum({name}, {variant})"
+            VList(l) => f"VList()"
+            VMap(keys, values) => f"VMap()"
+            VSB(sb) => f"VSB()"
+            VClosure(params, body, capNames, capVals, funcName, isFunc) => f"VClosure({funcName}, {isFunc})"
+            VCompose(c) => f"VCompose()"
+            VPartial(func, slots, holes) => f"VPartial()"
+        }
+    }
+}
 
 // --- signals (control flow) ----------------------------------------------
 // Myla has no exceptions, so block/call execution returns a Flow describing
@@ -1205,7 +1228,7 @@ fun format_value(v: Value) -> str {
         Value.VInt(n) => format("{}", n),
         Value.VFloat(f) => format("{}", f),
         Value.VChar(c) => cp_utf8(c as int32),
-        _ => "",
+        _ => format("ERR: {}", v.to_string()),
     }
 }
 

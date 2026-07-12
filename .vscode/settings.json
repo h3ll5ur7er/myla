@@ -23,5 +23,9 @@
                 }
             }
         }
-    ]
+    ],
+    "myla.compilerPath": "/home/coder/project/myla.py",
+    // "myla.compilerPath": "${workspaceFolder}/myla.py",
+    "myla.pythonPath": "/home/coder/project/.venv/bin/python"
+    // "myla.pythonPath": "${workspaceFolder}/.venv/bin/python"
 }
