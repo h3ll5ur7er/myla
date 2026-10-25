@@ -31,7 +31,10 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
 
 ## Next
 
-1. **Make the bootstrap fast**: [[MYLA-60]] and [[MYLA-16]], small changes with measured effect (5 minutes → 10 seconds).
+1. **Quick wins**:
+   - make the bootstrap fast: [[MYLA-60]] and [[MYLA-16]], small changes with measured effect (5 minutes → 10 seconds);
+   - DWARF line tables so gdb steps through Myla source ([[MYLA-71]]; proven by hand);
+   - the `myla` agent skill ([[MYLA-68]]) and GitHub Actions CI ([[MYLA-69]]), both in review.
 2. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs; the urgent ones are in `todo`:
    - Python backend: [[MYLA-2]] (dangling match bindings), [[MYLA-3]] (aggregate field assignment), [[MYLA-4]] (the only red burn test), [[MYLA-10]] (errors in the wrong file).
    - Self-hosted compiler: [[MYLA-21]] (destructuring boxed enums, breaks the self-hosted `run`), [[MYLA-22]] (`free` disabled).
@@ -46,13 +49,13 @@ Bigger directions, collected as tasks in the `Roadmap ideas` epic. None is desig
 
 | Idea | Task | Notes |
 | --- | --- | --- |
-| Swift-style actors and structured concurrency | [[MYLA-61]] | Prototyped partially in the Rust edition; value semantics help with isolation |
-| A mid-level IR between checker and code generators | [[MYLA-67]] | Makes reference counting checkable and new backends small; a stepping stone for the next two |
+| Swift-style actors and structured concurrency | [[MYLA-61]] | Safety from the checker (isolation, sendability, no locks), not runtime deadlocks |
+| A mid-level IR between checker and code generators | [[MYLA-67]] | Checkable reference counting, optimisations (slot reuse, register allocation, retain/drop elision, inlining), small backends |
 | Optional LLVM backend | [[MYLA-62]] | Less hand-written assembly; textual IR keeps the compiler dependency-free |
-| Debugger | [[MYLA-66]] | First step is cheap: `.file`/`.loc` directives give gdb line tables |
+| Debugger | [[MYLA-66]] | First step: line tables ([[MYLA-71]]) |
 | Better error messages | [[MYLA-65]] | Files, spans, notes, several errors per run |
 | A project tool like cargo | [[MYLA-64]] | Manifest, dependencies, `myla new/build/run/test`; grows out of `selfhost/main.my` |
-| A declarative GUI system inspired by SwiftUI | [[MYLA-63]] | Needs display access without libc, text rendering and a view-builder syntax |
+| A declarative GUI system inspired by SwiftUI | [[MYLA-63]] | **On hold** until everything else fits; GPU APIs would need a C FFI |
 
 ## Proposed after 1.0
 

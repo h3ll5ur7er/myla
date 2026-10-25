@@ -13,7 +13,8 @@ Two things have changed since:
 - The bootstrap's slowness turned out to be two fixable hot spots in the Python toolchain ([[MYLA-60]], [[MYLA-16]]); with both fixed, the whole bootstrap takes about 10 seconds ([[Development/Bootstrap]]).
 - To serve as a stage 0, the Rust edition would have to compile `selfhost/` natively, which needs the full static type system (sized integers, layouts, monomorphization) and a native backend for every construct. The dialect has neither: it doesn't type-check, and its native backend handles only scalar functions.
 
-What role it should play now (concurrency laboratory, a future replacement, or a frozen experiment) is open; the problems below are tracked either way.
+> [!IMPORTANT]
+> **Decision (2026-10-25):** the Rust edition was an experiment and will be removed from the repository once nothing depends on it ([[MYLA-70]]). Actors are designed in the main toolchain with compile-time isolation ([[MYLA-61]]). Its open problems below are tracked until then.
 
 ## Build and run
 

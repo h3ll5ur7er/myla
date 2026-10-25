@@ -62,6 +62,7 @@ Also by design (from the earlier known-issues list in [[Archive/known_issues]]):
 | [[MYLA-42]] | No static checking at all | medium |
 | [[MYLA-45]] | Tests check too little | medium |
 | [[MYLA-43]], [[MYLA-44]], [[MYLA-46]], [[MYLA-47]] | Language gaps, unused dependencies, docs vs parser, tree-sitter grammar | low |
+| [[MYLA-70]] | The Rust edition is to be removed once nothing depends on it | low |
 
 ## Editor tooling
 

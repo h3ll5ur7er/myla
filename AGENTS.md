@@ -11,3 +11,7 @@ This project plans its work as Genbeya tasks and documents itself in a Genbeya w
 - The `genbeya` skill (`.agents/skills/genbeya/SKILL.md`) describes the file formats and the workflow in detail.
 
 <!-- genbeya:end -->
+
+## Writing Myla
+
+Myla resembles Rust and Swift but differs from both in many details (no semicolons, `fun`, `return` required, `E.Variant`, `push(xs, v)`, no `+=`, no references, `float` is `float32`). Before writing or changing any `.my` file, read the `myla` skill (`.agents/skills/myla/SKILL.md`, also in `.claude/skills/myla/`); the full language reference is `docs/Language.md`. Check unfamiliar constructs with `python3 myla.py check file.my`.

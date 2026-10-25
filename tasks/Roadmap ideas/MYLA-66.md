@@ -8,7 +8,7 @@ labels: [tooling, debugging, backend]
 ---
 Debug Myla programs: breakpoints, stepping, inspecting variables.
 
-## A cheap first step
+## A cheap first step ([[MYLA-71]])
 
 The assembler already supports line tables: emitting GAS `.file` and `.loc` directives before each statement's code (every AST node knows its line and column) gives DWARF line information, so `gdb ./prog` can set breakpoints on `file.my:12`, step line by line and show backtraces with Myla function names, with no other change. Labels are already `myla_<name>`.
 

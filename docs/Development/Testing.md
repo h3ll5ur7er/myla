@@ -17,6 +17,16 @@ python3 -m unittest tests.burn.test_error_corpus -v      # one file
 
 The Rust edition has its own `cargo test` in `rust/` ([[Architecture/Rust-edition]]).
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on pull requests and pushes to `master` ([[MYLA-69]]):
+
+| Job | Runs |
+| --- | --- |
+| `unit` | Unit and integration tests on Python 3.12 and 3.13 |
+| `burn` | The burn suite (native builds with the runner's binutils) |
+| `bootstrap` | `scripts/bootstrap.sh`, then the stage 3 compiler builds and runs `examples/hello.my` |
+
 ## Results (October 2026)
 
 | Suite | Tests | Result |
