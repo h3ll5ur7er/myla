@@ -13,5 +13,5 @@ Run the test suites and the bootstrap on every pull request and on pushes to `ma
 - [x] `bootstrap`: `scripts/bootstrap.sh`, then the stage 3 compiler builds and runs `examples/hello.my`
 - [ ] First run on GitHub. All three jobs should be green: the last red burn test was fixed with [[MYLA-4]]
 - [x] The `bootstrap` job takes seconds now that [[MYLA-60]] and [[MYLA-16]] landed (8 s locally); the burn suite about 25 s
-- [ ] Optional: cache nothing (there are no dependencies); add a Rust job only if the Rust edition stays ([[MYLA-70]])
+- [x] Optional: cache nothing (there are no dependencies); no Rust job: the Rust edition was removed ([[MYLA-70]])
 - [ ] Mention the badge and the jobs on [[Development/Testing]] once it runs

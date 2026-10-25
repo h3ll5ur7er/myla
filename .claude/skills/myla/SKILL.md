@@ -7,7 +7,7 @@ description: Write, read, review and debug code in the Myla programming language
 
 Myla is a small, statically typed language with sized integers, value semantics, enums with `match`, traits and closures. It compiles to x86-64 Linux binaries without libc and is self-hosted. **It is not Rust and not Swift**: code that looks right in either usually fails here. The full reference is the wiki: `docs/Language.md` and its subpages; the grammar is `docs/Language/Grammar.md`.
 
-Which implementation defines the language: the Python toolchain in `src/myla/` (the interpreter is the semantics). The self-hosted compiler in `selfhost/` follows it. The Rust prototype in `rust/` is a different, experimental dialect (actors, `async`, semicolons, no type checking) and is going away: never copy its syntax into `.my` files elsewhere.
+Which implementation defines the language: the Python toolchain in `src/myla/` (the interpreter is the semantics). The self-hosted compiler in `selfhost/` follows it. A Rust prototype with a different dialect (actors, `async`, semicolons, no type checking) existed until October 2026 and was removed; its syntax is not Myla. Don't copy it from git history, and don't trust the tree-sitter grammar in `editor/`, which still follows it in places.
 
 ## A complete program
 

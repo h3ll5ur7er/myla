@@ -2,7 +2,7 @@
 id: MYLA-37
 title: Rust native backend crashes and coverage gaps
 type: improvement
-status: backlog
+status: done
 priority: medium
 labels: [rust, codegen]
 ---
@@ -20,3 +20,5 @@ The backend lowers only non-generic, non-async functions over int/float/bool/str
 - [ ] Output into a missing directory fails with a bare "No such file or directory"
 - [ ] Next constructs to support: `break`/`continue`, structs, enums, strings beyond literals, lists
 - [ ] Remove the dead `Codegen.strings`
+
+**Closed without a fix:** the Rust edition was removed from the repository ([[MYLA-70]]); its code is in git history (commit `043acb9`). See [[Architecture/Rust-edition]].

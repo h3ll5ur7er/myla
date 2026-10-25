@@ -2,7 +2,7 @@
 id: MYLA-39
 title: Rust interpreter control-flow and arity bugs
 type: bug
-status: backlog
+status: done
 priority: medium
 labels: [rust, interpreter]
 ---
@@ -12,3 +12,5 @@ labels: [rust, interpreter]
 - [ ] A non-`bool` `if`/`while` condition is silently false
 - [ ] Errors and `return` inside `spawn` and async functions become `()` (`unwrap_or(Value::Unit)`): `spawn { panic("boom") }` awaits to `()`
 - [ ] Cyclic consts (`A = B`, `B = A`) overflow the Rust stack and abort
+
+**Closed without a fix:** the Rust edition was removed from the repository ([[MYLA-70]]); its code is in git history (commit `043acb9`). See [[Architecture/Rust-edition]].

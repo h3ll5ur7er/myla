@@ -44,23 +44,11 @@ The reference implementation. Most problems are places where the native backend 
 
 Also by design (from the earlier known-issues list in [[Archive/known_issues]]): x86-64 Linux is the only target (D2), and the stdlib root is passed explicitly.
 
-## Rust edition
-
-| Task | Problem | Priority |
-| --- | --- | --- |
-| [[MYLA-36]] | The native backend silently miscompiles tail expressions, `if` values, hex literals, `&&`/`||`, unsigned and 32-bit arithmetic | high |
-| [[MYLA-37]] | Native backend crashes and coverage | medium |
-| [[MYLA-38]], [[MYLA-39]], [[MYLA-41]] | Interpreter: names ignored in struct/enum handling; control flow leaking out of functions; numeric kinds and hashing | medium |
-| [[MYLA-40]] | Channels never close; actors deadlock on self-calls | medium |
-| [[MYLA-42]] | No static checking at all | medium |
-| [[MYLA-45]] | Tests check too little | medium |
-| [[MYLA-43]], [[MYLA-44]], [[MYLA-46]], [[MYLA-47]] | Language gaps, unused dependencies, docs vs parser, tree-sitter grammar | low |
-| [[MYLA-70]] | The Rust edition is to be removed once nothing depends on it | low |
-
 ## Editor tooling
 
 | Task | Problem | Priority |
 | --- | --- | --- |
+| [[MYLA-47]] | The tree-sitter grammar still follows the removed Rust edition's dialect | low |
 | [[MYLA-48]] | Short declaration names are found inside the keyword | medium |
 | [[MYLA-52]] | Language-server tests: only diagnostics and the compiler adapter are covered | medium |
 | [[MYLA-49]], [[MYLA-50]], [[MYLA-51]] | Lifecycle races, dead code, name-only resolution | low |

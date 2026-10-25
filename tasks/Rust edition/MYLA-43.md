@@ -2,7 +2,7 @@
 id: MYLA-43
 title: Rust edition language gaps
 type: feature
-status: backlog
+status: done
 priority: low
 labels: [rust]
 ---
@@ -18,3 +18,5 @@ Parsed but ignored, or missing:
 - [ ] Exhaustiveness checking
 - [ ] `sort`, `join`, `reduce` and similar list functions
 - [ ] `push`/`pop`/`insert`/`remove` are intercepted by name before user methods, so user types can't define them; they also work on `let` bindings, against `stdlib.md`
+
+**Closed without a fix:** the Rust edition was removed from the repository ([[MYLA-70]]); its code is in git history (commit `043acb9`). See [[Architecture/Rust-edition]].

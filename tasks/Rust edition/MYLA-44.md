@@ -2,7 +2,7 @@
 id: MYLA-44
 title: Unused Rust dependencies and docs that claim them
 type: chore
-status: backlog
+status: done
 priority: low
 labels: [rust, cleanup, docs]
 ---
@@ -16,3 +16,5 @@ And the docs say otherwise: `docs/concurrency.md` mentions `parking_lot` locks (
 
 - [ ] Remove the dependencies or use them, and fix the docs
 - [ ] `"chan"` in the builtin list is dead (it's a keyword); `println` is undocumented
+
+**Closed without a fix:** the Rust edition was removed from the repository ([[MYLA-70]]); its code is in git history (commit `043acb9`). See [[Architecture/Rust-edition]].

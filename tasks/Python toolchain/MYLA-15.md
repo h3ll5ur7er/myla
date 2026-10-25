@@ -11,4 +11,4 @@ labels: [parser]
 ## Done when
 
 - [ ] The parser splits a `>=` (and `>>`-like sequences) when it closes type arguments, the way shifts are already recognised from adjacent tokens
-- [ ] Parser test; same fix in [[selfhost/parser.my]] and the Rust parser
+- [ ] Parser test; same fix in [[selfhost/parser.my]]

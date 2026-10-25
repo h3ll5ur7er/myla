@@ -47,8 +47,7 @@ The repository holds four implementations of the language and its tools:
 | --- | --- | --- |
 | **Python toolchain** | `src/myla/`, `myla.py` | Bootstrap compiler ("stage 0") and the reference: interpreter, `#test` runner and native x86-64 compiler. See [[Architecture/Lexer-and-parser]] onward. |
 | **Self-hosted compiler** | `selfhost/` | The same pipeline written in Myla; compiles itself. See [[Architecture/Self-hosted-compiler]]. |
-| **Rust edition** | `rust/` | A separate reimplementation with its own dialect (concurrency, no static checking) and a Cranelift backend. See [[Architecture/Rust-edition]]. |
-| **Editor tooling** | `src/myla/lsp/`, `vscode-extension/`, `rust/editor/` | Language server, VS Code extension, tree-sitter grammar. See [[Architecture/Editor-tooling]]. |
+| **Editor tooling** | `src/myla/lsp/`, `vscode-extension/`, `editor/` | Language server, VS Code extension, tree-sitter grammar. See [[Architecture/Editor-tooling]]. |
 
 ```mermaid
 flowchart LR
@@ -61,7 +60,7 @@ flowchart LR
 
 ## Status in one paragraph
 
-Version 1.0 is reached: every feature milestone (v0.0 to v0.5) is implemented in the Python toolchain with interpreter/native parity, and the self-hosted compiler reaches its three-stage fixed point. A code review in October 2026 found parity bugs between the interpreter and the native backend, a disabled `free` and several miscompiles in the self-hosted runtime, and a Rust native backend that miscompiles common code. They are tracked as tasks on the board and summarised on [[Project/Known-issues]]. The Python backend's memory and crash bugs from that review are fixed ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]]); so are the self-hosted destructuring miscompile ([[MYLA-21]]) and its disabled `free` ([[MYLA-22]]); the most urgent remaining one is [[MYLA-36]] (Rust edition).
+Version 1.0 is reached: every feature milestone (v0.0 to v0.5) is implemented in the Python toolchain with interpreter/native parity, and the self-hosted compiler reaches its three-stage fixed point. A code review in October 2026 found parity bugs between the interpreter and the native backend, a disabled `free` and several miscompiles in the self-hosted runtime, and a Rust reimplementation whose native backend miscompiled common code (since removed, [[Architecture/Rust-edition]]). They are tracked as tasks on the board and summarised on [[Project/Known-issues]]. The Python backend's memory and crash bugs from that review are fixed ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]]); so are the self-hosted destructuring miscompile ([[MYLA-21]]) and its disabled `free` ([[MYLA-22]]).
 
 ## Working in this repository
 

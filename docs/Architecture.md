@@ -51,7 +51,7 @@ All errors derive from `MylaError(message, line, column)` with a `kind` used as 
 ## The other implementations
 
 - [[Architecture/Self-hosted-compiler]]: the same pipeline in Myla.
-- [[Architecture/Rust-edition]]: a separate dialect and toolchain.
+- [[Architecture/Rust-edition]]: a separate dialect and toolchain in Rust, removed in October 2026 (history note).
 - [[Architecture/Editor-tooling]]: language server, VS Code extension, tree-sitter grammar.
 
 The original v0.0 design sketch of this architecture is [[Archive/architecture]].

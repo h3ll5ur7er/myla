@@ -2,7 +2,7 @@
 id: MYLA-42
 title: Rust edition has no static checking
 type: feature
-status: backlog
+status: done
 priority: medium
 labels: [rust, sema]
 ---
@@ -14,3 +14,5 @@ The Python and self-hosted toolchains check statically; this is the biggest sema
 
 - [ ] Decide whether the Rust edition is meant to stay "lightly typed" (then say so in its spec) or to gain a checker
 - [ ] At minimum: name resolution, arity checks and literal range checks at compile time
+
+**Closed without a fix:** the Rust edition was removed from the repository ([[MYLA-70]]); its code is in git history (commit `043acb9`). See [[Architecture/Rust-edition]].

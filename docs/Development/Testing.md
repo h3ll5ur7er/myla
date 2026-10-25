@@ -15,8 +15,6 @@ python3 -m unittest tests.burn.test_error_corpus -v      # one file
 
 `uv run pytest` works too when pytest is installed globally; it isn't a project dependency ([[MYLA-58]]).
 
-The Rust edition has its own `cargo test` in `rust/` ([[Architecture/Rust-edition]]).
-
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on pull requests and pushes to `master` ([[MYLA-69]]):
@@ -34,7 +32,6 @@ The Rust edition has its own `cargo test` in `rust/` ([[Architecture/Rust-editio
 | Unit | 408 | All pass, about 1 s |
 | Integration | 4 | Pass (2 need pygls) |
 | Burn | 338 (plus subtests) | All pass, about 32 s (green since [[MYLA-4]]) |
-| Rust (`cargo test`) | 20 | All pass |
 
 ## Unit tests
 

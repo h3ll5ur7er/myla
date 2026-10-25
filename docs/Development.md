@@ -26,7 +26,7 @@ tests/integration/      every example parses
 tests/burn/             end-to-end: interpreter output, native parity, #test cases, error corpus, self-hosting gates
 scripts/                bootstrap.sh, build.sh, run.sh, samples.sh
 justfile                bs, bootstrap, build, run, test, run-all recipes
-rust/                   the Rust edition
+editor/                 the tree-sitter grammar
 vscode-extension/myla/  the VS Code extension
 docs/                   this wiki
 tasks/                  the task board (Genbeya)

@@ -2,7 +2,7 @@
 id: MYLA-46
 title: Rust docs disagree with the parser
 type: bug
-status: backlog
+status: done
 priority: low
 labels: [rust, docs, parser]
 ---
@@ -10,3 +10,5 @@ labels: [rust, docs, parser]
 - [ ] Parentheses don't re-enable struct literals: `if (p == P { x: 1 })` fails because `parse_paren_or_lambda` doesn't reset `no_struct_lit`
 - [ ] The `select` example in `docs/concurrency.md` (trailing comma, expression arm body) doesn't parse; the parser wants block bodies
 - [ ] sema's "unknown attributes / duplicate definitions" only holds for functions (and structs for duplicates)
+
+**Closed without a fix:** the Rust edition was removed from the repository ([[MYLA-70]]); its code is in git history (commit `043acb9`). See [[Architecture/Rust-edition]].

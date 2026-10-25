@@ -42,7 +42,7 @@ is tracked as tasks under [`tasks/`](tasks/). Both are plain Markdown managed wi
 - [Home](docs/Home.md) — overview and where to start
 - [Getting started](docs/Getting-started.md) — run, build, test, bootstrap
 - [Language](docs/Language.md) — the language reference, including the [grammar](docs/Language/Grammar.md)
-- [Architecture](docs/Architecture.md) — the Python toolchain, the self-hosted compiler, the Rust edition, editor tooling
+- [Architecture](docs/Architecture.md) — the Python toolchain, the self-hosted compiler, editor tooling
 - [Development](docs/Development.md) — testing, bootstrap, conventions
 - [Project](docs/Project.md) — [roadmap](docs/Project/Roadmap.md), [decision log D1–D58](docs/Project/Decisions.md), [known issues](docs/Project/Known-issues.md)
 

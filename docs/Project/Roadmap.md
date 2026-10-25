@@ -8,7 +8,7 @@
 2. **Native compilation.** An x86-64 backend without libc was added because native code would be neat and faster. It was: compiled programs run far faster than interpreted ones.
 3. **Self-hosting.** Once the language could carry it, the compiler was rewritten in Myla, roadblock by roadblock, until it compiled itself to a fixed point (v1.0).
 4. **After self-hosting**, the bootstrap was too slow to iterate on: building the Myla compiler took over a minute with the Python toolchain, and the first self-built round about four more. That led to three ideas:
-   - rewrite the first stage in Rust to speed up and streamline the bootstrap: the origin of the [[Architecture/Rust-edition]];
+   - rewrite the first stage in Rust to speed up and streamline the bootstrap: the origin of the [[Architecture/Rust-edition]] (removed in October 2026, [[MYLA-70]]);
    - write more sample programs, which motivated the language server ([[Architecture/Editor-tooling]]);
    - a concurrency system close to Swift's actors, which is why the Rust edition has partial actors.
 
@@ -25,7 +25,7 @@ Measurements in October 2026 showed that the bootstrap's slowness comes from two
 | v0.5 | Modules and runtime: imports, `pub` and re-exports, the standard library, floats, `char` and UTF-8, freestanding I/O, generic traits, f-strings | Done |
 | v0.6–v0.9 | Self-hosting bring-up: lexer, parser, checker, code generator and loader ported to Myla, each tested against the Python oracle | Done |
 | **v1.0** | **Self-hosted: three-stage byte-identical fixed point** (30 June 2026) | **Done** |
-| post-1.0 | Subprocesses (`std.process.run`), the self-hosted CLI with `run`/`test`/`build`, the language server, the VS Code extension, the Rust edition | Done (July 2026), with open issues |
+| post-1.0 | Subprocesses (`std.process.run`), the self-hosted CLI with `run`/`test`/`build`, the language server, the VS Code extension, the Rust edition (removed in October 2026) | Done (July 2026), with open issues |
 
 The milestone numbering was locked by D23: self-hosting is the destination (v1.0), reached through the feature milestones. The detailed per-version designs are in [[Archive]].
 
@@ -35,8 +35,7 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
    - ~~make the bootstrap fast~~: done, 5 minutes → 8 seconds ([[MYLA-60]], [[MYLA-16]]);
    - ~~DWARF line tables so gdb steps through Myla source~~: done for the Python backend, `myla build -g` ([[MYLA-71]]);
    - the `myla` agent skill ([[MYLA-68]]) and GitHub Actions CI ([[MYLA-69]]), both in review.
-2. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs. The Python backend's urgent ones are fixed ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]], and [[MYLA-10]] for diagnostics); the remaining urgent ones:
-   - Rust edition: [[MYLA-36]] (silent miscompiles).
+2. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs. All the urgent ones are fixed: the Python backend's ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]], and [[MYLA-10]] for diagnostics) and the self-hosted compiler's ([[MYLA-21]], [[MYLA-22]]); the Rust edition, with its own miscompiles, was removed ([[MYLA-70]]). The medium and low ones are on [[Project/Known-issues]].
 3. **Close the self-hosted gaps**: floats ([[MYLA-29]]), the module loader ([[MYLA-30]]), diagnostics ([[MYLA-28]]), so that the self-hosted toolchain can replace the Python one for everyday use.
 4. **Performance**: string reclamation ([[MYLA-18]]).
 5. **Tooling**: language server precision ([[MYLA-51]]) and tests ([[MYLA-52]]), a REPL ([[MYLA-19]]).

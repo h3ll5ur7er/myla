@@ -1,66 +1,27 @@
-# Rust edition
+# Rust edition (removed)
 
-`rust/` is a separate implementation in Rust (edition 2021) with a dialect of its own. It doesn't share code with the other toolchains and isn't part of the bootstrap. Its own documents are in `rust/docs/` (`language-spec.md`, `grammar.md`, `architecture.md`, `stdlib.md`, `concurrency.md`, `changes-from-original.md`).
+From mid-2026 until October 2026 the repository had a second implementation in Rust under `rust/`: a separate dialect and toolchain (logos lexer, Pratt parser, a tree-walking interpreter, a partial Cranelift backend) that shared no code with the Python toolchain or the self-hosted compiler. It was removed in [[MYLA-70]]; the last commit that contains it is `043acb9` (`git show 043acb9:rust/README.md`, or `git checkout 043acb9 -- rust` to bring it back).
 
 [TOC]
 
-## Why it exists
+## Why it existed
 
-It began as a prototype for a faster **first bootstrap stage**: building the self-hosted compiler with the Python toolchain was too slow to iterate on ([[Project/Roadmap]]). It then also became the testbed for Swift-style actors ([[MYLA-61]]).
+It began as a prototype for a faster **first bootstrap stage**: building the self-hosted compiler with the Python toolchain took over a minute and the first self-built round about four more ([[Project/Roadmap]]). It then also became the testbed for Swift-style actors.
 
-Two things have changed since:
+## Why it was removed
 
-- The bootstrap's slowness turned out to be two fixable hot spots in the Python toolchain ([[MYLA-60]], [[MYLA-16]]); with both fixed, the whole bootstrap takes about 8 seconds ([[Development/Bootstrap]]).
-- To serve as a stage 0, the Rust edition would have to compile `selfhost/` natively, which needs the full static type system (sized integers, layouts, monomorphization) and a native backend for every construct. The dialect has neither: it doesn't type-check, and its native backend handles only scalar functions.
+- The bootstrap's slowness turned out to be two fixable hot spots in the Python toolchain ([[MYLA-60]], [[MYLA-16]]); the whole bootstrap now takes about 8 seconds ([[Development/Bootstrap]]).
+- To serve as a stage 0 it would have had to compile `selfhost/` natively, which needs the full static type system and a native backend for every construct. The dialect had neither: it didn't type-check, and its native backend handled only scalar functions (and silently miscompiled common code).
+- Actors are to be designed in the main toolchain with compile-time isolation ([[MYLA-61]], which records what the prototype taught).
 
-> [!IMPORTANT]
-> **Decision (2026-10-25):** the Rust edition was an experiment and will be removed from the repository once nothing depends on it ([[MYLA-70]]). Actors are designed in the main toolchain with compile-time isolation ([[MYLA-61]]). Its open problems below are tracked until then.
+## What it was
 
-## Build and run
-
-```bash
-cd rust
-cargo build                     # about a minute, no warnings
-cargo test                      # 20 tests, all passing
-target/debug/myla run examples/fib.my
-target/debug/myla test examples/fib.my
-target/debug/myla build examples/fib.my -o fib    # Cranelift + the system cc
-```
-
-## Crates
-
-```mermaid
-flowchart LR
-    syntax["myla-syntax<br/>logos lexer, Pratt parser, AST, diagnostics"] --> sema["myla-sema<br/>declaration tables, mutability check"]
-    syntax --> interp
-    sema --> interp["myla-interp<br/>tree-walking interpreter"]
-    runtime["myla-runtime<br/>integers, formatting, channels, tasks"] --> interp
-    syntax --> codegen["myla-codegen<br/>Cranelift object code"]
-    sema --> codegen
-    interp --> cli["myla-cli<br/>binary `myla` (clap)"]
-    codegen --> cli
-```
-
-- **myla-syntax**: tokens with logos (newlines kept; `<<`/`>>` formed from adjacent tokens as in Python), a recursive-descent parser with Pratt binding powers, f-string holes parsed again, a block's last expression stored as its tail value, error recovery to the next item keyword, a custom caret renderer.
-- **myla-sema**: name tables for functions, structs, enums, actors, methods, constants and aliases; maps prelude variants; resolves `#main` and collects `#test`; checks mutability. **No type checking and no name resolution.**
-- **myla-interp**: values are `Value` (integers as `i128` plus a kind, floats with a width, `Arc`-shared aggregates with copy-on-write through `Arc::make_mut`, closures that copy the whole environment, channels, tasks, actors). Control flow travels as `Result<_, Control>`.
-- **myla-runtime**: sized integer wrapping, float formatting (ryu), channels (crossbeam) and threads.
-- **myla-codegen**: lowers a subset to Cranelift IR for the host, links with a small C runtime through `cc`.
-
-## How the dialect differs
-
-From `rust/docs/changes-from-original.md` and the code:
-
-- **Lighter typing.** Annotations are parsed and ignored; unknown names fail at run time; generics run by erasure ([[MYLA-42]]).
-- **`float` is `float64`** (the Python toolchain's `float` is `float32`).
-- **Any value may be a map key.**
-- **Optional semicolons**, with newline rules of its own.
-- **Concurrency**: `async`/`await`, `spawn` and `go` (OS threads), `chan` with unbounded channels, `select`, and `actor` types whose methods run under a mutex.
+- **A different dialect**: types parsed but not checked, `float` was `float64`, optional semicolons, any value as a map key, no modules, traits or `#derive`.
+- **Concurrency**: `async`/`await`, `spawn`/`go` on OS threads, unbounded `chan` channels with `select`, and `actor` types whose methods ran under a mutex. Its problems (channels that never close, tasks killed at the end of `main`, actors that deadlock calling themselves) are summarised in [[MYLA-61]].
 - **More standard library**: `write_file`, `append_file`, `remove_file`, `run`, `env_var`, `now_millis`, `sleep_millis`, `read_line`.
-- **Not supported**: modules (`import` is parsed and ignored), `typealias` and bounds (recorded, unused), `#derive` (accepted, no effect), trait declarations (skipped, so no default methods), compound assignment, exhaustiveness checking ([[MYLA-43]]).
 
-## State
+The review's findings about it were tasks [[MYLA-36]] … [[MYLA-46]], closed with the removal.
 
-The interpreter runs every example. The native backend is a prototype: it supports integer/float/bool/str functions with basic control flow, and **silently miscompiles** common code: functions returning a block's tail value return 0, hex literals become 0, `&&`/`||` don't short-circuit ([[MYLA-36]]). Other open problems: [[MYLA-37]] … [[MYLA-41]], [[MYLA-44]] … [[MYLA-47]].
+## What stayed
 
-The tree-sitter grammar for editors lives in `rust/editor/tree-sitter-myla` and follows this dialect ([[Architecture/Editor-tooling]]).
+The tree-sitter grammar that lived in `rust/editor/` moved to `editor/tree-sitter-myla/` ([[Architecture/Editor-tooling]]). It still follows the Rust dialect in places ([[MYLA-47]]).

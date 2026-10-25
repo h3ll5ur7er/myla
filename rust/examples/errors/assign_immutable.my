@@ -1,5 +1,0 @@
-// Assigning to a `let` binding is rejected before execution.
-fun main() {
-    let x = 1
-    x = 2 //~ type error: cannot assign to immutable binding
-}

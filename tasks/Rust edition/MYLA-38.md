@@ -2,7 +2,7 @@
 id: MYLA-38
 title: Rust interpreter ignores names in struct and enum handling
 type: bug
-status: backlog
+status: done
 priority: medium
 labels: [rust, interpreter]
 ---
@@ -14,3 +14,5 @@ Confirmed by running:
 - [ ] Variant patterns compare only the variant name, so `B.Red` matches `A.Red()`
 - [ ] `variant_to_enum` is one global map of unqualified variant names; collisions overwrite silently, and duplicate enum names aren't detected (`myla-sema/src/lib.rs`)
 - [ ] A qualified nullary variant `Color.Red` without parentheses fails with "unknown name `Color`"
+
+**Closed without a fix:** the Rust edition was removed from the repository ([[MYLA-70]]); its code is in git history (commit `043acb9`). See [[Architecture/Rust-edition]].

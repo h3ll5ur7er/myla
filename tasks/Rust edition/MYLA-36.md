@@ -2,7 +2,7 @@
 id: MYLA-36
 title: Rust native backend silently miscompiles common code
 type: bug
-status: todo
+status: done
 priority: high
 labels: [rust, codegen, parity]
 ---
@@ -21,3 +21,5 @@ The Cranelift backend in `rust/crates/myla-codegen/src/lib.rs` produces wrong re
 
 - [ ] Every item above is fixed or makes the build fail with a clear "not supported" error
 - [ ] `tests/cli.rs` runs the native/interpreter differential over every example the backend accepts, not 3 hand-picked ones ([[MYLA-45]])
+
+**Closed without a fix:** the Rust edition was removed from the repository ([[MYLA-70]]); its code is in git history (commit `043acb9`). See [[Architecture/Rust-edition]].

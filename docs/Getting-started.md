@@ -6,7 +6,7 @@
 
 - **Python 3.12 or newer.** The Python toolchain has no third-party dependencies; `uv` is optional.
 - **GNU `as` and `ld`** (binutils) on x86-64 Linux, for native builds and the bootstrap.
-- Optional: **Rust/cargo** for the [[Architecture/Rust-edition]]; **pygls** (`uv sync --extra lsp`) for the language server.
+- Optional: **pygls** (`uv sync --extra lsp`) for the language server.
 
 ## Run a program
 

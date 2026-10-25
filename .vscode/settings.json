@@ -3,10 +3,10 @@
     "tree-sitter-vscode.languageConfigs": [
         {
             "lang": "myla",
-            "parser": "/home/eknecht/code/myla/rust/editor/tree-sitter-myla",
-            "folds": "/home/eknecht/code/myla/rust/editor/tree-sitter-myla/queries/folds.scm",
-            "highlights": "/home/eknecht/code/myla/rust/editor/tree-sitter-myla/queries/highlights.scm",
-            "injections": "/home/eknecht/code/myla/rust/editor/tree-sitter-myla/queries/injections.scm",
+            "parser": "/home/eknecht/code/myla/editor/tree-sitter-myla",
+            "folds": "/home/eknecht/code/myla/editor/tree-sitter-myla/queries/folds.scm",
+            "highlights": "/home/eknecht/code/myla/editor/tree-sitter-myla/queries/highlights.scm",
+            "injections": "/home/eknecht/code/myla/editor/tree-sitter-myla/queries/injections.scm",
             "semanticTokenTypeMappings": {
                 "constant": {
                     "targetTokenModifiers": ["declaration", "readonly"],

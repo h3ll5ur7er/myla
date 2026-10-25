@@ -1,4 +1,0 @@
-// A malformed declaration is caught by the parser.
-fun main( {  //~ parse error: expected
-    print(1)
-}

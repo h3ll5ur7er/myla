@@ -43,4 +43,4 @@ Open problems: [[MYLA-53]], [[MYLA-54]], [[MYLA-55]].
 
 ## tree-sitter grammar
 
-`rust/editor/tree-sitter-myla/` is a tree-sitter grammar (with bindings for C, Go, Node, Python, Rust and Swift, and highlight, fold, indent and injection queries). It follows the [[Architecture/Rust-edition]] dialect and is looser than either parser ([[MYLA-47]]).
+`editor/tree-sitter-myla/` is a tree-sitter grammar (with bindings for C, Go, Node, Python, Rust and Swift, and highlight, fold, indent and injection queries). It was written for the removed [[Architecture/Rust-edition]]'s dialect, still follows it in places and is looser than the real parser ([[MYLA-47]]).

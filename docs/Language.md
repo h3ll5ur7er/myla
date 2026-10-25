@@ -1,6 +1,6 @@
 # Language
 
-The reference for Myla as the Python toolchain implements it (version 1.0). The Python toolchain is the language's definition: where the self-hosted compiler or the Rust edition behave differently, the difference is a bug ([[Project/Known-issues]]) or a dialect difference ([[Architecture/Rust-edition]]).
+The reference for Myla as the Python toolchain implements it (version 1.0). The Python toolchain is the language's definition: where the self-hosted compiler behaves differently, the difference is a bug ([[Project/Known-issues]]).
 
 [SUBPAGES]
 
