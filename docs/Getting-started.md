@@ -87,7 +87,7 @@ The second argument of the self-hosted compiler is the folder that contains `std
 ```bash
 python3 -m unittest discover -s tests/unit -t .         # ~410 tests, about 1 s
 python3 -m unittest discover -s tests/integration -t .
-python3 -m unittest discover -s tests/burn -t .         # native builds, about 25 seconds
+python3 -m unittest discover -s tests/burn -t .         # native builds, about 30 seconds
 ```
 
 What each suite guarantees and the current results: [[Development/Testing]].

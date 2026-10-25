@@ -25,7 +25,7 @@ pub struct LamJob { lifted: str, params: [Param], ftype: Type, body: ExprOrBlock
 
 // A partial-application thunk to emit: `slots[i]` is the env byte offset of a
 // filled argument, or -1 for a hole (filled from the thunk's own parameters).
-pub struct PartialJob { lifted: str, target: str, slots: [int32] }
+pub struct PartialJob { lifted: str, target: str, slots: [int32], owned: [DropEntry] }
 
 // Continue/break target labels for the innermost loop. `depth` is the
 // drop-scope index of the loop body, so break/continue can release the heap
@@ -376,6 +376,9 @@ impl CodeGen {
                 for x in elems { for d in self.collect_expr_temps(x) { push(out, d) } }
             },
             ExprKind.MatchE(scrut, arms) => { for d in self.collect_expr_temps(scrut) { push(out, d) } },
+            // the `?` operand (a call's carrier, say) is a temporary of the
+            // statement on the success path; gen_try releases it on failure
+            ExprKind.Try(x) => { for d in self.collect_expr_temps(x) { push(out, d) } },
             _ => {},
         }
         return out
@@ -2008,29 +2011,6 @@ impl CodeGen {
         return self.stored_size(et)
     }
 
-    // Evaluate `e` into %rax, cloning when it is a list/map *place* (value
-    // semantics: moving an owned aggregate into a new location copies it, D38).
-    fun eval_owned(var self, e: Expr) {
-        self.eval(e)
-        let t = self.type_of(e.id)
-        if is_place(e) && (is_list_t(t) || is_map_t(t) || is_sb_t(t)) { self.clone_in_rax(t) }
-    }
-
-    // Clone the list/map/builder cell currently in %rax (shallow), copy in %rax.
-    fun clone_in_rax(var self, t: Type) {
-        self.emit("movq %rax, %rdi")
-        if is_list_t(t) {
-            self.emit(format("movq ${}, %rsi", self.elem_stride(list_elem(t))))
-            self.emit("call __list_clone")
-        } else if is_sb_t(t) {
-            self.emit("movq $1, %rsi")
-            self.emit("call __list_clone")
-        } else {
-            self.emit(format("movq ${}, %rsi", self.map_slot_size(t)))
-            self.emit("call __list_clone")
-        }
-    }
-
     fun gen_list_lit(var self, e: Expr, elems: [Expr]) {
         let lt = self.type_of(e.id)
         let et = list_elem(lt)
@@ -2929,6 +2909,13 @@ impl CodeGen {
         self.emit("movq %r10, %rsi")
         self.emit("movq 16(%rbp), %rdi")
         self.emit_copy(self.size(carrier))
+        // The None/Err escapes to the caller with its own references; then
+        // release the operand's temporaries and the function's owners, as a
+        // `return` does (MYLA-22).
+        self.emit("movq 16(%rbp), %r8")
+        self.retain("r8", 0, carrier)
+        self.drop_expr_temps(inner)
+        self.emit_return_drops()
         self.emit("movq 16(%rbp), %rax")
         self.emit(format("jmp {}", self.epilogue))
         self.emit(format("{}:", cont))
@@ -3066,23 +3053,27 @@ impl CodeGen {
     // the two fat values and `__compose_call` chains the (scalar) calls.
     fun gen_compose(var self, e: Expr, l: Expr, r: Expr) {
         let off = self.local_of(e.id)
-        self.emit("movq $32, %rdi")
+        // env cell: [drop fn:8][a:16][b:16] (see __compose_call/__compose_env_drop)
+        self.emit("movq $40, %rdi")
         self.emit("call __alloc")
         self.emit(format("movq %rax, {}(%rbp)", off + 8))
+        self.emit("leaq __compose_env_drop(%rip), %rcx")
+        self.emit("movq %rcx, (%rax)")
         self.addr_of_aggregate(l)
         self.emit("movq %rax, %rsi")
         self.emit(format("movq {}(%rbp), %rdi", off + 8))
+        self.emit("addq $8, %rdi")
         self.emit_copy(16)
         self.addr_of_aggregate(r)
         self.emit("movq %rax, %rsi")
         self.emit(format("movq {}(%rbp), %rdi", off + 8))
-        self.emit("addq $16, %rdi")
+        self.emit("addq $24, %rdi")
         self.emit_copy(16)
         // The env co-owns both composed function values; retain their envs so a
         // nested compose/closure temp isn't freed while still referenced.
         self.emit(format("movq {}(%rbp), %r8", off + 8))
-        self.retain("r8", 0, self.type_of(l.id))
-        self.retain("r8", 16, self.type_of(r.id))
+        self.retain("r8", 8, self.type_of(l.id))
+        self.retain("r8", 24, self.type_of(r.id))
         self.emit("leaq __compose_call(%rip), %rax")
         self.emit(format("movq %rax, {}(%rbp)", off))
     }
@@ -3094,7 +3085,8 @@ impl CodeGen {
         var slots: [int32] = []
         var fillexprs: [Expr] = []
         var filloffs: [int32] = []
-        var envsz = 0
+        var owned: [DropEntry] = []
+        var envsz = 8              // word 0 of the env holds its drop function
         for a in args {
             if is_hole_expr(a) {
                 push(slots, -1)
@@ -3102,24 +3094,28 @@ impl CodeGen {
                 push(slots, envsz)
                 push(fillexprs, a)
                 push(filloffs, envsz)
+                let at = self.type_of(a.id)
+                if self.owns_heap(at) { push(owned, DropEntry { off: envsz, ty: at }) }
                 envsz = envsz + 8
             }
         }
-        var asz = envsz
-        if asz == 0 { asz = 8 }
-        self.emit(format("movq ${}, %rdi", asz))
+        let nm = expr_name(callee)
+        let lifted = format("{}__partial{}", self.cur_mangled, e.id)
+        self.emit(format("movq ${}, %rdi", envsz))
         self.emit("call __alloc")
         self.emit(format("movq %rax, {}(%rbp)", off + 8))
+        if len(owned) > 0 { self.emit(format("leaq myla_{}_env_drop(%rip), %rcx", lifted)) }
+        else { self.emit("leaq __free(%rip), %rcx") }
+        self.emit("movq %rcx, (%rax)")
         var k = 0
         while k < len(fillexprs) {
             self.eval(fillexprs[k])
+            if self.owns_heap(self.type_of(fillexprs[k].id)) { self.emit("incq -8(%rax)") }   // the env owns it
             self.emit(format("movq {}(%rbp), %rcx", off + 8))
             self.emit(format("movq %rax, {}(%rcx)", filloffs[k]))
             k = k + 1
         }
-        let nm = expr_name(callee)
-        let lifted = format("{}__partial{}", self.cur_mangled, e.id)
-        push(self.partial_jobs, PartialJob { lifted: lifted, target: nm, slots: slots })
+        push(self.partial_jobs, PartialJob { lifted: lifted, target: nm, slots: slots, owned: owned })
         self.emit(format("leaq myla_{}(%rip), %rax", lifted))
         self.emit(format("movq %rax, {}(%rbp)", off))
     }
@@ -3153,6 +3149,7 @@ impl CodeGen {
         self.emit("leave")
         self.emit("ret")
         self.emit("")
+        if len(job.owned) > 0 { self.emit_env_drop(job.lifted, job.owned) }
     }
 
     // Materialize a top-level `fun` as a fat value `(thunk, null env)`.
@@ -3177,30 +3174,42 @@ impl CodeGen {
             self.emit(format("movq $0, {}(%rbp)", off + 8))
             return
         }
-        var envsz = 0
-        for c in caps { envsz = envsz + self.stored_size(c.ty) }
+        // env cell: [drop fn:8][captures…]; __func_drop calls the drop fn at
+        // refcount zero, which releases the captures and frees the cell
+        var envsz = 8
+        var owns = false
+        for c in caps {
+            envsz = envsz + self.size(c.ty)
+            if self.owns_heap(c.ty) { owns = true }
+        }
         self.emit(format("movq ${}, %rdi", envsz))
         self.emit("call __alloc")
         self.emit(format("movq %rax, {}(%rbp)", off + 8))
+        if owns { self.emit(format("leaq myla_{}_env_drop(%rip), %rcx", lifted)) }
+        else { self.emit("leaq __free(%rip), %rcx") }
+        self.emit("movq %rcx, (%rax)")
         self.emit(format("leaq {}(%rip), %rcx", code))
         self.emit(format("movq %rcx, {}(%rbp)", off))
         for c in caps { self.store_capture(c, off) }
     }
 
-    // Copy an enclosing variable into the env cell at its capture offset.
+    // Copy an enclosing variable into the env cell at its capture offset; the
+    // env owns the copy (retained), so it outlives the variable.
     fun store_capture(var self, c: Cap, fat_off: int32) {
         let b = self.lookup(c.name)
         if is_aggregate(c.ty) {
             self.emit_name_addr(b)
             self.emit("movq %rax, %rsi")
             self.emit(format("movq {}(%rbp), %rdi", fat_off + 8))
-            if c.off != 0 { self.emit(format("addq ${}, %rdi", c.off)) }
+            self.emit(format("addq ${}, %rdi", c.off))
             self.emit_copy(self.size(c.ty))
         } else {
             self.emit_name_scalar(b)
             self.emit(format("movq {}(%rbp), %rcx", fat_off + 8))
             self.emit(format("movq %rax, {}(%rcx)", c.off))
         }
+        self.emit(format("movq {}(%rbp), %r8", fat_off + 8))
+        self.retain("r8", c.off, c.ty)
     }
 
     // Leave the address of the value bound by `b` (local/param/capture) in %rax.
@@ -3318,7 +3327,26 @@ impl CodeGen {
         self.emit("ret")
         self.emit("")
         self.close_scope()
+        var owned: [DropEntry] = []
+        for c in job.caps { if self.owns_heap(c.ty) { push(owned, DropEntry { off: c.off, ty: c.ty }) } }
+        if len(owned) > 0 { self.emit_env_drop(job.lifted, owned) }
         self.subst = []
+    }
+
+    // `myla_<lifted>_env_drop(%rdi = env)`: release the env's owned values, then
+    // tail-call __free on the cell (reached through __func_drop at refcount 0).
+    fun emit_env_drop(var self, lifted: str, owned: [DropEntry]) {
+        self.emit(format("myla_{}_env_drop:", lifted))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("movq %rdi, %rbx")
+        for d in owned { self.drop_value("rbx", d.off, d.ty) }
+        self.emit("movq %rbx, %rdi")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("jmp __free")
+        self.emit("")
     }
 
     // `myla_<fn>__fnval(env, args…)`: adapter so a plain `fun` can be called
@@ -3359,14 +3387,14 @@ impl CodeGen {
         let frees = self.free_eb(body, bound)
         var caps: [Cap] = []
         var seen: [str] = []
-        var off = 0
+        var off = 8                // word 0 of the env holds its drop function
         for nm in frees {
             if list_has_str(seen, nm) { continue }
             if !self.has_binding(nm) { continue }
             push(seen, nm)
             let b = self.lookup(nm)
             push(caps, Cap { name: nm, ty: b.ty, off: off })
-            off = off + self.stored_size(b.ty)
+            off = off + self.size(b.ty)    // inline, like a variable (a recursive enum too)
         }
         return caps
     }
@@ -3926,8 +3954,12 @@ impl CodeGen {
         self.raw("\tleaq 16(%rax), %rax")
         self.raw("\tret")
         self.raw("")
+        // __free clobbers only %rax: drop sequences walk aggregates through
+        // other caller-saved registers across calls that end in __free.
         self.raw("__free:")
-        self.raw("\tret")
+        self.raw("\tpushq %rsi")
+        self.raw("\tpushq %r8")
+        self.raw("\tpushq %rcx")
         self.raw("\tmovq -16(%rdi), %rsi")
         self.raw("\tcmpq $4096, %rsi")
         self.raw("\tja .Lfree_large")
@@ -3935,13 +3967,17 @@ impl CodeGen {
         self.raw("\tmovq (%r8,%rsi), %rax")
         self.raw("\tmovq %rax, (%rdi)")
         self.raw("\tmovq %rdi, (%r8,%rsi)")
-        self.raw("\tret")
+        self.raw("\tjmp .Lfree_done")
         self.raw(".Lfree_large:")
         self.raw("\tbsrq %rsi, %rcx")
         self.raw("\tleaq __free_buckets+4104(%rip), %r8")
         self.raw("\tmovq (%r8,%rcx,8), %rax")
         self.raw("\tmovq %rax, (%rdi)")
         self.raw("\tmovq %rdi, (%r8,%rcx,8)")
+        self.raw(".Lfree_done:")
+        self.raw("\tpopq %rcx")
+        self.raw("\tpopq %r8")
+        self.raw("\tpopq %rsi")
         self.raw("\tret")
         self.raw("")
         self.raw("__func_retain:")
@@ -3951,12 +3987,15 @@ impl CodeGen {
         self.raw(".Lfret_done:")
         self.raw("\tret")
         self.raw("")
+        // at refcount zero, tail-call the env's drop function (word 0): it
+        // releases what the env owns and frees the cell
         self.raw("__func_drop:")
         self.raw("\ttestq %rdi, %rdi")
         self.raw("\tjz .Lfdrop_done")
         self.raw("\tdecq -8(%rdi)")
         self.raw("\tjnz .Lfdrop_done")
-        self.raw("\tjmp __free")
+        self.raw("\tmovq (%rdi), %rax")
+        self.raw("\tjmp *%rax")
         self.raw(".Lfdrop_done:")
         self.raw("\tret")
         self.raw("")
@@ -4625,8 +4664,9 @@ impl CodeGen {
         self.raw("")
     }
 
-    // __compose_call(env, x): env holds two fat values a (env[0]) and b (env[16]);
-    // computes b(a(x)) for scalar x/result via the closure calling convention.
+    // __compose_call(env, x): env holds two fat values a (env[8]) and b
+    // (env[24]); computes b(a(x)) for scalar x/result via the closure calling
+    // convention. __compose_env_drop releases both and frees the env.
     fun emit_compose_runtime(var self) {
         self.raw("__compose_call:")
         self.raw("\tpushq %rbp")
@@ -4635,21 +4675,32 @@ impl CodeGen {
         self.raw("\tmovq 16(%rbp), %rbx")
         self.raw("\tmovq 24(%rbp), %rcx")
         self.raw("\tpushq %rcx")
-        self.raw("\tmovq 8(%rbx), %rcx")
+        self.raw("\tmovq 16(%rbx), %rcx")
         self.raw("\tpushq %rcx")
-        self.raw("\tmovq 0(%rbx), %rcx")
+        self.raw("\tmovq 8(%rbx), %rcx")
         self.raw("\tcall *%rcx")
         self.raw("\taddq $16, %rsp")
         self.raw("\tmovq %rax, %rcx")
         self.raw("\tpushq %rcx")
-        self.raw("\tmovq 24(%rbx), %rcx")
+        self.raw("\tmovq 32(%rbx), %rcx")
         self.raw("\tpushq %rcx")
-        self.raw("\tmovq 16(%rbx), %rcx")
+        self.raw("\tmovq 24(%rbx), %rcx")
         self.raw("\tcall *%rcx")
         self.raw("\taddq $16, %rsp")
         self.raw("\tpopq %rbx")
         self.raw("\tleave")
         self.raw("\tret")
+        self.raw("")
+        self.raw("__compose_env_drop:")
+        self.raw("\tpushq %rbx")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq 16(%rbx), %rdi")
+        self.raw("\tcall __func_drop")
+        self.raw("\tmovq 32(%rbx), %rdi")
+        self.raw("\tcall __func_drop")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tpopq %rbx")
+        self.raw("\tjmp __free")
         self.raw("")
     }
 
@@ -4930,7 +4981,8 @@ impl CodeGen {
 
     // Map cell: [count:8][cap:8][slot0..]; slot = [state:8][key:8][value…] where
     // state 0=empty, 1=occupied, 2=tombstone. Open addressing, linear probing,
-    // FNV-1a hashing. cap is a power of two. Clones reuse __list_clone (shallow).
+    // FNV-1a hashing. cap is a power of two. Copy-on-write clones are per type
+    // (`__clone_map_*`, emit_map_clone_helper) and retain the values they share.
     fun emit_map_runtime(var self) {
         // __map_hash: rsi=key (value or str cell), rcx=is_str -> rax=hash.
         self.raw("__map_hash:")
@@ -5667,34 +5719,9 @@ impl CodeGen {
 
     // List cell layout: [len:8][cap:8][elem0..]. The value pointer points at the
     // length word. Strides are passed in (per element type) so one routine serves
-    // every list. Clones are shallow — sufficient for stdout/exit parity (D38).
+    // every list. Copy-on-write clones are per element type (`__clone_list_*`,
+    // emit_list_clone_helper): they retain the elements they share (D38).
     fun emit_list_runtime(var self) {
-        // __list_clone: rdi=src cell, rsi=stride -> rax=fresh independent cell.
-        self.raw("__list_clone:")
-        self.raw("\tpushq %rbp")
-        self.raw("\tmovq %rsp, %rbp")
-        self.raw("\tpushq %rbx")
-        self.raw("\tpushq %r12")
-        self.raw("\tpushq %r13")
-        self.raw("\tmovq %rdi, %rbx")
-        self.raw("\tmovq %rsi, %r12")
-        self.raw("\tmovq 8(%rbx), %rax")
-        self.raw("\timulq %r12, %rax")
-        self.raw("\taddq $16, %rax")
-        self.raw("\tmovq %rax, %r13")
-        self.raw("\tmovq %rax, %rdi")
-        self.raw("\tcall __alloc")
-        self.raw("\tmovq %rax, %rdi")
-        self.raw("\tmovq %rbx, %rsi")
-        self.raw("\tmovq %r13, %rcx")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
-        self.raw("\tpopq %r13")
-        self.raw("\tpopq %r12")
-        self.raw("\tpopq %rbx")
-        self.raw("\tleave")
-        self.raw("\tret")
-        self.raw("")
         // __list_grow: rdi=full cell (len==cap), rsi=stride -> rax=larger cell.
         self.raw("__list_grow:")
         self.raw("\tpushq %rbp")

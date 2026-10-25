@@ -30,7 +30,6 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-22]] | `__free` returns immediately: memory is never reused, and reference-counting bugs are hidden | high |
 | [[MYLA-29]] | No floats (the AST drops the literal's digits) | medium |
 | [[MYLA-30]] | The loader concatenates modules: name collisions, no packages or module aliases | medium |
 | [[MYLA-23]] | `#derive(Eq)` on recursive enums compares addresses | medium |

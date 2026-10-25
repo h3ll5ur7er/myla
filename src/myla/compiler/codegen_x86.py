@@ -3489,13 +3489,14 @@ class CodeGen:
 
     def _capture_layout(self, lam: ast.Lambda):
         """Env-cell layout for a lambda: returns (offsets, env_size, owns_any).
-        Slot 0 (8 bytes) holds the drop fn; captures follow."""
+        Slot 0 (8 bytes) holds the drop fn; captures follow, each stored inline
+        like a variable (a recursive enum too, not as a pointer)."""
         offsets: list[int] = []
         cur = 8
         owns = False
         for _name, t in lam.captures:
             offsets.append(cur)
-            cur += self._stored_size(t)
+            cur += self._size(t)
             if self._owns_heap(t):
                 owns = True
         return offsets, cur, owns

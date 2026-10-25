@@ -58,7 +58,7 @@ The burn tests run allocate-and-drop loops of millions of cells to prove memory 
 
 ## Closures
 
-A capturing lambda allocates an environment cell: word 0 holds a drop function (`myla_<lifted>_env_drop`, or `__free` when no capture owns heap), the captured values follow, copied and retained. Lambda bodies are emitted as separate functions `myla___lambda_<n>` whose hidden first argument is the environment; a captured name compiles to a load through it. `__func_drop` decrements the environment's count and tail-calls the stored drop function at zero.
+A capturing lambda allocates an environment cell: word 0 holds a drop function (`myla_<lifted>_env_drop`, or `__free` when no capture owns heap), the captured values follow inline (a recursive enum too, like a variable holds it), copied and retained. Lambda bodies are emitted as separate functions `myla___lambda_<n>` whose hidden first argument is the environment; a captured name compiles to a load through it. `__func_drop` decrements the environment's count and tail-calls the stored drop function at zero.
 
 ## Runtime helpers
 

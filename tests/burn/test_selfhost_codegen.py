@@ -33,6 +33,7 @@ import glob
 import io
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -58,7 +59,7 @@ EXCLUDED = {"floats.my"}
 # (MYLA-4); an assignment to any place unshares the containers on its path
 # (MYLA-3); a match binding keeps its value when the arm writes to the
 # scrutinee's variable (MYLA-2); destructuring reads boxed enum leaves through
-# their pointer (MYLA-21).
+# their pointer (MYLA-21); closure environments own their captures (MYLA-22).
 PARITY_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
@@ -70,6 +71,37 @@ PARITY_PROGRAMS = (
     "assign_to_a_field_of_a_shared_element_copies_it",
     "match_binding_survives_writes_to_the_scrutinee",
     "destructure_boxed_enum_and_list_leaves",
+    "closure_environments_own_their_captures",
+)
+
+# The Python backend's arena-reclaim stress programs (test_compiler_parity),
+# with their expected output. The self-hosted arena is 4 GiB, so rather than
+# "doesn't run out", each program must also stay under PEAK_LIMIT_MB: they
+# allocate and drop millions of cells, and without `free` they need 34 MB to
+# over 4 GiB (with it, 8 to 18 MB) (MYLA-22).
+STRESS_PROGRAMS = {
+    "STRESS_SRC": "354000000",
+    "STRESS_TRY_SRC": "100000",
+    "STRESS_TRY_AFTER_STAGED_VALUE_SRC": "7500000",
+    "STRESS_LOOPCTL_SRC": "200001\n133333",
+    "STRESS_LIST_SRC": "0",
+    "STRESS_MAP_SRC": "0",
+    "STRESS_SB_SRC": "0",
+    "STRESS_CLOSURE_SRC": "0",
+    "STRESS_PARTIAL_SRC": "0",
+    "STRESS_TRAIT_DISPATCH_SRC": "600000",
+    "STRESS_FRAGMENTED_FREE_SRC": "38000",
+}
+PEAK_LIMIT_MB = 30
+
+# A child's peak RSS counts its parent's memory at fork time, so the program
+# is started from this minimal helper (a few MB) rather than from the test
+# process, and the helper reports the program's exit code and peak (KB).
+_MEASURE = (
+    "import os, sys\n"
+    "pid = os.posix_spawn(sys.argv[1], [sys.argv[1]], os.environ)\n"
+    "_, status, usage = os.wait4(pid, 0)\n"
+    "sys.stderr.write(f'{os.waitstatus_to_exitcode(status)} {usage.ru_maxrss}\\n')\n"
 )
 
 
@@ -147,6 +179,11 @@ class SelfHostedCodegenParity(unittest.TestCase):
     def _build_and_run(self, asm: str) -> tuple[str, int]:
         """Assemble + link `asm` with the system toolchain, run it, return
         (stdout, exit code)."""
+        out, code, _peak = self._build_and_measure(asm)
+        return out, code
+
+    def _build_and_measure(self, asm: str) -> tuple[str, int, float]:
+        """Like `_build_and_run`, plus the program's peak memory in MB."""
         with tempfile.TemporaryDirectory() as tmp:
             asm_path = os.path.join(tmp, "out.s")
             obj_path = os.path.join(tmp, "out.o")
@@ -162,9 +199,11 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 capture_output=True, text=True,
             )
             proc = subprocess.run(
-                [bin_path], capture_output=True, text=True
+                [sys.executable, "-I", "-S", "-c", _MEASURE, bin_path],
+                capture_output=True, text=True,
             )
-            return proc.stdout, proc.returncode
+            code, peak_kb = proc.stderr.split()[-2:]
+            return proc.stdout, int(code), int(peak_kb) / 1024
 
     def test_corpus_codegen_parity(self) -> None:
         checked = 0
@@ -176,6 +215,18 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 checked += 1
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 20)
+
+    def test_stress_programs_reclaim_memory(self) -> None:
+        from . import test_compiler_parity
+
+        for name, expected in STRESS_PROGRAMS.items():
+            with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, name.lower() + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(getattr(test_compiler_parity, name))
+                out, code, peak = self._build_and_measure(self._emit_asm(path))
+                self.assertEqual((out.strip(), code), (expected, 0))
+                self.assertLess(peak, PEAK_LIMIT_MB, "memory was not reclaimed")
 
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS

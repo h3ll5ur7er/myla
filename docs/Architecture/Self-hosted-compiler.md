@@ -42,8 +42,8 @@ Myla has no global variables and no module-level maps, and everything is a value
 | Floats | Full support | None: the AST keeps only the literal's suffix ([[MYLA-29]]) |
 | Diagnostics | Messages with file positions | Positions only, offset by the prelude ([[MYLA-28]]) |
 | Runtime errors | Messages | Silent `__trap` (exit 1) |
-| Heap | 1 GiB arena, one exact-fit free list | 4 GiB arena, size-class free lists, but `__free` returns immediately ([[MYLA-22]]) |
-| Closure environments | Captures retained and dropped | Captures neither retained nor dropped |
+| Heap | 1 GiB arena, size-class free lists up to 4 KiB | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]) |
+| Closure environments | `[drop fn][captures…]`, captures retained and dropped | The same since [[MYLA-22]]; compositions and partial applications own their parts too |
 | Stdlib root | Built in | Must be passed as an argument ([[MYLA-31]]) |
 
 The calling convention, value layouts, list/map/builder runtimes and even the right-to-left operand order are ported nearly line for line from [[Architecture/Native-backend]].
@@ -58,11 +58,11 @@ Each stage was ported and tested against the Python oracle before the next one (
 4. **Code generator and loader**: native output of `gen_main`-compiled programs vs the interpreter.
 5. **Fixed point**: the compiler compiles itself until the output stops changing.
 
-The burn tests `tests/burn/test_selfhost_*.py` keep these gates; note they build the self-hosted tools with the **Python** backend, so they test the self-hosted front end, while only the bootstrap exercises self-compiled binaries ([[Development/Testing]]).
+The burn tests `tests/burn/test_selfhost_*.py` keep these gates; note they build the self-hosted tools with the **Python** backend, so they test the self-hosted front end and, through the programs `gen_main` compiles, its code generator and runtime (including the arena-reclaim stress programs, with a memory bound), while only the bootstrap exercises self-compiled binaries ([[Development/Testing]]).
 
 ## Current state
 
-- The three-stage fixed point holds: stage 2 and stage 3 output are identical (4.4 MB of assembly, 691 functions); stage 3 compiles the compiler in 1.5 s using 361 MB.
+- The three-stage fixed point holds: stage 2 and stage 3 output are identical (4.7 MB of assembly); stage 3 compiles the compiler in 1.3 s with a 163 MB peak (359 MB while `free` was disabled, [[MYLA-22]]).
 - Against the interpreter, the stage 3 compiler matches on 31 of 34 examples (`floats.my` drops every float line, `modules/main.my` fails to load its package, `args` differs only in argv[0]).
 - The stage 4 CLI's `myla run` (the Myla interpreter, compiled) fails on floats ([[MYLA-29]]). Programs that call methods work since [[MYLA-21]].
 - Further bugs: [[MYLA-23]] … [[MYLA-27]], [[MYLA-32]], [[MYLA-33]]. See [[Project/Known-issues]].

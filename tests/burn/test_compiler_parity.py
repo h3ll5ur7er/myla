@@ -882,6 +882,51 @@ PROGRAMS = {
         "    m[2] = len(m) * 100\n"            # the size before the insert
         "    print(m[2])\n}\n"
     ),
+    # MYLA-22: a closure environment owns its captures (and a composition or
+    # partial application its parts): they outlive the variables they came from.
+    "closure_environments_own_their_captures": (
+        "enum Tree { Leaf(int), Node(Tree, Tree) }\n"
+        "fun count(t: Tree) -> int {\n"
+        "    return match t {\n"
+        "        Leaf(n) => n\n        Node(a, b) => count(a) + count(b)\n    }\n}\n"
+        "fun make_adder(xs: [int]) -> (int) -> int {\n"
+        "    let k = len(xs)\n"
+        "    return (i: int) => xs[i] + k\n}\n"
+        "fun pick(xs: [int], i: int) -> int {\n    return xs[i]\n}\n"
+        "fun double(x: int) -> int {\n    return x * 2\n}\n"
+        "fun churn() {\n"                       # reuses freed cells, if any
+        "    var big: [[int]] = []\n"
+        "    for i in 0..50 { push(big, [i, i, i, i, i, i]) }\n}\n"
+        "#main\nfun main() {\n"
+        "    var f = make_adder([10, 20, 30])\n"
+        "    churn()\n"
+        "    print(f(1))\n"
+        "    var ys = [1, 2, 3]\n"
+        "    let g = (i: int) => ys[i]\n"
+        "    ys = [7]\n"
+        "    churn()\n"
+        "    print(g(2))\n"
+        "    var fs: [(int) -> int] = []\n"
+        "    push(fs, make_adder([4, 5]))\n"
+        "    churn()\n"
+        "    print(fs[0](0))\n"
+        "    let h = make_adder([1, 1]) >> double\n"
+        "    churn()\n"
+        "    print(h(0))\n"
+        "    var zs = [6, 7, 8]\n"
+        "    let p = pick(zs, _)\n"
+        "    zs = []\n"
+        "    churn()\n"
+        "    print(p(2))\n"
+        "    let t = Tree.Node(Tree.Leaf(1), Tree.Leaf(2))\n"
+        "    let k = 40\n"
+        "    let c = (x: int) => count(t) + k + x\n"   # a recursive enum capture is stored inline
+        "    churn()\n"
+        "    print(c(100))\n"
+        "    for r in 0..20000 {\n"           # environments are reclaimed
+        "        let q = make_adder([r, r, r])\n"
+        "        if r == 19999 { print(q(0)) }\n    }\n}\n"
+    ),
     # MYLA-21: destructuring reads a boxed (recursive) enum leaf through its
     # pointer, and the leaves own their heap values.
     "destructure_boxed_enum_and_list_leaves": (

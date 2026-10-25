@@ -61,7 +61,7 @@ flowchart LR
 
 ## Status in one paragraph
 
-Version 1.0 is reached: every feature milestone (v0.0 to v0.5) is implemented in the Python toolchain with interpreter/native parity, and the self-hosted compiler reaches its three-stage fixed point. A code review in October 2026 found parity bugs between the interpreter and the native backend, a disabled `free` and several miscompiles in the self-hosted runtime, and a Rust native backend that miscompiles common code. They are tracked as tasks on the board and summarised on [[Project/Known-issues]]. The Python backend's memory and crash bugs from that review are fixed ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]]); so is the self-hosted destructuring miscompile ([[MYLA-21]]); the most urgent remaining ones are [[MYLA-22]] and [[MYLA-36]].
+Version 1.0 is reached: every feature milestone (v0.0 to v0.5) is implemented in the Python toolchain with interpreter/native parity, and the self-hosted compiler reaches its three-stage fixed point. A code review in October 2026 found parity bugs between the interpreter and the native backend, a disabled `free` and several miscompiles in the self-hosted runtime, and a Rust native backend that miscompiles common code. They are tracked as tasks on the board and summarised on [[Project/Known-issues]]. The Python backend's memory and crash bugs from that review are fixed ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]]); so are the self-hosted destructuring miscompile ([[MYLA-21]]) and its disabled `free` ([[MYLA-22]]); the most urgent remaining one is [[MYLA-36]] (Rust edition).
 
 ## Working in this repository
 
