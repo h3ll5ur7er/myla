@@ -38,7 +38,7 @@ pub struct DropEntry { off: int32, ty: Type }
 // What an early return must release while a container store's value is staged
 // (see stage_value): the value in frame slot `slot`, in its stored form, and
 // the value's temporaries.
-pub struct StagedDrops { slot: int32, ty: Type, temps: [DropEntry] }
+pub struct StagedDrops { slot: int32, ty: Type, inline: bool, temps: [DropEntry] }
 
 // A leaf binding produced by destructuring a tuple pattern.
 pub struct DLeaf { name: str, off: int32, ty: Type }
@@ -288,7 +288,7 @@ impl CodeGen {
         while g >= 0 {
             let sd = self.staged_drops[g]
             for d in sd.temps { self.drop_value("rbp", d.off, d.ty) }
-            self.walk_member("rbp", sd.slot, sd.ty, false)
+            self.release("rbp", sd.slot, sd.ty, sd.inline)
             g = g - 1
         }
         var s = len(self.drop_scopes) - 1
@@ -996,10 +996,11 @@ impl CodeGen {
         self.locals[id] = -self.cursor
     }
 
-    // A frame slot for a value of type `t` staged before it is stored into a
-    // container (stage_value), keyed by the storing node.
-    fun alloc_staged(var self, id: int32, t: Type) {
-        self.cursor = self.cursor + self.stored_size(t)
+    // A frame slot for a value of type `t` staged before it is stored
+    // (stage_value), keyed by the storing node; `inline` for a variable.
+    fun alloc_staged(var self, id: int32, t: Type, inline: bool) {
+        if inline { self.cursor = self.cursor + self.size(t) }
+        else { self.cursor = self.cursor + self.stored_size(t) }
         self.staged[id] = -self.cursor
     }
 
@@ -1025,8 +1026,11 @@ impl CodeGen {
             StmtKind.Assign(target, value) => {
                 self.visit_expr(target)
                 self.visit_expr(value)
+                // the checker leaves targets untyped: size by the value's type
+                let vt = self.type_of(value.id)
                 let into_container = match target.kind { ExprKind.Index(b, i) => true, _ => false }
-                if into_container { self.alloc_staged(s.id, self.type_of(value.id)) }
+                let inline = match target.kind { ExprKind.Name(n) => true, _ => false }
+                if into_container || self.owns_heap(vt) { self.alloc_staged(s.id, vt, inline) }
             },
             StmtKind.IfS(cond, then, otherwise) => {
                 self.visit_expr(cond)
@@ -1114,7 +1118,7 @@ impl CodeGen {
                 if is_aggregate(rt) || self.owns_heap(rt) { self.alloc(e.id, self.size(rt)) }
                 match c.kind {
                     ExprKind.Name(nm) => {
-                        if nm == "push" && len(args) == 2 { self.alloc_staged(e.id, self.type_of(args[1].id)) }
+                        if nm == "push" && len(args) == 2 { self.alloc_staged(e.id, self.type_of(args[1].id), false) }
                     },
                     _ => {},
                 }
@@ -1145,7 +1149,7 @@ impl CodeGen {
                     self.visit_expr(en.value)
                 }
                 self.alloc(e.id, 8)
-                self.alloc_staged(e.id, map_val(self.type_of(e.id)))
+                self.alloc_staged(e.id, map_val(self.type_of(e.id)), false)
             },
             ExprKind.StructLit(name, fields) => {
                 for fi in fields { self.visit_expr(fi.value) }
@@ -1273,109 +1277,42 @@ impl CodeGen {
         }
     }
 
-    // Assignment to an lvalue (`name`, `agg.field`, `tuple.N`), scalar or aggregate.
-    // The checker leaves lvalue targets untyped, so key on the value's type (they
-    // are equal by the assignment's type rule).
+    // Assignment to a place: a variable, a field or a list element / map value,
+    // at any depth (the checker leaves targets untyped; place_type derives it).
     fun gen_assign(var self, s: Stmt, target: Expr, value: Expr) {
         let t = self.place_type(target)
-        let is_name = match target.kind { ExprKind.Name(n) => true, _ => false }
         match target.kind {
             ExprKind.Index(base, idx) => {
                 if is_map_t(self.place_type(base)) { self.gen_map_set(s, base, idx, value)
                 return }
-                let et = list_elem(self.place_type(base))
-                let staged = self.staged[s.id]
-                self.stage_value(value, et, staged)
-                self.mut_elem_addr(target, base, idx)   // &elem (CoW) -> rax
-                self.emit("movq %rax, %rcx")
-                self.drop_stored(et)
-                self.commit_staged(et, staged)
-                self.drop_expr_temps(value)
-                return
             },
             _ => {},
         }
-        if self.is_boxed(t) && !is_name {
-            // assigning into a boxed member: drop the old cell, store a fresh one
-            self.box_value(value, t)
-            self.emit("pushq %rax")
-            self.addr_of_lvalue(target)
+        if self.owns_heap(t) {
+            // Take the new value (one reference) before releasing the old one,
+            // which it may share or be part of (`p = p`, `o.a = o.a`).
+            let inline = match target.kind { ExprKind.Name(n) => true, _ => false }
+            let staged = self.staged[s.id]
+            self.stage_value(value, t, staged, inline)
+            self.mut_place_addr(target)            // &place (CoW, bounds-checked) -> rax
             self.emit("movq %rax, %rcx")
-            self.emit("movq (%rcx), %rsi")
-            self.emit("popq %rax")
-            self.emit("movq %rax, (%rcx)")
-            self.emit("movq %rsi, %rdi")
-            self.register_drop(t)
-            self.emit("call " + self.drop_call_name(t))
-            self.drop_expr_temps(value)
-        } else if is_aggregate(t) && self.owns_heap(t) {
-            if is_name {
-                let b = self.lookup(match target.kind { ExprKind.Name(n) => n, _ => "" })
-                self.addr_of_aggregate(value)
-                self.emit("pushq %rax")
-                self.drop_value("rbp", b.offset, t)
-                self.emit("popq %rsi")
-                self.emit(format("leaq {}(%rbp), %rdi", b.offset))
-                self.emit_copy(self.size(t))
-                self.retain("rbp", b.offset, t)
-                self.drop_expr_temps(value)
-            } else {
-                // A reference-counted aggregate into a member/element place: same
-                // drop-old / copy-new / retain-new dance as the simple-variable
-                // case, but the slot address is computed (not rbp-relative). Hold
-                // it in callee-saved %rbx so it survives the drop/retain helper
-                // calls; the new value is built first (it may read the old one).
-                self.addr_of_aggregate(value)
-                self.emit("pushq %rax")
-                self.addr_of_lvalue(target)
-                self.emit("pushq %rbx")
-                self.emit("movq %rax, %rbx")
-                self.drop_value("rbx", 0, t)
-                self.emit("movq 8(%rsp), %rsi")
-                self.emit("movq %rbx, %rdi")
-                self.emit_copy(self.size(t))
-                self.retain("rbx", 0, t)
-                self.emit("popq %rbx")
-                self.emit("addq $8, %rsp")
-                self.drop_expr_temps(value)
-            }
+            self.drop_stored(t, inline)
+            self.commit_staged(t, staged, inline)
         } else if is_aggregate(t) {
             self.addr_of_aggregate(value)
-            self.emit("movq %rax, %rsi")
-            self.addr_of_lvalue(target)
+            self.emit("pushq %rax")
+            self.mut_place_addr(target)
             self.emit("movq %rax, %rdi")
+            self.emit("popq %rsi")
             self.emit_copy(self.size(t))
-            self.drop_expr_temps(value)
-        } else if self.owns_heap(t) {
-            if is_name {
-                let b = self.lookup(match target.kind { ExprKind.Name(n) => n, _ => "" })
-                self.eval(value)
-                self.emit("pushq %rax")
-                self.emit("incq -8(%rax)")
-                self.drop_value("rbp", b.offset, t)
-                self.emit("popq %rax")
-                self.emit(format("movq %rax, {}(%rbp)", b.offset))
-            } else {
-                self.eval(value)
-                self.emit("pushq %rax")
-                self.emit("incq -8(%rax)")
-                self.addr_of_lvalue(target)
-                self.emit("pushq %rax")
-                self.emit("movq %rax, %rcx")
-                self.drop_box(0, "rcx", t)
-                self.emit("popq %rcx")
-                self.emit("popq %rax")
-                self.emit("movq %rax, (%rcx)")
-            }
-            self.drop_expr_temps(value)
         } else {
             self.eval(value)
             self.emit("pushq %rax")
-            self.addr_of_lvalue(target)
+            self.mut_place_addr(target)
             self.emit("popq %rcx")
             self.emit("movq %rcx, (%rax)")
-            self.drop_expr_temps(value)
         }
+        self.drop_expr_temps(value)
     }
 
     fun gen_destruct(var self, s: Stmt, binding: [BindElem], init: Expr) {
@@ -1983,28 +1920,6 @@ impl CodeGen {
         }
     }
 
-    // Leave the address of a scalar lvalue (`name` or `agg.field`) in %rax.
-    fun addr_of_lvalue(var self, e: Expr) {
-        match e.kind {
-            ExprKind.Name(n) => {
-                let b = self.lookup(n)
-                self.emit(format("leaq {}(%rbp), %rax", b.offset))
-            },
-            ExprKind.GetField(tgt, field) => {
-                self.addr_of_aggregate(tgt)
-                let foff = self.field_offset(self.place_type(tgt), field)
-                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
-            },
-            ExprKind.TupleIndex(tgt, idx) => {
-                self.addr_of_aggregate(tgt)
-                let foff = self.elem_offset(self.place_type(tgt), idx as int32)
-                if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
-            },
-            ExprKind.Index(base, idx) => { self.gen_index_addr(base, idx) },
-            _ => {},
-        }
-    }
-
     fun gen_struct_lit(var self, e: Expr, name: str, fields: [FieldInit]) {
         let base = self.local_of(e.id)
         for fi in fields {
@@ -2203,21 +2118,6 @@ impl CodeGen {
         self.emit("movq (%rax), %rax")
     }
 
-    // Address where a list-holder's pointer lives (so push/pop can write back a
-    // reallocated buffer): a local/param slot, a nested list element, or a map slot.
-    fun mut_holder_addr(var self, e: Expr) {
-        match e.kind {
-            ExprKind.Name(n) => {
-                let b = self.lookup(n)
-                self.emit(format("leaq {}(%rbp), %rax", b.offset))
-            },
-            ExprKind.Index(base, idx) => { self.gen_index_addr(base, idx) },
-            ExprKind.GetField(tgt, field) => { self.addr_of_lvalue(e) },
-            ExprKind.TupleIndex(tgt, idx) => { self.addr_of_lvalue(e) },
-            _ => {},
-        }
-    }
-
     // -- copy-on-write mutation addressing --------------------------------
 
     // In: %rax = address of the slot holding a list/map/builder pointer. Ensure
@@ -2260,12 +2160,12 @@ impl CodeGen {
                 }
             },
             ExprKind.GetField(tgt, field) => {
-                self.mut_addr_of_struct(tgt)
+                self.mut_place_addr(tgt)
                 let foff = self.field_offset(self.place_type(tgt), field)
                 if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
             },
             ExprKind.TupleIndex(tgt, idx) => {
-                self.mut_addr_of_struct(tgt)
+                self.mut_place_addr(tgt)
                 let foff = self.elem_offset(self.place_type(tgt), idx as int32)
                 if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
             },
@@ -2274,9 +2174,11 @@ impl CodeGen {
         }
     }
 
-    // Leave the address of inline-struct lvalue `e` in %rax (CoW-ing any
-    // list/map cell on the path).
-    fun mut_addr_of_struct(var self, e: Expr) {
+    // Leave the address of place `e` (a variable, a field or a list element /
+    // map value, at any depth) in %rax, unsharing (CoW) every list and map cell
+    // on the path, so the write that follows doesn't reach other owners of the
+    // container (MYLA-3).
+    fun mut_place_addr(var self, e: Expr) {
         match e.kind {
             ExprKind.Name(n) => {
                 let b = self.lookup(n)
@@ -2290,12 +2192,12 @@ impl CodeGen {
                 }
             },
             ExprKind.GetField(tgt, field) => {
-                self.mut_addr_of_struct(tgt)
+                self.mut_place_addr(tgt)
                 let foff = self.field_offset(self.place_type(tgt), field)
                 if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
             },
             ExprKind.TupleIndex(tgt, idx) => {
-                self.mut_addr_of_struct(tgt)
+                self.mut_place_addr(tgt)
                 let foff = self.elem_offset(self.place_type(tgt), idx as int32)
                 if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
             },
@@ -2355,8 +2257,9 @@ impl CodeGen {
     // Evaluate `value` into frame slot `slot` in its stored form, owning one
     // reference to every heap cell it holds: a fresh box for a boxed enum, a
     // retained copy of an inline aggregate, or a scalar or retained cell pointer.
-    fun stage_value(var self, value: Expr, t: Type, slot: int32) {
-        if self.is_boxed(t) {
+    // With `inline`, for a variable, even a boxed enum is staged as an inline copy.
+    fun stage_value(var self, value: Expr, t: Type, slot: int32, inline: bool) {
+        if self.is_boxed(t) && !inline {
             self.box_value(value, t)
             self.emit(format("movq %rax, {}(%rbp)", slot))
         } else if is_aggregate(t) {
@@ -2373,14 +2276,14 @@ impl CodeGen {
         // Until commit_staged hands the value over, an early return (a `?` in
         // the key, the index or the container expression) must release it, and
         // the value's temporaries, which the statement's end would have dropped.
-        push(self.staged_drops, StagedDrops { slot: slot, ty: t, temps: self.collect_expr_temps(value) })
+        push(self.staged_drops, StagedDrops { slot: slot, ty: t, inline: inline, temps: self.collect_expr_temps(value) })
     }
 
     // Move the value staged in `slot` into the storage at %rcx, which takes
     // over its references.
-    fun commit_staged(var self, t: Type, slot: int32) {
+    fun commit_staged(var self, t: Type, slot: int32, inline: bool) {
         self.staged_drops = drop_last(self.staged_drops)
-        if is_aggregate(t) && !self.is_boxed(t) {
+        if is_aggregate(t) && (inline || !self.is_boxed(t)) {
             self.emit(format("leaq {}(%rbp), %rsi", slot))
             self.emit("movq %rcx, %rdi")
             self.emit_copy(self.size(t))
@@ -2390,13 +2293,22 @@ impl CodeGen {
         }
     }
 
-    // Release the value of type `t` stored at %rcx (preserved).
-    fun drop_stored(var self, t: Type) {
+    // Release the value of type `t` stored at %rcx (preserved). The walk keeps
+    // the address in callee-saved %rbx across the drop calls.
+    fun drop_stored(var self, t: Type, inline: bool) {
         if self.owns_heap(t) {
-            self.emit("pushq %rcx")
-            self.walk_member("rcx", 0, t, false)
-            self.emit("popq %rcx")
+            self.emit("pushq %rbx")
+            self.emit("movq %rcx, %rbx")
+            self.release("rbx", 0, t, inline)
+            self.emit("movq %rbx, %rcx")
+            self.emit("popq %rbx")
         }
+    }
+
+    // Release the value of type `t` at `off(%base)`: stored as a member (a boxed
+    // enum as its pointer) or, with `inline`, as a variable holds it.
+    fun release(var self, base: str, off: int32, t: Type, inline: bool) {
+        if inline { self.drop_value(base, off, t) } else { self.walk_member(base, off, t, false) }
     }
 
     fun gen_push(var self, e: Expr, holder: Expr, value: Expr) {
@@ -2404,7 +2316,7 @@ impl CodeGen {
         let et = list_elem(lt)
         let stride = self.elem_stride(et)
         let staged = self.staged[e.id]
-        self.stage_value(value, et, staged)
+        self.stage_value(value, et, staged, false)
         self.mut_addr_of_list_holder(holder)   // &holder -> rax
         self.emit("pushq %rax")                // save &holder
         self.cow_unique(lt)                    // unique cell -> rax
@@ -2425,7 +2337,7 @@ impl CodeGen {
         self.emit(format("imulq ${}, %rdx", stride))
         self.emit("leaq 16(%rax,%rdx), %rcx")  // &elem (fresh slot)
         self.emit("addq $8, %rsp")             // discard saved &holder
-        self.commit_staged(et, staged)
+        self.commit_staged(et, staged, false)
         // The value temp (if any) is released by the enclosing statement's
         // drop_expr_temps; dropping it here too would double-free.
     }
@@ -2468,7 +2380,7 @@ impl CodeGen {
         self.emit(format("movq %rax, {}(%rbp)", slot))
         let staged = self.staged[e.id]
         for en in entries {
-            self.stage_value(en.value, map_val(mt), staged)
+            self.stage_value(en.value, map_val(mt), staged, false)
             self.emit(format("leaq {}(%rbp), %rax", slot))
             self.emit_map_put(en.key, mt, staged)
         }
@@ -2496,14 +2408,14 @@ impl CodeGen {
         self.emit(format("movq ${}, %rcx", is_str))
         self.emit("call __map_set_slot")
         self.emit("leaq 16(%rax), %rcx")     // &value
-        self.commit_staged(vt, staged)
+        self.commit_staged(vt, staged, false)
         self.emit("addq $16, %rsp")
     }
 
     fun gen_map_set(var self, s: Stmt, base: Expr, idx: Expr, value: Expr) {
         let mt = self.place_type(base)
         let staged = self.staged[s.id]
-        self.stage_value(value, map_val(mt), staged)
+        self.stage_value(value, map_val(mt), staged, false)
         self.mut_addr_of_list_holder(base)   // &holder -> rax
         self.emit("pushq %rax")
         self.cow_unique(mt)                  // unique cell, written back to holder

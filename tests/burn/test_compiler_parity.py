@@ -882,6 +882,69 @@ PROGRAMS = {
         "    m[2] = len(m) * 100\n"            # the size before the insert
         "    print(m[2])\n}\n"
     ),
+    # MYLA-3: a heap-owning aggregate can be assigned to any place; the new
+    # value is taken before the old one is released.
+    "assign_heap_owning_struct_to_any_place": (
+        "struct Inner { xs: [int] }\n"
+        "struct Outer { inner: Inner, tag: int }\n"
+        "struct Deep { outer: Outer }\n"
+        "#main\nfun main() {\n"
+        "    var o = Outer { inner: Inner { xs: [1] }, tag: 1 }\n"
+        "    o.inner = Inner { xs: [2, 3] }\n"
+        "    print(len(o.inner.xs))\n"
+        "    var d = Deep { outer: o }\n"
+        "    d.outer.inner = Inner { xs: [4, 5, 6] }\n"
+        "    print(len(d.outer.inner.xs))\n"
+        "    print(len(o.inner.xs))\n"          # value semantics: still 2
+        "    var os = [o, o]\n"
+        "    os[1].inner = Inner { xs: [7, 7, 7, 7] }\n"
+        "    print(len(os[0].inner.xs))\n"
+        "    print(len(os[1].inner.xs))\n"
+        "    var m: [int: Outer] = [1: o]\n"
+        "    m[1].inner = Inner { xs: [8] }\n"
+        "    print(len(m[1].inner.xs))\n"
+        "    print(len(o.inner.xs))\n}\n"
+    ),
+    "assign_to_a_field_of_a_shared_element_copies_it": (
+        # value semantics: writing a field through a list element or map value
+        # unshares the container first (the native code wrote into the cell
+        # both variables shared)
+        "struct P { x: int, ys: [int] }\n"
+        "struct W { p: P }\n"
+        "#main\nfun main() {\n"
+        "    var a = [P { x: 1, ys: [1] }]\n"
+        "    var b = a\n"
+        "    b[0].x = 5\n"
+        "    print(a[0].x)\n"
+        "    print(b[0].x)\n"
+        "    b[0].ys = [4, 4]\n"
+        "    print(len(a[0].ys))\n"
+        "    var m: [int: P] = [1: P { x: 1, ys: [] }]\n"
+        "    var m2 = m\n"
+        "    m2[1].x = 7\n"
+        "    print(m[1].x)\n"
+        "    var ws = [W { p: P { x: 1, ys: [] } }]\n"
+        "    var ws2 = ws\n"
+        "    ws2[0].p.x = 9\n"
+        "    print(ws[0].p.x)\n"
+        "    print(ws2[0].p.x)\n}\n"
+    ),
+    "assign_heap_owning_struct_to_itself": (
+        "struct Inner { xs: [int] }\n"
+        "struct Outer { inner: Inner }\n"
+        "fun churn() {\n"                       # reuses freed cells, if any
+        "    var big: [[int]] = []\n"
+        "    for i in 0..50 { push(big, [i, i, i, i]) }\n}\n"
+        "#main\nfun main() {\n"
+        "    var p = Inner { xs: [9, 9, 9] }\n"
+        "    p = p\n"
+        "    churn()\n"
+        "    print(len(p.xs))\n"
+        "    var o = Outer { inner: Inner { xs: [1, 2] } }\n"
+        "    o.inner = o.inner\n"
+        "    churn()\n"
+        "    print(len(o.inner.xs))\n}\n"
+    ),
     "assign_replaces_map_and_builder_elements": (
         # replacing an element releases the old one with its own type's drop
         # routine (the native compiler used to assume every element was a list)

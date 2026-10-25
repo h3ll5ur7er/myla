@@ -53,14 +53,18 @@ GEN_TOOL = os.path.join(_REPO, "selfhost", "gen_main.my")
 EXCLUDED = {"floats.my"}
 
 # Programs of the Python backend's parity suite (test_compiler_parity.PROGRAMS)
-# about stores into containers: the value is evaluated before the container is
-# touched, so `?` and `push(xs, pop(xs))` see no half-made slot (MYLA-4).
-CONTAINER_STORE_PROGRAMS = (
+# about stores: the value is evaluated before the container is touched, so `?`
+# and `push(xs, pop(xs))` see no half-made slot (MYLA-4), and an assignment to
+# any place unshares the containers on its path (MYLA-3).
+STORE_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
     "try_inside_append_byte_leaves_the_builder_intact",
     "push_evaluates_its_value_before_the_list",
     "assign_replaces_map_and_builder_elements",
+    "assign_heap_owning_struct_to_any_place",
+    "assign_heap_owning_struct_to_itself",
+    "assign_to_a_field_of_a_shared_element_copies_it",
 )
 
 
@@ -168,10 +172,10 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 20)
 
-    def test_container_stores_match_the_oracle(self) -> None:
+    def test_stores_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS
 
-        for name in CONTAINER_STORE_PROGRAMS:
+        for name in STORE_PROGRAMS:
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, name + ".my")
                 with open(path, "w", encoding="utf-8") as fh:

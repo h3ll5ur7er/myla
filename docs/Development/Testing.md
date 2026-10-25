@@ -33,7 +33,7 @@ The Rust edition has its own `cargo test` in `rust/` ([[Architecture/Rust-editio
 | --- | --- | --- |
 | Unit | 392 | All pass, about 1 s |
 | Integration | 2 | Pass |
-| Burn | 330 (plus subtests) | All pass, about 23 s (green since [[MYLA-4]]) |
+| Burn | 333 (plus subtests) | All pass, about 24 s (green since [[MYLA-4]]) |
 | Rust (`cargo test`) | 20 | All pass |
 
 ## Unit tests
@@ -48,11 +48,11 @@ The Rust edition has its own `cargo test` in `rust/` ([[Architecture/Rust-editio
 | `test_examples_compile.py` | Each listed example builds natively, exits 0 and prints what the interpreter prints; the list must match the directory |
 | `test_examples_tests.py` | Every `#test` case in the examples passes, and every non-generic value-returning top-level function has at least one |
 | `test_error_corpus.py` | Each file in `examples/errors/` fails in the stage its directive names, with a message containing its text |
-| `test_compiler_parity.py` | 79 targeted programs (wrapping, division, structs, methods, consts, collections and copy-on-write, stores into containers, strings, enums and reference counting, generics, `?`, closures, pipelines, traits, floats, chars) produce identical output natively; plus stress tests that allocate and drop millions of cells (lists, maps, builders, closures, partial application, trait dispatch, `?` early returns, values staged for a container store, `break`/`continue`) to prove memory is reclaimed, a timing guard that allocation never scans unusable free cells (MYLA-16), and trap tests for division by zero, `panic`, `assert` and `unreachable` |
+| `test_compiler_parity.py` | 82 targeted programs (wrapping, division, structs, methods, consts, collections and copy-on-write, stores into containers, strings, enums and reference counting, generics, `?`, closures, pipelines, traits, floats, chars) produce identical output natively; plus stress tests that allocate and drop millions of cells (lists, maps, builders, closures, partial application, trait dispatch, `?` early returns, values staged for a container store, `break`/`continue`) to prove memory is reclaimed, a timing guard that allocation never scans unusable free cells (MYLA-16), and trap tests for division by zero, `panic`, `assert` and `unreachable` |
 | `test_debug_info.py` | `myla build -g` binaries carry a line table readelf reads, behave exactly like plain builds, and (where gdb is installed) stop on a Myla source line |
 | `test_modules.py` | `examples/modules` in both back ends |
 | `test_stdio.py`, `test_fs.py`, `test_process.py` | Parity of stdout, stderr, exit status, argv, file contents, errno mapping, signals and spawn errors |
-| `test_selfhost_lexer.py`, `…_parser.py`, `…_checker.py`, `…_interp.py`, `…_codegen.py` | The self-hosting gates: the Myla-written stages, built with the Python backend, agree with the Python oracle (canonical tokens, canonical AST, accept/reject and error position, interpreted output, native output); the codegen gate also runs the container-store programs of `test_compiler_parity.py` |
+| `test_selfhost_lexer.py`, `…_parser.py`, `…_checker.py`, `…_interp.py`, `…_codegen.py` | The self-hosting gates: the Myla-written stages, built with the Python backend, agree with the Python oracle (canonical tokens, canonical AST, accept/reject and error position, interpreted output, native output); the codegen gate also runs the store programs of `test_compiler_parity.py` |
 
 `tests/burn/_native.py` holds the helpers to build and run native binaries.
 

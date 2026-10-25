@@ -944,9 +944,9 @@ class CodeGen:
             cursor[0] += size
             self._locals[id(node)] = -cursor[0]
 
-        def stage(node, t: Type) -> None:
-            # a value staged before it is stored into a container (_stage_value)
-            cursor[0] += self._stored_size(t)
+        def stage(node, t: Type, inline: bool = False) -> None:
+            # a value staged before it is stored (_stage_value)
+            cursor[0] += self._size(t) if inline else self._stored_size(t)
             self._locals[f"staged:{id(node)}"] = -cursor[0]
 
         def visit_stmt(stmt: ast.Stmt) -> None:
@@ -963,11 +963,13 @@ class CodeGen:
                 visit_expr(stmt.target)
                 visit_expr(stmt.value)
                 tgt = stmt.target
-                if isinstance(tgt, ast.Index):
-                    stage(stmt, tgt.resolved_type)   # the value, staged (MYLA-4)
-                    if isinstance(tgt.target.resolved_type, MapType):
-                        cursor[0] += 8   # scratch for the map lvalue holder address
-                        self._locals[f"mutholder:{id(stmt)}"] = -cursor[0]
+                if (isinstance(tgt, ast.Index)
+                        and isinstance(tgt.target.resolved_type, MapType)):
+                    stage(stmt, tgt.resolved_type)
+                    cursor[0] += 8       # scratch for the map lvalue holder address
+                    self._locals[f"mutholder:{id(stmt)}"] = -cursor[0]
+                elif self._owns_heap(tgt.resolved_type):
+                    stage(stmt, tgt.resolved_type, isinstance(tgt, ast.Name))
             elif isinstance(stmt, ast.If):
                 visit_expr(stmt.cond)
                 for s in stmt.then.statements:
@@ -1231,82 +1233,35 @@ class CodeGen:
             self._drop_expr_temps(stmt.expr)
 
     def _gen_assign(self, stmt: ast.Assign) -> None:
-        t = stmt.target.resolved_type
-        if isinstance(stmt.target, ast.Index):
-            if isinstance(stmt.target.target.resolved_type, MapType):
-                self._gen_map_set(stmt)           # m[k] = v (insert/update, CoW)
-                return
-            staged = self._locals[f"staged:{id(stmt)}"]
-            self._stage_value(stmt.value, t, staged)
-            self._mut_elem_addr(stmt.target)      # rax = &element (CoW, bounds-checked)
-            self._emit("movq %rax, %rcx")
-            self._drop_stored(t)
-            self._commit_staged(t, staged)
-            self._drop_expr_temps(stmt.value)
+        target = stmt.target
+        t = target.resolved_type
+        if isinstance(target, ast.Index) and isinstance(target.target.resolved_type, MapType):
+            self._gen_map_set(stmt)               # m[k] = v (insert/update, CoW)
             return
-        if self._is_boxed(t) and not isinstance(stmt.target, ast.Name):
-            # assigning into a boxed member: drop the old cell, store a fresh one
-            self._box(stmt.value, t)                  # rax = new pointer (rc=1)
-            self._emit("pushq %rax")
-            self._addr_of_lvalue(stmt.target)         # rax = address of the slot
+        if self._owns_heap(t):
+            # Take the new value (one reference) before releasing the old one,
+            # which it may share or be part of (`p = p`, `o.a = o.a`).
+            inline = isinstance(target, ast.Name)  # a variable holds even a boxed enum inline
+            staged = self._locals[f"staged:{id(stmt)}"]
+            self._stage_value(stmt.value, t, staged, inline)
+            self._mut_place_addr(target)          # rax = &place (CoW, bounds-checked)
             self._emit("movq %rax, %rcx")
-            self._emit("movq (%rcx), %rsi")           # old pointer
-            self._emit("popq %rax")
-            self._emit("movq %rax, (%rcx)")           # store new pointer
-            self._emit("movq %rsi, %rdi")
-            self._emit(f"call __dropb_{t.name}")      # release old subtree
-            self._drop_expr_temps(stmt.value)
-        elif _is_aggregate(t) and self._owns_heap(t):
-            if not isinstance(stmt.target, ast.Name):
-                raise NotImplementedError(
-                    "reference-counted aggregate assignment is only supported "
-                    "for simple variables")
-            kind, off, _ = self._lookup(stmt.target.ident)
-            self._addr_of_aggregate(stmt.value)       # build new value first
-            self._emit("pushq %rax")                  # (may read the old value)
-            self._drop_value("rbp", off, t)           # release the old value
-            self._emit("popq %rsi")
-            self._emit(f"leaq {off}(%rbp), %rdi")
-            self._emit_copy(self._size(t))
-            self._retain("rbp", off, t)
-            self._drop_expr_temps(stmt.value)
+            self._drop_stored(t, inline)
+            self._commit_staged(t, staged, inline)
         elif _is_aggregate(t):
             self._addr_of_aggregate(stmt.value)
-            self._emit("movq %rax, %rsi")
-            self._addr_of_lvalue(stmt.target)
+            self._emit("pushq %rax")
+            self._mut_place_addr(target)
             self._emit("movq %rax, %rdi")
+            self._emit("popq %rsi")
             self._emit_copy(self._size(t))
-            self._drop_expr_temps(stmt.value)
-        elif self._owns_heap(t):  # reassigning a heap-owning scalar (list/map/SB)
-            if isinstance(stmt.target, ast.Name):
-                kind, off, _ = self._lookup(stmt.target.ident)
-                self._eval(stmt.value)            # new cell pointer -> rax
-                self._emit("pushq %rax")
-                self._emit("incq -8(%rax)")       # the variable takes a reference
-                self._drop_value("rbp", off, t)   # release the old list
-                self._emit("popq %rax")
-                self._emit(f"movq %rax, {off}(%rbp)")
-            else:
-                # `place.field = list` / `place[i] = map` …: same retain-new /
-                # drop-old / store dance, but against a computed slot address.
-                self._eval(stmt.value)            # new cell pointer -> rax
-                self._emit("pushq %rax")          # save new pointer
-                self._emit("incq -8(%rax)")       # the slot takes a reference
-                self._addr_of_lvalue(stmt.target)  # rax = &slot
-                self._emit("pushq %rax")
-                self._emit("movq %rax, %rcx")
-                self._drop_box(0, "rcx", t)       # release the old cell at the slot
-                self._emit("popq %rcx")           # &slot
-                self._emit("popq %rax")           # new pointer
-                self._emit("movq %rax, (%rcx)")
-            self._drop_expr_temps(stmt.value)
         else:
             self._eval(stmt.value)
             self._emit("pushq %rax")
-            self._addr_of_lvalue(stmt.target)
+            self._mut_place_addr(target)
             self._emit("popq %rcx")
             self._emit("movq %rcx, (%rax)")
-            self._drop_expr_temps(stmt.value)
+        self._drop_expr_temps(stmt.value)
 
     def _gen_if(self, stmt: ast.If) -> None:
         end = self._label()
@@ -1474,20 +1429,6 @@ class CodeGen:
 
     # -- lvalues & struct addresses ------------------------------------------
 
-    def _addr_of_lvalue(self, expr: ast.Expr) -> None:
-        """Leave the *address* of a scalar lvalue in %rax."""
-        if isinstance(expr, ast.Name):
-            kind, off, _ = self._lookup(expr.ident)
-            # scalar params are immutable, so an assignable Name is always local
-            self._emit(f"leaq {off}(%rbp), %rax")
-        elif isinstance(expr, ast.FieldAccess):
-            self._addr_of_aggregate(expr.target)
-            foff = self._field_offset(expr.target.resolved_type.name, expr.field_name)
-            if foff:
-                self._emit(f"addq ${foff}, %rax")
-        else:  # pragma: no cover - checker guarantees a valid lvalue
-            raise ValueError("invalid lvalue")
-
     def _addr_of_aggregate(self, expr: ast.Expr) -> None:
         """Leave the *base address* of an aggregate (struct/tuple/enum) value in %rax."""
         if isinstance(expr, ast.Match):
@@ -1640,12 +1581,14 @@ class CodeGen:
     # (`push(xs, pop(xs))`), and neither may see a half-made slot. The new value
     # is also taken before the old one is released, so `xs[i] = xs[i]` is safe.
 
-    def _stage_value(self, value: ast.Expr, t: Type, slot: int) -> None:
+    def _stage_value(self, value: ast.Expr, t: Type, slot: int,
+                     inline: bool = False) -> None:
         """Evaluate `value` into frame slot `slot` in its stored form
         (`_stored_size(t)` bytes), owning one reference to every heap cell it
         holds: a fresh box for a boxed enum, a retained copy of an inline
-        aggregate, or a scalar or retained cell pointer."""
-        if self._is_boxed(t):
+        aggregate, or a scalar or retained cell pointer. With `inline`, for a
+        variable, even a boxed enum is staged as an inline copy."""
+        if self._is_boxed(t) and not inline:
             self._box(value, t)                  # rax = fresh heap copy (rc=1)
             self._emit(f"movq %rax, {slot}(%rbp)")
         elif _is_aggregate(t):
@@ -1667,14 +1610,14 @@ class CodeGen:
         drops = [lambda off=off, tt=tt: self._drop_value("rbp", off, tt)
                  for off, tt in temps]
         if self._owns_heap(t):
-            drops.append(lambda: self._walk_member("rbp", slot, t, self._drop_box))
+            drops.append(lambda: self._release(slot, t, inline))
         self._staged_drops.append(drops)
 
-    def _commit_staged(self, t: Type, slot: int) -> None:
+    def _commit_staged(self, t: Type, slot: int, inline: bool = False) -> None:
         """Move the value staged in `slot` into the storage at %rcx, which takes
         over its references."""
         self._staged_drops.pop()
-        if _is_aggregate(t) and not self._is_boxed(t):
+        if _is_aggregate(t) and (inline or not self._is_boxed(t)):
             self._emit(f"leaq {slot}(%rbp), %rsi")
             self._emit("movq %rcx, %rdi")
             self._emit_copy(self._size(t))
@@ -1682,12 +1625,23 @@ class CodeGen:
             self._emit(f"movq {slot}(%rbp), %rax")
             self._emit("movq %rax, (%rcx)")
 
-    def _drop_stored(self, t: Type) -> None:
-        """Release the value of type `t` stored at %rcx (preserved)."""
+    def _drop_stored(self, t: Type, inline: bool = False) -> None:
+        """Release the value of type `t` stored at %rcx (preserved). The walk
+        keeps the address in callee-saved %rbx across the drop calls."""
         if self._owns_heap(t):
-            self._emit("pushq %rcx")
-            self._walk_member("rcx", 0, t, self._drop_box)
-            self._emit("popq %rcx")
+            self._emit("pushq %rbx")
+            self._emit("movq %rcx, %rbx")
+            self._release(0, t, inline, base="rbx")
+            self._emit("movq %rbx, %rcx")
+            self._emit("popq %rbx")
+
+    def _release(self, off: int, t: Type, inline: bool, base: str = "rbp") -> None:
+        """Release the value of type `t` at `off(%base)`: stored as a member
+        (a boxed enum as its pointer) or, with `inline`, as a variable holds it."""
+        if inline:
+            self._drop_value(base, off, t)
+        else:
+            self._walk_member(base, off, t, self._drop_box)
 
     def _commit_map_value(self, vt: Type, slot: int) -> None:
         """After a map put (%rax = &value slot, %rdx = key already present):
@@ -1816,7 +1770,7 @@ class CodeGen:
             _, off, _ = self._lookup(expr.ident)
             self._emit(f"leaq {off}(%rbp), %rax")
         elif isinstance(expr, ast.FieldAccess):
-            self._mut_addr_of_struct(expr.target)
+            self._mut_place_addr(expr.target)
             foff = self._field_offset(expr.target.resolved_type.name, expr.field_name)
             if foff:
                 self._emit(f"addq ${foff}, %rax")
@@ -1825,9 +1779,11 @@ class CodeGen:
         else:  # pragma: no cover - checker guarantees a valid lvalue
             raise ValueError("invalid list lvalue")
 
-    def _mut_addr_of_struct(self, expr: ast.Expr) -> None:
-        """Leave the address of inline-struct lvalue `expr` in %rax (CoW-ing any
-        list/map cell on the path)."""
+    def _mut_place_addr(self, expr: ast.Expr) -> None:
+        """Leave the address of place `expr` (a variable, a field or a list
+        element / map value, at any depth) in %rax, unsharing (CoW) every list
+        and map cell on the path, so the write that follows doesn't reach other
+        owners of the container (MYLA-3)."""
         if isinstance(expr, ast.Name):
             kind, off, _ = self._lookup(expr.ident)
             if kind == "local":
@@ -1836,7 +1792,7 @@ class CodeGen:
                 # the caller's storage, so mutations write straight back to it.
                 self._emit(f"movq {off}(%rbp), %rax")
         elif isinstance(expr, ast.FieldAccess):
-            self._mut_addr_of_struct(expr.target)
+            self._mut_place_addr(expr.target)
             foff = self._field_offset(expr.target.resolved_type.name, expr.field_name)
             if foff:
                 self._emit(f"addq ${foff}, %rax")

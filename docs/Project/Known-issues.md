@@ -11,7 +11,6 @@ The reference implementation. Most problems are places where the native backend 
 | Task | Problem | Priority |
 | --- | --- | --- |
 | [[MYLA-2]] | A `match` binding holding a list dangles when the arm grows the original (use-after-free) | high |
-| [[MYLA-3]] | `o.inner = Inner{…}` with heap fields crashes the compiler (`NotImplementedError`) | high |
 | [[MYLA-10]] | Errors in imported modules are shown against the entry file | medium |
 | [[MYLA-5]] | `int64` minimum `/ -1` and `% -1` crash natively | medium |
 | [[MYLA-6]] | Float → integer casts of NaN/inf crash the interpreter; out-of-range casts disagree | medium |
