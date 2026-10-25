@@ -2,7 +2,7 @@
 id: MYLA-60
 title: Code generator spends almost all of stage 1 collecting list types
 type: improvement
-status: todo
+status: review
 priority: high
 labels: [native-backend, performance, bootstrap]
 ---
@@ -14,8 +14,9 @@ Loading, checking and monomorphizing take under 2 s; generating the functions th
 
 ## Done when
 
-- [ ] `_gather_list_types` skips types it has already visited (types are hashable frozen dataclasses); the per-path `seen` set becomes unnecessary
-- [ ] The emitted helper order stays deterministic
-- [ ] `tests/burn` passes; the bootstrap fixed point holds
-- [ ] Stage 1 time recorded on [[Development/Bootstrap]]
-- [ ] Check [[selfhost/codegen.my]] for the same pattern (its stage 3 already takes 2 s, so probably not)
+- [x] `_gather_list_types` skips types it has already visited (types are hashable frozen dataclasses); the per-path `seen` set is gone
+- [x] The emitted helper order stays deterministic: the self-hosted compiler's assembly is byte-identical to the old implementation's; `test_helpers_are_emitted_in_a_stable_order` pins the order
+- [x] Test first: `TestListTypeCollection.test_visits_each_type_once` counted 786,492 calls on a diamond chain of 17 structs before, fewer than 1,000 after
+- [x] `tests/burn` passes (apart from the known [[MYLA-4]]); the bootstrap fixed point holds
+- [x] Stage 1: code generation 55.7 s → 0.6 s, `myla build selfhost/gen_main.my` 57 s → 3.4 s; recorded on [[Development/Bootstrap]]
+- [x] [[selfhost/codegen.my]] doesn't show the problem: stage 3 compiles the compiler in 2.9 s

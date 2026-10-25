@@ -613,8 +613,20 @@ def link(
 
     merged: list[ast.Decl] = []
     for m in order:
+        _mark_source_path(m)
         merged.extend(m.decls)
     return ast.Program(merged)
+
+
+def _mark_source_path(m: _Module) -> None:
+    """Record the file each function comes from as `source_path`, so the native
+    backend can emit debug line tables against the right file (MYLA-71)."""
+    for d in m.decls:
+        if isinstance(d, ast.FunDecl):
+            d.source_path = m.path
+        elif isinstance(d, ast.ImplDecl):
+            for method in d.methods:
+                method.source_path = m.path
 
 
 def _check_id_collisions(order: list[_Module]) -> None:

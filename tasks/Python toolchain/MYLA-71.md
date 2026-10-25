@@ -2,7 +2,7 @@
 id: MYLA-71
 title: Emit DWARF line tables so gdb can step through Myla source
 type: feature
-status: todo
+status: review
 priority: medium
 labels: [native-backend, debugging, tooling]
 ---
@@ -19,7 +19,9 @@ Every AST node already carries its line and column, and labels are already `myla
 
 ## Done when
 
-- [ ] `myla build -g` (or always, if the size cost is small) emits `.file` per module and `.loc` before each statement (and each match arm) in [[src/myla/compiler/codegen_x86.py]]; the loader passes each declaration's source path along (shared need with [[MYLA-10]])
-- [ ] Runtime helpers carry no `.loc` (they show as assembly in gdb)
-- [ ] A manual check documented on [[Development]]: break, step, backtrace in `examples/structs.my`
-- [ ] The same in [[selfhost/codegen.my]] (the fixed point must still hold: the directives are deterministic)
+- [x] `myla build -g` emits `.file` per module and `.loc` at each function, statement and expression-bodied match arm in [[src/myla/compiler/codegen_x86.py]]; lambdas use the file they are created in; the loader records each function's `source_path`
+- [x] Runtime helpers carry no source line (`.loc <file> 0 0` after each function)
+- [x] Without `-g` the output is unchanged
+- [x] Tests first: `tests/unit/test_compiler.py::TestLineTables` (directives, files of imported modules, lambdas, line 0 after functions) and `tests/burn/test_debug_info.py` (readelf sees the lines; `-g` doesn't change behaviour; gdb stops on `prog.my:2` and shows the Myla backtrace)
+- [x] Documented with a real gdb session on [[Development/Debugging]]
+- [ ] The same in [[selfhost/codegen.my]]: **blocked** until its positions refer to the original files ([[MYLA-28]], [[MYLA-30]]); today they are coordinates in the concatenated program, so the table would point at wrong lines

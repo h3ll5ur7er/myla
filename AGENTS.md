@@ -15,3 +15,7 @@ This project plans its work as Genbeya tasks and documents itself in a Genbeya w
 ## Writing Myla
 
 Myla resembles Rust and Swift but differs from both in many details (no semicolons, `fun`, `return` required, `E.Variant`, `push(xs, v)`, no `+=`, no references, `float` is `float32`). Before writing or changing any `.my` file, read the `myla` skill (`.agents/skills/myla/SKILL.md`, also in `.claude/skills/myla/`); the full language reference is `docs/Language.md`. Check unfamiliar constructs with `python3 myla.py check file.my`.
+
+## Working agreement
+
+For every programming task: write the test first where it makes sense (soft TDD) and see it fail; before reporting that you are done, self-review the whole diff and improve or clean up what you find; then report with concrete evidence (test results before/after, measurements, program output, the bootstrap fixed point). Details: `docs/Development/Conventions.md`.

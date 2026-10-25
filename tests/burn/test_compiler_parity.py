@@ -1007,8 +1007,39 @@ STRESS_TRAIT_DISPATCH_SRC = (
 )
 
 
+STRESS_FRAGMENTED_FREE_SRC = (
+    # Leaves 8000 freed cells of 8000 different sizes behind (each `keys(m)` on
+    # a growing map frees a list one slot longer than the last), then allocates
+    # 30000 small lists that none of those cells fit. An allocator that scans
+    # one free list on every allocation does 240 million probes here (about
+    # 14 s); size-class free lists find "nothing free" at once (MYLA-16).
+    "#main\nfun main() {\n"
+    "    var m: [int: int] = [:]\n"
+    "    var i = 0\n"
+    "    while i < 8000 {\n"
+    "        m[i] = i\n"
+    "        let ks = keys(m)\n"
+    "        i = i + 1\n"
+    "    }\n"
+    "    var keep: [[int]] = []\n"
+    "    var j = 0\n"
+    "    while j < 30000 {\n"
+    "        push(keep, [j, j])\n"
+    "        j = j + 1\n"
+    "    }\n"
+    "    print(len(keep) + len(m))\n}\n"
+)
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
+    def test_allocation_does_not_scan_unusable_free_cells(self):
+        # Must finish far below the 5 s limit: the linear free-list scan took
+        # about 14 s, size-class free lists take milliseconds.
+        out, code = build_and_run(STRESS_FRAGMENTED_FREE_SRC, timeout=5)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "38000")
+
     def test_trait_dispatch_reference_counting_reclaims_heap(self):
         # millions of list cells allocated through a bounded-generic operator
         # that dispatches to a user `Add` impl: the results must be refcounted.

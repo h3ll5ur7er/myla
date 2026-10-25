@@ -1303,6 +1303,7 @@ class Checker:
             type_params=combined_tps, type_param_bounds=combined_bounds,
             receiver=m.receiver,
         ).at(m.line, m.column)
+        fdecl.source_path = getattr(m, "source_path", None)
         self._check_type_params(fdecl)
         self._type_params = frozenset(combined_tps)
         try:

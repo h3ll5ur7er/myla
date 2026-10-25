@@ -10,7 +10,7 @@ It began as a prototype for a faster **first bootstrap stage**: building the sel
 
 Two things have changed since:
 
-- The bootstrap's slowness turned out to be two fixable hot spots in the Python toolchain ([[MYLA-60]], [[MYLA-16]]); with both fixed, the whole bootstrap takes about 10 seconds ([[Development/Bootstrap]]).
+- The bootstrap's slowness turned out to be two fixable hot spots in the Python toolchain ([[MYLA-60]], [[MYLA-16]]); with both fixed, the whole bootstrap takes about 8 seconds ([[Development/Bootstrap]]).
 - To serve as a stage 0, the Rust edition would have to compile `selfhost/` natively, which needs the full static type system (sized integers, layouts, monomorphization) and a native backend for every construct. The dialect has neither: it doesn't type-check, and its native backend handles only scalar functions.
 
 > [!IMPORTANT]

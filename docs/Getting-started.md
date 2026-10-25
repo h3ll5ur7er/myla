@@ -31,7 +31,7 @@ type error: cannot assign to an immutable binding (declare it with 'var')
 | --- | --- |
 | `myla run <file> [args…]` | Load modules, type-check, interpret |
 | `myla test <file>` | Run every `#test(args)[expected]` case; prints `PASS`/`FAIL` per case and exits 1 on a failure |
-| `myla build <file> [-o out] [--keep-asm]` | Compile to a static x86-64 ELF (`a.out` by default) through `as` and `ld` |
+| `myla build <file> [-o out] [--keep-asm] [-g]` | Compile to a static x86-64 ELF (`a.out` by default) through `as` and `ld`; `-g` adds a DWARF line table for gdb ([[Development/Debugging]]) |
 | `myla check <file> [--canonical]` | Type-check only; `--canonical` prints `ok` or `err <line> <col> <kind>` for differential tests |
 | `myla tokenize <file> [--canonical]` | Dump the token stream |
 | `myla parse <file> [--canonical]` | Dump the AST (`--canonical`: one S-expression per declaration) |
@@ -75,7 +75,7 @@ Every value-returning function in the examples carries `#test` cases; see [[Deve
 ## Build the self-hosted compiler
 
 ```bash
-scripts/bootstrap.sh            # output in ./build (gitignored); about 5 minutes
+scripts/bootstrap.sh            # output in ./build (gitignored); about 8 seconds
 build/stage3 examples/hello.my src/myla > hello.s
 as --64 -o hello.o hello.s && ld -o hello hello.o && ./hello
 ```
@@ -85,9 +85,9 @@ The second argument of the self-hosted compiler is the folder that contains `std
 ## Run the tests
 
 ```bash
-python3 -m unittest discover -s tests/unit -t .         # ~385 tests, about 1 s
+python3 -m unittest discover -s tests/unit -t .         # ~390 tests, about 1 s
 python3 -m unittest discover -s tests/integration -t .
-python3 -m unittest discover -s tests/burn -t .         # native builds, about 2–3 minutes
+python3 -m unittest discover -s tests/burn -t .         # native builds, about 25 seconds
 ```
 
 What each suite guarantees and the current results: [[Development/Testing]].

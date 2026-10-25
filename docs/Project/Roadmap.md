@@ -12,7 +12,7 @@
    - write more sample programs, which motivated the language server ([[Architecture/Editor-tooling]]);
    - a concurrency system close to Swift's actors, which is why the Rust edition has partial actors.
 
-Measurements in October 2026 showed that the bootstrap's slowness comes from two hot spots in the Python toolchain's code generator and allocator, not from Python itself; fixing them brings the whole bootstrap to about 10 seconds ([[MYLA-60]], [[MYLA-16]], [[Development/Bootstrap]]).
+Measurements in October 2026 showed that the bootstrap's slowness comes from two hot spots in the Python toolchain's code generator and allocator, not from Python itself; fixing them brought the whole bootstrap down to about 8 seconds ([[MYLA-60]], [[MYLA-16]], [[Development/Bootstrap]]).
 
 ## Milestones
 
@@ -32,8 +32,8 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
 ## Next
 
 1. **Quick wins**:
-   - make the bootstrap fast: [[MYLA-60]] and [[MYLA-16]], small changes with measured effect (5 minutes → 10 seconds);
-   - DWARF line tables so gdb steps through Myla source ([[MYLA-71]]; proven by hand);
+   - ~~make the bootstrap fast~~: done, 5 minutes → 8 seconds ([[MYLA-60]], [[MYLA-16]]);
+   - ~~DWARF line tables so gdb steps through Myla source~~: done for the Python backend, `myla build -g` ([[MYLA-71]]);
    - the `myla` agent skill ([[MYLA-68]]) and GitHub Actions CI ([[MYLA-69]]), both in review.
 2. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs; the urgent ones are in `todo`:
    - Python backend: [[MYLA-2]] (dangling match bindings), [[MYLA-3]] (aggregate field assignment), [[MYLA-4]] (the only red burn test), [[MYLA-10]] (errors in the wrong file).

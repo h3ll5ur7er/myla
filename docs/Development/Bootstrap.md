@@ -16,24 +16,23 @@ flowchart LR
 
 | Stage | What runs | Time (4 cores) |
 | --- | --- | --- |
-| 1 | `python3 myla.py build selfhost/gen_main.my -o build/gen_tool` | about 67 s |
-| 2 | `build/gen_tool selfhost/gen_main.my src/myla > build/stage2.s`, then `as` + `ld` | about 4 min |
-| 3 | `build/stage2 selfhost/gen_main.my src/myla > build/stage3.s`, then `as` + `ld` | about 2 s |
+| 1 | `python3 myla.py build selfhost/gen_main.my -o build/gen_tool` | 3.4 s |
+| 2 | `build/gen_tool selfhost/gen_main.my src/myla > build/stage2.s`, then `as` + `ld` | 1.3 s |
+| 3 | `build/stage2 selfhost/gen_main.my src/myla > build/stage3.s`, then `as` + `ld` | 2.9 s |
 | check | `cmp build/stage2.s build/stage3.s` | |
 
 The result is about 4.4 MB of assembly (267,709 lines) and a 1 MB static binary. A fourth round produces the same output again.
 
-## Why it is slow, and how fast it can be
+## Why it used to be slow
 
-Neither slow stage is slow because of Python or because the program is big. Both have one hot spot each (measured 2026-10-25):
+Until October 2026 the bootstrap took about 5 minutes. Neither slow stage was slow because of Python or because the compiler is big; each had one hot spot:
 
-| Stage | Now | Cause | With the fix |
+| Stage | Before | Cause | After |
 | --- | --- | --- | --- |
-| 1 | about 60 s | 98% in `_collect_list_types`, which re-walks the type graph for every AST node without memoization ([[MYLA-60]]) | 3.8 s |
-| 2 | about 4 min | `gen_tool`'s allocator, from the Python backend, scans one free list linearly on every allocation ([[MYLA-16]]); stage 2 itself comes from the self-hosted backend, which never frees ([[MYLA-22]]) and so never scans | 2.5 s (measured with reuse turned off) |
-| 3 | about 2 s | — | 2 s |
+| 1 | about 60 s | 98% in `_collect_list_types`, which re-walked the type graph for every AST node ([[MYLA-60]]) | 3.4 s |
+| 2 | about 4 min | the Python backend's allocator scanned one free list on every allocation ([[MYLA-16]]) | 1.3 s |
 
-Both fixes left the generated `stage2.s` byte-identical. With them, a full bootstrap takes about 10 seconds, which makes "change the compiler, bootstrap, compare" an interactive loop.
+Both fixes left `stage2.s` byte-identical. A full bootstrap now takes about 8 seconds, so "change the compiler, bootstrap, compare" is an interactive loop.
 
 ## Running it
 

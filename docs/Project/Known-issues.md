@@ -13,8 +13,6 @@ The reference implementation. Most problems are places where the native backend 
 | [[MYLA-2]] | A `match` binding holding a list dangles when the arm grows the original (use-after-free) | high |
 | [[MYLA-3]] | `o.inner = Inner{…}` with heap fields crashes the compiler (`NotImplementedError`) | high |
 | [[MYLA-4]] | The self-hosted checker built by the Python backend segfaults on unknown parameter types: 5 failing burn subtests | high |
-| [[MYLA-60]] | Stage 1 of the bootstrap spends 98% of its time re-walking types in the code generator (57 s → 3.8 s with memoization) | high |
-| [[MYLA-16]] | The allocator scans one free list: stage 2 of the bootstrap takes 4 minutes instead of 2.5 s | high |
 | [[MYLA-10]] | Errors in imported modules are shown against the entry file | medium |
 | [[MYLA-5]] | `int64` minimum `/ -1` and `% -1` crash natively | medium |
 | [[MYLA-6]] | Float → integer casts of NaN/inf crash the interpreter; out-of-range casts disagree | medium |

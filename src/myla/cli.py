@@ -114,7 +114,8 @@ def _cmd_build(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     try:
         checker = _front_end(args.file)
-        path = build_program(checker, args.output, keep_asm=args.keep_asm)
+        path = build_program(checker, args.output, keep_asm=args.keep_asm,
+                             debug=args.debug)
     except MylaError as err:
         print(err.render(source, args.file), file=sys.stderr)
         return 1
@@ -193,6 +194,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("-o", "--output", default="a.out")
     p_build.add_argument("--keep-asm", action="store_true",
                          help="keep the generated .s assembly next to the output")
+    p_build.add_argument("-g", "--debug", action="store_true",
+                         help="emit a DWARF line table so debuggers such as gdb "
+                              "can break on and step through Myla source lines")
     p_build.set_defaults(func=_cmd_build)
 
     p_test = sub.add_parser("test", help="run #test cases in a .my file")

@@ -18,23 +18,25 @@ class BuildError(Exception):
     """A failure while assembling or linking the generated program."""
 
 
-def compile_to_asm(checker: Checker) -> str:
+def compile_to_asm(checker: Checker, debug: bool = False) -> str:
     """Return GAS/AT&T x86-64 assembly for a type-checked program.
 
     Generics are monomorphized away first (D13), so codegen only ever sees
-    concrete types.
+    concrete types. With `debug`, the assembly carries `.file`/`.loc` line
+    directives, from which the assembler builds a DWARF line table (MYLA-71).
     """
-    return _generate(monomorphize(checker))
+    return _generate(monomorphize(checker), debug=debug)
 
 
-def build(checker: Checker, output: str, keep_asm: bool = False) -> str:
+def build(checker: Checker, output: str, keep_asm: bool = False,
+          debug: bool = False) -> str:
     """Compile, assemble, and link `checker`'s program into `output`.
 
     Returns the path to the produced binary. Intermediate `.s`/`.o` files are
     written next to `output`; the object file is always removed and the assembly
     is removed unless `keep_asm` is set.
     """
-    asm = compile_to_asm(checker)
+    asm = compile_to_asm(checker, debug=debug)
     asm_path = output + ".s"
     obj_path = output + ".o"
 

@@ -44,8 +44,9 @@ Internal and stack-based (never called from C):
 
 Heap cells come from a 1 GiB anonymous `mmap` arena reserved on the first allocation. Every cell has a 16-byte header `[size:8][refcount:8]`; the pointer handed around points just after it.
 
-- `__alloc` rounds the size up to 8, takes an exact-size cell from the free list or bumps the arena pointer, and sets the count to 1. The free list is one list searched linearly ([[MYLA-16]]); exhausting the arena traps.
-- `__free` pushes the cell onto the free list.
+- `__alloc` rounds the size up to a multiple of 8 (at least 8), takes a free cell of exactly that size or bumps the arena pointer, and sets the count to 1. Exhausting the arena traps.
+- Free cells up to 4 KiB (`_SMALL_CELL_LIMIT`) sit on one LIFO list per 8-byte size class (`__free_buckets`, indexed by the size itself as a byte offset), so allocating and freeing them is O(1); larger cells share `__free_list`, searched for an exact fit. Before this (MYLA-16) all cells shared one scanned list, which made bootstrap stage 2 take four minutes instead of a second.
+- `__free` pushes the cell onto its list. It clobbers only `%rax`: drop sequences walk aggregates through other caller-saved registers across calls that end in `__free`.
 - **Retain** (`_retain`) increments the counts of every heap pointer a value owns: list/map/builder cells, boxed enum cells, closure environments, recursively through inline aggregates (`_emit_owned_walk`).
 - **Drop** (`_drop_value`) calls the per-type drop helper of each owned pointer: `__drop_list_<T>`, `__drop_map_<K>_<V>`, `__dropb_<Enum>`, `__sb_drop`, `__func_drop`. A helper decrements the count and, at zero, drops the children and frees the cell.
 - **Ownership rules.** A local owns its value; binding copies and retains. Parameters are borrowed: they are never dropped by the callee. Owning locals are recorded per scope (`_drop_scopes`) and dropped at scope exit, before `return` (`_emit_return_drops`) and on `break`/`continue` (`_emit_loop_exit_drops`). Owning temporaries (a call's result, a literal) are dropped when their statement ends (`_drop_expr_temps`). A `for` loop retains the list or map it iterates for the duration of the loop.
@@ -76,6 +77,10 @@ System calls used: read 0, write 1, open 2, close 3, fstat 5, poll 7, mmap 9, pi
 ## Float formatting
 
 `print` and `format` render floats with an algorithm both back ends share ([[src/myla/types.py#L353-L465]]): find the decimal exponent by binary search over a table of powers of ten, scale the value to a 9- or 17-digit integer using double-double arithmetic (Dekker's exact product with a high/low power-of-ten table), round half to even, renormalise, trim trailing zeros and lay the digits out positionally. The assembly version uses the same constants and the same operation order, so the output is byte-identical to the interpreter's.
+
+## Debug line tables
+
+`myla build -g` adds `.file`/`.loc` directives (MYLA-71): one `.file` per source module (the loader records each function's `source_path`), a `.loc` at each function's label, before every statement and before each expression-bodied match arm, and `.loc <file> 0 0` after each function so the runtime helpers emitted later have no source line. The assembler turns them into a DWARF `.debug_line` table. Lambdas take the file of the function they are created in. Without `-g` the output is unchanged. See [[Development/Debugging]].
 
 ## Integer details
 

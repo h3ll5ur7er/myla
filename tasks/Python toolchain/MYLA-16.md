@@ -2,7 +2,7 @@
 id: MYLA-16
 title: Native allocator scans one free list linearly
 type: improvement
-status: todo
+status: review
 priority: high
 labels: [native-backend, performance, bootstrap]
 ---
@@ -14,7 +14,9 @@ Map `remove` is O(capacity) as well: it rebuilds the table instead of leaving to
 
 ## Done when
 
-- [ ] Size-class free lists (for example per 8-byte class up to a few KiB, one list for larger cells), as the self-hosted runtime does
-- [ ] Stage 2 time measured before and after on [[Development/Bootstrap]]
-- [ ] Arena-reclaim stress tests still pass
+- [x] Size-class free lists: one per 8-byte class up to 4 KiB (`_SMALL_CELL_LIMIT`, the self-hosted runtime's limit), larger cells on the old exact-fit list; `__free` still clobbers only `%rax`
+- [x] Test first: `test_allocation_does_not_scan_unusable_free_cells` timed out at 5 s before (the linear scan needs about 14 s), passes in about 2 s including the build
+- [x] A 300,000-allocation version of that workload: 137 s → 1.4 s
+- [x] Stage 2: about 4 min → 1.3 s; full bootstrap 5 min → 7.8 s, fixed point holds, `stage2.s` identical to before; recorded on [[Development/Bootstrap]]
+- [x] Arena-reclaim stress tests still pass; the generated assembly differs from before only in `__alloc`, `__free` and `.bss`
 - [ ] Optional: tombstone deletion for maps (state 2 is already reserved)

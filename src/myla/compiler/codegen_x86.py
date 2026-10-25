@@ -44,6 +44,12 @@ def _f64_bits(x: float) -> int:
 # the `addq $_ARENA_BYTES` immediate fits a signed imm32.)
 _ARENA_BYTES = 1 << 30
 
+# Freed cells up to this value size (bytes) go onto one exact-size free list per
+# 8-byte size class, so allocating and freeing them never scans (MYLA-16). Larger
+# cells share one list that is searched for an exact fit. The self-hosted
+# runtime uses the same limit.
+_SMALL_CELL_LIMIT = 4096
+
 
 def _is_struct(t: Type | None) -> bool:
     return isinstance(t, StructType)
@@ -66,9 +72,17 @@ _SET_MNEMONIC = {
 
 
 class CodeGen:
-    def __init__(self, checker: Checker):
+    def __init__(self, checker: Checker, debug: bool = False):
         self.checker = checker
         self.text: list[str] = []
+        # debug line tables (MYLA-71): source path -> `.file` number, the number
+        # of the file being generated (None: no line info for this function, e.g.
+        # the prelude), and the file of each lambda, set where it is created.
+        self._debug = debug
+        self._files: dict[str, int] = {}
+        self._cur_file: int | None = None
+        self._last_loc = ""
+        self._lambda_files: dict[int, int | None] = {}
         self.rodata: list[str] = []
         self._label_n = 0
         self._str_n = 0
@@ -247,57 +261,60 @@ class CodeGen:
         return self._map_clone_name(t) if isinstance(t, MapType) \
             else self._list_clone_name(t)
 
-    def _gather_list_types(self, t: Type | None, into: dict,
-                           seen: frozenset = frozenset()) -> None:
+    def _gather_list_types(self, t: Type | None, into: dict, visited: set) -> None:
+        """Add every list/map/builder type reachable from `t` to `into` (keyed by
+        mangle, in discovery order). `visited` holds the types already expanded
+        during this collection, so each type is walked once however many paths
+        lead to it (MYLA-60); it also breaks recursive (boxed) type cycles."""
+        if t is None or t in visited:
+            return
+        visited.add(t)
         if isinstance(t, StringBuilderType):
             into.setdefault("SB", t)
         elif isinstance(t, ListType):
             into.setdefault(self._type_mangle(t), t)
-            self._gather_list_types(t.elem, into, seen)
+            self._gather_list_types(t.elem, into, visited)
         elif isinstance(t, MapType):
             into.setdefault(self._type_mangle(t), t)
-            self._gather_list_types(t.key, into, seen)
-            self._gather_list_types(t.value, into, seen)
+            self._gather_list_types(t.key, into, visited)
+            self._gather_list_types(t.value, into, visited)
         elif isinstance(t, StructType):
-            if t.name in seen:  # break recursive (boxed) type cycles
-                return
             for ft in self.checker.structs.get(t.name, {}).values():
-                self._gather_list_types(ft, into, seen | {t.name})
+                self._gather_list_types(ft, into, visited)
         elif isinstance(t, EnumType):
-            if t.name in seen:
-                return
             for payload in self.checker.enums.get(t.name, {}).values():
                 for ft in payload:
-                    self._gather_list_types(ft, into, seen | {t.name})
+                    self._gather_list_types(ft, into, visited)
         elif isinstance(t, TupleType):
             for e in t.elems:
-                self._gather_list_types(e, into, seen)
+                self._gather_list_types(e, into, visited)
         elif isinstance(t, FuncType):
             for p in t.params:
-                self._gather_list_types(p, into, seen)
-            self._gather_list_types(t.ret, into, seen)
+                self._gather_list_types(p, into, visited)
+            self._gather_list_types(t.ret, into, visited)
 
     def _collect_list_types(self) -> dict:
         """Every concrete list type used anywhere in the program (keyed by mangle),
         so we can emit one `__drop_list_<elem>` routine per element type."""
         found: dict = {}
+        visited: set = set()
         for fields in self.checker.structs.values():
             for ft in fields.values():
-                self._gather_list_types(ft, found)
+                self._gather_list_types(ft, found, visited)
         for variants in self.checker.enums.values():
             for payload in variants.values():
                 for ft in payload:
-                    self._gather_list_types(ft, found)
+                    self._gather_list_types(ft, found, visited)
         for sig in self.checker.functions.values():
             for p in sig.params:
-                self._gather_list_types(p, found)
-            self._gather_list_types(sig.ret, found)
+                self._gather_list_types(p, found, visited)
+            self._gather_list_types(sig.ret, found, visited)
         for info in self.checker.consts.values():
-            self._gather_list_types(info.type, found)
+            self._gather_list_types(info.type, found, visited)
 
         def walk(node) -> None:
             import dataclasses
-            self._gather_list_types(getattr(node, "resolved_type", None), found)
+            self._gather_list_types(getattr(node, "resolved_type", None), found, visited)
             if not dataclasses.is_dataclass(node):
                 return
             for f in dataclasses.fields(node):
@@ -374,6 +391,8 @@ class CodeGen:
     def _assemble_source(self) -> str:
         out: list[str] = []
         out.append("\t.text")
+        for path, number in self._files.items():
+            out.append(f'\t.file {number} "{_asm_string(path)}"')
         out.extend(self.text)
         out.append("")
         out.append("\t.section .rodata")
@@ -396,6 +415,8 @@ class CodeGen:
         out.append("\t.skip 8")
         out.append("__free_list:")
         out.append("\t.skip 8")
+        out.append("__free_buckets:")   # one list head per 8-byte size class
+        out.append(f"\t.skip {_SMALL_CELL_LIMIT + 8}")
         # argc/argv captured at `_start` for `std.process.args` (D29)
         out.append("__argc:")
         out.append("\t.skip 8")
@@ -718,9 +739,11 @@ class CodeGen:
         # --- heap: reference-counted cells over a lazily-mmap'd arena (v0.2.3b) ---
         # Each cell is  [size:8][refcount:8][value bytes...]  and the pointer we
         # hand around points at the value bytes, so size is at -16 and the refcount
-        # at -8. Cells are freed onto a size-segregated (exact-fit, LIFO) free list
-        # and reused, so a program that allocates and drops in a loop runs in
-        # bounded memory. The arena itself is anonymous mmap memory, zero-filled.
+        # at -8. Freed cells are reused, so a program that allocates and drops in
+        # a loop runs in bounded memory: cells up to _SMALL_CELL_LIMIT bytes go on
+        # LIFO free lists, one per 8-byte size class (`__free_buckets`, indexed by
+        # byte offset = size), larger ones on `__free_list`, searched for an exact
+        # fit. The arena itself is anonymous mmap memory, zero-filled.
         #
         # __heap_init: reserve the arena (preserves %rdi).
         e("__heap_init:")
@@ -742,14 +765,30 @@ class CodeGen:
         e("\tret")
         e("")
         # __alloc: in %rdi = value-size in bytes; out %rax = value pointer (rc = 1).
+        # Clobbers %rcx, %rsi, %r8 and %rdi.
         e("__alloc:")
         e("\taddq $7, %rdi")            # round value size up to a multiple of 8
         e("\tandq $-8, %rdi")
+        e("\tmovq $8, %rax")            # at least 8: a free cell's value area
+        e("\tcmpq %rax, %rdi")          # holds the free-list link
+        e("\tcmovbq %rax, %rdi")
         e("\tmovq __heap_end(%rip), %rax")
         e("\ttestq %rax, %rax")
         e("\tjnz .Lalloc_search")
         e("\tcall __heap_init")
-        e(".Lalloc_search:")            # exact-fit search of the free list
+        e(".Lalloc_search:")
+        e(f"\tcmpq ${_SMALL_CELL_LIMIT}, %rdi")
+        e("\tja .Lalloc_large")
+        e("\tleaq __free_buckets(%rip), %r8")
+        e("\tmovq (%r8,%rdi), %rsi")    # head of this size's list, or 0
+        e("\ttestq %rsi, %rsi")
+        e("\tjz .Lalloc_bump")
+        e("\tmovq (%rsi), %rax")        # pop: head = node.next
+        e("\tmovq %rax, (%r8,%rdi)")
+        e("\tmovq $1, -8(%rsi)")        # refcount = 1
+        e("\tmovq %rsi, %rax")
+        e("\tret")
+        e(".Lalloc_large:")             # exact-fit search of the large-cell list
         e("\tleaq __free_list(%rip), %r8")  # %r8 = address of the link to update
         e("\tmovq __free_list(%rip), %rsi") # %rsi = current node (value ptr) or 0
         e(".Lalloc_scan:")
@@ -777,8 +816,23 @@ class CodeGen:
         e("\tleaq 16(%rax), %rax")      # value pointer = base + 16
         e("\tret")
         e("")
-        # __free: in %rdi = value pointer; push the cell onto the free list.
+        # __free: in %rdi = value pointer; push the cell onto its free list.
+        # Clobbers only %rax: drop sequences walk aggregates through other
+        # caller-saved registers (e.g. %rcx) across calls that end in __free.
         e("__free:")
+        e("\tpushq %rcx")
+        e("\tmovq -16(%rdi), %rcx")     # value size
+        e(f"\tcmpq ${_SMALL_CELL_LIMIT}, %rcx")
+        e("\tja .Lfree_large")
+        e("\tleaq __free_buckets(%rip), %rax")
+        e("\taddq %rcx, %rax")          # &bucket for this size
+        e("\tmovq (%rax), %rcx")
+        e("\tmovq %rcx, (%rdi)")        # node.next = old head
+        e("\tmovq %rdi, (%rax)")        # head = node
+        e("\tpopq %rcx")
+        e("\tret")
+        e(".Lfree_large:")
+        e("\tpopq %rcx")
         e("\tmovq __free_list(%rip), %rax")
         e("\tmovq %rax, (%rdi)")        # node.next = old head (stored in value area)
         e("\tmovq %rdi, __free_list(%rip)")
@@ -824,8 +878,10 @@ class CodeGen:
 
         frame = self._layout_frame(decl)
         self._epilogue = f".Lret_{decl.name}"
+        self._cur_file = self._file_number(getattr(decl, "source_path", None))
 
         self._emit(f"myla_{decl.name}:")
+        self._emit_loc(decl)
         self._emit("pushq %rbp")
         self._emit("movq %rsp, %rbp")
         if frame:
@@ -845,9 +901,36 @@ class CodeGen:
         self._emit(f"{self._epilogue}:")
         self._emit("leave")
         self._emit("ret")
+        self._end_loc()
         self._emit("")
         self._drop_scopes.pop()
         self._scopes.pop()
+
+    # -- debug line tables (MYLA-71) ------------------------------------------
+
+    def _file_number(self, path: str | None) -> int | None:
+        """The `.file` number of `path`, registering it on first use; None when
+        line tables are off or the code has no source file."""
+        if not self._debug or path is None:
+            return None
+        return self._files.setdefault(path, len(self._files) + 1)
+
+    def _emit_loc(self, node: ast.Node) -> None:
+        """Attribute the code that follows to `node`'s source position."""
+        if self._cur_file is None or node.line <= 0:
+            return
+        loc = f".loc {self._cur_file} {node.line} {node.column}"
+        if loc != self._last_loc:
+            self._emit(loc)
+            self._last_loc = loc
+
+    def _end_loc(self) -> None:
+        """Mark the code that follows as having no source line (line 0), so
+        runtime helpers emitted after a function aren't attributed to it."""
+        if self._cur_file is not None:
+            self._emit(f".loc {self._cur_file} 0 0")
+        self._cur_file = None
+        self._last_loc = ""
 
     def _layout_frame(self, decl: ast.FunDecl) -> int:
         """Assign a unique stack slot to every local/temp; return frame size."""
@@ -1048,6 +1131,7 @@ class CodeGen:
         self._close_scope()
 
     def _gen_stmt(self, stmt: ast.Stmt) -> None:
+        self._emit_loc(stmt)
         if isinstance(stmt, ast.VarDecl):
             off = self._locals[id(stmt)]
             t = stmt.init.resolved_type
@@ -2131,6 +2215,7 @@ class CodeGen:
                     self._gen_stmt(s)
             self._close_scope()
         elif result_off is not None:
+            self._emit_loc(body)
             self._store_value(body, result_off, result_type)
             self._drop_expr_temps(body)
         elif _is_aggregate(body.resolved_type):
@@ -3463,6 +3548,7 @@ class CodeGen:
         refcounted env cell and copies/retains each captured value (D15)."""
         off = self._locals[id(lam)]
         code_label = "myla_" + lam.lifted_name
+        self._lambda_files[id(lam)] = self._cur_file   # its body is generated later
         if not lam.captures:
             self._emit(f"leaq {code_label}(%rip), %rax")
             self._emit(f"movq %rax, {off}(%rbp)")
@@ -3521,8 +3607,10 @@ class CodeGen:
         synth = ast.FunDecl(lam.lifted_name, list(lam.params), None, body)
         frame = self._layout_frame(synth)
         self._epilogue = f".Lret_{lam.lifted_name}"
+        self._cur_file = self._lambda_files.get(id(lam))
 
         self._emit(f"myla_{lam.lifted_name}:")
+        self._emit_loc(lam)
         self._emit("pushq %rbp")
         self._emit("movq %rsp, %rbp")
         if frame:
@@ -3544,6 +3632,7 @@ class CodeGen:
         self._emit(f"{self._epilogue}:")
         self._emit("leave")
         self._emit("ret")
+        self._end_loc()
         self._emit("")
         self._drop_scopes.pop()
         self._scopes.pop()
@@ -5201,5 +5290,10 @@ def _const_scalar(literal) -> int:
     raise ValueError(f"unsupported literal pattern {type(literal).__name__}")  # pragma: no cover
 
 
-def generate(checker: Checker) -> str:
-    return CodeGen(checker).generate()
+def _asm_string(text: str) -> str:
+    """Escape `text` for a double-quoted GAS string."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def generate(checker: Checker, debug: bool = False) -> str:
+    return CodeGen(checker, debug=debug).generate()
