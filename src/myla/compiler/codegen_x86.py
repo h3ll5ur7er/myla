@@ -90,6 +90,9 @@ class CodeGen:
         # per-function state
         self._locals: dict[int, int] = {}   # id(node) -> rbp offset (negative)
         self._scopes: list[dict[str, tuple]] = []
+        # per staged value not yet committed: drop emitters for what an early
+        # return must release (see _stage_value)
+        self._staged_drops: list[list] = []
         self._epilogue = ""
         self._struct_ret = False
         # top-level `fun`s referenced as values: each needs an env-ignoring thunk
@@ -872,6 +875,7 @@ class CodeGen:
         self._locals = {}
         self._scopes = []
         self._drop_scopes = []
+        self._staged_drops = []
         self._loops = []   # (continue_label, break_label, drop_scope_depth)
         self._struct_ret = _is_aggregate(sig.ret)
         self._ret_type = sig.ret
@@ -940,6 +944,11 @@ class CodeGen:
             cursor[0] += size
             self._locals[id(node)] = -cursor[0]
 
+        def stage(node, t: Type) -> None:
+            # a value staged before it is stored into a container (_stage_value)
+            cursor[0] += self._stored_size(t)
+            self._locals[f"staged:{id(node)}"] = -cursor[0]
+
         def visit_stmt(stmt: ast.Stmt) -> None:
             if isinstance(stmt, ast.VarDecl):
                 visit_expr(stmt.init)
@@ -954,10 +963,11 @@ class CodeGen:
                 visit_expr(stmt.target)
                 visit_expr(stmt.value)
                 tgt = stmt.target
-                if (isinstance(tgt, ast.Index)
-                        and isinstance(tgt.target.resolved_type, MapType)):
-                    cursor[0] += 8       # scratch for the map lvalue holder address
-                    self._locals[f"mutholder:{id(stmt)}"] = -cursor[0]
+                if isinstance(tgt, ast.Index):
+                    stage(stmt, tgt.resolved_type)   # the value, staged (MYLA-4)
+                    if isinstance(tgt.target.resolved_type, MapType):
+                        cursor[0] += 8   # scratch for the map lvalue holder address
+                        self._locals[f"mutholder:{id(stmt)}"] = -cursor[0]
             elif isinstance(stmt, ast.If):
                 visit_expr(stmt.cond)
                 for s in stmt.then.statements:
@@ -1053,6 +1063,8 @@ class CodeGen:
                                                   "append", "append_byte")):
                     cursor[0] += 8       # scratch to hold the lvalue holder address
                     self._locals[f"mutholder:{id(expr)}"] = -cursor[0]
+                    if expr.callee.ident == "push":
+                        stage(expr, expr.args[0].resolved_type.elem)
             elif isinstance(expr, ast.FieldAccess):
                 if getattr(expr, "enum_ctor", None) is not None:
                     alloc(expr, self._size(expr.resolved_type))  # no-payload variant
@@ -1072,6 +1084,7 @@ class CodeGen:
                     visit_expr(k)
                     visit_expr(v)
                 alloc(expr, 8)  # frame temp holding the cell pointer
+                stage(expr, expr.resolved_type.value)
             elif isinstance(expr, ast.StructLit):
                 for fi in expr.fields:
                     visit_expr(fi.value)
@@ -1223,9 +1236,12 @@ class CodeGen:
             if isinstance(stmt.target.target.resolved_type, MapType):
                 self._gen_map_set(stmt)           # m[k] = v (insert/update, CoW)
                 return
+            staged = self._locals[f"staged:{id(stmt)}"]
+            self._stage_value(stmt.value, t, staged)
             self._mut_elem_addr(stmt.target)      # rax = &element (CoW, bounds-checked)
-            self._emit("pushq %rax")
-            self._store_into_elem(stmt.value, t, drop_old=True)
+            self._emit("movq %rax, %rcx")
+            self._drop_stored(t)
+            self._commit_staged(t, staged)
             self._drop_expr_temps(stmt.value)
             return
         if self._is_boxed(t) and not isinstance(stmt.target, ast.Name):
@@ -1608,73 +1624,83 @@ class CodeGen:
         self._emit(f"movq ${cap}, %rdi")
         self._emit(f"call {self._map_new_name(mt)}")
         self._emit(f"movq %rax, {slot}(%rbp)")
+        staged = self._locals[f"staged:{id(expr)}"]
         for key, value in expr.entries:
-            self._emit(f"movq {slot}(%rbp), %rax")
-            self._emit("pushq %rax")             # cell
+            self._stage_value(value, vt, staged)
             self._eval(key)                      # key -> rax
             self._emit("movq %rax, %rsi")
-            self._emit("popq %rdi")              # cell
+            self._emit(f"movq {slot}(%rbp), %rdi")  # cell
             self._emit(f"call {self._map_put_name(mt)}")  # rax=&value, rdx=found
-            self._emit("pushq %rdx")             # found
-            self._emit("pushq %rax")             # &value
-            self._store_map_value(value, vt)
+            self._commit_map_value(vt, staged)
 
-    def _store_map_value(self, value: ast.Expr, vt: Type) -> None:
-        """Store `value` into the value slot whose address is on the stack top,
-        with the `found` flag pushed just below it. When `found`, the previous
-        value is released first; heap references the new value brings in are
-        retained (mirrors `_store_into_elem`, but the drop is conditional)."""
-        if self._is_boxed(vt):
-            self._box(value, vt)                 # rax = fresh heap copy (rc=1)
-            self._emit("popq %rcx")              # &value
-            self._emit("popq %rdx")              # found
-            skip = self._label()
-            self._emit("testq %rdx, %rdx")
-            self._emit(f"jz {skip}")
-            self._emit("pushq %rax")
-            self._emit("pushq %rcx")
-            self._emit("movq (%rcx), %rdi")
-            self._emit(f"call __dropb_{vt.name}")
-            self._emit("popq %rcx")
-            self._emit("popq %rax")
-            self._emit(f"{skip}:")
-            self._emit("movq %rax, (%rcx)")
-        elif _is_aggregate(vt):
+    # -- storing into containers ----------------------------------------------
+    # A store into a list element, map value or builder evaluates the value
+    # first and only then touches the container, as the interpreter does
+    # (MYLA-4): the value may return early (`?`) or change the same container
+    # (`push(xs, pop(xs))`), and neither may see a half-made slot. The new value
+    # is also taken before the old one is released, so `xs[i] = xs[i]` is safe.
+
+    def _stage_value(self, value: ast.Expr, t: Type, slot: int) -> None:
+        """Evaluate `value` into frame slot `slot` in its stored form
+        (`_stored_size(t)` bytes), owning one reference to every heap cell it
+        holds: a fresh box for a boxed enum, a retained copy of an inline
+        aggregate, or a scalar or retained cell pointer."""
+        if self._is_boxed(t):
+            self._box(value, t)                  # rax = fresh heap copy (rc=1)
+            self._emit(f"movq %rax, {slot}(%rbp)")
+        elif _is_aggregate(t):
             self._addr_of_aggregate(value)       # rax = src
-            self._emit("popq %rcx")              # dest = &value
-            self._emit("popq %rdx")              # found
-            skip = self._label()
-            self._emit("testq %rdx, %rdx")
-            self._emit(f"jz {skip}")
-            self._emit("pushq %rax")             # save src
-            self._emit("pushq %rcx")             # save dest
-            self._walk_member("rcx", 0, vt, self._drop_box)
-            self._emit("popq %rcx")
-            self._emit("popq %rax")
-            self._emit(f"{skip}:")
-            self._emit("movq %rax, %rsi")        # src
-            self._emit("pushq %rcx")
-            self._emit("movq %rcx, %rdi")        # dest
-            self._emit_copy(self._size(vt))
-            self._emit("popq %rcx")
-            self._retain("rcx", 0, vt)
-        else:                                    # scalar or list/map pointer
-            self._eval(value)                    # rax = new value
-            self._emit("popq %rcx")              # &value
-            self._emit("popq %rdx")              # found
-            if self._owns_heap(vt):
-                self._emit("incq -8(%rax)")      # store copies a reference
-                skip = self._label()
-                self._emit("testq %rdx, %rdx")
-                self._emit(f"jz {skip}")
-                self._emit("pushq %rax")
-                self._emit("pushq %rcx")
-                self._emit("movq (%rcx), %rdi")
-                self._emit(f"call {self._map_drop_name(vt) if isinstance(vt, MapType) else self._list_drop_name(vt)}")
-                self._emit("popq %rcx")
-                self._emit("popq %rax")
-                self._emit(f"{skip}:")
+            self._emit("movq %rax, %rsi")
+            self._emit(f"leaq {slot}(%rbp), %rdi")
+            self._emit_copy(self._size(t))
+            self._retain("rbp", slot, t)
+        else:
+            self._eval(value)
+            if self._owns_heap(t):
+                self._emit("incq -8(%rax)")      # the container gets a reference
+            self._emit(f"movq %rax, {slot}(%rbp)")
+        # Until _commit_staged hands the value over, an early return (a `?` in
+        # the key, the index or the container expression) must release it, and
+        # the value's temporaries, which the statement's end would have dropped.
+        temps: list = []
+        self._collect_expr_temps(value, temps)
+        drops = [lambda off=off, tt=tt: self._drop_value("rbp", off, tt)
+                 for off, tt in temps]
+        if self._owns_heap(t):
+            drops.append(lambda: self._walk_member("rbp", slot, t, self._drop_box))
+        self._staged_drops.append(drops)
+
+    def _commit_staged(self, t: Type, slot: int) -> None:
+        """Move the value staged in `slot` into the storage at %rcx, which takes
+        over its references."""
+        self._staged_drops.pop()
+        if _is_aggregate(t) and not self._is_boxed(t):
+            self._emit(f"leaq {slot}(%rbp), %rsi")
+            self._emit("movq %rcx, %rdi")
+            self._emit_copy(self._size(t))
+        else:
+            self._emit(f"movq {slot}(%rbp), %rax")
             self._emit("movq %rax, (%rcx)")
+
+    def _drop_stored(self, t: Type) -> None:
+        """Release the value of type `t` stored at %rcx (preserved)."""
+        if self._owns_heap(t):
+            self._emit("pushq %rcx")
+            self._walk_member("rcx", 0, t, self._drop_box)
+            self._emit("popq %rcx")
+
+    def _commit_map_value(self, vt: Type, slot: int) -> None:
+        """After a map put (%rax = &value slot, %rdx = key already present):
+        release the previous value if there was one, then move the staged value
+        in."""
+        self._emit("movq %rax, %rcx")
+        if self._owns_heap(vt):
+            fresh = self._label()
+            self._emit("testq %rdx, %rdx")
+            self._emit(f"jz {fresh}")
+            self._drop_stored(vt)
+            self._emit(f"{fresh}:")
+        self._commit_staged(vt, slot)
 
     def _map_find_addr(self, expr: ast.Index) -> None:
         """Leave the address of the value for `m[key]` in %rax, trapping when the
@@ -1819,57 +1845,14 @@ class CodeGen:
         else:  # pragma: no cover
             raise ValueError("invalid struct lvalue")
 
-    def _store_into_elem(self, value: ast.Expr, et: Type, drop_old: bool) -> None:
-        """Store `value` into the element whose address is on the stack top
-        (consumed), taking ownership of heap references it brings in and, when
-        `drop_old`, releasing whatever the slot held before."""
-        if self._is_boxed(et):
-            self._box(value, et)                  # rax = fresh heap copy (rc=1)
-            self._emit("popq %rcx")               # &elem
-            if drop_old:
-                self._emit("pushq %rax")
-                self._emit("pushq %rcx")
-                self._emit("movq (%rcx), %rdi")
-                self._emit(f"call __dropb_{et.name}")
-                self._emit("popq %rcx")
-                self._emit("popq %rax")
-            self._emit("movq %rax, (%rcx)")
-        elif _is_aggregate(et):
-            self._addr_of_aggregate(value)        # rax = src
-            self._emit("popq %rcx")               # dest = &elem
-            self._emit("pushq %rcx")              # keep dest
-            if drop_old:
-                self._emit("pushq %rax")          # save src
-                self._walk_member("rcx", 0, et, self._drop_box)
-                self._emit("popq %rax")           # src
-            self._emit("movq %rax, %rsi")
-            self._emit("movq (%rsp), %rdi")       # dest (peek)
-            self._emit_copy(self._size(et))
-            self._emit("popq %rcx")               # dest
-            self._retain("rcx", 0, et)
-        elif self._owns_heap(et):                 # list element (scalar pointer)
-            self._eval(value)                     # rax = new cell pointer
-            self._emit("popq %rcx")               # &elem
-            self._emit("incq -8(%rax)")           # store copies a reference
-            if drop_old:
-                self._emit("pushq %rax")
-                self._emit("pushq %rcx")
-                self._emit("movq (%rcx), %rdi")
-                self._emit(f"call {self._list_drop_name(et)}")
-                self._emit("popq %rcx")
-                self._emit("popq %rax")
-            self._emit("movq %rax, (%rcx)")
-        else:                                     # plain scalar (int/bool/str)
-            self._eval(value)
-            self._emit("popq %rcx")
-            self._emit("movq %rax, (%rcx)")
-
     def _gen_push(self, expr: ast.Call) -> None:
         arg0 = expr.args[0]
         lt = arg0.resolved_type
         et = lt.elem
         stride = self._stored_size(et)
         holder = self._locals[f"mutholder:{id(expr)}"]
+        staged = self._locals[f"staged:{id(expr)}"]
+        self._stage_value(expr.args[1], et, staged)
         self._mut_addr_of_list_holder(arg0)       # rax = &holder
         self._emit(f"movq %rax, {holder}(%rbp)")
         self._cow_unique(lt)                      # rax = unique cell (rc==1)
@@ -1887,18 +1870,19 @@ class CodeGen:
         self._emit("leaq 1(%rdx), %rcx")
         self._emit("movq %rcx, (%rax)")           # length += 1
         self._emit(f"imulq ${stride}, %rdx")
-        self._emit("leaq 16(%rax,%rdx), %rax")    # &elem (the fresh slot)
-        self._emit("pushq %rax")
-        self._store_into_elem(expr.args[1], et, drop_old=False)
+        self._emit("leaq 16(%rax,%rdx), %rcx")    # &elem (the fresh slot)
+        self._commit_staged(et, staged)
         # The value temp (if any) is released by the enclosing statement's
         # `_drop_expr_temps`, which recurses into call arguments; dropping it
         # here too would double-free an owning temp (e.g. a closure or list).
 
     def _gen_sb_append_byte(self, expr: ast.Call) -> None:
-        """`append_byte(sb, b)`: make `sb` unique (CoW), grow if full, store one
-        packed byte and bump the length."""
+        """`append_byte(sb, b)`: evaluate the byte, make `sb` unique (CoW), grow
+        if full, store the packed byte and bump the length."""
         arg0 = expr.args[0]
         holder = self._locals[f"mutholder:{id(expr)}"]
+        self._eval(expr.args[1])                  # byte value -> rax, first (MYLA-4)
+        self._emit("pushq %rax")
         self._mut_addr_of_list_holder(arg0)       # rax = &holder
         self._emit(f"movq %rax, {holder}(%rbp)")
         self._cow_unique(arg0.resolved_type)      # rax = unique cell (rc==1)
@@ -1915,11 +1899,8 @@ class CodeGen:
         self._emit("movq (%rax), %rdx")           # current length (append index)
         self._emit("leaq 1(%rdx), %rcx")
         self._emit("movq %rcx, (%rax)")           # length += 1
-        self._emit("leaq 16(%rax,%rdx), %rax")    # &byte (packed, stride 1)
-        self._emit("pushq %rax")
-        self._eval(expr.args[1])                  # byte value -> rax
-        self._emit("popq %rcx")                   # &byte
-        self._emit("movb %al, (%rcx)")
+        self._emit("popq %rcx")                   # byte value
+        self._emit("movb %cl, 16(%rax,%rdx)")     # packed, stride 1
         # Arg temp released by the enclosing statement (see _gen_push).
 
     def _gen_sb_append(self, expr: ast.Call) -> None:
@@ -1992,13 +1973,15 @@ class CodeGen:
         # Arg temp released by the enclosing statement (see _gen_push).
 
     def _gen_map_set(self, stmt: ast.Assign) -> None:
-        """`m[key] = value` (insert or update): make the map unique (CoW), grow it
-        if inserting would exceed the load factor, then store the value, releasing
-        the previous one if the key already existed."""
+        """`m[key] = value` (insert or update): evaluate the value, make the map
+        unique (CoW), grow it if inserting would exceed the load factor, then
+        store the value, releasing the previous one if the key already existed."""
         target = stmt.target
         mt = target.target.resolved_type
         vt = mt.value
         holder = self._locals[f"mutholder:{id(stmt)}"]
+        staged = self._locals[f"staged:{id(stmt)}"]
+        self._stage_value(stmt.value, vt, staged)
         self._mut_addr_of_list_holder(target.target)  # rax = &holder
         self._emit(f"movq %rax, {holder}(%rbp)")
         self._cow_unique(mt)                          # rax = unique cell (rc==1)
@@ -2020,9 +2003,7 @@ class CodeGen:
         self._emit("movq %rax, %rsi")
         self._emit("popq %rdi")                       # cell
         self._emit(f"call {self._map_put_name(mt)}")  # rax=&value, rdx=found
-        self._emit("pushq %rdx")                      # found
-        self._emit("pushq %rax")                      # &value
-        self._store_map_value(stmt.value, vt)
+        self._commit_map_value(vt, staged)
         self._drop_expr_temps(target.index)
         self._drop_expr_temps(stmt.value)
 
@@ -2369,7 +2350,11 @@ class CodeGen:
             self._drop_scopes[-1].append((slot, t))
 
     def _emit_return_drops(self) -> None:
-        """Drop every owning local currently in scope (for an early `return`)."""
+        """Drop every owning local currently in scope (for an early `return`),
+        and any value staged for a container store that hasn't been committed."""
+        for drops in reversed(self._staged_drops):
+            for drop in drops:
+                drop()
         for scope in reversed(self._drop_scopes):
             for slot, t in reversed(scope):
                 self._drop_value("rbp", slot, t)
@@ -3596,6 +3581,7 @@ class CodeGen:
         self._locals = {}
         self._scopes = []
         self._drop_scopes = []
+        self._staged_drops = []
         self._loops = []
         self._struct_ret = _is_aggregate(ret)
         self._ret_type = ret

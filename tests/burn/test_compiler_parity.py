@@ -805,6 +805,104 @@ PROGRAMS = {
         "    print(vowels(\"education\"))\n"   # 5
         "    print(len(chars(\"\")))\n}\n"     # 0
     ),
+    # MYLA-4: a mutating builtin evaluates its value argument before it touches
+    # the container. A `?` that returns early from inside the argument must
+    # leave the container as it was (no zeroed slot to drop or to leak to the
+    # caller through `var self`).
+    "try_inside_push_leaves_the_list_intact": (
+        "struct P { name: str, tags: [int] }\n"
+        "enum Tree { Leaf(int), Node(Tree, Tree) }\n"
+        "struct Bag { items: [[int]] }\n"
+        "fun upto(n: int, limit: int) -> Result<int, str> {\n"
+        "    if n >= limit { return Err(\"stop\") }\n    return Ok(n)\n}\n"
+        "impl Bag {\n"
+        "    fun fill(var self, n: int) -> Result<int, str> {\n"
+        "        var i = 0\n"
+        "        while i < n {\n"
+        "            push(self.items, [upto(i, 2)?])\n"
+        "            i = i + 1\n        }\n"
+        "        return Ok(len(self.items))\n    }\n}\n"
+        "fun lists(n: int) -> Result<int, str> {\n"
+        "    var xs: [[int]] = []\n"
+        "    for i in 0..n { push(xs, [upto(i, 2)?]) }\n"
+        "    return Ok(len(xs))\n}\n"
+        "fun structs(n: int) -> Result<int, str> {\n"
+        "    var ps: [P] = []\n"
+        "    for i in 0..n { push(ps, P { name: \"p\", tags: [upto(i, 2)?] }) }\n"
+        "    return Ok(len(ps))\n}\n"
+        "fun trees(n: int) -> Result<int, str> {\n"
+        "    var ts: [Tree] = []\n"
+        "    for i in 0..n { push(ts, Tree.Leaf(upto(i, 2)?)) }\n"
+        "    return Ok(len(ts))\n}\n"
+        "fun show(r: Result<int, str>) {\n"
+        "    match r { Ok(k) => print(k), Err(e) => print(e) }\n}\n"
+        "#main\nfun main() {\n"
+        "    var b = Bag { items: [] }\n"
+        "    show(b.fill(5))\n"
+        "    print(len(b.items))\n"            # 2: no half-pushed third item
+        "    show(lists(2))\n    show(lists(5))\n"
+        "    show(structs(2))\n    show(structs(5))\n"
+        "    show(trees(2))\n    show(trees(5))\n}\n"
+    ),
+    "try_inside_map_insert_leaves_the_map_intact": (
+        "struct Index { m: [int: [int]] }\n"
+        "fun upto(n: int, limit: int) -> Result<int, str> {\n"
+        "    if n >= limit { return Err(\"stop\") }\n    return Ok(n)\n}\n"
+        "impl Index {\n"
+        "    fun fill(var self, n: int) -> Result<int, str> {\n"
+        "        for i in 0..n { self.m[i] = [upto(i, 2)?] }\n"
+        "        return Ok(len(self.m))\n    }\n}\n"
+        "#main\nfun main() {\n"
+        "    var ix = Index { m: [:] }\n"
+        "    match ix.fill(5) { Ok(k) => print(k), Err(e) => print(e) }\n"
+        "    print(len(ix.m))\n"
+        "    for k in keys(ix.m) { print(len(ix.m[k])) }\n}\n"
+    ),
+    "try_inside_append_byte_leaves_the_builder_intact": (
+        "struct Out { sb: StringBuilder }\n"
+        "fun upto(n: int, limit: int) -> Result<int, str> {\n"
+        "    if n >= limit { return Err(\"stop\") }\n    return Ok(n)\n}\n"
+        "impl Out {\n"
+        "    fun fill(var self, n: int) -> Result<int, str> {\n"
+        "        for i in 0..n { append_byte(self.sb, (65 + upto(i, 2)?) as uint8) }\n"
+        "        return Ok(n)\n    }\n}\n"
+        "#main\nfun main() {\n"
+        "    var o = Out { sb: StringBuilder() }\n"
+        "    match o.fill(5) { Ok(k) => print(k), Err(e) => print(e) }\n"
+        "    print(build(o.sb))\n}\n"
+    ),
+    "push_evaluates_its_value_before_the_list": (
+        "#main\nfun main() {\n"
+        "    var xs = [1, 2, 3]\n"
+        "    push(xs, pop(xs) * 10)\n"         # [1, 2, 30]
+        "    print(len(xs))\n"
+        "    for x in xs { print(x) }\n"
+        "    var m: [int: int] = [:]\n"
+        "    m[1] = 5\n"
+        "    m[2] = len(m) * 100\n"            # the size before the insert
+        "    print(m[2])\n}\n"
+    ),
+    "assign_replaces_map_and_builder_elements": (
+        # replacing an element releases the old one with its own type's drop
+        # routine (the native compiler used to assume every element was a list)
+        "struct P { tags: [int] }\n"
+        "#main\nfun main() {\n"
+        "    var ms: [[int: int]] = [[1: 2]]\n"
+        "    ms[0] = [3: 4, 5: 6]\n"
+        "    print(len(ms[0]))\n"
+        "    var bs = [StringBuilder()]\n"
+        "    bs[0] = StringBuilder()\n"
+        "    append(bs[0], \"hi\")\n"
+        "    print(build(bs[0]))\n"
+        # the new value is taken before the old one is released, so a struct
+        # assigned to its own slot keeps its list alive
+        "    var ps = [P { tags: [7, 8] }]\n"
+        "    ps[0] = ps[0]\n"
+        "    var big: [int] = []\n"
+        "    for i in 0..64 { push(big, i) }\n"   # reuses a freed cell, if any
+        "    print(len(ps[0].tags))\n"
+        "    print(ps[0].tags[1])\n}\n"
+    ),
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -1007,6 +1105,36 @@ STRESS_TRAIT_DISPATCH_SRC = (
 )
 
 
+_BIG_LIST = "[" + ", ".join(["i"] * 64) + "]"   # a fresh 544-byte cell per use
+
+STRESS_TRY_AFTER_STAGED_VALUE_SRC = (
+    # A container store evaluates its value first (MYLA-4); a `?` that fails
+    # later, in the map key, the list index or the pushed-to list's expression,
+    # must release that value. 2.5 million leaked 64-element lists would need
+    # 1.4 GB, more than the 1 GiB arena.
+    "fun fail(i: int) -> Result<int, str> {\n    return Err(\"no\")\n}\n"
+    "fun by_key(i: int) -> Result<int, str> {\n"
+    "    var m: [int: [int]] = [:]\n"
+    f"    m[fail(i)?] = {_BIG_LIST}\n"
+    "    return Ok(len(m))\n}\n"
+    "fun by_index(i: int) -> Result<int, str> {\n"
+    "    var xs: [[int]] = [[]]\n"
+    f"    xs[fail(i)?] = {_BIG_LIST}\n"
+    "    return Ok(len(xs))\n}\n"
+    "fun by_holder(i: int) -> Result<int, str> {\n"
+    "    var xss: [[[int]]] = [[]]\n"
+    f"    push(xss[fail(i)?], {_BIG_LIST})\n"
+    "    return Ok(len(xss))\n}\n"
+    "#main\nfun main() {\n"
+    "    var fails = 0\n"
+    "    for i in 0..2500000 {\n"
+    "        match by_key(i) { Ok(n) => {}, Err(e) => { fails = fails + 1 } }\n"
+    "        match by_index(i) { Ok(n) => {}, Err(e) => { fails = fails + 1 } }\n"
+    "        match by_holder(i) { Ok(n) => {}, Err(e) => { fails = fails + 1 } }\n"
+    "    }\n    print(fails)\n}\n"
+)
+
+
 STRESS_FRAGMENTED_FREE_SRC = (
     # Leaves 8000 freed cells of 8000 different sizes behind (each `keys(m)` on
     # a growing map frees a list one slot longer than the last), then allocates
@@ -1095,6 +1223,11 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_TRY_SRC)
         self.assertEqual(code, 0, "arena exhausted — `?` early return leaked locals")
         self.assertEqual(out.strip(), "100000")
+
+    def test_try_after_a_staged_value_releases_it(self):
+        out, code = build_and_run(STRESS_TRY_AFTER_STAGED_VALUE_SRC)
+        self.assertEqual(code, 0, "arena exhausted — staged container values leaked")
+        self.assertEqual(out.strip(), "7500000")
 
     def test_break_continue_drop_live_heap(self):
         # `break`/`continue` must drop heap owners bound in the loop body scope.

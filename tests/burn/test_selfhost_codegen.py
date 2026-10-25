@@ -52,6 +52,17 @@ GEN_TOOL = os.path.join(_REPO, "selfhost", "gen_main.my")
 # Examples outside the v0.9 codegen gate's scope (see module docstring).
 EXCLUDED = {"floats.my"}
 
+# Programs of the Python backend's parity suite (test_compiler_parity.PROGRAMS)
+# about stores into containers: the value is evaluated before the container is
+# touched, so `?` and `push(xs, pop(xs))` see no half-made slot (MYLA-4).
+CONTAINER_STORE_PROGRAMS = (
+    "try_inside_push_leaves_the_list_intact",
+    "try_inside_map_insert_leaves_the_map_intact",
+    "try_inside_append_byte_leaves_the_builder_intact",
+    "push_evaluates_its_value_before_the_list",
+    "assign_replaces_map_and_builder_elements",
+)
+
 
 def _corpus() -> list[str]:
     """Every single-file top-level example. The import-driven multi-file
@@ -156,6 +167,17 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 checked += 1
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 20)
+
+    def test_container_stores_match_the_oracle(self) -> None:
+        from .test_compiler_parity import PROGRAMS
+
+        for name in CONTAINER_STORE_PROGRAMS:
+            with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(PROGRAMS[name])
+                got = self._build_and_run(self._emit_asm(path))
+                self.assertEqual(got, _oracle(path))
 
 
 if __name__ == "__main__":

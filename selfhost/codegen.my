@@ -35,6 +35,11 @@ pub struct LoopLab { cont: str, brk: str, depth: int32 }
 // An owning local/temp at `off(%rbp)` to release when its scope unwinds.
 pub struct DropEntry { off: int32, ty: Type }
 
+// What an early return must release while a container store's value is staged
+// (see stage_value): the value in frame slot `slot`, in its stored form, and
+// the value's temporaries.
+pub struct StagedDrops { slot: int32, ty: Type, temps: [DropEntry] }
+
 // A leaf binding produced by destructuring a tuple pattern.
 pub struct DLeaf { name: str, off: int32, ty: Type }
 
@@ -62,6 +67,7 @@ pub struct CodeGen {
     for_end: [int32: int32],
     destruct_base: [int32: int32],
     destruct_leaves: [int32: [int32]],
+    staged: [int32: int32],
     match_scrut: [int32: int32],
     match_res: [int32: int32],
     match_bind: [str: int32],
@@ -80,6 +86,7 @@ pub struct CodeGen {
     cur_mangled: str,
     scopes: [[CgBinding]],
     drop_scopes: [[DropEntry]],
+    staged_drops: [StagedDrops],
     loops: [LoopLab],
     cursor: int32,
     epilogue: str,
@@ -106,13 +113,13 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         label_n: 0, str_n: 0,
         str_texts: [], str_labels: [],
         locals: [:], for_lv: [:], for_end: [:],
-        destruct_base: [:], destruct_leaves: [:],
+        destruct_base: [:], destruct_leaves: [:], staged: [:],
         match_scrut: [:], match_res: [:], match_bind: [:], try_res: [:], unbox: [:],
         for_elem: [:], ind_code: [:], ind_env: [:],
         subst: [], fn_worklist: [], fn_done: [],
         lam_jobs: [], lam_done: [], partial_jobs: [], fnval_set: [],
         cur_mangled: "",
-        scopes: [], drop_scopes: [], loops: [],
+        scopes: [], drop_scopes: [], staged_drops: [], loops: [],
         cursor: 0,
         epilogue: "", struct_ret: false, ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
@@ -277,6 +284,13 @@ impl CodeGen {
 
     // Drop every owning local currently in scope (for an early `return`).
     fun emit_return_drops(var self) {
+        var g = len(self.staged_drops) - 1
+        while g >= 0 {
+            let sd = self.staged_drops[g]
+            for d in sd.temps { self.drop_value("rbp", d.off, d.ty) }
+            self.walk_member("rbp", sd.slot, sd.ty, false)
+            g = g - 1
+        }
         var s = len(self.drop_scopes) - 1
         while s >= 0 {
             let sc = self.drop_scopes[s]
@@ -923,6 +937,8 @@ impl CodeGen {
         self.for_end = [:]
         self.destruct_base = [:]
         self.destruct_leaves = [:]
+        self.staged = [:]
+        self.staged_drops = []
         self.match_scrut = [:]
         self.match_res = [:]
         self.match_bind = [:]
@@ -980,6 +996,13 @@ impl CodeGen {
         self.locals[id] = -self.cursor
     }
 
+    // A frame slot for a value of type `t` staged before it is stored into a
+    // container (stage_value), keyed by the storing node.
+    fun alloc_staged(var self, id: int32, t: Type) {
+        self.cursor = self.cursor + self.stored_size(t)
+        self.staged[id] = -self.cursor
+    }
+
     fun visit_stmt(var self, s: Stmt) {
         match s.kind {
             StmtKind.VarDecl(k, name, ty, init) => {
@@ -1002,6 +1025,8 @@ impl CodeGen {
             StmtKind.Assign(target, value) => {
                 self.visit_expr(target)
                 self.visit_expr(value)
+                let into_container = match target.kind { ExprKind.Index(b, i) => true, _ => false }
+                if into_container { self.alloc_staged(s.id, self.type_of(value.id)) }
             },
             StmtKind.IfS(cond, then, otherwise) => {
                 self.visit_expr(cond)
@@ -1087,6 +1112,12 @@ impl CodeGen {
                 for a in args { self.visit_expr(a) }
                 let rt = self.type_of(e.id)
                 if is_aggregate(rt) || self.owns_heap(rt) { self.alloc(e.id, self.size(rt)) }
+                match c.kind {
+                    ExprKind.Name(nm) => {
+                        if nm == "push" && len(args) == 2 { self.alloc_staged(e.id, self.type_of(args[1].id)) }
+                    },
+                    _ => {},
+                }
                 if indirect {
                     self.cursor = self.cursor + 8
                     self.ind_code[e.id] = -self.cursor
@@ -1114,6 +1145,7 @@ impl CodeGen {
                     self.visit_expr(en.value)
                 }
                 self.alloc(e.id, 8)
+                self.alloc_staged(e.id, map_val(self.type_of(e.id)))
             },
             ExprKind.StructLit(name, fields) => {
                 for fi in fields { self.visit_expr(fi.value) }
@@ -1224,7 +1256,7 @@ impl CodeGen {
                 }
                 self.emit(format("jmp {}", self.epilogue))
             },
-            StmtKind.Assign(target, value) => { self.gen_assign(target, value) },
+            StmtKind.Assign(target, value) => { self.gen_assign(s, target, value) },
             StmtKind.IfS(cond, then, otherwise) => { self.gen_if(cond, then, otherwise) },
             StmtKind.WhileS(cond, body) => { self.gen_while(cond, body) },
             StmtKind.ForS(vn, start, end, body, iter) => { self.gen_for(s, vn, start, end, body, iter) },
@@ -1244,17 +1276,20 @@ impl CodeGen {
     // Assignment to an lvalue (`name`, `agg.field`, `tuple.N`), scalar or aggregate.
     // The checker leaves lvalue targets untyped, so key on the value's type (they
     // are equal by the assignment's type rule).
-    fun gen_assign(var self, target: Expr, value: Expr) {
+    fun gen_assign(var self, s: Stmt, target: Expr, value: Expr) {
         let t = self.place_type(target)
         let is_name = match target.kind { ExprKind.Name(n) => true, _ => false }
         match target.kind {
             ExprKind.Index(base, idx) => {
-                if is_map_t(self.place_type(base)) { self.gen_map_set(base, idx, value)
+                if is_map_t(self.place_type(base)) { self.gen_map_set(s, base, idx, value)
                 return }
                 let et = list_elem(self.place_type(base))
+                let staged = self.staged[s.id]
+                self.stage_value(value, et, staged)
                 self.mut_elem_addr(target, base, idx)   // &elem (CoW) -> rax
-                self.emit("pushq %rax")
-                self.store_into_elem(value, et, true)
+                self.emit("movq %rax, %rcx")
+                self.drop_stored(et)
+                self.commit_staged(et, staged)
                 self.drop_expr_temps(value)
                 return
             },
@@ -2311,61 +2346,65 @@ impl CodeGen {
         self.emit("addq $16, %rax")
     }
 
-    // Store `value` into the element whose address is on the stack top
-    // (consumed), taking ownership of heap references it brings in and, when
-    // `drop_old`, releasing whatever the slot held before.
-    fun store_into_elem(var self, value: Expr, et: Type, drop_old: bool) {
-        if self.is_boxed(et) {
-            self.box_value(value, et)
-            self.emit("popq %rcx")
-            if drop_old {
-                self.emit("pushq %rax")
-                self.emit("pushq %rcx")
-                self.emit("movq (%rcx), %rdi")
-                self.emit("call " + self.drop_call_name(et))
-                self.emit("popq %rcx")
-                self.emit("popq %rax")
-            }
-            self.emit("movq %rax, (%rcx)")
-        } else if is_aggregate(et) {
+    // Stores into containers evaluate the value first and only then touch the
+    // container, as the interpreter does (MYLA-4): the value may return early
+    // (`?`) or change the same container (`push(xs, pop(xs))`), and neither may
+    // see a half-made slot. The new value is also taken before the old one is
+    // released, so `xs[i] = xs[i]` is safe.
+
+    // Evaluate `value` into frame slot `slot` in its stored form, owning one
+    // reference to every heap cell it holds: a fresh box for a boxed enum, a
+    // retained copy of an inline aggregate, or a scalar or retained cell pointer.
+    fun stage_value(var self, value: Expr, t: Type, slot: int32) {
+        if self.is_boxed(t) {
+            self.box_value(value, t)
+            self.emit(format("movq %rax, {}(%rbp)", slot))
+        } else if is_aggregate(t) {
             self.addr_of_aggregate(value)
-            self.emit("popq %rcx")
-            self.emit("pushq %rcx")
-            if drop_old {
-                self.emit("pushq %rax")
-                self.walk_member("rcx", 0, et, false)
-                self.emit("popq %rax")
-            }
             self.emit("movq %rax, %rsi")
-            self.emit("movq (%rsp), %rdi")
-            self.emit_copy(self.size(et))
-            self.emit("popq %rcx")
-            self.retain("rcx", 0, et)
-        } else if self.owns_heap(et) {
-            self.eval(value)
-            self.emit("popq %rcx")
-            self.emit("incq -8(%rax)")
-            if drop_old {
-                self.emit("pushq %rax")
-                self.emit("pushq %rcx")
-                self.emit("movq (%rcx), %rdi")
-                self.register_drop(et)
-                self.emit("call " + self.drop_call_name(et))
-                self.emit("popq %rcx")
-                self.emit("popq %rax")
-            }
-            self.emit("movq %rax, (%rcx)")
+            self.emit(format("leaq {}(%rbp), %rdi", slot))
+            self.emit_copy(self.size(t))
+            self.retain("rbp", slot, t)
         } else {
             self.eval(value)
-            self.emit("popq %rcx")
+            if self.owns_heap(t) { self.emit("incq -8(%rax)") }
+            self.emit(format("movq %rax, {}(%rbp)", slot))
+        }
+        // Until commit_staged hands the value over, an early return (a `?` in
+        // the key, the index or the container expression) must release it, and
+        // the value's temporaries, which the statement's end would have dropped.
+        push(self.staged_drops, StagedDrops { slot: slot, ty: t, temps: self.collect_expr_temps(value) })
+    }
+
+    // Move the value staged in `slot` into the storage at %rcx, which takes
+    // over its references.
+    fun commit_staged(var self, t: Type, slot: int32) {
+        self.staged_drops = drop_last(self.staged_drops)
+        if is_aggregate(t) && !self.is_boxed(t) {
+            self.emit(format("leaq {}(%rbp), %rsi", slot))
+            self.emit("movq %rcx, %rdi")
+            self.emit_copy(self.size(t))
+        } else {
+            self.emit(format("movq {}(%rbp), %rax", slot))
             self.emit("movq %rax, (%rcx)")
         }
     }
 
-    fun gen_push(var self, holder: Expr, value: Expr) {
+    // Release the value of type `t` stored at %rcx (preserved).
+    fun drop_stored(var self, t: Type) {
+        if self.owns_heap(t) {
+            self.emit("pushq %rcx")
+            self.walk_member("rcx", 0, t, false)
+            self.emit("popq %rcx")
+        }
+    }
+
+    fun gen_push(var self, e: Expr, holder: Expr, value: Expr) {
         let lt = self.place_type(holder)
         let et = list_elem(lt)
         let stride = self.elem_stride(et)
+        let staged = self.staged[e.id]
+        self.stage_value(value, et, staged)
         self.mut_addr_of_list_holder(holder)   // &holder -> rax
         self.emit("pushq %rax")                // save &holder
         self.cow_unique(lt)                    // unique cell -> rax
@@ -2384,10 +2423,9 @@ impl CodeGen {
         self.emit("leaq 1(%rdx), %rcx")
         self.emit("movq %rcx, (%rax)")         // length += 1
         self.emit(format("imulq ${}, %rdx", stride))
-        self.emit("leaq 16(%rax,%rdx), %rax")  // &elem (fresh slot)
+        self.emit("leaq 16(%rax,%rdx), %rcx")  // &elem (fresh slot)
         self.emit("addq $8, %rsp")             // discard saved &holder
-        self.emit("pushq %rax")
-        self.store_into_elem(value, et, false)
+        self.commit_staged(et, staged)
         // The value temp (if any) is released by the enclosing statement's
         // drop_expr_temps; dropping it here too would double-free.
     }
@@ -2428,16 +2466,19 @@ impl CodeGen {
         self.emit(format("movq ${}, %rsi", self.map_slot_size(mt)))
         self.emit("call __map_new")
         self.emit(format("movq %rax, {}(%rbp)", slot))
+        let staged = self.staged[e.id]
         for en in entries {
+            self.stage_value(en.value, map_val(mt), staged)
             self.emit(format("leaq {}(%rbp), %rax", slot))
-            self.emit_map_put(en.key, en.value, mt)
+            self.emit_map_put(en.key, mt, staged)
         }
         self.emit(format("movq {}(%rbp), %rax", slot))
     }
 
-    // Insert/overwrite (key -> value); precondition: %rax = &holder (a location
-    // holding the map cell pointer). Leaves the stack as found.
-    fun emit_map_put(var self, key: Expr, value: Expr, mt: Type) {
+    // Insert/overwrite (key -> the value staged in frame slot `staged`, see
+    // stage_value); precondition: %rax = &holder (a location holding the map
+    // cell pointer). Leaves the stack as found.
+    fun emit_map_put(var self, key: Expr, mt: Type, staged: int32) {
         let vt = map_val(mt)
         let slot_size = self.map_slot_size(mt)
         let is_str = self.map_is_str(mt)
@@ -2454,36 +2495,20 @@ impl CodeGen {
         self.emit(format("movq ${}, %rdx", slot_size))
         self.emit(format("movq ${}, %rcx", is_str))
         self.emit("call __map_set_slot")
-        self.emit("addq $16, %rax")
-        self.emit("pushq %rax")
-        if is_aggregate(vt) && !self.is_boxed(vt) {
-            self.addr_of_aggregate(value)
-            self.emit("movq %rax, %rsi")
-            self.emit("popq %rdi")
-            self.emit("pushq %rdi")
-            self.emit_copy(self.size(vt))
-            self.emit("popq %rcx")
-            self.retain("rcx", 0, vt)
-        } else if self.is_boxed(vt) {
-            self.box_value(value, vt)
-            self.emit("popq %rcx")
-            self.emit("movq %rax, (%rcx)")
-        } else {
-            self.eval(value)
-            self.emit("popq %rcx")
-            self.emit("movq %rax, (%rcx)")
-            if self.owns_heap(vt) { self.emit("incq -8(%rax)") }
-        }
+        self.emit("leaq 16(%rax), %rcx")     // &value
+        self.commit_staged(vt, staged)
         self.emit("addq $16, %rsp")
     }
 
-    fun gen_map_set(var self, base: Expr, idx: Expr, value: Expr) {
+    fun gen_map_set(var self, s: Stmt, base: Expr, idx: Expr, value: Expr) {
         let mt = self.place_type(base)
+        let staged = self.staged[s.id]
+        self.stage_value(value, map_val(mt), staged)
         self.mut_addr_of_list_holder(base)   // &holder -> rax
         self.emit("pushq %rax")
         self.cow_unique(mt)                  // unique cell, written back to holder
         self.emit("popq %rax")               // &holder
-        self.emit_map_put(idx, value, mt)
+        self.emit_map_put(idx, mt, staged)
         self.drop_expr_temps(idx)
         self.drop_expr_temps(value)
     }
@@ -2989,7 +3014,7 @@ impl CodeGen {
                 if nm == "print" { self.gen_print(args[0]) }
                 else if nm == "assert" || nm == "panic" || nm == "unreachable" { self.gen_intrinsic(nm, args) }
                 else if nm == "len" { self.gen_len(args[0]) }
-                else if nm == "push" { self.gen_push(args[0], args[1]) }
+                else if nm == "push" { self.gen_push(e, args[0], args[1]) }
                 else if nm == "pop" { self.gen_pop(e, args[0]) }
                 else if nm == "chars" { self.gen_chars(args[0]) }
                 else if nm == "format" { self.gen_format(e, args) }
@@ -3278,6 +3303,8 @@ impl CodeGen {
         self.for_end = [:]
         self.destruct_base = [:]
         self.destruct_leaves = [:]
+        self.staged = [:]
+        self.staged_drops = []
         self.match_scrut = [:]
         self.match_res = [:]
         self.match_bind = [:]

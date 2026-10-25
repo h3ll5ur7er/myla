@@ -18,4 +18,5 @@ Consequences:
 - [ ] Find what broke when `free` was live (run the bootstrap with `ret` removed, under a debug arena that poisons freed cells)
 - [ ] Fix capture retain/drop and the other unsound paths, matching the Python backend's ownership rules ([[Architecture/Native-backend]])
 - [ ] Remove the `ret`; the fixpoint still holds; peak memory of a self-compile drops
+- [ ] `?` releases nothing on its early return: `gen_try` jumps straight to the epilogue instead of calling `emit_return_drops`, so the function's owning locals (and a staged container value, see [[MYLA-4]]) leak; the Python backend's `?` goes through its `return` path
 - [ ] Port the arena-reclaim stress tests to the self-hosted backend
