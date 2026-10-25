@@ -2,6 +2,18 @@
 
 [TOC]
 
+## How Myla got here
+
+1. **A scripting language interpreted in Python.** The tree-walking interpreter came first and still defines the semantics.
+2. **Native compilation.** An x86-64 backend without libc was added because native code would be neat and faster. It was: compiled programs run far faster than interpreted ones.
+3. **Self-hosting.** Once the language could carry it, the compiler was rewritten in Myla, roadblock by roadblock, until it compiled itself to a fixed point (v1.0).
+4. **After self-hosting**, the bootstrap was too slow to iterate on: building the Myla compiler took over a minute with the Python toolchain, and the first self-built round about four more. That led to three ideas:
+   - rewrite the first stage in Rust to speed up and streamline the bootstrap: the origin of the [[Architecture/Rust-edition]];
+   - write more sample programs, which motivated the language server ([[Architecture/Editor-tooling]]);
+   - a concurrency system close to Swift's actors, which is why the Rust edition has partial actors.
+
+Measurements in October 2026 showed that the bootstrap's slowness comes from two hot spots in the Python toolchain's code generator and allocator, not from Python itself; fixing them brings the whole bootstrap to about 10 seconds ([[MYLA-60]], [[MYLA-16]], [[Development/Bootstrap]]).
+
 ## Milestones
 
 | Milestone | Theme | Status |
@@ -19,13 +31,28 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
 
 ## Next
 
-1. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs; the urgent ones are in `todo`:
+1. **Make the bootstrap fast**: [[MYLA-60]] and [[MYLA-16]], small changes with measured effect (5 minutes → 10 seconds).
+2. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs; the urgent ones are in `todo`:
    - Python backend: [[MYLA-2]] (dangling match bindings), [[MYLA-3]] (aggregate field assignment), [[MYLA-4]] (the only red burn test), [[MYLA-10]] (errors in the wrong file).
    - Self-hosted compiler: [[MYLA-21]] (destructuring boxed enums, breaks the self-hosted `run`), [[MYLA-22]] (`free` disabled).
    - Rust edition: [[MYLA-36]] (silent miscompiles).
-2. **Close the self-hosted gaps**: floats ([[MYLA-29]]), the module loader ([[MYLA-30]]), diagnostics ([[MYLA-28]]), so that the self-hosted toolchain can replace the Python one for everyday use.
-3. **Performance**: the allocator ([[MYLA-16]]) and string reclamation ([[MYLA-18]]).
-4. **Tooling**: language server precision ([[MYLA-51]]) and tests ([[MYLA-52]]), a REPL ([[MYLA-19]]).
+3. **Close the self-hosted gaps**: floats ([[MYLA-29]]), the module loader ([[MYLA-30]]), diagnostics ([[MYLA-28]]), so that the self-hosted toolchain can replace the Python one for everyday use.
+4. **Performance**: string reclamation ([[MYLA-18]]).
+5. **Tooling**: language server precision ([[MYLA-51]]) and tests ([[MYLA-52]]), a REPL ([[MYLA-19]]).
+
+## Ideas
+
+Bigger directions, collected as tasks in the `Roadmap ideas` epic. None is designed or scheduled yet.
+
+| Idea | Task | Notes |
+| --- | --- | --- |
+| Swift-style actors and structured concurrency | [[MYLA-61]] | Prototyped partially in the Rust edition; value semantics help with isolation |
+| A mid-level IR between checker and code generators | [[MYLA-67]] | Makes reference counting checkable and new backends small; a stepping stone for the next two |
+| Optional LLVM backend | [[MYLA-62]] | Less hand-written assembly; textual IR keeps the compiler dependency-free |
+| Debugger | [[MYLA-66]] | First step is cheap: `.file`/`.loc` directives give gdb line tables |
+| Better error messages | [[MYLA-65]] | Files, spans, notes, several errors per run |
+| A project tool like cargo | [[MYLA-64]] | Manifest, dependencies, `myla new/build/run/test`; grows out of `selfhost/main.my` |
+| A declarative GUI system inspired by SwiftUI | [[MYLA-63]] | Needs display access without libc, text rendering and a view-builder syntax |
 
 ## Proposed after 1.0
 
