@@ -99,7 +99,7 @@ Keywords cannot be used as identifiers.
 
   The value must fit the suffixed type or it is a compile-time error. (Floating
   suffixes `f32`/`f64` are reserved for when floats land — see
-  [future-features.md](archive/future-features.md).)
+  [future-features.md](future-features.md).)
 - **string** literals are double-quoted and support these escapes:
   `\n` (newline), `\t` (tab), `\\` (backslash), `\"` (double quote).
   No string interpolation in v0.0.
@@ -157,7 +157,7 @@ signed; modular for unsigned) — see [§7.4](#74-evaluation-and-arithmetic).
 | `str`  | immutable sequence of bytes (UTF-8)         |
 
 > Floating-point types (`float32`, `float64`) are intentionally **not** in v0.0;
-> see [future-features.md](archive/future-features.md).
+> see [future-features.md](future-features.md).
 
 ### 3.2 `int` and built-in aliases
 
@@ -441,7 +441,7 @@ attribute ::= "#" name ( "(" args? ")" )? ( "[" args? "]" )?
 ```
 
 v0.0 supports a **fixed, built-in set** of attributes (this is not a general
-user-macro system — see [future-features.md](archive/future-features.md) for that).
+user-macro system — see [future-features.md](future-features.md) for that).
 Unknown attributes are a compile-time error.
 
 ### 8.1 `#main` — entry point

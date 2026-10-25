@@ -1,6 +1,6 @@
 # Myla Self-Hosting Plan — the road to v1.0
 
-The long-term goal in the [README](../README.md) is for Myla to compile itself.
+The long-term goal in the [README](../../README.md) is for Myla to compile itself.
 This document scopes that effort: it works **backwards from the existing v0.0
 toolchain** (currently Python, under `src/myla/`) to derive exactly which
 language features Myla must grow before its own compiler can be written in Myla.

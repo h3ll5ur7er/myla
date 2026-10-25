@@ -59,7 +59,7 @@ type-checks → emits x86-64 GAS assembly to stdout. It does **not** include:
 
 - a `build` driver that runs `as`/`ld` itself — process spawning
   (`fork`/`execve`) is deferred until after self-hosting (D29). A host wrapper
-  ([`scripts/bootstrap.sh`](../scripts/bootstrap.sh)) runs `as`/`ld`.
+  ([`scripts/bootstrap.sh`](../../scripts/bootstrap.sh)) runs `as`/`ld`.
 - `myla test` / `myla repl` equivalents.
 
 A Myla-language interpreter port (`selfhost/interp.my`) exists but is not on the

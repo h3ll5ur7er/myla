@@ -1,0 +1,41 @@
+# Interpreter
+
+[[src/myla/interpreter.py]] is a tree-walking evaluator over the checked, desugared AST. It defines the language's behaviour: the native backend must print the same thing for every program.
+
+[TOC]
+
+## Values
+
+| Myla | Python |
+| --- | --- |
+| integers, `char` | `int`, wrapped to the width after every operation (`_wrap`) |
+| floats | `float`; `float32` results are rounded through `struct.pack("f")` |
+| `bool`, `str` | `bool`, `str` |
+| struct, tuple, enum | `StructValue(name, fields)`, `TupleValue(elems)`, `EnumValue(enum, variant, payload)` |
+| list, map, builder | `ListValue`, `MapValue` (a dict: insertion order), `StringBuilderValue` (a `bytearray`) |
+| function value | `ClosureValue(params, body, env, is_block)`; a `fun` used as a value has an empty env |
+
+**Value semantics by copying.** `_copy` deep-copies aggregates whenever a value is bound, assigned, passed, returned, stored or captured. There is no copy-on-write here; the observable behaviour matches the native backend's reference counting.
+
+## Execution
+
+- Environments are chains of dictionaries (`_Env`); each call starts a fresh frame whose parent is nothing, since functions see only their parameters, constants and other functions.
+- `return`, `break` and `continue` are Python exceptions; `std.process.exit` raises `_ExitSignal`, caught by `run()`, which returns the exit status.
+- Constants are evaluated once from the checker's folded values.
+- `var self` methods bind `self` to the caller's actual object (`_resolve_struct` finds it), so field writes reach the caller; read-only `self` gets a copy.
+- Operators on structs and enums inside a bounded generic body are dispatched at run time to `Type.add`, `Type.eq`, `Type.cmp`, … (`_dispatch_operator`); everywhere else they were desugared into method calls.
+- Runtime errors raise `MylaRuntimeError` with the node's position.
+
+## I/O primitives
+
+`__write` writes to the given stream, `__read_file` reads bytes and decodes them with `surrogateescape` (so any byte sequence survives), `__write_file`, `__args` (the argv passed to `Interpreter(..., argv=…)`), and `__run`, which uses `subprocess.run` with `executable=program` (no `PATH` search) and stores stderr, exit code, signal and errno for the `__run_*` primitives.
+
+## The test runner
+
+`run_tests()` goes through every function's `#test` attributes, evaluates arguments and the expected value, calls the function and compares with Python `==` (structural for every value type). A runtime error fails that case only.
+
+## Known problems
+
+- Float → integer casts of NaN, infinities and out-of-range values crash with a Python exception ([[MYLA-6]]).
+- `len`, indexing and writing a string that holds invalid UTF-8 crash ([[MYLA-12]]).
+- `s[i]` and `len(s)` encode the whole string each time, so byte loops over long strings are quadratic.

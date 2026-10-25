@@ -21,7 +21,7 @@ Inspired by modern languages like Swift, Rust, and Python.
 - All kinds of syntactic sugar
 
 > Concrete syntax proposals and a suggested rollout order for these live in
-> [docs/future-features.md](docs/future-features.md).
+> [docs/Archive/future-features.md](docs/Archive/future-features.md).
 
 ## Proposed guidelines
 ### Syntax
@@ -34,16 +34,21 @@ optional type suffixes (`255u8`, `123i64`); user-defined `typealias` is
 supported; and declarations may carry built-in attributes (`#main` to mark the
 entry point, `#test(inputs)[expected]` for inline tests run via `myla test`).
 
-Living docs:
-- [docs/roadmap.md](docs/roadmap.md) — live implementation status, progress, and the locked decision log (D1–D58)
-- [docs/language-spec.md](docs/language-spec.md) — concrete syntax & semantics
-- [docs/grammar.md](docs/grammar.md) — formal EBNF grammar
-- [docs/architecture.md](docs/architecture.md) — toolchain architecture (interpreter + x86-64 compiler)
-- [docs/known_issues.md](docs/known_issues.md) — known limitations of the self-hosted compiler (e.g. float codegen)
+Documentation lives in the project wiki under [`docs/`](docs/Home.md), and work
+is tracked as tasks under [`tasks/`](tasks/). Both are plain Markdown managed with
+[Genbeya](https://github.com/genbeya/genbeya), so they read fine on GitHub and live
+(with working `[[MYLA-12]]`-style references) in Genbeya:
 
-The during-development design notes (the self-hosting plan, the per-version
-v0.2–v0.5 design docs, the post-v0.0 feature catalog, and the open-questions
-tracker) are kept under [docs/archive/](docs/archive/).
+- [Home](docs/Home.md) — overview and where to start
+- [Getting started](docs/Getting-started.md) — run, build, test, bootstrap
+- [Language](docs/Language.md) — the language reference, including the [grammar](docs/Language/Grammar.md)
+- [Architecture](docs/Architecture.md) — the Python toolchain, the self-hosted compiler, the Rust edition, editor tooling
+- [Development](docs/Development.md) — testing, bootstrap, conventions
+- [Project](docs/Project.md) — [roadmap](docs/Project/Roadmap.md), [decision log D1–D58](docs/Project/Decisions.md), [known issues](docs/Project/Known-issues.md)
+
+The documents written during development (the v0.0 spec, grammar and architecture,
+the self-hosting plan, the per-version v0.2–v0.5 designs, the feature catalog and
+the open-questions tracker) are kept unchanged in the [Archive](docs/Archive.md).
 
 
 ### CLI (the Python toolchain — bootstrap stage0 + oracle)
@@ -83,8 +88,8 @@ build/stage3 examples/hello.my src/myla > hello.s
 as --64 -o hello.o hello.s && ld -o hello hello.o && ./hello
 ```
 
-See [docs/known_issues.md](docs/known_issues.md) for current gaps (notably float
-codegen) and [docs/roadmap.md](docs/roadmap.md) for status.
+See [Known issues](docs/Project/Known-issues.md) for current gaps (notably float
+codegen) and the [Roadmap](docs/Project/Roadmap.md) for status.
 
 ### Testing convention
 
@@ -134,7 +139,7 @@ program to `examples/regressions.my`, or a rejected one to `examples/errors/`.
 ## Roadmap
 
 For live status (what is implemented, in progress, planned) and the running log
-of design decisions, see [docs/roadmap.md](docs/roadmap.md). High-level
+of design decisions, see the [Roadmap](docs/Project/Roadmap.md) and [Decisions](docs/Project/Decisions.md). High-level
 milestone outline (all milestones below are **done** — the original
 "v0.1 = self-host" framing was superseded by D23, which makes self-hosting the
 v1.0 destination reached through the feature milestones):
@@ -150,5 +155,5 @@ v1.0 destination reached through the feature milestones):
 | **v1.0** | **Self-hosted: Myla compiles Myla to a byte-identical three-stage fixed point** (`scripts/bootstrap.sh`) |
 
 Post-1.0 ideas (custom operators, user macros, compound-assignment sugar) and the
-known gaps in the self-hosted backend live in [docs/roadmap.md](docs/roadmap.md)
-and [docs/known_issues.md](docs/known_issues.md).
+known gaps in the self-hosted backend live in the [Roadmap](docs/Project/Roadmap.md)
+and [Known issues](docs/Project/Known-issues.md).
