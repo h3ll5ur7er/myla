@@ -882,6 +882,20 @@ PROGRAMS = {
         "    m[2] = len(m) * 100\n"            # the size before the insert
         "    print(m[2])\n}\n"
     ),
+    "try_in_an_expression_lambda_returns_from_the_lambda": (
+        # the interpreter let the `?` escape the lambda and return from its
+        # caller (found with MYLA-10)
+        "fun half(x: int) -> Option<int> {\n"
+        "    if x % 2 == 1 { return None }\n    return Some(x / 2)\n}\n"
+        "fun twice(f: (int) -> Option<int>, x: int) -> int {\n"
+        "    let r = match f(x) { Some(v) => v, None => -1 }\n"
+        "    print(r)\n    return r\n}\n"
+        "fun run() -> Option<int> {\n"
+        "    let g: (int) -> Option<int> = (x: int) => Some(half(x)? + 100)\n"
+        "    print(twice(g, 4))\n    print(twice(g, 3))\n    return Some(7)\n}\n"
+        "#main\nfun main() {\n"
+        "    match run() { Some(v) => print(v), None => print(0) }\n}\n"
+    ),
     # MYLA-2: a match binding is a value: writing to the scrutinee's variable
     # in an arm must not change (or free) what the binding sees.
     "match_binding_survives_writes_to_the_scrutinee": (

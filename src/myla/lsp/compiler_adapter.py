@@ -32,7 +32,7 @@ _KIND_CODE = {
 
 
 def _diagnostic_from_myla_error(
-    err: MylaError, source_lines: list[str]
+    err: MylaError, source_lines: list[str], path: str
 ) -> CompilerDiagnostic:
     code = _KIND_CODE.get(err.kind, err.kind.split()[0] if err.kind else None)
 
@@ -55,16 +55,22 @@ def _diagnostic_from_myla_error(
         severity=DiagnosticSeverity.ERROR,
         code=code,
         source="myla",
+        path=path,
     )
 
 
-def check_file(path: str, source: str | None = None) -> list[CompilerDiagnostic]:
-    """Type-check `path` (using `source` as its in-memory contents when given)
-    and return the resulting diagnostics.
+def check_file(
+    path: str, source: str | None = None, open_sources: dict[str, str] | None = None
+) -> list[CompilerDiagnostic]:
+    """Type-check `path` (using `source` as its in-memory contents when given,
+    and `open_sources` for other modules open in the editor) and return the
+    resulting diagnostics, each with the path of the file it is in: an error in
+    an imported module belongs to that module (MYLA-10).
 
     Returns an empty list when the program checks cleanly."""
-    source_lines = (source or "").splitlines()
-    overrides = {path: source} if source is not None else None
+    overrides = {os.path.realpath(p): text for p, text in (open_sources or {}).items()}
+    if source is not None:
+        overrides[os.path.realpath(path)] = source
 
     try:
         program = link(
@@ -75,7 +81,15 @@ def check_file(path: str, source: str | None = None) -> list[CompilerDiagnostic]
         check(program)
         return []
     except MylaError as err:
-        return [_diagnostic_from_myla_error(err, source_lines)]
+        err_path = os.path.realpath(err.path or path)
+        text = overrides.get(err_path)
+        if text is None:
+            try:
+                with open(err_path, "r", encoding="utf-8") as fh:
+                    text = fh.read()
+            except OSError:
+                text = ""
+        return [_diagnostic_from_myla_error(err, text.splitlines(), err_path)]
     except Exception as exc:  # noqa: BLE001 - never crash the server on bad input
         return [
             CompilerDiagnostic(
@@ -89,6 +103,19 @@ def check_file(path: str, source: str | None = None) -> list[CompilerDiagnostic]
                 source="myla",
             )
         ]
+
+
+def diagnostics_by_file(
+    path: str, diagnostics: list[CompilerDiagnostic]
+) -> dict[str, list[CompilerDiagnostic]]:
+    """Group `diagnostics` from checking `path` by the file they are in. The
+    checked file is always present, so publishing the groups also clears its
+    old diagnostics."""
+    checked = os.path.realpath(path)
+    groups: dict[str, list[CompilerDiagnostic]] = {checked: []}
+    for d in diagnostics:
+        groups.setdefault(d.path or checked, []).append(d)
+    return groups
 
 
 def parse_symbols(path: str, source: str) -> list[Symbol]:

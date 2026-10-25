@@ -27,7 +27,9 @@ python3 myla.py lsp            # or: python -m myla.lsp
 
 Supported: `didOpen`/`didChange`/`didSave`/`didClose`, `documentSymbol`, `definition`, `hover`, `references`, `completion`. Not supported: formatting, rename, semantic tokens, signature help, code actions, workspace symbols.
 
-Open problems: [[MYLA-10]] (errors of imported modules), [[MYLA-48]] … [[MYLA-52]].
+An error in an imported module is published for that module's URI (it shows in the Problems panel and in that file), and cleared there once a later check of the importing document no longer finds it (MYLA-10); other open buffers are checked with their unsaved text. `tests/integration/test_lsp_diagnostics.py` drives the real server over stdio when pygls is installed.
+
+Open problems: [[MYLA-48]] … [[MYLA-52]].
 
 ## VS Code extension
 

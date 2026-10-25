@@ -29,11 +29,12 @@ A *binding* (the thing a name resolves to) is one of:
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 
 from . import ast
-from .errors import ModuleError
+from .errors import ModuleError, in_file
 from .lexer import tokenize
 from .parser import parse
 
@@ -590,15 +591,17 @@ def link(
                     source = fh.read()
             except OSError as exc:
                 raise ModuleError(f"cannot read module '{abspath}': {exc}")
-        program = parse(tokenize(source))
+        with in_file(abspath):
+            program = parse(tokenize(source))
         mid = _module_id(abspath, entry_abs, project_root)
         m = _Module(mid, abspath, program, source)
         modules[abspath] = m
         order.append(m)
         for imp in m.imports:
-            target = _resolve_module_path(
-                abspath, imp.path, project_root, stdlib_root
-            )
+            with in_file(abspath):
+                target = _resolve_module_path(
+                    abspath, imp.path, project_root, stdlib_root
+                )
             load(target)
         return m
 
@@ -609,7 +612,8 @@ def link(
 
     module_exports = {m.id: m.exports for m in order}
     for m in order:
-        _Renamer(m.env_decl(), m.module_aliases(), module_exports).rename_module(m)
+        with in_file(m.path):
+            _Renamer(m.env_decl(), m.module_aliases(), module_exports).rename_module(m)
 
     merged: list[ast.Decl] = []
     for m in order:
@@ -619,14 +623,28 @@ def link(
 
 
 def _mark_source_path(m: _Module) -> None:
-    """Record the file each function comes from as `source_path`, so the native
-    backend can emit debug line tables against the right file (MYLA-71)."""
+    """Record the file each declaration (and method) comes from as
+    `source_path`: the checker and interpreter attribute errors to it (MYLA-10),
+    the native backend emits debug line tables against it (MYLA-71)."""
     for d in m.decls:
-        if isinstance(d, ast.FunDecl):
-            d.source_path = m.path
-        elif isinstance(d, ast.ImplDecl):
+        d.source_path = m.path
+        if isinstance(d, ast.ImplDecl):
             for method in d.methods:
                 method.source_path = m.path
+        for lam in _lambdas(d):
+            lam.source_path = m.path
+
+
+def _lambdas(node):
+    """Every lambda in `node`'s subtree."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _lambdas(item)
+    elif isinstance(node, ast.Node):
+        if isinstance(node, ast.Lambda):
+            yield node
+        for f in dataclasses.fields(node):
+            yield from _lambdas(getattr(node, f.name))
 
 
 def _check_id_collisions(order: list[_Module]) -> None:
@@ -690,8 +708,9 @@ def _build_bindings(modules, order, project_root, stdlib_root) -> None:
         bindings: dict[str, tuple] = {}
         for d in _named_decls(m):
             bindings[d.name] = ("decl", m.qualify(d.name))
-        for imp in m.imports:
-            _apply_import(m, imp, bindings, modules, project_root, stdlib_root)
+        with in_file(m.path):
+            for imp in m.imports:
+                _apply_import(m, imp, bindings, modules, project_root, stdlib_root)
         m.bindings = bindings
 
 

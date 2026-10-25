@@ -10,7 +10,7 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-10]] | Errors in imported modules are shown against the entry file | medium |
+| [[MYLA-72]] | `?` in a lambda is checked against the enclosing function's return type | medium |
 | [[MYLA-5]] | `int64` minimum `/ -1` and `% -1` crash natively | medium |
 | [[MYLA-6]] | Float → integer casts of NaN/inf crash the interpreter; out-of-range casts disagree | medium |
 | [[MYLA-7]] | Out-of-range literal patterns (`-1` on `uint8`) match differently | medium |
@@ -64,7 +64,7 @@ Also by design (from the earlier known-issues list in [[Archive/known_issues]]):
 | Task | Problem | Priority |
 | --- | --- | --- |
 | [[MYLA-48]] | Short declaration names are found inside the keyword | medium |
-| [[MYLA-52]] | No language-server tests | medium |
+| [[MYLA-52]] | Language-server tests: only diagnostics and the compiler adapter are covered | medium |
 | [[MYLA-49]], [[MYLA-50]], [[MYLA-51]] | Lifecycle races, dead code, name-only resolution | low |
 | [[MYLA-53]], [[MYLA-54]], [[MYLA-55]] | VS Code settings and packaging, grammar and snippets, machine-specific workspace settings | low |
 

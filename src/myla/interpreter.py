@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import ast
-from .errors import MylaRuntimeError
+from .errors import MylaError, MylaRuntimeError
 from .types import (
     BoolType, CharType, Checker, FloatType, IntType, StrType, Type,
     char_utf8_bytes, float_div, float_rem, format_float, round_float,
@@ -186,15 +186,17 @@ class ClosureValue:
     Mirrors the native `(code_ptr, env_ptr)` fat value. `params` are the lambda
     (or referenced `fun`) parameters, `body` is an expression or a `Block`, and
     `env` maps each captured name to its by-value snapshot taken at creation
-    (D15). A plain `fun` reference has an empty `env`."""
+    (D15). A plain `fun` reference has an empty `env`. `path` is the file the
+    body was written in, for attributing runtime errors (MYLA-10)."""
 
-    __slots__ = ("params", "body", "env", "is_block")
+    __slots__ = ("params", "body", "env", "is_block", "path")
 
-    def __init__(self, params, body, env: dict, is_block: bool):
+    def __init__(self, params, body, env: dict, is_block: bool, path: str | None):
         self.params = params
         self.body = body
         self.env = env
         self.is_block = is_block
+        self.path = path
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<closure {len(self.params)} param(s), {len(self.env)} capture(s)>"
@@ -310,6 +312,10 @@ class Interpreter:
             self._exec_block(decl.body, frame)
         except _ReturnSignal as ret:
             return ret.value
+        except MylaError as err:   # attribute it to this function's file (MYLA-10)
+            if err.path is None:
+                err.path = getattr(decl, "source_path", None)
+            raise
         return None
 
     def _exec_block(self, block: ast.Block, parent: _Env) -> None:
@@ -523,7 +529,8 @@ class Interpreter:
             fref = getattr(expr, "func_ref", None)
             if fref is not None:  # a top-level `fun` used as a value (v0.4.2)
                 decl = self.functions[fref].decl
-                return ClosureValue(decl.params, decl.body, {}, True)
+                return ClosureValue(decl.params, decl.body, {}, True,
+                                    getattr(decl, "source_path", None))
             return env.get(expr.ident)
         if isinstance(expr, ast.Unary):
             return self._eval_unary(expr, env)
@@ -562,7 +569,8 @@ class Interpreter:
         if isinstance(expr, ast.Lambda):
             captured = {name: _copy(env.get(name)) for name, _t in expr.captures}
             return ClosureValue(expr.params, expr.body, captured,
-                                isinstance(expr.body, ast.Block))
+                                isinstance(expr.body, ast.Block),
+                                getattr(expr, "source_path", None))
         raise MylaRuntimeError(  # pragma: no cover
             f"cannot evaluate {type(expr).__name__}", expr.line, expr.column
         )
@@ -573,12 +581,16 @@ class Interpreter:
             frame.define(name, value)
         for param, value in zip(clo.params, args):
             frame.define(param.name, _copy(value))
-        if not clo.is_block:
-            return self._eval(clo.body, frame)
         try:
+            if not clo.is_block:
+                return self._eval(clo.body, frame)
             self._exec_block(clo.body, frame)
         except _ReturnSignal as ret:
             return ret.value
+        except MylaError as err:   # attribute it to the lambda's file (MYLA-10)
+            if err.path is None:
+                err.path = clo.path
+            raise
         return None
 
     def _index_read(self, expr: ast.Index, env: _Env):

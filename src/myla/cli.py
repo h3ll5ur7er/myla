@@ -13,6 +13,7 @@ Development/debug commands available now:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from . import __version__
@@ -29,6 +30,19 @@ from .types import check as check_program
 def _read_source(path: str) -> str:
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
+
+
+def _report(err: MylaError, entry: str, entry_source: str) -> None:
+    """Print `err` with the line it points at, from the file it comes from: the
+    entry file, or the imported module the error names (MYLA-10)."""
+    name, source = entry, entry_source
+    if err.path is not None and os.path.realpath(err.path) != os.path.realpath(entry):
+        name = os.path.relpath(err.path)
+        try:
+            source = _read_source(err.path)
+        except OSError:
+            source = None
+    print(err.render(source, name), file=sys.stderr)
 
 
 def _cmd_tokenize(args: argparse.Namespace) -> int:
@@ -81,7 +95,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         checker = _front_end(args.file)
         return Interpreter(checker, argv=argv).run()
     except MylaError as err:
-        print(err.render(source, args.file), file=sys.stderr)
+        _report(err, args.file, source)
         return 1
 
 
@@ -91,7 +105,7 @@ def _cmd_test(args: argparse.Namespace) -> int:
         checker = _front_end(args.file)
         results = Interpreter(checker).run_tests()
     except MylaError as err:
-        print(err.render(source, args.file), file=sys.stderr)
+        _report(err, args.file, source)
         return 1
 
     if not results:
@@ -117,7 +131,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         path = build_program(checker, args.output, keep_asm=args.keep_asm,
                              debug=args.debug)
     except MylaError as err:
-        print(err.render(source, args.file), file=sys.stderr)
+        _report(err, args.file, source)
         return 1
     except BuildError as err:
         print(f"build error: {err}", file=sys.stderr)
@@ -142,7 +156,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
             kind = err.kind.split()[0]
             print(f"err {line} {col} {kind}")
             return 0
-        print(err.render(source, args.file), file=sys.stderr)
+        _report(err, args.file, source)
         return 1
     print("ok")
     return 0

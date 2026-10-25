@@ -10,6 +10,7 @@ Run via `myla lsp` (see myla.cli) or `python -m myla.lsp`.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 
 from lsprotocol import types as lsp
@@ -76,6 +77,9 @@ class MylaLanguageServer(LanguageServer):
         self.index = WorkspaceIndex()
         self._open_uris: set[str] = set()
         self._roots_ready = False
+        # checked uri -> other files it last published diagnostics for (an
+        # error in an imported module is shown in that module, MYLA-10)
+        self._published_elsewhere: dict[str, set[str]] = {}
 
     def ensure_roots(self) -> None:
         """Populate the workspace index roots from the client's workspace
@@ -150,13 +154,22 @@ class MylaLanguageServer(LanguageServer):
         except Exception:  # noqa: BLE001 - untracked/closed document
             source = None
 
-        diagnostics = compiler_adapter.check_file(path, source)
-        self.text_document_publish_diagnostics(
-            lsp.PublishDiagnosticsParams(
-                uri=uri,
-                diagnostics=[_to_lsp_diagnostic(d) for d in diagnostics],
+        diagnostics = compiler_adapter.check_file(path, source, self.overrides())
+        by_uri: dict[str, list[CompilerDiagnostic]] = {}
+        for file, group in compiler_adapter.diagnostics_by_file(path, diagnostics).items():
+            same = os.path.realpath(file) == os.path.realpath(path)
+            by_uri[uri if same else (from_fs_path(file) or "file://" + file)] = group
+        # clear files this document's errors were shown in last time
+        for stale in self._published_elsewhere.get(uri, set()) - by_uri.keys():
+            by_uri[stale] = []
+        self._published_elsewhere[uri] = {u for u, g in by_uri.items() if u != uri and g}
+        for target, group in by_uri.items():
+            self.text_document_publish_diagnostics(
+                lsp.PublishDiagnosticsParams(
+                    uri=target,
+                    diagnostics=[_to_lsp_diagnostic(d) for d in group],
+                )
             )
-        )
 
 
 def _to_lsp_diagnostic(d: CompilerDiagnostic) -> lsp.Diagnostic:

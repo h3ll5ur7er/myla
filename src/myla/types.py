@@ -23,7 +23,7 @@ import struct
 from dataclasses import dataclass
 
 from . import ast
-from .errors import TypeCheckError
+from .errors import TypeCheckError, in_file
 
 
 # --- type representations --------------------------------------------------
@@ -669,6 +669,7 @@ class Checker:
         self._const_decls: dict[str, ast.ConstDecl] = {}
         self._const_folding: set[str] = set()  # in-progress, for cycle detection
         self._aliases_raw: dict[str, ast.TypeRef] = {}
+        self._alias_paths: dict[str, str | None] = {}   # alias -> its module's file
         self._alias_cache: dict[str, Type] = {}
         self.entry: ast.FunDecl | None = None
         self._current_ret: Type | None = None
@@ -704,9 +705,11 @@ class Checker:
         self._check_attributes_and_entry()
         for decl in self.program.decls:
             if isinstance(decl, ast.FunDecl):
-                self._check_function(decl)
+                with in_file(_source_path(decl)):
+                    self._check_function(decl)
         for mdecl in self._method_decls:
-            self._check_function(mdecl)
+            with in_file(_source_path(mdecl)):
+                self._check_function(mdecl)
         return self
 
     # -- global collection ---------------------------------------------------
@@ -714,102 +717,108 @@ class Checker:
     def _collect_globals(self) -> None:
         seen: dict[str, ast.Node] = {}
         for decl in self.program.decls:
-            if isinstance(decl, ast.ImportDecl):
-                # v0.5.1a parses imports but the module loader (v0.5.1b) is not
-                # wired yet; reaching the checker with an import means the source
-                # was type-checked directly rather than loaded as a module.
-                raise TypeCheckError(
-                    "module imports are not supported yet (the loader arrives in "
-                    "v0.5.1b)",
-                    decl.line, decl.column,
-                )
-            if isinstance(decl, ast.ImplDecl):
-                self._impl_decls.append(decl)
-                continue
-            if isinstance(decl, ast.TraitDecl):
-                if decl.name in _BUILTIN_OP_TRAIT_NAMES:
+            with in_file(_source_path(decl)):
+                if isinstance(decl, ast.ImportDecl):
+                    # v0.5.1a parses imports but the module loader (v0.5.1b) is not
+                    # wired yet; reaching the checker with an import means the source
+                    # was type-checked directly rather than loaded as a module.
                     raise TypeCheckError(
-                        f"'{decl.name}' is a built-in operator trait and cannot "
-                        "be redeclared",
+                        "module imports are not supported yet (the loader arrives in "
+                        "v0.5.1b)",
                         decl.line, decl.column,
                     )
-                if any(t.name == decl.name for t in self._trait_decls):
+                if isinstance(decl, ast.ImplDecl):
+                    self._impl_decls.append(decl)
+                    continue
+                if isinstance(decl, ast.TraitDecl):
+                    if decl.name in _BUILTIN_OP_TRAIT_NAMES:
+                        raise TypeCheckError(
+                            f"'{decl.name}' is a built-in operator trait and cannot "
+                            "be redeclared",
+                            decl.line, decl.column,
+                        )
+                    if any(t.name == decl.name for t in self._trait_decls):
+                        raise TypeCheckError(
+                            f"duplicate trait '{decl.name}'", decl.line, decl.column
+                        )
+                    self._trait_decls.append(decl)
+                    continue
+                name = decl.name
+                if name in _BUILTIN_FUNCS:
                     raise TypeCheckError(
-                        f"duplicate trait '{decl.name}'", decl.line, decl.column
+                        f"cannot redefine builtin '{name}'", decl.line, decl.column
                     )
-                self._trait_decls.append(decl)
-                continue
-            name = decl.name
-            if name in _BUILTIN_FUNCS:
-                raise TypeCheckError(
-                    f"cannot redefine builtin '{name}'", decl.line, decl.column
-                )
-            if name in seen:
-                raise TypeCheckError(
-                    f"duplicate top-level declaration '{name}'", decl.line, decl.column
-                )
-            seen[name] = decl
-            if isinstance(decl, ast.StructDecl):
-                self.struct_decls[name] = decl
-                self.structs[name] = {}  # filled during resolution
-            elif isinstance(decl, ast.EnumDecl):
-                self.enum_decls[name] = decl
-                self.enums[name] = {}  # filled during resolution
-            elif isinstance(decl, ast.TypeAliasDecl):
-                self._aliases_raw[name] = decl.target
-            elif isinstance(decl, ast.ConstDecl):
-                self._const_decls[name] = decl
-            elif isinstance(decl, ast.FunDecl):
-                self.functions[name] = FuncSig([], None, decl)  # filled later
+                if name in seen:
+                    raise TypeCheckError(
+                        f"duplicate top-level declaration '{name}'", decl.line, decl.column
+                    )
+                seen[name] = decl
+                if isinstance(decl, ast.StructDecl):
+                    self.struct_decls[name] = decl
+                    self.structs[name] = {}  # filled during resolution
+                elif isinstance(decl, ast.EnumDecl):
+                    self.enum_decls[name] = decl
+                    self.enums[name] = {}  # filled during resolution
+                elif isinstance(decl, ast.TypeAliasDecl):
+                    self._aliases_raw[name] = decl.target
+                    self._alias_paths[name] = _source_path(decl)
+                elif isinstance(decl, ast.ConstDecl):
+                    self._const_decls[name] = decl
+                elif isinstance(decl, ast.FunDecl):
+                    self.functions[name] = FuncSig([], None, decl)  # filled later
 
     def _resolve_signatures(self) -> None:
         # resolve every alias eagerly so cycles / bad targets are caught even
         # when the alias is never referenced
         for name, ref in self._aliases_raw.items():
-            self._resolve(ref, frozenset({name}))
+            with in_file(self._alias_paths.get(name)):
+                self._resolve(ref, frozenset({name}))
         # struct fields (resolved under the struct's own type parameters)
         for name, decl in self.struct_decls.items():
-            self._check_type_params(decl)
-            self._type_params = frozenset(decl.type_params)
-            try:
-                fields: dict[str, Type] = {}
-                for f in decl.fields:
-                    if f.name in fields:
-                        raise TypeCheckError(
-                            f"duplicate field '{f.name}' in struct '{name}'", f.line, f.column
-                        )
-                    fields[f.name] = self._resolve(f.type)
-            finally:
-                self._type_params = frozenset()
-            self.structs[name] = fields
+            with in_file(_source_path(decl)):
+                self._check_type_params(decl)
+                self._type_params = frozenset(decl.type_params)
+                try:
+                    fields: dict[str, Type] = {}
+                    for f in decl.fields:
+                        if f.name in fields:
+                            raise TypeCheckError(
+                                f"duplicate field '{f.name}' in struct '{name}'", f.line, f.column
+                            )
+                        fields[f.name] = self._resolve(f.type)
+                finally:
+                    self._type_params = frozenset()
+                self.structs[name] = fields
         # enum variants & payloads (resolved under the enum's type parameters)
         for name, decl in self.enum_decls.items():
-            self._check_type_params(decl)
-            self._type_params = frozenset(decl.type_params)
-            try:
-                variants: dict[str, list[Type]] = {}
-                for v in decl.variants:
-                    if v.name in variants:
-                        raise TypeCheckError(
-                            f"duplicate variant '{v.name}' in enum '{name}'", v.line, v.column
-                        )
-                    variants[v.name] = [self._resolve(p) for p in v.payload]
-            finally:
-                self._type_params = frozenset()
-            self.enums[name] = variants
+            with in_file(_source_path(decl)):
+                self._check_type_params(decl)
+                self._type_params = frozenset(decl.type_params)
+                try:
+                    variants: dict[str, list[Type]] = {}
+                    for v in decl.variants:
+                        if v.name in variants:
+                            raise TypeCheckError(
+                                f"duplicate variant '{v.name}' in enum '{name}'", v.line, v.column
+                            )
+                        variants[v.name] = [self._resolve(p) for p in v.payload]
+                finally:
+                    self._type_params = frozenset()
+                self.enums[name] = variants
         self._resolve_recursion()
         # function signatures (resolved under the function's own type parameters)
         for name, sig in self.functions.items():
-            decl = sig.decl
-            self._check_type_params(decl)
-            self._type_params = frozenset(decl.type_params)
-            try:
-                params = [self._resolve(p.type) for p in decl.params]
-                ret = self._resolve(decl.ret_type) if decl.ret_type is not None else None
-            finally:
-                self._type_params = frozenset()
-            self.functions[name] = FuncSig(params, ret, decl, list(decl.type_params),
-                                           dict(decl.type_param_bounds))
+            with in_file(_source_path(sig.decl)):
+                decl = sig.decl
+                self._check_type_params(decl)
+                self._type_params = frozenset(decl.type_params)
+                try:
+                    params = [self._resolve(p.type) for p in decl.params]
+                    ret = self._resolve(decl.ret_type) if decl.ret_type is not None else None
+                finally:
+                    self._type_params = frozenset()
+                self.functions[name] = FuncSig(params, ret, decl, list(decl.type_params),
+                                               dict(decl.type_param_bounds))
 
     def _check_type_params(self, decl) -> None:
         seen: set[str] = set()
@@ -847,28 +856,29 @@ class Checker:
         """Resolve each user `trait`'s method signatures, with `Self` allowed."""
         self._register_builtin_op_traits()
         for decl in self._trait_decls:
-            self._check_trait_type_params(decl)
-            methods: dict[str, TraitMethodSig] = {}
-            for m in decl.methods:
-                if m.name in methods:
-                    raise TypeCheckError(
-                        f"duplicate method '{m.name}' in trait '{decl.name}'",
-                        m.line, m.column,
-                    )
-                # `Self` and the trait's own type parameters are both in scope
-                # for the signatures (v0.5.5); the latter resolve to `TypeParam`s.
-                self._allow_self = True
-                self._type_params = frozenset(decl.type_params)
-                try:
-                    params = [SELF] + [self._resolve(p.type) for p in m.params]
-                    ret = (self._resolve(m.ret_type)
-                           if m.ret_type is not None else None)
-                finally:
-                    self._allow_self = False
-                    self._type_params = frozenset()
-                methods[m.name] = TraitMethodSig(m.name, params, ret, m.receiver)
-            self.traits[decl.name] = TraitSig(decl.name, methods, decl,
-                                              type_params=list(decl.type_params))
+            with in_file(_source_path(decl)):
+                self._check_trait_type_params(decl)
+                methods: dict[str, TraitMethodSig] = {}
+                for m in decl.methods:
+                    if m.name in methods:
+                        raise TypeCheckError(
+                            f"duplicate method '{m.name}' in trait '{decl.name}'",
+                            m.line, m.column,
+                        )
+                    # `Self` and the trait's own type parameters are both in scope
+                    # for the signatures (v0.5.5); the latter resolve to `TypeParam`s.
+                    self._allow_self = True
+                    self._type_params = frozenset(decl.type_params)
+                    try:
+                        params = [SELF] + [self._resolve(p.type) for p in m.params]
+                        ret = (self._resolve(m.ret_type)
+                               if m.ret_type is not None else None)
+                    finally:
+                        self._allow_self = False
+                        self._type_params = frozenset()
+                    methods[m.name] = TraitMethodSig(m.name, params, ret, m.receiver)
+                self.traits[decl.name] = TraitSig(decl.name, methods, decl,
+                                                  type_params=list(decl.type_params))
 
     def _check_trait_type_params(self, decl: ast.TraitDecl) -> None:
         seen: set[str] = set()
@@ -969,18 +979,19 @@ class Checker:
         """Check every generic signature's bounds name a real type parameter and
         a known trait (built-in or user); reject unknown bounds early (X9)."""
         for sig in self.functions.values():
-            for tp, traits in sig.bounds.items():
-                if tp not in sig.type_params:
-                    raise TypeCheckError(
-                        f"bound on unknown type parameter '{tp}'",
-                        sig.decl.line, sig.decl.column,
-                    )
-                for tr in traits:
-                    if tr not in self.traits:
+            with in_file(_source_path(sig.decl)):
+                for tp, traits in sig.bounds.items():
+                    if tp not in sig.type_params:
                         raise TypeCheckError(
-                            f"unknown trait '{tr}' in bound '{tp}: {tr}'",
+                            f"bound on unknown type parameter '{tp}'",
                             sig.decl.line, sig.decl.column,
                         )
+                    for tr in traits:
+                        if tr not in self.traits:
+                            raise TypeCheckError(
+                                f"unknown trait '{tr}' in bound '{tp}: {tr}'",
+                                sig.decl.line, sig.decl.column,
+                            )
 
     def _check_call_bounds(self, sig: FuncSig, subst: dict[str, Type],
                            expr: ast.Call) -> None:
@@ -1022,23 +1033,24 @@ class Checker:
         the allow-list is `Eq` only (Ord is the planned next addition)."""
         targets: list[ast.StructDecl | ast.EnumDecl] = []
         for decl in self.program.decls:
-            for attr in getattr(decl, "attributes", []):
-                if attr.name != "derive":
-                    continue
-                if not isinstance(decl, (ast.StructDecl, ast.EnumDecl)):
-                    raise TypeCheckError(
-                        "'#derive' may only be applied to a struct or enum",
-                        attr.line, attr.column,
-                    )
-                if decl.type_params:
-                    raise TypeCheckError(
-                        "deriving on generic types is not supported yet (v0.4.4 "
-                        "derives Eq for concrete structs/enums)",
-                        attr.line, attr.column,
-                    )
-                self._validate_derive_attr(attr)
-                if decl not in targets:
-                    targets.append(decl)
+            with in_file(_source_path(decl)):
+                for attr in getattr(decl, "attributes", []):
+                    if attr.name != "derive":
+                        continue
+                    if not isinstance(decl, (ast.StructDecl, ast.EnumDecl)):
+                        raise TypeCheckError(
+                            "'#derive' may only be applied to a struct or enum",
+                            attr.line, attr.column,
+                        )
+                    if decl.type_params:
+                        raise TypeCheckError(
+                            "deriving on generic types is not supported yet (v0.4.4 "
+                            "derives Eq for concrete structs/enums)",
+                            attr.line, attr.column,
+                        )
+                    self._validate_derive_attr(attr)
+                    if decl not in targets:
+                        targets.append(decl)
         if not targets:
             return
         # The set of named types that will be `Eq` — user `impl Eq for T` plus
@@ -1048,17 +1060,18 @@ class Checker:
             if impl.trait_name == "Eq" and isinstance(impl.target, ast.TypeRef):
                 eq_types.add(impl.target.name)
         for decl in targets:
-            if any(i.trait_name == "Eq" and isinstance(i.target, ast.TypeRef)
-                   and i.target.name == decl.name for i in self._impl_decls):
-                raise TypeCheckError(
-                    f"type '{decl.name}' both derives Eq and has an explicit "
-                    f"'impl Eq for {decl.name}'",
-                    decl.line, decl.column,
-                )
-            self._check_derivable_eq(decl, eq_types)
-            impl = self._make_eq_impl(decl)
-            self._impl_decls.append(impl)
-            self.program.decls.append(impl)
+            with in_file(_source_path(decl)):
+                if any(i.trait_name == "Eq" and isinstance(i.target, ast.TypeRef)
+                       and i.target.name == decl.name for i in self._impl_decls):
+                    raise TypeCheckError(
+                        f"type '{decl.name}' both derives Eq and has an explicit "
+                        f"'impl Eq for {decl.name}'",
+                        decl.line, decl.column,
+                    )
+                self._check_derivable_eq(decl, eq_types)
+                impl = self._make_eq_impl(decl)
+                self._impl_decls.append(impl)
+                self.program.decls.append(impl)
 
     def _validate_derive_attr(self, attr: ast.Attribute) -> None:
         if attr.outputs is not None:
@@ -1194,103 +1207,104 @@ class Checker:
         collide with a field; multiple `impl` blocks on one type are allowed.
         """
         for impl in self._impl_decls:
-            self._check_type_params(impl)
-            self._type_params = frozenset(impl.type_params)
-            try:
-                target = self._resolve(impl.target)
-                trait_args = [self._resolve(a) for a in impl.trait_args]
-            finally:
-                self._type_params = frozenset()
-            key = self._method_key(target)
-            if isinstance(target, (StructType, EnumType)):
-                if impl.type_params:
-                    want = tuple(TypeParam(p) for p in impl.type_params)
-                    if target.args != want:
+            with in_file(_source_path(impl)):
+                self._check_type_params(impl)
+                self._type_params = frozenset(impl.type_params)
+                try:
+                    target = self._resolve(impl.target)
+                    trait_args = [self._resolve(a) for a in impl.trait_args]
+                finally:
+                    self._type_params = frozenset()
+                key = self._method_key(target)
+                if isinstance(target, (StructType, EnumType)):
+                    if impl.type_params:
+                        want = tuple(TypeParam(p) for p in impl.type_params)
+                        if target.args != want:
+                            raise TypeCheckError(
+                                f"a generic impl must apply to "
+                                f"'{key}<{', '.join(impl.type_params)}>' with its type "
+                                "parameters in order",
+                                impl.line, impl.column,
+                            )
+                    elif target.args:
                         raise TypeCheckError(
-                            f"a generic impl must apply to "
-                            f"'{key}<{', '.join(impl.type_params)}>' with its type "
-                            "parameters in order",
+                            "cannot 'impl' on a concrete generic instantiation; write "
+                            "'impl<T> " + key + "<T> { ... }' to cover every instance",
                             impl.line, impl.column,
                         )
-                elif target.args:
-                    raise TypeCheckError(
-                        "cannot 'impl' on a concrete generic instantiation; write "
-                        "'impl<T> " + key + "<T> { ... }' to cover every instance",
-                        impl.line, impl.column,
-                    )
-            elif key is not None:
-                # A built-in receiver type (no orphan rule, D45). v0.4.1c covers
-                # read-only `self` on scalars / `str` / `StringBuilder`.
-                if impl.type_params:
-                    raise TypeCheckError(
-                        "generic impls on built-in types are not supported yet "
-                        "(v0.4.1 covers concrete built-in receivers)",
-                        impl.line, impl.column,
-                    )
-                for m in impl.methods:
-                    if m.receiver == "var self":
+                elif key is not None:
+                    # A built-in receiver type (no orphan rule, D45). v0.4.1c covers
+                    # read-only `self` on scalars / `str` / `StringBuilder`.
+                    if impl.type_params:
                         raise TypeCheckError(
-                            "'var self' methods on built-in types are not "
-                            "supported yet; use a read-only 'self' receiver",
+                            "generic impls on built-in types are not supported yet "
+                            "(v0.4.1 covers concrete built-in receivers)",
+                            impl.line, impl.column,
+                        )
+                    for m in impl.methods:
+                        if m.receiver == "var self":
+                            raise TypeCheckError(
+                                "'var self' methods on built-in types are not "
+                                "supported yet; use a read-only 'self' receiver",
+                                m.line, m.column,
+                            )
+                else:
+                    raise TypeCheckError(
+                        f"cannot 'impl' on type '{type_name(target)}'; v0.4.1 supports "
+                        "structs, enums, and concrete scalar / str / StringBuilder "
+                        "receivers",
+                        impl.line, impl.column,
+                    )
+                trait = None
+                param_map: dict | None = None
+                if impl.trait_name is not None:
+                    trait = self.traits.get(impl.trait_name)
+                    if trait is None:
+                        raise TypeCheckError(
+                            f"unknown trait '{impl.trait_name}' in "
+                            f"'impl {impl.trait_name} for {key}'",
+                            impl.line, impl.column,
+                        )
+                    # Match the trait's arity and bind its type parameters to this
+                    # impl's arguments (v0.5.5, D55). Coherence (below) ignores the
+                    # arguments, so a type implements a trait at most once.
+                    if len(trait_args) != len(trait.type_params):
+                        expected = (f"{impl.trait_name}<"
+                                    f"{', '.join(trait.type_params)}>"
+                                    if trait.type_params else impl.trait_name)
+                        raise TypeCheckError(
+                            f"trait '{impl.trait_name}' expects "
+                            f"{len(trait.type_params)} type argument(s), got "
+                            f"{len(trait_args)} (use 'impl {expected} for {key}')",
+                            impl.line, impl.column,
+                        )
+                    if trait.type_params:
+                        param_map = dict(zip(trait.type_params, trait_args))
+                    pair = (impl.trait_name, key)
+                    if pair in self._user_trait_impls:
+                        raise TypeCheckError(
+                            f"duplicate impl of trait '{impl.trait_name}' for type "
+                            f"'{key}' (at most one user impl per trait/type pair)",
+                            impl.line, impl.column,
+                        )
+                    self._user_trait_impls.add(pair)
+                table = self.methods.setdefault(key, {})
+                field_names = set(self.structs.get(key, {}).keys())
+                for m in impl.methods:
+                    if m.name in table:
+                        raise TypeCheckError(
+                            f"duplicate method '{m.name}' for type '{key}'",
                             m.line, m.column,
                         )
-            else:
-                raise TypeCheckError(
-                    f"cannot 'impl' on type '{type_name(target)}'; v0.4.1 supports "
-                    "structs, enums, and concrete scalar / str / StringBuilder "
-                    "receivers",
-                    impl.line, impl.column,
-                )
-            trait = None
-            param_map: dict | None = None
-            if impl.trait_name is not None:
-                trait = self.traits.get(impl.trait_name)
-                if trait is None:
-                    raise TypeCheckError(
-                        f"unknown trait '{impl.trait_name}' in "
-                        f"'impl {impl.trait_name} for {key}'",
-                        impl.line, impl.column,
-                    )
-                # Match the trait's arity and bind its type parameters to this
-                # impl's arguments (v0.5.5, D55). Coherence (below) ignores the
-                # arguments, so a type implements a trait at most once.
-                if len(trait_args) != len(trait.type_params):
-                    expected = (f"{impl.trait_name}<"
-                                f"{', '.join(trait.type_params)}>"
-                                if trait.type_params else impl.trait_name)
-                    raise TypeCheckError(
-                        f"trait '{impl.trait_name}' expects "
-                        f"{len(trait.type_params)} type argument(s), got "
-                        f"{len(trait_args)} (use 'impl {expected} for {key}')",
-                        impl.line, impl.column,
-                    )
-                if trait.type_params:
-                    param_map = dict(zip(trait.type_params, trait_args))
-                pair = (impl.trait_name, key)
-                if pair in self._user_trait_impls:
-                    raise TypeCheckError(
-                        f"duplicate impl of trait '{impl.trait_name}' for type "
-                        f"'{key}' (at most one user impl per trait/type pair)",
-                        impl.line, impl.column,
-                    )
-                self._user_trait_impls.add(pair)
-            table = self.methods.setdefault(key, {})
-            field_names = set(self.structs.get(key, {}).keys())
-            for m in impl.methods:
-                if m.name in table:
-                    raise TypeCheckError(
-                        f"duplicate method '{m.name}' for type '{key}'",
-                        m.line, m.column,
-                    )
-                if m.name in field_names:
-                    raise TypeCheckError(
-                        f"method '{m.name}' collides with a field of '{key}'",
-                        m.line, m.column,
-                    )
-                self._register_method(impl, key, m)
-            if trait is not None:
-                self._check_trait_conformance(impl, key, target, trait, param_map)
-                self.trait_impls.setdefault(key, set()).add(impl.trait_name)
+                    if m.name in field_names:
+                        raise TypeCheckError(
+                            f"method '{m.name}' collides with a field of '{key}'",
+                            m.line, m.column,
+                        )
+                    self._register_method(impl, key, m)
+                if trait is not None:
+                    self._check_trait_conformance(impl, key, target, trait, param_map)
+                    self.trait_impls.setdefault(key, set()).add(impl.trait_name)
 
     def _register_method(self, impl: ast.ImplDecl, key: str,
                          m: ast.FunDecl) -> None:
@@ -1396,7 +1410,8 @@ class Checker:
                 return self._alias_cache[name]
             if name in visiting:
                 raise TypeCheckError(f"type alias cycle involving '{name}'", ref.line, ref.column)
-            resolved = self._resolve(self._aliases_raw[name], visiting | {name})
+            with in_file(self._alias_paths.get(name)):
+                resolved = self._resolve(self._aliases_raw[name], visiting | {name})
             self._alias_cache[name] = resolved
             return resolved
         if name == "int":
@@ -1502,19 +1517,20 @@ class Checker:
             )
         self._const_folding.add(name)
         try:
-            declared = self._resolve(decl.declared_type)
-            if isinstance(declared, TypeParam):
-                raise TypeCheckError(
-                    "a const type must be concrete", decl.line, decl.column
-                )
-            vt = self._expect_value(decl.value, _Scope(), declared)
-            if vt != declared:
-                raise TypeCheckError(
-                    f"const '{name}' is declared '{type_name(declared)}' but its "
-                    f"value has type '{type_name(vt)}'",
-                    decl.value.line, decl.value.column,
-                )
-            value = self._fold_const_expr(decl.value)
+            with in_file(_source_path(decl)):   # also when folded from elsewhere
+                declared = self._resolve(decl.declared_type)
+                if isinstance(declared, TypeParam):
+                    raise TypeCheckError(
+                        "a const type must be concrete", decl.line, decl.column
+                    )
+                vt = self._expect_value(decl.value, _Scope(), declared)
+                if vt != declared:
+                    raise TypeCheckError(
+                        f"const '{name}' is declared '{type_name(declared)}' but its "
+                        f"value has type '{type_name(vt)}'",
+                        decl.value.line, decl.value.column,
+                    )
+                value = self._fold_const_expr(decl.value)
         finally:
             self._const_folding.discard(name)
         info = ConstInfo(declared, value)
@@ -1627,31 +1643,32 @@ class Checker:
     def _check_attributes_and_entry(self) -> None:
         main_decls: list[ast.FunDecl] = []
         for decl in self.program.decls:
-            for attr in decl.attributes:
-                # `#derive` (v0.4.4) is validated and lowered by
-                # `_synthesize_derives`; skip it here.
-                if attr.name == "derive":
-                    continue
-                if attr.name not in ("main", "test"):
-                    raise TypeCheckError(
-                        f"unknown attribute '#{attr.name}'", attr.line, attr.column
-                    )
-                if not isinstance(decl, ast.FunDecl):
-                    raise TypeCheckError(
-                        f"attribute '#{attr.name}' may only be applied to functions",
-                        attr.line, attr.column,
-                    )
-                if decl.type_params:
-                    raise TypeCheckError(
-                        f"attribute '#{attr.name}' cannot be applied to a generic "
-                        "function (it has no single concrete instantiation)",
-                        attr.line, attr.column,
-                    )
-                if attr.name == "main":
-                    self._check_main_attr(decl, attr)
-                    main_decls.append(decl)
-                else:
-                    self._check_test_attr(decl, attr)
+            with in_file(_source_path(decl)):
+                for attr in decl.attributes:
+                    # `#derive` (v0.4.4) is validated and lowered by
+                    # `_synthesize_derives`; skip it here.
+                    if attr.name == "derive":
+                        continue
+                    if attr.name not in ("main", "test"):
+                        raise TypeCheckError(
+                            f"unknown attribute '#{attr.name}'", attr.line, attr.column
+                        )
+                    if not isinstance(decl, ast.FunDecl):
+                        raise TypeCheckError(
+                            f"attribute '#{attr.name}' may only be applied to functions",
+                            attr.line, attr.column,
+                        )
+                    if decl.type_params:
+                        raise TypeCheckError(
+                            f"attribute '#{attr.name}' cannot be applied to a generic "
+                            "function (it has no single concrete instantiation)",
+                            attr.line, attr.column,
+                        )
+                    if attr.name == "main":
+                        self._check_main_attr(decl, attr)
+                        main_decls.append(decl)
+                    else:
+                        self._check_test_attr(decl, attr)
 
         named_main = self.functions.get("main")
         if main_decls and named_main is not None and named_main.decl not in main_decls:
@@ -4104,6 +4121,13 @@ def _prelude_decls() -> list[ast.Decl]:
     from .lexer import tokenize
     from .parser import parse
     return parse(tokenize(_PRELUDE_SRC)).decls
+
+
+def _source_path(decl: ast.Node) -> str | None:
+    """The file a declaration was loaded from (stamped by the loader), for
+    attributing errors to it (MYLA-10); None for the prelude or a program that
+    didn't come through the loader."""
+    return getattr(decl, "source_path", None)
 
 
 def check(program: ast.Program, with_prelude: bool = True) -> Checker:

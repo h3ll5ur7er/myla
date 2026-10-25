@@ -15,6 +15,7 @@ stage (see docs/architecture.md §8).
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 
 
@@ -34,7 +35,9 @@ class MylaError(Exception):
 
     `kind` is a short human label used as the diagnostic prefix (e.g. "lex
     error"). `line`/`column` are 1-based; they may be None for errors without a
-    precise location.
+    precise location. `path` is the file the position refers to, when known
+    (set by `in_file` as the error leaves the module or declaration it came
+    from; MYLA-10).
     """
 
     kind = "error"
@@ -44,6 +47,7 @@ class MylaError(Exception):
         self.message = message
         self.line = line
         self.column = column
+        self.path: str | None = None
 
     def render(self, source: str | None = None, filename: str = "<input>") -> str:
         """Format the error as a multi-line diagnostic string."""
@@ -67,6 +71,18 @@ class MylaError(Exception):
                     caret_pad = " " * (self.column - 1)
                     lines.append(f"{pad} | {caret_pad}^")
         return "\n".join(lines)
+
+
+@contextlib.contextmanager
+def in_file(path: str | None):
+    """Attribute a MylaError raised inside the block to `path`, unless an inner
+    block already did."""
+    try:
+        yield
+    except MylaError as err:
+        if err.path is None:
+            err.path = path
+        raise
 
 
 class LexError(MylaError):

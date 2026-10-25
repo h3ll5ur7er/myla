@@ -46,7 +46,7 @@ The whole toolchain uses only the Python standard library (the language server i
 
 ## Diagnostics
 
-All errors derive from `MylaError(message, line, column)` with a `kind` used as the prefix: `lex error`, `parse error`, `type error`, `module error`, `runtime error` ([[src/myla/errors.py]]). Each stage stops at its first error. The CLI renders the error with the offending source line and a caret. Errors don't record their file, so an error in an imported module is shown against the entry file ([[MYLA-10]]).
+All errors derive from `MylaError(message, line, column)` with a `kind` used as the prefix: `lex error`, `parse error`, `type error`, `module error`, `runtime error` ([[src/myla/errors.py]]). Each stage stops at its first error. An error records the file its position refers to (`path`, MYLA-10): the loader stamps lex, parse and module errors with the module being loaded and every declaration with its file (`source_path`), and `errors.in_file` stamps checker and runtime errors with the declaration, function or lambda they come from. The CLI renders the error with that file's source line and a caret; the language server publishes it for that file.
 
 ## The other implementations
 

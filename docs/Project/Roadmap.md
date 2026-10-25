@@ -35,8 +35,7 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
    - ~~make the bootstrap fast~~: done, 5 minutes → 8 seconds ([[MYLA-60]], [[MYLA-16]]);
    - ~~DWARF line tables so gdb steps through Myla source~~: done for the Python backend, `myla build -g` ([[MYLA-71]]);
    - the `myla` agent skill ([[MYLA-68]]) and GitHub Actions CI ([[MYLA-69]]), both in review.
-2. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs; the urgent ones are in `todo`:
-   - Python backend: [[MYLA-10]] (errors in the wrong file).
+2. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs. The Python backend's urgent ones are fixed ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]], and [[MYLA-10]] for diagnostics); the remaining urgent ones:
    - Self-hosted compiler: [[MYLA-21]] (destructuring boxed enums, breaks the self-hosted `run`), [[MYLA-22]] (`free` disabled).
    - Rust edition: [[MYLA-36]] (silent miscompiles).
 3. **Close the self-hosted gaps**: floats ([[MYLA-29]]), the module loader ([[MYLA-30]]), diagnostics ([[MYLA-28]]), so that the self-hosted toolchain can replace the Python one for everyday use.

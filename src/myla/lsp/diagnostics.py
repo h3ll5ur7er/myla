@@ -45,3 +45,4 @@ class CompilerDiagnostic:
     severity: DiagnosticSeverity = DiagnosticSeverity.ERROR
     code: str | None = None
     source: str = "myla"
+    path: str | None = None   # the file `range` is in (MYLA-10)
