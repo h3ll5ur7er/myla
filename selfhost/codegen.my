@@ -1326,6 +1326,8 @@ impl CodeGen {
             let leaf_off = slots[i]
             self.emit(format("movq {}(%rbp), %rsi", base_slot))
             if lf.off != 0 { self.emit(format("addq ${}, %rsi", lf.off)) }
+            // a boxed (recursive) enum member is a pointer to the value (MYLA-21)
+            if self.is_boxed(lf.ty) { self.emit("movq (%rsi), %rsi") }
             if is_aggregate(lf.ty) {
                 self.emit(format("leaq {}(%rbp), %rdi", leaf_off))
                 self.emit_copy(self.size(lf.ty))
@@ -1333,9 +1335,12 @@ impl CodeGen {
                 self.emit("movq (%rsi), %rax")
                 self.emit(format("movq %rax, {}(%rbp)", leaf_off))
             }
+            self.retain("rbp", leaf_off, lf.ty)    // each leaf owns its value
             self.bind(lf.name, "local", leaf_off, lf.ty)
+            self.register_owner(leaf_off, lf.ty)
             i = i + 1
         }
+        self.drop_expr_temps(init)
     }
 
     fun collect_leaves(self, elems: [BindElem], t: Type) -> [DLeaf] {

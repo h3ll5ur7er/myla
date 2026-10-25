@@ -1985,6 +1985,7 @@ class CodeGen:
             else:
                 self._emit("movq (%rsi), %rax")
                 self._emit(f"movq %rax, {leaf_off}(%rbp)")
+                self._retain("rbp", leaf_off, t)   # a list/map/builder leaf owns a reference
             self._scopes[-1][leaf.name] = ("local", leaf_off, t)
             self._register_owner(leaf_off, t)
         self._drop_expr_temps(stmt.init)

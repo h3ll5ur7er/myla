@@ -64,5 +64,5 @@ The burn tests `tests/burn/test_selfhost_*.py` keep these gates; note they build
 
 - The three-stage fixed point holds: stage 2 and stage 3 output are identical (4.4 MB of assembly, 691 functions); stage 3 compiles the compiler in 1.5 s using 361 MB.
 - Against the interpreter, the stage 3 compiler matches on 31 of 34 examples (`floats.my` drops every float line, `modules/main.my` fails to load its package, `args` differs only in argv[0]).
-- The stage 4 CLI's `myla run` (the Myla interpreter, compiled) fails on programs that call methods ([[MYLA-21]]) and on floats.
+- The stage 4 CLI's `myla run` (the Myla interpreter, compiled) fails on floats ([[MYLA-29]]). Programs that call methods work since [[MYLA-21]].
 - Further bugs: [[MYLA-23]] … [[MYLA-27]], [[MYLA-32]], [[MYLA-33]]. See [[Project/Known-issues]].

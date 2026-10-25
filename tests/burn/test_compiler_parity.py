@@ -882,6 +882,28 @@ PROGRAMS = {
         "    m[2] = len(m) * 100\n"            # the size before the insert
         "    print(m[2])\n}\n"
     ),
+    # MYLA-21: destructuring reads a boxed (recursive) enum leaf through its
+    # pointer, and the leaves own their heap values.
+    "destructure_boxed_enum_and_list_leaves": (
+        "enum V { VI(int), VP(V), VU }\n"
+        "fun pair() -> (V, int) {\n    return (V.VI(5), 1)\n}\n"
+        "fun nested() -> ((V, [int]), str) {\n"
+        "    return ((V.VP(V.VI(2)), [1, 2, 3]), \"s\")\n}\n"
+        "fun show(v: V) -> int {\n"
+        "    return match v {\n"
+        "        VI(n) => n\n        VP(w) => 10 + show(w)\n        VU => 0\n    }\n}\n"
+        "#main\nfun main() {\n"
+        "    let (a, b) = pair()\n"
+        "    print(show(a))\n    print(b)\n"
+        "    let ((c, xs), s) = nested()\n"
+        "    print(show(c))\n    print(len(xs))\n    print(s)\n"
+        "    var keep: [[int]] = []\n"
+        "    for i in 0..3 {\n"
+        "        let (v, n) = (V.VI(i), [i, i])\n"
+        "        push(keep, n)\n"
+        "        print(show(v))\n    }\n"
+        "    print(len(keep[2]))\n}\n"
+    ),
     "try_in_an_expression_lambda_returns_from_the_lambda": (
         # the interpreter let the `?` escape the lambda and return from its
         # caller (found with MYLA-10)

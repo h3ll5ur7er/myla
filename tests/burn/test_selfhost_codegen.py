@@ -53,11 +53,13 @@ GEN_TOOL = os.path.join(_REPO, "selfhost", "gen_main.my")
 EXCLUDED = {"floats.my"}
 
 # Programs of the Python backend's parity suite (test_compiler_parity.PROGRAMS)
-# about stores: the value is evaluated before the container is touched, so `?`
-# and `push(xs, pop(xs))` see no half-made slot (MYLA-4), and an assignment to
-# any place unshares the containers on its path (MYLA-3); a match binding
-# keeps its value when the arm writes to the scrutinee's variable (MYLA-2).
-STORE_PROGRAMS = (
+# for bugs both backends had: the value of a store is evaluated before the
+# container is touched, so `?` and `push(xs, pop(xs))` see no half-made slot
+# (MYLA-4); an assignment to any place unshares the containers on its path
+# (MYLA-3); a match binding keeps its value when the arm writes to the
+# scrutinee's variable (MYLA-2); destructuring reads boxed enum leaves through
+# their pointer (MYLA-21).
+PARITY_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
     "try_inside_append_byte_leaves_the_builder_intact",
@@ -67,6 +69,7 @@ STORE_PROGRAMS = (
     "assign_heap_owning_struct_to_itself",
     "assign_to_a_field_of_a_shared_element_copies_it",
     "match_binding_survives_writes_to_the_scrutinee",
+    "destructure_boxed_enum_and_list_leaves",
 )
 
 
@@ -174,10 +177,10 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 20)
 
-    def test_stores_match_the_oracle(self) -> None:
+    def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS
 
-        for name in STORE_PROGRAMS:
+        for name in PARITY_PROGRAMS:
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, name + ".my")
                 with open(path, "w", encoding="utf-8") as fh:
