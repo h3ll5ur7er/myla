@@ -882,6 +882,46 @@ PROGRAMS = {
         "    m[2] = len(m) * 100\n"            # the size before the insert
         "    print(m[2])\n}\n"
     ),
+    # MYLA-2: a match binding is a value: writing to the scrutinee's variable
+    # in an arm must not change (or free) what the binding sees.
+    "match_binding_survives_writes_to_the_scrutinee": (
+        "struct Bag { items: [int], name: str }\n"
+        "enum Box { Full([int]), Empty }\n"
+        "fun churn() {\n"                       # reuses freed cells, if any
+        "    var big: [[int]] = []\n"
+        "    for i in 0..50 { push(big, [i, i, i, i]) }\n}\n"
+        "#main\nfun main() {\n"
+        "    var xs = [1]\n"
+        "    match xs {\n"
+        "        ys => {\n"
+        "            push(xs, 2)\n            push(xs, 3)\n"
+        "            push(xs, 4)\n            push(xs, 5)\n"
+        "            churn()\n"
+        "            print(len(ys))\n"
+        "            print(ys[0])\n        }\n    }\n"
+        "    var b = Bag { items: [1, 2], name: \"b\" }\n"
+        "    match b {\n"
+        "        Bag { items, name } => {\n"
+        "            b.items = [9]\n"
+        "            churn()\n"
+        "            print(len(items))\n"
+        "            print(items[1])\n        }\n    }\n"
+        "    var m: [int: int] = [1: 10]\n"
+        "    match m {\n"
+        "        mm => {\n"
+        "            m[2] = 20\n            m[3] = 30\n"
+        "            m[4] = 40\n            m[5] = 50\n            m[6] = 60\n"
+        "            churn()\n"
+        "            print(len(mm))\n        }\n    }\n"
+        "    var bx = Box.Full([7, 7, 7])\n"
+        "    match bx {\n"
+        "        Full(vs) => {\n"
+        "            bx = Box.Empty\n"
+        "            churn()\n"
+        "            print(len(vs))\n        },\n"
+        "        Empty => print(0),\n    }\n"
+        "    print(len(xs))\n}\n"
+    ),
     # MYLA-3: a heap-owning aggregate can be assigned to any place; the new
     # value is taken before the old one is released.
     "assign_heap_owning_struct_to_any_place": (

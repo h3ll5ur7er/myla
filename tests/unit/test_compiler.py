@@ -6,7 +6,8 @@ import unittest
 from unittest import mock
 
 from myla.compiler import compile_to_asm
-from myla.compiler.codegen_x86 import CodeGen
+from myla import ast
+from myla.compiler.codegen_x86 import CodeGen, _may_write, _place_root
 from myla.lexer import tokenize
 from myla.loader import default_stdlib_root, link
 from myla.parser import parse
@@ -168,6 +169,51 @@ class TestLineTables(unittest.TestCase):
         asm = self.asm(debug=True)
         for label in ("myla_main:", "myla_lib$twice:", "myla___lambda_0:"):
             self.assertRegex(self.function(asm, label)[-1], r"^\t\.loc \d+ 0 0$")
+
+
+
+class TestMatchScrutineeOwnership(unittest.TestCase):
+    """MYLA-2: the native match copy holds references only when an arm may
+    write to the variable the scrutinee comes from."""
+
+    def arms_write(self, arm: str, scrutinee: str = "s.items") -> bool:
+        src = (
+            "struct S { items: [int], n: int }\n"
+            "impl S {\n    fun bump(var self) { self.n = self.n + 1 }\n}\n"
+            "fun main() {\n"
+            "    var s = S { items: [1], n: 0 }\n"
+            "    var other = [1]\n"
+            f"    match {scrutinee} {{\n        xs => {{\n            {arm}\n        }}\n    }}\n"
+            "}\n"
+        )
+        main = next(d for d in parse(tokenize(src)).decls
+                    if isinstance(d, ast.FunDecl) and d.name == "main")
+        match = main.body.statements[-1].expr
+        root = _place_root(match.scrutinee)
+        return any(_may_write([arm.guard, arm.body], root) for arm in match.arms)
+
+    def test_place_roots(self):
+        def root(code):
+            return _place_root(parse(tokenize(f"fun f() {{\n    let v = {code}\n}}\n"))
+                               .decls[0].body.statements[0].init)
+        self.assertEqual(root("a"), "a")
+        self.assertEqual(root("a.b[3].c"), "a")
+        self.assertIsNone(root("g(a)"))
+        self.assertIsNone(root("[1, 2]"))
+
+    def test_reads_are_not_writes(self):
+        self.assertFalse(self.arms_write("print(len(xs) + s.n)"))
+        self.assertFalse(self.arms_write("push(other, s.n)"))
+        self.assertFalse(self.arms_write("other = s.items"))
+
+    def test_writes_through_the_root_variable(self):
+        self.assertTrue(self.arms_write("s.n = 2"))
+        self.assertTrue(self.arms_write("s.items[0] = 2"))
+        self.assertTrue(self.arms_write("push(s.items, 2)"))
+        self.assertTrue(self.arms_write("s.items |> push(2)"))  # parsed as push(s.items, 2)
+        self.assertTrue(self.arms_write("s.bump()"))           # may take `var self`
+        self.assertTrue(self.arms_write("if true {\n                s = S { items: [], n: 1 }\n            }"))
+        self.assertTrue(self.arms_write("push(s.items, 1)", scrutinee="s"))
 
 
 if __name__ == "__main__":

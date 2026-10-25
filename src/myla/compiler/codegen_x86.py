@@ -21,6 +21,7 @@ Conventions chosen for v0.0 (internal; we never call into C):
 """
 from __future__ import annotations
 
+import dataclasses
 import struct
 
 from .. import ast
@@ -2022,6 +2023,19 @@ class CodeGen:
         else:
             self._eval(expr.scrutinee)
             self._emit(f"movq %rax, {root}(%rbp)")
+        # When an arm may write to the variable the scrutinee comes from
+        # (`match xs { ys => push(xs, 1) }`), the copy holds its own references
+        # (MYLA-2): the bindings borrow from the copy, and the write copies on
+        # write instead of changing or freeing what they see. It is released
+        # after the match, or by an early exit from an arm. Otherwise (no arm
+        # writes it, or it is a temporary such as a `?` operand) the bindings
+        # can safely borrow from the scrutinee itself.
+        root_var = _place_root(expr.scrutinee)
+        owns_copy = (root_var is not None and self._owns_heap(sst)
+                     and any(_may_write([arm.guard, arm.body], root_var) for arm in expr.arms))
+        if owns_copy:
+            self._retain("rbp", root, sst)
+        self._drop_scopes.append([(root, sst)] if owns_copy else [])
 
         result_off = self._locals.get(f"matchres:{id(expr)}")
         result_type = expr.resolved_type
@@ -2029,8 +2043,7 @@ class CodeGen:
         for arm in expr.arms:
             arm_fail = self._label()
             self._match_pat(arm.pattern, root, sst, arm, arm_fail)
-            # bindings and the scrutinee copy borrow from the scrutinee, which
-            # outlives the match, so they introduce no owners of their own.
+            # bindings borrow from the scrutinee copy: no owners of their own
             self._scopes.append(self._arm_scope(arm))
             self._drop_scopes.append([])
             if arm.guard is not None:
@@ -2044,6 +2057,9 @@ class CodeGen:
             self._emit(f"{arm_fail}:")
         self._emit("jmp __trap")   # unreachable when the match is exhaustive
         self._emit(f"{end}:")
+        self._drop_scopes.pop()
+        if owns_copy:
+            self._drop_value("rbp", root, sst)
 
     def _arm_scope(self, arm: ast.MatchArm) -> dict:
         binds: dict = {}
@@ -5235,6 +5251,42 @@ def _const_scalar(literal) -> int:
 def _asm_string(text: str) -> str:
     """Escape `text` for a double-quoted GAS string."""
     return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _place_root(expr: ast.Expr) -> str | None:
+    """The variable a place (`x`, `x.f`, `x[i].g`) starts from, or None when
+    `expr` is not a place."""
+    while isinstance(expr, (ast.FieldAccess, ast.TupleIndex, ast.Index)):
+        if getattr(expr, "enum_ctor", None) is not None:
+            return None
+        expr = expr.target
+    if isinstance(expr, ast.Name) and getattr(expr, "func_ref", None) is None:
+        return expr.ident
+    return None
+
+
+_MUTATING_BUILTINS = ("push", "pop", "remove", "append", "append_byte")
+
+
+def _may_write(node, name: str) -> bool:
+    """Whether running `node` may write to variable `name`, conservatively: an
+    assignment to or into it, a mutating builtin on it, or a method call on it
+    (the method may take `var self`). Myla has no references and closures
+    capture by value, so nothing else can."""
+    if isinstance(node, list):
+        return any(_may_write(n, name) for n in node)
+    if not isinstance(node, ast.Node):
+        return False
+    if isinstance(node, ast.Assign) and _place_root(node.target) == name:
+        return True
+    if isinstance(node, ast.Call):
+        callee = node.callee
+        if isinstance(callee, ast.FieldAccess) and _place_root(callee.target) == name:
+            return True
+        if (isinstance(callee, ast.Name) and callee.ident in _MUTATING_BUILTINS
+                and node.args and _place_root(node.args[0]) == name):
+            return True
+    return any(_may_write(getattr(node, f.name), name) for f in dataclasses.fields(node))
 
 
 def generate(checker: Checker, debug: bool = False) -> str:

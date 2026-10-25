@@ -2630,14 +2630,25 @@ impl CodeGen {
             self.eval(scrut)
             self.emit(format("movq %rax, {}(%rbp)", root))
         }
+        // When an arm may write to the variable the scrutinee comes from
+        // (`match xs { ys => push(xs, 1) }`), the copy holds its own references
+        // (MYLA-2): the bindings borrow from the copy, and the write copies on
+        // write instead of changing or freeing what they see. It is released
+        // after the match, or by an early exit from an arm. Otherwise (no arm
+        // writes it, or it is a temporary such as a `?` operand) the bindings
+        // can safely borrow from the scrutinee itself.
+        let root_var = place_root(scrut)
+        let owns_copy = root_var != "" && self.owns_heap(sst) && arms_may_write(arms, root_var)
+        if owns_copy { self.retain("rbp", root, sst) }
+        push(self.drop_scopes, [])
+        if owns_copy { self.register_owner(root, sst) }
         let result_off = self.match_res[e.id]
         let result_type = self.type_of(e.id)
         let end = self.label()
         for arm in arms {
             let arm_fail = self.label()
             self.match_pat(arm.pattern, root, sst, arm.pattern.id, arm_fail)
-            // Bindings and the scrutinee copy borrow from the scrutinee (which
-            // outlives the match), so the arm scope owns nothing of its own.
+            // bindings borrow from the scrutinee copy: no owners of their own
             push(self.scopes, self.arm_scope(arm, sst))
             push(self.drop_scopes, [])
             match arm.guard {
@@ -2656,6 +2667,8 @@ impl CodeGen {
         }
         self.emit("jmp __trap")
         self.emit(format("{}:", end))
+        self.drop_scopes = drop_last(self.drop_scopes)
+        if owns_copy { self.drop_value("rbp", root, sst) }
     }
 
     fun arm_scope(self, arm: MatchArm, sst: Type) -> [CgBinding] {
@@ -5840,6 +5853,113 @@ fun is_place(e: Expr) -> bool {
         ExprKind.TupleIndex(t, i) => true,
         _ => false,
     }
+}
+
+// The variable a place (`x`, `x.f`, `x[i].g`) starts from, or "" when `e` is
+// not a place.
+fun place_root(e: Expr) -> str {
+    return match e.kind {
+        ExprKind.Name(n) => n,
+        ExprKind.GetField(t, f) => place_root(t),
+        ExprKind.TupleIndex(t, i) => place_root(t),
+        ExprKind.Index(t, i) => place_root(t),
+        _ => "",
+    }
+}
+
+fun is_mutating_builtin(n: str) -> bool {
+    return n == "push" || n == "pop" || n == "remove" || n == "append" || n == "append_byte"
+}
+
+// Whether running an arm (guard and body) may write to variable `name`,
+// conservatively: an assignment to or into it, a mutating builtin on it, or a
+// method call on it (the method may take `var self`). Myla has no references
+// and closures capture by value, so nothing else can.
+fun arms_may_write(arms: [MatchArm], name: str) -> bool {
+    for arm in arms {
+        match arm.guard { Some(g) => { if may_write_expr(g, name) { return true } }, None => {} }
+        if may_write_body(arm.body, name) { return true }
+    }
+    return false
+}
+
+fun may_write_body(b: ExprOrBlock, name: str) -> bool {
+    return match b {
+        ExprOrBlock.EB_Expr(e) => may_write_expr(e, name),
+        ExprOrBlock.EB_Block(blk) => may_write_block(blk, name),
+    }
+}
+
+fun may_write_block(b: Block, name: str) -> bool {
+    for st in b.stmts { if may_write_stmt(st, name) { return true } }
+    return false
+}
+
+fun may_write_opt(oe: Option<Expr>, name: str) -> bool {
+    return match oe { Some(e) => may_write_expr(e, name), None => false }
+}
+
+fun may_write_exprs(es: [Expr], name: str) -> bool {
+    for e in es { if may_write_expr(e, name) { return true } }
+    return false
+}
+
+fun may_write_stmt(st: Stmt, name: str) -> bool {
+    match st.kind {
+        StmtKind.VarDecl(k, n, ty, init) => { return may_write_expr(init, name) },
+        StmtKind.DestructDecl(k, bs, ty, init) => { return may_write_expr(init, name) },
+        StmtKind.Assign(target, value) => {
+            return place_root(target) == name || may_write_expr(target, name) || may_write_expr(value, name)
+        },
+        StmtKind.IfS(c, then, otherwise) => {
+            if may_write_expr(c, name) || may_write_block(then, name) { return true }
+            return match otherwise {
+                Some(ElseTail.ElseBlock(b)) => may_write_block(b, name),
+                Some(ElseTail.ElseIf(s)) => may_write_stmt(s, name),
+                _ => false,
+            }
+        },
+        StmtKind.WhileS(c, body) => { return may_write_expr(c, name) || may_write_block(body, name) },
+        StmtKind.ForS(v, start, end, body, iter) => {
+            return may_write_opt(start, name) || may_write_opt(end, name) || may_write_opt(iter, name) || may_write_block(body, name)
+        },
+        StmtKind.ReturnS(ov) => { return may_write_opt(ov, name) },
+        StmtKind.ExprStmt(e) => { return may_write_expr(e, name) },
+        _ => {},
+    }
+    return false
+}
+
+fun may_write_expr(e: Expr, name: str) -> bool {
+    match e.kind {
+        ExprKind.Unary(op, x) => { return may_write_expr(x, name) },
+        ExprKind.Binary(op, l, r) => { return may_write_expr(l, name) || may_write_expr(r, name) },
+        ExprKind.Call(c, args) => {
+            let writes = match c.kind {
+                ExprKind.GetField(recv, m) => place_root(recv) == name,
+                ExprKind.Name(f) => is_mutating_builtin(f) && len(args) > 0 && place_root(args[0]) == name,
+                _ => false,
+            }
+            return writes || may_write_expr(c, name) || may_write_exprs(args, name)
+        },
+        ExprKind.GetField(t, f) => { return may_write_expr(t, name) },
+        ExprKind.StructLit(n, fields) => {
+            for fi in fields { if may_write_expr(fi.value, name) { return true } }
+        },
+        ExprKind.TupleLit(es) => { return may_write_exprs(es, name) },
+        ExprKind.TupleIndex(t, i) => { return may_write_expr(t, name) },
+        ExprKind.ListLit(es) => { return may_write_exprs(es, name) },
+        ExprKind.MapLit(entries) => {
+            for en in entries { if may_write_expr(en.key, name) || may_write_expr(en.value, name) { return true } }
+        },
+        ExprKind.Index(t, i) => { return may_write_expr(t, name) || may_write_expr(i, name) },
+        ExprKind.MatchE(s, arms) => { return may_write_expr(s, name) || arms_may_write(arms, name) },
+        ExprKind.Try(x) => { return may_write_expr(x, name) },
+        ExprKind.Cast(x, ty) => { return may_write_expr(x, name) },
+        ExprKind.Lambda(ps, rt, body) => { return may_write_body(body, name) },
+        _ => {},
+    }
+    return false
 }
 
 fun struct_name_of(t: Type) -> str {
