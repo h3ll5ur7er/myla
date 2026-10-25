@@ -39,7 +39,7 @@ Myla has no global variables and no module-level maps, and everything is a value
 | --- | --- | --- |
 | Modules | Qualified names, privacy, packages | Text concatenation ([[MYLA-30]]) |
 | Monomorphization | Separate pass, then a second check | During code generation, with a substitution list |
-| Floats | Full support | None: the AST keeps only the literal's suffix ([[MYLA-29]]) |
+| Floats | Full support | Full support since [[MYLA-29]]: literals converted with integer arithmetic (`selfhost/floatlit.my`), the float runtime generated from the Python backend's (`scripts/gen_selfhost_runtime.py`) |
 | Diagnostics | Messages with file positions | Positions only, offset by the prelude ([[MYLA-28]]) |
 | Runtime errors | Messages | Silent `__trap` (exit 1) |
 | Heap | 1 GiB arena, size-class free lists up to 4 KiB | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]) |
@@ -63,6 +63,6 @@ The burn tests `tests/burn/test_selfhost_*.py` keep these gates; note they build
 ## Current state
 
 - The three-stage fixed point holds: stage 2 and stage 3 output are identical (4.7 MB of assembly); stage 3 compiles the compiler in 1.3 s with a 163 MB peak (359 MB while `free` was disabled, [[MYLA-22]]).
-- Against the interpreter, the stage 3 compiler matches on 31 of 34 examples (`floats.my` drops every float line, `modules/main.my` fails to load its package, `args` differs only in argv[0]).
-- The stage 4 CLI's `myla run` (the Myla interpreter, compiled) fails on floats ([[MYLA-29]]). Programs that call methods work since [[MYLA-21]].
+- Against the interpreter, the stage 3 compiler matches on 32 of 34 examples (`modules/main.my` fails to load its package, [[MYLA-30]]; `args` differs only in argv[0]).
+- The stage 4 CLI's `myla run` and `myla test` (the Myla interpreter, compiled) match the Python interpreter on every single-file example, floats included ([[MYLA-21]], [[MYLA-29]]).
 - Further bugs: [[MYLA-23]] … [[MYLA-27]], [[MYLA-32]], [[MYLA-33]]. See [[Project/Known-issues]].

@@ -19,10 +19,7 @@ the Python interpreter.
 Scope. The gate covers the single-file top-level examples — the import-driven
 multi-file packages under `examples/<pkg>/` need a module loader the
 self-hosted `interp_main` does not have (same boundary as the checker gate).
-`floats.my` is excluded: the self-hosted AST records only a float literal's
-*suffix*, not its digits (`FloatLit(Option<str>)`), so the interpreter cannot
-reconstruct float values yet — a parser/AST limitation tracked separately, not
-an interpreter-port gap.
+`floats.my` is included since the self-hosted toolchain has floats (MYLA-29).
 """
 from __future__ import annotations
 
@@ -47,7 +44,7 @@ _REPO = os.path.abspath(
 INTERP_TOOL = os.path.join(_REPO, "selfhost", "interp_main.my")
 
 # Examples outside the v0.8 interpreter gate's scope (see module docstring).
-EXCLUDED = {"floats.my"}
+EXCLUDED: set[str] = set()
 
 
 def _corpus() -> list[str]:

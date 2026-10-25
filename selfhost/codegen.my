@@ -11,6 +11,7 @@
 // build and run a `hello`-class program through `as`/`ld` with parity.
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem
+from .floatlit import f64_literal_bits, f32_round_bits
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
@@ -87,6 +88,7 @@ pub struct CodeGen {
     scopes: [[CgBinding]],
     drop_scopes: [[DropEntry]],
     staged_drops: [StagedDrops],
+    uses_float: bool,
     loops: [LoopLab],
     cursor: int32,
     epilogue: str,
@@ -119,7 +121,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         subst: [], fn_worklist: [], fn_done: [],
         lam_jobs: [], lam_done: [], partial_jobs: [], fnval_set: [],
         cur_mangled: "",
-        scopes: [], drop_scopes: [], staged_drops: [], loops: [],
+        scopes: [], drop_scopes: [], staged_drops: [], uses_float: false, loops: [],
         cursor: 0,
         epilogue: "", struct_ret: false, ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
@@ -834,6 +836,7 @@ impl CodeGen {
         for pj in self.partial_jobs { self.gen_partial_function(pj) }
         for n in self.fnval_set { self.emit_fnval_thunk(n) }
         self.emit_drop_helpers()
+        if self.uses_float { for chunk in self.float_runtime_text() { self.raw(chunk) } }
         return self.assemble_source()
     }
 
@@ -900,6 +903,7 @@ impl CodeGen {
         push(out, ".Lstr_false:\n\t.quad 5\n\t.ascii \"false\"")
         push(out, ".Lstr_minus:\n\t.quad 1\n\t.ascii \"-\"")
         for line in self.rodata { push(out, line) }
+        if self.uses_float { for chunk in self.float_rodata_text() { push(out, chunk) } }
         push(out, "")
         push(out, "\t.bss")
         push(out, "\t.align 8")
@@ -1565,6 +1569,14 @@ impl CodeGen {
                 self.emit(format("movabsq ${}, %rax", v))
                 if !isc { self.wrap(self.type_of(e.id)) }
             },
+            ExprKind.FloatLit(lex, suf) => {
+                // a float is carried as its f64 bit pattern; a float32 as the
+                // double of its single-precision value (MYLA-29)
+                self.uses_float = true
+                var bits = f64_literal_bits(lex)
+                if is_tfloat32(self.type_of(e.id)) { bits = f32_round_bits(bits) }
+                self.emit(format("movabsq ${}, %rax", bits))
+            },
             ExprKind.BoolLit(b) => {
                 var one = 0
                 if b { one = 1 }
@@ -1651,7 +1663,11 @@ impl CodeGen {
 
     fun eval_unary(var self, e: Expr, op: str, x: Expr) {
         self.eval(x)
-        if op == "-" {
+        if op == "-" && is_tfloat(self.type_of(e.id)) {
+            self.uses_float = true
+            self.emit("movabsq $-9223372036854775808, %rcx")   // the sign bit
+            self.emit("xorq %rcx, %rax")
+        } else if op == "-" {
             self.emit("negq %rax")
             self.wrap(self.type_of(e.id))
         } else if op == "~" {
@@ -1674,6 +1690,10 @@ impl CodeGen {
             return
         }
         let lt = self.type_of(l.id)
+        if is_tfloat(lt) {
+            self.eval_binary_float(e, op, l, r)
+            return
+        }
         if is_overloadable_op(op) && is_struct_or_enum_t(lt) {
             self.gen_overloaded_binary(e, op, l, r, lt)
             return
@@ -1831,7 +1851,94 @@ impl CodeGen {
             self.wrap(tgt)
             return
         }
+        if is_tfloat(tgt) {
+            self.uses_float = true
+            if is_tfloat(src) {
+                // the runtime image is already f64; only narrowing changes it
+                self.emit("movq %rax, %xmm0")
+                self.round_xmm0(tgt)
+                self.emit("movq %xmm0, %rax")
+                return
+            }
+            let is_u64 = match src { Type.TInt(w, sg) => w == 64 && !sg, _ => false }
+            if is_u64 {
+                // uint64 with the high bit set can't go through the signed
+                // cvtsi2sd: halve with round-to-odd, convert, double
+                let direct = self.label()
+                let done = self.label()
+                self.emit("testq %rax, %rax")
+                self.emit(format("jns {}", direct))
+                self.emit("movq %rax, %rcx")
+                self.emit("shrq $1, %rcx")
+                self.emit("andq $1, %rax")
+                self.emit("orq %rax, %rcx")
+                self.emit("cvtsi2sdq %rcx, %xmm0")
+                self.emit("addsd %xmm0, %xmm0")
+                self.emit(format("jmp {}", done))
+                self.emit(format("{}:", direct))
+                self.emit("cvtsi2sdq %rax, %xmm0")
+                self.emit(format("{}:", done))
+            } else {
+                self.emit("cvtsi2sdq %rax, %xmm0")
+            }
+            self.round_xmm0(tgt)
+            self.emit("movq %xmm0, %rax")
+            return
+        }
+        if is_tfloat(src) {
+            // float -> int: truncate toward zero
+            self.uses_float = true
+            self.emit("movq %rax, %xmm0")
+            self.emit("cvttsd2si %xmm0, %rax")
+        }
         self.wrap(tgt)
+    }
+
+    // Narrow %xmm0 to single precision when `t` is float32 (round to nearest),
+    // then widen it back to the f64 image floats are carried as.
+    fun round_xmm0(var self, t: Type) {
+        if is_tfloat32(t) {
+            self.emit("cvtsd2ss %xmm0, %xmm0")
+            self.emit("cvtss2sd %xmm0, %xmm0")
+        }
+    }
+
+    // Float arithmetic and comparisons: the operands are f64 images in %rax,
+    // computed in XMM; `%` is fmod; float32 results are narrowed.
+    fun eval_binary_float(var self, e: Expr, op: str, l: Expr, r: Expr) {
+        self.uses_float = true
+        self.eval(r)
+        self.emit("pushq %rax")
+        self.eval(l)
+        self.emit("popq %rcx")
+        self.emit("movq %rax, %xmm0")
+        self.emit("movq %rcx, %xmm1")
+        if op == "+" || op == "-" || op == "*" || op == "/" || op == "%" {
+            if op == "+" { self.emit("addsd %xmm1, %xmm0") }
+            else if op == "-" { self.emit("subsd %xmm1, %xmm0") }
+            else if op == "*" { self.emit("mulsd %xmm1, %xmm0") }
+            else if op == "/" { self.emit("divsd %xmm1, %xmm0") }
+            else { self.emit("call __fmod") }
+            self.round_xmm0(self.type_of(e.id))
+            self.emit("movq %xmm0, %rax")
+            return
+        }
+        // comparison -> 0/1; NaN compares unordered (only != is true)
+        self.emit("ucomisd %xmm1, %xmm0")
+        if op == ">" { self.emit("seta %al") }
+        else if op == ">=" { self.emit("setae %al") }
+        else if op == "!=" {
+            self.emit("setne %al")
+            self.emit("setp %cl")
+            self.emit("orb %cl, %al")
+        } else {
+            if op == "<" { self.emit("setb %al") }
+            else if op == "<=" { self.emit("setbe %al") }
+            else { self.emit("sete %al") }
+            self.emit("setnp %cl")
+            self.emit("andb %cl, %al")
+        }
+        self.emit("movzbq %al, %rax")
     }
 
     fun wrap(var self, t: Type) {
@@ -2518,6 +2625,14 @@ impl CodeGen {
                 self.emit("movq %rax, %rdi")
                 if s { self.emit("call __int_to_str") }
                 else { self.emit("call __uint_to_str") }
+            },
+            Type.TFloat(w) => {
+                self.emit("movq %rax, %rdi")
+                self.float_to_str(w)
+            },
+            Type.TChar => {
+                self.emit("movq %rax, %rdi")
+                self.emit("call __char_to_str")
             },
             _ => {},
         }
@@ -3621,8 +3736,23 @@ impl CodeGen {
                 if s { self.emit("call __print_int") }
                 else { self.emit("call __print_uint") }
             },
+            Type.TFloat(w) => {
+                self.float_to_str(w)
+                self.emit("movq %rax, %rdi")
+                self.emit("call __print_str")
+            },
             _ => {},
         }
+    }
+
+    // %rdi = a float's f64 image -> %rax = its text: 9 significant digits for
+    // a float32, 17 for a float64, as the interpreter prints it.
+    fun float_to_str(var self, width: int32) {
+        self.uses_float = true
+        var digits = 17
+        if width == 32 { digits = 9 }
+        self.emit(format("movq ${}, %rsi", digits))
+        self.emit("call __float_to_str")
     }
 
     // -- runtime prelude (_start + print/heap helpers) --------------------
@@ -4003,6 +4133,7 @@ impl CodeGen {
         self.emit_sb_runtime()
         self.emit_map_runtime()
         self.emit_char_runtime()
+        for chunk in self.char_to_str_text() { self.raw(chunk) }
         self.emit_compose_runtime()
         self.emit_io_runtime()
         self.emit_derived_eq()
@@ -4703,6 +4834,75 @@ impl CodeGen {
         self.raw("\tjmp __free")
         self.raw("")
     }
+
+    // -- BEGIN generated runtime (scripts/gen_selfhost_runtime.py renders the Python backend's
+    // _emit_float_runtime, _float_rodata and _emit_char_runtime; don't
+    // edit by hand)
+
+    // __fmod, __float_to_str and their helpers: emitted once, after the
+    // functions, when the program uses floats.
+    fun float_runtime_text(self) -> [str] {
+        return [
+            "\n__fmod:\n\tsubq $16, %rsp\n\tmovsd %xmm1, (%rsp)\n\tmovsd %xmm0, 8(%rsp)\n\tfldl (%rsp)\n\tfldl 8(%rsp)\n.Lfm_loop:\n\tfprem\n\tfnstsw %ax\n\ttestb $0x04, %ah\n\tjnz .Lfm_loop\n\tfstpl 8(%rsp)\n\tfstp %st(0)\n\tmovsd 8(%rsp), %xmm0\n\taddq $16, %rsp\n\tret\n\n__two_prod:\n\tmovsd __fbig(%rip), %xmm7\n\tucomisd %xmm7, %xmm0\n\tjbe .Ltp_b\n\tmulsd __fdown(%rip), %xmm0\n\tmulsd __fup(%rip), %xmm1\n\tjmp .Ltp_split\n.Ltp_b:\n\tucomisd %xmm7, %xmm1\n\tjbe .Ltp_split\n\tmulsd __fup(%rip), %xmm0\n\tmulsd __fdown(%rip), %xmm1\n.Ltp_split:\n\tmovsd __fsplit(%rip), %xmm7\n\tmovsd %xmm0, %xmm2\n\tmulsd %xmm7, %xmm2\n\tmovsd %xmm2, %xmm3\n\tsubsd %xmm0, %xmm3\n\tsubsd %xmm3, %xmm2\n\tmovsd %xmm0, %xmm3\n\tsubsd %xmm2, %xmm3\n\tmovsd %xmm1, %xmm4",
+            "\tmulsd %xmm7, %xmm4\n\tmovsd %xmm4, %xmm5\n\tsubsd %xmm1, %xmm5\n\tsubsd %xmm5, %xmm4\n\tmovsd %xmm1, %xmm5\n\tsubsd %xmm4, %xmm5\n\tmulsd %xmm1, %xmm0\n\tmovsd %xmm2, %xmm6\n\tmulsd %xmm4, %xmm6\n\tsubsd %xmm0, %xmm6\n\tmovsd %xmm2, %xmm7\n\tmulsd %xmm5, %xmm7\n\taddsd %xmm7, %xmm6\n\tmovsd %xmm3, %xmm7\n\tmulsd %xmm4, %xmm7\n\taddsd %xmm7, %xmm6\n\tmovsd %xmm3, %xmm7\n\tmulsd %xmm5, %xmm7\n\taddsd %xmm7, %xmm6\n\tmovsd %xmm6, %xmm1\n\tret\n\n__fscale:\n\txorpd %xmm9, %xmm9\n\tcmpq $308, %r12\n\tjle .Lfsc_direct\n\tmovsd %xmm8, %xmm0\n\tleaq __pow10_hi(%rip), %rax\n\tmovsd 4184(%rax), %xmm1\n\tcall __two_prod\n\tleaq __pow10_lo(%rip), %rax\n\tmovsd 4184(%rax), %xmm2\n\tmovsd %xmm8, %xmm3\n\tmulsd %xmm2, %xmm3\n\taddsd %xmm3, %xmm1\n\tmovsd %xmm1, %xmm9\n\tmovsd %xmm0, %xmm8\n\tsubq $200, %r12\n.Lfsc_direct:\n\tleaq 323(%r12), %r11",
+            "\tmovsd %xmm8, %xmm0\n\tleaq __pow10_hi(%rip), %rax\n\tmovsd (%rax,%r11,8), %xmm1\n\tcall __two_prod\n\tleaq __pow10_lo(%rip), %rax\n\tmovsd (%rax,%r11,8), %xmm2\n\tmovsd %xmm8, %xmm3\n\tmulsd %xmm2, %xmm3\n\taddsd %xmm3, %xmm1\n\tleaq __pow10_hi(%rip), %rax\n\tmovsd (%rax,%r11,8), %xmm4\n\tmulsd %xmm9, %xmm4\n\taddsd %xmm4, %xmm1\n\tcvtsd2si %xmm0, %rax\n\tcvtsd2si %xmm1, %rcx\n\taddq %rcx, %rax\n\tret\n\n__float_to_str:\n\tpushq %rbp\n\tmovq %rsp, %rbp\n\tpushq %rbx\n\tpushq %r12\n\tpushq %r13\n\tpushq %r14\n\tpushq %r15\n\tsubq $1088, %rsp\n\tmovq %rdi, %rbx\n\tmovq %rsi, %r15\n\tmovq %rbx, %rax\n\tmovabsq $0x7fffffffffffffff, %rcx\n\tandq %rcx, %rax\n\tmovabsq $0x7ff0000000000000, %rcx\n\tcmpq %rcx, %rax\n\tja .Lf_nan\n\tje .Lf_inf\n\ttestq %rax, %rax\n\tjz .Lf_zero\n\txorq %r14, %r14\n\ttestq %rbx, %rbx",
+            "\tjns .Lf_pos\n\tmovq $1, %r14\n.Lf_pos:\n\tmovq %rax, %xmm8\n\txorq %r8, %r8\n\tmovq $631, %r9\n\tmovq $-1, %r10\n\tleaq __pow10_hi(%rip), %r13\n.Lf_bs:\n\tcmpq %r9, %r8\n\tjg .Lf_bsd\n\tleaq (%r8,%r9), %r11\n\tsarq $1, %r11\n\tmovsd (%r13,%r11,8), %xmm0\n\tucomisd %xmm0, %xmm8\n\tjb .Lf_bs_lo\n\tmovq %r11, %r10\n\tleaq 1(%r11), %r8\n\tjmp .Lf_bs\n.Lf_bs_lo:\n\tleaq -1(%r11), %r9\n\tjmp .Lf_bs\n.Lf_bsd:\n\tmovq %r15, %r12\n\tdecq %r12\n\taddq $323, %r12\n\tsubq %r10, %r12\n\tcall __fscale\n\tmovq $1, %r8\n\tmovq %r15, %rcx\n\tdecq %rcx\n.Lf_p10:\n\ttestq %rcx, %rcx\n\tjz .Lf_p10d\n\timulq $10, %r8\n\tdecq %rcx\n\tjmp .Lf_p10\n.Lf_p10d:\n\tleaq (%r8,%r8,4), %r9\n\taddq %r9, %r9",
+            "\tcmpq %r9, %rax\n\tjb .Lf_norm2\n\txorq %rdx, %rdx\n\tmovq $10, %rcx\n\tdivq %rcx\n\tincq %r10\n.Lf_norm2:\n\tcmpq %r8, %rax\n\tjae .Lf_digits\n\tmovq %r8, %rax\n.Lf_digits:\n\tleaq -1088(%rbp), %rdi\n\tmovq %r15, %rcx\n\tleaq -1(%rdi,%rcx), %rsi\n\tmovq $10, %r11\n.Lf_dg:\n\txorq %rdx, %rdx\n\tdivq %r11\n\taddb $48, %dl\n\tmovb %dl, (%rsi)\n\tdecq %rsi\n\tdecq %rcx\n\tjnz .Lf_dg\n\tmovq %r15, %rcx\n\tleaq -1088(%rbp), %rdi\n.Lf_trim:\n\tcmpq $1, %rcx\n\tjle .Lf_trimd\n\tmovzbl -1(%rdi,%rcx), %eax\n\tcmpb $48, %al\n\tjne .Lf_trimd\n\tdecq %rcx\n\tjmp .Lf_trim\n.Lf_trimd:\n\tmovq %rcx, %r8\n\tleaq -323(%r10), %r13\n\tleaq -512(%rbp), %r12\n\tmovq %r12, %rdi\n\ttestq %r14, %r14\n\tjz .Lf_nosign",
+            "\tmovb $45, (%rdi)\n\tincq %rdi\n.Lf_nosign:\n\tleaq -1088(%rbp), %rsi\n\tcld\n\tmovq %r8, %rax\n\tdecq %rax\n\tcmpq %rax, %r13\n\tjge .Lf_brA\n\ttestq %r13, %r13\n\tjs .Lf_brC\n\tleaq 1(%r13), %rcx\n\trep movsb\n\tmovb $46, (%rdi)\n\tincq %rdi\n\tmovq %r8, %rcx\n\tsubq %r13, %rcx\n\tdecq %rcx\n\trep movsb\n\tjmp .Lf_emit\n.Lf_brA:\n\tmovq %r8, %rcx\n\trep movsb\n\tmovq %r13, %rcx\n\tsubq %r8, %rcx\n\tincq %rcx\n.Lf_zA:\n\ttestq %rcx, %rcx\n\tjz .Lf_emit\n\tmovb $48, (%rdi)\n\tincq %rdi\n\tdecq %rcx\n\tjmp .Lf_zA\n.Lf_brC:\n\tmovb $48, (%rdi)\n\tincq %rdi\n\tmovb $46, (%rdi)\n\tincq %rdi\n\tmovq %r13, %rcx\n\tnegq %rcx",
+            "\tdecq %rcx\n.Lf_zC:\n\ttestq %rcx, %rcx\n\tjz .Lf_cC\n\tmovb $48, (%rdi)\n\tincq %rdi\n\tdecq %rcx\n\tjmp .Lf_zC\n.Lf_cC:\n\tmovq %r8, %rcx\n\trep movsb\n.Lf_emit:\n\tmovq %rdi, %r8\n\tsubq %r12, %r8\n\tleaq 8(%r8), %rdi\n\tpushq %r8\n\tpushq %r12\n\tcall __alloc\n\tpopq %r12\n\tpopq %r8\n\tmovq %r8, (%rax)\n\tleaq 8(%rax), %rdi\n\tmovq %r12, %rsi\n\tmovq %r8, %rcx\n\tcld\n\tpushq %rax\n\trep movsb\n\tpopq %rax\n\tjmp .Lf_ret\n.Lf_nan:\n\tleaq .Lstr_nan(%rip), %rax\n\tjmp .Lf_ret\n.Lf_inf:\n\ttestq %rbx, %rbx\n\tjs .Lf_ninf\n\tleaq .Lstr_inf(%rip), %rax\n\tjmp .Lf_ret\n.Lf_ninf:\n\tleaq .Lstr_ninf(%rip), %rax\n\tjmp .Lf_ret",
+            ".Lf_zero:\n\ttestq %rbx, %rbx\n\tjs .Lf_nzero\n\tleaq .Lstr_fzero(%rip), %rax\n\tjmp .Lf_ret\n.Lf_nzero:\n\tleaq .Lstr_fnzero(%rip), %rax\n.Lf_ret:\n\tleaq -40(%rbp), %rsp\n\tpopq %r15\n\tpopq %r14\n\tpopq %r13\n\tpopq %r12\n\tpopq %rbx\n\tpopq %rbp\n\tret\n",
+        ]
+    }
+
+    // The float runtime's read-only data: 10^k as double-double (high and
+    // low parts, k = -323 … 308) and the constants and strings it uses.
+    fun float_rodata_text(self) -> [str] {
+        return [
+            "\t.align 8\n__pow10_hi:\n\t.quad 2\n\t.quad 20\n\t.quad 202\n\t.quad 2024\n\t.quad 20240\n\t.quad 202402\n\t.quad 2024023\n\t.quad 20240225\n\t.quad 202402253\n\t.quad 2024022533\n\t.quad 20240225331\n\t.quad 202402253307\n\t.quad 2024022533073\n\t.quad 20240225330731\n\t.quad 202402253307311\n\t.quad 2024022533073106\n\t.quad 14067255587423757\n\t.quad 28843068552705937\n\t.quad 43935135038780789\n\t.quad 58984656790831465\n\t.quad 73730820988539331\n\t.quad 88785826515146292\n\t.quad 103904837566199265\n\t.quad 118622047889322841\n\t.quad 133640861072699439\n\t.quad 148827732767309341\n\t.quad 163516667822284197\n\t.quad 178500136920474894\n\t.quad 193753278774808361\n\t.quad 208414601263231731\n\t.quad 223363554653233072\n\t.quad 238672046670206876\n\t.quad 253315770551822017\n\t.quad 268231017195544690\n\t.quad 283497375779670158\n\t.quad 298220099847875929\n\t.quad 313102429747185839\n\t.quad 328327642400795355",
+            "\t.quad 343127515088718537\n\t.quad 357977699729812859\n\t.quad 373162730810652889\n\t.quad 388037943947518856\n\t.quad 402856736734887018\n\t.quad 418002527998569348\n\t.quad 432951315792606003\n\t.quad 447739452472819711\n\t.quad 462846923602558975\n\t.quad 477867561647738880\n\t.quad 492625760723309567\n\t.quad 507695809847245055\n\t.quad 522786614153307040\n\t.quad 537515577286843527\n\t.quad 552549081483236265\n\t.quad 567708407528440906\n\t.quad 582408819937334620\n\t.quad 597406635727923891\n\t.quad 612632877534010032\n\t.quad 627305408375869788\n\t.quad 642268372207666611\n\t.quad 657559961436488592\n\t.quad 672205264185541748\n\t.quad 687134192901330321\n\t.quad 702417654075538165\n\t.quad 717108310787339481\n\t.quad 732004002085151248\n\t.quad 747245916486888083\n\t.quad 762014473397072540\n\t.quad 776877706278891331\n\t.quad 792079047660636948\n\t.quad 806923678983304940\n\t.quad 821755214193255592\n\t.quad 836916933485166033\n\t.quad 851835856226274979\n\t.quad 866636436678541900\n\t.quad 881759462523347679\n\t.quad 896750935477777867\n\t.quad 911521286674494270\n\t.quad 926606525949861901",
+            "\t.quad 941668848721988616\n\t.quad 956409679161331466\n\t.quad 971458017489982157\n\t.quad 986589529537203136\n\t.quad 1001301531111923376\n\t.quad 1016313833359795804\n\t.quad 1031512913058476026\n\t.quad 1046196761445088248\n\t.quad 1061173872207825654\n\t.quad 1076438935941134042\n\t.quad 1091095290979984528\n\t.quad 1106038035058019764\n\t.quad 1121338765435035937\n\t.quad 1135997042391571637\n\t.quad 1150906225254077410\n\t.quad 1166165004111681755\n\t.quad 1180901940167114633\n\t.quad 1195778348405079915\n\t.quad 1210996158982008645\n\t.quad 1225809910563708299\n\t.quad 1240654312332395758\n\t.quad 1255832114822727210\n\t.quad 1270720881566796762\n\t.quad 1285534027017830097\n\t.quad 1300672759111093893\n\t.quad 1315634782849665299\n\t.quad 1330417404552989528\n\t.quad 1345517981961616942\n\t.quad 1360551545733881565\n\t.quad 1375304359089833620\n\t.quad 1390367676064245817\n\t.quad 1405471103150663971\n\t.quad 1420194806792385388\n\t.quad 1435221736624009287\n\t.quad 1450393389603155501\n\t.quad 1465088665789573560\n\t.quad 1480080061302068262\n\t.quad 1495318341129581720\n\t.quad 1509985856129180093\n\t.quad 1524942550158150189",
+            "\t.quad 1540245895267272284\n\t.quad 1554886299732867059\n\t.quad 1569809105594332656\n\t.quad 1585084913200636780\n\t.quad 1599789920352257571\n\t.quad 1614679632300144556\n\t.quad 1629914072514475415\n\t.quad 1644696643526046078\n\t.quad 1659554037198953950\n\t.quad 1674748079569560918\n\t.quad 1689606396538113878\n\t.quad 1704432229395612459\n\t.quad 1719586820746957814\n\t.quad 1734519108376626298\n\t.quad 1749314120125326744\n\t.quad 1764430185090674430\n\t.quad 1779434709694088543\n\t.quad 1794199622703728310\n\t.quad 1809278064245250148\n\t.quad 1824353132768337726\n\t.quad 1839088652478113550\n\t.quad 1854130352394805458\n\t.quad 1869274311464449155\n\t.quad 1883981126779826596\n\t.quad 1898986946203520525\n\t.quad 1914198181197535432\n\t.quad 1928876964877758202\n\t.quad 1943847744757508792\n\t.quad 1959124678896417459\n\t.quad 1973776087932934496\n\t.quad 1988712649508052920\n\t.quad 2004005651756423078\n\t.quad 2018678418954170056\n\t.quad 2033581564216171130\n\t.quad 2048832796073144600\n\t.quad 2063583882754760367\n\t.quad 2078454394898482779\n\t.quad 2093664835357607922\n\t.quad 2108492405910189303\n\t.quad 2123331049774342709",
+            "\t.quad 2138501654884006594\n\t.quad 2153403916716827833\n\t.quad 2168211439214214631\n\t.quad 2183343142615420257\n\t.quad 2198318345151600733\n\t.quad 2213095475689254516\n\t.quad 2228189189140793873\n\t.quad 2243235622832598603\n\t.quad 2257983073722075613\n\t.quad 2273039687613394005\n\t.quad 2288155682980613045\n\t.quad 2302874149838667426\n\t.quad 2317894533690707531\n\t.quad 2333078460381573359\n\t.quad 2347768622521441578\n\t.quad 2362753625475748981\n\t.quad 2378003891349863625\n\t.quad 2392666412163378171\n\t.quad 2407616863459743482\n\t.quad 2422927227859672249\n\t.quad 2437567441023246835\n\t.quad 2452484150466153072\n\t.quad 2467752337549257996\n\t.quad 2482471633181877288\n\t.quad 2497355391596014898\n\t.quad 2512582389893159038\n\t.quad 2527378914499454799\n\t.quad 2542230494174560547\n\t.quad 2557417269047914859\n\t.quad 2572289212573816547\n\t.quad 2587109367699086492\n\t.quad 2602256861885146051\n\t.quad 2617202456699725402\n\t.quad 2631991923788046320\n\t.quad 2647101057927919596\n\t.quad 2662118577829098228\n\t.quad 2676878076131336112\n\t.quad 2691949749288605597\n\t.quad 2707037508532166338\n\t.quad 2721767740441745010",
+            "\t.quad 2736802830608190479\n\t.quad 2751959182959546249\n\t.quad 2766660834407543660\n\t.quad 2781660198997012551\n\t.quad 2796883536805199404\n\t.quad 2811557277646183863\n\t.quad 2826521753976886565\n\t.quad 2841810507270260023\n\t.quad 2856456991659083397\n\t.quad 2871387397424584742\n\t.quad 2886672704910933552\n\t.quad 2901359899787470558\n\t.quad 2916257033516642453\n\t.quad 2931500750957579450\n\t.quad 2946265927169263605\n\t.quad 2961130568675457522\n\t.quad 2976333670837672046\n\t.quad 2991175000696960837\n\t.quad 3006007911516652822\n\t.quad 3021171350320739931\n\t.quad 3036087048976517625\n\t.quad 3050888972797672567\n\t.quad 3066013677853588373\n\t.quad 3081002002287187261\n\t.quad 3095773665367583373\n\t.quad 3110860544497550640\n\t.quad 3125919792542303038\n\t.quad 3140661904118051853\n\t.quad 3155711843867210001\n\t.quad 3170840353250979498\n\t.quad 3185553605935471189\n\t.quad 3200567472070557930\n\t.quad 3215763619480711314\n\t.quad 3230448689654209719\n\t.quad 3245427327650554853\n\t.quad 3260689527820848751\n\t.quad 3275347076010955275\n\t.quad 3290291311528060557\n\t.quad 3305593906203914289\n\t.quad 3320248687600129567",
+            "\t.quad 3335159326946102182\n\t.quad 3350419926408040080\n\t.quad 3365153448830347546\n\t.quad 3380031279415448416\n\t.quad 3395250867926296632\n\t.quad 3410061285881897251\n\t.quad 3424907076661459308\n\t.quad 3440086615415384007\n\t.quad 3454972126665216220\n\t.quad 3469786628572181779\n\t.quad 3484927056235360856\n\t.quad 3499885900780341111\n\t.quad 3514669847147661653\n\t.quad 3529772080386284458\n\t.quad 3544802539477307722\n\t.quad 3559556646450443677\n\t.quad 3574621580446335748\n\t.quad 3589721975617479139\n\t.quad 3604446942557231707\n\t.quad 3619475451511394546\n\t.quad 3634644143635780247\n\t.quad 3649340653511681853\n\t.quad 3664333591136030989\n\t.quad 3679568979503817384\n\t.quad 3694237699278302034\n\t.quad 3709195899275879974\n\t.quad 3724496420693862360\n\t.quad 3739138001697432014\n\t.quad 3754062278231366209\n\t.quad 3769339924178256082\n\t.quad 3784041484441278595\n\t.quad 3798932632592748196\n\t.quad 3814168868061557325\n\t.quad 3828948072970981232\n\t.quad 3843806869186450252\n\t.quad 3859002664735258655\n\t.quad 3873857694494683923\n\t.quad 3888684897022652376\n\t.quad 3903841200462085070\n\t.quad 3918770277926589793",
+            "\t.quad 3933566627244108473\n\t.quad 3948684364170478951\n\t.quad 3963685753846975329\n\t.quad 3978451973076164153\n\t.quad 3993532047392122311\n\t.quad 4008604054463141788\n\t.quad 4023340849777945987\n\t.quad 4038384144200923364\n\t.quad 4053525113571281807\n\t.quad 4068233174594694770\n\t.quad 4083240551153433103\n\t.quad 4098448866519239753\n\t.quad 4113128866711215964\n\t.quad 4128101167230658355\n\t.quad 4143375250170144896\n\t.quad 4158027847206421152\n\t.quad 4172965893781238599\n\t.quad 4188260752279232537\n\t.quad 4202930039008934928\n\t.quad 4217834634465954580\n\t.quad 4233087679066701273\n\t.quad 4247835366853742247\n\t.quad 4262707295203537489\n\t.quad 4277919505920253670\n\t.quad 4292743757239851855\n\t.quad 4307583784117748259\n\t.quad 4322756117994590892\n\t.quad 4337655138388951980\n\t.quad 4352464011485697175\n\t.quad 4367597403136100796\n\t.quad 4382569440205035030\n\t.quad 4397347889687374747\n\t.quad 4412443251819771522\n\t.quad 4427486594234968593\n\t.quad 4442235333156365461\n\t.quad 4457293557087583675\n\t.quad 4472406533629990549\n\t.quad 4487126258331716666\n\t.quad 4502148214488346440\n\t.quad 4517329193108106637",
+            "\t.quad 4532020583610935537\n\t.quad 4547007122018943789\n\t.quad 4562254508917369340\n\t.quad 4576918229304087675\n\t.quad 4591870180066957722\n\t.quad 4607182418800017408\n\t.quad 4621819117588971520\n\t.quad 4636737291354636288\n\t.quad 4652007308841189376\n\t.quad 4666723172467343360\n\t.quad 4681608360884174848\n\t.quad 4696837146684686336\n\t.quad 4711630319722168320\n\t.quad 4726483295884279808\n\t.quad 4741671816366391296\n\t.quad 4756540486875873280\n\t.quad 4771362005757984768\n\t.quad 4786511204640096256\n\t.quad 4801453603149578240\n\t.quad 4816244402031689728\n\t.quad 4831355200913801216\n\t.quad 4846369599423283200\n\t.quad 4861130398305394688\n\t.quad 4876203697187506176\n\t.quad 4891288408196988160\n\t.quad 4906019910204099648\n\t.quad 4921056587992461136\n\t.quad 4936209963552724370\n\t.quad 4950912855330343670\n\t.quad 4965913770331839924\n\t.quad 4981134201117475473\n\t.quad 4995809153217856309\n\t.quad 5010775143622804482\n\t.quad 5026061058026967681\n\t.quad 5040708725286295329\n\t.quad 5055640609639927018\n\t.quad 5070927765361438756\n\t.quad 5085611494797045271\n\t.quad 5100510072459938204\n\t.quad 5115755594818026499",
+            "\t.quad 5130517386810051970\n\t.quad 5145383438407770339\n\t.quad 5160588303184390427\n\t.quad 5175426328141668785\n\t.quad 5190260616003865117\n\t.quad 5205425776111082661\n\t.quad 5220338247323490791\n\t.quad 5235141515912716385\n\t.quad 5250267901928720505\n\t.quad 5265253074562153804\n\t.quad 5280026050892618910\n\t.quad 5295114571585172422\n\t.quad 5310170741700075612\n\t.quad 5324914135746594931\n\t.quad 5339965678584216207\n\t.quad 5355091182177117338\n\t.quad 5369805687274470848\n\t.quad 5384821118925634864\n\t.quad 5400014330993143358\n\t.quad 5414700624226077134\n\t.quad 5429680791046716481\n\t.quad 5444940124671458729\n\t.quad 5459598867255545107\n\t.quad 5474544595765125207\n\t.quad 5489849056681572461\n\t.quad 5504500338876674884\n\t.quad 5519412436223111189\n\t.quad 5534674858185628699\n\t.quad 5549404963419349393\n\t.quad 5564284217833028085\n\t.quad 5579505586129598578\n\t.quad 5594312666986969927\n\t.quad 5609159848224127513\n\t.quad 5624341125050046623\n\t.quad 5639223377414889316\n\t.quad 5654039237190600509\n\t.quad 5669181362189711628\n\t.quad 5684137024229819303\n\t.quad 5698922296640836753\n\t.quad 5714026187434080693",
+            "\t.quad 5729053538610189329\n\t.quad 5743808940547873046\n\t.quad 5758875493249449819\n\t.quad 5773972853347434393\n\t.quad 5788699084901003135\n\t.quad 5803729174622436191\n\t.quad 5818894902808190235\n\t.quad 5833592647658521698\n\t.quad 5848587129000908155\n\t.quad 5863819622897374573\n\t.quad 5878489548701575880\n\t.quad 5893449256236299642\n\t.quad 5908746951022133612\n\t.quad 5923389709789098439\n\t.quad 5938315458527276601\n\t.quad 5953594944729471431\n\t.quad 5968293054513797149\n\t.quad 5983185640364723748\n\t.quad 5998423672957854125\n\t.quad 6013199508259175692\n\t.quad 6028059708478020687\n\t.quad 6043257259031049059\n\t.quad 6058108998157561886\n\t.quad 6072937571782577189\n\t.quad 6088095589093318446\n\t.quad 6103021453049119613\n\t.quad 6117819141328598108\n\t.quad 6132938551957418355\n\t.quad 6147936803441821416\n\t.quad 6162704330251049122\n\t.quad 6177786039042055882\n\t.quad 6192854981472359231\n\t.quad 6207593053720795150\n\t.quad 6222637944310812178\n\t.quad 6237775920867971275\n\t.quad 6252485228896883966\n\t.quad 6267494164212496957\n\t.quad 6282699556909163622\n\t.quad 6297380774879948160\n\t.quad 6312354597622900960",
+            "\t.quad 6327625826393305484\n\t.quad 6342279612666699247\n\t.quad 6357219145787913579\n\t.quad 6372515862468903621\n\t.quad 6387181665105488315\n\t.quad 6402087712267973674\n\t.quad 6417342571500552501\n\t.quad 6432086856852908225\n\t.quad 6446960202883822321\n\t.quad 6462174185701937069\n\t.quad 6476995114331412940\n\t.quad 6491836525663526975\n\t.quad 6507010590108141647\n\t.quad 6521906365687930162\n\t.quad 6536716590790747262\n\t.quad 6551851672448740766\n\t.quad 6566820540753443970\n\t.quad 6581600310554213283\n\t.quad 6596697323084647052\n\t.quad 6611737571003524759\n\t.quad 6626487599298388029\n\t.quad 6641547434946439245\n\t.quad 6656657389519784240\n\t.quad 6671378373375286140\n\t.quad 6686401903474135643\n\t.quad 6701579930952233849\n\t.quad 6716272551097421911\n\t.quad 6731260626558379117\n\t.quad 6746505131482525380\n\t.quad 6761170052691860085\n\t.quad 6776123504483000594\n\t.quad 6791432928788053163\n\t.quad 6806070800255343574\n\t.quad 6820990439868928716\n\t.quad 6836262289665382271\n\t.quad 6850974717710472879\n\t.quad 6865861337619414107\n\t.quad 6881091912785062770\n\t.quad 6895881730762912551\n\t.quad 6910736104866537457",
+            "\t.quad 6925926372775540717\n\t.quad 6940791766859600628\n\t.quad 6955614650918971313\n\t.quad 6970765556272656797\n\t.quad 6985704755147937538\n\t.quad 7000496887210966211\n\t.quad 7015609352569224180\n\t.quad 7030620626435931512\n\t.quad 7045382727252532438\n\t.quad 7060457653552755724\n\t.quad 7075539313153278087\n\t.quad 7090272086580789417\n\t.quad 7105310353644650708\n\t.quad 7120460749313351812\n\t.quad 7135164882712455333\n\t.quad 7150167349740806863\n\t.quad 7165384870476088769\n\t.quad 7180061035097450290\n\t.quad 7195028541153624318\n\t.quad 7210311613711739039\n\t.quad 7224960465073586886\n\t.quad 7239893829555368824\n\t.quad 7255182835437068374\n\t.quad 7269863095822322742\n\t.quad 7284763118922862403\n\t.quad 7300010448078009108\n\t.quad 7314768852325550060\n\t.quad 7329636315483470312\n\t.quad 7344842944710342753\n\t.quad 7359677661323397949\n\t.quad 7374513327662353932\n\t.quad 7389680210865521039\n\t.quad 7404589451273023737\n\t.quad 7419394066030959928\n\t.quad 7434522134757852294\n\t.quad 7449504152308370132\n\t.quad 7464278443256716681\n\t.quad 7479368607221621995\n\t.quad 7494421696200865555\n\t.quad 7509166374053909719",
+            "\t.quad 7524219521649687053\n\t.quad 7539342016321045576\n\t.quad 7554057775135708506\n\t.quad 7569074773933509297\n\t.quad 7584265047601073839\n\t.quad 7598952565167317594\n\t.quad 7613934262404594417\n\t.quad 7629190726498141398\n\t.quad 7643850664720225804\n\t.quad 7658797887777303439\n\t.quad 7674104216878122611\n\t.quad 7688751996227527688\n\t.quad 7703665553093004554\n\t.quad 7718929799454322764\n\t.quad 7733656483940292144\n\t.quad 7748537163665533883\n\t.quad 7763760313601558186\n\t.quad 7778564053884953642\n\t.quad 7793412627027934517\n\t.quad 7808595643736132738\n\t.quad 7823474633821702097\n\t.quad 7838291852880443846\n\t.quad 7853435676983343159\n\t.quad 7868388153203847971\n\t.quad 7883174753039699947\n\t.quad 7898280303113987046\n\t.quad 7913304543138139760\n\t.quad 7928061241389138444\n\t.quad 7943129414482358927\n\t.quad 7958223736346011545\n\t.quad 7972951233830551935\n\t.quad 7987982905965699551\n\t.quad 8003145667125738796\n\t.quad 8017844648236784758\n\t.quad 8032840674905064340\n\t.quad 8048070271315481149\n\t.quad 8062741404405536460\n\t.quad 8077702621047577727\n\t.quad 8092997486257191375\n\t.quad 8107641424014248003",
+            "\t.quad 8122568646490040916\n\t.quad 8137849974864254185\n\t.quad 8152544630576045329\n\t.quad 8167438655623861334\n\t.quad 8182678487213103467\n\t.quad 8197450949396715491\n\t.quad 8212312555081272796\n\t.quad 8227511862466441555\n\t.quad 8242360307532691156\n\t.quad 8257190253682816137\n\t.quad 8272349986649944491\n\t.quad 8287272633750019851\n\t.quad 8302071662386050765\n\t.quad 8317192748460561537\n\t.quad 8332187858484294864\n\t.quad 8346956694235468292\n\t.quad 8362040039203907206\n\t.quad 8377105913801525268\n\t.quad 8391845264313580056\n\t.quad 8406891752733120670\n\t.quad 8422026733359923043\n\t.quad 8436737289693151036\n\t.quad 8451747785389158155\n\t.quad 8466950252372585831\n\t.quad 8481632689390553280\n\t.quad 8496608035942484721\n\t.quad 8511876407571054294\n\t.quad 8526531384320212620\n\t.quad 8541472405536132655\n\t.quad 8556770982335504827\n\t.quad 8571433297250123029\n\t.quad 8586340797630094426\n\t.quad 8601597473384530800\n\t.quad 8616338352758403622\n\t.quad 8631213117947018928\n\t.quad 8646428874712260188\n\t.quad 8661246477190873849\n\t.quad 8676089274419180472\n\t.quad 8691265071234035877\n\t.quad 8706157598619623015",
+            "\t.quad 8720969177136690689\n\t.quad 8736105950562497410\n\t.quad 8751071646802550833\n\t.quad 8765852738296924221\n\t.quad 8780951402944363085\n\t.quad 8795988553143856240\n\t.quad 8810739872155129740\n\t.quad 8825801321198693743\n\t.quad 8840908250655452261\n\t.quad 8855630494976198527\n\t.quad 8870655600656603486\n\t.quad 8885830673919285211\n\t.quad 8900524524987563474\n\t.quad 8915514139102383430\n\t.quad 8930755759050537036\n\t.quad 8945421882333202015\n\t.quad 8960376836716005366\n\t.quad 8975683443661690106\n\t.quad 8990322489028717112\n\t.quad 9005243596016972999\n\t.quad 9020517280031764984\n\t.quad 9035226268917471035\n\t.quad 9050114321809489162\n\t.quad 9065346688203983948\n\t.quad 9080133147627747248\n\t.quad 9094988921128908188\n\t.quad 9110180938284831491\n\t.quad 9125043052530916322\n\t.quad 9139867303189443290\n\t.quad 9155019916792074128\n\t.quad 9169955912700582330\n\t.quad 9184749379333099561\n\t.quad 9199863512903218227\n\t.quad 9214871658872686752\n__pow10_lo:\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0",
+            "\t.quad 0\n\t.quad 9223372036854775808\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 9223372036854775808\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 9223372036854775808\n\t.quad 0\n\t.quad 2\n\t.quad 9223372036854775814\n\t.quad 8\n\t.quad 587\n\t.quad 14064\n\t.quad 75109\n\t.quad 9223372036856121870\n\t.quad 9223372036859847825\n\t.quad 16388697\n\t.quad 1774499711\n\t.quad 9223372044879582477\n\t.quad 9223372048383365765\n\t.quad 9223373251652303152\n\t.quad 9223375388737027041\n\t.quad 9223475924421465803\n\t.quad 9224410912521675756\n\t.quad 7625641840482501\n\t.quad 9250131208096067717\n\t.quad 9253585101631713943\n\t.quad 9278617586545735144\n\t.quad 9287176517230560963\n\t.quad 9307722883409925178\n\t.quad 9325067961899398308\n\t.quad 9335748461204161435\n\t.quad 129611968246199743\n\t.quad 9360961078044752290\n\t.quad 9376218039925921802\n\t.quad 172912005781421181\n\t.quad 9413102558601261618",
+            "\t.quad 205315511206043970\n\t.quad 216051202608657188\n\t.quad 9461537860747342853\n\t.quad 250605974766649082\n\t.quad 261466072743550649\n\t.quad 9506375054453157069\n\t.quad 295890474250217472\n\t.quad 306812698029584896\n\t.quad 9545795405908119936\n\t.quad 337791449719276816\n\t.quad 352433517924853332\n\t.quad 360918037850841043\n\t.quad 375712253555095495\n\t.quad 390827323464885689\n\t.quad 9627676508649869529\n\t.quad 9642695517939417735\n\t.quad 9657454395663168297\n\t.quad 450963315984297990\n\t.quad 471566206793168388\n\t.quad 9713958342631775806\n\t.quad 502533925459790387\n\t.quad 513240875133344128\n\t.quad 527941129817382896\n\t.quad 9758704125064061009\n\t.quad 566796449001265530\n\t.quad 9802905969031155752\n\t.quad 594011375692237774\n\t.quad 9823510225096721021\n\t.quad 9846638484628479175\n\t.quad 9861717608216577017\n\t.quad 646928686026003986\n\t.quad 9885136457658737769\n\t.quad 681815119974302879\n\t.quad 699728127346696931\n\t.quad 714782372411718556\n\t.quad 712179856604746779\n\t.quad 739389513124320548\n\t.quad 754226005472164461\n\t.quad 769393921186441481\n\t.quad 10013416326221724461",
+            "\t.quad 791504387155570747\n\t.quad 806564516167638565\n\t.quad 10054999285888414357\n\t.quad 846348282669347014\n\t.quad 861108149186915964\n\t.quad 875975003065657883\n\t.quad 10111113018972564318\n\t.quad 897138486845911956\n\t.quad 10144914410269929442\n\t.quad 10162438740195993069\n\t.quad 10172671110909279953\n\t.quad 967748299553233086\n\t.quad 984833905780156278\n\t.quad 995729301695086932\n\t.quad 10228842093456563374\n\t.quad 1023276377962012179\n\t.quad 10264792861544555828\n\t.quad 10273182227136404738\n\t.quad 1059419019484993404\n\t.quad 10306996826213472425\n\t.quad 10322287045316523882\n\t.quad 10343102431324357282\n\t.quad 10353944952206365515\n\t.quad 10368624003215718429\n\t.quad 1165033315405014254\n\t.quad 1175942567452454441\n\t.quad 1190705032418597299\n\t.quad 10433180679918526448\n\t.quad 10444024764812224492\n\t.quad 10458705770836189671\n\t.quad 10479029630582066480\n\t.quad 1268821672991141764\n\t.quad 10500874286218971447\n\t.quad 10494511432984344649\n\t.quad 10509429207076071004\n\t.quad 10547567727224515584\n\t.quad 10562238775994173184\n\t.quad 1356461306567308192\n\t.quad 1364476181109834273\n\t.quad 1379155819642573141",
+            "\t.quad 1404608138080463210\n\t.quad 1407051955071307540\n\t.quad 10653506571183880010\n\t.quad 10673400674790722190\n\t.quad 10677382506108679366\n\t.quad 10698660049026169982\n\t.quad 10718510097044792783\n\t.quad 10722785632284212490\n\t.quad 10737529236255018534\n\t.quad 10760803048610341996\n\t.quad 1550486548008194681\n\t.quad 10779879726588617634\n\t.quad 1584131222284665967\n\t.quad 1582915802591669330\n\t.quad 10834620713920289043\n\t.quad 10834268007376911040\n\t.quad 10863277184278436247\n\t.quad 10878062603832590333\n\t.quad 10887622258872909816\n\t.quad 10902864447541469174\n\t.quad 1699655362604722691\n\t.quad 1714741637165188228\n\t.quad 1713580448653192488\n\t.quad 1728770295005247602\n\t.quad 1743636479508585287\n\t.quad 10996970442641317821\n\t.quad 11011914584204309462\n\t.quad 1797654312925896297\n\t.quad 1812470527116117507\n\t.quad 11052257662356724798\n\t.quad 11072927744337240487\n\t.quad 11068394694504718599\n\t.quad 11101668159971506250\n\t.quad 11107352073611811187\n\t.quad 1907657806960234508\n\t.quad 1927498768518380039\n\t.quad 1938747299587758217\n\t.quad 11174059050453672276\n\t.quad 1959746700351171757\n\t.quad 1974553614751377368",
+            "\t.quad 11224209480972450246\n\t.quad 2014937721198671816\n\t.quad 11251083709186951750\n\t.quad 11259476868651186606\n\t.quad 2055031654800618483\n\t.quad 11295847824855672712\n\t.quad 11314117688539650229\n\t.quad 2105214444971344158\n\t.quad 11328736871080424663\n\t.quad 2128112808786557821\n\t.quad 2150378704847931031\n\t.quad 2160376628177293434\n\t.quad 11398047848261720936\n\t.quad 2197369545894944623\n\t.quad 2208531776897906507\n\t.quad 2223610465558451486\n\t.quad 11460868939797443994\n\t.quad 11475802680534073728\n\t.quad 2261481737768549439\n\t.quad 11503460595146660441\n\t.quad 11523814563357343863\n\t.quad 2308085216923082454\n\t.quad 11529310967111437225\n\t.quad 11565423511863618805\n\t.quad 11580105127846619186\n\t.quad 11598176044105619743\n\t.quad 2379872784373400165\n\t.quad 2395002528442798846\n\t.quad 11645043835452534536\n\t.quad 2435776599753213238\n\t.quad 11671916932648421757\n\t.quad 11682822606342872028\n\t.quad 2478365411824158358\n\t.quad 11706934546938732305\n\t.quad 2509728243035585317\n\t.quad 11747236464665007633\n\t.quad 11762335322574650262\n\t.quad 2547201049757043466\n\t.quad 2562504563619175885\n\t.quad 11797233754340309696",
+            "\t.quad 2589817179187686216\n\t.quad 11832490450056525043\n\t.quad 2613423838358468417\n\t.quad 11866072572166420830\n\t.quad 11881051438188438491\n\t.quad 2666993726254343773\n\t.quad 2687499344461803514\n\t.quad 11929628033671590404\n\t.quad 11940785187931803268\n\t.quad 2720468495323428714\n\t.quad 11969068459544834735\n\t.quad 11963098807568758187\n\t.quad 2778484962396186215\n\t.quad 2789684959541760001\n\t.quad 2809780311493564929\n\t.quad 2820922846565585025\n\t.quad 2838874140091617873\n\t.quad 12075520332140570907\n\t.quad 12084330328322033348\n\t.quad 12099260159132735605\n\t.quad 2898100922638176347\n\t.quad 12133217143057959822\n\t.quad 2930955565638619335\n\t.quad 2931907998147695589\n\t.quad 2955788930666568248\n\t.quad 2976082738276335715\n\t.quad 2977399876241457645\n\t.quad 12219629312322944716\n\t.quad 3001586934749545990\n\t.quad 12253248776301968655\n\t.quad 3048464678931202519\n\t.quad 12277993256208530280\n\t.quad 12303358717044987536\n\t.quad 3086154407076808599\n\t.quad 12327298116018299714\n\t.quad 12342171298783566866\n\t.quad 3134751490642374261\n\t.quad 3149449726929455634\n\t.quad 3164444822567779478\n\t.quad 3156645114622736260",
+            "\t.quad 3171423647473183410\n\t.quad 3213423668297437269\n\t.quad 3228649650581959787\n\t.quad 3239800829089714566\n\t.quad 3254865702131250663\n\t.quad 3252741445267430150\n\t.quad 3283565231004130844\n\t.quad 3304228965786579666\n\t.quad 3299896910559508579\n\t.quad 3328766810794896232\n\t.quad 12570856230996255967\n\t.quad 3361425932982415849\n\t.quad 3370792248869510343\n\t.quad 3393274059167405310\n\t.quad 3403124768244593787\n\t.quad 12645979697529198387\n\t.quad 12657206682565836032\n\t.quad 12672366313768475712\n\t.quad 3461970110699351216\n\t.quad 12699521652806813731\n\t.quad 12714394337737512214\n\t.quad 3509535091037754066\n\t.quad 12747025918533859449\n\t.quad 3525943175987022659\n\t.quad 12775363413629680702\n\t.quad 12790505885876290982\n\t.quad 12796141262079990848\n\t.quad 12811131641049047889\n\t.quad 12826371826895506962\n\t.quad 3631430648259976141\n\t.quad 3640480070600066433\n\t.quad 3655509662310196961\n\t.quad 12893320477241352039\n\t.quad 3682299265275852992\n\t.quad 3704259509117775292\n\t.quad 12945848094099737451\n\t.quad 12956357641096191114\n\t.quad 12958867293328658100\n\t.quad 3766752122278926810\n\t.quad 3781824529517178960",
+            "\t.quad 3792783739217095781\n\t.quad 13034635638363518017\n\t.quad 3825410887416450735\n\t.quad 13050898080840183087\n\t.quad 3856671083969765240\n\t.quad 13093354562810783914\n\t.quad 13108338873110926036\n\t.quad 13125842237525285828\n\t.quad 13141067167156155062\n\t.quad 3929936356769448093\n\t.quad 3940768826356625604\n\t.quad 13180761268897297163\n\t.quad 13195876032842305511\n\t.quad 13210595012792947680\n\t.quad 4006679902334268308\n\t.quad 4017557959896326265\n\t.quad 13257037537719592809\n\t.quad 4053088618013570910\n\t.quad 4064309855427028278\n\t.quad 4074159742176345351\n\t.quad 13319332298180431086\n\t.quad 13334516046980853801\n\t.quad 4117896183574595481\n\t.quad 13364774405352715680\n\t.quad 4129421565601463783\n\t.quad 13388864664572583829\n\t.quad 4177509938886011014\n\t.quad 4199597566440843434\n\t.quad 13434811996002290988\n\t.quad 13453173979131656251\n\t.quad 13461312216836689044\n\t.quad 4257557416083959843\n\t.quad 4272608056927624236\n\t.quad 13514994075236376164\n\t.quad 13526175972679181822\n\t.quad 13535730809648611066\n\t.quad 13550970990787632824\n\t.quad 13572047837043726746\n\t.quad 0\n\t.quad 0",
+            "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 4710765210229538816\n\t.quad 4715268809856909312\n\t.quad 13964255069592354816\n\t.quad 13975162224939892736\n\t.quad 13981636149404237824\n\t.quad 4780645771244470272\n\t.quad 4800602457044418560\n\t.quad 14029299703590420480\n\t.quad 4824677260566986752\n\t.quad 14065604198855081984\n\t.quad 4857179894804643840\n\t.quad 4872391467718410240\n\t.quad 4883524634512719872\n\t.quad 14123963132267200512\n\t.quad 4915961517140082688\n\t.quad 4926518402099445760\n\t.quad 4947636018668699648\n\t.quad 14181858391540350976\n\t.quad 14186454650970357760",
+            "\t.quad 14214082209040764416\n\t.quad 14221472948906051072\n\t.quad 14248405003206058736\n\t.quad 5038506455456638036\n\t.quad 5038319906572856136\n\t.quad 14288703004709081917\n\t.quad 14303796683349599238\n\t.quad 5096493544750428921\n\t.quad 14337071784722739237\n\t.quad 5112961867177860753\n\t.quad 5127942638494901814\n\t.quad 5143200838688890850\n\t.quad 14397290248725482757\n\t.quad 14398922808440881432\n\t.quad 14428128031182130220\n\t.quad 14439035736522321719\n\t.quad 5231437703132034300\n\t.quad 5242260436232340027\n\t.quad 5260811358455337317\n\t.quad 5275599805665940926\n\t.quad 14511619896589403347\n\t.quad 14529814033601682180\n\t.quad 14538371886599431049\n\t.quad 5323625835746936617\n\t.quad 5351038025413396254\n\t.quad 5358588297429754776\n\t.quad 5379895436365873951\n\t.quad 14621001614315140620\n\t.quad 14636217619071722383\n\t.quad 14647356325669551219\n\t.quad 5441005738810886712\n\t.quad 5448138894227567384\n\t.quad 5469804492741534711\n\t.quad 5487468886786780795\n\t.quad 14723039205782783463\n\t.quad 5508224084316221759\n\t.quad 14741729030092055778\n\t.quad 5542071438375645305\n\t.quad 14749446225329969680\n\t.quad 5577685379488012783",
+            "\t.quad 5587784340134076631\n\t.quad 14825076670280873716\n\t.quad 14844185664571951404\n\t.quad 14849974435234508253\n\t.quad 14865012749971958100\n\t.quad 5663141587708117782\n\t.quad 5678307500522922971\n\t.quad 5679884581785203528\n\t.quad 5706896517143790083\n\t.quad 14950865444625768126\n\t.quad 14961853114133124718\n\t.quad 14976713600924163081\n\t.quad 14986836260241114646\n\t.quad 15001901696398029774\n\t.quad 15022576593064527969\n\t.quad 15040002003108459836\n\t.quad 5809408818375143055\n\t.quad 5841511392415234258\n\t.quad 15074943063333482996\n\t.quad 5869007220246249671\n\t.quad 5883848145480827129\n\t.quad 15106120826987902531\n\t.quad 15121019444973671379\n\t.quad 5935473250455630650\n\t.quad 15176174255843405820\n\t.quad 5960653527999080458\n\t.quad 15199843079118241530\n\t.quad 5987049862732030608\n\t.quad 15227255466277010022\n\t.quad 6022635847818765184\n\t.quad 6040717016522513968\n\t.quad 15269260354947328271\n\t.quad 15284411458276619091\n\t.quad 15299350285947639828\n\t.quad 15314142572679110169\n\t.quad 15336759055961162088\n\t.quad 6125770286988623422\n\t.quad 6144019587789745895\n\t.quad 6152439531315385665\n\t.quad 15394665851008064183",
+            "\t.quad 15403464737432683210\n\t.quad 6197920679731074626\n\t.quad 6218386980831686121\n\t.quad 6235682018646938802\n\t.quad 6250993751027435998\n\t.quad 6262252117155159126\n\t.quad 15503925170139340362\n\t.quad 6271183363525526621\n\t.quad 15532654322540951380\n\t.quad 6326594571711135083\n\t.quad 6326935628266169905\n\t.quad 15570827089239248913\n\t.quad 6370597604902122235\n\t.quad 6381114602043539315\n\t.quad 15622165001154191448\n\t.quad 15633218473674102894\n\t.quad 15648161214230834826\n\t.quad 15663461940206221868\n\t.quad 15682078863773624878\n\t.quad 15688762308479226597\n\t.quad 15710814377135527400\n\t.quad 15720958091877439171\n\t.quad 15736010368393754170\n\t.quad 6522380884343060591\n\t.quad 6549120143124506321\n\t.quad 6557168882463097367\n\t.quad 15800338897359821657\n\t.quad 15815403447284806191\n\t.quad 6600869564198716042\n\t.quad 15838667451556388051\n\t.quad 15859835150893108482\n\t.quad 6617891749752725196\n\t.quad 15888634959027437651\n\t.quad 15892880453312119199\n\t.quad 6689635118904938366\n\t.quad 6704719235758830430\n\t.quad 6726332552995057677\n\t.quad 6743988035458870792\n\t.quad 15966784744312877997\n\t.quad 15993224099435106323",
+            "\t.quad 6788024849156054516\n\t.quad 6802936600622187889\n\t.quad 16018336534649448017\n\t.quad 6836307205845535296\n\t.quad 6847526947788242129\n\t.quad 16083162576329208827\n\t.quad 6878180288986781571\n\t.quad 6893112902273744228\n\t.quad 16127511124838167363\n\t.quad 6920755653331083244\n\t.quad 16163091271436723213\n\t.quad 16166283706280145984\n\t.quad 16191591948408621610\n\t.quad 6982518012130186060\n\t.quad 16207083560356724492\n\t.quad 16222234571101812584\n\t.quad 16249733129449727144\n\t.quad 7035010233023956060\n\t.quad 16268284616197813531\n\t.quad 7074250895573587892\n\t.quad 16310916199304077919\n\t.quad 7101326876339410185\n\t.quad 16332176588905073514\n\t.quad 7125055747823104222\n\t.quad 7139782730942803221\n\t.quad 7164875495204004375\n\t.quad 16393981423484742343\n\t.quad 16408837817237730681\n\t.quad 16431233932633314486\n\t.quad 16446396254418704867\n\t.quad 16457467857302544476\n\t.quad 16475552148681415738\n\t.quad 7265953008968961208\n\t.quad 7275178623440543692\n\t.quad 7295308312253184992\n\t.quad 7310141167574771052\n\t.quad 16541975800264376947\n\t.quad 16567978094457343172\n\t.quad 7351786928465428502\n\t.quad 16591754666720184306",
+            "\t.quad 7389535513882014473\n\t.quad 7390553214977507116\n\t.quad 7405226470382092023\n\t.quad 16646175145755994278\n\t.quad 16666677697909592424\n\t.quad 16681743592819276513\n\t.quad 7468193549396569294\n\t.quad 16715571514660638208\n\t.quad 7507486656686235264\n\t.quad 7518742175219566113\n\t.quad 7538733424569326548\n\t.quad 7542067617601162022\n\t.quad 7563901724670788476\n\t.quad 7583846641578979885\n\t.quad 16812475236256400015\n\t.quad 7607932478437570151\n\t.quad 16851061413286473216\n\t.quad 7637122349227797761\n\t.quad 7637285979349467656\n\t.quad 16892362498314867415\n\t.quad 16907239086085770183\n\t.quad 16922057306108956344\n\t.quad 7710998379181313434\n\t.quad 7731514096036767872\n\t.quad 7742481479065600672\n\t.quad 16986518769728265820\n\t.quad 7776788537546717709\n\t.quad 7777443566502298754\n\t.quad 17031931430614575782\n\t.quad 17043019839657841999\n\t.quad 17058006250868767395\n\t.quad 7844839795278712168\n\t.quad 17080440031303470910\n\t.quad 17102447111357623491\n\t.quad 17117653641704540148\n\t.quad 7909777184276130567\n\t.quad 17146761182853081655\n\t.quad 7927555536158797039\n\t.quad 17168648009404892139\n\t.quad 17191936599390661945",
+            "\t.quad 17206997503608985736\n\t.quad 17224357254426754901\n\t.quad 17239642023056203562\n\t.quad 17250866684495116021\n\t.quad 17268663991083225689\n\t.quad 8057988658405415185\n\t.quad 17295889112523735211\n\t.quad 8091113990793215893\n\t.quad 8106412954591121275\n\t.quad 17341193333534809255\n\t.quad 17361146943751997928\n\t.quad 8149550550428492702\n\t.quad 8164821955346263173\n\t.quad 8168508878667849369\n\t.quad 17412924023456548464\n\t.quad 17428062688256055308\n\t.quad 17447236697115546500\n\t.quad 8240096742328358811\n\t.quad 17478081573710770814\n\t.quad 8269977678330400881\n\t.quad 17498647939198266825\n\t.quad 17513825484703193404\n\t.quad 17535117640951489507\n\t.quad 17552718380065087086\n\t.quad 17562759727809539090\n\t.quad 8353524032627828969\n\t.quad 8368405709970948498\n\t.quad 17610314891431048965\n\t.quad 17625261677323105478\n\t.quad 8417243843776749316\n\t.quad 17657468063736256827\n\t.quad 8447933695112687735\n\t.quad 8465129395903213130\n\t.quad 8475978919083309533\n\t.quad 17715779508703643564\n\t.quad 17712050424774629749\n\t.quad 8520154222361446403\n\t.quad 17761481200832101118\n\t.quad 17772561267521243582\n\t.quad 17787537250789514285",
+            "\t.quad 17802804428574947740\n\t.quad 8596151911769212925\n\t.quad 17838394584658356994\n\t.quad 8620798535177573499\n\t.quad 17862396941767623475\n\t.quad 17882805782688123392\n\t.quad 17882917943541818368\n\t.quad 17911450954185925072\n\t.quad 17926246462008244804\n\t.quad 8715443047340349227\n\t.quad 17946459272806599721\n\t.quad 8749146895201199642\n\t.quad 17986809087878668384\n\t.quad 8769928034088087312\n\t.quad 8784919622776474324\n\t.quad 18023157971702243959\n\t.quad 8819814338074970427\n\t.quad 18060019438313740859\n\t.quad 18074802370242207946\n\t.quad 18089903335432263933\n\t.quad 18107187971928035230\n\t.quad 18082348143375254873\n\t.quad 8912599740500244377\n\t.quad 8927245410063936192\n\t.quad 18157462554107144769\n\t.quad 8947714589084859183\n\t.quad 18184455833633773061\n__fsplit:\n\t.quad 4728779608772575232\n__fbig:\n\t.quad 9092767647661031424\n__fup:\n\t.quad 4895412794951729152\n__fdown:\n\t.quad 4318952042648305664\n.Lstr_nan:\n\t.quad 3\n\t.ascii \"nan\"\n.Lstr_inf:\n\t.quad 3",
+            "\t.ascii \"inf\"\n.Lstr_ninf:\n\t.quad 4\n\t.ascii \"-inf\"\n.Lstr_fzero:\n\t.quad 1\n\t.ascii \"0\"\n.Lstr_fnzero:\n\t.quad 2\n\t.ascii \"-0\"",
+        ]
+    }
+
+    // __char_to_str: rdi = Unicode scalar -> rax = its UTF-8 text as a str.
+    fun char_to_str_text(self) -> [str] {
+        return [
+            "\n__char_to_str:\n\tpushq %rbp\n\tmovq %rsp, %rbp\n\tsubq $16, %rsp\n\tmovq %rdi, %rax\n\tcmpq $0x80, %rax\n\tjae .Lc2s_2\n\tmovb %al, -8(%rbp)\n\tmovq $1, %r8\n\tjmp .Lc2s_emit\n.Lc2s_2:\n\tcmpq $0x800, %rax\n\tjae .Lc2s_3\n\tmovq %rax, %rcx\n\tshrq $6, %rcx\n\torq $0xC0, %rcx\n\tmovb %cl, -8(%rbp)\n\tmovq %rax, %rcx\n\tandq $0x3F, %rcx\n\torq $0x80, %rcx\n\tmovb %cl, -7(%rbp)\n\tmovq $2, %r8\n\tjmp .Lc2s_emit\n.Lc2s_3:\n\tcmpq $0x10000, %rax\n\tjae .Lc2s_4\n\tmovq %rax, %rcx\n\tshrq $12, %rcx\n\torq $0xE0, %rcx\n\tmovb %cl, -8(%rbp)\n\tmovq %rax, %rcx\n\tshrq $6, %rcx\n\tandq $0x3F, %rcx\n\torq $0x80, %rcx\n\tmovb %cl, -7(%rbp)\n\tmovq %rax, %rcx\n\tandq $0x3F, %rcx\n\torq $0x80, %rcx\n\tmovb %cl, -6(%rbp)",
+            "\tmovq $3, %r8\n\tjmp .Lc2s_emit\n.Lc2s_4:\n\tmovq %rax, %rcx\n\tshrq $18, %rcx\n\tandq $0x07, %rcx\n\torq $0xF0, %rcx\n\tmovb %cl, -8(%rbp)\n\tmovq %rax, %rcx\n\tshrq $12, %rcx\n\tandq $0x3F, %rcx\n\torq $0x80, %rcx\n\tmovb %cl, -7(%rbp)\n\tmovq %rax, %rcx\n\tshrq $6, %rcx\n\tandq $0x3F, %rcx\n\torq $0x80, %rcx\n\tmovb %cl, -6(%rbp)\n\tmovq %rax, %rcx\n\tandq $0x3F, %rcx\n\torq $0x80, %rcx\n\tmovb %cl, -5(%rbp)\n\tmovq $4, %r8\n.Lc2s_emit:\n\tleaq 8(%r8), %rdi\n\tpushq %r8\n\tcall __alloc\n\tpopq %r8\n\tmovq %r8, (%rax)\n\tleaq 8(%rax), %rdi\n\tleaq -8(%rbp), %rsi\n\tmovq %r8, %rcx\n\tcld\n\tpushq %rax\n\trep movsb\n\tpopq %rax\n\tleave\n\tret\n",
+        ]
+    }
+
+    // -- END generated runtime
 
     // Synthesize `{T}.eq(self, other) -> bool` for each `#derive(Eq)` type:
     // structural equality, field-by-field / tag-and-payload, recursing through
@@ -6258,6 +6458,14 @@ fun is_tstr(t: Type) -> bool {
 
 fun is_tchar(t: Type) -> bool {
     return match t { Type.TChar => true, _ => false }
+}
+
+fun is_tfloat(t: Type) -> bool {
+    return match t { Type.TFloat(w) => true, _ => false }
+}
+
+fun is_tfloat32(t: Type) -> bool {
+    return match t { Type.TFloat(w) => w == 32, _ => false }
 }
 
 fun int_signed(t: Type) -> bool {

@@ -22,10 +22,7 @@ way we run that backend differs.
 Scope. The gate covers the single-file top-level examples; the import-driven
 multi-file packages under `examples/<pkg>/` need a module loader the self-hosted
 `gen_main` does not have (same boundary as the interpreter/checker gates).
-`floats.my` is excluded: the self-hosted AST records only a float literal's
-*suffix*, not its digits (`FloatLit(Option<str>)`), so float values cannot be
-reconstructed yet — a parser/AST limitation tracked separately, not a codegen
-gap.
+`floats.my` is included since the self-hosted backend has floats (MYLA-29).
 """
 from __future__ import annotations
 
@@ -51,7 +48,7 @@ _REPO = os.path.abspath(
 GEN_TOOL = os.path.join(_REPO, "selfhost", "gen_main.my")
 
 # Examples outside the v0.9 codegen gate's scope (see module docstring).
-EXCLUDED = {"floats.my"}
+EXCLUDED: set[str] = set()
 
 # Programs of the Python backend's parity suite (test_compiler_parity.PROGRAMS)
 # for bugs both backends had: the value of a store is evaluated before the
@@ -59,7 +56,8 @@ EXCLUDED = {"floats.my"}
 # (MYLA-4); an assignment to any place unshares the containers on its path
 # (MYLA-3); a match binding keeps its value when the arm writes to the
 # scrutinee's variable (MYLA-2); destructuring reads boxed enum leaves through
-# their pointer (MYLA-21); closure environments own their captures (MYLA-22).
+# their pointer (MYLA-21); closure environments own their captures (MYLA-22);
+# floats (MYLA-29).
 PARITY_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
@@ -72,6 +70,7 @@ PARITY_PROGRAMS = (
     "match_binding_survives_writes_to_the_scrutinee",
     "destructure_boxed_enum_and_list_leaves",
     "closure_environments_own_their_captures",
+    "floats_in_depth",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),

@@ -977,7 +977,7 @@ impl Parser {
         }
         if k == TokenKind.FLOAT {
             self.advance()
-            return self.mk_expr(tok.line, tok.column, ExprKind.FloatLit(suffix_opt(tok.suffix)))
+            return self.mk_expr(tok.line, tok.column, ExprKind.FloatLit(tok.lexeme, suffix_opt(tok.suffix)))
         }
         if k == TokenKind.CHAR {
             self.advance()

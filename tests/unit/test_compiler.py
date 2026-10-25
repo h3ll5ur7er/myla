@@ -216,5 +216,24 @@ class TestMatchScrutineeOwnership(unittest.TestCase):
         self.assertTrue(self.arms_write("push(s.items, 1)", scrutinee="s"))
 
 
+
+class TestSelfHostedFloatRuntime(unittest.TestCase):
+    def test_generated_runtime_matches_the_python_backend(self):
+        # selfhost/codegen.my embeds the Python backend's float runtime and
+        # __char_to_str (scripts/gen_selfhost_runtime.py); after changing
+        # those, rerun the script (MYLA-29).
+        import importlib.util
+        root = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+        spec = importlib.util.spec_from_file_location(
+            "gen_runtime", os.path.join(root, "scripts", "gen_selfhost_runtime.py"))
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        with open(os.path.join(root, "selfhost", "codegen.my"), encoding="utf-8") as fh:
+            src = fh.read()
+        region = src[src.index(gen.BEGIN):src.index(gen.END) + len(gen.END)]
+        self.assertEqual(region, gen.render(),
+                         "run scripts/gen_selfhost_runtime.py")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -647,7 +647,7 @@ fun is_flexible_char_lit(e: Expr) -> bool {
 }
 
 fun is_flexible_float_lit(e: Expr) -> bool {
-    return match e.kind { ExprKind.FloatLit(suf) => match suf { Some(x) => false, None => true }, _ => false }
+    return match e.kind { ExprKind.FloatLit(lex, suf) => match suf { Some(x) => false, None => true }, _ => false }
 }
 
 fun int_lit_value(e: Expr) -> int64 {
@@ -1440,7 +1440,7 @@ impl Checker {
         self.stmt_match = false
         let r: Result<Option<Type>, CheckErr> = match e.kind {
             ExprKind.IntLit(v, suf, isc) => Ok(Some(self.infer_int_lit(e, expected)?)),
-            ExprKind.FloatLit(suf) => Ok(Some(self.infer_float_lit(e, expected)?)),
+            ExprKind.FloatLit(lex, suf) => Ok(Some(self.infer_float_lit(e, expected)?)),
             ExprKind.StrLit(s) => Ok(Some(Type.TStr)),
             ExprKind.BoolLit(b) => Ok(Some(Type.TBool)),
             ExprKind.Name(n) => Ok(Some(self.infer_name(e, n, expected)?)),
@@ -1499,7 +1499,7 @@ impl Checker {
 
     fun infer_float_lit(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         match e.kind {
-            ExprKind.FloatLit(suf) => {
+            ExprKind.FloatLit(lex, suf) => {
                 match suf {
                     Some(sx) => {
                         return match float_suffix_type(sx) {
@@ -2766,7 +2766,7 @@ impl Checker {
     fun fold_const_expr(var self, e: Expr) -> Result<CV, CheckErr> {
         return match e.kind {
             ExprKind.IntLit(v, suf, isc) => Ok(CV.CVInt(v)),
-            ExprKind.FloatLit(suf) => Ok(CV.CVFloat),
+            ExprKind.FloatLit(lex, suf) => Ok(CV.CVFloat),
             ExprKind.BoolLit(b) => Ok(CV.CVBool(b)),
             ExprKind.StrLit(s) => Ok(CV.CVStr(s)),
             ExprKind.Name(n) => {

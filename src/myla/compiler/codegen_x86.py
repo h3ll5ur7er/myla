@@ -29,7 +29,7 @@ from ..types import (
     BoolType, CharType, Checker, EnumType, FloatType, FuncSig, FuncType, IntType,
     ListType, MapType, StrType, StringBuilderType, StructType, TupleType, Type,
     type_name,
-    _FF_MINK, _FF_MAXK, _FF_POW10_DD, _FF_SPLIT, round_float,
+    _FF_MINK, _FF_MAXK, _FF_POW10_DD, _FF_SPLIT, _FF_BIG, _FF_UP, _FF_DOWN, round_float,
 )
 
 
@@ -3976,6 +3976,9 @@ class CodeGen:
         out.append("__pow10_lo:")          # the double-double low corrections
         out += [f"\t.quad {_f64_bits(lo)}" for _hi, lo in _FF_POW10_DD]
         out.append(f"__fsplit:\n\t.quad {_f64_bits(_FF_SPLIT)}")  # 2**27 + 1
+        out.append(f"__fbig:\n\t.quad {_f64_bits(_FF_BIG)}")      # 2**996
+        out.append(f"__fup:\n\t.quad {_f64_bits(_FF_UP)}")        # 2**64
+        out.append(f"__fdown:\n\t.quad {_f64_bits(_FF_DOWN)}")    # 2**-64
         out.append('.Lstr_nan:\n\t.quad 3\n\t.ascii "nan"')
         out.append('.Lstr_inf:\n\t.quad 3\n\t.ascii "inf"')
         out.append('.Lstr_ninf:\n\t.quad 4\n\t.ascii "-inf"')
@@ -4006,8 +4009,22 @@ class CodeGen:
         e("\tret")
         e("")
         # __two_prod: xmm0=a, xmm1=b -> xmm0=p, xmm1=e with p+e == a*b exactly
-        # (Dekker). Clobbers xmm2..xmm7; preserves xmm8.
+        # (Dekker). Clobbers xmm2..xmm7; preserves xmm8. An operand above 2^996
+        # would overflow the split: scale it down by 2^64 and the other up
+        # (exact; mirrors types._ff_two_prod).
         e("__two_prod:")
+        e("\tmovsd __fbig(%rip), %xmm7")
+        e("\tucomisd %xmm7, %xmm0")
+        e("\tjbe .Ltp_b")                   # a <= 2^996
+        e("\tmulsd __fdown(%rip), %xmm0")
+        e("\tmulsd __fup(%rip), %xmm1")
+        e("\tjmp .Ltp_split")
+        e(".Ltp_b:")
+        e("\tucomisd %xmm7, %xmm1")
+        e("\tjbe .Ltp_split")               # b <= 2^996
+        e("\tmulsd __fup(%rip), %xmm0")
+        e("\tmulsd __fdown(%rip), %xmm1")
+        e(".Ltp_split:")
         e("\tmovsd __fsplit(%rip), %xmm7")  # S
         e("\tmovsd %xmm0, %xmm2")           # split a
         e("\tmulsd %xmm7, %xmm2")           # ca = S*a
@@ -4040,21 +4057,23 @@ class CodeGen:
         e("\tret")
         e("")
         # __fscale: xmm8 = m (magnitude), r12 = idx -> rax = round(m * 10**idx)
-        # as an int64, using double-double scaling (split for very small m).
+        # as an int64, using double-double scaling (split for very small m;
+        # mirrors types._ff_scaled_int). Clobbers xmm0..xmm9.
         e("__fscale:")
+        e("\txorpd %xmm9, %xmm9")           # e1 = 0
         e("\tcmpq $308, %r12")              # idx > _FF_MAXK ?
         e("\tjle .Lfsc_direct")
         e("\tmovsd %xmm8, %xmm0")           # a = m
         e("\tleaq __pow10_hi(%rip), %rax")
         e("\tmovsd 4184(%rax), %xmm1")      # hi(10**200), index 523
         e("\tcall __two_prod")
-        e("\taddsd %xmm1, %xmm0")           # p + e
         e("\tleaq __pow10_lo(%rip), %rax")
         e("\tmovsd 4184(%rax), %xmm2")      # lo(10**200)
         e("\tmovsd %xmm8, %xmm3")
         e("\tmulsd %xmm2, %xmm3")           # m * lo
-        e("\taddsd %xmm3, %xmm0")           # m2 = p+e + m*lo
-        e("\tmovsd %xmm0, %xmm8")           # m <- m2
+        e("\taddsd %xmm3, %xmm1")           # e1 = e + m*lo
+        e("\tmovsd %xmm1, %xmm9")
+        e("\tmovsd %xmm0, %xmm8")           # m <- p (double-double (p, e1))
         e("\tsubq $200, %r12")              # idx -= 200
         e(".Lfsc_direct:")
         e("\tleaq 323(%r12), %r11")         # table index = idx - _FF_MINK
@@ -4067,6 +4086,10 @@ class CodeGen:
         e("\tmovsd %xmm8, %xmm3")
         e("\tmulsd %xmm2, %xmm3")           # m * lo
         e("\taddsd %xmm3, %xmm1")           # e += m*lo
+        e("\tleaq __pow10_hi(%rip), %rax")
+        e("\tmovsd (%rax,%r11,8), %xmm4")   # hi(10**idx)
+        e("\tmulsd %xmm9, %xmm4")           # e1 * hi
+        e("\taddsd %xmm4, %xmm1")           # e += e1*hi
         e("\tcvtsd2si %xmm0, %rax")         # llrint(p)
         e("\tcvtsd2si %xmm1, %rcx")         # llrint(e)
         e("\taddq %rcx, %rax")              # D = llrint(p) + llrint(e)

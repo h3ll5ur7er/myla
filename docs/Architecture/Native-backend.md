@@ -77,7 +77,7 @@ System calls used: read 0, write 1, open 2, close 3, fstat 5, poll 7, mmap 9, pi
 
 ## Float formatting
 
-`print` and `format` render floats with an algorithm both back ends share ([[src/myla/types.py#L353-L465]]): find the decimal exponent by binary search over a table of powers of ten, scale the value to a 9- or 17-digit integer using double-double arithmetic (Dekker's exact product with a high/low power-of-ten table), round half to even, renormalise, trim trailing zeros and lay the digits out positionally. The assembly version uses the same constants and the same operation order, so the output is byte-identical to the interpreter's.
+`print` and `format` render floats with an algorithm both back ends share ([[src/myla/types.py#L353-L465]]): find the decimal exponent by binary search over a table of powers of ten, scale the value to a 9- or 17-digit integer using double-double arithmetic (Dekker's exact product with a high/low power-of-ten table), round half to even, renormalise, trim trailing zeros and lay the digits out positionally. The assembly version uses the same constants and the same operation order, so the output is byte-identical to the interpreter's. Two details keep it exact at the ends of the range (MYLA-29): an operand above 2^996 would overflow Dekker's split, so `two_prod` first scales it down by 2^64 and the other operand up (both exact); and for magnitudes below about 10^-292, which are scaled by 10^200 first, the intermediate stays a double-double. The self-hosted backend embeds this runtime verbatim (`scripts/gen_selfhost_runtime.py` generates it from the Python code generator; a unit test checks they match).
 
 ## Debug line tables
 

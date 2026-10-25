@@ -882,6 +882,48 @@ PROGRAMS = {
         "    m[2] = len(m) * 100\n"            # the size before the insert
         "    print(m[2])\n}\n"
     ),
+    # MYLA-29: floats beyond examples/floats.my (also run through the
+    # self-hosted compiler)
+    "floats_in_depth": (
+        "struct P { x: float64, y: float32 }\n"
+        "const SCALE: float64 = 2.5f64\n"
+        "fun hyp(p: P) -> float64 {\n    return p.x * p.x + (p.y as float64) * (p.y as float64)\n}\n"
+        "#main\nfun main() {\n"
+        "    let a = 0.1f32 * 3.0f32\n"            # float32 rounding after each op
+        "    print(a)\n"
+        "    print(1.0f32 / 3.0f32)\n"
+        "    print(16777217.0f32)\n"               # rounds to 16777216
+        "    let nan = 0.0f64 / 0.0f64\n"
+        "    print(nan < 1.0f64)\n    print(nan <= 1.0f64)\n    print(nan > 1.0f64)\n"
+        "    print(nan >= 1.0f64)\n    print(nan == nan)\n    print(nan != nan)\n"
+        "    print(-7.5f64 % 2.0f64)\n"            # fmod keeps the dividend's sign
+        "    print(-0.0f64)\n    print(0.0f64 * -1.0f64)\n"
+        "    print(-1.0f64 / 0.0f64)\n    print(nan)\n"
+        "    print(-3.9f64 as int32)\n"            # truncates toward zero
+        "    print(300.7f64 as uint8)\n"           # then wraps
+        "    let umax = 0u64 - 1u64\n"            # (the self-hosted lexer can't read 2^64 - 1 yet)
+        "    print(umax as float64)\n"
+        "    print(9007199254740993i64 as float64)\n" # an int64 above 2^53
+        "    print((1.5f64 as float32) + 0.1f32)\n"
+        "    print(1e300f64 * 1e10f64)\n"
+        "    print(5e-324f64)\n    print(1.7976931348623157e308f64)\n"
+        "    print(1e-290f64)\n    print(3e300f64)\n    print(3.690843807971407e-302f64)\n"
+        "    print(SCALE * 4.0f64)\n"
+        "    let p = P { x: 3.0f64, y: 4.0f32 }\n"
+        "    print(hyp(p))\n"
+        "    var xs: [float64] = [0.5f64, 1.25f64]\n"
+        "    push(xs, -2.0f64)\n"
+        "    var total = 0.0f64\n"
+        "    for x in xs { total = total + x }\n"
+        "    print(total)\n"
+        "    var m: [int: float32] = [1: 0.5f32]\n"
+        "    m[2] = m[1] * 3.0f32\n"
+        "    print(m[2])\n"
+        "    print(format(\"{} and {}\", 2.5f64, 0.1f32))\n"
+        "    let c = 'z'\n"
+        "    print(f\"x={p.x} c={c} q={1.0f64 / 8.0f64}\")\n"
+        "    print(2.0f64 < 3.0f64 && 3.0f32 >= 3.0f32)\n}\n"
+    ),
     # MYLA-22: a closure environment owns its captures (and a composition or
     # partial application its parts): they outlive the variables they came from.
     "closure_environments_own_their_captures": (

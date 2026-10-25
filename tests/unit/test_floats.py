@@ -142,6 +142,26 @@ class TestFormatFloat(unittest.TestCase):
             v = random.uniform(-1e6, 1e6) * (10 ** random.randint(-9, 9))
             self.assertEqual(float(format_float(v, self.F64)), v)
 
+    def test_roundtrip_f64_over_the_whole_range(self):
+        import random
+        random.seed(29)
+        for _ in range(20000):
+            v = struct.unpack("<d", struct.pack("<Q", random.getrandbits(63)))[0]
+            if v != v or v == math.inf:
+                continue
+            self.assertEqual(float(format_float(v, self.F64)), v, repr(v))
+
+    def test_largest_magnitudes_print_correctly_rounded_digits(self):
+        # Dekker's split overflowed for operands above ~1.3e300 (the largest
+        # doubles, and tiny ones scaled by 10^300..10^308), so the correction
+        # term was dropped (the interpreter) or turned into garbage (native
+        # code) (MYLA-29).
+        for v in (1.7976931348623157e308, 3e300, 9.999999999999999e299, 1e-290,
+                  1.2345678901234567e-288):
+            expected = ("%.16e" % v).split("e")[0].replace(".", "").rstrip("0")
+            got = format_float(v, self.F64).lstrip("0.").replace(".", "").rstrip("0")
+            self.assertEqual(got, expected, repr(v))
+
     def test_roundtrip_f32(self):
         import random
         random.seed(13)

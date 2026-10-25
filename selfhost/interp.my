@@ -10,6 +10,7 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind
 from .checker import Checker, Type, build_checker_src
 from .util import cp_utf8
+from .floatlit import f64_literal_bits, f32_round_bits
 from std.io import write
 
 // =========================================================================
@@ -461,7 +462,7 @@ impl Interp {
         return match e.kind {
             ExprKind.StrLit(s) => Value.VStr(s),
             ExprKind.IntLit(v, suf, isc) => self.eval_int_lit(e, v, isc),
-            ExprKind.FloatLit(suf) => Value.VFloat(0.0),
+            ExprKind.FloatLit(lex, suf) => self.eval_float_lit(e, lex),
             ExprKind.BoolLit(b) => Value.VBool(b),
             ExprKind.Name(n) => self.eval_name(e, n),
             ExprKind.Unary(op, x) => self.eval_unary(e, op, x),
@@ -702,11 +703,13 @@ impl Interp {
         if is_float_op {
             let a = as_float(lv)
             let b = as_float(rv)
-            if op == "+" { return Value.VFloat(a + b) }
-            if op == "-" { return Value.VFloat(a - b) }
-            if op == "*" { return Value.VFloat(a * b) }
-            if op == "/" { return Value.VFloat(a / b) }
-            if op == "%" { return Value.VFloat(a % b) }
+            var f = 0.0f64
+            if op == "+" { f = a + b }
+            else if op == "-" { f = a - b }
+            else if op == "*" { f = a * b }
+            else if op == "/" { f = a / b }
+            else { f = a % b }
+            return Value.VFloat(round_float(f, rt))
         }
         // integer arithmetic / bitwise / shift
         let a = as_int(lv)
@@ -726,9 +729,12 @@ impl Interp {
     }
 
     fun compare(self, op: str, lv: Value, rv: Value) -> bool {
+        match lv {
+            Value.VFloat(f) => { return fcompare(op, f, as_float(rv)) },
+            _ => {},
+        }
         var c = 0
         match lv {
-            Value.VFloat(f) => { c = fcmp(as_float(lv), as_float(rv)) },
             Value.VStr(s) => { c = scmp(as_str(lv), as_str(rv)) },
             Value.VChar(ch) => { c = icmp(as_int(lv), as_int(rv)) },
             _ => { c = icmp(as_int(lv), as_int(rv)) },
@@ -737,6 +743,14 @@ impl Interp {
         if op == "<=" { return c <= 0 }
         if op == ">" { return c > 0 }
         return c >= 0
+    }
+
+    // A float literal's value: the correctly rounded double of its text, and
+    // for a float32 that rounded again to single precision (MYLA-29).
+    fun eval_float_lit(self, e: Expr, lex: str) -> Value {
+        var bits = f64_literal_bits(lex)
+        if is_float32_type(self.resolved_of(e.id)) { bits = f32_round_bits(bits) }
+        return Value.VFloat(f64_from_bits(bits))
     }
 
     fun eval_cast(var self, e: Expr, x: Expr) -> Value {
@@ -956,7 +970,7 @@ impl Interp {
         var parts: [str] = []
         var i = 1
         while i < len(args) {
-            push(parts, format_value(self.eval(args[i])))
+            push(parts, format_typed(self.eval(args[i]), self.resolved_of(args[i].id)))
             i = i + 1
         }
         return Value.VStr(render_format(fmt, parts))
@@ -976,7 +990,7 @@ impl Interp {
     fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
         if nm == "print" {
             let v = self.eval(args[0])
-            self.emit(format_value(v))
+            self.emit(format_typed(v, self.resolved_of(args[0].id)))
             self.emit("\n")
             return Value.VUnit
         }
@@ -1221,6 +1235,66 @@ impl Interp {
 // Free helpers (value coercions, arithmetic, formatting)
 // =========================================================================
 
+// format_value, with a float32 printed to its 9 significant digits (the
+// static type decides, as in the Python interpreter)
+fun format_typed(v: Value, t: Option<Type>) -> str {
+    match v {
+        Value.VFloat(f) => { if is_float32_type(t) { return format("{}", f as float32) } },
+        _ => {},
+    }
+    return format_value(v)
+}
+
+fun is_float32_type(t: Option<Type>) -> bool {
+    return match t { Some(Type.TFloat(w)) => w == 32, _ => false }
+}
+
+// Round to the precision of float type `t` (float32: to nearest single).
+fun round_float(f: float64, t: Option<Type>) -> float64 {
+    if is_float32_type(t) { return (f as float32) as float64 }
+    return f
+}
+
+// The float64 with IEEE bit pattern `bits` (from floatlit.my; literals are
+// never negative or NaN), built exactly as mantissa * 2^exp.
+fun f64_from_bits(bits: uint64) -> float64 {
+    let biased = ((bits >> 52) & 2047) as int32
+    if biased == 2047 {
+        return 1.0f64 / 0.0f64
+    }
+    var mant = bits & 4503599627370495
+    var e = -1074
+    if biased > 0 {
+        mant = mant | ((1 as uint64) << 52)
+        e = biased - 1075
+    }
+    let x = mant as float64             // exact: mant < 2^53
+    if e < -1000 {
+        // in two steps, so the intermediate stays a normal double
+        return x * pow2(e + 600) * pow2(-600)
+    }
+    return x * pow2(e)
+}
+
+// 2^k exactly, for -1022 <= k <= 1023 (repeated squaring)
+fun pow2(k: int32) -> float64 {
+    var base = 2.0f64
+    var n = k
+    if n < 0 {
+        base = 0.5f64
+        n = -n
+    }
+    var r = 1.0f64
+    while n > 0 {
+        if (n & 1) == 1 {
+            r = r * base
+        }
+        base = base * base
+        n = n >> 1
+    }
+    return r
+}
+
 fun format_value(v: Value) -> str {
     return match v {
         Value.VStr(s) => s,
@@ -1376,10 +1450,12 @@ fun icmp(a: int64, b: int64) -> int32 {
     return 0
 }
 
-fun fcmp(a: float64, b: float64) -> int32 {
-    if a < b { return -1 }
-    if a > b { return 1 }
-    return 0
+// float comparison with IEEE semantics: anything involving NaN is false
+fun fcompare(op: str, a: float64, b: float64) -> bool {
+    if op == "<" { return a < b }
+    if op == "<=" { return a <= b }
+    if op == ">" { return a > b }
+    return a >= b
 }
 
 fun scmp(a: str, b: str) -> int32 {
@@ -1462,9 +1538,10 @@ fun cast_value(v: Value, src: Option<Type>, tgt: Option<Type>) -> Value {
     match t {
         Type.TChar => { return Value.VChar(as_int(v)) },
         Type.TFloat(w) => {
-            let f = as_float(v)
-            if w == 32 { return Value.VFloat((f as float32) as float64) }
-            return Value.VFloat(f)
+            var f = as_float(v)
+            let from_u64 = match src { Some(Type.TInt(sw, ss)) => sw == 64 && !ss, _ => false }
+            if from_u64 { f = (as_int(v) as uint64) as float64 }
+            return Value.VFloat(round_float(f, tgt))
         },
         Type.TInt(w, s) => {
             var iv: int64 = 0

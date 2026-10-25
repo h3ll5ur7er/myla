@@ -357,13 +357,16 @@ def float_rem(a: float, b: float) -> float:
 #
 # A 17-digit integer exceeds 2**53, so a single f64 multiply cannot carry it; the
 # scaling therefore uses double-double (two-double) extended precision — Dekker's
-# branch-free `two_prod` plus a high/low power-of-ten table. The algorithm uses
+# `two_prod` plus a high/low power-of-ten table. The algorithm uses
 # only f64 +,-,* (identical IEEE ops in CPython and SSE2), int64, and a shared
 # constant table, so the interpreter and the native x86-64 backend (which emits
 # the *same* table and instruction sequence) produce byte-identical output.
 _FF_MINK = -323
 _FF_MAXK = 308
 _FF_SPLIT = 134217729.0   # 2**27 + 1, Dekker's splitting constant
+_FF_BIG = 2.0 ** 996      # above this, _FF_SPLIT * x overflows (see _ff_two_prod)
+_FF_UP = 2.0 ** 64
+_FF_DOWN = 2.0 ** -64
 
 
 def _ff_build_pow10_dd() -> list[tuple[float, float]]:
@@ -386,7 +389,18 @@ def _ff_pow10_hi(k: int) -> float:
 
 
 def _ff_two_prod(a: float, b: float) -> tuple[float, float]:
-    """Dekker's exact product: returns (p, e) with p + e == a*b exactly."""
+    """Dekker's exact product: returns (p, e) with p + e == a*b exactly.
+
+    Splitting an operand above 2**996 would overflow (`_FF_SPLIT * a`), so such
+    an operand is scaled down by 2**64 and the other one up by 2**64 first:
+    both scalings are exact, the other operand is tiny (the products here are
+    about 10**17), and the product is unchanged (MYLA-29)."""
+    if a > _FF_BIG:
+        a = a * _FF_DOWN
+        b = b * _FF_UP
+    elif b > _FF_BIG:
+        a = a * _FF_UP
+        b = b * _FF_DOWN
     p = a * b
     ca = _FF_SPLIT * a
     ahi = ca - (ca - a)
@@ -407,15 +421,18 @@ def _ff_llrint(x: float) -> int:
 
 def _ff_scaled_int(m: float, idx: int) -> int:
     """round(m * 10**idx) as an exact integer, via double-double scaling."""
-    k, lo_k = (idx - 200, 200) if idx > _FF_MAXK else (idx, None)
-    if lo_k is not None:
-        # Tiny magnitudes: split the scale so neither constant overflows.
-        hi, lo = _FF_POW10_DD[lo_k - _FF_MINK]
+    e1 = 0.0
+    if idx > _FF_MAXK:
+        # Tiny magnitudes: 10**idx isn't a double, so scale by 10**200 first and
+        # carry the result as a double-double (m, e1) into the second step
+        # (collapsing it to one double lost the last digit, MYLA-29).
+        hi, lo = _FF_POW10_DD[200 - _FF_MINK]
         p, e = _ff_two_prod(m, hi)
-        m = p + e + m * lo
-    hi, lo = _FF_POW10_DD[k - _FF_MINK]
+        m, e1 = p, e + m * lo
+        idx -= 200
+    hi, lo = _FF_POW10_DD[idx - _FF_MINK]
     p, e = _ff_two_prod(m, hi)
-    e = e + m * lo
+    e = e + m * lo + e1 * hi
     return _ff_llrint(p) + _ff_llrint(e)
 
 

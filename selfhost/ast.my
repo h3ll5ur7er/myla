@@ -39,7 +39,7 @@ pub enum ExprOrBlock {
 
 pub enum ExprKind {
     IntLit(int64, Option<str>, bool),   // value, suffix, is_char
-    FloatLit(Option<str>),              // suffix only (digits gated at tokens)
+    FloatLit(str, Option<str>),         // lexeme (value: floatlit.my), suffix
     StrLit(str),
     BoolLit(bool),
     Name(str),
@@ -242,7 +242,7 @@ fun dump_arm(a: MatchArm) -> str {
 pub fun dump_expr(e: Expr) -> str {
     return match e.kind {
         ExprKind.IntLit(v, suf, isc) => format("(int {} {} {})", v, opt_sstr(suf), bstr(isc)),
-        ExprKind.FloatLit(suf) => format("(float {})", opt_sstr(suf)),
+        ExprKind.FloatLit(lex, suf) => format("(float {})", opt_sstr(suf)),
         ExprKind.StrLit(s) => format("(str {})", sstr(s)),
         ExprKind.BoolLit(b) => format("(bool {})", bstr(b)),
         ExprKind.Name(n) => format("(name {})", sstr(n)),
