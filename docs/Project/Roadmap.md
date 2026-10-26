@@ -38,7 +38,7 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
 2. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs. All the urgent ones are fixed: the Python backend's ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]], and [[MYLA-10]] for diagnostics) and the self-hosted compiler's ([[MYLA-21]], [[MYLA-22]]); the Rust edition, with its own miscompiles, was removed ([[MYLA-70]]). The medium and low ones are on [[Project/Known-issues]].
 3. **Close the self-hosted gaps**: ~~floats~~ (done, [[MYLA-29]]), ~~the module loader~~ (done, [[MYLA-30]]), ~~diagnostics~~ (done, [[MYLA-28]]), so that the self-hosted toolchain can replace the Python one for everyday use.
 4. **Performance**: string reclamation ([[MYLA-18]]).
-5. **Tooling**: language server precision ([[MYLA-51]]) and tests ([[MYLA-52]]), a REPL ([[MYLA-19]]).
+5. **Tooling**: language server precision ([[MYLA-51]]), a REPL ([[MYLA-19]]).
 
 ## Ideas
 

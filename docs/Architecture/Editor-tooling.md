@@ -27,9 +27,11 @@ python3 myla.py lsp            # or: python -m myla.lsp
 
 Supported: `didOpen`/`didChange`/`didSave`/`didClose`, `documentSymbol`, `definition`, `hover`, `references`, `completion`. Not supported: formatting, rename, semantic tokens, signature help, code actions, workspace symbols.
 
-An error in an imported module is published for that module's URI (it shows in the Problems panel and in that file), and cleared there once a later check of the importing document no longer finds it (MYLA-10); other open buffers are checked with their unsaved text. `tests/integration/test_lsp_diagnostics.py` drives the real server over stdio when pygls is installed.
+A declaration's selection range (the target of go-to-definition, and the token `includeDeclaration: false` drops from references) is its name token, found in the token stream from the declaration's keyword (MYLA-48); for an `impl` it is the target type. Positions sent by the editor are UTF-16 offsets, which `positions.from_lsp_character` converts before a line is sliced.
 
-Open problems: [[MYLA-48]] … [[MYLA-52]].
+An error in an imported module is published for that module's URI (it shows in the Problems panel and in that file), and cleared there once a later check of the importing document no longer finds it (MYLA-10); other open buffers are checked with their unsaved text. `tests/integration/test_lsp_diagnostics.py` drives the real server over stdio when pygls is installed; `tests/unit/test_lsp_features.py` covers positions, symbols, definition, references and completion without it (MYLA-52).
+
+Open problems: [[MYLA-49]], [[MYLA-50]], [[MYLA-51]].
 
 ## VS Code extension
 

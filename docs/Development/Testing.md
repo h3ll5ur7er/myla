@@ -35,7 +35,7 @@ python3 -m unittest tests.burn.test_error_corpus -v      # one file
 
 ## Unit tests
 
-`tests/unit/` has one file per area: lexer, parser, types, enums/match, tuples, methods, traits, generic traits, floats, chars, interpolation, imports, loader (including module errors and which file an error is attributed to), interpreter, stdio, fs, process, the language server's compiler adapter, and assembly-text checks for the compiler. `tests/integration/test_lsp_diagnostics.py` starts the language server and checks its diagnostics over stdio (skipped without pygls; CI installs it). The rest of the language server has no tests yet ([[MYLA-52]]).
+`tests/unit/` has one file per area: lexer, parser, types, enums/match, tuples, methods, traits, generic traits, floats, chars, interpolation, imports, loader (including module errors and which file an error is attributed to), interpreter, stdio, fs, process, the language server's compiler adapter and its features (positions, symbols, definition, references, completion: `test_lsp_features.py`, no pygls needed), and assembly-text checks for the compiler. `tests/integration/test_lsp_diagnostics.py` starts the language server and checks its diagnostics over stdio (skipped without pygls; CI installs it).
 
 ## Burn tests
 

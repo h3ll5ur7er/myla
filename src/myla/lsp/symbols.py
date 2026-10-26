@@ -11,14 +11,17 @@ uses `positions.to_lsp_position`, and ranges reuse `diagnostics.SourceRange`.
 """
 from __future__ import annotations
 
+import bisect
 import dataclasses
-from dataclasses import dataclass
+import itertools
+from dataclasses import dataclass, field
 from enum import Enum
 
 from .. import ast
 from ..errors import MylaError
 from ..lexer import tokenize
 from ..parser import parse
+from ..tokens import Token, TokenKind
 from .diagnostics import SourceRange
 from .positions import to_lsp_position
 
@@ -91,84 +94,98 @@ def document_symbols(path: str, source: str) -> list[Symbol]:
 
     Returns an empty list if the file cannot be lexed/parsed."""
     try:
-        program = parse(tokenize(source))
+        tokens = tokenize(source)
+        program = parse(tokens)
     except MylaError:
         return []
     except Exception:  # noqa: BLE001 - never raise into the server
         return []
 
-    lines = source.splitlines()
+    doc = _Doc(source.splitlines(), tokens)
     symbols: list[Symbol] = []
     for decl in program.decls:
-        sym = _decl_symbol(decl, lines)
+        sym = _decl_symbol(decl, doc)
         if sym is not None:
             symbols.append(sym)
     return symbols
 
 
+@dataclass
+class _Doc:
+    """The document's lines and tokens (positions in the tokens are 1-based
+    and count code points, as in the AST)."""
+    lines: list[str]
+    tokens: list[Token]
+    keys: list[tuple[int, int]] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.keys = [(t.line, t.column) for t in self.tokens]
+
+
 # --- declaration -> symbol -------------------------------------------------
 
 
-def _decl_symbol(decl: ast.Node, lines: list[str]) -> Symbol | None:
+def _decl_symbol(decl: ast.Node, doc: _Doc) -> Symbol | None:
     if isinstance(decl, ast.StructDecl):
         children = [
-            _member_symbol(f, lines, SymbolKind.FIELD, detail=_type_str(f.type))
+            _member_symbol(f, doc, SymbolKind.FIELD, detail=_type_str(f.type))
             for f in decl.fields
         ]
-        return _make(decl, decl.name, SymbolKind.STRUCT, "struct", lines, children)
+        return _make(decl, decl.name, SymbolKind.STRUCT, "struct", doc, children)
 
     if isinstance(decl, ast.EnumDecl):
         children = [
             _member_symbol(
-                v, lines, SymbolKind.ENUM_MEMBER, detail=_variant_detail(v)
+                v, doc, SymbolKind.ENUM_MEMBER, detail=_variant_detail(v)
             )
             for v in decl.variants
         ]
-        return _make(decl, decl.name, SymbolKind.ENUM, "enum", lines, children)
+        return _make(decl, decl.name, SymbolKind.ENUM, "enum", doc, children)
 
     if isinstance(decl, ast.TraitDecl):
-        children = [_fun_symbol(m, lines) for m in decl.methods]
+        children = [_fun_symbol(m, doc) for m in decl.methods]
         return _make(
-            decl, decl.name, SymbolKind.INTERFACE, "trait", lines, children
+            decl, decl.name, SymbolKind.INTERFACE, "trait", doc, children
         )
 
     if isinstance(decl, ast.ImplDecl):
         target = _type_str(decl.target)
-        children = [_fun_symbol(m, lines) for m in decl.methods]
+        children = [_fun_symbol(m, doc) for m in decl.methods]
+        # the target is the last mention: `impl Tr<int32> for int32 {`
         return _make(
-            decl, target, SymbolKind.IMPL, f"impl {target}", lines, children,
-            name_for_selection=_type_head(decl.target),
+            decl, target, SymbolKind.IMPL, f"impl {target}", doc, children,
+            name_for_selection=_type_head(decl.target), last=True,
         )
 
     if isinstance(decl, ast.FunDecl):
-        return _fun_symbol(decl, lines)
+        return _fun_symbol(decl, doc)
 
     if isinstance(decl, ast.ConstDecl):
         return _make(
             decl, decl.name, SymbolKind.CONSTANT,
-            _type_str(decl.declared_type), lines, [],
+            _type_str(decl.declared_type), doc, [],
         )
 
     if isinstance(decl, ast.TypeAliasDecl):
         return _make(
             decl, decl.name, SymbolKind.TYPE_ALIAS,
-            _type_str(decl.target), lines, [],
+            _type_str(decl.target), doc, [],
         )
 
     # ImportDecl and anything else are intentionally omitted from the outline.
     return None
 
 
-def _fun_symbol(decl: ast.FunDecl, lines: list[str]) -> Symbol:
+def _fun_symbol(decl: ast.FunDecl, doc: _Doc) -> Symbol:
     kind = SymbolKind.METHOD if decl.receiver is not None else SymbolKind.FUNCTION
-    return _make(decl, decl.name, kind, _fun_signature(decl), lines, [])
+    return _make(decl, decl.name, kind, _fun_signature(decl), doc, [])
 
 
 def _member_symbol(
-    node: ast.Node, lines: list[str], kind: SymbolKind, detail: str
+    node: ast.Node, doc: _Doc, kind: SymbolKind, detail: str
 ) -> Symbol:
     name = getattr(node, "name", "")
-    return _make(node, name, kind, detail, lines, [])
+    return _make(node, name, kind, detail, doc, [])
 
 
 def _make(
@@ -176,20 +193,21 @@ def _make(
     name: str,
     kind: SymbolKind,
     detail: str,
-    lines: list[str],
+    doc: _Doc,
     children: list[Symbol],
     *,
     name_for_selection: str | None = None,
+    last: bool = False,
 ) -> Symbol:
     start_line = node.line if node.line else 1
     start_col = node.column if node.column else 1
 
-    full_start = to_lsp_position(lines, start_line, start_col)
+    full_start = to_lsp_position(doc.lines, start_line, start_col)
     end_line, end_col_1 = _subtree_end(node, start_line)
-    full_end = to_lsp_position(lines, end_line, end_col_1)
+    full_end = to_lsp_position(doc.lines, end_line, end_col_1)
     full_range = SourceRange(full_start[0], full_start[1], full_end[0], full_end[1])
 
-    selection = _name_range(lines, start_line, start_col, name_for_selection or name)
+    selection = _name_range(doc, start_line, start_col, name_for_selection or name, last)
     if selection is None:
         selection = full_range if children == [] else SourceRange(*full_start, *full_start)
 
@@ -206,19 +224,28 @@ def _make(
 # --- range helpers ---------------------------------------------------------
 
 
-def _name_range(
-    lines: list[str], line_1: int, col_1: int, name: str
-) -> SourceRange | None:
-    """Locate `name` on `line_1` at or after `col_1` and return its 0-based
-    UTF-16 range, or None when it can't be found."""
-    if not name or line_1 < 1 or line_1 > len(lines):
+def _name_range(doc: _Doc, line_1: int, col_1: int, name: str,
+                last: bool = False) -> SourceRange | None:
+    """The 0-based UTF-16 range of the first (with `last`, the last) token
+    `name` in a declaration's header: from its start (the keyword, or the name
+    of a field or variant) to `{` or the end of the line. Whole tokens only, so
+    `fun un` never finds the `un` in `fun` (MYLA-48); a type name such as
+    `int32` is a token of its own kind. None when there is none."""
+    found = None
+    i = bisect.bisect_left(doc.keys, (line_1, col_1))
+    for tok in itertools.islice(doc.tokens, i, None):
+        if tok.kind is TokenKind.NEWLINE and tok.line == line_1:
+            continue                      # the previous line's (it starts this one)
+        if tok.kind in (TokenKind.LBRACE, TokenKind.NEWLINE, TokenKind.EOF):
+            break
+        if tok.lexeme == name:
+            found = tok
+            if not last:
+                break
+    if found is None:
         return None
-    text = lines[line_1 - 1]
-    idx = text.find(name, max(col_1 - 1, 0))
-    if idx < 0:
-        return None
-    start = to_lsp_position(lines, line_1, idx + 1)
-    end = to_lsp_position(lines, line_1, idx + 1 + len(name))
+    start = to_lsp_position(doc.lines, found.line, found.column)
+    end = to_lsp_position(doc.lines, found.line, found.column + len(name))
     return SourceRange(start[0], start[1], end[0], end[1])
 
 

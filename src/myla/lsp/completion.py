@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .positions import from_lsp_character
 from .symbols import Symbol, SymbolKind, document_symbols, flatten
 
 # Reserved words / built-in type names offered as keyword completions.
@@ -20,8 +21,8 @@ KEYWORDS = [
     "fun", "struct", "enum", "trait", "impl", "typealias", "const",
     "import", "from", "as", "pub", "let", "var", "return", "if", "else",
     "match", "while", "for", "in", "break", "continue", "self", "true", "false",
-    "bool", "str", "int", "int8", "int16", "int32", "int64",
-    "uint8", "uint16", "uint32", "uint64",
+    "bool", "str", "char", "int", "int8", "int16", "int32", "int64",
+    "uint8", "uint16", "uint32", "uint64", "float", "float32", "float64",
 ]
 
 _MEMBER_KINDS = {SymbolKind.FIELD, SymbolKind.METHOD, SymbolKind.ENUM_MEMBER}
@@ -76,7 +77,8 @@ def _from_symbol(s: Symbol) -> Completion:
 def _is_member_access(lines: list[str], line: int, character: int) -> bool:
     if line < 0 or line >= len(lines):
         return False
-    prefix = lines[line][:character]
+    text = lines[line]
+    prefix = text[:from_lsp_character(text, character)]
     i = len(prefix)
     while i > 0 and (prefix[i - 1].isalnum() or prefix[i - 1] == "_"):
         i -= 1

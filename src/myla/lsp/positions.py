@@ -40,6 +40,18 @@ def to_lsp_position(
     return (line, _utf16_len(text[:col]))
 
 
+def from_lsp_character(text: str, character: int) -> int:
+    """The index into `text` (a Python ``str``) of the 0-based UTF-16 offset
+    `character`, clamped to the line; an offset inside a surrogate pair maps
+    to the character it belongs to."""
+    units = 0
+    for i, ch in enumerate(text):
+        units += 2 if ord(ch) > 0xFFFF else 1
+        if units > character:
+            return i
+    return len(text)
+
+
 def identifier_end_column(text: str, col_1based: int) -> int:
     """Best-effort end column (1-based, exclusive) for a diagnostic that only
     carries a start position.
