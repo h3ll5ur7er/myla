@@ -16,4 +16,4 @@ The self-hosted front end (lexer, parser, checker, loader, diagnostics in [[self
 - [ ] Document symbols, definition, references, hover, completion: port [[src/myla/lsp/]] and use its tests ([[tests/unit/test_lsp_features.py]], [[tests/integration/test_lsp_diagnostics.py]]) as parity tests against the Myla server
 - [ ] From [[MYLA-51]]: keep the last good parse when the buffer doesn't lex or parse; resolve names through scopes and imports (the checker) instead of by name across the workspace; member completion triggered by `.`; refresh the workspace index on `didChangeWatchedFiles`
 - [ ] Semantic tokens from the compiler's own lexer, so editors highlight exactly what the compiler sees
-- [ ] The VS Code extension starts the Myla server ([[MYLA-53]])
+- [ ] The VS Code extension starts the Myla server ([[MYLA-53]]), and registers its `**/*.my` file watcher again once the server handles `didChangeWatchedFiles` (removed in [[MYLA-53]] because the Python server ignores it)

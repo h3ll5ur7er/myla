@@ -1,9 +1,9 @@
 {
   "name": "myla-language-support",
   "displayName": "Myla Language Support",
-  "description": "Syntax highlighting and basic editor support for the Myla programming language.",
+  "description": "Syntax highlighting, snippets and the Myla language server (diagnostics, outline, definition, references, hover, completion).",
   "version": "0.0.1",
-  "publisher": "your-publisher-name",
+  "publisher": "h3ll5ur7er",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -43,10 +43,6 @@
         "title": "Myla: Show Extension Info"
       },
       {
-        "command": "myla.formatFile",
-        "title": "Myla: Format File"
-      },
-      {
         "command": "myla.restartLanguageServer",
         "title": "Myla: Restart Language Server"
       }
@@ -57,17 +53,17 @@
         "myla.pythonPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the Python interpreter used to run the Myla language server. Leave empty to auto-detect the project's `.venv` (created by `uv`), falling back to `python` on PATH."
+          "description": "Path to the Python interpreter used to run the Myla language server. Leave empty to auto-detect the project's `.venv` (created by `uv`), falling back to `python` on PATH. `${workspaceFolder}`, `${userHome}` and `~` are expanded."
         },
         "myla.compilerPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the Myla repository root (the folder containing `myla.py`) or directly to `myla.py`. Leave empty to auto-detect from the workspace root."
+          "description": "Path to the Myla repository root (the folder containing `myla.py`) or directly to `myla.py`. Leave empty to auto-detect from the workspace root. `${workspaceFolder}`, `${userHome}` and `~` are expanded."
         },
         "myla.diagnostics.enable": {
           "type": "boolean",
           "default": true,
-          "description": "Enable Myla compiler diagnostics from the language server."
+          "description": "Show the Myla compiler's diagnostics. When off, the language server keeps running for hover, definition and the rest."
         },
         "myla.trace.server": {
           "type": "string",
@@ -100,5 +96,9 @@
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/h3ll5ur7er/myla"
   }
 }

@@ -29,8 +29,7 @@ from .workspace import WorkspaceIndex
 logger = logging.getLogger("myla.lsp")
 
 # Wait this long after the last keystroke before re-checking a changed document,
-# so we don't run the whole front end on every character (see LSP_DESCRIPTION.md
-# "Phase 2 performance requirements").
+# so we don't run the whole front end on every character.
 _DEBOUNCE_SECONDS = 0.4
 
 _SEVERITY = {

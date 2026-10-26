@@ -5,7 +5,7 @@ A thin Language Server Protocol wrapper around the Myla bootstrapping compiler
 for diagnostics, symbols, and — eventually — hover/definition/etc.; nothing here
 re-implements lexing, parsing, or type checking.
 
-Layout (see vscode-extension/myla/LSP_DESCRIPTION.md):
+Layout (see the wiki page Architecture/Editor-tooling):
     positions.py        1-based compiler positions -> 0-based LSP positions
     diagnostics.py      compiler-independent diagnostic model
     compiler_adapter.py invoke the front end, convert errors to diagnostics

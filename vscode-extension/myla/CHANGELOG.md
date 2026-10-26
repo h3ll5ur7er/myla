@@ -1,9 +1,11 @@
 # Change Log
 
-All notable changes to the "myla" extension will be documented in this file.
-
-Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
-
 ## [Unreleased]
 
-- Initial release
+- The grammar and snippets follow the real language: no Rust-dialect keywords, the real type names and literal forms, `;` as an optional separator; every snippet is valid Myla.
+- `myla.trace.server` works, `myla.diagnostics.enable = false` hides only the diagnostics, and `${workspaceFolder}` is expanded in path settings.
+- Removed the placeholder `Myla: Format File` command and the file watcher whose notifications the server ignored.
+
+## 0.0.1
+
+- Initial version: highlighting, snippets and the Python language server client.

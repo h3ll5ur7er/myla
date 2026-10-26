@@ -21,11 +21,6 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand("myla.restartLanguageServer", async () => {
       await restartServer(context);
-    }),
-    vscode.commands.registerCommand("myla.formatFile", () => {
-      vscode.window.showInformationMessage(
-        "Myla formatter is not wired up yet. It will be provided by the language server in a later phase."
-      );
     })
   );
 
@@ -51,13 +46,6 @@ export function deactivate(): Thenable<void> | undefined {
 
 async function startServer(context: vscode.ExtensionContext): Promise<void> {
   const config = vscode.workspace.getConfiguration("myla");
-
-  if (config.get<boolean>("diagnostics.enable", true) === false) {
-    output.appendLine(
-      "Myla diagnostics are disabled (myla.diagnostics.enable = false)."
-    );
-    return;
-  }
 
   const entry = resolveCompilerEntry(config);
   if (!entry) {
@@ -86,14 +74,23 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
       { scheme: "file", language: "myla" },
       { scheme: "untitled", language: "myla" },
     ],
-    synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.my"),
-    },
     outputChannel: output,
+    middleware: {
+      // `myla.diagnostics.enable = false` hides the diagnostics only; hover,
+      // definition and the rest keep working.
+      handleDiagnostics: (uri, diagnostics, next) => {
+        const enabled = vscode.workspace
+          .getConfiguration("myla")
+          .get<boolean>("diagnostics.enable", true);
+        next(uri, enabled ? diagnostics : []);
+      },
+    },
   };
 
+  // The id is the settings prefix: vscode-languageclient reads the trace level
+  // from `<id>.trace.server`, i.e. `myla.trace.server`.
   client = new LanguageClient(
-    "mylaLanguageServer",
+    "myla",
     "Myla Language Server",
     serverOptions,
     clientOptions
@@ -128,7 +125,7 @@ async function restartServer(context: vscode.ExtensionContext): Promise<void> {
 function resolveCompilerEntry(
   config: vscode.WorkspaceConfiguration
 ): string | undefined {
-  const configured = config.get<string>("compilerPath", "").trim();
+  const configured = expandPath(config.get<string>("compilerPath", ""));
   if (configured) {
     if (configured.endsWith(".py") && fs.existsSync(configured)) {
       return configured;
@@ -158,7 +155,7 @@ function resolvePythonPath(
   config: vscode.WorkspaceConfiguration,
   entry: string
 ): string {
-  const configured = config.get<string>("pythonPath", "").trim();
+  const configured = expandPath(config.get<string>("pythonPath", ""));
   if (configured) {
     return configured;
   }
@@ -173,4 +170,21 @@ function resolvePythonPath(
     return venvWin;
   }
   return "python";
+}
+
+/**
+ * A path setting with `${workspaceFolder}` (the first workspace folder),
+ * `${userHome}` and a leading `~` expanded, as VS Code does for its own
+ * settings but not for an extension's.
+ */
+function expandPath(value: string): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+  let out = value.trim();
+  if (out.startsWith("~/")) {
+    out = path.join(home, out.slice(2));
+  }
+  return out
+    .replace(/\$\{workspaceFolder\}/g, folder)
+    .replace(/\$\{userHome\}/g, home);
 }

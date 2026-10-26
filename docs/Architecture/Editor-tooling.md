@@ -37,11 +37,10 @@ The Python server is to be replaced by one written in Myla ([[MYLA-80]]), which 
 
 `vscode-extension/myla/` contributes the `myla` language for `.my` files: a TextMate grammar, snippets, a language configuration and a language client.
 
-- The client looks for `myla.py` (setting `myla.compilerPath`, then the workspace folders) and for Python (`myla.pythonPath`, then `<repo>/.venv`, then `python`), and starts `python myla.py lsp` with the repository as working directory. Changing a setting restarts the server.
-- Settings: `myla.compilerPath`, `myla.pythonPath`, `myla.diagnostics.enable`, `myla.trace.server`.
-- A packaged `myla-language-support-0.0.1.vsix` is checked in.
-
-Open problems: [[MYLA-53]], [[MYLA-54]], [[MYLA-55]].
+- The client looks for `myla.py` (setting `myla.compilerPath`, then the workspace folders) and for Python (`myla.pythonPath`, then `<repo>/.venv`, then `python`), and starts `python myla.py lsp` with the repository as working directory. `${workspaceFolder}`, `${userHome}` and `~` are expanded in the two path settings. Changing a setting restarts the server.
+- Settings: `myla.compilerPath`, `myla.pythonPath`, `myla.diagnostics.enable` (hides diagnostics through a client middleware; the server keeps running), `myla.trace.server` (the client id is `myla`).
+- `npm run package` builds the `.vsix`; it isn't committed. `.vscodeignore` keeps sources out of it.
+- `tests/unit/test_vscode_extension.py` checks the grammar against the lexer's keywords and the built-in type names, and parses every snippet ([[MYLA-54]]).
 
 ## tree-sitter grammar
 

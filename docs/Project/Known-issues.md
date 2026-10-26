@@ -28,11 +28,7 @@ Also by design (from the earlier known-issues list in [[Archive/known_issues]]):
 
 ## Editor tooling
 
-| Task | Problem | Priority |
-| --- | --- | --- |
-| [[MYLA-53]], [[MYLA-55]] | VS Code settings and packaging, machine-specific workspace settings | low |
-
-The tree-sitter grammar ([[MYLA-47]]) and the Python language server's bugs ([[MYLA-49]], [[MYLA-50]], [[MYLA-51]]) are superseded by the `Tooling in Myla` epic ([[MYLA-77]], [[MYLA-80]]).
+No open issues. The tree-sitter grammar ([[MYLA-47]]) and the Python language server's bugs ([[MYLA-49]], [[MYLA-50]], [[MYLA-51]]) are superseded by the `Tooling in Myla` epic ([[MYLA-77]], [[MYLA-80]]).
 
 ## Documentation and repository
 
