@@ -31,7 +31,7 @@ A declaration's selection range (the target of go-to-definition, and the token `
 
 An error in an imported module is published for that module's URI (it shows in the Problems panel and in that file), and cleared there once a later check of the importing document no longer finds it (MYLA-10); other open buffers are checked with their unsaved text. `tests/integration/test_lsp_diagnostics.py` drives the real server over stdio when pygls is installed; `tests/unit/test_lsp_features.py` covers positions, symbols, definition, references and completion without it (MYLA-52).
 
-Open problems: [[MYLA-49]], [[MYLA-50]], [[MYLA-51]].
+The Python server is to be replaced by one written in Myla ([[MYLA-80]]), which takes the open findings of [[MYLA-49]], [[MYLA-50]] and [[MYLA-51]] as requirements.
 
 ## VS Code extension
 

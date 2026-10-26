@@ -17,7 +17,7 @@ The reference implementation. Most problems are places where the native backend 
 | [[MYLA-17]] | Native runtime: short writes, silent traps | low |
 | [[MYLA-18]] | Strings are never freed | low |
 | [[MYLA-59]] | A `match` ending an arm block must produce a value | low |
-| [[MYLA-19]], [[MYLA-20]] | No REPL; code hygiene | low |
+| [[MYLA-20]] | Code hygiene | low |
 
 ## Self-hosted compiler
 
@@ -33,9 +33,9 @@ Also by design (from the earlier known-issues list in [[Archive/known_issues]]):
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-47]] | The tree-sitter grammar still follows the removed Rust edition's dialect | low |
-| [[MYLA-49]], [[MYLA-50]], [[MYLA-51]] | Lifecycle races, dead code, name-only resolution | low |
 | [[MYLA-53]], [[MYLA-54]], [[MYLA-55]] | VS Code settings and packaging, grammar and snippets, machine-specific workspace settings | low |
+
+The tree-sitter grammar ([[MYLA-47]]) and the Python language server's bugs ([[MYLA-49]], [[MYLA-50]], [[MYLA-51]]) are superseded by the `Tooling in Myla` epic ([[MYLA-77]], [[MYLA-80]]).
 
 ## Documentation and repository
 

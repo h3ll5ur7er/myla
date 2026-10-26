@@ -38,7 +38,12 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
 2. **Make the existing toolchains correct.** The October 2026 review found parity and memory bugs. All the urgent ones are fixed: the Python backend's ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]], and [[MYLA-10]] for diagnostics) and the self-hosted compiler's ([[MYLA-21]], [[MYLA-22]]); the Rust edition, with its own miscompiles, was removed ([[MYLA-70]]). The medium and low ones are on [[Project/Known-issues]].
 3. **Close the self-hosted gaps**: ~~floats~~ (done, [[MYLA-29]]), ~~the module loader~~ (done, [[MYLA-30]]), ~~diagnostics~~ (done, [[MYLA-28]]), so that the self-hosted toolchain can replace the Python one for everyday use.
 4. **Performance**: string reclamation ([[MYLA-18]]).
-5. **Tooling**: language server precision ([[MYLA-51]]), a REPL ([[MYLA-19]]).
+5. **Tooling in Myla**: in the end, all tooling should be written in Myla, not only the compiler. The steps are tasks in the `Tooling in Myla` epic:
+   - a machine-readable grammar description, from which a generator written in Myla emits the tree-sitter grammar, tied to the compiler by tests ([[MYLA-77]]). The parsers stay hand-written for their error messages; the grammar can't be derived from their code, so the description is the source and the tests keep both in step;
+   - standard-library groundwork: reading stdin ([[MYLA-78]]) and JSON ([[MYLA-79]]);
+   - a language server written in Myla on the self-hosted front end, with the Python server's tests as parity tests ([[MYLA-80]]), and semantic tokens from the compiler's own lexer;
+   - `myla test` parity in the self-hosted CLI ([[MYLA-81]]) and a REPL ([[MYLA-82]]);
+   - finally retiring each Python tool once its Myla replacement passes the parity tests ([[MYLA-83]]).
 
 ## Ideas
 

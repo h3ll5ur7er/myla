@@ -2,7 +2,7 @@
 id: MYLA-49
 title: Language server lifecycle bugs
 type: bug
-status: backlog
+status: done
 priority: low
 labels: [lsp]
 ---
@@ -11,3 +11,7 @@ labels: [lsp]
 - [ ] Only the current buffer is passed to the loader as an override; other unsaved buffers are read from disk, and files that import a changed module aren't re-checked
 - [ ] Override keys are `to_fs_path(uri)` while indexed files are `realpath`, so unsaved edits are missed under symlinked roots ([[src/myla/lsp/workspace.py]])
 - [ ] Errors from imported modules land on the open document: [[MYLA-10]]
+
+## Superseded
+
+Closed without a fix: superseded by [[MYLA-80]] (the Python language server will be replaced by one written in Myla, which takes these findings as requirements, see [[Project/Roadmap]]).

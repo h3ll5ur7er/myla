@@ -2,7 +2,7 @@
 id: MYLA-51
 title: Language server features degrade on errors and resolve by name only
 type: improvement
-status: backlog
+status: done
 priority: low
 labels: [lsp]
 ---
@@ -12,3 +12,7 @@ labels: [lsp]
 - [ ] Declaration ranges stop before the closing `}`; signatures omit type parameters, bounds and `pub`; impl entries omit `Trait for`
 - [ ] Completion registers no trigger characters (no member completion after `.`), offers every known member regardless of the receiver type, and its keyword list lacks `float`, `float32`, `float64`, `char`
 - [ ] Workspace roots are read once and never refreshed; `workspace/didChangeWatchedFiles` is not handled
+
+## Superseded
+
+Closed without a fix: superseded by [[MYLA-80]] (the Python language server will be replaced by one written in Myla, which takes these findings as requirements, see [[Project/Roadmap]]).

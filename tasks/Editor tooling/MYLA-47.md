@@ -2,7 +2,7 @@
 id: MYLA-47
 title: tree-sitter grammar follows the removed Rust dialect
 type: improvement
-status: backlog
+status: done
 priority: low
 labels: [editor, tree-sitter]
 ---
@@ -15,3 +15,7 @@ labels: [editor, tree-sitter]
 - [ ] `highlights.scm` lists a `unit` builtin type that Myla doesn't have; type names are `int32`, `float64`, … (not `i32`, `f64`)
 - [ ] Version 0.0.1 in `Cargo.toml` vs 0.1.0 in `package.json`, and a placeholder repository URL
 - [ ] A corpus test (`tree-sitter test`) over the examples, so the grammar can't drift again
+
+## Superseded
+
+Closed without a fix: superseded by [[MYLA-77]] (the grammar will be generated from a grammar description and tested against the compiler, see [[Project/Roadmap]]).

@@ -36,7 +36,7 @@ type error: cannot assign to an immutable binding (declare it with 'var')
 | `myla tokenize <file> [--canonical]` | Dump the token stream |
 | `myla parse <file> [--canonical]` | Dump the AST (`--canonical`: one S-expression per declaration) |
 | `myla lsp` | Start the language server on stdio (needs the `lsp` extra) |
-| `myla repl` | Not implemented yet ([[MYLA-19]]) |
+| `myla repl` | Not implemented yet; to be written in Myla ([[MYLA-82]]) |
 
 All commands live in [[src/myla/cli.py]]; `myla.py` only puts `src/` on the import path.
 
