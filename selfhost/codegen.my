@@ -1765,11 +1765,9 @@ impl CodeGen {
             return
         }
         if (op == "==" || op == "!=") && is_tstr(lt) {
-            self.eval(r)
-            self.emit("pushq %rax")
-            self.eval(l)
+            self.eval_operands(l, r)
             self.emit("movq %rax, %rdi")
-            self.emit("popq %rsi")
+            self.emit("movq %rcx, %rsi")
             self.emit("call __str_eq")
             if op == "!=" {
                 self.emit("testq %rax, %rax")
@@ -1779,18 +1777,13 @@ impl CodeGen {
             return
         }
         if op == "+" && is_tstr(lt) {
-            self.eval(r)
-            self.emit("pushq %rax")
-            self.eval(l)
+            self.eval_operands(l, r)
             self.emit("movq %rax, %rdi")
-            self.emit("popq %rsi")
+            self.emit("movq %rcx, %rsi")
             self.emit("call __str_concat")
             return
         }
-        self.eval(r)
-        self.emit("pushq %rax")
-        self.eval(l)
-        self.emit("popq %rcx")
+        self.eval_operands(l, r)
         let rt = self.type_of(e.id)
         if op == "+" {
             self.emit("addq %rcx, %rax")
@@ -1881,12 +1874,31 @@ impl CodeGen {
     // Call a 2-arg method returning a scalar (Eq.eq -> bool, Ord.cmp -> int),
     // leaving the result in %rax. Both operands are aggregates passed by address.
     fun gen_scalar_method2(var self, key: str, name: str, l: Expr, r: Expr) {
-        self.addr_of_aggregate(r)
-        self.emit("pushq %rax")
+        self.emit("subq $16, %rsp")
         self.addr_of_aggregate(l)
-        self.emit("pushq %rax")
+        self.emit("movq %rax, 0(%rsp)")
+        self.addr_of_aggregate(r)
+        self.emit("movq %rax, 8(%rsp)")
         self.emit(format("call myla_{}.{}", key, name))
         self.emit("addq $16, %rsp")
+    }
+
+    // Evaluate `l` into %rax and `r` into %rcx, left to right (MYLA-8). With
+    // a literal operand the order can't be observed, and the right-first
+    // sequence is one instruction shorter.
+    fun eval_operands(var self, l: Expr, r: Expr) {
+        if is_literal(l) || is_literal(r) {
+            self.eval(r)
+            self.emit("pushq %rax")
+            self.eval(l)
+            self.emit("popq %rcx")
+            return
+        }
+        self.eval(l)
+        self.emit("pushq %rax")
+        self.eval(r)
+        self.emit("movq %rax, %rcx")
+        self.emit("popq %rax")
     }
 
     fun eval_logical(var self, op: str, l: Expr, r: Expr) {
@@ -2031,10 +2043,7 @@ impl CodeGen {
     // computed in XMM; `%` is fmod; float32 results are narrowed.
     fun eval_binary_float(var self, e: Expr, op: str, l: Expr, r: Expr) {
         self.uses_float = true
-        self.eval(r)
-        self.emit("pushq %rax")
-        self.eval(l)
-        self.emit("popq %rcx")
+        self.eval_operands(l, r)
         self.emit("movq %rax, %xmm0")
         self.emit("movq %rcx, %xmm1")
         if op == "+" || op == "-" || op == "*" || op == "/" || op == "%" {
@@ -2596,9 +2605,11 @@ impl CodeGen {
         self.emit(format("movq %rax, {}(%rbp)", slot))
         let staged = self.staged[e.id]
         for en in entries {
+            self.eval(en.key)                        // key, then value (MYLA-8)
+            self.emit("pushq %rax")
             self.stage_value(en.value, map_val(mt), staged, false)
             self.emit(format("leaq {}(%rbp), %rax", slot))
-            self.emit_map_put(en.key, mt, staged)
+            self.emit_map_put_pushed_key(mt, staged)
         }
         self.emit(format("movq {}(%rbp), %rax", slot))
     }
@@ -2607,24 +2618,40 @@ impl CodeGen {
     // stage_value); precondition: %rax = &holder (a location holding the map
     // cell pointer). Leaves the stack as found.
     fun emit_map_put(var self, key: Expr, mt: Type, staged: int32) {
-        let vt = map_val(mt)
-        let slot_size = self.map_slot_size(mt)
-        let is_str = self.map_is_str(mt)
         self.emit("pushq %rax")
-        self.emit("movq %rax, %rdi")
-        self.emit(format("movq ${}, %rsi", slot_size))
-        self.emit(format("movq ${}, %rcx", is_str))
-        self.emit("call __map_reserve")
+        self.emit_map_reserve(mt)
         self.eval(key)
         self.emit("pushq %rax")
-        self.emit("movq 8(%rsp), %rdi")
+        self.emit_map_set_slot(mt, staged, 8, 0)
+    }
+
+    // emit_map_put for a key evaluated and pushed already (a map literal
+    // evaluates each key before its value).
+    fun emit_map_put_pushed_key(var self, mt: Type, staged: int32) {
+        self.emit("pushq %rax")
+        self.emit_map_reserve(mt)
+        self.emit_map_set_slot(mt, staged, 0, 8)
+    }
+
+    // Make room for one more entry in the map whose holder is at %rax.
+    fun emit_map_reserve(var self, mt: Type) {
+        self.emit("movq %rax, %rdi")
+        self.emit(format("movq ${}, %rsi", self.map_slot_size(mt)))
+        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
+        self.emit("call __map_reserve")
+    }
+
+    // Set the key at `key_at`(%rsp) in the map whose holder is at
+    // `holder_at`(%rsp) to the staged value, then pop both words.
+    fun emit_map_set_slot(var self, mt: Type, staged: int32, holder_at: int32, key_at: int32) {
+        self.emit(format("movq {}(%rsp), %rdi", holder_at))
         self.emit("movq (%rdi), %rdi")
-        self.emit("movq (%rsp), %rsi")
-        self.emit(format("movq ${}, %rdx", slot_size))
-        self.emit(format("movq ${}, %rcx", is_str))
+        self.emit(format("movq {}(%rsp), %rsi", key_at))
+        self.emit(format("movq ${}, %rdx", self.map_slot_size(mt)))
+        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
         self.emit("call __map_set_slot")
         self.emit("leaq 16(%rax), %rcx")     // &value
-        self.commit_staged(vt, staged, false)
+        self.commit_staged(map_val(mt), staged, false)
         self.emit("addq $16, %rsp")
     }
 
@@ -3208,11 +3235,12 @@ impl CodeGen {
 
     // `__write(fd, s)`: rdi = fd, rsi = str cell -> write(2) the bytes.
     fun gen_io_write(var self, args: [Expr]) {
-        self.eval(args[1])
-        self.emit("pushq %rax")
         self.eval(args[0])
-        self.emit("movl %eax, %edi")
-        self.emit("popq %rsi")
+        self.emit("pushq %rax")
+        self.eval(args[1])
+        self.emit("movq %rax, %rsi")
+        self.emit("popq %rdi")
+        self.emit("movl %edi, %edi")
         self.emit("call __write")
     }
 
@@ -3234,22 +3262,22 @@ impl CodeGen {
     // `__write_file(path, contents)`: rdi = path str cell, rsi = contents str
     // cell -> void (errno in __io_errno_val).
     fun gen_io_write_file(var self, args: [Expr]) {
-        self.eval(args[1])
-        self.emit("pushq %rax")
         self.eval(args[0])
-        self.emit("movq %rax, %rdi")
-        self.emit("popq %rsi")
+        self.emit("pushq %rax")
+        self.eval(args[1])
+        self.emit("movq %rax, %rsi")
+        self.emit("popq %rdi")
         self.emit("call __write_file")
     }
 
     // `__run(program, argv)`: rdi = program str cell, rsi = argv [str] list cell
     // -> rax = the child's stdout [uint8] cell (results in __run_*_val globals).
     fun gen_io_run(var self, args: [Expr]) {
-        self.eval(args[1])
-        self.emit("pushq %rax")
         self.eval(args[0])
-        self.emit("movq %rax, %rdi")
-        self.emit("popq %rsi")
+        self.emit("pushq %rax")
+        self.eval(args[1])
+        self.emit("movq %rax, %rsi")
+        self.emit("popq %rdi")
         self.emit("call __run")
     }
 
@@ -3275,19 +3303,9 @@ impl CodeGen {
         self.emit(format("movq %rcx, {}(%rbp)", code_off))
         self.emit("movq 8(%rax), %rcx")
         self.emit(format("movq %rcx, {}(%rbp)", env_off))
-        var i = len(args) - 1
-        while i >= 0 {
-            if is_aggregate(params[i]) { self.addr_of_aggregate(args[i]) }
-            else { self.eval(args[i]) }
-            self.emit("pushq %rax")
-            i = i - 1
-        }
-        self.emit(format("movq {}(%rbp), %rax", env_off))
-        self.emit("pushq %rax")
-        if struct_ret {
-            self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
-            self.emit("pushq %rax")
-        }
+        var sret = -1
+        if struct_ret { sret = self.local_of(e.id) }
+        self.store_call_words(sret, env_off, args, params)
         self.emit(format("call *{}(%rbp)", code_off))
         var n = len(args) + 1
         if struct_ret { n = n + 1 }
@@ -3912,21 +3930,46 @@ impl CodeGen {
             ret = opt_subst_type(sig.ret, sub)
         }
         let struct_ret = is_aggregate_opt(ret)
-        var i = len(argv) - 1
-        while i >= 0 {
-            if is_aggregate(params[i]) { self.addr_of_aggregate(argv[i]) }
-            else { self.eval(argv[i]) }
-            self.emit("pushq %rax")
-            i = i - 1
-        }
-        if struct_ret {
-            self.emit(format("leaq {}(%rbp), %rax", self.local_of(e.id)))
-            self.emit("pushq %rax")
-        }
+        var sret = -1
+        if struct_ret { sret = self.local_of(e.id) }
+        self.store_call_words(sret, -1, argv, params)
         self.emit(format("call myla_{}", target))
         var n = len(argv)
         if struct_ret { n = n + 1 }
         if n > 0 { self.emit(format("addq ${}, %rsp", 8 * n)) }
+    }
+
+    // Put the outgoing words `[sret,] [env,] args` on the stack, the first at
+    // the lowest address, evaluating the arguments left to right (MYLA-8):
+    // the words are reserved, then filled in source order. When at most one
+    // argument has effects or reads state (the others are literals), pushing
+    // them last to first is the same and shorter. `sret` is the frame slot of
+    // the result and `env` the one holding the env pointer, or -1.
+    fun store_call_words(var self, sret: int32, env: int32, args: [Expr], params: [Type]) {
+        var first = 0
+        if sret != -1 { first = first + 1 }
+        if env != -1 { first = first + 1 }
+        var effects = 0
+        for a in args { if !is_literal(a) { effects = effects + 1 } }
+        let ordered = effects > 1
+        let n = len(args) + first
+        if ordered { self.emit(format("subq ${}, %rsp", 8 * n)) }
+        var k = 0
+        while k < n {
+            var w = n - 1 - k                        // the word to fill
+            if ordered { w = k }
+            if w == 0 && sret != -1 {
+                self.emit(format("leaq {}(%rbp), %rax", sret))
+            } else if w == first - 1 && env != -1 {
+                self.emit(format("movq {}(%rbp), %rax", env))
+            } else if is_aggregate(params[w - first]) {
+                self.addr_of_aggregate(args[w - first])
+            } else {
+                self.eval(args[w - first])
+            }
+            if ordered { self.emit(format("movq %rax, {}(%rsp)", 8 * w)) } else { self.emit("pushq %rax") }
+            k = k + 1
+        }
     }
 
     // `recv.field(args)` — a method call when `field` names a method of the
@@ -6682,6 +6725,26 @@ fun is_tfloat(t: Type) -> bool {
 
 fun is_tfloat32(t: Type) -> bool {
     return match t { Type.TFloat(w) => w == 32, _ => false }
+}
+
+// Whether `e` is a (possibly negated) scalar or string literal: it has no
+// effects and reads no state, so when it is evaluated doesn't matter.
+fun is_literal(e: Expr) -> bool {
+    match e.kind {
+        ExprKind.Unary(op, x) => { return op == "-" && is_literal_leaf(x) },
+        _ => {},
+    }
+    return is_literal_leaf(e)
+}
+
+fun is_literal_leaf(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.IntLit(v, suf, isc, big) => true,
+        ExprKind.FloatLit(lex, suf) => true,
+        ExprKind.StrLit(t) => true,
+        ExprKind.BoolLit(b) => true,
+        _ => false,
+    }
 }
 
 // The bits of the double 2^k (-2^k when `neg`), as a signed immediate.

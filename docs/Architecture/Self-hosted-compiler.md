@@ -46,7 +46,7 @@ Myla has no global variables and no module-level maps, and everything is a value
 | Closure environments | `[drop fn][captures…]`, captures retained and dropped | The same since [[MYLA-22]]; compositions and partial applications own their parts too |
 | Stdlib root | Built in | Must be passed as an argument ([[MYLA-31]]) |
 
-The calling convention, value layouts, list/map/builder runtimes and even the right-to-left operand order are ported nearly line for line from [[Architecture/Native-backend]].
+The calling convention, value layouts, list/map/builder runtimes and the evaluation order are ported nearly line for line from [[Architecture/Native-backend]].
 
 ## How it was brought up
 

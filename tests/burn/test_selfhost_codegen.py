@@ -63,7 +63,7 @@ EXCLUDED: set[str] = set()
 # (MYLA-27), `remove` on a shared map (MYLA-25), partial application of
 # aggregates (MYLA-26), derived `Eq` on recursive enums (MYLA-23), integer
 # literals of 2^63 and above (MYLA-73), the int64 minimum divided by -1 (MYLA-5),
-# saturating float -> integer casts (MYLA-6).
+# saturating float -> integer casts (MYLA-6), left-to-right evaluation (MYLA-8).
 PARITY_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
@@ -86,6 +86,7 @@ PARITY_PROGRAMS = (
     "big_integer_literals",
     "int64_min_divided_by_minus_one",
     "float_to_int_casts_saturate",
+    "evaluation_order_is_left_to_right",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),

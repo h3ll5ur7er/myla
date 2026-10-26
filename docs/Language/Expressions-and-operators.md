@@ -112,4 +112,10 @@ The checker rewrites `?` into a `match` once the carrier is known, so the backen
 
 ## Evaluation order
 
-The interpreter evaluates operands, arguments and literal elements left to right. Native code (both backends) currently evaluates binary operands and call arguments right to left, so side effects in operands come out in a different order ([[MYLA-8]]). Until that is fixed, don't rely on the order of side effects within one expression.
+Subexpressions evaluate left to right, in the interpreter and in native code alike ([[MYLA-8]]):
+
+- A binary operator evaluates its left operand, then its right. `&&` and `||` skip the right operand when the left one decides.
+- A call evaluates the arguments in order; a method call evaluates the receiver first, and a call through a function value evaluates the callee first. `x |> f(y)` is `f(x, y)`, so `x` comes first.
+- Struct, tuple, list and enum literals evaluate their elements in the order written (a struct literal in the order of its fields as written, not as declared). A map literal evaluates each key, then its value.
+- `format` and `f"…"` evaluate their arguments left to right.
+- An assignment evaluates the value first, then the place: `xs[i] = v` evaluates `v`, then `xs`, then `i`. `push(xs, v)`, `append_byte(sb, b)` and the other writes into a container likewise evaluate the value before they touch the container (MYLA-4).

@@ -1573,9 +1573,10 @@ class CodeGen:
         self._emit(f"movq %rax, {slot}(%rbp)")
         staged = self._locals[f"staged:{id(expr)}"]
         for key, value in expr.entries:
+            self._eval(key)                      # key, then value (MYLA-8)
+            self._emit("pushq %rax")
             self._stage_value(value, vt, staged)
-            self._eval(key)                      # key -> rax
-            self._emit("movq %rax, %rsi")
+            self._emit("popq %rsi")
             self._emit(f"movq {slot}(%rbp), %rdi")  # cell
             self._emit(f"call {self._map_put_name(mt)}")  # rax=&value, rdx=found
             self._commit_map_value(vt, staged)
@@ -3378,11 +3379,9 @@ class CodeGen:
             return
 
         if op in ("==", "!=") and isinstance(ltype, StrType):
-            self._eval(expr.right)
-            self._emit("pushq %rax")
-            self._eval(expr.left)
+            self._eval_operands(expr)
             self._emit("movq %rax, %rdi")
-            self._emit("popq %rsi")
+            self._emit("movq %rcx, %rsi")
             self._emit("call __str_eq")
             if op == "!=":
                 self._emit("testq %rax, %rax")
@@ -3391,19 +3390,13 @@ class CodeGen:
             return
 
         if op == "+" and isinstance(ltype, StrType):
-            self._eval(expr.right)
-            self._emit("pushq %rax")
-            self._eval(expr.left)
+            self._eval_operands(expr)
             self._emit("movq %rax, %rdi")        # A
-            self._emit("popq %rsi")              # B
+            self._emit("movq %rcx, %rsi")        # B
             self._emit("call __str_concat")      # rax = A + B (fresh heap str)
             return
 
-        # evaluate right, push; evaluate left into rax; pop right into rcx
-        self._eval(expr.right)
-        self._emit("pushq %rax")
-        self._eval(expr.left)
-        self._emit("popq %rcx")
+        self._eval_operands(expr)
 
         if op == "+":
             self._emit("addq %rcx, %rax")
@@ -3485,16 +3478,28 @@ class CodeGen:
     }
     _FARITH = {"+": "addsd", "-": "subsd", "*": "mulsd", "/": "divsd"}
 
+    def _eval_operands(self, expr: ast.Binary) -> None:
+        """Evaluate the left operand into %rax and the right into %rcx, left
+        to right (MYLA-8). With a literal operand the order can't be observed,
+        and the right-first sequence is one instruction shorter."""
+        if _is_literal(expr.left) or _is_literal(expr.right):
+            self._eval(expr.right)
+            self._emit("pushq %rax")
+            self._eval(expr.left)
+            self._emit("popq %rcx")
+            return
+        self._eval(expr.left)
+        self._emit("pushq %rax")
+        self._eval(expr.right)
+        self._emit("movq %rax, %rcx")
+        self._emit("popq %rax")
+
     def _eval_binary_float(self, expr: ast.Binary) -> None:
         """Float arithmetic/comparison (D56): operands are carried as f64 images
         in %rax; compute in XMM, then narrow `float32` results."""
         self._uses_float = True
         op = expr.op
-        # right -> push; left -> rax; pop right -> rcx (same shape as the int path)
-        self._eval(expr.right)
-        self._emit("pushq %rax")
-        self._eval(expr.left)
-        self._emit("popq %rcx")
+        self._eval_operands(expr)
         self._emit("movq %rax, %xmm0")        # left
         self._emit("movq %rcx, %xmm1")        # right
         if op in self._FARITH:
@@ -3717,19 +3722,7 @@ class CodeGen:
         logical.append(("env", env_off))
         for i, arg in enumerate(expr.args):
             logical.append(("arg", arg, ft.params[i]))
-
-        for item in reversed(logical):
-            if item[0] == "sret":
-                self._emit(f"leaq {item[1]}(%rbp), %rax")
-            elif item[0] == "env":
-                self._emit(f"movq {item[1]}(%rbp), %rax")
-            else:
-                _, arg, ptype = item
-                if _is_aggregate(ptype):
-                    self._addr_of_aggregate(arg)
-                else:
-                    self._eval(arg)
-            self._emit("pushq %rax")
+        self._store_call_words(logical)
         self._emit(f"call *{code_off}(%rbp)")
         self._emit(f"addq ${8 * len(logical)}, %rsp")
 
@@ -3747,11 +3740,12 @@ class CodeGen:
 
         if name == "__write":
             self._uses_write = True
-            self._eval(expr.args[1])             # str cell pointer -> rax
-            self._emit("pushq %rax")
             self._eval(expr.args[0])             # fd -> rax
-            self._emit("movl %eax, %edi")        # fd (int32, zero-extended)
-            self._emit("popq %rsi")              # str cell pointer
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # str cell pointer -> rax
+            self._emit("movq %rax, %rsi")
+            self._emit("popq %rdi")              # fd
+            self._emit("movl %edi, %edi")        # (int32, zero-extended)
             self._emit("call __write")
             return
         if name == "__exit":
@@ -3777,21 +3771,21 @@ class CodeGen:
 
         if name == "__write_file":
             self._uses_write_file = True
-            self._eval(expr.args[1])             # contents str cell -> rax
-            self._emit("pushq %rax")
             self._eval(expr.args[0])             # path str cell -> rax
-            self._emit("movq %rax, %rdi")        # path
-            self._emit("popq %rsi")              # contents
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # contents str cell -> rax
+            self._emit("movq %rax, %rsi")        # contents
+            self._emit("popq %rdi")              # path
             self._emit("call __write_file")      # errno -> global
             return
 
         if name == "__run":
             self._uses_run = True
-            self._eval(expr.args[1])             # argv [str] list cell -> rax
-            self._emit("pushq %rax")
             self._eval(expr.args[0])             # program str cell -> rax
-            self._emit("movq %rax, %rdi")        # program
-            self._emit("popq %rsi")              # argv list cell
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # argv [str] list cell -> rax
+            self._emit("movq %rax, %rsi")        # argv list cell
+            self._emit("popq %rdi")              # program
             self._emit("call __run")             # rax = stdout [uint8] cell
             return
         if name == "__run_stderr":
@@ -3866,27 +3860,41 @@ class CodeGen:
         sig = self._sig(name)
         struct_ret = _is_aggregate(sig.ret)
 
-        # build the logical argument list and push it in reverse
         logical: list = []
         if struct_ret:
             logical.append(("sret", self._locals[id(expr)]))
         for i, arg in enumerate(expr.args):
-            logical.append(("arg", i, arg, sig.params[i]))
+            logical.append(("arg", arg, sig.params[i]))
+        self._store_call_words(logical)
+        self._emit(f"call myla_{name}")
+        if logical:
+            self._emit(f"addq ${8 * len(logical)}, %rsp")
 
-        for item in reversed(logical):
+    def _store_call_words(self, logical: list) -> None:
+        """Put the outgoing argument words on the stack, the first at the
+        lowest address, evaluating the arguments left to right (MYLA-8): the
+        words are reserved, then filled in source order. When at most one word
+        has effects or reads state (the others are literals, the sret pointer
+        or the env), pushing them last to first is the same and shorter.
+        Items: ("sret", slot), ("env", slot) or ("arg", expr, type)."""
+        if not logical:
+            return
+        ordered = sum(1 for item in logical if item[0] == "arg" and not _is_literal(item[1])) > 1
+        if ordered:
+            self._emit(f"subq ${8 * len(logical)}, %rsp")
+        for k in range(len(logical)) if ordered else reversed(range(len(logical))):
+            item = logical[k]
             if item[0] == "sret":
                 self._emit(f"leaq {item[1]}(%rbp), %rax")
+            elif item[0] == "env":
+                self._emit(f"movq {item[1]}(%rbp), %rax")
             else:
-                _, _, arg, ptype = item
+                _, arg, ptype = item
                 if _is_aggregate(ptype):
                     self._addr_of_aggregate(arg)
                 else:
                     self._eval(arg)
-            self._emit("pushq %rax")
-
-        self._emit(f"call myla_{name}")
-        if logical:
-            self._emit(f"addq ${8 * len(logical)}, %rsp")
+            self._emit(f"movq %rax, {8 * k}(%rsp)" if ordered else "pushq %rax")
 
     def _gen_intrinsic(self, expr: ast.Call) -> None:
         """`assert`/`panic`/`unreachable`: write a message to stderr and exit(1)
@@ -5314,6 +5322,14 @@ def _collect_bindings(pat, into: dict) -> None:
 
 def _const_str(literal) -> str:
     return literal.value
+
+
+def _is_literal(expr: ast.Expr) -> bool:
+    """Whether `expr` is a (possibly negated) scalar or string literal: it has
+    no effects and reads no state, so when it is evaluated doesn't matter."""
+    if isinstance(expr, ast.Unary) and expr.op == "-":
+        expr = expr.operand
+    return isinstance(expr, (ast.IntLit, ast.FloatLit, ast.BoolLit, ast.StrLit))
 
 
 def _const_scalar(literal) -> int:

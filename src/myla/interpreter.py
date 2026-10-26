@@ -557,7 +557,8 @@ class Interpreter:
         if isinstance(expr, ast.MapLit):
             m = MapValue()
             for k, v in expr.entries:
-                m.entries[self._eval(k, env)] = _copy(self._eval(v, env))
+                key = self._eval(k, env)         # key, then value (MYLA-8)
+                m.entries[key] = _copy(self._eval(v, env))
             return m
         if isinstance(expr, ast.Index):
             return self._index_read(expr, env)
