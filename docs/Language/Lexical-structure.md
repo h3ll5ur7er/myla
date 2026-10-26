@@ -66,7 +66,7 @@ fun main() {
 
 - `_` may only stand between two digits.
 - There are no negative literals: `-5` is unary minus applied to `5`.
-- An unsuffixed literal takes the integer type its context expects (an annotation, a parameter, the other operand), defaulting to `int`. It must fit that type, or it is a type error. For signed types the check allows a magnitude up to 2^(width-1), so that `-128i8` works; `128i8` is therefore accepted and wraps to -128 ([[MYLA-7]]).
+- An unsuffixed literal takes the integer type its context expects (an annotation, a parameter, the other operand), defaulting to `int`. It must fit that type, or it is a type error. For signed types the check allows a magnitude up to 2^(width-1), so that `-128i8` works; `128i8` is therefore accepted and wraps to -128. A literal *pattern* is checked as the value it denotes, so `128` or `-1` can't match an `int8` or `uint8` ([[MYLA-7]]).
 - A literal directly followed by letters that aren't a suffix (`5x`) is a lex error.
 
 ## Float literals

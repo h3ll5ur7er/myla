@@ -64,4 +64,4 @@ Every method becomes a function named `Type.method` (the dot can't occur in a us
 
 ## Known gaps
 
-Over-conservative exhaustiveness ([[MYLA-14]]), out-of-range literal patterns ([[MYLA-7]]), `#derive(Eq)` on `char`/float fields ([[MYLA-13]]), a trailing `match` in an arm block ([[MYLA-59]]).
+Over-conservative exhaustiveness ([[MYLA-14]]), `#derive(Eq)` on `char`/float fields ([[MYLA-13]]), a trailing `match` in an arm block ([[MYLA-59]]).

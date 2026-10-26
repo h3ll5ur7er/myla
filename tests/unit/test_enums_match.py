@@ -130,6 +130,26 @@ class TestEnumChecking(unittest.TestCase):
                 "    return match s { Shape.Circle(r) if r => r, _ => 0 }\n}\n"
             )
 
+    def test_literal_patterns_must_fit_the_scrutinee(self):
+        # a pattern is compared as written, so -1 on uint8 or 128 on int8 can
+        # never match (MYLA-7)
+        def match_on(t: str, pattern: str) -> str:
+            return (f"fun f(x: {t}) -> int {{\n"
+                    f"    return match x {{ {pattern} => 1, _ => 0 }}\n}}\n")
+        for t, pattern, shown in (("uint8", "-1", "-1"), ("int8", "128", "128"),
+                                  ("int8", "-129", "129"), ("uint64", "-1u64", "-1"),
+                                  ("int64", "9223372036854775808", "9223372036854775808")):
+            with self.subTest(t=t, pattern=pattern):
+                with self.assertRaises(TypeCheckError) as cm:
+                    check_src(match_on(t, pattern))
+                self.assertEqual(cm.exception.message,
+                                 f"integer literal {shown} does not fit in '{t}'")
+        for t, pattern in (("int8", "-128"), ("int8", "127"), ("uint8", "255"), ("uint8", "-0"),
+                           ("int64", "-9223372036854775808"), ("uint64", "18446744073709551615"),
+                           ("uint8", "'a'")):
+            with self.subTest(t=t, pattern=pattern):
+                check_src(match_on(t, pattern))
+
 
 class TestEnumInterpreter(unittest.TestCase):
     def test_payload_and_guard(self):

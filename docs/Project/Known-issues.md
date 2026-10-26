@@ -10,7 +10,6 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-7]] | Out-of-range literal patterns (`-1` on `uint8`) match differently | medium |
 | [[MYLA-8]] | Native evaluation order is right to left | medium |
 | [[MYLA-11]] | `#test` in an imported module can't name that module's declarations | medium |
 | [[MYLA-12]] | The interpreter crashes on strings that aren't valid UTF-8 | medium |

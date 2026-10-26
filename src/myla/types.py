@@ -293,6 +293,13 @@ def int_fits(value: int, t: IntType) -> bool:
     return 0 <= value <= (1 << t.width) - 1
 
 
+def _in_range(value: int, t: IntType) -> bool:
+    """Whether the signed `value` is one of the values of `t`."""
+    if t.signed:
+        return -(1 << (t.width - 1)) <= value < (1 << (t.width - 1))
+    return 0 <= value < (1 << t.width)
+
+
 def _const_int(expr: ast.Expr) -> int | None:
     """A constant integer value for compile-time checks, or None if not constant.
 
@@ -2467,6 +2474,14 @@ class Checker:
                 raise TypeCheckError(
                     f"literal pattern of type '{type_name(lt)}' cannot match "
                     f"value of type '{type_name(t)}'",
+                    pat.line, pat.column,
+                )
+            value = _const_int(pat.literal)
+            if isinstance(t, IntType) and value is not None and not _in_range(value, t):
+                # A pattern has no arithmetic to wrap: `-1` on `uint8` or `128`
+                # on `int8` could never match (MYLA-7).
+                raise TypeCheckError(
+                    f"integer literal {value} does not fit in '{type_name(t)}'",
                     pat.line, pat.column,
                 )
             return

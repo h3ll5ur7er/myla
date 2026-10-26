@@ -197,6 +197,17 @@ TYPE_ERRORS: dict[str, str] = {
     "huge_hex_literal": _main("let x: uint8 = 0x1_0000_0000_0000_0000"),
     "shift_by_huge_literal": _main("let x = 1 << 9223372036854775808"),
     "or_pattern_rebinds": _main("match (1, 2) {", "    (x, x | x) => {},", "}"),
+    # literal patterns outside the scrutinee's range (MYLA-7)
+    "negative_pattern_on_unsigned": _main("let b: uint8 = 255", "match b {", "    -1 => {},", "    _ => {},", "}"),
+    "pattern_above_signed_max": _main("let c: int8 = 0", "match c {", "    128 => {},", "    _ => {},", "}"),
+    "pattern_below_signed_min": _main("let c: int8 = 0", "match c {", "    -129 => {},", "    _ => {},", "}"),
+    "big_pattern_on_int64": _main("let c: int64 = 0", "match c {", "    9223372036854775808 => {},", "    _ => {},", "}"),
+    "big_negative_pattern_on_uint64": _main("let c: uint64 = 0", "match c {", "    -9223372036854775808 => {},", "    _ => {},", "}"),
+    # (these fit; the error is the last line)
+    "patterns_at_the_bounds_fit": _main("let c: int64 = 0", "match c {", "    -9223372036854775808 => {},",
+                                        "    9223372036854775807 => {},", "    -0 => {},", "    _ => {},", "}",
+                                        "let u: uint64 = 0", "match u {", "    18446744073709551615 => {},",
+                                        "    -0 => {},", "    _ => {},", "}", "let z: bool = 1"),
 }
 
 

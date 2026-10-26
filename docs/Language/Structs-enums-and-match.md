@@ -92,7 +92,7 @@ fun main() {
 | --- | --- | --- |
 | Wildcard | `_` | Anything |
 | Binding | `x` | Anything, and binds it |
-| Literal | `42`, `-1`, `'a'`, `"go"`, `true` | Equal integer, `char`, `str` or `bool` (no float literals) |
+| Literal | `42`, `-1`, `'a'`, `"go"`, `true` | Equal integer, `char`, `str` or `bool` (no float literals). An integer literal must be a value of the scrutinee's type: `-1` on a `uint8` or `128` on an `int8` is a type error ([[MYLA-7]]) |
 | Variant | `Some(x)`, `Shape.Rect(w, h)`, `.Red`, `Red` | That variant, with payload patterns |
 | Tuple | `(a, _, 0)` | A tuple of that arity |
 | Struct | `Point { x: 0, y }` | A struct; `y` alone binds field `y`; unlisted fields are ignored |

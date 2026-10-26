@@ -434,6 +434,41 @@ fun func_ret_of(t: Type) -> Option<Type> {
     return None
 }
 
+// The value of an integer literal pattern that is not a value of `t`, as the
+// error shows it, or "": a pattern has no arithmetic to wrap, so `-1` on
+// `uint8` or `128` on `int8` could never match (MYLA-7). The literal check
+// already bounds the magnitude by 2^(w-1) (signed) or 2^w - 1 (unsigned).
+fun pattern_misfit(lit: Expr, t: Type) -> str {
+    let w = int_width(t)
+    if w == 0 { return "" }
+    let signed = match t { Type.TInt(tw, ts) => ts, _ => false }
+    match lit.kind {
+        ExprKind.IntLit(v, suf, isc, big) => {
+            if !signed { return "" }
+            if big != "" || (w < 64 && v == (1i64 << ((w - 1) as int64))) { return int_text(v, big) }
+            return ""
+        },
+        ExprKind.Unary(op, x) => {
+            if signed || op != "-" { return "" }
+            return negated_misfit(x)
+        },
+        _ => {},
+    }
+    return ""
+}
+
+// `-x` for an unsigned scrutinee: fine only for a zero literal.
+fun negated_misfit(x: Expr) -> str {
+    match x.kind {
+        ExprKind.IntLit(v, suf, isc, big) => {
+            if v == 0 && big == "" { return "" }
+            return "-" + int_text(v, big)
+        },
+        _ => {},
+    }
+    return ""
+}
+
 fun pat_bool_value(pat: Pattern) -> Option<bool> {
     match pat.kind {
         PatternKind.PLit(litexpr) => {
@@ -2273,6 +2308,8 @@ impl Checker {
                 let lt = self.expect_value(litexpr, hint)?
                 if !(is_int(t) || is_char(t) || is_bool(t) || is_str(t)) { return Err(terr(pat.line, pat.col, format("cannot match a literal against '{}'", type_name(t)))) }
                 if !type_eq(lt, t) { return Err(terr(pat.line, pat.col, format("literal pattern of type '{}' cannot match value of type '{}'", type_name(lt), type_name(t)))) }
+                let misfit = pattern_misfit(litexpr, t)
+                if misfit != "" { return Err(terr(pat.line, pat.col, format("integer literal {} does not fit in '{}'", misfit, type_name(t)))) }
                 Ok(0)
             },
             PatternKind.PEnum(en, variant, elems, hp) => self.check_enum_pattern(pat, en, variant, elems, hp, t),
