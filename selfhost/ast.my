@@ -81,9 +81,17 @@ pub struct MatchArm { line: int32, col: int32, pattern: Pattern, guard: Option<E
 // --- bindings (destructuring) --------------------------------------------
 
 pub enum BindElem {
-    BName(str),
+    BName(str, int32, int32),           // name, line, col
     BWild,
-    BTuple([BindElem]),
+    BTuple([BindElem], int32, int32),   // elements, position of the '('
+}
+
+// The elements of a destructuring binding (always a tuple at the top).
+pub fun bind_elems(b: BindElem) -> [BindElem] {
+    return match b {
+        BindElem.BTuple(es, l, c) => es,
+        _ => [b],
+    }
 }
 
 // --- statements ----------------------------------------------------------
@@ -99,7 +107,7 @@ pub enum ElseTail {
 
 pub enum StmtKind {
     VarDecl(str, str, Option<TypeExpr>, Expr),          // kind, name, type, init
-    DestructDecl(str, [BindElem], Option<TypeExpr>, Expr),
+    DestructDecl(str, BindElem, Option<TypeExpr>, Expr),    // kind, tuple binding, type, init
     Assign(Expr, Expr),
     IfS(Expr, Block, Option<ElseTail>),
     WhileS(Expr, Block),
@@ -282,9 +290,9 @@ pub fun dump_pattern(p: Pattern) -> str {
 
 fun dump_bindelem(b: BindElem) -> str {
     return match b {
-        BindElem.BName(n) => format("(bname {})", sstr(n)),
+        BindElem.BName(n, l, c) => format("(bname {})", sstr(n)),
         BindElem.BWild => "(bwild)",
-        BindElem.BTuple(elems) => format("(btuple {})", join_map(elems, dump_bindelem)),
+        BindElem.BTuple(elems, l, c) => format("(btuple {})", join_map(elems, dump_bindelem)),
     }
 }
 
@@ -302,7 +310,7 @@ pub fun dump_block(b: Block) -> str {
 pub fun dump_stmt(s: Stmt) -> str {
     return match s.kind {
         StmtKind.VarDecl(kind, name, ty, init) => format("(vardecl {} {} {} {})", sstr(kind), sstr(name), opt_type(ty), dump_expr(init)),
-        StmtKind.DestructDecl(kind, binding, ty, init) => format("(destruct {} (btuple {}) {} {})", sstr(kind), join_map(binding, dump_bindelem), opt_type(ty), dump_expr(init)),
+        StmtKind.DestructDecl(kind, binding, ty, init) => format("(destruct {} {} {} {})", sstr(kind), dump_bindelem(binding), opt_type(ty), dump_expr(init)),
         StmtKind.Assign(t, v) => format("(assign {} {})", dump_expr(t), dump_expr(v)),
         StmtKind.IfS(cond, then, otherwise) => {
             let ot = match otherwise {

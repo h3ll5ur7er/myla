@@ -662,14 +662,14 @@ impl Parser {
         let kind = kw.lexeme
         if self.check(TokenKind.LPAREN) {
             let lp = self.peek()
-            let binding = self.tuple_binding()
+            let binding = BindElem.BTuple(self.tuple_binding(), lp.line, lp.column)
             var ty: Option<TypeExpr> = None
             if self.match1(TokenKind.COLON) {
                 ty = Some(self.parse_type())
             }
             self.expect(TokenKind.ASSIGN, "'=' in variable declaration")
             let init = self.expression()
-            return self.mk_stmt(lp.line, lp.column, StmtKind.DestructDecl(kind, binding, ty, init))
+            return self.mk_stmt(kw.line, kw.column, StmtKind.DestructDecl(kind, binding, ty, init))
         }
         let name = self.expect(TokenKind.IDENT, "variable name").lexeme
         var ty: Option<TypeExpr> = None
@@ -700,14 +700,14 @@ impl Parser {
     fun binding_elem(var self) -> BindElem {
         let tok = self.peek()
         if tok.kind == TokenKind.LPAREN {
-            return BindElem.BTuple(self.tuple_binding())
+            return BindElem.BTuple(self.tuple_binding(), tok.line, tok.column)
         }
         if tok.kind == TokenKind.IDENT {
             self.advance()
             if tok.lexeme == "_" {
                 return BindElem.BWild
             }
-            return BindElem.BName(tok.lexeme)
+            return BindElem.BName(tok.lexeme, tok.line, tok.column)
         }
         self.fail_at(tok, format("expected a binding name, '_', or '(', found '{}'", tok.lexeme))
         return BindElem.BWild

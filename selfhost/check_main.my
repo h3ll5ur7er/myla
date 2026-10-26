@@ -2,7 +2,7 @@
 //
 // Reads a .my file, lexes + parses + type-checks it, and prints the stable
 // accept/reject + diagnostic-position line for differential comparison against
-// `myla check --canonical`: `ok` on success, else `err <line> <col> type`.
+// the Python checker: `ok` on success, else `err <line> <col> type: <message>`.
 // (The checker gate covers single-file programs that lex + parse cleanly; the
 // only diagnostic class it emits is `type`.)
 
@@ -11,18 +11,19 @@ from std.fs import read_to_string
 from std.io import println, eprintln
 from .parser import parse_source
 from .checker import check_program
+from .diag import canonical_err
 
 fun check_and_report(src: str) {
     let parsed = match parse_source(src, 0) {
         Ok(p) => p,
         Err(d) => {
-            println(format("err {} {} {}", d.line, d.col, d.kind))
+            println(canonical_err(d))
             return
         },
     }
     match check_program(parsed.program) {
         Ok(x) => println("ok"),
-        Err(e) => println(format("err {} {} type", e.line, e.col)),
+        Err(e) => println(format("err {} {} type: {}", e.line, e.col, e.msg)),
     }
 }
 

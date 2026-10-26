@@ -510,8 +510,8 @@ fun bind_names(bs: [BindElem]) -> [str] {
     var out: [str] = []
     for b in bs {
         match b {
-            BindElem.BName(n) => { push(out, n) },
-            BindElem.BTuple(sub) => { for n in bind_names(sub) { push(out, n) } },
+            BindElem.BName(n, l, c) => { push(out, n) },
+            BindElem.BTuple(sub, l, c) => { for n in bind_names(sub) { push(out, n) } },
             _ => {},
         }
     }
@@ -683,7 +683,7 @@ impl Renamer {
             StmtKind.DestructDecl(kind, bs, t, init) => {
                 let init2 = self.expr(init)
                 let t2 = self.opt_ty(t)
-                for n in bind_names(bs) { push(self.vals, n) }
+                for n in bind_names([bs]) { push(self.vals, n) }
                 StmtKind.DestructDecl(kind, bs, t2, init2)
             },
             StmtKind.Assign(target, value) => {

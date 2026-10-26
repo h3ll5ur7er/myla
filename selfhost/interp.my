@@ -7,7 +7,7 @@
 // runtime needs (integer widths, print/format rendering, casts) comes from the
 // checker's `resolved` side table, keyed by AST node id.
 
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
 from .checker import Checker, Type
 from .util import cp_utf8
 from .floatlit import f64_literal_bits, f32_round_bits
@@ -326,7 +326,7 @@ impl Interp {
             },
             StmtKind.DestructDecl(kind, binding, ty, init) => {
                 let v = self.eval(init)
-                self.bind_destructure(binding, v)
+                self.bind_destructure(bind_elems(binding), v)
             },
             StmtKind.Assign(target, value) => {
                 let v = self.eval(value)
@@ -446,9 +446,9 @@ impl Interp {
 
     fun bind_elem(var self, b: BindElem, v: Value) {
         match b {
-            BindElem.BName(n) => { self.define(n, v) },
+            BindElem.BName(n, l, c) => { self.define(n, v) },
             BindElem.BWild => {},
-            BindElem.BTuple(sub) => {
+            BindElem.BTuple(sub, l, c) => {
                 let elems = match v { Value.VTuple(es) => es, _ => empty_values() }
                 var i = 0
                 while i < len(sub) {

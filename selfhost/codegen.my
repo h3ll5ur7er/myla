@@ -10,7 +10,7 @@
 // prelude, simple frame layout, and scalar `_eval`/calls/`print` -- enough to
 // build and run a `hello`-class program through `as`/`ld` with parity.
 
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem, bind_elems
 from .floatlit import f64_literal_bits, f32_round_bits
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type
 
@@ -1022,7 +1022,7 @@ impl CodeGen {
                 self.cursor = self.cursor + 8
                 self.destruct_base[s.id] = -self.cursor
                 var slots: [int32] = []
-                for lf in self.collect_leaves(binding, self.type_of(init.id)) {
+                for lf in self.collect_leaves(bind_elems(binding), self.type_of(init.id)) {
                     self.cursor = self.cursor + self.size(lf.ty)
                     push(slots, -self.cursor)
                 }
@@ -1230,7 +1230,7 @@ impl CodeGen {
                 self.register_owner(off, t)
                 self.drop_expr_temps(init)
             },
-            StmtKind.DestructDecl(k, binding, ty, init) => { self.gen_destruct(s, binding, init) },
+            StmtKind.DestructDecl(k, binding, ty, init) => { self.gen_destruct(s, bind_elems(binding), init) },
             StmtKind.ReturnS(ov) => {
                 match ov {
                     Some(e) => {
@@ -1358,9 +1358,9 @@ impl CodeGen {
         for be in elems {
             let et = ets[i]
             match be {
-                BindElem.BName(n) => { push(out, DLeaf { name: n, off: off, ty: et }) },
+                BindElem.BName(n, l, c) => { push(out, DLeaf { name: n, off: off, ty: et }) },
                 BindElem.BWild => {},
-                BindElem.BTuple(sub) => {
+                BindElem.BTuple(sub, l, c) => {
                     for lf in self.collect_leaves(sub, et) {
                         push(out, DLeaf { name: lf.name, off: off + lf.off, ty: lf.ty })
                     }
@@ -3532,7 +3532,7 @@ impl CodeGen {
                 },
                 StmtKind.DestructDecl(k, binding, ty, init) => {
                     for v in self.free_expr(init, bnd) { push(out, v) }
-                    for nm in bind_names(binding) { push(bnd, nm) }
+                    for nm in bind_elem_names(binding) { push(bnd, nm) }
                 },
                 StmtKind.Assign(target, value) => {
                     for v in self.free_expr(target, bnd) { push(out, v) }
@@ -6226,18 +6226,13 @@ fun args_have_hole(args: [Expr]) -> bool {
 fun bind_elem_names(be: BindElem) -> [str] {
     var out: [str] = []
     match be {
-        BindElem.BName(n) => { push(out, n) },
+        BindElem.BName(n, l, c) => { push(out, n) },
         BindElem.BWild => {},
-        BindElem.BTuple(es) => { for e in es { for n in bind_elem_names(e) { push(out, n) } } },
+        BindElem.BTuple(es, l, c) => { for e in es { for n in bind_elem_names(e) { push(out, n) } } },
     }
     return out
 }
 
-fun bind_names(bs: [BindElem]) -> [str] {
-    var out: [str] = []
-    for b in bs { for n in bind_elem_names(b) { push(out, n) } }
-    return out
-}
 
 fun pattern_names(p: Pattern) -> [str] {
     var out: [str] = []
