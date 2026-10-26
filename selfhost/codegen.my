@@ -25,8 +25,12 @@ pub struct Cap { name: str, ty: Type, off: int32 }
 pub struct LamJob { lifted: str, params: [Param], ftype: Type, body: ExprOrBlock, caps: [Cap], subst: [Subst] }
 
 // A partial-application thunk to emit: `slots[i]` is the env byte offset of a
-// filled argument, or -1 for a hole (filled from the thunk's own parameters).
-pub struct PartialJob { lifted: str, target: str, slots: [int32], owned: [DropEntry] }
+// filled argument, or -1 for a hole (filled from the thunk's own parameters);
+// `aggs[i]` says the argument is an aggregate (passed by address), `sret` that
+// the target returns one (through a caller-provided pointer). The target is the
+// function `target`, or (`fn_off` >= 0) the function value stored in the env
+// at that offset.
+pub struct PartialJob { lifted: str, target: str, fn_off: int32, slots: [int32], aggs: [bool], sret: bool, owned: [DropEntry] }
 
 // Continue/break target labels for the innermost loop. `depth` is the
 // drop-scope index of the loop body, so break/continue can release the heap
@@ -2553,9 +2557,12 @@ impl CodeGen {
         self.emit("movzbl %al, %eax")
     }
 
+    // `remove(m, key)`: make the map unique (copies of it keep the entry), then
+    // turn the key's slot into a tombstone and release its value (MYLA-25).
     fun gen_map_remove(var self, m: Expr, k: Expr) {
         let mt = self.place_type(m)
-        self.eval(m)
+        self.mut_addr_of_list_holder(m)      // &holder -> rax
+        self.cow_unique(mt)                  // unique cell, written back to holder
         self.emit("pushq %rax")
         self.eval(k)
         self.emit("movq %rax, %rsi")
@@ -2563,12 +2570,14 @@ impl CodeGen {
         self.emit(format("movq ${}, %rdx", self.map_slot_size(mt)))
         self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
         self.emit("call __map_lookup")
-        self.emit("popq %rcx")
+        self.emit("popq %rdx")               // cell
         let done = self.label()
         self.emit("testq %rax, %rax")
         self.emit(format("jz {}", done))
-        self.emit("movq $2, (%rax)")
-        self.emit("decq (%rcx)")
+        self.emit("movq $2, (%rax)")         // tombstone
+        self.emit("decq (%rdx)")             // len -= 1
+        self.emit("leaq 16(%rax), %rcx")     // &value
+        self.drop_stored(map_val(mt), false)
         self.emit(format("{}:", done))
     }
 
@@ -3193,16 +3202,59 @@ impl CodeGen {
         self.emit(format("movq %rax, {}(%rbp)", off))
     }
 
-    // `f(a, _, …)` partial application: capture the filled (scalar) arguments in
-    // an env and emit a thunk that fills the holes from its own parameters.
-    fun gen_partial(var self, e: Expr, callee: Expr, args: [Expr]) {
+    // `f(a, _, …)` partial application: copy the filled arguments into an env
+    // (owned, like lambda captures) and emit a thunk that fills the holes from
+    // its own parameters.
+    fun gen_partial(var self, e: Expr, callee: Expr, given: [Expr]) {
         let off = self.local_of(e.id)
+        // the target: a function, a method (the receiver becomes the first,
+        // filled argument), or a function value (captured into the env)
+        var target = ""
+        var args = given
+        var params: [Type] = []
+        var ret: Option<Type> = None
+        var fn_value = false
+        match callee.kind {
+            ExprKind.Name(n) => {
+                if self.has_binding(n) { fn_value = true } else { target = n }
+            },
+            ExprKind.GetField(recv, field) => {
+                let mname = format("{}.{}", self.type_key(self.type_of(recv.id)), field)
+                if self.has_func(mname) {
+                    target = mname
+                    args = [recv]
+                    for a in given { push(args, a) }
+                } else {
+                    fn_value = true                 // a function-valued field
+                }
+            },
+            _ => { fn_value = true },
+        }
+        if fn_value {
+            let ft = self.place_type(callee)
+            params = tfunc_params(ft)
+            ret = tfunc_ret(ft)
+        } else {
+            let sig = self.sig_of(target)
+            params = sig.params
+            ret = sig.ret
+        }
         var slots: [int32] = []
+        var aggs: [bool] = []
         var fillexprs: [Expr] = []
         var filloffs: [int32] = []
         var owned: [DropEntry] = []
         var envsz = 8              // word 0 of the env holds its drop function
-        for a in args {
+        var fn_off = -1
+        if fn_value {
+            fn_off = envsz
+            push(owned, DropEntry { off: envsz, ty: self.place_type(callee) })
+            envsz = envsz + 16
+        }
+        var i = 0
+        while i < len(args) {
+            let a = args[i]
+            push(aggs, is_aggregate(params[i]))
             if is_hole_expr(a) {
                 push(slots, -1)
             } else {
@@ -3211,10 +3263,10 @@ impl CodeGen {
                 push(filloffs, envsz)
                 let at = self.type_of(a.id)
                 if self.owns_heap(at) { push(owned, DropEntry { off: envsz, ty: at }) }
-                envsz = envsz + 8
+                envsz = envsz + self.size(at)
             }
+            i = i + 1
         }
-        let nm = expr_name(callee)
         let lifted = format("{}__partial{}", self.cur_mangled, e.id)
         self.emit(format("movq ${}, %rdi", envsz))
         self.emit("call __alloc")
@@ -3222,23 +3274,46 @@ impl CodeGen {
         if len(owned) > 0 { self.emit(format("leaq myla_{}_env_drop(%rip), %rcx", lifted)) }
         else { self.emit("leaq __free(%rip), %rcx") }
         self.emit("movq %rcx, (%rax)")
+        if fn_value {
+            self.addr_of_aggregate(callee)
+            self.emit("movq %rax, %rsi")
+            self.emit(format("movq {}(%rbp), %rdi", off + 8))
+            self.emit(format("addq ${}, %rdi", fn_off))
+            self.emit_copy(16)
+            self.emit(format("movq {}(%rbp), %r8", off + 8))
+            self.retain("r8", fn_off, self.place_type(callee))
+        }
         var k = 0
         while k < len(fillexprs) {
-            self.eval(fillexprs[k])
-            if self.owns_heap(self.type_of(fillexprs[k].id)) { self.emit("incq -8(%rax)") }   // the env owns it
-            self.emit(format("movq {}(%rbp), %rcx", off + 8))
-            self.emit(format("movq %rax, {}(%rcx)", filloffs[k]))
+            let at = self.type_of(fillexprs[k].id)
+            if is_aggregate(at) {
+                self.addr_of_aggregate(fillexprs[k])
+                self.emit("movq %rax, %rsi")
+                self.emit(format("movq {}(%rbp), %rdi", off + 8))
+                self.emit(format("addq ${}, %rdi", filloffs[k]))
+                self.emit_copy(self.size(at))
+            } else {
+                self.eval(fillexprs[k])
+                self.emit(format("movq {}(%rbp), %rcx", off + 8))
+                self.emit(format("movq %rax, {}(%rcx)", filloffs[k]))
+            }
+            self.emit(format("movq {}(%rbp), %r8", off + 8))
+            self.retain("r8", filloffs[k], at)      // the env owns its copy
             k = k + 1
         }
-        push(self.partial_jobs, PartialJob { lifted: lifted, target: nm, slots: slots, owned: owned })
+        push(self.partial_jobs, PartialJob { lifted: lifted, target: target, fn_off: fn_off, slots: slots, aggs: aggs, sret: is_aggregate_opt(ret), owned: owned })
         self.emit(format("leaq myla_{}(%rip), %rax", lifted))
         self.emit(format("movq %rax, {}(%rbp)", off))
     }
 
-    // Emit a partial-application thunk: reconstruct the full (scalar) argument
-    // list from the env (filled) and its own params (holes), then call the target.
+    // Emit a partial-application thunk, called as `thunk([sret,] env, holes…)`:
+    // rebuild the full argument list from the env (filled; an aggregate passed
+    // by its address in the env) and the holes, forward the sret pointer, and
+    // call the target (a function value with its own env, as gen_indirect_call).
     fun gen_partial_function(var self, job: PartialJob) {
         let n = len(job.slots)
+        var env_off = 16
+        if job.sret { env_off = 24 }
         self.emit(format("myla_{}:", job.lifted))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
@@ -3251,16 +3326,34 @@ impl CodeGen {
                     if job.slots[j] < 0 { hidx = hidx + 1 }
                     j = j + 1
                 }
-                self.emit(format("movq {}(%rbp), %rax", 24 + 8 * hidx))
+                self.emit(format("movq {}(%rbp), %rax", env_off + 8 + 8 * hidx))
             } else {
-                self.emit("movq 16(%rbp), %rcx")
-                self.emit(format("movq {}(%rcx), %rax", job.slots[pos]))
+                self.emit(format("movq {}(%rbp), %rcx", env_off))
+                if job.aggs[pos] { self.emit(format("leaq {}(%rcx), %rax", job.slots[pos])) }
+                else { self.emit(format("movq {}(%rcx), %rax", job.slots[pos])) }
             }
             self.emit("pushq %rax")
             pos = pos - 1
         }
-        self.emit(format("call myla_{}", job.target))
-        if n > 0 { self.emit(format("addq ${}, %rsp", 8 * n)) }
+        var pushed = n
+        if job.fn_off >= 0 {
+            self.emit(format("movq {}(%rbp), %rcx", env_off))
+            self.emit(format("movq {}(%rcx), %rax", job.fn_off + 8))   // the value's env
+            self.emit("pushq %rax")
+            pushed = pushed + 1
+        }
+        if job.sret {
+            self.emit("movq 16(%rbp), %rax")
+            self.emit("pushq %rax")
+            pushed = pushed + 1
+        }
+        if job.fn_off >= 0 {
+            self.emit(format("movq {}(%rbp), %rcx", env_off))
+            self.emit(format("call *{}(%rcx)", job.fn_off))
+        } else {
+            self.emit(format("call myla_{}", job.target))
+        }
+        if pushed > 0 { self.emit(format("addq ${}, %rsp", 8 * pushed)) }
         self.emit("leave")
         self.emit("ret")
         self.emit("")
@@ -4981,13 +5074,17 @@ impl CodeGen {
 
     // Compare the component of type `ft` at byte offset `off` in the two cells
     // pointed to by 16(%rbp) (self) and 24(%rbp) (other); jump to `lne` if unequal.
+    // A boxed (recursive) enum component holds a pointer to its value, which is
+    // what `eq` takes (MYLA-23); any other aggregate is passed by its address.
     fun emit_eq_component(var self, off: int32, ft: Type, lne: str) {
         if is_struct_or_enum_t(ft) {
+            var load = "leaq"
+            if self.is_boxed(ft) { load = "movq" }
             self.emit("movq 24(%rbp), %rax")
-            self.emit(format("leaq {}(%rax), %rax", off))
+            self.emit(format("{} {}(%rax), %rax", load, off))
             self.emit("pushq %rax")
             self.emit("movq 16(%rbp), %rax")
-            self.emit(format("leaq {}(%rax), %rax", off))
+            self.emit(format("{} {}(%rax), %rax", load, off))
             self.emit("pushq %rax")
             self.emit(format("call myla_{}.eq", self.type_key(ft)))
             self.emit("addq $16, %rsp")

@@ -2,7 +2,7 @@
 id: MYLA-23
 title: "#derive(Eq) on recursive enums compares box addresses"
 type: bug
-status: backlog
+status: review
 priority: medium
 labels: [selfhost, codegen, traits]
 ---
@@ -10,5 +10,5 @@ labels: [selfhost, codegen, traits]
 
 ## Done when
 
-- [ ] Boxed components are compared by calling the enum's `eq` on the dereferenced cells
-- [ ] Differential test with a derived recursive enum
+- [x] Boxed components are compared by calling the enum's `eq` on the dereferenced cells
+- [x] Differential test with a derived recursive enum: `derived_eq_on_recursive_enums` (a list and a tree; printed `false false true false false` before)

@@ -2,7 +2,7 @@
 id: MYLA-25
 title: remove() on a map changes copies of the map too
 type: bug
-status: backlog
+status: review
 priority: medium
 labels: [selfhost, codegen, collections]
 ---
@@ -22,5 +22,5 @@ Python toolchain: `2 true`. Self-hosted: `1 false`.
 
 ## Done when
 
-- [ ] `remove` runs `cow_unique` on the holder first and drops the removed value
-- [ ] Differential test
+- [x] `remove` runs `cow_unique` on the holder first and drops the removed value
+- [x] Differential test: the parity program `remove_leaves_map_copies_alone` (printed `1 false 1` before), and the stress program `STRESS_MAP_REMOVE_SRC` (600k removals from one map: 54 MB peak before, under the 30 MB bound after; also run against the Python backend)

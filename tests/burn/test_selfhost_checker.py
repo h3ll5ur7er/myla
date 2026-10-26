@@ -186,6 +186,10 @@ TYPE_ERRORS: dict[str, str] = {
     "format_lone_close": _main("let s = format(\"a}\")"),
     "alias_not_generic": "typealias A = int\nfun f(x: A<int>) {}\nfun main() {}\n",
     "match_arm_int_types": _main("let x = match 1 {", "    1 => 1u8,", "    _ => 2i64,", "}"),
+    "const_division_through_a_const": "const Z: int = 0\nconst Q: int = 1 / Z\nfun main() {}\n",
+    "const_division_by_wrapped_zero": "const A: uint8 = 128\nconst Z: uint8 = A + A\nconst Q: int = 1 / (Z as int)\nfun main() {}\n",
+    "const_division_by_negated_zero": "const A: int = 0\nconst Q: int = 1 % -A\nfun main() {}\n",
+    "const_cycle": "const A: int = B\nconst B: int = A\nfun main() {}\n",
     "or_pattern_rebinds": _main("match (1, 2) {", "    (x, x | x) => {},", "}"),
 }
 

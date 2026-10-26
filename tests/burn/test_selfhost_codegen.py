@@ -59,7 +59,9 @@ EXCLUDED: set[str] = set()
 # scrutinee's variable (MYLA-2); destructuring reads boxed enum leaves through
 # their pointer (MYLA-21); closure environments own their captures (MYLA-22);
 # floats (MYLA-29); `?` in a lambda checked against the lambda (MYLA-72); a
-# `panic` arm of a match that yields an aggregate (MYLA-28).
+# `panic` arm of a match that yields an aggregate (MYLA-28); const references
+# (MYLA-27), `remove` on a shared map (MYLA-25), partial application of
+# aggregates (MYLA-26), derived `Eq` on recursive enums (MYLA-23).
 PARITY_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
@@ -75,6 +77,10 @@ PARITY_PROGRAMS = (
     "floats_in_depth",
     "try_in_lambdas_checks_against_the_lambda",
     "diverging_arm_of_an_aggregate_match",
+    "consts_fold_through_references",
+    "remove_leaves_map_copies_alone",
+    "partial_application_of_aggregates",
+    "derived_eq_on_recursive_enums",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -89,6 +95,7 @@ STRESS_PROGRAMS = {
     "STRESS_LOOPCTL_SRC": "200001\n133333",
     "STRESS_LIST_SRC": "0",
     "STRESS_MAP_SRC": "0",
+    "STRESS_MAP_REMOVE_SRC": "2399994",
     "STRESS_SB_SRC": "0",
     "STRESS_CLOSURE_SRC": "0",
     "STRESS_PARTIAL_SRC": "0",

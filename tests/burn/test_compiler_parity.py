@@ -1146,6 +1146,115 @@ PROGRAMS = {
         "    print(len(ps[0].tags))\n"
         "    print(ps[0].tags[1])\n}\n"
     ),
+    # const references fold to the referenced value; unary operators fold (MYLA-27)
+    "consts_fold_through_references": (
+        'const A: int = 4\n'
+        'const B: int = 100 / A\n'
+        'const C: int = -A\n'
+        'const D: int = ~A\n'
+        'const E: bool = !(A > 3)\n'
+        'const F: int = B - C\n'
+        'const G: uint8 = 200\n'
+        'const H: uint8 = G + G\n'
+        '#main\n'
+        'fun main() {\n'
+        '    print(B)\n'
+        '    print(C)\n'
+        '    print(D)\n'
+        '    print(E)\n'
+        '    print(F)\n'
+        '    print(H)\n'
+        '}\n'
+    ),
+    # `remove` unshares the map first and drops the removed value (MYLA-25)
+    "remove_leaves_map_copies_alone": (
+        '#main\n'
+        'fun main() {\n'
+        '    var a = ["x": [1, 2], "y": [3]]\n'
+        '    var b = a\n'
+        '    remove(b, "x")\n'
+        '    print(len(a))\n'
+        '    print(contains(a, "x"))\n'
+        '    print(len(b))\n'
+        '    print(len(a["x"]))\n'
+        '    var c = a\n'
+        '    remove(c, "y")\n'
+        '    remove(c, "nope")\n'
+        '    print(len(c))\n'
+        '    print(len(a))\n'
+        '}\n'
+    ),
+    # partial application of functions, methods and function values with
+    # aggregate results and arguments (MYLA-26)
+    "partial_application_of_aggregates": (
+        'struct P { x: int, y: int }\n'
+        'struct H { f: (P, int) -> P }\n'
+        'impl P {\n'
+        '    fun moved(self, d: int, q: P) -> P {\n'
+        '        return P { x: self.x + d + q.x, y: self.y + d + q.y }\n'
+        '    }\n'
+        '}\n'
+        'fun mk(a: int, b: int) -> P {\n'
+        '    return P { x: a, y: b }\n'
+        '}\n'
+        'fun shift(p: P, d: int) -> P {\n'
+        '    return P { x: p.x + d, y: p.y + d }\n'
+        '}\n'
+        'fun pair(a: int, s: str) -> (int, str) {\n'
+        '    return (a * 2, s)\n'
+        '}\n'
+        '#main\n'
+        'fun main() {\n'
+        '    let f = mk(3, _)\n'
+        '    let p = f(5)\n'
+        '    print(p.x)\n'
+        '    print(p.y)\n'
+        '    let g = shift(_, 10)\n'
+        '    let q = g(P { x: 1, y: 2 })\n'
+        '    print(q.x)\n'
+        '    print(q.y)\n'
+        '    let h = pair(_, "hi")\n'
+        '    let t = h(21)\n'
+        '    print(t.0)\n'
+        '    print(t.1)\n'
+        '    let base = P { x: 100, y: 200 }\n'
+        '    let m = base.moved(_, P { x: 1, y: 1 })\n'
+        '    let r = m(5)\n'
+        '    print(r.x)\n'
+        '    print(r.y)\n'
+        '    let lam = (a: int, s: P) => P { x: a * s.x, y: a * s.y }\n'
+        '    let twice = lam(2, _)\n'
+        '    let u = twice(P { x: 3, y: 4 })\n'
+        '    print(u.x)\n'
+        '    print(u.y)\n'
+        '    let holder = H { f: shift }\n'
+        '    let viafield = holder.f(_, 7)\n'
+        '    let w = viafield(P { x: 0, y: 1 })\n'
+        '    print(w.x)\n'
+        '    print(w.y)\n'
+        '}\n'
+    ),
+    # `#derive(Eq)` compares boxed payloads structurally (MYLA-23)
+    "derived_eq_on_recursive_enums": (
+        '#derive(Eq)\n'
+        'enum L { Nil, Cons(int, L) }\n'
+        '#derive(Eq)\n'
+        'enum T { Leaf(str), Node(T, T) }\n'
+        '#main\n'
+        'fun main() {\n'
+        '    let a = L.Cons(1, L.Cons(2, L.Nil))\n'
+        '    let b = L.Cons(1, L.Cons(2, L.Nil))\n'
+        '    let c = L.Cons(1, L.Cons(3, L.Nil))\n'
+        '    print(a == b)\n'
+        '    print(a == c)\n'
+        '    print(a != c)\n'
+        '    let t1 = T.Node(T.Leaf("x"), T.Node(T.Leaf("y"), T.Leaf("z")))\n'
+        '    let t2 = T.Node(T.Leaf("x"), T.Node(T.Leaf("y"), T.Leaf("z")))\n'
+        '    let t3 = T.Node(T.Leaf("x"), T.Leaf("y"))\n'
+        '    print(t1 == t2)\n'
+        '    print(t1 == t3)\n'
+        '}\n'
+    ),
     "diverging_arm_of_an_aggregate_match": (
         # an arm ending in `panic`/`unreachable` has no value to store (the
         # native compiler used to look for its aggregate result and crash)
@@ -1277,6 +1386,21 @@ STRESS_MAP_SRC = (
     "        acc = acc + len(m) - len(m)\n"  # net 0, but keeps m live
     "    }\n"
     "    print(acc)\n}\n"
+)
+
+
+# `remove` releases the value it takes out of the map (the self-hosted compiler
+# leaked it, MYLA-25): 600k removals of a fresh 8-element list from one map.
+STRESS_MAP_REMOVE_SRC = (
+    "#main\nfun main() {\n"
+    "    var m: [int: [int]] = [:]\n"
+    "    var total = 0\n"
+    "    for r in 0..600000 {\n"
+    "        m[r % 7] = [r, r, r, r, r, r, r, r]\n"
+    "        remove(m, (r + 3) % 7)\n"
+    "        total = total + len(m)\n"
+    "    }\n"
+    "    print(total)\n}\n"
 )
 
 
@@ -1452,6 +1576,10 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_SB_SRC)
         self.assertEqual(code, 0, "arena exhausted — builder cells were not reclaimed")
         self.assertEqual(out.strip(), "0")
+
+    def test_map_remove_reclaims_heap(self):
+        out, code = build_and_run(STRESS_MAP_REMOVE_SRC)
+        self.assertEqual((out.strip(), code), ("2399994", 0))
 
     def test_map_reference_counting_reclaims_heap(self):
         # millions of map cells (build/grow/share/CoW/remove) through a finite arena.

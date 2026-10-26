@@ -29,10 +29,6 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-23]] | `#derive(Eq)` on recursive enums compares addresses | medium |
-| [[MYLA-25]] | `remove` on a map changes its copies | medium |
-| [[MYLA-26]] | Partial application of an aggregate-returning function returns garbage | medium |
-| [[MYLA-27]] | Const folding treats const references as 0 | medium |
 | [[MYLA-32]] | The Myla interpreter diverges from the Python one in nine ways | medium |
 | [[MYLA-73]] | Integer literals of 2^63 and above wrap (the lexer stores `int64`) | low |
 | [[MYLA-31]] | Without a stdlib root, `std` resolves to `/std` (`scripts/build.sh`) | low |

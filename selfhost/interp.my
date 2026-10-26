@@ -840,9 +840,27 @@ impl Interp {
     }
 
     fun eval_partial(var self, callee: Expr, args: [Expr]) -> Value {
-        let base = self.eval(callee)
         var slots: [Value] = []
         var holes: [bool] = []
+        // `recv.method(_, …)`: the method as a function value, the receiver its
+        // first (filled) argument
+        match callee.kind {
+            ExprKind.GetField(recv, field) => {
+                let mname = format("{}.{}", self.recv_key(recv), field)
+                if self.func_idx(mname) >= 0 {
+                    push(slots, self.eval(recv))
+                    push(holes, false)
+                    return self.partial_slots(Value.VClosure(empty_params(), eb_dummy(), [], [], mname, true), slots, holes, args)
+                }
+            },
+            _ => {},
+        }
+        return self.partial_slots(self.eval(callee), slots, holes, args)
+    }
+
+    fun partial_slots(var self, base: Value, given_slots: [Value], given_holes: [bool], args: [Expr]) -> Value {
+        var slots = given_slots
+        var holes = given_holes
         for a in args {
             match a.kind {
                 ExprKind.Hole => {
@@ -1166,8 +1184,19 @@ impl Interp {
     fun call_closure(var self, ps: [Param], body: ExprOrBlock, cnames: [str], cvals: [Value], fname: str, isfunc: bool, argv: [Value]) -> Value {
         if isfunc {
             let fi = self.func_idx(fname)
-            if fi >= 0 { return self.call_func(fi, argv) }
-            return Value.VUnit
+            if fi < 0 { return Value.VUnit }
+            if is_method_name(fname) {
+                // a method value (partial application): argv[0] is the receiver
+                var rest: [Value] = []
+                var k = 1
+                while k < len(argv) {
+                    push(rest, argv[k])
+                    k = k + 1
+                }
+                let (rv, final_self) = self.call_method(fi, argv[0], rest)
+                return rv
+            }
+            return self.call_func(fi, argv)
         }
         let saved = self.scopes
         self.scopes = []
@@ -1904,4 +1933,12 @@ fun drop_last_frame(xs: [RtFrame]) -> [RtFrame] {
         i = i + 1
     }
     return out
+}
+
+// `Key.method`: a method's mangled name (plain function names have no dot).
+fun is_method_name(name: str) -> bool {
+    for c in chars(name) {
+        if c == '.' { return true }
+    }
+    return false
 }

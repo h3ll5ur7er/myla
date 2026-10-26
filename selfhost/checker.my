@@ -656,7 +656,8 @@ pub struct Checker {
     aliases: [AliasRaw],
     alias_cache: [AliasCached],
     const_decls: [ConstDeclT],
-    consts: [AliasCached],          // reuse {name, ty} (value not needed for gate)
+    consts: [AliasCached],          // folded consts: {name, ty}
+    const_values: [str: CV],        // ... and their values
     const_done: [str],
     const_folding: [str],
     allow_self: bool,
@@ -681,7 +682,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
         impl_decls: [], traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
-        aliases: [], alias_cache: [], const_decls: [], consts: [], const_done: [], const_folding: [],
+        aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, loop_depth: 0, try_counter: 0,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
@@ -2862,7 +2863,8 @@ fun decl_attrs(d: Decl) -> [Attribute] {
 // const folding
 // =========================================================================
 
-pub enum CV { CVInt(int64), CVFloat, CVBool(bool), CVStr(str) }
+// A folded const value; float values and values derived from them are not tracked.
+pub enum CV { CVInt(int64), CVFloat, CVBool(bool), CVStr(str), CVUnknown }
 
 impl Checker {
     fun fold_consts(var self) -> Result<int32, CheckErr> {
@@ -2898,68 +2900,156 @@ impl Checker {
         self.pop_scope()
         if !type_eq(vt, declared) { self.const_folding = remove_str(self.const_folding, name)
             return Err(terr(decl.value.line, decl.value.col, format("const '{}' is declared '{}' but its value has type '{}'", name, type_name(declared), type_name(vt)))) }
-        self.fold_const_expr(decl.value)?
+        let value = self.fold_const_expr(decl.value)?
+        self.const_values[name] = value
         self.const_folding = remove_str(self.const_folding, name)
         push(self.consts, AliasCached { name: name, ty: declared })
         self.cur_decl = outer_decl
         return Ok(declared)
     }
 
+    // The value of a const initializer, as types.py folds it: integers wrapped
+    // to each node's type. Float values aren't tracked (`CVFloat`), so a float
+    // cast to an integer folds to an unknown value (`CVUnknown`).
     fun fold_const_expr(var self, e: Expr) -> Result<CV, CheckErr> {
+        let t = self.node_type(e)
         return match e.kind {
-            ExprKind.IntLit(v, suf, isc) => Ok(CV.CVInt(v)),
+            ExprKind.IntLit(v, suf, isc) => {
+                if is_char(t) { return Ok(CV.CVInt(v)) }      // a char folds to its codepoint
+                Ok(CV.CVInt(wrap_int(v, t)))
+            },
             ExprKind.FloatLit(lex, suf) => Ok(CV.CVFloat),
             ExprKind.BoolLit(b) => Ok(CV.CVBool(b)),
             ExprKind.StrLit(s) => Ok(CV.CVStr(s)),
             ExprKind.Name(n) => {
                 if self.const_decl_idx(n) < 0 { return Err(terr(e.line, e.col, format("'{}' is not a constant and cannot appear in a const initializer", n))) }
                 self.ensure_const(n)?
-                let di = self.const_done_idx(n)
-                return Ok(CV.CVInt(0))
+                return match get(self.const_values, n) { Some(v) => Ok(v), None => Ok(CV.CVUnknown) }
             },
-            ExprKind.Unary(op, x) => self.fold_const_expr(x),
-            ExprKind.Cast(x, ty) => self.fold_const_expr(x),
-            ExprKind.Binary(op, l, r) => self.fold_const_binary(e, op, l, r),
+            ExprKind.Unary(op, x) => {
+                let v = self.fold_const_expr(x)?
+                if op == "!" { return Ok(CV.CVBool(!cv_bool(v))) }
+                if is_float(t) { return Ok(CV.CVFloat) }
+                return match v {
+                    CV.CVInt(i) => Ok(CV.CVInt(wrap_int(if_neg(op == "-", i), t))),
+                    _ => Ok(CV.CVUnknown),
+                }
+            },
+            ExprKind.Cast(x, ty) => {
+                let v = self.fold_const_expr(x)?
+                let src = self.node_type(x)
+                if is_float(t) { return Ok(CV.CVFloat) }
+                return match v {
+                    CV.CVInt(i) => {
+                        if is_char(t) { return Ok(CV.CVInt(i)) }
+                        Ok(CV.CVInt(wrap_int(i, t)))
+                    },
+                    _ => Ok(CV.CVUnknown),
+                }
+            },
+            ExprKind.Binary(op, l, r) => self.fold_const_binary(e, op, l, r, t),
             _ => Err(terr(e.line, e.col, "const initializer must be a constant expression (literals, other consts, and arithmetic/bitwise/comparison/cast operations over them)")),
         }
     }
 
-    fun fold_const_binary(var self, e: Expr, op: str, l: Expr, r: Expr) -> Result<CV, CheckErr> {
-        if op == "&&" || op == "||" {
-            self.fold_const_expr(l)?
-            self.fold_const_expr(r)?
-            return Ok(CV.CVBool(true))
+    fun node_type(self, e: Expr) -> Type {
+        return match get(self.resolved, e.id) { Some(t) => t, None => t_int() }
+    }
+
+    fun fold_const_binary(var self, e: Expr, op: str, l: Expr, r: Expr, t: Type) -> Result<CV, CheckErr> {
+        if op == "&&" {
+            let lv = self.fold_const_expr(l)?
+            if !cv_bool(lv) { return Ok(CV.CVBool(false)) }
+            return Ok(CV.CVBool(cv_bool(self.fold_const_expr(r)?)))
+        }
+        if op == "||" {
+            let lv = self.fold_const_expr(l)?
+            if cv_bool(lv) { return Ok(CV.CVBool(true)) }
+            return Ok(CV.CVBool(cv_bool(self.fold_const_expr(r)?)))
         }
         let lv = self.fold_const_expr(l)?
         let rv = self.fold_const_expr(r)?
-        let li = match lv { CV.CVInt(x) => x, _ => 0 }
-        let ri = match rv { CV.CVInt(x) => x, _ => 0 }
-        var l_int = false
-        var r_int = false
-        match lv { CV.CVInt(x) => { l_int = true }, _ => {} }
-        match rv { CV.CVInt(y) => { r_int = true }, _ => {} }
-        if l_int && r_int {
-            if op == "+" { return Ok(CV.CVInt(li + ri)) }
-            if op == "-" { return Ok(CV.CVInt(li - ri)) }
-            if op == "*" { return Ok(CV.CVInt(li * ri)) }
-            if op == "/" || op == "%" {
-                if ri == 0 { return Err(terr(e.line, e.col, "const division by zero")) }
-                if op == "/" { return Ok(CV.CVInt(li / ri)) }
-                return Ok(CV.CVInt(li % ri))
+        if op == "==" || op == "!=" {
+            return match cv_equal(lv, rv) {
+                Some(eq) => Ok(CV.CVBool(eq == (op == "=="))),
+                None => Ok(CV.CVUnknown),
             }
-            if op == "&" { return Ok(CV.CVInt(li & ri)) }
-            if op == "|" { return Ok(CV.CVInt(li | ri)) }
-            if op == "^" { return Ok(CV.CVInt(li ^ ri)) }
-            if op == "<<" { return Ok(CV.CVInt(li << ri)) }
-            if op == ">>" { return Ok(CV.CVInt(li >> ri)) }
-            if op == "<" { return Ok(CV.CVBool(li < ri)) }
-            if op == "<=" { return Ok(CV.CVBool(li <= ri)) }
-            if op == ">" { return Ok(CV.CVBool(li > ri)) }
-            if op == ">=" { return Ok(CV.CVBool(li >= ri)) }
-            if op == "==" { return Ok(CV.CVBool(li == ri)) }
-            if op == "!=" { return Ok(CV.CVBool(li != ri)) }
         }
-        return Ok(lv)
+        if is_float(t) { return Ok(CV.CVFloat) }
+        let li = match lv { CV.CVInt(x) => x, _ => { return Ok(CV.CVUnknown) } }
+        let ri = match rv { CV.CVInt(x) => x, _ => { return Ok(CV.CVUnknown) } }
+        if op == "+" { return Ok(CV.CVInt(wrap_int(li + ri, t))) }
+        if op == "-" { return Ok(CV.CVInt(wrap_int(li - ri, t))) }
+        if op == "*" { return Ok(CV.CVInt(wrap_int(li * ri, t))) }
+        if op == "/" || op == "%" {
+            if ri == 0 { return Err(terr(e.line, e.col, "const division by zero")) }
+            if is_u64(t) {
+                let q = ((li as uint64) / (ri as uint64)) as int64
+                if op == "/" { return Ok(CV.CVInt(q)) }
+                return Ok(CV.CVInt(li - q * ri))
+            }
+            let q = li / ri                                  // truncates toward zero, like _const_idiv
+            if op == "/" { return Ok(CV.CVInt(wrap_int(q, t))) }
+            return Ok(CV.CVInt(wrap_int(li - q * ri, t)))
+        }
+        if op == "&" { return Ok(CV.CVInt(wrap_int(li & ri, t))) }
+        if op == "|" { return Ok(CV.CVInt(wrap_int(li | ri, t))) }
+        if op == "^" { return Ok(CV.CVInt(wrap_int(li ^ ri, t))) }
+        let w = int_width(t) as int64
+        if op == "<<" { return Ok(CV.CVInt(wrap_int(li << (ri & (w - 1)), t))) }
+        if op == ">>" {
+            let lw = wrap_int(li, self.node_type(l))
+            if is_u64(t) { return Ok(CV.CVInt(((lw as uint64) >> ((ri & (w - 1)) as uint64)) as int64)) }
+            return Ok(CV.CVInt(wrap_int(lw >> (ri & (w - 1)), t)))
+        }
+        // comparisons, unsigned for uint64 (stored as int64)
+        let lt_ = int_less(li, ri, self.node_type(l))
+        let gt_ = int_less(ri, li, self.node_type(l))
+        if op == "<" { return Ok(CV.CVBool(lt_)) }
+        if op == "<=" { return Ok(CV.CVBool(!gt_)) }
+        if op == ">" { return Ok(CV.CVBool(gt_)) }
+        if op == ">=" { return Ok(CV.CVBool(!lt_)) }
+        return Ok(CV.CVUnknown)
+    }
+}
+
+// `v` wrapped into integer type `t` (two's complement); other types unchanged.
+fun wrap_int(v: int64, t: Type) -> int64 {
+    return match t {
+        Type.TInt(w, signed) => {
+            if w >= 64 { return v }
+            let m = v & (((1 as int64) << (w as int64)) - 1)
+            if signed && ((m >> ((w - 1) as int64)) & 1) == 1 { return m - ((1 as int64) << (w as int64)) }
+            m
+        },
+        _ => v,
+    }
+}
+
+fun is_u64(t: Type) -> bool {
+    return match t { Type.TInt(w, signed) => w == 64 && !signed, _ => false }
+}
+
+fun int_less(a: int64, b: int64, t: Type) -> bool {
+    if is_u64(t) { return (a as uint64) < (b as uint64) }
+    return a < b
+}
+
+fun if_neg(neg: bool, v: int64) -> int64 {
+    if neg { return 0 - v }
+    return ~v
+}
+
+fun cv_bool(v: CV) -> bool {
+    return match v { CV.CVBool(b) => b, _ => false }
+}
+
+fun cv_equal(a: CV, b: CV) -> Option<bool> {
+    return match (a, b) {
+        (CV.CVInt(x), CV.CVInt(y)) => Some(x == y),
+        (CV.CVBool(x), CV.CVBool(y)) => Some(x == y),
+        (CV.CVStr(x), CV.CVStr(y)) => Some(x == y),
+        _ => None,
     }
 }
 
