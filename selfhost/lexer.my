@@ -35,7 +35,7 @@ pub fun canonical_line(t: Token) -> str {
     append(sb, escape(t.lexeme))
     append_byte(sb, '"')
     if t.kind == TokenKind.INT {
-        append(sb, format(" int={}", t.ival))
+        if t.big != "" { append(sb, format(" int={}", t.big)) } else { append(sb, format(" int={}", t.ival)) }
         if t.suffix != "" {
             append(sb, format(" suf={}", t.suffix))
         }
@@ -106,7 +106,7 @@ impl Lexer {
     }
 
     fun emit(var self, kind: TokenKind, lexeme: str, line: int32, col: int32, ival: int64, suffix: str) {
-        push(self.toks, Token { kind: kind, lexeme: lexeme, line: line, column: col, ival: ival, suffix: suffix })
+        push(self.toks, Token { kind: kind, lexeme: lexeme, line: line, column: col, ival: ival, suffix: suffix, big: "" })
     }
 
     fun emit0(var self, kind: TokenKind, lexeme: str, line: int32, col: int32) {
@@ -215,7 +215,7 @@ impl Lexer {
             let value = parse_value(digits, base as int64)
             let suffix = self.scan_int_suffix(sl, sc)
             let lexeme = self.slice_str(sp, self.pos)
-            self.emit(TokenKind.INT, lexeme, sl, sc, value, suffix)
+            self.emit_int(lexeme, sl, sc, value, suffix, big_text(digits, base as int64))
             return
         }
         let int_digits = self.scan_digits(10)
@@ -264,7 +264,13 @@ impl Lexer {
         }
         let value = parse_value(int_digits, 10)
         let lexeme = self.slice_str(sp, self.pos)
-        self.emit(TokenKind.INT, lexeme, sl, sc, value, suffix)
+        self.emit_int(lexeme, sl, sc, value, suffix, big_text(int_digits, 10))
+    }
+
+    // An INT token: `value` holds the literal's 64 low bits, `big` its decimal
+    // text when it is 2^63 or more (Python keeps the exact value).
+    fun emit_int(var self, lexeme: str, line: int32, col: int32, value: int64, suffix: str, big: str) {
+        push(self.toks, Token { kind: TokenKind.INT, lexeme: lexeme, line: line, column: col, ival: value, suffix: suffix, big: big })
     }
 
     fun scan_string(var self) {
@@ -558,7 +564,7 @@ impl Lexer {
         for t in sub_toks {
             if t.kind != TokenKind.EOF && t.kind != TokenKind.NEWLINE {
                 let col = slice_col + (t.column - 1)
-                push(out, Token { kind: t.kind, lexeme: t.lexeme, line: slice_line, column: col, ival: t.ival, suffix: t.suffix })
+                push(out, Token { kind: t.kind, lexeme: t.lexeme, line: slice_line, column: col, ival: t.ival, suffix: t.suffix, big: t.big })
             }
         }
         return out
@@ -681,6 +687,56 @@ pub fun lex(src: str) -> Result<[Token], Diag> {
         Some(e) => Err(e),
         None => Ok(toks),
     }
+}
+
+// The decimal text of the literal `digits` in `base` if its value is 2^63 or
+// more, else "" (MYLA-73). Short literals can't be that big, so only long ones
+// pay for the base-10^9 arithmetic.
+fun big_text(digits: str, base: int64) -> str {
+    if len(digits) < 16 { return "" }
+    var limbs: [int64] = [0]                 // little endian, base 10^9
+    for ch in chars(digits) {
+        var carry = digit_value(ch as int32) as int64
+        var i = 0
+        while i < len(limbs) {
+            let x = limbs[i] * base + carry
+            limbs[i] = x % 1000000000
+            carry = x / 1000000000
+            i = i + 1
+        }
+        while carry > 0 {
+            push(limbs, carry % 1000000000)
+            carry = carry / 1000000000
+        }
+    }
+    var sb = StringBuilder()
+    var top = len(limbs) - 1
+    while top > 0 && limbs[top] == 0 { top = top - 1 }
+    append(sb, format("{}", limbs[top]))
+    var k = top - 1
+    while k >= 0 {
+        let part = format("{}", limbs[k])
+        var pad = 9 - len(part)
+        while pad > 0 {
+            append_byte(sb, '0')
+            pad = pad - 1
+        }
+        append(sb, part)
+        k = k - 1
+    }
+    let text = build(sb)
+    if len(text) > 19 || (len(text) == 19 && !text_less(text, "9223372036854775808")) { return text }
+    return ""
+}
+
+// `a < b` for decimal texts of the same length.
+fun text_less(a: str, b: str) -> bool {
+    var i = 0
+    while i < len(a) {
+        if a[i] != b[i] { return a[i] < b[i] }
+        i = i + 1
+    }
+    return false
 }
 
 // `c` lowered if it is an ASCII capital letter.

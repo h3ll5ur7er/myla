@@ -581,7 +581,7 @@ impl Interp {
         if self.stop() { return Value.VUnit }
         return match e.kind {
             ExprKind.StrLit(s) => Value.VStr(s),
-            ExprKind.IntLit(v, suf, isc) => self.eval_int_lit(e, v, isc),
+            ExprKind.IntLit(v, suf, isc, big) => self.eval_int_lit(e, v, isc),
             ExprKind.FloatLit(lex, suf) => self.eval_float_lit(e, lex),
             ExprKind.BoolLit(b) => Value.VBool(b),
             ExprKind.Name(n) => self.eval_name(e, n),
@@ -816,7 +816,10 @@ impl Interp {
         // comparisons -> bool
         if op == "==" { return Value.VBool(value_eq(lv, rv)) }
         if op == "!=" { return Value.VBool(!value_eq(lv, rv)) }
-        if is_cmp_op(op) { return Value.VBool(self.compare(op, lv, rv)) }
+        if is_cmp_op(op) {
+            if is_u64(self.resolved_of(l.id)) { return Value.VBool(ucompare(op, as_int(lv), as_int(rv))) }
+            return Value.VBool(self.compare(op, lv, rv))
+        }
         // float arithmetic
         var is_float_op = false
         match lv { Value.VFloat(f) => { is_float_op = true }, _ => {} }
@@ -843,14 +846,14 @@ impl Interp {
                 self.fail(e, "division by zero")
                 return Value.VUnit
             }
-            res = idiv(a, b)
+            if is_u64(rt) { res = ((a as uint64) / (b as uint64)) as int64 } else { res = idiv(a, b) }
         }
         else if op == "%" {
             if b == 0 {
                 self.fail(e, "modulo by zero")
                 return Value.VUnit
             }
-            res = imod(a, b)
+            if is_u64(rt) { res = ((a as uint64) % (b as uint64)) as int64 } else { res = imod(a, b) }
         }
         else if op == "&" { res = a & b }
         else if op == "|" { res = a | b }
@@ -1433,9 +1436,16 @@ impl Interp {
 fun format_typed(v: Value, t: Option<Type>) -> str {
     match v {
         Value.VFloat(f) => { if is_float32_type(t) { return format("{}", f as float32) } },
+        Value.VInt(i) => { if is_u64(t) { return format("{}", i as uint64) } },   // stored as its bits
         _ => {},
     }
     return format_value(v)
+}
+
+// A uint64 value is stored as the int64 with the same bits; division,
+// remainder, comparison and printing read it unsigned.
+fun is_u64(t: Option<Type>) -> bool {
+    return match t { Some(Type.TInt(w, sg)) => w == 64 && !sg, _ => false }
 }
 
 fun is_float32_type(t: Option<Type>) -> bool {
@@ -1635,6 +1645,15 @@ fun str_concat(a: str, b: str) -> str { return a + b }
 
 fun is_cmp_op(op: str) -> bool {
     return op == "<" || op == "<=" || op == ">" || op == ">="
+}
+
+fun ucompare(op: str, a: int64, b: int64) -> bool {
+    let x = a as uint64
+    let y = b as uint64
+    if op == "<" { return x < y }
+    if op == "<=" { return x <= y }
+    if op == ">" { return x > y }
+    return x >= y
 }
 
 fun icmp(a: int64, b: int64) -> int32 {

@@ -1569,7 +1569,7 @@ impl CodeGen {
 
     fun eval(var self, e: Expr) {
         match e.kind {
-            ExprKind.IntLit(v, suf, isc) => {
+            ExprKind.IntLit(v, suf, isc, big) => {
                 self.emit(format("movabsq ${}, %rax", v))
                 if !isc { self.wrap(self.type_of(e.id)) }
             },

@@ -190,6 +190,12 @@ TYPE_ERRORS: dict[str, str] = {
     "const_division_by_wrapped_zero": "const A: uint8 = 128\nconst Z: uint8 = A + A\nconst Q: int = 1 / (Z as int)\nfun main() {}\n",
     "const_division_by_negated_zero": "const A: int = 0\nconst Q: int = 1 % -A\nfun main() {}\n",
     "const_cycle": "const A: int = B\nconst B: int = A\nfun main() {}\n",
+    "literal_above_uint64": _main("let x = 18446744073709551616u64"),
+    "literal_above_int64": _main("let x = 9223372036854775809i64"),
+    "literal_at_int64_magnitude_is_fine_but_wrong_type": _main("let x: int32 = 9223372036854775808i64"),
+    "literal_above_int32_default": _main("let x = 9223372036854775808"),
+    "huge_hex_literal": _main("let x: uint8 = 0x1_0000_0000_0000_0000"),
+    "shift_by_huge_literal": _main("let x = 1 << 9223372036854775808"),
     "or_pattern_rebinds": _main("match (1, 2) {", "    (x, x | x) => {},", "}"),
 }
 

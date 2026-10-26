@@ -997,7 +997,7 @@ impl Parser {
         let k = tok.kind
         if k == TokenKind.INT {
             self.advance()
-            return self.mk_expr(tok.line, tok.column, ExprKind.IntLit(tok.ival, suffix_opt(tok.suffix), false))
+            return self.mk_expr(tok.line, tok.column, ExprKind.IntLit(tok.ival, suffix_opt(tok.suffix), false, tok.big))
         }
         if k == TokenKind.FLOAT {
             self.advance()
@@ -1005,7 +1005,7 @@ impl Parser {
         }
         if k == TokenKind.CHAR {
             self.advance()
-            return self.mk_expr(tok.line, tok.column, ExprKind.IntLit(tok.ival, None, true))
+            return self.mk_expr(tok.line, tok.column, ExprKind.IntLit(tok.ival, None, true, ""))
         }
         if k == TokenKind.STRING {
             self.advance()
@@ -1168,7 +1168,7 @@ impl Parser {
         if k == TokenKind.MINUS {
             self.advance()
             let int_tok = self.expect(TokenKind.INT, "integer literal after '-' in pattern")
-            let inner = self.mk_expr(int_tok.line, int_tok.column, ExprKind.IntLit(int_tok.ival, suffix_opt(int_tok.suffix), false))
+            let inner = self.mk_expr(int_tok.line, int_tok.column, ExprKind.IntLit(int_tok.ival, suffix_opt(int_tok.suffix), false, int_tok.big))
             let lit = self.mk_expr(tok.line, tok.column, ExprKind.Unary("-", inner))
             return self.mk_pat(tok.line, tok.column, PatternKind.PLit(lit))
         }

@@ -8,6 +8,7 @@
 // is the oracle's: same position, same message (MYLA-28).
 
 from .parser import parse_source, Parsed
+from .ast import int_text
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
 from .ast import Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
@@ -223,6 +224,26 @@ fun float_suffix_type(s: str) -> Option<Type> {
 
 // half-open: signed permits magnitude up to 2**(width-1) (negation handled
 // separately); unsigned permits up to 2**width - 1.
+// Whether a literal fits a type, as types.int_fits: `big` is its decimal text
+// when it is 2^63 or more (`value` then holds only its low bits). A signed
+// type admits the magnitude 2^(w-1), so that `-128i8` is accepted.
+fun lit_fits(value: int64, big: str, w: int32, signed: bool) -> bool {
+    if big == "" { return int_fits(value, w, signed) }
+    if w < 64 { return false }
+    if signed { return big == "9223372036854775808" }
+    return len(big) < 20 || (len(big) == 20 && !text_greater(big, "18446744073709551615"))
+}
+
+// `a > b` for decimal texts of the same length.
+fun text_greater(a: str, b: str) -> bool {
+    var i = 0
+    while i < len(a) {
+        if a[i] != b[i] { return a[i] > b[i] }
+        i = i + 1
+    }
+    return false
+}
+
 fun int_fits(value: int64, w: int32, signed: bool) -> bool {
     if value < 0 { return false }
     if signed {
@@ -721,13 +742,13 @@ fun block_returns(b: Block) -> bool {
 
 fun is_flexible_int_lit(e: Expr) -> bool {
     return match e.kind {
-        ExprKind.IntLit(v, suf, isc) => match suf { Some(x) => false, None => (!isc) || v <= 127 },
+        ExprKind.IntLit(v, suf, isc, big) => match suf { Some(x) => false, None => (!isc) || v <= 127 },
         _ => false,
     }
 }
 
 fun is_flexible_char_lit(e: Expr) -> bool {
-    return match e.kind { ExprKind.IntLit(v, suf, isc) => isc, _ => false }
+    return match e.kind { ExprKind.IntLit(v, suf, isc, big) => isc, _ => false }
 }
 
 fun is_flexible_float_lit(e: Expr) -> bool {
@@ -735,12 +756,12 @@ fun is_flexible_float_lit(e: Expr) -> bool {
 }
 
 fun int_lit_value(e: Expr) -> int64 {
-    return match e.kind { ExprKind.IntLit(v, suf, isc) => v, _ => 0 }
+    return match e.kind { ExprKind.IntLit(v, suf, isc, big) => v, _ => 0 }
 }
 
 fun const_int(e: Expr) -> Option<int64> {
     return match e.kind {
-        ExprKind.IntLit(v, suf, isc) => Some(v),
+        ExprKind.IntLit(v, suf, isc, big) => Some(v),
         ExprKind.Unary(op, x) => const_int_neg(op, x),
         _ => None,
     }
@@ -749,7 +770,7 @@ fun const_int(e: Expr) -> Option<int64> {
 fun const_int_neg(op: str, x: Expr) -> Option<int64> {
     if op != "-" { return None }
     return match x.kind {
-        ExprKind.IntLit(v, suf, isc) => Some(0 - v),
+        ExprKind.IntLit(v, suf, isc, big) => Some(0 - v),
         _ => None,
     }
 }
@@ -1561,7 +1582,7 @@ impl Checker {
         let as_stmt = self.stmt_match
         self.stmt_match = false
         let r: Result<Option<Type>, CheckErr> = match e.kind {
-            ExprKind.IntLit(v, suf, isc) => Ok(Some(self.infer_int_lit(e, expected)?)),
+            ExprKind.IntLit(v, suf, isc, big) => Ok(Some(self.infer_int_lit(e, expected)?)),
             ExprKind.FloatLit(lex, suf) => Ok(Some(self.infer_float_lit(e, expected)?)),
             ExprKind.StrLit(s) => Ok(Some(Type.TStr)),
             ExprKind.BoolLit(b) => Ok(Some(Type.TBool)),
@@ -1592,7 +1613,7 @@ impl Checker {
 
     fun infer_int_lit(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         return match e.kind {
-            ExprKind.IntLit(v, suf, isc) => {
+            ExprKind.IntLit(v, suf, isc, big) => {
                 var t = t_int()
                 if isc {
                     let useint = match expected { Some(et) => is_int(et) && v <= 127, None => false }
@@ -1612,7 +1633,7 @@ impl Checker {
                 }
                 let w = match t { Type.TInt(ww, ss) => ww, _ => 32 }
                 let sg = match t { Type.TInt(ww, ss) => ss, _ => true }
-                if !int_fits(v, w, sg) { return Err(terr(e.line, e.col, format("integer literal {} does not fit in '{}'", v, type_name(t)))) }
+                if !lit_fits(v, big, w, sg) { return Err(terr(e.line, e.col, format("integer literal {} does not fit in '{}'", int_text(v, big), type_name(t)))) }
                 Ok(t)
             },
             _ => Err(terr(e.line, e.col, "expected an integer literal")),   // unreachable
@@ -2914,7 +2935,7 @@ impl Checker {
     fun fold_const_expr(var self, e: Expr) -> Result<CV, CheckErr> {
         let t = self.node_type(e)
         return match e.kind {
-            ExprKind.IntLit(v, suf, isc) => {
+            ExprKind.IntLit(v, suf, isc, big) => {
                 if is_char(t) { return Ok(CV.CVInt(v)) }      // a char folds to its codepoint
                 Ok(CV.CVInt(wrap_int(v, t)))
             },

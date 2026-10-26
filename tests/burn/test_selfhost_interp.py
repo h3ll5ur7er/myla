@@ -107,7 +107,7 @@ INTERP_PROGRAMS = {
     "pop_empty": _main("var xs: [int] = []", "let x = pop(xs)"),
     "no_entry_point": "fun helper() -> int {\n    return 1\n}\n",
     "error_inside_print_stops_it": _main("let xs = [1]", "print(xs[1] + 1)", "print(9)"),
-    "unsigned_shift": _main("let x: uint64 = 0u64 - 1u64", "print(x >> 60)", "let y: int64 = -16", "print(y >> 2)"),
+    "unsigned_shift": _main("let x: uint64 = 18446744073709551615", "print(x >> 60)", "let y: int64 = -16", "print(y >> 2)"),
     "range_beyond_int32": _main("for i in 3000000000..3000000002 {", "    print(i)", "}"),
     "receiver_before_arguments": _main("var cs = [C { n: 0 }]", "print(cs[at(\"recv\", 0)].bump(at(\"arg\", 5)))",
                                        "print(cs[0].n)", before=_TRACE),

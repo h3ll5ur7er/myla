@@ -33,4 +33,4 @@ Both fixed identically in `types.py` and the assembly runtime, and regenerated i
 - [x] Tests: `tests/burn/test_selfhost_floatlit.py` (845 literals bit-identical to Python; a mutant without ties-to-even fails it), the parity program `floats_in_depth` (both backends), `floats.my` back in the self-hosted codegen and interpreter gates, `tests/unit/test_floats.py` round-trip over the whole double range and correctly rounded digits at the top of the range (both failed before the formatting fixes), and the runtime-sync unit test
 - [x] Bootstrap fixed point holds (4,963,698 bytes; about 160 KB of that growth is the runtime's text kept as string data, which the self-hosted compiler writes as `.byte` lists)
 
-Not covered: integer literals of 2^63 and above in the self-hosted lexer ([[MYLA-73]]).
+Not covered then: integer literals of 2^63 and above in the self-hosted lexer, since fixed ([[MYLA-73]]).

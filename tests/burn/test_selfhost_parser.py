@@ -105,6 +105,24 @@ SYNTAX_ERRORS = {
     "expected_pattern": "fun main() {\n    let x = match 1 {\n        + => 1,\n    }\n}\n",
 }
 
+# Integer literals of 2^63 and above (MYLA-73): the canonical AST and token
+# dumps show their value, which the self-hosted lexer used to wrap.
+BIG_LITERALS = (
+    "fun main() {\n"
+    "    let a = 9223372036854775807\n"
+    "    let b = 9223372036854775808\n"
+    "    let c = 18446744073709551615u64\n"
+    "    let d = 18446744073709551616\n"
+    "    let e = 0xFFFF_FFFF_FFFF_FFFF\n"
+    "    let f = 0x1_0000_0000_0000_0000\n"
+    "    let g = 0b1000000000000000000000000000000000000000000000000000000000000000\n"
+    "    let h = 340282366920938463463374607431768211456\n"
+    "    let i = 000000000000000000000000000000000000000000042\n"
+    "    let m = x & 9223372036854775808\n"
+    "}\n"
+)
+
+
 # Files whose every prefix (cut at each line end and in the middle of each
 # line) is parsed by both front ends: they must agree, and the self-hosted one
 # must stop after its first error instead of looping.
@@ -192,6 +210,9 @@ class SelfHostedParserParity(unittest.TestCase):
                 expected = _canonical(source)
                 self.assertTrue(expected.startswith("err "), "not an error in Python")
                 self.assertEqual(self._myla_parse_source(source), expected)
+
+    def test_big_integer_literals_match_the_oracle(self) -> None:
+        self.assertEqual(self._myla_parse_source(BIG_LITERALS), _canonical(BIG_LITERALS))
 
     def test_truncated_sources_match_the_oracle(self) -> None:
         for name in TRUNCATED:

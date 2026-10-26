@@ -918,7 +918,7 @@ PROGRAMS = {
         "    print(-1.0f64 / 0.0f64)\n    print(nan)\n"
         "    print(-3.9f64 as int32)\n"            # truncates toward zero
         "    print(300.7f64 as uint8)\n"           # then wraps
-        "    let umax = 0u64 - 1u64\n"            # (the self-hosted lexer can't read 2^64 - 1 yet)
+        "    let umax = 18446744073709551615u64\n"
         "    print(umax as float64)\n"
         "    print(9007199254740993i64 as float64)\n" # an int64 above 2^53
         "    print((1.5f64 as float32) + 0.1f32)\n"
@@ -1164,6 +1164,28 @@ PROGRAMS = {
         '    print(E)\n'
         '    print(F)\n'
         '    print(H)\n'
+        '}\n'
+    ),
+    # integer literals of 2^63 and above (MYLA-73)
+    "big_integer_literals": (
+        '#main\n'
+        'fun main() {\n'
+        '    let max: uint64 = 18446744073709551615u64\n'
+        '    print(max)\n'
+        '    print(max >> 60)\n'
+        '    let top: uint64 = 9223372036854775808\n'
+        '    print(top)\n'
+        '    print(top == (1u64 << 63))\n'
+        '    let low: int64 = -9223372036854775808i64\n'
+        '    print(low)\n'
+        '    print(0xFFFF_FFFF_FFFF_FFFFu64 == max)\n'
+        '    let x: uint64 = 12345678901234567890\n'
+        '    print(x & 9223372036854775808u64)\n'
+        '    print(x % 1000)\n'
+        '    match max {\n'
+        '        18446744073709551615 => { print("max") },\n'
+        '        _ => { print("other") },\n'
+        '    }\n'
         '}\n'
     ),
     # `remove` unshares the map first and drops the removed value (MYLA-25)

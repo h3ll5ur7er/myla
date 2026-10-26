@@ -38,7 +38,7 @@ pub enum ExprOrBlock {
 }
 
 pub enum ExprKind {
-    IntLit(int64, Option<str>, bool),   // value, suffix, is_char
+    IntLit(int64, Option<str>, bool, str),   // value (64 low bits), suffix, is_char, big (lexer.my)
     FloatLit(str, Option<str>),         // lexeme (value: floatlit.my), suffix
     StrLit(str),
     BoolLit(bool),
@@ -184,6 +184,12 @@ fun sstr(s: str) -> str {
     return format("\"{}\"", escape(s))
 }
 
+// An integer literal's value: its decimal text when it is 2^63 or more.
+pub fun int_text(v: int64, big: str) -> str {
+    if big != "" { return big }
+    return format("{}", v)
+}
+
 fun bstr(b: bool) -> str {
     if b { return "true" }
     return "false"
@@ -249,7 +255,7 @@ fun dump_arm(a: MatchArm) -> str {
 
 pub fun dump_expr(e: Expr) -> str {
     return match e.kind {
-        ExprKind.IntLit(v, suf, isc) => format("(int {} {} {})", v, opt_sstr(suf), bstr(isc)),
+        ExprKind.IntLit(v, suf, isc, big) => format("(int {} {} {})", int_text(v, big), opt_sstr(suf), bstr(isc)),
         ExprKind.FloatLit(lex, suf) => format("(float {})", opt_sstr(suf)),
         ExprKind.StrLit(s) => format("(str {})", sstr(s)),
         ExprKind.BoolLit(b) => format("(bool {})", bstr(b)),

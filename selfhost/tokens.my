@@ -25,8 +25,9 @@ pub struct Token {
     lexeme: str,
     line: int32,
     column: int32,
-    ival: int64,     // INT value or CHAR codepoint; 0 otherwise
+    ival: int64,     // INT value (its 64 low bits) or CHAR codepoint; 0 otherwise
     suffix: str,     // "" when there is no suffix
+    big: str,        // an INT value of 2^63 or more in decimal (MYLA-73); "" otherwise
 }
 
 pub fun keyword_kind(text: str) -> TokenKind {

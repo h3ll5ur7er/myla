@@ -99,6 +99,19 @@ class SelfHostedLexerParity(unittest.TestCase):
         ).run()
         return out.getvalue().rstrip("\n")
 
+    def test_big_integer_literals(self) -> None:
+        # the token dump shows the value of literals of 2^63 and above (MYLA-73)
+        from .test_selfhost_parser import BIG_LITERALS
+
+        with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", delete=False) as fh:
+            fh.write(BIG_LITERALS)
+        try:
+            with open(fh.name, encoding="utf-8") as src:
+                expected = canonical_tokens(tokenize(src.read()))
+            self.assertEqual(self._myla_lex(fh.name), expected)
+        finally:
+            os.unlink(fh.name)
+
     def test_corpus_token_parity(self) -> None:
         checked = 0
         for path in _corpus():
