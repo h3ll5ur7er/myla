@@ -8,8 +8,8 @@ from std.process import args, exit
 from std.io import eprintln
 from .checker import build_checker_decls
 from .interp import new_interp
-from .loader import load_program, Loaded
-from .diag import render
+from .loader import load_program, Loaded, file_of
+from .diag import render, type_report
 
 fun run_program(prog: Loaded, file: str) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
@@ -18,7 +18,7 @@ fun run_program(prog: Loaded, file: str) -> int32 {
             it.run()
         },
         Err(e) => {
-            eprintln("interp_main: program failed to type-check")
+            eprintln(render(type_report(e.line, e.col, e.msg, file_of(prog, e.decl))))
             1
         },
     }

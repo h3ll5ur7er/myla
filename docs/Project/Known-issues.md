@@ -34,7 +34,6 @@ The reference implementation. Most problems are places where the native backend 
 | [[MYLA-26]] | Partial application of an aggregate-returning function returns garbage | medium |
 | [[MYLA-27]] | Const folding treats const references as 0 | medium |
 | [[MYLA-32]] | The Myla interpreter diverges from the Python one in nine ways | medium |
-| [[MYLA-28]] | Diagnostics have shifted positions and no messages | low |
 | [[MYLA-73]] | Integer literals of 2^63 and above wrap (the lexer stores `int64`) | low |
 | [[MYLA-31]] | Without a stdlib root, `std` resolves to `/std` (`scripts/build.sh`) | low |
 | [[MYLA-33]], [[MYLA-34]], [[MYLA-35]] | Latent issues, dead code, `justfile` recipes | low |

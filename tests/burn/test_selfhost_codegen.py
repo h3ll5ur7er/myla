@@ -237,9 +237,9 @@ MODULE_PROJECTS = {
     },
 }
 
-# Programs the loader rejects (MYLA-30), and lex and parse errors in imported
-# modules (MYLA-28): the self-hosted compiler prints the Python CLI's diagnostic
-# (message, file, position, source line and caret).
+# Programs the loader rejects (MYLA-30), and lex, parse and type errors in
+# imported modules (MYLA-28): the self-hosted compiler prints the Python CLI's
+# diagnostic (message, file, position, source line and caret).
 MODULE_ERRORS = {
     "parse_error_in_module": {
         "main.my": "import lib\nfun main() {\n    print(lib.f())\n}\n",
@@ -250,6 +250,32 @@ MODULE_ERRORS = {
         "lib.my": "pub fun f() -> int {\n    return 0x\n}\n",
     },
     "parse_error_in_entry": {"main.my": "fun main() {\n    let x = \n}\n"},
+    # type errors (MYLA-28): attributed to the file of the declaration
+    "type_error_in_entry": {"main.my": "fun main() {\n    let x: int = \"s\"\n}\n"},
+    "type_error_in_module": {
+        "main.my": "import lib\nfun main() {\n    print(lib.f())\n}\n",
+        "lib.my": "pub fun f() -> int {\n    return \"s\"\n}\n",
+    },
+    "type_error_in_method_of_module": {
+        "main.my": "from .lib import P\nfun main() {\n    print(P { x: 1 }.get())\n}\n",
+        "lib.my": "pub struct P { x: int }\nimpl P {\n    fun get(self) -> int {\n        return self.y\n    }\n}\n",
+    },
+    "field_type_error_in_module": {
+        "main.my": "from .lib import P\nfun main() {}\n",
+        "lib.my": "pub struct P { x: Nope }\n",
+    },
+    "const_error_in_module": {
+        "main.my": "from .lib import N\nfun main() {\n    print(N)\n}\n",
+        "lib.my": "pub const N: int = 1 / 0\n",
+    },
+    "recursive_struct_in_module": {
+        "main.my": "from .lib import P\nfun main() {}\n",
+        "lib.my": "pub struct P { next: P }\n",
+    },
+    "trait_error_in_module": {
+        "main.my": "from .lib import P\nfun main() {}\n",
+        "lib.my": "pub struct P { x: int }\ntrait T {\n    fun f(self) -> int\n}\nimpl T for P {\n}\n",
+    },
     "private_name": {
         "main.my": "from .lib import secret\nfun main() {\n    print(secret())\n}\n",
         "lib.my": "fun secret() -> int {\n    return 1\n}\n",
@@ -441,7 +467,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 with self.subTest(program=name):
                     entry = _write_project(os.path.join(tmp, name), files)
                     with self.assertRaises(MylaError) as ctx:
-                        link(entry, stdlib_root=stdlib)
+                        check(link(entry, stdlib_root=stdlib))
                     err = ctx.exception
                     path = err.path or entry
                     with open(path, encoding="utf-8") as fh:

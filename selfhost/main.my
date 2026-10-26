@@ -14,8 +14,8 @@
 from std.process import args, exit, run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file
-from .loader import load_program
-from .diag import render
+from .loader import load_program, file_of
+from .diag import render, type_report
 from .checker import build_checker_decls, Checker, CheckErr
 from .codegen import new_codegen
 from .interp import new_interp
@@ -36,7 +36,7 @@ fun load_and_check(file: str, stdlib: str) -> Result<Checker, str> {
     }
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => Ok(c),
-        Err(e) => Err(format("myla: type-check failed at {}:{}", e.line, e.col)),
+        Err(e) => Err(render(type_report(e.line, e.col, e.msg, file_of(prog, e.decl)))),
     }
 }
 

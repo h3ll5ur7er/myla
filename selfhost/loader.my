@@ -37,9 +37,22 @@ struct Module {
     bindings: [str: Binding],
 }
 
-// The linked program: every module's declarations, and the next free node id
-// (the checker parses the prelude from there).
-pub struct Loaded { decls: [Decl], next_id: int32 }
+// The linked program: every module's declarations, the next free node id
+// (the checker parses the prelude from there), and where each module's node ids
+// start, in increasing order (`file_of`).
+pub struct Loaded { decls: [Decl], next_id: int32, spans: [Span] }
+
+pub struct Span { first_id: int32, path: str }
+
+// The file of node `id` (a declaration a type error names); the entry file for
+// an unknown one (-1).
+pub fun file_of(prog: Loaded, id: int32) -> str {
+    var path = prog.spans[0].path
+    for sp in prog.spans {
+        if sp.first_id <= id { path = sp.path }
+    }
+    return path
+}
 
 struct Loader {
     stdlib_root: str,
@@ -47,6 +60,7 @@ struct Loader {
     entry: str,
     modules: [Module],
     next_id: int32,
+    spans: [Span],
 }
 
 // -- paths ------------------------------------------------------------------
@@ -303,6 +317,7 @@ impl Loader {
             Ok(s) => { src = s },
             Err(e) => { return Err(Report { kind: "module error", msg: format("cannot read module '{}'", path), path: path, line: 0, col: 0 }) },
         }
+        push(self.spans, Span { first_id: self.next_id, path: path })
         var parsed = match parse_source(src, self.next_id) {
             Ok(x) => x,
             Err(d) => { return Err(report(d, path)) },
@@ -956,7 +971,7 @@ pub fun load_program(entry: str, stdlib_root: str) -> Result<Loaded, Report> {
     let e = normalize(entry)
     var stdlib = ""
     if stdlib_root != "" { stdlib = normalize(stdlib_root) }
-    var ld = Loader { stdlib_root: stdlib, project_root: dirname(e), entry: e, modules: [], next_id: 0 }
+    var ld = Loader { stdlib_root: stdlib, project_root: dirname(e), entry: e, modules: [], next_id: 0, spans: [] }
     ld.load(e)?
     ld.check_ids()?
     ld.build_exports()
@@ -969,5 +984,5 @@ pub fun load_program(entry: str, stdlib_root: str) -> Result<Loaded, Report> {
         for d in m.decls { push(decls, r.decl(d, m.id)) }
         match r.err { Some(e) => { return Err(e) }, None => {} }
     }
-    return Ok(Loaded { decls: decls, next_id: ld.next_id })
+    return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans })
 }

@@ -10,8 +10,8 @@ from std.process import args, exit
 from std.io import write, eprintln
 from .checker import build_checker_decls
 from .codegen import new_codegen
-from .loader import load_program, Loaded
-from .diag import render
+from .loader import load_program, Loaded, file_of
+from .diag import render, type_report
 
 fun emit_asm(prog: Loaded) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
@@ -22,7 +22,7 @@ fun emit_asm(prog: Loaded) -> int32 {
             0
         },
         Err(e) => {
-            eprintln(format("gen_main: type-check failed at {}:{}", e.line, e.col))
+            eprintln(render(type_report(e.line, e.col, e.msg, file_of(prog, e.decl))))
             1
         },
     }

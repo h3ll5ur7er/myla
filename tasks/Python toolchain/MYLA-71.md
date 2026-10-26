@@ -24,4 +24,4 @@ Every AST node already carries its line and column, and labels are already `myla
 - [x] Without `-g` the output is unchanged
 - [x] Tests first: `tests/unit/test_compiler.py::TestLineTables` (directives, files of imported modules, lambdas, line 0 after functions) and `tests/burn/test_debug_info.py` (readelf sees the lines; `-g` doesn't change behaviour; gdb stops on `prog.my:2` and shows the Myla backtrace)
 - [x] Documented with a real gdb session on [[Development/Debugging]]
-- [ ] The same in [[selfhost/codegen.my]]: **blocked** until its positions refer to the original files ([[MYLA-28]], [[MYLA-30]]); today they are coordinates in the concatenated program, so the table would point at wrong lines
+- [ ] The same in [[selfhost/codegen.my]]: unblocked: positions are per file since [[MYLA-30]], and the loader's `Loaded.spans` maps each node id to its file ([[MYLA-28]])

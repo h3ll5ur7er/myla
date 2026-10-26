@@ -1506,12 +1506,13 @@ class Checker:
             if find_cycle(name, name, frozenset({name}), stop_at_boxed=True):
                 kind = "enum" if name in self.enums else "struct"
                 decl = self.enum_decls.get(name) or self.struct_decls.get(name)
-                raise TypeCheckError(
-                    f"recursive {kind} '{name}' would have infinite size; "
-                    "only enums can be recursive (they are boxed) — wrap the "
-                    "cycle in an enum to introduce indirection",
-                    decl.line, decl.column,
-                )
+                with in_file(_source_path(decl)):
+                    raise TypeCheckError(
+                        f"recursive {kind} '{name}' would have infinite size; "
+                        "only enums can be recursive (they are boxed) — wrap the "
+                        "cycle in an enum to introduce indirection",
+                        decl.line, decl.column,
+                    )
 
     # -- attributes & entry point -------------------------------------------
 
@@ -1689,19 +1690,22 @@ class Checker:
 
         named_main = self.functions.get("main")
         if main_decls and named_main is not None and named_main.decl not in main_decls:
-            raise TypeCheckError(
-                "both a '#main' function and a function named 'main' are present",
-                named_main.decl.line, named_main.decl.column,
-            )
+            with in_file(_source_path(named_main.decl)):
+                raise TypeCheckError(
+                    "both a '#main' function and a function named 'main' are present",
+                    named_main.decl.line, named_main.decl.column,
+                )
         if len(main_decls) > 1:
-            raise TypeCheckError(
-                "more than one '#main' entry point", main_decls[1].line, main_decls[1].column
-            )
+            with in_file(_source_path(main_decls[1])):
+                raise TypeCheckError(
+                    "more than one '#main' entry point", main_decls[1].line, main_decls[1].column
+                )
         entry = main_decls[0] if main_decls else (named_main.decl if named_main else None)
         if entry is not None and entry.params:
-            raise TypeCheckError(
-                "entry point must take no parameters in v0.0", entry.line, entry.column
-            )
+            with in_file(_source_path(entry)):
+                raise TypeCheckError(
+                    "entry point must take no parameters in v0.0", entry.line, entry.column
+                )
         self.entry = entry
 
     def _check_main_attr(self, decl: ast.FunDecl, attr: ast.Attribute) -> None:

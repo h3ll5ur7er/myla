@@ -34,10 +34,11 @@ pub enum Type {
     TSelf,
 }
 
-// A type error: position and the Python checker's message.
-pub struct CheckErr { line: int32, col: int32, msg: str }
+// A type error: position, the Python checker's message, and the id of the
+// declaration being checked, whose module is the error's file (-1: unknown).
+pub struct CheckErr { line: int32, col: int32, msg: str, decl: int32 }
 
-fun terr(line: int32, col: int32, msg: str) -> CheckErr { return CheckErr { line: line, col: col, msg: msg } }
+fun terr(line: int32, col: int32, msg: str) -> CheckErr { return CheckErr { line: line, col: col, msg: msg, decl: -1 } }
 
 // A type as the Python checker's messages write it (types.py: type_name).
 fun type_name(t: Type) -> str {
@@ -595,10 +596,10 @@ fun unify_list(ps: [Type], ats: [Type], subst: [Subst]) -> UniRes {
 // =========================================================================
 
 pub struct FieldT { name: str, ty: Type }
-pub struct StructInfo { name: str, type_params: [str], fields: [FieldT], line: int32, col: int32 }
+pub struct StructInfo { name: str, type_params: [str], fields: [FieldT], line: int32, col: int32, id: int32 }
 
 pub struct VariantT { name: str, payload: [Type] }
-pub struct EnumInfo { name: str, type_params: [str], variants: [VariantT], line: int32, col: int32 }
+pub struct EnumInfo { name: str, type_params: [str], variants: [VariantT], line: int32, col: int32, id: int32 }
 
 pub struct Bound { tp: str, traits: [str] }
 pub struct FuncSig {
@@ -609,6 +610,7 @@ pub struct FuncSig {
     bounds: [Bound],
     decl: FunData,
     has_decl: bool,
+    decl_id: int32,                 // its declaration (the impl, for a method)
 }
 
 pub struct TraitMethodSig { name: str, params: [Type], ret: Option<Type>, receiver: str }
@@ -617,10 +619,10 @@ pub struct TraitInfo { name: str, methods: [TraitMethodSig], type_params: [str],
 pub struct MethodEntry { key: str, name: str, sig: FuncSig }
 pub struct TraitImplPair { trait_name: str, key: str }
 
-pub struct AliasRaw { name: str, target: TypeExpr, line: int32, col: int32 }
+pub struct AliasRaw { name: str, target: TypeExpr, line: int32, col: int32, id: int32 }
 pub struct AliasCached { name: str, ty: Type }
 
-pub struct ConstDeclT { name: str, declared: TypeExpr, value: Expr, line: int32, col: int32 }
+pub struct ConstDeclT { name: str, declared: TypeExpr, value: Expr, line: int32, col: int32, id: int32 }
 
 pub struct Binding { ty: Type, mutable: bool }
 pub struct Frame { names: [str], binds: [Binding] }
@@ -645,6 +647,7 @@ pub struct Checker {
     methods: [MethodEntry],
     method_decls: [FunData],
     method_decl_keys: [str],
+    method_decl_ids: [int32],       // each method's impl declaration
     impl_decls: [Decl],
     traits: [TraitInfo],
     trait_decls: [Decl],
@@ -666,6 +669,7 @@ pub struct Checker {
     frames: [Frame],
     lambda_infer_active: bool,
     lambda_depth: int32,            // lambdas being checked (`?` names "lambda" or "function")
+    cur_decl: int32,                // the declaration being checked, for CheckErr.decl
     lambda_infer: [MatchVal],
     stmt_match: bool,
     resolved: [int32: Type],        // expr node id -> resolved type (v0.8 interp side table)
@@ -675,12 +679,12 @@ fun new_checker(decls: [Decl]) -> Checker {
     return Checker {
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
-        functions: [], methods: [], method_decls: [], method_decl_keys: [],
+        functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
         impl_decls: [], traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, loop_depth: 0, try_counter: 0,
-        frames: [], lambda_infer_active: false, lambda_depth: 0, lambda_infer: [], stmt_match: false,
+        frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
         resolved: [:],
     }
 }
@@ -975,6 +979,7 @@ impl Checker {
     fun collect_globals(var self) -> Result<int32, CheckErr> {
         var seen: [str] = []
         for decl in self.decls {
+            self.cur_decl = decl.id
             let ln = decl.line
             let cl = decl.col
             let handled = match decl.kind {
@@ -995,11 +1000,11 @@ impl Checker {
             if contains_str(seen, name) { return Err(terr(ln, cl, format("duplicate top-level declaration '{}'", name))) }
             push(seen, name)
             match decl.kind {
-                DeclKind.StructDecl(n, fields, attrs, tps, isp) => { push(self.structs, StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl }) },
-                DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { push(self.enums, EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl }) },
-                DeclKind.TypeAliasDecl(n, target, attrs, isp) => { push(self.aliases, AliasRaw { name: n, target: target, line: ln, col: cl }) },
-                DeclKind.ConstDecl(n, ty, value, attrs, isp) => { push(self.const_decls, ConstDeclT { name: n, declared: ty, value: value, line: ln, col: cl }) },
-                DeclKind.FunDecl(fd) => { push(self.functions, FuncSig { name: fd.name, params: [], ret: None, type_params: [], bounds: [], decl: fd, has_decl: true }) },
+                DeclKind.StructDecl(n, fields, attrs, tps, isp) => { push(self.structs, StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl, id: decl.id }) },
+                DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { push(self.enums, EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl, id: decl.id }) },
+                DeclKind.TypeAliasDecl(n, target, attrs, isp) => { push(self.aliases, AliasRaw { name: n, target: target, line: ln, col: cl, id: decl.id }) },
+                DeclKind.ConstDecl(n, ty, value, attrs, isp) => { push(self.const_decls, ConstDeclT { name: n, declared: ty, value: value, line: ln, col: cl, id: decl.id }) },
+                DeclKind.FunDecl(fd) => { push(self.functions, FuncSig { name: fd.name, params: [], ret: None, type_params: [], bounds: [], decl: fd, has_decl: true, decl_id: decl.id }) },
                 _ => {},
             }
         }
@@ -1048,6 +1053,7 @@ impl Checker {
         var ai = 0
         while ai < len(self.aliases) {
             let a = self.aliases[ai]
+            self.cur_decl = a.id
             self.resolve(a.target, [a.name])?
             ai = ai + 1
         }
@@ -1055,6 +1061,7 @@ impl Checker {
         for decl in self.decls {
             match decl.kind {
                 DeclKind.StructDecl(n, fields, attrs, tps, isp) => {
+                    self.cur_decl = decl.id
                     self.check_type_params(tp_names(tps), decl.line, decl.col)?
                     self.type_params = tp_names(tps)
                     var fs: [FieldT] = []
@@ -1066,7 +1073,7 @@ impl Checker {
                     }
                     self.type_params = []
                     let idx = self.struct_idx(n)
-                    self.structs[idx] = StructInfo { name: n, type_params: tp_names(tps), fields: fs, line: decl.line, col: decl.col }
+                    self.structs[idx] = StructInfo { name: n, type_params: tp_names(tps), fields: fs, line: decl.line, col: decl.col, id: decl.id }
                 },
                 _ => {},
             }
@@ -1075,6 +1082,7 @@ impl Checker {
         for decl in self.decls {
             match decl.kind {
                 DeclKind.EnumDecl(n, variants, attrs, tps, isp) => {
+                    self.cur_decl = decl.id
                     self.check_type_params(tp_names(tps), decl.line, decl.col)?
                     self.type_params = tp_names(tps)
                     var vs: [VariantT] = []
@@ -1087,7 +1095,7 @@ impl Checker {
                     }
                     self.type_params = []
                     let idx = self.enum_idx(n)
-                    self.enums[idx] = EnumInfo { name: n, type_params: tp_names(tps), variants: vs, line: decl.line, col: decl.col }
+                    self.enums[idx] = EnumInfo { name: n, type_params: tp_names(tps), variants: vs, line: decl.line, col: decl.col, id: decl.id }
                 },
                 _ => {},
             }
@@ -1097,6 +1105,7 @@ impl Checker {
         for decl in self.decls {
             match decl.kind {
                 DeclKind.FunDecl(fd) => {
+                    self.cur_decl = decl.id
                     self.check_type_params(tp_names(fd.type_params), fd.line, fd.col)?
                     self.type_params = tp_names(fd.type_params)
                     var ps: [Type] = []
@@ -1105,7 +1114,7 @@ impl Checker {
                     match fd.ret_type { Some(te) => { rt = Some(self.resolve0(te)?) }, None => {} }
                     self.type_params = []
                     let idx = self.func_idx(fd.name)
-                    self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), bounds: build_bounds(fd.type_params), decl: fd, has_decl: true }
+                    self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), bounds: build_bounds(fd.type_params), decl: fd, has_decl: true, decl_id: decl.id }
                 },
                 _ => {},
             }
@@ -1158,11 +1167,13 @@ impl Checker {
         }
         for e in self.enums {
             if self.find_cycle(e.name, e.name, [e.name], true) {
+                self.cur_decl = e.id
                 return Err(terr(e.line, e.col, format("recursive enum '{}' would have infinite size; only enums can be recursive (they are boxed) — wrap the cycle in an enum to introduce indirection", e.name)))
             }
         }
         for s in self.structs {
             if self.find_cycle(s.name, s.name, [s.name], true) {
+                self.cur_decl = s.id
                 return Err(terr(s.line, s.col, format("recursive struct '{}' would have infinite size; only enums can be recursive (they are boxed) — wrap the cycle in an enum to introduce indirection", s.name)))
             }
         }
@@ -1201,6 +1212,7 @@ impl Checker {
     fun resolve_traits(var self) -> Result<int32, CheckErr> {
         self.register_builtin_op_traits()
         for decl in self.trait_decls {
+            self.cur_decl = decl.id
             match decl.kind {
                 DeclKind.TraitDecl(name, methods, tps, isp) => {
                     // check trait type params: no Self, no dup
@@ -1274,6 +1286,7 @@ fun opt_subst_self(t: Option<Type>, target: Type, pmap: [Subst]) -> Option<Type>
 impl Checker {
     fun resolve_impls(var self) -> Result<int32, CheckErr> {
         for decl in self.impl_decls {
+            self.cur_decl = decl.id
             match decl.kind {
                 DeclKind.ImplDecl(target_te, methods, tps, trait_name, trait_args_te) => {
                     self.resolve_impl(decl, target_te, methods, tps, trait_name, trait_args_te)?
@@ -1345,7 +1358,7 @@ impl Checker {
         for m in methods {
             match self.method_sig(key, m.name) { Some(x) => { return Err(terr(m.line, m.col, format("duplicate method '{}' for type '{}'", m.name, key))) }, None => {} }
             if contains_str(field_names, m.name) { return Err(terr(m.line, m.col, format("method '{}' collides with a field of '{}'", m.name, key))) }
-            self.register_method(target_te, key, tps, m)?
+            self.register_method(target_te, key, tps, m, decl.id)?
         }
         if have_trait {
             var impl_names: [str] = []
@@ -1358,7 +1371,7 @@ impl Checker {
         return Ok(0)
     }
 
-    fun register_method(var self, target_te: TypeExpr, key: str, impl_tps: [TypeParam], m: FunData) -> Result<int32, CheckErr> {
+    fun register_method(var self, target_te: TypeExpr, key: str, impl_tps: [TypeParam], m: FunData, impl_id: int32) -> Result<int32, CheckErr> {
         let mangled = format("{}.{}", key, m.name)
         var combined_names: [str] = []
         for t in impl_tps { push(combined_names, t.name) }
@@ -1380,11 +1393,12 @@ impl Checker {
             ret_type: m.ret_type, body: m.body, attributes: [],
             type_params: synth_typarams(combined_names), receiver: m.receiver, is_pub: false,
         }
-        let sig = FuncSig { name: mangled, params: params, ret: rt, type_params: combined_names, bounds: combined_bounds, decl: fdecl, has_decl: true }
+        let sig = FuncSig { name: mangled, params: params, ret: rt, type_params: combined_names, bounds: combined_bounds, decl: fdecl, has_decl: true, decl_id: impl_id }
         push(self.functions, sig)
         push(self.methods, MethodEntry { key: key, name: m.name, sig: sig })
         push(self.method_decls, fdecl)
         push(self.method_decl_keys, key)
+        push(self.method_decl_ids, impl_id)
         return Ok(0)
     }
 
@@ -1429,8 +1443,9 @@ impl Checker {
         return Ok(0)
     }
 
-    fun validate_bounds(self) -> Result<int32, CheckErr> {
+    fun validate_bounds(var self) -> Result<int32, CheckErr> {
         for sig in self.functions {
+            self.cur_decl = sig.decl_id
             for b in sig.bounds {
                 if !contains_str(sig.type_params, b.tp) { return Err(terr(sig.decl.line, sig.decl.col, format("bound on unknown type parameter '{}'", b.tp))) }
                 for tr in b.traits {
@@ -2750,6 +2765,7 @@ impl Checker {
     fun synthesize_derives(var self) -> Result<int32, CheckErr> {
         var targets: [Decl] = []
         for decl in self.decls {
+            self.cur_decl = decl.id
             let attrs = decl_attrs(decl)
             for attr in attrs {
                 if attr.name != "derive" { continue }
@@ -2777,6 +2793,7 @@ impl Checker {
             }
         }
         for decl in targets {
+            self.cur_decl = decl.id
             let name = decl_kind_name(decl)
             // explicit `impl Eq for name`?
             for d in self.impl_decls {
@@ -2790,7 +2807,7 @@ impl Checker {
             var self_t = Type.TEnum(name, [])
             if self.is_struct(name) { self_t = Type.TStruct(name, []) }
             let fdecl = FunData { line: decl.line, col: decl.col, name: format("{}.eq", name), params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: Some("self"), is_pub: false }
-            let sig = FuncSig { name: format("{}.eq", name), params: [self_t, self_t], ret: Some(Type.TBool), type_params: [], bounds: [], decl: fdecl, has_decl: true }
+            let sig = FuncSig { name: format("{}.eq", name), params: [self_t, self_t], ret: Some(Type.TBool), type_params: [], bounds: [], decl: fdecl, has_decl: true, decl_id: decl.id }
             push(self.methods, MethodEntry { key: name, name: "eq", sig: sig })
             push(self.trait_impls, TraitImplPair { trait_name: "Eq", key: name })
             push(self.user_trait_impls, TraitImplPair { trait_name: "Eq", key: name })
@@ -2868,6 +2885,9 @@ impl Checker {
         if di >= 0 { return Ok(self.consts[di].ty) }
         let ci = self.const_decl_idx(name)
         let decl = self.const_decls[ci]
+        // errors folding it are in the const's file, wherever it is used from
+        let outer_decl = self.cur_decl
+        self.cur_decl = decl.id
         if contains_str(self.const_folding, name) { return Err(terr(decl.line, decl.col, format("const '{}' is defined in terms of itself", name))) }
         push(self.const_folding, name)
         let declared = self.resolve0(decl.declared)?
@@ -2881,6 +2901,7 @@ impl Checker {
         self.fold_const_expr(decl.value)?
         self.const_folding = remove_str(self.const_folding, name)
         push(self.consts, AliasCached { name: name, ty: declared })
+        self.cur_decl = outer_decl
         return Ok(declared)
     }
 
@@ -2957,7 +2978,9 @@ impl Checker {
         var main_lines: [int32] = []
         var main_cols: [int32] = []
         var main_names: [str] = []
+        var main_ids: [int32] = []
         for decl in self.decls {
+            self.cur_decl = decl.id
             let attrs = decl_attrs(decl)
             let is_fun = match decl.kind { DeclKind.FunDecl(fd) => true, _ => false }
             for attr in attrs {
@@ -2973,6 +2996,7 @@ impl Checker {
                             push(main_lines, fd.line)
                             push(main_cols, fd.col)
                             push(main_names, fd.name)
+                            push(main_ids, decl.id)
                         } else {
                             self.check_test_attr(decl, fd, attr)?
                         }
@@ -2983,17 +3007,23 @@ impl Checker {
         }
         let named_main = self.func_idx("main")
         if len(main_lines) > 0 && named_main >= 0 && !contains_str(main_names, "main") {
+            self.cur_decl = self.functions[named_main].decl_id
             return Err(terr(self.functions[named_main].decl.line, self.functions[named_main].decl.col, "both a '#main' function and a function named 'main' are present"))
         }
-        if len(main_lines) > 1 { return Err(terr(main_lines[1], main_cols[1], "more than one '#main' entry point")) }
+        if len(main_lines) > 1 {
+            self.cur_decl = main_ids[1]
+            return Err(terr(main_lines[1], main_cols[1], "more than one '#main' entry point"))
+        }
         // entry param check
         if len(main_lines) > 0 {
             // entry is main_decls[0]; need its params - find decl by name
             let en = main_names[0]
             let ei = self.func_idx(en)
-            if ei >= 0 { if len(self.functions[ei].decl.params) > 0 { return Err(terr(self.functions[ei].decl.line, self.functions[ei].decl.col, "entry point must take no parameters in v0.0")) } }
+            if ei >= 0 { if len(self.functions[ei].decl.params) > 0 { self.cur_decl = self.functions[ei].decl_id
+            return Err(terr(self.functions[ei].decl.line, self.functions[ei].decl.col, "entry point must take no parameters in v0.0")) } }
         } else {
-            if named_main >= 0 { if len(self.functions[named_main].decl.params) > 0 { return Err(terr(self.functions[named_main].decl.line, self.functions[named_main].decl.col, "entry point must take no parameters in v0.0")) } }
+            if named_main >= 0 { if len(self.functions[named_main].decl.params) > 0 { self.cur_decl = self.functions[named_main].decl_id
+            return Err(terr(self.functions[named_main].decl.line, self.functions[named_main].decl.col, "entry point must take no parameters in v0.0")) } }
         }
         return Ok(0)
     }
@@ -3018,6 +3048,13 @@ impl Checker {
 
     // -- driver -----------------------------------------------------------
     fun run_all(var self) -> Result<int32, CheckErr> {
+        return match self.run_phases() {
+            Ok(x) => Ok(x),
+            Err(e) => Err(CheckErr { line: e.line, col: e.col, msg: e.msg, decl: self.cur_decl }),
+        }
+    }
+
+    fun run_phases(var self) -> Result<int32, CheckErr> {
         self.collect_globals()?
         self.resolve_signatures()?
         self.resolve_traits()?
@@ -3027,11 +3064,15 @@ impl Checker {
         self.fold_consts()?
         self.check_attributes_and_entry()?
         for decl in self.decls {
+            self.cur_decl = decl.id
             match decl.kind { DeclKind.FunDecl(fd) => { self.check_function(fd)? }, _ => {} }
         }
         var i = 0
-        while i < len(self.method_decls) { self.check_function(self.method_decls[i])?
-            i = i + 1 }
+        while i < len(self.method_decls) {
+            self.cur_decl = self.method_decl_ids[i]
+            self.check_function(self.method_decls[i])?
+            i = i + 1
+        }
         return Ok(0)
     }
 }

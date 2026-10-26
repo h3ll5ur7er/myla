@@ -298,6 +298,19 @@ class TestErrorPaths(unittest.TestCase):
         self.assert_in_bad(self.error_in(
             "pub fun f() -> int {\n    return 1\n}\nstruct S {\n    x: Nope,\n}\n"), 5)
 
+    def test_recursive_type(self):
+        # raised after the per-declaration passes, so it needs its own file (MYLA-28)
+        self.assert_in_bad(self.error_in(
+            "pub fun f() -> int {\n    return 1\n}\nstruct S {\n    next: S,\n}\n"), 4)
+
+    def test_entry_point_errors(self):
+        self.assert_in_bad(self.error_in(
+            "pub fun f() -> int {\n    return 1\n}\n#main\nfun g(x: int) {}\n",
+            main_src="from .bad import f\n"), 5)
+        self.assert_in_bad(self.error_in(
+            "pub fun f() -> int {\n    return 1\n}\n#main\nfun g() {}\n#main\nfun h() {}\n",
+            main_src="from .bad import f\n"), 7)
+
     def test_module_error(self):
         self.assert_in_bad(self.error_in(
             "// one\nfrom .missing import g\npub fun f() -> int {\n    return 1\n}\n"), 2)

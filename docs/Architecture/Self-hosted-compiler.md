@@ -10,13 +10,13 @@
 | --- | --- | --- |
 | `tokens.my` | 150 | `#derive(Eq) enum TokenKind` (~80 variants), `struct Token`, keyword lookup as an `if` chain, `kind_name` |
 | `util.my` | 100 | UTF-8 encoding, escaping for canonical dumps, character classes, digit parsing |
-| `lexer.my` | 620 | Decodes the source to code points (so columns match Python), scans tokens, lowers f-strings like the Python lexer; the first error is returned with the Python lexer's message and position |
+| `lexer.my` | 710 | Decodes the source to code points (so columns match Python), scans tokens, lowers f-strings like the Python lexer; the first error is returned with the Python lexer's message and position |
 | `ast.my` | 380 | AST nodes as wrapper structs `{id, line, col, kind}` around `enum …Kind`; unique node ids; the canonical S-expression dump |
-| `parser.my` | 1390 | Recursive descent with the same precedence levels and desugarings as `parser.py` |
-| `checker.my` | 3570 | Name tables, inference, generics, traits, exhaustiveness, const folding; records each expression's type in `resolved: [int32: Type]` keyed by node id |
+| `parser.my` | 1430 | Recursive descent with the same precedence levels and desugarings as `parser.py` |
+| `checker.my` | 3760 | Name tables, inference, generics, traits, exhaustiveness, const folding; records each expression's type in `resolved: [int32: Type]` keyed by node id; type errors carry the Python checker's messages |
 | `codegen.my` | 6200 | Monomorphizing code generator and the whole runtime, as assembly text |
 | `interp.my` | 1830 | Tree-walking interpreter over checked declarations |
-| `loader.my` | 970 | Module loader: resolves imports, parses each module once, qualifies module-level names (`id$name`), checks `pub`, folds `alias.member` ([[Architecture/Module-loader]]) |
+| `loader.my` | 990 | Module loader: resolves imports, parses each module once, qualifies module-level names (`id$name`), checks `pub`, folds `alias.member` ([[Architecture/Module-loader]]) |
 | `diag.my` | 85 | Renders a diagnostic like the Python CLI: message, `--> file:line:col`, source line and caret |
 | `gen_main.my` | 50 | The bootstrap compiler: `gen_main <file.my> <stdlib_root>` → assembly on stdout |
 | `main.my` | 170 | The self-hosted CLI: `myla run|test|build <file> [-o out] [stdlib_root]`; `build` runs `as`/`ld` through `std.process.run` |
@@ -30,7 +30,7 @@ Myla has no global variables and no module-level maps, and everything is a value
 - Scopes are lists of frames: `[Frame{names: [str], binds: [Binding]}]`.
 - Maps serve as side tables keyed by node id (`resolved`, and in codegen `locals`, `match_scrut`, `match_bind` keyed `"patid:name"`).
 - `Type` is an enum: `TInt(width, signed) | TFloat | TChar | TBool | TStr | TSB | TStruct(name, args) | TEnum(name, args) | TTuple | TList | TMap | TFunc(params, Option<ret>) | TParam | TSelf`.
-- Errors are `Result` values propagated with `?`; a type error is just `CheckErr{line, col}` without a message.
+- Errors are `Result` values propagated with `?`: a type error is `CheckErr{line, col, msg, decl}`, the declaration naming its file. The lexer and parser have no `Result` plumbing: they record their first error and skip to the end of the input.
 - State lives in structs passed around with `var self` methods; updating a nested value means rebuilding it.
 
 ## Pipeline differences from the Python toolchain
@@ -40,7 +40,7 @@ Myla has no global variables and no module-level maps, and everything is a value
 | Modules | Qualified names, privacy, packages | The same since [[MYLA-30]] (small differences on [[Architecture/Module-loader]]) |
 | Monomorphization | Separate pass, then a second check | During code generation, with a substitution list |
 | Floats | Full support | Full support since [[MYLA-29]]: literals converted with integer arithmetic (`selfhost/floatlit.my`), the float runtime generated from the Python backend's (`scripts/gen_selfhost_runtime.py`) |
-| Diagnostics | Messages with file positions | Lex, parse and module errors printed exactly like the Python CLI; type errors as a bare position, without file or message ([[MYLA-28]]) |
+| Diagnostics | Messages with file positions | The same: lex, parse, module and type errors print exactly as in the Python CLI, file, source line and caret included ([[MYLA-28]]) |
 | Runtime errors | Messages | Silent `__trap` (exit 1) |
 | Heap | 1 GiB arena, size-class free lists up to 4 KiB | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]) |
 | Closure environments | `[drop fn][captures…]`, captures retained and dropped | The same since [[MYLA-22]]; compositions and partial applications own their parts too |
@@ -62,7 +62,7 @@ The burn tests `tests/burn/test_selfhost_*.py` keep these gates; note they build
 
 ## Current state
 
-- The three-stage fixed point holds: stage 2 and stage 3 output are identical (5.6 MB of assembly); stage 3 compiles the compiler in 1.3 s with a 163 MB peak (359 MB while `free` was disabled, [[MYLA-22]]).
+- The three-stage fixed point holds: stage 2 and stage 3 output are identical (5.8 MB of assembly); stage 3 compiles the compiler in 1.3 s with a 163 MB peak (359 MB while `free` was disabled, [[MYLA-22]]).
 - Against the interpreter, the stage 3 compiler matches on 33 of 34 examples (`args` differs only in argv[0]: the binary's path instead of the source file's).
 - The stage 4 CLI's `myla run` and `myla test` (the Myla interpreter, compiled) match the Python interpreter on all 34 examples, multi-module ones and floats included ([[MYLA-21]], [[MYLA-29]], [[MYLA-30]]). The program's `args()` is `[file]`, as under `myla run` without extra arguments (the self-hosted CLI takes no program arguments).
 - Further bugs: [[MYLA-23]] … [[MYLA-27]], [[MYLA-32]], [[MYLA-33]]. See [[Project/Known-issues]].

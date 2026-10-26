@@ -31,6 +31,10 @@ fun split_kind(kind: str) -> str {
     return build(sb)
 }
 
+pub fun type_report(line: int32, col: int32, msg: str, path: str) -> Report {
+    return Report { kind: "type error", msg: msg, path: path, line: line, col: col }
+}
+
 pub fun report(d: Diag, path: str) -> Report {
     return Report { kind: d.kind, msg: d.msg, path: path, line: d.line, col: d.col }
 }
