@@ -10,7 +10,6 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-11]] | `#test` in an imported module can't name that module's declarations | medium |
 | [[MYLA-12]] | The interpreter crashes on strings that aren't valid UTF-8 | medium |
 | [[MYLA-75]] | Partial application evaluates its filled arguments at every call | medium |
 | [[MYLA-9]] | Mangled names of generic instantiations can collide | low |

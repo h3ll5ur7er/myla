@@ -33,7 +33,7 @@ fun main() {
 - `myla test file.my` calls the function for each case in the interpreter and compares the result with the expected value structurally. A runtime error fails the case. Output: `PASS  add #1` / `FAIL  add #2: expected 101, got …` and a summary; the exit status is 1 if anything failed.
 - `#test` never affects `run` or `build`.
 
-Every value-returning function in `examples/` and in `selfhost/` carries tests, and the burn tests enforce that ([[Development/Conventions]]). `#test` in an imported module can't refer to that module's own declarations yet ([[MYLA-11]]).
+Every value-returning function in `examples/` and in `selfhost/` carries tests, and the burn tests enforce that ([[Development/Conventions]]). A `#test` in an imported module can use that module's own declarations ([[MYLA-11]]).
 
 ## const
 

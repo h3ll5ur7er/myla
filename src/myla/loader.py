@@ -265,6 +265,13 @@ class _Renamer:
         saved_t = self.type_locals
         self.type_locals = set(fn.type_params) | set(impl_params or []) | {"Self"}
         self._signature_types(fn)
+        # `#test` cases are expressions in the module's scope (MYLA-11)
+        self.value_locals = set()
+        for attr in fn.attributes:
+            if attr.name == "test":
+                attr.args = [self._expr(a) for a in attr.args]
+                if attr.outputs is not None:
+                    attr.outputs = [self._expr(o) for o in attr.outputs]
         self.value_locals = {p.name for p in fn.params}
         if receiver:
             self.value_locals.add("self")

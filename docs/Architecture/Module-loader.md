@@ -19,7 +19,7 @@ Path resolution (`_resolve_module_path`) uses the leading-dot count: none means 
 
 - `$` can't appear in source identifiers, so qualified names never collide with user names, the prelude or `Type.method` keys, and they are valid assembly labels.
 - Methods need no renaming: their key is the qualified type name.
-- Attribute arguments are **not** renamed, so a `#test` in an imported module can't refer to that module's names ([[MYLA-11]]).
+- The arguments and expected outputs of a function's `#test` attributes are renamed like other expressions, in the module's scope (the function's parameters aren't visible there), so a `#test` in an imported module can use that module's consts, structs and enums ([[MYLA-11]]).
 
 ## The self-hosted loader
 

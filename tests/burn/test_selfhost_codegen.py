@@ -115,6 +115,15 @@ PEAK_LIMIT_MB = 30
 # re-exports, module aliases, nested modules and packages. Each project is
 # written to a temporary directory; `main.my` is the entry.
 MODULE_PROJECTS = {
+    # `#test` cases in an imported module name its declarations (MYLA-11)
+    "test_attributes_name_module_declarations": {
+        "main.my": "from .lib import double\nfun main() {\n    print(double(4))\n}\n",
+        "lib.my": (
+            "pub const LIMIT: int = 10\nstruct P { x: int }\nenum E { A(int), B }\n"
+            "fun val(e: E) -> int {\n    return match e { A(n) => n, B => 0 }\n}\n"
+            "#test(LIMIT)[20]\n#test(P { x: LIMIT }.x)[val(E.A(20))]\n"
+            "pub fun double(x: int) -> int {\n    return x * 2\n}\n"),
+    },
     # MYLA-30's repro: a user `collect` next to std.process's private one
     "private_std_helper_name": {
         "main.my": (

@@ -2,7 +2,7 @@
 id: MYLA-11
 title: "#test attributes in imported modules can't name module-level declarations"
 type: bug
-status: backlog
+status: review
 priority: medium
 labels: [loader, testing]
 ---
@@ -31,5 +31,16 @@ fun main() { print(double(4)) }
 
 ## Done when
 
-- [ ] `_Renamer` rewrites `#test` arguments and outputs like other expressions
-- [ ] Loader unit test
+- [x] `_Renamer` rewrites `#test` arguments and outputs like other expressions
+- [x] Loader unit test
+
+## How
+
+- Python: `_Renamer._function` rewrites the arguments and outputs of each `#test` attribute with no locals in scope, before the parameters become locals ([[src/myla/loader.py]]).
+- The self-hosted loader had the same gap (the self-hosted interpreter and compiler both failed with `unknown name 'LIMIT'` at `lib.my:7:7`): `Renamer.attributes` in [[selfhost/loader.my]] does the same.
+
+## Evidence
+
+- `test_test_attributes_name_their_modules_declarations` in [[tests/unit/test_loader.py]] (a const, a struct literal, an enum constructor and a private function in `#test` cases): before, `TypeCheckError: unknown name 'LIMIT'`; after, the program runs and `run_tests` passes both cases of `lib$double`.
+- The same project in the self-hosted `MODULE_PROJECTS` ([[tests/burn/test_selfhost_codegen.py]], also run by the interpreter gate).
+- Bootstrap fixed point holds (6,087,364 bytes); unit, integration and burn suites pass.

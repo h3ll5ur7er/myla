@@ -50,6 +50,24 @@ class TestLinking(unittest.TestCase):
         })
         self.assertEqual(out, "42\n")
 
+    def test_test_attributes_name_their_modules_declarations(self):
+        # `#test` cases are expressions in the module's scope (MYLA-11)
+        files = {
+            "main.my": "from .lib import double\nfun main() { print(double(4)) }\n",
+            "lib.my": ("pub const LIMIT: int = 10\n"
+                       "struct P { x: int }\n"
+                       "enum E { A(int), B }\n"
+                       "fun val(e: E) -> int {\n"
+                       "    return match e { A(n) => n, B => 0 }\n}\n"
+                       "#test(LIMIT)[20]\n"
+                       "#test(P { x: LIMIT }.x)[val(E.A(20))]\n"
+                       "pub fun double(x: int) -> int {\n    return x * 2\n}\n"),
+        }
+        self.assertEqual(run_project(files), "8\n")
+        checker = check(link(os.path.join(_project(files), "main.my")))
+        results = Interpreter(checker, io.StringIO()).run_tests()
+        self.assertEqual([(r.function, r.passed) for r in results], [("lib$double", True)] * 2)
+
     def test_entry_names_unqualified_imports_qualified(self):
         ns = names({
             "main.my": "from .lib import f\nfun main() { f() }\n",

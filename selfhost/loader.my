@@ -20,7 +20,7 @@ from .parser import parse_source
 from .diag import Report, report
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
-from .ast import MapEntry, Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
+from .ast import MapEntry, Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock, Attribute
 from .ast import Pattern, PatternKind, FieldPat, MatchArm
 
 // What a name visible in a module refers to: a declaration (`value` is its
@@ -645,13 +645,38 @@ impl Renamer {
         let rt = self.opt_ty(fd.ret_type)
         let tps = self.bounds(fd.type_params)
         self.vals = []
+        let attrs = self.attributes(fd.attributes)
         for p in fd.params { push(self.vals, p.name) }
         if receiver { push(self.vals, "self") }
         var body = fd.body
         match fd.body { Some(b) => { body = Some(self.block(b)) }, None => {} }
         self.vals = []
         self.tys = saved
-        return FunData { line: fd.line, col: fd.col, name: name, params: ps, ret_type: rt, body: body, attributes: fd.attributes, type_params: tps, receiver: fd.receiver, is_pub: fd.is_pub }
+        return FunData { line: fd.line, col: fd.col, name: name, params: ps, ret_type: rt, body: body, attributes: attrs, type_params: tps, receiver: fd.receiver, is_pub: fd.is_pub }
+    }
+
+    // `#test` cases are expressions in the module's scope (MYLA-11)
+    fun attributes(var self, attrs: [Attribute]) -> [Attribute] {
+        var out: [Attribute] = []
+        for a in attrs {
+            if a.name != "test" {
+                push(out, a)
+                continue
+            }
+            var args: [Expr] = []
+            for x in a.args { push(args, self.expr(x)) }
+            var outputs: Option<[Expr]> = None
+            match a.outputs {
+                Some(os) => {
+                    var renamed: [Expr] = []
+                    for o in os { push(renamed, self.expr(o)) }
+                    outputs = Some(renamed)
+                },
+                None => {},
+            }
+            push(out, Attribute { line: a.line, col: a.col, name: a.name, args: args, outputs: outputs })
+        }
+        return out
     }
 
     // -- types --
