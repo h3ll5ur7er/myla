@@ -334,6 +334,20 @@ def round_float(value: float, t: Type) -> float:
     return value
 
 
+def float_to_int(value: float, t: IntType) -> int:
+    """`value as t` for a float: truncate toward zero and clamp to the range
+    of `t`; NaN gives 0 (D59). Both native backends emit the same clamps."""
+    if value != value:
+        return 0
+    lo = -(1 << (t.width - 1)) if t.signed else 0
+    hi = (1 << (t.width - 1 if t.signed else t.width)) - 1
+    if value <= lo:
+        return lo
+    if value >= hi:
+        return hi
+    return int(value)
+
+
 def float_div(a: float, b: float) -> float:
     """IEEE-754 division: by zero yields ±inf (or NaN for 0/0), never traps."""
     if b == 0.0:
@@ -491,7 +505,7 @@ def _cast_const_value(v, src: Type, target: Type):
     if isinstance(target, FloatType):
         return round_float(float(v), target)
     if isinstance(src, FloatType):
-        return _wrap_int(int(v), target)   # float -> int: truncate toward zero
+        return float_to_int(v, target)
     return _wrap_int(v, target)
 
 

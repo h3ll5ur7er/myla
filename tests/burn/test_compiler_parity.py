@@ -1166,6 +1166,33 @@ PROGRAMS = {
         '    print(H)\n'
         '}\n'
     ),
+    # float -> integer casts saturate, NaN gives 0 (D59, MYLA-6)
+    "float_to_int_casts_saturate": (
+        "const BIG: float64 = 1e19\n"
+        "const CA: uint64 = BIG as uint64\n"
+        "const CB: int16 = (0.0f64 / 0.0f64) as int16\n"
+        "fun to_u64(x: float64) -> uint64 {\n    return x as uint64\n}\n"
+        "fun to_i64(x: float64) -> int64 {\n    return x as int64\n}\n"
+        "fun to_i32(x: float64) -> int32 {\n    return x as int32\n}\n"
+        "fun to_u32(x: float64) -> uint32 {\n    return x as uint32\n}\n"
+        "fun to_u8(x: float64) -> uint8 {\n    return x as uint8\n}\n"
+        "fun to_i8(x: float64) -> int8 {\n    return x as int8\n}\n"
+        "#main\nfun main() {\n"
+        "    let z: float64 = 0.0\n"
+        "    let xs: [float64] = [z / z, 1.0f64 / z, -1.0f64 / z, 0.0, -0.0, 0.9, -0.9, 1.5, -1.5,"
+        " 2.9, -2.9, 127.9, 128.0, -128.9, -129.0, 255.9, 256.0, 300.0, -300.0,"
+        " 2147483647.5, 2147483648.0, -2147483648.9, -2147483649.0, 4294967295.5, 4294967296.0,"
+        " 9223372036854775807.0, -9223372036854775808.0, -1e19, 1e19, 1.8e19,"
+        " 18446744073709549568.0, 18446744073709551616.0, 3e19]\n"
+        "    for x in xs {\n"
+        "        print(f\"{to_u64(x)} {to_i64(x)} {to_i32(x)} {to_u32(x)} {to_u8(x)} {to_i8(x)}\")\n"
+        "    }\n"
+        "    let f: float32 = 3e9\n"
+        "    print(f as int32)\n    print(f as uint32)\n"
+        "    let n: float32 = 0.0 / 0.0\n    print(n as uint64)\n"
+        "    print(CA)\n    print(CB)\n"
+        "}\n"
+    ),
     # the int64 minimum divided by -1 wraps instead of trapping (MYLA-5)
     "int64_min_divided_by_minus_one": (
         'const MIN: int64 = -9223372036854775807 - 1\n'

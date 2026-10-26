@@ -42,13 +42,13 @@ From loosest to tightest. Every binary level is left-associative.
 
 ## Casts
 
-`x as T` converts between numeric types and `char` (D26):
+`x as T` converts between numeric types and `char` (D26, D59):
 
 | From → to | Behaviour |
 | --- | --- |
 | integer → integer | Wraps to the target width; widening sign- or zero-extends by the source's signedness |
 | integer → float | Rounds to nearest |
-| float → integer | Truncates toward zero, then wraps (NaN, ±inf and out-of-range values: see [[MYLA-6]]) |
+| float → integer | Truncates toward zero and saturates: out-of-range values and ±inf clamp to the target's minimum or maximum, NaN gives `0` (D59) |
 | float → float | Widens, or rounds to `float32` |
 | integer ↔ `char` | The codepoint, unchecked one way and wrapped the other |
 | `char` ↔ float, `bool`, `str` | Not allowed |

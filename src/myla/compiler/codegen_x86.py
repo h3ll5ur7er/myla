@@ -38,6 +38,11 @@ def _f64_bits(x: float) -> int:
     return struct.unpack("<Q", struct.pack("<d", x))[0]
 
 
+def _f64_imm(x: float) -> int:
+    """The pattern of `x` as a signed 64-bit immediate (for `movabsq`)."""
+    return struct.unpack("<q", struct.pack("<d", x))[0]
+
+
 # Size of the heap arena reserved on first allocation (1 GiB). Generous for a
 # bootstrap compiler; exhausting it traps. Reference counting (v0.2.3b) will let
 # this memory be reused instead of only grown. (The arena is lazily-faulted
@@ -3297,13 +3302,48 @@ class CodeGen:
                     self._emit("cvtsi2sdq %rax, %xmm0")
                 self._round_xmm0(target)
                 self._emit("movq %xmm0, %rax")
-        elif isinstance(src, FloatType):  # float -> int (truncate toward zero)
-            self._uses_float = True
-            self._emit("movq %rax, %xmm0")
-            self._emit("cvttsd2si %xmm0, %rax")
-            self._wrap(target)
+        elif isinstance(src, FloatType):
+            self._float_to_int(target)
         else:  # int -> int
             self._wrap(target)
+
+    def _float_to_int(self, t: IntType) -> None:
+        """The float in %rax `as t`: truncate toward zero, clamp to the range
+        of `t`, NaN gives 0 (D59, `types.float_to_int`). cvttsd2si alone
+        returns 2^63 for anything outside the int64 range."""
+        self._uses_float = True
+        low = -(1 << (t.width - 1)) if t.signed else 0
+        high = (1 << (t.width - 1 if t.signed else t.width)) - 1
+        high_imm = high - (1 << 64) if high >= 1 << 63 else high   # all ones for uint64
+        done = self._label()
+        self._emit("movq %rax, %xmm0")
+        self._emit("xorl %eax, %eax")
+        self._emit("ucomisd %xmm0, %xmm0")
+        self._emit(f"jp {done}")                     # NaN -> 0
+        self._emit(f"movabsq ${_f64_imm(float(high + 1))}, %rcx")
+        self._emit("movq %rcx, %xmm1")
+        self._emit(f"movabsq ${high_imm}, %rax")
+        self._emit("ucomisd %xmm1, %xmm0")
+        self._emit(f"jae {done}")                    # x >= high + 1 -> high
+        self._emit(f"movabsq ${_f64_imm(float(low))}, %rcx")
+        self._emit("movq %rcx, %xmm1")
+        self._emit(f"movabsq ${low}, %rax")
+        self._emit("ucomisd %xmm1, %xmm0")
+        self._emit(f"jbe {done}")                    # x <= low -> low
+        if t.width == 64 and not t.signed:
+            # 2^63 <= x < 2^64: convert x - 2^63, then set the top bit
+            small = self._label()
+            self._emit(f"movabsq ${_f64_imm(2.0 ** 63)}, %rcx")
+            self._emit("movq %rcx, %xmm1")
+            self._emit("ucomisd %xmm1, %xmm0")
+            self._emit(f"jb {small}")
+            self._emit("subsd %xmm1, %xmm0")
+            self._emit("cvttsd2si %xmm0, %rax")
+            self._emit("btcq $63, %rax")
+            self._emit(f"jmp {done}")
+            self._emit(f"{small}:")
+        self._emit("cvttsd2si %xmm0, %rax")
+        self._emit(f"{done}:")
 
     def _eval_unary(self, expr: ast.Unary) -> None:
         if expr.op == "-" and isinstance(expr.resolved_type, FloatType):

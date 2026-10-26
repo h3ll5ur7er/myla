@@ -193,6 +193,40 @@ class TestFloatInterpreter(unittest.TestCase):
         self.assertEqual(run("fun main() { print(3.9 as int32) }\n"), "3\n")
         self.assertEqual(run("fun main() { print(5 as float64) }\n"), "5\n")
 
+    def test_float_to_int_casts_saturate(self):
+        # D59 (MYLA-6): truncate toward zero, clamp to the target's range, NaN -> 0
+        src = (
+            "fun main() {\n"
+            "    let z: float64 = 0.0\n"
+            "    let big: float64 = 1e19\n"
+            "    let huge: float64 = 3e19\n"
+            "    print((z / z) as int32)\n"
+            "    print((1.0f64 / z) as int32)\n"
+            "    print((-1.0f64 / z) as int64)\n"
+            "    print(big as uint64)\n"
+            "    print(big as int64)\n"
+            "    print(huge as uint64)\n"
+            "    print(300.0 as uint8)\n"
+            "    print(-300.0 as int8)\n"
+            "    print(-1.5 as uint8)\n"
+            "    print(-2.9 as int8)\n"
+            "}\n"
+        )
+        self.assertEqual(run(src).split(), [
+            "0", "2147483647", "-9223372036854775808", "10000000000000000000",
+            "9223372036854775807", "18446744073709551615", "255", "-128", "0", "-2"])
+
+    def test_const_float_to_int_casts_saturate(self):
+        src = (
+            "const BIG: float64 = 1e19\n"
+            "const A: uint64 = BIG as uint64\n"
+            "const B: int64 = BIG as int64\n"
+            "const C: uint8 = 300.0 as uint8\n"
+            "const D: int32 = (0.0f64 / 0.0f64) as int32\n"
+            "fun main() {\n    print(A)\n    print(B)\n    print(C)\n    print(D)\n}\n"
+        )
+        self.assertEqual(run(src).split(), ["10000000000000000000", "9223372036854775807", "255", "0"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1758,13 +1758,31 @@ fun cast_value(v: Value, src: Option<Type>, tgt: Option<Type>) -> Value {
             return Value.VFloat(round_float(f, tgt))
         },
         Type.TInt(w, s) => {
-            var iv: int64 = 0
-            match v { Value.VFloat(f) => { iv = f as int64 }, _ => { iv = as_int(v) } }
-            return Value.VInt(wrap_int_w(iv, w, s))
+            match v { Value.VFloat(f) => { return Value.VInt(float_to_int(f, w, s)) }, _ => {} }
+            return Value.VInt(wrap_int_w(as_int(v), w, s))
         },
         _ => {},
     }
     return v
+}
+
+// `f as` an integer of width `w`: truncate toward zero, clamp to the range,
+// NaN gives 0 (D59). A uint64 above 2^63 comes back as its bit pattern.
+fun float_to_int(f: float64, w: int32, s: bool) -> int64 {
+    if f != f { return 0 }
+    var top = w                                  // high + 1 = 2^top
+    if s { top = w - 1 }
+    if f >= pow2(top) {
+        if top == 64 { return -1 }               // all ones: the uint64 maximum
+        return (1i64 << (top as int64)) - 1
+    }
+    if s {
+        if f <= -pow2(top) { return -(1i64 << (top as int64)) }
+    } else if f <= 0.0f64 {
+        return 0
+    }
+    if f >= pow2(63) { return ((f - pow2(63)) as int64) | (1i64 << 63) }
+    return f as int64
 }
 
 fun empty_values() -> [Value] {

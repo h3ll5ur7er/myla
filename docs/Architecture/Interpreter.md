@@ -36,6 +36,5 @@
 
 ## Known problems
 
-- Float → integer casts of NaN, infinities and out-of-range values crash with a Python exception ([[MYLA-6]]).
 - `len`, indexing and writing a string that holds invalid UTF-8 crash ([[MYLA-12]]).
 - `s[i]` and `len(s)` encode the whole string each time, so byte loops over long strings are quadratic.

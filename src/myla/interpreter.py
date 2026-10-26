@@ -14,7 +14,7 @@ from . import ast
 from .errors import MylaError, MylaRuntimeError
 from .types import (
     BoolType, CharType, Checker, FloatType, IntType, StrType, Type,
-    char_utf8_bytes, float_div, float_rem, format_float, round_float,
+    char_utf8_bytes, float_div, float_rem, float_to_int, format_float, round_float,
 )
 
 # Overloadable binary operators → the operator-trait method dispatched on a
@@ -945,7 +945,7 @@ def _wrap(value, t: Type):
 def _cast_value(v, src: Type, target: Type):
     """Apply an `as` numeric conversion at runtime (mirrors the native backend
     and const folding): int↔int wrap, int→float round, float→int truncate
-    toward zero, float→float widen/round."""
+    toward zero and saturate (D59), float→float widen/round."""
     if isinstance(target, CharType):
         return int(v)                  # int -> char: the codepoint (unchecked)
     if isinstance(src, CharType):
@@ -953,7 +953,7 @@ def _cast_value(v, src: Type, target: Type):
     if isinstance(target, FloatType):
         return round_float(float(v), target)
     if isinstance(src, FloatType):
-        return _wrap(int(v), target)   # float -> int: truncate toward zero
+        return float_to_int(v, target)
     return _wrap(v, target)
 
 

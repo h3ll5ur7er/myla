@@ -88,4 +88,4 @@ System calls used: read 0, write 1, open 2, close 3, fstat 5, poll 7, mmap 9, pi
 - `/` and `%` test the divisor for zero (`jz __trap`), then use `idivq` (signed, after `cqo`) or `divq`. A signed divisor of -1 skips `idivq` (which faults on the minimum): `/` negates and `%` gives 0, so the result wraps ([[MYLA-5]]).
 - Shift counts are masked to `width - 1` before `shl`/`sar`/`shr`.
 - Comparisons pick signed (`setl`…) or unsigned (`setb`…) instructions from the left operand's type; `char` compares unsigned.
-- Float → integer casts use `cvttsd2si`, which gives the "integer indefinite" value for NaN and out-of-range inputs ([[MYLA-6]]); `uint64` → float handles the high bit with a halving trick.
+- Float → integer casts saturate (D59): NaN (`ucomisd` sets the parity flag) gives 0, inputs at or beyond the target's bounds give its minimum or maximum, the rest go through `cvttsd2si`; a `uint64` from 2^63 up converts `x - 2^63` and sets the top bit. `uint64` → float handles the high bit with a halving trick.

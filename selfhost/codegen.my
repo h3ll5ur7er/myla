@@ -1963,12 +1963,59 @@ impl CodeGen {
             return
         }
         if is_tfloat(src) {
-            // float -> int: truncate toward zero
-            self.uses_float = true
-            self.emit("movq %rax, %xmm0")
-            self.emit("cvttsd2si %xmm0, %rax")
+            self.float_to_int(tgt)
+            return
         }
         self.wrap(tgt)
+    }
+
+    // The float in %rax `as t`: truncate toward zero, clamp to the range of
+    // `t`, NaN gives 0 (D59). cvttsd2si alone returns 2^63 for anything
+    // outside the int64 range.
+    fun float_to_int(var self, t: Type) {
+        self.uses_float = true
+        let w = int_width_cg(t)
+        let signed = int_signed(t)
+        var top = w                                  // the clamp bounds: high + 1 = 2^top
+        var low: int64 = 0
+        var low_bits: int64 = 0
+        if signed {
+            top = w - 1
+            low = -(1i64 << (top as int64))
+            low_bits = pow2_bits(top, true)
+        }
+        var high: int64 = -1                         // all ones for uint64
+        if top < 64 { high = (1i64 << (top as int64)) - 1 }
+        let done = self.label()
+        self.emit("movq %rax, %xmm0")
+        self.emit("xorl %eax, %eax")
+        self.emit("ucomisd %xmm0, %xmm0")
+        self.emit(format("jp {}", done))             // NaN -> 0
+        self.emit(format("movabsq ${}, %rcx", pow2_bits(top, false)))
+        self.emit("movq %rcx, %xmm1")
+        self.emit(format("movabsq ${}, %rax", high))
+        self.emit("ucomisd %xmm1, %xmm0")
+        self.emit(format("jae {}", done))            // x >= high + 1 -> high
+        self.emit(format("movabsq ${}, %rcx", low_bits))
+        self.emit("movq %rcx, %xmm1")
+        self.emit(format("movabsq ${}, %rax", low))
+        self.emit("ucomisd %xmm1, %xmm0")
+        self.emit(format("jbe {}", done))            // x <= low -> low
+        if w == 64 && !signed {
+            // 2^63 <= x < 2^64: convert x - 2^63, then set the top bit
+            let small = self.label()
+            self.emit(format("movabsq ${}, %rcx", pow2_bits(63, false)))
+            self.emit("movq %rcx, %xmm1")
+            self.emit("ucomisd %xmm1, %xmm0")
+            self.emit(format("jb {}", small))
+            self.emit("subsd %xmm1, %xmm0")
+            self.emit("cvttsd2si %xmm0, %rax")
+            self.emit("btcq $63, %rax")
+            self.emit(format("jmp {}", done))
+            self.emit(format("{}:", small))
+        }
+        self.emit("cvttsd2si %xmm0, %rax")
+        self.emit(format("{}:", done))
     }
 
     // Narrow %xmm0 to single precision when `t` is float32 (round to nearest),
@@ -6635,6 +6682,13 @@ fun is_tfloat(t: Type) -> bool {
 
 fun is_tfloat32(t: Type) -> bool {
     return match t { Type.TFloat(w) => w == 32, _ => false }
+}
+
+// The bits of the double 2^k (-2^k when `neg`), as a signed immediate.
+fun pow2_bits(k: int32, neg: bool) -> int64 {
+    let bits = ((1023 + k) as int64) << 52
+    if neg { return bits | (1i64 << 63) }
+    return bits
 }
 
 fun int_signed(t: Type) -> bool {
