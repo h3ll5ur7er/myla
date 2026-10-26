@@ -2,12 +2,12 @@
 //
 // The source is decoded to a list of Unicode scalars so column counting matches
 // the Python oracle (which indexes a codepoint string) and multi-byte literals
-// lex correctly. Errors `panic` (the differential gate compares only successful
-// streams); a later pass will switch to Result once the diagnostics are ported.
+// lex correctly. The first error is recorded with the Python lexer's message
+// and position, and lexing stops there (`fail` jumps to the end of the input).
 
 from .util import cp_utf8, is_digit, is_ident_start, is_ident_continue
 from .util import digit_value, parse_value, is_blank, escape
-from .tokens import TokenKind, Token, keyword_kind, is_int_suffix, is_float_suffix, kind_name
+from .tokens import TokenKind, Token, Diag, keyword_kind, is_int_suffix, is_float_suffix, kind_name
 
 pub struct Lexer {
     cps: [int32],
@@ -16,6 +16,7 @@ pub struct Lexer {
     col: int32,
     n: int32,
     toks: [Token],
+    err: Option<Diag>,
 }
 
 pub fun new_lexer(src: str) -> Lexer {
@@ -23,7 +24,7 @@ pub fun new_lexer(src: str) -> Lexer {
     for ch in chars(src) {
         push(cps, ch as int32)
     }
-    return Lexer { cps: cps, pos: 0, line: 1, col: 1, n: len(cps) as int32, toks: [] }
+    return Lexer { cps: cps, pos: 0, line: 1, col: 1, n: len(cps) as int32, toks: [], err: None }
 }
 
 // One canonical token line (mirror of src/myla/canon.py:canonical_token).
@@ -81,7 +82,18 @@ impl Lexer {
         return self.cps[self.pos + 2]
     }
 
+    // Record the first error and stop: the scanners return after calling this,
+    // and at the end of the input every loop ends.
+    fun fail(var self, line: int32, col: int32, msg: str) {
+        match self.err {
+            None => { self.err = Some(Diag { kind: "lex error", line: line, col: col, msg: msg }) },
+            Some(e) => {},
+        }
+        self.pos = self.n
+    }
+
     fun advance(var self) -> int32 {
+        if self.pos >= self.n { return 0 }
         let c = self.cps[self.pos]
         self.pos = self.pos + 1
         if c == 10 {
@@ -114,6 +126,8 @@ impl Lexer {
     }
 
     fun block_comment(var self) {
+        let sl = self.line
+        let sc = self.col
         self.advance()
         self.advance()
         while !self.at_end() {
@@ -124,7 +138,7 @@ impl Lexer {
             }
             self.advance()
         }
-        panic("unterminated block comment")
+        self.fail(sl, sc, "unterminated block comment")
     }
 
     fun scan_digits(var self, base: int32) -> str {
@@ -135,7 +149,8 @@ impl Lexer {
             let c = self.peek()
             if c == 95 {
                 if !any || prev_us {
-                    panic("'_' separators must sit between digits")
+                    self.fail(self.line, self.col, "'_' separators in an integer literal must sit between digits")
+                    return ""
                 }
                 prev_us = true
                 self.advance()
@@ -152,12 +167,12 @@ impl Lexer {
             }
         }
         if prev_us {
-            panic("integer literal cannot end with '_'")
+            self.fail(self.line, self.col, "integer literal cannot end with '_'")
         }
         return build(sb)
     }
 
-    fun scan_int_suffix(var self) -> str {
+    fun scan_int_suffix(var self, sl: int32, sc: int32) -> str {
         if self.peek() == 105 || self.peek() == 117 {
             let sp = self.pos
             self.advance()
@@ -166,12 +181,13 @@ impl Lexer {
             }
             let cand = self.slice_str(sp, self.pos)
             if !is_int_suffix(cand) {
-                panic(format("invalid integer literal suffix '{}'", cand))
+                self.fail(sl, sc, format("invalid integer literal suffix '{}'", cand))
+                return ""
             }
             return cand
         }
         if is_ident_continue(self.peek()) {
-            panic("invalid integer literal: unexpected character after digits")
+            self.fail(self.line, self.col, format("invalid integer literal: unexpected '{}' after digits", cp_utf8(self.peek())))
         }
         return ""
     }
@@ -193,10 +209,11 @@ impl Lexer {
             self.advance()
             let digits = self.scan_digits(base)
             if len(digits) == 0 {
-                panic("integer literal has no digits after base prefix")
+                self.fail(sl, sc, format("integer literal has no digits after '0{}'", cp_utf8(lower(p1))))
+                return
             }
             let value = parse_value(digits, base as int64)
-            let suffix = self.scan_int_suffix()
+            let suffix = self.scan_int_suffix(sl, sc)
             let lexeme = self.slice_str(sp, self.pos)
             self.emit(TokenKind.INT, lexeme, sl, sc, value, suffix)
             return
@@ -228,16 +245,18 @@ impl Lexer {
             }
             let cand = self.slice_str(fsp, self.pos)
             if !is_float_suffix(cand) {
-                panic(format("invalid float literal suffix '{}'", cand))
+                self.fail(sl, sc, format("invalid float literal suffix '{}'", cand))
+                return
             }
             suffix = cand
             is_float = true
         } else if !is_float {
-            suffix = self.scan_int_suffix()
+            suffix = self.scan_int_suffix(sl, sc)
         }
         if is_float {
             if is_ident_continue(self.peek()) {
-                panic("invalid float literal: unexpected character after digits")
+                self.fail(self.line, self.col, format("invalid float literal: unexpected '{}' after digits", cp_utf8(self.peek())))
+                return
             }
             let lexeme = self.slice_str(sp, self.pos)
             self.emit(TokenKind.FLOAT, lexeme, sl, sc, 0, suffix)
@@ -255,15 +274,19 @@ impl Lexer {
         var sb = StringBuilder()
         while true {
             if self.at_end() || self.peek() == 10 {
-                panic("unterminated string literal")
+                self.fail(sl, sc, "unterminated string literal")
+                return
             }
             let c = self.advance()
             if c == 34 {
                 break
             }
             if c == 92 {
+                let el = self.line
+                let ec = self.col
                 if self.at_end() {
-                    panic("unterminated string literal")
+                    self.fail(sl, sc, "unterminated string literal")
+                    return
                 }
                 let esc = self.advance()
                 if esc == 110 {
@@ -275,7 +298,8 @@ impl Lexer {
                 } else if esc == 34 {
                     append_byte(sb, 34)
                 } else {
-                    panic("invalid escape sequence in string literal")
+                    self.fail(el, ec, format("invalid escape sequence '\\{}'", cp_utf8(esc)))
+                    return
                 }
             } else {
                 append(sb, cp_utf8(c))
@@ -285,30 +309,35 @@ impl Lexer {
         self.emit(TokenKind.STRING, value, sl, sc, 0, "")
     }
 
-    fun scan_unicode_escape(var self) -> int32 {
+    fun scan_unicode_escape(var self, line: int32, col: int32) -> int32 {
         if self.at_end() || self.advance() != 123 {
-            panic("expected '{' after '\\u' in char literal")
+            self.fail(line, col, "expected '{' after '\\u' in char literal")
+            return 0
         }
         var sb = StringBuilder()
         var cnt = 0
         while !self.at_end() && self.peek() != 125 {
             let d = self.advance()
             if digit_value(d) < 0 {
-                panic("invalid hex digit in '\\u{...}' escape")
+                self.fail(line, col, format("invalid hex digit '{}' in '\\u{{…}}' escape", cp_utf8(d)))
+                return 0
             }
             append_byte(sb, d as uint8)
             cnt = cnt + 1
         }
         if self.at_end() {
-            panic("unterminated '\\u{...}' escape")
+            self.fail(line, col, "unterminated '\\u{…}' escape")
+            return 0
         }
         self.advance()
         if cnt == 0 {
-            panic("empty '\\u{...}' escape")
+            self.fail(line, col, "empty '\\u{…}' escape")
+            return 0
         }
         let cp = parse_value(build(sb), 16)
         if cp > 1114111 || (cp >= 55296 && cp <= 57343) {
-            panic("invalid Unicode scalar in char literal")
+            self.fail(line, col, format("invalid Unicode scalar U+{} in char literal (must be 0..0x10FFFF and not a surrogate)", hex_upper(cp)))
+            return 0
         }
         return cp as int32
     }
@@ -319,17 +348,21 @@ impl Lexer {
         let sp = self.pos
         self.advance()
         if self.at_end() || self.peek() == 10 || self.peek() == 39 {
-            panic("empty or unterminated char literal")
+            self.fail(sl, sc, "empty or unterminated char literal")
+            return
         }
         let c = self.advance()
         var cp = 0
         if c == 92 {
+            let el = self.line
+            let ec = self.col
             if self.at_end() {
-                panic("unterminated char literal")
+                self.fail(sl, sc, "unterminated char literal")
+                return
             }
             let esc = self.advance()
             if esc == 117 {
-                cp = self.scan_unicode_escape()
+                cp = self.scan_unicode_escape(el, ec)
             } else if esc == 110 {
                 cp = 10
             } else if esc == 116 {
@@ -343,13 +376,15 @@ impl Lexer {
             } else if esc == 48 {
                 cp = 0
             } else {
-                panic("invalid escape sequence in char literal")
+                self.fail(el, ec, format("invalid escape sequence '\\{}'", cp_utf8(esc)))
+                return
             }
         } else {
             cp = c
         }
         if self.at_end() || self.peek() != 39 {
-            panic("char literal must contain exactly one character")
+            self.fail(sl, sc, "char literal must contain exactly one character")
+            return
         }
         self.advance()
         let lexeme = self.slice_str(sp, self.pos)
@@ -413,10 +448,13 @@ impl Lexer {
             self.advance()
             self.emit0(TokenKind.OR, "||", sl, sc)
         } else {
-            self.advance()
-            let lex = cp_utf8(c)
             let k = self.one_char_kind(c)
-            self.emit0(k, lex, sl, sc)
+            if k == TokenKind.EOF {
+                self.fail(sl, sc, format("unexpected character '{}'", cp_utf8(c)))
+                return
+            }
+            self.advance()
+            self.emit0(k, cp_utf8(c), sl, sc)
         }
     }
 
@@ -445,8 +483,7 @@ impl Lexer {
         if c == 46 { return TokenKind.DOT }
         if c == 35 { return TokenKind.HASH }
         if c == 63 { return TokenKind.QUESTION }
-        panic(format("unexpected character (codepoint {})", c))
-        return TokenKind.EOF
+        return TokenKind.EOF            // not an operator character
     }
 
     fun copy_quoted(var self) -> str {
@@ -455,13 +492,15 @@ impl Lexer {
         append(b, cp_utf8(q))
         while true {
             if self.at_end() || self.peek() == 10 {
-                panic("unterminated string in f-string expression")
+                self.fail(self.line, self.col, "unterminated string in f-string expression")
+                return build(b)
             }
             let ch = self.advance()
             append(b, cp_utf8(ch))
             if ch == 92 {
                 if self.at_end() {
-                    panic("unterminated string in f-string expression")
+                    self.fail(self.line, self.col, "unterminated string in f-string expression")
+                    return build(b)
                 }
                 append(b, cp_utf8(self.advance()))
             } else if ch == q {
@@ -478,7 +517,8 @@ impl Lexer {
         var depth = 1
         while true {
             if self.at_end() || self.peek() == 10 {
-                panic("unterminated '{' in f-string")
+                self.fail(fs_line, fs_col, "unterminated '{' in f-string")
+                return []
             }
             let c = self.peek()
             if c == 123 {
@@ -501,10 +541,19 @@ impl Lexer {
         }
         let src = build(buf)
         if is_blank(src) {
-            panic("empty '{}' hole in f-string (expected an expression)")
+            self.fail(slice_line, slice_col, "empty '{}' hole in f-string (expected an expression)")
+            return []
         }
         var sub = new_lexer(src)
         let sub_toks = sub.run()
+        match sub.err {
+            // reported in the slice's own coordinates, as the Python lexer does
+            Some(e) => {
+                self.fail(e.line, e.col, e.msg)
+                return []
+            },
+            None => {},
+        }
         var out: [Token] = []
         for t in sub_toks {
             if t.kind != TokenKind.EOF && t.kind != TokenKind.NEWLINE {
@@ -524,7 +573,8 @@ impl Lexer {
         var args: [[Token]] = []
         while true {
             if self.at_end() || self.peek() == 10 {
-                panic("unterminated f-string literal")
+                self.fail(sl, sc, "unterminated f-string literal (f\"…\" is single-line)")
+                return
             }
             let c = self.peek()
             if c == 34 {
@@ -546,12 +596,16 @@ impl Lexer {
                     self.advance()
                     append(fmt, "}}")
                 } else {
-                    panic("single '}' in f-string (use '}}' for a literal '}')")
+                    self.fail(self.line, self.col, "single '}' in f-string (use '}}' for a literal '}')")
+                    return
                 }
             } else if c == 92 {
+                let el = self.line
+                let ec = self.col
                 self.advance()
                 if self.at_end() || self.peek() == 10 {
-                    panic("unterminated f-string literal")
+                    self.fail(sl, sc, "unterminated f-string literal")
+                    return
                 }
                 let esc = self.advance()
                 if esc == 110 {
@@ -563,7 +617,8 @@ impl Lexer {
                 } else if esc == 34 {
                     append_byte(fmt, 34)
                 } else {
-                    panic("invalid escape sequence in f-string")
+                    self.fail(el, ec, format("invalid escape sequence '\\{}'", cp_utf8(esc)))
+                    return
                 }
             } else {
                 self.advance()
@@ -618,7 +673,37 @@ impl Lexer {
     }
 }
 
-pub fun lex(src: str) -> [Token] {
+// The tokens of `src`, or its first lex error.
+pub fun lex(src: str) -> Result<[Token], Diag> {
     var lx = new_lexer(src)
-    return lx.run()
+    let toks = lx.run()
+    return match lx.err {
+        Some(e) => Err(e),
+        None => Ok(toks),
+    }
+}
+
+// `c` lowered if it is an ASCII capital letter.
+fun lower(c: int32) -> int32 {
+    if c >= 65 && c <= 90 { return c + 32 }
+    return c
+}
+
+// `v` in upper-case hexadecimal, without a prefix.
+fun hex_upper(v: int64) -> str {
+    if v == 0 { return "0" }
+    var digits: [uint8] = []
+    var x = v
+    while x > 0 {
+        let d = (x % 16) as uint8
+        if d < 10 { push(digits, d + 48) } else { push(digits, d + 55) }
+        x = x / 16
+    }
+    var sb = StringBuilder()
+    var i = len(digits) - 1
+    while i >= 0 {
+        append_byte(sb, digits[i])
+        i = i - 1
+    }
+    return build(sb)
 }

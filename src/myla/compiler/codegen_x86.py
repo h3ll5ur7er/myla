@@ -28,7 +28,7 @@ from .. import ast
 from ..types import (
     BoolType, CharType, Checker, EnumType, FloatType, FuncSig, FuncType, IntType,
     ListType, MapType, StrType, StringBuilderType, StructType, TupleType, Type,
-    type_name,
+    type_name, _is_diverging,
     _FF_MINK, _FF_MAXK, _FF_POW10_DD, _FF_SPLIT, _FF_BIG, _FF_UP, _FF_DOWN, round_float,
 )
 
@@ -2158,21 +2158,24 @@ class CodeGen:
         self._emit(f"jne {fail}")
 
     def _gen_arm_body(self, body, result_off, result_type) -> None:
+        # An arm ending in `panic`/`unreachable` never produces the match's
+        # value: generate the call alone, with nothing to store.
         if isinstance(body, ast.Block):
             self._open_scope()
             stmts = body.statements
             for i, s in enumerate(stmts):
-                if i == len(stmts) - 1 and isinstance(s, ast.ExprStmt) and result_off is not None:
+                if (i == len(stmts) - 1 and isinstance(s, ast.ExprStmt)
+                        and result_off is not None and not _is_diverging(s.expr)):
                     self._store_value(s.expr, result_off, result_type)
                     self._drop_expr_temps(s.expr)
                 else:
                     self._gen_stmt(s)
             self._close_scope()
-        elif result_off is not None:
+        elif result_off is not None and not _is_diverging(body):
             self._emit_loc(body)
             self._store_value(body, result_off, result_type)
             self._drop_expr_temps(body)
-        elif _is_aggregate(body.resolved_type):
+        elif _is_aggregate(body.resolved_type) and not _is_diverging(body):
             self._addr_of_aggregate(body)
             self._drop_expr_temps(body)
         else:

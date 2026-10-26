@@ -16,8 +16,8 @@
 //   6. Merge: every module's declarations (imports removed), in load order.
 
 from std.fs import read_to_string
-from .lexer import lex
-from .parser import parse_ids
+from .parser import parse_source
+from .diag import Report, report
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
 from .ast import MapEntry, Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
@@ -214,8 +214,8 @@ fun same_binding(a: Binding, b: Binding) -> bool {
     return a.is_module == b.is_module && a.value == b.value
 }
 
-fun at(path: str, line: int32, col: int32, msg: str) -> str {
-    return format("{}:{}:{}: {}", path, line, col, msg)
+fun at(path: str, line: int32, col: int32, msg: str) -> Report {
+    return Report { kind: "module error", msg: msg, path: path, line: line, col: col }
 }
 
 impl Loader {
@@ -256,7 +256,7 @@ impl Loader {
     // root `x/x.my`. No dots: the project root, then the stdlib root (`std.*`
     // only the stdlib root); one dot: the importer's directory; more dots
     // climb one level each.
-    fun resolve(self, importer: str, p: ImportPath) -> Result<str, str> {
+    fun resolve(self, importer: str, p: ImportPath) -> Result<str, Report> {
         var bases: [str] = []
         if p.dots == 0 {
             if p.segments[0] != "std" { push(bases, self.project_root) }
@@ -292,7 +292,7 @@ impl Loader {
     }
 
     // Load `path` and its imports (depth first) once each; its module index.
-    fun load(var self, path: str) -> Result<int32, str> {
+    fun load(var self, path: str) -> Result<int32, Report> {
         var k = 0
         while k < len(self.modules) {
             if self.modules[k].path == path { return Ok(k) }
@@ -301,9 +301,12 @@ impl Loader {
         var src = ""
         match read_to_string(path) {
             Ok(s) => { src = s },
-            Err(e) => { return Err(format("cannot read module '{}'", path)) },
+            Err(e) => { return Err(Report { kind: "module error", msg: format("cannot read module '{}'", path), path: path, line: 0, col: 0 }) },
         }
-        let parsed = parse_ids(lex(src), self.next_id)
+        var parsed = match parse_source(src, self.next_id) {
+            Ok(x) => x,
+            Err(d) => { return Err(report(d, path)) },
+        }
         self.next_id = parsed.next_id
         var imports: [Decl] = []
         var decls: [Decl] = []
@@ -331,12 +334,12 @@ impl Loader {
         return Ok(idx)
     }
 
-    fun check_ids(self) -> Result<int32, str> {
+    fun check_ids(self) -> Result<int32, Report> {
         var seen: [str: str] = [:]
         for m in self.modules {
             if m.id == "" { continue }
             match get(seen, m.id) {
-                Some(other) => { return Err(format("module id collision '{}' between {} and {}", m.id, other, m.path)) },
+                Some(other) => { return Err(at(m.path, 0, 0, format("module id collision '{}' between {} and {}", m.id, other, m.path))) },
                 None => {},
             }
             seen[m.id] = m.path
@@ -392,7 +395,7 @@ impl Loader {
         }
     }
 
-    fun build_bindings(var self) -> Result<int32, str> {
+    fun build_bindings(var self) -> Result<int32, Report> {
         var i = 0
         while i < len(self.modules) {
             var m = self.modules[i]
@@ -415,7 +418,7 @@ impl Loader {
                             }
                             let clash = match get(bindings, nb.name) { Some(c) => !same_binding(c, nb.binding), None => false }
                             if clash {
-                                return Err(at(m.path, imp.line, imp.col, format("import of '{}' collides with an existing name in this module -- rename with 'as'", nb.name)))
+                                return Err(at(m.path, imp.line, imp.col, format("import of '{}' collides with an existing name in this module — rename with 'as'", nb.name)))
                             }
                             bindings[nb.name] = nb.binding
                         }
@@ -490,7 +493,7 @@ struct Renamer {
     vals: [str],                        // local value names in scope
     tys: [str],                         // type parameter names in scope
     path: str,
-    err: str,
+    err: Option<Report>,
 }
 
 fun mk_expr(e: Expr, k: ExprKind) -> Expr {
@@ -530,7 +533,10 @@ fun pattern_binds(p: Pattern) -> [str] {
 
 impl Renamer {
     fun fail(var self, line: int32, col: int32, msg: str) {
-        if self.err == "" { self.err = at(self.path, line, col, msg) }
+        match self.err {
+            None => { self.err = Some(at(self.path, line, col, msg)) },
+            Some(e) => {},
+        }
     }
 
     fun type_name(self, n: str) -> str {
@@ -743,7 +749,7 @@ impl Renamer {
                 if !has(self.vals, n) {
                     match get(self.env, n) { Some(q) => { return mk_expr(e, ExprKind.Name(q)) }, None => {} }
                     match get(self.aliases, n) {
-                        Some(m) => { self.fail(e.line, e.col, format("module '{}' cannot be used as a value -- access a member with '{}.<name>'", n, n)) },
+                        Some(m) => { self.fail(e.line, e.col, format("module '{}' cannot be used as a value — access a member with '{}.<name>'", n, n)) },
                         None => {},
                     }
                 }
@@ -865,7 +871,7 @@ impl Renamer {
         }
         if !found { return None }
         if k == cnt {
-            self.fail(cur.line, cur.col, format("module '{}' cannot be used as a value -- access a member with '.<name>'", key))
+            self.fail(cur.line, cur.col, format("module '{}' cannot be used as a value — access a member with '.<name>'", key))
             return Some(e)
         }
         var s = k
@@ -946,7 +952,7 @@ fun module_env(bindings: [str: Binding]) -> [str: str] {
 
 // Load and link the program rooted at `entry`; `std.*` imports resolve under
 // `stdlib_root` ("" for none).
-pub fun load_program(entry: str, stdlib_root: str) -> Result<Loaded, str> {
+pub fun load_program(entry: str, stdlib_root: str) -> Result<Loaded, Report> {
     let e = normalize(entry)
     var stdlib = ""
     if stdlib_root != "" { stdlib = normalize(stdlib_root) }
@@ -959,9 +965,9 @@ pub fun load_program(entry: str, stdlib_root: str) -> Result<Loaded, str> {
     for m in ld.modules { exports[m.id] = m.exports }
     var decls: [Decl] = []
     for m in ld.modules {
-        var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: "" }
+        var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: None }
         for d in m.decls { push(decls, r.decl(d, m.id)) }
-        if r.err != "" { return Err(r.err) }
+        match r.err { Some(e) => { return Err(e) }, None => {} }
     }
     return Ok(Loaded { decls: decls, next_id: ld.next_id })
 }

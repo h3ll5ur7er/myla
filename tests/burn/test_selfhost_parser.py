@@ -51,15 +51,78 @@ def _corpus() -> list[str]:
     return sorted(files)
 
 
-def _oracle(path: str) -> str | None:
-    """Canonical AST dump from the Python parser, or None if the file does not
-    parse cleanly (the differential gate compares only successful parses)."""
-    with open(path, "r", encoding="utf-8") as fh:
-        source = fh.read()
+# Snippets for every lexer and parser error the corpus lacks (MYLA-28): the
+# self-hosted front end must report Python's message at Python's position.
+SYNTAX_ERRORS = {
+    "block_comment": "fun main() {}\n/* never closed\n",
+    "separator_doubled": "fun main() {\n    let x = 1__0\n}\n",
+    "separator_leading": "fun main() {\n    let x = 0x_1\n}\n",
+    "separator_trailing": "fun main() {\n    let x = 10_\n}\n",
+    "int_suffix": "fun main() {\n    let x = 5i7\n}\n",
+    "int_trailing_letter": "fun main() {\n    let x = 5x\n}\n",
+    "no_digits_after_prefix": "fun main() {\n    let x = 0b\n}\n",
+    "float_suffix": "fun main() {\n    let x = 1.5f16\n}\n",
+    "float_trailing_letter": "fun main() {\n    let x = 1.5q\n}\n",
+    "string_newline": 'fun main() {\n    let s = "abc\n}\n',
+    "string_backslash_at_end": 'let s = "ab\\',
+    "string_escape": 'fun main() {\n    let s = "a\\qb"\n}\n',
+    "unicode_no_brace": "fun main() {\n    let c = '\\u0041'\n}\n",
+    "unicode_hex_digit": "fun main() {\n    let c = '\\u{4G}'\n}\n",
+    "unicode_unterminated": "let c = '\\u{41",
+    "unicode_empty": "fun main() {\n    let c = '\\u{}'\n}\n",
+    "unicode_surrogate": "fun main() {\n    let c = '\\u{D800}'\n}\n",
+    "unicode_too_big": "fun main() {\n    let c = '\\u{110000}'\n}\n",
+    "char_empty": "fun main() {\n    let c = ''\n}\n",
+    "char_backslash_at_end": "let c = '\\",
+    "char_escape": "fun main() {\n    let c = '\\q'\n}\n",
+    "char_two": "fun main() {\n    let c = 'ab'\n}\n",
+    "unexpected_char": "fun main() {\n    let x = 1 @ 2\n}\n",
+    "unexpected_multibyte_char": "fun main() {\n    let x = 1 \u20ac 2\n}\n",
+    "fstring_newline": 'fun main() {\n    let s = f"abc\n}\n',
+    "fstring_single_close": 'fun main() {\n    let s = f"a}b"\n}\n',
+    "fstring_backslash_at_end": 'let s = f"a\\',
+    "fstring_escape": 'fun main() {\n    let s = f"a\\qb"\n}\n',
+    "fstring_open_hole": 'fun main() {\n    let s = f"a{x"\n}\n',
+    "fstring_blank_hole": 'fun main() {\n    let s = f"a{  }b"\n}\n',
+    "fstring_hole_string": 'fun main() {\n    let s = f"a{"bc}"\n}\n',
+    "fstring_hole_lex_error": 'fun main() {\n    let s = f"a{1x}"\n}\n',
+    "expect": "fun main( {\n}\n",
+    "end_of_statement": "fun main() {\n    let x = 1 let y = 2\n}\n",
+    "impl_attribute": "struct S { a: int }\n#test\nimpl S {\n}\n",
+    "impl_pub": "struct S { a: int }\npub impl S {\n}\n",
+    "import_attribute": "#test\nimport foo\n",
+    "pub_import_without_alias": "pub import foo\n",
+    "empty_type_params": "fun f<>() {\n}\n",
+    "bounds_on_alias": "type A<T: Eq> = int\n",
+    "impl_trait_not_a_name": "struct S { a: int }\nimpl [int] for S {\n}\n",
+    "impl_body_not_fun": "struct S { a: int }\nimpl S {\n    let x = 1\n}\n",
+    "trait_body_not_fun": "trait T {\n    let x = 1\n}\n",
+    "expected_type": "fun f(x: 1) {\n}\n",
+    "unit_type": "fun f(x: ()) {\n}\n",
+    "struct_fields_on_one_line": "struct S { a: int b: int }\n",
+    "binding_name": "fun main() {\n    let (1, 2) = (1, 2)\n}\n",
+    "expected_expression": "fun main() {\n    let x = \n}\n",
+    "expected_pattern": "fun main() {\n    let x = match 1 {\n        + => 1,\n    }\n}\n",
+}
+
+# Files whose every prefix (cut at each line end and in the middle of each
+# line) is parsed by both front ends: they must agree, and the self-hosted one
+# must stop after its first error instead of looping.
+TRUNCATED = ["closures.my", "enums.my", "interpolation.my", "traits.my", "generics.my", "chars.my"]
+
+
+def _canonical(source: str) -> str:
+    """Canonical AST dump from the Python parser, or its error as
+    `err <line> <col> <kind>: <message>` (what `parse_main` prints)."""
     try:
         return canonical_ast(parse(tokenize(source)))
-    except MylaError:
-        return None
+    except MylaError as err:
+        return f"err {err.line} {err.column} {err.kind.split()[0]}: {err.message}"
+
+
+def _oracle(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as fh:
+        return _canonical(fh.read())
 
 
 def _check_file(path: str):
@@ -86,6 +149,14 @@ class SelfHostedParserParity(unittest.TestCase):
         if cls._tmp is not None:
             cls._tmp.cleanup()
 
+    def _myla_parse_source(self, source: str) -> str:
+        with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", delete=False) as fh:
+            fh.write(source)
+        try:
+            return self._myla_parse(fh.name)
+        finally:
+            os.unlink(fh.name)
+
     def _myla_parse(self, path: str) -> str:
         if self._binary is not None:
             proc = subprocess.run(
@@ -103,17 +174,39 @@ class SelfHostedParserParity(unittest.TestCase):
         return out.getvalue().rstrip("\n")
 
     def test_corpus_ast_parity(self) -> None:
-        checked = 0
+        checked = errors = 0
         for path in _corpus():
             expected = _oracle(path)
-            if expected is None:
-                continue  # parse-error file: not part of the AST-parity gate
             with self.subTest(file=os.path.relpath(path, _REPO)):
                 actual = self._myla_parse(path)
                 self.assertEqual(actual, expected)
                 checked += 1
+                errors += expected.startswith("err ")
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 25)
+        self.assertGreater(errors, 15)
+
+    def test_syntax_errors_match_the_oracle(self) -> None:
+        for name, source in SYNTAX_ERRORS.items():
+            with self.subTest(case=name):
+                expected = _canonical(source)
+                self.assertTrue(expected.startswith("err "), "not an error in Python")
+                self.assertEqual(self._myla_parse_source(source), expected)
+
+    def test_truncated_sources_match_the_oracle(self) -> None:
+        for name in TRUNCATED:
+            with open(os.path.join(_REPO, "examples", name), encoding="utf-8") as fh:
+                source = fh.read()
+            cuts = set()
+            pos = 0
+            for line in source.splitlines(keepends=True):
+                cuts.add(pos + len(line) // 2)
+                pos += len(line)
+                cuts.add(pos)
+            for cut in sorted(cuts):
+                prefix = source[:cut]
+                with self.subTest(file=name, cut=cut):
+                    self.assertEqual(self._myla_parse_source(prefix), _canonical(prefix))
 
 
 if __name__ == "__main__":

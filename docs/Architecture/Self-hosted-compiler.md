@@ -10,17 +10,17 @@
 | --- | --- | --- |
 | `tokens.my` | 150 | `#derive(Eq) enum TokenKind` (~80 variants), `struct Token`, keyword lookup as an `if` chain, `kind_name` |
 | `util.my` | 100 | UTF-8 encoding, escaping for canonical dumps, character classes, digit parsing |
-| `lexer.my` | 620 | Decodes the source to code points (so columns match Python), scans tokens, lowers f-strings like the Python lexer; errors `panic` |
+| `lexer.my` | 620 | Decodes the source to code points (so columns match Python), scans tokens, lowers f-strings like the Python lexer; the first error is returned with the Python lexer's message and position |
 | `ast.my` | 380 | AST nodes as wrapper structs `{id, line, col, kind}` around `enum …Kind`; unique node ids; the canonical S-expression dump |
 | `parser.my` | 1390 | Recursive descent with the same precedence levels and desugarings as `parser.py` |
 | `checker.my` | 3570 | Name tables, inference, generics, traits, exhaustiveness, const folding; records each expression's type in `resolved: [int32: Type]` keyed by node id |
 | `codegen.my` | 6200 | Monomorphizing code generator and the whole runtime, as assembly text |
 | `interp.my` | 1830 | Tree-walking interpreter over checked declarations |
 | `loader.my` | 970 | Module loader: resolves imports, parses each module once, qualifies module-level names (`id$name`), checks `pub`, folds `alias.member` ([[Architecture/Module-loader]]) |
+| `diag.my` | 85 | Renders a diagnostic like the Python CLI: message, `--> file:line:col`, source line and caret |
 | `gen_main.my` | 50 | The bootstrap compiler: `gen_main <file.my> <stdlib_root>` → assembly on stdout |
 | `main.my` | 170 | The self-hosted CLI: `myla run|test|build <file> [-o out] [stdlib_root]`; `build` runs `as`/`ld` through `std.process.run` |
 | `lex_main.my`, `parse_main.my`, `check_main.my`, `interp_main.my` | 30–50 each | Drivers for the differential tests (canonical tokens, canonical AST, `ok`/`err line col kind`, interpreted output; `interp_main` goes through the loader) |
-| `probe_*.my` | 15–20 each | Bring-up scratch files, unused ([[MYLA-34]]) |
 
 ## Writing a compiler in Myla
 
@@ -40,7 +40,7 @@ Myla has no global variables and no module-level maps, and everything is a value
 | Modules | Qualified names, privacy, packages | The same since [[MYLA-30]] (small differences on [[Architecture/Module-loader]]) |
 | Monomorphization | Separate pass, then a second check | During code generation, with a substitution list |
 | Floats | Full support | Full support since [[MYLA-29]]: literals converted with integer arithmetic (`selfhost/floatlit.my`), the float runtime generated from the Python backend's (`scripts/gen_selfhost_runtime.py`) |
-| Diagnostics | Messages with file positions | Loader errors with messages; type errors as a bare position in its own file, without the file name ([[MYLA-28]]) |
+| Diagnostics | Messages with file positions | Lex, parse and module errors printed exactly like the Python CLI; type errors as a bare position, without file or message ([[MYLA-28]]) |
 | Runtime errors | Messages | Silent `__trap` (exit 1) |
 | Heap | 1 GiB arena, size-class free lists up to 4 KiB | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]) |
 | Closure environments | `[drop fn][captures…]`, captures retained and dropped | The same since [[MYLA-22]]; compositions and partial applications own their parts too |

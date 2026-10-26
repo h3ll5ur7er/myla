@@ -2,19 +2,21 @@
 //
 // Reads a .my file, lexes + parses it, and prints the canonical AST dump
 // (src/myla/canon.py:canonical_ast), for byte-for-byte differential comparison
-// against `myla parse --canonical`.
+// against `myla parse --canonical`; for a lex or parse error, its
+// `err <line> <col> <kind>: <message>` line.
 
 from std.process import args, exit
 from std.fs import read_to_string
 from std.io import println, eprintln
-from .lexer import lex
-from .parser import parse
+from .parser import parse_source
 from .ast import dump_program
+from .diag import canonical_err
 
 fun parse_and_dump(src: str) {
-    let toks = lex(src)
-    let prog = parse(toks)
-    println(dump_program(prog))
+    match parse_source(src, 0) {
+        Ok(p) => { println(dump_program(p.program)) },
+        Err(d) => { println(canonical_err(d)) },
+    }
 }
 
 fun main() {

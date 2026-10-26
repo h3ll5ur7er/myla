@@ -1146,6 +1146,22 @@ PROGRAMS = {
         "    print(len(ps[0].tags))\n"
         "    print(ps[0].tags[1])\n}\n"
     ),
+    "diverging_arm_of_an_aggregate_match": (
+        # an arm ending in `panic`/`unreachable` has no value to store (the
+        # native compiler used to look for its aggregate result and crash)
+        "struct P { a: int, b: str }\n"
+        "fun mk(ok: bool) -> Result<P, str> {\n"
+        "    if ok { return Ok(P { a: 1, b: \"x\" }) }\n    return Err(\"no\")\n}\n"
+        "fun block_arm(ok: bool) -> P {\n"
+        "    return match mk(ok) {\n        Ok(p) => p,\n"
+        "        Err(d) => { panic(\"cannot happen\") },\n    }\n}\n"
+        "fun expr_arm(ok: bool) -> P {\n"
+        "    return match mk(ok) {\n        Ok(p) => p,\n        Err(d) => unreachable(),\n    }\n}\n"
+        "#main\nfun main() {\n"
+        "    print(block_arm(true).b)\n    print(expr_arm(true).a)\n"
+        "    let t = match mk(true) {\n        Ok(p) => (p.a, p.b),\n"
+        "        Err(d) => { panic(d) },\n    }\n    print(t.1)\n}\n"
+    ),
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap

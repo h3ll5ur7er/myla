@@ -58,7 +58,8 @@ EXCLUDED: set[str] = set()
 # (MYLA-3); a match binding keeps its value when the arm writes to the
 # scrutinee's variable (MYLA-2); destructuring reads boxed enum leaves through
 # their pointer (MYLA-21); closure environments own their captures (MYLA-22);
-# floats (MYLA-29); `?` in a lambda checked against the lambda (MYLA-72).
+# floats (MYLA-29); `?` in a lambda checked against the lambda (MYLA-72); a
+# `panic` arm of a match that yields an aggregate (MYLA-28).
 PARITY_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
@@ -73,6 +74,7 @@ PARITY_PROGRAMS = (
     "closure_environments_own_their_captures",
     "floats_in_depth",
     "try_in_lambdas_checks_against_the_lambda",
+    "diverging_arm_of_an_aggregate_match",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -235,9 +237,19 @@ MODULE_PROJECTS = {
     },
 }
 
-# Programs the loader rejects (MYLA-30): the self-hosted loader reports the
-# Python loader's message at the same position (`--` for its em dash).
+# Programs the loader rejects (MYLA-30), and lex and parse errors in imported
+# modules (MYLA-28): the self-hosted compiler prints the Python CLI's diagnostic
+# (message, file, position, source line and caret).
 MODULE_ERRORS = {
+    "parse_error_in_module": {
+        "main.my": "import lib\nfun main() {\n    print(lib.f())\n}\n",
+        "lib.my": "pub fun f() -> int {\n    return 1 +\n}\n",
+    },
+    "lex_error_in_module": {
+        "main.my": "from .lib import f\nfun main() {\n    print(f())\n}\n",
+        "lib.my": "pub fun f() -> int {\n    return 0x\n}\n",
+    },
+    "parse_error_in_entry": {"main.my": "fun main() {\n    let x = \n}\n"},
     "private_name": {
         "main.my": "from .lib import secret\nfun main() {\n    print(secret())\n}\n",
         "lib.my": "fun secret() -> int {\n    return 1\n}\n",
@@ -419,7 +431,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     self.assertEqual((out, code), (expected, 0))
 
     def test_module_errors_match_the_python_loader(self) -> None:
-        from myla.errors import ModuleError
+        from myla.errors import MylaError
 
         if self._binary is None:
             self.skipTest("the self-hosted compiler could not be built natively")
@@ -428,15 +440,16 @@ class SelfHostedCodegenParity(unittest.TestCase):
             for name, files in MODULE_ERRORS.items():
                 with self.subTest(program=name):
                     entry = _write_project(os.path.join(tmp, name), files)
-                    with self.assertRaises(ModuleError) as ctx:
+                    with self.assertRaises(MylaError) as ctx:
                         link(entry, stdlib_root=stdlib)
                     err = ctx.exception
-                    message = err.message.replace("\u2014", "--")
+                    path = err.path or entry
+                    with open(path, encoding="utf-8") as fh:
+                        expected = err.render(fh.read(), path)
                     proc = subprocess.run(
                         [self._binary, entry, stdlib], capture_output=True, text=True
                     )
-                    self.assertEqual(proc.returncode, 1)
-                    self.assertIn(f"{err.line}:{err.column}: {message}", proc.stderr)
+                    self.assertEqual((proc.returncode, proc.stderr), (1, expected + "\n"))
 
     def test_stress_programs_reclaim_memory(self) -> None:
         from . import test_compiler_parity

@@ -9,6 +9,7 @@ from std.io import eprintln
 from .checker import build_checker_decls
 from .interp import new_interp
 from .loader import load_program, Loaded
+from .diag import render
 
 fun run_program(prog: Loaded, file: str) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
@@ -38,8 +39,8 @@ fun main() {
             let code = run_program(prog, argv[1])
             exit(code)
         },
-        Err(e) => {
-            eprintln("interp_main: " + e)
+        Err(r) => {
+            eprintln(render(r))
             exit(1)
         },
     }

@@ -1,0 +1,84 @@
+// diag.my -- diagnostics as the Python CLI prints them (MYLA-28):
+//
+//     parse error: expected an expression, found '}'
+//       --> examples/bad.my:3:13
+//       |
+//     3 |     let x =
+//       |             ^
+//
+// (src/myla/errors.py: MylaError.render). The file is read again for the
+// source line; without a position only the first line is printed.
+
+from std.fs import read_to_string
+from .tokens import Diag
+
+// An error with the file it is in (`line` 0: no position).
+pub struct Report { kind: str, msg: str, path: str, line: int32, col: int32 }
+
+// `d` as `err <line> <col> <kind>: <message>`, the line the differential test
+// drivers print (the Python side builds it from its exception).
+pub fun canonical_err(d: Diag) -> str {
+    return format("err {} {} {}: {}", d.line, d.col, split_kind(d.kind), d.msg)
+}
+
+// The first word of `kind` ("parse" of "parse error").
+fun split_kind(kind: str) -> str {
+    var sb = StringBuilder()
+    for c in chars(kind) {
+        if c == ' ' { return build(sb) }
+        append_byte(sb, c as uint8)
+    }
+    return build(sb)
+}
+
+pub fun report(d: Diag, path: str) -> Report {
+    return Report { kind: d.kind, msg: d.msg, path: path, line: d.line, col: d.col }
+}
+
+// Line `n` (1-based) of `src`, if it has one.
+fun source_line(src: str, n: int32) -> Option<str> {
+    var line = 1
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(src) {
+        let c = src[i]
+        if c == '\n' {
+            if line == n { return Some(build(sb)) }
+            line = line + 1
+        } else if line == n {
+            append_byte(sb, c)
+        }
+        i = i + 1
+    }
+    if line == n && len(build(sb)) > 0 { return Some(build(sb)) }
+    return None
+}
+
+pub fun render(r: Report) -> str {
+    var sb = StringBuilder()
+    append(sb, format("{}: {}", r.kind, r.msg))
+    if r.line == 0 { return build(sb) }
+    append(sb, format("\n  --> {}:{}:{}", r.path, r.line, r.col))
+    var src_line: Option<str> = None
+    match read_to_string(r.path) {
+        Ok(s) => { src_line = source_line(s, r.line) },
+        Err(e) => {},
+    }
+    match src_line {
+        Some(l) => {
+            let gutter = format("{}", r.line)
+            var pad = StringBuilder()
+            for c in chars(gutter) { append_byte(pad, ' ') }
+            let p = build(pad)
+            var caret = StringBuilder()
+            var k = 1
+            while k < r.col {
+                append_byte(caret, ' ')
+                k = k + 1
+            }
+            append(sb, format("\n{} |\n{} | {}\n{} | {}^", p, gutter, l, p, build(caret)))
+        },
+        None => {},
+    }
+    return build(sb)
+}

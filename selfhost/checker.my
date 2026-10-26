@@ -10,8 +10,7 @@
 // iteration order mirror types.py exactly so the *first* error's position
 // matches the oracle.
 
-from .lexer import lex
-from .parser import parse, parse_ids
+from .parser import parse_source, Parsed
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
 from .ast import Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
@@ -2919,10 +2918,18 @@ fun prelude_src() -> str {
     return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\n"
 }
 
+// The prelude's declarations, with node ids from `first_id`.
+fun prelude(first_id: int32) -> Parsed {
+    return match parse_source(prelude_src(), first_id) {
+        Ok(p) => p,
+        Err(d) => { panic("the prelude does not parse") },
+    }
+}
+
 pub fun check_program(user: Program) -> Result<int32, CheckErr> {
-    let pre = parse(lex(prelude_src()))
+    let pre = prelude(0)
     var decls: [Decl] = []
-    for d in pre.decls { push(decls, d) }
+    for d in pre.program.decls { push(decls, d) }
     for d in user.decls { push(decls, d) }
     var c = new_checker(decls)
     return c.run_all()
@@ -2932,7 +2939,7 @@ pub fun check_program(user: Program) -> Result<int32, CheckErr> {
 // ids are below `next_id`), with the prelude parsed after it so every id stays
 // unique, and return the populated checker (MYLA-30).
 pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, CheckErr> {
-    let pre = parse_ids(lex(prelude_src()), next_id)
+    let pre = prelude(next_id)
     var all: [Decl] = []
     for d in pre.program.decls { push(all, d) }
     for d in decls { push(all, d) }

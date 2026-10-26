@@ -16,6 +16,10 @@ pub enum TokenKind {
     NEWLINE, EOF,
 }
 
+// A lex or parse error (`kind` is "lex error" or "parse error"), with the
+// message and 1-based position the Python front end reports.
+pub struct Diag { kind: str, line: int32, col: int32, msg: str }
+
 pub struct Token {
     kind: TokenKind,
     lexeme: str,

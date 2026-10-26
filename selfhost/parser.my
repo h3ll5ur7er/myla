@@ -1,14 +1,15 @@
 // parser.my — the Myla parser (mirror of src/myla/parser.py).
 //
-// Recursive descent with a layered precedence grammar. Python raises ParseError
-// on the first syntax error; here we `panic` (the differential gate compares
-// only successful parses). Every node is stamped with a unique NodeId and the
+// Recursive descent with a layered precedence grammar. Like Python's ParseError,
+// the first syntax error ends the parse: `fail` records it (message and position
+// as in parser.py) and jumps to EOF, where every loop ends. Every node is stamped with a unique NodeId and the
 // 1-based source position of the token Python's `.at(...)` uses, so the checker
 // reproduces diagnostic positions byte-for-byte. Parser desugarings are
 // preserved exactly: `|>` -> Call, `return a, b` -> Return(TupleLit), adjacent
 // `<`/`>` -> shift Binary, char literal -> IntLit(is_char=true).
 
-from .tokens import Token, TokenKind
+from .tokens import Token, TokenKind, Diag
+from .lexer import lex
 from .ast import TypeExpr, TypeKind, Expr, ExprKind, Stmt, StmtKind
 from .ast import Pattern, PatternKind, Decl, DeclKind, Block, ExprOrBlock, ElseTail
 from .ast import BindElem, FieldInit, MapEntry, MatchArm, FieldPat, Param
@@ -20,10 +21,11 @@ pub struct Parser {
     pos: int32,
     allow_struct_lit: bool,
     next_id: int32,
+    err: Option<Diag>,
 }
 
 pub fun new_parser(toks: [Token]) -> Parser {
-    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0 }
+    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, err: None }
 }
 
 fun suffix_opt(s: str) -> Option<str> {
@@ -118,10 +120,25 @@ impl Parser {
         return false
     }
 
+    // Record the first error and skip to EOF (the callers carry on with
+    // placeholder nodes, which are discarded).
+    fun fail(var self, line: int32, col: int32, msg: str) {
+        match self.err {
+            None => { self.err = Some(Diag { kind: "parse error", line: line, col: col, msg: msg }) },
+            Some(e) => {},
+        }
+        self.pos = len(self.toks) - 1
+    }
+
+    fun fail_at(var self, tok: Token, msg: str) {
+        self.fail(tok.line, tok.column, msg)
+    }
+
     fun expect(var self, k: TokenKind, what: str) -> Token {
         let tok = self.peek()
         if tok.kind != k {
-            panic(format("expected {}, found '{}'", what, tok.lexeme))
+            self.fail_at(tok, format("expected {}, found '{}'", what, tok.lexeme))
+            return tok
         }
         return self.advance()
     }
@@ -150,7 +167,8 @@ impl Parser {
         } else if self.check(TokenKind.RBRACE) || self.at_end() {
             return
         } else {
-            panic(format("expected end of {} (newline), found '{}'", what, self.peek().lexeme))
+            let tok = self.peek()
+            self.fail_at(tok, format("expected end of {} (newline), found '{}'", what, tok.lexeme))
         }
     }
 
@@ -159,11 +177,13 @@ impl Parser {
     fun declaration(var self) -> Decl {
         let attrs = self.attributes()
         var is_pub = false
+        let pub_tok = self.peek()
         if self.check(TokenKind.PUB) {
             self.advance()
             is_pub = true
         }
-        let k = self.peek().kind
+        let tok = self.peek()
+        let k = tok.kind
         if k == TokenKind.STRUCT {
             return self.struct_decl(attrs, is_pub)
         } else if k == TokenKind.FUN {
@@ -171,13 +191,13 @@ impl Parser {
         } else if k == TokenKind.ENUM {
             return self.enum_decl(attrs, is_pub)
         } else if k == TokenKind.IMPL {
+            let d = self.impl_decl()
             if len(attrs) > 0 {
-                panic("attributes are not allowed on an 'impl' block")
+                self.fail_at(tok, "attributes are not allowed on an 'impl' block")
+            } else if is_pub {
+                self.fail_at(pub_tok, "'pub' is not allowed on an 'impl' block (visibility follows the implemented type)")
             }
-            if is_pub {
-                panic("'pub' is not allowed on an 'impl' block")
-            }
-            return self.impl_decl()
+            return d
         } else if k == TokenKind.TRAIT {
             return self.trait_decl(attrs, is_pub)
         } else if k == TokenKind.TYPEALIAS {
@@ -185,12 +205,13 @@ impl Parser {
         } else if k == TokenKind.CONST {
             return self.const_decl(attrs, is_pub)
         } else if k == TokenKind.IMPORT || k == TokenKind.FROM {
+            let d = self.import_decl(is_pub)
             if len(attrs) > 0 {
-                panic("attributes are not allowed on an import statement")
+                self.fail_at(tok, "attributes are not allowed on an import statement")
             }
-            return self.import_decl(is_pub)
+            return d
         }
-        panic(format("expected a declaration, found '{}'", self.peek().lexeme))
+        self.fail_at(tok, format("expected a declaration (struct/fun/enum/typealias/const/trait/impl/import), found '{}'", tok.lexeme))
         return self.mk_decl(0, 0, DeclKind.ImportDecl(ImportPath { line: 0, col: 0, dots: 0, segments: [] }, None, None, false))
     }
 
@@ -213,7 +234,7 @@ impl Parser {
         }
         let no_alias = match alias { Some(a) => false, None => true }
         if is_pub && no_alias {
-            panic("a 'pub import' must bind a simple name: add 'as <name>'")
+            self.fail_at(start, "a 'pub import' must bind a simple name: add 'as <name>' (the full path cannot be re-exported directly)")
         }
         return self.mk_decl(start.line, start.column, DeclKind.ImportDecl(path, None, alias, is_pub))
     }
@@ -288,7 +309,7 @@ impl Parser {
         }
         self.expect(TokenKind.GT, "'>' to close type parameters")
         if len(params) == 0 {
-            panic("empty type-parameter list")
+            self.fail_at(self.peek(), "empty type-parameter list")    // unreachable: a name is expected first
         }
         return params
     }
@@ -297,7 +318,7 @@ impl Parser {
         let ps = self.generics()
         for p in ps {
             if len(p.bounds) > 0 {
-                panic(format("type-parameter bounds are not supported on {}", where))
+                self.fail_at(self.peek(), format("type-parameter bounds are not supported on {}", where))
             }
         }
         return ps
@@ -400,7 +421,7 @@ impl Parser {
                     trait_name = Some(nm)
                     trait_args = args
                 },
-                _ => panic("the trait in 'impl Trait for T' must be a trait name"),
+                _ => { self.fail_at(kw, "the trait in 'impl Trait for T' must be a (possibly generic) trait name") },
             }
             target = self.parse_type()
         }
@@ -409,7 +430,8 @@ impl Parser {
         var methods: [FunData] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
             if !self.check(TokenKind.FUN) {
-                panic(format("expected a method ('fun ...') in impl block, found '{}'", self.peek().lexeme))
+                let tok = self.peek()
+                self.fail_at(tok, format("expected a method ('fun ...') in impl block, found '{}'", tok.lexeme))
             }
             push(methods, self.method_decl())
             self.skip_newlines()
@@ -427,7 +449,8 @@ impl Parser {
         var methods: [FunData] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
             if !self.check(TokenKind.FUN) {
-                panic(format("expected a method signature ('fun ...') in trait body, found '{}'", self.peek().lexeme))
+                let tok = self.peek()
+                self.fail_at(tok, format("expected a method signature ('fun ...') in trait body, found '{}'", tok.lexeme))
             }
             push(methods, self.method_sig())
             self.skip_newlines()
@@ -449,7 +472,7 @@ impl Parser {
         } else if self.match1(TokenKind.SELF) {
             receiver = Some("self")
         } else {
-            panic("a method's first parameter must be 'self' or 'var self'")
+            self.fail_at(self.peek(), "a method's first parameter must be 'self' or 'var self'")
         }
         var params: [Param] = []
         while self.match1(TokenKind.COMMA) {
@@ -535,7 +558,7 @@ impl Parser {
             let args = self.type_args()
             return self.mk_type(tok.line, tok.column, TypeKind.TRef(tok.lexeme, args))
         }
-        panic(format("expected a type, found '{}'", tok.lexeme))
+        self.fail_at(tok, format("expected a type, found '{}'", tok.lexeme))
         return self.mk_type(tok.line, tok.column, TypeKind.TRef("", []))
     }
 
@@ -577,10 +600,10 @@ impl Parser {
             return self.mk_type(lp.line, lp.column, TypeKind.TFn(params, ret))
         }
         if len(params) == 0 {
-            panic("'()' is only valid as a function type '() -> R'")
+            self.fail_at(lp, "'()' is only valid as a function type '() -> R'")
         }
         if !saw_comma {
-            panic("expected ',' in tuple type (use '(T,)' for a 1-tuple)")
+            self.fail_at(self.peek(), "expected ',' in tuple type (use '(T,)' for a 1-tuple)")
         }
         return self.mk_type(lp.line, lp.column, TypeKind.TTuple(params))
     }
@@ -598,7 +621,8 @@ impl Parser {
             } else if self.check(TokenKind.RBRACE) {
                 break
             } else {
-                panic(format("expected newline or '}}', found '{}'", self.peek().lexeme))
+                let tok = self.peek()
+                self.fail_at(tok, format("expected newline or '}}', found '{}'", tok.lexeme))
             }
         }
         self.expect(TokenKind.RBRACE, "'}'")
@@ -661,7 +685,7 @@ impl Parser {
         self.advance()
         var elems: [BindElem] = [self.binding_elem()]
         if !self.match1(TokenKind.COMMA) {
-            panic("expected ',' in destructuring binding (use '(x,)' for a 1-tuple)")
+            self.fail_at(self.peek(), "expected ',' in destructuring binding (use '(x,)' for a 1-tuple)")
         }
         while !self.check(TokenKind.RPAREN) {
             push(elems, self.binding_elem())
@@ -685,7 +709,7 @@ impl Parser {
             }
             return BindElem.BName(tok.lexeme)
         }
-        panic(format("expected a binding name, '_', or '(', found '{}'", tok.lexeme))
+        self.fail_at(tok, format("expected a binding name, '_', or '(', found '{}'", tok.lexeme))
         return BindElem.BWild
     }
 
@@ -752,7 +776,7 @@ impl Parser {
         if self.check(TokenKind.ASSIGN) {
             let eq = self.advance()
             if !is_lvalue(expr) {
-                panic("invalid assignment target")
+                self.fail(expr.line, expr.col, "invalid assignment target")
             }
             let value = self.expression()
             return self.mk_stmt(eq.line, eq.column, StmtKind.Assign(expr, value))
@@ -951,7 +975,7 @@ impl Parser {
                 if self.check(TokenKind.INT) {
                     let idx_tok = self.advance()
                     if idx_tok.suffix != "" {
-                        panic("tuple index may not have a type suffix")
+                        self.fail_at(idx_tok, "tuple index may not have a type suffix")
                     }
                     expr = self.mk_expr(dot.line, dot.column, ExprKind.TupleIndex(expr, idx_tok.ival))
                 } else {
@@ -1018,7 +1042,7 @@ impl Parser {
         if k == TokenKind.LBRACKET {
             return self.list_or_map_lit()
         }
-        panic(format("expected an expression, found '{}'", tok.lexeme))
+        self.fail_at(tok, format("expected an expression, found '{}'", tok.lexeme))
         return self.mk_expr(tok.line, tok.column, ExprKind.Hole)
     }
 
@@ -1099,7 +1123,7 @@ impl Parser {
         }
         self.expect(TokenKind.RBRACE, "'}' to end match")
         if len(arms) == 0 {
-            panic("match expression needs at least one arm")
+            self.fail_at(kw, "match expression needs at least one arm")
         }
         return self.mk_expr(kw.line, kw.column, ExprKind.MatchE(scrutinee, arms))
     }
@@ -1159,7 +1183,7 @@ impl Parser {
         if k == TokenKind.IDENT {
             return self.ident_pattern(tok)
         }
-        panic(format("expected a pattern, found '{}'", tok.lexeme))
+        self.fail_at(tok, format("expected a pattern, found '{}'", tok.lexeme))
         return self.mk_pat(tok.line, tok.column, PatternKind.PWild)
     }
 
@@ -1205,7 +1229,7 @@ impl Parser {
         let lp = self.advance()
         var elems: [Pattern] = [self.pattern()]
         if !self.match1(TokenKind.COMMA) {
-            panic("expected ',' in tuple pattern (use '(p,)' for a 1-tuple)")
+            self.fail_at(self.peek(), "expected ',' in tuple pattern (use '(p,)' for a 1-tuple)")
         }
         while !self.check(TokenKind.RPAREN) {
             push(elems, self.pattern())
@@ -1379,9 +1403,10 @@ impl Parser {
     }
 }
 
-pub fun parse(toks: [Token]) -> Program {
-    var p = new_parser(toks)
-    return p.parse_program()
+// The program `toks` spell, or its first parse error.
+pub fun parse(toks: [Token]) -> Result<Program, Diag> {
+    let parsed = parse_ids(toks, 0)?
+    return Ok(parsed.program)
 }
 
 // A parsed module and the next unused node id.
@@ -1390,9 +1415,17 @@ pub struct Parsed { program: Program, next_id: int32 }
 // Parse with node ids starting at `first_id`, so separately parsed modules
 // (and the prelude) get ids unique across the whole program: the checker's
 // type tables are keyed by node id (MYLA-30).
-pub fun parse_ids(toks: [Token], first_id: int32) -> Parsed {
+pub fun parse_ids(toks: [Token], first_id: int32) -> Result<Parsed, Diag> {
     var p = new_parser(toks)
     p.next_id = first_id
     let prog = p.parse_program()
-    return Parsed { program: prog, next_id: p.next_id }
+    return match p.err {
+        Some(e) => Err(e),
+        None => Ok(Parsed { program: prog, next_id: p.next_id }),
+    }
+}
+
+// Lex and parse `src` (node ids from `first_id`): its first lex or parse error.
+pub fun parse_source(src: str, first_id: int32) -> Result<Parsed, Diag> {
+    return parse_ids(lex(src)?, first_id)
 }

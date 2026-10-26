@@ -48,16 +48,15 @@ def _corpus() -> list[str]:
     return files
 
 
-def _oracle(path: str) -> str | None:
-    """Canonical token dump from the Python lexer, or None if the file does not
-    lex cleanly (those are exercised elsewhere; the differential gate compares
-    only successful token streams)."""
+def _oracle(path: str) -> str:
+    """Canonical token dump from the Python lexer, or its error as
+    `err <line> <col> lex: <message>` (what `lex_main` prints)."""
     with open(path, "r", encoding="utf-8") as fh:
         source = fh.read()
     try:
         return canonical_tokens(tokenize(source))
-    except MylaError:
-        return None
+    except MylaError as err:
+        return f"err {err.line} {err.column} {err.kind.split()[0]}: {err.message}"
 
 
 def _check_file(path: str):
@@ -104,8 +103,6 @@ class SelfHostedLexerParity(unittest.TestCase):
         checked = 0
         for path in _corpus():
             expected = _oracle(path)
-            if expected is None:
-                continue  # lex-error file: not part of the token-parity gate
             with self.subTest(file=os.path.relpath(path, _REPO)):
                 actual = self._myla_lex(path)
                 self.assertEqual(actual, expected)
