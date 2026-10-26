@@ -2108,6 +2108,8 @@ class Checker:
                                 stmt.line, stmt.column,
                             )
             else:
+                # a `?` in the body returns from the lambda (MYLA-72)
+                self._current_ret = want_ret
                 ret_t = self._infer(expr.body, lam_scope, want_ret)
         finally:
             self._current_ret = saved_ret
@@ -2282,18 +2284,27 @@ class Checker:
     def _infer_try(self, expr: ast.Try, scope: _Scope) -> Type:
         ot = self._expect_value(expr.operand, scope, None)
         ret = self._current_ret
+        # `?` returns from the innermost function or lambda (MYLA-72)
+        where = "lambda" if self._lambda_stack else "function"
+        if ret is None and self._lambda_stack:
+            raise TypeCheckError(
+                "'?' in a lambda needs the lambda's result type: pass the lambda "
+                "where a function type is expected, or annotate the variable "
+                "(e.g. 'let f: (int) -> Option<int> = …')",
+                expr.line, expr.column,
+            )
         if isinstance(ot, EnumType) and ot.name == "Result" and len(ot.args) == 2:
             ok_t, err_t = ot.args
             if not (isinstance(ret, EnumType) and ret.name == "Result"
                     and len(ret.args) == 2):
                 raise TypeCheckError(
-                    "'?' on a Result requires the enclosing function to return a "
+                    f"'?' on a Result requires the enclosing {where} to return a "
                     "Result", expr.line, expr.column,
                 )
             if ret.args[1] != err_t:
                 raise TypeCheckError(
                     f"'?' propagates an error of type '{type_name(err_t)}', but the "
-                    f"function returns 'Result<_, {type_name(ret.args[1])}>' "
+                    f"{where} returns 'Result<_, {type_name(ret.args[1])}>' "
                     "(there is no error conversion in v0.2)",
                     expr.line, expr.column,
                 )
@@ -2302,7 +2313,7 @@ class Checker:
             if not (isinstance(ret, EnumType) and ret.name == "Option"
                     and len(ret.args) == 1):
                 raise TypeCheckError(
-                    "'?' on an Option requires the enclosing function to return an "
+                    f"'?' on an Option requires the enclosing {where} to return an "
                     "Option", expr.line, expr.column,
                 )
             result_t, succ, fail, fail_payload = ot.args[0], "Some", "None", False

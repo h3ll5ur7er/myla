@@ -101,6 +101,13 @@ fun main() {
 }
 ```
 
+Inside a lambda, `?` returns from the lambda, so it needs the **lambda's** result type, not the enclosing function's: pass the lambda where a function type is expected, or annotate the variable it is bound to.
+
+```myla
+let next: (int) -> Option<int> = (x: int) => Some(half(x)? + 1)   // fine in any function
+let bad = (x: int) => Some(half(x)? + 1)     // error: the lambda's result type isn't known
+```
+
 The checker rewrites `?` into a `match` once the carrier is known, so the backends never see it.
 
 ## Evaluation order

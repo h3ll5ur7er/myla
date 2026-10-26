@@ -185,5 +185,46 @@ class TestEnumInterpreter(unittest.TestCase):
         self.assertEqual(out, "10\n")
 
 
+
+class TestTryInLambdas(unittest.TestCase):
+    """MYLA-72: `?` inside a lambda propagates out of the lambda, so it is
+    checked against the lambda's result type, not the enclosing function's."""
+
+    HALF = ("fun half(x: int) -> Option<int> {\n"
+            "    if x % 2 == 1 { return None }\n    return Some(x / 2)\n}\n")
+
+    def test_annotated_expression_lambda(self):
+        src = self.HALF + (
+            "fun main() {\n"
+            "    let g: (int) -> Option<int> = (x: int) => Some(half(x)? + 100)\n"
+            "    print(match g(4) { Some(v) => v, None => -1 })\n"
+            "    print(match g(3) { Some(v) => v, None => -1 })\n}\n")
+        self.assertEqual(run_src(src), "102\n-1\n")
+
+    def test_expression_lambda_passed_as_an_argument(self):
+        src = self.HALF + (
+            "fun apply(f: (int) -> Option<int>, x: int) -> int {\n"
+            "    return match f(x) { Some(v) => v, None => 0 }\n}\n"
+            "fun main() {\n"
+            "    print(apply((x) => Some(half(x)? * 10), 8))\n}\n")
+        self.assertEqual(run_src(src), "40\n")
+
+    def test_the_enclosing_function_type_no_longer_counts(self):
+        # main returns an Option, but the lambda returns a Result
+        src = self.HALF + (
+            "fun main() -> Option<int> {\n"
+            "    let g: (int) -> Result<int, str> = (x: int) => Ok(half(x)?)\n"
+            "    return None\n}\n")
+        with self.assertRaisesRegex(TypeCheckError, "lambda"):
+            check_src(src)
+
+    def test_a_lambda_of_unknown_result_type_says_so(self):
+        src = self.HALF + (
+            "fun main() {\n"
+            "    let g = (x: int) => Some(half(x)? + 1)\n}\n")
+        with self.assertRaisesRegex(TypeCheckError, "lambda's result type"):
+            check_src(src)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,7 @@
+//~ type error: '?' in a lambda needs the lambda's result type
+fun half(x: int) -> Option<int> {
+    return Some(x / 2)
+}
+fun main() {
+    let g = (x: int) => Some(half(x)? + 1)
+}

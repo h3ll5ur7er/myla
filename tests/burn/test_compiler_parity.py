@@ -882,6 +882,23 @@ PROGRAMS = {
         "    m[2] = len(m) * 100\n"            # the size before the insert
         "    print(m[2])\n}\n"
     ),
+    # MYLA-72: `?` in a lambda is checked against the lambda's result type,
+    # so the enclosing function needn't return an Option
+    "try_in_lambdas_checks_against_the_lambda": (
+        "fun half(x: int) -> Option<int> {\n"
+        "    if x % 2 == 1 { return None }\n    return Some(x / 2)\n}\n"
+        "fun parse(s: str) -> Result<int, str> {\n"
+        "    if s == \"\" { return Err(\"empty\") }\n    return Ok(len(s))\n}\n"
+        "fun apply(f: (int) -> Option<int>, x: int) -> int {\n"
+        "    return match f(x) { Some(v) => v, None => -1 }\n}\n"
+        "#main\nfun main() {\n"
+        "    let g: (int) -> Option<int> = (x: int) => Some(half(x)? + 100)\n"
+        "    print(apply(g, 4))\n    print(apply(g, 3))\n"
+        "    print(apply((x) => Some(half(half(x)?)? * 10), 8))\n"
+        "    let total: (str, str) -> Result<int, str> = (a: str, b: str) => Ok(parse(a)? + parse(b)?)\n"
+        "    print(match total(\"ab\", \"cde\") { Ok(n) => n, Err(e) => -1 })\n"
+        "    print(match total(\"ab\", \"\") { Ok(n) => n, Err(e) => -1 })\n}\n"
+    ),
     # MYLA-29: floats beyond examples/floats.my (also run through the
     # self-hosted compiler)
     "floats_in_depth": (

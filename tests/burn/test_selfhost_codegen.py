@@ -57,7 +57,7 @@ EXCLUDED: set[str] = set()
 # (MYLA-3); a match binding keeps its value when the arm writes to the
 # scrutinee's variable (MYLA-2); destructuring reads boxed enum leaves through
 # their pointer (MYLA-21); closure environments own their captures (MYLA-22);
-# floats (MYLA-29).
+# floats (MYLA-29); `?` in a lambda checked against the lambda (MYLA-72).
 PARITY_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
@@ -71,6 +71,7 @@ PARITY_PROGRAMS = (
     "destructure_boxed_enum_and_list_leaves",
     "closure_environments_own_their_captures",
     "floats_in_depth",
+    "try_in_lambdas_checks_against_the_lambda",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),

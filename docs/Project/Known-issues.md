@@ -10,7 +10,6 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-72]] | `?` in a lambda is checked against the enclosing function's return type | medium |
 | [[MYLA-5]] | `int64` minimum `/ -1` and `% -1` crash natively | medium |
 | [[MYLA-6]] | Float → integer casts of NaN/inf crash the interpreter; out-of-range casts disagree | medium |
 | [[MYLA-7]] | Out-of-range literal patterns (`-1` on `uint8`) match differently | medium |

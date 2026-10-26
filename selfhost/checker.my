@@ -3449,6 +3449,9 @@ impl Checker {
                 ret_t = ret_t
             },
             ExprOrBlock.EB_Expr(ex) => {
+                // a `?` in the body returns from the lambda (MYLA-72)
+                self.cur_ret = want_ret
+                self.has_cur_ret = match want_ret { Some(w) => true, None => false }
                 ret_t = self.infer(ex, want_ret)?
             },
         }
