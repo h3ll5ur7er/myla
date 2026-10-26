@@ -96,6 +96,7 @@ class TokenKind(Enum):
 
     # structural
     NEWLINE = auto()      # statement separator
+    SEMI = auto()         # ; (may stand for a separating NEWLINE, D61)
     EOF = auto()
 
 

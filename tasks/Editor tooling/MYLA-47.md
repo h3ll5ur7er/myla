@@ -8,7 +8,7 @@ labels: [editor, tree-sitter]
 ---
 `editor/tree-sitter-myla/grammar.js` was written for the Rust edition's dialect (moved here from `rust/editor/` when the Rust edition was removed, [[MYLA-70]]) and is much looser than the real parser ([[src/myla/parser.py]], [[Language/Grammar]]).
 
-- [ ] Drop the Rust-dialect constructs: `;` separators, `select`, `actor`, `async`/`await`, `spawn`/`go`, `chan`
+- [ ] Drop the Rust-dialect constructs: required `;` separators, `select`, `actor`, `async`/`await`, `spawn`/`go`, `chan`. Since D61 ([[MYLA-76]]) a `;` is an *optional* separator between statements, top-level declarations and `impl`/trait methods, so keep it there as an alternative to a newline
 - [ ] Add what real Myla has: `as` casts, `?`, ranges in `for` heads, `<<`/`>>`, struct literals, `|>`/`>>`/`_`, f-strings, `#test(args)[expected]` and `#derive`, `pub` and `from … import x as y`
 - [ ] Real patterns (match arms are `_expr`)
 - [ ] Float forms `1e9` and `2f32`, suffixes on hex/binary/octal literals, `'\u{…}'` chars

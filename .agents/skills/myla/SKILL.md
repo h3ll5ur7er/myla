@@ -63,7 +63,7 @@ fun main() {
 | Don't write | Write | Why |
 | --- | --- | --- |
 | `fn f()`, `func f()` | `fun f()` | The keyword is `fun` |
-| `let x = 1;` | `let x = 1` | No semicolons; a newline ends a statement |
+| `let x = 1;` at the end of every line | `let x = 1` | A newline ends a statement. `;` is optional and only separates statements or declarations on one line (`let a = 1; let b = 2`); never inside `( )`, `[ ]`, struct fields or match arms |
 | `let mut x`, `var x` (Swift ok) | `var x = 1` | `let` is immutable (deeply), `var` mutable |
 | `fun f() -> int { x + 1 }` | `{ return x + 1 }` | Function bodies need `return`; there is no implicit tail value |
 | `let v = if c { 1 } else { 2 }` | `let v = match c { true => 1, false => 2 }` | `if` is a statement, `match` is an expression |

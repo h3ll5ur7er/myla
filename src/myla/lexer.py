@@ -53,6 +53,7 @@ _ONE_CHAR_OPS: dict[str, TokenKind] = {
     ".": TokenKind.DOT,
     "#": TokenKind.HASH,
     "?": TokenKind.QUESTION,
+    ";": TokenKind.SEMI,
 }
 
 _STRING_ESCAPES: dict[str, str] = {

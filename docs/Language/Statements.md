@@ -2,6 +2,8 @@
 
 Statement checking is `Checker._check_stmt` ([[src/myla/types.py#L1733-L1863]]).
 
+Statements are separated by line breaks, or by `;` to put several on one line: `let t = a; let u = b` (D61, [[Language/Lexical-structure]]).
+
 [TOC]
 
 ## Bindings

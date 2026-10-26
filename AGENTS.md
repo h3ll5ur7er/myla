@@ -14,7 +14,7 @@ This project plans its work as Genbeya tasks and documents itself in a Genbeya w
 
 ## Writing Myla
 
-Myla resembles Rust and Swift but differs from both in many details (no semicolons, `fun`, `return` required, `E.Variant`, `push(xs, v)`, no `+=`, no references, `float` is `float32`). Before writing or changing any `.my` file, read the `myla` skill (`.agents/skills/myla/SKILL.md`, also in `.claude/skills/myla/`); the full language reference is `docs/Language.md`. Check unfamiliar constructs with `python3 myla.py check file.my`.
+Myla resembles Rust and Swift but differs from both in many details (newlines end statements and `;` is only an optional separator, `fun`, `return` required, `E.Variant`, `push(xs, v)`, no `+=`, no references, `float` is `float32`). Before writing or changing any `.my` file, read the `myla` skill (`.agents/skills/myla/SKILL.md`, also in `.claude/skills/myla/`); the full language reference is `docs/Language.md`. Check unfamiliar constructs with `python3 myla.py check file.my`.
 
 ## Working agreement
 

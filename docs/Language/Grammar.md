@@ -2,7 +2,7 @@
 
 The syntax of Myla 1.0 in EBNF, as [[src/myla/parser.py]] accepts it. The original v0.0 grammar is in [[Archive/grammar]].
 
-Notation: `"x"` terminal, `A B` sequence, `A | B` alternative, `( … )` group, `?` optional, `*` zero or more, `+` one or more. `NL` is a newline token; where the grammar doesn't mention `NL`, newlines aren't allowed (see [[Language/Lexical-structure]] for where the parser skips them).
+Notation: `"x"` terminal, `A B` sequence, `A | B` alternative, `( … )` group, `?` optional, `*` zero or more, `+` one or more. `NL` is a newline token; where the grammar doesn't mention `NL`, newlines aren't allowed (see [[Language/Lexical-structure]] for where the parser skips them). `SEP` is a separator, a newline or a `;` (D61).
 
 [TOC]
 
@@ -25,8 +25,9 @@ FSTRING  = 'f"' ( char | escape | "{{" | "}}" | "{" expression "}" )* '"' ;
 ## Declarations
 
 ```ebnf
-program      = NL* ( declaration terminator )* EOF ;
-terminator   = NL+ | (* before "}" or EOF *) ;
+program      = SEP* ( declaration terminator )* EOF ;
+terminator   = SEP+ | (* before "}" or EOF *) ;
+SEP          = NL | ";" ;
 
 declaration  = attribute* "pub"? decl ;
 decl         = struct_decl | enum_decl | fun_decl | impl_decl | trait_decl
@@ -47,13 +48,13 @@ generics     = "<" generic ( "," generic )* ">" ;
 generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;     (* bound: trait names *)
 type_params  = "<" IDENT ( "," IDENT )* ">" ;             (* no bounds on structs/enums/traits *)
 
-impl_decl    = "impl" generics? type ( "for" type )? "{" NL* ( method NL* )* "}" ;
+impl_decl    = "impl" generics? type ( "for" type )? "{" SEP* ( method SEP* )* "}" ;
              (* with "for": the first type is the trait, possibly with arguments *)
 method       = method_head block ;
 method_head  = "fun" IDENT generics? "(" receiver ( "," param )* ","? ")" ( "->" type )? ;
 receiver     = "self" | "var" "self" ;
 
-trait_decl   = "trait" IDENT type_params? "{" NL* ( method_head NL* )* "}" ;
+trait_decl   = "trait" IDENT type_params? "{" SEP* ( method_head SEP* )* "}" ;
 
 typealias_decl = "typealias" IDENT "=" type ;
 const_decl   = "const" IDENT ":" type "=" expression ;
@@ -80,7 +81,7 @@ prim_type = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
 ## Statements
 
 ```ebnf
-block      = "{" NL* ( statement ( NL+ | (* before "}" *) ) )* "}" ;
+block      = "{" SEP* ( statement ( SEP+ | (* before "}" *) ) )* "}" ;
 statement  = var_decl | if_stmt | while_stmt | for_stmt | return_stmt
            | "break" | "continue" | assign_or_expr ;
 

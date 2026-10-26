@@ -103,6 +103,15 @@ SYNTAX_ERRORS = {
     "binding_name": "fun main() {\n    let (1, 2) = (1, 2)\n}\n",
     "expected_expression": "fun main() {\n    let x = \n}\n",
     "expected_pattern": "fun main() {\n    let x = match 1 {\n        + => 1,\n    }\n}\n",
+    # `;` separates statements and declarations, and nothing else (MYLA-76)
+    "semicolon_in_arguments": "fun main() { f(1; 2) }\n",
+    "semicolon_in_list": "fun main() { let x = [1; 2] }\n",
+    "semicolon_between_fields": "struct S { a: int; b: int }\n",
+    "semicolon_as_expression": "fun main() { let x = ; }\n",
+    "semicolon_between_arms": "fun main() { match 1 { 1 => 2; _ => 3 } }\n",
+    "semicolon_before_else": "fun main() { if true {}; else {} }\n",
+    "statements_without_separator": "fun main() {\n    let x = 1 let y = 2\n}\n",
+    "declarations_without_separator": "const A: int = 1 const B: int = 2\n",
 }
 
 # Integer literals of 2^63 and above (MYLA-73): the canonical AST and token

@@ -13,7 +13,7 @@ pub enum TokenKind {
     LT, GT, BANG, ASSIGN,
     LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
     COMMA, COLON, DOT, HASH, QUESTION,
-    NEWLINE, EOF,
+    NEWLINE, SEMI, EOF,
 }
 
 // A lex or parse error (`kind` is "lex error" or "parse error"), with the
@@ -154,6 +154,7 @@ pub fun kind_name(k: TokenKind) -> str {
         TokenKind.HASH => "HASH",
         TokenKind.QUESTION => "QUESTION",
         TokenKind.NEWLINE => "NEWLINE",
+        TokenKind.SEMI => "SEMI",
         TokenKind.EOF => "EOF",
     }
 }

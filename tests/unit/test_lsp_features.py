@@ -100,6 +100,12 @@ class TestSymbolRanges(unittest.TestCase):
         syms = self.symbols('struct P { a: str }\nfun f() -> P {\n    return P { a: "😀" }\n}\n')
         self.assertEqual(syms["f"].selection_range, rng(1, 4, 5))
 
+    def test_declarations_separated_by_semicolons(self):
+        syms = self.symbols("const A: int = 1; const B: int = A\nfun f() {}; fun g() {}\n")
+        self.assertEqual(syms["A"].selection_range, rng(0, 6, 7))
+        self.assertEqual(syms["B"].selection_range, rng(0, 24, 25))
+        self.assertEqual(syms["g"].selection_range, rng(1, 16, 17))
+
     def test_outline(self):
         source = ("struct P { x: int, y: int }\nenum Sh { Dot, Box(int) }\n"
                   "trait Area {\n    fun area(self) -> int\n}\n"

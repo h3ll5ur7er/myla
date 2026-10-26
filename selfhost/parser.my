@@ -149,11 +149,22 @@ impl Parser {
         }
     }
 
+    // Skip the newlines and `;` between statements or declarations (D61).
+    fun skip_separators(var self) {
+        while self.at_separator() {
+            self.advance()
+        }
+    }
+
+    fun at_separator(self) -> bool {
+        return self.check(TokenKind.NEWLINE) || self.check(TokenKind.SEMI)
+    }
+
     // -- entry point -------------------------------------------------------
 
     fun parse_program(var self) -> Program {
         var decls: [Decl] = []
-        self.skip_newlines()
+        self.skip_separators()
         while !self.at_end() {
             push(decls, self.declaration())
             self.terminate("declaration")
@@ -162,13 +173,13 @@ impl Parser {
     }
 
     fun terminate(var self, what: str) {
-        if self.check(TokenKind.NEWLINE) {
-            self.skip_newlines()
+        if self.at_separator() {
+            self.skip_separators()
         } else if self.check(TokenKind.RBRACE) || self.at_end() {
             return
         } else {
             let tok = self.peek()
-            self.fail_at(tok, format("expected end of {} (newline), found '{}'", what, tok.lexeme))
+            self.fail_at(tok, format("expected end of {} (newline or ';'), found '{}'", what, tok.lexeme))
         }
     }
 
@@ -426,7 +437,7 @@ impl Parser {
             target = self.parse_type()
         }
         self.expect(TokenKind.LBRACE, "'{' to begin impl block")
-        self.skip_newlines()
+        self.skip_separators()
         var methods: [FunData] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
             if !self.check(TokenKind.FUN) {
@@ -434,7 +445,7 @@ impl Parser {
                 self.fail_at(tok, format("expected a method ('fun ...') in impl block, found '{}'", tok.lexeme))
             }
             push(methods, self.method_decl())
-            self.skip_newlines()
+            self.skip_separators()
         }
         self.expect(TokenKind.RBRACE, "'}' to close impl block")
         return self.mk_decl(kw.line, kw.column, DeclKind.ImplDecl(target, methods, tps, trait_name, trait_args))
@@ -445,7 +456,7 @@ impl Parser {
         let name = self.expect(TokenKind.IDENT, "trait name").lexeme
         let tps = self.generics_no_bounds("a trait")
         self.expect(TokenKind.LBRACE, "'{' to begin trait body")
-        self.skip_newlines()
+        self.skip_separators()
         var methods: [FunData] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
             if !self.check(TokenKind.FUN) {
@@ -453,7 +464,7 @@ impl Parser {
                 self.fail_at(tok, format("expected a method signature ('fun ...') in trait body, found '{}'", tok.lexeme))
             }
             push(methods, self.method_sig())
-            self.skip_newlines()
+            self.skip_separators()
         }
         self.expect(TokenKind.RBRACE, "'}' to close trait body")
         return self.mk_decl(kw.line, kw.column, DeclKind.TraitDecl(name, methods, tps, is_pub))
@@ -613,16 +624,16 @@ impl Parser {
     fun block(var self) -> Block {
         let lbrace = self.expect(TokenKind.LBRACE, "'{'")
         var stmts: [Stmt] = []
-        self.skip_newlines()
+        self.skip_separators()
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
             push(stmts, self.statement())
-            if self.check(TokenKind.NEWLINE) {
-                self.skip_newlines()
+            if self.at_separator() {
+                self.skip_separators()
             } else if self.check(TokenKind.RBRACE) {
                 break
             } else {
                 let tok = self.peek()
-                self.fail_at(tok, format("expected newline or '}}', found '{}'", tok.lexeme))
+                self.fail_at(tok, format("expected newline, ';' or '}}', found '{}'", tok.lexeme))
             }
         }
         self.expect(TokenKind.RBRACE, "'}'")
@@ -755,7 +766,7 @@ impl Parser {
 
     fun return_stmt(var self) -> Stmt {
         let kw = self.advance()
-        if self.check(TokenKind.NEWLINE) || self.check(TokenKind.RBRACE) || self.at_end() {
+        if self.at_separator() || self.check(TokenKind.RBRACE) || self.at_end() {
             return self.mk_stmt(kw.line, kw.column, StmtKind.ReturnS(None))
         }
         var value = self.expression()

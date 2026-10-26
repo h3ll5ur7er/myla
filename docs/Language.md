@@ -10,7 +10,7 @@ The reference for Myla as the Python toolchain implements it (version 1.0). The 
 - **Value semantics.** Assignment, arguments and returns copy values: structs, tuples, enums, lists, maps and builders alike. Lists, maps and builders are reference-counted and copy-on-write, so copies are cheap.
 - **Immutable by default.** `let` bindings can't be changed, and neither can anything inside them; `var` allows both.
 - **Mostly statements.** `if` and loops are statements; `match` is an expression, and so are lambdas.
-- **Newlines end statements.** No semicolons. Blocks use braces; indentation doesn't matter.
+- **Newlines end statements.** A `;` may replace that line break to put several statements on one line (D61). Blocks use braces; indentation doesn't matter.
 - **Errors as values.** `Option<T>` and `Result<T, E>` with the `?` operator; no exceptions. `panic`, `assert` and `unreachable` stop the program.
 - **Everything checked before running.** The interpreter and the native backend both run only programs the checker accepted, and must agree on everything they print.
 

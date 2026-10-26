@@ -8,10 +8,24 @@ How source text becomes tokens. The lexer is [[src/myla/lexer.py]]; token kinds 
 
 A program is one or more UTF-8 files with the extension `.my`. A file is a sequence of top-level declarations: `struct`, `enum`, `fun`, `impl`, `trait`, `typealias`, `const` and imports. Statements at the top level are a parse error.
 
-## Whitespace, newlines and comments
+## Whitespace, newlines, semicolons and comments
 
 - Spaces, tabs and carriage returns separate tokens.
 - A **newline ends a statement or declaration**. Runs of blank lines count as one, and leading and trailing newlines are dropped.
+- A **`;`** may stand for that newline (D61): between the statements of a block, between top-level declarations, between the methods of an `impl` or a trait, and after a bare `return`. A run of `;` and newlines is one separator, so a trailing `;` is harmless. Line breaks stay the normal style; `;` is for short code that reads better on one line. Anywhere else, including between call arguments, list elements, struct fields and match arms, `;` is a syntax error.
+
+```myla
+const W: int = 3; const H: int = 4
+
+trait Shape { fun area(self) -> int; fun name(self) -> str }
+
+fun abs(x: int) -> int { if x < 0 { return -x }; return x }
+
+fun main() {
+    let a = abs(W - H); print(a)
+}
+```
+
 - Newlines are skipped in these places only: inside call argument lists, attribute argument lists, list and map literals, struct literals, struct and enum bodies, `impl`/`trait` bodies and between match arms. A binary expression can **not** continue on the next line, and neither can a parenthesised expression or a tuple:
 
 ```myla

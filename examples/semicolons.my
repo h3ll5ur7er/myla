@@ -1,0 +1,34 @@
+// semicolons.my — a `;` may stand for the line break that ends a statement
+// or a declaration (D61), for short code that reads better on one line.
+// A run of `;` and line breaks is one separator; a trailing `;` is harmless.
+
+const W: int = 3; const H: int = 4
+
+struct Size { w: int, h: int }
+
+trait Shape { fun area(self) -> int; fun name(self) -> str }
+
+impl Shape for Size {
+    fun area(self) -> int { return self.w * self.h }; fun name(self) -> str { return "size" }
+}
+
+#test(-2)[2]
+#test(5)[5]
+fun abs(x: int) -> int { if x < 0 { return -x }; return x }
+
+#test(4)[10]
+fun triangle(n: int) -> int { var t = 0; for i in 1..n + 1 { t = t + i }; return t }
+
+// Line breaks and semicolons mix freely.
+#test(3, 4)[(4, 3)]
+fun swap(a: int, b: int) -> (int, int) {
+    let t = a; let u = b
+    return u, t;
+}
+
+fun main() {
+    let s = Size { w: W, h: H }; print(s.area()); print(s.name())
+    print(abs(-7)); print(triangle(5))
+    let (x, y) = swap(1, 2); print(x * 10 + y)
+    let double = (n: int) => { let d = n * 2; return d }; print(double(21))
+}

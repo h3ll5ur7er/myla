@@ -489,6 +489,7 @@ impl Lexer {
         if c == 46 { return TokenKind.DOT }
         if c == 35 { return TokenKind.HASH }
         if c == 63 { return TokenKind.QUESTION }
+        if c == 59 { return TokenKind.SEMI }
         return TokenKind.EOF            // not an operator character
     }
 

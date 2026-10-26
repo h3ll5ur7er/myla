@@ -4,8 +4,9 @@ Recursive descent with a layered expression grammar encoding precedence and
 associativity, mirroring docs/grammar.md §2. Panic-mode error handling: the
 first syntax error raises `ParseError` (docs/architecture.md §3.2).
 
-Newlines (NEWLINE tokens) separate statements and top-level declarations. A few
-notes on the tricky bits:
+Newlines (NEWLINE tokens) separate statements and top-level declarations; a
+`;` may stand for such a newline (D61), and a run of both is one separator. A
+few notes on the tricky bits:
 
 - Struct literals (`Name { ... }`) are only parsed where an expression is
   unambiguously expected. Inside control-flow headers (`if`/`while` conditions,
@@ -71,26 +72,34 @@ class Parser:
         while self._check(T.NEWLINE):
             self._advance()
 
+    def _skip_separators(self) -> None:
+        """Skip the newlines and `;` between statements or declarations."""
+        while self._at_separator():
+            self._advance()
+
+    def _at_separator(self) -> bool:
+        return self._check(T.NEWLINE) or self._check(T.SEMI)
+
     # -- entry point ---------------------------------------------------------
 
     def parse_program(self) -> ast.Program:
         decls: list[ast.Decl] = []
-        self._skip_newlines()
+        self._skip_separators()
         while not self._at_end():
             decls.append(self._declaration())
             self._terminate("declaration")
         return ast.Program(decls)
 
     def _terminate(self, what: str) -> None:
-        """Require a NEWLINE / RBRACE / EOF after a statement or declaration."""
-        if self._check(T.NEWLINE):
-            self._skip_newlines()
+        """Require a separator / RBRACE / EOF after a statement or declaration."""
+        if self._at_separator():
+            self._skip_separators()
         elif self._check(T.RBRACE) or self._at_end():
             return
         else:
             tok = self._peek()
             raise ParseError(
-                f"expected end of {what} (newline), found '{tok.lexeme}'",
+                f"expected end of {what} (newline or ';'), found '{tok.lexeme}'",
                 tok.line, tok.column,
             )
 
@@ -331,7 +340,7 @@ class Parser:
             trait_args = first.args
             target = self._type()
         self._expect(T.LBRACE, "'{' to begin impl block")
-        self._skip_newlines()
+        self._skip_separators()
         methods: list[ast.FunDecl] = []
         while not self._check(T.RBRACE) and not self._at_end():
             if not self._check(T.FUN):
@@ -343,7 +352,7 @@ class Parser:
             methods.append(self._method_decl())
             # a method always ends in `}`, so the next method's `fun` (or the
             # impl's closing `}`) may follow on the same or a later line.
-            self._skip_newlines()
+            self._skip_separators()
         self._expect(T.RBRACE, "'}' to close impl block")
         return ast.ImplDecl(
             target, methods, type_params=type_params,
@@ -356,7 +365,7 @@ class Parser:
         name = self._expect(T.IDENT, "trait name")
         type_params = self._generics_no_bounds("a trait")
         self._expect(T.LBRACE, "'{' to begin trait body")
-        self._skip_newlines()
+        self._skip_separators()
         methods: list[ast.FunDecl] = []
         while not self._check(T.RBRACE) and not self._at_end():
             if not self._check(T.FUN):
@@ -367,7 +376,7 @@ class Parser:
                     tok.line, tok.column,
                 )
             methods.append(self._method_sig())
-            self._skip_newlines()
+            self._skip_separators()
         self._expect(T.RBRACE, "'}' to close trait body")
         return ast.TraitDecl(
             name.value, methods, type_params=type_params
@@ -513,17 +522,17 @@ class Parser:
     def _block(self) -> ast.Block:
         lbrace = self._expect(T.LBRACE, "'{'")
         stmts: list[ast.Stmt] = []
-        self._skip_newlines()
+        self._skip_separators()
         while not self._check(T.RBRACE) and not self._at_end():
             stmts.append(self._statement())
-            if self._check(T.NEWLINE):
-                self._skip_newlines()
+            if self._at_separator():
+                self._skip_separators()
             elif self._check(T.RBRACE):
                 break
             else:
                 tok = self._peek()
                 raise ParseError(
-                    f"expected newline or '}}', found '{tok.lexeme}'", tok.line, tok.column
+                    f"expected newline, ';' or '}}', found '{tok.lexeme}'", tok.line, tok.column
                 )
         self._expect(T.RBRACE, "'}'")
         return ast.Block(stmts).at(lbrace.line, lbrace.column)
@@ -636,7 +645,7 @@ class Parser:
     def _return_stmt(self) -> ast.Return:
         kw = self._advance()  # return
         value = None
-        if not (self._check(T.NEWLINE) or self._check(T.RBRACE) or self._at_end()):
+        if not (self._at_separator() or self._check(T.RBRACE) or self._at_end()):
             value = self._expression()
             # `return a, b` is sugar for returning a tuple `(a, b)`.
             if self._check(T.COMMA):

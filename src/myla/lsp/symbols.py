@@ -228,15 +228,15 @@ def _name_range(doc: _Doc, line_1: int, col_1: int, name: str,
                 last: bool = False) -> SourceRange | None:
     """The 0-based UTF-16 range of the first (with `last`, the last) token
     `name` in a declaration's header: from its start (the keyword, or the name
-    of a field or variant) to `{` or the end of the line. Whole tokens only, so
-    `fun un` never finds the `un` in `fun` (MYLA-48); a type name such as
-    `int32` is a token of its own kind. None when there is none."""
+    of a field or variant) to `{`, `;` or the end of the line. Whole tokens
+    only, so `fun un` never finds the `un` in `fun` (MYLA-48); a type name
+    such as `int32` is a token of its own kind. None when there is none."""
     found = None
     i = bisect.bisect_left(doc.keys, (line_1, col_1))
     for tok in itertools.islice(doc.tokens, i, None):
         if tok.kind is TokenKind.NEWLINE and tok.line == line_1:
             continue                      # the previous line's (it starts this one)
-        if tok.kind in (TokenKind.LBRACE, TokenKind.NEWLINE, TokenKind.EOF):
+        if tok.kind in (TokenKind.LBRACE, TokenKind.NEWLINE, TokenKind.SEMI, TokenKind.EOF):
             break
         if tok.lexeme == name:
             found = tok
