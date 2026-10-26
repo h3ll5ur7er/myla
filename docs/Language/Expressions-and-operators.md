@@ -73,7 +73,7 @@ fun main() {
 
 - `x |> f` is `f(x)`, and `x |> f(a, b)` is `f(x, a, b)`. It is rewritten by the parser (D50).
 - `f >> g` with two one-argument function values is `(x) => g(f(x))`; `f`'s result type must equal `g`'s parameter type. With integer operands `>>` is the shift (D24).
-- A call with `_` arguments is a lambda over the holes, left to right; the other arguments (and a method's receiver) are captured by value. Every parameter must be listed: there is no automatic currying (D51). It works on functions, methods and function values, not on generic functions.
+- A call with `_` arguments is a lambda over the holes, left to right. The other arguments (and a method's receiver) are evaluated once, left to right, when the partial is made, and every call reuses those values (D51, D60): `let p = g(f(1), _)` runs `f(1)` right there, not at each `p(…)`. Every parameter must be listed: there is no automatic currying. It works on functions, methods and function values bound to a name, not on generic functions.
 
 ## The `?` operator
 
@@ -118,4 +118,5 @@ Subexpressions evaluate left to right, in the interpreter and in native code ali
 - A call evaluates the arguments in order; a method call evaluates the receiver first, and a call through a function value evaluates the callee first. `x |> f(y)` is `f(x, y)`, so `x` comes first.
 - Struct, tuple, list and enum literals evaluate their elements in the order written (a struct literal in the order of its fields as written, not as declared). A map literal evaluates each key, then its value.
 - `format` and `f"…"` evaluate their arguments left to right.
+- A partial application `f(a, _)` evaluates its receiver and filled arguments when it is made (D60).
 - An assignment evaluates the value first, then the place: `xs[i] = v` evaluates `v`, then `xs`, then `i`. `push(xs, v)`, `append_byte(sb, b)` and the other writes into a container likewise evaluate the value before they touch the container (MYLA-4).

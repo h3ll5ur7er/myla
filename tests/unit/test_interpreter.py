@@ -87,6 +87,24 @@ class TestFunctions(unittest.TestCase):
         self.assertEqual(run_src(src + "fun main() {\n    print(fact(5))\n}\n"), "120\n")
 
 
+class TestPartialApplication(unittest.TestCase):
+    def test_filled_arguments_are_evaluated_once_when_made(self):
+        # D51, D60 (MYLA-75): callee, receiver and filled arguments run once,
+        # left to right, when the partial is made; a variable is its value then
+        pre = ("struct C { n: int }\nimpl C {\n    fun add(self, a: int, b: int) -> int {\n"
+               "        return self.n + a + b\n    }\n}\n"
+               "fun f(x: int) -> int {\n    print(x)\n    return x\n}\n"
+               "fun c(n: int) -> C {\n    print(n)\n    return C { n: n }\n}\n"
+               "fun g(a: int, b: int, c: int) -> int {\n    return a * 100 + b * 10 + c\n}\n")
+        body = ("let p = g(f(1), _, f(2))\n    print(0)\n    print(p(f(3)))\n    print(p(4))\n"
+                "    let m = c(5).add(f(6), _)\n    print(0)\n    print(m(7))\n    print(m(8))\n"
+                "    var x = 1\n    let r = g(x, _, 3)\n    x = 2\n    print(r(0))")
+        self.assertEqual(run_main(body, pre).split(), [
+            "1", "2", "0", "3", "132", "142",
+            "5", "6", "0", "18", "19",
+            "103"])
+
+
 class TestStructValueSemantics(unittest.TestCase):
     PRE = "struct P {\n    x: int,\n    y: int,\n}\n"
 

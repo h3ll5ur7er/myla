@@ -300,6 +300,14 @@ def _in_range(value: int, t: IntType) -> bool:
     return 0 <= value < (1 << t.width)
 
 
+def _is_literal_expr(expr: ast.Expr) -> bool:
+    """A (possibly negated) scalar or string literal: evaluating it has no
+    effect and reads nothing, so when (or how often) it runs doesn't matter."""
+    if isinstance(expr, ast.Unary) and expr.op == "-":
+        expr = expr.operand
+    return isinstance(expr, (ast.IntLit, ast.FloatLit, ast.BoolLit, ast.StrLit))
+
+
 def _const_int(expr: ast.Expr) -> int | None:
     """A constant integer value for compile-time checks, or None if not constant.
 
@@ -3654,10 +3662,14 @@ class Checker:
         """Desugar a call with `_` holes into a lambda over the holes (X7).
 
         `f(a, _, c, _)` becomes `(h0, h1) => f(a, h0, c, h1)`; the hole
-        parameters take the callee's parameter types at those positions, and the
-        filled arguments are captured by value (they are inlined into the lambda
-        body, which the capture analysis snapshots, D48). Works for free
-        functions, function values, and methods (the receiver is captured)."""
+        parameters take the callee's parameter types at those positions. Works
+        for free functions, function values, and methods.
+
+        The receiver and the filled arguments are evaluated once, left to
+        right, when the partial is made (D51, D60): unless they are literals,
+        they become the arguments of an outer lambda applied on the spot,
+        `((r, t0) => (h0) => r.m(t0, h0))(recv, a)`, whose parameters the
+        inner lambda captures by value (D48)."""
         param_types, _ret_t = self._partial_target(expr, scope)
         if len(expr.args) != len(param_types):
             raise TypeCheckError(
@@ -3666,6 +3678,18 @@ class Checker:
                 f"'_' for each one to leave open (no implicit currying)",
                 expr.line, expr.column,
             )
+        bound_params: list[ast.Param] = []   # the outer lambda's
+        bound_args: list[ast.Expr] = []
+
+        def bind(value: ast.Expr, t: Type, name: str) -> ast.Expr:
+            bound_params.append(ast.Param(name, _type_to_typeexpr(t)).at(value.line, value.column))
+            bound_args.append(value)
+            return ast.Name(name).at(value.line, value.column)
+
+        callee = expr.callee
+        if isinstance(callee, ast.FieldAccess):
+            recv = bind(callee.target, callee.target.resolved_type, "__recv")
+            callee = ast.FieldAccess(recv, callee.field_name).at(callee.line, callee.column)
         lam_params: list[ast.Param] = []
         new_args: list[ast.Expr] = []
         for i, a in enumerate(expr.args):
@@ -3674,11 +3698,16 @@ class Checker:
                 ann = _type_to_typeexpr(param_types[i])
                 lam_params.append(ast.Param(pname, ann).at(a.line, a.column))
                 new_args.append(ast.Name(pname).at(a.line, a.column))
-            else:
+            elif _is_literal_expr(a):
                 new_args.append(a)
-        body = ast.Call(expr.callee, new_args).at(expr.line, expr.column)
-        lam = ast.Lambda(lam_params, body).at(expr.line, expr.column)
-        ft = self._infer_lambda(lam, scope, None)
+            else:
+                new_args.append(bind(a, param_types[i], f"__arg{i}"))
+        body = ast.Call(callee, new_args).at(expr.line, expr.column)
+        lam: ast.Expr = ast.Lambda(lam_params, body).at(expr.line, expr.column)
+        if bound_params:
+            outer = ast.Lambda(bound_params, lam).at(expr.line, expr.column)
+            lam = ast.Call(outer, bound_args).at(expr.line, expr.column)
+        ft = self._expect_value(lam, scope, None)
         expr.desugared = lam
         expr.resolved_type = ft
         return ft

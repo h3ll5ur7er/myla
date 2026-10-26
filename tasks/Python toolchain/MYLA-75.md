@@ -2,7 +2,7 @@
 id: MYLA-75
 title: "Partial application evaluates its filled arguments at every call"
 type: bug
-status: backlog
+status: review
 priority: medium
 labels: [interpreter, native-backend, selfhost, parity, spec]
 ---
@@ -34,6 +34,20 @@ Decide, and record it on [[Project/Decisions]]. Evaluating the filled arguments 
 
 ## Done when
 
-- [ ] The semantics decided and written down (D51 refined if needed)
-- [ ] The Python interpreter, both native backends and the self-hosted interpreter agree
-- [ ] A parity program with side effects in the filled arguments and the receiver
+- [x] The semantics decided and written down (D51 refined if needed)
+- [x] The Python interpreter, both native backends and the self-hosted interpreter agree
+- [x] A parity program with side effects in the filled arguments and the receiver
+
+## How
+
+D60 (refining D51): the receiver and the filled arguments are evaluated once, left to right, when the partial is made, which is what "captured by value" says and what the self-hosted interpreter and code generator already did.
+
+The Python checker's desugaring (`_infer_partial` in [[src/myla/types.py]]) now binds them as the parameters of an outer lambda applied on the spot: `g(f(1), _)` becomes `((__arg0: int) => (__hole0: int) => g(__arg0, __hole0))(f(1))`, and `c(5).add(f(6), _)` binds `__recv` as well. Literals stay inline, and a partial without anything to bind keeps the plain lambda. The interpreter and the native backend run the desugared form, so both changed together; the self-hosted toolchain needed no change. `_is_literal_expr` is shared with the code generator's MYLA-8 shortcut.
+
+Calling partial application on an arbitrary expression (`pick(9)(_, 1)`) is still rejected by both checkers ("requires a function, method, or function value"); a function value has to be bound to a name first.
+
+## Evidence
+
+- `TestPartialApplication` in [[tests/unit/test_interpreter.py]]: before, `0 3 1 2 132 1 2 142 …` (the arguments ran at every call, after the hole's); after, `1 2 0 3 132 142 5 6 0 18 19 103`.
+- Parity program `partial_application_evaluates_its_arguments_once` (filled arguments, receiver, a function value, a variable changed after the partial is made, literals) in [[tests/burn/test_compiler_parity.py]] and the self-hosted `PARITY_PROGRAMS`: the Python native backend, the self-hosted compiler and the self-hosted interpreter all match the interpreter. The partial reference-counting stress test still reclaims its heap.
+- Bootstrap fixed point holds (6,091,753 bytes); unit, integration and burn suites pass.

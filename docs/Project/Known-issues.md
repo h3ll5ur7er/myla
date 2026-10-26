@@ -10,7 +10,6 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-75]] | Partial application evaluates its filled arguments at every call | medium |
 | [[MYLA-9]] | Mangled names of generic instantiations can collide | low |
 | [[MYLA-13]] | `#derive(Eq)` rejects `char` and float fields | low |
 | [[MYLA-14]] | Exhaustiveness rejects nested and `true \| false` matches | low |

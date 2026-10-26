@@ -28,7 +28,7 @@ from .. import ast
 from ..types import (
     BoolType, CharType, Checker, EnumType, FloatType, FuncSig, FuncType, IntType,
     ListType, MapType, StrType, StringBuilderType, StructType, TupleType, Type,
-    type_name, _is_diverging,
+    type_name, _is_diverging, _is_literal_expr as _is_literal,
     _FF_MINK, _FF_MAXK, _FF_POW10_DD, _FF_SPLIT, _FF_BIG, _FF_UP, _FF_DOWN, round_float,
 )
 
@@ -5337,14 +5337,6 @@ def _collect_bindings(pat, into: dict) -> None:
 
 def _const_str(literal) -> str:
     return literal.value
-
-
-def _is_literal(expr: ast.Expr) -> bool:
-    """Whether `expr` is a (possibly negated) scalar or string literal: it has
-    no effects and reads no state, so when it is evaluated doesn't matter."""
-    if isinstance(expr, ast.Unary) and expr.op == "-":
-        expr = expr.operand
-    return isinstance(expr, (ast.IntLit, ast.FloatLit, ast.BoolLit, ast.StrLit))
 
 
 def _const_scalar(literal) -> int:
