@@ -20,7 +20,7 @@ The reference implementation. Most problems are places where the native backend 
 | Task | Problem | Priority |
 | --- | --- | --- |
 | [[MYLA-74]] | The Myla interpreter copies containers on every update (quadratic loops) | low |
-| [[MYLA-33]], [[MYLA-34]] | Latent issues, dead code | low |
+| [[MYLA-33]] | Latent issues | low |
 
 Also by design (from the earlier known-issues list in [[Archive/known_issues]]): x86-64 Linux is the only target (D2), and the stdlib root is passed explicitly.
 
@@ -32,5 +32,4 @@ No open issues. The tree-sitter grammar ([[MYLA-47]]) and the Python language se
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-57]] | `examples/playground.my` is a scratch file pinned by the tests | low |
 | [[MYLA-58]] | pytest vs unittest; the slow burn suite | low |

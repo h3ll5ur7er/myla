@@ -6368,18 +6368,6 @@ fun is_map_t(t: Type) -> bool { return match t { Type.TMap(k, v) => true, _ => f
 fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => false } }
 fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
 
-// A place expression denotes storage that already owns its value, so moving it
-// into a new owning location requires a value-semantics clone (lists/maps).
-fun is_place(e: Expr) -> bool {
-    return match e.kind {
-        ExprKind.Name(n) => true,
-        ExprKind.GetField(t, f) => true,
-        ExprKind.Index(t, i) => true,
-        ExprKind.TupleIndex(t, i) => true,
-        _ => false,
-    }
-}
-
 // The variable a place (`x`, `x.f`, `x[i].g`) starts from, or "" when `e` is
 // not a place.
 fun place_root(e: Expr) -> str {

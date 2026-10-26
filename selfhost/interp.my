@@ -36,9 +36,7 @@ pub enum Value {
 }
 impl Value {
     fun to_string(self) -> str {
-        var sb = StringBuilder()
         return match self {
-            
             VInt(i) => f"VInt({i})"
             VFloat(f) => f"VFloat({f})"
             VBool(b) => f"VBool({b})"
@@ -1641,7 +1639,6 @@ fun i_args_have_hole(args: [Expr]) -> bool {
     return false
 }
 
-fun str_concat(a: str, b: str) -> str { return a + b }
 
 fun is_cmp_op(op: str) -> bool {
     return op == "<" || op == "<=" || op == ">" || op == ">="

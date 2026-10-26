@@ -684,7 +684,7 @@ pub struct Binding { ty: Type, mutable: bool }
 pub struct Frame { names: [str], binds: [Binding] }
 
 // a checked match-arm body value (with its source node for re-inference)
-pub struct MatchVal { ty: Type, node: Option<Expr>, has_node: bool }
+pub struct MatchVal { ty: Type, node: Option<Expr> }
 pub enum ArmBody {
     ABDiverge,
     ABValue(Option<Type>, Option<Expr>),
@@ -722,7 +722,6 @@ pub struct Checker {
     cur_ret: Option<Type>,
     has_cur_ret: bool,
     loop_depth: int32,
-    try_counter: int32,
     frames: [Frame],
     lambda_infer_active: bool,
     lambda_depth: int32,            // lambdas being checked (`?` names "lambda" or "function")
@@ -740,7 +739,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         impl_decls: [], traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
-        cur_ret: None, has_cur_ret: false, loop_depth: 0, try_counter: 0,
+        cur_ret: None, has_cur_ret: false, loop_depth: 0,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
         resolved: [:],
     }
@@ -2198,7 +2197,7 @@ impl Checker {
                 ArmBody.ABDiverge => {},
                 ArmBody.ABValue(ot, node) => {
                     let t = match ot { Some(x) => x, None => { return Err(terr(e.line, e.col, "this match is used as a value, so every arm must produce one")) } }
-                    push(vals, MatchVal { ty: t, node: node, has_node: match node { Some(x) => true, None => false } })
+                    push(vals, MatchVal { ty: t, node: node })
                 },
             }
         }
@@ -2700,7 +2699,7 @@ impl Checker {
                     if self.lambda_infer_active {
                         let vt = self.expect_value(ve, None)?
                         // positioned at the `return`, where Python reports a mismatch
-                        push(self.lambda_infer, MatchVal { ty: vt, node: Some(Expr { id: ve.id, line: s.line, col: s.col, kind: ve.kind }), has_node: true })
+                        push(self.lambda_infer, MatchVal { ty: vt, node: Some(Expr { id: ve.id, line: s.line, col: s.col, kind: ve.kind }) })
                     } else {
                         return Err(terr(s.line, s.col, "cannot return a value from a function with no return type"))
                     }
@@ -3781,7 +3780,6 @@ impl Checker {
                         }
                     },
                 }
-                ret_t = ret_t
             },
             ExprOrBlock.EB_Expr(ex) => {
                 // a `?` in the body returns from the lambda (MYLA-72)

@@ -1,3 +1,9 @@
+// traits_on_builtins.my — traits implemented for built-in types (D45): a
+// generic trait on `int32`, a trait that turns an `int` into an enum, enum
+// payload patterns with a literal (`ParseError(42)`), and an entry point that
+// isn't called `main` (`#main`).
+
+// A generic trait, implemented at most once per type (D55).
 trait Garbage<T> {
     fun combine_with_seven(self) -> T
 }
@@ -28,17 +34,19 @@ enum ErrorCode {
 }
 
 impl ErrorCode {
-    fun resolve(var self) -> ErrorCode {
+    // Every error resolves, eventually.
+    fun resolve(self) -> ErrorCode {
         return ErrorCode.Success
     }
 }
 
+// Methods on a literal: `418.parse()`.
 impl Parsable<ErrorCode> for int {
     fun parse(self) -> ErrorCode {
         return match self {
             200 => ErrorCode.Success,
             401 => ErrorCode.Unauthorized,
-404 => ErrorCode.NotFound,
+            404 => ErrorCode.NotFound,
             418 => ErrorCode.ImATeapot,
             500 => ErrorCode.InternalServerError,
             _ => ErrorCode.ParseError(self),
@@ -54,25 +62,24 @@ impl Describe for ErrorCode {
             ErrorCode.NotFound => "Not Found",
             ErrorCode.ImATeapot => "I'm a teapot",
             ErrorCode.InternalServerError => "Internal Server Error",
-            ErrorCode.ParseError(42) => f"This is not the error you are looking for. It is the answer to life, the universe, and everything.",
+            ErrorCode.ParseError(42) => "This is not the error you are looking for. It is the answer to life, the universe, and everything.",
             ErrorCode.ParseError(code) => f"This is not the error you are looking for. It is {code}",
         }
     }
 }
 
+// The entry point is the function marked `#main`, whatever its name.
 #main
 fun someentry() {
-    let y: int32= 7
+    let y: int32= 7                 // `>=` closing type arguments splits (MYLA-15)
     print(y.combine_with_seven())
     let x: int32 = 6
     print(x.combine_with_seven())
     print(418.parse().describe())
     print(42.parse().describe())
     print(13.parse().describe())
-    var z: int = 15
-    var zE = z.parse()
-    var zD = zE.describe()
-    print(zD)
-    var zR = zE.resolve()
-    print(zR.describe())
+    let z: int = 15
+    let code = z.parse()
+    print(code.describe())
+    print(code.resolve().describe())
 }
