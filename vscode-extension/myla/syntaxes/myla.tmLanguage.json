@@ -3,19 +3,45 @@
   "name": "Myla",
   "scopeName": "source.myla",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#attributes" },
-    { "include": "#strings" },
-    { "include": "#chars" },
-    { "include": "#numbers" },
-    { "include": "#declarations" },
-    { "include": "#types" },
-    { "include": "#constants" },
-    { "include": "#keywords" },
-    { "include": "#operators" },
-    { "include": "#function-calls" },
-    { "include": "#fields" },
-    { "include": "#punctuation" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#attributes"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#chars"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#function-calls"
+    },
+    {
+      "include": "#fields"
+    },
+    {
+      "include": "#punctuation"
+    }
   ],
   "repository": {
     "comments": {
@@ -37,17 +63,33 @@
           "name": "meta.annotation.myla",
           "begin": "(#)([A-Za-z_][A-Za-z0-9_]*)",
           "beginCaptures": {
-            "1": { "name": "punctuation.definition.annotation.myla" },
-            "2": { "name": "entity.name.function.attribute.myla" }
+            "1": {
+              "name": "punctuation.definition.annotation.myla"
+            },
+            "2": {
+              "name": "entity.name.function.attribute.myla"
+            }
           },
-          "end": "(?=$|\\{|fun\\b|struct\\b|enum\\b|trait\\b|impl\\b|actor\\b|typealias\\b|const\\b|import\\b|from\\b)",
+          "end": "(?=$|\\{|fun\\b|struct\\b|enum\\b|trait\\b|impl\\b|typealias\\b|const\\b|import\\b|from\\b)",
           "patterns": [
-            { "include": "#strings" },
-            { "include": "#chars" },
-            { "include": "#numbers" },
-            { "include": "#constants" },
-            { "include": "#operators" },
-            { "include": "#punctuation" }
+            {
+              "include": "#strings"
+            },
+            {
+              "include": "#chars"
+            },
+            {
+              "include": "#numbers"
+            },
+            {
+              "include": "#constants"
+            },
+            {
+              "include": "#operators"
+            },
+            {
+              "include": "#punctuation"
+            }
           ]
         }
       ]
@@ -58,28 +100,42 @@
           "name": "string.quoted.double.fstring.myla",
           "begin": "f\"",
           "beginCaptures": {
-            "0": { "name": "punctuation.definition.string.begin.myla" }
+            "0": {
+              "name": "punctuation.definition.string.begin.myla"
+            }
           },
           "end": "\"",
           "endCaptures": {
-            "0": { "name": "punctuation.definition.string.end.myla" }
+            "0": {
+              "name": "punctuation.definition.string.end.myla"
+            }
           },
           "patterns": [
-            { "name": "constant.character.escape.myla", "match": "\\\\." }
+            {
+              "name": "constant.character.escape.myla",
+              "match": "\\\\."
+            }
           ]
         },
         {
           "name": "string.quoted.double.myla",
           "begin": "\"",
           "beginCaptures": {
-            "0": { "name": "punctuation.definition.string.begin.myla" }
+            "0": {
+              "name": "punctuation.definition.string.begin.myla"
+            }
           },
           "end": "\"",
           "endCaptures": {
-            "0": { "name": "punctuation.definition.string.end.myla" }
+            "0": {
+              "name": "punctuation.definition.string.end.myla"
+            }
           },
           "patterns": [
-            { "name": "constant.character.escape.myla", "match": "\\\\." }
+            {
+              "name": "constant.character.escape.myla",
+              "match": "\\\\."
+            }
           ]
         }
       ]
@@ -88,7 +144,7 @@
       "patterns": [
         {
           "name": "string.quoted.single.char.myla",
-          "match": "'([^'\\\\]|\\\\.)'"
+          "match": "'([^'\\\\]|\\\\u\\{[0-9a-fA-F]+\\}|\\\\.)'"
         }
       ]
     },
@@ -96,23 +152,23 @@
       "patterns": [
         {
           "name": "constant.numeric.float.myla",
-          "match": "\\b[0-9][0-9_]*\\.[0-9_]+([eE][+-]?[0-9_]+)?(f32|f64)?\\b"
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*(?:[eE][+-]?[0-9][0-9_]*)?|[eE][+-]?[0-9][0-9_]*)(?:f32|f64)?\\b|\\b[0-9][0-9_]*(?:f32|f64)\\b"
         },
         {
           "name": "constant.numeric.integer.hexadecimal.myla",
-          "match": "\\b0x[0-9a-fA-F_]+\\b"
+          "match": "\\b0x[0-9a-fA-F_]+(?:[iu](?:8|16|32|64))?\\b"
         },
         {
           "name": "constant.numeric.integer.binary.myla",
-          "match": "\\b0b[01_]+\\b"
+          "match": "\\b0b[01_]+(?:[iu](?:8|16|32|64))?\\b"
         },
         {
           "name": "constant.numeric.integer.octal.myla",
-          "match": "\\b0o[0-7_]+\\b"
+          "match": "\\b0o[0-7_]+(?:[iu](?:8|16|32|64))?\\b"
         },
         {
           "name": "constant.numeric.integer.myla",
-          "match": "\\b[0-9][0-9_]*([iu](8|16|32|64))?\\b"
+          "match": "\\b[0-9][0-9_]*(?:[iu](?:8|16|32|64))?\\b"
         }
       ]
     },
@@ -120,66 +176,83 @@
       "patterns": [
         {
           "name": "meta.function.myla",
-          "match": "\\b(async\\s+)?(fun)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "\\b(fun)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "storage.modifier.async.myla" },
-            "2": { "name": "storage.type.function.myla" },
-            "3": { "name": "entity.name.function.myla" }
+            "1": {
+              "name": "storage.type.function.myla"
+            },
+            "2": {
+              "name": "entity.name.function.myla"
+            }
           }
         },
         {
           "name": "meta.struct.myla",
           "match": "\\b(struct)\\s+([A-Z_a-z][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "storage.type.struct.myla" },
-            "2": { "name": "entity.name.type.struct.myla" }
+            "1": {
+              "name": "storage.type.struct.myla"
+            },
+            "2": {
+              "name": "entity.name.type.struct.myla"
+            }
           }
         },
         {
           "name": "meta.enum.myla",
           "match": "\\b(enum)\\s+([A-Z_a-z][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "storage.type.enum.myla" },
-            "2": { "name": "entity.name.type.enum.myla" }
+            "1": {
+              "name": "storage.type.enum.myla"
+            },
+            "2": {
+              "name": "entity.name.type.enum.myla"
+            }
           }
         },
         {
           "name": "meta.trait.myla",
           "match": "\\b(trait)\\s+([A-Z_a-z][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "storage.type.trait.myla" },
-            "2": { "name": "entity.name.type.trait.myla" }
-          }
-        },
-        {
-          "name": "meta.actor.myla",
-          "match": "\\b(actor)\\s+([A-Z_a-z][A-Za-z0-9_]*)",
-          "captures": {
-            "1": { "name": "storage.type.actor.myla" },
-            "2": { "name": "entity.name.type.actor.myla" }
+            "1": {
+              "name": "storage.type.trait.myla"
+            },
+            "2": {
+              "name": "entity.name.type.trait.myla"
+            }
           }
         },
         {
           "name": "meta.typealias.myla",
           "match": "\\b(typealias)\\s+([A-Z_a-z][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "storage.type.alias.myla" },
-            "2": { "name": "entity.name.type.alias.myla" }
+            "1": {
+              "name": "storage.type.alias.myla"
+            },
+            "2": {
+              "name": "entity.name.type.alias.myla"
+            }
           }
         },
         {
           "name": "meta.impl.myla",
           "match": "\\b(impl)\\b",
           "captures": {
-            "1": { "name": "storage.type.impl.myla" }
+            "1": {
+              "name": "storage.type.impl.myla"
+            }
           }
         },
         {
           "name": "meta.const.myla",
           "match": "\\b(const)\\s+([A-Z_a-z][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "storage.modifier.const.myla" },
-            "2": { "name": "variable.other.constant.myla" }
+            "1": {
+              "name": "storage.modifier.const.myla"
+            },
+            "2": {
+              "name": "variable.other.constant.myla"
+            }
           }
         }
       ]
@@ -188,11 +261,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.myla",
-          "match": "\\b(int|int8|int16|int32|int64|uint8|uint16|uint32|uint64|float|f32|f64|bool|str|char|void)\\b"
-        },
-        {
-          "name": "support.type.channel.myla",
-          "match": "\\bchan\\b"
+          "match": "\\b(int|int8|int16|int32|int64|uint8|uint16|uint32|uint64|float|float32|float64|bool|str|char)\\b"
         },
         {
           "name": "entity.name.type.myla",
@@ -241,10 +310,6 @@
         {
           "name": "keyword.control.import.myla",
           "match": "\\b(import|from|as)\\b"
-        },
-        {
-          "name": "keyword.control.concurrent.myla",
-          "match": "\\b(spawn|go|await)\\b"
         }
       ]
     },
@@ -253,6 +318,10 @@
         {
           "name": "keyword.operator.pipeline.myla",
           "match": "\\|>|>>"
+        },
+        {
+          "name": "keyword.operator.shift.myla",
+          "match": "<<"
         },
         {
           "name": "storage.type.function.arrow.myla",
@@ -277,6 +346,10 @@
         {
           "name": "keyword.operator.arithmetic.myla",
           "match": "\\+|-|\\*|/|%"
+        },
+        {
+          "name": "keyword.operator.try.myla",
+          "match": "\\?"
         }
       ]
     },
@@ -298,19 +371,43 @@
           "name": "variable.other.field.myla",
           "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)",
           "captures": {
-            "0": { "name": "variable.other.field.myla" }
+            "0": {
+              "name": "variable.other.field.myla"
+            }
           }
         }
       ]
     },
     "punctuation": {
       "patterns": [
-        { "name": "punctuation.separator.comma.myla", "match": "," },
-        { "name": "punctuation.separator.colon.myla", "match": ":" },
-        { "name": "punctuation.accessor.dot.myla", "match": "\\." },
-        { "name": "punctuation.definition.block.myla", "match": "[{}]" },
-        { "name": "punctuation.definition.parameters.myla", "match": "[()]" },
-        { "name": "punctuation.definition.brackets.myla", "match": "[\\[\\]]" }
+        {
+          "name": "punctuation.terminator.statement.myla",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.comma.myla",
+          "match": ","
+        },
+        {
+          "name": "punctuation.separator.colon.myla",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.accessor.dot.myla",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.definition.block.myla",
+          "match": "[{}]"
+        },
+        {
+          "name": "punctuation.definition.parameters.myla",
+          "match": "[()]"
+        },
+        {
+          "name": "punctuation.definition.brackets.myla",
+          "match": "[\\[\\]]"
+        }
       ]
     }
   }
