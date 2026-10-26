@@ -62,13 +62,13 @@ There are no global variables.
 
 ## Runtime errors
 
+Both report on stderr and exit 1. The interpreter gives the message with its values and the source position; a native binary prints `runtime error: <message>` without the values or position ([[MYLA-17]]):
+
 | Error | Interpreter | Native |
 | --- | --- | --- |
-| Division or remainder by zero | message and position, exit 1 | exit 1, no message |
-| List or string index out of bounds | message, exit 1 | exit 1, no message |
-| Missing map key (`m[k]`) | message, exit 1 | exit 1, no message |
-| `pop` on an empty list | message, exit 1 | exit 1, no message |
-| `assert`, `panic`, `unreachable` | message, exit 1 | message on stderr, exit 1 |
-| Heap arena exhausted (1 GiB) | — | exit 1, no message |
-
-Silent native traps are tracked in [[MYLA-17]].
+| Division or remainder by zero | `division by zero` / `modulo by zero` | the same |
+| List or string index out of bounds | `list index 5 out of bounds (len 2)` | `index out of bounds` |
+| Missing map key (`m[k]`) | `map key 'b' not found` | `map key not found` |
+| `pop` on an empty list | `pop from an empty list` | the same |
+| `assert`, `panic`, `unreachable` | the message | the same |
+| Heap arena exhausted | — | `out of memory` |

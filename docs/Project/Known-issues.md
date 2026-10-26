@@ -11,7 +11,6 @@ The reference implementation. Most problems are places where the native backend 
 | Task | Problem | Priority |
 | --- | --- | --- |
 | [[MYLA-14]] | Exhaustiveness rejects nested and `true \| false` matches | low |
-| [[MYLA-17]] | Native runtime: short writes, silent traps | low |
 | [[MYLA-18]] | Strings are never freed | low |
 
 ## Self-hosted compiler

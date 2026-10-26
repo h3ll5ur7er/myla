@@ -64,7 +64,7 @@ A capturing lambda allocates an environment cell: word 0 holds a drop function (
 
 | Group | Helpers |
 | --- | --- |
-| Process | `_start`, `__trap` (exit 1), `__panic` (message to stderr, exit 1) |
+| Process | `_start`, `__panic` (message to stderr, exit 1), the runtime-error entries `__trap_index`, `__trap_key`, `__trap_pop`, `__trap_div`, `__trap_mod`, `__trap_match`, `__trap_oom` (each writes `runtime error: <message>` through `__panic`, [[MYLA-17]]), `__write_all` (loops over short writes, retries `EINTR`/`EAGAIN`; every output goes through it) |
 | Printing | `__print_int`, `__print_uint`, `__print_bool`, `__print_str`, `__print_nl`, `__float_to_str`, `__char_to_str` |
 | Strings | `__str_eq`, `__str_concat`, `__int_to_str`, `__uint_to_str`, `__bool_to_str`, `__str_chars` (UTF-8 decode; U+FFFD for each byte outside a well-formed sequence) |
 | Heap | `__heap_init`, `__alloc`, `__free`, `__func_retain`, `__func_drop` |
@@ -85,7 +85,7 @@ System calls used: read 0, write 1, open 2, close 3, fstat 5, poll 7, mmap 9, pi
 
 ## Integer details
 
-- `/` and `%` test the divisor for zero (`jz __trap`), then use `idivq` (signed, after `cqo`) or `divq`. A signed divisor of -1 skips `idivq` (which faults on the minimum): `/` negates and `%` gives 0, so the result wraps ([[MYLA-5]]).
+- `/` and `%` test the divisor for zero (`jz __trap_div` / `__trap_mod`), then use `idivq` (signed, after `cqo`) or `divq`. A signed divisor of -1 skips `idivq` (which faults on the minimum): `/` negates and `%` gives 0, so the result wraps ([[MYLA-5]]).
 - Shift counts are masked to `width - 1` before `shl`/`sar`/`shr`.
 - Comparisons pick signed (`setl`…) or unsigned (`setb`…) instructions from the left operand's type; `char` compares unsigned.
 - Float → integer casts saturate (D59): NaN (`ucomisd` sets the parity flag) gives 0, inputs at or beyond the target's bounds give its minimum or maximum, the rest go through `cvttsd2si`; a `uint64` from 2^63 up converts `x - 2^63` and sets the top bit. `uint64` → float handles the high bit with a halving trick.

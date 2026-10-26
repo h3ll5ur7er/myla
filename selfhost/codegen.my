@@ -964,6 +964,13 @@ impl CodeGen {
         push(out, ".Lstr_true:\n\t.quad 4\n\t.ascii \"true\"")
         push(out, ".Lstr_false:\n\t.quad 5\n\t.ascii \"false\"")
         push(out, ".Lstr_minus:\n\t.quad 1\n\t.ascii \"-\"")
+        let messages = trap_messages()
+        var ti = 0
+        for label in trap_labels() {
+            let text = "runtime error: " + messages[ti]
+            push(out, format(".Lmsg{}:\n\t.quad {}\n\t.ascii \"{}\"", label, len(text), text))
+            ti = ti + 1
+        }
         for line in self.rodata { push(out, line) }
         if self.uses_float { for chunk in self.float_rodata_text() { push(out, chunk) } }
         push(out, "")
@@ -1796,7 +1803,7 @@ impl CodeGen {
             self.wrap(rt)
         } else if op == "/" || op == "%" {
             self.emit("testq %rcx, %rcx")
-            self.emit("jz __trap")
+            if op == "/" { self.emit("jz __trap_div") } else { self.emit("jz __trap_mod") }
             if int_signed(lt) {
                 // x / -1 is -x and x % -1 is 0; idivq would trap on the
                 // minimum (its quotient overflows), the language wraps (MYLA-5)
@@ -2307,7 +2314,7 @@ impl CodeGen {
         self.emit("popq %rax")
         self.emit("movq (%rax), %rdx")
         self.emit("cmpq %rdx, %rcx")
-        self.emit("jae __trap")
+        self.emit("jae __trap_index")
         if is_str_t(bt) {
             self.emit("leaq 8(%rax), %rax")
             self.emit("addq %rcx, %rax")
@@ -2451,7 +2458,7 @@ impl CodeGen {
         self.emit("popq %rcx")
         self.emit("movq (%rcx), %rdx")
         self.emit("cmpq %rdx, %rax")
-        self.emit("jae __trap")
+        self.emit("jae __trap_index")
         self.emit(format("imulq ${}, %rax", stride))
         self.emit("leaq 16(%rcx,%rax), %rax")
     }
@@ -2469,7 +2476,7 @@ impl CodeGen {
         self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
         self.emit("call __map_lookup")
         self.emit("testq %rax, %rax")
-        self.emit("jz __trap")
+        self.emit("jz __trap_key")
         self.emit("addq $16, %rax")
     }
 
@@ -2573,7 +2580,7 @@ impl CodeGen {
         self.mut_container_cell(holder)        // unique cell -> rax
         self.emit("movq (%rax), %rcx")         // len
         self.emit("testq %rcx, %rcx")
-        self.emit("jz __trap")
+        self.emit("jz __trap_pop")
         self.emit("decq %rcx")
         self.emit("movq %rcx, (%rax)")         // len -= 1
         self.emit(format("imulq ${}, %rcx", stride))
@@ -2680,7 +2687,7 @@ impl CodeGen {
         self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
         self.emit("call __map_lookup")
         self.emit("testq %rax, %rax")
-        self.emit("jz __trap")
+        self.emit("jz __trap_key")
         self.emit("addq $16, %rax")
     }
 
@@ -2921,7 +2928,7 @@ impl CodeGen {
             self.scopes = drop_last(self.scopes)
             self.emit(format("{}:", arm_fail))
         }
-        self.emit("jmp __trap")
+        self.emit("jmp __trap_match")
         self.emit(format("{}:", end))
         self.drop_scopes = drop_last(self.drop_scopes)
         if owns_copy { self.drop_value("rbp", root, sst) }
@@ -4031,24 +4038,46 @@ impl CodeGen {
         self.raw("\txorq %rdi, %rdi")
         self.raw("\tsyscall")
         self.raw("")
-        self.raw("__trap:")
-        self.raw("\tmovq $60, %rax")
-        self.raw("\tmovq $1, %rdi")
+        // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
+        // (MYLA-17); the message is the interpreter's, without the values.
+        for label in trap_labels() {
+            self.raw(format("{}:", label))
+            self.raw(format("\tleaq .Lmsg{}(%rip), %rdi", label))
+            self.raw("\tjmp __panic")
+        }
+        self.raw("")
+        // __write_all: write rdx bytes at rsi to fd rdi, however many write
+        // calls it takes: a short write continues, EINTR and EAGAIN (a full
+        // non-blocking pipe) retry, another error gives up (MYLA-17).
+        self.raw("__write_all:")
+        self.raw(".Lwa_loop:")
+        self.raw("\ttestq %rdx, %rdx")
+        self.raw("\tjz .Lwa_done")
+        self.raw("\tmovq $1, %rax")
         self.raw("\tsyscall")
+        self.raw("\tcmpq $-4, %rax")
+        self.raw("\tje .Lwa_loop")
+        self.raw("\tcmpq $-11, %rax")
+        self.raw("\tje .Lwa_loop")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lwa_done")
+        self.raw("\taddq %rax, %rsi")
+        self.raw("\tsubq %rax, %rdx")
+        self.raw("\tjmp .Lwa_loop")
+        self.raw(".Lwa_done:")
+        self.raw("\tret")
         self.raw("")
         self.raw("__panic:")
         self.raw("\tmovq (%rdi), %rdx")
         self.raw("\tleaq 8(%rdi), %rsi")
-        self.raw("\tmovq $1, %rax")
         self.raw("\tmovq $2, %rdi")
-        self.raw("\tsyscall")
+        self.raw("\tcall __write_all")
         self.raw("\tsubq $16, %rsp")
         self.raw("\tmovb $10, (%rsp)")
-        self.raw("\tmovq $1, %rax")
         self.raw("\tmovq $2, %rdi")
         self.raw("\tmovq %rsp, %rsi")
         self.raw("\tmovq $1, %rdx")
-        self.raw("\tsyscall")
+        self.raw("\tcall __write_all")
         self.raw("\taddq $16, %rsp")
         self.raw("\tmovq $60, %rax")
         self.raw("\tmovq $1, %rdi")
@@ -4057,22 +4086,20 @@ impl CodeGen {
         self.raw("__print_nl:")
         self.raw("\tsubq $16, %rsp")
         self.raw("\tmovb $10, (%rsp)")
-        self.raw("\tmovq $1, %rax")
         self.raw("\tmovq $1, %rdi")
         self.raw("\tmovq %rsp, %rsi")
         self.raw("\tmovq $1, %rdx")
-        self.raw("\tsyscall")
+        self.raw("\tcall __write_all")
         self.raw("\taddq $16, %rsp")
         self.raw("\tret")
         self.raw("")
         self.raw("__print_minus:")
         self.raw("\tsubq $16, %rsp")
         self.raw("\tmovb $45, (%rsp)")
-        self.raw("\tmovq $1, %rax")
         self.raw("\tmovq $1, %rdi")
         self.raw("\tmovq %rsp, %rsi")
         self.raw("\tmovq $1, %rdx")
-        self.raw("\tsyscall")
+        self.raw("\tcall __write_all")
         self.raw("\taddq $16, %rsp")
         self.raw("\tret")
         self.raw("")
@@ -4101,9 +4128,8 @@ impl CodeGen {
         self.raw("\tincq %rsi")
         self.raw("\tmovq %rbp, %rdx")
         self.raw("\tsubq %rsi, %rdx")
-        self.raw("\tmovq $1, %rax")
         self.raw("\tmovq $1, %rdi")
-        self.raw("\tsyscall")
+        self.raw("\tcall __write_all")
         self.raw("\tcall __print_nl")
         self.raw("\tleave")
         self.raw("\tret")
@@ -4132,18 +4158,16 @@ impl CodeGen {
         self.raw("\tleaq .Lbool_false(%rip), %rsi")
         self.raw("\tmovq $5, %rdx")
         self.raw(".Lpb_write:")
-        self.raw("\tmovq $1, %rax")
         self.raw("\tmovq $1, %rdi")
-        self.raw("\tsyscall")
+        self.raw("\tcall __write_all")
         self.raw("\tcall __print_nl")
         self.raw("\tret")
         self.raw("")
         self.raw("__print_str:")
         self.raw("\tmovq (%rdi), %rdx")
         self.raw("\tleaq 8(%rdi), %rsi")
-        self.raw("\tmovq $1, %rax")
         self.raw("\tmovq $1, %rdi")
-        self.raw("\tsyscall")
+        self.raw("\tcall __write_all")
         self.raw("\tcall __print_nl")
         self.raw("\tret")
         self.raw("")
@@ -4291,7 +4315,7 @@ impl CodeGen {
         self.raw("\txorq %r9, %r9")
         self.raw("\tsyscall")
         self.raw("\tcmpq $-4096, %rax")
-        self.raw("\tja __trap")
+        self.raw("\tja __trap_oom")
         self.raw("\tmovq %rax, __heap_ptr(%rip)")
         self.raw("\tmovabsq $4294967296, %rcx")
         self.raw("\taddq %rcx, %rax")
@@ -4337,7 +4361,7 @@ impl CodeGen {
         self.raw("\tmovq __heap_ptr(%rip), %rax")
         self.raw("\tleaq 16(%rax,%rdi), %rcx")
         self.raw("\tcmpq __heap_end(%rip), %rcx")
-        self.raw("\tja __trap")
+        self.raw("\tja __trap_oom")
         self.raw("\tmovq %rcx, __heap_ptr(%rip)")
         self.raw("\tmovq %rdi, (%rax)")
         self.raw("\tmovq $1, 8(%rax)")
@@ -4407,9 +4431,7 @@ impl CodeGen {
         self.raw("__write:")
         self.raw("\tmovq (%rsi), %rdx")
         self.raw("\tleaq 8(%rsi), %rsi")
-        self.raw("\tmovq $1, %rax")
-        self.raw("\tsyscall")
-        self.raw("\tret")
+        self.raw("\tjmp __write_all")
         self.raw("")
         self.raw("__args:")
         self.raw("\tpushq %rbp")
@@ -5351,9 +5373,8 @@ impl CodeGen {
         self.raw("\tmovb %al, (%rsi)")
         self.raw("\tmovq $1, %rdx")
         self.raw(".Lpc_write:")
-        self.raw("\tmovq $1, %rax")
         self.raw("\tmovq $1, %rdi")
-        self.raw("\tsyscall")
+        self.raw("\tcall __write_all")
         self.raw("\tcall __print_nl")
         self.raw("\tleave")
         self.raw("\tret")
@@ -6758,6 +6779,16 @@ fun is_tfloat(t: Type) -> bool {
 
 fun is_tfloat32(t: Type) -> bool {
     return match t { Type.TFloat(w) => w == 32, _ => false }
+}
+
+// The runtime-error entries and their messages (MYLA-17), as in the Python
+// backend (`_TRAPS`).
+fun trap_labels() -> [str] {
+    return ["__trap", "__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom"]
+}
+
+fun trap_messages() -> [str] {
+    return ["runtime error", "index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory"]
 }
 
 // Whether `e` is a (possibly negated) scalar or string literal: it has no

@@ -34,6 +34,20 @@ from ..types import (
 from .monomorphize import type_token
 
 
+# The runtime-error entries and their messages (MYLA-17); the same in the
+# self-hosted code generator.
+_TRAPS = [
+    ("__trap", "runtime error"),
+    ("__trap_index", "index out of bounds"),
+    ("__trap_key", "map key not found"),
+    ("__trap_pop", "pop from an empty list"),
+    ("__trap_div", "division by zero"),
+    ("__trap_mod", "modulo by zero"),
+    ("__trap_match", "no match arm matched"),
+    ("__trap_oom", "out of memory"),
+]
+
+
 def _f64_bits(x: float) -> int:
     """The unsigned 64-bit pattern of `x` as an IEEE-754 double."""
     return struct.unpack("<Q", struct.pack("<d", x))[0]
@@ -401,6 +415,9 @@ class CodeGen:
         out.append('.Lstr_true:\n\t.quad 4\n\t.ascii "true"')
         out.append('.Lstr_false:\n\t.quad 5\n\t.ascii "false"')
         out.append('.Lstr_minus:\n\t.quad 1\n\t.ascii "-"')
+        for label, message in _TRAPS:
+            text = "runtime error: " + message
+            out.append(f'.Lmsg{label}:\n\t.quad {len(text)}\n\t.ascii "{text}"')
         if self._uses_float:
             out.extend(self._float_rodata())
         out.extend(self.rodata)
@@ -469,27 +486,48 @@ class CodeGen:
         e("\txorq %rdi, %rdi")
         e("\tsyscall")
         e("")
-        # __trap: exit(1) for runtime errors (e.g. divide by zero)
-        e("__trap:")
-        e("\tmovq $60, %rax")
-        e("\tmovq $1, %rdi")
+        # Runtime errors: `runtime error: <message>` on stderr, then exit(1)
+        # (MYLA-17). Each kind has its own entry; the message is the
+        # interpreter's, without the values.
+        for label, _message in _TRAPS:
+            e(f"{label}:")
+            e(f"\tleaq .Lmsg{label}(%rip), %rdi")
+            e("\tjmp __panic")
+        e("")
+        # __write_all: write rdx bytes at rsi to fd rdi, however many write
+        # calls it takes: a short write continues, EINTR and EAGAIN (a full
+        # non-blocking pipe) retry, another error gives up (MYLA-17).
+        e("__write_all:")
+        e(".Lwa_loop:")
+        e("\ttestq %rdx, %rdx")
+        e("\tjz .Lwa_done")
+        e("\tmovq $1, %rax")            # write
         e("\tsyscall")
+        e("\tcmpq $-4, %rax")           # EINTR
+        e("\tje .Lwa_loop")
+        e("\tcmpq $-11, %rax")          # EAGAIN
+        e("\tje .Lwa_loop")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lwa_done")
+        e("\taddq %rax, %rsi")
+        e("\tsubq %rax, %rdx")
+        e("\tjmp .Lwa_loop")
+        e(".Lwa_done:")
+        e("\tret")
         e("")
         # __panic: %rdi -> [len:8][bytes]; write the message + newline to stderr,
-        # then exit(1). Used by assert/panic/unreachable (§7).
+        # then exit(1). Used by assert/panic/unreachable (§7) and the traps.
         e("__panic:")
         e("\tmovq (%rdi), %rdx")        # len
         e("\tleaq 8(%rdi), %rsi")       # data
-        e("\tmovq $1, %rax")            # write
         e("\tmovq $2, %rdi")            # stderr
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\tsubq $16, %rsp")           # newline to stderr
         e("\tmovb $10, (%rsp)")
-        e("\tmovq $1, %rax")
         e("\tmovq $2, %rdi")
         e("\tmovq %rsp, %rsi")
         e("\tmovq $1, %rdx")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\taddq $16, %rsp")
         e("\tmovq $60, %rax")           # exit(1)
         e("\tmovq $1, %rdi")
@@ -499,11 +537,10 @@ class CodeGen:
         e("__print_nl:")
         e("\tsubq $16, %rsp")
         e("\tmovb $10, (%rsp)")
-        e("\tmovq $1, %rax")
         e("\tmovq $1, %rdi")
         e("\tmovq %rsp, %rsi")
         e("\tmovq $1, %rdx")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\taddq $16, %rsp")
         e("\tret")
         e("")
@@ -511,11 +548,10 @@ class CodeGen:
         e("__print_minus:")
         e("\tsubq $16, %rsp")
         e("\tmovb $45, (%rsp)")
-        e("\tmovq $1, %rax")
         e("\tmovq $1, %rdi")
         e("\tmovq %rsp, %rsi")
         e("\tmovq $1, %rdx")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\taddq $16, %rsp")
         e("\tret")
         e("")
@@ -545,9 +581,8 @@ class CodeGen:
         e("\tincq %rsi")               # rsi -> first digit
         e("\tmovq %rbp, %rdx")
         e("\tsubq %rsi, %rdx")         # length = rbp - rsi
-        e("\tmovq $1, %rax")
         e("\tmovq $1, %rdi")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\tcall __print_nl")
         e("\tleave")
         e("\tret")
@@ -578,9 +613,8 @@ class CodeGen:
         e("\tleaq .Lbool_false(%rip), %rsi")
         e("\tmovq $5, %rdx")
         e(".Lpb_write:")
-        e("\tmovq $1, %rax")
         e("\tmovq $1, %rdi")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\tcall __print_nl")
         e("\tret")
         e("")
@@ -588,9 +622,8 @@ class CodeGen:
         e("__print_str:")
         e("\tmovq (%rdi), %rdx")       # len
         e("\tleaq 8(%rdi), %rsi")      # data
-        e("\tmovq $1, %rax")
         e("\tmovq $1, %rdi")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\tcall __print_nl")
         e("\tret")
         e("")
@@ -756,7 +789,7 @@ class CodeGen:
         e("\txorq %r9, %r9")            # offset
         e("\tsyscall")
         e("\tcmpq $-4096, %rax")        # mmap error? (return in [-4095,-1])
-        e("\tja __trap")
+        e("\tja __trap_oom")
         e("\tmovq %rax, __heap_ptr(%rip)")
         e(f"\taddq ${_ARENA_BYTES}, %rax")
         e("\tmovq %rax, __heap_end(%rip)")
@@ -808,7 +841,7 @@ class CodeGen:
         e("\tmovq __heap_ptr(%rip), %rax")
         e("\tleaq 16(%rax,%rdi), %rcx") # new top = base + header(16) + size
         e("\tcmpq __heap_end(%rip), %rcx")
-        e("\tja __trap")                # out of arena
+        e("\tja __trap_oom")            # out of arena
         e("\tmovq %rcx, __heap_ptr(%rip)")
         e("\tmovq %rdi, (%rax)")        # header: size
         e("\tmovq $1, 8(%rax)")         # header: refcount
@@ -1664,7 +1697,7 @@ class CodeGen:
         self._emit("popq %rdi")              # cell
         self._emit(f"call {self._map_find_name(mt)}")
         self._emit("testq %rax, %rax")
-        self._emit("jz __trap")              # key absent
+        self._emit("jz __trap_key")          # key absent
         self._emit("addq $16, %rax")         # &value (skip state + key)
 
     def _gen_str_index(self, expr: ast.Index) -> None:
@@ -1677,7 +1710,7 @@ class CodeGen:
         self._emit("popq %rcx")              # str pointer
         self._emit("movq (%rcx), %rdx")      # byte length (offset 0)
         self._emit("cmpq %rdx, %rax")
-        self._emit("jae __trap")             # i < 0 (huge unsigned) or i >= len
+        self._emit("jae __trap_index")       # i < 0 (huge unsigned) or i >= len
         self._emit("movzbq 8(%rcx,%rax), %rax")
 
     def _index_addr(self, expr: ast.Index) -> None:
@@ -1694,7 +1727,7 @@ class CodeGen:
         self._emit("popq %rcx")              # cell pointer
         self._emit("movq (%rcx), %rdx")      # length
         self._emit("cmpq %rdx, %rax")
-        self._emit("jae __trap")             # i < 0 (huge unsigned) or i >= len
+        self._emit("jae __trap_index")       # i < 0 (huge unsigned) or i >= len
         self._emit(f"imulq ${stride}, %rax")
         self._emit("leaq 16(%rcx,%rax), %rax")
 
@@ -1733,7 +1766,7 @@ class CodeGen:
         self._emit("popq %rcx")                 # cell
         self._emit("movq (%rcx), %rdx")         # len
         self._emit("cmpq %rdx, %rax")
-        self._emit("jae __trap")
+        self._emit("jae __trap_index")
         self._emit(f"imulq ${stride}, %rax")
         self._emit("leaq 16(%rcx,%rax), %rax")
 
@@ -1749,7 +1782,7 @@ class CodeGen:
         self._emit("popq %rdi")                 # cell
         self._emit(f"call {self._map_find_name(mt)}")
         self._emit("testq %rax, %rax")
-        self._emit("jz __trap")
+        self._emit("jz __trap_key")
         self._emit("addq $16, %rax")            # &value
 
     def _mut_index_addr(self, expr: ast.Index) -> None:
@@ -1881,7 +1914,7 @@ class CodeGen:
         self._mut_container_cell(arg0)            # rax = unique cell
         self._emit("movq (%rax), %rdx")           # len
         self._emit("testq %rdx, %rdx")
-        self._emit("jz __trap")                   # pop from an empty list traps
+        self._emit("jz __trap_pop")               # pop from an empty list traps
         self._emit("decq %rdx")
         self._emit("movq %rdx, (%rax)")           # len -= 1
         self._emit(f"imulq ${stride}, %rdx")
@@ -2052,7 +2085,7 @@ class CodeGen:
             self._drop_scopes.pop()
             self._scopes.pop()
             self._emit(f"{arm_fail}:")
-        self._emit("jmp __trap")   # unreachable when the match is exhaustive
+        self._emit("jmp __trap_match")   # unreachable when the match is exhaustive
         self._emit(f"{end}:")
         self._drop_scopes.pop()
         if owns_copy:
@@ -3399,7 +3432,7 @@ class CodeGen:
             self._wrap(expr.resolved_type)
         elif op in ("/", "%"):
             self._emit("testq %rcx, %rcx")
-            self._emit("jz __trap")
+            self._emit("jz __trap_div" if op == "/" else "jz __trap_mod")
             if ltype.signed:
                 # x / -1 is -x and x % -1 is 0; idivq would trap on the
                 # minimum (its quotient overflows), the language wraps (MYLA-5)
@@ -4570,9 +4603,7 @@ class CodeGen:
         e("__write:")
         e("\tmovq (%rsi), %rdx")        # len
         e("\tleaq 8(%rsi), %rsi")       # data pointer
-        e("\tmovq $1, %rax")            # write syscall, rdi = fd already set
-        e("\tsyscall")
-        e("\tret")
+        e("\tjmp __write_all")          # rdi = fd already set
         e("")
 
     def _emit_args_runtime(self) -> None:
