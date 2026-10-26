@@ -1,4 +1,4 @@
-"""Unit tests for the Myla tree-walking interpreter (docs/architecture.md §6)."""
+"""Unit tests for the Myla tree-walking interpreter (docs/Architecture/Interpreter.md)."""
 import io
 import unittest
 

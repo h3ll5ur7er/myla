@@ -1,4 +1,4 @@
-"""Unit tests for the Myla parser (docs/grammar.md §2)."""
+"""Unit tests for the Myla parser (docs/Language/Grammar.md)."""
 import unittest
 
 from myla import ast

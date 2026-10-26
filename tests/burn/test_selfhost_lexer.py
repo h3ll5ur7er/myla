@@ -4,7 +4,7 @@
 every source file in the shared corpus, its canonical token dump is byte-for-byte
 identical to the Python oracle's (`myla tokenize --canonical`, i.e.
 `canon.canonical_tokens`). That is the v0.6a differential gate from
-docs/self-hosting.md §5.
+docs/Development/Testing.md
 
 The Myla lexer is exercised as a *native binary* when the host can build one
 (x86-64 Linux with `as`/`ld`), which also checks interpreter/compiler parity of

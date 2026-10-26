@@ -1,6 +1,6 @@
 """The Myla lexer: source text -> list of Tokens.
 
-Implements the lexical grammar in docs/grammar.md §1. The lexer is a single
+Implements the lexical grammar in docs/Language/Lexical-structure.md The lexer is a single
 forward pass that tracks 1-based line/column positions, skips whitespace and
 comments, coalesces runs of blank lines into a single NEWLINE separator, and
 emits a trailing EOF token.
@@ -77,7 +77,7 @@ _CHAR_ESCAPES: dict[str, int] = {
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
-# Digit alphabets per integer base (docs/grammar.md: int_lit).
+# Digit alphabets per integer base (docs/Language/Lexical-structure.md: int_lit).
 _BASE_DIGITS: dict[int, str] = {
     2: "01",
     8: "01234567",

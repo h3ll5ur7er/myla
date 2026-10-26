@@ -3,7 +3,7 @@
 // Reads a .my file, loads and links its modules, type-checks the program
 // (with the same prelude `myla run` injects), generates x86-64 assembly, and writes that
 // assembly to stdout. A thin host wrapper runs `as`/`ld` over it (§4 of
-// docs/self-hosting.md), so this stays a pure front-end + codegen with no
+// docs/Architecture/Self-hosted-compiler.md), so this stays a pure front-end + codegen with no
 // process spawning of its own.
 
 from std.process import args, exit

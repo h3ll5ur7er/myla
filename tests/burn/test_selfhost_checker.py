@@ -6,7 +6,7 @@ accept/reject line (`ok`, else `err <line> <col> type: <message>`). This test
 asserts that, for every single-file source in the shared corpus and for every
 snippet of TYPE_ERRORS, that line is identical to the Python oracle's: the same
 verdict, position and message (MYLA-28). That is the v0.7 checker-parity gate
-from docs/self-hosting.md.
+from docs/Development/Testing.md.
 
 As with the lexer/parser gates, the Myla checker runs as a *native binary* when
 the host can build one (which also exercises interpreter/compiler parity of the

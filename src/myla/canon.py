@@ -1,7 +1,7 @@
 """Canonical, cross-implementation dump formats (self-hosting, v0.6).
 
 The self-hosted Myla toolchain is brought up stage by stage and validated by
-*differential testing* against this Python oracle (see docs/self-hosting.md §5).
+*differential testing* against this Python oracle (see docs/Architecture/Self-hosted-compiler.md).
 Comparing the Python debug reprs (e.g. ``Token.__str__``) is brittle — they lean
 on Python ``repr`` escaping. Instead each stage emits a deliberately simple,
 stable line format that is trivial to reproduce byte-for-byte in Myla.

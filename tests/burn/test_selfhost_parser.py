@@ -4,7 +4,7 @@
 + parses a file and prints the canonical AST dump (`canon.canonical_ast`). This
 test asserts that, for every source file in the shared corpus, that dump is
 byte-for-byte identical to the Python oracle's (`myla parse --canonical`). That
-is the v0.6b structural-AST gate from docs/self-hosting.md §5.
+is the v0.6b structural-AST gate from docs/Development/Testing.md
 
 As with the lexer gate, the Myla parser runs as a *native binary* when the host
 can build one (which also checks interpreter/compiler parity of the toolchain

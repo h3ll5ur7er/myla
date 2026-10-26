@@ -1,8 +1,8 @@
 """The Myla parser: a list of Tokens -> an AST (a `Program`).
 
 Recursive descent with a layered expression grammar encoding precedence and
-associativity, mirroring docs/grammar.md §2. Panic-mode error handling: the
-first syntax error raises `ParseError` (docs/architecture.md §3.2).
+associativity, mirroring docs/Language/Grammar.md Panic-mode error handling: the
+first syntax error raises `ParseError` (docs/Architecture/Lexer-and-parser.md).
 
 Newlines (NEWLINE tokens) separate statements and top-level declarations; a
 `;` may stand for such a newline (D61), and a run of both is one separator. A

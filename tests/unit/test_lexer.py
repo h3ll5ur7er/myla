@@ -1,4 +1,4 @@
-"""Unit tests for the Myla lexer (docs/grammar.md §1)."""
+"""Unit tests for the Myla lexer (docs/Language/Lexical-structure.md)."""
 import unittest
 
 from myla.errors import LexError

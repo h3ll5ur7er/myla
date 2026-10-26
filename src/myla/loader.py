@@ -3,7 +3,7 @@
 Myla modules are an entirely *front-end* concern: this stage turns an entry file
 plus its `import` graph into a single, flat `ast.Program` with globally-unique
 declaration names, which the existing checker / interpreter / compiler consume
-unchanged (docs/v0.5-modules-and-runtime.md §1).
+unchanged (docs/Architecture/Module-loader.md).
 
 Pipeline:
     link(entry) -> load every reachable module once (memoized by canonical path)

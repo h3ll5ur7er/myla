@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # bootstrap.sh — build the self-hosted Myla compiler and verify the
-# three-stage fixpoint (the definition of "self-hosted", per docs/roadmap.md).
+# three-stage fixpoint (the definition of "self-hosted", per docs/Project/Roadmap.md).
 #
 #   stage1: the Python toolchain compiles the Myla-written compiler -> gen_tool
 #   stage2: gen_tool compiles the compiler                         -> stage2(.s)

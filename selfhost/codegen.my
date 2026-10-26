@@ -2,7 +2,7 @@
 //
 // Mirrors src/myla/compiler/codegen_x86.py: turns a type-checked program into
 // GAS/AT&T assembly text. The build driver (a thin host wrapper, see §4 of
-// docs/self-hosting.md) runs `as`/`ld` over the emitted assembly. This is the
+// docs/Architecture/Self-hosted-compiler.md) runs `as`/`ld` over the emitted assembly. This is the
 // v0.9 milestone, ported incrementally and differentially tested against the
 // Python backend (same stdout/exit for every example).
 //

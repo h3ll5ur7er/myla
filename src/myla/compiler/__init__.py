@@ -2,7 +2,7 @@
 
 `compile_to_asm` turns a type-checked program into GAS assembly text;
 `build` writes that assembly out and drives the system `as`/`ld` to produce a
-native ELF binary (no libc — see docs/architecture.md §7).
+native ELF binary (no libc — see docs/Architecture/Native-backend.md).
 """
 from __future__ import annotations
 

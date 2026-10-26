@@ -1,6 +1,6 @@
 """Type representations and the static type checker for Myla v0.0.
 
-The checker (docs/architecture.md §5) runs after parsing and before
+The checker (docs/Architecture/Type-checker.md) runs after parsing and before
 interpretation/compilation. It:
 
 - builds global tables of structs, functions, and type aliases (order
@@ -765,12 +765,11 @@ class Checker:
         for decl in self.program.decls:
             with in_file(_source_path(decl)):
                 if isinstance(decl, ast.ImportDecl):
-                    # v0.5.1a parses imports but the module loader (v0.5.1b) is not
-                    # wired yet; reaching the checker with an import means the source
-                    # was type-checked directly rather than loaded as a module.
+                    # The loader resolves imports before checking; an import that
+                    # reaches the checker means the file was checked on its own.
                     raise TypeCheckError(
-                        "module imports are not supported yet (the loader arrives in "
-                        "v0.5.1b)",
+                        "imports need the module loader: this file was type-checked "
+                        "on its own (use 'myla check' or 'myla run')",
                         decl.line, decl.column,
                     )
                 if isinstance(decl, ast.ImplDecl):

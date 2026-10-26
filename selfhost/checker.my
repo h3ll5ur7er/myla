@@ -1040,7 +1040,7 @@ impl Checker {
             let ln = decl.line
             let cl = decl.col
             let handled = match decl.kind {
-                DeclKind.ImportDecl(p, items, alias, isp) => { return Err(terr(ln, cl, "module imports are not supported yet (the loader arrives in v0.5.1b)")) },
+                DeclKind.ImportDecl(p, items, alias, isp) => { return Err(terr(ln, cl, "imports need the module loader: this file was type-checked on its own (use 'myla check' or 'myla run')")) },
                 DeclKind.ImplDecl(tg, m, tp, tn, ta) => { push(self.impl_decls, decl)
             true },
                 DeclKind.TraitDecl(n, m, tp, isp) => {

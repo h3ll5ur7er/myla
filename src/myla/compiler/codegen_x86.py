@@ -1,4 +1,4 @@
-"""x86-64 code generator for Myla v0.0 (docs/architecture.md §7).
+"""x86-64 code generator for Myla v0.0 (docs/Architecture/Native-backend.md).
 
 Emits GAS / AT&T-syntax assembly for Linux x86-64, with no libc dependency:
 I/O is done with raw `write`/`exit` syscalls. The generator is a single,

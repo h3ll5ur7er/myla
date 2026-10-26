@@ -54,7 +54,7 @@ def _cmd_tokenize(args: argparse.Namespace) -> int:
         return 1
     if getattr(args, "canonical", False):
         # Stable cross-implementation format for differential self-hosting tests
-        # (docs/self-hosting.md §5); the Myla lexer reproduces it byte-for-byte.
+        # (docs/Architecture/Self-hosted-compiler.md); the Myla lexer reproduces it byte-for-byte.
         from .canon import canonical_token
         for tok in tokens:
             print(canonical_token(tok))
@@ -169,7 +169,8 @@ def _cmd_lsp(args: argparse.Namespace) -> int:
     extra) is only required when this command is actually used; the rest of the
     toolchain stays dependency-free."""
     try:
-        from .lsp import main as lsp_main
+        # the server module itself, since it is what imports pygls/lsprotocol
+        from .lsp.server import main as lsp_main
     except ImportError as err:
         print(
             "error: the Myla language server requires the optional 'lsp' extra.\n"

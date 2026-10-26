@@ -14,7 +14,6 @@ The reference implementation. Most problems are places where the native backend 
 | [[MYLA-14]] | Exhaustiveness rejects nested and `true \| false` matches | low |
 | [[MYLA-17]] | Native runtime: short writes, silent traps | low |
 | [[MYLA-18]] | Strings are never freed | low |
-| [[MYLA-20]] | Code hygiene | low |
 
 ## Self-hosted compiler
 
@@ -34,6 +33,5 @@ No open issues. The tree-sitter grammar ([[MYLA-47]]) and the Python language se
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-56]] | Docstrings point at moved or stale documents | low |
 | [[MYLA-57]] | `examples/playground.my` is a scratch file pinned by the tests | low |
 | [[MYLA-58]] | pytest vs unittest; the slow burn suite | low |

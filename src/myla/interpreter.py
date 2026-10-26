@@ -1,4 +1,4 @@
-"""The Myla tree-walking interpreter (docs/architecture.md §6).
+"""The Myla tree-walking interpreter (docs/Architecture/Interpreter.md).
 
 Runs a type-checked `Program`: it relies on the `resolved_type` annotations the
 checker attaches to expressions (for integer wrapping and for formatting values

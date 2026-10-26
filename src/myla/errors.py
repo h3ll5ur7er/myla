@@ -11,7 +11,7 @@ at the offending column, e.g.::
        |     ^
 
 v0.0 uses panic-mode error handling: the first error in a stage aborts that
-stage (see docs/architecture.md §8).
+stage (see docs/Architecture.md).
 """
 from __future__ import annotations
 
