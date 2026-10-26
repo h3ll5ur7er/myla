@@ -80,7 +80,7 @@ build/stage3 examples/hello.my src/myla > hello.s
 as --64 -o hello.o hello.s && ld -o hello hello.o && ./hello
 ```
 
-The second argument of the self-hosted compiler is the folder that contains `std/` ([[MYLA-31]]). `just bootstrap` does the same and additionally builds `build/myla`, the self-hosted command-line tool with `run`, `test` and `build`. Details, stages and timings: [[Development/Bootstrap]].
+The second argument of the self-hosted compiler is the folder that contains `std/` (by default `src/myla` next to its `build/` directory). The script also builds `build/myla`, the self-hosted command-line tool: `build/myla run|test|build <file.my>`. Details, stages and timings: [[Development/Bootstrap]].
 
 ## Run the tests
 

@@ -2,20 +2,23 @@
 //
 // Dispatches subcommands, mirroring the Python `myla` CLI:
 //
-//   myla run   <file.my> [stdlib_root]           interpret a program
-//   myla test  <file.my> [stdlib_root]           run its #test cases
-//   myla build <file.my> [-o <out>] [-g] [stdlib_root]  compile to a native binary
+//   myla run   <file.my> [--stdlib <dir>] [args...]   interpret a program
+//   myla test  <file.my> [--stdlib <dir>]             run its #test cases
+//   myla build <file.my> [-o <out>] [-g] [--stdlib <dir>]  compile to a native binary
 //
-// `build` type-checks and generates x86-64 assembly (with `-g`, DWARF line
-// tables for gdb, MYLA-71), writes it to `<out>.s`,
-// then shells out to the system assembler and linker (`as`/`ld`, located via
-// `/usr/bin/env` so PATH is honored) to produce the executable `<out>`. The
-// stdlib root defaults to `src/myla` (where `std/` lives in this repo).
+// `run` passes the arguments after the file to the program (its argv is the
+// file, then those), as the Python `myla run` does. `build` type-checks and
+// generates x86-64 assembly (with `-g`, DWARF line tables for gdb, MYLA-71),
+// writes it to `<out>.s`, then shells out to the system assembler and linker
+// (`as`/`ld`, located via `/usr/bin/env` so PATH is honored) to produce the
+// executable `<out>`, and removes the intermediate files. The stdlib root
+// defaults to `src/myla` next to the `build/` directory this binary is in
+// (`default_stdlib_root`, MYLA-31).
 
 from std.process import args, exit, run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file
-from .loader import load_program, file_of, Loaded
+from .loader import load_program, file_of, default_stdlib_root, Loaded
 from .diag import render, type_report, Report
 from .checker import build_checker_decls, Checker, CheckErr
 from .codegen import new_codegen
@@ -89,12 +92,14 @@ fun run_step(program: str, argv: [str], label: str) -> bool {
     return failed
 }
 
-// `myla run <file> [stdlib]` / `myla test`: interpret the program, or run its
-// #test cases; the exit status.
-fun cmd_interp(file: str, stdlib: str, tests: bool) -> int32 {
+// `myla run <file> [args]` / `myla test`: interpret the program with argv
+// `[file, args...]`, or run its #test cases; the exit status.
+fun cmd_interp(file: str, stdlib: str, tests: bool, prog_args: [str]) -> int32 {
     match load_and_check(file, stdlib) {
         Ok(ch) => {
-            var it = new_interp(ch.checker, [file])
+            var argv = [file]
+            for a in prog_args { push(argv, a) }
+            var it = new_interp(ch.checker, argv)
             if tests {
                 return it.run_tests()
             }
@@ -137,15 +142,20 @@ fun cmd_build(file: str, output: str, stdlib: str, debug: bool) -> int32 {
     if run_step("/usr/bin/env", ["ld", "-o", output, obj_path], "myla: linker failed") {
         return 1
     }
+    // the assembly and object file were only steps (MYLA-35)
+    if run_step("/usr/bin/env", ["rm", "-f", asm_path, obj_path], "myla: cannot remove the intermediate files") {
+        return 1
+    }
     return 0
 }
 
 fun usage() {
     eprintln("usage: myla <command> <file.my> [options]")
     eprintln("commands:")
-    eprintln("  run   <file.my> [stdlib_root]              interpret a program")
-    eprintln("  test  <file.my> [stdlib_root]              run its #test cases")
-    eprintln("  build <file.my> [-o <out>] [-g] [stdlib_root]  compile to a binary (-g: line tables for gdb)")
+    eprintln("  run   <file.my> [--stdlib <dir>] [args...]  interpret a program with these arguments")
+    eprintln("  test  <file.my> [--stdlib <dir>]            run its #test cases")
+    eprintln("  build <file.my> [-o <out>] [-g] [--stdlib <dir>]  compile to a binary (-g: line tables for gdb)")
+    eprintln("--stdlib: the directory holding std/ (default: src/myla next to this binary's build/ directory)")
 }
 
 fun main() {
@@ -156,30 +166,42 @@ fun main() {
     }
     let cmd = argv[1]
     let file = argv[2]
+    var stdlib = default_stdlib_root(argv[0])
 
     if cmd == "run" || cmd == "test" {
-        var stdlib = "src/myla"
-        if len(argv) >= 4 {
-            stdlib = argv[3]
+        // `--stdlib <dir>` anywhere; everything else goes to the program
+        var rest: [str] = []
+        var j = 3
+        while j < len(argv) {
+            if argv[j] == "--stdlib" && j + 1 < len(argv) {
+                stdlib = argv[j + 1]
+                j = j + 2
+            } else {
+                push(rest, argv[j])
+                j = j + 1
+            }
         }
-        exit(cmd_interp(file, stdlib, cmd == "test"))
+        exit(cmd_interp(file, stdlib, cmd == "test", rest))
     }
 
     if cmd == "build" {
         var output = "a.out"
-        var stdlib = "src/myla"
         var debug = false
         var j = 3
         while j < len(argv) {
             if argv[j] == "-o" && j + 1 < len(argv) {
                 output = argv[j + 1]
                 j = j + 2
+            } else if argv[j] == "--stdlib" && j + 1 < len(argv) {
+                stdlib = argv[j + 1]
+                j = j + 2
             } else if argv[j] == "-g" {
                 debug = true
                 j = j + 1
             } else {
-                stdlib = argv[j]
-                j = j + 1
+                eprintln("myla: unknown option '" + argv[j] + "'")
+                usage()
+                exit(2)
             }
         }
         exit(cmd_build(file, output, stdlib, debug))

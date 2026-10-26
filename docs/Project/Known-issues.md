@@ -20,8 +20,7 @@ The reference implementation. Most problems are places where the native backend 
 | Task | Problem | Priority |
 | --- | --- | --- |
 | [[MYLA-74]] | The Myla interpreter copies containers on every update (quadratic loops) | low |
-| [[MYLA-31]] | Without a stdlib root, `std` resolves to `/std` (`scripts/build.sh`) | low |
-| [[MYLA-33]], [[MYLA-34]], [[MYLA-35]] | Latent issues, dead code, `justfile` recipes | low |
+| [[MYLA-33]], [[MYLA-34]] | Latent issues, dead code | low |
 
 Also by design (from the earlier known-issues list in [[Archive/known_issues]]): x86-64 Linux is the only target (D2), and the stdlib root is passed explicitly.
 

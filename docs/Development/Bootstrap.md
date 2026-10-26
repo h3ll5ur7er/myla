@@ -38,15 +38,18 @@ Both fixes left `stage2.s` byte-identical. A full bootstrap now takes about 8 se
 
 ```bash
 scripts/bootstrap.sh [OUT_DIR]       # default ./build; MYLA="uv run myla.py" to change the stage-1 command
-just bootstrap                       # the same, plus timers and stage 4: build/myla, the self-hosted CLI
+just bootstrap                       # the same
 ```
 
-`build/myla` (from `selfhost/main.my`) offers `run`, `test` and `build`; its `build` runs `as` and `ld` itself through `std.process.run`:
+After the fixed point, the script also builds `build/myla` (from `selfhost/main.my`), the self-hosted command-line tool with `run`, `test` and `build`. Its `build` runs `as` and `ld` itself through `std.process.run` and removes the intermediate `.s` and `.o` files; `run` passes the arguments after the file to the program:
 
 ```bash
 build/myla build examples/hello.my -o build/hello && build/hello
-build/myla run examples/hello.my
+build/myla run examples/args/main.my one two
+build/myla test examples/traits.my
 ```
+
+The tools find the standard library in `src/myla` next to the `build/` directory they are in, so they work from any directory; `--stdlib <dir>` overrides it ([[MYLA-31]]).
 
 ## Using the self-hosted compiler directly
 
@@ -55,7 +58,7 @@ build/stage3 program.my src/myla > program.s     # the second argument is the fo
 as --64 -o program.o program.s && ld -o program program.o
 ```
 
-`scripts/build.sh` and `scripts/run.sh` wrap this, but don't pass the stdlib root yet ([[MYLA-31]]).
+Without the second argument the root is derived from the compiler's location, as for `build/myla`. `scripts/build.sh <file> [out]` and `scripts/run.sh <file> [args]` wrap this and work from any directory.
 
 ## When the fixed point breaks
 

@@ -302,6 +302,9 @@ impl Loader {
             if has_file { return Ok(file) }
             if has_pkg { return Ok(pkg) }
         }
+        if p.dots == 0 && p.segments[0] == "std" && self.stdlib_root == "" {
+            return Err(at(importer, p.line, p.col, format("cannot resolve import '{}': no standard library root was given", dotted(p))))
+        }
         return Err(at(importer, p.line, p.col, format("cannot resolve import '{}'", dotted(p))))
     }
 
@@ -988,6 +991,16 @@ fun module_env(bindings: [str: Binding]) -> [str: str] {
         if b.is_module { out[k] = b.value }
     }
     return out
+}
+
+// The stdlib root for a tool started as `argv0` (MYLA-31): `src/myla` next
+// to the `build/` directory the tools live in, so `build/myla` works from any
+// directory; plain `src/myla` when argv0 has no directory part.
+pub fun default_stdlib_root(argv0: str) -> str {
+    var has_dir = false
+    for c in chars(argv0) { if c == '/' { has_dir = true } }
+    if !has_dir { return "src/myla" }
+    return normalize(join_path(dirname(argv0), "../src/myla"))
 }
 
 // Load and link the program rooted at `entry`; `std.*` imports resolve under

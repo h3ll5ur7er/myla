@@ -19,7 +19,7 @@
 | `loader.my` | 990 | Module loader: resolves imports, parses each module once, qualifies module-level names (`id$name`), checks `pub`, folds `alias.member` ([[Architecture/Module-loader]]) |
 | `diag.my` | 85 | Renders a diagnostic like the Python CLI: message, `--> file:line:col`, source line and caret |
 | `gen_main.my` | 60 | The bootstrap compiler: `gen_main <file.my> <stdlib_root> [-g]` → assembly on stdout (`-g`: DWARF line tables, [[MYLA-71]]) |
-| `main.my` | 190 | The self-hosted CLI: `myla run|test|build <file> [-o out] [-g] [stdlib_root]`; `build` runs `as`/`ld` through `std.process.run` |
+| `main.my` | 220 | The self-hosted CLI: `myla run <file> [args…]`, `test`, `build <file> [-o out] [-g]`, each with `--stdlib <dir>`; `build` runs `as`/`ld` through `std.process.run` |
 | `lex_main.my`, `parse_main.my`, `check_main.my`, `interp_main.my` | 30–50 each | Drivers for the differential tests (canonical tokens, canonical AST, `ok` or `err line col kind: message`, interpreted output; `interp_main` goes through the loader and prints runtime errors like the Python CLI) |
 
 ## Writing a compiler in Myla
@@ -64,5 +64,5 @@ The burn tests `tests/burn/test_selfhost_*.py` keep these gates; note they build
 
 - The three-stage fixed point holds: stage 2 and stage 3 output are identical (5.8 MB of assembly); stage 3 compiles the compiler in 1.3 s with a 163 MB peak (359 MB while `free` was disabled, [[MYLA-22]]).
 - Against the interpreter, the stage 3 compiler matches on 33 of 34 examples (`args` differs only in argv[0]: the binary's path instead of the source file's).
-- The stage 4 CLI's `myla run` (the Myla interpreter, compiled) prints byte for byte what the Python CLI prints (stdout, stderr, exit code) on all 34 examples and the whole error corpus: lex, parse, type and runtime errors ([[MYLA-28]], [[MYLA-32]]). The program's `args()` is `[file]`, as under `myla run` without extra arguments (the self-hosted CLI takes no program arguments). The interpreter is slow on growing containers ([[MYLA-74]]).
+- The stage 4 CLI's `myla run` (the Myla interpreter, compiled) prints byte for byte what the Python CLI prints (stdout, stderr, exit code) on all 34 examples and the whole error corpus: lex, parse, type and runtime errors ([[MYLA-28]], [[MYLA-32]]). The program's `args()` is the file followed by the arguments after it, as under the Python `myla run`. The interpreter is slow on growing containers ([[MYLA-74]]).
 - Further bugs: [[MYLA-23]] … [[MYLA-27]], [[MYLA-32]], [[MYLA-33]]. See [[Project/Known-issues]].

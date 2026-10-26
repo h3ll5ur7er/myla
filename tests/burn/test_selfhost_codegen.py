@@ -5,7 +5,7 @@
 type-checks it (with the same `Option`/`Result`/`get` prelude the Python `run`
 injects), generates GAS assembly, and writes that assembly to
 stdout. A host wrapper then runs `as`/`ld` over it to produce a real ELF binary
-(§4 of docs/Development/Testing.md).
+(see docs/Development/Testing.md).
 
 This test closes the v0.9 *codegen* parity gate: for every runnable example in
 the corpus, the binary produced by the self-hosted backend must have the same

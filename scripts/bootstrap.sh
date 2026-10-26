@@ -7,6 +7,7 @@
 #   stage2: gen_tool compiles the compiler                         -> stage2(.s)
 #   stage3: stage2 compiles the compiler                           -> stage3(.s)
 #   check : assert stage2.s == stage3.s  (byte-identical fixed point)
+#   cli   : stage3 compiles the `myla` command-line tool          -> myla
 #
 # Usage:
 #   scripts/bootstrap.sh [OUT_DIR]
@@ -55,3 +56,8 @@ else
     diff "$OUT_DIR/stage2.s" "$OUT_DIR/stage3.s" | head -40 >&2
     exit 1
 fi
+
+echo "==> cli: stage3 builds the myla command-line tool"
+"$OUT_DIR/stage3" selfhost/main.my "$STDLIB_ROOT" > "$OUT_DIR/myla.s"
+asm_to_bin "$OUT_DIR/myla.s" "$OUT_DIR/myla"
+echo "Self-hosted CLI: $OUT_DIR/myla (run / test / build)"
