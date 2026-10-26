@@ -3378,13 +3378,24 @@ class CodeGen:
             self._emit("testq %rcx, %rcx")
             self._emit("jz __trap")
             if ltype.signed:
+                # x / -1 is -x and x % -1 is 0; idivq would trap on the
+                # minimum (its quotient overflows), the language wraps (MYLA-5)
+                divide, done = self._label(), self._label()
+                self._emit("cmpq $-1, %rcx")
+                self._emit(f"jne {divide}")
+                self._emit("negq %rax" if op == "/" else "xorl %eax, %eax")
+                self._emit(f"jmp {done}")
+                self._emit(f"{divide}:")
                 self._emit("cqo")
                 self._emit("idivq %rcx")
+                if op == "%":
+                    self._emit("movq %rdx, %rax")
+                self._emit(f"{done}:")
             else:
                 self._emit("xorq %rdx, %rdx")
                 self._emit("divq %rcx")
-            if op == "%":
-                self._emit("movq %rdx, %rax")
+                if op == "%":
+                    self._emit("movq %rdx, %rax")
             self._wrap(expr.resolved_type)
         elif op in _SET_MNEMONIC:
             signed_set, unsigned_set = _SET_MNEMONIC[op]

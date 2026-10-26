@@ -1805,13 +1805,24 @@ impl CodeGen {
             self.emit("testq %rcx, %rcx")
             self.emit("jz __trap")
             if int_signed(lt) {
+                // x / -1 is -x and x % -1 is 0; idivq would trap on the
+                // minimum (its quotient overflows), the language wraps (MYLA-5)
+                let divide = self.label()
+                let done = self.label()
+                self.emit("cmpq $-1, %rcx")
+                self.emit(format("jne {}", divide))
+                if op == "/" { self.emit("negq %rax") } else { self.emit("xorl %eax, %eax") }
+                self.emit(format("jmp {}", done))
+                self.emit(format("{}:", divide))
                 self.emit("cqo")
                 self.emit("idivq %rcx")
+                if op == "%" { self.emit("movq %rdx, %rax") }
+                self.emit(format("{}:", done))
             } else {
                 self.emit("xorq %rdx, %rdx")
                 self.emit("divq %rcx")
+                if op == "%" { self.emit("movq %rdx, %rax") }
             }
-            if op == "%" { self.emit("movq %rdx, %rax") }
             self.wrap(rt)
         } else if is_cmp(op) {
             self.emit("cmpq %rcx, %rax")

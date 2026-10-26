@@ -1166,6 +1166,37 @@ PROGRAMS = {
         '    print(H)\n'
         '}\n'
     ),
+    # the int64 minimum divided by -1 wraps instead of trapping (MYLA-5)
+    "int64_min_divided_by_minus_one": (
+        'const MIN: int64 = -9223372036854775807 - 1\n'
+        'const Q: int64 = MIN / -1\n'
+        'const R: int64 = MIN % -1\n'
+        'fun div(a: int64, b: int64) -> int64 {\n'
+        '    return a / b\n'
+        '}\n'
+        'fun rem(a: int64, b: int64) -> int64 {\n'
+        '    return a % b\n'
+        '}\n'
+        '#main\n'
+        'fun main() {\n'
+        '    let a: int64 = -9223372036854775807 - 1\n'
+        '    var b: int64 = -1\n'
+        '    print(a / b)\n'
+        '    print(a % b)\n'
+        '    print(div(a, -1))\n'
+        '    print(rem(a, -1))\n'
+        '    print(div(-7, -1))\n'
+        '    print(rem(-7, -1))\n'
+        '    print(div(7, -2))\n'
+        '    print(rem(7, -2))\n'
+        '    let c: int32 = -2147483647 - 1\n'
+        '    var d: int32 = -1\n'
+        '    print(c / d)\n'
+        '    print(c % d)\n'
+        '    print(Q)\n'
+        '    print(R)\n'
+        '}\n'
+    ),
     # integer literals of 2^63 and above (MYLA-73)
     "big_integer_literals": (
         '#main\n'
