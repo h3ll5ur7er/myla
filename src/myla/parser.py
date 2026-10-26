@@ -31,7 +31,7 @@ _PRIM_TYPE_KINDS = {
 
 class Parser:
     def __init__(self, tokens: list[Token]):
-        self.tokens = tokens
+        self.tokens = list(tokens)       # a copy: `_type_args` may split a `>=`
         self.pos = 0
         self._allow_struct_lit = True
 
@@ -481,6 +481,12 @@ class Parser:
         args = [self._type()]
         while self._match(T.COMMA):
             args.append(self._type())
+        if self._check(T.GE):
+            # `Option<int>= x`: the `>=` token closes the list and leaves its
+            # `=` behind (MYLA-15)
+            ge = self._peek()
+            self.tokens[self.pos] = Token(T.ASSIGN, "=", ge.line, ge.column + 1)
+            return args
         self._expect(T.GT, "'>' to close type arguments")
         return args
 

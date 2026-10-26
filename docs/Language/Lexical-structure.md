@@ -120,4 +120,4 @@ The lexer rewrites an f-string into a call `format("… {} …", expr, …)`: ea
 ( ) { } [ ] , : . # ?
 ```
 
-`<<` and `>>` are not tokens. The parser reads two `<` or two `>` tokens that touch (no space between them) as a shift, so that nested generics such as `Option<List<int>>` close normally (D44). Consequently `a > > b` is not a shift. The same rule causes `Option<int>= x` to lex `>=` as one token and fail ([[MYLA-15]]).
+`<<` and `>>` are not tokens. The parser reads two `<` or two `>` tokens that touch (no space between them) as a shift, so that nested generics such as `Option<List<int>>` close normally (D44). Consequently `a > > b` is not a shift. `>=` is one token, but where it would close type arguments (`let x: Option<int>= None`) the parser splits it into `>` and `=` ([[MYLA-15]]).

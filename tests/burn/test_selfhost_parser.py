@@ -112,6 +112,9 @@ SYNTAX_ERRORS = {
     "semicolon_before_else": "fun main() { if true {}; else {} }\n",
     "statements_without_separator": "fun main() {\n    let x = 1 let y = 2\n}\n",
     "declarations_without_separator": "const A: int = 1 const B: int = 2\n",
+    # `>=` closing type arguments is split into `>` and `=` (MYLA-15)
+    "split_ge_then_missing_value": "fun main() {\n    let x: Option<int>=\n}\n",
+    "split_ge_in_a_parameter": "fun f(x: Option<int>= 1) {}\n",
 }
 
 # Integer literals of 2^63 and above (MYLA-73): the canonical AST and token

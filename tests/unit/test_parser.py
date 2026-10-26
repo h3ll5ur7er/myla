@@ -256,5 +256,30 @@ class TestErrors(unittest.TestCase):
             parse_src("1 + 2\n")
 
 
+
+class TestTypeArgumentsBeforeAssign(unittest.TestCase):
+    """MYLA-15: `>=` right after type arguments closes them, then assigns."""
+
+    def test_split_ge(self):
+        from myla.canon import canonical_ast
+        for tight, spaced in (
+            ("let x: Option<int>= None", "let x: Option<int> = None"),
+            ("var m: [str: Option<Result<int, str>>]= [:]", "var m: [str: Option<Result<int, str>>] = [:]"),
+            ("let y: Option<Option<int>>= None", "let y: Option<Option<int>> = None"),
+        ):
+            with self.subTest(tight=tight):
+                self.assertEqual(canonical_ast(parse_src(f"fun main() {{\n    {tight}\n}}\n")),
+                                 canonical_ast(parse_src(f"fun main() {{\n    {spaced}\n}}\n")))
+
+    def test_comparison_still_works(self):
+        prog = parse_src("fun main() {\n    let b = 1 >= 2\n}\n")
+        self.assertEqual(prog.decls[0].body.statements[0].init.op, ">=")
+
+    def test_position_of_the_split_assign(self):
+        with self.assertRaises(ParseError) as cm:
+            parse_src("fun main() {\n    let x: Option<int>= \n}\n")
+        self.assertEqual((cm.exception.line, cm.exception.column), (3, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

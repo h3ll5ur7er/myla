@@ -587,6 +587,13 @@ impl Parser {
         while self.match1(TokenKind.COMMA) {
             push(args, self.parse_type())
         }
+        if self.check(TokenKind.GE) {
+            // `Option<int>= x`: the `>=` token closes the list and leaves its
+            // `=` behind (MYLA-15)
+            let ge = self.peek()
+            self.toks[self.pos] = Token { kind: TokenKind.ASSIGN, lexeme: "=", line: ge.line, column: ge.column + 1, ival: 0, suffix: "", big: "" }
+            return args
+        }
         self.expect(TokenKind.GT, "'>' to close type arguments")
         return args
     }
