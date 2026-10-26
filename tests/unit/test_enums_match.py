@@ -130,6 +130,22 @@ class TestEnumChecking(unittest.TestCase):
                 "    return match s { Shape.Circle(r) if r => r, _ => 0 }\n}\n"
             )
 
+    def test_arm_block_of_a_statement_match_may_end_in_a_match(self):
+        # MYLA-59: the inner match is a statement, like the outer one
+        src = ("fun main() {\n    let r: Result<int, str> = Ok(1)\n    match r {\n"
+               "        Ok(n) => {\n            print(n)\n            match n {\n"
+               "                1 => print(\"one\")\n                _ => print(\"other\")\n"
+               "            }\n        }\n        Err(e) => print(e)\n    }\n}\n")
+        self.assertEqual(run_src(src), "1\none\n")
+
+    def test_a_value_match_still_needs_values(self):
+        with self.assertRaises(TypeCheckError) as cm:
+            check_src("fun main() {\n    let v = match 1 {\n        1 => {\n"
+                      "            match 2 {\n                _ => print(1)\n            }\n"
+                      "        }\n        _ => 0\n    }\n}\n")
+        self.assertEqual(cm.exception.message,
+                         "this match is used as a value, so every arm must produce one")
+
     def test_literal_patterns_must_fit_the_scrutinee(self):
         # a pattern is compared as written, so -1 on uint8 or 128 on int8 can
         # never match (MYLA-7)

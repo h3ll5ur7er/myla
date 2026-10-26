@@ -2184,7 +2184,7 @@ impl Checker {
             self.push_scope()
             self.check_pattern(arm.pattern, st)?
             match arm.guard { Some(g) => { self.expect_type(g, Type.TBool, "match guard")? }, None => {} }
-            let ab = self.check_arm_body(arm.body, expected)?
+            let ab = self.check_arm_body(arm.body, expected, as_stmt)?
             self.pop_scope()
             push(bodies, ab)
         }
@@ -2207,16 +2207,19 @@ impl Checker {
         return Ok(Some(result))
     }
 
-    fun check_arm_body(var self, body: ExprOrBlock, expected: Option<Type>) -> Result<ArmBody, CheckErr> {
+    // The arms of a statement match (`as_stmt`) need no value, so their last
+    // statement is checked as a statement, and a match there is one too (MYLA-59).
+    fun check_arm_body(var self, body: ExprOrBlock, expected: Option<Type>, as_stmt: bool) -> Result<ArmBody, CheckErr> {
         match body {
             ExprOrBlock.EB_Expr(ex) => {
+                if as_stmt { match ex.kind { ExprKind.MatchE(sc, arms) => { self.stmt_match = true }, _ => {} } }
                 let t = self.infer(ex, expected)?
                 if is_diverging(ex) { return Ok(ArmBody.ABDiverge) }
                 return Ok(ArmBody.ABValue(t, Some(ex)))
             },
             ExprOrBlock.EB_Block(bl) => {
                 self.push_scope()
-                let res = self.check_arm_block(bl, expected)?
+                let res = self.check_arm_block(bl, expected, as_stmt)?
                 self.pop_scope()
                 return Ok(res)
             },
@@ -2224,12 +2227,12 @@ impl Checker {
         return Ok(ArmBody.ABDiverge)
     }
 
-    fun check_arm_block(var self, bl: Block, expected: Option<Type>) -> Result<ArmBody, CheckErr> {
+    fun check_arm_block(var self, bl: Block, expected: Option<Type>, as_stmt: bool) -> Result<ArmBody, CheckErr> {
         let n = len(bl.stmts)
         var i = 0
         while i < n {
             let s = bl.stmts[i]
-            if i == n - 1 {
+            if i == n - 1 && !as_stmt {
                 match s.kind {
                     StmtKind.ExprStmt(ex) => {
                         let t = self.infer(ex, expected)?

@@ -65,7 +65,7 @@ EXCLUDED: set[str] = set()
 # literals of 2^63 and above (MYLA-73), the int64 minimum divided by -1 (MYLA-5),
 # saturating float -> integer casts (MYLA-6), left-to-right evaluation (MYLA-8),
 # partial application evaluating its arguments once (MYLA-75), derived Eq on
-# char and float fields (MYLA-13).
+# char and float fields (MYLA-13), a match statement ending an arm block (MYLA-59).
 PARITY_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
@@ -91,6 +91,7 @@ PARITY_PROGRAMS = (
     "evaluation_order_is_left_to_right",
     "partial_application_evaluates_its_arguments_once",
     "derived_eq_on_char_and_float_fields",
+    "match_statement_ending_an_arm_block",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),

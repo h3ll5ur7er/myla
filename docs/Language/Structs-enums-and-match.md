@@ -84,7 +84,7 @@ fun main() {
 - Arms are `pattern [if guard] => body`, separated by newlines or commas. A body is an expression, or a block whose final expression statement is its value. An arm that always returns (or calls `panic`/`unreachable`) doesn't need a value.
 - The scrutinee is evaluated once; arms are tried top to bottom; bindings are copies.
 - Used as a value, all arm values must have one type (unsuffixed integer literals adopt the type of the others).
-- Pitfall: a `match` that ends a block arm counts as that arm's value, even when the outer `match` is a statement, so its arms must produce values ([[MYLA-59]]). Put another statement after it, or bind it with `let`.
+- The arms of a `match` used as a statement need no value: an arm block may end in another `match` statement or a call ([[MYLA-59]]). In a `match` used as a value, the last expression statement of a block arm is its value.
 
 ### Patterns
 

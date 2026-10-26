@@ -2288,7 +2288,7 @@ class Checker:
             self._check_pattern(arm.pattern, st, arm_scope)
             if arm.guard is not None:
                 self._expect_type(arm.guard, arm_scope, BOOL, "match guard")
-            bodies.append(self._check_arm_body(arm.body, arm_scope, expected))
+            bodies.append(self._check_arm_body(arm.body, arm_scope, expected, is_stmt))
 
         self._check_exhaustive(expr, st)
         self._check_redundant(expr, st)
@@ -2393,13 +2393,18 @@ class Checker:
         ))
         return at(ast.Match(expr.operand, [succ_arm, fail_arm]))
 
-    def _check_arm_body(self, body, scope: _Scope,
-                        expected: Type | None) -> tuple[object, ast.Expr | None]:
+    def _check_arm_body(self, body, scope: _Scope, expected: Type | None,
+                        is_stmt: bool = False) -> tuple[object, ast.Expr | None]:
+        """Check an arm body; returns its (type, value node). The arms of a
+        statement match (`is_stmt`) need no value, so their last statement is
+        checked as a statement, and a `match` there is one too (MYLA-59)."""
+        if is_stmt and isinstance(body, ast.Match):
+            body.is_statement = True
         if isinstance(body, ast.Block):
             bscope = _Scope(scope)
             stmts = body.statements
             for i, s in enumerate(stmts):
-                if i == len(stmts) - 1 and isinstance(s, ast.ExprStmt):
+                if i == len(stmts) - 1 and isinstance(s, ast.ExprStmt) and not is_stmt:
                     t = self._infer(s.expr, bscope, expected)
                     if _is_diverging(s.expr):
                         return (_DIVERGE, None)
