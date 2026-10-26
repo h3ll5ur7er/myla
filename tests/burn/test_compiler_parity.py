@@ -1375,6 +1375,31 @@ PROGRAMS = {
         "    print(lit(5))\n"
         "}\n"
     ),
+    # #derive(Eq) on char and float fields compares like `==`: NaN is not
+    # equal to itself, 0.0 equals -0.0 (MYLA-13)
+    "derived_eq_on_char_and_float_fields": (
+        "#derive(Eq)\n"
+        "struct P { c: char, f: float64, g: float }\n"
+        "\n"
+        "#derive(Eq)\n"
+        "enum E { A(char), B(float64), N }\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    let z: float64 = 0.0\n"
+        "    let nan = z / z\n"
+        "    let a = P { c: 'x', f: 1.5f64, g: 2.5 }\n"
+        "    print(a == P { c: 'x', f: 1.5f64, g: 2.5 })\n"
+        "    print(a == P { c: 'y', f: 1.5f64, g: 2.5 })\n"
+        "    print(a != P { c: 'x', f: 1.25f64, g: 2.5 })\n"
+        "    print(P { c: 'x', f: nan, g: 0.0 } == P { c: 'x', f: nan, g: 0.0 })\n"
+        "    print(P { c: 'x', f: 0.0, g: 0.0 } == P { c: 'x', f: -z, g: -0.0 })\n"
+        "    print(E.A('\\u{1F600}') == E.A('\\u{1F600}'))\n"
+        "    print(E.B(nan) == E.B(nan))\n"
+        "    print(E.B(-z) == E.B(z))\n"
+        "    print(E.A('a') == E.N)\n"
+        "}\n"
+    ),
     # float -> integer casts saturate, NaN gives 0 (D59, MYLA-6)
     "float_to_int_casts_saturate": (
         "const BIG: float64 = 1e19\n"

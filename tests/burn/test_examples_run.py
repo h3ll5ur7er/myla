@@ -44,7 +44,7 @@ EXPECTED = {
     "closures.my": ("36\n15\nhi, world\n24\n16\n18\n107\n60\n"
                     "6\n100\n42\n"),
     "pipelines.my": "11\n8\n21\n14\n15\n42\n18\n11\n12\n20\n",
-    "traits.my": "4\n6\ntrue\ntrue\nvec\ntrue\nfalse\ntrue\n60\n3\n4\n8\n3\n",
+    "traits.my": "4\n6\ntrue\ntrue\nvec\ntrue\nfalse\ntrue\ntrue\n60\n3\n4\n8\n3\n",
     "floats.my": ("0.5\n3.1415926535897931\n3.75\n3.5\n1.5\n-3.1415926535897931\n"
                   "0.30000000000000004\n0.300000012\ninf\ntrue\nfalse\n9\n3\n3\n"),
     "chars.my": "a\nλ\n😀\ntrue\nfalse\n65\nλ\ntrue\n2\n1\n5\n3\n104\n233\n955\n",

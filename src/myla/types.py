@@ -1144,7 +1144,8 @@ class Checker:
 
     def _check_derivable_eq(self, decl, eq_types: set[str]) -> None:
         def is_eq(t: Type) -> bool:
-            if isinstance(t, (IntType, BoolType, StrType)):
+            # every primitive with a built-in `==` (MYLA-13)
+            if isinstance(t, (IntType, BoolType, StrType, CharType, FloatType)):
                 return True
             if isinstance(t, (StructType, EnumType)):
                 return t.name in eq_types

@@ -39,6 +39,10 @@ enum Color { Red, Green, Blue }
 #derive(Eq)
 struct Pixel { at: Vec2, color: Color }
 
+// `char` and float fields compare as `==` does: a NaN width is never equal.
+#derive(Eq)
+struct Glyph { c: char, width: float64 }
+
 // Limited generic bounds (X9): inside the body the operators named by the bound
 // are usable on `T`; the concrete `T` must implement the trait at the call site.
 fun sum<T: Add>(xs: [T], zero: T) -> T {
@@ -106,6 +110,7 @@ fun main() {
     print(Color.Green == Color.Blue)          // false
     let p = Pixel { at: Vec2 { x: 0, y: 0 }, color: Color.Red }
     print(p == Pixel { at: Vec2 { x: 0, y: 0 }, color: Color.Red })   // true
+    print(Glyph { c: 'm', width: 0.5f64 } == Glyph { c: 'm', width: 0.5f64 })   // true
 
     // generic bounds over both primitives and user types
     print(sum([10, 20, 30], 0))               // 60

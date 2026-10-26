@@ -2814,6 +2814,8 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
         Type.TInt(w, s) => true,
         Type.TBool => true,
         Type.TStr => true,
+        Type.TChar => true,
+        Type.TFloat(w) => true,
         Type.TStruct(n, a) => contains_str(eq_names, n),
         Type.TEnum(n, a) => contains_str(eq_names, n),
         _ => false,

@@ -5265,6 +5265,16 @@ impl CodeGen {
             self.emit("call __str_eq")
             self.emit("testq %rax, %rax")
             self.emit(format("jz {}", lne))
+        } else if is_tfloat(ft) {
+            // as `==` does: NaN is unequal to everything, 0.0 equals -0.0 (MYLA-13)
+            self.uses_float = true
+            self.emit("movq 16(%rbp), %rax")
+            self.emit(format("movq {}(%rax), %xmm0", off))
+            self.emit("movq 24(%rbp), %rax")
+            self.emit(format("movq {}(%rax), %xmm1", off))
+            self.emit("ucomisd %xmm1, %xmm0")
+            self.emit(format("jne {}", lne))
+            self.emit(format("jp {}", lne))
         } else {
             self.emit("movq 16(%rbp), %rax")
             self.emit(format("movq {}(%rax), %rax", off))
