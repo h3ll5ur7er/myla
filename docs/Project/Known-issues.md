@@ -14,9 +14,7 @@ The reference implementation. Most problems are places where the native backend 
 
 ## Self-hosted compiler
 
-| Task | Problem | Priority |
-| --- | --- | --- |
-| [[MYLA-74]] | The Myla interpreter copies containers on every update (quadratic loops) | low |
+No open issues.
 
 Also by design (from the earlier known-issues list in [[Archive/known_issues]]): x86-64 Linux is the only target (D2). The stdlib root no longer has to be passed: `build/myla` finds it from its own location ([[MYLA-31]]).
 

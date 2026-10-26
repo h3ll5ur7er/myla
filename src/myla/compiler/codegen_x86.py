@@ -1206,7 +1206,7 @@ class CodeGen:
         elif isinstance(stmt, ast.While):
             start, end = self._label(), self._label()
             self._emit(f"{start}:")
-            self._eval(stmt.cond)
+            self._eval_scalar(stmt.cond)
             self._emit("testq %rax, %rax")
             self._emit(f"jz {end}")
             self._loops.append((start, end, len(self._drop_scopes)))
@@ -1292,9 +1292,22 @@ class CodeGen:
             self._emit("movq %rcx, (%rax)")
         self._drop_expr_temps(stmt.value)
 
+    def _eval_scalar(self, expr: ast.Expr) -> None:
+        """Evaluate a scalar `expr` that no statement end follows (a condition,
+        a guard, a range bound) into %rax, and release its temporaries
+        (MYLA-74)."""
+        self._eval(expr)
+        temps: list = []
+        self._collect_expr_temps(expr, temps)
+        if temps:
+            self._emit("pushq %rax")
+            for slot, t in temps:
+                self._drop_value("rbp", slot, t)
+            self._emit("popq %rax")
+
     def _gen_if(self, stmt: ast.If) -> None:
         end = self._label()
-        self._eval(stmt.cond)
+        self._eval_scalar(stmt.cond)
         self._emit("testq %rax, %rax")
         if stmt.otherwise is None:
             self._emit(f"jz {end}")
@@ -1422,9 +1435,9 @@ class CodeGen:
         loop_t = stmt.start.resolved_type
         lv = self._loopvar_off(stmt)
         fe = self._forend_off(stmt)
-        self._eval(stmt.start)
+        self._eval_scalar(stmt.start)
         self._emit(f"movq %rax, {lv}(%rbp)")
-        self._eval(stmt.end)
+        self._eval_scalar(stmt.end)
         self._emit(f"movq %rax, {fe}(%rbp)")
 
         start, cont, end = self._label(), self._label(), self._label()
@@ -1919,7 +1932,18 @@ class CodeGen:
         self._emit("movq %rdx, (%rax)")           # len -= 1
         self._emit(f"imulq ${stride}, %rdx")
         self._emit("leaq 16(%rax,%rdx), %rax")    # &elem (removed last element)
-        if _is_aggregate(et):                     # copy out (ownership transfers)
+        if self._is_boxed(et):
+            # The list held a box: copy the value out, give the copy its own
+            # references, then release the box (MYLA-74).
+            slot = self._locals[id(expr)]
+            self._emit("movq (%rax), %rsi")
+            self._emit("pushq %rsi")
+            self._emit(f"leaq {slot}(%rbp), %rdi")
+            self._emit_copy(self._size(et))
+            self._retain("rbp", slot, et)
+            self._emit("popq %rdi")
+            self._emit(f"call __dropb_{et.name}")
+        elif _is_aggregate(et):                   # copy out (ownership transfers)
             slot = self._locals[id(expr)]
             self._emit("movq %rax, %rsi")
             self._emit(f"leaq {slot}(%rbp), %rdi")
@@ -2065,7 +2089,12 @@ class CodeGen:
                      and any(_may_write([arm.guard, arm.body], root_var) for arm in expr.arms))
         if owns_copy:
             self._retain("rbp", root, sst)
-        self._drop_scopes.append([(root, sst)] if owns_copy else [])
+        # The scrutinee's temporaries (a call's result, say) are dropped when
+        # the statement ends; an arm that leaves early (`return`, `break`,
+        # `continue`, a failing `?`) skips that, so it drops them (MYLA-74).
+        temps: list = []
+        self._collect_expr_temps(expr.scrutinee, temps)
+        self._drop_scopes.append(([(root, sst)] if owns_copy else []) + temps)
 
         result_off = self._locals.get(f"matchres:{id(expr)}")
         result_type = expr.resolved_type
@@ -2077,7 +2106,7 @@ class CodeGen:
             self._scopes.append(self._arm_scope(arm))
             self._drop_scopes.append([])
             if arm.guard is not None:
-                self._eval(arm.guard)
+                self._eval_scalar(arm.guard)
                 self._emit("testq %rax, %rax")
                 self._emit(f"jz {arm_fail}")
             self._gen_arm_body(arm.body, result_off, result_type)
@@ -2383,8 +2412,9 @@ class CodeGen:
         if isinstance(expr, (ast.Unary, ast.Cast)):
             self._collect_expr_temps(expr.operand, out)
         elif isinstance(expr, ast.Binary):
-            self._collect_expr_temps(expr.left, out)
-            self._collect_expr_temps(expr.right, out)
+            if expr.op not in ("&&", "||"):       # those release their own
+                self._collect_expr_temps(expr.left, out)
+                self._collect_expr_temps(expr.right, out)
         elif isinstance(expr, ast.Call):
             if getattr(expr, "indirect_call", False):
                 self._collect_expr_temps(expr.callee, out)
@@ -2413,6 +2443,10 @@ class CodeGen:
                 self._collect_expr_temps(e, out)
         elif isinstance(expr, ast.Match):
             self._collect_expr_temps(expr.scrutinee, out)
+            # the arm's value is retained into the result slot (MYLA-74)
+            res = self._locals.get(f"matchres:{id(expr)}")
+            if res is not None and self._owns_heap(expr.resolved_type):
+                out.append((res, expr.resolved_type))
 
     def _drop_expr_temps(self, expr: ast.Expr) -> None:
         temps: list = []
@@ -3542,11 +3576,13 @@ class CodeGen:
     def _eval_logical(self, expr: ast.Binary) -> None:
         short = self._label()
         end = self._label()
+        # Each operand releases its own temporaries: the right one may not run,
+        # so the statement's end can't (MYLA-74).
         if expr.op == "&&":
-            self._eval(expr.left)
+            self._eval_scalar(expr.left)
             self._emit("testq %rax, %rax")
             self._emit(f"jz {short}")
-            self._eval(expr.right)
+            self._eval_scalar(expr.right)
             self._emit("testq %rax, %rax")
             self._emit(f"jz {short}")
             self._emit("movq $1, %rax")
@@ -3555,10 +3591,10 @@ class CodeGen:
             self._emit("xorq %rax, %rax")
             self._emit(f"{end}:")
         else:  # "||"
-            self._eval(expr.left)
+            self._eval_scalar(expr.left)
             self._emit("testq %rax, %rax")
             self._emit(f"jnz {short}")
-            self._eval(expr.right)
+            self._eval_scalar(expr.right)
             self._emit("testq %rax, %rax")
             self._emit(f"jnz {short}")
             self._emit("xorq %rax, %rax")

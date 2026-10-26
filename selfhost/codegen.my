@@ -400,8 +400,10 @@ impl CodeGen {
             ExprKind.Unary(op, x) => { for d in self.collect_expr_temps(x) { push(out, d) } },
             ExprKind.Cast(x, ty) => { for d in self.collect_expr_temps(x) { push(out, d) } },
             ExprKind.Binary(op, a, b) => {
-                for d in self.collect_expr_temps(a) { push(out, d) }
-                for d in self.collect_expr_temps(b) { push(out, d) }
+                if op != "&&" && op != "||" {       // those release their own
+                    for d in self.collect_expr_temps(a) { push(out, d) }
+                    for d in self.collect_expr_temps(b) { push(out, d) }
+                }
             },
             ExprKind.Call(callee, args) => {
                 if self.call_is_indirect(callee) {
@@ -434,7 +436,14 @@ impl CodeGen {
             ExprKind.TupleLit(elems) => {
                 for x in elems { for d in self.collect_expr_temps(x) { push(out, d) } }
             },
-            ExprKind.MatchE(scrut, arms) => { for d in self.collect_expr_temps(scrut) { push(out, d) } },
+            ExprKind.MatchE(scrut, arms) => {
+                for d in self.collect_expr_temps(scrut) { push(out, d) }
+                // the arm's value is retained into the result slot (MYLA-74)
+                match get(self.match_res, e.id) {
+                    Some(off) => { if self.owns_heap(t) { push(out, DropEntry { off: off, ty: t }) } },
+                    None => {},
+                }
+            },
             // the `?` operand (a call's carrier, say) is a temporary of the
             // statement on the success path; gen_try releases it on failure
             ExprKind.Try(x) => { for d in self.collect_expr_temps(x) { push(out, d) } },
@@ -1445,9 +1454,21 @@ impl CodeGen {
         return out
     }
 
+    // Evaluate a scalar `e` that no statement end follows (a condition, a
+    // guard, a range bound) into %rax, and release its temporaries (MYLA-74).
+    fun eval_scalar(var self, e: Expr) {
+        self.eval(e)
+        let temps = self.collect_expr_temps(e)
+        if len(temps) > 0 {
+            self.emit("pushq %rax")
+            for d in temps { self.drop_value("rbp", d.off, d.ty) }
+            self.emit("popq %rax")
+        }
+    }
+
     fun gen_if(var self, cond: Expr, then: Block, otherwise: Option<ElseTail>) {
         let end = self.label()
-        self.eval(cond)
+        self.eval_scalar(cond)
         self.emit("testq %rax, %rax")
         match otherwise {
             None => {
@@ -1474,7 +1495,7 @@ impl CodeGen {
         let start = self.label()
         let end = self.label()
         self.emit(format("{}:", start))
-        self.eval(cond)
+        self.eval_scalar(cond)
         self.emit("testq %rax, %rax")
         self.emit(format("jz {}", end))
         push(self.loops, LoopLab { cont: start, brk: end, depth: len(self.drop_scopes) })
@@ -1493,9 +1514,9 @@ impl CodeGen {
         let loop_t = match start { Some(e) => self.type_of(e.id), None => Type.TInt(32, true) }
         let lv = self.get_or_zero(self.for_lv, s.id)
         let fe = self.get_or_zero(self.for_end, s.id)
-        match start { Some(e) => { self.eval(e) }, None => {} }
+        match start { Some(e) => { self.eval_scalar(e) }, None => {} }
         self.emit(format("movq %rax, {}(%rbp)", lv))
-        match end { Some(e) => { self.eval(e) }, None => {} }
+        match end { Some(e) => { self.eval_scalar(e) }, None => {} }
         self.emit(format("movq %rax, {}(%rbp)", fe))
 
         let lstart = self.label()
@@ -1911,11 +1932,13 @@ impl CodeGen {
     fun eval_logical(var self, op: str, l: Expr, r: Expr) {
         let short = self.label()
         let end = self.label()
+        // Each operand releases its own temporaries: the right one may not run,
+        // so the statement's end can't (MYLA-74).
         if op == "&&" {
-            self.eval(l)
+            self.eval_scalar(l)
             self.emit("testq %rax, %rax")
             self.emit(format("jz {}", short))
-            self.eval(r)
+            self.eval_scalar(r)
             self.emit("testq %rax, %rax")
             self.emit(format("jz {}", short))
             self.emit("movq $1, %rax")
@@ -1924,10 +1947,10 @@ impl CodeGen {
             self.emit("xorq %rax, %rax")
             self.emit(format("{}:", end))
         } else {
-            self.eval(l)
+            self.eval_scalar(l)
             self.emit("testq %rax, %rax")
             self.emit(format("jnz {}", short))
-            self.eval(r)
+            self.eval_scalar(r)
             self.emit("testq %rax, %rax")
             self.emit(format("jnz {}", short))
             self.emit("xorq %rax, %rax")
@@ -2585,7 +2608,18 @@ impl CodeGen {
         self.emit("movq %rcx, (%rax)")         // len -= 1
         self.emit(format("imulq ${}, %rcx", stride))
         self.emit("leaq 16(%rax,%rcx), %rdx")  // &elem (removed last element)
-        if is_aggregate(et) && !self.is_boxed(et) {
+        if self.is_boxed(et) {
+            // The list held a box: copy the value out, give the copy its own
+            // references, then release the box (MYLA-74).
+            let slot = self.local_of(e.id)
+            self.emit("movq (%rdx), %rsi")
+            self.emit("pushq %rsi")
+            self.emit(format("leaq {}(%rbp), %rdi", slot))
+            self.emit_copy(self.size(et))
+            self.retain("rbp", slot, et)
+            self.emit("popq %rdi")
+            self.emit(format("call {}", self.drop_call_name(et)))
+        } else if is_aggregate(et) {
             let slot = self.local_of(e.id)
             self.emit("movq %rdx, %rsi")
             self.emit(format("leaq {}(%rbp), %rdi", slot))
@@ -2905,6 +2939,10 @@ impl CodeGen {
         if owns_copy { self.retain("rbp", root, sst) }
         push(self.drop_scopes, [])
         if owns_copy { self.register_owner(root, sst) }
+        // The scrutinee's temporaries (a call's result, say) are dropped when
+        // the statement ends; an arm that leaves early (`return`, `break`,
+        // `continue`) skips that, so it drops them (MYLA-74).
+        for d in self.collect_expr_temps(scrut) { self.register_owner(d.off, d.ty) }
         let result_off = self.match_res[e.id]
         let result_type = self.type_of(e.id)
         let end = self.label()
@@ -2916,7 +2954,7 @@ impl CodeGen {
             push(self.drop_scopes, [])
             match arm.guard {
                 Some(g) => {
-                    self.eval(g)
+                    self.eval_scalar(g)
                     self.emit("testq %rax, %rax")
                     self.emit(format("jz {}", arm_fail))
                 },

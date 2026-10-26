@@ -1679,6 +1679,23 @@ PROGRAMS = {
         "    let t = match mk(true) {\n        Ok(p) => (p.a, p.b),\n"
         "        Err(d) => { panic(d) },\n    }\n    print(t.1)\n}\n"
     ),
+    "pop_a_boxed_enum": (
+        # a list of a recursive enum holds boxes; `pop` copies the value out of
+        # the box and releases it (both compilers used to hand out the box
+        # pointer itself, MYLA-74)
+        "enum T {\n    Leaf(int),\n    Node(T, [T]),\n}\n"
+        "fun show(t: T) -> str {\n"
+        "    return match t {\n        T.Leaf(n) => f\"leaf {n}\",\n"
+        "        T.Node(l, kids) => f\"node({show(l)}, {len(kids)} kids)\",\n    }\n}\n"
+        "struct Stack { items: [T] }\n"
+        "impl Stack {\n    fun take(var self) -> T {\n        return pop(self.items)\n    }\n}\n"
+        "#main\nfun main() {\n"
+        "    var xs: [T] = [T.Leaf(1), T.Node(T.Leaf(2), [T.Leaf(3)]), T.Leaf(4)]\n"
+        "    let a = pop(xs)\n    print(show(a))\n"
+        "    print(show(pop(xs)))\n"
+        "    var s = Stack { items: xs }\n    print(show(s.take()))\n"
+        "    print(len(s.items))\n    print(len(xs))\n}\n"
+    ),
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -1926,6 +1943,87 @@ STRESS_TRY_AFTER_STAGED_VALUE_SRC = (
 )
 
 
+# The temporaries of an `if` or `while` condition, a range bound and a match
+# guard have no statement end to release them; they must be dropped right after
+# the value is computed. An `&&`/`||` operand drops its own, since the right one
+# may not run (here it ran in the previous iteration, so its slot holds a
+# dropped list) (MYLA-74).
+STRESS_CONDITION_TEMPS_SRC = (
+    "fun make(n: int) -> [int] {\n"
+    "    var out: [int] = []\n    for i in 0..n {\n        push(out, i)\n    }\n    return out\n}\n"
+    "fun nonempty(xs: [int]) -> bool {\n    return len(xs) > 0\n}\n"
+    "#main\nfun main() {\n"
+    "    var acc = 0\n"
+    "    for r in 0..600000 {\n"
+    "        if nonempty(make(200)) {\n            acc = acc + 1\n        }\n"
+    "        var k = 0\n"
+    "        while k < len(make(30)) {\n            k = k + 10\n        }\n"
+    "        for i in 0..len(make(100)) - 99 {\n            acc = acc + k\n        }\n"
+    "        match r {\n            x if nonempty(make(50)) => {\n                acc = acc + 1\n            },\n            _ => {},\n        }\n"
+    "        if r % 2 == 0 && nonempty(make(20)) {\n            acc = acc + 1\n        }\n"
+    "        let b = r % 3 == 0 || len(make(10)) > 5\n"
+    "        if b {\n            acc = acc + 1\n        }\n"
+    "    }\n"
+    "    print(acc)\n}\n"
+)
+
+# A match's scrutinee temporaries (here the `Option` a call returns, holding a
+# list) are dropped when the statement ends; an arm that leaves early with
+# `return`, `continue` or `break` must drop them itself. A leak keeps the lists
+# alive and exhausts the arena (MYLA-74).
+STRESS_MATCH_EARLY_EXIT_SRC = (
+    "fun make(n: int) -> [int] {\n"
+    "    var out: [int] = []\n    for i in 0..n {\n        push(out, i)\n    }\n    return out\n}\n"
+    "fun find(xs: [[int]], i: int) -> Option<[int]> {\n"
+    "    if i < len(xs) {\n        return Some(xs[i])\n    }\n    return None\n}\n"
+    "fun first(xs: [[int]]) -> [int] {\n"
+    "    match find(xs, 0) {\n        Some(v) => {\n            return v\n        },\n        None => {},\n    }\n"
+    "    return []\n}\n"
+    "fun total(xs: [[int]]) -> int {\n"
+    "    var n = 0\n    var i = 0\n"
+    "    while true {\n"
+    "        match find(xs, i) {\n"
+    "            Some(v) => {\n"
+    "                i = i + 1\n"
+    "                if len(v) == 100 {\n                    continue\n                }\n"
+    "                n = n + len(v)\n"
+    "            },\n"
+    "            None => {\n                break\n            },\n"
+    "        }\n"
+    "    }\n"
+    "    return n\n}\n"
+    "#main\nfun main() {\n"
+    "    var acc = 0\n"
+    "    for r in 0..600000 {\n"
+    "        let xs = [make(200), make(100), make(50)]\n"
+    "        acc = acc + len(first(xs)) + total(xs)\n"
+    "    }\n"
+    "    print(acc)\n}\n"
+)
+
+# A match expression's value owns a reference (the arm's value is retained into
+# the result slot); the statement that uses it must release it like any other
+# temporary. Here a list comes out of a match through `return`, a `let` and a
+# call argument, 600,000 times: a leaked reference keeps every list alive and
+# exhausts the arena (MYLA-74).
+STRESS_MATCH_RESULT_SRC = (
+    "enum Box {\n    Full([int]),\n    Empty,\n}\n"
+    "fun items(b: Box) -> [int] {\n"
+    "    return match b {\n        Box.Full(xs) => xs,\n        Box.Empty => [],\n    }\n}\n"
+    "fun make(n: int) -> [int] {\n"
+    "    var out: [int] = []\n    for i in 0..n {\n        push(out, i)\n    }\n    return out\n}\n"
+    "#main\nfun main() {\n"
+    "    var acc = 0\n"
+    "    for r in 0..600000 {\n"
+    "        let b = Box.Full(make(200))\n"
+    "        let xs = items(b)\n"
+    "        let ys = match b {\n            Box.Full(zs) => zs,\n            Box.Empty => xs,\n        }\n"
+    "        acc = acc + len(xs) + len(ys) - len(match b {\n            Box.Full(ws) => ws,\n            Box.Empty => xs,\n        })\n"
+    "    }\n"
+    "    print(acc)\n}\n"
+)
+
+
 STRESS_FRAGMENTED_FREE_SRC = (
     # Leaves 8000 freed cells of 8000 different sizes behind (each `keys(m)` on
     # a growing map frees a list one slot longer than the last), then allocates
@@ -1958,6 +2056,21 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_FRAGMENTED_FREE_SRC, timeout=5)
         self.assertEqual(code, 0)
         self.assertEqual(out.strip(), "38000")
+
+    def test_condition_temporaries_are_released(self):
+        out, code = build_and_run(STRESS_CONDITION_TEMPS_SRC)
+        self.assertEqual(code, 0, "arena exhausted — condition temporaries leaked")
+        self.assertEqual(out.strip(), "20100000")
+
+    def test_early_exits_from_match_arms_drop_the_scrutinee(self):
+        out, code = build_and_run(STRESS_MATCH_EARLY_EXIT_SRC)
+        self.assertEqual(code, 0, "arena exhausted — scrutinee temporaries leaked")
+        self.assertEqual(out.strip(), "270000000")
+
+    def test_match_results_are_released(self):
+        out, code = build_and_run(STRESS_MATCH_RESULT_SRC)
+        self.assertEqual(code, 0, "arena exhausted — match results leaked")
+        self.assertEqual(out.strip(), "120000000")
 
     def test_trait_dispatch_reference_counting_reclaims_heap(self):
         # millions of list cells allocated through a bounded-generic operator

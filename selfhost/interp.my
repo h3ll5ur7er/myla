@@ -94,6 +94,8 @@ pub struct Interp {
     exit_code: int32,
     argv: [str],            // what the program's `args()` returns
     rt_err: Option<RtError>, // the runtime error that stopped the program
+    cell: Value,            // the value `update_cell` is changing
+    receivers: [Value],     // `var self` receivers on their way into a call
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
@@ -111,6 +113,16 @@ enum Step {
 // or map builtin, or a `var self` call updates.
 struct Place { root: str, steps: [Step] }
 
+// What an update does at the end of a place (`Interp.update_place`).
+enum PlaceOp {
+    OSet(Value),
+    OPush(Value),
+    OPop,
+    ORemove(Value),
+    OAppend(str),
+    OAppendByte(int64),
+}
+
 // An interpreter for the checked program `c`, run as `argv` (argv[0] is the
 // program's path, as for `myla run`).
 pub fun new_interp(c: Checker, argv: [str]) -> Interp {
@@ -126,6 +138,8 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         exit_code: 0,
         argv: argv,
         rt_err: None,
+        cell: Value.VUnit,
+        receivers: [],
     }
     return it
 }
@@ -204,19 +218,6 @@ impl Interp {
             i = i - 1
         }
         return None
-    }
-
-    fun assign_name(var self, name: str, v: Value) {
-        var i = len(self.scopes) - 1
-        while i >= 0 {
-            var j = len(self.scopes[i].names) - 1
-            while j >= 0 {
-                if self.scopes[i].names[j] == name { self.scopes[i].vals[j] = v
-                    return }
-                j = j - 1
-            }
-            i = i - 1
-        }
     }
 
     // -- program entry ----------------------------------------------------
@@ -328,28 +329,28 @@ impl Interp {
     // Whether `c[k]` can be read (or, `assigning`, written: a missing map key
     // is then an insert); fails with the Python interpreter's message if not.
     fun check_index(var self, c: Value, k: Value, e: Expr, assigning: bool) -> bool {
-        match c {
-            Value.VList(xs) => {
-                let i = as_int(k)
-                if i < 0 || i >= (len(xs) as int64) {
-                    self.fail(e, format("list index {} out of bounds (len {})", i, len(xs)))
-                    return false
-                }
-            },
-            Value.VStr(str_) => {
-                let i = as_int(k)
-                if i < 0 || i >= (len(str_) as int64) {
-                    self.fail(e, format("string index {} out of bounds (len {})", i, len(str_)))
-                    return false
-                }
-            },
-            Value.VMap(ks, vs) => {
-                if !assigning && !map_has(c, k) {
-                    self.fail(e, format("map key {} not found", py_repr(k)))
-                    return false
-                }
-            },
-            _ => {},
+        let msg = index_error(c, k, assigning)
+        if len(msg) > 0 {
+            self.fail(e, msg)
+            return false
+        }
+        return true
+    }
+
+    // Whether every index on the path to `p` is still valid, without failing.
+    fun place_valid(self, p: Place) -> bool {
+        var v = self.lookup_or_unit(p.root)
+        var i = 0
+        while i < len(p.steps) {
+            match p.steps[i] {
+                Step.SField(f) => { v = get_field(v, f) },
+                Step.SIndex(k, nd) => {
+                    let last = i == len(p.steps) - 1
+                    if len(index_error(v, k, last)) > 0 { return false }
+                    if !last { v = index_get(v, k) }
+                },
+            }
+            i = i + 1
         }
         return true
     }
@@ -411,7 +412,134 @@ impl Interp {
                 _ => {},
             }
         }
-        self.assign_name(p.root, write_steps(self.lookup_or_unit(p.root), p.steps, 0, v))
+        self.update_place(p, PlaceOp.OSet(v))
+    }
+
+    // Apply `op` to the value at `p`, whose indices are already checked, in
+    // place; yields what `op` yields (the popped element), else unit.
+    //
+    // The variable's value moves into `self.cell`, leaving unit behind, so
+    // when the interpreted program shares nothing the interpreter holds the
+    // only reference and the native copy-on-write doesn't copy: `push` and
+    // `xs[i] = v` cost O(1) instead of rebuilding the container (MYLA-74).
+    fun update_place(var self, p: Place, op: PlaceOp) -> Value {
+        var i = len(self.scopes) - 1
+        while i >= 0 {
+            var j = len(self.scopes[i].names) - 1
+            while j >= 0 {
+                if self.scopes[i].names[j] == p.root {
+                    self.cell = self.scopes[i].vals[j]
+                    self.scopes[i].vals[j] = Value.VUnit
+                    let r = self.update_cell(p.steps, 0, op)
+                    self.scopes[i].vals[j] = self.cell
+                    self.cell = Value.VUnit
+                    return r
+                }
+                j = j - 1
+            }
+            i = i - 1
+        }
+        return Value.VUnit
+    }
+
+    // Apply `op` at `steps[i..]` below `self.cell`, in place. Each container
+    // on the path is taken apart (its parts held only here), the child moves
+    // into the cell for the next step, and everything is put back after.
+    fun update_cell(var self, steps: [Step], i: int32, op: PlaceOp) -> Value {
+        if i == len(steps) { return self.apply_op(op) }
+        var r = Value.VUnit
+        match steps[i] {
+            Step.SField(f) => {
+                if !is_vstruct(self.cell) { return r }
+                let n = struct_name(self.cell)
+                let names = struct_field_names(self.cell)
+                var vals = struct_values(self.cell)
+                self.cell = Value.VUnit
+                var j = 0
+                while j < len(names) && names[j] != f { j = j + 1 }
+                if j < len(vals) {
+                    self.cell = vals[j]
+                    vals[j] = Value.VUnit
+                    r = self.update_cell(steps, i + 1, op)
+                    vals[j] = self.cell
+                }
+                self.cell = Value.VStruct(n, names, vals)
+            },
+            Step.SIndex(k, nd) => {
+                if is_vmap(self.cell) {
+                    var ks = map_key_values(self.cell)
+                    var vs = map_val_values(self.cell)
+                    self.cell = Value.VUnit
+                    var j = key_index(ks, k)
+                    if j < 0 {
+                        push(ks, k)
+                        push(vs, Value.VUnit)
+                        j = len(ks) - 1
+                    }
+                    self.cell = vs[j]
+                    vs[j] = Value.VUnit
+                    r = self.update_cell(steps, i + 1, op)
+                    vs[j] = self.cell
+                    self.cell = Value.VMap(ks, vs)
+                } else if is_vlist(self.cell) {
+                    var xs = list_values(self.cell)
+                    self.cell = Value.VUnit
+                    let j = as_int(k) as int32
+                    self.cell = xs[j]
+                    xs[j] = Value.VUnit
+                    r = self.update_cell(steps, i + 1, op)
+                    xs[j] = self.cell
+                    self.cell = Value.VList(xs)
+                }
+            },
+        }
+        return r
+    }
+
+    // Apply `op` to `self.cell` itself.
+    fun apply_op(var self, op: PlaceOp) -> Value {
+        match op {
+            PlaceOp.OSet(v) => { self.cell = v },
+            PlaceOp.OPush(v) => {
+                var xs = list_values(self.cell)
+                self.cell = Value.VUnit
+                push(xs, v)
+                self.cell = Value.VList(xs)
+            },
+            PlaceOp.OPop => {
+                var xs = list_values(self.cell)
+                self.cell = Value.VUnit
+                let last = pop(xs)
+                self.cell = Value.VList(xs)
+                return last
+            },
+            PlaceOp.ORemove(k) => {
+                let m = self.cell
+                self.cell = map_remove(m, k)
+            },
+            PlaceOp.OAppend(piece) => {
+                var b = sb_bytes(self.cell)
+                self.cell = Value.VUnit
+                var j = 0
+                while j < len(piece) {
+                    push(b, piece[j] as int64)
+                    j = j + 1
+                }
+                self.cell = Value.VSB(b)
+            },
+            PlaceOp.OAppendByte(byte) => {
+                var b = sb_bytes(self.cell)
+                self.cell = Value.VUnit
+                push(b, byte & 255)
+                self.cell = Value.VSB(b)
+            },
+        }
+        return Value.VUnit
+    }
+
+    // The length of the value at `p`, its indices checked (a read).
+    fun place_len(var self, p: Place) -> int64 {
+        return value_len(self.read_place(p))
     }
 
     fun exec_block_body(var self, body: Option<Block>) {
@@ -1026,11 +1154,18 @@ impl Interp {
         if fi >= 0 {
             // the receiver first (once), then the arguments, as in Python
             if self.method_is_var_self(fi) {
+                // The receiver's value moves into the call, so the method can
+                // change it in place (MYLA-74); the arguments are evaluated
+                // first, and the final `self` is stored back after.
                 let p = self.place_of(recv)
-                let rv0 = self.read_place(p)
+                push(self.receivers, self.read_place(p))
                 let argv = self.eval_args(args)
-                if self.stop() { return Value.VUnit }
-                let (rv, final_self) = self.call_method(fi, rv0, argv)
+                if self.stop() {
+                    pop(self.receivers)
+                    return Value.VUnit
+                }
+                if self.place_valid(p) { self.update_place(p, PlaceOp.OSet(Value.VUnit)) }
+                let (rv, final_self) = self.call_with_receiver(fi, argv)
                 self.write_place(p, final_self)
                 return rv
             }
@@ -1076,11 +1211,18 @@ impl Interp {
     }
 
     fun call_method(var self, fi: int32, recv_val: Value, argv: [Value]) -> (Value, Value) {
+        push(self.receivers, recv_val)
+        return self.call_with_receiver(fi, argv)
+    }
+
+    // Call method `fi` on the receiver on top of `self.receivers`, which
+    // moves into the method's `self`; yields the result and the final `self`.
+    fun call_with_receiver(var self, fi: int32, argv: [Value]) -> (Value, Value) {
         let fd = self.func_decls[fi]
         let saved = self.scopes
         self.scopes = []
         self.push_scope()
-        self.define("self", recv_val)
+        self.define("self", pop(self.receivers))
         var i = 0
         while i < len(fd.params) {
             self.define(fd.params[i].name, argv[i])
@@ -1212,25 +1354,24 @@ impl Interp {
         }
         if nm == "len" { return Value.VInt(value_len(self.eval(args[0]))) }
         if nm == "push" {
-            // the list's place, then the value; the list is read afterwards, so
-            // `push(xs, pop(xs))` sees the pop
+            // the list's place, then the value; the list is changed afterwards,
+            // so `push(xs, pop(xs))` sees the pop
             let p = self.place_of(args[0])
             let v = self.eval(args[1])
-            let cur = self.read_place(p)
-            self.write_place(p, list_push(cur, v))
+            self.read_place(p)                  // checks the indices
+            if self.stop() { return Value.VUnit }
+            self.update_place(p, PlaceOp.OPush(v))
             return Value.VUnit
         }
         if nm == "pop" {
             let p = self.place_of(args[0])
-            let cur = self.read_place(p)
+            let n = self.place_len(p)
             if self.stop() { return Value.VUnit }
-            if value_len(cur) == 0 {
+            if n == 0 {
                 self.fail(e, "pop from an empty list")
                 return Value.VUnit
             }
-            let last = list_last(cur)
-            self.write_place(p, list_drop_last(cur))
-            return last
+            return self.update_place(p, PlaceOp.OPop)
         }
         if nm == "contains" {
             let m = self.eval(args[0])
@@ -1239,7 +1380,9 @@ impl Interp {
         if nm == "remove" {
             let p = self.place_of(args[0])
             let k = self.eval(args[1])
-            self.write_place(p, map_remove(self.read_place(p), k))
+            self.read_place(p)
+            if self.stop() { return Value.VUnit }
+            self.update_place(p, PlaceOp.ORemove(k))
             return Value.VUnit
         }
         if nm == "keys" { return map_keys(self.eval(args[0])) }
@@ -1249,13 +1392,17 @@ impl Interp {
         if nm == "append" {
             let p = self.place_of(args[0])
             let piece = as_str(self.eval(args[1]))
-            self.write_place(p, sb_append_str(self.read_place(p), piece))
+            self.read_place(p)
+            if self.stop() { return Value.VUnit }
+            self.update_place(p, PlaceOp.OAppend(piece))
             return Value.VUnit
         }
         if nm == "append_byte" {
             let p = self.place_of(args[0])
             let b = as_int(self.eval(args[1]))
-            self.write_place(p, sb_append_byte(self.read_place(p), b))
+            self.read_place(p)
+            if self.stop() { return Value.VUnit }
+            self.update_place(p, PlaceOp.OAppendByte(b))
             return Value.VUnit
         }
         if nm == "build" { return Value.VStr(sb_build(self.eval(args[0]))) }
@@ -1806,41 +1953,113 @@ fun value_len(v: Value) -> int64 {
     }
 }
 
-fun list_push(c: Value, v: Value) -> Value {
-    return match c {
-        Value.VList(xs) => list_with_appended(xs, v),
-        _ => c,
+// Why `c[k]` can't be read (or, `assigning`, written: a missing map key is
+// then an insert), with the Python interpreter's message; "" if it can.
+fun index_error(c: Value, k: Value, assigning: bool) -> str {
+    match c {
+        Value.VList(xs) => {
+            let i = as_int(k)
+            if i < 0 || i >= (len(xs) as int64) {
+                return format("list index {} out of bounds (len {})", i, len(xs))
+            }
+        },
+        Value.VStr(str_) => {
+            let i = as_int(k)
+            if i < 0 || i >= (len(str_) as int64) {
+                return format("string index {} out of bounds (len {})", i, len(str_))
+            }
+        },
+        Value.VMap(ks, vs) => {
+            if !assigning && !map_has(c, k) {
+                return format("map key {} not found", py_repr(k))
+            }
+        },
+        _ => {},
+    }
+    return ""
+}
+
+// The parts of a container value (empty for any other value), for
+// `Interp.update_cell`: the caller releases the container, then changes them.
+fun list_values(v: Value) -> [Value] {
+    return match v {
+        Value.VList(xs) => xs,
+        _ => empty_values(),
     }
 }
 
-fun list_with_appended(xs: [Value], v: Value) -> Value {
-    var out = xs
-    push(out, v)
-    return Value.VList(out)
-}
-
-fun list_last(c: Value) -> Value {
-    return match c {
-        Value.VList(xs) => xs[len(xs) - 1],
-        _ => Value.VUnit,
+fun is_vmap(v: Value) -> bool {
+    return match v {
+        Value.VMap(ks, vs) => true,
+        _ => false,
     }
 }
 
-fun list_drop_last(c: Value) -> Value {
-    return match c {
-        Value.VList(xs) => list_without_last(xs),
-        _ => c,
+fun is_vlist(v: Value) -> bool {
+    return match v {
+        Value.VList(xs) => true,
+        _ => false,
     }
 }
 
-fun list_without_last(xs: [Value]) -> Value {
-    var out: [Value] = []
+fun is_vstruct(v: Value) -> bool {
+    return match v {
+        Value.VStruct(n, names, vals) => true,
+        _ => false,
+    }
+}
+
+fun map_key_values(v: Value) -> [Value] {
+    return match v {
+        Value.VMap(ks, vs) => ks,
+        _ => empty_values(),
+    }
+}
+
+fun map_val_values(v: Value) -> [Value] {
+    return match v {
+        Value.VMap(ks, vs) => vs,
+        _ => empty_values(),
+    }
+}
+
+fun struct_name(v: Value) -> str {
+    return match v {
+        Value.VStruct(n, names, vals) => n,
+        _ => "",
+    }
+}
+
+fun struct_field_names(v: Value) -> [str] {
+    let none: [str] = []
+    return match v {
+        Value.VStruct(n, names, vals) => names,
+        _ => none,
+    }
+}
+
+fun struct_values(v: Value) -> [Value] {
+    return match v {
+        Value.VStruct(n, names, vals) => vals,
+        _ => empty_values(),
+    }
+}
+
+fun sb_bytes(v: Value) -> [int64] {
+    return match v {
+        Value.VSB(b) => b,
+        _ => empty_bytes(),
+    }
+}
+
+// The index of key `k` in `ks`, or -1.
+fun key_index(ks: [Value], k: Value) -> int32 {
     var i = 0
-    while i < len(xs) - 1 {
-        push(out, xs[i])
+    while i < len(ks) {
+        if value_eq(ks[i], k) { return i }
         i = i + 1
     }
-    return Value.VList(out)
+    return -1
 }
 
 fun map_has(c: Value, k: Value) -> bool {
@@ -1851,12 +2070,7 @@ fun map_has(c: Value, k: Value) -> bool {
 }
 
 fun keys_contain(ks: [Value], k: Value) -> bool {
-    var i = 0
-    while i < len(ks) {
-        if value_eq(ks[i], k) { return true }
-        i = i + 1
-    }
-    return false
+    return key_index(ks, k) >= 0
 }
 
 fun map_remove(c: Value, k: Value) -> Value {
@@ -1898,36 +2112,6 @@ fun decode_chars(s: str) -> Value {
 fun empty_bytes() -> [int64] {
     let x: [int64] = []
     return x
-}
-
-fun sb_append_str(c: Value, s: str) -> Value {
-    return match c {
-        Value.VSB(b) => sb_with_str(b, s),
-        _ => c,
-    }
-}
-
-fun sb_with_str(b: [int64], s: str) -> Value {
-    var out = b
-    var i = 0
-    while i < len(s) {
-        push(out, s[i] as int64)
-        i = i + 1
-    }
-    return Value.VSB(out)
-}
-
-fun sb_append_byte(c: Value, byte: int64) -> Value {
-    return match c {
-        Value.VSB(b) => sb_with_byte(b, byte),
-        _ => c,
-    }
-}
-
-fun sb_with_byte(b: [int64], byte: int64) -> Value {
-    var out = b
-    push(out, byte & 255)
-    return Value.VSB(out)
 }
 
 fun sb_build(c: Value) -> str {
@@ -2053,22 +2237,6 @@ fun get_field(v: Value, field: str) -> Value {
     return Value.VUnit
 }
 
-fun set_field(v: Value, field: str, nv: Value) -> Value {
-    return match v {
-        Value.VStruct(n, names, vals) => {
-            var out: [Value] = []
-            var i = 0
-            while i < len(names) {
-                if names[i] == field { push(out, nv) }
-                else { push(out, vals[i]) }
-                i = i + 1
-            }
-            Value.VStruct(n, names, out)
-        },
-        _ => v,
-    }
-}
-
 fun index_get(c: Value, k: Value) -> Value {
     return match c {
         Value.VList(xs) => xs[as_int(k) as int32],
@@ -2087,40 +2255,6 @@ fun map_get(ks: [Value], vs: [Value], k: Value) -> Value {
     return Value.VUnit
 }
 
-fun set_index(c: Value, k: Value, nv: Value) -> Value {
-    return match c {
-        Value.VList(xs) => {
-            var out: [Value] = []
-            var i = 0
-            while i < len(xs) {
-                if (i as int64) == as_int(k) { push(out, nv) }
-                else { push(out, xs[i]) }
-                i = i + 1
-            }
-            Value.VList(out)
-        },
-        Value.VMap(ks, vs) => map_set(ks, vs, k, nv),
-        _ => c,
-    }
-}
-
-fun map_set(ks: [Value], vs: [Value], k: Value, nv: Value) -> Value {
-    var nks: [Value] = []
-    var nvs: [Value] = []
-    var found = false
-    var i = 0
-    while i < len(ks) {
-        push(nks, ks[i])
-        if value_eq(ks[i], k) { push(nvs, nv)
-            found = true }
-        else { push(nvs, vs[i]) }
-        i = i + 1
-    }
-    if !found { push(nks, k)
-        push(nvs, nv) }
-    return Value.VMap(nks, nvs)
-}
-
 fun drop_last_frame(xs: [RtFrame]) -> [RtFrame] {
     var out: [RtFrame] = []
     var i = 0
@@ -2137,24 +2271,6 @@ fun is_method_name(name: str) -> bool {
         if c == '.' { return true }
     }
     return false
-}
-
-// `cur` with `v` stored at path `steps[i..]` (values are rebuilt, not shared).
-fun write_steps(cur: Value, steps: [Step], i: int32, v: Value) -> Value {
-    if i == len(steps) { return v }
-    return match steps[i] {
-        Step.SField(f) => set_field(cur, f, write_steps(get_field(cur, f), steps, i + 1, v)),
-        Step.SIndex(k, nd) => {
-            let inner = match cur { Value.VMap(ks, vs) => if_map_get(cur, k), _ => index_get(cur, k) }
-            set_index(cur, k, write_steps(inner, steps, i + 1, v))
-        },
-    }
-}
-
-// `m[k]` if present, else unit (a map insert at the end of a path).
-fun if_map_get(m: Value, k: Value) -> Value {
-    if map_has(m, k) { return index_get(m, k) }
-    return Value.VUnit
 }
 
 // A map key as Python's `repr` writes it (the "map key … not found" message).

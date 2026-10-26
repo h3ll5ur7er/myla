@@ -15,7 +15,7 @@
 | `parser.my` | 1430 | Recursive descent with the same precedence levels and desugarings as `parser.py` |
 | `checker.my` | 3760 | Name tables, inference, generics, traits, exhaustiveness, const folding; records each expression's type in `resolved: [int32: Type]` keyed by node id; type errors carry the Python checker's messages |
 | `codegen.my` | 6200 | Monomorphizing code generator and the whole runtime, as assembly text |
-| `interp.my` | 1830 | Tree-walking interpreter over checked declarations |
+| `interp.my` | 2320 | Tree-walking interpreter over checked declarations; updates containers in place ([[MYLA-74]]) |
 | `loader.my` | 990 | Module loader: resolves imports, parses each module once, qualifies module-level names (`id$name`), checks `pub`, folds `alias.member` ([[Architecture/Module-loader]]) |
 | `diag.my` | 85 | Renders a diagnostic like the Python CLI: message, `--> file:line:col`, source line and caret |
 | `gen_main.my` | 60 | The bootstrap compiler: `gen_main <file.my> <stdlib_root> [-g]` → assembly on stdout (`-g`: DWARF line tables, [[MYLA-71]]) |
@@ -44,7 +44,7 @@ Myla has no global variables and no module-level maps, and everything is a value
 | Runtime errors | Messages | The interpreter (`myla run`/`test`): the same messages and rendering since [[MYLA-32]]; native binaries: `runtime error: <message>` on stderr and exit 1, without the position, as the Python backend's ([[MYLA-17]]) |
 | Heap | 1 GiB arena, size-class free lists up to 4 KiB | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]) |
 | Closure environments | `[drop fn][captures…]`, captures retained and dropped | The same since [[MYLA-22]]; compositions and partial applications own their parts too |
-| Stdlib root | Built in | Must be passed as an argument ([[MYLA-31]]) |
+| Stdlib root | Built in | Found from the binary's location (`build/myla` → `src/myla`), or `--stdlib <dir>` ([[MYLA-31]]) |
 
 The calling convention, value layouts, list/map/builder runtimes and the evaluation order are ported nearly line for line from [[Architecture/Native-backend]].
 
@@ -62,7 +62,7 @@ The burn tests `tests/burn/test_selfhost_*.py` keep these gates; note they build
 
 ## Current state
 
-- The three-stage fixed point holds: stage 2 and stage 3 output are identical (5.8 MB of assembly); stage 3 compiles the compiler in 1.3 s with a 163 MB peak (359 MB while `free` was disabled, [[MYLA-22]]).
+- The three-stage fixed point holds: stage 2 and stage 3 output are identical (6.3 MB of assembly); stage 3 compiles the compiler in 2.3 s with a 211 MB peak (243 MB before match results and condition temporaries were released, [[MYLA-74]]; 359 MB while `free` was disabled, [[MYLA-22]]).
 - Against the interpreter, the stage 3 compiler matches on 33 of 34 examples (`args` differs only in argv[0]: the binary's path instead of the source file's).
-- The stage 4 CLI's `myla run` (the Myla interpreter, compiled) prints byte for byte what the Python CLI prints (stdout, stderr, exit code) on all 34 examples and the whole error corpus: lex, parse, type and runtime errors ([[MYLA-28]], [[MYLA-32]]). The program's `args()` is the file followed by the arguments after it, as under the Python `myla run`. The interpreter is slow on growing containers ([[MYLA-74]]).
+- The stage 4 CLI's `myla run` (the Myla interpreter, compiled) prints byte for byte what the Python CLI prints (stdout, stderr, exit code) on all 34 examples and the whole error corpus: lex, parse, type and runtime errors ([[MYLA-28]], [[MYLA-32]]). The program's `args()` is the file followed by the arguments after it, as under the Python `myla run`. Since [[MYLA-74]] it updates containers in place, so a loop of a million `push`es takes 4 s (the Python interpreter: 10 s).
 - Further bugs: [[MYLA-23]] … [[MYLA-27]], [[MYLA-32]], [[MYLA-33]]. See [[Project/Known-issues]].

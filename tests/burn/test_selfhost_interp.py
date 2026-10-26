@@ -28,6 +28,7 @@ import io
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 
 from myla.errors import MylaError
@@ -215,6 +216,60 @@ class SelfHostedInterpParity(unittest.TestCase):
                     checker = check(link(entry, stdlib_root=stdlib))
                     code = Interpreter(checker, out, argv=[entry]).run()
                     self.assertEqual(self._myla_run(entry), (out.getvalue(), code))
+
+    def test_updates_are_amortised_constant(self) -> None:
+        """`push`, element assignment, a `push` inside a `var self` method and
+        one into a nested list update the container in place (MYLA-74): four
+        times the iterations take about four times as long, not sixteen."""
+        if self._binary is None:
+            self.skipTest("timing needs the natively built interpreter")
+        with tempfile.TemporaryDirectory() as tmp:
+            times = {}
+            for n in (UPDATE_N, 4 * UPDATE_N):
+                path = os.path.join(tmp, f"updates_{n}.my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(UPDATES.replace("N_ITER", str(n)))
+                start = time.perf_counter()
+                proc = subprocess.run([self._binary, path, default_stdlib_root()],
+                                      capture_output=True, text=True, timeout=120)
+                times[n] = time.perf_counter() - start
+                self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
+                                 (f"{4 * n}\n{n * (n + 1) // 2}\n", "", 0))
+            small, large = times[UPDATE_N], times[4 * UPDATE_N]
+            self.assertLess(large, 8 * small + 0.5, f"{UPDATE_N}: {small:.2f} s, {4 * UPDATE_N}: {large:.2f} s")
+
+
+# A loop of in-place updates (test_updates_are_amortised_constant).
+UPDATE_N = 20000
+UPDATES = """\
+struct Bag { items: [int] }
+
+impl Bag {
+    fun add(var self, x: int) {
+        push(self.items, x)
+    }
+}
+
+fun main() {
+    var xs: [int] = []
+    var bag = Bag { items: [] }
+    var grid: [[int]] = [[]]
+    var i = 0
+    while i < N_ITER {
+        push(xs, i)
+        xs[i] = xs[i] + 1
+        bag.add(i)
+        push(grid[0], i)
+        i = i + 1
+    }
+    var total: int64 = 0
+    for x in xs {
+        total = total + (x as int64)
+    }
+    print(len(xs) + len(bag.items) + len(grid[0]) + len(xs))
+    print(total)
+}
+"""
 
 
 if __name__ == "__main__":
