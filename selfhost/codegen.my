@@ -523,7 +523,7 @@ impl CodeGen {
     fun drop_call_name(self, t: Type) -> str {
         return match t {
             Type.TList(e) => "__drop_list_" + mono_token(e),
-            Type.TMap(k, v) => format("__drop_map_{}_{}", mono_token(k), mono_token(v)),
+            Type.TMap(k, v) => "__drop_map_" + map_token(k, v),
             Type.TSB => "__sb_drop",
             _ => "__dropb_" + mono_token(t),
         }
@@ -582,7 +582,7 @@ impl CodeGen {
     fun clone_call_name(self, t: Type) -> str {
         return match t {
             Type.TList(e) => "__clone_list_" + mono_token(e),
-            Type.TMap(k, v) => format("__clone_map_{}_{}", mono_token(k), mono_token(v)),
+            Type.TMap(k, v) => "__clone_map_" + map_token(k, v),
             Type.TSB => "__sb_clone",
             _ => "__sb_clone",
         }
@@ -6054,7 +6054,7 @@ impl CodeGen {
         let kt = map_key(t)
         let vt = map_val(t)
         let ss = self.map_slot_size(t)
-        self.emit(format("__drop_map_{}_{}:", mono_token(kt), mono_token(vt)))
+        self.emit(format("__drop_map_{}:", map_token(kt, vt)))
         self.emit("decq -8(%rdi)")
         let keep = self.label()
         self.emit(format("jnz {}", keep))
@@ -6105,7 +6105,7 @@ impl CodeGen {
         let kt = map_key(t)
         let vt = map_val(t)
         let ss = self.map_slot_size(t)
-        self.emit(format("__clone_map_{}_{}:", mono_token(kt), mono_token(vt)))
+        self.emit(format("__clone_map_{}:", map_token(kt, vt)))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
         self.emit("pushq %rbx")
@@ -6551,6 +6551,8 @@ fun is_builtin_call_name(nm: str) -> bool {
     if nm == "StringBuilder" || nm == "append" || nm == "append_byte" || nm == "build" { return true }
     if nm == "contains" || nm == "remove" || nm == "keys" { return true }
     if nm == "__write" || nm == "__exit" || nm == "__args" || nm == "__read_file" || nm == "__io_errno" { return true }
+    if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" { return true }
+    if nm == "__run_signal" || nm == "__run_errno" { return true }
     return false
 }
 
@@ -6621,20 +6623,29 @@ fun mangle_fn(name: str, args: [Type]) -> str {
     return format("{}__{}", name, join_tokens(args))
 }
 
+// Mangled names are injective (MYLA-9): every type argument's token is
+// prefixed with its length, and a built-in token starts with `.`, which no
+// identifier contains, while a user type's token is its name. So
+// `Pair<A_B, C>` is `Pair__3A_B1C` and `Pair<A, B_C>` is `Pair__1A3B_C`.
 fun join_tokens(xs: [Type]) -> str {
     var s = ""
-    var i = 0
-    for x in xs {
-        if i > 0 { s = s + "_" }
-        s = s + mono_token(x)
-        i = i + 1
-    }
+    for x in xs { s = s + lp(mono_token(x)) }
     return s
 }
 
+// `tok` prefixed with its length, so a run of tokens reads back one way.
+fun lp(tok: str) -> str {
+    return format("{}{}", len(tok), tok)
+}
+
+// The suffix naming a map type's helpers.
+fun map_token(k: Type, v: Type) -> str {
+    return lp(mono_token(k)) + lp(mono_token(v))
+}
+
 fun int_token(w: int32, s: bool) -> str {
-    if s { return format("i{}", w) }
-    return format("u{}", w)
+    if s { return format(".i{}", w) }
+    return format(".u{}", w)
 }
 
 fun agg_token(n: str, args: [Type]) -> str {
@@ -6646,19 +6657,24 @@ fun agg_token(n: str, args: [Type]) -> str {
 fun mono_token(t: Type) -> str {
     return match t {
         Type.TInt(w, s) => int_token(w, s),
-        Type.TBool => "bool",
-        Type.TStr => "str",
-        Type.TChar => "char",
-        Type.TFloat(w) => format("f{}", w),
-        Type.TSB => "sb",
+        Type.TBool => ".bool",
+        Type.TStr => ".str",
+        Type.TChar => ".char",
+        Type.TFloat(w) => format(".f{}", w),
+        Type.TSB => ".sb",
         Type.TStruct(n, a) => agg_token(n, a),
         Type.TEnum(n, a) => agg_token(n, a),
-        Type.TTuple(es) => format("T{}_{}", len(es), join_tokens(es)),
-        Type.TList(e) => format("L_{}", mono_token(e)),
-        Type.TMap(k, v) => format("M_{}_{}", mono_token(k), mono_token(v)),
+        Type.TTuple(es) => ".T" + join_tokens(es),
+        Type.TList(e) => ".L" + lp(mono_token(e)),
+        Type.TMap(k, v) => ".M" + map_token(k, v),
+        Type.TFunc(ps, r) => ".F" + join_tokens(ps) + "R" + lp(ret_token(r)),
         Type.TParam(n) => n,
-        _ => "X",
+        _ => ".X",
     }
+}
+
+fun ret_token(r: Option<Type>) -> str {
+    return match r { Some(t) => mono_token(t), None => ".void" }
 }
 
 // The component types of a composite type, in a canonical order, so two types

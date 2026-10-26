@@ -31,6 +31,7 @@ from ..types import (
     type_name, _is_diverging, _is_literal_expr as _is_literal,
     _FF_MINK, _FF_MAXK, _FF_POW10_DD, _FF_SPLIT, _FF_BIG, _FF_UP, _FF_DOWN, round_float,
 )
+from .monomorphize import type_token
 
 
 def _f64_bits(x: float) -> int:
@@ -204,23 +205,12 @@ class CodeGen:
     # -- list layout: a heap cell [len:8][cap:8][elem0][elem1]...] ------------
 
     def _type_mangle(self, t: Type) -> str:
-        """A stable identifier fragment for `t`, used to name per-type helpers."""
-        if isinstance(t, ListType):
-            return "L_" + self._type_mangle(t.elem)
-        if isinstance(t, MapType):
-            return "M_" + self._type_mangle(t.key) + "_" + self._type_mangle(t.value)
+        """A stable, injective identifier fragment for `t`, used to name
+        per-type helpers (MYLA-9). Structs and enums are already concrete,
+        with mangled names, after monomorphization."""
         if isinstance(t, (StructType, EnumType)):
             return t.name
-        if isinstance(t, TupleType):
-            return "T" + str(len(t.elems)) + "".join(
-                "_" + self._type_mangle(e) for e in t.elems)
-        if isinstance(t, StringBuilderType):
-            return "SB"
-        if isinstance(t, FuncType):
-            params = "_".join(self._type_mangle(p) for p in t.params)
-            ret = self._type_mangle(t.ret) if t.ret is not None else "void"
-            return "Fn" + str(len(t.params)) + "_" + params + "_R_" + ret
-        return type_name(t)  # int32 / bool / str
+        return type_token(t, self._type_mangle)
 
     def _list_drop_name(self, t: ListType) -> str:
         return "__drop_list_" + self._type_mangle(t.elem)
@@ -235,7 +225,7 @@ class CodeGen:
     # [state:8][key:8][value:vs] with state 0=empty / 1=occupied / 2=tombstone --
 
     def _map_suffix(self, t: MapType) -> str:
-        return self._type_mangle(t.key) + "_" + self._type_mangle(t.value)
+        return self._type_mangle(t)
 
     def _map_slot_size(self, t: MapType) -> int:
         return 16 + self._stored_size(t.value)

@@ -32,7 +32,7 @@ Breakpoint 1, myla_manhattan () at structs.my:16
 29	    moved.x = 100
 ```
 
-- Functions are named `myla_<name>` (`myla_main`, `myla_Point.len` for methods, `myla_geometry$area` for a function from module `geometry`, `myla___lambda_3` for lambdas, `myla_first__int32` for a generic instantiation). `break myla_main`, `break myla_Point.len` and `break myla_geometry$area` work as written. gdb guesses a demangling for `__` and shows the generic instance as `myla_first.int32` in frames; break on it by its label.
+- Functions are named `myla_<name>` (`myla_main`, `myla_Point.len` for methods, `myla_geometry$area` for a function from module `geometry`, `myla___lambda_3` for lambdas, `myla_first__6.int32` for a generic instantiation, see [[Architecture/Monomorphization]]). `break myla_main`, `break myla_Point.len` and `break myla_geometry$area` work as written; quote a generic instance: `break 'myla_first__6.int32'`. gdb shows it as `myla_first.6.int32` in frames.
 - Every statement and every expression-bodied match arm starts a line entry. Runtime helpers (`__alloc`, `__print_int`, …) have no source line; `step` into them shows assembly, `finish` gets you out.
 - `-g` changes nothing else: the binary behaves exactly like one built without it (`tests/burn/test_debug_info.py`).
 

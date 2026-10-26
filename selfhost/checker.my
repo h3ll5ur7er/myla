@@ -3314,7 +3314,7 @@ impl Checker {
                     Some(en) => { return Ok(Some(self.infer_variant_ctor(e, en, field, args, expected)?)) },
                     None => {},
                 }
-                return self.infer_method_call(e, target, field, args, expected)
+                return self.infer_method_call(e, callee, target, field, args, expected)
             },
             _ => {},
         }
@@ -3593,7 +3593,9 @@ impl Checker {
         return Ok(0)
     }
 
-    fun infer_method_call(var self, e: Expr, target: Expr, field: str, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
+    // `callee` is the `target.field` node itself (a function-valued field is
+    // typed through it, MYLA-33).
+    fun infer_method_call(var self, e: Expr, callee: Expr, target: Expr, field: str, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         let recv_type = self.expect_value(target, None)?
         let key_opt = self.type_key(recv_type)
         var sig_opt: Option<FuncSig> = None
@@ -3609,7 +3611,7 @@ impl Checker {
                             Some(ft) => match ft { Type.TFunc(p, r) => true, _ => false },
                             None => false,
                         }
-                        if is_func { return self.infer_indirect_call(e, struct_field_callee(target, field, e), args) }
+                        if is_func { return self.infer_indirect_call(e, callee, args) }
                     },
                     _ => {},
                 }
@@ -3902,7 +3904,4 @@ fun func_to_partial_res(t: Type, e: Expr) -> Result<PartialTgt, CheckErr> {
 // call to it reports ("" for a function value).
 pub struct PartialTgt { params: [Type], ret: Option<Type>, name: str }
 
-fun struct_field_callee(target: Expr, field: str, e: Expr) -> Expr {
-    return Expr { id: 0, line: e.line, col: e.col, kind: ExprKind.GetField(target, field) }
-}
 

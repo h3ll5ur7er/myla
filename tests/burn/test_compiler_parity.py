@@ -1457,6 +1457,43 @@ PROGRAMS = {
         "    print(v)\n"
         "}\n"
     ),
+    # instantiations with type arguments that share a mangled spelling, or
+    # that differ only in function types, are distinct (MYLA-9, MYLA-33)
+    "generic_instantiations_get_distinct_names": (
+        "struct A_B { v: int }\n"
+        "struct C { v: int }\n"
+        "struct A { s: str, v: int }\n"
+        "struct B_C { v: int }\n"
+        "struct Pair<X, Y> { x: X, y: Y }\n"
+        "\n"
+        "fun first<X, Y>(p: Pair<X, Y>) -> X {\n"
+        "    return p.x\n"
+        "}\n"
+        "\n"
+        "fun ident<T>(x: T) -> T {\n"
+        "    return x\n"
+        "}\n"
+        "\n"
+        "fun call<T>(f: T, describe: str) -> str {\n"
+        "    return describe\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    let p1 = Pair { x: A_B { v: 1 }, y: C { v: 2 } }\n"
+        "    let p2 = Pair { x: A { s: \"three\", v: 3 }, y: B_C { v: 4 } }\n"
+        "    print(first(p1).v + first(p2).v)\n"
+        "    let inc = ident((a: int) => a + 1)\n"
+        "    let size = ident((s: str) => len(s))\n"
+        "    print(inc(41))\n"
+        "    print(size(\"four\"))\n"
+        "    print(call((a: int) => a, \"int to int\"))\n"
+        "    print(call((s: str) => s, \"str to str\"))\n"
+        "    let t1 = ident((1, A_B { v: 5 }))\n"
+        "    let t2 = ident((A { s: \"six\", v: 6 }, 2))\n"
+        "    print(t1.1.v + t2.0.v)\n"
+        "}\n"
+    ),
     # float -> integer casts saturate, NaN gives 0 (D59, MYLA-6)
     "float_to_int_casts_saturate": (
         "const BIG: float64 = 1e19\n"

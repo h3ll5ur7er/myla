@@ -19,7 +19,13 @@ Generic templates, type aliases, `impl` and `trait` declarations don't appear in
 
 ## Name mangling
 
-`name__` followed by one token per type argument joined with `_`: primitives by name (`int32`), aggregates by their (stamped) name, `T2_a_b` for tuples, `L_t` for lists, `M_k_v` for maps, `Fn<n>_params_R_ret` for functions. Because type names may contain `_`, two instantiations can get the same name ([[MYLA-9]]).
+`name__` followed by one token per type argument, each prefixed with its length, so the name reads back one way ([[MYLA-9]]):
+
+- a user struct or enum: its name (a generic one: its own mangled name, so `Box<Pair<int, str>>` nests);
+- a built-in type: `.` and its name (`.int32`, `.str`); identifiers can't contain `.`, so these never collide with user names;
+- a tuple: `.T` and its elements' tokens; a list: `.L` and its element's; a map: `.M`, key, value; a function type: `.F`, its parameters, `R`, its return type (`.void` for none).
+
+So `Pair<A_B, C>` is `Pair__3A_B1C`, `Pair<A, B_C>` is `Pair__1A3B_C`, and `first<int, (int) -> int>` is `first__6.int3215.F7.int32R7.int32`. The code generator names its per-type helpers (`__drop_list_…`, `__drop_map_…`) with the same tokens (`type_token`); the self-hosted code generator uses the same scheme with its own spellings (`.i32`, `.f64`).
 
 ## Cost
 

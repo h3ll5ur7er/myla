@@ -390,31 +390,44 @@ class _Monomorphizer:
 
     # -- name mangling -------------------------------------------------------
 
+    # A mangled name is injective (MYLA-9): every type argument's token is
+    # prefixed with its length, and a built-in token starts with `.`, which no
+    # identifier contains, while a user type's token is its name. So
+    # `Pair<A_B, C>` is `Pair__3A_B1C` and `Pair<A, B_C>` is `Pair__1A3B_C`.
+
     def _mangle(self, name: str, args: tuple[Type, ...]) -> str:
-        return name + "__" + "_".join(self._mono_token(a) for a in args)
+        return name + "__" + "".join(_lp(self._mono_token(a)) for a in args)
 
     def _mangle_type(self, t: Type) -> str:
-        return t.name + "__" + "_".join(self._mono_token(a) for a in t.args)
+        return self._mangle(t.name, t.args)
 
     def _mono_token(self, t: Type) -> str:
-        if isinstance(t, (IntType, FloatType, CharType, BoolType, StrType,
-                          StringBuilderType)):
-            return type_name(t)
         if isinstance(t, (StructType, EnumType)):
             return self._mangle_type(t) if t.args else t.name
-        if isinstance(t, TupleType):
-            return "T" + str(len(t.elems)) + "".join(
-                "_" + self._mono_token(e) for e in t.elems
-            )
-        if isinstance(t, ListType):
-            return "L_" + self._mono_token(t.elem)
-        if isinstance(t, MapType):
-            return "M_" + self._mono_token(t.key) + "_" + self._mono_token(t.value)
-        if isinstance(t, FuncType):
-            params = "_".join(self._mono_token(p) for p in t.params)
-            ret = self._mono_token(t.ret) if t.ret is not None else "void"
-            return "Fn" + str(len(t.params)) + "_" + params + "_R_" + ret
-        return "X"  # pragma: no cover - defensive
+        return type_token(t, self._mono_token)
+
+
+def _lp(token: str) -> str:
+    """`token` prefixed with its length, so a run of tokens reads back one way."""
+    return f"{len(token)}{token}"
+
+
+def type_token(t: Type, token) -> str:
+    """The token of a built-in type (or a composite of tokens made by `token`),
+    for mangled names: `.int32`, `.T3.int`, `.L…`, `.M……`, `.F…R…`. Shared by
+    the monomorphizer and the code generator's per-type helper names."""
+    if isinstance(t, (IntType, FloatType, CharType, BoolType, StrType, StringBuilderType)):
+        return "." + type_name(t)
+    if isinstance(t, TupleType):
+        return ".T" + "".join(_lp(token(e)) for e in t.elems)
+    if isinstance(t, ListType):
+        return ".L" + _lp(token(t.elem))
+    if isinstance(t, MapType):
+        return ".M" + _lp(token(t.key)) + _lp(token(t.value))
+    if isinstance(t, FuncType):
+        ret = token(t.ret) if t.ret is not None else ".void"
+        return ".F" + "".join(_lp(token(p)) for p in t.params) + "R" + _lp(ret)
+    raise ValueError(f"no mangled token for {type_name(t)}")  # pragma: no cover
 
 
 def monomorphize(checker: Checker) -> Checker:

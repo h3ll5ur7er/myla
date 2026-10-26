@@ -63,4 +63,4 @@ There is no `f<int>(x)` call syntax: annotate the binding instead.
 | Python native backend | A separate pass stamps out `name__T1_T2` copies of reachable functions, structs and enums, then re-checks the concrete program ([[src/myla/compiler/monomorphize.py]]) |
 | Self-hosted backend | Monomorphizes during code generation with a substitution map |
 
-The mangled names can collide when type names contain underscores ([[MYLA-9]]).
+Each instantiation gets its own name, whatever the type arguments are called ([[MYLA-9]], [[Architecture/Monomorphization]]).

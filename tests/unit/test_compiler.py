@@ -71,7 +71,7 @@ class TestListTypeCollection(unittest.TestCase):
 
         with mock.patch.object(CodeGen, "_gather_list_types", counting):
             asm = asm_for(diamond_struct_chain(16))
-        self.assertIn("__drop_list_int32:", asm)   # the list type was still found
+        self.assertIn("__drop_list_.int32:", asm)  # the list type was still found
         self.assertLess(calls, 1000)                # 2**16 paths if not memoized
 
     def test_helpers_are_emitted_in_a_stable_order(self):
@@ -82,10 +82,11 @@ class TestListTypeCollection(unittest.TestCase):
         labels = [line for line in asm.splitlines()
                   if line.startswith(("__drop_list_", "__drop_map_", "__sb_new"))]
         # Recorded from the unmemoized implementation: memoization must not
-        # change which helpers are emitted or their order.
+        # change which helpers are emitted or their order. (Spelled with the
+        # injective type tokens of MYLA-9.)
         self.assertEqual(labels, [
-            "__sb_new:", "__drop_list_int32:", "__drop_map_str_L_uint8:",
-            "__drop_list_uint8:", "__drop_list_bool:",
+            "__sb_new:", "__drop_list_.int32:", "__drop_map_.M4.str9.L6.uint8:",
+            "__drop_list_.uint8:", "__drop_list_.bool:",
         ])
         self.assertEqual(asm, asm_for(src))
 

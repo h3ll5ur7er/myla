@@ -10,7 +10,6 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-9]] | Mangled names of generic instantiations can collide | low |
 | [[MYLA-14]] | Exhaustiveness rejects nested and `true \| false` matches | low |
 | [[MYLA-17]] | Native runtime: short writes, silent traps | low |
 | [[MYLA-18]] | Strings are never freed | low |
@@ -20,7 +19,6 @@ The reference implementation. Most problems are places where the native backend 
 | Task | Problem | Priority |
 | --- | --- | --- |
 | [[MYLA-74]] | The Myla interpreter copies containers on every update (quadratic loops) | low |
-| [[MYLA-33]] | Latent issues | low |
 
 Also by design (from the earlier known-issues list in [[Archive/known_issues]]): x86-64 Linux is the only target (D2), and the stdlib root is passed explicitly.
 

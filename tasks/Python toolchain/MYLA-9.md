@@ -2,7 +2,7 @@
 id: MYLA-9
 title: Generic instantiations can get the same mangled name
 type: bug
-status: backlog
+status: review
 priority: low
 labels: [monomorphize, native-backend]
 ---
@@ -32,6 +32,15 @@ fun main() {
 
 ## Done when
 
-- [ ] Mangling is injective (length-prefixed tokens, or a separator that can't appear in identifiers such as `$`, which the loader already uses)
-- [ ] The repro is a parity test
-- [ ] Check [[selfhost/codegen.my]] `mono_token` too, which also maps every function type to `X` (see [[MYLA-33]])
+- [x] Mangling is injective (length-prefixed tokens, or a separator that can't appear in identifiers such as `$`, which the loader already uses)
+- [x] The repro is a parity test
+- [x] Check [[selfhost/codegen.my]] `mono_token` too, which also maps every function type to `X` (see [[MYLA-33]])
+
+## How
+
+Every type-argument token is prefixed with its length, and every built-in token starts with `.` (which identifiers can't contain), so the name is injective: `Pair<A_B, C>` → `Pair__3A_B1C`, `Pair<A, B_C>` → `Pair__1A3B_C` ([[Architecture/Monomorphization]]). The same `type_token` names the code generator's per-type helpers (`__drop_map_…` had the same ambiguity: `[A: B_C]` and `[A_B: C]` shared a helper). The self-hosted code generator uses the same scheme in `mono_token` / `map_token` ([[selfhost/codegen.my]]), now with a real token for function types instead of `X` ([[MYLA-33]]).
+
+## Evidence
+
+- Parity program `generic_instantiations_get_distinct_names` (the repro with different layouts behind the colliding names, generic functions over two function types and over tuples) in [[tests/burn/test_compiler_parity.py]] and the self-hosted `PARITY_PROGRAMS`. Before: the Python backend failed with `duplicate top-level declaration 'Pair__A_B_C'`, and the self-hosted binary silently reused one instantiation and printed `1` instead of `4`. After: both print `4 42 4 int to int str to str 11`, like the interpreter.
+- gdb still breaks on a generic instance by its label: `break 'myla_first__6.int32'` ([[Development/Debugging]]).
