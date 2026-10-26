@@ -39,7 +39,7 @@ Breakpoint 1, myla_manhattan () at structs.my:16
 ## What doesn't work yet
 
 - **Variables.** gdb doesn't know Myla's locals or types yet. Every local has a fixed slot at a negative offset from `%rbp`; with `--keep-asm` you can find the slot in the `.s` file and read it with `x/gd $rbp-24`. Variable and type information is the next step of [[MYLA-66]].
-- **The self-hosted compiler** doesn't emit line tables: its source positions are still in coordinates of the concatenated program ([[MYLA-28]], [[MYLA-30]]).
+- **The self-hosted compiler** doesn't emit line tables yet. Since [[MYLA-30]] every node has a position in its own module, so the remaining work is recording each declaration's file ([[MYLA-28]]).
 
 ## Other tools
 

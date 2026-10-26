@@ -1383,3 +1383,16 @@ pub fun parse(toks: [Token]) -> Program {
     var p = new_parser(toks)
     return p.parse_program()
 }
+
+// A parsed module and the next unused node id.
+pub struct Parsed { program: Program, next_id: int32 }
+
+// Parse with node ids starting at `first_id`, so separately parsed modules
+// (and the prelude) get ids unique across the whole program: the checker's
+// type tables are keyed by node id (MYLA-30).
+pub fun parse_ids(toks: [Token], first_id: int32) -> Parsed {
+    var p = new_parser(toks)
+    p.next_id = first_id
+    let prog = p.parse_program()
+    return Parsed { program: prog, next_id: p.next_id }
+}

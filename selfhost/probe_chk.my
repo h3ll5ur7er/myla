@@ -1,9 +1,12 @@
 from std.process import exit
 from std.io import eprintln
-from .checker import build_checker_src
+from .lexer import lex
+from .parser import parse_ids
+from .checker import build_checker_decls
 
 fun main() {
-    match build_checker_src("fun main() { let x = 1 }") {
+    let p = parse_ids(lex("fun main() { let x = 1 }"), 0)
+    match build_checker_decls(p.program.decls, p.next_id) {
         Ok(c) => {
             eprintln("[p] ok")
             exit(0)

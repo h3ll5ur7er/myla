@@ -29,7 +29,6 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-30]] | The loader concatenates modules: name collisions, no packages or module aliases | medium |
 | [[MYLA-23]] | `#derive(Eq)` on recursive enums compares addresses | medium |
 | [[MYLA-25]] | `remove` on a map changes its copies | medium |
 | [[MYLA-26]] | Partial application of an aggregate-returning function returns garbage | medium |

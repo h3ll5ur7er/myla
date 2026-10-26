@@ -1,9 +1,8 @@
 """Differential burn test for the self-hosted interpreter (self-hosting v0.8).
 
 `selfhost/interp.my` is the Myla-written tree-walking interpreter;
-`selfhost/interp_main.my` reads a single-file program, lexes + parses +
-type-checks it (prepending the same `Option`/`Result`/`get` prelude the Python
-`run` injects), then interprets it — producing the same stdout and exit status
+`selfhost/interp_main.my` loads a program, type-checks it (with the same
+`Option`/`Result`/`get` prelude the Python `run` injects), then interprets it — producing the same stdout and exit status
 as `myla run` (the Python interpreter). This test asserts that, for every
 runnable example in the corpus, the self-hosted interpreter's (stdout, exit
 code) is identical to the Python oracle's. That is the v0.8 interpreter-parity
@@ -16,10 +15,11 @@ binary* when the host can build one (which also exercises codegen parity of the
 toolchain); otherwise it falls back to running the interpreter source through
 the Python interpreter.
 
-Scope. The gate covers the single-file top-level examples — the import-driven
-multi-file packages under `examples/<pkg>/` need a module loader the
-self-hosted `interp_main` does not have (same boundary as the checker gate).
-`floats.my` is included since the self-hosted toolchain has floats (MYLA-29).
+Scope. The corpus gate covers the single-file top-level examples (`floats.my`
+included since MYLA-29). `interp_main` links its input with the self-hosted
+module loader (MYLA-30), so the multi-module programs of the codegen gate
+(`examples/modules` and its MODULE_PROJECTS) run here too, against the Python
+`link` + interpreter.
 """
 from __future__ import annotations
 
@@ -98,9 +98,10 @@ class SelfHostedInterpParity(unittest.TestCase):
             cls._tmp.cleanup()
 
     def _myla_run(self, path: str) -> tuple[str, int]:
+        argv = [path, default_stdlib_root()]
         if self._binary is not None:
             proc = subprocess.run(
-                [self._binary, path], capture_output=True, text=True
+                [self._binary, *argv], capture_output=True, text=True
             )
             return proc.stdout, proc.returncode
         # Interpreter fallback (no native toolchain on this host): run the
@@ -108,7 +109,7 @@ class SelfHostedInterpParity(unittest.TestCase):
         # path as argv[1] (what `interp_main` reads).
         out = io.StringIO()
         code = Interpreter(
-            _check_tool(), out, argv=["interp_tool", path]
+            _check_tool(), out, argv=["interp_tool", *argv]
         ).run()
         return out.getvalue(), code
 
@@ -121,6 +122,21 @@ class SelfHostedInterpParity(unittest.TestCase):
                 checked += 1
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 20)
+
+    def test_module_programs_match_the_oracle(self) -> None:
+        from .test_selfhost_codegen import MODULE_PROJECTS, _write_project
+
+        stdlib = default_stdlib_root()
+        entries = {"examples/modules": os.path.join(_REPO, "examples", "modules", "main.my")}
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, files in MODULE_PROJECTS.items():
+                entries[name] = _write_project(os.path.join(tmp, name), files)
+            for name, entry in entries.items():
+                with self.subTest(program=name):
+                    out = io.StringIO()
+                    checker = check(link(entry, stdlib_root=stdlib))
+                    code = Interpreter(checker, out, argv=[entry]).run()
+                    self.assertEqual(self._myla_run(entry), (out.getvalue(), code))
 
 
 if __name__ == "__main__":

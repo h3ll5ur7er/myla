@@ -11,7 +11,7 @@
 // matches the oracle.
 
 from .lexer import lex
-from .parser import parse
+from .parser import parse, parse_ids
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
 from .ast import Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
@@ -2928,12 +2928,15 @@ pub fun check_program(user: Program) -> Result<int32, CheckErr> {
     return c.run_all()
 }
 
-// Self-hosting v0.8: type-check `src` (prelude + user parsed as one stream so
-// node ids are globally unique) and return the populated checker, whose
-// `decls`/`resolved`/`functions` tables drive the tree-walking interpreter.
-pub fun build_checker_src(src: str) -> Result<Checker, CheckErr> {
-    let prog = parse(lex(prelude_src() + src))
-    var c = new_checker(prog.decls)
+// Type-check a linked program (selfhost/loader.my: its declarations, whose node
+// ids are below `next_id`), with the prelude parsed after it so every id stays
+// unique, and return the populated checker (MYLA-30).
+pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, CheckErr> {
+    let pre = parse_ids(lex(prelude_src()), next_id)
+    var all: [Decl] = []
+    for d in pre.program.decls { push(all, d) }
+    for d in decls { push(all, d) }
+    var c = new_checker(all)
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
     return Ok(c)

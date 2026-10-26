@@ -1,9 +1,9 @@
 """Differential burn test for the self-hosted code generator (self-hosting v0.9).
 
 `selfhost/codegen.my` is the Myla-written x86-64 backend and
-`selfhost/gen_main.my` the thin driver: it reads a single-file program, lexes +
-parses + type-checks it (prepending the same `Option`/`Result`/`get` prelude the
-Python `run` injects), generates GAS assembly, and writes that assembly to
+`selfhost/gen_main.my` the thin driver: it loads and links a program's modules,
+type-checks it (with the same `Option`/`Result`/`get` prelude the Python `run`
+injects), generates GAS assembly, and writes that assembly to
 stdout. A host wrapper then runs `as`/`ld` over it to produce a real ELF binary
 (§4 of docs/self-hosting.md).
 
@@ -19,10 +19,11 @@ otherwise we run the compiler's source through the Python interpreter. Either
 way the *assembly under test* is emitted by the Myla-written backend — only the
 way we run that backend differs.
 
-Scope. The gate covers the single-file top-level examples; the import-driven
-multi-file packages under `examples/<pkg>/` need a module loader the self-hosted
-`gen_main` does not have (same boundary as the interpreter/checker gates).
-`floats.my` is included since the self-hosted backend has floats (MYLA-29).
+Scope. The corpus gate covers the single-file top-level examples (`floats.my`
+included since MYLA-29). Multi-module programs (`examples/modules` and the
+projects in MODULE_PROJECTS) go through the self-hosted module loader (MYLA-30)
+and are compared with the Python `link` + interpreter; MODULE_ERRORS pins the
+loader's diagnostics to the Python loader's.
 """
 from __future__ import annotations
 
@@ -94,6 +95,178 @@ STRESS_PROGRAMS = {
 }
 PEAK_LIMIT_MB = 30
 
+# Multi-module programs (MYLA-30): the self-hosted loader links modules the way
+# the Python one does: per-module names (`id$name`), `pub` exports and
+# re-exports, module aliases, nested modules and packages. Each project is
+# written to a temporary directory; `main.my` is the entry.
+MODULE_PROJECTS = {
+    # MYLA-30's repro: a user `collect` next to std.process's private one
+    "private_std_helper_name": {
+        "main.my": (
+            "from std.process import args\n"
+            "fun collect(n: int) -> int {\n    return n * 2\n}\n"
+            "fun main() {\n    print(collect(len(args()) as int))\n}\n"),
+    },
+    # the same private name in three modules
+    "private_names_per_module": {
+        "main.my": (
+            "from .a import fa\nfrom .b import fb\n"
+            "fun helper() -> int {\n    return 100\n}\n"
+            "fun main() {\n    print(fa() + fb() + helper())\n}\n"),
+        "a.my": "fun helper() -> int {\n    return 1\n}\npub fun fa() -> int {\n    return helper()\n}\n",
+        "b.my": "fun helper() -> int {\n    return 2\n}\npub fun fb() -> int {\n    return helper() * 10\n}\n",
+    },
+    # aliases, nested modules, a package, enum constructors through an alias
+    "aliases_and_packages": {
+        "main.my": (
+            "import .shapes as sh\n"
+            "from .util.mathx import square, Pair\n"
+            "import .util.mathx as mx\n"
+            "import .geo as g\n"
+            "fun main() {\n"
+            "    let p = Pair { a: 3, b: 4 }\n"
+            "    print(square(p.a) + mx.square(p.b))\n"
+            "    print(sh.area(sh.Shape.Rect(2, 5)))\n"
+            "    let s = sh.unit()\n"
+            "    print(match s { Rect(w, h) => w * h, Circle(r) => r })\n"
+            "    print(g.dist(g.origin()))\n}\n"),
+        "shapes.my": (
+            "pub enum Shape { Circle(int), Rect(int, int) }\n"
+            "pub fun area(s: Shape) -> int {\n"
+            "    return match s { Circle(r) => 3 * r * r, Rect(w, h) => w * h }\n}\n"
+            "pub fun unit() -> Shape {\n    return Shape.Circle(1)\n}\n"),
+        "util/mathx.my": (
+            "pub struct Pair { a: int, b: int }\n"
+            "pub fun square(x: int) -> int {\n    return x * x\n}\n"),
+        "geo/geo.my": (
+            "pub struct P { x: int, y: int }\n"
+            "pub fun origin() -> P {\n    return P { x: 0, y: 0 }\n}\n"
+            "pub fun dist(p: P) -> int {\n    return p.x + p.y + 42\n}\n"),
+    },
+    # types, methods, traits, generics and consts across modules, re-exports
+    "types_methods_traits_generics": {
+        "main.my": (
+            "from .lib import Point, Shape, first, LIMIT, Area, deep\n"
+            "fun total(xs: [Point]) -> int {\n"
+            "    var n = 0\n    for x in xs { n = n + x.area() }\n    return n\n}\n"
+            "fun main() {\n"
+            "    let p = Point { x: 1, y: 2 }\n"
+            "    print(p.sum())\n"
+            "    let s = Shape.Line(p, Point { x: 5, y: 5 })\n"
+            "    print(match s { Dot(q) => q.x, Line(a, b) => a.x + b.y })\n"
+            "    print(first([LIMIT, 1]))\n"
+            "    print(total([p, Point { x: 3, y: 3 }]))\n"
+            "    print(deep())\n"
+            "    let q = p + Point { x: 10, y: 20 }\n"
+            "    print(q.y)\n}\n"),
+        "lib/lib.my": (
+            "pub from .inner import deep\n"
+            "pub trait Area {\n    fun area(self) -> int\n}\n"
+            "pub struct Point { x: int, y: int }\n"
+            "impl Point {\n    fun sum(self) -> int {\n        return self.x + self.y\n    }\n}\n"
+            "impl Area for Point {\n    fun area(self) -> int {\n        return self.x * self.y\n    }\n}\n"
+            "impl Add for Point {\n    fun add(self, other: Point) -> Point {\n"
+            "        return Point { x: self.x + other.x, y: self.y + other.y }\n    }\n}\n"
+            "pub enum Shape { Dot(Point), Line(Point, Point) }\n"
+            "pub fun first<T>(xs: [T]) -> T {\n    return xs[0]\n}\n"
+            "pub const LIMIT: int = 7\n"),
+        "lib/inner.my": "pub fun deep() -> int {\n    return 99\n}\n",
+    },
+    # locals, parameters, loop variables, match and lambda bindings and type
+    # parameters shadow module-level names (in a non-entry module, where the
+    # module names are qualified)
+    "locals_shadow_module_names": {
+        "main.my": (
+            'import .lib\n'
+            'from .lib import Box\n'
+            'fun local_alias() -> int {\n'
+            '    let lib = Box { v: 4 }\n'
+            '    return lib.v\n'
+            '}\n'
+            'fun main() {\n'
+            '    print(lib.shadowing(1))\n'
+            '    print(lib.captures())\n'
+            '    print(lib.generic(9))\n'
+            '    print(lib.unbox(Box { v: 6 }))\n'
+            '    print(local_alias())\n'
+            '}\n'
+        ),
+        "lib.my": (
+            'pub struct Box { v: int }\n'
+            'fun helper() -> int {\n'
+            '    return 1000\n'
+            '}\n'
+            'fun count() -> int {\n'
+            '    return 5\n'
+            '}\n'
+            'fun one() -> int {\n'
+            '    return 1\n'
+            '}\n'
+            'fun two() -> int {\n'
+            '    return 2\n'
+            '}\n'
+            'pub fun shadowing(count: int) -> int {\n'
+            '    let helper = 3\n'
+            '    var total = count + helper\n'
+            '    for count in 0..3 {\n'
+            '        total = total + count\n'
+            '    }\n'
+            '    let f = (helper: int) => helper * 2\n'
+            '    total = total + f(10)\n'
+            '    let o: Option<int> = Some(7)\n'
+            '    total = total + match o {\n'
+            '        Some(count) => count,\n'
+            '        None => 0,\n'
+            '    }\n'
+            '    let (one, two) = (100, 200)\n'
+            '    return total + one + two\n'
+            '}\n'
+            'pub fun captures() -> int {\n'
+            '    let add = (x: int) => x + count() + helper()\n'
+            '    return add(1)\n'
+            '}\n'
+            'pub fun generic<Box>(x: Box) -> Box {\n'
+            '    return x\n'
+            '}\n'
+            'pub fun unbox(b: Box) -> int {\n'
+            '    return b.v\n'
+            '}\n'
+        ),
+    },
+}
+
+# Programs the loader rejects (MYLA-30): the self-hosted loader reports the
+# Python loader's message at the same position (`--` for its em dash).
+MODULE_ERRORS = {
+    "private_name": {
+        "main.my": "from .lib import secret\nfun main() {\n    print(secret())\n}\n",
+        "lib.my": "fun secret() -> int {\n    return 1\n}\n",
+    },
+    "unresolved": {"main.my": "fun f() {}\nimport nothere\nfun main() {}\n"},
+    "module_as_value": {
+        "main.my": "import lib\nfun main() {\n    let x = lib\n}\n",
+        "lib.my": "pub fun f() -> int {\n    return 1\n}\n",
+    },
+    "nested_module_as_value": {
+        "main.my": "import lib.inner\nfun main() {\n    let x = lib.inner\n}\n",
+        "lib.my": "pub fun f() -> int {\n    return 1\n}\n",
+        "lib/inner.my": "pub fun g() -> int {\n    return 2\n}\n",
+    },
+    "member_not_exported": {
+        "main.my": "import lib\nfun main() {\n    print(lib.g())\n}\n",
+        "lib.my": "fun g() -> int {\n    return 1\n}\n",
+    },
+    "import_collision": {
+        "main.my": "from .lib import f\nfun f() -> int {\n    return 2\n}\nfun main() {}\n",
+        "lib.my": "pub fun f() -> int {\n    return 1\n}\n",
+    },
+    "ambiguous_package": {
+        "main.my": "import pkg\nfun main() {}\n",
+        "pkg.my": "pub fun f() -> int {\n    return 1\n}\n",
+        "pkg/pkg.my": "pub fun f() -> int {\n    return 2\n}\n",
+    },
+}
+
 # A child's peak RSS counts its parent's memory at fork time, so the program
 # is started from this minimal helper (a few MB) rather than from the test
 # process, and the helper reports the program's exit code and peak (KB).
@@ -103,6 +276,16 @@ _MEASURE = (
     "_, status, usage = os.wait4(pid, 0)\n"
     "sys.stderr.write(f'{os.waitstatus_to_exitcode(status)} {usage.ru_maxrss}\\n')\n"
 )
+
+
+def _write_project(root: str, files: dict[str, str]) -> str:
+    """Write a multi-module project under `root`; the path of its entry."""
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    return os.path.join(root, "main.my")
 
 
 def _corpus() -> list[str]:
@@ -155,11 +338,12 @@ class SelfHostedCodegenParity(unittest.TestCase):
         if cls._tmp is not None:
             cls._tmp.cleanup()
 
-    def _emit_asm(self, path: str) -> str:
+    def _emit_asm(self, path: str, stdlib_root: str | None = None) -> str:
         """Assembly for `path`, produced by the self-hosted backend."""
+        extra = [stdlib_root] if stdlib_root is not None else []
         if self._binary is not None:
             proc = subprocess.run(
-                [self._binary, path], capture_output=True, text=True
+                [self._binary, path, *extra], capture_output=True, text=True
             )
             self.assertEqual(
                 proc.returncode, 0,
@@ -171,7 +355,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # example path as argv[1] (what `gen_main` reads).
         out = io.StringIO()
         code = Interpreter(
-            _check_tool(), out, argv=["gen_tool", path]
+            _check_tool(), out, argv=["gen_tool", path, *extra]
         ).run()
         self.assertEqual(code, 0, "self-hosted compile failed")
         return out.getvalue()
@@ -215,6 +399,44 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 checked += 1
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 20)
+
+    def _linked_oracle(self, path: str) -> tuple[str, int]:
+        out = io.StringIO()
+        checker = check(link(path, stdlib_root=default_stdlib_root()))
+        code = Interpreter(checker, out, argv=[path]).run()
+        return out.getvalue(), code
+
+    def test_module_programs_match_the_oracle(self) -> None:
+        stdlib = default_stdlib_root()
+        entries = {"examples/modules": os.path.join(_REPO, "examples", "modules", "main.my")}
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, files in MODULE_PROJECTS.items():
+                entries[name] = _write_project(os.path.join(tmp, name), files)
+            for name, entry in entries.items():
+                with self.subTest(program=name):
+                    out, code = self._build_and_run(self._emit_asm(entry, stdlib))
+                    expected, _ = self._linked_oracle(entry)
+                    self.assertEqual((out, code), (expected, 0))
+
+    def test_module_errors_match_the_python_loader(self) -> None:
+        from myla.errors import ModuleError
+
+        if self._binary is None:
+            self.skipTest("the self-hosted compiler could not be built natively")
+        stdlib = default_stdlib_root()
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, files in MODULE_ERRORS.items():
+                with self.subTest(program=name):
+                    entry = _write_project(os.path.join(tmp, name), files)
+                    with self.assertRaises(ModuleError) as ctx:
+                        link(entry, stdlib_root=stdlib)
+                    err = ctx.exception
+                    message = err.message.replace("\u2014", "--")
+                    proc = subprocess.run(
+                        [self._binary, entry, stdlib], capture_output=True, text=True
+                    )
+                    self.assertEqual(proc.returncode, 1)
+                    self.assertIn(f"{err.line}:{err.column}: {message}", proc.stderr)
 
     def test_stress_programs_reclaim_memory(self) -> None:
         from . import test_compiler_parity

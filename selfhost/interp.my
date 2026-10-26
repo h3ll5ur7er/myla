@@ -1,14 +1,14 @@
 // interp.my -- the Myla tree-walking interpreter (self-hosting v0.8).
 //
 // Mirrors src/myla/interpreter.py: runs a type-checked program produced by
-// `build_checker_src` (checker.my). Integer arithmetic wraps at each type's
+// `build_checker_decls` (checker.my). Integer arithmetic wraps at each type's
 // width; structs/tuples/enums/lists/maps have value semantics (copied on bind,
 // assign, argument passing, return, and construction). Type information the
 // runtime needs (integer widths, print/format rendering, casts) comes from the
 // checker's `resolved` side table, keyed by AST node id.
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind
-from .checker import Checker, Type, build_checker_src
+from .checker import Checker, Type
 from .util import cp_utf8
 from .floatlit import f64_literal_bits, f32_round_bits
 from std.io import write
@@ -94,9 +94,12 @@ pub struct Interp {
     ctrl: Ctrl,
     ctrl_val: Value,
     exit_code: int32,
+    argv: [str],            // what the program's `args()` returns
 }
 
-pub fun new_interp(c: Checker) -> Interp {
+// An interpreter for the checked program `c`, run as `argv` (argv[0] is the
+// program's path, as for `myla run`).
+pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     var it = Interp {
         decls: c.decls,
         resolved: c.resolved,
@@ -107,6 +110,7 @@ pub fun new_interp(c: Checker) -> Interp {
         ctrl: Ctrl.CNone,
         ctrl_val: Value.VUnit,
         exit_code: 0,
+        argv: argv,
     }
     return it
 }
@@ -1016,7 +1020,7 @@ impl Interp {
         }
         if nm == "__args" {
             var out: [Value] = []
-            for a in __args() { push(out, Value.VStr(a)) }
+            for a in self.argv { push(out, Value.VStr(a)) }
             return Value.VList(out)
         }
         if nm == "__run" {

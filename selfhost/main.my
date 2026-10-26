@@ -14,8 +14,8 @@
 from std.process import args, exit, run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file
-from .loader import amalgamate
-from .checker import build_checker_src, CheckErr
+from .loader import load_program
+from .checker import build_checker_decls, Checker, CheckErr
 from .codegen import new_codegen
 from .interp import new_interp
 
@@ -26,17 +26,20 @@ fun decode(bytes: [uint8]) -> str {
     return build(sb)
 }
 
-// Amalgamate + type-check `file`, then generate its x86-64 assembly. Errors are
-// carried as a human-readable string.
-fun compile_asm(file: str, stdlib: str) -> Result<str, str> {
-    let src = amalgamate(file, stdlib)?
-    return match build_checker_src(src) {
-        Ok(c) => {
-            var g = new_codegen(c)
-            Ok(g.generate())
-        },
+// Load, link and type-check the program rooted at `file`. Errors are carried as
+// a human-readable string.
+fun load_and_check(file: str, stdlib: str) -> Result<Checker, str> {
+    let prog = load_program(file, stdlib)?
+    return match build_checker_decls(prog.decls, prog.next_id) {
+        Ok(c) => Ok(c),
         Err(e) => Err(format("type-check failed at {}:{}", e.line, e.col)),
     }
+}
+
+// Type-check `file`, then generate its x86-64 assembly.
+fun compile_asm(file: str, stdlib: str) -> Result<str, str> {
+    var g = new_codegen(load_and_check(file, stdlib)?)
+    return Ok(g.generate())
 }
 
 // Inspect a finished child's status; return true on failure (nonzero exit or a
@@ -75,46 +78,19 @@ fun run_step(program: str, argv: [str], label: str) -> bool {
     return failed
 }
 
-// `myla run <file> [stdlib]`: interpret the program, returning its exit status.
-fun cmd_run(file: str, stdlib: str) -> int32 {
-    match amalgamate(file, stdlib) {
-        Ok(src) => {
-            return run_interp(src, false)
-        },
-        Err(e) => {
-            eprintln("myla: " + e)
-            return 1
-        },
-    }
-    return 0
-}
-
-// `myla test <file> [stdlib]`: run the program's #test cases.
-fun cmd_test(file: str, stdlib: str) -> int32 {
-    match amalgamate(file, stdlib) {
-        Ok(src) => {
-            return run_interp(src, true)
-        },
-        Err(e) => {
-            eprintln("myla: " + e)
-            return 1
-        },
-    }
-    return 0
-}
-
-// Shared body of run/test: type-check `src`, then either run it or its tests.
-fun run_interp(src: str, tests: bool) -> int32 {
-    match build_checker_src(src) {
+// `myla run <file> [stdlib]` / `myla test`: interpret the program, or run its
+// #test cases; the exit status.
+fun cmd_interp(file: str, stdlib: str, tests: bool) -> int32 {
+    match load_and_check(file, stdlib) {
         Ok(c) => {
-            var it = new_interp(c)
+            var it = new_interp(c, [file])
             if tests {
                 return it.run_tests()
             }
             return it.run()
         },
         Err(e) => {
-            eprintln(format("myla: type-check failed at {}:{}", e.line, e.col))
+            eprintln("myla: " + e)
             return 1
         },
     }
@@ -170,10 +146,7 @@ fun main() {
         if len(argv) >= 4 {
             stdlib = argv[3]
         }
-        if cmd == "run" {
-            exit(cmd_run(file, stdlib))
-        }
-        exit(cmd_test(file, stdlib))
+        exit(cmd_interp(file, stdlib, cmd == "test"))
     }
 
     if cmd == "build" {

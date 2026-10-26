@@ -16,10 +16,10 @@
 | `checker.my` | 3570 | Name tables, inference, generics, traits, exhaustiveness, const folding; records each expression's type in `resolved: [int32: Type]` keyed by node id |
 | `codegen.my` | 6200 | Monomorphizing code generator and the whole runtime, as assembly text |
 | `interp.my` | 1830 | Tree-walking interpreter over checked declarations |
-| `loader.my` | 170 | Finds imports, strips them, concatenates modules' source (dependencies first) |
+| `loader.my` | 970 | Module loader: resolves imports, parses each module once, qualifies module-level names (`id$name`), checks `pub`, folds `alias.member` ([[Architecture/Module-loader]]) |
 | `gen_main.my` | 50 | The bootstrap compiler: `gen_main <file.my> <stdlib_root>` → assembly on stdout |
-| `main.my` | 200 | The self-hosted CLI: `myla run|test|build <file> [-o out] [stdlib_root]`; `build` runs `as`/`ld` through `std.process.run` |
-| `lex_main.my`, `parse_main.my`, `check_main.my`, `interp_main.my`, `amalg_main.my` | 30–40 each | Drivers for the differential tests (canonical tokens, canonical AST, `ok`/`err line col kind`, interpreted output, amalgamated source) |
+| `main.my` | 170 | The self-hosted CLI: `myla run|test|build <file> [-o out] [stdlib_root]`; `build` runs `as`/`ld` through `std.process.run` |
+| `lex_main.my`, `parse_main.my`, `check_main.my`, `interp_main.my` | 30–50 each | Drivers for the differential tests (canonical tokens, canonical AST, `ok`/`err line col kind`, interpreted output; `interp_main` goes through the loader) |
 | `probe_*.my` | 15–20 each | Bring-up scratch files, unused ([[MYLA-34]]) |
 
 ## Writing a compiler in Myla
@@ -37,10 +37,10 @@ Myla has no global variables and no module-level maps, and everything is a value
 
 | Area | Python toolchain | Self-hosted |
 | --- | --- | --- |
-| Modules | Qualified names, privacy, packages | Text concatenation ([[MYLA-30]]) |
+| Modules | Qualified names, privacy, packages | The same since [[MYLA-30]] (small differences on [[Architecture/Module-loader]]) |
 | Monomorphization | Separate pass, then a second check | During code generation, with a substitution list |
 | Floats | Full support | Full support since [[MYLA-29]]: literals converted with integer arithmetic (`selfhost/floatlit.my`), the float runtime generated from the Python backend's (`scripts/gen_selfhost_runtime.py`) |
-| Diagnostics | Messages with file positions | Positions only, offset by the prelude ([[MYLA-28]]) |
+| Diagnostics | Messages with file positions | Loader errors with messages; type errors as a bare position in its own file, without the file name ([[MYLA-28]]) |
 | Runtime errors | Messages | Silent `__trap` (exit 1) |
 | Heap | 1 GiB arena, size-class free lists up to 4 KiB | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]) |
 | Closure environments | `[drop fn][captures…]`, captures retained and dropped | The same since [[MYLA-22]]; compositions and partial applications own their parts too |
@@ -62,7 +62,7 @@ The burn tests `tests/burn/test_selfhost_*.py` keep these gates; note they build
 
 ## Current state
 
-- The three-stage fixed point holds: stage 2 and stage 3 output are identical (4.7 MB of assembly); stage 3 compiles the compiler in 1.3 s with a 163 MB peak (359 MB while `free` was disabled, [[MYLA-22]]).
-- Against the interpreter, the stage 3 compiler matches on 32 of 34 examples (`modules/main.my` fails to load its package, [[MYLA-30]]; `args` differs only in argv[0]).
-- The stage 4 CLI's `myla run` and `myla test` (the Myla interpreter, compiled) match the Python interpreter on every single-file example, floats included ([[MYLA-21]], [[MYLA-29]]).
+- The three-stage fixed point holds: stage 2 and stage 3 output are identical (5.6 MB of assembly); stage 3 compiles the compiler in 1.3 s with a 163 MB peak (359 MB while `free` was disabled, [[MYLA-22]]).
+- Against the interpreter, the stage 3 compiler matches on 33 of 34 examples (`args` differs only in argv[0]: the binary's path instead of the source file's).
+- The stage 4 CLI's `myla run` and `myla test` (the Myla interpreter, compiled) match the Python interpreter on all 34 examples, multi-module ones and floats included ([[MYLA-21]], [[MYLA-29]], [[MYLA-30]]). The program's `args()` is `[file]`, as under `myla run` without extra arguments (the self-hosted CLI takes no program arguments).
 - Further bugs: [[MYLA-23]] … [[MYLA-27]], [[MYLA-32]], [[MYLA-33]]. See [[Project/Known-issues]].

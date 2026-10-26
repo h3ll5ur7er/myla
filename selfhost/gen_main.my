@@ -1,19 +1,19 @@
 // gen_main.my -- `compile` tool, written in Myla (self-hosting v0.9).
 //
-// Reads a .my file, lexes + parses + type-checks it (prepending the same
-// prelude `myla run` injects), generates x86-64 assembly, and writes that
+// Reads a .my file, loads and links its modules, type-checks the program
+// (with the same prelude `myla run` injects), generates x86-64 assembly, and writes that
 // assembly to stdout. A thin host wrapper runs `as`/`ld` over it (§4 of
 // docs/self-hosting.md), so this stays a pure front-end + codegen with no
 // process spawning of its own.
 
 from std.process import args, exit
 from std.io import write, eprintln
-from .checker import build_checker_src
+from .checker import build_checker_decls
 from .codegen import new_codegen
-from .loader import amalgamate
+from .loader import load_program, Loaded
 
-fun emit_asm(src: str) -> int32 {
-    return match build_checker_src(src) {
+fun emit_asm(prog: Loaded) -> int32 {
+    return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
             var g = new_codegen(c)
             let asm = g.generate()
@@ -37,9 +37,9 @@ fun main() {
     if len(argv) >= 3 {
         stdlib = argv[2]
     }
-    match amalgamate(argv[1], stdlib) {
-        Ok(src) => {
-            let code = emit_asm(src)
+    match load_program(argv[1], stdlib) {
+        Ok(prog) => {
+            let code = emit_asm(prog)
             exit(code)
         },
         Err(e) => {

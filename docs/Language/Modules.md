@@ -1,6 +1,6 @@
 # Modules
 
-Modules are resolved by the loader before type checking ([[Architecture/Module-loader]]). These are the rules of the Python toolchain (D17, D22, D54, D57); the self-hosted loader supports less ([[MYLA-30]]).
+Modules are resolved by the loader before type checking ([[Architecture/Module-loader]]). These are the rules of both toolchains (D17, D22, D54, D57); the self-hosted loader differs only in edge cases ([[Architecture/Module-loader]]).
 
 [TOC]
 
