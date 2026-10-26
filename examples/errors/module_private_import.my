@@ -1,0 +1,5 @@
+//~ module error: does not export 'collect'
+// Declarations are private to their module unless marked `pub` (D22).
+from std.process import collect
+
+fun main() {}

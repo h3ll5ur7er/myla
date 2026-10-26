@@ -90,15 +90,13 @@ class TestSelfHostedLineTables(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from myla.compiler import build
-        from myla.loader import default_stdlib_root, link
-        from myla.types import check
+        from myla.loader import default_stdlib_root
+
+        from ._tools import selfhost_tool
 
         cls.tmp = tempfile.TemporaryDirectory()
         cls.stdlib = default_stdlib_root()
-        cls.gen = os.path.join(cls.tmp.name, "gen_tool")
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        build(check(link(os.path.join(repo, "selfhost", "gen_main.my"), stdlib_root=cls.stdlib)), cls.gen)
+        cls.gen = selfhost_tool("gen_main")
 
     @classmethod
     def tearDownClass(cls):

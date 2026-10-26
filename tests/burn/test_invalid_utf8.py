@@ -23,6 +23,7 @@ from myla.loader import default_stdlib_root, link
 from myla.types import check
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _MYLA = os.path.join(_REPO, "myla.py")
@@ -122,12 +123,8 @@ class InvalidUtf8(unittest.TestCase):
         return proc.stdout
 
     def _tool(self, name: str) -> str:
-        """`selfhost/<name>.my` built by the Python backend."""
-        binary = os.path.join(self.dir, name)
-        if not os.path.exists(binary):
-            tool = os.path.join(_REPO, "selfhost", f"{name}.my")
-            build(check(link(tool, stdlib_root=self.stdlib)), binary)
-        return binary
+        """`selfhost/<name>.my` built by the Python backend (cached)."""
+        return selfhost_tool(name)
 
     def test_python_interpreter(self) -> None:
         self.assertEqual(self._run([sys.executable, _MYLA, "run", self.prog]), EXPECTED)

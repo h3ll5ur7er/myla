@@ -37,6 +37,7 @@ from myla.parser import parse
 from myla.types import check
 
 from ._native import CAN_BUILD_NATIVE
+from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -291,34 +292,14 @@ def _check_file(path: str):
 
 class SelfHostedCheckerParity(unittest.TestCase):
     _binary: str | None = None
-    _tmp: tempfile.TemporaryDirectory | None = None
 
     @classmethod
     def setUpClass(cls) -> None:
         if not CAN_BUILD_NATIVE:
             return
-        from myla.compiler import build
-
-        # Build the Myla checker to a native binary when we can, so the gate also
-        # exercises codegen parity of the toolchain. The x86 backend does not yet
-        # support every construct `checker.my` uses (e.g. assigning a heap-owning
-        # value to a struct field — that's v0.9a codegen work), so fall back to
-        # the interpreter rather than failing the v0.7 *checker* gate on a codegen
-        # gap. Once codegen catches up this path upgrades to native automatically.
-        tmp = tempfile.TemporaryDirectory()
-        binary = os.path.join(tmp.name, "check_tool")
-        try:
-            build(check(_check_file(CHECK_TOOL)), binary)
-        except Exception:
-            tmp.cleanup()
-            return
-        cls._tmp = tmp
-        cls._binary = binary
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        if cls._tmp is not None:
-            cls._tmp.cleanup()
+        # The Myla checker, built natively by the Python backend (cached), so
+        # the gate also exercises the codegen parity of the toolchain.
+        cls._binary = selfhost_tool("check_main")
 
     def _myla_check(self, path: str) -> str:
         if self._binary is not None:

@@ -22,6 +22,7 @@ from myla.loader import default_stdlib_root, link
 from myla.types import check
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -55,9 +56,7 @@ class NativeRuntime(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory()
         cls.dir = cls._tmp.name
         cls.stdlib = default_stdlib_root()
-        gen = os.path.join(cls.dir, "gen_main")
-        build(check(link(os.path.join(_REPO, "selfhost", "gen_main.my"), stdlib_root=cls.stdlib)), gen)
-        cls.gen = gen
+        cls.gen = selfhost_tool("gen_main")
 
     @classmethod
     def tearDownClass(cls) -> None:

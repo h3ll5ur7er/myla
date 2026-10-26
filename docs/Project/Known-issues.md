@@ -18,7 +18,7 @@ The reference implementation. Most problems are places where the native backend 
 | --- | --- | --- |
 | [[MYLA-74]] | The Myla interpreter copies containers on every update (quadratic loops) | low |
 
-Also by design (from the earlier known-issues list in [[Archive/known_issues]]): x86-64 Linux is the only target (D2), and the stdlib root is passed explicitly.
+Also by design (from the earlier known-issues list in [[Archive/known_issues]]): x86-64 Linux is the only target (D2). The stdlib root no longer has to be passed: `build/myla` finds it from its own location ([[MYLA-31]]).
 
 ## Editor tooling
 
@@ -26,6 +26,4 @@ No open issues. The tree-sitter grammar ([[MYLA-47]]) and the Python language se
 
 ## Documentation and repository
 
-| Task | Problem | Priority |
-| --- | --- | --- |
-| [[MYLA-58]] | pytest vs unittest; the slow burn suite | low |
+No open issues.

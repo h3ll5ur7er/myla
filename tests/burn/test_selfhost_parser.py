@@ -27,6 +27,7 @@ from myla.loader import default_stdlib_root, link
 from myla.parser import parse
 
 from ._native import CAN_BUILD_NATIVE
+from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -161,23 +162,12 @@ def _check_file(path: str):
 
 class SelfHostedParserParity(unittest.TestCase):
     _binary: str | None = None
-    _tmp: tempfile.TemporaryDirectory | None = None
 
     @classmethod
     def setUpClass(cls) -> None:
         if not CAN_BUILD_NATIVE:
             return
-        from myla.compiler import build
-        from myla.types import check
-
-        cls._tmp = tempfile.TemporaryDirectory()
-        cls._binary = os.path.join(cls._tmp.name, "parse_tool")
-        build(check(_check_file(PARSE_TOOL)), cls._binary)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        if cls._tmp is not None:
-            cls._tmp.cleanup()
+        cls._binary = selfhost_tool("parse_main")
 
     def _myla_parse_source(self, source: str) -> str:
         with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", delete=False) as fh:

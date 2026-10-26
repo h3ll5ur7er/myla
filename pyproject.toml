@@ -11,7 +11,13 @@ lsp = [
     "pygls>=2.1.1",
 ]
 
-# No third-party dependencies, by design (see README "Visions / Short Term").
-# Tests use the standard-library `unittest`, so there are no dev dependencies
-# either. Run the toolchain with `uv run myla.py <cmd>` and the tests with
-# `uv run python -m unittest discover -s tests` (or plain `python3`).
+# No third-party runtime dependencies, by design (see README "Visions / Short
+# Term"). The tests are standard-library `unittest`s: `python3 -m unittest
+# discover -s tests/unit -t .` (or `scripts/test.sh`) needs nothing else. pytest
+# is an optional development tool that runs the same tests: `uv run pytest`
+# installs it from the `dev` group below (MYLA-58).
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]

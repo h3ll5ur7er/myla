@@ -13,11 +13,9 @@ the corpus, the binary produced by the self-hosted backend must have the same
 interpreter).
 
 How the assembly is produced. The self-hosted compiler is itself a Myla
-program. Where the host can build a native binary we compile `gen_main.my` once
-(with the Python backend) and invoke that binary per example, which is fast;
-otherwise we run the compiler's source through the Python interpreter. Either
-way the *assembly under test* is emitted by the Myla-written backend — only the
-way we run that backend differs.
+program: `gen_main.my` is compiled once by the Python backend (cached by
+`_tools.selfhost_tool`) and that binary is invoked per example, so the
+*assembly under test* is emitted by the Myla-written backend.
 
 Scope. The corpus gate covers the single-file top-level examples (`floats.my`
 included since MYLA-29). Multi-module programs (`examples/modules` and the
@@ -42,11 +40,11 @@ from myla.parser import parse
 from myla.types import check
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 )
-GEN_TOOL = os.path.join(_REPO, "selfhost", "gen_main.my")
 
 # Examples outside the v0.9 codegen gate's scope (see module docstring).
 EXCLUDED: set[str] = set()
@@ -371,61 +369,27 @@ def _oracle(path: str) -> tuple[str, int]:
     return out.getvalue(), code
 
 
-def _check_tool():
-    return check(link(GEN_TOOL, stdlib_root=default_stdlib_root()))
-
-
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedCodegenParity(unittest.TestCase):
-    _binary: str | None = None
-    _tmp: "tempfile.TemporaryDirectory | None" = None
+    _binary: str
 
     @classmethod
     def setUpClass(cls) -> None:
-        from myla.compiler import build
-
-        # Build the Myla compiler to a native binary when we can, so emitting
-        # the assembly under test is a fast subprocess call. The Python x86
-        # backend does not yet support every construct `codegen.my` uses, so
-        # fall back to running the compiler source through the interpreter
-        # rather than failing this gate on a *host*-backend gap. Once the host
-        # backend catches up this path upgrades automatically.
-        tmp = tempfile.TemporaryDirectory()
-        binary = os.path.join(tmp.name, "gen_tool")
-        try:
-            build(_check_tool(), binary)
-        except Exception:
-            tmp.cleanup()
-            return
-        cls._tmp = tmp
-        cls._binary = binary
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        if cls._tmp is not None:
-            cls._tmp.cleanup()
+        # The Myla compiler, built natively by the Python backend (cached), so
+        # emitting the assembly under test is a fast subprocess call.
+        cls._binary = selfhost_tool("gen_main")
 
     def _emit_asm(self, path: str, stdlib_root: str | None = None) -> str:
         """Assembly for `path`, produced by the self-hosted backend."""
         extra = [stdlib_root] if stdlib_root is not None else []
-        if self._binary is not None:
-            proc = subprocess.run(
-                [self._binary, path, *extra], capture_output=True, text=True
-            )
-            self.assertEqual(
-                proc.returncode, 0,
-                f"self-hosted compile failed: {proc.stderr}",
-            )
-            return proc.stdout
-        # Interpreter fallback (host backend can't build the compiler yet):
-        # run the compiler source through the Python interpreter, with the
-        # example path as argv[1] (what `gen_main` reads).
-        out = io.StringIO()
-        code = Interpreter(
-            _check_tool(), out, argv=["gen_tool", path, *extra]
-        ).run()
-        self.assertEqual(code, 0, "self-hosted compile failed")
-        return out.getvalue()
+        proc = subprocess.run(
+            [self._binary, path, *extra], capture_output=True, text=True
+        )
+        self.assertEqual(
+            proc.returncode, 0,
+            f"self-hosted compile failed: {proc.stderr}",
+        )
+        return proc.stdout
 
     def _build_and_run(self, asm: str) -> tuple[str, int]:
         """Assemble + link `asm` with the system toolchain, run it, return
@@ -488,8 +452,6 @@ class SelfHostedCodegenParity(unittest.TestCase):
     def test_module_errors_match_the_python_loader(self) -> None:
         from myla.errors import MylaError
 
-        if self._binary is None:
-            self.skipTest("the self-hosted compiler could not be built natively")
         stdlib = default_stdlib_root()
         with tempfile.TemporaryDirectory() as tmp:
             for name, files in MODULE_ERRORS.items():

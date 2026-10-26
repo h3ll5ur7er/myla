@@ -8,15 +8,13 @@ the binary's own location.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
 
-from myla.compiler import build
-from myla.loader import default_stdlib_root, link
-from myla.types import check
-
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -49,8 +47,7 @@ class SelfHostedCli(unittest.TestCase):
         os.makedirs(os.path.join(root, "src"))
         os.symlink(os.path.join(_REPO, "src", "myla"), os.path.join(root, "src", "myla"))
         cls.myla = os.path.join(root, "build", "myla")
-        tool = os.path.join(_REPO, "selfhost", "main.my")
-        build(check(link(tool, stdlib_root=default_stdlib_root())), cls.myla)
+        shutil.copy(selfhost_tool("main"), cls.myla)
         cls.work = os.path.join(root, "work")       # the directory commands run in
         os.makedirs(cls.work)
         with open(os.path.join(cls.work, "prog.my"), "w", encoding="utf-8") as fh:

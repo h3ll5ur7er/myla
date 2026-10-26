@@ -38,6 +38,7 @@ from myla.parser import parse
 from myla.types import check
 
 from ._native import CAN_BUILD_NATIVE
+from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -126,33 +127,14 @@ def _check_tool():
 
 class SelfHostedInterpParity(unittest.TestCase):
     _binary: str | None = None
-    _tmp: "tempfile.TemporaryDirectory | None" = None
 
     @classmethod
     def setUpClass(cls) -> None:
         if not CAN_BUILD_NATIVE:
             return
-        from myla.compiler import build
-
-        # Build the Myla interpreter to a native binary when we can, so the gate
-        # also exercises codegen parity of the toolchain. The x86 backend does
-        # not yet support every construct `interp.my` uses, so fall back to the
-        # interpreter rather than failing the v0.8 *interpreter* gate on a
-        # codegen gap. Once codegen catches up this path upgrades automatically.
-        tmp = tempfile.TemporaryDirectory()
-        binary = os.path.join(tmp.name, "interp_tool")
-        try:
-            build(_check_tool(), binary)
-        except Exception:
-            tmp.cleanup()
-            return
-        cls._tmp = tmp
-        cls._binary = binary
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        if cls._tmp is not None:
-            cls._tmp.cleanup()
+        # The Myla interpreter, built natively by the Python backend (cached),
+        # so the gate also exercises the codegen parity of the toolchain.
+        cls._binary = selfhost_tool("interp_main")
 
     def _myla_run_full(self, path: str) -> tuple[str, str, int]:
         proc = subprocess.run(
