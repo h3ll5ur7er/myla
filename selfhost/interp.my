@@ -95,7 +95,23 @@ pub struct Interp {
     ctrl_val: Value,
     exit_code: int32,
     argv: [str],            // what the program's `args()` returns
+    rt_err: Option<RtError>, // the runtime error that stopped the program
 }
+
+// A runtime error, with the Python interpreter's message; `node` is the id of
+// the expression it happened at (its file: loader.file_of), `line` 0 for none.
+pub struct RtError { msg: str, line: int32, col: int32, node: int32 }
+
+// A step of an assignable place: a struct field, or an index (evaluated once)
+// with the expression it came from.
+enum Step {
+    SField(str),
+    SIndex(Value, Expr),
+}
+
+// A variable and the path into it that an assignment, `push`/`pop`, a builder
+// or map builtin, or a `var self` call updates.
+struct Place { root: str, steps: [Step] }
 
 // An interpreter for the checked program `c`, run as `argv` (argv[0] is the
 // program's path, as for `myla run`).
@@ -111,6 +127,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         ctrl_val: Value.VUnit,
         exit_code: 0,
         argv: argv,
+        rt_err: None,
     }
     return it
 }
@@ -210,7 +227,10 @@ impl Interp {
         self.collect()
         self.eval_consts()
         let ei = self.entry_idx()
-        if ei < 0 { return 0 }
+        if ei < 0 {
+            self.rt_err = Some(RtError { msg: "no entry point: define '#main' or a function named 'main'", line: 0, col: 0, node: -1 })
+            return 1
+        }
         self.call_func(ei, [])
         match self.ctrl { Ctrl.CExit => { return self.exit_code }, _ => {} }
         return 0
@@ -295,6 +315,107 @@ impl Interp {
         return match self.ctrl { Ctrl.CNone => false, _ => true }
     }
 
+    fun returning(self) -> bool {
+        return match self.ctrl { Ctrl.CReturn => true, _ => false }
+    }
+
+    // Stop the program with a runtime error at `e` (exit status 1).
+    fun fail(var self, e: Expr, msg: str) {
+        if self.stop() { return }
+        self.rt_err = Some(RtError { msg: msg, line: e.line, col: e.col, node: e.id })
+        self.ctrl = Ctrl.CExit
+        self.exit_code = 1
+    }
+
+    // Whether `c[k]` can be read (or, `assigning`, written: a missing map key
+    // is then an insert); fails with the Python interpreter's message if not.
+    fun check_index(var self, c: Value, k: Value, e: Expr, assigning: bool) -> bool {
+        match c {
+            Value.VList(xs) => {
+                let i = as_int(k)
+                if i < 0 || i >= (len(xs) as int64) {
+                    self.fail(e, format("list index {} out of bounds (len {})", i, len(xs)))
+                    return false
+                }
+            },
+            Value.VStr(str_) => {
+                let i = as_int(k)
+                if i < 0 || i >= (len(str_) as int64) {
+                    self.fail(e, format("string index {} out of bounds (len {})", i, len(str_)))
+                    return false
+                }
+            },
+            Value.VMap(ks, vs) => {
+                if !assigning && !map_has(c, k) {
+                    self.fail(e, format("map key {} not found", py_repr(k)))
+                    return false
+                }
+            },
+            _ => {},
+        }
+        return true
+    }
+
+    // -- places -----------------------------------------------------------
+
+    // Resolve the place `e` names, evaluating each index once, left to right;
+    // a containing index is read (and bounds-checked) before the next key.
+    fun place_of(var self, e: Expr) -> Place {
+        return match e.kind {
+            ExprKind.GetField(t, f) => {
+                var p = self.place_of(t)
+                push(p.steps, Step.SField(f))
+                p
+            },
+            ExprKind.Index(t, i) => {
+                var p = self.place_of(t)
+                if len(p.steps) > 0 { self.read_place(p) }
+                let k = self.eval(i)
+                push(p.steps, Step.SIndex(k, e))
+                p
+            },
+            ExprKind.Name(n) => Place { root: n, steps: [] },
+            _ => Place { root: "", steps: [] },
+        }
+    }
+
+    // The value at `p`, bounds-checked at every index (a read).
+    fun read_place(var self, p: Place) -> Value {
+        var v = self.lookup_or_unit(p.root)
+        for st in p.steps {
+            if self.stop() { return Value.VUnit }
+            match st {
+                Step.SField(f) => { v = get_field(v, f) },
+                Step.SIndex(k, nd) => {
+                    if !self.check_index(v, k, nd, false) { return Value.VUnit }
+                    v = index_get(v, k)
+                },
+            }
+        }
+        return v
+    }
+
+    // Store `v` at `p`; writing past the end of a list fails, at the target.
+    fun write_place(var self, p: Place, v: Value) {
+        if self.stop() || len(p.root) == 0 { return }
+        let n = len(p.steps)
+        if n > 0 {
+            match p.steps[n - 1] {
+                Step.SIndex(k, nd) => {
+                    var parent = Place { root: p.root, steps: [] }
+                    var i = 0
+                    while i < n - 1 {
+                        push(parent.steps, p.steps[i])
+                        i = i + 1
+                    }
+                    if !self.check_index(self.read_place(parent), k, nd, true) { return }
+                },
+                _ => {},
+            }
+        }
+        self.assign_name(p.root, write_steps(self.lookup_or_unit(p.root), p.steps, 0, v))
+    }
+
     fun exec_block_body(var self, body: Option<Block>) {
         match body {
             Some(b) => { self.exec_block(b) },
@@ -329,8 +450,9 @@ impl Interp {
                 self.bind_destructure(bind_elems(binding), v)
             },
             StmtKind.Assign(target, value) => {
-                let v = self.eval(value)
-                self.assign_lvalue(target, v)
+                let v = self.eval(value)            // the value first, as in Python
+                let p = self.place_of(target)
+                self.write_place(p, v)
             },
             StmtKind.ReturnS(v) => {
                 var rv = Value.VUnit
@@ -376,36 +498,46 @@ impl Interp {
     }
 
     fun exec_for(var self, var_name: str, start: Option<Expr>, end: Option<Expr>, body: Block, iter: Option<Expr>) {
-        var items: [Value] = []
         match iter {
-            Some(it) => { items = self.iter_items(self.eval(it)) },
+            Some(it) => {
+                for item in self.iter_items(self.eval(it)) {
+                    if !self.loop_iteration(var_name, item, body) { return }
+                }
+            },
             None => {
-                var lo = 0
-                var hi = 0
-                match start { Some(s) => { lo = as_int(self.eval(s)) as int32 }, None => {} }
-                match end { Some(e) => { hi = as_int(self.eval(e)) as int32 }, None => {} }
+                // an integer range runs without materializing its values
+                var lo: int64 = 0
+                var hi: int64 = 0
+                match start { Some(s) => { lo = as_int(self.eval(s)) }, None => {} }
+                match end { Some(e) => { hi = as_int(self.eval(e)) }, None => {} }
                 var k = lo
                 while k < hi {
-                    push(items, Value.VInt(k as int64))
+                    if !self.loop_iteration(var_name, Value.VInt(k), body) { return }
                     k = k + 1
                 }
             },
         }
-        var i = 0
-        while i < len(items) {
-            if self.stop() { return }
-            self.push_scope()
-            self.define(var_name, items[i])
-            self.exec_block(body)
-            self.pop_scope()
-            match self.ctrl {
-                Ctrl.CContinue => { self.ctrl = Ctrl.CNone },
-                Ctrl.CBreak => { self.ctrl = Ctrl.CNone
-                    return },
-                Ctrl.CNone => {},
-                _ => { return },
-            }
-            i = i + 1
+    }
+
+    // Run one iteration of a `for` body with the loop variable bound to `v`;
+    // false when the loop ends (break, return, `?`, exit or a runtime error).
+    fun loop_iteration(var self, var_name: str, v: Value, body: Block) -> bool {
+        if self.stop() { return false }
+        self.push_scope()
+        self.define(var_name, v)
+        self.exec_block(body)
+        self.pop_scope()
+        return match self.ctrl {
+            Ctrl.CContinue => {
+                self.ctrl = Ctrl.CNone
+                true
+            },
+            Ctrl.CBreak => {
+                self.ctrl = Ctrl.CNone
+                false
+            },
+            Ctrl.CNone => true,
+            _ => false,
         }
     }
 
@@ -418,22 +550,6 @@ impl Interp {
     }
 
     // -- lvalues / destructuring -----------------------------------------
-
-    fun assign_lvalue(var self, target: Expr, v: Value) {
-        match target.kind {
-            ExprKind.Name(n) => { self.assign_name(n, v) },
-            ExprKind.Index(cont, idx) => {
-                let c = self.eval(cont)
-                let k = self.eval(idx)
-                self.assign_lvalue(cont, set_index(c, k, v))
-            },
-            ExprKind.GetField(tgt, field) => {
-                let c = self.eval(tgt)
-                self.assign_lvalue(tgt, set_field(c, field, v))
-            },
-            _ => {},
-        }
-    }
 
     fun bind_destructure(var self, b: [BindElem], v: Value) {
         let elems = match v { Value.VTuple(es) => es, _ => empty_values() }
@@ -695,8 +811,8 @@ impl Interp {
         if op == ">>" && is_callable(lv) { return compose_values(lv, rv) }
         // operator overloading: dispatch to a trait method for user types
         if i_is_struct_or_enum(lv) { return self.eval_op_overload(op, lv, rv) }
-        // string concatenation
-        if is_vstr(lv) { return Value.VStr(as_str(lv) + as_str(rv)) }
+        // string concatenation (`==`/`!=` on strings compare, below)
+        if op == "+" && is_vstr(lv) { return Value.VStr(as_str(lv) + as_str(rv)) }
         // comparisons -> bool
         if op == "==" { return Value.VBool(value_eq(lv, rv)) }
         if op == "!=" { return Value.VBool(!value_eq(lv, rv)) }
@@ -722,8 +838,20 @@ impl Interp {
         if op == "+" { res = a + b }
         else if op == "-" { res = a - b }
         else if op == "*" { res = a * b }
-        else if op == "/" { res = idiv(a, b) }
-        else if op == "%" { res = imod(a, b) }
+        else if op == "/" {
+            if b == 0 {
+                self.fail(e, "division by zero")
+                return Value.VUnit
+            }
+            res = idiv(a, b)
+        }
+        else if op == "%" {
+            if b == 0 {
+                self.fail(e, "modulo by zero")
+                return Value.VUnit
+            }
+            res = imod(a, b)
+        }
         else if op == "&" { res = a & b }
         else if op == "|" { res = a | b }
         else if op == "^" { res = a ^ b }
@@ -818,6 +946,7 @@ impl Interp {
     fun eval_index(var self, e: Expr, tgt: Expr, idx: Expr) -> Value {
         let c = self.eval(tgt)
         let k = self.eval(idx)
+        if self.stop() || !self.check_index(c, k, e, false) { return Value.VUnit }
         return index_get(c, k)
     }
 
@@ -894,14 +1023,20 @@ impl Interp {
         let key = self.recv_key(recv)
         let fi = self.func_idx(format("{}.{}", key, method))
         if fi >= 0 {
-            let argv = self.eval_args(args)
+            // the receiver first (once), then the arguments, as in Python
             if self.method_is_var_self(fi) {
-                let rv0 = self.eval(recv)
+                let p = self.place_of(recv)
+                let rv0 = self.read_place(p)
+                let argv = self.eval_args(args)
+                if self.stop() { return Value.VUnit }
                 let (rv, final_self) = self.call_method(fi, rv0, argv)
-                self.assign_lvalue(recv, final_self)
+                self.write_place(p, final_self)
                 return rv
             }
-            let (rv, fs) = self.call_method(fi, self.eval(recv), argv)
+            let rv0 = self.eval(recv)
+            let argv = self.eval_args(args)
+            if self.stop() { return Value.VUnit }
+            let (rv, fs) = self.call_method(fi, rv0, argv)
             return rv
         }
         // not a method: a struct field holding a closure, called indirectly
@@ -1012,6 +1147,7 @@ impl Interp {
     fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
         if nm == "print" {
             let v = self.eval(args[0])
+            if self.stop() { return Value.VUnit }
             self.emit(format_typed(v, self.resolved_of(args[0].id)))
             self.emit("\n")
             return Value.VUnit
@@ -1019,6 +1155,7 @@ impl Interp {
         if nm == "__write" {
             let fd = as_int(self.eval(args[0])) as int32
             let s = as_str(self.eval(args[1]))
+            if self.stop() { return Value.VUnit }
             write(fd, s)
             return Value.VUnit
         }
@@ -1055,22 +1192,43 @@ impl Interp {
         if nm == "__run_signal" { return Value.VInt(__run_signal() as int64) }
         if nm == "__run_errno" { return Value.VInt(__run_errno() as int64) }
         if nm == "assert" {
-            if !as_bool(self.eval(args[0])) { self.halt_panic() }
+            let ok = as_bool(self.eval(args[0]))
+            if !ok && !self.stop() {
+                var msg = "assertion failed"
+                if len(args) == 2 { msg = as_str(self.eval(args[1])) }
+                self.fail(e, msg)
+            }
             return Value.VUnit
         }
-        if nm == "panic" || nm == "unreachable" { self.halt_panic()
-            return Value.VUnit }
+        if nm == "panic" {
+            let msg = as_str(self.eval(args[0]))
+            self.fail(e, msg)
+            return Value.VUnit
+        }
+        if nm == "unreachable" {
+            self.fail(e, "reached unreachable code")
+            return Value.VUnit
+        }
         if nm == "len" { return Value.VInt(value_len(self.eval(args[0]))) }
         if nm == "push" {
-            let cur = self.eval(args[0])
+            // the list's place, then the value; the list is read afterwards, so
+            // `push(xs, pop(xs))` sees the pop
+            let p = self.place_of(args[0])
             let v = self.eval(args[1])
-            self.assign_lvalue(args[0], list_push(cur, v))
+            let cur = self.read_place(p)
+            self.write_place(p, list_push(cur, v))
             return Value.VUnit
         }
         if nm == "pop" {
-            let cur = self.eval(args[0])
+            let p = self.place_of(args[0])
+            let cur = self.read_place(p)
+            if self.stop() { return Value.VUnit }
+            if value_len(cur) == 0 {
+                self.fail(e, "pop from an empty list")
+                return Value.VUnit
+            }
             let last = list_last(cur)
-            self.assign_lvalue(args[0], list_drop_last(cur))
+            self.write_place(p, list_drop_last(cur))
             return last
         }
         if nm == "contains" {
@@ -1078,8 +1236,9 @@ impl Interp {
             return Value.VBool(map_has(m, self.eval(args[1])))
         }
         if nm == "remove" {
-            let m = self.eval(args[0])
-            self.assign_lvalue(args[0], map_remove(m, self.eval(args[1])))
+            let p = self.place_of(args[0])
+            let k = self.eval(args[1])
+            self.write_place(p, map_remove(self.read_place(p), k))
             return Value.VUnit
         }
         if nm == "keys" { return map_keys(self.eval(args[0])) }
@@ -1087,13 +1246,15 @@ impl Interp {
         if nm == "format" { return self.eval_format(args) }
         if nm == "StringBuilder" { return Value.VSB(empty_bytes()) }
         if nm == "append" {
-            let cur = self.eval(args[0])
-            self.assign_lvalue(args[0], sb_append_str(cur, as_str(self.eval(args[1]))))
+            let p = self.place_of(args[0])
+            let piece = as_str(self.eval(args[1]))
+            self.write_place(p, sb_append_str(self.read_place(p), piece))
             return Value.VUnit
         }
         if nm == "append_byte" {
-            let cur = self.eval(args[0])
-            self.assign_lvalue(args[0], sb_append_byte(cur, as_int(self.eval(args[1]))))
+            let p = self.place_of(args[0])
+            let b = as_int(self.eval(args[1]))
+            self.write_place(p, sb_append_byte(self.read_place(p), b))
             return Value.VUnit
         }
         if nm == "build" { return Value.VStr(sb_build(self.eval(args[0]))) }
@@ -1122,11 +1283,6 @@ impl Interp {
             }
         }
         return None
-    }
-
-    fun halt_panic(var self) {
-        self.ctrl = Ctrl.CExit
-        self.exit_code = 1
     }
 
     fun call_value(var self, v: Value, argv: [Value]) -> Value {
@@ -1213,7 +1369,11 @@ impl Interp {
         }
         var rv = Value.VUnit
         match body {
-            ExprOrBlock.EB_Expr(ex) => { rv = self.eval(ex) },
+            ExprOrBlock.EB_Expr(ex) => {
+                rv = self.eval(ex)
+                // a `?` in the body returns from the lambda (MYLA-72)
+                if self.returning() { rv = self.take_return() }
+            },
             ExprOrBlock.EB_Block(b) => {
                 self.exec_block(b)
                 rv = self.take_return()
@@ -1537,6 +1697,8 @@ fun shift_count(b: int64, rt: Option<Type>) -> int64 {
 fun shr_typed(a: int64, b: int64, rt: Option<Type>) -> int64 {
     let count = shift_count(b, rt)
     let aw = wrap_opt(a, rt)
+    let unsigned64 = match rt { Some(t) => match t { Type.TInt(w, sg) => w == 64 && !sg, _ => false }, None => false }
+    if unsigned64 { return ((aw as uint64) >> (count as uint64)) as int64 }   // logical
     return wrap_opt(aw >> count, rt)
 }
 
@@ -1941,4 +2103,70 @@ fun is_method_name(name: str) -> bool {
         if c == '.' { return true }
     }
     return false
+}
+
+// `cur` with `v` stored at path `steps[i..]` (values are rebuilt, not shared).
+fun write_steps(cur: Value, steps: [Step], i: int32, v: Value) -> Value {
+    if i == len(steps) { return v }
+    return match steps[i] {
+        Step.SField(f) => set_field(cur, f, write_steps(get_field(cur, f), steps, i + 1, v)),
+        Step.SIndex(k, nd) => {
+            let inner = match cur { Value.VMap(ks, vs) => if_map_get(cur, k), _ => index_get(cur, k) }
+            set_index(cur, k, write_steps(inner, steps, i + 1, v))
+        },
+    }
+}
+
+// `m[k]` if present, else unit (a map insert at the end of a path).
+fun if_map_get(m: Value, k: Value) -> Value {
+    if map_has(m, k) { return index_get(m, k) }
+    return Value.VUnit
+}
+
+// A map key as Python's `repr` writes it (the "map key … not found" message).
+fun py_repr(v: Value) -> str {
+    return match v {
+        Value.VStr(s) => py_repr_str(s),
+        Value.VBool(b) => if_text(b, "True", "False"),
+        Value.VChar(c) => format("{}", c),
+        _ => format("{}", as_int(v)),
+    }
+}
+
+fun if_text(c: bool, a: str, b: str) -> str {
+    if c { return a }
+    return b
+}
+
+fun py_repr_str(s: str) -> str {
+    var has_single = false
+    var has_double = false
+    for c in chars(s) {
+        if c == '\'' { has_single = true }
+        if c == '"' { has_double = true }
+    }
+    var quote = '\''
+    if has_single && !has_double { quote = '"' }
+    var sb = StringBuilder()
+    append(sb, cp_utf8(quote as int32))
+    for c in chars(s) {
+        let cp = c as int32
+        if c == '\\' { append(sb, "\\\\") }
+        else if c == quote { append(sb, "\\" + cp_utf8(cp)) }
+        else if cp == 10 { append(sb, "\\n") }
+        else if cp == 9 { append(sb, "\\t") }
+        else if cp == 13 { append(sb, "\\r") }
+        else if cp < 32 || (cp >= 127 && cp < 160) { append(sb, format("\\x{}", hex2(cp))) }
+        else { append(sb, cp_utf8(cp)) }
+    }
+    append(sb, cp_utf8(quote as int32))
+    return build(sb)
+}
+
+fun hex2(v: int32) -> str {
+    let digits = "0123456789abcdef"
+    var sb = StringBuilder()
+    append_byte(sb, digits[(v / 16) % 16])
+    append_byte(sb, digits[v % 16])
+    return build(sb)
 }

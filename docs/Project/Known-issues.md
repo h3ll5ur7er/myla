@@ -29,8 +29,8 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-32]] | The Myla interpreter diverges from the Python one in nine ways | medium |
 | [[MYLA-73]] | Integer literals of 2^63 and above wrap (the lexer stores `int64`) | low |
+| [[MYLA-74]] | The Myla interpreter copies containers on every update (quadratic loops) | low |
 | [[MYLA-31]] | Without a stdlib root, `std` resolves to `/std` (`scripts/build.sh`) | low |
 | [[MYLA-33]], [[MYLA-34]], [[MYLA-35]] | Latent issues, dead code, `justfile` recipes | low |
 

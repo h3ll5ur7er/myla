@@ -7,21 +7,28 @@
 from std.process import args, exit
 from std.io import eprintln
 from .checker import build_checker_decls
-from .interp import new_interp
+from .interp import new_interp, RtError
 from .loader import load_program, Loaded, file_of
-from .diag import render, type_report
+from .diag import render, type_report, Report
 
 fun run_program(prog: Loaded, file: str) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
             var it = new_interp(c, [file])
-            it.run()
+            let code = it.run()
+            match it.rt_err { Some(r) => { eprintln(render(runtime_report(r, prog))) }, None => {} }
+            code
         },
         Err(e) => {
             eprintln(render(type_report(e.line, e.col, e.msg, file_of(prog, e.decl))))
             1
         },
     }
+}
+
+// A runtime error as the Python CLI prints it, in the file of its expression.
+fun runtime_report(r: RtError, prog: Loaded) -> Report {
+    return Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col }
 }
 
 fun main() {
