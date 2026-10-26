@@ -66,5 +66,96 @@ class TestLineTables(unittest.TestCase):
         self.assertIn("myla_main", session)               # the caller in the backtrace
 
 
+# The same program with `add` in an imported module and a lambda, for the
+# self-hosted compiler's line tables (MYLA-71).
+MODULE_MAIN = (
+    "from .lib import add\n"                  # line 1
+    "fun main() {\n"                           # line 2
+    "    let twice = (x: int) => x * 2\n"     # line 3
+    "    print(twice(add(2, 3)))\n"           # line 4
+    "}\n"
+)
+MODULE_LIB = (
+    "pub fun add(a: int, b: int) -> int {\n"  # line 1
+    "    let c = a + b\n"                      # line 2
+    "    return c\n"                           # line 3
+    "}\n"
+)
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestSelfHostedLineTables(unittest.TestCase):
+    """`gen_main -g` (the self-hosted compiler) emits the same kind of line
+    table: one `.file` per module, `.loc` per function, lambda and statement."""
+
+    @classmethod
+    def setUpClass(cls):
+        from myla.compiler import build
+        from myla.loader import default_stdlib_root, link
+        from myla.types import check
+
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.stdlib = default_stdlib_root()
+        cls.gen = os.path.join(cls.tmp.name, "gen_tool")
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        build(check(link(os.path.join(repo, "selfhost", "gen_main.my"), stdlib_root=cls.stdlib)), cls.gen)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = os.path.realpath(tmp.name)
+        for name, text in (("main.my", MODULE_MAIN), ("lib.my", MODULE_LIB)):
+            with open(os.path.join(self.dir, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+    def build(self, *flags: str) -> str:
+        asm = subprocess.run([self.gen, os.path.join(self.dir, "main.my"), self.stdlib, *flags],
+                             capture_output=True, text=True, check=True).stdout
+        binary = os.path.join(self.dir, "prog" + "".join(flags).replace("-", "_"))
+        with open(binary + ".s", "w", encoding="utf-8") as fh:
+            fh.write(asm)
+        subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
+        subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
+        return binary
+
+    def test_readelf_sees_the_lines_of_every_module(self):
+        dump = subprocess.run(
+            ["readelf", "--debug-dump=decodedline", self.build("-g")],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        rows = {tuple(line.split()[:2]) for line in dump.splitlines()
+                if line.startswith(("main.my", "lib.my"))}
+        for row in (("main.my", "2"), ("main.my", "3"), ("main.my", "4"),
+                    ("lib.my", "1"), ("lib.my", "2"), ("lib.my", "3")):
+            self.assertIn(row, rows)
+
+    def test_line_tables_do_not_change_behaviour(self):
+        plain = subprocess.run([self.build()], capture_output=True, text=True)
+        debug = subprocess.run([self.build("-g")], capture_output=True, text=True)
+        self.assertEqual((plain.stdout, plain.returncode), ("10\n", 0))
+        self.assertEqual((debug.stdout, debug.returncode), (plain.stdout, plain.returncode))
+
+    def test_without_g_there_are_no_line_directives(self):
+        asm = subprocess.run([self.gen, os.path.join(self.dir, "main.my"), self.stdlib],
+                             capture_output=True, text=True, check=True).stdout
+        self.assertNotIn(".loc", asm)
+        self.assertNotIn(".file", asm)
+
+    @unittest.skipUnless(shutil.which("gdb"), "gdb is not installed")
+    def test_gdb_stops_on_a_line_of_an_imported_module(self):
+        session = subprocess.run(
+            ["gdb", "-q", "-batch", "-ex", "break lib.my:2", "-ex", "run",
+             "-ex", "bt", self.build("-g")],
+            capture_output=True, text=True, timeout=60,
+        ).stdout
+        self.assertIn("let c = a + b", session)
+        self.assertIn("lib.my:2", session)
+        self.assertIn("main.my:4", session)                # the caller's line
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,10 +36,31 @@ Breakpoint 1, myla_manhattan () at structs.my:16
 - Every statement and every expression-bodied match arm starts a line entry. Runtime helpers (`__alloc`, `__print_int`, …) have no source line; `step` into them shows assembly, `finish` gets you out.
 - `-g` changes nothing else: the binary behaves exactly like one built without it (`tests/burn/test_debug_info.py`).
 
+## The self-hosted compiler
+
+The self-hosted compiler emits the same line tables with `-g` (`gen_main <file.my> <stdlib_root> -g`, or `myla build … -g` with the self-hosted CLI). The loader knows which node ids belong to which file (`Loaded.spans`), so each module gets its own `.file` entry. That makes the self-hosted compiler debuggable in its own source: build it with `-g` by the stage 3 compiler and break in the checker while it reports a type error:
+
+```
+$ build/stage3 selfhost/gen_main.my src/myla -g > gen.s && as --64 -o gen.o gen.s && ld -o gen_g gen.o
+$ gdb -q -batch -ex 'break checker.my:2561' -ex 'run bad.my src/myla' -ex bt ./gen_g
+Breakpoint 1, myla_checker$Checker.check_stmt () at selfhost/checker.my:2561
+2561	                        if !type_eq(value_type, d) { return Err(terr(s.line, s.col, format("cannot assign value of type …
+#0  myla_checker$Checker.check_stmt () at selfhost/checker.my:2561
+#1  myla_checker$Checker.check_block () at selfhost/checker.my:2547
+#2  myla_checker$Checker.check_function () at selfhost/checker.my:2756
+#3  myla_checker$Checker.run_phases () at selfhost/checker.my:3179
+#4  myla_checker$Checker.run_all () at selfhost/checker.my:3162
+#5  myla_checker$build_checker_decls () at selfhost/checker.my:3221
+#6  myla_emit_asm () at selfhost/gen_main.my:18
+#7  myla_main () at selfhost/gen_main.my:48
+#8  _start ()
+```
+
+(Line numbers are those of the tree at the time; addresses shortened.)
+
 ## What doesn't work yet
 
 - **Variables.** gdb doesn't know Myla's locals or types yet. Every local has a fixed slot at a negative offset from `%rbp`; with `--keep-asm` you can find the slot in the `.s` file and read it with `x/gd $rbp-24`. Variable and type information is the next step of [[MYLA-66]].
-- **The self-hosted compiler** doesn't emit line tables yet. Everything they need is there now: every node has a position in its own module ([[MYLA-30]]) and the loader records which node ids belong to which file (`Loaded.spans`, [[MYLA-28]]); see [[MYLA-71]].
 
 ## Other tools
 

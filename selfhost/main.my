@@ -4,9 +4,10 @@
 //
 //   myla run   <file.my> [stdlib_root]           interpret a program
 //   myla test  <file.my> [stdlib_root]           run its #test cases
-//   myla build <file.my> [-o <out>] [stdlib_root]  compile to a native binary
+//   myla build <file.my> [-o <out>] [-g] [stdlib_root]  compile to a native binary
 //
-// `build` type-checks and generates x86-64 assembly, writes it to `<out>.s`,
+// `build` type-checks and generates x86-64 assembly (with `-g`, DWARF line
+// tables for gdb, MYLA-71), writes it to `<out>.s`,
 // then shells out to the system assembler and linker (`as`/`ld`, located via
 // `/usr/bin/env` so PATH is honored) to produce the executable `<out>`. The
 // stdlib root defaults to `src/myla` (where `std/` lives in this repo).
@@ -43,9 +44,12 @@ fun load_and_check(file: str, stdlib: str) -> Result<Checked, str> {
     }
 }
 
-// Type-check `file`, then generate its x86-64 assembly.
-fun compile_asm(file: str, stdlib: str) -> Result<str, str> {
-    var g = new_codegen(load_and_check(file, stdlib)?.checker)
+// Type-check `file`, then generate its x86-64 assembly (`debug`: with DWARF
+// line tables, MYLA-71).
+fun compile_asm(file: str, stdlib: str, debug: bool) -> Result<str, str> {
+    let ch = load_and_check(file, stdlib)?
+    var g = new_codegen(ch.checker)
+    if debug { g.enable_line_tables(ch.prog.spans, ch.prog.next_id) }
     return Ok(g.generate())
 }
 
@@ -110,8 +114,8 @@ fun cmd_interp(file: str, stdlib: str, tests: bool) -> int32 {
 }
 
 // `myla build <file> -o <out> [stdlib]`: compile to a native binary at `out`.
-fun cmd_build(file: str, output: str, stdlib: str) -> int32 {
-    let asm = match compile_asm(file, stdlib) {
+fun cmd_build(file: str, output: str, stdlib: str, debug: bool) -> int32 {
+    let asm = match compile_asm(file, stdlib, debug) {
         Ok(a) => a,
         Err(e) => {
             eprintln(e)
@@ -141,7 +145,7 @@ fun usage() {
     eprintln("commands:")
     eprintln("  run   <file.my> [stdlib_root]              interpret a program")
     eprintln("  test  <file.my> [stdlib_root]              run its #test cases")
-    eprintln("  build <file.my> [-o <out>] [stdlib_root]   compile to a binary")
+    eprintln("  build <file.my> [-o <out>] [-g] [stdlib_root]  compile to a binary (-g: line tables for gdb)")
 }
 
 fun main() {
@@ -164,17 +168,21 @@ fun main() {
     if cmd == "build" {
         var output = "a.out"
         var stdlib = "src/myla"
+        var debug = false
         var j = 3
         while j < len(argv) {
             if argv[j] == "-o" && j + 1 < len(argv) {
                 output = argv[j + 1]
                 j = j + 2
+            } else if argv[j] == "-g" {
+                debug = true
+                j = j + 1
             } else {
                 stdlib = argv[j]
                 j = j + 1
             }
         }
-        exit(cmd_build(file, output, stdlib))
+        exit(cmd_build(file, output, stdlib, debug))
     }
 
     eprintln("myla: unknown command '" + cmd + "'")

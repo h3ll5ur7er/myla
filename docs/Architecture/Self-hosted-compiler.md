@@ -18,9 +18,9 @@
 | `interp.my` | 1830 | Tree-walking interpreter over checked declarations |
 | `loader.my` | 990 | Module loader: resolves imports, parses each module once, qualifies module-level names (`id$name`), checks `pub`, folds `alias.member` ([[Architecture/Module-loader]]) |
 | `diag.my` | 85 | Renders a diagnostic like the Python CLI: message, `--> file:line:col`, source line and caret |
-| `gen_main.my` | 50 | The bootstrap compiler: `gen_main <file.my> <stdlib_root>` → assembly on stdout |
-| `main.my` | 170 | The self-hosted CLI: `myla run|test|build <file> [-o out] [stdlib_root]`; `build` runs `as`/`ld` through `std.process.run` |
-| `lex_main.my`, `parse_main.my`, `check_main.my`, `interp_main.my` | 30–50 each | Drivers for the differential tests (canonical tokens, canonical AST, `ok`/`err line col kind`, interpreted output; `interp_main` goes through the loader) |
+| `gen_main.my` | 60 | The bootstrap compiler: `gen_main <file.my> <stdlib_root> [-g]` → assembly on stdout (`-g`: DWARF line tables, [[MYLA-71]]) |
+| `main.my` | 190 | The self-hosted CLI: `myla run|test|build <file> [-o out] [-g] [stdlib_root]`; `build` runs `as`/`ld` through `std.process.run` |
+| `lex_main.my`, `parse_main.my`, `check_main.my`, `interp_main.my` | 30–50 each | Drivers for the differential tests (canonical tokens, canonical AST, `ok` or `err line col kind: message`, interpreted output; `interp_main` goes through the loader and prints runtime errors like the Python CLI) |
 
 ## Writing a compiler in Myla
 

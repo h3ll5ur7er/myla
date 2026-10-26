@@ -13,10 +13,12 @@ from .codegen import new_codegen
 from .loader import load_program, Loaded, file_of
 from .diag import render, type_report
 
-fun emit_asm(prog: Loaded) -> int32 {
+// `debug`: DWARF line tables, so gdb steps through the Myla source (MYLA-71).
+fun emit_asm(prog: Loaded, debug: bool) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
             var g = new_codegen(c)
+            if debug { g.enable_line_tables(prog.spans, prog.next_id) }
             let asm = g.generate()
             write(1, asm)
             0
@@ -31,16 +33,19 @@ fun emit_asm(prog: Loaded) -> int32 {
 fun main() {
     let argv = args()
     if len(argv) < 2 {
-        eprintln("usage: gen_main <file.my> [stdlib_root]")
+        eprintln("usage: gen_main <file.my> [stdlib_root] [-g]")
         exit(2)
     }
     var stdlib = ""
-    if len(argv) >= 3 {
-        stdlib = argv[2]
+    var debug = false
+    var j = 2
+    while j < len(argv) {
+        if argv[j] == "-g" { debug = true } else { stdlib = argv[j] }
+        j = j + 1
     }
     match load_program(argv[1], stdlib) {
         Ok(prog) => {
-            let code = emit_asm(prog)
+            let code = emit_asm(prog, debug)
             exit(code)
         },
         Err(r) => {

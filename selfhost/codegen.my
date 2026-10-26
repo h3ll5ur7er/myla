@@ -12,6 +12,7 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem, bind_elems
 from .floatlit import f64_literal_bits, f32_round_bits
+from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
@@ -22,7 +23,7 @@ pub struct CgBinding { name: str, kind: str, offset: int32, ty: Type, capoff: in
 pub struct Cap { name: str, ty: Type, off: int32 }
 
 // A lifted lambda body to emit as a top-level function (monomorphized per stamp).
-pub struct LamJob { lifted: str, params: [Param], ftype: Type, body: ExprOrBlock, caps: [Cap], subst: [Subst] }
+pub struct LamJob { lifted: str, params: [Param], ftype: Type, body: ExprOrBlock, caps: [Cap], subst: [Subst], id: int32, line: int32, col: int32 }
 
 // A partial-application thunk to emit: `slots[i]` is the env byte offset of a
 // filled argument, or -1 for a hole (filled from the thunk's own parameters);
@@ -105,6 +106,15 @@ pub struct CodeGen {
     need_clone: [Type],
     clone_emitted: [str],
     need_sb: bool,
+    // DWARF line tables (`-g`, MYLA-71): the loader's module spans (which node
+    // ids belong to which file; ids from `prelude_id` on are the prelude's, with
+    // no source), the `.file` paths in number order, the number of the file of
+    // the function being generated (0: none), and the last `.loc` emitted.
+    line_spans: [Span],
+    prelude_id: int32,
+    line_files: [str],
+    cur_file: int32,
+    last_loc: str,
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -130,10 +140,53 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         epilogue: "", struct_ret: false, ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
         need_sb: false,
+        line_spans: [], prelude_id: 0, line_files: [], cur_file: 0, last_loc: "",
     }
 }
 
 impl CodeGen {
+    // Emit DWARF line directives for the program `spans` describes (the
+    // loader's `Loaded.spans`; node ids from `next_id` on are the prelude's).
+    fun enable_line_tables(var self, spans: [Span], next_id: int32) {
+        self.line_spans = spans
+        self.prelude_id = next_id
+    }
+
+    // -- debug line tables (MYLA-71) --------------------------------------
+
+    // The `.file` number of the module node `id` is in, registered on first
+    // use; 0 when line tables are off or the node is the prelude's.
+    fun file_number(var self, id: int32) -> int32 {
+        if len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return 0 }
+        var path = self.line_spans[0].path
+        for sp in self.line_spans { if sp.first_id <= id { path = sp.path } }
+        var i = 0
+        while i < len(self.line_files) {
+            if self.line_files[i] == path { return i + 1 }
+            i = i + 1
+        }
+        push(self.line_files, path)
+        return len(self.line_files)
+    }
+
+    // Attribute the code that follows to source position `line:col`.
+    fun emit_loc(var self, line: int32, col: int32) {
+        if self.cur_file == 0 || line <= 0 { return }
+        let loc = format(".loc {} {} {}", self.cur_file, line, col)
+        if loc != self.last_loc {
+            self.emit(loc)
+            self.last_loc = loc
+        }
+    }
+
+    // Mark the code that follows as having no source line (line 0), so code
+    // emitted after a function isn't attributed to it.
+    fun end_loc(var self) {
+        if self.cur_file != 0 { self.emit(format(".loc {} 0 0", self.cur_file)) }
+        self.cur_file = 0
+        self.last_loc = ""
+    }
+
     // -- emit helpers -----------------------------------------------------
 
     // Append a generated instruction (tab-indented) or a label (flush-left).
@@ -898,6 +951,11 @@ impl CodeGen {
     fun assemble_source(var self) -> str {
         var out: [str] = []
         push(out, "\t.text")
+        var fi = 0
+        while fi < len(self.line_files) {
+            push(out, format("\t.file {} \"{}\"", fi + 1, asm_string(self.line_files[fi])))
+            fi = fi + 1
+        }
         for line in self.text { push(out, line) }
         push(out, "")
         push(out, "\t.section .rodata")
@@ -969,7 +1027,9 @@ impl CodeGen {
         let frame = self.layout_frame(fd)
         self.epilogue = format(".Lret_{}", mangled)
 
+        self.cur_file = self.file_number(sig.decl_id)
         self.emit(format("myla_{}:", mangled))
+        self.emit_loc(fd.line, fd.col)
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
         if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
@@ -989,6 +1049,7 @@ impl CodeGen {
         self.emit(format("{}:", self.epilogue))
         self.emit("leave")
         self.emit("ret")
+        self.end_loc()
         self.emit("")
         self.close_scope()
     }
@@ -1211,6 +1272,7 @@ impl CodeGen {
     }
 
     fun gen_stmt(var self, s: Stmt) {
+        self.emit_loc(s.line, s.col)
         match s.kind {
             StmtKind.ExprStmt(e) => {
                 if is_aggregate(self.type_of(e.id)) { self.addr_of_aggregate(e) } else { self.eval(e) }
@@ -2993,6 +3055,7 @@ impl CodeGen {
                 self.close_scope()
             },
             ExprOrBlock.EB_Expr(ex) => {
+                self.emit_loc(ex.line, ex.col)
                 self.store_value(ex, result_off, result_type)
                 self.drop_expr_temps(ex)
             },
@@ -3374,7 +3437,7 @@ impl CodeGen {
         let off = self.local_of(e.id)
         let caps = self.lambda_captures(params, body)
         let lifted = format("{}__lam{}", self.cur_mangled, e.id)
-        push(self.lam_jobs, LamJob { lifted: lifted, params: params, ftype: self.type_of(e.id), body: body, caps: caps, subst: self.subst })
+        push(self.lam_jobs, LamJob { lifted: lifted, params: params, ftype: self.type_of(e.id), body: body, caps: caps, subst: self.subst, id: e.id, line: e.line, col: e.col })
         let code = format("myla_{}", lifted)
         if len(caps) == 0 {
             self.emit(format("leaq {}(%rip), %rax", code))
@@ -3478,7 +3541,9 @@ impl CodeGen {
         let frame = band(self.cursor + 15, bnot(15))
         self.epilogue = format(".Lret_{}", job.lifted)
 
+        self.cur_file = self.file_number(job.id)
         self.emit(format("myla_{}:", job.lifted))
+        self.emit_loc(job.line, job.col)
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
         if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
@@ -3533,6 +3598,7 @@ impl CodeGen {
         self.emit(format("{}:", self.epilogue))
         self.emit("leave")
         self.emit("ret")
+        self.end_loc()
         self.emit("")
         self.close_scope()
         var owned: [DropEntry] = []
@@ -6587,4 +6653,17 @@ fun cmp_set(op: str, signed: bool) -> str {
     }
     if signed { return "setge" }
     return "setae"
+}
+
+// `s` as the body of an assembler string literal (a `.file` path).
+fun asm_string(s: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(s) {
+        let c = s[i]
+        if c == '\\' || c == '"' { append_byte(sb, '\\') }
+        append_byte(sb, c)
+        i = i + 1
+    }
+    return build(sb)
 }
