@@ -61,7 +61,7 @@ Lists, maps and builders behave like every other value: `let b = a` makes an ind
 
 ## Strings
 
-`str` is an immutable sequence of UTF-8 bytes (D21, D42):
+`str` is an immutable sequence of bytes, normally UTF-8 (D21, D42). A string read from a file or built with `append_byte` can hold any bytes; every operation below works on the bytes, and `print` writes them unchanged ([[MYLA-12]]).
 
 | Operation | Result |
 | --- | --- |
@@ -69,7 +69,7 @@ Lists, maps and builders behave like every other value: `let b = a` makes an ind
 | `s[i]` | The byte at `i`, as a `uint8`; out of bounds is a runtime error; strings can't be assigned into |
 | `a + b` | A new string |
 | `a == b`, `a != b` | Byte-wise equality; there is no `<` on strings |
-| `chars(s)` | `[char]`, one element per Unicode scalar |
+| `chars(s)` | `[char]`, one element per Unicode scalar; each byte that isn't part of a well-formed UTF-8 sequence (a stray or truncated byte, an overlong form, an encoded surrogate) gives U+FFFD |
 | `format("{} of {}", a, b)` | See below |
 
 Byte comparisons with ASCII char literals type-check directly: `if s[i] == ' ' { … }`.

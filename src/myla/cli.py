@@ -260,6 +260,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # A program's strings needn't be UTF-8; the interpreter carries the stray
+    # bytes as escapes, which go out as the bytes they stand for (MYLA-12).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="surrogateescape")
     try:
         return args.func(args)
     except FileNotFoundError as err:

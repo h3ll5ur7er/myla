@@ -598,7 +598,7 @@ class Interpreter:
         target = self._eval(expr.target, env)
         key = self._eval(expr.index, env)
         if isinstance(target, str):
-            data = target.encode("utf-8")
+            data = _str_bytes(target)
             if key < 0 or key >= len(data):
                 raise MylaRuntimeError(
                     f"string index {key} out of bounds (len {len(data)})",
@@ -645,7 +645,7 @@ class Interpreter:
 
         if op == "+":
             if isinstance(expr.resolved_type, StrType):
-                return left + right          # string concatenation (D41)
+                return _concat(left, right)  # string concatenation (D41)
             return _wrap(left + right, expr.resolved_type)
         if op == "-":
             return _wrap(left - right, expr.resolved_type)
@@ -788,7 +788,7 @@ class Interpreter:
                 self._err.write(s)
             else:
                 import os
-                os.write(fd, s.encode("utf-8"))
+                os.write(fd, _str_bytes(s))
             return None
         if callee.ident == "__exit":
             raise _ExitSignal(self._eval(expr.args[0], env))
@@ -800,9 +800,7 @@ class Interpreter:
                 with open(path, "rb") as fh:
                     data = fh.read()
                 self._io_errno = 0
-                # decode like the native backend treats the bytes as UTF-8; the
-                # byte length (what `len` reports) is preserved for valid UTF-8.
-                return data.decode("utf-8", errors="surrogateescape")
+                return _bytes_str(data)          # any bytes, kept exactly
             except OSError as err:
                 self._io_errno = err.errno or 0
                 return ""
@@ -813,7 +811,7 @@ class Interpreter:
             data = self._eval(expr.args[1], env)
             try:
                 with open(path, "wb") as fh:
-                    fh.write(data.encode("utf-8", errors="surrogateescape"))
+                    fh.write(_str_bytes(data))
                 self._io_errno = 0
             except OSError as err:
                 self._io_errno = err.errno or 0
@@ -833,7 +831,7 @@ class Interpreter:
         if callee.ident == "len":
             target = self._eval(expr.args[0], env)
             if isinstance(target, str):
-                return len(target.encode("utf-8"))
+                return len(_str_bytes(target))
             if isinstance(target, MapValue):
                 return len(target.entries)
             if isinstance(target, StringBuilderValue):
@@ -851,7 +849,7 @@ class Interpreter:
             return lst.elems.pop()
         if callee.ident == "chars":
             s = self._eval(expr.args[0], env)
-            return ListValue([ord(c) for c in s])   # one codepoint per scalar
+            return ListValue(_decode_chars(s))
 
         if callee.ident == "contains":
             m = self._eval(expr.args[0], env)
@@ -864,12 +862,12 @@ class Interpreter:
             fmt = expr.args[0].value          # checked to be a string literal
             parts = [_format_value(self._eval(a, env), a.resolved_type)
                      for a in expr.args[1:]]
-            return _render_format(fmt, parts)
+            return _normalize(_render_format(fmt, parts))
         if callee.ident == "StringBuilder":
             return StringBuilderValue()
         if callee.ident == "append":
             sb = self._eval(expr.args[0], env)
-            sb.buf.extend(self._eval(expr.args[1], env).encode("utf-8"))
+            sb.buf.extend(_str_bytes(self._eval(expr.args[1], env)))
             return None
         if callee.ident == "append_byte":
             sb = self._eval(expr.args[0], env)
@@ -877,7 +875,7 @@ class Interpreter:
             return None
         if callee.ident == "build":
             sb = self._eval(expr.args[0], env)
-            return bytes(sb.buf).decode("utf-8", errors="surrogateescape")
+            return _bytes_str(bytes(sb.buf))
         if callee.ident == "keys":
             m = self._eval(expr.args[0], env)
             return ListValue([_copy(k) for k in m.entries.keys()])
@@ -980,6 +978,68 @@ def _format_value(value, t: Type | None) -> str:
     if isinstance(t, CharType):
         return char_utf8_bytes(value).decode("utf-8")   # render as its glyph
     return str(value)  # pragma: no cover - print() is restricted by the checker
+
+
+# A Myla `str` is bytes, which needn't be UTF-8 (a file, `append_byte`). The
+# interpreter keeps it as a Python str in which each byte that isn't part of
+# valid UTF-8 is a lone surrogate U+DC80..U+DCFF (Python's "surrogateescape"),
+# so all byte-level work goes through these helpers (MYLA-12).
+
+def _str_bytes(s: str) -> bytes:
+    return s.encode("utf-8", "surrogateescape")
+
+
+def _bytes_str(data: bytes) -> str:
+    return data.decode("utf-8", "surrogateescape")
+
+
+def _normalize(s: str) -> str:
+    """`s` with the bytes of a sequence that was split across pieces (each
+    escaped on its own) decoded again, so equal bytes make equal strings."""
+    return s if s.isascii() else _bytes_str(_str_bytes(s))
+
+
+def _concat(a: str, b: str) -> str:
+    if a.isascii() or b.isascii():       # no sequence can be split between them
+        return a + b
+    return _normalize(a + b)
+
+
+def _decode_chars(s: str) -> list[int]:
+    """`chars(s)`: the scalar of each well-formed UTF-8 sequence, and U+FFFD
+    for each byte that isn't part of one (as the native `__str_chars`)."""
+    try:
+        s.encode("utf-8")                # valid: no escaped bytes
+        return [ord(c) for c in s]
+    except UnicodeEncodeError:
+        pass
+    data = _str_bytes(s)
+    out: list[int] = []
+    i, n = 0, len(data)
+    while i < n:
+        b0 = data[i]
+        if b0 < 0x80:
+            out.append(b0)
+            i += 1
+            continue
+        if 0xC2 <= b0 <= 0xDF:
+            size, cp, least = 2, b0 & 0x1F, 0x80
+        elif 0xE0 <= b0 <= 0xEF:
+            size, cp, least = 3, b0 & 0x0F, 0x800
+        elif 0xF0 <= b0 <= 0xF4:
+            size, cp, least = 4, b0 & 0x07, 0x10000
+        else:
+            size = 0
+        if 0 < size and i + size <= n and all(data[i + k] & 0xC0 == 0x80 for k in range(1, size)):
+            for k in range(1, size):
+                cp = (cp << 6) | (data[i + k] & 0x3F)
+            if least <= cp <= 0x10FFFF and not 0xD800 <= cp <= 0xDFFF:
+                out.append(cp)
+                i += size
+                continue
+        out.append(0xFFFD)
+        i += 1
+    return out
 
 
 def _render_format(fmt: str, parts: list[str]) -> str:

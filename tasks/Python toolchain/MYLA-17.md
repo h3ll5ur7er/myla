@@ -15,5 +15,5 @@ Small gaps in the hand-written runtime:
 ## Done when
 
 - [ ] Write loops until all bytes are written, retrying on `EINTR`
-- [ ] `__str_chars` bounds-checks every continuation byte (replace invalid sequences with U+FFFD, the same in the interpreter)
+- [x] `__str_chars` bounds-checks every continuation byte (replace invalid sequences with U+FFFD, the same in the interpreter): done with [[MYLA-12]]
 - [ ] `__trap` takes a message (`index out of bounds`, `map key not found`, `division by zero`) and writes it to stderr

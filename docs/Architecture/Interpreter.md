@@ -30,11 +30,14 @@
 
 `__write` writes to the given stream, `__read_file` reads bytes and decodes them with `surrogateescape` (so any byte sequence survives), `__write_file`, `__args` (the argv passed to `Interpreter(..., argv=…)`), and `__run`, which uses `subprocess.run` with `executable=program` (no `PATH` search) and stores stderr, exit code, signal and errno for the `__run_*` primitives.
 
+## Strings
+
+A Myla `str` is bytes, kept as a Python `str` in which every byte that isn't part of valid UTF-8 is a lone surrogate U+DC80..U+DCFF (Python's `surrogateescape`). `_str_bytes` and `_bytes_str` convert; `len`, indexing, `append`, `__write` and `__read_file` go through them. `+` and `format` decode their result again when a sequence may have been split between the pieces (`_normalize`), so equal bytes are always equal strings and map keys. `chars` uses `_decode_chars`, the same decoder as the native `__str_chars`. The CLI sets `errors="surrogateescape"` on stdout and stderr, so the escapes go out as the original bytes ([[MYLA-12]]).
+
 ## The test runner
 
 `run_tests()` goes through every function's `#test` attributes, evaluates arguments and the expected value, calls the function and compares with Python `==` (structural for every value type). A runtime error fails that case only.
 
 ## Known problems
 
-- `len`, indexing and writing a string that holds invalid UTF-8 crash ([[MYLA-12]]).
 - `s[i]` and `len(s)` encode the whole string each time, so byte loops over long strings are quadratic.

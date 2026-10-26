@@ -66,7 +66,7 @@ A capturing lambda allocates an environment cell: word 0 holds a drop function (
 | --- | --- |
 | Process | `_start`, `__trap` (exit 1), `__panic` (message to stderr, exit 1) |
 | Printing | `__print_int`, `__print_uint`, `__print_bool`, `__print_str`, `__print_nl`, `__float_to_str`, `__char_to_str` |
-| Strings | `__str_eq`, `__str_concat`, `__int_to_str`, `__uint_to_str`, `__bool_to_str`, `__str_chars` (UTF-8 decode) |
+| Strings | `__str_eq`, `__str_concat`, `__int_to_str`, `__uint_to_str`, `__bool_to_str`, `__str_chars` (UTF-8 decode; U+FFFD for each byte outside a well-formed sequence) |
 | Heap | `__heap_init`, `__alloc`, `__free`, `__func_retain`, `__func_drop` |
 | Collections | per type: `__drop_list_T`, `__clone_list_T`, `__grow_list_T` (doubling, minimum 4); `__new_map_*`, `__put_map_*`, `__find_map_*`, `__clone_map_*`, `__grow_map_*`, `__drop_map_*`, `__keys_map_*`, `__remove_map_*` (rebuilds the table); `__sb_new`, `__sb_drop`, `__sb_clone`, `__sb_grow`, `__sb_extend`, `__sb_build` |
 | I/O | `__write`, `__args`, `__read_file` (open/fstat/read loop/close), `__write_file` (open O_WRONLY\|O_CREAT\|O_TRUNC 0644, write loop) |

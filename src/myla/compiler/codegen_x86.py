@@ -4459,9 +4459,11 @@ class CodeGen:
 
     def _emit_str_chars_runtime(self) -> None:
         """`__str_chars`: rdi = str cell [len:8][bytes] -> rax = a fresh `[char]`
-        list cell [len:8][cap:8][cp:8 …], one element per UTF-8 scalar. Assumes
-        well-formed UTF-8 (every Myla `str` is). Capacity is the byte length (an
-        upper bound on the scalar count); length is the exact scalar count."""
+        list cell [len:8][cap:8][cp:8 …]: the scalar of each well-formed UTF-8
+        sequence, and U+FFFD for each byte that isn't part of one (a `str` read
+        from a file needn't be UTF-8, MYLA-12; `_decode_chars` in the
+        interpreter). Capacity is the byte length (an upper bound on the
+        element count); length is the exact count."""
         e = self.text.append
         e("")
         e("__str_chars:")
@@ -4489,50 +4491,63 @@ class CodeGen:
         e("\tmovzbq (%rbx,%r14), %rax")     # b0
         e("\tcmpq $0x80, %rax")
         e("\tjb .Lsc_1")
+        # a lead byte: rdx = sequence length, rcx = its payload bits,
+        # r8 = the least scalar of that length (shorter is overlong)
+        e("\tcmpq $0xC2, %rax")
+        e("\tjb .Lsc_bad")
         e("\tcmpq $0xE0, %rax")
-        e("\tjb .Lsc_2")
+        e("\tjb .Lsc_lead2")
         e("\tcmpq $0xF0, %rax")
-        e("\tjb .Lsc_3")
-        # 4-byte: cp = (b0&07)<<18 | (b1&3F)<<12 | (b2&3F)<<6 | (b3&3F)
-        e("\tandq $0x07, %rax")
-        e("\tshlq $18, %rax")
+        e("\tjb .Lsc_lead3")
+        e("\tcmpq $0xF5, %rax")
+        e("\tjae .Lsc_bad")
         e("\tmovq %rax, %rcx")
-        e("\tmovzbq 1(%rbx,%r14), %rax")
+        e("\tandq $0x07, %rcx")
+        e("\tmovq $4, %rdx")
+        e("\tmovq $0x10000, %r8")
+        e("\tjmp .Lsc_seq")
+        e(".Lsc_lead3:")
+        e("\tmovq %rax, %rcx")
+        e("\tandq $0x0F, %rcx")
+        e("\tmovq $3, %rdx")
+        e("\tmovq $0x800, %r8")
+        e("\tjmp .Lsc_seq")
+        e(".Lsc_lead2:")
+        e("\tmovq %rax, %rcx")
+        e("\tandq $0x1F, %rcx")
+        e("\tmovq $2, %rdx")
+        e("\tmovq $0x80, %r8")
+        e(".Lsc_seq:")
+        e("\tleaq (%r14,%rdx), %r9")        # end of the sequence
+        e("\tcmpq %r12, %r9")
+        e("\tja .Lsc_bad")                  # cut off by the end of the string
+        e("\tleaq (%rbx,%r14), %r11")
+        e("\tmovq $1, %r10")
+        e(".Lsc_cont:")
+        e("\tmovzbq (%r11,%r10), %rax")
+        e("\tmovq %rax, %rsi")
+        e("\tandq $0xC0, %rsi")
+        e("\tcmpq $0x80, %rsi")
+        e("\tjne .Lsc_bad")                 # not a continuation byte
+        e("\tshlq $6, %rcx")
         e("\tandq $0x3F, %rax")
-        e("\tshlq $12, %rax")
         e("\torq %rax, %rcx")
-        e("\tmovzbq 2(%rbx,%r14), %rax")
-        e("\tandq $0x3F, %rax")
-        e("\tshlq $6, %rax")
-        e("\torq %rax, %rcx")
-        e("\tmovzbq 3(%rbx,%r14), %rax")
-        e("\tandq $0x3F, %rax")
-        e("\torq %rax, %rcx")
-        e("\taddq $4, %r14")
+        e("\tincq %r10")
+        e("\tcmpq %rdx, %r10")
+        e("\tjb .Lsc_cont")
+        e("\tcmpq %r8, %rcx")
+        e("\tjb .Lsc_bad")                  # overlong
+        e("\tcmpq $0x10FFFF, %rcx")
+        e("\tja .Lsc_bad")
+        e("\tmovq %rcx, %rax")
+        e("\tandq $-2048, %rax")
+        e("\tcmpq $0xD800, %rax")
+        e("\tje .Lsc_bad")                  # a surrogate
+        e("\tmovq %r9, %r14")
         e("\tjmp .Lsc_store")
-        e(".Lsc_3:")
-        # 3-byte: cp = (b0&0F)<<12 | (b1&3F)<<6 | (b2&3F)
-        e("\tandq $0x0F, %rax")
-        e("\tshlq $12, %rax")
-        e("\tmovq %rax, %rcx")
-        e("\tmovzbq 1(%rbx,%r14), %rax")
-        e("\tandq $0x3F, %rax")
-        e("\tshlq $6, %rax")
-        e("\torq %rax, %rcx")
-        e("\tmovzbq 2(%rbx,%r14), %rax")
-        e("\tandq $0x3F, %rax")
-        e("\torq %rax, %rcx")
-        e("\taddq $3, %r14")
-        e("\tjmp .Lsc_store")
-        e(".Lsc_2:")
-        # 2-byte: cp = (b0&1F)<<6 | (b1&3F)
-        e("\tandq $0x1F, %rax")
-        e("\tshlq $6, %rax")
-        e("\tmovq %rax, %rcx")
-        e("\tmovzbq 1(%rbx,%r14), %rax")
-        e("\tandq $0x3F, %rax")
-        e("\torq %rax, %rcx")
-        e("\taddq $2, %r14")
+        e(".Lsc_bad:")
+        e("\tmovq $0xFFFD, %rcx")           # U+FFFD for this byte
+        e("\tincq %r14")
         e("\tjmp .Lsc_store")
         e(".Lsc_1:")
         e("\tmovq %rax, %rcx")              # cp = b0

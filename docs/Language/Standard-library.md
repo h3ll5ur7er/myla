@@ -78,4 +78,4 @@ fun main() {
 | `write_to_file(path: str, contents: str) -> Result<int32, IoError>` | Creates or truncates (mode 0644); `Ok` holds the number of bytes |
 | `enum IoError { NotFound, PermissionDenied, Other(int32) }` | Mapped from the OS errno |
 
-The file's bytes become the string unchanged; nothing checks that they are valid UTF-8 ([[MYLA-12]]).
+The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).

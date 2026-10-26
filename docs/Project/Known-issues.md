@@ -10,13 +10,12 @@ The reference implementation. Most problems are places where the native backend 
 
 | Task | Problem | Priority |
 | --- | --- | --- |
-| [[MYLA-12]] | The interpreter crashes on strings that aren't valid UTF-8 | medium |
 | [[MYLA-75]] | Partial application evaluates its filled arguments at every call | medium |
 | [[MYLA-9]] | Mangled names of generic instantiations can collide | low |
 | [[MYLA-13]] | `#derive(Eq)` rejects `char` and float fields | low |
 | [[MYLA-14]] | Exhaustiveness rejects nested and `true \| false` matches | low |
 | [[MYLA-15]] | `Option<int>= x` is a parse error | low |
-| [[MYLA-17]] | Native runtime: short writes, malformed UTF-8 in `chars`, silent traps | low |
+| [[MYLA-17]] | Native runtime: short writes, silent traps | low |
 | [[MYLA-18]] | Strings are never freed | low |
 | [[MYLA-59]] | A `match` ending an arm block must produce a value | low |
 | [[MYLA-19]], [[MYLA-20]] | No REPL; code hygiene | low |
