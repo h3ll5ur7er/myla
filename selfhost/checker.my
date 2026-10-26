@@ -469,19 +469,6 @@ fun negated_misfit(x: Expr) -> str {
     return ""
 }
 
-fun pat_bool_value(pat: Pattern) -> Option<bool> {
-    match pat.kind {
-        PatternKind.PLit(litexpr) => {
-            match litexpr.kind {
-                ExprKind.BoolLit(b) => { return Some(b) },
-                _ => {},
-            }
-            return None
-        },
-        _ => {},
-    }
-    return None
-}
 
 fun impl_eq_target_name(d: Decl) -> Option<str> {
     match d.kind {
@@ -2403,69 +2390,144 @@ impl Checker {
 
     // -- exhaustiveness & redundancy --------------------------------------
 
+    // Maranget's "usefulness" over pattern matrices (MYLA-14), as in the
+    // Python checker: a row of patterns is useful against earlier rows when
+    // some value matches it and none of them. Patterns are normalized to
+    // `NPat`s first; a constructor's key is an enum variant's name, or `#t` /
+    // `#f`, `#()` (a tuple), `#{}` (a struct), `#i<n>` / `#s<text>` (literals).
+
     fun irrefutable(self, pat: Pattern, t: Type) -> bool {
+        return !self.useful([[self.norm_pat(pat, t)]], [NPat.NWild], [t])
+    }
+
+    fun norm_pat(self, pat: Pattern, t: Type) -> NPat {
         match pat.kind {
-            PatternKind.PWild => { return true },
+            PatternKind.PWild => { return NPat.NWild },
             PatternKind.PBind(n) => {
                 match t {
-                    Type.TEnum(en, args) => { return !(self.enum_has_variant(en, n) && self.is_novpayload_variant(en, n)) },
+                    Type.TEnum(en, args) => {
+                        if self.enum_has_variant(en, n) && self.is_novpayload_variant(en, n) { return NPat.NCon(n, []) }
+                    },
                     _ => {},
                 }
-                return true
+                return NPat.NWild
+            },
+            PatternKind.PLit(e) => { return NPat.NCon(literal_key(e), []) },
+            PatternKind.POr(alts) => {
+                var out: [NPat] = []
+                for a in alts { push(out, self.norm_pat(a, t)) }
+                return NPat.NOr(out)
             },
             PatternKind.PTuple(elems) => {
                 match t {
                     Type.TTuple(ets) => {
+                        var out: [NPat] = []
                         var i = 0
-                        while i < len(elems) {
-                            if !self.irrefutable(elems[i], ets[i]) { return false }
+                        while i < len(elems) && i < len(ets) {
+                            push(out, self.norm_pat(elems[i], ets[i]))
                             i = i + 1
                         }
-                        return true
+                        return NPat.NCon("#()", out)
                     },
                     _ => {},
                 }
-                return false
             },
             PatternKind.PStruct(name, fps) => {
                 match t {
                     Type.TStruct(tn, args) => {
-                        let fields = self.struct_field_types(tn, args)
-                        for fp in fps {
-                            match field_type_get(fields, fp.name) {
-                                Some(ft) => { if !self.irrefutable(fp.pattern, ft) { return false } },
-                                None => {},
-                            }
+                        var out: [NPat] = []
+                        for f in self.struct_field_types(tn, args) {
+                            var sub = NPat.NWild
+                            for fp in fps { if fp.name == f.name { sub = self.norm_pat(fp.pattern, f.ty) } }
+                            push(out, sub)
                         }
-                        return true
+                        return NPat.NCon("#{}", out)
                     },
                     _ => {},
                 }
-                return false
             },
             PatternKind.PEnum(en, variant, elems, hp) => {
                 match t {
                     Type.TEnum(tn, args) => {
-                        if len(self.enum_variant_names(tn)) != 1 { return false }
                         let payload = match self.enum_variant_payload(tn, args, variant) { Some(p) => p, None => empty_types() }
+                        var out: [NPat] = []
                         var i = 0
-                        while i < len(elems) {
-                            if !self.irrefutable(elems[i], payload[i]) { return false }
+                        while i < len(payload) {
+                            if i < len(elems) { push(out, self.norm_pat(elems[i], payload[i])) } else { push(out, NPat.NWild) }
                             i = i + 1
                         }
-                        return true
+                        return NPat.NCon(variant, out)
                     },
                     _ => {},
                 }
-                return false
             },
-            PatternKind.POr(altl) => {
-                for a in altl { if self.irrefutable(a, t) { return true } }
-                return false
-            },
-            _ => { return false },
         }
-        return false
+        return NPat.NWild
+    }
+
+    // All constructors of `t` with their field types; none for values that
+    // can't be enumerated (integers, strings, chars).
+    fun signature(self, t: Type) -> Option<[SigCon]> {
+        var out: [SigCon] = []
+        match t {
+            Type.TEnum(tn, args) => {
+                for v in self.enum_variant_names(tn) {
+                    let payload = match self.enum_variant_payload(tn, args, v) { Some(p) => p, None => empty_types() }
+                    push(out, SigCon { key: v, types: payload })
+                }
+            },
+            Type.TBool => {
+                push(out, SigCon { key: "#t", types: empty_types() })
+                push(out, SigCon { key: "#f", types: empty_types() })
+            },
+            Type.TTuple(ets) => { push(out, SigCon { key: "#()", types: ets }) },
+            Type.TStruct(tn, args) => {
+                var ts: [Type] = []
+                for f in self.struct_field_types(tn, args) { push(ts, f.ty) }
+                push(out, SigCon { key: "#{}", types: ts })
+            },
+            _ => { return None },
+        }
+        return Some(out)
+    }
+
+    fun useful(self, rows0: [[NPat]], q: [NPat], types: [Type]) -> bool {
+        if len(q) == 0 { return len(rows0) == 0 }
+        let rows = expand_or(rows0)
+        let rest = list_tail(q)
+        let trest = list_tail(types)
+        match q[0] {
+            NPat.NOr(alts) => {
+                for alt in alts { if self.useful(rows, list_concat([alt], rest), types) { return true } }
+                return false
+            },
+            NPat.NCon(key, subs) => {
+                var sub_types: [Type] = []
+                match self.signature(types[0]) {
+                    Some(sig) => { for c in sig { if c.key == key { sub_types = c.types } } },
+                    None => {},
+                }
+                if len(sub_types) != len(subs) { sub_types = repeat_type(types[0], len(subs)) }
+                return self.useful(specialize(rows, key, len(subs)), list_concat(subs, rest), list_concat(sub_types, trest))
+            },
+            NPat.NWild => {},
+        }
+        match self.signature(types[0]) {
+            Some(sig) => {
+                var complete = true
+                for c in sig { if !head_has_key(rows, c.key) { complete = false } }
+                if complete {
+                    for c in sig {
+                        if self.useful(specialize(rows, c.key, len(c.types)), list_concat(wilds(len(c.types)), rest), list_concat(c.types, trest)) { return true }
+                    }
+                    return false
+                }
+            },
+            None => {},
+        }
+        var def: [[NPat]] = []
+        for row in rows { if is_nwild(row[0]) { push(def, list_tail(row)) } }
+        return self.useful(def, rest, trest)
     }
 
     fun covered_variants(self, pat: Pattern, tn: str, args: [Type]) -> [str] {
@@ -2501,33 +2563,19 @@ impl Checker {
     }
 
     fun check_exhaustive(self, e: Expr, st: Type, arms: [MatchArm]) -> Result<int32, CheckErr> {
-        var noguard: [MatchArm] = []
-        for a in arms { match a.guard { Some(g) => {}, None => push(noguard, a) } }
-        for a in noguard { if self.irrefutable(a.pattern, st) { return Ok(0) } }
+        var rows: [[NPat]] = []
+        for a in arms { match a.guard { Some(g) => {}, None => push(rows, [self.norm_pat(a.pattern, st)]) } }
+        if !self.useful(rows, [NPat.NWild], [st]) { return Ok(0) }
         match st {
             Type.TEnum(tn, args) => {
-                var covered: [str] = []
-                for a in noguard { for v in self.covered_variants(a.pattern, tn, args) { if !contains_str(covered, v) { push(covered, v) } } }
                 var missing: [str] = []
-                for v in self.enum_variant_names(tn) { if !contains_str(covered, v) { push(missing, v) } }
-                if len(missing) > 0 { return Err(terr(e.line, e.col, format("non-exhaustive match on '{}': missing variant(s) {} (add them or a '_' arm)", tn, join_strs(missing, ", ")))) }
-                return Ok(0)
-            },
-            Type.TBool => {
-                var saw_true = false
-                var saw_false = false
-                for a in noguard {
-                    match pat_bool_value(a.pattern) {
-                        Some(b) => {
-                            if b { saw_true = true }
-                            if !b { saw_false = true }
-                        },
-                        None => {},
-                    }
+                for v in self.enum_variant_names(tn) {
+                    let payload = match self.enum_variant_payload(tn, args, v) { Some(p) => p, None => empty_types() }
+                    if self.useful(specialize(rows, v, len(payload)), wilds(len(payload)), payload) { push(missing, v) }
                 }
-                if saw_true && saw_false { return Ok(0) }
-                return Err(terr(e.line, e.col, "non-exhaustive match on 'bool': cover both true and false (or add a '_' arm)"))
+                return Err(terr(e.line, e.col, format("non-exhaustive match on '{}': missing variant(s) {} (add them or a '_' arm)", tn, join_strs(missing, ", "))))
             },
+            Type.TBool => { return Err(terr(e.line, e.col, "non-exhaustive match on 'bool': cover both true and false (or add a '_' arm)")) },
             _ => {},
         }
         return Err(terr(e.line, e.col, format("non-exhaustive match on '{}': add a '_' arm", type_name(st))))
@@ -2535,27 +2583,148 @@ impl Checker {
 
     fun check_redundant(self, arms: [MatchArm], st: Type) -> Result<int32, CheckErr> {
         var saw_irrefutable = false
-        var covered: [str] = []
+        var covered: [str] = []        // enum variants covered in full so far
+        var rows: [[NPat]] = []
         for arm in arms {
             if saw_irrefutable { return Err(terr(arm.line, arm.col, "unreachable match arm (a previous arm already matches everything)")) }
             let has_guard = match arm.guard { Some(g) => true, None => false }
-            if has_guard { continue }
-            match st {
-                Type.TEnum(tn, args) => {
-                    let vs = self.covered_variants(arm.pattern, tn, args)
-                    if len(vs) > 0 {
-                        var subset = true
-                        for v in vs { if !contains_str(covered, v) { subset = false } }
-                        if subset { return Err(terr(arm.line, arm.col, "unreachable match arm (its variant(s) are already covered)")) }
-                    }
-                    for v in vs { if !contains_str(covered, v) { push(covered, v) } }
-                },
-                _ => {},
+            let row = [self.norm_pat(arm.pattern, st)]
+            var vs: [str] = []
+            match st { Type.TEnum(tn, args) => { vs = self.covered_variants(arm.pattern, tn, args) }, _ => {} }
+            if !has_guard && len(vs) > 0 {
+                var subset = true
+                for v in vs { if !contains_str(covered, v) { subset = false } }
+                if subset { return Err(terr(arm.line, arm.col, "unreachable match arm (its variant(s) are already covered)")) }
             }
+            if !self.useful(rows, row, [st]) { return Err(terr(arm.line, arm.col, "unreachable match arm (earlier arms already cover it)")) }
+            if has_guard { continue }
+            for v in vs { if !contains_str(covered, v) { push(covered, v) } }
+            push(rows, row)
             if self.irrefutable(arm.pattern, st) { saw_irrefutable = true }
         }
         return Ok(0)
     }
+}
+
+// A pattern normalized for exhaustiveness: a wildcard, a constructor with its
+// subpatterns, or an or-pattern (MYLA-14).
+enum NPat { NWild, NCon(str, [NPat]), NOr([NPat]) }
+
+// A constructor of a type and its field types.
+struct SigCon { key: str, types: [Type] }
+
+fun literal_key(e: Expr) -> str {
+    match e.kind {
+        ExprKind.BoolLit(b) => {
+            if b { return "#t" }
+            return "#f"
+        },
+        ExprKind.StrLit(t) => { return "#s" + t },
+        ExprKind.IntLit(v, suf, isc, big) => { return "#i" + int_text(v, big) },
+        ExprKind.Unary(op, x) => {
+            let k = literal_key(x)            // "#i<n>"
+            if k == "#i0" { return k }        // -0 is 0
+            return "#i-" + slice_from(k, 2)
+        },
+        _ => {},
+    }
+    return "#?"
+}
+
+fun slice_from(s: str, start: int) -> str {
+    var sb = StringBuilder()
+    var i = start
+    while i < len(s) {
+        append_byte(sb, s[i])
+        i = i + 1
+    }
+    return build(sb)
+}
+
+fun is_nwild(p: NPat) -> bool {
+    return match p { NPat.NWild => true, _ => false }
+}
+
+fun head_has_key(rows: [[NPat]], key: str) -> bool {
+    for row in rows {
+        match row[0] {
+            NPat.NCon(k, subs) => { if k == key { return true } },
+            _ => {},
+        }
+    }
+    return false
+}
+
+fun repeat_type(t: Type, n: int) -> [Type] {
+    var out: [Type] = []
+    var i = 0
+    while i < n {
+        push(out, t)
+        i = i + 1
+    }
+    return out
+}
+
+fun wilds(n: int) -> [NPat] {
+    var out: [NPat] = []
+    var i = 0
+    while i < n {
+        push(out, NPat.NWild)
+        i = i + 1
+    }
+    return out
+}
+
+fun list_tail<T>(xs: [T]) -> [T] {
+    var out: [T] = []
+    var i = 1
+    while i < len(xs) {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun list_concat<T>(a: [T], b: [T]) -> [T] {
+    var out = a
+    for x in b { push(out, x) }
+    return out
+}
+
+// Rows with a leading or-pattern split into one row per alternative.
+fun expand_or(rows: [[NPat]]) -> [[NPat]] {
+    var out: [[NPat]] = []
+    for row in rows {
+        var split = false
+        if len(row) == 0 {
+            push(out, row)
+            continue
+        }
+        match row[0] {
+            NPat.NOr(alts) => {
+                split = true
+                var alt_rows: [[NPat]] = []
+                for alt in alts { push(alt_rows, list_concat([alt], list_tail(row))) }
+                for r in expand_or(alt_rows) { push(out, r) }
+            },
+            _ => {},
+        }
+        if !split { push(out, row) }
+    }
+    return out
+}
+
+// The rows that match constructor `key`, with its subpatterns in front.
+fun specialize(rows: [[NPat]], key: str, arity: int) -> [[NPat]] {
+    var out: [[NPat]] = []
+    for row in expand_or(rows) {
+        match row[0] {
+            NPat.NWild => { push(out, list_concat(wilds(arity), list_tail(row))) },
+            NPat.NCon(k, subs) => { if k == key { push(out, list_concat(subs, list_tail(row))) } },
+            NPat.NOr(alts) => {},
+        }
+    }
+    return out
 }
 
 fun bindmaps_eq(an: [str], at: [Type], bn: [str], bt: [Type]) -> bool {

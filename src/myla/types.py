@@ -300,6 +300,10 @@ def _in_range(value: int, t: IntType) -> bool:
     return 0 <= value < (1 << t.width)
 
 
+# A wildcard in a normalized pattern (exhaustiveness, MYLA-14).
+_WILD = "_"
+
+
 def _is_literal_expr(expr: ast.Expr) -> bool:
     """A (possibly negated) scalar or string literal: evaluating it has no
     effect and reads nothing, so when (or how often) it runs doesn't matter."""
@@ -2611,29 +2615,30 @@ class Checker:
 
     # -- exhaustiveness & redundancy -----------------------------------------
 
+    # -- exhaustiveness and redundancy (MYLA-14) -------------------------------
+    # Maranget's "usefulness" over pattern matrices: a row of patterns is useful
+    # against earlier rows when some value matches it and none of them. A match
+    # is exhaustive when a wildcard isn't useful against its unguarded arms; an
+    # arm is redundant when it isn't useful against the unguarded arms before
+    # it. Patterns are normalized first: `_WILD`, or a constructor
+    # `(key, [subpatterns])` (an enum variant, `True`/`False`, the single
+    # constructor `()` of a tuple or `{}` of a struct, or a literal `("lit", v)`),
+    # or an or-pattern `("|", [alternatives])`.
+
     def _check_exhaustive(self, expr: ast.Match, st: Type) -> None:
-        arms = [a for a in expr.arms if a.guard is None]
-        if any(self._irrefutable(a.pattern, st) for a in arms):
+        rows = [[self._norm_pat(a.pattern, st)] for a in expr.arms if a.guard is None]
+        if not self._useful(rows, [_WILD], [st]):
             return
         if isinstance(st, EnumType):
-            covered: set[str] = set()
-            for a in arms:
-                covered |= self._covered_variants(a.pattern, st)
-            missing = [v for v in self.enums[st.name] if v not in covered]
-            if missing:
-                raise TypeCheckError(
-                    f"non-exhaustive match on '{st.name}': missing variant(s) "
-                    f"{', '.join(missing)} (add them or a '_' arm)",
-                    expr.line, expr.column,
-                )
-            return
+            missing = [v for v, payload in self._enum_variant_types(st).items()
+                       if self._useful(self._specialize(rows, v, len(payload)),
+                                       [_WILD] * len(payload), list(payload))]
+            raise TypeCheckError(
+                f"non-exhaustive match on '{st.name}': missing variant(s) "
+                f"{', '.join(missing)} (add them or a '_' arm)",
+                expr.line, expr.column,
+            )
         if isinstance(st, BoolType):
-            seen: set[bool] = set()
-            for a in arms:
-                if isinstance(a.pattern, ast.PatLiteral):
-                    seen.add(bool(_const_bool(a.pattern.literal)))
-            if {True, False} <= seen:
-                return
             raise TypeCheckError(
                 "non-exhaustive match on 'bool': cover both true and false "
                 "(or add a '_' arm)",
@@ -2644,7 +2649,38 @@ class Checker:
             expr.line, expr.column,
         )
 
+    def _check_redundant(self, expr: ast.Match, st: Type) -> None:
+        saw_irrefutable = False
+        covered: set[str] = set()      # enum variants covered in full so far
+        rows: list[list] = []
+        for arm in expr.arms:
+            if saw_irrefutable:
+                raise TypeCheckError(
+                    "unreachable match arm (a previous arm already matches "
+                    "everything)",
+                    arm.line, arm.column,
+                )
+            row = [self._norm_pat(arm.pattern, st)]
+            vs = self._covered_variants(arm.pattern, st) if isinstance(st, EnumType) else set()
+            if arm.guard is None and vs and vs <= covered:
+                raise TypeCheckError(
+                    "unreachable match arm (its variant(s) are already covered)",
+                    arm.line, arm.column,
+                )
+            if not self._useful(rows, row, [st]):
+                raise TypeCheckError(
+                    "unreachable match arm (earlier arms already cover it)",
+                    arm.line, arm.column,
+                )
+            if arm.guard is not None:
+                continue
+            covered |= vs
+            rows.append(row)
+            if self._irrefutable(arm.pattern, st):
+                saw_irrefutable = True
+
     def _covered_variants(self, pat, st: "EnumType") -> set[str]:
+        """The variants `pat` matches in full (every payload irrefutable)."""
         if self._irrefutable(pat, st):
             return set(self.enums[st.name])
         if isinstance(pat, ast.PatOr):
@@ -2661,45 +2697,89 @@ class Checker:
         return set()
 
     def _irrefutable(self, pat, t: Type) -> bool:
-        if isinstance(pat, ast.PatWildcard):
-            return True
-        if isinstance(pat, ast.PatBinding):
-            return getattr(pat, "as_variant", None) is None
-        if isinstance(pat, ast.PatTuple) and isinstance(t, TupleType):
-            return all(self._irrefutable(s, et) for s, et in zip(pat.elems, t.elems))
-        if isinstance(pat, ast.PatStruct) and isinstance(t, StructType):
-            fields = self._struct_field_types(t)
-            return all(self._irrefutable(fp.pattern, fields[fp.name]) for fp in pat.fields)
-        if isinstance(pat, ast.PatEnum) and isinstance(t, EnumType):
-            if len(self.enums[t.name]) == 1:
-                payload = self._enum_variant_types(t)[pat.variant]
-                return all(self._irrefutable(s, ft) for s, ft in zip(pat.elems, payload))
-        if isinstance(pat, ast.PatOr):
-            return any(self._irrefutable(a, t) for a in pat.alts)
-        return False
+        return not self._useful([[self._norm_pat(pat, t)]], [_WILD], [t])
 
-    def _check_redundant(self, expr: ast.Match, st: Type) -> None:
-        saw_irrefutable = False
-        covered: set[str] = set()
-        for arm in expr.arms:
-            if saw_irrefutable:
-                raise TypeCheckError(
-                    "unreachable match arm (a previous arm already matches "
-                    "everything)",
-                    arm.line, arm.column,
-                )
-            if arm.guard is not None:
-                continue
-            if isinstance(st, EnumType):
-                vs = self._covered_variants(arm.pattern, st)
-                if vs and vs <= covered:
-                    raise TypeCheckError(
-                        "unreachable match arm (its variant(s) are already covered)",
-                        arm.line, arm.column,
-                    )
-                covered |= vs
-            if self._irrefutable(arm.pattern, st):
-                saw_irrefutable = True
+    def _norm_pat(self, pat, t: Type):
+        """`pat` (checked against `t`) in the normalized form above."""
+        if isinstance(pat, ast.PatWildcard):
+            return _WILD
+        if isinstance(pat, ast.PatBinding):
+            v = getattr(pat, "as_variant", None)
+            return (v[1], []) if v is not None else _WILD
+        if isinstance(pat, ast.PatLiteral):
+            lit = pat.literal
+            if isinstance(t, BoolType):
+                return (bool(_const_bool(lit)), [])
+            if isinstance(lit, ast.StrLit):
+                return (("lit", "s", lit.value), [])
+            return (("lit", "i", _const_int(lit)), [])
+        if isinstance(pat, ast.PatOr):
+            return ("|", [self._norm_pat(a, t) for a in pat.alts])
+        if isinstance(pat, ast.PatTuple) and isinstance(t, TupleType):
+            return ("()", [self._norm_pat(e, et) for e, et in zip(pat.elems, t.elems)])
+        if isinstance(pat, ast.PatStruct) and isinstance(t, StructType):
+            given = {fp.name: fp.pattern for fp in pat.fields}
+            return ("{}", [self._norm_pat(given[f], ft) if f in given else _WILD
+                           for f, ft in self._struct_field_types(t).items()])
+        if isinstance(pat, ast.PatEnum) and isinstance(t, EnumType):
+            payload = self._enum_variant_types(t)[pat.variant]
+            subs = [self._norm_pat(e, pt) for e, pt in zip(pat.elems, payload)]
+            return (pat.variant, subs + [_WILD] * (len(payload) - len(subs)))
+        return _WILD  # pragma: no cover - the checker rejected the pattern
+
+    def _signature(self, t: Type) -> list[tuple[object, list[Type]]] | None:
+        """All constructors of `t` with their field types, or None when the
+        values can't be enumerated (integers, strings, chars)."""
+        if isinstance(t, EnumType):
+            return [(v, list(p)) for v, p in self._enum_variant_types(t).items()]
+        if isinstance(t, BoolType):
+            return [(True, []), (False, [])]
+        if isinstance(t, TupleType):
+            return [("()", list(t.elems))]
+        if isinstance(t, StructType):
+            return [("{}", list(self._struct_field_types(t).values()))]
+        return None
+
+    def _expand_or(self, rows: list[list]) -> list[list]:
+        out: list[list] = []
+        for row in rows:
+            if row and row[0] is not _WILD and row[0][0] == "|":
+                out.extend(self._expand_or([[alt] + row[1:] for alt in row[0][1]]))
+            else:
+                out.append(row)
+        return out
+
+    def _specialize(self, rows: list[list], key, arity: int) -> list[list]:
+        out: list[list] = []
+        for row in self._expand_or(rows):
+            head = row[0]
+            if head is _WILD:
+                out.append([_WILD] * arity + row[1:])
+            elif head[0] == key:
+                out.append(list(head[1]) + row[1:])
+        return out
+
+    def _useful(self, rows: list[list], q: list, types: list[Type]) -> bool:
+        rows = self._expand_or(rows)
+        if not q:
+            return not rows
+        head = q[0]
+        if head is not _WILD and head[0] == "|":
+            return any(self._useful(rows, [alt] + q[1:], types) for alt in head[1])
+        sig = self._signature(types[0])
+        if head is not _WILD:
+            key, subs = head
+            sub_types = next((ts for k, ts in sig if k == key), []) if sig else []
+            sub_types = sub_types or [types[0]] * len(subs)
+            return self._useful(self._specialize(rows, key, len(subs)),
+                                list(subs) + q[1:], list(sub_types) + types[1:])
+        seen = {row[0][0] for row in rows if row[0] is not _WILD}
+        if sig is not None and seen >= {k for k, _ in sig}:
+            return any(self._useful(self._specialize(rows, k, len(ts)),
+                                    [_WILD] * len(ts) + q[1:], ts + types[1:])
+                       for k, ts in sig)
+        default = [row[1:] for row in rows if row[0] is _WILD]
+        return self._useful(default, q[1:], types[1:])
 
     def _infer_int_lit(self, expr: ast.IntLit, expected: Type | None) -> Type:
         if expr.is_char:

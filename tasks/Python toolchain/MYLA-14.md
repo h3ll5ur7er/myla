@@ -2,7 +2,7 @@
 id: MYLA-14
 title: Exhaustiveness check rejects exhaustive matches
 type: bug
-status: backlog
+status: review
 priority: low
 labels: [checker, match]
 ---
@@ -24,6 +24,17 @@ fun f(x: Option<Result<int, str>>) -> int {
 
 ## Done when
 
-- [ ] Exhaustiveness uses a pattern-matrix algorithm (Maranget's "usefulness") that handles or-patterns, nesting, tuples and structs, and redundancy with it
-- [ ] Ported to [[selfhost/checker.my]]
-- [ ] Tests for both cases, plus genuinely non-exhaustive nested matches
+- [x] Exhaustiveness uses a pattern-matrix algorithm (Maranget's "usefulness") that handles or-patterns, nesting, tuples and structs, and redundancy with it
+- [x] Ported to [[selfhost/checker.my]]
+- [x] Tests for both cases, plus genuinely non-exhaustive nested matches
+
+## How
+
+Maranget's usefulness algorithm in both checkers (`_useful`, `_specialize`, `_norm_pat`, `_signature` in [[src/myla/types.py]]; `useful`, `specialize`, `norm_pat`, `signature` and the `NPat` enum in [[selfhost/checker.my]]). Patterns are normalized to constructors (enum variants, `true`/`false`, the single constructor of a tuple or struct, literals keyed by value) and wildcards; or-patterns split rows. A match is exhaustive when a wildcard row isn't useful against its unguarded arms, and an arm is redundant when it isn't useful against the unguarded arms before it. The messages stay as they were where they fired before (the missing-variants list now names the variants a wildcard can still reach), and the newly found redundant arms say `unreachable match arm (earlier arms already cover it)`. `_irrefutable` is now "a wildcard isn't useful after this pattern".
+
+## Evidence
+
+- `TestExhaustiveness` in [[tests/unit/test_enums_match.py]]: six exhaustive matches (the two cases above, tuples and structs of `bool`, `Some(true) | None`, mixed tuples), five non-exhaustive ones with their messages, a guarded arm that doesn't cover, and six redundant arms. Before: 6 errors and 4 failures; after: all pass.
+- Six new `TYPE_ERRORS` cases in [[tests/burn/test_selfhost_checker.py]] give the same verdicts in the self-hosted checker (the first port crashed with `runtime error: index out of bounds`, the message of [[MYLA-17]], on a zero-column row; fixed).
+- The whole corpus (examples, stdlib, self-hosted sources) still checks; no existing code had redundant arms.
+

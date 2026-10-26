@@ -102,11 +102,28 @@ A bare name that is a payload-less variant of the scrutinee's enum is a variant 
 
 ### Exhaustiveness and redundancy
 
-The checker requires a match to cover every value ([[src/myla/types.py#L2522-L2610]]):
+A match must cover every value, and every arm must be able to match something that the arms before it don't ([[MYLA-14]]). The checker works on the patterns as a whole, so nesting, or-patterns, tuples and structs count:
 
-- On an enum, every variant must be covered by an arm without a guard whose sub-patterns are all irrefutable, or there must be a catch-all arm.
-- On a `bool`, both `true` and `false` literal arms, or a catch-all.
-- On anything else (integers, strings, tuples, structs), a catch-all arm (`_` or a binding, or a pattern that can't fail).
-- An arm after a catch-all, or one whose variants are all covered already, is a type error.
+```myla
+fun f(x: Option<Result<int, str>>, b: bool) -> int {
+    let a = match x {
+        Some(Ok(v)) => v
+        Some(Err(e)) => 0
+        None => 1
+    }
+    let c = match (x, b) {
+        (None, _) => 0
+        (Some(r), true) => 1
+        (_, false) => 2
+    }
+    let d = match b {
+        true | false => 3
+    }
+    return a + c + d
+}
+```
 
-These rules are conservative: nested matches such as `Some(Ok(v))`, `Some(Err(e))`, `None`, and `true | false` on a `bool`, are rejected even though they are exhaustive ([[MYLA-14]]). Add a `_` arm.
+- Arms with a guard (`if …`) don't count towards covering, since the guard may fail.
+- Enums, `bool`, tuples and structs can be covered by their constructors; integers, strings and `char`s only by a catch-all (`_` or a binding).
+- A missing case is a type error: `non-exhaustive match on 'Option': missing variant(s) Some (add them or a '_' arm)` names the variants that aren't fully covered; for other types the message asks for a `_` arm.
+- An arm that can't match anything new is a type error too: after a catch-all, when its variants are covered already, or when earlier arms cover it in any other way (`1 => …` twice, `_` after `true` and `false`).

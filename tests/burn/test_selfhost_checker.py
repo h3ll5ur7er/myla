@@ -203,6 +203,22 @@ TYPE_ERRORS: dict[str, str] = {
     "pattern_below_signed_min": _main("let c: int8 = 0", "match c {", "    -129 => {},", "    _ => {},", "}"),
     "big_pattern_on_int64": _main("let c: int64 = 0", "match c {", "    9223372036854775808 => {},", "    _ => {},", "}"),
     "big_negative_pattern_on_uint64": _main("let c: uint64 = 0", "match c {", "    -9223372036854775808 => {},", "    _ => {},", "}"),
+    # exhaustiveness and redundancy by pattern matrices (MYLA-14)
+    "nested_match_missing_a_variant": _main("let x: Option<Result<int, str>> = None", "let n = match x {",
+                                            "    Some(Ok(v)) => v,", "    None => 0,", "}"),
+    "tuple_of_bools_not_covered": _main("let x = (true, false)", "let n = match x {",
+                                        "    (true, _) => 1,", "    (false, true) => 2,", "}"),
+    "redundant_nested_arm": _main("let x: Option<Result<int, str>> = None", "let n = match x {",
+                                  "    Some(Ok(v)) => v,", "    Some(Ok(1)) => 1,", "    _ => 0,", "}"),
+    "redundant_literal_arm": _main("let x = 3", "let n = match x {", "    1 => 1,", "    1 => 2,", "    _ => 0,", "}"),
+    "redundant_after_true_false": _main("let x = true", "let n = match x {", "    true => 1,", "    false => 2,",
+                                        "    _ => 0,", "}"),
+    # (exhaustive, so the error is the last line)
+    "exhaustive_nested_and_or_patterns": _main(
+        "let x: Option<Result<int, str>> = None", "let a = match x {", "    Some(Ok(v)) => v,",
+        "    Some(Err(e)) => 0,", "    None => 1,", "}", "let b = match (x, true) {", "    (None, _) => 0,",
+        "    (Some(r), true) => 1,", "    (_, false) => 2,", "}", "let c = match true {", "    true | false => 1,", "}",
+        "let z: bool = 1"),
     # (these fit; the error is the last line)
     "patterns_at_the_bounds_fit": _main("let c: int64 = 0", "match c {", "    -9223372036854775808 => {},",
                                         "    9223372036854775807 => {},", "    -0 => {},", "    _ => {},", "}",

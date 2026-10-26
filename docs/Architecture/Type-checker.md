@@ -35,7 +35,7 @@ Inference is local and bidirectional: `_infer(expr, scope, expected)` returns th
 - **Generic calls** solve type parameters left to right with `_unify_param`, using each solved parameter type as the hint for the next argument, then verify every argument against the substituted parameter types (`_infer_generic_call`). Struct literals and enum constructors do the same with `_infer_type_args`, seeded by the expected type.
 - **Lambdas** take parameter types from annotations or from an expected `FuncType`. Without an expected type, a block body's result type is collected from its `return`s (`_lambda_infer`).
 - **Captures**: while a lambda body is checked, `_record_capture` adds every name that resolves to a scope outside the lambda's parameter scope to each enclosing lambda's capture list. Each lambda also gets a unique `lifted_name` for the native backend.
-- **match** checks each arm in its own scope, then exhaustiveness and redundancy, then unifies the non-diverging arm values.
+- **match** checks each arm in its own scope, then exhaustiveness and redundancy, then unifies the non-diverging arm values. Exhaustiveness and redundancy use Maranget's usefulness over pattern matrices: patterns are normalized to constructors (enum variants, `true`/`false`, the single constructor of a tuple or struct, literals) and wildcards, a match is exhaustive when a wildcard row isn't useful against the unguarded arms, and an arm is redundant when it isn't useful against the unguarded arms before it (`_useful`, [[MYLA-14]]; the same algorithm in [[selfhost/checker.my]]).
 
 ## Desugaring in the checker
 
@@ -64,4 +64,4 @@ Every method becomes a function named `Type.method` (the dot can't occur in a us
 
 ## Known gaps
 
-Over-conservative exhaustiveness ([[MYLA-14]]).
+None recorded; see [[Project/Known-issues]].

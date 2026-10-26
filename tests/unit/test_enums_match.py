@@ -167,6 +167,71 @@ class TestEnumChecking(unittest.TestCase):
                 check_src(match_on(t, pattern))
 
 
+class TestExhaustiveness(unittest.TestCase):
+    """MYLA-14: exhaustiveness and redundancy by pattern matrices (Maranget's
+    usefulness), so nested patterns, or-patterns, tuples and structs count."""
+
+    def matches(self, scrutinee_type: str, arms: list[str], before: str = "") -> None:
+        body = "".join(f"        {a} => 0,\n" for a in arms)
+        check_src(f"{before}fun f(x: {scrutinee_type}) -> int {{\n"
+                  f"    return match x {{\n{body}    }}\n}}\n")
+
+    def rejected(self, scrutinee_type: str, arms: list[str], before: str = "") -> str:
+        with self.assertRaises(TypeCheckError) as cm:
+            self.matches(scrutinee_type, arms, before)
+        return cm.exception.message
+
+    def test_exhaustive(self):
+        P = "struct P { a: bool, b: int }\n"
+        for t, arms, before in (
+            ("bool", ["true | false"], ""),
+            ("Option<Result<int, str>>", ["Some(Ok(v))", "Some(Err(e))", "None"], ""),
+            ("(bool, bool)", ["(true, _)", "(false, true)", "(false, false)"], ""),
+            ("P", ["P { a: true }", "P { a: false, b: 1 }", "P { a: false }"], P),
+            ("Option<bool>", ["Some(true) | None", "Some(false)"], ""),
+            ("(Option<int>, bool)", ["(None, _)", "(Some(n), true)", "(_, false)"], ""),
+        ):
+            with self.subTest(t=t, arms=arms):
+                self.matches(t, arms, before)
+
+    def test_non_exhaustive(self):
+        for t, arms, message in (
+            ("Option<Result<int, str>>", ["Some(Ok(v))", "None"],
+             "non-exhaustive match on 'Option': missing variant(s) Some (add them or a '_' arm)"),
+            ("(bool, bool)", ["(true, _)", "(false, true)"],
+             "non-exhaustive match on '(bool, bool)': add a '_' arm"),
+            ("bool", ["true"],
+             "non-exhaustive match on 'bool': cover both true and false (or add a '_' arm)"),
+            ("Option<bool>", ["Some(true)", "None"],
+             "non-exhaustive match on 'Option': missing variant(s) Some (add them or a '_' arm)"),
+            ("int", ["1", "2"], "non-exhaustive match on 'int32': add a '_' arm"),
+        ):
+            with self.subTest(t=t, arms=arms):
+                self.assertEqual(self.rejected(t, arms), message)
+
+    def test_a_guarded_arm_does_not_cover(self):
+        with self.assertRaises(TypeCheckError):
+            check_src("fun f(x: bool) -> int {\n    return match x {\n"
+                      "        true => 1,\n        false if 1 > 0 => 2,\n    }\n}\n")
+
+    def test_redundant(self):
+        for t, arms, message in (
+            ("Option<Result<int, str>>", ["Some(Ok(v))", "Some(Ok(1))", "_"],
+             "unreachable match arm (earlier arms already cover it)"),
+            ("int", ["1", "1", "_"], "unreachable match arm (earlier arms already cover it)"),
+            ("(bool, bool)", ["(true, _)", "(_, true)", "(true, false)", "_"],
+             "unreachable match arm (earlier arms already cover it)"),
+            ("bool", ["true", "false", "_"],
+             "unreachable match arm (earlier arms already cover it)"),
+            ("Option<int>", ["None", "Some(n)", "None"],
+             "unreachable match arm (its variant(s) are already covered)"),
+            ("int", ["n", "2"],
+             "unreachable match arm (a previous arm already matches everything)"),
+        ):
+            with self.subTest(t=t, arms=arms):
+                self.assertEqual(self.rejected(t, arms), message)
+
+
 class TestEnumInterpreter(unittest.TestCase):
     def test_payload_and_guard(self):
         out = run_src(
