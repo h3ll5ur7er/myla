@@ -1,4 +1,5 @@
 //~ type error: unknown attribute
+//~ span: #bogus
 #bogus
 fun main() {
 }

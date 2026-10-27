@@ -8,6 +8,7 @@
 // checker's `resolved` side table, keyed by AST node id.
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
+from .tokens import SrcSpan, no_span
 from .checker import Checker, Type
 from .util import cp_utf8
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
@@ -103,8 +104,26 @@ pub struct Interp {
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
-// the expression it happened at (its file: loader.file_of), `line` 0 for none.
-pub struct RtError { msg: str, line: int32, col: int32, node: int32 }
+// the expression it happened at (its file: loader.file_of), `sp` its range,
+// `line` 0 for none.
+pub struct RtError { msg: str, line: int32, col: int32, sp: SrcSpan, node: int32 }
+
+// The results of a run of `#test` cases: a PASS/FAIL line for each case, and
+// how many passed of how many (run_test_cases).
+pub struct TestRun { report: [str], passed: int32, total: int32 }
+
+// Whether the loader qualified `name` with a module id (`geo$area`,
+// `geo$Point.eq`): it isn't declared in the entry module.
+#test("area")[false]
+#test("Point.eq")[false]
+#test("geo$area")[true]
+#test("util$strings$Point.eq")[true]
+fun is_qualified(name: str) -> bool {
+    for c in chars(name) {
+        if c == '$' { return true }
+    }
+    return false
+}
 
 // A step of an assignable place: a struct field, or an index (evaluated once)
 // with the expression it came from.
@@ -280,7 +299,7 @@ impl Interp {
         self.eval_consts()
         let ei = self.entry_idx()
         if ei < 0 {
-            self.rt_err = Some(RtError { msg: "no entry point: define '#main' or a function named 'main'", line: 0, col: 0, node: -1 })
+            self.rt_err = Some(RtError { msg: "no entry point: define '#main' or a function named 'main'", line: 0, col: 0, sp: no_span(), node: -1 })
             return 1
         }
         self.call_func(ei, [])
@@ -288,13 +307,27 @@ impl Interp {
         return 0
     }
 
-    // Run every function's `#test(args…)[expected]` cases, printing a PASS/FAIL
-    // line per case and a summary; returns 0 if all pass (or none exist), else 1.
-    // Mirrors `Interpreter.run_tests` in src/myla/interpreter.py.
-    // Run every #test, then print a line for each (after whatever the tests
-    // printed) and the summary, as the Python CLI does (MYLA-81); the exit
-    // status.
+    // Run every function's `#test(args…)[expected]` cases, then print a
+    // PASS/FAIL line for each (after whatever the tests printed) and the
+    // summary, as the Python CLI does (`Interpreter.run_tests`, MYLA-81); the
+    // exit status: 0 if all pass (or none exist), else 1.
     fun run_tests(var self) -> int32 {
+        let r = self.run_test_cases(false)
+        if r.total == 0 {
+            write(1, "no #test cases found.\n")
+            return 0
+        }
+        for line in r.report { write(1, line) }
+        write(1, format("\n{}/{} passed.\n", r.passed, r.total))
+        if r.passed == r.total { return 0 }
+        return 1
+    }
+
+    // Run the `#test` cases, of the entry module's own functions only when
+    // `own_only` (`myla test` in a project, MYLA-94: the entry's names are the
+    // ones the loader doesn't qualify with a module id), and collect a
+    // PASS/FAIL line for each.
+    fun run_test_cases(var self, own_only: bool) -> TestRun {
         self.collect()
         self.eval_consts()
         var report: [str] = []
@@ -305,7 +338,7 @@ impl Interp {
             let fd = self.func_decls[i]
             var idx = 0
             for attr in fd.attributes {
-                if attr.name == "test" {
+                if attr.name == "test" && (!own_only || !is_qualified(fd.name)) {
                     idx = idx + 1
                     total = total + 1
                     self.push_scope()
@@ -344,14 +377,7 @@ impl Interp {
             }
             i = i + 1
         }
-        if total == 0 {
-            write(1, "no #test cases found.\n")
-            return 0
-        }
-        for line in report { write(1, line) }
-        write(1, format("\n{}/{} passed.\n", passed, total))
-        if passed == total { return 0 }
-        return 1
+        return TestRun { report: report, passed: passed, total: total }
     }
 
     fun eval_consts(var self) {
@@ -390,7 +416,7 @@ impl Interp {
     // Stop the program with a runtime error at `e` (exit status 1).
     fun fail(var self, e: Expr, msg: str) {
         if self.stop() { return }
-        self.rt_err = Some(RtError { msg: msg, line: e.line, col: e.col, node: e.id })
+        self.rt_err = Some(RtError { msg: msg, line: e.line, col: e.col, sp: e.sp, node: e.id })
         self.ctrl = Ctrl.CExit
         self.exit_code = 1
     }
@@ -468,20 +494,32 @@ impl Interp {
         if self.stop() || len(p.root) == 0 { return }
         let n = len(p.steps)
         if n > 0 {
+            var parent = Place { root: p.root, steps: [] }
+            var i = 0
+            while i < n - 1 {
+                push(parent.steps, p.steps[i])
+                i = i + 1
+            }
             match p.steps[n - 1] {
                 Step.SIndex(k, nd) => {
-                    var parent = Place { root: p.root, steps: [] }
-                    var i = 0
-                    while i < n - 1 {
-                        push(parent.steps, p.steps[i])
-                        i = i + 1
-                    }
                     if !self.check_index(self.read_place(parent), k, nd, true) { return }
                 },
-                _ => {},
+                // a field: the indices on the way are read, so a missing map
+                // key fails (`m[k].f = v`) as in the Python interpreter
+                _ => {
+                    if !self.readable(parent) { return }
+                },
             }
         }
         self.update_place(p, PlaceOp.OSet(v))
+    }
+
+    // Whether `p` can be read: every index on the way is checked, failing
+    // like a read. The value read is released before anything is written, so
+    // the write doesn't copy the containers on the way (MYLA-74).
+    fun readable(var self, p: Place) -> bool {
+        self.read_place(p)
+        return !self.stop()
     }
 
     // Apply `op` to the value at `p`, whose indices are already checked, in
@@ -642,6 +680,7 @@ impl Interp {
             },
             StmtKind.DestructDecl(kind, binding, ty, init) => {
                 let v = self.eval(init)
+                if self.stop() { return }           // `?` returned early: nothing to bind
                 self.bind_destructure(bind_elems(binding), v)
             },
             StmtKind.Assign(target, value) => {
@@ -757,9 +796,9 @@ impl Interp {
 
     fun bind_elem(var self, b: BindElem, v: Value) {
         match b {
-            BindElem.BName(n, l, c) => { self.define(n, v) },
+            BindElem.BName(n, l, c, sp) => { self.define(n, v) },
             BindElem.BWild => {},
-            BindElem.BTuple(sub, l, c) => {
+            BindElem.BTuple(sub, l, c, sp) => {
                 let elems = match v { Value.VTuple(es) => es, _ => empty_values() }
                 var i = 0
                 while i < len(sub) {
@@ -1389,8 +1428,16 @@ impl Interp {
             return Value.VInt(__poll(fd, as_int(self.eval(args[1])) as int32) as int64)
         }
         if nm == "__io_errno" { return Value.VInt(__io_errno() as int64) }
+        if nm == "__getcwd" { return Value.VStr(__getcwd()) }
         if nm == "__write_file" {
             __write_file(as_str(self.eval(args[0])), as_str(self.eval(args[1])))
+            return Value.VUnit
+        }
+        if nm == "__list_dir" { return Value.VStr(__list_dir(as_str(self.eval(args[0])))) }
+        if nm == "__stat" { return Value.VInt(__stat(as_str(self.eval(args[0]))) as int64) }
+        if nm == "__mkdir" {
+            let path = as_str(self.eval(args[0]))
+            __mkdir(path, as_int(self.eval(args[1])) as int32)
             return Value.VUnit
         }
         if nm == "__args" {
@@ -1500,13 +1547,14 @@ impl Interp {
             Some(en) => { return Value.VEnum(en, nm, self.eval_args(args)) },
             None => {},
         }
-        let fi = self.func_idx(nm)
-        if fi >= 0 { return self.call_func(fi, self.eval_args(args)) }
-        // indirect call: `f(args)` where f is a closure value
+        // indirect call: `f(args)` where f is a closure value; a local binding
+        // shadows a function of the same name, as the checker types it (MYLA-102)
         match self.lookup(nm) {
             Some(v) => { return self.call_value(v, self.eval_args(args)) },
             None => {},
         }
+        let fi = self.func_idx(nm)
+        if fi >= 0 { return self.call_func(fi, self.eval_args(args)) }
         return Value.VUnit
     }
 
@@ -1879,21 +1927,20 @@ fun scmp(a: str, b: str) -> int32 {
     return 0
 }
 
+// `a / b` truncated toward zero; the int64 minimum divided by -1 wraps to
+// itself instead of trapping (MYLA-5).
+#test(-7, 2)[-3]
+#test(-9223372036854775807 - 1, 10)[-922337203685477580]
+#test(-9223372036854775807 - 1, -1)[-9223372036854775807 - 1]
 fun idiv(a: int64, b: int64) -> int64 {
     if b == 0 { return 0 }
-    var q = iabs(a) / iabs(b)
-    if (a < 0) != (b < 0) { return -q }
-    return q
+    if b == -1 { return -a }
+    return a / b
 }
 
 fun imod(a: int64, b: int64) -> int64 {
     if b == 0 { return 0 }
     return a - idiv(a, b) * b
-}
-
-fun iabs(a: int64) -> int64 {
-    if a < 0 { return -a }
-    return a
 }
 
 fun width_of(rt: Option<Type>) -> int32 {
@@ -1989,7 +2036,7 @@ fun empty_params() -> [Param] {
 }
 
 fun eb_dummy() -> ExprOrBlock {
-    return ExprOrBlock.EB_Block(Block { line: 0, col: 0, stmts: [] })
+    return ExprOrBlock.EB_Block(Block { line: 0, col: 0, sp: no_span(), stmts: [] })
 }
 
 fun value_len(v: Value) -> int64 {

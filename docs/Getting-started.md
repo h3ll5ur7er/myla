@@ -14,14 +14,14 @@ python3 myla.py run examples/hello.my          # or: uv run myla.py run …
 python3 myla.py run examples/args/main.my a b  # arguments after the file go to the program
 ```
 
-`run` interprets the program and exits with its exit status (0, or the code passed to `std.process.exit`). A compile error or runtime error prints a diagnostic and exits 1:
+`run` interprets the program and exits with its exit status (0, or the code passed to `std.process.exit`). A compile error or runtime error prints a diagnostic and exits 1; the carets underline what the error is about:
 
 ```
 type error: cannot assign to an immutable binding (declare it with 'var')
-  --> x.my:3:5
+  --> x.my:3:7
   |
 3 |     x = 2
-  |     ^
+  |     ^^^^^
 ```
 
 ## The commands
@@ -30,13 +30,15 @@ type error: cannot assign to an immutable binding (declare it with 'var')
 | --- | --- |
 | `myla run <file> [args…]` | Load modules, type-check, interpret |
 | `myla test <file>` | Run every `#test(args)[expected]` case; prints `PASS`/`FAIL` per case and exits 1 on a failure |
-| `myla build <file> [-o out] [--keep-asm] [-g]` | Compile to a static x86-64 ELF (`a.out` by default) through `as` and `ld`; `-g` adds a DWARF line table for gdb ([[Development/Debugging]]) |
+| `myla build <file> [-o out] [--keep-asm] [-g]` | Compile to a static x86-64 ELF (`a.out` by default) through `as` and `ld`; `-g` adds DWARF debug information for gdb: line table, variables and types ([[Development/Debugging]]) |
 | `myla check <file> [--canonical]` | Type-check only; `--canonical` prints `ok` or `err <line> <col> <kind>` for differential tests |
 | `myla tokenize <file> [--canonical]` | Dump the token stream |
 | `myla parse <file> [--canonical]` | Dump the AST (`--canonical`: one S-expression per declaration) |
 | `myla repl` | Points to the REPL written in Myla: `build/myla repl` (built by `scripts/bootstrap.sh`, [[MYLA-82]]) |
 
-All commands live in [[src/myla/cli.py]]; `myla.py` only puts `src/` on the import path. The self-hosted CLI, `build/myla` ([[selfhost/main.my]]), has `run`, `test` and `build` (printing what the Python ones print, [[MYLA-81]]) and the REPL:
+`run`, `test`, `build` and `check` take `--package name=dir` (repeatable), before or after the file: a dependency whose modules `import name` and `from name.shapes import …` find in `dir`, as if it were a directory `name/` next to the entry file ([[Language/Modules]]). The project commands below pass these flags themselves.
+
+All commands live in [[src/myla/cli.py]]; `myla.py` only puts `src/` on the import path. The self-hosted CLI, `build/myla` ([[selfhost/main.my]]), has `run`, `test` and `build` (printing what the Python ones print, [[MYLA-81]], and taking `--stdlib <dir>` and `--package name=dir` like the REPL) and the REPL:
 
 ```text
 $ build/myla repl
@@ -49,6 +51,46 @@ myla> twice(len(xs))
 ```
 
 Declarations accumulate, a final expression's value is shown as Myla source writes it, an open bracket continues the input, and an error is reported against the input's lines without ending the session ([[Architecture/Self-hosted-compiler]]).
+
+## Projects
+
+The self-hosted CLI also works on projects: a directory with a manifest `myla.toml`, the program in `src/main.my`, and dependencies on other projects ([[Architecture/Project-tool]], D73). Without a file argument, its commands work on the project around the working directory:
+
+```text
+$ build/myla new hello
+created package 'hello' in hello/
+$ cd hello
+$ myla run                 # interpret src/main.my (arguments go to the program)
+Hello from hello!
+$ myla test                # the #test cases of every file under src/, each file's own
+== src/main.my
+PASS  greeting #1
+
+1/1 passed in 1 file.
+$ myla build               # build/hello (-g: with debug information)
+$ myla check               # type-check every file under src/
+$ myla clean               # remove build/ (--deps: also .myla/)
+```
+
+A dependency on another project by its directory goes into the manifest; its library `src/<name>.my` is then `import <name>`:
+
+```toml
+[package]
+name = "hello"
+version = "0.1.0"
+
+[dependencies]
+geo = { path = "../geo" }
+```
+
+A dependency from Git names a tag, a branch or a commit (`rev`), or none for the default branch. `myla fetch` resolves it to a commit, checks it out into `.myla/deps/`, and pins it in `myla.lock`, which you commit; the other commands use the pinned commits (checking them out if needed), and `myla fetch --update` moves them:
+
+```toml
+[dependencies]
+json5 = { git = "https://github.com/example/json5-myla.git", tag = "v1.2.0" }
+```
+
+A command given a `.my` file works on that file alone and reads no manifest.
 
 ## A first program
 
@@ -104,4 +146,17 @@ What each suite guarantees and the current results: [[Development/Testing]].
 
 ## Editor support
 
-The VS Code extension in `vscode-extension/myla/` starts the language server written in Myla, `build/myla-lsp` (built by `scripts/bootstrap.sh`), and offers diagnostics, outline, go to definition, hover, references, completion and semantic highlighting. See [[Architecture/Editor-tooling]] for setup and limits.
+The VS Code extension in `vscode-extension/myla/` starts the language server written in Myla, `build/myla-lsp` (diagnostics, outline, go to definition, hover, references, completion, semantic highlighting), runs, tests and builds the current file, and debugs it with gdb (`F5`). It finds the tools in the repository's `build/`, so run `scripts/bootstrap.sh` first and open the repository as a workspace folder (or point `myla.compilerPath` at it). Debugging needs gdb: `sudo apt install gdb`.
+
+Install it from a `.vsix`:
+
+- **From CI:** every CI run uploads the extension as the artifact `myla-vscode-extension` (on GitHub: the run's page under *Actions*, *Artifacts*). Unzip the download to get `myla-language-support-<version>.vsix`.
+- **Or build it:**
+
+  ```bash
+  cd vscode-extension/myla
+  npm ci
+  npx vsce package          # myla-language-support-<version>.vsix
+  ```
+
+Then `code --install-extension myla-language-support-<version>.vsix`, or *Extensions: Install from VSIX…* in VS Code. See [[Architecture/Editor-tooling]] for how it works and [[Development/Debugging]] for debugging.

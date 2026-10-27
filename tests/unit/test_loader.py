@@ -305,6 +305,241 @@ class TestLoaderErrors(unittest.TestCase):
 
 
 
+class TestPackages(unittest.TestCase):
+    """MYLA-92 (D73 (6), Architecture/Project-tool): a package `geo` with
+    directory D behaves as if D were a directory `geo/` in the project root;
+    imports without dots look in the project, then the packages, then the
+    standard library."""
+
+    GEO = {
+        # the package root re-exports through a relative import
+        "geo/src/geo.my": "pub from .shapes import Circle, area\n"
+                          "pub fun origin() -> int { return 0 }\n",
+        "geo/src/shapes.my": "from .units import scale\n"
+                             "pub struct Circle { r: int }\n"
+                             "pub fun area(c: Circle) -> int { return scale(3 * c.r * c.r) }\n",
+        "geo/src/units.my": "pub fun scale(x: int) -> int { return x * 10 }\n",
+        "geo/src/curves/round.my": "pub fun pi() -> int { return 3 }\n",
+        "geo/src/solid/solid.my": "pub fun faces() -> int { return 6 }\n",
+        # a second package that imports the first by name
+        "fmt/src/fmt.my": "from geo import Circle, area\n"
+                          "pub fun show(c: Circle) -> str { return f\"circle {area(c)}\" }\n",
+    }
+    PACKAGES = [("geo", "geo/src"), ("fmt", "fmt/src")]
+
+    def workspace(self, app: dict[str, str], extra: dict[str, str] | None = None) -> str:
+        files = dict(self.GEO)
+        files.update({f"app/{rel}": src for rel, src in app.items()})
+        files.update(extra or {})
+        return _project(files)
+
+    def pkgs(self, ws: str, packages=None):
+        return [(n, os.path.join(ws, d)) for n, d in (self.PACKAGES if packages is None else packages)]
+
+    def link_app(self, app, *, extra=None, packages=None, entry="main.my", **kw):
+        ws = self.workspace(app, extra)
+        return link(os.path.join(ws, "app", entry), packages=self.pkgs(ws, packages), **kw)
+
+    def run_app(self, app, **kw) -> str:
+        out = io.StringIO()
+        Interpreter(check(self.link_app(app, **kw)), out).run()
+        return out.getvalue()
+
+    def err(self, app, **kw) -> ModuleError:
+        with self.assertRaises(ModuleError) as cm:
+            self.link_app(app, **kw)
+        return cm.exception
+
+    def test_root_module_and_reexports(self):
+        out = self.run_app({"main.my": "import geo\nfrom geo import Circle, area\n"
+                                       "fun main() {\n    print(area(Circle { r: 2 }))\n"
+                                       "    print(geo.origin())\n    print(geo.area(Circle { r: 1 }))\n}\n"})
+        self.assertEqual(out, "120\n0\n30\n")
+
+    def test_submodules_and_nested_directories(self):
+        out = self.run_app({"main.my": "from geo.shapes import Circle\nimport geo.curves.round as round\n"
+                                       "import geo.solid\nimport geo.units\n"
+                                       "fun main() {\n    print(Circle { r: 5 }.r)\n    print(round.pi())\n"
+                                       "    print(geo.solid.faces())\n    print(geo.units.scale(4))\n}\n"})
+        self.assertEqual(out, "5\n3\n6\n40\n")
+
+    def test_a_package_imports_another(self):
+        out = self.run_app({"main.my": "from fmt import show\nfrom geo import Circle\n"
+                                       "fun main() {\n    print(show(Circle { r: 1 }))\n}\n"})
+        self.assertEqual(out, "circle 30\n")
+
+    def test_project_modules_and_relative_imports_still_resolve(self):
+        out = self.run_app({"main.my": "import util\nfrom .util import two\nfun main() {\n"
+                                       "    print(util.two() + two())\n}\n",
+                            "util.my": "pub fun two() -> int { return 2 }\n"})
+        self.assertEqual(out, "4\n")
+
+    def test_packages_come_before_the_standard_library(self):
+        ws = self.workspace({"main.my": "from geo import origin\nfrom std.io import println\n"
+                                        "import other\nfun main() {\n    println(f\"{origin()} {other.x()}\")\n}\n"},
+                            {"stdlib/geo.my": "pub fun origin() -> int { return 99 }\n",
+                             "stdlib/other.my": "pub fun x() -> int { return 7 }\n",
+                             "stdlib/std/io.my": "pub fun println(s: str) { print(s) }\n"})
+        out = io.StringIO()
+        prog = link(os.path.join(ws, "app", "main.my"), stdlib_root=os.path.join(ws, "stdlib"),
+                    packages=self.pkgs(ws))
+        Interpreter(check(prog), out).run()
+        self.assertEqual(out.getvalue(), "0 7\n")
+
+    def test_unresolved_paths_in_a_package(self):
+        e = self.err({"main.my": "import geo.nope\nfun main() {}\n"})
+        self.assertEqual((str(e), e.line), ("cannot resolve import 'geo.nope'", 1))
+        e = self.err({"main.my": "import nope\nfun main() {}\n"})
+        self.assertEqual(str(e), "cannot resolve import 'nope'")
+
+    def test_a_package_without_its_root_module(self):
+        ws = self.workspace({"main.my": "fun main() {}\nimport fmt\n"})
+        d = os.path.join(ws, "geo/src/curves")
+        with self.assertRaises(ModuleError) as cm:
+            link(os.path.join(ws, "app", "main.my"), packages=[("fmt", d)])
+        self.assertEqual((str(cm.exception), cm.exception.line),
+                         (f"package 'fmt' has no root module 'fmt.my' in {d}", 2))
+
+    def test_a_project_file_or_directory_cannot_shadow_a_package(self):
+        msg = "'geo' is a dependency and cannot be shadowed by a project file or directory"
+        for extra in ({"app/geo.my": "pub fun f() {}\n"}, {"app/geo/x.my": "pub fun f() {}\n"}):
+            with self.subTest(extra=extra):
+                e = self.err({"main.my": "fun main() {}\nfrom geo.shapes import Circle\n"}, extra=extra)
+                self.assertEqual((str(e), e.line, e.column), (msg, 2, 6))
+        # unless nothing imports the package by name
+        out = self.run_app({"main.my": "from .geo import f\nfun main() {\n    print(f())\n}\n",
+                            "geo.my": "pub fun f() -> int { return 1 }\n"})
+        self.assertEqual(out, "1\n")
+
+    def test_package_list_errors(self):
+        cases = [
+            ([("std", "geo/src")], "a package cannot be named 'std': it is the standard library"),
+            ([("geo", "geo/src"), ("geo", "fmt/src")], "package 'geo' is given twice"),
+            ([("", "geo/src")], "invalid package name ''"),
+            ([("9geo", "geo/src")], "invalid package name '9geo'"),
+            ([("geo-x", "geo/src")], "invalid package name 'geo-x'"),
+            ([("match", "geo/src")], "invalid package name 'match'"),
+        ]
+        for packages, msg in cases:
+            with self.subTest(packages=packages):
+                self.assertEqual(str(self.err({"main.my": "fun main() {}\n"}, packages=packages)), msg)
+        ws = self.workspace({"main.my": "fun main() {}\n"})
+        for d, msg in (("", "package 'geo' has no directory"),
+                       ("/nowhere/at/all", "package 'geo': '/nowhere/at/all' is not a directory")):
+            with self.subTest(dir=d), self.assertRaises(ModuleError) as cm:
+                link(os.path.join(ws, "app", "main.my"), packages=[("geo", d)])
+            self.assertEqual(str(cm.exception), msg)
+
+    def test_flags(self):
+        from myla.loader import parse_package_flag
+        self.assertEqual(parse_package_flag("geo=../geo/src"), ("geo", "../geo/src"))
+        self.assertEqual(parse_package_flag("geo=a=b"), ("geo", "a=b"))
+        self.assertEqual(parse_package_flag("=x"), ("", "x"))     # reported by link
+        with self.assertRaises(ModuleError) as cm:
+            parse_package_flag("geo")
+        self.assertEqual(str(cm.exception), "malformed --package 'geo': expected name=dir")
+
+    def test_module_ids_do_not_depend_on_the_package_directory(self):
+        prog = self.link_app({"main.my": "from fmt import show\nimport geo.curves.round\nfun main() {}\n"},
+                             extra={".myla/deps/geo-4f3c2a1/src/geo.my": self.GEO["geo/src/geo.my"],
+                                    ".myla/deps/geo-4f3c2a1/src/shapes.my": self.GEO["geo/src/shapes.my"],
+                                    ".myla/deps/geo-4f3c2a1/src/units.my": self.GEO["geo/src/units.my"],
+                                    ".myla/deps/geo-4f3c2a1/src/curves/round.my": "pub fun pi() -> int { return 3 }\n"},
+                             packages=[("geo", ".myla/deps/geo-4f3c2a1/src"), ("fmt", "fmt/src")])
+        names = {getattr(d, "name", None) for d in prog.decls}
+        self.assertTrue({"geo$geo$origin", "geo$shapes$Circle", "geo$units$scale",
+                         "geo$curves$round$pi", "fmt$fmt$show"} <= names, names)
+
+    def test_module_id_rules(self):
+        from myla.loader import _module_id
+        root, std = "/w/app/src", "/w/lib/myla"
+        pkgs = [("geo", "/w/app/.myla/deps/geo-4f3c/src"), ("fmt", "/w/fmt/src")]
+        cases = {
+            "/w/app/.myla/deps/geo-4f3c/src/geo.my": "geo$geo",
+            "/w/app/.myla/deps/geo-4f3c/src/shapes/round.my": "geo$shapes$round",
+            "/w/fmt/src/fmt.my": "fmt$fmt",
+            "/w/app/src/util.my": "util",
+            "/w/lib/myla/std/io.my": "std$io",
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(_module_id(path, "/w/app/src/main.my", root, std, pkgs), expected)
+
+    def test_without_packages_nothing_changes(self):
+        self.assertEqual(str(self.err({"main.my": "import geo\nfun main() {}\n"}, packages=[])),
+                         "cannot resolve import 'geo'")
+
+
+class TestProjectRoot(unittest.TestCase):
+    """The project root defaults to the entry's directory; `project_root` sets
+    it, so a nested file loads like `src/main.my` does (`myla test`/`check` in
+    project mode, Architecture/Project-tool)."""
+
+    FILES = {
+        "src/main.my": "fun main() {}\n",
+        "src/util.my": "pub fun two() -> int { return 2 }\n",
+        "src/geo/round.my": "import util\nfrom .near import one\n"
+                            "fun main() {\n    print(util.two() + one())\n}\n",
+        "src/geo/near.my": "pub fun one() -> int { return 1 }\n",
+    }
+
+    def test_a_nested_entry_resolves_from_the_root(self):
+        root = _project(self.FILES)
+        prog = link(os.path.join(root, "src/geo/round.my"), project_root=os.path.join(root, "src"))
+        out = io.StringIO()
+        Interpreter(check(prog), out).run()
+        self.assertEqual(out.getvalue(), "3\n")
+        names = {getattr(d, "name", None) for d in prog.decls}
+        self.assertTrue({"main", "util$two", "geo$near$one"} <= names, names)
+
+    def test_the_default_is_the_entry_directory(self):
+        root = _project(self.FILES)
+        with self.assertRaises(ModuleError) as cm:
+            link(os.path.join(root, "src/geo/round.my"))
+        self.assertEqual(str(cm.exception), "cannot resolve import 'util'")
+
+    def test_shadowing_is_checked_in_the_root(self):
+        root = _project(dict(self.FILES, **{"lib/geo.my": "pub fun g() {}\n"}))
+        with self.assertRaises(ModuleError) as cm:
+            link(os.path.join(root, "src/geo/round.my"), project_root=os.path.join(root, "src"),
+                 packages=[("util", os.path.join(root, "lib"))])
+        self.assertIn("'util' is a dependency", str(cm.exception))
+
+
+class TestPackageFlags(unittest.TestCase):
+    """`--package name=dir` (repeatable) for run, test, build and check."""
+
+    def setUp(self):
+        self.ws = _project({
+            "app/main.my": "from geo import area\n#test(1)[10]\nfun f(x: int) -> int { return area(x) }\n"
+                           "fun main() {\n    print(area(2))\n}\n",
+            "geo/src/geo.my": "pub fun area(r: int) -> int { return r * r * 10 }\n",
+        })
+        self.main = os.path.join(self.ws, "app", "main.my")
+        self.flag = f"geo={os.path.join(self.ws, 'geo', 'src')}"
+
+    def cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli_main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_run_before_and_after_the_file(self):
+        self.assertEqual(self.cli("run", "--package", self.flag, self.main), (0, "40\n", ""))
+        self.assertEqual(self.cli("run", self.main, "--package", self.flag), (0, "40\n", ""))
+
+    def test_test_and_check(self):
+        self.assertEqual(self.cli("test", self.main, "--package", self.flag)[:2], (0, "PASS  f #1\n\n1/1 passed.\n"))
+        self.assertEqual(self.cli("check", "--package", self.flag, self.main), (0, "ok\n", ""))
+        self.assertEqual(self.cli("check", self.main)[0], 1)
+
+    def test_flag_errors(self):
+        code, out, err = self.cli("check", self.main, "--package", "geo")
+        self.assertEqual((code, err), (1, "module error: malformed --package 'geo': expected name=dir\n"))
+        code, out, err = self.cli("check", self.main, "--package", self.flag, "--package", self.flag)
+        self.assertEqual((code, err), (1, "module error: package 'geo' is given twice\n"))
+
+
 class TestErrorPaths(unittest.TestCase):
     """MYLA-10: an error carries the path of the module it comes from, and the
     CLI shows that file's line."""
@@ -367,6 +602,27 @@ class TestErrorPaths(unittest.TestCase):
             main_src="from .bad import f\nfun main() {\n    let g = f()\n    print(g(1))\n}\n",
             run=True)
         self.assert_in_bad(err, 3)
+
+    def test_runtime_error_in_a_method(self):
+        # a method's body is run by the method call, not `_call` (MYLA-66: the
+        # native backends name the method's file, so the interpreter must too)
+        err = self.error_in(
+            "pub struct B { xs: [int] }\nimpl B {\n    fun get(self) -> int {\n"
+            "        return self.xs[3]\n    }\n}\npub fun f() -> int {\n    return 1\n}\n",
+            main_src="from .bad import B\nfun main() {\n    let b = B { xs: [] }\n"
+                     "    print(b.get())\n}\n",
+            run=True)
+        self.assert_in_bad(err, 4)
+
+    def test_runtime_error_in_an_operator_method(self):
+        err = self.error_in(
+            "pub struct P { x: int }\nimpl Add for P {\n    fun add(self, other: P) -> P {\n"
+            "        return P { x: self.x / other.x }\n    }\n}\npub fun f() -> int {\n"
+            "    return 1\n}\n",
+            main_src="from .bad import P\nfun main() {\n    let p = P { x: 1 } + P { x: 0 }\n"
+                     "    print(p.x)\n}\n",
+            run=True)
+        self.assert_in_bad(err, 4)
 
     def test_errors_in_the_entry_file_name_it(self):
         err = self.error_in("pub fun f() -> int {\n    return 1\n}\n",

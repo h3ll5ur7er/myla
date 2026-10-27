@@ -1,4 +1,5 @@
 //~ parse error: match expression needs at least one arm
+//~ span: match
 enum E { A, B }
 fun f(e: E) -> int {
     return match e { }

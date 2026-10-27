@@ -1,4 +1,5 @@
 //~ type error: argument(s)
+//~ span: add(1)
 fun add(a: int, b: int) -> int {
     return a + b
 }

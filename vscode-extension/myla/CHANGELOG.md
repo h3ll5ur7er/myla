@@ -1,13 +1,19 @@
-# Change Log
+# Changelog
 
-## [Unreleased]
+## 0.1.0
+
+- **Debugger** (`myla` debug type, MYLA-99): `F5` on a `.my` file builds it with `myla build -g` (a project, its directory or `myla.toml`, with the project's own `myla build -g`, MYLA-94) and debugs it with gdb through the extension's own debug adapter (GDB/MI, no other extension needed). Line, conditional, hit-count and function breakpoints; continue, step over/in/out, pause; the call stack with Myla names; locals and arguments with expandable structs, tuples, enums and lists, and heap strings and lists inside them shown as values; evaluate and hover; `-exec` gdb commands in the Debug Console; stops on runtime errors with their message; program output and exit code in the Debug Console; Run Without Debugging. A build error stops the launch with the compiler's message and a jump to it.
+- **Commands and tasks** (MYLA-100): *Run Current File*, *Run Tests in Current File*, *Build Current File* and *Debug Current File*, in the command palette and the editor title's run menu; tasks of type `myla` with a `$myla` problem matcher; *Show Output*. The placeholder *Show Extension Info* is gone.
+- New settings `myla.cliPath` (the `myla` CLI: `build/myla`, else `python3 myla.py`) and `myla.debug.gdbPath`.
+- A language status item shows whether the language server runs and restarts it.
+- In untrusted workspaces the path settings come from user settings only.
+- Bundled with esbuild: the `.vsix` holds two scripts and the static files, no `node_modules`. An icon, a license (MIT), and the template's leftovers removed.
+- Built, tested and packaged in CI; each run uploads the `.vsix` (MYLA-101).
+
+## Before 0.1.0
 
 - The Python language server is retired: the extension starts only `build/myla-lsp`, and says how to build it when it is missing; the settings `myla.server` and `myla.pythonPath` are gone.
-- Starts the language server written in Myla (`build/myla-lsp`) by default, falling back to the Python server when it isn't built; new settings `myla.server` and `myla.serverPath`. The `**/*.my` file watcher is back for the Myla server, which handles `workspace/didChangeWatchedFiles`.
+- Starts the language server written in Myla (`build/myla-lsp`); the `**/*.my` file watcher reports changes on disk to it.
 - The grammar and snippets follow the real language: no Rust-dialect keywords, the real type names and literal forms, `;` as an optional separator; every snippet is valid Myla.
 - `myla.trace.server` works, `myla.diagnostics.enable = false` hides only the diagnostics, and `${workspaceFolder}` is expanded in path settings.
-- Removed the placeholder `Myla: Format File` command and the file watcher whose notifications the server ignored.
-
-## 0.0.1
-
-- Initial version: highlighting, snippets and the Python language server client.
+- 0.0.1: highlighting, snippets and the Python language server client.

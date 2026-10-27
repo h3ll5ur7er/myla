@@ -1,0 +1,8 @@
+// Runs until it is stopped, for the debug adapter's pause and conditional
+// breakpoint tests (MYLA-99).
+fun main() {
+    var i = 0
+    while true {
+        i = i + 1  // bp:loop
+    }
+}

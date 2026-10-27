@@ -1,0 +1,11 @@
+//~ runtime error: map key 'b' not found
+//~ native: runtime error: map key not found
+// Changing a field of an absent map value traps: the value must exist.
+struct Counter {
+    n: int,
+}
+
+fun main() {
+    var m = ["a": Counter { n: 0 }]
+    m["b"].n = 1
+}

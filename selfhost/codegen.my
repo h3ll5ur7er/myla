@@ -11,9 +11,12 @@
 // build and run a `hello`-class program through `as`/`ld` with parity.
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem, bind_elems
+from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
+from std.fs import current_dir
 from .loader import Span
-from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV
+from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
+from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
 // `capoff` is the byte offset within the closure env for a "capture" binding.
@@ -21,6 +24,16 @@ pub struct CgBinding { name: str, kind: str, offset: int32, ty: Type, capoff: in
 
 // A by-value captured variable in a closure environment cell.
 pub struct Cap { name: str, ty: Type, off: int32 }
+
+// A Myla scope for the debug information: the label its lexical blocks end
+// at, and how many it opened (MYLA-66).
+pub struct DbgScope { end: str, blocks: int32 }
+
+// A type DIE still to emit (MYLA-66): its label, what it describes (`kind`:
+// base, byte, ptr, voidptr, slice, array, cell or agg), the Myla type, the
+// label it points at, and two numbers (a base type's size; an array's stride
+// and header).
+pub struct DbgType { label: str, kind: str, ty: Type, target: str, n: int32, m: int32 }
 
 // A lifted lambda body to emit as a top-level function (monomorphized per stamp).
 pub struct LamJob { lifted: str, params: [Param], ftype: Type, body: ExprOrBlock, caps: [Cap], subst: [Subst], id: int32, line: int32, col: int32 }
@@ -108,15 +121,36 @@ pub struct CodeGen {
     need_clone: [Type],
     clone_emitted: [str],
     need_sb: bool,
-    // DWARF line tables (`-g`, MYLA-71): the loader's module spans (which node
-    // ids belong to which file; ids from `prelude_id` on are the prelude's, with
-    // no source), the `.file` paths in number order, the number of the file of
-    // the function being generated (0: none), and the last `.loc` emitted.
+    // The loader's module spans (which node ids belong to which file; ids from
+    // `prelude_id` on are the prelude's, with no source), for runtime-error
+    // positions and debug information.
     line_spans: [Span],
     prelude_id: int32,
+    // Runtime-error positions (MYLA-65, MYLA-66): the file of the function
+    // being generated, the record label of each position ("file:line:col"),
+    // and the records, `[file str][line:4][col:4]`, for .rodata.
+    cur_path: str,
+    pos_labels: [str: str],
+    posdata: [str],
+    // DWARF line tables (`-g`, MYLA-71): whether to emit them, the `.file`
+    // paths in number order, the number of the file of the function being
+    // generated (0: none), and the last `.loc` emitted.
+    debug: bool,
     line_files: [str],
     cur_file: int32,
     last_loc: str,
+    // Variables and types (`-g`, MYLA-66): whether the function being
+    // generated gets them, the subprograms' DIEs, each type DIE's label by key
+    // and the type DIEs to emit, the open scopes, the function's end label,
+    // where the last lexical block opened, and a label counter.
+    dbg_fn: bool,
+    dbg_lines: [str],
+    dbg_types: [str: str],
+    dbg_pending: [DbgType],
+    dbg_scopes: [DbgScope],
+    dbg_fn_end: str,
+    dbg_mark: str,
+    dbg_n: int32,
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -150,16 +184,486 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         epilogue: "", struct_ret: false, ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
         need_sb: false,
-        line_spans: [], prelude_id: 0, line_files: [], cur_file: 0, last_loc: "",
+        line_spans: [], prelude_id: 0,
+        cur_path: "<input>", pos_labels: [:], posdata: [],
+        debug: false, line_files: [], cur_file: 0, last_loc: "",
+        dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
+        dbg_fn_end: "", dbg_mark: "", dbg_n: 0,
     }
 }
 
 impl CodeGen {
-    // Emit DWARF line directives for the program `spans` describes (the
-    // loader's `Loaded.spans`; node ids from `next_id` on are the prelude's).
-    fun enable_line_tables(var self, spans: [Span], next_id: int32) {
+    // The files of the program: `spans` is the loader's `Loaded.spans`, node
+    // ids from `next_id` on are the prelude's. Runtime errors name them.
+    fun set_sources(var self, spans: [Span], next_id: int32) {
         self.line_spans = spans
         self.prelude_id = next_id
+    }
+
+    // Emit DWARF debug information (`-g`): line tables (MYLA-71), variables
+    // and types (MYLA-66).
+    fun enable_debug_info(var self) {
+        self.debug = true
+    }
+
+    // The path of the file node `id` is in, as the loader names it (the entry
+    // file as given, the self-hosted CLI's diagnostics name the same), or
+    // `<input>` without one.
+    fun path_of(self, id: int32) -> str {
+        if len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return "<input>" }
+        var path = self.line_spans[0].path
+        for sp in self.line_spans { if sp.first_id <= id { path = sp.path } }
+        return path
+    }
+
+    // -- runtime-error positions (MYLA-65, MYLA-66) ------------------------
+
+    // Load the address of the record of position `line:col` in the current
+    // function's file into `reg` (0 without a position): `[file str:8]
+    // [line:4][col:4]`, one per distinct position, which `__panic` prints as
+    // `  --> file:line:col`.
+    fun load_position(var self, line: int32, col: int32, reg: str) {
+        if line <= 0 {
+            self.emit(format("movq $0, %{}", reg))
+            return
+        }
+        let key = format("{}:{}:{}", self.cur_path, line, col)
+        var lab = ""
+        match get(self.pos_labels, key) {
+            Some(l) => { lab = l },
+            None => {
+                lab = format(".Lpos{}", len(self.pos_labels))
+                self.pos_labels[key] = lab
+                let file = self.string_label(self.cur_path)
+                push(self.posdata, "\t.balign 8")
+                push(self.posdata, format("{}:", lab))
+                push(self.posdata, format("\t.quad {}", file))
+                push(self.posdata, format("\t.long {}, {}", line, col))
+            },
+        }
+        self.emit(format("leaq {}(%rip), %{}", lab, reg))
+    }
+
+    // Take the runtime-error entry `trap` when `jump` (`jae`, `jz`, ..., or
+    // `jmp`) would jump, reporting position `line:col` (the interpreter's for
+    // the same error). The call leaves a return address for gdb's backtrace.
+    fun trap(var self, jump: str, trap: str, line: int32, col: int32) {
+        var skip = ""
+        if jump != "jmp" {
+            skip = self.label()
+            self.emit(format("{} {}", skip_trap(jump), skip))
+        }
+        self.load_position(line, col, "rsi")
+        self.emit(format("call {}", trap))
+        if skip != "" { self.emit(format("{}:", skip)) }
+    }
+
+    // -- debug information: variables and types (`-g`, MYLA-66) ----------
+    //
+    // As src/myla/compiler/dwarf.py: a subprogram per function with its
+    // parameters and captures, its locals in lexical blocks (one opens where a
+    // binding starts and ends with the Myla scope), and the types they use.
+
+    fun dbg_label(var self, kind: str) -> str {
+        self.dbg_n = self.dbg_n + 1
+        return format(".Ld{}{}", kind, self.dbg_n)
+    }
+
+    fun dbg_line(var self, line: str) { push(self.dbg_lines, line) }
+
+    // Open the subprogram of the function at label `symbol`, if the function
+    // has a line table.
+    fun dbg_begin_function(var self, symbol: str) {
+        self.dbg_fn = self.cur_file != 0
+        if !self.dbg_fn { return }
+        self.dbg_fn_end = self.dbg_label("f")
+        self.dbg_scopes = []
+        self.dbg_line(format("\t.uleb128 {}", AB_SUBPROGRAM))
+        self.dbg_line(dw_string(symbol))
+        self.dbg_line(format("\t.quad {}", symbol))
+        self.dbg_line(format("\t.quad {} - {}", self.dbg_fn_end, symbol))
+        self.dbg_line("\t.uleb128 1")
+        self.dbg_line(format("\t.byte {}", OP_REG6))
+    }
+
+    // Close the subprogram; its end label goes after the function's code.
+    fun dbg_end_function(var self) {
+        if !self.dbg_fn { return }
+        self.emit(format("{}:", self.dbg_fn_end))
+        self.dbg_line("\t.byte 0")
+        self.dbg_fn = false
+    }
+
+    fun dbg_push_scope(var self) {
+        if self.dbg_fn { push(self.dbg_scopes, DbgScope { end: self.dbg_label("e"), blocks: 0 }) }
+    }
+
+    fun dbg_pop_scope(var self) {
+        if !self.dbg_fn { return }
+        let top = pop(self.dbg_scopes)
+        if top.blocks > 0 {
+            self.emit(format("{}:", top.end))
+            var i = 0
+            while i < top.blocks {
+                self.dbg_line("\t.byte 0")
+                i = i + 1
+            }
+        }
+    }
+
+    // Describe binding `b` for gdb. A parameter or a capture (`whole`) is
+    // visible in the whole function; another binding from here to the end of
+    // its scope, in a lexical block that starts at a label emitted now.
+    fun dbg_variable(var self, b: CgBinding, whole: bool, param: bool) {
+        if !self.dbg_fn || is_internal_name(b.name) { return }
+        if !whole {
+            let si = len(self.dbg_scopes) - 1
+            let end = self.dbg_scopes[si].end
+            if format("{}:{}", end, len(self.text)) != self.dbg_mark {
+                let start = self.dbg_label("b")
+                self.emit(format("{}:", start))
+                self.dbg_line(format("\t.uleb128 {}", AB_BLOCK))
+                self.dbg_line(format("\t.quad {}", start))
+                self.dbg_line(format("\t.quad {} - {}", end, start))
+                self.dbg_scopes[si].blocks = self.dbg_scopes[si].blocks + 1
+                self.dbg_mark = format("{}:{}", end, len(self.text))
+            }
+        }
+        // the address of the value
+        var addr: [int32] = [OP_FBREG]
+        for x in sleb(b.offset) { push(addr, x) }
+        if b.kind == "capture" {
+            push(addr, OP_DEREF)
+            if b.capoff != 0 {
+                push(addr, OP_PLUS_UCONST)
+                for x in uleb(b.capoff) { push(addr, x) }
+            }
+        } else if b.kind == "param" && is_aggregate(b.ty) {
+            push(addr, OP_DEREF)               // passed (or borrowed) by address
+        }
+        var ty = ""
+        var loc: [str] = []
+        match b.ty {
+            Type.TStr => {
+                ty = self.dbg_slice()
+                loc = exprloc(str_pieces(addr, 8))
+            },
+            Type.TSB => {
+                ty = self.dbg_slice()
+                loc = exprloc(str_pieces(addr, 16))
+            },
+            Type.TList(e) => {
+                ty = self.dbg_items(e)
+                push(addr, OP_DEREF)
+                push(addr, OP_PLUS_UCONST)
+                push(addr, 16)
+                loc = exprloc(addr)
+            },
+            Type.TFloat(w) => {
+                if w == 32 {
+                    ty = self.dbg_base(b.ty, 4)
+                    loc = self.dbg_convert(addr, ty)
+                } else {
+                    ty = self.dbg_base(b.ty, 8)
+                    loc = exprloc(addr)
+                }
+            },
+            Type.TEnum(n, a) => {
+                ty = self.dbg_aggregate(b.ty)  // a variable holds even a boxed enum inline
+                loc = exprloc(addr)
+            },
+            _ => {
+                ty = self.dbg_element(b.ty)
+                loc = exprloc(addr)
+            },
+        }
+        var tag = AB_VAR
+        if param { tag = AB_PARAM }
+        self.dbg_line(format("\t.uleb128 {}", tag))
+        self.dbg_line(dw_string(b.name))
+        self.dbg_line(dw_ref(ty))
+        for l in loc { self.dbg_line(l) }
+    }
+
+    // The location of a float32 variable: the double it is kept as, converted
+    // to the type `f32`.
+    fun dbg_convert(var self, addr: [int32], f32: str) -> [str] {
+        let f64 = self.dbg_base(Type.TFloat(64), 8)
+        let start = self.dbg_label("x")
+        let end = self.dbg_label("x")
+        var out = [format("\t.uleb128 {} - {}", end, start), format("{}:", start), bytes_line(addr)]
+        push(out, format("\t.byte {}, 8", OP_GNU_DEREF_TYPE))
+        push(out, format("\t.uleb128 {} - .Ldebug_info0", f64))
+        push(out, format("\t.byte {}", OP_GNU_CONVERT))
+        push(out, format("\t.uleb128 {} - .Ldebug_info0", f32))
+        push(out, format("\t.byte {}", OP_STACK_VALUE))
+        push(out, format("{}:", end))
+        return out
+    }
+
+    // The label of the type DIE `key` names, registered the first time.
+    fun dbg_type(var self, key: str, kind: str, ty: Type, target: str, n: int32, m: int32) -> str {
+        match get(self.dbg_types, key) {
+            Some(l) => { return l },
+            None => {},
+        }
+        let label = format(".Ldty{}", len(self.dbg_types))
+        self.dbg_types[key] = label
+        push(self.dbg_pending, DbgType { label: label, kind: kind, ty: ty, target: target, n: n, m: m })
+        return label
+    }
+
+    // A scalar's base type, `size` bytes wide.
+    fun dbg_base(var self, t: Type, size: int32) -> str {
+        return self.dbg_type(format("base:{}:{}", type_name(t), size), "base", t, "", size, 0)
+    }
+
+    // A string's byte, shown with its character.
+    fun dbg_byte(var self) -> str { return self.dbg_type("byte", "byte", Type.TBool, "", 0, 0) }
+
+    fun dbg_pointer(var self, target: str) -> str {
+        return self.dbg_type(format("ptr:{}", target), "ptr", Type.TBool, target, 0, 0)
+    }
+
+    fun dbg_void_pointer(var self) -> str { return self.dbg_type("voidptr", "voidptr", Type.TBool, "", 0, 0) }
+
+    // A Rust `&str`, which gdb prints as a string literal.
+    fun dbg_slice(var self) -> str { return self.dbg_type("slice", "slice", Type.TBool, "", 0, 0) }
+
+    // An array of `elem`s `stride` bytes apart, as many as the 8 bytes
+    // `header` bytes before the first say (a cell's length).
+    fun dbg_array(var self, elem: str, stride: int32, header: int32) -> str {
+        return self.dbg_type(format("array:{}:{}:{}", elem, stride, header), "array", Type.TBool, elem, stride, header)
+    }
+
+    // The elements of a list of `e`s, at its cell + 16.
+    fun dbg_items(var self, e: Type) -> str {
+        let elem = self.dbg_element(e)
+        return self.dbg_array(elem, self.stored_size(e), 16)
+    }
+
+    // The heap cell of a `str`, list, builder or map, for a pointer to it.
+    fun dbg_cell(var self, t: Type) -> str {
+        return self.dbg_type(format("cell:{}", type_name(t)), "cell", t, "", 0, 0)
+    }
+
+    fun dbg_aggregate(var self, t: Type) -> str {
+        return self.dbg_type(format("agg:{}", type_name(t)), "agg", t, "", 0, 0)
+    }
+
+    // The type of a value inside an aggregate or a list (or of a scalar
+    // variable): types of a fixed size only.
+    fun dbg_element(var self, t: Type) -> str {
+        match t {
+            Type.TInt(w, sg) => {
+                // a signed integer is its whole sign-extended slot, so that `set
+                // var` writes a canonical value (an unsigned one's upper bytes stay 0)
+                if sg { return self.dbg_base(t, 8) }
+                return self.dbg_base(t, w / 8)
+            },
+            Type.TBool => { return self.dbg_base(t, 1) },
+            Type.TChar => { return self.dbg_base(t, 4) },
+            Type.TFloat(w) => { return self.dbg_base(t, 8) },   // a float32 is kept as a double
+            Type.TStr => {},
+            Type.TSB => {},
+            Type.TList(e) => {},
+            Type.TMap(k, v) => {},
+            _ => {
+                let agg = self.dbg_aggregate(t)
+                if self.is_boxed(t) { return self.dbg_pointer(agg) }
+                return agg
+            },
+        }
+        let cell = self.dbg_cell(t)
+        return self.dbg_pointer(cell)
+    }
+
+    // A structure type's lines: `members` of `types` at `offs`.
+    fun dbg_struct_lines(self, name: str, size: int32, members: [str], types: [str], offs: [int32]) -> [str] {
+        var out = [format("\t.uleb128 {}", AB_STRUCT), dw_string(name), format("\t.uleb128 {}", size)]
+        var i = 0
+        while i < len(members) {
+            push(out, format("\t.uleb128 {}", AB_MEMBER))
+            push(out, dw_string(members[i]))
+            push(out, dw_ref(types[i]))
+            push(out, format("\t.uleb128 {}", offs[i]))
+            i = i + 1
+        }
+        push(out, "\t.byte 0")
+        return out
+    }
+
+    // The lines of the type DIE `p` describes.
+    fun dbg_build(var self, p: DbgType) -> [str] {
+        let i64 = Type.TInt(64, true)
+        if p.kind == "base" {
+            return [format("\t.uleb128 {}", AB_BASE), dw_string(type_name(p.ty)), format("\t.byte {}", ate_of(p.ty)), format("\t.byte {}", p.n)]
+        }
+        if p.kind == "byte" {
+            return [format("\t.uleb128 {}", AB_BASE), dw_string("uint8"), format("\t.byte {}", ATE_UTF), "\t.byte 1"]
+        }
+        if p.kind == "ptr" { return [format("\t.uleb128 {}", AB_PTR), "\t.byte 8", dw_ref(p.target)] }
+        if p.kind == "voidptr" { return [format("\t.uleb128 {}", AB_VOIDPTR), "\t.byte 8"] }
+        if p.kind == "slice" {
+            let byte = self.dbg_byte()
+            let data = self.dbg_pointer(byte)
+            let length = self.dbg_base(i64, 8)
+            return self.dbg_struct_lines("&str", 16, ["data_ptr", "length"], [data, length], [0, 8])
+        }
+        if p.kind == "array" {
+            var out = [format("\t.uleb128 {}", AB_ARRAY), dw_ref(p.target), format("\t.uleb128 {}", p.n), format("\t.uleb128 {}", AB_SUBRANGE)]
+            for l in exprloc([OP_PUSH_OBJECT_ADDRESS, OP_LIT0 + p.m, OP_MINUS, OP_DEREF]) { push(out, l) }
+            push(out, "\t.byte 0")
+            return out
+        }
+        if p.kind == "cell" { return self.dbg_cell_lines(p.ty) }
+        return self.dbg_aggregate_lines(p.ty)
+    }
+
+    fun dbg_cell_lines(var self, t: Type) -> [str] {
+        let len_t = self.dbg_base(Type.TInt(64, true), 8)
+        match t {
+            Type.TStr => {
+                let byte = self.dbg_byte()
+                let bytes = self.dbg_array(byte, 1, 8)
+                return self.dbg_struct_lines("str", 8, ["len", "bytes"], [len_t, bytes], [0, 8])
+            },
+            Type.TSB => {
+                let byte = self.dbg_byte()
+                let bytes = self.dbg_array(byte, 1, 16)
+                return self.dbg_struct_lines("StringBuilder", 16, ["len", "cap", "bytes"], [len_t, len_t, bytes], [0, 8, 16])
+            },
+            Type.TList(e) => {
+                let items = self.dbg_items(e)
+                return self.dbg_struct_lines(type_name(t), 16, ["len", "cap", "items"], [len_t, len_t, items], [0, 8, 16])
+            },
+            _ => {},
+        }
+        return self.dbg_struct_lines(type_name(t), 16, ["len", "cap"], [len_t, len_t], [0, 8])
+    }
+
+    fun dbg_aggregate_lines(var self, t: Type) -> [str] {
+        let name = type_name(t)
+        let size = self.size(t)
+        var members: [str] = []
+        var types: [str] = []
+        var offs: [int32] = []
+        var off = 0
+        match t {
+            Type.TStruct(n, a) => {
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                for f in info.fields {
+                    let ft = subst_type(f.ty, sub)
+                    push(members, f.name)
+                    push(types, self.dbg_element(ft))
+                    push(offs, off)
+                    off = off + self.stored_size(ft)
+                }
+            },
+            Type.TTuple(es) => {
+                var i = 0
+                for et in es {
+                    push(members, format("__{}", i))
+                    push(types, self.dbg_element(et))
+                    push(offs, off)
+                    off = off + self.stored_size(et)
+                    i = i + 1
+                }
+            },
+            Type.TFunc(ps, r) => {
+                // `fn…`: a name starting with `(` would make gdb take it for a tuple
+                let vp = self.dbg_void_pointer()
+                return self.dbg_struct_lines("fn" + name, 16, ["code_ptr", "env_ptr"], [vp, vp], [0, 8])
+            },
+            Type.TEnum(n, a) => { return self.dbg_enum_lines(t, n, name, size) },
+            _ => {},
+        }
+        return self.dbg_struct_lines(name, size, members, types, offs)
+    }
+
+    // An enum as Rust describes one: a variant part whose discriminant is the
+    // tag, a variant per tag value holding a struct of the payload (fields
+    // `__0`, `__1`, ... at their offsets in the whole value).
+    fun dbg_enum_lines(var self, t: Type, n: str, name: str, size: int32) -> [str] {
+        let variants = self.enum_info(n).variants
+        let tag = self.dbg_label("g")
+        let tag_t = self.dbg_base(Type.TInt(64, false), 8)
+        var out = [format("\t.uleb128 {}", AB_STRUCT), dw_string(name), format("\t.uleb128 {}", size)]
+        push(out, format("\t.uleb128 {}", AB_VARIANT_PART))
+        push(out, dw_ref(tag))
+        push(out, format("{}:", tag))
+        push(out, format("\t.uleb128 {}", AB_TAG))
+        push(out, dw_string("<tag>"))
+        push(out, dw_ref(tag_t))
+        push(out, "\t.uleb128 0")
+        var labels: [str] = []
+        for v in variants { push(labels, self.dbg_label("v")) }
+        var i = 0
+        for v in variants {
+            push(out, format("\t.uleb128 {}", AB_VARIANT))
+            push(out, format("\t.uleb128 {}", i))
+            push(out, format("\t.uleb128 {}", AB_MEMBER))
+            push(out, dw_string(v.name))
+            push(out, dw_ref(labels[i]))
+            push(out, "\t.uleb128 0")
+            push(out, "\t.byte 0")
+            i = i + 1
+        }
+        push(out, "\t.byte 0")                  // end of the variant part
+        i = 0
+        for v in variants {
+            push(out, format("{}:", labels[i]))
+            push(out, format("\t.uleb128 {}", AB_STRUCT))
+            push(out, dw_string(v.name))
+            push(out, format("\t.uleb128 {}", size))
+            var off = 8
+            var j = 0
+            for ft in self.variant_payload(t, v.name) {
+                let ty = self.dbg_element(ft)
+                push(out, format("\t.uleb128 {}", AB_MEMBER))
+                push(out, dw_string(format("__{}", j)))
+                push(out, dw_ref(ty))
+                push(out, format("\t.uleb128 {}", off))
+                off = off + self.stored_size(ft)
+                j = j + 1
+            }
+            push(out, "\t.byte 0")
+            i = i + 1
+        }
+        push(out, "\t.byte 0")
+        return out
+    }
+
+    // `.debug_abbrev`, `.debug_info`, and the start of `.debug_line` (the
+    // assembler appends the line table it builds from `.loc` there). The
+    // compile directory is the working directory, as in the Python backend
+    // (`.` if it can't be read).
+    fun dbg_sections(var self) -> [str] {
+        var types: [str] = []
+        var i = 0
+        while i < len(self.dbg_pending) {
+            let p = self.dbg_pending[i]
+            push(types, format("{}:", p.label))
+            for l in self.dbg_build(p) { push(types, l) }
+            i = i + 1
+        }
+        var out = abbrev_section()
+        for l in ["\t.section .debug_info,\"\",@progbits", ".Ldebug_info0:", "\t.long .Ldebug_info_end - .Ldebug_info_start", ".Ldebug_info_start:", "\t.value 4", "\t.long .Ldebug_abbrev0", "\t.byte 8"] { push(out, l) }
+        push(out, format("\t.uleb128 {}", AB_CU))
+        push(out, dw_string("myla (self-hosted)"))
+        push(out, format("\t.value {}", LANG_RUST))
+        push(out, dw_string(self.line_files[0]))
+        let comp_dir = match current_dir() {
+            Ok(d) => d
+            Err(e) => "."
+        }
+        push(out, dw_string(comp_dir))
+        for l in ["\t.quad .Ltext0", "\t.quad .Letext0 - .Ltext0", "\t.long .Ldebug_line0"] { push(out, l) }
+        for l in self.dbg_lines { push(out, l) }
+        for l in types { push(out, l) }
+        for l in ["\t.byte 0", ".Ldebug_info_end:", "\t.section .debug_line,\"\",@progbits", ".Ldebug_line0:"] { push(out, l) }
+        return out
     }
 
     // -- debug line tables (MYLA-71) --------------------------------------
@@ -167,9 +671,8 @@ impl CodeGen {
     // The `.file` number of the module node `id` is in, registered on first
     // use; 0 when line tables are off or the node is the prelude's.
     fun file_number(var self, id: int32) -> int32 {
-        if len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return 0 }
-        var path = self.line_spans[0].path
-        for sp in self.line_spans { if sp.first_id <= id { path = sp.path } }
+        if !self.debug || len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return 0 }
+        let path = self.path_of(id)
         var i = 0
         while i < len(self.line_files) {
             if self.line_files[i] == path { return i + 1 }
@@ -304,7 +807,17 @@ impl CodeGen {
 
     fun bind(var self, name: str, kind: str, offset: int32, ty: Type) {
         let top = len(self.scopes) - 1
-        push(self.scopes[top], CgBinding { name: name, kind: kind, offset: offset, ty: ty, capoff: 0 })
+        let b = CgBinding { name: name, kind: kind, offset: offset, ty: ty, capoff: 0 }
+        push(self.scopes[top], b)
+        self.dbg_variable(b, false, false)
+    }
+
+    // Bind a parameter (visible in the whole function, for gdb too).
+    fun bind_param(var self, name: str, offset: int32, ty: Type) {
+        let top = len(self.scopes) - 1
+        let b = CgBinding { name: name, kind: "param", offset: offset, ty: ty, capoff: 0 }
+        push(self.scopes[top], b)
+        self.dbg_variable(b, true, true)
     }
 
     fun lookup(self, name: str) -> CgBinding {
@@ -325,6 +838,7 @@ impl CodeGen {
     fun open_scope(var self) {
         push(self.scopes, [])
         push(self.drop_scopes, [])
+        self.dbg_push_scope()
     }
 
     // Drop the owning locals declared in the innermost scope (reverse order),
@@ -338,6 +852,7 @@ impl CodeGen {
         }
         self.drop_scopes = drop_last(self.drop_scopes)
         self.scopes = drop_last(self.scopes)
+        self.dbg_pop_scope()
     }
 
     // Record an owning local at `off(%rbp)` so it is released when its scope ends.
@@ -836,11 +1351,18 @@ impl CodeGen {
         return false
     }
 
+    // Whether the checker typed `callee` as a value, which it does only for an
+    // indirect call: a local binding shadows a function of the same name
+    // (MYLA-102), so `f(x)` with a local `f` calls the local.
+    fun called_as_value(self, callee: Expr) -> bool {
+        return contains(self.resolved, callee.id)
+    }
+
     // Whether a call through `callee` resolves indirectly (a function value)
     // rather than to a builtin, a user function, or a method.
     fun call_is_indirect(self, callee: Expr) -> bool {
         match callee.kind {
-            ExprKind.Name(nm) => { return !is_builtin_call_name(nm) && !self.has_function(nm) },
+            ExprKind.Name(nm) => { return !is_builtin_call_name(nm) && (!self.has_function(nm) || self.called_as_value(callee)) },
             ExprKind.GetField(recv, field) => {
                 return !self.has_func(format("{}.{}", self.type_key(self.type_of(recv.id)), field))
             },
@@ -975,7 +1497,9 @@ impl CodeGen {
             push(out, format("\t.file {} \"{}\"", fi + 1, asm_string(self.line_files[fi])))
             fi = fi + 1
         }
+        if len(self.line_files) > 0 { push(out, ".Ltext0:") }     // the compile unit's code (MYLA-66)
         for line in self.text { push(out, line) }
+        if len(self.line_files) > 0 { push(out, ".Letext0:") }
         push(out, "")
         push(out, "\t.section .rodata")
         push(out, ".Lbool_true:\n\t.ascii \"true\"")
@@ -983,10 +1507,13 @@ impl CodeGen {
         let messages = trap_messages()
         var ti = 0
         for label in trap_labels() {
-            let text = "runtime error: " + messages[ti]
+            let text = messages[ti]
             push(out, format(".Lmsg{}:\n\t.quad {}\n\t.ascii \"{}\"", label, len(text), text))
             ti = ti + 1
         }
+        push(out, ".Lmsg_rterr:\n\t.quad 15\n\t.ascii \"runtime error: \"")
+        push(out, ".Lmsg_at:\n\t.quad 7\n\t.ascii \"\\n  --> \"")
+        for line in self.posdata { push(out, line) }
         for line in self.rodata { push(out, line) }
         if self.uses_float { for chunk in self.float_rodata_text() { push(out, chunk) } }
         push(out, "")
@@ -1031,6 +1558,7 @@ impl CodeGen {
         push(out, "__run_errno_val:")
         push(out, "\t.skip 8")
         push(out, "")
+        if len(self.line_files) > 0 { for l in self.dbg_sections() { push(out, l) } }
         push(out, "\t.section .note.GNU-stack,\"\",@progbits")
         push(out, "")
         return join_lines(out)
@@ -1067,7 +1595,9 @@ impl CodeGen {
         self.epilogue = format(".Lret_{}", mangled)
 
         self.cur_file = self.file_number(sig.decl_id)
+        self.cur_path = self.path_of(sig.decl_id)
         self.emit(format("myla_{}:", mangled))
+        self.dbg_begin_function(format("myla_{}", mangled))
         self.emit_loc(fd.line, fd.col)
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
@@ -1079,7 +1609,7 @@ impl CodeGen {
         var i = 0
         while i < len(fd.params) {
             let offset = 16 + 8 * (param_base + i)
-            self.bind(fd.params[i].name, "param", offset, subst_type(sig.params[i], self.subst))
+            self.bind_param(fd.params[i].name, offset, subst_type(sig.params[i], self.subst))
             i = i + 1
         }
 
@@ -1089,8 +1619,9 @@ impl CodeGen {
         self.emit("leave")
         self.emit("ret")
         self.end_loc()
-        self.emit("")
         self.close_scope()
+        self.dbg_end_function()
+        self.emit("")
     }
 
     // Assign every local/temp a unique stack slot; return the frame size.
@@ -1223,7 +1754,9 @@ impl CodeGen {
                 let indirect = self.call_is_indirect(c)
                 match c.kind {
                     ExprKind.GetField(rc, fld) => { self.visit_expr(c) },
-                    ExprKind.Name(nm) => { if indirect { self.visit_expr(c) } },
+                    // a called name needs no slot: a function is called directly, a
+                    // local (one shadowing a function too, MYLA-102) by its own slot
+                    ExprKind.Name(nm) => {},
                     _ => { self.visit_expr(c) },
                 }
                 for a in args { self.visit_expr(a) }
@@ -1465,9 +1998,9 @@ impl CodeGen {
         for be in elems {
             let et = ets[i]
             match be {
-                BindElem.BName(n, l, c) => { push(out, DLeaf { name: n, off: off, ty: et }) },
+                BindElem.BName(n, l, c, sp) => { push(out, DLeaf { name: n, off: off, ty: et }) },
                 BindElem.BWild => {},
-                BindElem.BTuple(sub, l, c) => {
+                BindElem.BTuple(sub, l, c, sp) => {
                     for lf in self.collect_leaves(sub, et) {
                         push(out, DLeaf { name: lf.name, off: off + lf.off, ty: lf.ty })
                     }
@@ -1867,7 +2400,7 @@ impl CodeGen {
             self.wrap(rt)
         } else if op == "/" || op == "%" {
             self.emit("testq %rcx, %rcx")
-            if op == "/" { self.emit("jz __trap_div") } else { self.emit("jz __trap_mod") }
+            if op == "/" { self.trap("jz", "__trap_div", e.line, e.col) } else { self.trap("jz", "__trap_mod", e.line, e.col) }
             if int_signed(lt) {
                 // x / -1 is -x and x % -1 is 0; idivq would trap on the
                 // minimum (its quotient overflows), the language wraps (MYLA-5)
@@ -2206,7 +2739,7 @@ impl CodeGen {
                 else if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
             },
             ExprKind.Index(base, idx) => {
-                self.gen_index_addr(base, idx)
+                self.gen_index_addr(e, base, idx)
                 if self.is_boxed(self.type_of(e.id)) { self.emit("movq (%rax), %rax") }
             },
             ExprKind.Lambda(params, ret, body) => {
@@ -2370,8 +2903,9 @@ impl CodeGen {
         }
     }
 
-    // Leave the address of element `base[idx]` in %rax (list or string).
-    fun gen_elem_addr(var self, base: Expr, idx: Expr) {
+    // Leave the address of element `base[idx]` in %rax (list or string); `e`
+    // is the index expression, whose position an out-of-bounds index reports.
+    fun gen_elem_addr(var self, e: Expr, base: Expr, idx: Expr) {
         let bt = self.place_type(base)
         self.eval(base)
         self.emit("pushq %rax")
@@ -2380,7 +2914,7 @@ impl CodeGen {
         self.emit("popq %rax")
         self.emit("movq (%rax), %rdx")
         self.emit("cmpq %rdx, %rcx")
-        self.emit("jae __trap_index")
+        self.trap("jae", "__trap_index", e.line, e.col)
         if is_str_t(bt) {
             self.emit("leaq 8(%rax), %rax")
             self.emit("addq %rcx, %rax")
@@ -2397,16 +2931,16 @@ impl CodeGen {
     }
 
     // Address of an indexed lvalue/aggregate element (list/str/map).
-    fun gen_index_addr(var self, base: Expr, idx: Expr) {
-        if is_map_t(self.place_type(base)) { self.gen_map_value_addr(base, idx) }
-        else { self.gen_elem_addr(base, idx) }
+    fun gen_index_addr(var self, e: Expr, base: Expr, idx: Expr) {
+        if is_map_t(self.place_type(base)) { self.gen_map_value_addr(e, base, idx) }
+        else { self.gen_elem_addr(e, base, idx) }
     }
 
     fun gen_index_read(var self, e: Expr, base: Expr, idx: Expr) {
         let bt = self.place_type(base)
-        if is_map_t(bt) { self.gen_map_get(base, idx)
+        if is_map_t(bt) { self.gen_map_get(e, base, idx)
         return }
-        self.gen_elem_addr(base, idx)
+        self.gen_elem_addr(e, base, idx)
         if is_str_t(bt) { self.emit("movzbl (%rax), %eax") }
         else { self.emit("movq (%rax), %rax") }
     }
@@ -2524,7 +3058,7 @@ impl CodeGen {
         self.emit("popq %rcx")
         self.emit("movq (%rcx), %rdx")
         self.emit("cmpq %rdx, %rax")
-        self.emit("jae __trap_index")
+        self.trap("jae", "__trap_index", e.line, e.col)
         self.emit(format("imulq ${}, %rax", stride))
         self.emit("leaq 16(%rcx,%rax), %rax")
     }
@@ -2542,7 +3076,7 @@ impl CodeGen {
         self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
         self.emit("call __map_lookup")
         self.emit("testq %rax, %rax")
-        self.emit("jz __trap_key")
+        self.trap("jz", "__trap_key", e.line, e.col)
         self.emit("addq $16, %rax")
     }
 
@@ -2646,7 +3180,7 @@ impl CodeGen {
         self.mut_container_cell(holder)        // unique cell -> rax
         self.emit("movq (%rax), %rcx")         // len
         self.emit("testq %rcx, %rcx")
-        self.emit("jz __trap_pop")
+        self.trap("jz", "__trap_pop", e.line, e.col)
         self.emit("decq %rcx")
         self.emit("movq %rcx, (%rax)")         // len -= 1
         self.emit(format("imulq ${}, %rcx", stride))
@@ -2760,8 +3294,9 @@ impl CodeGen {
         self.drop_expr_temps(value)
     }
 
-    // Leave the address of map value `base[idx]` in %rax; trap if the key is absent.
-    fun gen_map_value_addr(var self, base: Expr, idx: Expr) {
+    // Leave the address of map value `base[idx]` in %rax; trap if the key is
+    // absent, at the position of index expression `e`.
+    fun gen_map_value_addr(var self, e: Expr, base: Expr, idx: Expr) {
         let mt = self.place_type(base)
         self.eval(base)
         self.emit("pushq %rax")
@@ -2772,12 +3307,12 @@ impl CodeGen {
         self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
         self.emit("call __map_lookup")
         self.emit("testq %rax, %rax")
-        self.emit("jz __trap_key")
+        self.trap("jz", "__trap_key", e.line, e.col)
         self.emit("addq $16, %rax")
     }
 
-    fun gen_map_get(var self, base: Expr, idx: Expr) {
-        self.gen_map_value_addr(base, idx)
+    fun gen_map_get(var self, e: Expr, base: Expr, idx: Expr) {
+        self.gen_map_value_addr(e, base, idx)
         self.emit("movq (%rax), %rax")
     }
 
@@ -2944,7 +3479,7 @@ impl CodeGen {
 
     // `append(sb, s)`, or `append(sb, s, start, end)` for the bytes
     // s[start..end], which traps unless 0 <= start <= end <= len(s) (MYLA-85).
-    fun gen_sb_append(var self, args: [Expr]) {
+    fun gen_sb_append(var self, e: Expr, args: [Expr]) {
         self.mut_addr_of_list_holder(args[0])   // &holder -> rax
         self.emit("pushq %rax")
         self.cow_unique(Type.TSB)          // unique cell, written back to holder
@@ -2958,12 +3493,17 @@ impl CodeGen {
             self.emit("popq %rdx")
             self.emit("movslq %edx, %rdx")     // start
             self.emit("popq %rsi")             // str
+            let bad = self.label()
+            let good = self.label()
             self.emit("testq %rdx, %rdx")
-            self.emit("jl __trap_index")
+            self.emit(format("jl {}", bad))
             self.emit("cmpq %rdx, %rcx")
-            self.emit("jl __trap_index")
+            self.emit(format("jl {}", bad))
             self.emit("cmpq (%rsi), %rcx")
-            self.emit("jg __trap_index")
+            self.emit(format("jle {}", good))
+            self.emit(format("{}:", bad))
+            self.trap("jmp", "__trap_index", e.line, e.col)
+            self.emit(format("{}:", good))
             self.emit("leaq 8(%rsi,%rdx), %rsi")   // &bytes[start]
             self.emit("subq %rdx, %rcx")
             self.emit("movq %rcx, %rdx")       // count
@@ -3072,7 +3612,9 @@ impl CodeGen {
             let arm_fail = self.label()
             self.match_pat(arm.pattern, root, sst, arm.pattern.id, arm_fail)
             // bindings borrow from the scrutinee copy: no owners of their own
-            push(self.scopes, self.arm_scope(arm, sst))
+            push(self.scopes, [])
+            self.dbg_push_scope()
+            for b in self.arm_scope(arm, sst) { self.bind(b.name, b.kind, b.offset, b.ty) }
             push(self.drop_scopes, [])
             match arm.guard {
                 Some(g) => {
@@ -3086,9 +3628,10 @@ impl CodeGen {
             self.emit(format("jmp {}", end))
             self.drop_scopes = drop_last(self.drop_scopes)
             self.scopes = drop_last(self.scopes)
+            self.dbg_pop_scope()
             self.emit(format("{}:", arm_fail))
         }
-        self.emit("jmp __trap_match")
+        self.trap("jmp", "__trap_match", e.line, e.col)
         self.emit(format("{}:", end))
         self.drop_scopes = drop_last(self.drop_scopes)
         if owns_copy { self.drop_value("rbp", root, sst) }
@@ -3376,14 +3919,14 @@ impl CodeGen {
         match callee.kind {
             ExprKind.Name(nm) => {
                 if nm == "print" { self.gen_print(args[0]) }
-                else if nm == "assert" || nm == "panic" || nm == "unreachable" { self.gen_intrinsic(nm, args) }
+                else if nm == "assert" || nm == "panic" || nm == "unreachable" { self.gen_intrinsic(e, nm, args) }
                 else if nm == "len" { self.gen_len(args[0]) }
                 else if nm == "push" { self.gen_push(e, args[0], args[1]) }
                 else if nm == "pop" { self.gen_pop(e, args[0]) }
                 else if nm == "chars" { self.gen_chars(args[0]) }
                 else if nm == "format" { self.gen_format(e, args) }
                 else if nm == "StringBuilder" { self.gen_sb_new(e) }
-                else if nm == "append" { self.gen_sb_append(args) }
+                else if nm == "append" { self.gen_sb_append(e, args) }
                 else if nm == "append_byte" { self.gen_sb_append_byte(args[0], args[1]) }
                 else if nm == "build" { self.gen_sb_build(args[0]) }
                 else if nm == "contains" { self.gen_map_contains(args[0], args[1]) }
@@ -3394,15 +3937,18 @@ impl CodeGen {
                 else if nm == "__args" { self.emit("call __args") }
                 else if nm == "__read_file" { self.gen_io_read_file(args) }
                 else if nm == "__io_errno" { self.emit("movq __io_errno_val(%rip), %rax") }
+                else if nm == "__getcwd" { self.emit("call __getcwd") }
                 else if nm == "__write_file" { self.gen_io_write_file(args) }
                 else if nm == "__read" { self.gen_io_read(args) }
                 else if nm == "__poll" { self.gen_io_poll(args) }
+                else if nm == "__list_dir" || nm == "__stat" { self.gen_io_path_call(nm, args) }
+                else if nm == "__mkdir" { self.gen_io_mkdir(args) }
                 else if nm == "__run" { self.gen_io_run(args) }
                 else if nm == "__run_stderr" { self.emit("movq __run_stderr_val(%rip), %rax") }
                 else if nm == "__run_exit_code" { self.emit("movslq __run_exit_val(%rip), %rax") }
                 else if nm == "__run_signal" { self.emit("movslq __run_signal_val(%rip), %rax") }
                 else if nm == "__run_errno" { self.emit("movslq __run_errno_val(%rip), %rax") }
-                else if self.has_func(nm) { self.gen_user_call(e, nm, args) }
+                else if self.has_func(nm) && !self.called_as_value(callee) { self.gen_user_call(e, nm, args) }
                 else { self.gen_indirect_call(e, callee, args) }
             },
             ExprKind.GetField(recv, field) => { self.gen_method_or_closure_call(e, callee, recv, field, args) },
@@ -3468,6 +4014,25 @@ impl CodeGen {
         self.emit("movq %rax, %rsi")
         self.emit("popq %rdi")
         self.emit("call __write_file")
+    }
+
+    // `__list_dir(path)` / `__stat(path)`: rdi = path str cell -> rax = the
+    // names str cell / the st_mode (errno in __io_errno_val; MYLA-88).
+    fun gen_io_path_call(var self, nm: str, args: [Expr]) {
+        self.eval(args[0])
+        self.emit("movq %rax, %rdi")
+        self.emit("call " + nm)
+    }
+
+    // `__mkdir(path, mode)`: rdi = path str cell, esi = mode -> void (errno in
+    // __io_errno_val; MYLA-88).
+    fun gen_io_mkdir(var self, args: [Expr]) {
+        self.eval(args[0])
+        self.emit("pushq %rax")
+        self.eval(args[1])
+        self.emit("movl %eax, %esi")
+        self.emit("popq %rdi")
+        self.emit("call __mkdir")
     }
 
     // `__run(program, argv)`: rdi = program str cell, rsi = argv [str] list cell
@@ -3818,7 +4383,9 @@ impl CodeGen {
         self.epilogue = format(".Lret_{}", job.lifted)
 
         self.cur_file = self.file_number(job.id)
+        self.cur_path = self.path_of(job.id)
         self.emit(format("myla_{}:", job.lifted))
+        self.dbg_begin_function(format("myla_{}", job.lifted))
         self.emit_loc(job.line, job.col)
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
@@ -3832,12 +4399,14 @@ impl CodeGen {
         var i = 0
         while i < len(job.params) {
             let offset = 16 + 8 * (param_base + 1 + i)
-            self.bind(job.params[i].name, "param", offset, ptypes[i])
+            self.bind_param(job.params[i].name, offset, ptypes[i])
             i = i + 1
         }
         let top = len(self.scopes) - 1
         for c in job.caps {
-            push(self.scopes[top], CgBinding { name: c.name, kind: "capture", offset: env_off, ty: c.ty, capoff: c.off })
+            let b = CgBinding { name: c.name, kind: "capture", offset: env_off, ty: c.ty, capoff: c.off }
+            push(self.scopes[top], b)
+            self.dbg_variable(b, true, false)
         }
 
         match job.body {
@@ -3875,8 +4444,9 @@ impl CodeGen {
         self.emit("leave")
         self.emit("ret")
         self.end_loc()
-        self.emit("")
         self.close_scope()
+        self.dbg_end_function()
+        self.emit("")
         var owned: [DropEntry] = []
         for c in job.caps { if self.owns_heap(c.ty) { push(owned, DropEntry { off: c.off, ty: c.ty }) } }
         if len(owned) > 0 { self.emit_env_drop(job.lifted, owned) }
@@ -4008,7 +4578,7 @@ impl CodeGen {
     fun free_else(self, et: ElseTail, bound: [str]) -> [str] {
         return match et {
             ElseTail.ElseBlock(b) => self.free_block(b, bound),
-            ElseTail.ElseIf(s) => self.free_block(Block { line: 0, col: 0, stmts: [s] }, bound),
+            ElseTail.ElseIf(s) => self.free_block(Block { line: 0, col: 0, sp: no_span(), stmts: [s] }, bound),
         }
     }
 
@@ -4074,17 +4644,20 @@ impl CodeGen {
         return out
     }
 
-    // `assert`/`panic`/`unreachable`: write a message to stderr and exit(1).
-    fun gen_intrinsic(var self, nm: str, args: [Expr]) {
+    // `assert`/`panic`/`unreachable`: write a message and the position of
+    // call `e` to stderr and exit(1).
+    fun gen_intrinsic(var self, e: Expr, nm: str, args: [Expr]) {
         if nm == "panic" {
             self.eval(args[0])
             self.emit("movq %rax, %rdi")
+            self.load_position(e.line, e.col, "rsi")
             self.emit("call __panic")
             return
         }
         if nm == "unreachable" {
             let lab = self.string_label("reached unreachable code")
             self.emit(format("leaq {}(%rip), %rdi", lab))
+            self.load_position(e.line, e.col, "rsi")
             self.emit("call __panic")
             return
         }
@@ -4099,6 +4672,7 @@ impl CodeGen {
             let lab = self.string_label("assertion failed")
             self.emit(format("leaq {}(%rip), %rdi", lab))
         }
+        self.load_position(e.line, e.col, "rsi")
         self.emit("call __panic")
         self.emit(format("{}:", ok))
     }
@@ -4231,9 +4805,11 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("")
         // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
-        // (MYLA-17); the message is the interpreter's, without the values.
+        // (MYLA-17); the message is the interpreter's, without the values. The
+        // caller passes the position record in %rsi; out of memory has none.
         for label in trap_labels() {
             self.raw(format("{}:", label))
+            if label == "__trap_oom" { self.raw("\txorl %esi, %esi") }
             self.raw(format("\tleaq .Lmsg{}(%rip), %rdi", label))
             self.raw("\tjmp __panic")
         }
@@ -4259,11 +4835,31 @@ impl CodeGen {
         self.raw(".Lwa_done:")
         self.raw("\tret")
         self.raw("")
+        // __panic: %rdi -> the message, %rsi -> the position record or 0;
+        // `runtime error: <message>`, then `  --> file:line:col` (MYLA-65).
         self.raw("__panic:")
-        self.raw("\tmovq (%rdi), %rdx")
-        self.raw("\tleaq 8(%rdi), %rsi")
-        self.raw("\tmovq $2, %rdi")
-        self.raw("\tcall __write_all")
+        self.raw("\tpushq %rsi")
+        self.raw("\tpushq %rdi")
+        self.raw("\tleaq .Lmsg_rterr(%rip), %rdi")
+        self.raw("\tcall __write_err")
+        self.raw("\tpopq %rdi")
+        self.raw("\tcall __write_err")
+        self.raw("\tpopq %rsi")
+        self.raw("\ttestq %rsi, %rsi")
+        self.raw("\tjz .Lpanic_nl")
+        self.raw("\tpushq %rsi")
+        self.raw("\tleaq .Lmsg_at(%rip), %rdi")
+        self.raw("\tcall __write_err")
+        self.raw("\tmovq (%rsp), %rsi")
+        self.raw("\tmovq (%rsi), %rdi")
+        self.raw("\tcall __write_err")
+        self.raw("\tmovq (%rsp), %rsi")
+        self.raw("\tmovl 8(%rsi), %edi")
+        self.raw("\tcall __write_err_num")
+        self.raw("\tpopq %rsi")
+        self.raw("\tmovl 12(%rsi), %edi")
+        self.raw("\tcall __write_err_num")
+        self.raw(".Lpanic_nl:")
         self.raw("\tsubq $16, %rsp")
         self.raw("\tmovb $10, (%rsp)")
         self.raw("\tmovq $2, %rdi")
@@ -4274,6 +4870,37 @@ impl CodeGen {
         self.raw("\tmovq $60, %rax")
         self.raw("\tmovq $1, %rdi")
         self.raw("\tsyscall")
+        self.raw("")
+        // __write_err: write the [len:8][bytes] at %rdi to stderr
+        self.raw("__write_err:")
+        self.raw("\tmovq (%rdi), %rdx")
+        self.raw("\tleaq 8(%rdi), %rsi")
+        self.raw("\tmovq $2, %rdi")
+        self.raw("\tjmp __write_all")
+        self.raw("")
+        // __write_err_num: write ':' and %rdi in decimal to stderr
+        self.raw("__write_err_num:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tsubq $32, %rsp")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tleaq -1(%rbp), %rsi")
+        self.raw("\tmovq $10, %rcx")
+        self.raw(".Lwen_loop:")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw("\tdivq %rcx")
+        self.raw("\taddb $48, %dl")
+        self.raw("\tmovb %dl, (%rsi)")
+        self.raw("\tdecq %rsi")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjnz .Lwen_loop")
+        self.raw("\tmovb $58, (%rsi)")
+        self.raw("\tmovq %rbp, %rdx")
+        self.raw("\tsubq %rsi, %rdx")
+        self.raw("\tmovq $2, %rdi")
+        self.raw("\tcall __write_all")
+        self.raw("\tleave")
+        self.raw("\tret")
         self.raw("")
         self.raw("__print_nl:")
         self.raw("\tsubq $16, %rsp")
@@ -4798,6 +5425,10 @@ impl CodeGen {
         self.emit_write_file_runtime()
         self.emit_read_runtime()
         self.emit_poll_runtime()
+        self.emit_list_dir_runtime()
+        self.emit_mkdir_runtime()
+        self.emit_stat_runtime()
+        self.emit_getcwd_runtime()
         self.emit_run_runtime()
     }
 
@@ -4834,6 +5465,263 @@ impl CodeGen {
         self.raw("\tmovq $-1, %rax")
         self.raw(".Lpl_done:")
         self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // Copy the str cell in %rdi onto the stack as a NUL-terminated path
+    // (16-byte aligned, below the current %rsp) and leave its address in
+    // `dst`. Clobbers %rax, %rcx and %rdx; the helper restores %rsp from %rbp
+    // when it returns. Used by the directory helpers (MYLA-88).
+    fun emit_c_path(var self, label: str, dst: str) {
+        self.raw("\tmovq (%rdi), %rcx")
+        self.raw("\tleaq 16(%rcx), %rax")
+        self.raw("\tandq $-16, %rax")
+        self.raw("\tsubq %rax, %rsp")
+        self.raw("\tmovq %rsp, " + dst)
+        self.raw("\txorq %rax, %rax")
+        self.raw(label + ":")
+        self.raw("\tcmpq %rcx, %rax")
+        self.raw("\tjae " + label + "_end")
+        self.raw("\tmovb 8(%rdi,%rax), %dl")
+        self.raw("\tmovb %dl, (" + dst + ",%rax)")
+        self.raw("\tincq %rax")
+        self.raw("\tjmp " + label)
+        self.raw(label + "_end:")
+        self.raw("\tmovb $0, (" + dst + ",%rcx)")
+    }
+
+    // `__list_dir`: rdi = path str cell -> rax = a fresh str cell (rc=1)
+    // holding the name of every entry of the directory, each followed by a NUL
+    // byte, in getdents64(217) order ("." and ".." included). Opens the path
+    // with O_RDONLY|O_DIRECTORY|O_CLOEXEC, reads 4 KB of records at a time
+    // into a stack buffer and appends their names to the result, which is
+    // reallocated at twice the size when full; then closes it. On an error the
+    // result is empty and `__io_errno_val` holds the errno (0 otherwise).
+    // Backs `std.fs.list_dir` (MYLA-88).
+    fun emit_list_dir_runtime(var self) {
+        self.raw("__list_dir:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.emit_c_path(".Lld_path", "%r12")
+        self.raw("\tmovq $2, %rax")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq $0x90000, %rsi")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lld_open_err")
+        self.raw("\tmovq %rax, %rbx")
+        self.raw("\tmovq $4096, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tmovq $0, (%r13)")
+        self.raw("\tsubq $4096, %rsp")
+        self.raw("\tmovq %rsp, %r12")
+        self.raw(".Lld_fill:")
+        self.raw("\tmovq $217, %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tmovq %r12, %rsi")
+        self.raw("\tmovq $4096, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\tcmpq $-4, %rax")
+        self.raw("\tje .Lld_fill")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lld_read_err")
+        self.raw("\tjz .Lld_close")
+        self.raw("\tmovq %rax, %r14")
+        self.raw("\txorq %r15, %r15")
+        self.raw(".Lld_entry:")
+        self.raw("\tcmpq %r14, %r15")
+        self.raw("\tjae .Lld_fill")
+        self.raw("\tleaq 19(%r12,%r15), %rsi")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw(".Lld_nlen:")
+        self.raw("\tcmpb $0, (%rsi,%rdx)")
+        self.raw("\tje .Lld_room")
+        self.raw("\tincq %rdx")
+        self.raw("\tjmp .Lld_nlen")
+        self.raw(".Lld_room:")
+        self.raw("\tmovq (%r13), %rcx")
+        self.raw("\tleaq 1(%rcx,%rdx), %rcx")
+        self.raw("\tmovq -16(%r13), %rax")
+        self.raw("\tsubq $8, %rax")
+        self.raw("\tcmpq %rax, %rcx")
+        self.raw("\tjbe .Lld_copy")
+        self.raw("\tpushq %rsi")
+        self.raw("\tpushq %rdx")
+        self.raw("\tleaq 8(%rcx,%rcx), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq (%r13), %rcx")
+        self.raw("\tmovq %rcx, (%rax)")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw(".Lld_move:")
+        self.raw("\tcmpq %rcx, %rdx")
+        self.raw("\tjae .Lld_moved")
+        self.raw("\tmovb 8(%r13,%rdx), %r8b")
+        self.raw("\tmovb %r8b, 8(%rax,%rdx)")
+        self.raw("\tincq %rdx")
+        self.raw("\tjmp .Lld_move")
+        self.raw(".Lld_moved:")
+        self.raw("\tmovq %r13, %rdi")
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tcall __free")
+        self.raw("\tpopq %rdx")
+        self.raw("\tpopq %rsi")
+        self.raw(".Lld_copy:")
+        self.raw("\tmovq (%r13), %rcx")
+        self.raw("\tleaq 8(%r13,%rcx), %rdi")
+        self.raw("\txorq %rax, %rax")
+        self.raw(".Lld_name:")
+        self.raw("\tcmpq %rdx, %rax")
+        self.raw("\tjae .Lld_named")
+        self.raw("\tmovb (%rsi,%rax), %r8b")
+        self.raw("\tmovb %r8b, (%rdi,%rax)")
+        self.raw("\tincq %rax")
+        self.raw("\tjmp .Lld_name")
+        self.raw(".Lld_named:")
+        self.raw("\tmovb $0, (%rdi,%rdx)")
+        self.raw("\tleaq 1(%rcx,%rdx), %rcx")
+        self.raw("\tmovq %rcx, (%r13)")
+        self.raw("\tmovzwq 16(%r12,%r15), %rax")
+        self.raw("\taddq %rax, %r15")
+        self.raw("\tjmp .Lld_entry")
+        self.raw(".Lld_read_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw("\tmovq $0, (%r13)")
+        self.raw(".Lld_close:")
+        self.raw("\tmovq $3, %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\tmovq %r13, %rax")
+        self.raw("\tjmp .Lld_ret")
+        self.raw(".Lld_open_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw("\tmovq $8, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq $0, (%rax)")
+        self.raw(".Lld_ret:")
+        self.raw("\tleaq -40(%rbp), %rsp")
+        self.raw("\tpopq %r15")
+        self.raw("\tpopq %r14")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // `__mkdir`: rdi = path str cell, esi = mode -> void; mkdir(83) sets
+    // `__io_errno_val` to 0 or the errno. Backs `std.fs.make_dir` (MYLA-88).
+    fun emit_mkdir_runtime(var self) {
+        self.raw("__mkdir:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw("\tmovl %esi, %ebx")
+        self.emit_c_path(".Lmd_path", "%r12")
+        self.raw("\tmovq $83, %rax")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq %rbx, %rsi")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjns .Lmd_ret")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(".Lmd_ret:")
+        self.raw("\tleaq -16(%rbp), %rsp")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // `__getcwd`: -> rax = a fresh str cell (rc=1) holding the working
+    // directory that getcwd(79) writes into a 4 KB stack buffer, without its
+    // NUL. On an error (ENOENT for a removed directory, ERANGE for one longer
+    // than the buffer) the result is empty and `__io_errno_val` holds the
+    // errno (0 otherwise). Backs `std.fs.current_dir` (MYLA-98).
+    fun emit_getcwd_runtime(var self) {
+        self.raw("__getcwd:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw("\tsubq $4096, %rsp")
+        self.raw("\tmovq %rsp, %r12")
+        self.raw("\tmovq $79, %rax")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq $4096, %rsi")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lgc_err")
+        self.raw("\tleaq -1(%rax), %r13")
+        self.raw("\tleaq 8(%r13), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %r13, (%rax)")
+        self.raw("\txorq %rcx, %rcx")
+        self.raw(".Lgc_copy:")
+        self.raw("\tcmpq %r13, %rcx")
+        self.raw("\tjae .Lgc_ret")
+        self.raw("\tmovb (%r12,%rcx), %dl")
+        self.raw("\tmovb %dl, 8(%rax,%rcx)")
+        self.raw("\tincq %rcx")
+        self.raw("\tjmp .Lgc_copy")
+        self.raw(".Lgc_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw("\tmovq $8, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq $0, (%rax)")
+        self.raw(".Lgc_ret:")
+        self.raw("\tleaq -16(%rbp), %rsp")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // `__stat`: rdi = path str cell -> rax = the `st_mode` that stat(4) gives
+    // (symbolic links followed), or -1 with the errno in `__io_errno_val` (0
+    // otherwise). Backs `std.fs.exists`, `is_dir` and `is_file` (MYLA-88).
+    fun emit_stat_runtime(var self) {
+        self.raw("__stat:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %r12")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.emit_c_path(".Lst_path", "%r12")
+        self.raw("\tsubq $144, %rsp")
+        self.raw("\tmovq $4, %rax")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq %rsp, %rsi")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lst_err")
+        self.raw("\tmovl 24(%rsp), %eax")
+        self.raw("\tjmp .Lst_ret")
+        self.raw(".Lst_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw("\tmovq $-1, %rax")
+        self.raw(".Lst_ret:")
+        self.raw("\tleaq -8(%rbp), %rsp")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbp")
         self.raw("\tret")
         self.raw("")
     }
@@ -6873,9 +7761,9 @@ fun args_have_hole(args: [Expr]) -> bool {
 fun bind_elem_names(be: BindElem) -> [str] {
     var out: [str] = []
     match be {
-        BindElem.BName(n, l, c) => { push(out, n) },
+        BindElem.BName(n, l, c, sp) => { push(out, n) },
         BindElem.BWild => {},
-        BindElem.BTuple(es, l, c) => { for e in es { for n in bind_elem_names(e) { push(out, n) } } },
+        BindElem.BTuple(es, l, c, sp) => { for e in es { for n in bind_elem_names(e) { push(out, n) } } },
     }
     return out
 }
@@ -6919,6 +7807,7 @@ fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__write" || nm == "__exit" || nm == "__args" || nm == "__read_file" || nm == "__io_errno" { return true }
     if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" || nm == "__poll" { return true }
     if nm == "__run_signal" || nm == "__run_errno" { return true }
+    if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" || nm == "__getcwd" { return true }
     return false
 }
 
@@ -7132,13 +8021,48 @@ fun is_tfloat32(t: Type) -> bool {
 }
 
 // The runtime-error entries and their messages (MYLA-17), as in the Python
-// backend (`_TRAPS`).
+// backend (`_TRAPS`). `__panic` prints them after `runtime error: `.
 fun trap_labels() -> [str] {
-    return ["__trap", "__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom"]
+    return ["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom"]
 }
 
 fun trap_messages() -> [str] {
-    return ["runtime error", "index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory"]
+    return ["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory"]
+}
+
+// The DW_ATE encoding of a scalar type (MYLA-66).
+#test(Type.TInt(32, true))[5]
+#test(Type.TInt(8, false))[7]
+#test(Type.TBool)[2]
+#test(Type.TChar)[16]
+#test(Type.TFloat(32))[4]
+fun ate_of(t: Type) -> int32 {
+    return match t {
+        Type.TInt(w, signed) => match signed { true => ATE_SIGNED, false => ATE_UNSIGNED },
+        Type.TBool => ATE_BOOLEAN,
+        Type.TChar => ATE_UTF,
+        _ => ATE_FLOAT,
+    }
+}
+
+// Whether `name` is the compiler's own (`__…`), not shown to gdb.
+#test("__tmp")[true]
+#test("x")[false]
+#test("_")[false]
+fun is_internal_name(name: str) -> bool {
+    return len(name) >= 2 && name[0] == '_' && name[1] == '_'
+}
+
+// The conditional jump that skips a trap call, for each jump to a trap.
+#test("jae")["jb"]
+#test("jz")["jnz"]
+#test("jl")["jge"]
+#test("jg")["jle"]
+fun skip_trap(jump: str) -> str {
+    if jump == "jae" { return "jb" }
+    if jump == "jz" { return "jnz" }
+    if jump == "jl" { return "jge" }
+    return "jle"
 }
 
 // Whether `e` is a (possibly negated) scalar or string literal: it has no

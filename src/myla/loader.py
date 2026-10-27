@@ -32,17 +32,23 @@ from __future__ import annotations
 import dataclasses
 import os
 import re
+from collections.abc import Sequence
 
 from . import ast
 from .errors import ModuleError, in_file
 from .lexer import tokenize
 from .parser import parse
+from .tokens import KEYWORDS
 
 # Roots that always resolve to the bundled standard library, never the project
 # tree (D57: builtins are shadow-protected). The stdlib ships under
 # `<package>/std/` (see `default_stdlib_root`) and may not be shadowed by a
 # project directory.
 _RESERVED_ROOTS = frozenset({"std"})
+
+# A package's name: what imports start with (MYLA-92), the manifest's rule for
+# `package.name` (Architecture/Project-tool); keywords are excluded as well.
+_PACKAGE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*\Z")
 
 
 def default_stdlib_root() -> str:
@@ -66,6 +72,9 @@ class _Module:
         self.decls: list[ast.Decl] = [
             d for d in program.decls if not isinstance(d, ast.ImportDecl)
         ]
+        # the real path of each import's module, in `imports` order (filled
+        # while loading, so each import is resolved once)
+        self.targets: list[str] = []
         # simple exported name -> binding (filled by the linker)
         self.exports: dict[str, tuple] = {}
         # name visible inside this module -> binding
@@ -115,7 +124,7 @@ def _search_bases(importer_path: str, path: ast.ImportPath, project_root: str,
 
 
 def _descend(base: str, segments: list[str], dotted: str,
-             line: int, col: int) -> str | None:
+             path: ast.ImportPath) -> str | None:
     """Resolve `base/seg0/seg1/.../segN` to a module file, or None if absent.
 
     Intermediate segments must be packages (directories); the final segment is a
@@ -136,7 +145,7 @@ def _descend(base: str, segments: list[str], dotted: str,
         raise ModuleError(
             f"ambiguous import '{dotted}': both '{last}.my' and a package "
             f"'{last}/' exist in {cur}",
-            line, col,
+            at=path,
         )
     if file_exists:
         return os.path.realpath(file_cand)
@@ -147,44 +156,122 @@ def _descend(base: str, segments: list[str], dotted: str,
         raise ModuleError(
             f"package '{dotted}' has no package-root module "
             f"'{last}/{last}.my'",
-            line, col,
+            at=path,
         )
     return None
 
 
 def _resolve_module_path(importer_path: str, path: ast.ImportPath,
-                         project_root: str, stdlib_root: str | None) -> str:
+                         project_root: str, stdlib_root: str | None,
+                         packages: dict[str, str] | None = None) -> str:
     dotted = path.dotted()
-    line, col = path.line, path.column
-    if path.dots == 0 and path.segments[0] in _RESERVED_ROOTS:
+    first = path.segments[0]
+    if path.dots == 0 and first in _RESERVED_ROOTS:
         # Reserved roots resolve to the stdlib and may not be shadowed (D57 r4).
-        if os.path.exists(os.path.join(project_root, path.segments[0])):
+        if os.path.exists(os.path.join(project_root, first)):
             raise ModuleError(
-                f"'{path.segments[0]}' is a reserved standard-library root and "
+                f"'{first}' is a reserved standard-library root and "
                 f"cannot be shadowed by a project file or directory",
-                line, col,
+                at=path,
             )
+    elif path.dots == 0 and packages and first in packages:
+        # A package `geo` is looked up as if its directory were `geo/` in the
+        # project root, which therefore may not have one (MYLA-92, D73 (6)).
+        if os.path.exists(os.path.join(project_root, first)) or \
+                os.path.exists(os.path.join(project_root, first + ".my")):
+            raise ModuleError(
+                f"'{first}' is a dependency and cannot be shadowed by a project "
+                f"file or directory",
+                at=path,
+            )
+        return _resolve_in_package(first, packages[first], path)
     for base in _search_bases(importer_path, path, project_root, stdlib_root):
-        resolved = _descend(base, path.segments, dotted, line, col)
+        resolved = _descend(base, path.segments, dotted, path)
         if resolved is not None:
             return resolved
-    raise ModuleError(f"cannot resolve import '{dotted}'", line, col)
+    raise ModuleError(f"cannot resolve import '{dotted}'", at=path)
+
+
+def _resolve_in_package(name: str, pkg_dir: str, path: ast.ImportPath) -> str:
+    """`name.rest` in the package `name` whose directory is `pkg_dir`: `name`
+    alone is its root module `pkg_dir/name.my`, `name.b.c` is `pkg_dir/b/c.my`
+    (or the package root `pkg_dir/b/c/c.my`)."""
+    if len(path.segments) == 1:
+        root = os.path.join(pkg_dir, name + ".my")
+        if os.path.isfile(root):
+            return os.path.realpath(root)
+        raise ModuleError(
+            f"package '{name}' has no root module '{name}.my' in {pkg_dir}", at=path
+        )
+    resolved = _descend(pkg_dir, path.segments[1:], path.dotted(), path)
+    if resolved is None:
+        raise ModuleError(f"cannot resolve import '{path.dotted()}'", at=path)
+    return resolved
+
+
+def parse_package_flag(text: str) -> tuple[str, str]:
+    """`name=dir`, the value of a `--package` flag, as a (name, dir) pair for
+    `link`; the name ends at the first `=`. `link` checks the pair."""
+    name, eq, directory = text.partition("=")
+    if not eq:
+        raise ModuleError(f"malformed --package '{text}': expected name=dir")
+    return name, directory
+
+
+def _check_packages(packages: Sequence[tuple[str, str]]) -> dict[str, str]:
+    """The packages as `name -> real directory`, or the first error in the
+    list: a package named `std`, a name that can't start an import, a name
+    given twice, a missing directory."""
+    out: dict[str, str] = {}
+    for name, directory in packages:
+        if name in _RESERVED_ROOTS:
+            raise ModuleError(f"a package cannot be named '{name}': it is the standard library")
+        if not _PACKAGE_NAME.match(name) or name in KEYWORDS:
+            raise ModuleError(f"invalid package name '{name}'")
+        if name in out:
+            raise ModuleError(f"package '{name}' is given twice")
+        if directory == "":
+            raise ModuleError(f"package '{name}' has no directory")
+        if not os.path.isdir(directory):
+            raise ModuleError(f"package '{name}': '{directory}' is not a directory")
+        out[name] = os.path.realpath(directory)
+    return out
+
+
+def _under(parts: list[str], root: str) -> list[str] | None:
+    """The segments of a path (split into `parts`) below `root`, if below."""
+    rs = root.rstrip(os.sep).split(os.sep)
+    return parts[len(rs):] if parts[:len(rs)] == rs else None
 
 
 def _module_id(abspath: str, entry_path: str, project_root: str,
-               stdlib_root: str | None = None) -> str:
+               stdlib_root: str | None = None,
+               packages: Sequence[tuple[str, str]] = ()) -> str:
     """The id prefixing a module's global names, by the self-hosted loader's
     rules (selfhost/loader.my, `module_id`): "" for the entry, the path under
-    the stdlib root for the standard library, under the project root for the
-    project, and above it one `up` per level climbed (MYLA-81: `../x` and `x`
-    no longer collide, and both toolchains name things alike)."""
+    the stdlib root for the standard library, a package's name and the path
+    under its directory for a package (as if the directory were `<name>/` in
+    the project root, MYLA-92: no fetch paths in names), the path under the
+    project root for the project, and above it one `up` per level climbed
+    (MYLA-81: `../x` and `x` no longer collide, and both toolchains name things
+    alike)."""
     if abspath == entry_path:
         return ""
     parts = abspath.split(os.sep)
-    for root in ([stdlib_root] if stdlib_root else []) + [project_root]:
-        rs = root.rstrip(os.sep).split(os.sep)
-        if parts[:len(rs)] == rs:
-            return _module_tag(parts[len(rs):])
+    if stdlib_root:
+        rest = _under(parts, stdlib_root)
+        if rest is not None:
+            return _module_tag(rest)
+    best: list[str] | None = None        # the innermost package directory wins
+    for name, pkg_dir in packages:
+        rest = _under(parts, pkg_dir)
+        if rest is not None and (best is None or len(rest) + 1 < len(best)):
+            best = [name, *rest]
+    if best is not None:
+        return _module_tag(best)
+    rest = _under(parts, project_root)
+    if rest is not None:
+        return _module_tag(rest)
     rs = project_root.rstrip(os.sep).split(os.sep)
     common = 0
     while common < min(len(parts), len(rs)) and parts[common] == rs[common]:
@@ -380,7 +467,7 @@ class _Renamer:
                 raise ModuleError(
                     f"module '{e.ident}' cannot be used as a value — access a "
                     f"member with '{e.ident}.<name>'",
-                    e.line, e.column,
+                    at=e,
                 )
             return e
         if isinstance(e, ast.Unary):
@@ -449,9 +536,11 @@ class _Renamer:
         """If `e` is a `module.member[.…]` chain, fold the module prefix into the
         qualified target and return the rewritten node; else None."""
         names: list[str] = []
+        accesses: list[ast.FieldAccess] = []
         cur = e
         while isinstance(cur, ast.FieldAccess):
             names.append(cur.field_name)
+            accesses.append(cur)
             cur = cur.target
         if not isinstance(cur, ast.Name):
             return None
@@ -474,12 +563,16 @@ class _Renamer:
             raise ModuleError(
                 f"module '{'.'.join([root.ident] + seg_names[:match_k])}' cannot "
                 f"be used as a value — access a member with '.<name>'",
-                root.line, root.column,
+                at=root,
             )
         qualified, remaining = self._resolve_member_chain(mid, rest, root)
+        # each new node spans the access it replaces (MYLA-65)
+        replaced = list(reversed(accesses))[len(seg_names) - len(remaining) - 1:]
         node = ast.Name(qualified).at(root.line, root.column)
-        for seg in remaining:
+        node.span = replaced[0].span
+        for seg, access in zip(remaining, replaced[1:]):
             node = ast.FieldAccess(node, seg).at(root.line, root.column)
+            node.span = access.span
         return node
 
     def _resolve_member_chain(self, mid: str, members: list[str], pos):
@@ -495,7 +588,7 @@ class _Renamer:
                 raise ModuleError(
                     f"module does not export '{name}' (declarations are private "
                     f"unless marked 'pub')",
-                    pos.line, pos.column,
+                    at=pos,
                 )
             kind, value = exports[name]
             i += 1
@@ -504,7 +597,7 @@ class _Renamer:
             cur_mid = value  # a re-exported sub-module; keep walking
         raise ModuleError(
             "a module reference must end in a member access",
-            pos.line, pos.column,
+            at=pos,
         )
 
     def _match(self, m: ast.Match) -> None:
@@ -589,6 +682,8 @@ def link(
     *,
     stdlib_root: str | None = None,
     source_overrides: dict[str, str] | None = None,
+    packages: Sequence[tuple[str, str]] | None = None,
+    project_root: str | None = None,
 ) -> ast.Program:
     """Resolve the import graph rooted at `entry_path` and return one flat,
     name-qualified `ast.Program` ready for `types.check`.
@@ -597,9 +692,19 @@ def link(
     to be loaded matches one of those paths, its text is used instead of reading
     from disk. This lets tools (e.g. the language server) type-check unsaved
     editor buffers without touching the filesystem. Keys are normalized with
-    `os.path.realpath`, matching how modules are keyed internally."""
+    `os.path.realpath`, matching how modules are keyed internally.
+
+    `packages` lists the build's dependencies as (name, directory) pairs, the
+    `--package name=dir` flags (MYLA-92): an import `name.b.c` resolves in the
+    directory as if it were `name/` in the project root. `project_root` is the
+    base of imports without dots; it defaults to the entry file's directory
+    (D57), and the project tool sets it to `src/` for nested files."""
     entry_abs = os.path.realpath(entry_path)
-    project_root = os.path.dirname(entry_abs)
+    if project_root is None:
+        project_root = os.path.dirname(entry_abs)
+    else:
+        project_root = os.path.realpath(project_root)
+    package_dirs = _check_packages(packages or ())
     overrides = {
         os.path.realpath(p): text for p, text in (source_overrides or {}).items()
     }
@@ -620,22 +725,24 @@ def link(
                 raise ModuleError(f"cannot read module '{abspath}': {exc}")
         with in_file(abspath):
             program = parse(tokenize(source))
-        mid = _module_id(abspath, entry_abs, project_root, stdlib_root)
+        mid = _module_id(abspath, entry_abs, project_root, stdlib_root,
+                         list(package_dirs.items()))
         m = _Module(mid, abspath, program, source)
         modules[abspath] = m
         order.append(m)
         for imp in m.imports:
             with in_file(abspath):
                 target = _resolve_module_path(
-                    abspath, imp.path, project_root, stdlib_root
+                    abspath, imp.path, project_root, stdlib_root, package_dirs
                 )
+            m.targets.append(target)
             load(target)
         return m
 
     load(entry_abs)
     _check_id_collisions(order)
-    _build_exports(modules, order, project_root, stdlib_root)
-    _build_bindings(modules, order, project_root, stdlib_root)
+    _build_exports(modules, order)
+    _build_bindings(modules, order)
 
     module_exports = {m.id: m.exports for m in order}
     for m in order:
@@ -687,16 +794,7 @@ def _check_id_collisions(order: list[_Module]) -> None:
         seen[m.id] = m.path
 
 
-def _target_module(importer: _Module, imp: ast.ImportDecl,
-                   modules: dict[str, _Module], project_root: str,
-                   stdlib_root: str | None) -> _Module:
-    target_path = _resolve_module_path(
-        importer.path, imp.path, project_root, stdlib_root
-    )
-    return modules[target_path]
-
-
-def _build_exports(modules, order, project_root, stdlib_root) -> None:
+def _build_exports(modules, order) -> None:
     # Base exports: a module's own `pub` declarations.
     for m in order:
         for d in _named_decls(m):
@@ -708,10 +806,10 @@ def _build_exports(modules, order, project_root, stdlib_root) -> None:
     while changed:
         changed = False
         for m in order:
-            for imp in m.imports:
+            for imp, target in zip(m.imports, m.targets):
                 if not imp.is_pub:
                     continue
-                src = _target_module(m, imp, modules, project_root, stdlib_root)
+                src = modules[target]
                 if imp.items is None:
                     # pub import P as x -> re-export the module under `x`.
                     name = imp.alias  # parser guarantees `as` on a pub import
@@ -730,14 +828,14 @@ def _build_exports(modules, order, project_root, stdlib_root) -> None:
                         changed = True
 
 
-def _build_bindings(modules, order, project_root, stdlib_root) -> None:
+def _build_bindings(modules, order) -> None:
     for m in order:
         bindings: dict[str, tuple] = {}
         for d in _named_decls(m):
             bindings[d.name] = ("decl", m.qualify(d.name))
         with in_file(m.path):
-            for imp in m.imports:
-                _apply_import(m, imp, bindings, modules, project_root, stdlib_root)
+            for imp, target in zip(m.imports, m.targets):
+                _apply_import(imp, bindings, modules[target])
         m.bindings = bindings
 
 
@@ -746,13 +844,12 @@ def _bind(bindings: dict, name: str, binding: tuple, imp: ast.ImportDecl) -> Non
         raise ModuleError(
             f"import of '{name}' collides with an existing name in this module "
             f"— rename with 'as'",
-            imp.line, imp.column,
+            at=imp,
         )
     bindings[name] = binding
 
 
-def _apply_import(m, imp, bindings, modules, project_root, stdlib_root) -> None:
-    src = _target_module(m, imp, modules, project_root, stdlib_root)
+def _apply_import(imp, bindings, src: _Module) -> None:
     if imp.items is None:
         # whole-module `import a.b.c [as x]`: bind the module for member access.
         key = imp.alias if imp.alias is not None else imp.path.dotted().lstrip(".")
@@ -764,6 +861,6 @@ def _apply_import(m, imp, bindings, modules, project_root, stdlib_root) -> None:
             raise ModuleError(
                 f"module '{imp.path.dotted()}' does not export '{item.name}' "
                 f"(declarations are private unless marked 'pub')",
-                imp.line, imp.column,
+                at=imp,
             )
         _bind(bindings, bound, src.exports[item.name], imp)

@@ -1,0 +1,72 @@
+// project_main.my -- a driver for the project model (MYLA-93), for
+// tests/burn/test_project.py:
+//
+//   project_main [dir]          finds myla.toml from `dir` (default: the
+//                               working directory) upwards and prints the
+//                               project (describe_project), or the error as
+//                               the CLI prints it, with exit status 1
+//   project_main --fetch [dir]  the same, but lists Git dependencies without
+//                               a current lock entry instead of failing (as
+//                               `myla fetch` sees the build), then the lock
+//                               file it would write
+//   project_main --lock file    reads a lock file and prints it as
+//                               render_lock writes it
+
+from std.io import write, eprintln
+from std.process import args, exit
+from .project import find_manifest, load_project, load_lock, project_lock, resolve_project, render_lock, render_project_error
+from .project import describe_project, lock_of, Lock, ProjectError
+
+fun fail(e: ProjectError) {
+    eprintln(render_project_error(e))
+    exit(1)
+}
+
+fun main() {
+    let argv = args()
+    var mode = ""
+    var rest: [str] = []
+    var i = 1
+    while i < len(argv) {
+        if argv[i] == "--fetch" || argv[i] == "--lock" { mode = argv[i] } else { push(rest, argv[i]) }
+        i = i + 1
+    }
+    if mode == "--lock" {
+        match load_lock(rest[0]) {
+            Ok(lock) => { write(1, render_lock(lock)) },
+            Err(e) => { fail(e) },
+        }
+        return
+    }
+    var start = "."
+    if len(rest) > 0 { start = rest[0] }
+    let manifest = match find_manifest(start) {
+        Some(m) => m
+        None => {
+            eprintln("myla: no myla.toml in this directory or above it")
+            exit(1)
+            ""
+        }
+    }
+    if mode == "--fetch" {
+        let lock = match project_lock(manifest) {
+            Ok(l) => l
+            Err(e) => {
+                fail(e)
+                Lock { entries: [] }
+            }
+        }
+        match resolve_project(manifest, lock, true) {
+            Ok(p) => {
+                write(1, describe_project(p))
+                write(1, "-- myla.lock\n" + render_lock(lock_of(p)))
+            },
+            Err(e) => { fail(e) },
+        }
+        return
+    }
+    match load_project(manifest) {
+        Ok(p) => { write(1, describe_project(p)) },
+        Err(e) => { fail(e) },
+    }
+}

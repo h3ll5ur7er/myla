@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import unittest
 
-from myla.canon import canonical_ast
+from myla.canon import canonical_ast, canonical_error
 from myla.errors import MylaError
 from myla.interpreter import Interpreter
 from myla.lexer import tokenize
@@ -157,11 +157,12 @@ TRUNCATED = ["closures.my", "enums.my", "interpolation.my", "traits.my", "generi
 
 def _canonical(source: str) -> str:
     """Canonical AST dump from the Python parser, or its error as
-    `err <line> <col> <kind>: <message>` (what `parse_main` prints)."""
+    `err <line> <col> <span> <kind>: <message>` (what `parse_main` prints):
+    the range a diagnostic underlines must agree too (MYLA-65)."""
     try:
         return canonical_ast(parse(tokenize(source)))
     except MylaError as err:
-        return f"err {err.line} {err.column} {err.kind.split()[0]}: {err.message}"
+        return canonical_error(err)
 
 
 def _oracle(path: str) -> str:

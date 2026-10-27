@@ -86,14 +86,16 @@ def interpret_full(checker, argv=None) -> tuple[str, str, int]:
     return out.getvalue(), err.getvalue(), code
 
 
-def build_and_run_full(checker, args=None, argv0="prog") -> tuple[str, str, int]:
+def build_and_run_full(checker, args=None, argv0="prog",
+                       entry_path=None) -> tuple[str, str, int]:
     """Compile `checker` to a native binary and run it, returning
     (stdout, stderr, exit). `args` are extra program arguments; `argv0` is the
     program name the binary sees as `argv[0]` (so the native argv can be made to
-    match the interpreter's for parity)."""
+    match the interpreter's for parity); `entry_path` names the entry file in
+    runtime-error positions, as `myla build <entry_path>` would."""
     with tempfile.TemporaryDirectory() as tmp:
         binary = os.path.join(tmp, "prog")
-        build(checker, binary)
+        build(checker, binary, entry_path=entry_path)
         program_argv = [argv0, *(args or [])]
         proc = subprocess.run(program_argv, executable=binary,
                               capture_output=True, text=True)

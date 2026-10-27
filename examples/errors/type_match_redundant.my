@@ -1,4 +1,5 @@
 //~ type error: unreachable match arm
+//~ span: A => 1
 enum C { A, B }
 fun f(c: C) -> int {
     return match c {

@@ -1,4 +1,5 @@
 //~ type error: unknown type 'Nope'
+//~ span: Nope
 fun f(x: Nope) {
 }
 fun main() {

@@ -1,0 +1,189 @@
+// dwarf.my -- the fixed parts of the DWARF debug information `-g` emits:
+// LEB128 numbers, the abbreviation table, strings and references (MYLA-66).
+//
+// Mirrors src/myla/compiler/dwarf.py; the code generator (codegen.my) builds
+// the compile unit's DIEs with these. See docs/Development/Debugging.md.
+
+// Abbreviation codes (the table is `abbrev_section`).
+pub const AB_CU: int32 = 1
+pub const AB_BASE: int32 = 2
+pub const AB_SUBPROGRAM: int32 = 3
+pub const AB_PARAM: int32 = 4
+pub const AB_VAR: int32 = 5
+pub const AB_BLOCK: int32 = 6
+pub const AB_PTR: int32 = 7
+pub const AB_VOIDPTR: int32 = 8
+pub const AB_STRUCT: int32 = 9
+pub const AB_MEMBER: int32 = 10
+pub const AB_ARRAY: int32 = 11
+pub const AB_SUBRANGE: int32 = 12
+pub const AB_VARIANT_PART: int32 = 13
+pub const AB_VARIANT: int32 = 14
+pub const AB_TAG: int32 = 15
+
+// DWARF expression operators.
+pub const OP_FBREG: int32 = 0x91
+pub const OP_DEREF: int32 = 0x06
+pub const OP_PLUS_UCONST: int32 = 0x23
+pub const OP_STACK_VALUE: int32 = 0x9f
+pub const OP_PIECE: int32 = 0x93
+pub const OP_PUSH_OBJECT_ADDRESS: int32 = 0x97
+pub const OP_LIT0: int32 = 0x30
+pub const OP_MINUS: int32 = 0x1c
+pub const OP_REG6: int32 = 0x56
+pub const OP_GNU_DEREF_TYPE: int32 = 0xf6
+pub const OP_GNU_CONVERT: int32 = 0xf7
+
+// DW_ATE base type encodings.
+pub const ATE_BOOLEAN: int32 = 0x02
+pub const ATE_FLOAT: int32 = 0x04
+pub const ATE_SIGNED: int32 = 0x05
+pub const ATE_UNSIGNED: int32 = 0x07
+pub const ATE_UTF: int32 = 0x10
+
+// The compile unit's language: Rust, whose printing rules are Myla's.
+pub const LANG_RUST: int32 = 0x1c
+
+// `n` (not negative) as unsigned LEB128 bytes.
+#test(0)[[0]]
+#test(127)[[127]]
+#test(128)[[128, 1]]
+#test(624485)[[229, 142, 38]]
+pub fun uleb(n: int32) -> [int32] {
+    var out: [int32] = []
+    var v = n
+    while true {
+        let b = v & 0x7f
+        v = v >> 7
+        if v == 0 {
+            push(out, b)
+            return out
+        }
+        push(out, b | 0x80)
+    }
+    unreachable()
+}
+
+// `n` as signed LEB128 bytes.
+#test(0)[[0]]
+#test(-8)[[120]]
+#test(63)[[63]]
+#test(64)[[192, 0]]
+#test(-128)[[128, 127]]
+#test(-200)[[184, 126]]
+pub fun sleb(n: int32) -> [int32] {
+    var out: [int32] = []
+    var v = n
+    while true {
+        let b = v & 0x7f
+        v = v >> 7
+        if (v == 0 && (b & 0x40) == 0) || (v == -1 && (b & 0x40) != 0) {
+            push(out, b)
+            return out
+        }
+        push(out, b | 0x80)
+    }
+    unreachable()
+}
+
+// `.byte` of `ops`, comma-separated.
+#test([145, 120])["\t.byte 145, 120"]
+pub fun bytes_line(ops: [int32]) -> str {
+    var sb = StringBuilder()
+    append(sb, "\t.byte ")
+    var i = 0
+    while i < len(ops) {
+        if i > 0 { append(sb, ", ") }
+        append(sb, format("{}", ops[i]))
+        i = i + 1
+    }
+    return build(sb)
+}
+
+// An exprloc of plain bytes: its length, then the bytes.
+#test([145, 120])[["\t.uleb128 2", "\t.byte 145, 120"]]
+pub fun exprloc(ops: [int32]) -> [str] {
+    return [format("\t.uleb128 {}", len(ops)), bytes_line(ops)]
+}
+
+// The location of a `str` (data `data` bytes into its cell) or builder
+// variable as a Rust `&str`: two pieces, `data_ptr` and `length`, computed
+// from the cell the address `addr` holds.
+#test([145, 120], 8)[[145, 120, 6, 35, 8, 159, 147, 8, 145, 120, 6, 6, 159, 147, 8]]
+pub fun str_pieces(addr: [int32], data: int32) -> [int32] {
+    var out: [int32] = []
+    for x in addr { push(out, x) }
+    for x in [OP_DEREF, OP_PLUS_UCONST, data, OP_STACK_VALUE, OP_PIECE, 8] { push(out, x) }
+    for x in addr { push(out, x) }
+    for x in [OP_DEREF, OP_DEREF, OP_STACK_VALUE, OP_PIECE, 8] { push(out, x) }
+    return out
+}
+
+// A DW_FORM_string attribute.
+#test("a\"b")["\t.string \"a\\\"b\""]
+pub fun dw_string(s: str) -> str {
+    var sb = StringBuilder()
+    append(sb, "\t.string \"")
+    var i = 0
+    while i < len(s) {
+        let c = s[i]
+        if c == '\\' || c == '"' { append_byte(sb, '\\') }
+        append_byte(sb, c)
+        i = i + 1
+    }
+    append(sb, "\"")
+    return build(sb)
+}
+
+// A DW_FORM_ref4 to the DIE at `label`.
+#test(".Ldty3")["\t.long .Ldty3 - .Ldebug_info0"]
+pub fun dw_ref(label: str) -> str {
+    return format("\t.long {} - .Ldebug_info0", label)
+}
+
+// One abbreviation: its code, tag, whether it has children, and its
+// (attribute, form) pairs.
+fun abbrev(code: int32, tag: int32, children: bool, attrs: [int32]) -> [str] {
+    var line = StringBuilder()
+    append(line, "\t.uleb128 ")
+    for a in attrs { append(line, format("{}, ", a)) }
+    append(line, "0, 0")
+    var ch = 0
+    if children { ch = 1 }
+    return [format("\t.uleb128 {}, {}, {}", code, tag, ch), build(line)]
+}
+
+// The `.debug_abbrev` section: the same table as the Python backend's.
+#test()[33]
+pub fun abbrev_count() -> int32 {
+    return len(abbrev_section()) as int32
+}
+
+pub fun abbrev_section() -> [str] {
+    let str_ = 0x08
+    let data1 = 0x0b
+    let udata = 0x0f
+    let ref4 = 0x13
+    let exprl = 0x18
+    var out = ["\t.section .debug_abbrev,\"\",@progbits", ".Ldebug_abbrev0:"]
+    let tables = [
+        abbrev(AB_CU, 0x11, true, [0x25, str_, 0x13, 0x05, 0x03, str_, 0x1b, str_, 0x11, 0x01, 0x12, 0x07, 0x10, 0x17]),
+        abbrev(AB_BASE, 0x24, false, [0x03, str_, 0x3e, data1, 0x0b, data1]),
+        abbrev(AB_SUBPROGRAM, 0x2e, true, [0x03, str_, 0x11, 0x01, 0x12, 0x07, 0x40, exprl]),
+        abbrev(AB_PARAM, 0x05, false, [0x03, str_, 0x49, ref4, 0x02, exprl]),
+        abbrev(AB_VAR, 0x34, false, [0x03, str_, 0x49, ref4, 0x02, exprl]),
+        abbrev(AB_BLOCK, 0x0b, true, [0x11, 0x01, 0x12, 0x07]),
+        abbrev(AB_PTR, 0x0f, false, [0x0b, data1, 0x49, ref4]),
+        abbrev(AB_VOIDPTR, 0x0f, false, [0x0b, data1]),
+        abbrev(AB_STRUCT, 0x13, true, [0x03, str_, 0x0b, udata]),
+        abbrev(AB_MEMBER, 0x0d, false, [0x03, str_, 0x49, ref4, 0x38, udata]),
+        abbrev(AB_ARRAY, 0x01, true, [0x49, ref4, 0x51, udata]),
+        abbrev(AB_SUBRANGE, 0x21, false, [0x37, exprl]),
+        abbrev(AB_VARIANT_PART, 0x33, true, [0x15, ref4]),
+        abbrev(AB_VARIANT, 0x19, true, [0x16, udata]),
+        abbrev(AB_TAG, 0x0d, false, [0x03, str_, 0x49, ref4, 0x38, udata, 0x34, 0x19]),
+    ]
+    for t in tables { for l in t { push(out, l) } }
+    push(out, "\t.byte 0")
+    return out
+}

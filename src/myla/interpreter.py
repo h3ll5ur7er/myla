@@ -350,7 +350,7 @@ class Interpreter:
                 elif key < 0 or key >= len(container.elems):
                     raise MylaRuntimeError(
                         f"list index {key} out of bounds (len {len(container.elems)})",
-                        target.line, target.column,
+                        at=target,
                     )
                 else:
                     container.elems[key] = value
@@ -410,7 +410,7 @@ class Interpreter:
             self._eval(stmt.expr, env)
 
         else:  # pragma: no cover - defensive
-            raise MylaRuntimeError(f"cannot execute {type(stmt).__name__}", stmt.line, stmt.column)
+            raise MylaRuntimeError(f"cannot execute {type(stmt).__name__}", at=stmt)
 
     def _eval_match(self, expr: ast.Match, env: _Env):
         scrut = self._eval(expr.scrutinee, env)
@@ -425,7 +425,7 @@ class Interpreter:
                 continue
             return self._eval_arm_body(arm.body, arm_env)
         raise MylaRuntimeError(  # pragma: no cover - checker enforces exhaustiveness
-            "no match arm matched", expr.line, expr.column
+            "no match arm matched", at=expr
         )
 
     def _eval_arm_body(self, body, env: _Env):
@@ -477,7 +477,7 @@ class Interpreter:
                     return True
             return False
         raise MylaRuntimeError(  # pragma: no cover - defensive
-            "unsupported pattern", pat.line, pat.column
+            "unsupported pattern", at=pat
         )
 
     def _bind_pattern(self, binding, value, env: _Env) -> None:
@@ -504,15 +504,15 @@ class Interpreter:
             if isinstance(container, MapValue):
                 if key not in container.entries:
                     raise MylaRuntimeError(f"map key {key!r} not found",
-                                           expr.line, expr.column)
+                                           at=expr)
                 return container.entries[key]
             if key < 0 or key >= len(container.elems):
                 raise MylaRuntimeError(
                     f"list index {key} out of bounds (len {len(container.elems)})",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             return container.elems[key]
-        raise MylaRuntimeError("invalid assignment target", expr.line, expr.column)  # pragma: no cover
+        raise MylaRuntimeError("invalid assignment target", at=expr)  # pragma: no cover
 
     # -- expression evaluation ----------------------------------------------
 
@@ -579,7 +579,7 @@ class Interpreter:
                                 isinstance(expr.body, ast.Block),
                                 getattr(expr, "source_path", None))
         raise MylaRuntimeError(  # pragma: no cover
-            f"cannot evaluate {type(expr).__name__}", expr.line, expr.column
+            f"cannot evaluate {type(expr).__name__}", at=expr
         )
 
     def _call_closure(self, clo: "ClosureValue", args: list):
@@ -608,19 +608,19 @@ class Interpreter:
             if key < 0 or key >= len(data):
                 raise MylaRuntimeError(
                     f"string index {key} out of bounds (len {len(data)})",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             return data[key]            # the byte value (uint8)
         if isinstance(target, MapValue):
             if key not in target.entries:
                 raise MylaRuntimeError(
-                    f"map key {key!r} not found", expr.line, expr.column,
+                    f"map key {key!r} not found", at=expr,
                 )
             return target.entries[key]
         if key < 0 or key >= len(target.elems):
             raise MylaRuntimeError(
                 f"list index {key} out of bounds (len {len(target.elems)})",
-                expr.line, expr.column,
+                at=expr,
             )
         return target.elems[key]
 
@@ -662,13 +662,13 @@ class Interpreter:
                 # IEEE-754 true division: by zero yields ±inf/NaN, never traps.
                 return _wrap(float_div(left, right), expr.resolved_type)
             if right == 0:
-                raise MylaRuntimeError("division by zero", expr.line, expr.column)
+                raise MylaRuntimeError("division by zero", at=expr)
             return _wrap(_idiv(left, right), expr.resolved_type)
         if op == "%":
             if isinstance(expr.resolved_type, FloatType):
                 return _wrap(float_rem(left, right), expr.resolved_type)
             if right == 0:
-                raise MylaRuntimeError("modulo by zero", expr.line, expr.column)
+                raise MylaRuntimeError("modulo by zero", at=expr)
             return _wrap(_imod(left, right), expr.resolved_type)
         if op == "<":
             return left < right
@@ -692,7 +692,7 @@ class Interpreter:
             return _wrap(left << (right & (expr.resolved_type.width - 1)), expr.resolved_type)
         if op == ">>":
             return self._eval_shr(left, right, expr.resolved_type)
-        raise MylaRuntimeError(f"unknown operator '{op}'", expr.line, expr.column)  # pragma: no cover
+        raise MylaRuntimeError(f"unknown operator '{op}'", at=expr)  # pragma: no cover
 
     def _dispatch_operator(self, op: str, left, right, expr: ast.Binary):
         key = left.name if isinstance(left, StructValue) else left.enum_name
@@ -716,7 +716,7 @@ class Interpreter:
         if sig is None:  # pragma: no cover - guaranteed by the checker/bounds
             raise MylaRuntimeError(
                 f"type '{key}' has no '{method}' method for operator dispatch",
-                expr.line, expr.column,
+                at=expr,
             )
         frame = _Env()
         frame.define("self", _copy(left))
@@ -725,6 +725,10 @@ class Interpreter:
             self._exec_block(sig.decl.body, frame)
         except _ReturnSignal as ret:
             return ret.value
+        except MylaError as err:   # attribute it to the method's file (MYLA-10)
+            if err.path is None:
+                err.path = getattr(sig.decl, "source_path", None)
+            raise
         return None
 
     @staticmethod
@@ -734,6 +738,28 @@ class Interpreter:
         # result is arithmetic for signed types and logical for unsigned ones.
         count = right & (t.width - 1)
         return _wrap(_wrap(left, t) >> count, t)
+
+    def _directory_primitive(self, name: str, expr: ast.Call, env):
+        """`__list_dir(path)`, `__mkdir(path, mode)` and `__stat(path)`
+        (MYLA-88), as the native helpers behave: the path ends at its first NUL
+        byte (it is a C string there), and each call sets `__io_errno`.
+        `__list_dir` gives every name followed by a NUL byte (`os.listdir`
+        leaves out "." and "..", which `std.fs` drops anyway); `__stat` the
+        `st_mode`, or -1; `__mkdir` nothing."""
+        import os
+        path = _str_bytes(self._eval(expr.args[0], env)).split(b"\0")[0]
+        mode = self._eval(expr.args[1], env) if name == "__mkdir" else 0
+        self._io_errno = 0
+        try:
+            if name == "__list_dir":
+                return _bytes_str(b"".join(n + b"\0" for n in os.listdir(path)))
+            if name == "__stat":
+                return os.stat(path).st_mode
+            os.mkdir(path, mode)
+            return None
+        except OSError as err:
+            self._io_errno = err.errno or 0
+            return {"__list_dir": "", "__stat": -1}.get(name)
 
     def _run_process(self, program: str, argv: list[str]) -> "ListValue":
         """Spawn `program` with `argv`, wait for it, and capture its output.
@@ -849,6 +875,16 @@ class Interpreter:
             return 1 if ready else 0
         if callee.ident == "__io_errno":
             return self._io_errno
+        if callee.ident == "__getcwd":
+            # the working directory as the kernel's getcwd gives it (MYLA-98)
+            import os
+            try:
+                cwd = os.getcwdb()
+            except OSError as err:
+                self._io_errno = err.errno or 0
+                return ""
+            self._io_errno = 0
+            return _bytes_str(cwd)
         if callee.ident == "__write_file":
             path = self._eval(expr.args[0], env)
             data = self._eval(expr.args[1], env)
@@ -859,6 +895,8 @@ class Interpreter:
             except OSError as err:
                 self._io_errno = err.errno or 0
             return None
+        if callee.ident in ("__list_dir", "__mkdir", "__stat"):
+            return self._directory_primitive(callee.ident, expr, env)
         if callee.ident == "__run":
             program = self._eval(expr.args[0], env)
             argv = [str(a) for a in self._eval(expr.args[1], env).elems]
@@ -888,7 +926,7 @@ class Interpreter:
             lst = self._eval(expr.args[0], env)
             if not lst.elems:
                 raise MylaRuntimeError("pop from an empty list",
-                                       expr.line, expr.column)
+                                       at=expr)
             return lst.elems.pop()
         if callee.ident == "chars":
             s = self._eval(expr.args[0], env)
@@ -917,7 +955,7 @@ class Interpreter:
                 if not 0 <= start <= end <= len(data):
                     raise MylaRuntimeError(
                         f"string range {start}..{end} out of bounds (len {len(data)})",
-                        expr.line, expr.column,
+                        at=expr,
                     )
                 data = data[start:end]
             sb.buf.extend(data)
@@ -956,6 +994,10 @@ class Interpreter:
             self._exec_block(decl.body, frame)
         except _ReturnSignal as ret:
             return ret.value
+        except MylaError as err:   # attribute it to the method's file (MYLA-10)
+            if err.path is None:
+                err.path = getattr(decl, "source_path", None)
+            raise
         return None
 
     def _eval_intrinsic(self, expr: ast.Call, env: _Env):
@@ -964,13 +1006,13 @@ class Interpreter:
             if not self._eval(expr.args[0], env):
                 msg = (self._eval(expr.args[1], env) if len(expr.args) == 2
                        else "assertion failed")
-                raise MylaRuntimeError(msg, expr.line, expr.column)
+                raise MylaRuntimeError(msg, at=expr)
             return None
         if name == "panic":
             raise MylaRuntimeError(self._eval(expr.args[0], env),
-                                   expr.line, expr.column)
+                                   at=expr)
         # unreachable
-        raise MylaRuntimeError("reached unreachable code", expr.line, expr.column)
+        raise MylaRuntimeError("reached unreachable code", at=expr)
 
 
 # --- helpers ---------------------------------------------------------------

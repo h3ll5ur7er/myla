@@ -1,0 +1,7 @@
+//~ runtime error: list index 5 out of bounds (len 2)
+//~ native: runtime error: index out of bounds
+// Assigning past the end of a list traps (D40): `push` appends.
+fun main() {
+    var xs = [1, 2]
+    xs[5] = 3
+}

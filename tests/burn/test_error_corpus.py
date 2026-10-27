@@ -23,8 +23,13 @@ has no values in it (MYLA-17, MYLA-58)::
     //~ native: runtime error: index out of bounds
 
 and is built with the Python backend, which must exit with status 1 and print
-that text on stderr. Module errors are checked through the loader, with the
-bundled standard library.
+exactly that line and the interpreter's position, `  --> <file>:<line>:<col>`
+(MYLA-65, MYLA-66), on stderr. Module errors are checked through the loader,
+with the bundled standard library.
+
+A file may also pin the source text the diagnostic underlines (MYLA-65)::
+
+    //~ span: nope(1)
 """
 import os
 import re
@@ -45,6 +50,7 @@ ERRORS_DIR = os.path.abspath(
 
 _DIRECTIVE = re.compile(r"//~\s*(lex|parse|module|type|runtime)\s+error:\s*(.*?)\s*$")
 _NATIVE = re.compile(r"//~\s*native:\s*(.*?)\s*$")
+_SPAN = re.compile(r"//~\s*span:\s?(.*?)$")
 
 # phase -> (exception class, how far to drive the pipeline)
 _PHASES = {
@@ -84,6 +90,18 @@ def _native(source: str) -> str | None:
     return matches[0] if matches else None
 
 
+def _span(source: str) -> str | None:
+    matches = [m.group(1) for line in source.splitlines() if (m := _SPAN.match(line.strip()))]
+    return matches[0] if matches else None
+
+
+def _underlined(err, source: str) -> str:
+    """The text of the error's line under its carets."""
+    text = source.splitlines()[err.line - 1]
+    start, end = err.caret_range(text)
+    return text[start - 1:end - 1]
+
+
 def _directive(source: str) -> tuple[str, str]:
     matches = [m for line in source.splitlines() if (m := _DIRECTIVE.match(line.strip()))]
     if len(matches) != 1:
@@ -114,13 +132,18 @@ def _make(name: str):
                 str(ctx.exception).lower(),
                 f"{name}: diagnostic '{ctx.exception}' should contain '{needle}'",
             )
+        span = _span(source)
+        if span is not None:
+            self.assertEqual(_underlined(ctx.exception, source), span, f"{name}: the underlined text")
         native = _native(source)
         if phase == "runtime":
             self.assertIsNotNone(native, f"{name}: a runtime error file needs a '//~ native:' line")
             if CAN_BUILD_NATIVE:
-                out, err, code = build_and_run_full(check(parse(tokenize(source))))
+                checker = check(link(path, stdlib_root=default_stdlib_root()))
+                out, err, code = build_and_run_full(checker, entry_path=path)
                 self.assertEqual(code, 1, f"{name}: the native binary should exit 1")
-                self.assertIn(native, err, f"{name}: native stderr {err!r}")
+                where = f"  --> {path}:{ctx.exception.line}:{ctx.exception.column}"
+                self.assertEqual(err, f"{native}\n{where}\n", f"{name}: native stderr")
         else:
             self.assertIsNone(native, f"{name}: '//~ native:' only goes with a runtime error")
     return test

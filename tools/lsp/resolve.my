@@ -601,9 +601,9 @@ impl Resolver {
     // The names a destructuring binds, of the parts of type `t`.
     fun bind_elem(var self, b: BindElem, k: str, t: str) {
         match b {
-            BindElem.BName(name, line, col) => { self.declare(line, col, name, DefKind.Local(k), t) },
+            BindElem.BName(name, line, col, sp) => { self.declare(line, col, name, DefKind.Local(k), t) },
             BindElem.BWild => {},
-            BindElem.BTuple(es, line, col) => {
+            BindElem.BTuple(es, line, col, sp) => {
                 let parts = tuple_elems(self.unalias(t))
                 var i = 0
                 for e in es {

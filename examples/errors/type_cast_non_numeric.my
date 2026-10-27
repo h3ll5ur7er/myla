@@ -1,4 +1,5 @@
 //~ type error: numeric and char types only
+//~ span: "42" as int32
 // `as` converts between numeric/char types; a string cannot be cast to an integer.
 fun bad() -> int32 {
     return "42" as int32

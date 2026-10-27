@@ -4,11 +4,13 @@
 // the first syntax error ends the parse: `fail` records it (message and position
 // as in parser.py) and jumps to EOF, where every loop ends. Every node is stamped with a unique NodeId and the
 // 1-based source position of the token Python's `.at(...)` uses, so the checker
-// reproduces diagnostic positions byte-for-byte. Parser desugarings are
-// preserved exactly: `|>` -> Call, `return a, b` -> Return(TupleLit), adjacent
+// reproduces diagnostic positions byte-for-byte, and with the range of the
+// tokens consumed for it (MYLA-65): from its position, or from where its left
+// operand began, to the end of the last token consumed when it is built.
+// Parser desugarings are preserved exactly: `|>` -> Call, `return a, b` -> Return(TupleLit), adjacent
 // `<`/`>` -> shift Binary, char literal -> IntLit(is_char=true).
 
-from .tokens import Token, TokenKind, Diag
+from .tokens import Token, TokenKind, Diag, SrcSpan
 from .lexer import lex
 from .ast import TypeExpr, TypeKind, Expr, ExprKind, Stmt, StmtKind
 from .ast import Pattern, PatternKind, Decl, DeclKind, Block, ExprOrBlock, ElseTail
@@ -59,24 +61,45 @@ impl Parser {
         return i
     }
 
+    // From `sline`:`scol` to the end of the last token consumed.
+    fun span_from(self, sline: int32, scol: int32) -> SrcSpan {
+        var i = self.pos - 1
+        if i < 0 { i = 0 }
+        return SrcSpan { sline: sline, scol: scol, eline: self.toks[i].eline, ecol: self.toks[i].ecol }
+    }
+
     fun mk_expr(var self, line: int32, col: int32, k: ExprKind) -> Expr {
-        return Expr { id: self.fresh(), line: line, col: col, kind: k }
+        return Expr { id: self.fresh(), line: line, col: col, sp: self.span_from(line, col), kind: k }
+    }
+
+    // A node whose range starts at `st` rather than at its position (a binary
+    // expression, a call, a field access, … begins with its left operand).
+    fun mk_expr_from(var self, st: Token, line: int32, col: int32, k: ExprKind) -> Expr {
+        return Expr { id: self.fresh(), line: line, col: col, sp: self.span_from(st.line, st.column), kind: k }
     }
 
     fun mk_stmt(var self, line: int32, col: int32, k: StmtKind) -> Stmt {
-        return Stmt { id: self.fresh(), line: line, col: col, kind: k }
+        return Stmt { id: self.fresh(), line: line, col: col, sp: self.span_from(line, col), kind: k }
+    }
+
+    fun mk_stmt_from(var self, st: Token, line: int32, col: int32, k: StmtKind) -> Stmt {
+        return Stmt { id: self.fresh(), line: line, col: col, sp: self.span_from(st.line, st.column), kind: k }
     }
 
     fun mk_pat(var self, line: int32, col: int32, k: PatternKind) -> Pattern {
-        return Pattern { id: self.fresh(), line: line, col: col, kind: k }
+        return Pattern { id: self.fresh(), line: line, col: col, sp: self.span_from(line, col), kind: k }
+    }
+
+    fun mk_pat_from(var self, sline: int32, scol: int32, line: int32, col: int32, k: PatternKind) -> Pattern {
+        return Pattern { id: self.fresh(), line: line, col: col, sp: self.span_from(sline, scol), kind: k }
     }
 
     fun mk_type(var self, line: int32, col: int32, k: TypeKind) -> TypeExpr {
-        return TypeExpr { id: self.fresh(), line: line, col: col, kind: k }
+        return TypeExpr { id: self.fresh(), line: line, col: col, sp: self.span_from(line, col), kind: k }
     }
 
     fun mk_decl(var self, line: int32, col: int32, k: DeclKind) -> Decl {
-        return Decl { id: self.fresh(), line: line, col: col, kind: k }
+        return Decl { id: self.fresh(), line: line, col: col, sp: self.span_from(line, col), kind: k }
     }
 
     // -- cursor helpers ----------------------------------------------------
@@ -122,16 +145,17 @@ impl Parser {
 
     // Record the first error and skip to EOF (the callers carry on with
     // placeholder nodes, which are discarded).
-    fun fail(var self, line: int32, col: int32, msg: str) {
+    fun fail(var self, line: int32, col: int32, sp: SrcSpan, msg: str) {
         match self.err {
-            None => { self.err = Some(Diag { kind: "parse error", line: line, col: col, msg: msg }) },
+            None => { self.err = Some(Diag { kind: "parse error", line: line, col: col, sp: sp, msg: msg }) },
             Some(e) => {},
         }
         self.pos = len(self.toks) - 1
     }
 
+    // An error about the token `tok`, which it underlines.
     fun fail_at(var self, tok: Token, msg: str) {
-        self.fail(tok.line, tok.column, msg)
+        self.fail(tok.line, tok.column, SrcSpan { sline: tok.line, scol: tok.column, eline: tok.eline, ecol: tok.ecol }, msg)
     }
 
     fun expect(var self, k: TokenKind, what: str) -> Token {
@@ -223,7 +247,7 @@ impl Parser {
             return d
         }
         self.fail_at(tok, format("expected a declaration (struct/fun/enum/typealias/const/trait/impl/import), found '{}'", tok.lexeme))
-        return self.mk_decl(0, 0, DeclKind.ImportDecl(ImportPath { line: 0, col: 0, dots: 0, segments: [] }, None, None, false))
+        return self.mk_decl(0, 0, DeclKind.ImportDecl(ImportPath { line: 0, col: 0, sp: self.span_from(0, 0), dots: 0, segments: [] }, None, None, false))
     }
 
     fun import_decl(var self, is_pub: bool) -> Decl {
@@ -265,7 +289,7 @@ impl Parser {
         while self.match1(TokenKind.DOT) {
             push(segments, self.expect(TokenKind.IDENT, "a path segment after '.'").lexeme)
         }
-        return ImportPath { line: tok.line, col: tok.column, dots: dots, segments: segments }
+        return ImportPath { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), dots: dots, segments: segments }
     }
 
     fun import_item(var self) -> ImportItem {
@@ -274,7 +298,7 @@ impl Parser {
         if self.match1(TokenKind.AS) {
             alias = Some(self.expect(TokenKind.IDENT, "an alias name after 'as'").lexeme)
         }
-        return ImportItem { line: tok.line, col: tok.column, name: tok.lexeme, alias: alias }
+        return ImportItem { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), name: tok.lexeme, alias: alias }
     }
 
     fun attributes(var self) -> [Attribute] {
@@ -292,7 +316,7 @@ impl Parser {
                 outputs = Some(self.expr_list(TokenKind.RBRACKET))
                 self.expect(TokenKind.RBRACKET, "']'")
             }
-            push(attrs, Attribute { line: hash_tok.line, col: hash_tok.column, name: name, args: args, outputs: outputs })
+            push(attrs, Attribute { line: hash_tok.line, col: hash_tok.column, sp: self.span_from(hash_tok.line, hash_tok.column), name: name, args: args, outputs: outputs })
             self.skip_newlines()
         }
         return attrs
@@ -313,7 +337,7 @@ impl Parser {
                     push(bounds, self.expect(TokenKind.IDENT, "trait name after '+'").lexeme)
                 }
             }
-            push(params, TypeParam { line: tok.line, col: tok.column, name: tok.lexeme, bounds: bounds })
+            push(params, TypeParam { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), name: tok.lexeme, bounds: bounds })
             if !self.match1(TokenKind.COMMA) {
                 break
             }
@@ -346,7 +370,7 @@ impl Parser {
             let fname = self.expect(TokenKind.IDENT, "field name")
             self.expect(TokenKind.COLON, "':'")
             let ftype = self.parse_type()
-            push(fields, Field { line: fname.line, col: fname.column, name: fname.lexeme, ty: ftype })
+            push(fields, Field { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, ty: ftype })
             if !self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
                 break
@@ -377,7 +401,7 @@ impl Parser {
                 }
                 self.expect(TokenKind.RPAREN, "')'")
             }
-            push(variants, Variant { line: vname.line, col: vname.column, name: vname.lexeme, payload: payload })
+            push(variants, Variant { line: vname.line, col: vname.column, sp: self.span_from(vname.line, vname.column), name: vname.lexeme, payload: payload })
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
             } else {
@@ -399,7 +423,7 @@ impl Parser {
                 let pname = self.expect(TokenKind.IDENT, "parameter name")
                 self.expect(TokenKind.COLON, "':'")
                 let ptype = self.parse_type()
-                push(params, Param { line: pname.line, col: pname.column, name: pname.lexeme, ty: Some(ptype) })
+                push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
                 if !self.match1(TokenKind.COMMA) {
                     break
                 }
@@ -412,7 +436,7 @@ impl Parser {
         }
         let body = self.block()
         let fd = FunData {
-            line: kw.line, col: kw.column, name: name, params: params,
+            line: kw.line, col: kw.column, sp: self.span_from(kw.line, kw.column), name: name, params: params,
             ret_type: ret, body: Some(body), attributes: attrs,
             type_params: tps, receiver: None, is_pub: is_pub,
         }
@@ -493,7 +517,7 @@ impl Parser {
             let pname = self.expect(TokenKind.IDENT, "parameter name")
             self.expect(TokenKind.COLON, "':'")
             let ptype = self.parse_type()
-            push(params, Param { line: pname.line, col: pname.column, name: pname.lexeme, ty: Some(ptype) })
+            push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
         }
         self.expect(TokenKind.RPAREN, "')'")
         var ret: Option<TypeExpr> = None
@@ -501,7 +525,7 @@ impl Parser {
             ret = Some(self.parse_type())
         }
         return FunData {
-            line: kw.line, col: kw.column, name: name, params: params,
+            line: kw.line, col: kw.column, sp: self.span_from(kw.line, kw.column), name: name, params: params,
             ret_type: ret, body: None, attributes: [],
             type_params: tps, receiver: receiver, is_pub: false,
         }
@@ -513,7 +537,7 @@ impl Parser {
         // Rebuild rather than mutate `h.body`: the native backend does not yet
         // support assigning a ref-counted aggregate into a struct field.
         return FunData {
-            line: h.line, col: h.col, name: h.name, params: h.params,
+            line: h.line, col: h.col, sp: self.span_from(h.line, h.col), name: h.name, params: h.params,
             ret_type: h.ret_type, body: Some(body), attributes: h.attributes,
             type_params: h.type_params, receiver: h.receiver, is_pub: h.is_pub,
         }
@@ -591,7 +615,7 @@ impl Parser {
             // `Option<int>= x`: the `>=` token closes the list and leaves its
             // `=` behind (MYLA-15)
             let ge = self.peek()
-            self.toks[self.pos] = Token { kind: TokenKind.ASSIGN, lexeme: "=", line: ge.line, column: ge.column + 1, ival: 0, suffix: "", big: "" }
+            self.toks[self.pos] = Token { kind: TokenKind.ASSIGN, lexeme: "=", line: ge.line, column: ge.column + 1, eline: ge.eline, ecol: ge.ecol, ival: 0, suffix: "", big: "" }
             return args
         }
         self.expect(TokenKind.GT, "'>' to close type arguments")
@@ -644,7 +668,7 @@ impl Parser {
             }
         }
         self.expect(TokenKind.RBRACE, "'}'")
-        return Block { line: lbrace.line, col: lbrace.column, stmts: stmts }
+        return Block { line: lbrace.line, col: lbrace.column, sp: self.span_from(lbrace.line, lbrace.column), stmts: stmts }
     }
 
     fun statement(var self) -> Stmt {
@@ -680,7 +704,8 @@ impl Parser {
         let kind = kw.lexeme
         if self.check(TokenKind.LPAREN) {
             let lp = self.peek()
-            let binding = BindElem.BTuple(self.tuple_binding(), lp.line, lp.column)
+            let elems = self.tuple_binding()
+            let binding = BindElem.BTuple(elems, lp.line, lp.column, self.span_from(lp.line, lp.column))
             var ty: Option<TypeExpr> = None
             if self.match1(TokenKind.COLON) {
                 ty = Some(self.parse_type())
@@ -718,14 +743,15 @@ impl Parser {
     fun binding_elem(var self) -> BindElem {
         let tok = self.peek()
         if tok.kind == TokenKind.LPAREN {
-            return BindElem.BTuple(self.tuple_binding(), tok.line, tok.column)
+            let elems = self.tuple_binding()
+            return BindElem.BTuple(elems, tok.line, tok.column, self.span_from(tok.line, tok.column))
         }
         if tok.kind == TokenKind.IDENT {
             self.advance()
             if tok.lexeme == "_" {
                 return BindElem.BWild
             }
-            return BindElem.BName(tok.lexeme, tok.line, tok.column)
+            return BindElem.BName(tok.lexeme, tok.line, tok.column, self.span_from(tok.line, tok.column))
         }
         self.fail_at(tok, format("expected a binding name, '_', or '(', found '{}'", tok.lexeme))
         return BindElem.BWild
@@ -776,6 +802,7 @@ impl Parser {
         if self.at_separator() || self.check(TokenKind.RBRACE) || self.at_end() {
             return self.mk_stmt(kw.line, kw.column, StmtKind.ReturnS(None))
         }
+        let st = self.peek()
         var value = self.expression()
         if self.check(TokenKind.COMMA) {
             let vl = value.line
@@ -784,22 +811,23 @@ impl Parser {
             while self.match1(TokenKind.COMMA) {
                 push(elems, self.expression())
             }
-            value = self.mk_expr(vl, vc, ExprKind.TupleLit(elems))
+            value = self.mk_expr_from(st, vl, vc, ExprKind.TupleLit(elems))
         }
         return self.mk_stmt(kw.line, kw.column, StmtKind.ReturnS(Some(value)))
     }
 
     fun assign_or_expr(var self) -> Stmt {
+        let st = self.peek()
         let expr = self.expression()
         if self.check(TokenKind.ASSIGN) {
             let eq = self.advance()
             if !is_lvalue(expr) {
-                self.fail(expr.line, expr.col, "invalid assignment target")
+                self.fail(expr.line, expr.col, expr.sp, "invalid assignment target")
             }
             let value = self.expression()
-            return self.mk_stmt(eq.line, eq.column, StmtKind.Assign(expr, value))
+            return self.mk_stmt_from(st, eq.line, eq.column, StmtKind.Assign(expr, value))
         }
-        return self.mk_stmt(expr.line, expr.col, StmtKind.ExprStmt(expr))
+        return self.mk_stmt_from(st, expr.line, expr.col, StmtKind.ExprStmt(expr))
     }
 
     // -- expressions (precedence climbing) ---------------------------------
@@ -821,6 +849,7 @@ impl Parser {
     }
 
     fun pipe(var self) -> Expr {
+        let st = self.peek()
         var expr = self.logic_or()
         while self.check(TokenKind.PIPEGT) {
             let op = self.advance()
@@ -829,77 +858,84 @@ impl Parser {
                 ExprKind.Call(callee, args) => ExprKind.Call(callee, cons_expr(expr, args)),
                 _ => ExprKind.Call(rhs, [expr]),
             }
-            expr = self.mk_expr(op.line, op.column, spliced)
+            expr = self.mk_expr_from(st, op.line, op.column, spliced)
         }
         return expr
     }
 
     fun logic_or(var self) -> Expr {
+        let st = self.peek()
         var expr = self.logic_and()
         while self.check(TokenKind.OR) {
             let op = self.advance()
             let right = self.logic_and()
-            expr = self.mk_expr(op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     fun logic_and(var self) -> Expr {
+        let st = self.peek()
         var expr = self.equality()
         while self.check(TokenKind.AND) {
             let op = self.advance()
             let right = self.equality()
-            expr = self.mk_expr(op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     fun equality(var self) -> Expr {
+        let st = self.peek()
         var expr = self.comparison()
         while self.check(TokenKind.EQ) || self.check(TokenKind.NE) {
             let op = self.advance()
             let right = self.comparison()
-            expr = self.mk_expr(op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     fun comparison(var self) -> Expr {
+        let st = self.peek()
         var expr = self.bit_or()
         while self.check(TokenKind.LT) || self.check(TokenKind.LE) || self.check(TokenKind.GT) || self.check(TokenKind.GE) {
             let op = self.advance()
             let right = self.bit_or()
-            expr = self.mk_expr(op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     fun bit_or(var self) -> Expr {
+        let st = self.peek()
         var expr = self.bit_xor()
         while self.check(TokenKind.PIPE) {
             let op = self.advance()
             let right = self.bit_xor()
-            expr = self.mk_expr(op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     fun bit_xor(var self) -> Expr {
+        let st = self.peek()
         var expr = self.bit_and()
         while self.check(TokenKind.CARET) {
             let op = self.advance()
             let right = self.bit_and()
-            expr = self.mk_expr(op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     fun bit_and(var self) -> Expr {
+        let st = self.peek()
         var expr = self.shift()
         while self.check(TokenKind.AMP) {
             let op = self.advance()
             let right = self.shift()
-            expr = self.mk_expr(op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
@@ -920,6 +956,7 @@ impl Parser {
     }
 
     fun shift(var self) -> Expr {
+        let st = self.peek()
         var expr = self.term()
         while true {
             let op = self.adjacent_shift()
@@ -930,37 +967,40 @@ impl Parser {
             self.advance()
             self.advance()
             let right = self.term()
-            expr = self.mk_expr(a.line, a.column, ExprKind.Binary(op, expr, right))
+            expr = self.mk_expr_from(st, a.line, a.column, ExprKind.Binary(op, expr, right))
         }
         return expr
     }
 
     fun term(var self) -> Expr {
+        let st = self.peek()
         var expr = self.factor()
         while self.check(TokenKind.PLUS) || self.check(TokenKind.MINUS) {
             let op = self.advance()
             let right = self.factor()
-            expr = self.mk_expr(op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     fun factor(var self) -> Expr {
+        let st = self.peek()
         var expr = self.cast()
         while self.check(TokenKind.STAR) || self.check(TokenKind.SLASH) || self.check(TokenKind.PERCENT) {
             let op = self.advance()
             let right = self.cast()
-            expr = self.mk_expr(op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
+            expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
         }
         return expr
     }
 
     fun cast(var self) -> Expr {
+        let st = self.peek()
         var expr = self.unary()
         while self.check(TokenKind.AS) {
             let kw = self.advance()
             let target = self.parse_type()
-            expr = self.mk_expr(kw.line, kw.column, ExprKind.Cast(expr, target))
+            expr = self.mk_expr_from(st, kw.line, kw.column, ExprKind.Cast(expr, target))
         }
         return expr
     }
@@ -976,18 +1016,19 @@ impl Parser {
     }
 
     fun postfix(var self) -> Expr {
+        let st = self.peek()
         var expr = self.primary()
         while true {
             if self.check(TokenKind.LPAREN) {
                 let lp = self.advance()
                 let args = self.call_args()
                 self.expect(TokenKind.RPAREN, "')'")
-                expr = self.mk_expr(lp.line, lp.column, ExprKind.Call(expr, args))
+                expr = self.mk_expr_from(st, lp.line, lp.column, ExprKind.Call(expr, args))
             } else if self.check(TokenKind.LBRACKET) {
                 let lb = self.advance()
                 let index = self.expression()
                 self.expect(TokenKind.RBRACKET, "']' to close index")
-                expr = self.mk_expr(lb.line, lb.column, ExprKind.Index(expr, index))
+                expr = self.mk_expr_from(st, lb.line, lb.column, ExprKind.Index(expr, index))
             } else if self.check(TokenKind.DOT) {
                 let dot = self.advance()
                 if self.check(TokenKind.INT) {
@@ -995,14 +1036,14 @@ impl Parser {
                     if idx_tok.suffix != "" {
                         self.fail_at(idx_tok, "tuple index may not have a type suffix")
                     }
-                    expr = self.mk_expr(dot.line, dot.column, ExprKind.TupleIndex(expr, idx_tok.ival))
+                    expr = self.mk_expr_from(st, dot.line, dot.column, ExprKind.TupleIndex(expr, idx_tok.ival))
                 } else {
                     let name = self.expect(TokenKind.IDENT, "field name or tuple index after '.'").lexeme
-                    expr = self.mk_expr(dot.line, dot.column, ExprKind.GetField(expr, name))
+                    expr = self.mk_expr_from(st, dot.line, dot.column, ExprKind.GetField(expr, name))
                 }
             } else if self.check(TokenKind.QUESTION) {
                 let q = self.advance()
-                expr = self.mk_expr(q.line, q.column, ExprKind.Try(expr))
+                expr = self.mk_expr_from(st, q.line, q.column, ExprKind.Try(expr))
             } else {
                 break
             }
@@ -1147,6 +1188,7 @@ impl Parser {
     }
 
     fun match_arm(var self) -> MatchArm {
+        let st = self.peek()
         let pattern = self.pattern()
         var guard: Option<Expr> = None
         if self.match1(TokenKind.IF) {
@@ -1159,7 +1201,7 @@ impl Parser {
         } else {
             body = ExprOrBlock.EB_Expr(self.expression())
         }
-        return MatchArm { line: arrow.line, col: arrow.column, pattern: pattern, guard: guard, body: body }
+        return MatchArm { line: arrow.line, col: arrow.column, sp: self.span_from(st.line, st.column), pattern: pattern, guard: guard, body: body }
     }
 
     fun pattern(var self) -> Pattern {
@@ -1173,7 +1215,7 @@ impl Parser {
         while self.match1(TokenKind.PIPE) {
             push(alts, self.base_pattern())
         }
-        return self.mk_pat(pl, pc, PatternKind.POr(alts))
+        return self.mk_pat_from(first.sp.sline, first.sp.scol, pl, pc, PatternKind.POr(alts))
     }
 
     fun base_pattern(var self) -> Pattern {
@@ -1193,7 +1235,7 @@ impl Parser {
         if k == TokenKind.DOT {
             self.advance()
             let vtok = self.expect(TokenKind.IDENT, "variant name after '.'")
-            return self.enum_pattern_tail(None, vtok)
+            return self.enum_pattern_tail(None, vtok, tok)
         }
         if k == TokenKind.LPAREN {
             return self.tuple_pattern()
@@ -1216,15 +1258,17 @@ impl Parser {
         if self.check(TokenKind.DOT) {
             self.advance()
             let vtok = self.expect(TokenKind.IDENT, "variant name after '.'")
-            return self.enum_pattern_tail(Some(first.lexeme), vtok)
+            return self.enum_pattern_tail(Some(first.lexeme), vtok, first)
         }
         if self.check(TokenKind.LPAREN) {
-            return self.enum_pattern_tail(None, first)
+            return self.enum_pattern_tail(None, first, first)
         }
         return self.mk_pat(first.line, first.column, PatternKind.PBind(first.lexeme))
     }
 
-    fun enum_pattern_tail(var self, enum_name: Option<str>, variant_tok: Token) -> Pattern {
+    // The rest of an enum pattern whose variant name is `variant_tok`; it
+    // started at `st` (`Enum`, `.` or the variant).
+    fun enum_pattern_tail(var self, enum_name: Option<str>, variant_tok: Token, st: Token) -> Pattern {
         var elems: [Pattern] = []
         var has_payload = false
         if self.match1(TokenKind.LPAREN) {
@@ -1240,7 +1284,7 @@ impl Parser {
             }
             self.expect(TokenKind.RPAREN, "')'")
         }
-        return self.mk_pat(variant_tok.line, variant_tok.column, PatternKind.PEnum(enum_name, variant_tok.lexeme, elems, has_payload))
+        return self.mk_pat_from(st.line, st.column, variant_tok.line, variant_tok.column, PatternKind.PEnum(enum_name, variant_tok.lexeme, elems, has_payload))
     }
 
     fun tuple_pattern(var self) -> Pattern {
@@ -1271,7 +1315,7 @@ impl Parser {
             } else {
                 pat = self.mk_pat(fname.line, fname.column, PatternKind.PBind(fname.lexeme))
             }
-            push(fields, FieldPat { line: fname.line, col: fname.column, name: fname.lexeme, pattern: pat })
+            push(fields, FieldPat { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, pattern: pat })
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
             } else {
@@ -1315,7 +1359,7 @@ impl Parser {
                 if self.match1(TokenKind.COLON) {
                     pty = Some(self.parse_type())
                 }
-                push(params, Param { line: pname.line, col: pname.column, name: pname.lexeme, ty: pty })
+                push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: pty })
                 if !self.match1(TokenKind.COMMA) {
                     break
                 }
@@ -1359,7 +1403,7 @@ impl Parser {
             let fname = self.expect(TokenKind.IDENT, "field name")
             self.expect(TokenKind.COLON, "':'")
             let value = self.expression()
-            push(fields, FieldInit { line: fname.line, col: fname.column, name: fname.lexeme, value: value })
+            push(fields, FieldInit { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, value: value })
             if !self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
                 break

@@ -4,10 +4,21 @@
 program (which also uses argv, the I/O streams, and exit) plus focused parity
 programs are linked against the bundled stdlib and run through both the
 interpreter and the native compiler, which must agree on stdout, stderr, and the
-process exit status — including the errno-keyed `IoError` paths."""
+process exit status — including the errno-keyed `IoError` paths.
+
+The directory functions (`list_dir`, `make_dir`, `make_dir_all`, `exists`,
+`is_dir`, `is_file`; MYLA-88) are run in all four implementations: the Python
+interpreter, the Python native backend, the self-hosted interpreter and the
+self-hosted native backend, each in a fresh working directory; so is
+`current_dir` (MYLA-98), also in a working directory that was removed."""
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
+
+from myla.compiler import build
+from myla.loader import default_stdlib_root
 
 from ._native import (
     CAN_BUILD_NATIVE,
@@ -17,6 +28,10 @@ from ._native import (
     interpret_full,
     write_program,
 )
+from ._tools import selfhost_tool
+from tests.unit.test_fs import CWD_PROGRAM, FS_TOUR, FS_TOUR_OUTPUT
+
+_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
 EXAMPLE = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir,
@@ -183,6 +198,122 @@ class TestWriteToFileParity(unittest.TestCase):
             "}\n",
         )
         self.assertEqual(out, "21\n")   # EISDIR on Linux
+
+
+# A directory with many entries of every length from 1 to 255 bytes (the
+# longest name Linux allows), so getdents64 fills its buffer many times and
+# the native result grows several times over.
+MANY = """from std.fs import list_dir
+from std.io import println
+fun main() {
+    match list_dir("big") {
+        Ok(names) => {
+            var total = 0
+            for n in names { total = total + len(n) }
+            println(format("{} names, {} bytes", len(names), total))
+            for n in names { println(n) }
+        },
+        Err(e) => { println("error") },
+    }
+}
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class DirectoryParity(unittest.TestCase):
+    """The same program, in a fresh working directory, prints the same in the
+    Python interpreter, the Python native backend, the self-hosted interpreter
+    and the self-hosted native backend (MYLA-88)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.interp = selfhost_tool("interp_main")
+        cls.gen = selfhost_tool("gen_main")
+        cls.tmp = tempfile.TemporaryDirectory()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp.cleanup()
+
+    def commands(self, name: str, source: str) -> dict[str, list[str]]:
+        """The command that runs `source` in each implementation."""
+        d = os.path.join(self.tmp.name, name)
+        os.makedirs(d)
+        path = os.path.join(d, "main.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(source)
+        py_native = os.path.join(d, "py_native")
+        build(check_file(path), py_native)
+        asm = subprocess.run([self.gen, path, default_stdlib_root()],
+                             capture_output=True, text=True, check=True)
+        sh_native = os.path.join(d, "sh_native")
+        with open(sh_native + ".s", "w", encoding="utf-8") as fh:
+            fh.write(asm.stdout)
+        subprocess.run(["as", "--64", "-o", sh_native + ".o", sh_native + ".s"], check=True)
+        subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
+        return {
+            "python interpreter": [sys.executable, os.path.join(_REPO, "myla.py"), "run", path],
+            "python native": [py_native],
+            "self-hosted interpreter": [self.interp, path, default_stdlib_root()],
+            "self-hosted native": [sh_native],
+        }
+
+    def work_dir(self, name: str, impl: str) -> str:
+        """The working directory `run_all` gives the implementation `impl`."""
+        return os.path.join(self.tmp.name, name, impl.replace(" ", "-"))
+
+    def run_all(self, name: str, source: str, prepare=None, wrap=None) -> dict[str, tuple[str, str, int]]:
+        """Run `source` in each implementation, each in its own empty working
+        directory (filled by `prepare(dir)` first; the command is `wrap(argv)`
+        if given)."""
+        results = {}
+        for impl, argv in self.commands(name, source).items():
+            work = self.work_dir(name, impl)
+            os.makedirs(work)
+            if prepare is not None:
+                prepare(work)
+            if wrap is not None:
+                argv = wrap(argv)
+            proc = subprocess.run(argv, cwd=work, capture_output=True, timeout=120)
+            results[impl] = (proc.stdout.decode(), proc.stderr.decode(), proc.returncode)
+        return results
+
+    def test_tour(self) -> None:
+        for impl, result in self.run_all("tour", FS_TOUR).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (FS_TOUR_OUTPUT, "", 0))
+
+    def test_current_dir(self) -> None:
+        for impl, result in self.run_all("cwd", CWD_PROGRAM).items():
+            with self.subTest(implementation=impl):
+                work = os.path.realpath(self.work_dir("cwd", impl))
+                self.assertEqual(result, (f"{work} true\n", "", 0))
+
+    def test_current_dir_removed(self) -> None:
+        # The program starts in a directory that was removed: getcwd fails
+        # with ENOENT.
+        def wrap(argv: list[str]) -> list[str]:
+            return ["sh", "-c", 'mkdir gone && cd gone && rmdir ../gone && exec "$@"', "sh", *argv]
+
+        for impl, result in self.run_all("cwd-removed", CWD_PROGRAM, wrap=wrap).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, ("not found\n", "", 0))
+
+    def test_many_long_names(self) -> None:
+        names = [f"{i:03d}" + "x" * (i - 3) if i >= 3 else "n" * i for i in range(1, 256)]
+        names += [f"short-{i}" for i in range(400)]
+
+        def prepare(work: str) -> None:
+            os.makedirs(os.path.join(work, "big"))
+            for n in names:
+                open(os.path.join(work, "big", n), "w").close()
+
+        ordered = sorted(names, key=str.encode)
+        expected = (f"{len(names)} names, {sum(map(len, names))} bytes\n"
+                    + "".join(n + "\n" for n in ordered))
+        for impl, result in self.run_all("many", MANY, prepare).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (expected, "", 0))
 
 
 if __name__ == "__main__":

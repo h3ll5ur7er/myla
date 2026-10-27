@@ -28,7 +28,7 @@
 
 ## I/O primitives
 
-`__write` writes to the given stream, `__read` reads with `os.read` (fd 0 from the `stdin=` byte stream when one was passed, as the tests do) after flushing stdout and stderr, so a program's answer is out before it waits for the next request ([[MYLA-78]]), `__read_file` reads bytes and decodes them with `surrogateescape` (so any byte sequence survives), `__write_file`, `__args` (the argv passed to `Interpreter(..., argv=…)`), and `__run`, which uses `subprocess.run` with `executable=program` (no `PATH` search) and stores stderr, exit code, signal and errno for the `__run_*` primitives.
+`__write` writes to the given stream, `__read` reads with `os.read` (fd 0 from the `stdin=` byte stream when one was passed, as the tests do) after flushing stdout and stderr, so a program's answer is out before it waits for the next request ([[MYLA-78]]), `__read_file` reads bytes and decodes them with `surrogateescape` (so any byte sequence survives), `__write_file`, the directory primitives `__list_dir` (`os.listdir`, each name followed by a NUL byte), `__mkdir` and `__stat` (`st_mode` or -1), whose path ends at its first NUL byte as natively ([[MYLA-88]]), `__args` (the argv passed to `Interpreter(..., argv=…)`), and `__run`, which uses `subprocess.run` with `executable=program` (no `PATH` search) and stores stderr, exit code, signal and errno for the `__run_*` primitives.
 
 ## Strings
 

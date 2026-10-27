@@ -1,226 +1,179 @@
 // main.my -- the unified `myla` command-line tool (self-hosting).
 //
-// Dispatches subcommands, mirroring the Python `myla` CLI:
+// With a file, the commands mirror the Python `myla` CLI:
 //
-//   myla run   <file.my> [--stdlib <dir>] [args...]   interpret a program
-//   myla test  <file.my> [--stdlib <dir>]             run its #test cases
-//   myla build <file.my> [-o <out>] [-g] [--stdlib <dir>]  compile to a native binary
-//   myla repl  [--stdlib <dir>]                       the interactive interpreter (repl.my)
+//   myla run   <file.my> [options] [args...]          interpret a program
+//   myla test  <file.my> [options]                    run its #test cases
+//   myla build <file.my> [-o <out>] [-g] [options]    compile to a native binary
+//   myla check <file.my> [options]                    type-check it (prints `ok`)
+//   myla repl  [options]                              the interactive interpreter (repl.my)
 //
-// `run` passes the arguments after the file to the program (its argv is the
-// file, then those), as the Python `myla run` does. `build` type-checks and
-// generates x86-64 assembly (with `-g`, DWARF line tables for gdb, MYLA-71),
-// writes it to `<out>.s`, then shells out to the system assembler and linker
-// (`as`/`ld`, located via `/usr/bin/env` so PATH is honored) to produce the
-// executable `<out>`, and removes the intermediate files. The stdlib root
-// defaults to `src/myla` next to the `build/` directory this binary is in
+// Without a file (the first argument after the command doesn't end in `.my`)
+// they work on the project around the working directory, found by its
+// `myla.toml` (project_cmd.my, MYLA-94, D73): `myla build [-g]` writes
+// `build/<name>`, `myla run [args...]` interprets `src/main.my`, `myla test` and
+// `myla check` take every file under `src/`; and `myla new <name>` creates a
+// project, `myla clean [--deps]` removes `build/` (and `.myla/`), `myla fetch
+// [--update]` resolves the Git dependencies and writes `myla.lock` (MYLA-95).
+//
+// The options, before or after the file: `--stdlib <dir>`, and `--package
+// name=dir` (repeatable), a dependency whose modules `import name…` finds in
+// `dir` (MYLA-92). `run` passes the other arguments after the file to the
+// program (its argv is the file, then those), as the Python `myla run` does.
+// What the commands do with a file is in driver.my. The stdlib root defaults
+// to `src/myla` next to the `build/` directory this binary is in
 // (`default_stdlib_root`, MYLA-31).
 
-from std.process import args, exit, run, Output, ExitStatus, SpawnError
-from std.io import write, eprintln
-from std.fs import write_to_file
+from std.process import args, exit
+from std.io import eprintln
 from .repl import repl
-from .loader import load_program, file_of, default_stdlib_root, Loaded
-from .diag import render, type_report, Report
-from .checker import build_checker_decls, Checker, CheckErr
-from .codegen import new_codegen
-from .interp import new_interp, RtError
-
-// Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
-fun decode(bytes: [uint8]) -> str {
-    var sb = StringBuilder()
-    for b in bytes { append_byte(sb, b) }
-    return build(sb)
-}
-
-// A checked program, and the linked one (for the files of its node ids).
-struct Checked { checker: Checker, prog: Loaded }
-
-// Load, link and type-check the program rooted at `file`. Errors are carried as
-// the diagnostic text to print.
-fun load_and_check(file: str, stdlib: str) -> Result<Checked, str> {
-    let prog = match load_program(file, stdlib) {
-        Ok(p) => p,
-        Err(r) => { return Err(render(r)) },
-    }
-    return match build_checker_decls(prog.decls, prog.next_id) {
-        Ok(c) => Ok(Checked { checker: c, prog: prog }),
-        Err(e) => Err(render(type_report(e.line, e.col, e.msg, file_of(prog, e.decl)))),
-    }
-}
-
-// Type-check `file`, then generate its x86-64 assembly (`debug`: with DWARF
-// line tables, MYLA-71).
-fun compile_asm(file: str, stdlib: str, debug: bool) -> Result<str, str> {
-    let ch = load_and_check(file, stdlib)?
-    var g = new_codegen(ch.checker)
-    if debug { g.enable_line_tables(ch.prog.spans, ch.prog.next_id) }
-    return Ok(g.generate())
-}
-
-// Inspect a finished child's status; return true on failure (nonzero exit or a
-// terminating signal), echoing its stderr and `label`.
-fun step_failed(out: Output, label: str) -> bool {
-    match out.status {
-        ExitStatus.Exited(code) => {
-            if code != 0 {
-                eprintln(label)
-                write(2, decode(out.stderr))
-                return true
-            }
-            return false
-        },
-        ExitStatus.Signaled(sig) => {
-            eprintln(label)
-            return true
-        },
-    }
-    return false
-}
-
-// Run one build step (`program args…`); return true on failure (nonzero exit,
-// terminating signal, or spawn error), echoing the child's stderr and `label`.
-fun run_step(program: str, argv: [str], label: str) -> bool {
-    var failed = false
-    match run(program, argv) {
-        Ok(out) => {
-            failed = step_failed(out, label)
-        },
-        Err(e) => {
-            eprintln(label)
-            failed = true
-        },
-    }
-    return failed
-}
-
-// `myla run <file> [args]` / `myla test`: interpret the program with argv
-// `[file, args...]`, or run its #test cases; the exit status.
-fun cmd_interp(file: str, stdlib: str, tests: bool, prog_args: [str]) -> int32 {
-    match load_and_check(file, stdlib) {
-        Ok(ch) => {
-            var argv = [file]
-            for a in prog_args { push(argv, a) }
-            var it = new_interp(ch.checker, argv)
-            if tests {
-                return it.run_tests()
-            }
-            let code = it.run()
-            match it.rt_err {
-                Some(r) => { eprintln(render(Report { kind: "runtime error", msg: r.msg, path: file_of(ch.prog, r.node), line: r.line, col: r.col })) },
-                None => {},
-            }
-            return code
-        },
-        Err(e) => {
-            eprintln(e)
-            return 1
-        },
-    }
-    return 0
-}
-
-// `myla build <file> -o <out> [stdlib]`: compile to a native binary at `out`.
-fun cmd_build(file: str, output: str, stdlib: str, debug: bool) -> int32 {
-    let asm = match compile_asm(file, stdlib, debug) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln(e)
-            return 1
-        },
-    }
-    let asm_path = output + ".s"
-    let obj_path = output + ".o"
-    match write_to_file(asm_path, asm) {
-        Ok(n) => {},
-        Err(e) => {
-            eprintln("myla: cannot write assembly to " + asm_path)
-            return 1
-        },
-    }
-    if run_step("/usr/bin/env", ["as", "--64", "-o", obj_path, asm_path], "myla: assembler failed") {
-        return 1
-    }
-    if run_step("/usr/bin/env", ["ld", "-o", output, obj_path], "myla: linker failed") {
-        return 1
-    }
-    // the assembly and object file were only steps (MYLA-35)
-    if run_step("/usr/bin/env", ["rm", "-f", asm_path, obj_path], "myla: cannot remove the intermediate files") {
-        return 1
-    }
-    return 0
-}
+from .loader import load_options, LoadOptions, parse_package_flag, default_stdlib_root
+from .diag import render
+from .driver import cmd_build, cmd_interp, load_and_check
+from .project_cmd import project_build, project_run, project_test, project_check, project_clean, project_new, project_fetch, ends_with
 
 fun usage() {
-    eprintln("usage: myla <command> <file.my> [options]")
-    eprintln("commands:")
-    eprintln("  run   <file.my> [--stdlib <dir>] [args...]  interpret a program with these arguments")
-    eprintln("  test  <file.my> [--stdlib <dir>]            run its #test cases")
-    eprintln("  build <file.my> [-o <out>] [-g] [--stdlib <dir>]  compile to a binary (-g: line tables for gdb)")
-    eprintln("  repl  [--stdlib <dir>]                      the interactive interpreter")
-    eprintln("--stdlib: the directory holding std/ (default: src/myla next to this binary's build/ directory)")
+    eprintln("usage: myla <command> [<file.my>] [options]")
+    eprintln("commands on a file:")
+    eprintln("  run   <file.my> [options] [args...]  interpret a program with these arguments")
+    eprintln("  test  <file.my> [options]            run its #test cases")
+    eprintln("  build <file.my> [-o <out>] [-g] [options]  compile to a binary (-g: debug information for gdb)")
+    eprintln("  check <file.my> [options]            type-check it")
+    eprintln("  repl  [options]                      the interactive interpreter")
+    eprintln("commands on the project around the working directory (myla.toml):")
+    eprintln("  new   <name>                         create a project in the directory <name>")
+    eprintln("  build [-g] [options]                 compile src/main.my to build/<name>")
+    eprintln("  run   [options] [args...]            interpret src/main.my with these arguments")
+    eprintln("  test  [options]                      run the #test cases of every file under src/")
+    eprintln("  check [options]                      type-check every file under src/")
+    eprintln("  clean [--deps]                       remove build/ (--deps: and the fetched dependencies, .myla/)")
+    eprintln("  fetch [--update]                     resolve the Git dependencies, check them out and write myla.lock")
+    eprintln("options:")
+    eprintln("  --stdlib <dir>        the directory holding std/ (default: src/myla next to this binary's build/ directory)")
+    eprintln("  --package <name=dir>  a dependency: imports of <name> resolve in <dir> (repeatable)")
+}
+
+// A command's arguments: its file ("" in project mode), the load options,
+// `build`'s output and `-g`, `clean`'s `--deps`, `fetch`'s `--update`, `new`'s
+// name, and the program's arguments (`run`).
+struct CommandLine { file: str, opts: LoadOptions, output: str, debug: bool, deps: bool, update: bool, name: str, rest: [str] }
+
+// A command line that can't be run: the message, and whether the usage
+// follows it (exit status 2; else 1).
+struct CliError { msg: str, usage: bool }
+
+// The arguments after the command; `--stdlib` and `--package` anywhere, `-o`
+// and `-g` for `build`, `--deps` for `clean`, `--update` for `fetch`. The first other argument is the
+// file if it ends in `.my` (else there is none: project mode); then `run`
+// passes the rest to the program, `test` too with a file, `new` takes one
+// name, and other commands reject them.
+fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
+    let cmd = argv[1]
+    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root(argv[0])), output: "a.out", debug: false, deps: false, update: false, name: "", rest: [] }
+    var positional = 0
+    var j = 2
+    while j < len(argv) {
+        let a = argv[j]
+        let has_value = j + 1 < len(argv)
+        if a == "--stdlib" && has_value {
+            cl.opts.stdlib_root = argv[j + 1]
+            j = j + 2
+        } else if a == "--package" && has_value {
+            match parse_package_flag(argv[j + 1]) {
+                Ok(pkg) => { push(cl.opts.packages, pkg) },
+                Err(r) => { return Err(CliError { msg: render(r), usage: false }) },
+            }
+            j = j + 2
+        } else if cmd == "build" && a == "-o" && has_value {
+            cl.output = argv[j + 1]
+            j = j + 2
+        } else if cmd == "build" && a == "-g" {
+            cl.debug = true
+            j = j + 1
+        } else if cmd == "clean" && a == "--deps" {
+            cl.deps = true
+            j = j + 1
+        } else if cmd == "fetch" && a == "--update" {
+            cl.update = true
+            j = j + 1
+        } else if cmd == "new" && cl.name == "" {
+            cl.name = a
+            j = j + 1
+        } else if positional == 0 && cmd != "repl" && cmd != "new" && cmd != "clean" && cmd != "fetch" && ends_with(a, ".my") {
+            cl.file = a
+            positional = 1
+            j = j + 1
+        } else if cmd == "run" || (cmd == "test" && cl.file != "") {
+            push(cl.rest, a)
+            positional = positional + 1
+            j = j + 1
+        } else {
+            return Err(CliError { msg: "myla: unknown option '" + a + "'", usage: true })
+        }
+    }
+    return Ok(cl)
 }
 
 fun main() {
     let argv = args()
-    if len(argv) >= 2 && argv[1] == "repl" {
-        var stdlib = default_stdlib_root(argv[0])
-        if len(argv) == 4 && argv[2] == "--stdlib" {
-            stdlib = argv[3]
-        } else if len(argv) != 2 {
-            usage()
-            exit(2)
-        }
-        exit(repl(stdlib))
-    }
-    if len(argv) < 3 {
+    if len(argv) < 2 {
         usage()
         exit(2)
     }
     let cmd = argv[1]
-    let file = argv[2]
-    var stdlib = default_stdlib_root(argv[0])
-
-    if cmd == "run" || cmd == "test" {
-        // `--stdlib <dir>` anywhere; everything else goes to the program
-        var rest: [str] = []
-        var j = 3
-        while j < len(argv) {
-            if argv[j] == "--stdlib" && j + 1 < len(argv) {
-                stdlib = argv[j + 1]
-                j = j + 2
-            } else {
-                push(rest, argv[j])
-                j = j + 1
-            }
-        }
-        exit(cmd_interp(file, stdlib, cmd == "test", rest))
+    let known = ["run", "test", "build", "check", "repl", "new", "clean", "fetch"]
+    var ok = false
+    for k in known { if k == cmd { ok = true } }
+    if !ok {
+        eprintln("myla: unknown command '" + cmd + "'")
+        usage()
+        exit(2)
     }
-
-    if cmd == "build" {
-        var output = "a.out"
-        var debug = false
-        var j = 3
-        while j < len(argv) {
-            if argv[j] == "-o" && j + 1 < len(argv) {
-                output = argv[j + 1]
-                j = j + 2
-            } else if argv[j] == "--stdlib" && j + 1 < len(argv) {
-                stdlib = argv[j + 1]
-                j = j + 2
-            } else if argv[j] == "-g" {
-                debug = true
-                j = j + 1
-            } else {
-                eprintln("myla: unknown option '" + argv[j] + "'")
+    var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, deps: false, update: false, name: "", rest: [] }
+    match parse_command_line(argv) {
+        Ok(c) => { cl = c },
+        Err(e) => {
+            eprintln(e.msg)
+            if e.usage {
                 usage()
                 exit(2)
             }
-        }
-        exit(cmd_build(file, output, stdlib, debug))
+            exit(1)
+        },
     }
-
-    eprintln("myla: unknown command '" + cmd + "'")
-    usage()
-    exit(2)
+    if cmd == "repl" {
+        exit(repl(cl.opts.stdlib_root, cl.opts.packages))
+    }
+    if cmd == "new" {
+        if cl.name == "" {
+            usage()
+            exit(2)
+        }
+        exit(project_new(cl.name))
+    }
+    if cmd == "clean" { exit(project_clean(cl.deps)) }
+    if cmd == "fetch" { exit(project_fetch(cl.update)) }
+    if cl.file == "" {
+        // project mode (MYLA-94)
+        if cmd == "build" { exit(project_build(cl.opts, cl.debug)) }
+        if cmd == "run" { exit(project_run(cl.opts, cl.rest)) }
+        if cmd == "test" { exit(project_test(cl.opts)) }
+        exit(project_check(cl.opts))
+    }
+    if cmd == "build" {
+        exit(cmd_build(cl.file, cl.output, cl.opts, cl.debug))
+    }
+    if cmd == "check" {
+        match load_and_check(cl.file, cl.opts) {
+            Ok(ch) => {
+                print("ok")
+                exit(0)
+            },
+            Err(e) => {
+                eprintln(e)
+                exit(1)
+            },
+        }
+    }
+    exit(cmd_interp(cl.file, cl.opts, cmd == "test", cl.rest))
 }

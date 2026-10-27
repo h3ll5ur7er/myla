@@ -153,9 +153,9 @@ class LspScenarios:
         self.change(self.bad, "pub fun f() -> int {\n    return true\n}\n")
         got = self.client.diagnostics(1, full=True)[_uri(self.bad)]
         self.assertEqual(len(got), 1)
-        # at `return`, the squiggle as wide as the word
+        # under the whole `return true`, as the command line underlines it (MYLA-65)
         self.assertEqual(got[0]["range"], {"start": {"line": 1, "character": 4},
-                                           "end": {"line": 1, "character": 10}})
+                                           "end": {"line": 1, "character": 15}})
         self.assertEqual((got[0]["severity"], got[0]["source"], got[0]["code"]), (1, "myla", "type"))
 
     def test_other_open_buffers_are_used_unsaved(self):
@@ -170,9 +170,9 @@ class LspScenarios:
         self.open(self.main, src)
         got = self.client.diagnostics(1, full=True)[_uri(self.main)]
         self.assertEqual(len(got), 1)
-        # at the second `let`, code point 18; "😀" is two UTF-16 units
+        # the second `let` statement, from code point 18; "😀" is two UTF-16 units
         self.assertEqual(got[0]["range"], {"start": {"line": 1, "character": 19},
-                                           "end": {"line": 1, "character": 22}})
+                                           "end": {"line": 1, "character": 33}})
 
     def test_a_parse_error(self):
         self.open(self.main, "fun main() {\n    let = 1\n}\n")

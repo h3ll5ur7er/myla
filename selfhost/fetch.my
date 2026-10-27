@@ -1,0 +1,245 @@
+// fetch.my -- Git dependencies (MYLA-95, D73): `myla fetch` resolves them to
+// commits and writes `myla.lock`; every command that compiles checks out the
+// locked commits it is missing (wiki: Architecture/Project-tool, "Git").
+//
+// Git runs through `/usr/bin/env`, so `git` is found on PATH and inherits the
+// environment (the user's credentials, proxy and SSH configuration), with
+// GIT_TERMINAL_PROMPT=0 so a missing credential fails instead of waiting for a
+// password. A checkout is cloned into `<name>-<commit>.partial` and renamed
+// when it is complete, so an interrupted fetch leaves nothing with the final
+// name; a stale `.partial` is removed first. Checkouts never change after
+// that: another commit is another directory.
+
+from std.process import run, Output, ExitStatus
+from std.fs import exists, is_file, make_dir_all, write_to_file
+from std.io import eprintln
+from .project import resolve_project, load_project, project_lock, render_lock, lock_of, render_project_error, parent_dir, ref_text
+from .project import Project, Lock, LockEntry, GitPackage, GitSource, GitRef
+
+// What a git command printed, and whether it succeeded.
+struct GitRun { ok: bool, out: str, err: str }
+
+fun text_of(bytes: [uint8]) -> str {
+    var sb = StringBuilder()
+    for b in bytes { append_byte(sb, b) }
+    return build(sb)
+}
+
+// Run `git args…`.
+fun git(argv: [str]) -> GitRun {
+    var full = ["GIT_TERMINAL_PROMPT=0", "git"]
+    for a in argv { push(full, a) }
+    return match run("/usr/bin/env", full) {
+        Ok(out) => finished(out)
+        Err(e) => GitRun { ok: false, out: "", err: "cannot run /usr/bin/env\n" }
+    }
+}
+
+fun finished(out: Output) -> GitRun {
+    let stdout = text_of(out.stdout)
+    let stderr = text_of(out.stderr)
+    return match out.status {
+        ExitStatus.Exited(code) => match code {
+            0 => GitRun { ok: true, out: stdout, err: stderr }
+            127 => GitRun { ok: false, out: stdout, err: "git is not installed (it isn't on PATH)\n" }
+            _ => GitRun { ok: false, out: stdout, err: stderr }
+        }
+        ExitStatus.Signaled(sig) => GitRun { ok: false, out: stdout, err: format("git was killed by signal {}\n", sig) }
+    }
+}
+
+// The commit the Git dependency `name` (`g`) names now: a tag's (an annotated
+// one's commit, not the tag object), a branch's, the default branch's, or the
+// `rev` itself. Err: the message to print.
+pub fun remote_commit(name: str, g: GitSource) -> Result<str, str> {
+    var refs: [str] = []
+    var what = ""
+    match g.reference {
+        GitRef.Rev(c) => { return Ok(c) },
+        GitRef.Tag(t) => {
+            refs = ["refs/tags/" + t, "refs/tags/" + t + "^{}"]
+            what = format("tag '{}'", t)
+        },
+        GitRef.Branch(b) => {
+            refs = ["refs/heads/" + b]
+            what = format("branch '{}'", b)
+        },
+        GitRef.DefaultBranch => {
+            refs = ["HEAD"]
+            what = "default branch (HEAD)"
+        },
+    }
+    var argv = ["ls-remote", g.url]
+    for r in refs { push(argv, r) }
+    let r = git(argv)
+    if !r.ok { return Err(format("myla: dependency '{}': git ls-remote {} failed\n{}", name, g.url, trim_end(r.err))) }
+    var found = ""
+    for line in lines(r.out) {
+        let (sha, name_of_ref) = split_tab(line)
+        if len(refs) == 2 && name_of_ref == refs[1] { return Ok(sha) }        // the peeled tag
+        if name_of_ref == refs[0] { found = sha }
+    }
+    if found == "" { return Err(format("myla: dependency '{}': there is no {} in {}", name, what, g.url)) }
+    return Ok(found)
+}
+
+// Check out the locked commit of `g` into `g.dir`, printing what it fetches.
+pub fun check_out(g: GitPackage) -> Result<int32, str> {
+    let partial = g.dir + ".partial"
+    let failed = format("myla: dependency '{}': cannot check out commit {} from {}", g.name, g.git.commit, g.git.url)
+    if exists(partial) && !remove_tree(partial) { return Err(format("myla: cannot remove {}", partial)) }
+    match make_dir_all(parent_dir(g.dir)) {
+        Ok(n) => {},
+        Err(e) => { return Err(format("myla: cannot create {}", parent_dir(g.dir))) },
+    }
+    eprintln(format("fetching {}{} ({})", g.name, ref_text(g.git.reference), short(g.git.commit)))
+    let clone = git(["clone", "--quiet", g.git.url, partial])
+    if !clone.ok {
+        remove_tree(partial)
+        return Err(failed + "\n" + trim_end(clone.err))
+    }
+    let co = git(["-C", partial, "checkout", "--quiet", "--detach", g.git.commit])
+    if !co.ok {
+        remove_tree(partial)
+        return Err(failed + "\n" + trim_end(co.err))
+    }
+    match run("/usr/bin/env", ["mv", partial, g.dir]) {
+        Ok(out) => {
+            if !finished(out).ok { return Err(format("myla: cannot rename {} to {}", partial, g.dir)) }
+        },
+        Err(e) => { return Err(format("myla: cannot rename {} to {}", partial, g.dir)) },
+    }
+    return Ok(0)
+}
+
+// The project whose manifest is `manifest`, with every locked commit checked
+// out (as `build`, `run`, `test` and `check` need it). A Git dependency
+// without a current lock entry is an error that says to run `myla fetch`.
+pub fun checked_out_project(manifest: str) -> Result<Project, str> {
+    var rounds = 0
+    while rounds < 100 {
+        let p = match load_project(manifest) {
+            Ok(p) => p
+            Err(e) => { return Err(render_project_error(e)) }
+        }
+        if len(p.missing) == 0 { return Ok(p) }
+        for g in p.missing { check_out(g)? }
+        rounds = rounds + 1
+    }
+    return Err("myla: the dependencies keep changing while they are checked out")
+}
+
+// `myla fetch [--update]`: resolve each Git dependency of the build without a
+// current lock entry (each one, with `update`), check out what is missing,
+// again for the dependencies those bring, and write `myla.lock` (if the build
+// has Git dependencies, or had a lock file).
+pub fun fetch(manifest: str, update: bool) -> Result<int32, str> {
+    var lock = Lock { entries: [] }
+    if !update {
+        lock = match project_lock(manifest) {
+            Ok(l) => l
+            Err(e) => { return Err(render_project_error(e)) }
+        }
+    }
+    var rounds = 0
+    while rounds < 100 {
+        let p = match resolve_project(manifest, lock, true) {
+            Ok(p) => p
+            Err(e) => { return Err(render_project_error(e)) }
+        }
+        if len(p.unlocked) == 0 && len(p.missing) == 0 { return write_lock(p) }
+        for g in p.unlocked {
+            let commit = remote_commit(g.name, g.git)?
+            lock = with_entry(lock, LockEntry { name: g.name, git: GitSource { url: g.git.url, reference: g.git.reference, commit: commit } })
+        }
+        for g in p.missing { check_out(g)? }
+        rounds = rounds + 1
+    }
+    return Err("myla: the dependencies keep changing while they are fetched")
+}
+
+// Write the current lock entries of `p` next to its manifest.
+fun write_lock(p: Project) -> Result<int32, str> {
+    let lock = lock_of(p)
+    let path = parent_dir(p.manifest) + "/myla.lock"
+    if len(lock.entries) == 0 && !is_file(path) { return Ok(0) }
+    return match write_to_file(path, render_lock(lock)) {
+        Ok(n) => Ok(0)
+        Err(e) => Err("myla: cannot write " + path)
+    }
+}
+
+// `lock` with `e` in place of the entry for its name.
+fun with_entry(lock: Lock, e: LockEntry) -> Lock {
+    var entries: [LockEntry] = []
+    for old in lock.entries {
+        if old.name != e.name { push(entries, old) }
+    }
+    push(entries, e)
+    return Lock { entries: entries }
+}
+
+// Remove the directory tree `path`; whether that worked.
+fun remove_tree(path: str) -> bool {
+    return match run("/usr/bin/env", ["rm", "-rf", path]) {
+        Ok(out) => finished(out).ok
+        Err(e) => false
+    }
+}
+
+#test("4f3c2a1e9b0d5c6a7e8f9a0b1c2d3e4f5a6b7c8d")["4f3c2a1"]
+#test("abc")["abc"]
+fun short(commit: str) -> str {
+    if len(commit) <= 7 { return commit }
+    var sb = StringBuilder()
+    append(sb, commit, 0, 7)
+    return build(sb)
+}
+
+// The lines of `s`, without their line breaks (and without a last empty one).
+#test("a\tb\nc\n")[["a\tb", "c"]]
+#test("")[[]]
+fun lines(s: str) -> [str] {
+    var out: [str] = []
+    var start = 0
+    var i = 0
+    while i < len(s) {
+        if s[i] == '\n' {
+            var sb = StringBuilder()
+            append(sb, s, start, i)
+            push(out, build(sb))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < len(s) {
+        var sb = StringBuilder()
+        append(sb, s, start, len(s))
+        push(out, build(sb))
+    }
+    return out
+}
+
+// A line of `git ls-remote`: the commit and the reference.
+#test("abc\trefs/tags/v1")[("abc", "refs/tags/v1")]
+#test("abc")[("abc", "")]
+fun split_tab(line: str) -> (str, str) {
+    var i = 0
+    while i < len(line) && line[i] != '\t' { i = i + 1 }
+    var a = StringBuilder()
+    append(a, line, 0, i)
+    var b = StringBuilder()
+    if i < len(line) { append(b, line, i + 1, len(line)) }
+    return (build(a), build(b))
+}
+
+// `s` without trailing line breaks and spaces.
+#test("x\n\n")["x"]
+#test("")[""]
+fun trim_end(s: str) -> str {
+    var end = len(s)
+    while end > 0 && (s[end - 1] == '\n' || s[end - 1] == ' ' || s[end - 1] == '\r') { end = end - 1 }
+    var sb = StringBuilder()
+    append(sb, s, 0, end)
+    return build(sb)
+}

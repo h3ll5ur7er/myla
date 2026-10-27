@@ -1,27 +1,40 @@
 // diag.my -- diagnostics as the Python CLI prints them (MYLA-28):
 //
-//     parse error: expected an expression, found '}'
-//       --> examples/bad.my:3:13
+//     type error: cannot concatenate 'str' with 'int32'
+//       --> examples/bad.my:3:17
 //       |
-//     3 |     let x =
-//       |             ^
+//     3 |     let x = "a" + 1
+//       |             ^^^^^^^
 //
-// (src/myla/errors.py: MylaError.render). The file is read again for the
-// source line; without a position only the first line is printed.
+// (src/myla/errors.py: MylaError.render). The carets underline the error's
+// range on its line, to the end of the line when the range goes on (MYLA-65).
+// The file is read again for the source line; without a position only the
+// first line is printed.
 
 from std.fs import read_to_string
-from .tokens import Diag
+from .tokens import Diag, SrcSpan
 
-// An error with the file it is in (`line` 0: no position).
-pub struct Report { kind: str, msg: str, path: str, line: int32, col: int32 }
+// An error with the file it is in (`line` 0: no position; `sp` with `eline` 0:
+// no range, one caret).
+pub struct Report { kind: str, msg: str, path: str, line: int32, col: int32, sp: SrcSpan }
 
-// `d` as `err <line> <col> <kind>: <message>`, the line the differential test
-// drivers print (the Python side builds it from its exception).
+// `d` as `err <line> <col> <span> <kind>: <message>`, the line the differential
+// test drivers print (the Python side builds it from its exception with
+// canon.canonical_error).
 pub fun canonical_err(d: Diag) -> str {
-    return format("err {} {} {}: {}", d.line, d.col, split_kind(d.kind), d.msg)
+    return canonical(d.line, d.col, d.sp, split_kind(d.kind), d.msg)
+}
+
+#test(3, 7, SrcSpan { sline: 3, scol: 5, eline: 3, ecol: 9 }, "type", "m")["err 3 7 3:5-3:9 type: m"]
+#test(3, 7, SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, "type", "m")["err 3 7 - type: m"]
+pub fun canonical(line: int32, col: int32, sp: SrcSpan, kind: str, msg: str) -> str {
+    var span = "-"
+    if sp.eline > 0 { span = format("{}:{}-{}:{}", sp.sline, sp.scol, sp.eline, sp.ecol) }
+    return format("err {} {} {} {}: {}", line, col, span, kind, msg)
 }
 
 // The first word of `kind` ("parse" of "parse error").
+#test("parse error")["parse"]
 fun split_kind(kind: str) -> str {
     var sb = StringBuilder()
     for c in chars(kind) {
@@ -31,12 +44,12 @@ fun split_kind(kind: str) -> str {
     return build(sb)
 }
 
-pub fun type_report(line: int32, col: int32, msg: str, path: str) -> Report {
-    return Report { kind: "type error", msg: msg, path: path, line: line, col: col }
+pub fun type_report(line: int32, col: int32, sp: SrcSpan, msg: str, path: str) -> Report {
+    return Report { kind: "type error", msg: msg, path: path, line: line, col: col, sp: sp }
 }
 
 pub fun report(d: Diag, path: str) -> Report {
-    return Report { kind: d.kind, msg: d.msg, path: path, line: d.line, col: d.col }
+    return Report { kind: d.kind, msg: d.msg, path: path, line: d.line, col: d.col, sp: d.sp }
 }
 
 // Line `n` (1-based) of `src`, if it has one.
@@ -58,6 +71,42 @@ fun source_line(src: str, n: int32) -> Option<str> {
     return None
 }
 
+// The columns to underline on `text`, line `line` of a diagnostic at column
+// `col` with range `sp`: (first, one past the last). The range's part on that
+// line, to the line's end when the range goes on, and always `col`
+// (MylaError.caret_range).
+#test("    x = 1 + y", 1, 7, SrcSpan { sline: 1, scol: 5, eline: 1, ecol: 14 })[(5, 14)]
+#test("[1,\n    2] + y", 2, 8, SrcSpan { sline: 1, scol: 1, eline: 2, ecol: 11 })[(8, 11)]
+#test("fun größe() {", 1, 1, SrcSpan { sline: 1, scol: 1, eline: 3, ecol: 2 })[(1, 14)]
+#test("abc", 1, 2, SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 })[(2, 3)]
+pub fun caret_range(text: str, line: int32, col: int32, sp: SrcSpan) -> (int32, int32) {
+    var first = col
+    var end = col + 1
+    if sp.eline > 0 {
+        if sp.sline == line { first = sp.scol }
+        if sp.eline == line { end = sp.ecol } else { end = len(chars(text)) as int32 + 1 }
+    }
+    if first > col { first = col }
+    if end < col + 1 { end = col + 1 }
+    return (first, end)
+}
+
+// The caret line under `text` (see caret_range).
+#test("let x = 1", 1, 5, SrcSpan { sline: 1, scol: 5, eline: 1, ecol: 6 })["    ^"]
+#test("    x = 1 + y", 1, 7, SrcSpan { sline: 1, scol: 5, eline: 1, ecol: 14 })["    ^^^^^^^^^"]
+#test("fun größe() {", 1, 1, SrcSpan { sline: 1, scol: 1, eline: 3, ecol: 2 })["^^^^^^^^^^^^^"]
+#test("abc", 1, 2, SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 })[" ^"]
+pub fun carets(text: str, line: int32, col: int32, sp: SrcSpan) -> str {
+    let (first, end) = caret_range(text, line, col, sp)
+    var sb = StringBuilder()
+    var k = 1
+    while k < end {
+        if k < first { append_byte(sb, ' ') } else { append_byte(sb, '^') }
+        k = k + 1
+    }
+    return build(sb)
+}
+
 pub fun render(r: Report) -> str {
     var sb = StringBuilder()
     append(sb, format("{}: {}", r.kind, r.msg))
@@ -74,13 +123,7 @@ pub fun render(r: Report) -> str {
             var pad = StringBuilder()
             for c in chars(gutter) { append_byte(pad, ' ') }
             let p = build(pad)
-            var caret = StringBuilder()
-            var k = 1
-            while k < r.col {
-                append_byte(caret, ' ')
-                k = k + 1
-            }
-            append(sb, format("\n{} |\n{} | {}\n{} | {}^", p, gutter, l, p, build(caret)))
+            append(sb, format("\n{} |\n{} | {}\n{} | {}", p, gutter, l, p, carets(l, r.line, r.col, r.sp)))
         },
         None => {},
     }

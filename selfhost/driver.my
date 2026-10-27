@@ -1,0 +1,153 @@
+// driver.my -- what the `myla` commands do with one entry file: load, link and
+// type-check it, interpret it or run its tests, compile it to a binary. Shared
+// by the file commands (main.my) and the project commands (project_cmd.my,
+// MYLA-94).
+//
+// `build` type-checks and generates x86-64 assembly (with `debug`, DWARF debug
+// information for gdb: line tables and variables, MYLA-71, MYLA-66), writes it
+// to `<out>.s`, then shells out to the system assembler and linker (`as`/`ld`,
+// located via `/usr/bin/env` so PATH is honored) to produce the executable
+// `<out>`, and removes the intermediate files.
+
+from std.process import run, Output, ExitStatus, SpawnError
+from std.io import write, eprintln
+from std.fs import write_to_file
+from .loader import load_program_opts, LoadOptions, file_of, Loaded
+from .diag import render, type_report, Report
+from .checker import build_checker_decls, Checker, CheckErr
+from .codegen import new_codegen
+from .interp import new_interp, RtError, TestRun
+
+// Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
+fun decode(bytes: [uint8]) -> str {
+    var sb = StringBuilder()
+    for b in bytes { append_byte(sb, b) }
+    return build(sb)
+}
+
+// A checked program, and the linked one (for the files of its node ids).
+pub struct Checked { checker: Checker, prog: Loaded }
+
+// Load, link and type-check the program rooted at `file`, as `opts` says.
+// Errors are carried as the diagnostic text to print.
+pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
+    let prog = match load_program_opts(file, opts) {
+        Ok(p) => p,
+        Err(r) => { return Err(render(r)) },
+    }
+    return match build_checker_decls(prog.decls, prog.next_id) {
+        Ok(c) => Ok(Checked { checker: c, prog: prog }),
+        Err(e) => Err(render(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl)))),
+    }
+}
+
+// Type-check `file`, then generate its x86-64 assembly (`debug`: with DWARF
+// debug information, MYLA-71, MYLA-66).
+fun compile_asm(file: str, opts: LoadOptions, debug: bool) -> Result<str, str> {
+    let ch = load_and_check(file, opts)?
+    var g = new_codegen(ch.checker)
+    g.set_sources(ch.prog.spans, ch.prog.next_id)
+    if debug { g.enable_debug_info() }
+    return Ok(g.generate())
+}
+
+// Inspect a finished child's status; return true on failure (nonzero exit or a
+// terminating signal), echoing its stderr and `label`.
+fun step_failed(out: Output, label: str) -> bool {
+    match out.status {
+        ExitStatus.Exited(code) => {
+            if code != 0 {
+                eprintln(label)
+                write(2, decode(out.stderr))
+                return true
+            }
+            return false
+        },
+        ExitStatus.Signaled(sig) => {
+            eprintln(label)
+            return true
+        },
+    }
+    return false
+}
+
+// Run one step (`program args…`); return true on failure (nonzero exit,
+// terminating signal, or spawn error), echoing the child's stderr and `label`.
+pub fun run_step(program: str, argv: [str], label: str) -> bool {
+    var failed = false
+    match run(program, argv) {
+        Ok(out) => {
+            failed = step_failed(out, label)
+        },
+        Err(e) => {
+            eprintln(label)
+            failed = true
+        },
+    }
+    return failed
+}
+
+// `myla run <file> [args]` / `myla test`: interpret the program with argv
+// `[file, args...]`, or run its #test cases; the exit status.
+pub fun cmd_interp(file: str, opts: LoadOptions, tests: bool, prog_args: [str]) -> int32 {
+    match load_and_check(file, opts) {
+        Ok(ch) => {
+            var argv = [file]
+            for a in prog_args { push(argv, a) }
+            var it = new_interp(ch.checker, argv)
+            if tests {
+                return it.run_tests()
+            }
+            let code = it.run()
+            match it.rt_err {
+                Some(r) => { eprintln(render(Report { kind: "runtime error", msg: r.msg, path: file_of(ch.prog, r.node), line: r.line, col: r.col, sp: r.sp })) },
+                None => {},
+            }
+            return code
+        },
+        Err(e) => {
+            eprintln(e)
+            return 1
+        },
+    }
+    return 0
+}
+
+// The `#test` cases declared in `file` itself (not in the modules it links),
+// run as `myla test` does in a project (MYLA-94); Err: the diagnostic.
+pub fun own_tests(file: str, opts: LoadOptions) -> Result<TestRun, str> {
+    let ch = load_and_check(file, opts)?
+    var it = new_interp(ch.checker, [file])
+    return Ok(it.run_test_cases(true))
+}
+
+// `myla build <file> -o <out>`: compile to a native binary at `out`.
+pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool) -> int32 {
+    let asm = match compile_asm(file, opts, debug) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln(e)
+            return 1
+        },
+    }
+    let asm_path = output + ".s"
+    let obj_path = output + ".o"
+    match write_to_file(asm_path, asm) {
+        Ok(n) => {},
+        Err(e) => {
+            eprintln("myla: cannot write assembly to " + asm_path)
+            return 1
+        },
+    }
+    if run_step("/usr/bin/env", ["as", "--64", "-o", obj_path, asm_path], "myla: assembler failed") {
+        return 1
+    }
+    if run_step("/usr/bin/env", ["ld", "-o", output, obj_path], "myla: linker failed") {
+        return 1
+    }
+    // the assembly and object file were only steps (MYLA-35)
+    if run_step("/usr/bin/env", ["rm", "-f", asm_path, obj_path], "myla: cannot remove the intermediate files") {
+        return 1
+    }
+    return 0
+}

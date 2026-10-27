@@ -17,9 +17,10 @@ from std.num import format_float
 from .lexer import lex
 from .tokens import Token, TokenKind
 from .ast import Decl, DeclKind, Stmt, StmtKind, ElseTail
-from .loader import load_program_with, file_of, normalize, Loaded
+from .loader import load_program_opts, load_options, file_of, normalize, Loaded
 from .checker import build_checker_decls, Checker
-from .diag import render, type_report, Report
+from .diag import render, type_report, Report, carets
+from .tokens import SrcSpan
 from .interp import new_interp, Value, SessionStep
 from .util import cp_utf8
 
@@ -27,6 +28,7 @@ const ENTRY: str = "__repl__.my"
 
 struct Session {
     stdlib: str,
+    packages: [(str, str)],  // the `--package` flags' (name, dir) pairs (MYLA-92)
     decls: str,              // the declarations typed so far
     levels: [str],           // the statement inputs so far, outermost first
     names: [str],            // the session's variables (the latest of a name last)
@@ -36,9 +38,10 @@ struct Session {
 // A session's text with one more input; where that input starts (1-based).
 struct Text { source: str, start: int32 }
 
-// Run the REPL on stdin until its end (status 0) or an `exit` (its status).
-pub fun repl(stdlib: str) -> int32 {
-    var s = Session { stdlib: stdlib, decls: "", levels: [], names: [], vals: [] }
+// Run the REPL on stdin until its end (status 0) or an `exit` (its status);
+// inputs may import the `packages` (name, directory).
+pub fun repl(stdlib: str, packages: [(str, str)]) -> int32 {
+    var s = Session { stdlib: stdlib, packages: packages, decls: "", levels: [], names: [], vals: [] }
     var input = stdin()
     while true {
         eprint("myla> ")
@@ -78,9 +81,10 @@ impl Session {
         let decl = starts_a_declaration(input)
         var t = self.text("", input)
         if decl { t = self.text(input, "") }
-        var overrides: [str: str] = [:]
-        overrides[ENTRY] = t.source
-        let prog = match load_program_with(ENTRY, self.stdlib, overrides) {
+        var opts = load_options(self.stdlib)
+        opts.packages = self.packages
+        opts.overrides[ENTRY] = t.source
+        let prog = match load_program_opts(ENTRY, opts) {
             Ok(p) => p,
             Err(r) => {
                 report(r, t, input)
@@ -90,7 +94,7 @@ impl Session {
         let c = match build_checker_decls(prog.decls, prog.next_id) {
             Ok(c) => c,
             Err(e) => {
-                report(type_report(e.line, e.col, e.msg, file_of(prog, e.decl)), t, input)
+                report(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl)), t, input)
                 return -1
             },
         }
@@ -102,7 +106,7 @@ impl Session {
         let step = it.session_step(self.names, self.vals, input_stmts(c, len(self.levels)), true)
         match step.err {
             Some(r) => {
-                report(Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col }, t, input)
+                report(Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp }, t, input)
                 return -1
             },
             None => {},
@@ -189,18 +193,15 @@ fun report(r: Report, t: Text, input: str) {
         }
         return
     }
-    let line = r.line - t.start + 1
+    let shift = t.start - 1
+    let line = r.line - shift
     let src = input_line(input, line)
     let gutter = format("{}", line)
     var pad = StringBuilder()
     for c in chars(gutter) { append_byte(pad, ' ') }
-    var caret = StringBuilder()
-    var k = 1
-    while k < r.col {
-        append_byte(caret, ' ')
-        k = k + 1
-    }
-    eprintln(format("{}: {}\n  --> <input>:{}:{}\n{} |\n{} | {}\n{} | {}^", r.kind, r.msg, line, r.col, build(pad), gutter, src, build(pad), build(caret)))
+    var sp = r.sp
+    if sp.eline > 0 { sp = SrcSpan { sline: sp.sline - shift, scol: sp.scol, eline: sp.eline - shift, ecol: sp.ecol } }
+    eprintln(format("{}: {}\n  --> <input>:{}:{}\n{} |\n{} | {}\n{} | {}", r.kind, r.msg, line, r.col, build(pad), gutter, src, build(pad), carets(src, line, r.col, sp)))
 }
 
 // Whether `text` leaves a bracket open (so the input goes on); a text that

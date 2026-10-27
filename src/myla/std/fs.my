@@ -1,4 +1,4 @@
-// std.fs — minimal filesystem access (v0.5.4, D29).
+// std.fs — minimal filesystem access (v0.5.4, D29; directories MYLA-88).
 //
 // `read_to_string` opens a file, reads it whole, and closes it, returning the
 // contents as a `str` or an `IoError` describing why it failed. Errors are
@@ -50,4 +50,159 @@ pub fun write_to_file(path: str, contents: str) -> Result<int32, IoError> {
         return Ok(len(contents))
     }
     return Err(from_errno(err))
+}
+
+// --- directories (MYLA-88) ---------------------------------------------------
+//
+// Four primitives make the system calls, the rest is Myla (D64):
+// `__list_dir(path)` gives every name the directory lists, each followed by a
+// NUL byte, in the file system's order ("." and ".." may be among them);
+// `__mkdir(path, mode)` makes one directory; `__stat(path)` gives the
+// `st_mode` of what the path names (symbolic links followed), or -1;
+// `__getcwd()` gives the working directory, or "" (MYLA-98). Each sets the
+// errno that `__io_errno` reads.
+//
+// The helpers below have no `#test` cases: `myla test` runs the cases of every
+// linked module, and every program that prints links this one through
+// `std.io`. `tests/unit/test_fs.py` and `tests/burn/test_fs.py` cover them.
+
+const S_IFMT: int32 = 0xF000
+const S_IFDIR: int32 = 0x4000
+const S_IFREG: int32 = 0x8000
+
+// The working directory, as an absolute path without symbolic links (the
+// kernel's getcwd, through the primitive `__getcwd`, MYLA-98). A directory
+// that was removed is `NotFound`.
+pub fun current_dir() -> Result<str, IoError> {
+    let dir = __getcwd()
+    let err = __io_errno()
+    if err == 0 {
+        return Ok(dir)
+    }
+    return Err(from_errno(err))
+}
+
+// The names of the entries of the directory `path`, without "." and "..",
+// sorted by their bytes, so every implementation and file system gives the
+// same list.
+pub fun list_dir(path: str) -> Result<[str], IoError> {
+    let raw = __list_dir(path)
+    let err = __io_errno()
+    if err != 0 {
+        return Err(from_errno(err))
+    }
+    return Ok(sorted_names(split_names(raw)))
+}
+
+// Make the directory `path` (mode 0755, less the umask). Its parent must
+// exist; a path that exists already is `Other(17)` (EEXIST). `Ok` holds 0.
+pub fun make_dir(path: str) -> Result<int32, IoError> {
+    __mkdir(path, 0o755)
+    let err = __io_errno()
+    if err == 0 {
+        return Ok(0)
+    }
+    return Err(from_errno(err))
+}
+
+// Make the directory `path` and the parents it lacks, like `mkdir -p`. A
+// directory that exists already is fine; a file at `path` is `Other(17)`
+// (EEXIST), and a file where a parent should be is `Other(20)` (ENOTDIR).
+// `Ok` holds 0.
+pub fun make_dir_all(path: str) -> Result<int32, IoError> {
+    var i = 1
+    while i <= len(path) {
+        if i == len(path) || path[i] == '/' {
+            var sb = StringBuilder()
+            append(sb, path, 0, i)
+            let prefix = build(sb)
+            if !exists(prefix) {
+                make_dir(prefix)?
+            }
+        }
+        i = i + 1
+    }
+    if is_dir(path) {
+        return Ok(0)
+    }
+    return Err(from_errno(17))
+}
+
+// Whether `path` names something that exists (a dangling symbolic link
+// doesn't).
+pub fun exists(path: str) -> bool {
+    return __stat(path) >= 0
+}
+
+// Whether `path` names a directory (or a symbolic link to one).
+pub fun is_dir(path: str) -> bool {
+    let mode = __stat(path)
+    return mode >= 0 && (mode & S_IFMT) == S_IFDIR
+}
+
+// Whether `path` names a regular file (or a symbolic link to one).
+pub fun is_file(path: str) -> bool {
+    let mode = __stat(path)
+    return mode >= 0 && (mode & S_IFMT) == S_IFREG
+}
+
+// The names in `raw`, each followed by a NUL byte, without "." and "..".
+fun split_names(raw: str) -> [str] {
+    var names: [str] = []
+    var start = 0
+    var i = 0
+    while i < len(raw) {
+        if raw[i] == 0 {
+            var sb = StringBuilder()
+            append(sb, raw, start, i)
+            let name = build(sb)
+            if name != "." && name != ".." {
+                push(names, name)
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return names
+}
+
+// Whether `a` sorts before `b`, byte by byte (a prefix first).
+fun before(a: str, b: str) -> bool {
+    var i = 0
+    while i < len(a) && i < len(b) {
+        if a[i] != b[i] {
+            return a[i] < b[i]
+        }
+        i = i + 1
+    }
+    return len(a) < len(b)
+}
+
+// `names` sorted by their bytes (a stable merge sort).
+fun sorted_names(names: [str]) -> [str] {
+    if len(names) <= 1 {
+        return names
+    }
+    var left: [str] = []
+    var right: [str] = []
+    var i = 0
+    while i < len(names) {
+        if i < len(names) / 2 { push(left, names[i]) } else { push(right, names[i]) }
+        i = i + 1
+    }
+    let l = sorted_names(left)
+    let r = sorted_names(right)
+    var out: [str] = []
+    var a = 0
+    var b = 0
+    while a < len(l) || b < len(r) {
+        if b >= len(r) || (a < len(l) && !before(r[b], l[a])) {
+            push(out, l[a])
+            a = a + 1
+        } else {
+            push(out, r[b])
+            b = b + 1
+        }
+    }
+    return out
 }

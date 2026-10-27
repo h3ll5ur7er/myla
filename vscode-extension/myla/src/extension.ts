@@ -1,45 +1,66 @@
-import * as fs from "fs";
-import * as path from "path";
+// The Myla extension: starts the language server, offers run/test/build
+// commands and tasks, and registers the gdb debugger.
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as vscode from "vscode";
-import {
-  LanguageClient,
-  LanguageClientOptions,
-  ServerOptions,
-  TransportKind,
-} from "vscode-languageclient/node";
-import { chooseServer } from "./server";
+import { LanguageClient, TransportKind, type LanguageClientOptions, type ServerOptions } from "vscode-languageclient/node";
+import { registerDebugger } from "./debugProvider.ts";
+import { chooseServer } from "./server.ts";
+import { registerTasks } from "./tasks.ts";
+import { chooseCli, expandPath, findCompilerEntry, type Toolchain, type ToolMissing } from "./toolchain.ts";
 
 let client: LanguageClient | undefined;
 let watcher: vscode.FileSystemWatcher | undefined;
 let output: vscode.OutputChannel;
+let status: vscode.LanguageStatusItem;
 
-export async function activate(context: vscode.ExtensionContext) {
+/** A path setting, expanded. */
+function pathSetting(name: string): string {
+  const value = vscode.workspace.getConfiguration("myla").get<string>(name, "");
+  return expandPath(value, {
+    home: os.homedir(),
+    folder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
+  });
+}
+
+/** The repository's myla.py, which marks its root. */
+function compilerEntry(): string | undefined {
+  const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+  return findCompilerEntry(pathSetting("compilerPath"), folders, fs.existsSync);
+}
+
+/** The myla CLI from the settings and the repository. */
+export function resolveCli(): Toolchain | ToolMissing {
+  return chooseCli({ cliPath: pathSetting("cliPath"), compilerEntry: compilerEntry() }, fs.existsSync);
+}
+
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   output = vscode.window.createOutputChannel("Myla");
-  context.subscriptions.push(output);
+  status = vscode.languages.createLanguageStatusItem("myla.languageServer", { language: "myla" });
+  status.name = "Myla language server";
+  context.subscriptions.push(output, status);
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("myla.showExtensionInfo", () => {
-      vscode.window.showInformationMessage("Myla language support is active.");
-    }),
-    vscode.commands.registerCommand("myla.restartLanguageServer", async () => {
-      await restartServer(context);
-    })
-  );
-
-  // Restart the server when its configuration changes.
-  context.subscriptions.push(
+    vscode.commands.registerCommand("myla.restartLanguageServer", () => restartServer()),
+    vscode.commands.registerCommand("myla.showOutput", () => output.show()),
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (
         e.affectsConfiguration("myla.serverPath") ||
         e.affectsConfiguration("myla.compilerPath") ||
         e.affectsConfiguration("myla.diagnostics.enable")
       ) {
-        await restartServer(context);
+        await restartServer();
       }
-    })
+    }),
   );
+  registerTasks(context, { output, resolveCli });
+  registerDebugger(context, {
+    output,
+    resolveCli,
+    gdbPath: () => vscode.workspace.getConfiguration("myla").get<string>("debug.gdbPath", "gdb") || "gdb",
+  });
 
-  await startServer(context);
+  await startServer();
 }
 
 export function deactivate(): Thenable<void> | undefined {
@@ -47,18 +68,18 @@ export function deactivate(): Thenable<void> | undefined {
   return client?.stop();
 }
 
-async function startServer(context: vscode.ExtensionContext): Promise<void> {
-  const config = vscode.workspace.getConfiguration("myla");
+function showStatus(text: string, detail: string, severity: vscode.LanguageStatusSeverity): void {
+  status.text = text;
+  status.detail = detail;
+  status.severity = severity;
+  status.command = { title: "Restart", command: "myla.restartLanguageServer" };
+}
 
-  const choice = chooseServer(
-    {
-      serverPath: expandPath(config.get<string>("serverPath", "")),
-      compilerEntry: resolveCompilerEntry(config),
-    },
-    fs.existsSync
-  );
+async function startServer(): Promise<void> {
+  const choice = chooseServer({ serverPath: pathSetting("serverPath"), compilerEntry: compilerEntry() }, fs.existsSync);
   if ("missing" in choice) {
     output.appendLine(choice.missing);
+    showStatus("Myla: no language server", choice.missing, vscode.LanguageStatusSeverity.Warning);
     vscode.window.showWarningMessage(choice.missing);
     return;
   }
@@ -87,9 +108,7 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
       // `myla.diagnostics.enable = false` hides the diagnostics only; hover,
       // definition and the rest keep working.
       handleDiagnostics: (uri, diagnostics, next) => {
-        const enabled = vscode.workspace
-          .getConfiguration("myla")
-          .get<boolean>("diagnostics.enable", true);
+        const enabled = vscode.workspace.getConfiguration("myla").get<boolean>("diagnostics.enable", true);
         next(uri, enabled ? diagnostics : []);
       },
     },
@@ -97,78 +116,29 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
 
   // The id is the settings prefix: vscode-languageclient reads the trace level
   // from `<id>.trace.server`, i.e. `myla.trace.server`.
-  client = new LanguageClient(
-    "myla",
-    "Myla Language Server",
-    serverOptions,
-    clientOptions
-  );
+  client = new LanguageClient("myla", "Myla Language Server", serverOptions, clientOptions);
 
   try {
     await client.start();
     output.appendLine("Myla language server started.");
+    showStatus("Myla", `Language server: ${choice.command}`, vscode.LanguageStatusSeverity.Information);
   } catch (err) {
     output.appendLine(`Failed to start Myla language server: ${err}`);
+    showStatus("Myla: language server failed", String(err), vscode.LanguageStatusSeverity.Error);
     vscode.window.showErrorMessage(
-      "Could not start the Myla language server. Check 'myla.serverPath' and 'myla.compilerPath', and see the Myla output channel."
+      "Could not start the Myla language server. Check 'myla.serverPath' and 'myla.compilerPath', and see the Myla output channel.",
     );
     client = undefined;
   }
 }
 
-async function restartServer(context: vscode.ExtensionContext): Promise<void> {
+async function restartServer(): Promise<void> {
   if (client) {
-    output.appendLine("Restarting Myla language server...");
+    output.appendLine("Restarting the Myla language server...");
     await client.stop();
     client = undefined;
   }
   watcher?.dispose();
   watcher = undefined;
-  await startServer(context);
-}
-
-/**
- * Resolve the path to the compiler entry point (`myla.py`).
- * `myla.compilerPath` may point at the repo root or directly at `myla.py`.
- * When empty, search each workspace folder for a `myla.py`.
- */
-function resolveCompilerEntry(
-  config: vscode.WorkspaceConfiguration
-): string | undefined {
-  const configured = expandPath(config.get<string>("compilerPath", ""));
-  if (configured) {
-    if (configured.endsWith(".py") && fs.existsSync(configured)) {
-      return configured;
-    }
-    const candidate = path.join(configured, "myla.py");
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-    return undefined;
-  }
-
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    const candidate = path.join(folder.uri.fsPath, "myla.py");
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return undefined;
-}
-
-/**
- * A path setting with `${workspaceFolder}` (the first workspace folder),
- * `${userHome}` and a leading `~` expanded, as VS Code does for its own
- * settings but not for an extension's.
- */
-function expandPath(value: string): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-  const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
-  let out = value.trim();
-  if (out.startsWith("~/")) {
-    out = path.join(home, out.slice(2));
-  }
-  return out
-    .replace(/\$\{workspaceFolder\}/g, folder)
-    .replace(/\$\{userHome\}/g, home);
+  await startServer();
 }

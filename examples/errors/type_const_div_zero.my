@@ -1,4 +1,5 @@
 //~ type error: const division by zero
+//~ span: 100 / (5 - 5)
 // Division by a zero constant is caught while folding, not at runtime.
 const BAD: int32 = 100 / (5 - 5)
 

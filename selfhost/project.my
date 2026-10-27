@@ -1,0 +1,985 @@
+// project.my -- the project model of the project tool (MYLA-93, D73, D77):
+// turns `myla.toml` and `myla.lock` into the packages of a build, as the wiki
+// page Architecture/Project-tool describes.
+//
+//   1. `find_manifest` looks for `myla.toml` in a directory and its parents.
+//   2. `parse_manifest` reads and checks one manifest (pure): `[package]` with
+//      `name` and `version`, `[dependencies]` with a `path` or a `git` each;
+//      unknown keys are errors. Errors point at the key or value in the file.
+//   3. `resolve_project` follows the dependencies breadth first, each name
+//      once: a path dependency at its directory, a Git dependency in its
+//      checkout `.myla/deps/<name>-<commit>/` under the root package, the
+//      commit coming from the lock file. One version per name; a dependency's
+//      `package.name` equals its key, and it has a library.
+//   4. `loader_packages` gives the `--package name=dir/src` list (MYLA-92).
+//
+// Every directory is absolute and lexically normalised (no `.`, `..` or `//`),
+// so two requests for one package directory compare equal; symbolic links are
+// not resolved, as neither loader resolves them. A Git dependency whose locked
+// commit isn't checked out yet is not an error here: it is in
+// `Project.missing`, for `myla fetch` and the commands to check out
+// (MYLA-94, MYLA-95). One without a current lock entry is an error, unless the
+// caller (`myla fetch`) asks for them in `Project.unlocked`.
+//
+// The module depends on the standard library, `diag` (to print errors like
+// compile errors) and `tokens` (the keywords), not on the loader or the CLI.
+
+from std.fs import read_to_string, is_dir, is_file, current_dir, IoError
+from std.toml import parse_doc, Toml, TomlDoc, TomlPos, key_pos, value_pos
+from .tokens import keywords, SrcSpan
+from .diag import Report, render
+
+// --- The model ----------------------------------------------------------------
+
+// A package of the build: its name and version (from its manifest), its
+// package directory (absolute, normalised; it holds `myla.toml`), whether it
+// has a program (`src/main.my`) and a library (`src/<name>.my`), and where it
+// comes from.
+pub struct Package { name: str, version: str, dir: str, has_program: bool, has_library: bool, source: Source }
+
+// Where a package comes from: the root package (the project being built), a
+// path dependency (its directory, as resolved: absolute and normalised), or a
+// Git dependency.
+pub enum Source {
+    Root,
+    Path(str),
+    Git(GitSource),
+}
+
+// A Git dependency: the URL and the reference the manifest asks for, and the
+// commit the lock file pins it to ("" while it has no lock entry).
+pub struct GitSource { url: str, reference: GitRef, commit: str }
+
+// The reference of a Git dependency: none (the remote's default branch), a
+// tag, a branch or a full commit id.
+pub enum GitRef {
+    DefaultBranch,
+    Tag(str),
+    Branch(str),
+    Rev(str),
+}
+
+// A Git package that can't be read yet: in `Project.missing` its commit is
+// locked but `dir`, its checkout, doesn't exist; in `Project.unlocked` it has
+// no current lock entry (commit and dir are "").
+pub struct GitPackage { name: str, git: GitSource, dir: str }
+
+// The packages of a build: the manifest's path (absolute), the root package,
+// and its transitive dependencies sorted by name (the root not among them,
+// also when a dependency depends on it). `missing` and `unlocked` (sorted by
+// name) are the Git packages whose own dependencies couldn't be followed;
+// a build needs both empty.
+pub struct Project { manifest: str, root: Package, deps: [Package], missing: [GitPackage], unlocked: [GitPackage] }
+
+// Why the packages couldn't be worked out. `line` 0: no position; otherwise
+// the error is at `line`:`col` of the file `path` (a manifest or the lock
+// file), and `end_line`:`end_col` is where the text it is about ends (0: one
+// caret).
+pub struct ProjectError { msg: str, path: str, line: int32, col: int32, end_line: int32, end_col: int32 }
+
+// `myla.lock`: the commit of each Git package of the build.
+pub struct Lock { entries: [LockEntry] }
+
+pub struct LockEntry { name: str, git: GitSource }
+
+// A checked manifest.
+pub struct Manifest { name: str, version: str, deps: [Dependency] }
+
+// A dependency as a manifest declares it; `pos` is its key (or its header),
+// where errors about it point.
+pub struct Dependency { name: str, origin: DepSource, pos: TomlPos }
+
+pub enum DepSource {
+    FromPath(str),
+    FromGit(str, GitRef),
+}
+
+// --- Errors ---------------------------------------------------------------------
+
+fun no_pos() -> TomlPos {
+    return TomlPos { line: 0, col: 0, end_line: 0, end_col: 0 }
+}
+
+#test("m", TomlPos { line: 2, col: 3, end_line: 2, end_col: 7 }, "x")[ProjectError { msg: "x", path: "m", line: 2, col: 3, end_line: 2, end_col: 7 }]
+fun error_at(path: str, pos: TomlPos, msg: str) -> ProjectError {
+    return ProjectError { msg: msg, path: path, line: pos.line, col: pos.col, end_line: pos.end_line, end_col: pos.end_col }
+}
+
+fun error_in(path: str, msg: str) -> ProjectError {
+    return error_at(path, no_pos(), msg)
+}
+
+fun error_plain(msg: str) -> ProjectError {
+    return error_at("", no_pos(), msg)
+}
+
+fun key_at(doc: TomlDoc, path: [str]) -> TomlPos {
+    return match key_pos(doc, path) {
+        Some(p) => p
+        None => no_pos()
+    }
+}
+
+fun value_at(doc: TomlDoc, path: [str]) -> TomlPos {
+    return match value_pos(doc, path) {
+        Some(p) => p
+        None => no_pos()
+    }
+}
+
+#test(IoError.NotFound)["no such file or directory"]
+#test(IoError.Other(21))["errno 21"]
+fun io_text(e: IoError) -> str {
+    return match e {
+        IoError.NotFound => "no such file or directory"
+        IoError.PermissionDenied => "permission denied"
+        IoError.Other(code) => format("errno {}", code)
+    }
+}
+
+// `e` as the CLI prints it: like a compile error, with the line and carets,
+// when it has a position (`manifest error` or `lock file error`), else
+// `myla: <path>: <message>` (`myla: <message>` without a file).
+#test(ProjectError { msg: "missing table [package]", path: "/a/myla.toml", line: 0, col: 0, end_line: 0, end_col: 0 })["myla: /a/myla.toml: missing table [package]"]
+#test(ProjectError { msg: "cannot find the working directory", path: "", line: 0, col: 0, end_line: 0, end_col: 0 })["myla: cannot find the working directory"]
+pub fun render_project_error(e: ProjectError) -> str {
+    if e.line == 0 {
+        if e.path == "" { return "myla: " + e.msg }
+        return format("myla: {}: {}", e.path, e.msg)
+    }
+    var kind = "manifest error"
+    if base_name(e.path) == "myla.lock" { kind = "lock file error" }
+    let sp = SrcSpan { sline: e.line, scol: e.col, eline: e.end_line, ecol: e.end_col }
+    return render(Report { kind: kind, msg: e.msg, path: e.path, line: e.line, col: e.col, sp: sp })
+}
+
+// --- Names ------------------------------------------------------------------------
+
+// Why `name` can't be a package name, or "" if it can: an ASCII letter, then
+// ASCII letters, digits and `_`; not a keyword, not `std`.
+#test("geo")[""]
+#test("Geo_2")[""]
+#test("")["a package name can't be empty"]
+#test("1geo")["'1geo' is not a valid package name: it must be an ASCII letter followed by ASCII letters, digits and '_'"]
+#test("geo-x")["'geo-x' is not a valid package name: it must be an ASCII letter followed by ASCII letters, digits and '_'"]
+#test("_geo")["'_geo' is not a valid package name: it must be an ASCII letter followed by ASCII letters, digits and '_'"]
+#test("größe")["'größe' is not a valid package name: it must be an ASCII letter followed by ASCII letters, digits and '_'"]
+#test("fun")["'fun' is a keyword and can't be a package name"]
+#test("std")["'std' is the standard library and can't be a package name"]
+pub fun name_error(name: str) -> str {
+    if len(name) == 0 { return "a package name can't be empty" }
+    var ok = is_ascii_letter(name[0])
+    var i = 1
+    while i < len(name) && ok {
+        let c = name[i]
+        ok = is_ascii_letter(c) || (c >= '0' && c <= '9') || c == '_'
+        i = i + 1
+    }
+    if !ok { return format("'{}' is not a valid package name: it must be an ASCII letter followed by ASCII letters, digits and '_'", name) }
+    for k in keywords() {
+        if k == name { return format("'{}' is a keyword and can't be a package name", name) }
+    }
+    if name == "std" { return "'std' is the standard library and can't be a package name" }
+    return ""
+}
+
+#test('a')[true]
+#test('_')[false]
+fun is_ascii_letter(c: uint8) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// Whether `s` is a full commit id: 40 hexadecimal digits.
+#test("4f3c2a1e9b0d5c6a7e8f9a0b1c2d3e4f5a6b7c8d")[true]
+#test("4F3C2A1E9B0D5C6A7E8F9A0B1C2D3E4F5A6B7C8D")[true]
+#test("4f3c2a1")[false]
+#test("4f3c2a1e9b0d5c6a7e8f9a0b1c2d3e4f5a6b7c8g")[false]
+pub fun is_commit_id(s: str) -> bool {
+    if len(s) != 40 { return false }
+    var i = 0
+    while i < len(s) {
+        let c = s[i]
+        if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// --- Paths ----------------------------------------------------------------------
+
+// `p` without `.` components, empty components and trailing slashes, and with
+// each `..` taking away the component before it (at the root, nothing). A
+// relative path keeps the `..` it can't take away; an empty one is ".".
+#test("/a/b/../c/./d/")["/a/c/d"]
+#test("/a//b")["/a/b"]
+#test("/..")["/"]
+#test("/../a")["/a"]
+#test("/")["/"]
+#test("a/./b/..")["a"]
+#test("../a/../../b")["../../b"]
+#test("a/..")["."]
+#test("")["."]
+#test("./")["."]
+pub fun normalize_path(p: str) -> str {
+    let absolute = len(p) > 0 && p[0] == '/'
+    var parts: [str] = []
+    for part in split_path(p) {
+        if part == "" || part == "." {
+            // nothing
+        } else if part == ".." {
+            if len(parts) > 0 && parts[len(parts) - 1] != ".." {
+                pop(parts)
+            } else if !absolute {
+                push(parts, part)
+            }
+        } else {
+            push(parts, part)
+        }
+    }
+    var sb = StringBuilder()
+    if absolute { append(sb, "/") }
+    var first = true
+    for part in parts {
+        if !first { append(sb, "/") }
+        append(sb, part)
+        first = false
+    }
+    if len(sb) == 0 { return "." }
+    return build(sb)
+}
+
+// The components of `p` between its slashes (empty ones included).
+fun split_path(p: str) -> [str] {
+    var out: [str] = []
+    var start = 0
+    var i = 0
+    while i <= len(p) {
+        if i == len(p) || p[i] == '/' {
+            var sb = StringBuilder()
+            append(sb, p, start, i)
+            push(out, build(sb))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// `rel` taken from the directory `base` (`rel` itself if it is absolute),
+// normalised.
+#test("/a/b", "../c")["/a/c"]
+#test("/a/b", "/x/./y")["/x/y"]
+#test("/", "myla.toml")["/myla.toml"]
+#test("/a", "")["/a"]
+pub fun join_path(base: str, rel: str) -> str {
+    if len(rel) > 0 && rel[0] == '/' { return normalize_path(rel) }
+    return normalize_path(base + "/" + rel)
+}
+
+// The directory that holds `p` (normalised; the root's is the root).
+#test("/a/b/myla.toml")["/a/b"]
+#test("/a")["/"]
+#test("/")["/"]
+pub fun parent_dir(p: str) -> str {
+    return normalize_path(p + "/..")
+}
+
+// The last component of `p`.
+#test("/a/b/myla.lock")["myla.lock"]
+#test("myla.toml")["myla.toml"]
+fun base_name(p: str) -> str {
+    let parts = split_path(p)
+    return parts[len(parts) - 1]
+}
+
+// Whether the normalised path `p` is the directory `dir` or inside it.
+#test("/a/b", "/a/b")[true]
+#test("/a/b", "/a/b/c")[true]
+#test("/a/b", "/a/bc")[false]
+#test("/a/b", "/a")[false]
+#test("/", "/a")[true]
+pub fun is_inside(dir: str, p: str) -> bool {
+    if p == dir || dir == "/" { return true }
+    let prefix = dir + "/"
+    if len(p) < len(prefix) { return false }
+    var i = 0
+    while i < len(prefix) {
+        if p[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// The normalised absolute path `p` as seen from the directory `base` (also
+// absolute and normalised): below it without a prefix, elsewhere with one
+// `..` per level up to their common directory.
+#test("/a/b", "/a/b/src/main.my")["src/main.my"]
+#test("/a/b", "/a/b")["."]
+#test("/a/b/src/util", "/a/b/src/main.my")["../main.my"]
+#test("/a/b", "/a/c/d")["../c/d"]
+#test("/", "/a")["a"]
+#test("/a", "/")[".."]
+pub fun relative_path(base: str, p: str) -> str {
+    if p == base { return "." }
+    if is_inside(base, p) {
+        if base == "/" { return part_from(p, 1) }
+        return part_from(p, len(base) + 1)
+    }
+    let fs = split_path(base)
+    let ps = split_path(p)
+    var common = 0
+    while common < len(fs) && common < len(ps) && fs[common] == ps[common] { common = common + 1 }
+    var parts: [str] = []
+    var i = common
+    while i < len(fs) {
+        if fs[i] != "" { push(parts, "..") }
+        i = i + 1
+    }
+    i = common
+    while i < len(ps) {
+        if ps[i] != "" { push(parts, ps[i]) }
+        i = i + 1
+    }
+    var sb = StringBuilder()
+    for q in parts {
+        if len(sb) > 0 { append(sb, "/") }
+        append(sb, q)
+    }
+    return build(sb)
+}
+
+// `s` from the byte `start` on.
+fun part_from(s: str, start: int32) -> str {
+    var sb = StringBuilder()
+    append(sb, s, start, len(s))
+    return build(sb)
+}
+
+// `p` as an absolute, normalised path (a relative one is taken from the
+// working directory); None if the working directory can't be found.
+pub fun absolute_path(p: str) -> Option<str> {
+    if len(p) > 0 && p[0] == '/' { return Some(normalize_path(p)) }
+    return match current_dir() {
+        Ok(d) => Some(join_path(d, p))
+        Err(e) => None
+    }
+}
+
+// --- Finding the manifest -------------------------------------------------------
+
+// The nearest `myla.toml` from the directory `start` upwards (`start`, its
+// parent, and so on to the root), as an absolute path; None if there is none.
+pub fun find_manifest(start: str) -> Option<str> {
+    var dir = match absolute_path(start) {
+        Some(d) => d
+        None => { return None }
+    }
+    while true {
+        let candidate = join_path(dir, "myla.toml")
+        if is_file(candidate) { return Some(candidate) }
+        if dir == "/" { return None }
+        dir = parent_dir(dir)
+    }
+    return None
+}
+
+// --- The manifest ---------------------------------------------------------------
+
+// The manifest in `text` (from the file `path`, for errors), checked.
+pub fun parse_manifest(text: str, path: str) -> Result<Manifest, ProjectError> {
+    let doc = match parse_doc(text) {
+        Ok(d) => d
+        Err(e) => { return Err(ProjectError { msg: e.msg, path: path, line: e.line, col: e.col, end_line: 0, end_col: 0 }) }
+    }
+    var package: [(str, Toml)] = []
+    var has_package = false
+    var deps: [(str, Toml)] = []
+    for top in table_members(doc.root) {
+        let (key, v) = top
+        if key == "package" || key == "dependencies" {
+            match v {
+                Toml.Table(members) => {
+                    if key == "package" {
+                        package = members
+                        has_package = true
+                    } else {
+                        deps = members
+                    }
+                },
+                _ => { return Err(error_at(path, value_at(doc, [key]), format("'{}' must be a table", key))) },
+            }
+        } else {
+            let what = match v { Toml.Table(m) => "table", _ => "key" }
+            return Err(error_at(path, key_at(doc, [key]), format("unknown {} '{}'", what, key)))
+        }
+    }
+    if !has_package { return Err(error_in(path, "missing table [package]")) }
+    var name = ""
+    var has_name = false
+    var version = ""
+    var has_version = false
+    for m in package {
+        let (key, v) = m
+        let at = ["package", key]
+        if key == "name" || key == "version" || key == "description" || key == "license" {
+            let s = match v {
+                Toml.Str(s) => s
+                _ => { return Err(error_at(path, value_at(doc, at), format("'package.{}' must be a string", key))) }
+            }
+            if key == "name" {
+                name = s
+                has_name = true
+            }
+            if key == "version" {
+                version = s
+                has_version = true
+            }
+        } else if key == "authors" {
+            if !is_string_array(v) { return Err(error_at(path, value_at(doc, at), "'package.authors' must be an array of strings")) }
+        } else {
+            return Err(error_at(path, key_at(doc, at), format("unknown key '{}' in [package]", key)))
+        }
+    }
+    if !has_name { return Err(error_at(path, key_at(doc, ["package"]), "missing 'name' in [package]")) }
+    let problem = name_error(name)
+    if problem != "" { return Err(error_at(path, value_at(doc, ["package", "name"]), problem)) }
+    if !has_version { return Err(error_at(path, key_at(doc, ["package"]), "missing 'version' in [package]")) }
+    var out: [Dependency] = []
+    for d in deps {
+        push(out, parse_dependency(doc, path, d.0, d.1)?)
+    }
+    return Ok(Manifest { name: name, version: version, deps: out })
+}
+
+// The dependency `name = spec` of the manifest `doc` (the file `path`).
+fun parse_dependency(doc: TomlDoc, path: str, name: str, spec: Toml) -> Result<Dependency, ProjectError> {
+    let at = ["dependencies", name]
+    let pos = key_at(doc, at)
+    let problem = name_error(name)
+    if problem != "" { return Err(error_at(path, pos, problem)) }
+    let members = match spec {
+        Toml.Table(ms) => ms
+        _ => { return Err(error_at(path, value_at(doc, at), format("dependency '{}' must be a table, such as {} = {{ path = \"../{}\" }}", name, name, name))) }
+    }
+    var dir: Option<str> = None
+    var url: Option<str> = None
+    var reference = GitRef.DefaultBranch
+    var ref_key = ""
+    for m in members {
+        let (key, v) = m
+        let kat = ["dependencies", name, key]
+        if key != "path" && key != "git" && key != "tag" && key != "branch" && key != "rev" {
+            return Err(error_at(path, key_at(doc, kat), format("unknown key '{}' in dependency '{}'", key, name)))
+        }
+        let s = match v {
+            Toml.Str(s) => s
+            _ => { return Err(error_at(path, value_at(doc, kat), format("'{}' of dependency '{}' must be a string", key, name))) }
+        }
+        if s == "" { return Err(error_at(path, value_at(doc, kat), format("'{}' of dependency '{}' is empty", key, name))) }
+        if key == "path" { dir = Some(s) }
+        if key == "git" { url = Some(s) }
+        if key == "tag" || key == "branch" || key == "rev" {
+            if ref_key != "" { return Err(error_at(path, key_at(doc, kat), format("dependency '{}' has both '{}' and '{}': give at most one of 'tag', 'branch' and 'rev'", name, ref_key, key))) }
+            ref_key = key
+            if key == "rev" && !is_commit_id(s) { return Err(error_at(path, value_at(doc, kat), format("'rev' of dependency '{}' must be a full commit id (40 hexadecimal digits)", name))) }
+            if key == "tag" { reference = GitRef.Tag(s) }
+            if key == "branch" { reference = GitRef.Branch(s) }
+            if key == "rev" { reference = GitRef.Rev(s) }
+        }
+    }
+    match (dir, url) {
+        (Some(d), Some(u)) => { return Err(error_at(path, pos, format("dependency '{}' has both 'path' and 'git'", name))) },
+        (Some(d), None) => {
+            if ref_key != "" { return Err(error_at(path, key_at(doc, ["dependencies", name, ref_key]), format("'{}' of dependency '{}' needs 'git', not 'path'", ref_key, name))) }
+            return Ok(Dependency { name: name, origin: DepSource.FromPath(d), pos: pos })
+        },
+        (None, Some(u)) => { return Ok(Dependency { name: name, origin: DepSource.FromGit(u, reference), pos: pos }) },
+        (None, None) => { return Err(error_at(path, pos, format("dependency '{}' needs 'path' or 'git'", name))) },
+    }
+    unreachable()
+}
+
+// What `parse_manifest` says of `text`: "ok <name> <version> <dependencies>"
+// or "<line>:<col>-<end line>:<end col> <message>" (for the tests).
+#test("[package]\nname = \"geo\"\nversion = \"1\"\n[dependencies]\na = { path = \"../a\" }\nb = { git = \"u\", branch = \"x\" }\n")["ok geo 1 a=path ../a b=git u branch x"]
+#test("[package]\nname = \"geo\"\n")["1:1-1:10 missing 'version' in [package]"]
+#test("[package]\nname = \"if\"\nversion = \"1\"\n")["2:8-2:12 'if' is a keyword and can't be a package name"]
+#test("[package]\nname = \"geo\"\nversion = \"1\"\nauthors = [\n  'a', 2]\n")["5:8-0:0 arrays may only hold strings"]
+#test("[package]\nname = \"geo\"\nversion = \"1\"\nauthors = [\n  'a']\n")["ok geo 1"]
+#test("[package]\nname = \"geo\"\nversion = \"1\"\nauthors = ['a', \"b\"]\nlicense = 1\n")["5:11-5:12 'package.license' must be a string"]
+#test("[package]\nname = \"geo\"\nversion = \"1\"\n[dependencies.a]\npath = \"x\"\nrev = \"0123456789012345678901234567890123456789\"\n")["6:1-6:4 'rev' of dependency 'a' needs 'git', not 'path'"]
+#test("x = 1\n")["1:1-1:2 unknown key 'x'"]
+#test("")["0:0-0:0 missing table [package]"]
+fun manifest_summary(text: str) -> str {
+    return match parse_manifest(text, "myla.toml") {
+        Ok(m) => {
+            var sb = StringBuilder()
+            append(sb, format("ok {} {}", m.name, m.version))
+            for d in m.deps {
+                let from_text = match d.origin {
+                    DepSource.FromPath(p) => "path " + p
+                    DepSource.FromGit(u, r) => "git " + u + ref_text(r)
+                }
+                append(sb, format(" {}={}", d.name, from_text))
+            }
+            build(sb)
+        }
+        Err(e) => format("{}:{}-{}:{} {}", e.line, e.col, e.end_line, e.end_col, e.msg)
+    }
+}
+
+fun table_members(t: Toml) -> [(str, Toml)] {
+    var none: [(str, Toml)] = []
+    return match t {
+        Toml.Table(ms) => ms
+        _ => none
+    }
+}
+
+fun is_string_array(v: Toml) -> bool {
+    match v {
+        Toml.Array(items) => {
+            for x in items {
+                match x { Toml.Str(s) => {}, _ => { return false } }
+            }
+            return true
+        },
+        _ => { return false },
+    }
+    unreachable()
+}
+
+// --- Git references -------------------------------------------------------------
+
+// `r` as messages and the lock file name it: " tag v1", " branch main",
+// " rev …", or "" for the default branch.
+#test(GitRef.Tag("v1.2.0"))[" tag v1.2.0"]
+#test(GitRef.DefaultBranch)[""]
+pub fun ref_text(r: GitRef) -> str {
+    return match r {
+        GitRef.DefaultBranch => ""
+        GitRef.Tag(t) => " tag " + t
+        GitRef.Branch(b) => " branch " + b
+        GitRef.Rev(c) => " rev " + c
+    }
+}
+
+// Whether two requests name the same Git source.
+#test("u", GitRef.Tag("a"), "u", GitRef.Tag("a"))[true]
+#test("u", GitRef.Tag("a"), "u", GitRef.Branch("a"))[false]
+#test("u", GitRef.DefaultBranch, "v", GitRef.DefaultBranch)[false]
+fun same_git(url_a: str, a: GitRef, url_b: str, b: GitRef) -> bool {
+    return url_a == url_b && ref_text(a) == ref_text(b)
+}
+
+// --- The lock file --------------------------------------------------------------
+
+// The lock file at `path`.
+pub fun load_lock(path: str) -> Result<Lock, ProjectError> {
+    let text = match read_to_string(path) {
+        Ok(t) => t
+        Err(e) => { return Err(error_in(path, format("cannot read the lock file: {}", io_text(e)))) }
+    }
+    return parse_lock(text, path)
+}
+
+// The lock file in `text` (from the file `path`, for errors), checked: format
+// version 1, and a table `[git.<name>]` with `url`, at most one of `tag`,
+// `branch` and `rev`, and `commit` for each Git package.
+pub fun parse_lock(text: str, path: str) -> Result<Lock, ProjectError> {
+    let doc = match parse_doc(text) {
+        Ok(d) => d
+        Err(e) => { return Err(ProjectError { msg: e.msg, path: path, line: e.line, col: e.col, end_line: 0, end_col: 0 }) }
+    }
+    var has_version = false
+    var entries: [LockEntry] = []
+    for top in table_members(doc.root) {
+        let (key, v) = top
+        if key == "version" {
+            let n = match v {
+                Toml.Int(n) => n
+                _ => { return Err(error_at(path, value_at(doc, [key]), "'version' must be an integer")) }
+            }
+            if n > 1i64 { return Err(error_at(path, value_at(doc, [key]), "myla.lock is from a newer myla")) }
+            if n < 1i64 { return Err(error_at(path, value_at(doc, [key]), format("unknown lock file version {}", n))) }
+            has_version = true
+        } else if key == "git" {
+            let members = match v {
+                Toml.Table(ms) => ms
+                _ => { return Err(error_at(path, value_at(doc, [key]), "'git' must be a table")) }
+            }
+            for m in members {
+                push(entries, parse_lock_entry(doc, path, m.0, m.1)?)
+            }
+        } else {
+            return Err(error_at(path, key_at(doc, [key]), format("unknown key '{}' in the lock file", key)))
+        }
+    }
+    if !has_version { return Err(error_in(path, "the lock file has no 'version'")) }
+    return Ok(Lock { entries: entries })
+}
+
+fun parse_lock_entry(doc: TomlDoc, path: str, name: str, t: Toml) -> Result<LockEntry, ProjectError> {
+    let at = ["git", name]
+    let problem = name_error(name)
+    if problem != "" { return Err(error_at(path, key_at(doc, at), problem)) }
+    let members = match t {
+        Toml.Table(ms) => ms
+        _ => { return Err(error_at(path, value_at(doc, at), format("'git.{}' must be a table", name))) }
+    }
+    var url = ""
+    var commit = ""
+    var reference = GitRef.DefaultBranch
+    var ref_key = ""
+    for m in members {
+        let (key, v) = m
+        let kat = ["git", name, key]
+        if key != "url" && key != "commit" && key != "tag" && key != "branch" && key != "rev" {
+            return Err(error_at(path, key_at(doc, kat), format("unknown key '{}' in [git.{}]", key, name)))
+        }
+        let s = match v {
+            Toml.Str(s) => s
+            _ => { return Err(error_at(path, value_at(doc, kat), format("'{}' of [git.{}] must be a string", key, name))) }
+        }
+        if key == "url" { url = s }
+        if key == "commit" {
+            if !is_commit_id(s) { return Err(error_at(path, value_at(doc, kat), format("'commit' of [git.{}] must be 40 hexadecimal digits", name))) }
+            commit = s
+        }
+        if key == "tag" || key == "branch" || key == "rev" {
+            if ref_key != "" { return Err(error_at(path, key_at(doc, kat), format("[git.{}] has both '{}' and '{}'", name, ref_key, key))) }
+            ref_key = key
+            if key == "tag" { reference = GitRef.Tag(s) }
+            if key == "branch" { reference = GitRef.Branch(s) }
+            if key == "rev" { reference = GitRef.Rev(s) }
+        }
+    }
+    if url == "" { return Err(error_at(path, key_at(doc, at), format("missing 'url' in [git.{}]", name))) }
+    if commit == "" { return Err(error_at(path, key_at(doc, at), format("missing 'commit' in [git.{}]", name))) }
+    return Ok(LockEntry { name: name, git: GitSource { url: url, reference: reference, commit: commit } })
+}
+
+// `lock` as `myla fetch` writes it: a comment, the format version, and one
+// table per Git package, sorted by name.
+#test(Lock { entries: [] })["# Written by `myla fetch`. Commit it; don't edit it.\nversion = 1\n"]
+#test(Lock { entries: [LockEntry { name: "b", git: GitSource { url: "u\"\\", reference: GitRef.Rev("0123456789012345678901234567890123456789"), commit: "0123456789012345678901234567890123456789" } }, LockEntry { name: "a", git: GitSource { url: "x", reference: GitRef.DefaultBranch, commit: "abcdefabcdefabcdefabcdefabcdefabcdefabcd" } }] })["# Written by `myla fetch`. Commit it; don't edit it.\nversion = 1\n\n[git.a]\nurl = \"x\"\ncommit = \"abcdefabcdefabcdefabcdefabcdefabcdefabcd\"\n\n[git.b]\nurl = \"u\\\"\\\\\"\nrev = \"0123456789012345678901234567890123456789\"\ncommit = \"0123456789012345678901234567890123456789\"\n"]
+pub fun render_lock(lock: Lock) -> str {
+    var sb = StringBuilder()
+    append(sb, "# Written by `myla fetch`. Commit it; don't edit it.\nversion = 1\n")
+    for e in sorted_entries(lock.entries) {
+        append(sb, format("\n[git.{}]\nurl = {}\n", e.name, toml_string(e.git.url)))
+        match e.git.reference {
+            GitRef.DefaultBranch => {},
+            GitRef.Tag(t) => { append(sb, format("tag = {}\n", toml_string(t))) },
+            GitRef.Branch(b) => { append(sb, format("branch = {}\n", toml_string(b))) },
+            GitRef.Rev(c) => { append(sb, format("rev = {}\n", toml_string(c))) },
+        }
+        append(sb, format("commit = {}\n", toml_string(e.git.commit)))
+    }
+    return build(sb)
+}
+
+// `s` as a TOML basic string: quoted, with '"', '\' and control characters
+// escaped.
+#test("a\"b\\c")["\"a\\\"b\\\\c\""]
+#test("tab\tλ\u{7f}")["\"tab\\u0009λ\\u007F\""]
+fun toml_string(s: str) -> str {
+    let digits = "0123456789ABCDEF"
+    var sb = StringBuilder()
+    append_byte(sb, '"')
+    var i = 0
+    while i < len(s) {
+        let c = s[i]
+        if c == '"' || c == '\\' {
+            append_byte(sb, '\\')
+            append_byte(sb, c)
+        } else if c < 32u8 || c == 127u8 {
+            append(sb, "\\u00")
+            append_byte(sb, digits[(c >> 4) as int32])
+            append_byte(sb, digits[(c & 15u8) as int32])
+        } else {
+            append_byte(sb, c)
+        }
+        i = i + 1
+    }
+    append_byte(sb, '"')
+    return build(sb)
+}
+
+// Whether `text` reads as a lock file that renders back to `text` (the round
+// trip `myla fetch` relies on).
+#test("# Written by `myla fetch`. Commit it; don't edit it.\nversion = 1\n")[true]
+#test("# Written by `myla fetch`. Commit it; don't edit it.\nversion = 1\n\n[git.color]\nurl = \"https://example.org/color.git\"\nbranch = \"main\"\ncommit = \"0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c\"\n\n[git.json5]\nurl = \"https://github.com/example/json5-myla.git\"\ntag = \"v1.2.0\"\ncommit = \"4f3c2a1e9b0d5c6a7e8f9a0b1c2d3e4f5a6b7c8d\"\n")[true]
+#test("version = 1\n")[false]
+pub fun lock_round_trips(text: str) -> bool {
+    return match parse_lock(text, "myla.lock") {
+        Ok(lock) => render_lock(lock) == text
+        Err(e) => false
+    }
+}
+
+// The lock entry for the package `name`, if `lock` has one.
+fun lock_entry(lock: Lock, name: str) -> Option<LockEntry> {
+    for e in lock.entries {
+        if e.name == name { return Some(e) }
+    }
+    return None
+}
+
+// The lock file of the project `p`: an entry for each Git package it reads or
+// has yet to check out (the current entries; `myla fetch` adds the ones it
+// resolves for `p.unlocked`).
+pub fun lock_of(p: Project) -> Lock {
+    var entries: [LockEntry] = []
+    for d in p.deps {
+        match d.source {
+            Source.Git(g) => { push(entries, LockEntry { name: d.name, git: g }) },
+            _ => {},
+        }
+    }
+    for m in p.missing { push(entries, LockEntry { name: m.name, git: m.git }) }
+    return Lock { entries: sorted_entries(entries) }
+}
+
+// --- Resolving ------------------------------------------------------------------
+
+// A package whose dependencies are still to be followed.
+struct Pending {
+    name: str,
+    manifest: str,
+    deps: [Dependency],
+    dir: str,
+    // the Git checkout the package is in ("" if none): its path dependencies
+    // must stay inside
+    checkout: str,
+}
+
+// The first request for a name: what it names (`key`), how messages describe
+// it, and which package asked ("" for the root package itself).
+struct Request { key: str, text: str, by: str }
+
+// The packages of the build whose manifest is at `manifest`: reads the lock
+// file next to it (if there is one) and resolves the dependencies. A Git
+// dependency without a current lock entry is an error.
+pub fun load_project(manifest: str) -> Result<Project, ProjectError> {
+    let lock = project_lock(manifest)?
+    return resolve_project(manifest, lock, false)
+}
+
+// The lock file next to the manifest `manifest`; no entries if there is none.
+pub fun project_lock(manifest: str) -> Result<Lock, ProjectError> {
+    let path = match absolute_path(manifest) {
+        Some(p) => p
+        None => { return Err(error_plain("cannot find the working directory")) }
+    }
+    let lock_path = join_path(parent_dir(path), "myla.lock")
+    if !is_file(lock_path) { return Ok(Lock { entries: [] }) }
+    return load_lock(lock_path)
+}
+
+// The packages of the build whose manifest is at `manifest`, with the commits
+// of `lock`. A Git dependency without a current entry (one for its name with
+// the same URL and reference) is an error, or, with `allow_unlocked` (for
+// `myla fetch`), listed in `unlocked`; one whose checkout doesn't exist is
+// listed in `missing`. The dependencies of either aren't followed.
+pub fun resolve_project(manifest: str, lock: Lock, allow_unlocked: bool) -> Result<Project, ProjectError> {
+    let path = match absolute_path(manifest) {
+        Some(p) => p
+        None => { return Err(error_plain("cannot find the working directory")) }
+    }
+    let root_dir = parent_dir(path)
+    let m = read_manifest(path)?
+    let root = Package { name: m.name, version: m.version, dir: root_dir, has_program: is_file(root_dir + "/src/main.my"), has_library: is_file(library_of(root_dir, m.name)), source: Source.Root }
+    var requests: [str: Request] = [:]
+    requests[m.name] = Request { key: "path:" + root_dir, text: "the root package", by: "" }
+    var deps: [Package] = []
+    var missing: [GitPackage] = []
+    var unlocked: [GitPackage] = []
+    var queue = [Pending { name: m.name, manifest: path, deps: m.deps, dir: root_dir, checkout: "" }]
+    var next = 0
+    while next < len(queue) {
+        let parent = queue[next]
+        next = next + 1
+        for d in parent.deps {
+            var key = ""
+            var text = ""
+            var dir = ""
+            var checkout = parent.checkout
+            var source = Source.Root
+            var git = GitSource { url: "", reference: GitRef.DefaultBranch, commit: "" }
+            var is_git = false
+            match d.origin {
+                DepSource.FromPath(p) => {
+                    dir = join_path(parent.dir, p)
+                    if checkout != "" && !is_inside(checkout, dir) { return Err(dep_error(parent, d, format("path dependency '{}' of '{}' is outside its Git checkout", d.name, parent.name))) }
+                    key = "path:" + dir
+                    text = "path " + p
+                    source = Source.Path(dir)
+                },
+                DepSource.FromGit(url, r) => {
+                    key = "git:" + url + ref_text(r)
+                    text = "git " + url + ref_text(r)
+                    git = GitSource { url: url, reference: r, commit: "" }
+                    is_git = true
+                },
+            }
+            match get(requests, d.name) {
+                Some(first) => {
+                    if first.key != key {
+                        var by = ""
+                        if first.by != "" { by = format(" (required by {})", first.by) }
+                        return Err(dep_error(parent, d, format("two versions of package '{}': {}{} and {} (required by {})", d.name, first.text, by, text, parent.name)))
+                    }
+                    if first.by == "" && !root.has_library { return Err(dep_error(parent, d, format("dependency '{}' has no library (src/{}.my)", d.name, d.name))) }
+                    continue
+                },
+                None => {},
+            }
+            requests[d.name] = Request { key: key, text: text, by: parent.name }
+            if is_git {
+                let entry = match lock_entry(lock, d.name) {
+                    Some(e) => e
+                    None => LockEntry { name: "", git: git }
+                }
+                if entry.name == "" || !same_git(entry.git.url, entry.git.reference, git.url, git.reference) {
+                    if !allow_unlocked { return Err(dep_error(parent, d, format("dependency '{}' is not locked: run `myla fetch`", d.name))) }
+                    push(unlocked, GitPackage { name: d.name, git: git, dir: "" })
+                    continue
+                }
+                git = entry.git
+                dir = format("{}/.myla/deps/{}-{}", root_dir, d.name, git.commit)
+                checkout = dir
+                source = Source.Git(git)
+                if !is_dir(dir) {
+                    push(missing, GitPackage { name: d.name, git: git, dir: dir })
+                    continue
+                }
+            }
+            let dep_manifest = dir + "/myla.toml"
+            if !is_file(dep_manifest) { return Err(dep_error(parent, d, format("dependency '{}' has no myla.toml in {}", d.name, dir))) }
+            let dm = read_manifest(dep_manifest)?
+            if dm.name != d.name { return Err(dep_error(parent, d, format("dependency '{}' is named '{}' in its myla.toml", d.name, dm.name))) }
+            if !is_file(library_of(dir, d.name)) { return Err(dep_error(parent, d, format("dependency '{}' has no library (src/{}.my)", d.name, d.name))) }
+            push(deps, Package { name: d.name, version: dm.version, dir: dir, has_program: is_file(dir + "/src/main.my"), has_library: true, source: source })
+            push(queue, Pending { name: d.name, manifest: dep_manifest, deps: dm.deps, dir: dir, checkout: checkout })
+        }
+    }
+    return Ok(Project { manifest: path, root: root, deps: sorted_packages(deps), missing: sorted_git(missing), unlocked: sorted_git(unlocked) })
+}
+
+// An error about the dependency `d` of `parent`, at its key.
+fun dep_error(parent: Pending, d: Dependency, msg: str) -> ProjectError {
+    return error_at(parent.manifest, d.pos, msg)
+}
+
+fun library_of(dir: str, name: str) -> str {
+    return format("{}/src/{}.my", dir, name)
+}
+
+fun read_manifest(path: str) -> Result<Manifest, ProjectError> {
+    let text = match read_to_string(path) {
+        Ok(t) => t
+        Err(e) => { return Err(error_in(path, format("cannot read the manifest: {}", io_text(e)))) }
+    }
+    return parse_manifest(text, path)
+}
+
+// The `--package` list for the loader: `(name, dir/src)` for each dependency
+// (not the root package, whose `src/` is the project root).
+pub fun loader_packages(p: Project) -> [(str, str)] {
+    var out: [(str, str)] = []
+    for d in p.deps { push(out, (d.name, d.dir + "/src")) }
+    return out
+}
+
+// --- Sorting --------------------------------------------------------------------
+
+// Whether `a` sorts before `b`, byte by byte (a prefix first).
+#test("a", "b")[true]
+#test("ab", "a")[false]
+#test("a", "ab")[true]
+#test("B", "a")[true]
+fun before(a: str, b: str) -> bool {
+    var i = 0
+    while i < len(a) && i < len(b) {
+        if a[i] != b[i] { return a[i] < b[i] }
+        i = i + 1
+    }
+    return len(a) < len(b)
+}
+
+// The lists below are small (one entry per package), so insertion sorts do.
+
+fun sorted_packages(xs: [Package]) -> [Package] {
+    var out: [Package] = []
+    for x in xs {
+        var i = len(out)
+        push(out, x)
+        while i > 0 && before(x.name, out[i - 1].name) {
+            out[i] = out[i - 1]
+            i = i - 1
+        }
+        out[i] = x
+    }
+    return out
+}
+
+fun sorted_git(xs: [GitPackage]) -> [GitPackage] {
+    var out: [GitPackage] = []
+    for x in xs {
+        var i = len(out)
+        push(out, x)
+        while i > 0 && before(x.name, out[i - 1].name) {
+            out[i] = out[i - 1]
+            i = i - 1
+        }
+        out[i] = x
+    }
+    return out
+}
+
+fun sorted_entries(xs: [LockEntry]) -> [LockEntry] {
+    var out: [LockEntry] = []
+    for x in xs {
+        var i = len(out)
+        push(out, x)
+        while i > 0 && before(x.name, out[i - 1].name) {
+            out[i] = out[i - 1]
+            i = i - 1
+        }
+        out[i] = x
+    }
+    return out
+}
+
+// --- Describing -----------------------------------------------------------------
+
+// `p` in lines, for tests and debugging: the manifest, the root package, each
+// dependency, each missing or unlocked Git package, and the loader's list.
+pub fun describe_project(p: Project) -> str {
+    var sb = StringBuilder()
+    append(sb, format("manifest {}\n", p.manifest))
+    append(sb, format("root {}\n", describe_package(p.root)))
+    for d in p.deps { append(sb, format("dep {}\n", describe_package(d))) }
+    for m in p.missing { append(sb, format("missing {} git {}{} {} {}\n", m.name, m.git.url, ref_text(m.git.reference), m.git.commit, m.dir)) }
+    for u in p.unlocked { append(sb, format("unlocked {} git {}{}\n", u.name, u.git.url, ref_text(u.git.reference))) }
+    for lp in loader_packages(p) { append(sb, format("--package {}={}\n", lp.0, lp.1)) }
+    return build(sb)
+}
+
+// One package in a line: name, version, source, directory, and what it has.
+#test(Package { name: "geo", version: "0.1.0", dir: "/g", has_program: false, has_library: true, source: Source.Path("/g") })["geo 0.1.0 path /g library"]
+#test(Package { name: "app", version: "1", dir: "/a", has_program: true, has_library: false, source: Source.Root })["app 1 root /a program"]
+#test(Package { name: "c", version: "2", dir: "/r/.myla/deps/c-ab", has_program: false, has_library: true, source: Source.Git(GitSource { url: "u", reference: GitRef.Branch("main"), commit: "ab" }) })["c 2 git u branch main ab /r/.myla/deps/c-ab library"]
+pub fun describe_package(p: Package) -> str {
+    let source = match p.source {
+        Source.Root => format("root {}", p.dir)
+        Source.Path(d) => format("path {}", d)
+        Source.Git(g) => format("git {}{} {} {}", g.url, ref_text(g.reference), g.commit, p.dir)
+    }
+    var sb = StringBuilder()
+    append(sb, format("{} {} {}", p.name, p.version, source))
+    if p.has_program { append(sb, " program") }
+    if p.has_library { append(sb, " library") }
+    return build(sb)
+}

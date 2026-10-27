@@ -1,4 +1,5 @@
 //~ type error: cannot concatenate 'str' with 'int32'
+//~ span: "a" + 1
 // `+` joins two strings; mixing a string and an integer is rejected (use
 // format() to interpolate).
 #main

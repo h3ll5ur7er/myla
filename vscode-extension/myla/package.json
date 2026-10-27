@@ -1,15 +1,52 @@
 {
   "name": "myla-language-support",
-  "displayName": "Myla Language Support",
-  "description": "Syntax highlighting, snippets and the Myla language server (diagnostics, outline, definition, references, hover, completion).",
-  "version": "0.0.1",
+  "displayName": "Myla",
+  "description": "Myla for VS Code: highlighting, snippets, the Myla language server, run/test/build commands and a gdb debugger.",
+  "version": "0.1.0",
   "publisher": "h3ll5ur7er",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/h3ll5ur7er/myla",
+    "directory": "vscode-extension/myla"
+  },
+  "bugs": {
+    "url": "https://github.com/h3ll5ur7er/myla/issues"
+  },
+  "keywords": [
+    "myla",
+    "language server",
+    "debugger",
+    "gdb",
+    "syntax highlighting"
+  ],
   "engines": {
     "vscode": "^1.90.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Debuggers",
+    "Snippets"
   ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onDebugResolve:myla",
+    "onDebugDynamicConfigurations:myla"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In an untrusted workspace, the settings that name programs to run (the language server, the myla CLI, gdb) are taken from your user settings only.",
+      "restrictedConfigurations": [
+        "myla.serverPath",
+        "myla.cliPath",
+        "myla.compilerPath",
+        "myla.debug.gdbPath"
+      ]
+    },
+    "virtualWorkspaces": false
+  },
   "contributes": {
     "languages": [
       {
@@ -39,26 +76,257 @@
     ],
     "commands": [
       {
-        "command": "myla.showExtensionInfo",
-        "title": "Myla: Show Extension Info"
+        "command": "myla.runFile",
+        "title": "Run Current File",
+        "category": "Myla",
+        "icon": "$(play)"
+      },
+      {
+        "command": "myla.testFile",
+        "title": "Run Tests in Current File",
+        "category": "Myla",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "myla.buildFile",
+        "title": "Build Current File",
+        "category": "Myla",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "myla.debugFile",
+        "title": "Debug Current File",
+        "category": "Myla",
+        "icon": "$(debug-alt)"
       },
       {
         "command": "myla.restartLanguageServer",
-        "title": "Myla: Restart Language Server"
+        "title": "Restart Language Server",
+        "category": "Myla"
+      },
+      {
+        "command": "myla.showOutput",
+        "title": "Show Output",
+        "category": "Myla"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "myla.runFile",
+          "when": "resourceLangId == myla",
+          "group": "navigation@1"
+        },
+        {
+          "command": "myla.debugFile",
+          "when": "resourceLangId == myla",
+          "group": "navigation@2"
+        },
+        {
+          "command": "myla.testFile",
+          "when": "resourceLangId == myla",
+          "group": "navigation@3"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "myla.runFile",
+          "when": "editorLangId == myla"
+        },
+        {
+          "command": "myla.testFile",
+          "when": "editorLangId == myla"
+        },
+        {
+          "command": "myla.buildFile",
+          "when": "editorLangId == myla"
+        },
+        {
+          "command": "myla.debugFile",
+          "when": "editorLangId == myla"
+        }
+      ]
+    },
+    "taskDefinitions": [
+      {
+        "type": "myla",
+        "required": [
+          "command",
+          "file"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "enum": [
+              "run",
+              "test",
+              "build"
+            ],
+            "description": "The myla command: run (interpret), test (the file's #test cases) or build (a native binary)."
+          },
+          "file": {
+            "type": "string",
+            "description": "The .my file, for example ${file}."
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "More arguments: the program's arguments for run, options such as -g for build."
+          }
+        }
+      }
+    ],
+    "problemMatchers": [
+      {
+        "name": "myla",
+        "owner": "myla",
+        "source": "myla",
+        "fileLocation": [
+          "autoDetect",
+          "${workspaceFolder}"
+        ],
+        "pattern": [
+          {
+            "regexp": "^(?:\\w+ )?(error|warning): (.*)$",
+            "severity": 1,
+            "message": 2
+          },
+          {
+            "regexp": "^\\s*--> (.+):(\\d+):(\\d+)$",
+            "file": 1,
+            "line": 2,
+            "column": 3
+          }
+        ]
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "myla"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "myla",
+        "label": "Myla (gdb)",
+        "languages": [
+          "myla"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "The .my file to debug: it is built with `myla build -g` first. A binary built with -g works too.",
+                "default": "${file}"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The program's command-line arguments.",
+                "default": []
+              },
+              "cwd": {
+                "type": "string",
+                "description": "The program's working directory. Default: the workspace folder, else the program's directory.",
+                "default": "${workspaceFolder}"
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Environment variables to set for the program.",
+                "default": {}
+              },
+              "stdin": {
+                "type": "string",
+                "description": "A file the program reads as its standard input. Default: none (/dev/null)."
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Stop at the first line of main.",
+                "default": false
+              },
+              "gdbPath": {
+                "type": "string",
+                "description": "The gdb to use. Default: the setting myla.debug.gdbPath."
+              },
+              "trace": {
+                "type": "boolean",
+                "description": "Show the adapter's conversation with gdb (GDB/MI) in the Debug Console.",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "myla",
+            "request": "launch",
+            "name": "Debug current Myla file",
+            "program": "${file}",
+            "args": [],
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Myla: Debug current file",
+            "description": "Build the active .my file with -g and debug it with gdb.",
+            "body": {
+              "type": "myla",
+              "request": "launch",
+              "name": "Debug current Myla file",
+              "program": "^\"\\${file}\"",
+              "args": [],
+              "stopOnEntry": false
+            }
+          },
+          {
+            "label": "Myla: Debug a program",
+            "description": "Build a .my file with -g and debug it with arguments.",
+            "body": {
+              "type": "myla",
+              "request": "launch",
+              "name": "Debug ${1:main.my}",
+              "program": "^\"\\${workspaceFolder}/${1:main.my}\"",
+              "args": [],
+              "cwd": "^\"\\${workspaceFolder}\""
+            }
+          }
+        ]
       }
     ],
     "configuration": {
       "title": "Myla",
       "properties": {
-        "myla.serverPath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to the Myla language server binary. Leave empty to use `build/myla-lsp` in the repository (built by `scripts/bootstrap.sh`). `${workspaceFolder}`, `${userHome}` and `~` are expanded."
-        },
         "myla.compilerPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the Myla repository root (the folder containing `myla.py`), where the language server is `build/myla-lsp`. Leave empty to auto-detect from the workspace folders. `${workspaceFolder}`, `${userHome}` and `~` are expanded."
+          "markdownDescription": "The Myla repository root (the folder with `myla.py`) or its `myla.py`. The language server and the CLI are found in its `build/` folder. Empty: the workspace folder that has a `myla.py`. `${workspaceFolder}`, `${userHome}` and `~` are expanded."
+        },
+        "myla.serverPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The Myla language server binary. Empty: `build/myla-lsp` in the repository (built by `scripts/bootstrap.sh`)."
+        },
+        "myla.cliPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The `myla` command-line tool for running, testing, building and debugging. Empty: `build/myla` in the repository, else `python3 myla.py`. A path ending in `.py` runs with `python3`."
+        },
+        "myla.debug.gdbPath": {
+          "type": "string",
+          "default": "gdb",
+          "markdownDescription": "The gdb the debugger runs (`gdb` from `PATH` by default)."
         },
         "myla.diagnostics.enable": {
           "type": "boolean",
@@ -78,27 +346,29 @@
       }
     }
   },
-  "main": "./out/extension.js",
-  "activationEvents": [
-    "onLanguage:myla"
-  ],
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc -p .",
+    "lint": "eslint .",
+    "pretest": "npm run build",
+    "test": "node --experimental-strip-types --test \"test/**/*.test.ts\"",
+    "test:unit": "node --experimental-strip-types --test \"test/unit/*.test.ts\"",
     "package": "vsce package"
-  },
-  "devDependencies": {
-    "@types/node": "^20.14.0",
-    "@types/vscode": "^1.90.0",
-    "@vscode/vsce": "^2.15.0",
-    "typescript": "^5.4.5"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/h3ll5ur7er/myla"
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^20.19.43",
+    "@types/vscode": "~1.90.0",
+    "@vscode/debugprotocol": "^1.68.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.13.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.1"
   }
 }

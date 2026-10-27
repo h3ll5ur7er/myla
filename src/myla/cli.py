@@ -22,7 +22,7 @@ from .compiler import BuildError, build as build_program
 from .errors import MylaError
 from .interpreter import Interpreter
 from .lexer import tokenize as lex_source
-from .loader import default_stdlib_root, link as link_program
+from .loader import default_stdlib_root, link as link_program, parse_package_flag
 from .parser import parse as parse_tokens
 from .types import check as check_program
 
@@ -80,19 +80,39 @@ def _cmd_parse(args: argparse.Namespace) -> int:
     return 0
 
 
-def _front_end(path: str):
-    """Resolve the module graph rooted at `path`, then lex -> parse -> type-check
-    the merged program. Returns the populated Checker."""
-    return check_program(link_program(path, stdlib_root=default_stdlib_root()))
+def _front_end(path: str, args: argparse.Namespace):
+    """Resolve the module graph rooted at `path` with the packages of the
+    `--package name=dir` flags (MYLA-92), then lex -> parse -> type-check the
+    merged program. Returns the populated Checker."""
+    packages = [parse_package_flag(flag) for flag in args.package or []]
+    return check_program(link_program(path, stdlib_root=default_stdlib_root(),
+                                      packages=packages))
+
+
+def _split_package_flags(argv: list[str], flags: list[str]) -> list[str]:
+    """`argv` without its `--package <value>` pairs, whose values are added to
+    `flags`: `myla run file.my --package geo=dir` takes the flag after the
+    file too, as the self-hosted `myla run` does."""
+    rest: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--package" and i + 1 < len(argv):
+            flags.append(argv[i + 1])
+            i += 2
+        else:
+            rest.append(argv[i])
+            i += 1
+    return rest
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     # argv[0] is the program as invoked; the rest are its arguments (parity with
     # the native binary, where the kernel supplies argv at `_start`).
-    argv = [args.file, *args.args]
+    args.package = list(args.package or [])
+    argv = [args.file, *_split_package_flags(args.args, args.package)]
     try:
-        checker = _front_end(args.file)
+        checker = _front_end(args.file, args)
         return Interpreter(checker, argv=argv).run()
     except MylaError as err:
         _report(err, args.file, source)
@@ -102,7 +122,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _cmd_test(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     try:
-        checker = _front_end(args.file)
+        checker = _front_end(args.file, args)
         results = Interpreter(checker).run_tests()
     except MylaError as err:
         _report(err, args.file, source)
@@ -127,9 +147,9 @@ def _cmd_test(args: argparse.Namespace) -> int:
 def _cmd_build(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     try:
-        checker = _front_end(args.file)
+        checker = _front_end(args.file, args)
         path = build_program(checker, args.output, keep_asm=args.keep_asm,
-                             debug=args.debug)
+                             debug=args.debug, entry_path=args.file)
     except MylaError as err:
         _report(err, args.file, source)
         return 1
@@ -148,7 +168,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     canonical = getattr(args, "canonical", False)
     try:
-        _front_end(args.file)
+        _front_end(args.file, args)
     except MylaError as err:
         if canonical:
             line = "-" if err.line is None else str(err.line)
@@ -174,10 +194,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"myla {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    def add_package_flag(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--package", action="append", metavar="NAME=DIR",
+                       help="a dependency: imports of NAME resolve in DIR, as if it were "
+                            "the directory NAME/ in the project root (repeatable)")
+
     p_run = sub.add_parser("run", help="interpret a .my file")
     p_run.add_argument("file")
     p_run.add_argument("args", nargs=argparse.REMAINDER,
                        help="arguments passed to the program (std.process.args)")
+    add_package_flag(p_run)
     p_run.set_defaults(func=_cmd_run)
 
     p_build = sub.add_parser("build", help="compile a .my file to a native binary")
@@ -186,12 +212,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--keep-asm", action="store_true",
                          help="keep the generated .s assembly next to the output")
     p_build.add_argument("-g", "--debug", action="store_true",
-                         help="emit a DWARF line table so debuggers such as gdb "
-                              "can break on and step through Myla source lines")
+                         help="emit DWARF debug information so debuggers such as gdb "
+                              "can break on and step through Myla source lines and "
+                              "show variables")
+    add_package_flag(p_build)
     p_build.set_defaults(func=_cmd_build)
 
     p_test = sub.add_parser("test", help="run #test cases in a .my file")
     p_test.add_argument("file")
+    add_package_flag(p_test)
     p_test.set_defaults(func=_cmd_test)
 
     p_repl = sub.add_parser("repl", help="the interactive interpreter: see `build/myla repl`")
@@ -216,6 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--canonical", action="store_true",
                          help="emit the stable accept/reject + diagnostic-position "
                               "line (for self-hosting differential tests)")
+    add_package_flag(p_check)
     p_check.set_defaults(func=_cmd_check)
 
 
