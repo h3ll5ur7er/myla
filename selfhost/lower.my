@@ -1,0 +1,528 @@
+// lower.my -- the checked AST of one function → IR (MYLA-103, D79; wiki:
+// Architecture/IR).
+//
+// `lower_function` reads the code generator's state (the checker's types, the
+// signatures, the monomorphizer's substitution) and builds an `IrFunc`, or
+// returns the construct it can't lower yet, and the code generator emits the
+// function the old way (the per-function fallback of D79 (5)). This first step
+// covers scalar functions: integer, float, bool and char parameters, locals and
+// results; arithmetic with its traps, comparisons, casts, `&&`/`||`; `if`,
+// `while`, `for` over a range, `break`, `continue`, `return`; calls of
+// non-generic user functions with scalar arguments; `print` of a scalar or a
+// string literal. It emits what the old path emits for them (the same order of
+// evaluation, the same scopes and positions), so a function behaves the same
+// whichever path generates it.
+
+from std.num import f64_literal_bits, f32_round_bits
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail
+from .checker import Type, opt_subst_type, subst_type
+from .codegen import CodeGen, is_builtin_call_name, is_internal_name
+from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos
+
+// A name in scope: the slot holding it.
+struct Local { name: str, slot: int32 }
+
+// Where `continue` and `break` go in the innermost loop.
+struct LoopTarget { cont: int32, brk: int32 }
+
+// The function being lowered: the IR so far, the block instructions go to,
+// the names in scope (innermost scope last), the loops, and the first
+// construct that can't be lowered ("" while there is none).
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], loops: [LoopTarget], err: str }
+
+// The IR of the function `fd`, generated as `mangled`; Err: why it can't be
+// lowered yet.
+pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<IrFunc, str> {
+    let sig = cg.sig_of(fd.name)
+    let ret = opt_subst_type(sig.ret, cg.subst)
+    match ret {
+        Some(t) => { if !is_scalar(t) { return Err("its result type") } },
+        None => {},
+    }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [] }, cur: 0, scopes: [[]], loops: [], err: "" }
+    let entry = lw.new_block()
+    lw.start(entry)
+    var i = 0
+    while i < len(fd.params) {
+        let t = subst_type(sig.params[i], cg.subst)
+        if !is_scalar(t) { return Err("an aggregate or heap parameter") }
+        let s = lw.new_slot(fd.params[i].name, t, i)
+        lw.declare(fd.params[i].name, s)
+        lw.add(Inst.Bind(fd.params[i].name, s))
+        i = i + 1
+    }
+    match fd.body {
+        Some(b) => { lw.block(cg, b) },
+        None => {},
+    }
+    if lw.err != "" { return Err(lw.err) }
+    // the end of the body: as `gen_function`, fall through to the epilogue
+    lw.finish(Term.Ret(-1))
+    return Ok(lw.f)
+}
+
+// Whether `t` is a scalar this step lowers: an integer, float, bool or char.
+fun is_scalar(t: Type) -> bool {
+    return match t {
+        Type.TInt(w, s) => true
+        Type.TFloat(w) => true
+        Type.TBool => true
+        Type.TChar => true
+        _ => false
+    }
+}
+
+fun is_float(t: Type) -> bool {
+    return match t {
+        Type.TFloat(w) => true
+        _ => false
+    }
+}
+
+impl Lower {
+    // --- building -------------------------------------------------------------
+
+    fun new_block(var self) -> int32 {
+        push(self.f.blocks, IrBlock { insts: [], term: Term.Open })
+        return len(self.f.blocks) - 1
+    }
+
+    // Make `b` the block instructions go to (blocks are emitted in this order).
+    fun start(var self, b: int32) {
+        self.cur = b
+        push(self.f.order, b)
+    }
+
+    fun add(var self, inst: Inst) {
+        push(self.f.blocks[self.cur].insts, inst)
+    }
+
+    // End the current block with `t` (if it isn't ended yet).
+    fun finish(var self, t: Term) {
+        match self.f.blocks[self.cur].term {
+            Term.Open => { self.f.blocks[self.cur].term = t },
+            _ => {},
+        }
+    }
+
+    // End the current block with `t` and continue in a new block, which only a
+    // jump made later can reach (the code after a `return` or `break`).
+    fun leave(var self, t: Term) {
+        self.finish(t)
+        let next = self.new_block()
+        self.start(next)
+    }
+
+    fun temp(var self, t: Type) -> int32 {
+        push(self.f.temps, t)
+        return len(self.f.temps) - 1
+    }
+
+    fun new_slot(var self, name: str, t: Type, word: int32) -> int32 {
+        push(self.f.slots, Slot { name: name, ty: t, word: word })
+        return len(self.f.slots) - 1
+    }
+
+    fun declare(var self, name: str, slot: int32) {
+        push(self.scopes[len(self.scopes) - 1], Local { name: name, slot: slot })
+    }
+
+    // The slot of the innermost `name` in scope, or -1.
+    fun lookup(self, name: str) -> int32 {
+        var i = len(self.scopes) - 1
+        while i >= 0 {
+            var j = len(self.scopes[i]) - 1
+            while j >= 0 {
+                if self.scopes[i][j].name == name { return self.scopes[i][j].slot }
+                j = j - 1
+            }
+            i = i - 1
+        }
+        return -1
+    }
+
+    fun open_scope(var self) {
+        var empty: [Local] = []
+        push(self.scopes, empty)
+        self.add(Inst.Scope(true))
+    }
+
+    fun close_scope(var self) {
+        self.scopes = drop_last_scope(self.scopes)
+        self.add(Inst.Scope(false))
+    }
+
+    // Record the first construct that can't be lowered; returns a dummy temp.
+    fun unsupported(var self, what: str) -> int32 {
+        if self.err == "" { self.err = what }
+        return self.temp(Type.TInt(64, true))
+    }
+
+    // --- statements -------------------------------------------------------------
+
+    fun block(var self, cg: CodeGen, b: Block) {
+        self.open_scope()
+        for s in b.stmts { self.stmt(cg, s) }
+        self.close_scope()
+    }
+
+    fun stmt(var self, cg: CodeGen, s: Stmt) {
+        if self.err != "" { return }
+        self.add(Inst.Loc(Pos { line: s.line, col: s.col }))
+        match s.kind {
+            StmtKind.ExprStmt(e) => {
+                let v = self.expr_or_unit(cg, e)
+            },
+            StmtKind.VarDecl(k, name, ty, init) => {
+                let t = cg.type_of(init.id)
+                if !is_scalar(t) {
+                    let d = self.unsupported("a local that isn't a scalar")
+                    return
+                }
+                let v = self.expr(cg, init)
+                let slot = self.new_slot(name, t, -1)
+                self.add(Inst.Store(slot, v))
+                self.declare(name, slot)
+                self.add(Inst.Bind(name, slot))
+            },
+            StmtKind.Assign(target, value) => {
+                match target.kind {
+                    ExprKind.Name(n) => {
+                        let slot = self.lookup(n)
+                        if slot < 0 || !is_scalar(self.f.slots[slot].ty) {
+                            let d = self.unsupported("an assignment to that place")
+                            return
+                        }
+                        let v = self.expr(cg, value)
+                        self.add(Inst.Store(slot, v))
+                    },
+                    _ => { let d = self.unsupported("an assignment to a field or element") },
+                }
+            },
+            StmtKind.ReturnS(ov) => {
+                match ov {
+                    Some(e) => {
+                        let v = self.expr(cg, e)
+                        self.leave(Term.Ret(v))
+                    },
+                    None => { self.leave(Term.Ret(-1)) },
+                }
+            },
+            StmtKind.IfS(cond, then, otherwise) => { self.if_stmt(cg, cond, then, otherwise) },
+            StmtKind.WhileS(cond, body) => {
+                let head = self.new_block()
+                self.finish(Term.Jmp(head))
+                self.start(head)
+                let c = self.expr(cg, cond)
+                let body_b = self.new_block()
+                let end = self.new_block()
+                self.finish(Term.Br(c, body_b, end))
+                self.start(body_b)
+                push(self.loops, LoopTarget { cont: head, brk: end })
+                self.block(cg, body)
+                self.loops = drop_last_loop(self.loops)
+                self.finish(Term.Jmp(head))
+                self.start(end)
+            },
+            StmtKind.ForS(vn, start, end, body, iter) => { self.for_range(cg, vn, start, end, body, iter) },
+            StmtKind.BreakS => {
+                let lp = self.loops[len(self.loops) - 1]
+                self.leave(Term.Jmp(lp.brk))
+            },
+            StmtKind.ContinueS => {
+                let lp = self.loops[len(self.loops) - 1]
+                self.leave(Term.Jmp(lp.cont))
+            },
+            _ => { let d = self.unsupported("a destructuring declaration") },
+        }
+    }
+
+    fun if_stmt(var self, cg: CodeGen, cond: Expr, then: Block, otherwise: Option<ElseTail>) {
+        let c = self.expr(cg, cond)
+        let then_b = self.new_block()
+        let end = self.new_block()
+        match otherwise {
+            None => {
+                self.finish(Term.Br(c, then_b, end))
+                self.start(then_b)
+                self.block(cg, then)
+                self.finish(Term.Jmp(end))
+            },
+            Some(et) => {
+                let else_b = self.new_block()
+                self.finish(Term.Br(c, then_b, else_b))
+                self.start(then_b)
+                self.block(cg, then)
+                self.finish(Term.Jmp(end))
+                self.start(else_b)
+                match et {
+                    ElseTail.ElseBlock(b) => { self.block(cg, b) },
+                    ElseTail.ElseIf(s2) => { self.stmt(cg, s2) },
+                }
+                self.finish(Term.Jmp(end))
+            },
+        }
+        self.start(end)
+    }
+
+    // `for v in start..end { body }`: the variable and the end in slots, the
+    // end evaluated once, the variable incremented (wrapping) after the body.
+    fun for_range(var self, cg: CodeGen, vn: str, start: Option<Expr>, end: Option<Expr>, body: Block, iter: Option<Expr>) {
+        match iter {
+            Some(it) => {
+                let d = self.unsupported("a for loop over a collection")
+                return
+            },
+            None => {},
+        }
+        let loop_t = match start {
+            Some(e) => cg.type_of(e.id)
+            None => Type.TInt(32, true)
+        }
+        let lv = self.new_slot(vn, loop_t, -1)
+        let fe = self.new_slot("__end", loop_t, -1)
+        match start {
+            Some(e) => {
+                let v = self.expr(cg, e)
+                self.add(Inst.Store(lv, v))
+            },
+            None => {},
+        }
+        match end {
+            Some(e) => {
+                let v = self.expr(cg, e)
+                self.add(Inst.Store(fe, v))
+            },
+            None => {},
+        }
+        let head = self.new_block()
+        self.finish(Term.Jmp(head))
+        self.start(head)
+        let a = self.temp(loop_t)
+        self.add(Inst.Load(a, lv))
+        let b = self.temp(loop_t)
+        self.add(Inst.Load(b, fe))
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "<", loop_t, a, b))
+        let body_b = self.new_block()
+        let cont = self.new_block()
+        let done = self.new_block()
+        self.finish(Term.Br(c, body_b, done))
+        self.start(body_b)
+        var empty: [Local] = []
+        push(self.scopes, empty)
+        self.add(Inst.Scope(true))
+        self.declare(vn, lv)
+        self.add(Inst.Bind(vn, lv))
+        push(self.loops, LoopTarget { cont: cont, brk: done })
+        for st in body.stmts { self.stmt(cg, st) }
+        self.loops = drop_last_loop(self.loops)
+        self.close_scope()
+        self.finish(Term.Jmp(cont))
+        self.start(cont)
+        let x = self.temp(loop_t)
+        self.add(Inst.Load(x, lv))
+        let one = self.temp(loop_t)
+        self.add(Inst.Const(one, loop_t, 1))
+        let y = self.temp(loop_t)
+        self.add(Inst.Bin(y, "+", loop_t, loop_t, x, one, Pos { line: 0, col: 0 }))
+        self.add(Inst.Store(lv, y))
+        self.finish(Term.Jmp(head))
+        self.start(done)
+    }
+
+    // --- expressions ------------------------------------------------------------
+
+    // An expression statement's value, or -1 when it has none (a call of a
+    // function without a result, `print`).
+    fun expr_or_unit(var self, cg: CodeGen, e: Expr) -> int32 {
+        match e.kind {
+            ExprKind.Call(callee, args) => { return self.call(cg, e, callee, args) },
+            _ => {},
+        }
+        return self.expr(cg, e)
+    }
+
+    // The temporary holding the value of the scalar expression `e`.
+    fun expr(var self, cg: CodeGen, e: Expr) -> int32 {
+        if self.err != "" { return 0 }
+        let t = cg.type_of(e.id)
+        match e.kind {
+            ExprKind.IntLit(v, suf, isc, big) => {
+                let d = self.temp(t)
+                self.add(Inst.Const(d, t, v))
+                return d
+            },
+            ExprKind.FloatLit(lex, suf) => {
+                var bits = f64_literal_bits(lex)
+                match t {
+                    Type.TFloat(w) => { if w == 32 { bits = f32_round_bits(bits) } },
+                    _ => {},
+                }
+                let d = self.temp(t)
+                self.add(Inst.Const(d, t, bits as int64))
+                return d
+            },
+            ExprKind.BoolLit(b) => {
+                var one: int64 = 0
+                if b { one = 1 }
+                let d = self.temp(Type.TBool)
+                self.add(Inst.Const(d, Type.TBool, one))
+                return d
+            },
+            ExprKind.Name(n) => { return self.name(cg, n, t) },
+            ExprKind.Unary(op, x) => {
+                if !is_scalar(t) { return self.unsupported("a unary operator on a value that isn't a scalar") }
+                let a = self.expr(cg, x)
+                let d = self.temp(t)
+                self.add(Inst.Un(d, op, t, a))
+                return d
+            },
+            ExprKind.Binary(op, l, r) => { return self.binary(cg, e, op, l, r) },
+            ExprKind.Cast(x, ty) => {
+                let src = cg.type_of(x.id)
+                if !is_scalar(src) || !is_scalar(t) { return self.unsupported("a cast of a value that isn't a scalar") }
+                let a = self.expr(cg, x)
+                let d = self.temp(t)
+                self.add(Inst.Cast(d, src, t, a))
+                return d
+            },
+            ExprKind.Call(callee, args) => {
+                let d = self.call(cg, e, callee, args)
+                if d < 0 { return self.unsupported("a call without a value used as one") }
+                return d
+            },
+            _ => {},
+        }
+        return self.unsupported("that kind of expression")
+    }
+
+    fun name(var self, cg: CodeGen, n: str, t: Type) -> int32 {
+        let slot = self.lookup(n)
+        if slot >= 0 {
+            let d = self.temp(self.f.slots[slot].ty)
+            self.add(Inst.Load(d, slot))
+            return d
+        }
+        if !is_scalar(t) { return self.unsupported("a name that isn't a scalar local") }
+        // a scalar const is its expression, evaluated where it is used, as the
+        // old path does
+        match cg.const_value_expr(n) {
+            Some(ve) => { return self.expr(cg, ve) },
+            None => {},
+        }
+        return self.unsupported("a function used as a value")
+    }
+
+    fun binary(var self, cg: CodeGen, e: Expr, op: str, l: Expr, r: Expr) -> int32 {
+        if op == "&&" || op == "||" { return self.logical(cg, op, l, r) }
+        let lt = cg.type_of(l.id)
+        let rt = cg.type_of(e.id)
+        if !is_scalar(lt) || !is_scalar(rt) { return self.unsupported("an operator on values that aren't scalars") }
+        let a = self.expr(cg, l)
+        let b = self.expr(cg, r)
+        let d = self.temp(rt)
+        if op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" {
+            self.add(Inst.Cmp(d, op, lt, a, b))
+        } else {
+            self.add(Inst.Bin(d, op, lt, rt, a, b, Pos { line: e.line, col: e.col }))
+        }
+        return d
+    }
+
+    // `l && r` / `l || r`: `r` runs only when it decides the result.
+    fun logical(var self, cg: CodeGen, op: str, l: Expr, r: Expr) -> int32 {
+        let d = self.temp(Type.TBool)
+        let a = self.expr(cg, l)
+        let rhs = self.new_block()
+        let yes = self.new_block()
+        let no = self.new_block()
+        let end = self.new_block()
+        if op == "&&" { self.finish(Term.Br(a, rhs, no)) } else { self.finish(Term.Br(a, yes, rhs)) }
+        self.start(rhs)
+        let b = self.expr(cg, r)
+        self.finish(Term.Br(b, yes, no))
+        self.start(yes)
+        self.add(Inst.Const(d, Type.TBool, 1))
+        self.finish(Term.Jmp(end))
+        self.start(no)
+        self.add(Inst.Const(d, Type.TBool, 0))
+        self.finish(Term.Jmp(end))
+        self.start(end)
+        return d
+    }
+
+    // A call: `print`, or a non-generic user function with scalar arguments;
+    // its result's temporary, -1 without one.
+    fun call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr]) -> int32 {
+        if self.err != "" { return -1 }
+        let nm = match callee.kind {
+            ExprKind.Name(n) => n
+            _ => ""
+        }
+        if nm == "" { return self.unsupported("a method call or a call of a function value") }
+        if nm == "print" && len(args) == 1 { return self.print(cg, args[0]) }
+        if is_builtin_call_name(nm) { return self.unsupported(format("the builtin {}", nm)) }
+        if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.unsupported("a call of a function value") }
+        let sig = cg.sig_of(nm)
+        if len(sig.type_params) > 0 { return self.unsupported("a call of a generic function") }
+        for p in sig.params {
+            if !is_scalar(p) { return self.unsupported("a call with an argument that isn't a scalar") }
+        }
+        var argv: [int32] = []
+        for a in args { push(argv, self.expr(cg, a)) }
+        return match sig.ret {
+            Some(rt) => self.call_with_result(sig.name, rt, argv)
+            None => self.call_without_result(sig.name, argv)
+        }
+    }
+
+    fun call_with_result(var self, name: str, rt: Type, argv: [int32]) -> int32 {
+        if !is_scalar(rt) { return self.unsupported("a call whose result isn't a scalar") }
+        let d = self.temp(rt)
+        self.add(Inst.Call(d, name, argv))
+        return d
+    }
+
+    fun call_without_result(var self, name: str, argv: [int32]) -> int32 {
+        self.add(Inst.Call(-1, name, argv))
+        return -1
+    }
+
+    fun print(var self, cg: CodeGen, arg: Expr) -> int32 {
+        let t = cg.type_of(arg.id)
+        match arg.kind {
+            ExprKind.StrLit(text) => {
+                let d = self.temp(Type.TStr)
+                self.add(Inst.Str(d, text))
+                self.add(Inst.Print(Type.TStr, d))
+                return -1
+            },
+            _ => {},
+        }
+        if !is_scalar(t) { return self.unsupported("print of a value that isn't a scalar") }
+        let v = self.expr(cg, arg)
+        self.add(Inst.Print(t, v))
+        return -1
+    }
+}
+
+fun drop_last_scope(xs: [[Local]]) -> [[Local]] {
+    var out: [[Local]] = []
+    var i = 0
+    while i + 1 < len(xs) {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun drop_last_loop(xs: [LoopTarget]) -> [LoopTarget] {
+    var out: [LoopTarget] = []
+    var i = 0
+    while i + 1 < len(xs) {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}

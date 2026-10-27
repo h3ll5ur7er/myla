@@ -7,6 +7,9 @@
 // process spawning of its own. `--package name=dir` adds a dependency, as in
 // `myla build` (MYLA-92); `--root dir` sets the project root (default: the
 // file's directory), as the project tool does for files under `src/`.
+// `--ir` lowers functions to the IR first (MYLA-103, D79), `--ir-stats` also
+// reports on stderr how many went through it and why the others didn't,
+// `--emit-ir` prints their IR instead of the assembly.
 
 from std.process import args, exit
 from std.io import write, eprintln
@@ -15,16 +18,22 @@ from .codegen import new_codegen
 from .loader import load_program_opts, load_options, parse_package_flag, Loaded, file_of, default_stdlib_root
 from .diag import render, type_report
 
-// `debug`: DWARF debug information, so gdb steps through the Myla source and
-// shows its variables (MYLA-71, MYLA-66).
-fun emit_asm(prog: Loaded, debug: bool) -> int32 {
+// How the assembly is generated: `debug`, DWARF debug information, so gdb
+// steps through the Myla source and shows its variables (MYLA-71, MYLA-66);
+// `ir`, through the IR, with its statistics (`ir_stats`) or its text instead
+// of the assembly (`emit_ir`).
+struct Mode { debug: bool, ir: bool, ir_stats: bool, emit_ir: bool }
+
+fun emit_asm(prog: Loaded, mode: Mode) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
             var g = new_codegen(c)
             g.set_sources(prog.spans, prog.next_id)
-            if debug { g.enable_debug_info() }
+            if mode.debug { g.enable_debug_info() }
+            if mode.ir || mode.ir_stats || mode.emit_ir { g.enable_ir(mode.emit_ir) }
             let asm = g.generate()
-            write(1, asm)
+            if mode.emit_ir { write(1, g.ir_text()) } else { write(1, asm) }
+            if mode.ir_stats { write(2, g.ir_stats()) }
             0
         },
         Err(e) => {
@@ -37,15 +46,21 @@ fun emit_asm(prog: Loaded, debug: bool) -> int32 {
 fun main() {
     let argv = args()
     if len(argv) < 2 {
-        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--package name=dir]... [--root dir]")
+        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--ir] [--ir-stats] [--emit-ir] [--package name=dir]... [--root dir]")
         exit(2)
     }
     var opts = load_options(default_stdlib_root(argv[0]))
-    var debug = false
+    var mode = Mode { debug: false, ir: false, ir_stats: false, emit_ir: false }
     var j = 2
     while j < len(argv) {
         if argv[j] == "-g" {
-            debug = true
+            mode.debug = true
+        } else if argv[j] == "--ir" {
+            mode.ir = true
+        } else if argv[j] == "--ir-stats" {
+            mode.ir_stats = true
+        } else if argv[j] == "--emit-ir" {
+            mode.emit_ir = true
         } else if argv[j] == "--package" && j + 1 < len(argv) {
             match parse_package_flag(argv[j + 1]) {
                 Ok(pkg) => { push(opts.packages, pkg) },
@@ -65,7 +80,7 @@ fun main() {
     }
     match load_program_opts(argv[1], opts) {
         Ok(prog) => {
-            let code = emit_asm(prog, debug)
+            let code = emit_asm(prog, mode)
             exit(code)
         },
         Err(r) => {

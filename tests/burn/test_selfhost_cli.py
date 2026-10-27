@@ -83,6 +83,15 @@ class SelfHostedCli(_Layout):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("1/1 passed", proc.stdout)
 
+    def test_build_through_the_ir(self):
+        # MYLA-103: `--ir` lowers what it can to the IR; the binary behaves the same
+        out = os.path.join(self.work, "out_ir", "prog")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        proc = self.myla_cmd("build", "prog.my", "-o", out, "--ir")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        run = subprocess.run([out, "z"], capture_output=True, text=True)
+        self.assertEqual(run.stdout, f"2\n{out}\nz\n42\n")
+
     def test_build_leaves_only_the_binary(self):
         out = os.path.join(self.work, "out", "prog")
         os.makedirs(os.path.dirname(out), exist_ok=True)

@@ -1,0 +1,180 @@
+// ir.my -- the mid-level IR between the checker and the self-hosted backend
+// (MYLA-67, D79; wiki: Architecture/IR): three-address code on basic blocks.
+//
+// A function has slots (frame memory: locals, and the argument words of its
+// parameters), temporaries (8-byte scalars, assigned by any number of
+// instructions: not SSA) and blocks, block 0 the entry. Each block ends in one
+// terminator. Scalars are 8-byte values in the backend's canonical form, and
+// every instruction that computes one carries the Myla type it has, so the
+// backend wraps, compares and converts as the current path does.
+// `render_func` prints the text form (`gen_main --emit-ir`).
+
+from .checker import Type, type_name
+
+// A source position: of a statement (`Loc`), or where a runtime error is
+// reported (a division's divisor).
+pub struct Pos { line: int32, col: int32 }
+
+// An instruction. `dst` and the operands are temporaries.
+pub enum Inst {
+    // %dst = const ty bits: an integer, bool or char value, or a float's f64 image
+    Const(int32, Type, int64),
+    // %dst = str "text": the address of the static str cell holding the text
+    Str(int32, str),
+    // %dst = load [$slot]: the 8-byte scalar in a slot
+    Load(int32, int32),
+    // store [$slot], %src
+    Store(int32, int32),
+    // %dst = op ty %a, %b: + - * / % & | ^ << >> on integers (ty: the left
+    // operand's type, rt: the result's) or + - * / % on floats; / and % trap at
+    // the position on a zero integer divisor
+    Bin(int32, str, Type, Type, int32, int32, Pos),
+    // %dst = cmp op ty %a, %b: == != < <= > >= on integers, floats, bools, chars
+    Cmp(int32, str, Type, int32, int32),
+    // %dst = op ty %a: - ~ ! with the result type
+    Un(int32, str, Type, int32),
+    // %dst = cast from -> to %a
+    Cast(int32, Type, Type, int32),
+    // %dst = call name(%args): a user function with scalar arguments; dst -1
+    // when its result isn't used or it has none
+    Call(int32, str, [int32]),
+    // print ty %a: a scalar, as `print` writes it
+    Print(Type, int32),
+    // loc line col: the source position of the code that follows
+    Loc(Pos),
+    // bind name $slot: debug information, the variable lives in the slot from
+    // here to the end of the enclosing scope (a parameter: the whole function)
+    Bind(str, int32),
+    // scope open / close: the lexical scopes of debug information
+    Scope(bool),
+}
+
+// How a block ends.
+pub enum Term {
+    // not ended yet (only while lowering)
+    Open,
+    Jmp(int32),
+    // br %cond, then, else
+    Br(int32, int32, int32),
+    // ret %value, or -1 for none
+    Ret(int32),
+}
+
+pub struct IrBlock { insts: [Inst], term: Term }
+
+// A slot: its name (for debug information and the text form), the Myla type
+// of what it holds, and, for a parameter, the index of its argument word
+// (`16 + 8 * word(%rbp)`), else -1.
+pub struct Slot { name: str, ty: Type, word: int32 }
+
+// A function: its assembly name (without `myla_`), its result type (None:
+// none), its slots, the type of each temporary, its blocks, and the order in
+// which lowering started the blocks, which is the order they are emitted in.
+pub struct IrFunc { name: str, ret: Option<Type>, slots: [Slot], temps: [Type], blocks: [IrBlock], order: [int32] }
+
+// --- The text form --------------------------------------------------------------
+
+pub fun render_func(f: IrFunc) -> str {
+    var sb = StringBuilder()
+    var ret = ""
+    match f.ret {
+        Some(t) => { ret = " -> " + type_name(t) },
+        None => {},
+    }
+    append(sb, format("fun myla_{}{} {{\n", f.name, ret))
+    var i = 0
+    while i < len(f.slots) {
+        let s = f.slots[i]
+        var where = ""
+        if s.word >= 0 { where = format(" (argument {})", s.word) }
+        append(sb, format("  ${} {}: {}{}\n", i, s.name, type_name(s.ty), where))
+        i = i + 1
+    }
+    for b in f.order {
+        append(sb, format("L{}:\n", b))
+        for inst in f.blocks[b].insts { append(sb, "  " + render_inst(inst) + "\n") }
+        append(sb, "  " + render_term(f.blocks[b].term) + "\n")
+    }
+    append(sb, "}\n")
+    return build(sb)
+}
+
+#test(Inst.Const(0, Type.TInt(32, true), 42))["%t0 = const int32 42"]
+#test(Inst.Bin(3, "/", Type.TInt(32, true), Type.TInt(32, true), 1, 2, Pos { line: 4, col: 9 }))["%t3 = / int32 %t1, %t2 @4:9"]
+#test(Inst.Call(-1, "f", [1, 2]))["call myla_f(%t1, %t2)"]
+#test(Inst.Scope(true))["scope open"]
+pub fun render_inst(inst: Inst) -> str {
+    return match inst {
+        Inst.Const(d, t, v) => format("%t{} = const {} {}", d, type_name(t), v)
+        Inst.Str(d, text) => format("%t{} = str {}", d, quoted(text))
+        Inst.Load(d, s) => format("%t{} = load ${}", d, s)
+        Inst.Store(s, v) => format("store ${}, %t{}", s, v)
+        Inst.Bin(d, op, t, rt, a, b, pos) => render_bin(d, op, t, rt, a, b, pos)
+        Inst.Cmp(d, op, t, a, b) => format("%t{} = cmp {} {} %t{}, %t{}", d, op, type_name(t), a, b)
+        Inst.Un(d, op, t, a) => format("%t{} = {} {} %t{}", d, op, type_name(t), a)
+        Inst.Cast(d, from_t, to_t, a) => format("%t{} = cast {} -> {} %t{}", d, type_name(from_t), type_name(to_t), a)
+        Inst.Call(d, name, args) => render_call(d, name, args)
+        Inst.Print(t, a) => format("print {} %t{}", type_name(t), a)
+        Inst.Loc(p) => format("loc {} {}", p.line, p.col)
+        Inst.Bind(name, s) => format("bind {} ${}", name, s)
+        Inst.Scope(open) => match open {
+            true => "scope open"
+            false => "scope close"
+        }
+    }
+}
+
+fun render_bin(d: int32, op: str, t: Type, rt: Type, a: int32, b: int32, pos: Pos) -> str {
+    var text = format("%t{} = {} {} %t{}, %t{}", d, op, type_name(t), a, b)
+    if !type_eq_names(t, rt) { text = text + " -> " + type_name(rt) }
+    if pos.line > 0 { text = text + format(" @{}:{}", pos.line, pos.col) }
+    return text
+}
+
+fun type_eq_names(a: Type, b: Type) -> bool {
+    return type_name(a) == type_name(b)
+}
+
+fun render_call(d: int32, name: str, args: [int32]) -> str {
+    var sb = StringBuilder()
+    if d >= 0 { append(sb, format("%t{} = ", d)) }
+    append(sb, format("call myla_{}(", name))
+    var first = true
+    for a in args {
+        if !first { append(sb, ", ") }
+        append(sb, format("%t{}", a))
+        first = false
+    }
+    append(sb, ")")
+    return build(sb)
+}
+
+#test(Term.Br(1, 2, 3))["br %t1, L2, L3"]
+#test(Term.Ret(-1))["ret"]
+pub fun render_term(t: Term) -> str {
+    return match t {
+        Term.Open => "(open)"
+        Term.Jmp(b) => format("jmp L{}", b)
+        Term.Br(c, a, b) => format("br %t{}, L{}, L{}", c, a, b)
+        Term.Ret(v) => match v {
+            -1 => "ret"
+            _ => format("ret %t{}", v)
+        }
+    }
+}
+
+// `s` as a double-quoted string with `"`, `\` and control characters escaped.
+#test("a\"b\n")["\"a\\\"b\\n\""]
+fun quoted(s: str) -> str {
+    var sb = StringBuilder()
+    append(sb, "\"")
+    for c in chars(s) {
+        if c == '"' { append(sb, "\\\"") }
+        else if c == '\\' { append(sb, "\\\\") }
+        else if c == '\n' { append(sb, "\\n") }
+        else if c == '\t' { append(sb, "\\t") }
+        else { append(sb, format("{}", c)) }
+    }
+    append(sb, "\"")
+    return build(sb)
+}

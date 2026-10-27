@@ -408,6 +408,8 @@ def _oracle(path: str) -> tuple[str, int]:
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedCodegenParity(unittest.TestCase):
     _binary: str
+    # extra flags for the compiler (the subclass below adds `--ir`)
+    _flags: list[str] = []
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -419,7 +421,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         """Assembly for `path`, produced by the self-hosted backend."""
         extra = [stdlib_root] if stdlib_root is not None else []
         proc = subprocess.run(
-            [self._binary, path, *extra], capture_output=True, text=True
+            [self._binary, path, *extra, *self._flags], capture_output=True, text=True
         )
         self.assertEqual(
             proc.returncode, 0,
@@ -540,7 +542,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         with open(path, encoding="utf-8") as fh:
             expected = err.render(fh.read(), path)
         proc = subprocess.run(
-            [self._binary, entry, stdlib], capture_output=True, text=True
+            [self._binary, entry, stdlib, *self._flags], capture_output=True, text=True
         )
         self.assertEqual((proc.returncode, proc.stderr), (1, expected + "\n"))
 
@@ -589,6 +591,93 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     fh.write(PROGRAMS[name])
                 got = self._build_and_run(self._emit_asm(path))
                 self.assertEqual(got, _oracle(path))
+
+
+
+IR_SAMPLE = """\
+fun scale(x: int32, by: int32) -> int32 {
+    if x > 100 {
+        return x
+    }
+    return x * by
+}
+
+fun main() {
+    print(scale(7, 6))
+}
+"""
+
+IR_SAMPLE_TEXT = """\
+fun myla_scale -> int32 {
+  $0 x: int32 (argument 0)
+  $1 by: int32 (argument 1)
+L0:
+  bind x $0
+  bind by $1
+  scope open
+  loc 2 5
+  %t0 = load $0
+  %t1 = const int32 100
+  %t2 = cmp > int32 %t0, %t1
+  br %t2, L1, L2
+L1:
+  scope open
+  loc 3 9
+  %t3 = load $0
+  ret %t3
+L3:
+  scope close
+  jmp L2
+L2:
+  loc 5 5
+  %t4 = load $0
+  %t5 = load $1
+  %t6 = * int32 %t4, %t5 @5:14
+  ret %t6
+L4:
+  scope close
+  ret
+}
+"""
+
+
+class SelfHostedCodegenParityThroughIR(SelfHostedCodegenParity):
+    """The code-generating tests again, with every function the IR covers
+    lowered to it first (`--ir`, MYLA-103, D79): the same output, the same
+    runtime errors, memory reclaimed. The front-end tests aren't repeated."""
+
+    _flags = ["--ir"]
+    test_module_errors_match_the_python_loader = None
+    test_diagnostics_match_the_python_cli = None
+    test_derived_eq_on_a_plain_enum_compares_tags = None
+
+    def _ir_run(self, source: str, *flags: str) -> subprocess.CompletedProcess:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            return subprocess.run([self._binary, path, *flags], capture_output=True, text=True)
+
+    def test_the_text_form(self) -> None:
+        proc = self._ir_run(IR_SAMPLE, "--emit-ir")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        start = proc.stdout.index("fun myla_scale")
+        self.assertEqual(proc.stdout[start:proc.stdout.index("}\n", start) + 2], IR_SAMPLE_TEXT)
+
+    def test_the_corpus_goes_through_the_ir(self) -> None:
+        # the examples and parity programs exercise the IR, not only the
+        # fallback: count the functions that went through it
+        from .test_compiler_parity import PROGRAMS
+        sources = [PROGRAMS[name] for name in PARITY_PROGRAMS]
+        for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
+            with open(path, encoding="utf-8") as fh:
+                sources.append(fh.read())
+        through = 0
+        for source in sources:
+            proc = self._ir_run(source, default_stdlib_root(), "--ir-stats")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            through += int(proc.stderr.split(" functions through the IR")[0].split()[-1])
+        self.assertGreater(through, 60)
 
 
 if __name__ == "__main__":

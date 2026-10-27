@@ -16,6 +16,9 @@ from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
+from .ir import render_func
+from .lower import lower_function
+import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
@@ -151,6 +154,14 @@ pub struct CodeGen {
     dbg_fn_end: str,
     dbg_mark: str,
     dbg_n: int32,
+    // The IR (MYLA-103, D79): whether functions are lowered to it (`--ir`),
+    // whether their IR text is kept (`--emit-ir`), the functions emitted from
+    // it, those that fell back to the old path with the reason, and the text.
+    use_ir: bool,
+    keep_ir: bool,
+    ir_done: [str],
+    ir_skipped: [str],
+    ir_texts: [str],
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -189,6 +200,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         debug: false, line_files: [], cur_file: 0, last_loc: "",
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0,
+        use_ir: false, keep_ir: false, ir_done: [], ir_skipped: [], ir_texts: [],
     }
 }
 
@@ -204,6 +216,29 @@ impl CodeGen {
     // and types (MYLA-66).
     fun enable_debug_info(var self) {
         self.debug = true
+    }
+
+    // Lower each function to the IR and emit it from there, falling back to
+    // the old path for constructs the IR doesn't cover yet (MYLA-103, D79);
+    // `keep`: keep each function's IR text (`ir_text`).
+    fun enable_ir(var self, keep: bool) {
+        self.use_ir = true
+        self.keep_ir = keep
+    }
+
+    // The IR of every function emitted from it, as text.
+    fun ir_text(self) -> str {
+        var sb = StringBuilder()
+        for t in self.ir_texts { append(sb, t) }
+        return build(sb)
+    }
+
+    // How many functions went through the IR and which fell back, and why.
+    fun ir_stats(self) -> str {
+        var sb = StringBuilder()
+        append(sb, format("ir: {} functions through the IR, {} by the old path\n", len(self.ir_done), len(self.ir_skipped)))
+        for line in self.ir_skipped { append(sb, "  " + line + "\n") }
+        return build(sb)
     }
 
     // The path of the file node `id` is in, as the loader names it (the entry
@@ -1421,7 +1456,7 @@ impl CodeGen {
                 if list_has_str(self.fn_done, job.mangled) { continue }
                 push(self.fn_done, job.mangled)
                 self.subst = job.subst
-                self.gen_function(self.sig_of(job.orig).decl, job.mangled)
+                self.gen_any_function(self.sig_of(job.orig).decl, job.mangled)
                 self.subst = []
             } else {
                 let lj = self.lam_jobs[len(self.lam_jobs) - 1]
@@ -1565,6 +1600,23 @@ impl CodeGen {
     }
 
     // -- functions --------------------------------------------------------
+
+    // Emit a function: through the IR with `--ir` when it can be lowered,
+    // else by the old path (MYLA-103, D79 (5)).
+    fun gen_any_function(var self, fd: FunData, mangled: str) {
+        if self.use_ir {
+            match lower_function(self, fd, mangled) {
+                Ok(f) => {
+                    push(self.ir_done, mangled)
+                    if self.keep_ir { push(self.ir_texts, render_func(f)) }
+                    self.emit_ir(f, fd, mangled)
+                    return
+                },
+                Err(why) => { push(self.ir_skipped, format("{}: {}", mangled, why)) },
+            }
+        }
+        self.gen_function(fd, mangled)
+    }
 
     fun gen_function(var self, fd: FunData, mangled: str) {
         let sig = self.sig_of(fd.name)
@@ -2331,16 +2383,22 @@ impl CodeGen {
 
     fun eval_unary(var self, e: Expr, op: str, x: Expr) {
         self.eval(x)
-        if op == "-" && is_tfloat(self.type_of(e.id)) {
+        self.emit_unary(op, self.type_of(e.id))
+    }
+
+    // `op` (`-`, `~` or `!`) on the value in %rax, whose result has type `t`
+    // (shared with the IR backend, MYLA-103).
+    fun emit_unary(var self, op: str, t: Type) {
+        if op == "-" && is_tfloat(t) {
             self.uses_float = true
             self.emit("movabsq $-9223372036854775808, %rcx")   // the sign bit
             self.emit("xorq %rcx, %rax")
         } else if op == "-" {
             self.emit("negq %rax")
-            self.wrap(self.type_of(e.id))
+            self.wrap(t)
         } else if op == "~" {
             self.emit("notq %rax")
-            self.wrap(self.type_of(e.id))
+            self.wrap(t)
         } else {
             self.emit("testq %rax, %rax")
             self.emit("sete %al")
@@ -2388,7 +2446,13 @@ impl CodeGen {
             return
         }
         self.eval_operands(l, r)
-        let rt = self.type_of(e.id)
+        self.emit_int_op(op, lt, self.type_of(e.id), e.line, e.col)
+    }
+
+    // The integer operation `op` on %rax (left, of type `lt`) and %rcx (right),
+    // its result (of type `rt`) in %rax; `/` and `%` trap at line:col on a zero
+    // divisor (shared with the IR backend, MYLA-103).
+    fun emit_int_op(var self, op: str, lt: Type, rt: Type, line: int32, col: int32) {
         if op == "+" {
             self.emit("addq %rcx, %rax")
             self.wrap(rt)
@@ -2400,7 +2464,7 @@ impl CodeGen {
             self.wrap(rt)
         } else if op == "/" || op == "%" {
             self.emit("testq %rcx, %rcx")
-            if op == "/" { self.trap("jz", "__trap_div", e.line, e.col) } else { self.trap("jz", "__trap_mod", e.line, e.col) }
+            if op == "/" { self.trap("jz", "__trap_div", line, col) } else { self.trap("jz", "__trap_mod", line, col) }
             if int_signed(lt) {
                 // x / -1 is -x and x % -1 is 0; idivq would trap on the
                 // minimum (its quotient overflows), the language wraps (MYLA-5)
@@ -2538,9 +2602,13 @@ impl CodeGen {
     }
 
     fun gen_cast(var self, e: Expr, x: Expr) {
-        let src = self.type_of(x.id)
-        let tgt = self.type_of(e.id)
         self.eval(x)
+        self.emit_cast(self.type_of(x.id), self.type_of(e.id))
+    }
+
+    // The value in %rax, of type `src`, `as tgt` (shared with the IR backend,
+    // MYLA-103).
+    fun emit_cast(var self, src: Type, tgt: Type) {
         if is_tchar(tgt) { return }
         if is_tchar(src) {
             self.wrap(tgt)
@@ -2648,8 +2716,15 @@ impl CodeGen {
     // Float arithmetic and comparisons: the operands are f64 images in %rax,
     // computed in XMM; `%` is fmod; float32 results are narrowed.
     fun eval_binary_float(var self, e: Expr, op: str, l: Expr, r: Expr) {
-        self.uses_float = true
         self.eval_operands(l, r)
+        self.emit_float_op(op, self.type_of(e.id))
+    }
+
+    // The float operation `op` on the f64 images in %rax and %rcx, the result
+    // (of type `t` for arithmetic, 0/1 for a comparison) in %rax (shared with
+    // the IR backend, MYLA-103).
+    fun emit_float_op(var self, op: str, t: Type) {
+        self.uses_float = true
         self.emit("movq %rax, %xmm0")
         self.emit("movq %rcx, %xmm1")
         if op == "+" || op == "-" || op == "*" || op == "/" || op == "%" {
@@ -2658,7 +2733,7 @@ impl CodeGen {
             else if op == "*" { self.emit("mulsd %xmm1, %xmm0") }
             else if op == "/" { self.emit("divsd %xmm1, %xmm0") }
             else { self.emit("call __fmod") }
-            self.round_xmm0(self.type_of(e.id))
+            self.round_xmm0(t)
             self.emit("movq %xmm0, %rax")
             return
         }
@@ -4761,8 +4836,14 @@ impl CodeGen {
 
     fun gen_print(var self, arg: Expr) {
         self.eval(arg)
+        self.emit_print(self.type_of(arg.id))
+    }
+
+    // Print the scalar in %rax, of type `t`, as `print` does
+    // (shared with the IR backend, MYLA-103).
+    fun emit_print(var self, t: Type) {
         self.emit("movq %rax, %rdi")
-        match self.type_of(arg.id) {
+        match t {
             Type.TBool => { self.emit("call __print_bool") },
             Type.TStr => { self.emit("call __print_str") },
             Type.TChar => { self.emit("call __print_char") },
@@ -7799,7 +7880,7 @@ fun tfunc_ret(t: Type) -> Option<Type> {
 }
 
 // Names that `gen_call` handles as builtins (i.e. not indirect calls).
-fun is_builtin_call_name(nm: str) -> bool {
+pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "print" || nm == "assert" || nm == "panic" || nm == "unreachable" { return true }
     if nm == "len" || nm == "push" || nm == "pop" || nm == "chars" || nm == "format" { return true }
     if nm == "StringBuilder" || nm == "append" || nm == "append_byte" || nm == "build" { return true }
@@ -8049,7 +8130,7 @@ fun ate_of(t: Type) -> int32 {
 #test("__tmp")[true]
 #test("x")[false]
 #test("_")[false]
-fun is_internal_name(name: str) -> bool {
+pub fun is_internal_name(name: str) -> bool {
     return len(name) >= 2 && name[0] == '_' && name[1] == '_'
 }
 

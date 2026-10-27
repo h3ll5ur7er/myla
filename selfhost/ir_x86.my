@@ -1,0 +1,191 @@
+// ir_x86.my -- IR → x86-64 assembly (MYLA-103, D79; wiki: Architecture/IR).
+//
+// `emit_ir` is a method of the code generator, so a function lowered to IR
+// is emitted with the same pools (string literals, runtime-error positions,
+// helper flags), the same debug information and the same calling convention
+// as one emitted by the old path, and the two call each other freely. The
+// frame gives every slot that isn't an argument word, and every temporary,
+// an 8-byte slot of its own, as wasteful as the old path; the instruction
+// sequences for operations, casts and `print` are the old path's own
+// (`emit_int_op`, `emit_float_op`, `emit_cast`, `emit_unary`, `emit_print`).
+
+from .ast import FunData
+from .checker import Type
+from .codegen import CodeGen, CgBinding
+from .ir import IrFunc, Inst, Term
+
+impl CodeGen {
+    // Emit `f`, the IR of the function `fd`, as `myla_<mangled>`.
+    fun emit_ir(var self, f: IrFunc, fd: FunData, mangled: str) {
+        let sig = self.sig_of(fd.name)
+        self.cur_mangled = mangled
+        self.struct_ret = false
+        self.ret_type = f.ret
+        self.scopes = []
+        self.loops = []
+        // the frame: each slot that isn't an argument word, then each temporary
+        var slot_off: [int32] = []
+        var cursor = 0
+        for s in f.slots {
+            if s.word >= 0 {
+                push(slot_off, 16 + 8 * s.word)
+            } else {
+                cursor = cursor + 8
+                push(slot_off, -cursor)
+            }
+        }
+        let temp_base = cursor
+        cursor = cursor + 8 * len(f.temps)
+        let frame = (cursor + 15) / 16 * 16
+        self.epilogue = format(".Lret_{}", mangled)
+        var labels: [str] = []
+        for b in f.blocks { push(labels, self.label()) }
+
+        self.cur_file = self.file_number(sig.decl_id)
+        self.cur_path = self.path_of(sig.decl_id)
+        self.emit(format("myla_{}:", mangled))
+        self.dbg_begin_function(format("myla_{}", mangled))
+        self.emit_loc(fd.line, fd.col)
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
+        self.dbg_push_scope()
+
+        var k = 0
+        while k < len(f.order) {
+            let b = f.order[k]
+            self.emit(format("{}:", labels[b]))
+            for inst in f.blocks[b].insts { self.emit_inst(f, inst, slot_off, temp_base) }
+            var next = -1
+            if k + 1 < len(f.order) { next = f.order[k + 1] }
+            self.emit_term(f.blocks[b].term, labels, next, temp_base)
+            k = k + 1
+        }
+
+        self.emit(format("{}:", self.epilogue))
+        self.emit("leave")
+        self.emit("ret")
+        self.end_loc()
+        self.dbg_pop_scope()
+        self.dbg_end_function()
+        self.emit("")
+    }
+
+    fun emit_inst(var self, f: IrFunc, inst: Inst, slot_off: [int32], temp_base: int32) {
+        match inst {
+            Inst.Const(d, t, v) => {
+                match t {
+                    Type.TFloat(w) => {
+                        self.uses_float = true
+                        self.emit(format("movabsq ${}, %rax", v))
+                    },
+                    Type.TInt(w, s) => {
+                        self.emit(format("movabsq ${}, %rax", v))
+                        self.wrap(t)
+                    },
+                    _ => { self.emit(format("movq ${}, %rax", v)) },
+                }
+                self.store_temp(d, temp_base)
+            },
+            Inst.Str(d, text) => {
+                self.emit(format("leaq {}(%rip), %rax", self.string_label(text)))
+                self.store_temp(d, temp_base)
+            },
+            Inst.Load(d, s) => {
+                self.emit(format("movq {}(%rbp), %rax", slot_off[s]))
+                self.store_temp(d, temp_base)
+            },
+            Inst.Store(s, v) => {
+                self.load_temp(v, "rax", temp_base)
+                self.emit(format("movq %rax, {}(%rbp)", slot_off[s]))
+            },
+            Inst.Bin(d, op, t, rt, a, b, pos) => {
+                self.load_temp(a, "rax", temp_base)
+                self.load_temp(b, "rcx", temp_base)
+                match t {
+                    Type.TFloat(w) => { self.emit_float_op(op, rt) },
+                    _ => { self.emit_int_op(op, t, rt, pos.line, pos.col) },
+                }
+                self.store_temp(d, temp_base)
+            },
+            Inst.Cmp(d, op, t, a, b) => {
+                self.load_temp(a, "rax", temp_base)
+                self.load_temp(b, "rcx", temp_base)
+                match t {
+                    Type.TFloat(w) => { self.emit_float_op(op, t) },
+                    _ => { self.emit_int_op(op, t, Type.TBool, 0, 0) },
+                }
+                self.store_temp(d, temp_base)
+            },
+            Inst.Un(d, op, t, a) => {
+                self.load_temp(a, "rax", temp_base)
+                self.emit_unary(op, t)
+                self.store_temp(d, temp_base)
+            },
+            Inst.Cast(d, src, tgt, a) => {
+                self.load_temp(a, "rax", temp_base)
+                self.emit_cast(src, tgt)
+                self.store_temp(d, temp_base)
+            },
+            Inst.Call(d, name, args) => {
+                // the first argument at the lowest address: push the last first
+                var i = len(args) - 1
+                while i >= 0 {
+                    self.load_temp(args[i], "rax", temp_base)
+                    self.emit("pushq %rax")
+                    i = i - 1
+                }
+                self.emit(format("call myla_{}", name))
+                if len(args) > 0 { self.emit(format("addq ${}, %rsp", 8 * len(args))) }
+                if d >= 0 { self.store_temp(d, temp_base) }
+            },
+            Inst.Print(t, a) => {
+                self.load_temp(a, "rax", temp_base)
+                self.emit_print(t)
+            },
+            Inst.Loc(p) => { self.emit_loc(p.line, p.col) },
+            Inst.Bind(name, s) => {
+                let slot = f.slots[s]
+                if slot.word >= 0 {
+                    let b = CgBinding { name: name, kind: "param", offset: slot_off[s], ty: slot.ty, capoff: 0 }
+                    self.dbg_variable(b, true, true)
+                } else {
+                    let b = CgBinding { name: name, kind: "local", offset: slot_off[s], ty: slot.ty, capoff: 0 }
+                    self.dbg_variable(b, false, false)
+                }
+            },
+            Inst.Scope(open) => {
+                if open { self.dbg_push_scope() } else { self.dbg_pop_scope() }
+            },
+        }
+    }
+
+    // A block's terminator; `next` is the block emitted after it (-1: none),
+    // which a jump to it can fall through to.
+    fun emit_term(var self, t: Term, labels: [str], next: int32, temp_base: int32) {
+        match t {
+            Term.Open => {},
+            Term.Jmp(b) => {
+                if b != next { self.emit(format("jmp {}", labels[b])) }
+            },
+            Term.Br(c, a, b) => {
+                self.load_temp(c, "rax", temp_base)
+                self.emit("testq %rax, %rax")
+                self.emit(format("jz {}", labels[b]))
+                if a != next { self.emit(format("jmp {}", labels[a])) }
+            },
+            Term.Ret(v) => {
+                if v >= 0 { self.load_temp(v, "rax", temp_base) }
+                self.emit(format("jmp {}", self.epilogue))
+            },
+        }
+    }
+
+    fun load_temp(var self, t: int32, reg: str, temp_base: int32) {
+        self.emit(format("movq {}(%rbp), %{}", -(temp_base + 8 * (t + 1)), reg))
+    }
+
+    fun store_temp(var self, t: int32, temp_base: int32) {
+        self.emit(format("movq %rax, {}(%rbp)", -(temp_base + 8 * (t + 1))))
+    }
+}

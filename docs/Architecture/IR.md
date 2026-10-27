@@ -39,6 +39,8 @@ A function has parameters, a result, slots, temporaries and basic blocks; block 
 
 ### Instructions
 
+What [[MYLA-103]] built is marked *now*; the rest is the plan for the next steps.
+
 ```text
 %t = const i32 42             %t = const f64 0x400921fb54442d18
 %t = str "text"               ; the address of a static str cell
@@ -63,7 +65,9 @@ loc 12 5                      ; the source position of what follows
 bind x $s3                    ; debug information: x lives in $s3 from here
 ```
 
-Terminators:
+*Now*: `const`, `str`, `load`/`store` of 8-byte slots, the integer and float operations (`%t = + int32 %a, %b`, with the result type after `->` when it differs, and `@line:col` on a division), `cmp`, the unary operators, `cast`, `call` with scalar arguments, `print ty %a` (a scalar, as `print` writes it), `loc`, `bind`, and `scope open`/`scope close` (the lexical scopes of debug information, which `emit_ir` turns into the same DWARF blocks as the old path).
+
+Terminators (*now*: `jmp`, `br`, `ret`):
 
 ```text
 jmp L3
@@ -83,25 +87,57 @@ The lowering makes every rule of [[Architecture/Native-backend#heap-and-referenc
 
 `gen_main <file> <stdlib> --emit-ir` prints every IR function, for tests and debugging:
 
-```text
-fun myla_add_one(i32) -> i32 {
-  slots: $s0 n: i32 (8)
-L0:
-  loc 2 5
-  %t0 = param 0
-  store i64 [$s0], %t0
-  bind n $s0
-  loc 3 5
-  %t1 = load i64 [$s0]
-  %t2 = const i32 1
-  %t3 = add i32 %t1, %t2
-  ret %t3
+```myla
+fun scale(x: int32, by: int32) -> int32 {
+    if x > 100 {
+        return x
+    }
+    return x * by
 }
 ```
 
+```text
+fun myla_scale -> int32 {
+  $0 x: int32 (argument 0)
+  $1 by: int32 (argument 1)
+L0:
+  bind x $0
+  bind by $1
+  scope open
+  loc 2 5
+  %t0 = load $0
+  %t1 = const int32 100
+  %t2 = cmp > int32 %t0, %t1
+  br %t2, L1, L2
+L1:
+  scope open
+  loc 3 9
+  %t3 = load $0
+  ret %t3
+L3:
+  scope close
+  jmp L2
+L2:
+  loc 5 5
+  %t4 = load $0
+  %t5 = load $1
+  %t6 = * int32 %t4, %t5 @5:14
+  ret %t6
+L4:
+  scope close
+  ret
+}
+```
+
+A parameter is a slot at its argument word, so it needs no copy. The code after a `return` lands in a block nothing jumps to (`L3`, `L4`), as the old path emits dead code there too; blocks are printed and emitted in the order lowering started them, the source order, which keeps the debug information's scopes nested.
+
 ## The backend
 
-`emit_ir` lays out the frame (each slot its offset, each temporary an 8-byte slot of its own at first, exactly as wasteful as today), then emits each block: a label per block, one short instruction sequence per IR instruction, the prologue and epilogue as `gen_function` emits them. `loc` becomes `.loc` (with `-g`), `bind` the DWARF variable and scope entries through the existing `dbg_*` methods.
+`emit_ir` lays out the frame (each slot its offset, each temporary an 8-byte slot of its own at first, exactly as wasteful as today), then emits each block: a label per block, one short instruction sequence per IR instruction, the prologue and epilogue as `gen_function` emits them. The sequences for operations, casts, `print` and the unary operators are the old path's own: `emit_int_op`, `emit_float_op`, `emit_cast`, `emit_unary` and `emit_print` were split out of `eval_binary`, `eval_binary_float`, `gen_cast`, `eval_unary` and `gen_print` (which emit byte-identical assembly since), so wrapping, traps and float rounding can't drift between the paths. `loc` becomes `.loc` (with `-g`), `bind` and `scope` the DWARF variable and scope entries through the existing `dbg_*` methods.
+
+### Coverage
+
+`gen_main <file> <stdlib> --ir-stats` reports how many functions went through the IR and, for each other one, the first construct the lowering doesn't cover yet. After [[MYLA-103]] the compiler itself has 13 of 1,004 functions through the IR; the rest have an aggregate or heap result (566) or parameter (418), the subjects of [[MYLA-104]] and [[MYLA-105]]. The examples have 50 of 227.
 
 ## Steps
 

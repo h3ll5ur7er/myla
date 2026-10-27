@@ -42,12 +42,14 @@ pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
 }
 
 // Type-check `file`, then generate its x86-64 assembly (`debug`: with DWARF
-// debug information, MYLA-71, MYLA-66).
-fun compile_asm(file: str, opts: LoadOptions, debug: bool) -> Result<str, str> {
+// debug information, MYLA-71, MYLA-66; `ir`: lowering functions to the IR
+// first, MYLA-103).
+fun compile_asm(file: str, opts: LoadOptions, debug: bool, ir: bool) -> Result<str, str> {
     let ch = load_and_check(file, opts)?
     var g = new_codegen(ch.checker)
     g.set_sources(ch.prog.spans, ch.prog.next_id)
     if debug { g.enable_debug_info() }
+    if ir { g.enable_ir(false) }
     return Ok(g.generate())
 }
 
@@ -122,8 +124,8 @@ pub fun own_tests(file: str, opts: LoadOptions) -> Result<TestRun, str> {
 }
 
 // `myla build <file> -o <out>`: compile to a native binary at `out`.
-pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool) -> int32 {
-    let asm = match compile_asm(file, opts, debug) {
+pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool, ir: bool) -> int32 {
+    let asm = match compile_asm(file, opts, debug, ir) {
         Ok(a) => a,
         Err(e) => {
             eprintln(e)

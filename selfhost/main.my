@@ -37,7 +37,7 @@ fun usage() {
     eprintln("commands on a file:")
     eprintln("  run   <file.my> [options] [args...]  interpret a program with these arguments")
     eprintln("  test  <file.my> [options]            run its #test cases")
-    eprintln("  build <file.my> [-o <out>] [-g] [options]  compile to a binary (-g: debug information for gdb)")
+    eprintln("  build <file.my> [-o <out>] [-g] [--ir] [options]  compile to a binary (-g: debug information for gdb; --ir: through the IR)")
     eprintln("  check <file.my> [options]            type-check it")
     eprintln("  repl  [options]                      the interactive interpreter")
     eprintln("commands on the project around the working directory (myla.toml):")
@@ -56,7 +56,7 @@ fun usage() {
 // A command's arguments: its file ("" in project mode), the load options,
 // `build`'s output and `-g`, `clean`'s `--deps`, `fetch`'s `--update`, `new`'s
 // name, and the program's arguments (`run`).
-struct CommandLine { file: str, opts: LoadOptions, output: str, debug: bool, deps: bool, update: bool, name: str, rest: [str] }
+struct CommandLine { file: str, opts: LoadOptions, output: str, debug: bool, ir: bool, deps: bool, update: bool, name: str, rest: [str] }
 
 // A command line that can't be run: the message, and whether the usage
 // follows it (exit status 2; else 1).
@@ -69,7 +69,7 @@ struct CliError { msg: str, usage: bool }
 // name, and other commands reject them.
 fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
     let cmd = argv[1]
-    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root(argv[0])), output: "a.out", debug: false, deps: false, update: false, name: "", rest: [] }
+    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root(argv[0])), output: "a.out", debug: false, ir: false, deps: false, update: false, name: "", rest: [] }
     var positional = 0
     var j = 2
     while j < len(argv) {
@@ -89,6 +89,9 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
             j = j + 2
         } else if cmd == "build" && a == "-g" {
             cl.debug = true
+            j = j + 1
+        } else if cmd == "build" && a == "--ir" {
+            cl.ir = true
             j = j + 1
         } else if cmd == "clean" && a == "--deps" {
             cl.deps = true
@@ -129,7 +132,7 @@ fun main() {
         usage()
         exit(2)
     }
-    var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, deps: false, update: false, name: "", rest: [] }
+    var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, ir: false, deps: false, update: false, name: "", rest: [] }
     match parse_command_line(argv) {
         Ok(c) => { cl = c },
         Err(e) => {
@@ -155,13 +158,13 @@ fun main() {
     if cmd == "fetch" { exit(project_fetch(cl.update)) }
     if cl.file == "" {
         // project mode (MYLA-94)
-        if cmd == "build" { exit(project_build(cl.opts, cl.debug)) }
+        if cmd == "build" { exit(project_build(cl.opts, cl.debug, cl.ir)) }
         if cmd == "run" { exit(project_run(cl.opts, cl.rest)) }
         if cmd == "test" { exit(project_test(cl.opts)) }
         exit(project_check(cl.opts))
     }
     if cmd == "build" {
-        exit(cmd_build(cl.file, cl.output, cl.opts, cl.debug))
+        exit(cmd_build(cl.file, cl.output, cl.opts, cl.debug, cl.ir))
     }
     if cmd == "check" {
         match load_and_check(cl.file, cl.opts) {

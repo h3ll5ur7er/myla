@@ -21,7 +21,7 @@ A small IR in between (for the self-hosted backend, D79), with explicit temporar
 ## Steps (epic `IR`)
 
 - [x] The design on [[Architecture/IR]] and D79
-- [ ] [[MYLA-103]] `ir.my`, the flags, scalar functions through the IR
+- [x] [[MYLA-103]] `ir.my`, the flags, scalar functions through the IR (in review)
 - [ ] [[MYLA-104]] Aggregates
 - [ ] [[MYLA-105]] Heap values, ownership and the verifier
 - [ ] [[MYLA-106]] Closures, function values, the remaining constructs, `-g`
