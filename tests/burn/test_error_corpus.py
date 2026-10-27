@@ -23,8 +23,9 @@ has no values in it (MYLA-17, MYLA-58)::
     //~ native: runtime error: index out of bounds
 
 and is built with the Python backend, which must exit with status 1 and print
-that text on stderr. Module errors are checked through the loader, with the
-bundled standard library.
+exactly that line and the interpreter's position, `  --> <file>:<line>:<col>`
+(MYLA-65, MYLA-66), on stderr. Module errors are checked through the loader,
+with the bundled standard library.
 """
 import os
 import re
@@ -118,9 +119,11 @@ def _make(name: str):
         if phase == "runtime":
             self.assertIsNotNone(native, f"{name}: a runtime error file needs a '//~ native:' line")
             if CAN_BUILD_NATIVE:
-                out, err, code = build_and_run_full(check(parse(tokenize(source))))
+                checker = check(link(path, stdlib_root=default_stdlib_root()))
+                out, err, code = build_and_run_full(checker, entry_path=path)
                 self.assertEqual(code, 1, f"{name}: the native binary should exit 1")
-                self.assertIn(native, err, f"{name}: native stderr {err!r}")
+                where = f"  --> {path}:{ctx.exception.line}:{ctx.exception.column}"
+                self.assertEqual(err, f"{native}\n{where}\n", f"{name}: native stderr")
         else:
             self.assertIsNone(native, f"{name}: '//~ native:' only goes with a runtime error")
     return test

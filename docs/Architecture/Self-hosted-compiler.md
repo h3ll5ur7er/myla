@@ -43,7 +43,7 @@ Myla has no global variables and no module-level maps, and everything is a value
 | Monomorphization | Separate pass, then a second check | During code generation, with a substitution list |
 | Floats | Full support | Full support since [[MYLA-29]]: literals converted with integer arithmetic (`std.num`, moved there from `selfhost/floatlit.my` in [[MYLA-79]]), the float runtime generated from the Python backend's (`scripts/gen_selfhost_runtime.py`) |
 | Diagnostics | Messages with file positions | The same: lex, parse, module and type errors print exactly as in the Python CLI, file, source line and caret included ([[MYLA-28]]) |
-| Runtime errors | Messages | The interpreter (`myla run`/`test`): the same messages and rendering since [[MYLA-32]]; native binaries: `runtime error: <message>` on stderr and exit 1, without the position, as the Python backend's ([[MYLA-17]]) |
+| Runtime errors | Messages | The interpreter (`myla run`/`test`): the same messages and rendering since [[MYLA-32]]; native binaries: `runtime error: <message>` and `  --> file:line:col` on stderr and exit 1, as the Python backend's ([[MYLA-17]], [[MYLA-65]]) |
 | Heap | 1 GiB arena, size-class free lists (powers of two above 4 KiB since [[MYLA-80]]) | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]); maps leave a tombstone on `remove` and then rebuild, the Python backend rebuilds directly ([[MYLA-18]]) |
 | Closure environments | `[drop fn][captures…]`, captures retained and dropped | The same since [[MYLA-22]]; compositions and partial applications own their parts too |
 | Stdlib root | Built in | Found from the binary's location (`build/myla` → `src/myla`), or `--stdlib <dir>` ([[MYLA-31]]) |

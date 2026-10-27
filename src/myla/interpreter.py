@@ -725,6 +725,10 @@ class Interpreter:
             self._exec_block(sig.decl.body, frame)
         except _ReturnSignal as ret:
             return ret.value
+        except MylaError as err:   # attribute it to the method's file (MYLA-10)
+            if err.path is None:
+                err.path = getattr(sig.decl, "source_path", None)
+            raise
         return None
 
     @staticmethod
@@ -956,6 +960,10 @@ class Interpreter:
             self._exec_block(decl.body, frame)
         except _ReturnSignal as ret:
             return ret.value
+        except MylaError as err:   # attribute it to the method's file (MYLA-10)
+            if err.path is None:
+                err.path = getattr(decl, "source_path", None)
+            raise
         return None
 
     def _eval_intrinsic(self, expr: ast.Call, env: _Env):

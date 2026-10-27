@@ -65,7 +65,7 @@ A capturing lambda allocates an environment cell: word 0 holds a drop function (
 
 | Group | Helpers |
 | --- | --- |
-| Process | `_start`, `__panic` (message to stderr, exit 1), the runtime-error entries `__trap_index`, `__trap_key`, `__trap_pop`, `__trap_div`, `__trap_mod`, `__trap_match`, `__trap_oom` (each writes `runtime error: <message>` through `__panic`, [[MYLA-17]]), `__write_all` (loops over short writes, retries `EINTR`/`EAGAIN`; every output goes through it) |
+| Process | `_start`, `__panic` (`runtime error: <message>` and the position to stderr, exit 1; `__write_err`, `__write_err_num` write its parts), the runtime-error entries `__trap_index`, `__trap_key`, `__trap_pop`, `__trap_div`, `__trap_mod`, `__trap_match`, `__trap_oom` (each passes its message to `__panic`, [[MYLA-17]]; see below), `__write_all` (loops over short writes, retries `EINTR`/`EAGAIN`; every output goes through it) |
 | Printing | `__print_int`, `__print_uint`, `__print_bool`, `__print_str`, `__print_nl`, `__float_to_str`, `__char_to_str` |
 | Strings | `__str_eq`, `__str_concat`, `__int_to_str`, `__uint_to_str`, `__bool_to_str`, `__str_chars` (UTF-8 decode; U+FFFD for each byte outside a well-formed sequence) |
 | Heap | `__heap_init`, `__alloc`, `__free`, `__func_retain`, `__func_drop` |
@@ -75,6 +75,16 @@ A capturing lambda allocates an environment cell: word 0 holds a drop function (
 | Floats | `__fmod` (x87 `fprem`), `__two_prod` (Dekker), `__fscale`, and the power-of-ten tables `__pow10_hi`/`__pow10_lo` |
 
 System calls used: read 0, write 1, open 2, close 3, fstat 5, poll 7, mmap 9, pipe 22, dup2 33, fork 57, execve 59, exit 60, wait4 61, pipe2 293.
+
+## Runtime-error positions
+
+A runtime error prints the interpreter's first two lines: `runtime error: <message>` (without the values) and `  --> file:line:col`, the position of the node the interpreter reports for the same error ([[MYLA-65]], D75). It works in every build, not only with `-g`:
+
+- Each position a trap can report has a 16-byte record in `.rodata`, `[file str:8][line:4][col:4]`, where the file is a static `str` cell (shared with literals of the same text); records are shared by all traps at one position (`_load_position`).
+- A check jumps over a call to the trap entry (`_trap`): `cmpq %rdx, %rax; jb .L7; leaq .Lpos3(%rip), %rsi; call __trap_index; .L7:`. The common case falls through one taken branch. The `call` (it never returns) leaves a return address, so under gdb `break __panic` then `bt` shows the Myla frame and line, and `up` shows its variables.
+- `__trap_<kind>` loads its message into `%rdi` and jumps to `__panic`, which writes the prefix, the message and, when `%rsi` isn't 0, the position. `panic`, `assert` and `unreachable` call `__panic` with their message and the call's record. `__trap_oom`, reached from `__alloc`, has no position.
+- `append(sb, s, start, end)` checks its range inside `__sb_extend_range`; the caller passes the record in `%r8`.
+- The file is named as the compiling CLI names it in diagnostics: the entry file as given (`build(…, entry_path=…)`, which `myla build` passes), another module relative to the working directory (`_display_path`); without an entry path (API callers) the loader's absolute path, without any (a program compiled from text) `<input>`. The self-hosted backend names files as its loader does (`set_sources`, `path_of`), which is the same for paths given relative to the working directory.
 
 ## Float formatting
 

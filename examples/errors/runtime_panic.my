@@ -1,0 +1,7 @@
+//~ runtime error: giving up after 3 tries
+//~ native: runtime error: giving up after 3 tries
+// `panic` stops the program with its message, at the call.
+fun main() {
+    let tries = 3
+    panic(f"giving up after {tries} tries")
+}

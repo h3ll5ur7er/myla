@@ -54,7 +54,8 @@ fun load_and_check(file: str, stdlib: str) -> Result<Checked, str> {
 fun compile_asm(file: str, stdlib: str, debug: bool) -> Result<str, str> {
     let ch = load_and_check(file, stdlib)?
     var g = new_codegen(ch.checker)
-    if debug { g.enable_line_tables(ch.prog.spans, ch.prog.next_id) }
+    g.set_sources(ch.prog.spans, ch.prog.next_id)
+    if debug { g.enable_debug_info() }
     return Ok(g.generate())
 }
 

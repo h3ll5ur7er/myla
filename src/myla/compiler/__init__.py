@@ -18,25 +18,29 @@ class BuildError(Exception):
     """A failure while assembling or linking the generated program."""
 
 
-def compile_to_asm(checker: Checker, debug: bool = False) -> str:
+def compile_to_asm(checker: Checker, debug: bool = False,
+                   entry_path: str | None = None) -> str:
     """Return GAS/AT&T x86-64 assembly for a type-checked program.
 
     Generics are monomorphized away first (D13), so codegen only ever sees
-    concrete types. With `debug`, the assembly carries `.file`/`.loc` line
-    directives, from which the assembler builds a DWARF line table (MYLA-71).
+    concrete types. With `debug`, the assembly carries DWARF debug information:
+    `.file`/`.loc` line directives, from which the assembler builds the line
+    table (MYLA-71), and the variables of each function (MYLA-66).
+    `entry_path` is the entry file as the user named it: runtime errors print
+    positions in files named as `myla run` would name them (MYLA-65).
     """
-    return _generate(monomorphize(checker), debug=debug)
+    return _generate(monomorphize(checker), debug=debug, entry_path=entry_path)
 
 
 def build(checker: Checker, output: str, keep_asm: bool = False,
-          debug: bool = False) -> str:
+          debug: bool = False, entry_path: str | None = None) -> str:
     """Compile, assemble, and link `checker`'s program into `output`.
 
     Returns the path to the produced binary. Intermediate `.s`/`.o` files are
     written next to `output`; the object file is always removed and the assembly
     is removed unless `keep_asm` is set.
     """
-    asm = compile_to_asm(checker, debug=debug)
+    asm = compile_to_asm(checker, debug=debug, entry_path=entry_path)
     asm_path = output + ".s"
     obj_path = output + ".o"
 

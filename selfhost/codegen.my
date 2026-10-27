@@ -108,12 +108,21 @@ pub struct CodeGen {
     need_clone: [Type],
     clone_emitted: [str],
     need_sb: bool,
-    // DWARF line tables (`-g`, MYLA-71): the loader's module spans (which node
-    // ids belong to which file; ids from `prelude_id` on are the prelude's, with
-    // no source), the `.file` paths in number order, the number of the file of
-    // the function being generated (0: none), and the last `.loc` emitted.
+    // The loader's module spans (which node ids belong to which file; ids from
+    // `prelude_id` on are the prelude's, with no source), for runtime-error
+    // positions and debug information.
     line_spans: [Span],
     prelude_id: int32,
+    // Runtime-error positions (MYLA-65, MYLA-66): the file of the function
+    // being generated, the record label of each position ("file:line:col"),
+    // and the records, `[file str][line:4][col:4]`, for .rodata.
+    cur_path: str,
+    pos_labels: [str: str],
+    posdata: [str],
+    // DWARF line tables (`-g`, MYLA-71): whether to emit them, the `.file`
+    // paths in number order, the number of the file of the function being
+    // generated (0: none), and the last `.loc` emitted.
+    debug: bool,
     line_files: [str],
     cur_file: int32,
     last_loc: str,
@@ -150,16 +159,75 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         epilogue: "", struct_ret: false, ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
         need_sb: false,
-        line_spans: [], prelude_id: 0, line_files: [], cur_file: 0, last_loc: "",
+        line_spans: [], prelude_id: 0,
+        cur_path: "<input>", pos_labels: [:], posdata: [],
+        debug: false, line_files: [], cur_file: 0, last_loc: "",
     }
 }
 
 impl CodeGen {
-    // Emit DWARF line directives for the program `spans` describes (the
-    // loader's `Loaded.spans`; node ids from `next_id` on are the prelude's).
-    fun enable_line_tables(var self, spans: [Span], next_id: int32) {
+    // The files of the program: `spans` is the loader's `Loaded.spans`, node
+    // ids from `next_id` on are the prelude's. Runtime errors name them.
+    fun set_sources(var self, spans: [Span], next_id: int32) {
         self.line_spans = spans
         self.prelude_id = next_id
+    }
+
+    // Emit DWARF debug information (`-g`): line tables (MYLA-71).
+    fun enable_debug_info(var self) {
+        self.debug = true
+    }
+
+    // The path of the file node `id` is in, as the loader names it (the entry
+    // file as given, the self-hosted CLI's diagnostics name the same), or
+    // `<input>` without one.
+    fun path_of(self, id: int32) -> str {
+        if len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return "<input>" }
+        var path = self.line_spans[0].path
+        for sp in self.line_spans { if sp.first_id <= id { path = sp.path } }
+        return path
+    }
+
+    // -- runtime-error positions (MYLA-65, MYLA-66) ------------------------
+
+    // Load the address of the record of position `line:col` in the current
+    // function's file into `reg` (0 without a position): `[file str:8]
+    // [line:4][col:4]`, one per distinct position, which `__panic` prints as
+    // `  --> file:line:col`.
+    fun load_position(var self, line: int32, col: int32, reg: str) {
+        if line <= 0 {
+            self.emit(format("movq $0, %{}", reg))
+            return
+        }
+        let key = format("{}:{}:{}", self.cur_path, line, col)
+        var lab = ""
+        match get(self.pos_labels, key) {
+            Some(l) => { lab = l },
+            None => {
+                lab = format(".Lpos{}", len(self.pos_labels))
+                self.pos_labels[key] = lab
+                let file = self.string_label(self.cur_path)
+                push(self.posdata, "\t.balign 8")
+                push(self.posdata, format("{}:", lab))
+                push(self.posdata, format("\t.quad {}", file))
+                push(self.posdata, format("\t.long {}, {}", line, col))
+            },
+        }
+        self.emit(format("leaq {}(%rip), %{}", lab, reg))
+    }
+
+    // Take the runtime-error entry `trap` when `jump` (`jae`, `jz`, ..., or
+    // `jmp`) would jump, reporting position `line:col` (the interpreter's for
+    // the same error). The call leaves a return address for gdb's backtrace.
+    fun trap(var self, jump: str, trap: str, line: int32, col: int32) {
+        var skip = ""
+        if jump != "jmp" {
+            skip = self.label()
+            self.emit(format("{} {}", skip_trap(jump), skip))
+        }
+        self.load_position(line, col, "rsi")
+        self.emit(format("call {}", trap))
+        if skip != "" { self.emit(format("{}:", skip)) }
     }
 
     // -- debug line tables (MYLA-71) --------------------------------------
@@ -167,9 +235,8 @@ impl CodeGen {
     // The `.file` number of the module node `id` is in, registered on first
     // use; 0 when line tables are off or the node is the prelude's.
     fun file_number(var self, id: int32) -> int32 {
-        if len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return 0 }
-        var path = self.line_spans[0].path
-        for sp in self.line_spans { if sp.first_id <= id { path = sp.path } }
+        if !self.debug || len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return 0 }
+        let path = self.path_of(id)
         var i = 0
         while i < len(self.line_files) {
             if self.line_files[i] == path { return i + 1 }
@@ -983,10 +1050,13 @@ impl CodeGen {
         let messages = trap_messages()
         var ti = 0
         for label in trap_labels() {
-            let text = "runtime error: " + messages[ti]
+            let text = messages[ti]
             push(out, format(".Lmsg{}:\n\t.quad {}\n\t.ascii \"{}\"", label, len(text), text))
             ti = ti + 1
         }
+        push(out, ".Lmsg_rterr:\n\t.quad 15\n\t.ascii \"runtime error: \"")
+        push(out, ".Lmsg_at:\n\t.quad 7\n\t.ascii \"\\n  --> \"")
+        for line in self.posdata { push(out, line) }
         for line in self.rodata { push(out, line) }
         if self.uses_float { for chunk in self.float_rodata_text() { push(out, chunk) } }
         push(out, "")
@@ -1067,6 +1137,7 @@ impl CodeGen {
         self.epilogue = format(".Lret_{}", mangled)
 
         self.cur_file = self.file_number(sig.decl_id)
+        self.cur_path = self.path_of(sig.decl_id)
         self.emit(format("myla_{}:", mangled))
         self.emit_loc(fd.line, fd.col)
         self.emit("pushq %rbp")
@@ -1867,7 +1938,7 @@ impl CodeGen {
             self.wrap(rt)
         } else if op == "/" || op == "%" {
             self.emit("testq %rcx, %rcx")
-            if op == "/" { self.emit("jz __trap_div") } else { self.emit("jz __trap_mod") }
+            if op == "/" { self.trap("jz", "__trap_div", e.line, e.col) } else { self.trap("jz", "__trap_mod", e.line, e.col) }
             if int_signed(lt) {
                 // x / -1 is -x and x % -1 is 0; idivq would trap on the
                 // minimum (its quotient overflows), the language wraps (MYLA-5)
@@ -2206,7 +2277,7 @@ impl CodeGen {
                 else if foff != 0 { self.emit(format("addq ${}, %rax", foff)) }
             },
             ExprKind.Index(base, idx) => {
-                self.gen_index_addr(base, idx)
+                self.gen_index_addr(e, base, idx)
                 if self.is_boxed(self.type_of(e.id)) { self.emit("movq (%rax), %rax") }
             },
             ExprKind.Lambda(params, ret, body) => {
@@ -2370,8 +2441,9 @@ impl CodeGen {
         }
     }
 
-    // Leave the address of element `base[idx]` in %rax (list or string).
-    fun gen_elem_addr(var self, base: Expr, idx: Expr) {
+    // Leave the address of element `base[idx]` in %rax (list or string); `e`
+    // is the index expression, whose position an out-of-bounds index reports.
+    fun gen_elem_addr(var self, e: Expr, base: Expr, idx: Expr) {
         let bt = self.place_type(base)
         self.eval(base)
         self.emit("pushq %rax")
@@ -2380,7 +2452,7 @@ impl CodeGen {
         self.emit("popq %rax")
         self.emit("movq (%rax), %rdx")
         self.emit("cmpq %rdx, %rcx")
-        self.emit("jae __trap_index")
+        self.trap("jae", "__trap_index", e.line, e.col)
         if is_str_t(bt) {
             self.emit("leaq 8(%rax), %rax")
             self.emit("addq %rcx, %rax")
@@ -2397,16 +2469,16 @@ impl CodeGen {
     }
 
     // Address of an indexed lvalue/aggregate element (list/str/map).
-    fun gen_index_addr(var self, base: Expr, idx: Expr) {
-        if is_map_t(self.place_type(base)) { self.gen_map_value_addr(base, idx) }
-        else { self.gen_elem_addr(base, idx) }
+    fun gen_index_addr(var self, e: Expr, base: Expr, idx: Expr) {
+        if is_map_t(self.place_type(base)) { self.gen_map_value_addr(e, base, idx) }
+        else { self.gen_elem_addr(e, base, idx) }
     }
 
     fun gen_index_read(var self, e: Expr, base: Expr, idx: Expr) {
         let bt = self.place_type(base)
-        if is_map_t(bt) { self.gen_map_get(base, idx)
+        if is_map_t(bt) { self.gen_map_get(e, base, idx)
         return }
-        self.gen_elem_addr(base, idx)
+        self.gen_elem_addr(e, base, idx)
         if is_str_t(bt) { self.emit("movzbl (%rax), %eax") }
         else { self.emit("movq (%rax), %rax") }
     }
@@ -2524,7 +2596,7 @@ impl CodeGen {
         self.emit("popq %rcx")
         self.emit("movq (%rcx), %rdx")
         self.emit("cmpq %rdx, %rax")
-        self.emit("jae __trap_index")
+        self.trap("jae", "__trap_index", e.line, e.col)
         self.emit(format("imulq ${}, %rax", stride))
         self.emit("leaq 16(%rcx,%rax), %rax")
     }
@@ -2542,7 +2614,7 @@ impl CodeGen {
         self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
         self.emit("call __map_lookup")
         self.emit("testq %rax, %rax")
-        self.emit("jz __trap_key")
+        self.trap("jz", "__trap_key", e.line, e.col)
         self.emit("addq $16, %rax")
     }
 
@@ -2646,7 +2718,7 @@ impl CodeGen {
         self.mut_container_cell(holder)        // unique cell -> rax
         self.emit("movq (%rax), %rcx")         // len
         self.emit("testq %rcx, %rcx")
-        self.emit("jz __trap_pop")
+        self.trap("jz", "__trap_pop", e.line, e.col)
         self.emit("decq %rcx")
         self.emit("movq %rcx, (%rax)")         // len -= 1
         self.emit(format("imulq ${}, %rcx", stride))
@@ -2760,8 +2832,9 @@ impl CodeGen {
         self.drop_expr_temps(value)
     }
 
-    // Leave the address of map value `base[idx]` in %rax; trap if the key is absent.
-    fun gen_map_value_addr(var self, base: Expr, idx: Expr) {
+    // Leave the address of map value `base[idx]` in %rax; trap if the key is
+    // absent, at the position of index expression `e`.
+    fun gen_map_value_addr(var self, e: Expr, base: Expr, idx: Expr) {
         let mt = self.place_type(base)
         self.eval(base)
         self.emit("pushq %rax")
@@ -2772,12 +2845,12 @@ impl CodeGen {
         self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
         self.emit("call __map_lookup")
         self.emit("testq %rax, %rax")
-        self.emit("jz __trap_key")
+        self.trap("jz", "__trap_key", e.line, e.col)
         self.emit("addq $16, %rax")
     }
 
-    fun gen_map_get(var self, base: Expr, idx: Expr) {
-        self.gen_map_value_addr(base, idx)
+    fun gen_map_get(var self, e: Expr, base: Expr, idx: Expr) {
+        self.gen_map_value_addr(e, base, idx)
         self.emit("movq (%rax), %rax")
     }
 
@@ -2944,7 +3017,7 @@ impl CodeGen {
 
     // `append(sb, s)`, or `append(sb, s, start, end)` for the bytes
     // s[start..end], which traps unless 0 <= start <= end <= len(s) (MYLA-85).
-    fun gen_sb_append(var self, args: [Expr]) {
+    fun gen_sb_append(var self, e: Expr, args: [Expr]) {
         self.mut_addr_of_list_holder(args[0])   // &holder -> rax
         self.emit("pushq %rax")
         self.cow_unique(Type.TSB)          // unique cell, written back to holder
@@ -2958,12 +3031,17 @@ impl CodeGen {
             self.emit("popq %rdx")
             self.emit("movslq %edx, %rdx")     // start
             self.emit("popq %rsi")             // str
+            let bad = self.label()
+            let good = self.label()
             self.emit("testq %rdx, %rdx")
-            self.emit("jl __trap_index")
+            self.emit(format("jl {}", bad))
             self.emit("cmpq %rdx, %rcx")
-            self.emit("jl __trap_index")
+            self.emit(format("jl {}", bad))
             self.emit("cmpq (%rsi), %rcx")
-            self.emit("jg __trap_index")
+            self.emit(format("jle {}", good))
+            self.emit(format("{}:", bad))
+            self.trap("jmp", "__trap_index", e.line, e.col)
+            self.emit(format("{}:", good))
             self.emit("leaq 8(%rsi,%rdx), %rsi")   // &bytes[start]
             self.emit("subq %rdx, %rcx")
             self.emit("movq %rcx, %rdx")       // count
@@ -3088,7 +3166,7 @@ impl CodeGen {
             self.scopes = drop_last(self.scopes)
             self.emit(format("{}:", arm_fail))
         }
-        self.emit("jmp __trap_match")
+        self.trap("jmp", "__trap_match", e.line, e.col)
         self.emit(format("{}:", end))
         self.drop_scopes = drop_last(self.drop_scopes)
         if owns_copy { self.drop_value("rbp", root, sst) }
@@ -3376,14 +3454,14 @@ impl CodeGen {
         match callee.kind {
             ExprKind.Name(nm) => {
                 if nm == "print" { self.gen_print(args[0]) }
-                else if nm == "assert" || nm == "panic" || nm == "unreachable" { self.gen_intrinsic(nm, args) }
+                else if nm == "assert" || nm == "panic" || nm == "unreachable" { self.gen_intrinsic(e, nm, args) }
                 else if nm == "len" { self.gen_len(args[0]) }
                 else if nm == "push" { self.gen_push(e, args[0], args[1]) }
                 else if nm == "pop" { self.gen_pop(e, args[0]) }
                 else if nm == "chars" { self.gen_chars(args[0]) }
                 else if nm == "format" { self.gen_format(e, args) }
                 else if nm == "StringBuilder" { self.gen_sb_new(e) }
-                else if nm == "append" { self.gen_sb_append(args) }
+                else if nm == "append" { self.gen_sb_append(e, args) }
                 else if nm == "append_byte" { self.gen_sb_append_byte(args[0], args[1]) }
                 else if nm == "build" { self.gen_sb_build(args[0]) }
                 else if nm == "contains" { self.gen_map_contains(args[0], args[1]) }
@@ -3818,6 +3896,7 @@ impl CodeGen {
         self.epilogue = format(".Lret_{}", job.lifted)
 
         self.cur_file = self.file_number(job.id)
+        self.cur_path = self.path_of(job.id)
         self.emit(format("myla_{}:", job.lifted))
         self.emit_loc(job.line, job.col)
         self.emit("pushq %rbp")
@@ -4074,17 +4153,20 @@ impl CodeGen {
         return out
     }
 
-    // `assert`/`panic`/`unreachable`: write a message to stderr and exit(1).
-    fun gen_intrinsic(var self, nm: str, args: [Expr]) {
+    // `assert`/`panic`/`unreachable`: write a message and the position of
+    // call `e` to stderr and exit(1).
+    fun gen_intrinsic(var self, e: Expr, nm: str, args: [Expr]) {
         if nm == "panic" {
             self.eval(args[0])
             self.emit("movq %rax, %rdi")
+            self.load_position(e.line, e.col, "rsi")
             self.emit("call __panic")
             return
         }
         if nm == "unreachable" {
             let lab = self.string_label("reached unreachable code")
             self.emit(format("leaq {}(%rip), %rdi", lab))
+            self.load_position(e.line, e.col, "rsi")
             self.emit("call __panic")
             return
         }
@@ -4099,6 +4181,7 @@ impl CodeGen {
             let lab = self.string_label("assertion failed")
             self.emit(format("leaq {}(%rip), %rdi", lab))
         }
+        self.load_position(e.line, e.col, "rsi")
         self.emit("call __panic")
         self.emit(format("{}:", ok))
     }
@@ -4231,9 +4314,11 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("")
         // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
-        // (MYLA-17); the message is the interpreter's, without the values.
+        // (MYLA-17); the message is the interpreter's, without the values. The
+        // caller passes the position record in %rsi; out of memory has none.
         for label in trap_labels() {
             self.raw(format("{}:", label))
+            if label == "__trap_oom" { self.raw("\txorl %esi, %esi") }
             self.raw(format("\tleaq .Lmsg{}(%rip), %rdi", label))
             self.raw("\tjmp __panic")
         }
@@ -4259,11 +4344,31 @@ impl CodeGen {
         self.raw(".Lwa_done:")
         self.raw("\tret")
         self.raw("")
+        // __panic: %rdi -> the message, %rsi -> the position record or 0;
+        // `runtime error: <message>`, then `  --> file:line:col` (MYLA-65).
         self.raw("__panic:")
-        self.raw("\tmovq (%rdi), %rdx")
-        self.raw("\tleaq 8(%rdi), %rsi")
-        self.raw("\tmovq $2, %rdi")
-        self.raw("\tcall __write_all")
+        self.raw("\tpushq %rsi")
+        self.raw("\tpushq %rdi")
+        self.raw("\tleaq .Lmsg_rterr(%rip), %rdi")
+        self.raw("\tcall __write_err")
+        self.raw("\tpopq %rdi")
+        self.raw("\tcall __write_err")
+        self.raw("\tpopq %rsi")
+        self.raw("\ttestq %rsi, %rsi")
+        self.raw("\tjz .Lpanic_nl")
+        self.raw("\tpushq %rsi")
+        self.raw("\tleaq .Lmsg_at(%rip), %rdi")
+        self.raw("\tcall __write_err")
+        self.raw("\tmovq (%rsp), %rsi")
+        self.raw("\tmovq (%rsi), %rdi")
+        self.raw("\tcall __write_err")
+        self.raw("\tmovq (%rsp), %rsi")
+        self.raw("\tmovl 8(%rsi), %edi")
+        self.raw("\tcall __write_err_num")
+        self.raw("\tpopq %rsi")
+        self.raw("\tmovl 12(%rsi), %edi")
+        self.raw("\tcall __write_err_num")
+        self.raw(".Lpanic_nl:")
         self.raw("\tsubq $16, %rsp")
         self.raw("\tmovb $10, (%rsp)")
         self.raw("\tmovq $2, %rdi")
@@ -4274,6 +4379,37 @@ impl CodeGen {
         self.raw("\tmovq $60, %rax")
         self.raw("\tmovq $1, %rdi")
         self.raw("\tsyscall")
+        self.raw("")
+        // __write_err: write the [len:8][bytes] at %rdi to stderr
+        self.raw("__write_err:")
+        self.raw("\tmovq (%rdi), %rdx")
+        self.raw("\tleaq 8(%rdi), %rsi")
+        self.raw("\tmovq $2, %rdi")
+        self.raw("\tjmp __write_all")
+        self.raw("")
+        // __write_err_num: write ':' and %rdi in decimal to stderr
+        self.raw("__write_err_num:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tsubq $32, %rsp")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tleaq -1(%rbp), %rsi")
+        self.raw("\tmovq $10, %rcx")
+        self.raw(".Lwen_loop:")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw("\tdivq %rcx")
+        self.raw("\taddb $48, %dl")
+        self.raw("\tmovb %dl, (%rsi)")
+        self.raw("\tdecq %rsi")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjnz .Lwen_loop")
+        self.raw("\tmovb $58, (%rsi)")
+        self.raw("\tmovq %rbp, %rdx")
+        self.raw("\tsubq %rsi, %rdx")
+        self.raw("\tmovq $2, %rdi")
+        self.raw("\tcall __write_all")
+        self.raw("\tleave")
+        self.raw("\tret")
         self.raw("")
         self.raw("__print_nl:")
         self.raw("\tsubq $16, %rsp")
@@ -7132,13 +7268,25 @@ fun is_tfloat32(t: Type) -> bool {
 }
 
 // The runtime-error entries and their messages (MYLA-17), as in the Python
-// backend (`_TRAPS`).
+// backend (`_TRAPS`). `__panic` prints them after `runtime error: `.
 fun trap_labels() -> [str] {
-    return ["__trap", "__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom"]
+    return ["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom"]
 }
 
 fun trap_messages() -> [str] {
-    return ["runtime error", "index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory"]
+    return ["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory"]
+}
+
+// The conditional jump that skips a trap call, for each jump to a trap.
+#test("jae")["jb"]
+#test("jz")["jnz"]
+#test("jl")["jge"]
+#test("jg")["jle"]
+fun skip_trap(jump: str) -> str {
+    if jump == "jae" { return "jb" }
+    if jump == "jz" { return "jnz" }
+    if jump == "jl" { return "jge" }
+    return "jle"
 }
 
 // Whether `e` is a (possibly negated) scalar or string literal: it has no

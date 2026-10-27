@@ -129,7 +129,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     try:
         checker = _front_end(args.file)
         path = build_program(checker, args.output, keep_asm=args.keep_asm,
-                             debug=args.debug)
+                             debug=args.debug, entry_path=args.file)
     except MylaError as err:
         _report(err, args.file, source)
         return 1

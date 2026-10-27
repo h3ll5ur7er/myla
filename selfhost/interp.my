@@ -468,20 +468,32 @@ impl Interp {
         if self.stop() || len(p.root) == 0 { return }
         let n = len(p.steps)
         if n > 0 {
+            var parent = Place { root: p.root, steps: [] }
+            var i = 0
+            while i < n - 1 {
+                push(parent.steps, p.steps[i])
+                i = i + 1
+            }
             match p.steps[n - 1] {
                 Step.SIndex(k, nd) => {
-                    var parent = Place { root: p.root, steps: [] }
-                    var i = 0
-                    while i < n - 1 {
-                        push(parent.steps, p.steps[i])
-                        i = i + 1
-                    }
                     if !self.check_index(self.read_place(parent), k, nd, true) { return }
                 },
-                _ => {},
+                // a field: the indices on the way are read, so a missing map
+                // key fails (`m[k].f = v`) as in the Python interpreter
+                _ => {
+                    if !self.readable(parent) { return }
+                },
             }
         }
         self.update_place(p, PlaceOp.OSet(v))
+    }
+
+    // Whether `p` can be read: every index on the way is checked, failing
+    // like a read. The value read is released before anything is written, so
+    // the write doesn't copy the containers on the way (MYLA-74).
+    fun readable(var self, p: Place) -> bool {
+        self.read_place(p)
+        return !self.stop()
     }
 
     // Apply `op` to the value at `p`, whose indices are already checked, in

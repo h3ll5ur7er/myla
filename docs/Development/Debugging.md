@@ -64,6 +64,6 @@ Breakpoint 1, myla_checker$Checker.check_stmt () at selfhost/checker.my:2561
 
 ## Other tools
 
-- A native binary reports a runtime error as `runtime error: <message>` (such as `index out of bounds`) without its position ([[MYLA-17]]); `myla run` reports the same error with the source position, so reproduce there, or run the binary built with `-g` under gdb and `break __panic`.
+- A native binary reports a runtime error as `runtime error: <message>` (such as `index out of bounds`, without the values) and its position, `  --> file:line:col`, in every build ([[MYLA-17]], [[MYLA-65]]); `myla run` adds the values and the source line. Under gdb, `break __panic` stops at any runtime error; `bt` then shows the Myla frame and line that failed, and with `-g`, `up` and `info locals` show its variables.
 - `myla build --keep-asm` keeps the generated `.s` next to the binary; `myla parse` and `myla tokenize` dump the front end's view of a file.
 - `readelf --debug-dump=decodedline ./binary` lists the line table that `-g` produced.

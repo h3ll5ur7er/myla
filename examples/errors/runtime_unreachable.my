@@ -1,0 +1,12 @@
+//~ runtime error: reached unreachable code
+//~ native: runtime error: reached unreachable code
+// `unreachable()` traps when it is reached after all.
+fun sign(x: int) -> int {
+    if x > 0 { return 1 }
+    if x < 0 { return -1 }
+    unreachable()
+}
+
+fun main() {
+    print(sign(0))
+}

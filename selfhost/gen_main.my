@@ -13,12 +13,14 @@ from .codegen import new_codegen
 from .loader import load_program, Loaded, file_of, default_stdlib_root
 from .diag import render, type_report
 
-// `debug`: DWARF line tables, so gdb steps through the Myla source (MYLA-71).
+// `debug`: DWARF debug information, so gdb steps through the Myla source and
+// shows its variables (MYLA-71, MYLA-66).
 fun emit_asm(prog: Loaded, debug: bool) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
             var g = new_codegen(c)
-            if debug { g.enable_line_tables(prog.spans, prog.next_id) }
+            g.set_sources(prog.spans, prog.next_id)
+            if debug { g.enable_debug_info() }
             let asm = g.generate()
             write(1, asm)
             0
