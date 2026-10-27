@@ -125,7 +125,7 @@ Before, the trap was a jump: the backtrace stopped at `?? ()` and the frame had 
 
 ## The self-hosted compiler
 
-The self-hosted compiler emits the same debug information with `-g` (`gen_main <file.my> <stdlib_root> -g`, or `myla build … -g` with the self-hosted CLI). The loader knows which node ids belong to which file (`Loaded.spans`), so each module gets its own `.file` entry. It records `.` as the compilation directory (Myla can't read the working directory yet), so with relative source paths start gdb where you compiled, or tell it with `directory`. That makes the self-hosted compiler debuggable in its own source: build it with `-g` by the stage 3 compiler and break in the checker while it reports a type error:
+The self-hosted compiler emits the same debug information with `-g` (`gen_main <file.my> <stdlib_root> -g`, or `myla build … -g` with the self-hosted CLI). The loader knows which node ids belong to which file (`Loaded.spans`), so each module gets its own `.file` entry. Like the Python backend, it records the working directory as the compilation directory (`std.fs.current_dir`, [[MYLA-98]]), so gdb finds sources given by relative paths from anywhere. That makes the self-hosted compiler debuggable in its own source: build it with `-g` by the stage 3 compiler and break in the checker while it reports a type error:
 
 ```
 $ build/stage3 selfhost/gen_main.my src/myla -g > gen.s && as --64 -o gen.o gen.s && ld -o gen_g gen.o

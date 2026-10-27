@@ -155,6 +155,21 @@ class TestSelfHostedLineTables(unittest.TestCase):
                                     capture_output=True, text=True, check=True).stdout
         self.assertEqual(table(selfhosted), table(python))
 
+    def test_the_compile_unit_names_the_working_directory(self):
+        # std.fs.current_dir (MYLA-98), as the Python backend's os.getcwd()
+        asm = subprocess.run([self.gen, "main.my", self.stdlib, "-g"], cwd=self.dir,
+                             capture_output=True, text=True, check=True).stdout
+        binary = os.path.join(self.dir, "prog_cwd")
+        with open(binary + ".s", "w", encoding="utf-8") as fh:
+            fh.write(asm)
+        subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
+        subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
+        dump = subprocess.run(["readelf", "--debug-dump=info", binary],
+                              capture_output=True, text=True, check=True).stdout
+        comp_dir = [line for line in dump.splitlines() if "DW_AT_comp_dir" in line]
+        self.assertEqual(len(comp_dir), 1, comp_dir)
+        self.assertTrue(comp_dir[0].rstrip().endswith(": " + self.dir), comp_dir)
+
     def test_without_g_there_are_no_line_directives(self):
         asm = subprocess.run([self.gen, os.path.join(self.dir, "main.my"), self.stdlib],
                              capture_output=True, text=True, check=True).stdout
