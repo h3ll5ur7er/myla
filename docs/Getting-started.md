@@ -104,4 +104,17 @@ What each suite guarantees and the current results: [[Development/Testing]].
 
 ## Editor support
 
-The VS Code extension in `vscode-extension/myla/` starts the language server written in Myla, `build/myla-lsp` (built by `scripts/bootstrap.sh`), and offers diagnostics, outline, go to definition, hover, references, completion and semantic highlighting. See [[Architecture/Editor-tooling]] for setup and limits.
+The VS Code extension in `vscode-extension/myla/` starts the language server written in Myla, `build/myla-lsp` (diagnostics, outline, go to definition, hover, references, completion, semantic highlighting), runs, tests and builds the current file, and debugs it with gdb (`F5`). It finds the tools in the repository's `build/`, so run `scripts/bootstrap.sh` first and open the repository as a workspace folder (or point `myla.compilerPath` at it). Debugging needs gdb: `sudo apt install gdb`.
+
+Install it from a `.vsix`:
+
+- **From CI:** every CI run uploads the extension as the artifact `myla-vscode-extension` (on GitHub: the run's page under *Actions*, *Artifacts*). Unzip the download to get `myla-language-support-<version>.vsix`.
+- **Or build it:**
+
+  ```bash
+  cd vscode-extension/myla
+  npm ci
+  npx vsce package          # myla-language-support-<version>.vsix
+  ```
+
+Then `code --install-extension myla-language-support-<version>.vsix`, or *Extensions: Install from VSIX…* in VS Code. See [[Architecture/Editor-tooling]] for how it works and [[Development/Debugging]] for debugging.
