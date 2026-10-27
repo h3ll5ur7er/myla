@@ -1,4 +1,5 @@
 //~ type error: cannot return a value from a function with no return type
+//~ span: return 1
 fun f() {
     return 1
 }

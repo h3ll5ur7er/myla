@@ -20,7 +20,7 @@ fun run_program(prog: Loaded, file: str) -> int32 {
             code
         },
         Err(e) => {
-            eprintln(render(type_report(e.line, e.col, e.msg, file_of(prog, e.decl))))
+            eprintln(render(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl))))
             1
         },
     }
@@ -28,7 +28,7 @@ fun run_program(prog: Loaded, file: str) -> int32 {
 
 // A runtime error as the Python CLI prints it, in the file of its expression.
 fun runtime_report(r: RtError, prog: Loaded) -> Report {
-    return Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col }
+    return Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp }
 }
 
 fun main() {

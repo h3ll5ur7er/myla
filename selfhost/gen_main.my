@@ -24,7 +24,7 @@ fun emit_asm(prog: Loaded, debug: bool) -> int32 {
             0
         },
         Err(e) => {
-            eprintln(render(type_report(e.line, e.col, e.msg, file_of(prog, e.decl))))
+            eprintln(render(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl))))
             1
         },
     }

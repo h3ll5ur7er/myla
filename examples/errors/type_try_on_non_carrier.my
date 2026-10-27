@@ -1,4 +1,5 @@
 //~ type error: can only be applied to an Option or Result
+//~ span: 5?
 // `?` is meaningless on a plain value.
 fun bad() -> Result<int, str> {
     let x = 5?

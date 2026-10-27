@@ -1,4 +1,5 @@
 //~ type error: may finish without returning
+//~ span: fun f(n: int) -> int {
 // Every path of a value-returning function must return.
 fun f(n: int) -> int {
     if n > 0 {

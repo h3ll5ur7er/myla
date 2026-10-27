@@ -1,4 +1,5 @@
 //~ type error: expected 'int32', found 'str'
+//~ span: "nope"
 // Once a generic struct's type argument is fixed, its fields are concrete: here
 // `T = int` is fixed by the annotation, so a `str` initializer is rejected.
 struct Box<T> {

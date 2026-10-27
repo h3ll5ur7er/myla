@@ -14,14 +14,14 @@ python3 myla.py run examples/hello.my          # or: uv run myla.py run …
 python3 myla.py run examples/args/main.my a b  # arguments after the file go to the program
 ```
 
-`run` interprets the program and exits with its exit status (0, or the code passed to `std.process.exit`). A compile error or runtime error prints a diagnostic and exits 1:
+`run` interprets the program and exits with its exit status (0, or the code passed to `std.process.exit`). A compile error or runtime error prints a diagnostic and exits 1; the carets underline what the error is about:
 
 ```
 type error: cannot assign to an immutable binding (declare it with 'var')
-  --> x.my:3:5
+  --> x.my:3:7
   |
 3 |     x = 2
-  |     ^
+  |     ^^^^^
 ```
 
 ## The commands

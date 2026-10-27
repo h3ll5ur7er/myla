@@ -1,4 +1,5 @@
 //~ type error: cannot assign value of type '(int32, int32) -> int32'
+//~ span: let h: (int) -> int = (a: int, b: int) => a
 fun main() {
     let h: (int) -> int = (a: int, b: int) => a
 }

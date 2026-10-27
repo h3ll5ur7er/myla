@@ -1,4 +1,5 @@
 //~ type error: cannot call a value of type
+//~ span: 5 |> 3
 fun main() {
     print(5 |> 3)
 }

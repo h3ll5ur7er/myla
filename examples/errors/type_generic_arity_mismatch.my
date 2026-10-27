@@ -1,4 +1,5 @@
 //~ type error: expects 1 type argument(s), got 2
+//~ span: Box<int, str>
 // A generic type must be applied to exactly as many arguments as it declares.
 struct Box<T> {
     value: T,

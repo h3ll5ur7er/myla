@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import unittest
 
-from myla.canon import canonical_tokens
+from myla.canon import canonical_error, canonical_tokens
 from myla.errors import MylaError
 from myla.interpreter import Interpreter
 from myla.lexer import tokenize
@@ -50,14 +50,15 @@ def _corpus() -> list[str]:
 
 
 def _oracle(path: str) -> str:
-    """Canonical token dump from the Python lexer, or its error as
-    `err <line> <col> lex: <message>` (what `lex_main` prints)."""
+    """Canonical token dump from the Python lexer (token ends included), or
+    its error as `err <line> <col> <span> lex: <message>` (what `lex_main`
+    prints): the same tokens and errors, ranges included (MYLA-65)."""
     with open(path, "r", encoding="utf-8") as fh:
         source = fh.read()
     try:
         return canonical_tokens(tokenize(source))
     except MylaError as err:
-        return f"err {err.line} {err.column} {err.kind.split()[0]}: {err.message}"
+        return canonical_error(err)
 
 
 def _check_file(path: str):

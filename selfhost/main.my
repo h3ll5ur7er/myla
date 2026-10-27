@@ -45,7 +45,7 @@ fun load_and_check(file: str, stdlib: str) -> Result<Checked, str> {
     }
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => Ok(Checked { checker: c, prog: prog }),
-        Err(e) => Err(render(type_report(e.line, e.col, e.msg, file_of(prog, e.decl)))),
+        Err(e) => Err(render(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl)))),
     }
 }
 
@@ -107,7 +107,7 @@ fun cmd_interp(file: str, stdlib: str, tests: bool, prog_args: [str]) -> int32 {
             }
             let code = it.run()
             match it.rt_err {
-                Some(r) => { eprintln(render(Report { kind: "runtime error", msg: r.msg, path: file_of(ch.prog, r.node), line: r.line, col: r.col })) },
+                Some(r) => { eprintln(render(Report { kind: "runtime error", msg: r.msg, path: file_of(ch.prog, r.node), line: r.line, col: r.col, sp: r.sp })) },
                 None => {},
             }
             return code

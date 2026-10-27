@@ -17,14 +17,28 @@ from typing import Optional, Union
 
 
 class Node:
-    """Base class for all AST nodes; carries an optional source position."""
+    """Base class for all AST nodes; carries an optional source position.
+
+    `line`/`column` is the node's position in diagnostics (often its first
+    token, but an operator's for a binary expression, the `(` for a call, …).
+    `span` is the source range of the tokens the parser consumed for it, from
+    the first to the end of the last (MYLA-65): a diagnostic underlines it.
+    Nodes the checker synthesizes have no span.
+    """
 
     line: int = 0
     column: int = 0
+    span: Optional[tuple[int, int, int, int]] = None
 
-    def at(self, line: int, column: int):
+    def at(self, line: int, column: int, end: Optional[tuple[int, int]] = None,
+           start: Optional[tuple[int, int]] = None):
+        """Position the node at `line`:`column`; with `end`, it spans from
+        `start` (default: that position) to `end`."""
         self.line = line
         self.column = column
+        if end is not None:
+            sl, sc = start if start is not None else (line, column)
+            self.span = (sl, sc, end[0], end[1])
         return self
 
 

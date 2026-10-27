@@ -11,6 +11,7 @@
 // build and run a `hello`-class program through `as`/`ld` with parity.
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem, bind_elems
+from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV
@@ -1465,9 +1466,9 @@ impl CodeGen {
         for be in elems {
             let et = ets[i]
             match be {
-                BindElem.BName(n, l, c) => { push(out, DLeaf { name: n, off: off, ty: et }) },
+                BindElem.BName(n, l, c, sp) => { push(out, DLeaf { name: n, off: off, ty: et }) },
                 BindElem.BWild => {},
-                BindElem.BTuple(sub, l, c) => {
+                BindElem.BTuple(sub, l, c, sp) => {
                     for lf in self.collect_leaves(sub, et) {
                         push(out, DLeaf { name: lf.name, off: off + lf.off, ty: lf.ty })
                     }
@@ -4029,7 +4030,7 @@ impl CodeGen {
     fun free_else(self, et: ElseTail, bound: [str]) -> [str] {
         return match et {
             ElseTail.ElseBlock(b) => self.free_block(b, bound),
-            ElseTail.ElseIf(s) => self.free_block(Block { line: 0, col: 0, stmts: [s] }, bound),
+            ElseTail.ElseIf(s) => self.free_block(Block { line: 0, col: 0, sp: no_span(), stmts: [s] }, bound),
         }
     }
 
@@ -7107,9 +7108,9 @@ fun args_have_hole(args: [Expr]) -> bool {
 fun bind_elem_names(be: BindElem) -> [str] {
     var out: [str] = []
     match be {
-        BindElem.BName(n, l, c) => { push(out, n) },
+        BindElem.BName(n, l, c, sp) => { push(out, n) },
         BindElem.BWild => {},
-        BindElem.BTuple(es, l, c) => { for e in es { for n in bind_elem_names(e) { push(out, n) } } },
+        BindElem.BTuple(es, l, c, sp) => { for e in es { for n in bind_elem_names(e) { push(out, n) } } },
     }
     return out
 }

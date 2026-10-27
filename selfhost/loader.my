@@ -18,6 +18,7 @@
 from std.fs import read_to_string
 from .parser import parse_source
 from .diag import Report, report
+from .tokens import SrcSpan, no_span
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
 from .ast import MapEntry, Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock, Attribute
@@ -229,8 +230,8 @@ fun same_binding(a: Binding, b: Binding) -> bool {
     return a.is_module == b.is_module && a.value == b.value
 }
 
-fun at(path: str, line: int32, col: int32, msg: str) -> Report {
-    return Report { kind: "module error", msg: msg, path: path, line: line, col: col }
+fun at(path: str, line: int32, col: int32, sp: SrcSpan, msg: str) -> Report {
+    return Report { kind: "module error", msg: msg, path: path, line: line, col: col, sp: sp }
 }
 
 impl Loader {
@@ -302,15 +303,15 @@ impl Loader {
             let has_file = self.readable(file)
             let has_pkg = self.readable(pkg)
             if has_file && has_pkg {
-                return Err(at(importer, p.line, p.col, format("ambiguous import '{}': both '{}.my' and a package '{}/' exist in {}", dotted(p), last, last, dir)))
+                return Err(at(importer, p.line, p.col, p.sp, format("ambiguous import '{}': both '{}.my' and a package '{}/' exist in {}", dotted(p), last, last, dir)))
             }
             if has_file { return Ok(file) }
             if has_pkg { return Ok(pkg) }
         }
         if p.dots == 0 && p.segments[0] == "std" && self.stdlib_root == "" {
-            return Err(at(importer, p.line, p.col, format("cannot resolve import '{}': no standard library root was given", dotted(p))))
+            return Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}': no standard library root was given", dotted(p))))
         }
-        return Err(at(importer, p.line, p.col, format("cannot resolve import '{}'", dotted(p))))
+        return Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}'", dotted(p))))
     }
 
     // Load `path` and its imports (depth first) once each; its module index.
@@ -326,7 +327,7 @@ impl Loader {
             None => {
                 match read_to_string(path) {
                     Ok(s) => { src = s },
-                    Err(e) => { return Err(Report { kind: "module error", msg: format("cannot read module '{}'", path), path: path, line: 0, col: 0 }) },
+                    Err(e) => { return Err(Report { kind: "module error", msg: format("cannot read module '{}'", path), path: path, line: 0, col: 0, sp: no_span() }) },
                 }
             },
         }
@@ -367,7 +368,7 @@ impl Loader {
         for m in self.modules {
             if m.id == "" { continue }
             match get(seen, m.id) {
-                Some(other) => { return Err(at(m.path, 0, 0, format("module id collision '{}' between {} and {}", m.id, other, m.path))) },
+                Some(other) => { return Err(at(m.path, 0, 0, no_span(), format("module id collision '{}' between {} and {}", m.id, other, m.path))) },
                 None => {},
             }
             seen[m.id] = m.path
@@ -442,11 +443,11 @@ impl Loader {
                     DeclKind.ImportDecl(p, items, alias, isp) => {
                         for nb in import_bindings(src, p, items, alias) {
                             if nb.missing {
-                                return Err(at(m.path, imp.line, imp.col, format("module '{}' does not export '{}' (declarations are private unless marked 'pub')", dotted(p), nb.name)))
+                                return Err(at(m.path, imp.line, imp.col, imp.sp, format("module '{}' does not export '{}' (declarations are private unless marked 'pub')", dotted(p), nb.name)))
                             }
                             let clash = match get(bindings, nb.name) { Some(c) => !same_binding(c, nb.binding), None => false }
                             if clash {
-                                return Err(at(m.path, imp.line, imp.col, format("import of '{}' collides with an existing name in this module — rename with 'as'", nb.name)))
+                                return Err(at(m.path, imp.line, imp.col, imp.sp, format("import of '{}' collides with an existing name in this module — rename with 'as'", nb.name)))
                             }
                             bindings[nb.name] = nb.binding
                         }
@@ -525,7 +526,12 @@ struct Renamer {
 }
 
 fun mk_expr(e: Expr, k: ExprKind) -> Expr {
-    return Expr { id: e.id, line: e.line, col: e.col, kind: k }
+    return Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: k }
+}
+
+// `e` rebuilt with kind `k`, positioned where `pos` is.
+fun mk_expr_at(e: Expr, pos: Expr, k: ExprKind) -> Expr {
+    return Expr { id: e.id, line: pos.line, col: pos.col, sp: e.sp, kind: k }
 }
 
 fun tp_names(tps: [TypeParam]) -> [str] {
@@ -538,8 +544,8 @@ fun bind_names(bs: [BindElem]) -> [str] {
     var out: [str] = []
     for b in bs {
         match b {
-            BindElem.BName(n, l, c) => { push(out, n) },
-            BindElem.BTuple(sub, l, c) => { for n in bind_names(sub) { push(out, n) } },
+            BindElem.BName(n, l, c, sp) => { push(out, n) },
+            BindElem.BTuple(sub, l, c, sp) => { for n in bind_names(sub) { push(out, n) } },
             _ => {},
         }
     }
@@ -560,9 +566,9 @@ fun pattern_binds(p: Pattern) -> [str] {
 }
 
 impl Renamer {
-    fun fail(var self, line: int32, col: int32, msg: str) {
+    fun fail(var self, line: int32, col: int32, sp: SrcSpan, msg: str) {
         match self.err {
-            None => { self.err = Some(at(self.path, line, col, msg)) },
+            None => { self.err = Some(at(self.path, line, col, sp, msg)) },
             Some(e) => {},
         }
     }
@@ -581,14 +587,14 @@ impl Renamer {
             DeclKind.StructDecl(n, fields, attrs, tps, isp) => {
                 self.tys = tp_names(tps)
                 var fs: [Field] = []
-                for f in fields { push(fs, Field { line: f.line, col: f.col, name: f.name, ty: self.ty(f.ty) }) }
+                for f in fields { push(fs, Field { line: f.line, col: f.col, sp: f.sp, name: f.name, ty: self.ty(f.ty) }) }
                 self.tys = []
                 DeclKind.StructDecl(qualify(mid, n), fs, attrs, tps, isp)
             },
             DeclKind.EnumDecl(n, variants, attrs, tps, isp) => {
                 self.tys = tp_names(tps)
                 var vs: [Variant] = []
-                for v in variants { push(vs, Variant { line: v.line, col: v.col, name: v.name, payload: self.ty_list(v.payload) }) }
+                for v in variants { push(vs, Variant { line: v.line, col: v.col, sp: v.sp, name: v.name, payload: self.ty_list(v.payload) }) }
                 self.tys = []
                 DeclKind.EnumDecl(qualify(mid, n), vs, attrs, tps, isp)
             },
@@ -618,7 +624,7 @@ impl Renamer {
             },
             _ => d.kind,
         }
-        return Decl { id: d.id, line: d.line, col: d.col, kind: k }
+        return Decl { id: d.id, line: d.line, col: d.col, sp: d.sp, kind: k }
     }
 
     // type parameters with their bounds (trait names) renamed
@@ -627,14 +633,14 @@ impl Renamer {
         for tp in tps {
             var bs: [str] = []
             for b in tp.bounds { push(bs, self.type_name(b)) }
-            push(out, TypeParam { line: tp.line, col: tp.col, name: tp.name, bounds: bs })
+            push(out, TypeParam { line: tp.line, col: tp.col, sp: tp.sp, name: tp.name, bounds: bs })
         }
         return out
     }
 
     fun params(self, ps: [Param]) -> [Param] {
         var out: [Param] = []
-        for p in ps { push(out, Param { line: p.line, col: p.col, name: p.name, ty: self.opt_ty(p.ty) }) }
+        for p in ps { push(out, Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty) }) }
         return out
     }
 
@@ -646,7 +652,7 @@ impl Renamer {
         let ps = self.params(m.params)
         let rt = self.opt_ty(m.ret_type)
         self.tys = saved
-        return FunData { line: m.line, col: m.col, name: m.name, params: ps, ret_type: rt, body: m.body, attributes: m.attributes, type_params: m.type_params, receiver: m.receiver, is_pub: m.is_pub }
+        return FunData { line: m.line, col: m.col, sp: m.sp, name: m.name, params: ps, ret_type: rt, body: m.body, attributes: m.attributes, type_params: m.type_params, receiver: m.receiver, is_pub: m.is_pub }
     }
 
     fun function(var self, fd: FunData, name: str, receiver: bool, impl_params: [str]) -> FunData {
@@ -665,7 +671,7 @@ impl Renamer {
         match fd.body { Some(b) => { body = Some(self.block(b)) }, None => {} }
         self.vals = []
         self.tys = saved
-        return FunData { line: fd.line, col: fd.col, name: name, params: ps, ret_type: rt, body: body, attributes: attrs, type_params: tps, receiver: fd.receiver, is_pub: fd.is_pub }
+        return FunData { line: fd.line, col: fd.col, sp: fd.sp, name: name, params: ps, ret_type: rt, body: body, attributes: attrs, type_params: tps, receiver: fd.receiver, is_pub: fd.is_pub }
     }
 
     // `#test` cases are expressions in the module's scope (MYLA-11)
@@ -687,7 +693,7 @@ impl Renamer {
                 },
                 None => {},
             }
-            push(out, Attribute { line: a.line, col: a.col, name: a.name, args: args, outputs: outputs })
+            push(out, Attribute { line: a.line, col: a.col, sp: a.sp, name: a.name, args: args, outputs: outputs })
         }
         return out
     }
@@ -702,7 +708,7 @@ impl Renamer {
             TypeKind.TMap(a, b) => TypeKind.TMap(self.ty(a), self.ty(b)),
             TypeKind.TFn(ps, r) => TypeKind.TFn(self.ty_list(ps), self.ty(r)),
         }
-        return TypeExpr { id: t.id, line: t.line, col: t.col, kind: k }
+        return TypeExpr { id: t.id, line: t.line, col: t.col, sp: t.sp, kind: k }
     }
 
     fun ty_list(self, ts: [TypeExpr]) -> [TypeExpr] {
@@ -722,7 +728,7 @@ impl Renamer {
         var out: [Stmt] = []
         for s in b.stmts { push(out, self.stmt(s)) }
         self.vals = saved
-        return Block { line: b.line, col: b.col, stmts: out }
+        return Block { line: b.line, col: b.col, sp: b.sp, stmts: out }
     }
 
     fun stmt(var self, s: Stmt) -> Stmt {
@@ -766,7 +772,7 @@ impl Renamer {
             StmtKind.ExprStmt(x) => StmtKind.ExprStmt(self.expr(x)),
             _ => s.kind,
         }
-        return Stmt { id: s.id, line: s.line, col: s.col, kind: k }
+        return Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: k }
     }
 
     fun else_tail(var self, t: Option<ElseTail>) -> Option<ElseTail> {
@@ -802,7 +808,7 @@ impl Renamer {
                 if !has(self.vals, n) {
                     match get(self.env, n) { Some(q) => { return mk_expr(e, ExprKind.Name(q)) }, None => {} }
                     match get(self.aliases, n) {
-                        Some(m) => { self.fail(e.line, e.col, format("module '{}' cannot be used as a value — access a member with '{}.<name>'", n, n)) },
+                        Some(m) => { self.fail(e.line, e.col, e.sp, format("module '{}' cannot be used as a value — access a member with '{}.<name>'", n, n)) },
                         None => {},
                     }
                 }
@@ -822,7 +828,7 @@ impl Renamer {
                     let guard = self.opt_expr(a.guard)
                     let body = self.body(a.body)
                     self.vals = saved
-                    push(arms2, MatchArm { line: a.line, col: a.col, pattern: pat, guard: guard, body: body })
+                    push(arms2, MatchArm { line: a.line, col: a.col, sp: a.sp, pattern: pat, guard: guard, body: body })
                 }
                 return mk_expr(e, ExprKind.MatchE(scrut2, arms2))
             },
@@ -830,7 +836,7 @@ impl Renamer {
                 let saved = self.vals
                 var ps2: [Param] = []
                 for p in ps {
-                    push(ps2, Param { line: p.line, col: p.col, name: p.name, ty: self.opt_ty(p.ty) })
+                    push(ps2, Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty) })
                     push(self.vals, p.name)
                 }
                 let rt2 = self.opt_ty(rt)
@@ -852,7 +858,7 @@ impl Renamer {
             },
             ExprKind.StructLit(n, fields) => {
                 var fs: [FieldInit] = []
-                for f in fields { push(fs, FieldInit { line: f.line, col: f.col, name: f.name, value: self.expr(f.value) }) }
+                for f in fields { push(fs, FieldInit { line: f.line, col: f.col, sp: f.sp, name: f.name, value: self.expr(f.value) }) }
                 ExprKind.StructLit(self.type_name(n), fs)
             },
             ExprKind.TupleLit(es) => ExprKind.TupleLit(self.exprs(es)),
@@ -924,7 +930,7 @@ impl Renamer {
         }
         if !found { return None }
         if k == cnt {
-            self.fail(cur.line, cur.col, format("module '{}' cannot be used as a value — access a member with '.<name>'", key))
+            self.fail(cur.line, cur.col, cur.sp, format("module '{}' cannot be used as a value — access a member with '.<name>'", key))
             return Some(e)
         }
         var s = k
@@ -938,19 +944,21 @@ impl Renamer {
                     if b.is_module { mid = b.value } else { qualified = b.value }
                 },
                 None => {
-                    self.fail(cur.line, cur.col, format("module does not export '{}' (declarations are private unless marked 'pub')", name))
+                    self.fail(cur.line, cur.col, cur.sp, format("module does not export '{}' (declarations are private unless marked 'pub')", name))
                     return Some(e)
                 },
             }
             s = s + 1
         }
         if qualified == "" {
-            self.fail(cur.line, cur.col, "a module reference must end in a member access")
+            self.fail(cur.line, cur.col, cur.sp, "a module reference must end in a member access")
             return Some(e)
         }
-        var node = mk_expr(nodes[cnt - s], ExprKind.Name(qualified))
+        // positioned at the root name, as the Python loader does; each node
+        // spans the access it replaces (MYLA-65)
+        var node = mk_expr_at(nodes[cnt - s], cur, ExprKind.Name(qualified))
         while s < cnt {
-            node = mk_expr(nodes[cnt - 1 - s], ExprKind.GetField(node, names[cnt - 1 - s]))
+            node = mk_expr_at(nodes[cnt - 1 - s], cur, ExprKind.GetField(node, names[cnt - 1 - s]))
             s = s + 1
         }
         return Some(node)
@@ -975,13 +983,13 @@ impl Renamer {
             PatternKind.PTuple(elems) => PatternKind.PTuple(self.patterns(elems)),
             PatternKind.PStruct(n, fps) => {
                 var fps2: [FieldPat] = []
-                for fp in fps { push(fps2, FieldPat { line: fp.line, col: fp.col, name: fp.name, pattern: self.pattern(fp.pattern) }) }
+                for fp in fps { push(fps2, FieldPat { line: fp.line, col: fp.col, sp: fp.sp, name: fp.name, pattern: self.pattern(fp.pattern) }) }
                 PatternKind.PStruct(self.type_name(n), fps2)
             },
             PatternKind.POr(alts) => PatternKind.POr(self.patterns(alts)),
             _ => p.kind,
         }
-        return Pattern { id: p.id, line: p.line, col: p.col, kind: k }
+        return Pattern { id: p.id, line: p.line, col: p.col, sp: p.sp, kind: k }
     }
 }
 

@@ -31,7 +31,7 @@ flowchart LR
 | `compiler/codegen_x86.py` | 5210 | AST → GAS/AT&T assembly plus the runtime | [[Architecture/Native-backend]] |
 | `compiler/__init__.py` | 70 | Writes the `.s`, runs `as` and `ld` | [[Architecture/Native-backend]] |
 | `canon.py` | 320 | Canonical token and AST dumps for differential tests | [[Architecture/Self-hosted-compiler]] |
-| `errors.py` | 100 | `MylaError` and its subclasses, caret rendering | below |
+| `errors.py` | 130 | `MylaError` and its subclasses, rendering with the error's range underlined | below |
 | `std/*.my` | 200 | The standard library, in Myla | [[Language/Standard-library]] |
 
 The whole toolchain uses only the Python standard library. The tools beyond the compiler (the language server, the grammar generator) are written in Myla, in `tools/` (D71).
@@ -45,7 +45,17 @@ The whole toolchain uses only the Python standard library. The tools beyond the 
 
 ## Diagnostics
 
-All errors derive from `MylaError(message, line, column)` with a `kind` used as the prefix: `lex error`, `parse error`, `type error`, `module error`, `runtime error` ([[src/myla/errors.py]]). Each stage stops at its first error. An error records the file its position refers to (`path`, MYLA-10): the loader stamps lex, parse and module errors with the module being loaded and every declaration with its file (`source_path`), and `errors.in_file` stamps checker and runtime errors with the declaration, function or lambda they come from. The CLI renders the error with that file's source line and a caret; the language server publishes it for that file.
+All errors derive from `MylaError(message, line, column, span)` with a `kind` used as the prefix: `lex error`, `parse error`, `type error`, `module error`, `runtime error` ([[src/myla/errors.py]]). Each stage stops at its first error. An error records the file its position refers to (`path`, MYLA-10): the loader stamps lex, parse and module errors with the module being loaded and every declaration with its file (`source_path`), and `errors.in_file` stamps checker and runtime errors with the declaration, function or lambda they come from. The CLI renders the error with that file's source line and carets under the error's range; the language server publishes it for that file.
+
+The range (`span`: start line and column, and the position just past the end) comes from what the error is about (D74, [[MYLA-65]]). Errors are raised with `at=` a token or a syntax node, which know their range: a token from the lexer, a node from the parser, which records the tokens it consumed for it, from the first to the last (so `f(1, 2)` and `a + b` include their left operand, and the parentheses around an operand belong to the enclosing expression, not to the operand). A lex error runs from its position to where the lexer stopped (`"oops` for an unterminated string, `10i9` for a bad suffix). The carets cover the range's part on the error's line, to the end of the line when the range goes on (a declaration shows its first line), and always the error's column, which stays where it was: for `a + b` the operator, for a call its `(`. Nodes the checker synthesizes have no range and get one caret.
+
+```
+type error: unknown function 'nope'
+  --> x.my:2:17
+  |
+2 |     let x = nope(1)
+  |             ^^^^^^^
+```
 
 ## The other implementations
 

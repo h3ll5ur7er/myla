@@ -13,7 +13,7 @@ from std.io import stdin
 from std.json import Json, field
 from std.fs import read_to_string
 from ...selfhost.loader import load_program_with, file_of, normalize
-from ...selfhost.diag import Report, type_report
+from ...selfhost.diag import Report, type_report, caret_range
 from ...selfhost.checker import build_checker_decls
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
 from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
@@ -194,7 +194,7 @@ impl Server {
             Ok(prog) => {
                 match build_checker_decls(prog.decls, prog.next_id) {
                     Ok(c) => {},
-                    Err(e) => { found = Some(type_report(e.line, e.col, e.msg, file_of(prog, e.decl))) },
+                    Err(e) => { found = Some(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl))) },
                 }
             },
         }
@@ -588,8 +588,9 @@ fun position(p: Pos) -> Json {
     return Json.Object([("line", Json.Int(p.line as int64)), ("character", Json.Int(p.character as int64))])
 }
 
-// A diagnostic for report `r` in a file whose text is `text`: from the
-// reported column to the end of the word there, on the same line.
+// A diagnostic for report `r` in a file whose text is `text`: what the
+// command line underlines (MYLA-65), or without a range from the reported
+// column to the end of the word there, on the same line.
 fun diagnostic(r: Report, text: str) -> Json {
     var start = Pos { line: 0, character: 0 }
     var end = Pos { line: 0, character: 1 }
@@ -597,10 +598,17 @@ fun diagnostic(r: Report, text: str) -> Json {
         let lines = lines_of(text)
         var col = r.col
         if col < 1 { col = 1 }
-        start = to_lsp(lines, r.line, col)
         var line_text = ""
-        if start.line < len(lines) { line_text = lines[start.line] }
-        end = to_lsp(lines, r.line, word_end(line_text, col))
+        if r.line - 1 < len(lines) { line_text = lines[r.line - 1] }
+        var first = col
+        var last = word_end(line_text, col)
+        if r.sp.eline > 0 {
+            let (f, e) = caret_range(line_text, r.line, col, r.sp)
+            first = f
+            last = e
+        }
+        start = to_lsp(lines, r.line, first)
+        end = to_lsp(lines, r.line, last)
     }
     let range = Json.Object([("start", position(start)), ("end", position(end))])
     return Json.Object([("range", range), ("message", Json.Str(r.msg)), ("severity", Json.Int(1)),

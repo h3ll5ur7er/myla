@@ -8,6 +8,7 @@
 // checker's `resolved` side table, keyed by AST node id.
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
+from .tokens import SrcSpan, no_span
 from .checker import Checker, Type
 from .util import cp_utf8
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
@@ -103,8 +104,9 @@ pub struct Interp {
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
-// the expression it happened at (its file: loader.file_of), `line` 0 for none.
-pub struct RtError { msg: str, line: int32, col: int32, node: int32 }
+// the expression it happened at (its file: loader.file_of), `sp` its range,
+// `line` 0 for none.
+pub struct RtError { msg: str, line: int32, col: int32, sp: SrcSpan, node: int32 }
 
 // A step of an assignable place: a struct field, or an index (evaluated once)
 // with the expression it came from.
@@ -280,7 +282,7 @@ impl Interp {
         self.eval_consts()
         let ei = self.entry_idx()
         if ei < 0 {
-            self.rt_err = Some(RtError { msg: "no entry point: define '#main' or a function named 'main'", line: 0, col: 0, node: -1 })
+            self.rt_err = Some(RtError { msg: "no entry point: define '#main' or a function named 'main'", line: 0, col: 0, sp: no_span(), node: -1 })
             return 1
         }
         self.call_func(ei, [])
@@ -390,7 +392,7 @@ impl Interp {
     // Stop the program with a runtime error at `e` (exit status 1).
     fun fail(var self, e: Expr, msg: str) {
         if self.stop() { return }
-        self.rt_err = Some(RtError { msg: msg, line: e.line, col: e.col, node: e.id })
+        self.rt_err = Some(RtError { msg: msg, line: e.line, col: e.col, sp: e.sp, node: e.id })
         self.ctrl = Ctrl.CExit
         self.exit_code = 1
     }
@@ -758,9 +760,9 @@ impl Interp {
 
     fun bind_elem(var self, b: BindElem, v: Value) {
         match b {
-            BindElem.BName(n, l, c) => { self.define(n, v) },
+            BindElem.BName(n, l, c, sp) => { self.define(n, v) },
             BindElem.BWild => {},
-            BindElem.BTuple(sub, l, c) => {
+            BindElem.BTuple(sub, l, c, sp) => {
                 let elems = match v { Value.VTuple(es) => es, _ => empty_values() }
                 var i = 0
                 while i < len(sub) {
@@ -1996,7 +1998,7 @@ fun empty_params() -> [Param] {
 }
 
 fun eb_dummy() -> ExprOrBlock {
-    return ExprOrBlock.EB_Block(Block { line: 0, col: 0, stmts: [] })
+    return ExprOrBlock.EB_Block(Block { line: 0, col: 0, sp: no_span(), stmts: [] })
 }
 
 fun value_len(v: Value) -> int64 {

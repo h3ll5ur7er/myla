@@ -115,7 +115,7 @@ def _search_bases(importer_path: str, path: ast.ImportPath, project_root: str,
 
 
 def _descend(base: str, segments: list[str], dotted: str,
-             line: int, col: int) -> str | None:
+             path: ast.ImportPath) -> str | None:
     """Resolve `base/seg0/seg1/.../segN` to a module file, or None if absent.
 
     Intermediate segments must be packages (directories); the final segment is a
@@ -136,7 +136,7 @@ def _descend(base: str, segments: list[str], dotted: str,
         raise ModuleError(
             f"ambiguous import '{dotted}': both '{last}.my' and a package "
             f"'{last}/' exist in {cur}",
-            line, col,
+            at=path,
         )
     if file_exists:
         return os.path.realpath(file_cand)
@@ -147,7 +147,7 @@ def _descend(base: str, segments: list[str], dotted: str,
         raise ModuleError(
             f"package '{dotted}' has no package-root module "
             f"'{last}/{last}.my'",
-            line, col,
+            at=path,
         )
     return None
 
@@ -155,20 +155,19 @@ def _descend(base: str, segments: list[str], dotted: str,
 def _resolve_module_path(importer_path: str, path: ast.ImportPath,
                          project_root: str, stdlib_root: str | None) -> str:
     dotted = path.dotted()
-    line, col = path.line, path.column
     if path.dots == 0 and path.segments[0] in _RESERVED_ROOTS:
         # Reserved roots resolve to the stdlib and may not be shadowed (D57 r4).
         if os.path.exists(os.path.join(project_root, path.segments[0])):
             raise ModuleError(
                 f"'{path.segments[0]}' is a reserved standard-library root and "
                 f"cannot be shadowed by a project file or directory",
-                line, col,
+                at=path,
             )
     for base in _search_bases(importer_path, path, project_root, stdlib_root):
-        resolved = _descend(base, path.segments, dotted, line, col)
+        resolved = _descend(base, path.segments, dotted, path)
         if resolved is not None:
             return resolved
-    raise ModuleError(f"cannot resolve import '{dotted}'", line, col)
+    raise ModuleError(f"cannot resolve import '{dotted}'", at=path)
 
 
 def _module_id(abspath: str, entry_path: str, project_root: str,
@@ -380,7 +379,7 @@ class _Renamer:
                 raise ModuleError(
                     f"module '{e.ident}' cannot be used as a value — access a "
                     f"member with '{e.ident}.<name>'",
-                    e.line, e.column,
+                    at=e,
                 )
             return e
         if isinstance(e, ast.Unary):
@@ -449,9 +448,11 @@ class _Renamer:
         """If `e` is a `module.member[.…]` chain, fold the module prefix into the
         qualified target and return the rewritten node; else None."""
         names: list[str] = []
+        accesses: list[ast.FieldAccess] = []
         cur = e
         while isinstance(cur, ast.FieldAccess):
             names.append(cur.field_name)
+            accesses.append(cur)
             cur = cur.target
         if not isinstance(cur, ast.Name):
             return None
@@ -474,12 +475,16 @@ class _Renamer:
             raise ModuleError(
                 f"module '{'.'.join([root.ident] + seg_names[:match_k])}' cannot "
                 f"be used as a value — access a member with '.<name>'",
-                root.line, root.column,
+                at=root,
             )
         qualified, remaining = self._resolve_member_chain(mid, rest, root)
+        # each new node spans the access it replaces (MYLA-65)
+        replaced = list(reversed(accesses))[len(seg_names) - len(remaining) - 1:]
         node = ast.Name(qualified).at(root.line, root.column)
-        for seg in remaining:
+        node.span = replaced[0].span
+        for seg, access in zip(remaining, replaced[1:]):
             node = ast.FieldAccess(node, seg).at(root.line, root.column)
+            node.span = access.span
         return node
 
     def _resolve_member_chain(self, mid: str, members: list[str], pos):
@@ -495,7 +500,7 @@ class _Renamer:
                 raise ModuleError(
                     f"module does not export '{name}' (declarations are private "
                     f"unless marked 'pub')",
-                    pos.line, pos.column,
+                    at=pos,
                 )
             kind, value = exports[name]
             i += 1
@@ -504,7 +509,7 @@ class _Renamer:
             cur_mid = value  # a re-exported sub-module; keep walking
         raise ModuleError(
             "a module reference must end in a member access",
-            pos.line, pos.column,
+            at=pos,
         )
 
     def _match(self, m: ast.Match) -> None:
@@ -746,7 +751,7 @@ def _bind(bindings: dict, name: str, binding: tuple, imp: ast.ImportDecl) -> Non
         raise ModuleError(
             f"import of '{name}' collides with an existing name in this module "
             f"— rename with 'as'",
-            imp.line, imp.column,
+            at=imp,
         )
     bindings[name] = binding
 
@@ -764,6 +769,6 @@ def _apply_import(m, imp, bindings, modules, project_root, stdlib_root) -> None:
             raise ModuleError(
                 f"module '{imp.path.dotted()}' does not export '{item.name}' "
                 f"(declarations are private unless marked 'pub')",
-                imp.line, imp.column,
+                at=imp,
             )
         _bind(bindings, bound, src.exports[item.name], imp)

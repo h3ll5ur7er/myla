@@ -8,13 +8,15 @@ stable line format that is trivial to reproduce byte-for-byte in Myla.
 
 Token line grammar (one token per line):
 
-    KIND SP line SP col SP "<escaped-lexeme>"[ SP aux]*
+    KIND SP line SP col SP "<escaped-lexeme>"[ SP aux]* SP end=<line>:<col>
 
 where ``aux`` carries only the fields the lexeme does not already determine:
 
     INT   -> int=<decimal>  [suf=<suffix>]
     FLOAT -> [suf=<suffix>]          (the lexeme already fixes the digits)
     CHAR  -> cp=<codepoint>
+
+and ``end`` is where the token ends (MYLA-65).
 
 The escaper handles just ``\\``, ``\n``, ``\t``, ``\r`` and ``"``; every other
 byte (including multi-byte UTF-8) passes through verbatim, so a Myla port only
@@ -57,14 +59,23 @@ def canonical_token(tok: Token) -> str:
             aux.append(f"suf={tok.suffix}")
     elif tok.kind is TokenKind.CHAR:
         aux.append(f"cp={tok.value}")
-    if aux:
-        return line + " " + " ".join(aux)
-    return line
+    aux.append(f"end={tok.end_line}:{tok.end_column}")
+    return line + " " + " ".join(aux)
 
 
 def canonical_tokens(tokens: list[Token]) -> str:
     """The canonical dump of a whole token stream (one token per line)."""
     return "\n".join(canonical_token(t) for t in tokens)
+
+
+def canonical_error(err) -> str:
+    """A diagnostic as the self-hosted drivers print it:
+    `err <line> <col> <span> <kind>: <message>`, the span `l:c-l:c` or `-`
+    (MYLA-65), a missing position `-`."""
+    line = "-" if err.line is None else str(err.line)
+    col = "-" if err.column is None else str(err.column)
+    span = "-" if err.span is None else "{}:{}-{}:{}".format(*err.span)
+    return f"err {line} {col} {span} {err.kind.split()[0]}: {err.message}"
 
 
 # --- canonical AST dump (self-hosting v0.6b) -------------------------------
