@@ -1,0 +1,376 @@
+// sample.my: random programs from the grammar description (MYLA-77), to
+// check that the self-hosted parser accepts everything the grammar allows.
+//
+// A program is a random derivation from the start rule. Choices are guided
+// by coverage, counted over the whole run: an alternative chosen less than a
+// quarter as often as the most chosen one, or an optional part produced less
+// than a quarter as often as left out, is taken while the program is in the
+// first half of its size budget. Otherwise a choice is cheap (its alternative
+// with the fewest tokens, an optional part left out) with a chance that grows
+// with its depth and with the program's size, and else mostly the least
+// chosen. Past a depth limit and the size budget every choice is cheap, so
+// derivations end. Coverage, not the number of seeds, is what finds deep
+// constructs, so a few long runs test more than many short ones.
+// `@restrict R X …` keeps X out of R's subtree, `@sample` gives each token's
+// lexemes, and the tokens are printed separated by spaces (a newline token
+// by a line break), so the lexer splits them as the grammar does.
+
+from .ebnf import Grammar, GRule, GExpr, rule_index, directive_args, arg_text, refs_of, children, canon
+from .treesitter import rule_kinds, start_rule, list_has, is_newline_token, join_strs
+from ...selfhost.parser import parse_source
+from std.io import println
+
+const MAX_DEPTH: int32 = 40
+const MAX_TOKENS: int32 = 300
+const CHEAP_DEPTH: int32 = 60      // a choice at depth d is cheap with chance d/60
+const INFINITE: int32 = 1000000
+
+// A linear congruential generator (Knuth's MMIX constants).
+struct Rng { state: uint64 }
+
+impl Rng {
+    fun next(var self) -> uint64 {
+        self.state = self.state * 6364136223846793005u64 + 1442695040888963407u64
+        return self.state >> 33
+    }
+
+    // A number in 0..n.
+    fun below(var self, n: int32) -> int32 {
+        return (self.next() % (n as uint64)) as int32
+    }
+}
+
+struct Sampler {
+    g: Grammar,
+    kinds: [str],
+    costs: [int32],        // per rule: the fewest tokens it can produce
+    rng: Rng,
+    toks: [str],           // the program so far
+    excluded: [str],       // names the current subtree must not contain
+    depth: int32,
+    seen: [str: int32],    // how often each choice was made, by canon(…) key
+}
+
+impl Sampler {
+    // The fewest tokens `e` can produce.
+    fun cost(self, e: GExpr) -> int32 {
+        return match e {
+            GExpr.GTerm(t) => 1,
+            GExpr.GClass(c) => 1,
+            GExpr.GRef(n) => self.ref_cost(n),
+            GExpr.GSeq(xs) => self.sum_cost(xs),
+            GExpr.GAlt(xs) => self.min_cost(xs),
+            GExpr.GOpt(x) => 0,
+            GExpr.GStar(x) => 0,
+            GExpr.GPlus(x) => self.cost(x),
+            GExpr.GLabel(x, l) => self.cost(x),
+        }
+    }
+
+    fun ref_cost(self, n: str) -> int32 {
+        let k = rule_index(self.g, n)
+        if self.kinds[k] == "token" { return 1 }
+        return self.costs[k]
+    }
+
+    fun sum_cost(self, xs: [GExpr]) -> int32 {
+        var total = 0
+        for x in xs {
+            total = total + self.cost(x)
+            if total >= INFINITE { return INFINITE }
+        }
+        return total
+    }
+
+    fun min_cost(self, xs: [GExpr]) -> int32 {
+        var best = INFINITE
+        for x in xs {
+            let c = self.cost(x)
+            if c < best { best = c }
+        }
+        return best
+    }
+
+    // Whether `e` can be produced without the excluded names (looking one
+    // rule deep).
+    fun allowed(self, e: GExpr) -> bool {
+        return match e {
+            GExpr.GRef(n) => !list_has(self.excluded, n),
+            GExpr.GLabel(x, l) => !list_has(self.excluded, l) && self.allowed(x),
+            GExpr.GSeq(xs) => self.all_allowed(xs),
+            GExpr.GAlt(xs) => self.any_allowed(xs),
+            GExpr.GPlus(x) => self.allowed(x),
+            _ => true,
+        }
+    }
+
+    fun all_allowed(self, xs: [GExpr]) -> bool {
+        for x in xs {
+            if !self.allowed(x) { return false }
+        }
+        return true
+    }
+
+    fun any_allowed(self, xs: [GExpr]) -> bool {
+        for x in xs {
+            if self.allowed(x) { return true }
+        }
+        return false
+    }
+
+    fun minimal(self) -> bool {
+        return self.depth > MAX_DEPTH || len(self.toks) > MAX_TOKENS
+    }
+
+    // Whether a choice goes the cheap way: likelier the deeper it is and the
+    // more of the size budget the program has used.
+    fun cheap(var self) -> bool {
+        return self.minimal() || self.rng.below(CHEAP_DEPTH) < self.depth || self.rng.below(MAX_TOKENS) < len(self.toks)
+    }
+
+    // Whether an under-covered choice may still be forced: in the first half
+    // of the size budget, so that one expression doesn't use it all.
+    fun roomy(self) -> bool {
+        return !self.minimal() && len(self.toks) < MAX_TOKENS / 2
+    }
+
+    fun times_seen(self, key: str) -> int32 {
+        return match get(self.seen, key) {
+            Some(n) => n,
+            None => 0,
+        }
+    }
+
+    fun count(var self, key: str) {
+        self.seen[key] = self.times_seen(key) + 1
+    }
+
+    // Whether an optional part `x` is produced: always while it was produced
+    // less than a quarter as often as left out (see roomy), else not when the
+    // choice is cheap, else the less-seen way, mostly.
+    fun take(var self, x: GExpr) -> bool {
+        if !self.allowed(x) || self.minimal() { return false }
+        let key = canon(x, 2)
+        let yes = key + " +"
+        let no = key + " -"
+        if self.roomy() && self.times_seen(yes) * 4 <= self.times_seen(no) {
+            self.count(yes)
+            return true
+        }
+        if self.cheap() {
+            self.count(no)
+            return false
+        }
+        var answer = self.times_seen(yes) < self.times_seen(no)
+        if self.times_seen(yes) == self.times_seen(no) || self.rng.below(4) == 0 { answer = self.rng.below(2) == 0 }
+        if answer { self.count(yes) } else { self.count(no) }
+        return answer
+    }
+
+    // How many times a repetition runs, at least `least`.
+    fun repeats(var self, least: int32, x: GExpr) -> int32 {
+        var n = least
+        if n == 0 && !self.take(x) { return 0 }
+        if n == 0 { n = 1 }
+        while n < 3 && !self.cheap() && self.rng.below(3) == 0 { n = n + 1 }
+        return n
+    }
+
+    fun gen(var self, e: GExpr) {
+        match e {
+            GExpr.GTerm(t) => { push(self.toks, t) },
+            GExpr.GClass(c) => {},
+            GExpr.GRef(n) => { self.gen_ref(n) },
+            GExpr.GSeq(xs) => {
+                for x in xs { self.gen(x) }
+            },
+            GExpr.GAlt(xs) => { self.gen(self.pick(xs)) },
+            GExpr.GOpt(x) => {
+                if self.take(x) { self.gen(x) }
+            },
+            GExpr.GStar(x) => { self.gen_times(x, self.repeats(0, x)) },
+            GExpr.GPlus(x) => { self.gen_times(x, self.repeats(1, x)) },
+            GExpr.GLabel(x, l) => {
+                let saved = len(self.excluded)
+                self.restrict(l)
+                self.gen(x)
+                self.unrestrict(saved)
+            },
+        }
+    }
+
+    fun gen_times(var self, x: GExpr, n: int32) {
+        var i = 0
+        while i < n {
+            self.gen(x)
+            i = i + 1
+        }
+    }
+
+    // An alternative among those the restrictions allow: the least chosen
+    // while it was chosen less than a quarter as often as the most chosen
+    // (see roomy), else the cheapest when the choice is cheap, else mostly the
+    // least chosen, sometimes a random one.
+    fun pick(var self, xs: [GExpr]) -> GExpr {
+        var ok: [GExpr] = []
+        for x in xs {
+            if self.allowed(x) { push(ok, x) }
+        }
+        if len(ok) == 0 { ok = xs }
+        var least = ok[0]
+        var fewest = INFINITE
+        var most = 0
+        for x in ok {
+            let n = self.times_seen(canon(x, 0))
+            if n < fewest {
+                fewest = n
+                least = x
+            }
+            if n > most { most = n }
+        }
+        var choice = least
+        if !self.roomy() || fewest * 4 > most {
+            if self.cheap() {
+                choice = ok[0]
+                for x in ok {
+                    if self.cost(x) < self.cost(choice) { choice = x }
+                }
+            } else if self.rng.below(4) == 0 {
+                choice = ok[self.rng.below(len(ok))]
+            }
+        }
+        self.count(canon(choice, 0))
+        return choice
+    }
+
+    fun gen_ref(var self, n: str) {
+        let k = rule_index(self.g, n)
+        let r = self.g.rules[k]
+        if self.kinds[k] == "token" {
+            if is_newline_token(r) {
+                push(self.toks, "\n")
+            } else {
+                let lexemes = samples_of(self.g, n)
+                push(self.toks, lexemes[self.rng.below(len(lexemes))])
+            }
+            return
+        }
+        let saved = len(self.excluded)
+        self.restrict(n)
+        self.depth = self.depth + 1
+        self.gen(r.body)
+        self.depth = self.depth - 1
+        self.unrestrict(saved)
+    }
+
+    // Add the names `@restrict name …` excludes.
+    fun restrict(var self, name: str) {
+        for args in directive_args(self.g, "restrict") {
+            if arg_text(args[0]) == name {
+                var i = 1
+                while i < len(args) {
+                    push(self.excluded, arg_text(args[i]))
+                    i = i + 1
+                }
+            }
+        }
+    }
+
+    fun unrestrict(var self, saved: int32) {
+        while len(self.excluded) > saved { pop(self.excluded) }
+    }
+}
+
+// The @sample lexemes of token `name`.
+fun samples_of(g: Grammar, name: str) -> [str] {
+    var out: [str] = []
+    for args in directive_args(g, "sample") {
+        if arg_text(args[0]) == name {
+            var i = 1
+            while i < len(args) {
+                push(out, arg_text(args[i]))
+                i = i + 1
+            }
+        }
+    }
+    return out
+}
+
+// The fewest tokens each rule can produce.
+fun rule_costs(g: Grammar, kinds: [str]) -> [int32] {
+    var costs: [int32] = []
+    for r in g.rules { push(costs, INFINITE) }
+    var s = Sampler { g: g, kinds: kinds, costs: costs, rng: Rng { state: 0u64 }, toks: [], excluded: [], depth: 0, seen: [:] }
+    var changed = true
+    while changed {
+        changed = false
+        var k = 0
+        while k < len(g.rules) {
+            if kinds[k] == "syntax" {
+                let c = s.cost(g.rules[k].body)
+                if c < s.costs[k] {
+                    s.costs[k] = c
+                    changed = true
+                }
+            }
+            k = k + 1
+        }
+    }
+    return s.costs
+}
+
+// The tokens as source text: separated by spaces, a newline by a line break.
+#test(["a", "=", "1", "\n", "b"])["a = 1\nb"]
+fun render(toks: [str]) -> str {
+    var sb = StringBuilder()
+    var line_start = true
+    for t in toks {
+        if t == "\n" {
+            append(sb, "\n")
+            line_start = true
+        } else {
+            if !line_start { append(sb, " ") }
+            append(sb, t)
+            line_start = false
+        }
+    }
+    return build(sb)
+}
+
+// `n` random programs; one run of choices, so later programs cover what
+// earlier ones didn't.
+pub fun samples(g: Grammar, seed: int32, n: int32) -> [str] {
+    let kinds = rule_kinds(g)
+    let costs = rule_costs(g, kinds)
+    let start = g.rules[start_rule(kinds)].name
+    var out: [str] = []
+    let state = (seed as uint64) * 2654435761u64 + 1u64
+    var s = Sampler { g: g, kinds: kinds, costs: costs, rng: Rng { state: state }, toks: [], excluded: [], depth: 0, seen: [:] }
+    var i = 0
+    while i < n {
+        s.toks = []
+        s.gen_ref(start)
+        push(out, render(s.toks))
+        i = i + 1
+    }
+    return out
+}
+
+// Whether the self-hosted parser accepts `n` random programs; prints each
+// one it rejects, with the error.
+pub fun check_samples(g: Grammar, seed: int32, n: int32) -> bool {
+    var ok = true
+    var i = 0
+    for p in samples(g, seed, n) {
+        match parse_source(p, 0) {
+            Ok(parsed) => {},
+            Err(d) => {
+                println(format("--- sample {} of seed {}: {}:{}: {}", i, seed, d.line, d.col, d.msg))
+                println(p)
+                ok = false
+            },
+        }
+        i = i + 1
+    }
+    return ok
+}

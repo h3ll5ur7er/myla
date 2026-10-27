@@ -1,0 +1,219 @@
+(* myla.ebnf: the syntax of Myla, machine-readable (MYLA-77).
+
+   This file is the source of the editor grammars: `tools/grammar` turns it
+   into the tree-sitter grammar in editor/tree-sitter-myla, and samples random
+   programs from it that the self-hosted parser must accept. The EBNF on the
+   wiki page Language/Grammar is the same grammar without the annotations;
+   a test compares the two.
+
+   Notation: "x" or 'x' is a terminal (no escapes: "\" is a backslash), /…/ a
+   character class in regex syntax, A B a sequence, A | B an alternative,
+   ( … ) a group, ? optional, * zero or more, + one or more.
+
+   Rule names in capitals whose bodies use only terminals, classes and
+   lowercase helper rules are tokens (IDENT, INT …); their helpers are token
+   fragments. Every other rule is syntactic. NL is a newline token; where a
+   rule doesn't mention NL, a line break isn't allowed. SEP is a separator: a
+   newline or a ";" (D61).
+
+   Annotations, for the generators only:
+     A … @name           this alternative is a syntax-tree node called name
+     R @name = …          rule R's node (or token) is called name
+     R @immediate = …     token R allows no whitespace before it
+     @word R ;            keywords are the words that token R would also match
+     @extras … ;          tokens skipped between any two tokens
+     @conflict R S … ;    the ambiguity tree-sitter resolves at run time (GLR)
+     @adjacent "t" … ;    a terminal that the lexer produces as two tokens
+     @soft "t" … ;        a word the lexer produces as an identifier
+     @lexical R ;         a rule the lexer handles inside one token (f-strings)
+     @restrict R X … ;    samples of R never contain the node or rule X
+     @sample T "…" … ;    the lexemes a sample uses for token T *)
+
+@word IDENT ;
+@extras /[ \t\r]/ COMMENT ;
+
+(* ----- Tokens ----- *)
+
+IDENT @identifier = ( letter | "_" ) ( letter | digit | "_" )* ;
+INT @integer      = ( digits | "0x" hexdigits | "0b" bindigits | "0o" octdigits ) int_suffix? ;
+TUPLE_INDEX @integer = digits | "0x" hexdigits | "0b" bindigits | "0o" octdigits ;
+FLOAT @float      = digits ( "." digits exponent? | exponent ) float_suffix? | digits float_suffix ;
+CHAR @char        = "'" ( char_char | "\" ( "n" | "t" | "r" | "\" | "'" | "0" ) | "\u{" hexdigit+ "}" ) "'" ;
+                    (* 1 to 6 hex digits naming a Unicode scalar value *)
+STRING @string    = '"' ( string_char | "\" ( "n" | "t" | "\" | '"' ) )* '"' ;
+FSTRING_TEXT @string_content @immediate = ( fstring_char | "\" ( "n" | "t" | "\" | '"' ) )+ ;
+COMMENT @comment  = "//" line_char* | "/*" not_star* ( "*"+ not_star_slash not_star* )* "*"+ "/" ;
+NL                = /\n/ ;
+
+letter         = /[A-Za-z]/ ;
+digit          = /[0-9]/ ;
+hexdigit       = /[0-9a-fA-F]/ ;
+digits         = digit ( "_"? digit )* ;
+hexdigits      = hexdigit ( "_"? hexdigit )* ;
+bindigits      = /[01]/ ( "_"? /[01]/ )* ;
+octdigits      = /[0-7]/ ( "_"? /[0-7]/ )* ;
+int_suffix     = ( "i" | "u" ) ( "8" | "16" | "32" | "64" ) ;
+float_suffix   = "f32" | "f64" ;
+exponent       = ( "e" | "E" ) ( "+" | "-" )? digits ;
+char_char      = /[^'\\\n]/ ;
+string_char    = /[^"\\\n]/ ;
+fstring_char   = /[^"{}\\\n]/ ;
+line_char      = /[^\n]/ ;
+not_star       = /[^*]/ ;
+not_star_slash = /[^*\/]/ ;
+
+(* ----- Declarations ----- *)
+
+program @source_file = SEP* ( declaration ( SEP+ declaration )* SEP* )? ;
+SEP          = NL | ";" ;
+
+declaration  = attribute* "pub"? item_decl | impl_decl | import_decl | "pub" pub_import ;
+item_decl    = struct_decl | enum_decl | fun_decl | trait_decl | typealias_decl | const_decl ;
+
+attribute    = "#" IDENT ( "(" expr_list? ")" )? ( "[" expr_list? "]" )? NL* ;
+expr_list    = NL+ | NL* expression NL* ( "," NL* expression NL* )* ;
+
+struct_decl  = "struct" IDENT type_params? "{" NL* ( field ( "," NL* field )* ","? NL* )? "}" ;
+field        = IDENT ":" type ;
+
+enum_decl    = "enum" IDENT type_params? "{" NL* ( variant ","? NL* )* "}" ;
+variant      = IDENT ( "(" type ( "," type )* ","? ")" )? ;
+
+fun_decl     = "fun" IDENT generics? "(" ( param ( "," param )* )? ")" ( "->" type )? block ;
+param        = IDENT ":" type ;
+generics     = "<" generic ( "," generic )* ">" ;
+generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
+type_params  = "<" IDENT ( "," IDENT )* ">" ;
+
+impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;
+method       = method_head block ;
+method_head  = "fun" IDENT generics? "(" receiver ( "," param )* ","? ")" ( "->" type )? ;
+receiver     = "self" | "var" "self" ;
+
+trait_decl   = "trait" IDENT type_params? "{" SEP* ( method_head SEP* )* "}" ;
+
+typealias_decl = "typealias" IDENT "=" type ;
+const_decl   = "const" IDENT ":" type "=" expression ;
+
+import_decl  = "import" import_path ( "as" IDENT )? | from_import ;
+pub_import   = "import" import_path "as" IDENT | from_import ;
+from_import  = "from" import_path "import" import_item ( "," import_item )* ;
+import_path  = ( "." | ".." )* IDENT ( "." IDENT )* ;
+import_item  = IDENT ( "as" IDENT )? ;
+
+(* ----- Types ----- *)
+
+type          = prim_type | named_type | "[" type "]" @list_type | "[" type ":" type "]" @map_type
+              | tuple_type | function_type ;
+named_type    = IDENT type_args? ;
+type_args     = "<" type ( "," type )* ">" ;
+prim_type     = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
+              | "uint8" | "uint16" | "uint32" | "uint64" ;
+tuple_type    = "(" type "," ( type ( "," type )* ","? )? ")" ;
+function_type = "(" ( type ( "," type )* ","? )? ")" "->" type ;
+
+(* ----- Statements ----- *)
+
+block       = "{" SEP* ( statement ( SEP+ statement )* SEP* )? "}" ;
+statement   = var_decl | if_stmt | while_stmt | for_stmt | return_stmt
+            | "break" @break_stmt | "continue" @continue_stmt | assignment | expression ;
+
+var_decl    = ( "let" | "var" ) ( IDENT | bind_tuple ) ( ":" type )? "=" expression ;
+bind_tuple  = "(" bind_elem "," ( bind_elem ( "," bind_elem )* ","? )? ")" ;
+bind_elem   = IDENT | bind_tuple ;                  (* the name "_" discards *)
+
+if_stmt     = "if" cond block ( NL* "else" ( if_stmt | block ) )? ;
+while_stmt  = "while" cond block ;
+for_stmt    = "for" IDENT "in" cond ( ".." cond )? block ;
+cond        = expression ;                          (* without struct literals *)
+return_stmt = "return" ( expression ( "," expression )* )? ;   (* a, b is a tuple *)
+
+assignment  = place "=" expression ;
+place       = ( IDENT | "self" @self | "(" place ")" )
+              ( "." IDENT @field_expression | "[" expression "]" @index_expression )* ;
+
+(* ----- Expressions ----- *)
+
+expression  = pipe ;
+pipe        = logic_or ( "|>" logic_or @binary_expression )* ;
+logic_or    = logic_and ( "||" logic_and @binary_expression )* ;
+logic_and   = equality ( "&&" equality @binary_expression )* ;
+equality    = comparison ( ( "==" | "!=" ) comparison @binary_expression )* ;
+comparison  = bit_or ( ( "<" | "<=" | ">" | ">=" ) bit_or @binary_expression )* ;
+bit_or      = bit_xor ( "|" bit_xor @binary_expression )* ;
+bit_xor     = bit_and ( "^" bit_and @binary_expression )* ;
+bit_and     = shift ( "&" shift @binary_expression )* ;
+shift       = term ( ( "<<" | ">>" ) term @binary_expression )* ;   (* two touching "<" or ">" *)
+term        = factor ( ( "+" | "-" ) factor @binary_expression )* ;
+factor      = cast ( ( "*" | "/" | "%" ) cast @binary_expression )* ;
+cast        = unary ( "as" type @cast_expression )* ;
+unary       = ( "-" | "!" | "~" ) unary @unary_expression | postfix | lambda ;
+              (* the parser also lets a suffix follow a lambda whose body
+                 can't take it, as in (x) => x as T [0]; write ((x) => …)[0] *)
+postfix     = primary ( "(" call_args? ")" @call_expression | "[" expression "]" @index_expression
+                      | "." ( IDENT | TUPLE_INDEX ) @field_expression | "?" @try_expression )* ;
+call_args   = NL+ | NL* call_arg NL* ( "," NL* call_arg NL* )* ;
+call_arg    = "_" @hole | expression ;            (* "_" alone: a partial-application hole *)
+
+primary     = INT | FLOAT | CHAR | STRING | fstring | "true" @boolean | "false" @boolean
+            | "self" @self | IDENT | struct_literal | "(" expression ")" @paren_expression
+            | tuple | list | map | match_expr ;
+fstring     = 'f"' ( FSTRING_TEXT | "{{" @escape_sequence | "}}" @escape_sequence
+                   | "{" expression "}" @interpolation )* '"' ;
+              (* lowered by the lexer to: format(STRING, expression, …) *)
+struct_literal = IDENT "{" NL* ( field_init ( "," NL* field_init )* ","? NL* )? "}" ;
+field_init  = IDENT ":" expression ;
+tuple       = "(" expression "," ( expression ( "," expression )* ","? )? ")" ;
+lambda      = "(" ( lambda_param ( "," lambda_param )* )? ")" "=>" ( block | expression ) ;
+lambda_param = IDENT ( ":" type )? ;
+list        = "[" NL* ( expression NL* ( "," NL* expression NL* )* ( "," NL* )? )? "]" ;
+map         = "[" NL* ":" "]"
+            | "[" NL* map_entry NL* ( "," NL* map_entry NL* )* ( "," NL* )? "]" ;
+map_entry   = expression ":" expression ;
+
+match_expr  = "match" cond "{" NL* ( block_arm ARM_SEP? | expr_arm ARM_SEP )*
+              ( block_arm ARM_SEP? | expr_arm ARM_SEP? ) "}" ;
+ARM_SEP     = "," NL* | NL+ ;
+block_arm @match_arm = pattern ( "if" guard )? "=>" block ;
+expr_arm @match_arm  = pattern ( "if" guard )? "=>" expression ;
+guard       = expression ;                          (* without struct literals *)
+
+(* ----- Patterns ----- *)
+
+pattern       = base_pattern ( "|" base_pattern @or_pattern )* ;
+base_pattern  = INT | CHAR | STRING | "true" @boolean | "false" @boolean | "-" INT @negative_literal
+              | "_" @wildcard | IDENT | variant_pattern | tuple_pattern | struct_pattern ;
+variant_pattern = IDENT "." IDENT payload? | "." IDENT payload? | IDENT payload ;
+payload       = "(" ( pattern ( "," pattern )* ","? )? ")" ;
+tuple_pattern = "(" pattern "," ( pattern ( "," pattern )* ","? )? ")" ;
+struct_pattern = IDENT "{" NL* ( field_pattern ( "," NL* field_pattern )* ","? NL* )? "}" ;
+field_pattern = IDENT ( ":" pattern )? ;
+
+(* ----- For the generators ----- *)
+
+@adjacent "<<" ">>" ;           (* D44: the parser joins two touching tokens *)
+@soft "_" ;                     (* an identifier the parser treats specially *)
+@lexical fstring ;
+
+(* The parser resolves these with context (struct literals off in conditions)
+   or by scanning ahead (a lambda is a "(" … ")" followed by "=>"). *)
+@conflict primary lambda_param ;
+@conflict primary struct_literal ;
+@conflict place primary ;
+@conflict place primary lambda_param ;
+@conflict tuple_type ;
+@conflict named_type ;
+@conflict if_stmt ;
+
+@restrict cond struct_literal lambda ;            (* a lambda's body would take the "{" *)
+@restrict guard struct_literal paren_expression tuple lambda ;   (* "(…) =>" would read as a lambda *)
+@restrict cast_expression named_type ;            (* "a as T < b": "<" opens type arguments *)
+@restrict fstring NL ;                            (* f-strings are single-line *)
+
+@sample IDENT "x" "y" "count" "Point" "_t" "f" ;
+@sample INT "0" "7" "42" "0xff" "0b1010" "1_000" "255u8" "3i64" ;
+@sample TUPLE_INDEX "0" "1" ;
+@sample FLOAT "1.5" "2e3" "0.25f64" "3f32" "1.5e-3" ;
+@sample CHAR "'a'" "'\n'" "'\\'" "'\''" "'\u{1F600}'" ;
+@sample STRING '""' '"hi"' '"a\"b\n"' ;
+@sample FSTRING_TEXT "abc " " = " "x\n" ;

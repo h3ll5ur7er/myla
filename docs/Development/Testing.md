@@ -18,7 +18,7 @@ uv run pytest tests/unit -q                              # pytest from the dev g
 
 `scripts/test.sh fast` runs the unit and integration tests and the burn tests without the self-hosting gates (`tests/burn/test_selfhost_*`); use it while working and the full run before committing.
 
-The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by the Python backend) through `selfhost_tool(name)` in `tests/burn/_tools.py`. A tool is cached as `build/test-tools/<name>-<hash>`, where the hash covers every source that can change it (`src/myla/**/*.py`, `src/myla/std/*.my`, `selfhost/*.my`), so an edit to any of them rebuilds it and the stale copy is removed. The full burn run takes about 65 s with an empty cache and about 42 s with a warm one; when every module built its own tools it took 78 s, with fewer tests ([[MYLA-58]]).
+The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by the Python backend) through `selfhost_tool(name)` in `tests/burn/_tools.py`, and other Myla programs such as the grammar tool through `myla_tool(path, name)`. A tool is cached as `build/test-tools/<name>-<hash>`, where the hash covers every source that can change it (`src/myla/**/*.py`, `src/myla/std/*.my`, `selfhost/*.my`, `tools/**/*.my`), so an edit to any of them rebuilds it and the stale copy is removed. The full burn run takes about 65 s with an empty cache and about 42 s with a warm one; when every module built its own tools it took 78 s, with fewer tests ([[MYLA-58]]).
 
 ## Continuous integration
 
@@ -27,7 +27,7 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 | Job | Runs |
 | --- | --- |
 | `unit` | Unit and integration tests on Python 3.12 and 3.13, with pygls for the language server test |
-| `burn` | The burn suite (native builds with the runner's binutils) |
+| `burn` | The burn suite (native builds with the runner's binutils), with Node and the tree-sitter CLI for `test_grammar.py` |
 | `bootstrap` | `scripts/bootstrap.sh`, then the stage 3 compiler builds and runs `examples/hello.my` |
 
 ## Results (October 2026)
@@ -36,7 +36,7 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 | --- | --- | --- |
 | Unit | 466 | All pass, about 2 s |
 | Integration | 4 | Pass (2 need pygls) |
-| Burn | 391 (plus subtests) | All pass, about 47 s with cached tools (green since [[MYLA-4]]) |
+| Burn | 401 (plus subtests) | All pass, about 47 s with cached tools (green since [[MYLA-4]]) |
 
 ## Unit tests
 
@@ -54,6 +54,7 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 | `test_debug_info.py` | `myla build -g` binaries carry a line table readelf reads, behave exactly like plain builds, and (where gdb is installed) stop on a Myla source line |
 | `test_modules.py` | `examples/modules` in both back ends |
 | `test_stdio.py`, `test_fs.py`, `test_process.py` | Parity of stdout, stderr, exit status, argv, file contents, errno mapping, signals and spawn errors |
+| `test_grammar.py` | [[grammar/myla.ebnf]] and what is generated from it ([[MYLA-77]]): the wiki page [[Language/Grammar]] shows the same rules; `grammar.js` and `highlights.scm` in `editor/tree-sitter-myla/` are current; the self-hosted parser accepts 10,000 programs sampled from the grammar; `keywords()` in `selfhost/tokens.my`, which the grammar must use in full, matches the Python lexer's table; the grammar tool's `#test` cases pass. With the tree-sitter CLI (`npm install` in `editor/tree-sitter-myla`, or `TREE_SITTER`) and `cc`, also: `src/` is current, tree-sitter parses every `.my` file of the repository and 2,000 samples without an ERROR or MISSING node, every lex and parse error of the error corpus gives one, and the queries compile; skipped without the CLI, CI installs it |
 | `test_selfhost_floatlit.py` | The self-hosted float literal conversion (`selfhost/floatlit.my`) gives the same double and float32 bits as Python on tricky and 800 random literals |
 | `test_selfhost_lexer.py`, `…_parser.py`, `…_checker.py`, `…_interp.py`, `…_codegen.py` | The self-hosting gates: the Myla-written stages, built with the Python backend, agree with the Python oracle (canonical tokens, canonical AST, accept/reject with the error's position and message, interpreted output, native output); the checker gate also runs the programs the Python unit tests expect to fail (`tests/burn/data/type_error_snippets.json`, collected by `scripts/harvest_type_errors.py`) and a snippet for each remaining message; the lexer and parser gates also compare every lex and parse error (message and position) on the corpus, on snippets for each message, and on every line prefix of a few examples, which also proves the self-hosted parser stops after its first error; the interpreter gate also compares runtime errors (message, file, caret) and evaluation order with the Python CLI, runs the codegen gate's parity programs, and checks that `push`, element assignment and updates inside `var self` methods and nested lists scale linearly ([[MYLA-74]]); the codegen and interpreter gates also run multi-module projects through the self-hosted loader (and the codegen gate checks that its diagnostics, lex and parse errors in imported modules included, print exactly as the Python CLI's), the codegen gate also runs the `test_compiler_parity.py` programs for bugs both backends had, and its arena-reclaim stress programs with a 30 MB peak-memory bound (measured from a minimal helper process: a child's peak RSS includes its parent's at fork) |
 

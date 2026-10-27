@@ -1,7 +1,8 @@
 # Continuous integration for the Python toolchain and the self-hosted compiler.
 # Everything here uses only the standard library plus GNU binutils (as/ld), which
 # the Ubuntu runners already have; the unit job also installs pygls (the `lsp`
-# extra) so the language server test runs. See docs/Development/Testing.md.
+# extra) so the language server test runs, and the burn job the tree-sitter CLI
+# for the editor-grammar tests. See docs/Development/Testing.md.
 name: CI
 
 on:
@@ -43,11 +44,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: tree-sitter CLI for the editor-grammar tests (MYLA-77)
+        run: |
+          npm ci --no-audit --no-fund --ignore-scripts --prefix editor/tree-sitter-myla
+          cd editor/tree-sitter-myla/node_modules/tree-sitter-cli && node install.js
       - name: Toolchain versions
         run: |
           python --version
           as --version | head -1
           ld --version | head -1
+          editor/tree-sitter-myla/node_modules/.bin/tree-sitter --version
       - name: Burn tests
         run: python -m unittest discover -s tests/burn -t . -v
 

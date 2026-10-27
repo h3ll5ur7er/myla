@@ -1,7 +1,7 @@
 {
   "name": "tree-sitter-myla",
   "version": "0.1.0",
-  "description": "Tree-sitter grammar for the Myla language (editor tooling only)",
+  "description": "Tree-sitter grammar for Myla, generated from grammar/myla.ebnf (editor tooling)",
   "main": "bindings/node",
   "types": "bindings/node",
   "keywords": [
@@ -19,12 +19,12 @@
   ],
   "license": "MIT",
   "devDependencies": {
-    "tree-sitter-cli": "^0.22.0",
+    "tree-sitter-cli": "0.25.10",
     "prebuildify": "^6.0.0"
   },
   "scripts": {
     "generate": "tree-sitter generate --abi 14",
-    "test": "tree-sitter test",
+    "test": "cd ../.. && python3 -m unittest tests.burn.test_grammar",
     "ts": "tree-sitter",
     "build": "tree-sitter build --wasm",
     "install": "node-gyp-build",

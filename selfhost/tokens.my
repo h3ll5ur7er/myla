@@ -30,6 +30,37 @@ pub struct Token {
     big: str,        // an INT value of 2^63 or more in decimal (MYLA-73); "" otherwise
 }
 
+// The reserved words, as keyword_kind recognises them (the grammar tool
+// checks that grammar/myla.ebnf uses each of them, MYLA-77).
+pub fun keywords() -> [str] {
+    return ["let", "var", "fun", "return", "struct", "enum", "impl", "trait", "self", "match",
+            "typealias", "as", "pub", "import", "from", "const", "break", "continue", "if", "else",
+            "while", "for", "in", "true", "false", "bool", "str", "int8", "int16", "int32",
+            "int64", "uint8", "uint16", "uint32", "uint64"]
+}
+
+// Whether keywords() and keyword_kind agree: each word is a keyword whose
+// kind is named after it.
+#test()[true]
+pub fun keywords_agree() -> bool {
+    for k in keywords() {
+        let kind = keyword_kind(k)
+        if kind == TokenKind.IDENT || kind_name(kind) != upper_ascii(k) { return false }
+    }
+    return true
+}
+
+#test("int8")["INT8"]
+fun upper_ascii(s: str) -> str {
+    var sb = StringBuilder()
+    for c in chars(s) {
+        var b = c as uint8
+        if b >= 'a' && b <= 'z' { b = b - 32 }
+        append_byte(sb, b)
+    }
+    return build(sb)
+}
+
 pub fun keyword_kind(text: str) -> TokenKind {
     if text == "let" { return TokenKind.LET }
     if text == "var" { return TokenKind.VAR }

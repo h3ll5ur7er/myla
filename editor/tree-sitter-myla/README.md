@@ -1,23 +1,34 @@
 # tree-sitter-myla
 
 A [tree-sitter](https://tree-sitter.github.io/) grammar for **Myla**, for editor
-syntax highlighting and structural navigation.
+syntax highlighting, folding, indentation and structural navigation.
 
-> This grammar is **editor tooling only** and is intentionally kept off the
-> compiler path. The authoritative parser is the Python toolchain's
-> (`src/myla/parser.py`, grammar in `docs/Language/Grammar.md`), which resolves
-> ambiguities (struct literal vs block) that a context-free grammar cannot.
-> Expect this grammar to be looser than the real parser. It was written for
-> the experimental Rust edition's dialect (semicolons, `select`, actors), removed
-> in MYLA-70, and still follows it in places (MYLA-47).
+`grammar.js` and `queries/highlights.scm` are **generated**: the source is the
+machine-readable grammar [`grammar/myla.ebnf`](../../grammar/myla.ebnf) (the same
+rules as the wiki page `docs/Language/Grammar.md`), turned into tree-sitter by
+the grammar tool in [`tools/grammar`](../../tools/grammar), which is written in
+Myla. Don't edit them by hand; change the EBNF (and for highlights the
+hand-written part, `tools/grammar/highlights.scm`) and regenerate. `src/` is
+what `tree-sitter generate` makes of `grammar.js`. The other queries (`folds`,
+`indents`, `injections`) are hand-written.
 
-## Usage
+Newlines are real tokens, as in the compiler, so the grammar needs no external
+scanner. Where the compiler's parser decides with context (struct literals are
+off in `if`/`while`/`match` heads) or by scanning ahead (a lambda is a `( … )`
+followed by `=>`), the grammar declares a conflict and tree-sitter keeps both
+readings until one fails.
+
+## Regenerating
 
 ```bash
-npm install
-npm run generate   # tree-sitter generate
-npm test           # if you add corpus tests under test/
+cd editor/tree-sitter-myla && npm install   # the tree-sitter CLI, once
+cd ../.. && scripts/gen_treesitter.sh       # grammar.js, highlights.scm, src/
 ```
 
-Point your editor's tree-sitter integration at the generated parser to get
-highlighting for `*.my` files.
+## Tests
+
+`tests/burn/test_grammar.py` (run with the burn suite, or `npm test` here)
+checks that the generated files are current, that tree-sitter parses every
+Myla file of the repository without an error node, that every syntax error of
+the error corpus gives one, that the self-hosted parser accepts thousands of
+programs sampled from the grammar, and that the queries compile.

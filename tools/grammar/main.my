@@ -1,0 +1,119 @@
+// main.my: the grammar tool (MYLA-77). It reads grammar/myla.ebnf, the
+// machine-readable syntax of Myla, and
+//
+//   grammar canon <file>                   prints its rules in canonical form,
+//                                          without annotations (for a .md
+//                                          file, from its ```ebnf blocks)
+//   grammar treesitter <grammar> <highlights> <dir>
+//                                          writes <dir>/grammar.js and
+//                                          <dir>/queries/highlights.scm, the
+//                                          structural highlights followed by
+//                                          generated keyword and operator lists
+//   grammar sample <grammar> <seed> <n> [parse]
+//                                          prints n random programs, each
+//                                          after a `// sample <i>` line, or with
+//                                          `parse` checks that the self-hosted
+//                                          parser accepts each of them
+
+from std.fs import read_to_string, write_to_file
+from std.io import println, eprintln
+from std.process import args, exit
+from .ebnf import Grammar, parse_grammar, ebnf_blocks, canon_rule, ends_with
+from .treesitter import grammar_js, highlights, check_grammar
+from .sample import samples, check_samples
+
+fun read_or_exit(path: str) -> str {
+    match read_to_string(path) {
+        Ok(s) => { return s },
+        Err(e) => {
+            eprintln(format("grammar: cannot read {}", path))
+            exit(1)
+        },
+    }
+    return ""
+}
+
+fun write_or_exit(path: str, text: str) {
+    match write_to_file(path, text) {
+        Ok(n) => {},
+        Err(e) => {
+            eprintln(format("grammar: cannot write {}", path))
+            exit(1)
+        },
+    }
+}
+
+// The grammar in `path` (a .md file: its ```ebnf blocks), or exit with the
+// error.
+fun load(path: str) -> Grammar {
+    var src = read_or_exit(path)
+    if ends_with(path, ".md") { src = ebnf_blocks(src) }
+    match parse_grammar(src) {
+        Ok(g) => { return g },
+        Err(msg) => {
+            eprintln(format("{}:{}", path, msg))
+            exit(1)
+        },
+    }
+    unreachable()
+}
+
+// Load and validate the grammar; exit on errors.
+fun load_checked(path: str) -> Grammar {
+    let g = load(path)
+    let errors = check_grammar(g)
+    for msg in errors { eprintln(format("{}: {}", path, msg)) }
+    if len(errors) > 0 { exit(1) }
+    return g
+}
+
+#test("12")[12]
+#test("x")[-1]
+fun parse_count(s: str) -> int32 {
+    if len(s) == 0 { return -1 }
+    var n = 0
+    for c in chars(s) {
+        if c < '0' || c > '9' { return -1 }
+        n = n * 10 + ((c as int32) - 48)
+    }
+    return n
+}
+
+fun usage() {
+    eprintln("usage: grammar canon <file>")
+    eprintln("       grammar treesitter <grammar.ebnf> <highlights.scm> <dir>")
+    eprintln("       grammar sample <grammar.ebnf> <seed> <count> [parse]")
+    exit(2)
+}
+
+fun main() {
+    let argv = args()
+    if len(argv) < 3 { usage() }
+    let cmd = argv[1]
+    if cmd == "canon" {
+        let g = load(argv[2])
+        for r in g.rules { println(canon_rule(r)) }
+    } else if cmd == "treesitter" && len(argv) == 5 {
+        let g = load_checked(argv[2])
+        let template = read_or_exit(argv[3])
+        write_or_exit(argv[4] + "/grammar.js", grammar_js(g))
+        write_or_exit(argv[4] + "/queries/highlights.scm", highlights(g, template))
+    } else if cmd == "sample" && len(argv) >= 5 {
+        let g = load_checked(argv[2])
+        let seed = parse_count(argv[3])
+        let n = parse_count(argv[4])
+        if seed < 0 || n < 0 { usage() }
+        if len(argv) == 6 && argv[5] == "parse" {
+            if !check_samples(g, seed, n) { exit(1) }
+        } else {
+            var i = 0
+            for p in samples(g, seed, n) {
+                println(format("// sample {}", i))
+                println(p)
+                i = i + 1
+            }
+        }
+    } else {
+        usage()
+    }
+}
