@@ -1,4 +1,5 @@
 //~ type error: has no method
+//~ span: p.nope()
 // Calling a method that no `impl` defines for the receiver type is rejected.
 struct P { x: int }
 

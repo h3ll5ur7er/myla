@@ -1,4 +1,5 @@
 //~ type error: expected '(int32) -> int32'
+//~ span: (s: str) => 0
 fun apply(g: (int) -> int) -> int {
     return g(1)
 }

@@ -774,7 +774,7 @@ class Checker:
                     raise TypeCheckError(
                         "imports need the module loader: this file was type-checked "
                         "on its own (use 'myla check' or 'myla run')",
-                        decl.line, decl.column,
+                        at=decl,
                     )
                 if isinstance(decl, ast.ImplDecl):
                     self._impl_decls.append(decl)
@@ -784,22 +784,22 @@ class Checker:
                         raise TypeCheckError(
                             f"'{decl.name}' is a built-in operator trait and cannot "
                             "be redeclared",
-                            decl.line, decl.column,
+                            at=decl,
                         )
                     if any(t.name == decl.name for t in self._trait_decls):
                         raise TypeCheckError(
-                            f"duplicate trait '{decl.name}'", decl.line, decl.column
+                            f"duplicate trait '{decl.name}'", at=decl
                         )
                     self._trait_decls.append(decl)
                     continue
                 name = decl.name
                 if name in _BUILTIN_FUNCS:
                     raise TypeCheckError(
-                        f"cannot redefine builtin '{name}'", decl.line, decl.column
+                        f"cannot redefine builtin '{name}'", at=decl
                     )
                 if name in seen:
                     raise TypeCheckError(
-                        f"duplicate top-level declaration '{name}'", decl.line, decl.column
+                        f"duplicate top-level declaration '{name}'", at=decl
                     )
                 seen[name] = decl
                 if isinstance(decl, ast.StructDecl):
@@ -832,7 +832,7 @@ class Checker:
                     for f in decl.fields:
                         if f.name in fields:
                             raise TypeCheckError(
-                                f"duplicate field '{f.name}' in struct '{name}'", f.line, f.column
+                                f"duplicate field '{f.name}' in struct '{name}'", at=f
                             )
                         fields[f.name] = self._resolve(f.type)
                 finally:
@@ -848,7 +848,7 @@ class Checker:
                     for v in decl.variants:
                         if v.name in variants:
                             raise TypeCheckError(
-                                f"duplicate variant '{v.name}' in enum '{name}'", v.line, v.column
+                                f"duplicate variant '{v.name}' in enum '{name}'", at=v
                             )
                         variants[v.name] = [self._resolve(p) for p in v.payload]
                 finally:
@@ -875,14 +875,14 @@ class Checker:
             if tp in _PRIMITIVES or tp == "int":
                 raise TypeCheckError(
                     f"type parameter '{tp}' shadows a built-in type name",
-                    decl.line, decl.column,
+                    at=decl,
                 )
             # A type parameter may shadow a user type name (standard lexical
             # scoping — and the prelude's `Result<T, E>` must coexist with a user
             # type happening to be named `E`).
             if tp in seen:
                 raise TypeCheckError(
-                    f"duplicate type parameter '{tp}'", decl.line, decl.column
+                    f"duplicate type parameter '{tp}'", at=decl
                 )
             seen.add(tp)
 
@@ -912,7 +912,7 @@ class Checker:
                     if m.name in methods:
                         raise TypeCheckError(
                             f"duplicate method '{m.name}' in trait '{decl.name}'",
-                            m.line, m.column,
+                            at=m,
                         )
                     # `Self` and the trait's own type parameters are both in scope
                     # for the signatures (v0.5.5); the latter resolve to `TypeParam`s.
@@ -935,12 +935,12 @@ class Checker:
             if p == "Self":
                 raise TypeCheckError(
                     f"trait '{decl.name}' cannot use 'Self' as a type parameter",
-                    decl.line, decl.column,
+                    at=decl,
                 )
             if p in seen:
                 raise TypeCheckError(
                     f"duplicate type parameter '{p}' on trait '{decl.name}'",
-                    decl.line, decl.column,
+                    at=decl,
                 )
             seen.add(p)
 
@@ -993,14 +993,14 @@ class Checker:
             raise TypeCheckError(
                 f"impl of trait '{trait.name}' for '{key}' is missing method(s): "
                 f"{', '.join(sorted(missing))}",
-                impl.line, impl.column,
+                at=impl,
             )
         extra = set(impl_methods) - set(trait.methods)
         if extra:
             raise TypeCheckError(
                 f"impl of trait '{trait.name}' for '{key}' declares method(s) not "
                 f"in the trait: {', '.join(sorted(extra))}",
-                impl.line, impl.column,
+                at=impl,
             )
         for mname, tmsig in trait.methods.items():
             sig = self.methods[key][mname]
@@ -1009,7 +1009,7 @@ class Checker:
                     f"method '{mname}' in impl of trait '{trait.name}' for "
                     f"'{key}' has receiver '{sig.decl.receiver}' but the trait "
                     f"declares '{tmsig.receiver}'",
-                    sig.decl.line, sig.decl.column,
+                    at=sig.decl,
                 )
             exp_params = [self._subst_self(p, target, param_map)
                           for p in tmsig.params]
@@ -1021,7 +1021,7 @@ class Checker:
                     f"method '{mname}' in impl of trait '{trait.name}' for "
                     f"'{key}' does not match the trait signature (expected "
                     f"'{exp}')",
-                    sig.decl.line, sig.decl.column,
+                    at=sig.decl,
                 )
 
     def _validate_bounds(self) -> None:
@@ -1033,13 +1033,13 @@ class Checker:
                     if tp not in sig.type_params:
                         raise TypeCheckError(
                             f"bound on unknown type parameter '{tp}'",
-                            sig.decl.line, sig.decl.column,
+                            at=sig.decl,
                         )
                     for tr in traits:
                         if tr not in self.traits:
                             raise TypeCheckError(
                                 f"unknown trait '{tr}' in bound '{tp}: {tr}'",
-                                sig.decl.line, sig.decl.column,
+                                at=sig.decl,
                             )
 
     def _check_call_bounds(self, sig: FuncSig, subst: dict[str, Type],
@@ -1061,7 +1061,7 @@ class Checker:
                     raise TypeCheckError(
                         f"type '{type_name(concrete)}' does not satisfy the bound "
                         f"'{tp}: {tr}' required by '{sig.decl.name}'",
-                        expr.line, expr.column,
+                        at=expr,
                     )
 
     def _type_implements(self, t: Type, trait: str) -> bool:
@@ -1089,13 +1089,13 @@ class Checker:
                     if not isinstance(decl, (ast.StructDecl, ast.EnumDecl)):
                         raise TypeCheckError(
                             "'#derive' may only be applied to a struct or enum",
-                            attr.line, attr.column,
+                            at=attr,
                         )
                     if decl.type_params:
                         raise TypeCheckError(
                             "deriving on generic types is not supported yet (v0.4.4 "
                             "derives Eq for concrete structs/enums)",
-                            attr.line, attr.column,
+                            at=attr,
                         )
                     self._validate_derive_attr(attr)
                     if decl not in targets:
@@ -1115,7 +1115,7 @@ class Checker:
                     raise TypeCheckError(
                         f"type '{decl.name}' both derives Eq and has an explicit "
                         f"'impl Eq for {decl.name}'",
-                        decl.line, decl.column,
+                        at=decl,
                     )
                 self._check_derivable_eq(decl, eq_types)
                 impl = self._make_eq_impl(decl)
@@ -1126,23 +1126,23 @@ class Checker:
         if attr.outputs is not None:
             raise TypeCheckError(
                 "'#derive' takes trait names in parentheses, e.g. #derive(Eq)",
-                attr.line, attr.column,
+                at=attr,
             )
         if not attr.args:
             raise TypeCheckError(
                 "'#derive' needs at least one trait, e.g. #derive(Eq)",
-                attr.line, attr.column,
+                at=attr,
             )
         for a in attr.args:
             if not isinstance(a, ast.Name):
                 raise TypeCheckError(
-                    "'#derive' arguments must be trait names", a.line, a.column
+                    "'#derive' arguments must be trait names", at=a
                 )
             if a.ident != "Eq":
                 raise TypeCheckError(
                     f"cannot derive '{a.ident}'; only 'Eq' is derivable in "
                     "v0.4.4 (Ord is the planned next addition)",
-                    a.line, a.column,
+                    at=a,
                 )
 
     def _check_derivable_eq(self, decl, eq_types: set[str]) -> None:
@@ -1161,7 +1161,7 @@ class Checker:
                         f"cannot derive Eq for struct '{decl.name}': field "
                         f"'{fname}' has type '{type_name(ftype)}', which is "
                         "not Eq",
-                        decl.line, decl.column,
+                        at=decl,
                     )
         else:
             for vname, payload in self.enums[decl.name].items():
@@ -1171,7 +1171,7 @@ class Checker:
                             f"cannot derive Eq for enum '{decl.name}': payload "
                             f"#{i} of variant '{vname}' has type "
                             f"'{type_name(pt)}', which is not Eq",
-                            decl.line, decl.column,
+                            at=decl,
                         )
 
     def _make_eq_impl(self, decl) -> ast.ImplDecl:
@@ -1278,13 +1278,13 @@ class Checker:
                                 f"a generic impl must apply to "
                                 f"'{key}<{', '.join(impl.type_params)}>' with its type "
                                 "parameters in order",
-                                impl.line, impl.column,
+                                at=impl,
                             )
                     elif target.args:
                         raise TypeCheckError(
                             "cannot 'impl' on a concrete generic instantiation; write "
                             "'impl<T> " + key + "<T> { ... }' to cover every instance",
-                            impl.line, impl.column,
+                            at=impl,
                         )
                 elif key is not None:
                     # A built-in receiver type (no orphan rule, D45). v0.4.1c covers
@@ -1293,21 +1293,21 @@ class Checker:
                         raise TypeCheckError(
                             "generic impls on built-in types are not supported yet "
                             "(v0.4.1 covers concrete built-in receivers)",
-                            impl.line, impl.column,
+                            at=impl,
                         )
                     for m in impl.methods:
                         if m.receiver == "var self":
                             raise TypeCheckError(
                                 "'var self' methods on built-in types are not "
                                 "supported yet; use a read-only 'self' receiver",
-                                m.line, m.column,
+                                at=m,
                             )
                 else:
                     raise TypeCheckError(
                         f"cannot 'impl' on type '{type_name(target)}'; v0.4.1 supports "
                         "structs, enums, and concrete scalar / str / StringBuilder "
                         "receivers",
-                        impl.line, impl.column,
+                        at=impl,
                     )
                 trait = None
                 param_map: dict | None = None
@@ -1317,7 +1317,7 @@ class Checker:
                         raise TypeCheckError(
                             f"unknown trait '{impl.trait_name}' in "
                             f"'impl {impl.trait_name} for {key}'",
-                            impl.line, impl.column,
+                            at=impl,
                         )
                     # Match the trait's arity and bind its type parameters to this
                     # impl's arguments (v0.5.5, D55). Coherence (below) ignores the
@@ -1330,7 +1330,7 @@ class Checker:
                             f"trait '{impl.trait_name}' expects "
                             f"{len(trait.type_params)} type argument(s), got "
                             f"{len(trait_args)} (use 'impl {expected} for {key}')",
-                            impl.line, impl.column,
+                            at=impl,
                         )
                     if trait.type_params:
                         param_map = dict(zip(trait.type_params, trait_args))
@@ -1339,7 +1339,7 @@ class Checker:
                         raise TypeCheckError(
                             f"duplicate impl of trait '{impl.trait_name}' for type "
                             f"'{key}' (at most one user impl per trait/type pair)",
-                            impl.line, impl.column,
+                            at=impl,
                         )
                     self._user_trait_impls.add(pair)
                 table = self.methods.setdefault(key, {})
@@ -1348,12 +1348,12 @@ class Checker:
                     if m.name in table:
                         raise TypeCheckError(
                             f"duplicate method '{m.name}' for type '{key}'",
-                            m.line, m.column,
+                            at=m,
                         )
                     if m.name in field_names:
                         raise TypeCheckError(
                             f"method '{m.name}' collides with a field of '{key}'",
-                            m.line, m.column,
+                            at=m,
                         )
                     self._register_method(impl, key, m)
                 if trait is not None:
@@ -1371,6 +1371,7 @@ class Checker:
             type_params=combined_tps, type_param_bounds=combined_bounds,
             receiver=m.receiver,
         ).at(m.line, m.column)
+        fdecl.span = m.span
         fdecl.source_path = getattr(m, "source_path", None)
         fdecl.tag_eq = getattr(m, "tag_eq", False)
         self._check_type_params(fdecl)
@@ -1411,7 +1412,7 @@ class Checker:
                 raise TypeCheckError(
                     f"map key type must be a primitive (integer, char, bool, or "
                     f"str), found '{type_name(kt)}'",
-                    ref.line, ref.column,
+                    at=ref,
                 )
             return MapType(kt, vt)
         if isinstance(ref, ast.FnTypeRef):
@@ -1424,18 +1425,18 @@ class Checker:
             if not self._allow_self:
                 raise TypeCheckError(
                     "'Self' is only valid inside a trait declaration",
-                    ref.line, ref.column,
+                    at=ref,
                 )
             if args:
                 raise TypeCheckError(
-                    "'Self' cannot take type arguments", ref.line, ref.column
+                    "'Self' cannot take type arguments", at=ref
                 )
             return SELF
         if name in self._type_params:
             if args:
                 raise TypeCheckError(
                     f"type parameter '{name}' cannot take type arguments",
-                    ref.line, ref.column,
+                    at=ref,
                 )
             return TypeParam(name)
         # generic struct/enum instantiation: `Box<int>`, `Result<int, str>`
@@ -1446,7 +1447,7 @@ class Checker:
                     raise TypeCheckError(
                         f"type '{name}' expects {len(params)} type argument(s), "
                         f"got {len(args)}",
-                        ref.line, ref.column,
+                        at=ref,
                     )
                 resolved_args = tuple(self._resolve(a, visiting) for a in args)
                 if name in self.struct_decls:
@@ -1456,7 +1457,7 @@ class Checker:
         if args:
             raise TypeCheckError(
                 f"type '{name}' is not generic (it takes no type arguments)",
-                ref.line, ref.column,
+                at=ref,
             )
         if name in _PRIMITIVES:
             return _PRIMITIVES[name]
@@ -1464,7 +1465,7 @@ class Checker:
             if name in self._alias_cache:
                 return self._alias_cache[name]
             if name in visiting:
-                raise TypeCheckError(f"type alias cycle involving '{name}'", ref.line, ref.column)
+                raise TypeCheckError(f"type alias cycle involving '{name}'", at=ref)
             with in_file(self._alias_paths.get(name)):
                 resolved = self._resolve(self._aliases_raw[name], visiting | {name})
             self._alias_cache[name] = resolved
@@ -1473,7 +1474,7 @@ class Checker:
             return INT
         if name == "float":
             return FLOAT
-        raise TypeCheckError(f"unknown type '{name}'", ref.line, ref.column)
+        raise TypeCheckError(f"unknown type '{name}'", at=ref)
 
     def _resolve_recursion(self) -> None:
         """Classify by-value type cycles (e.g. a recursive `enum Expr`).
@@ -1549,7 +1550,7 @@ class Checker:
                         f"recursive {kind} '{name}' would have infinite size; "
                         "only enums can be recursive (they are boxed) — wrap the "
                         "cycle in an enum to introduce indirection",
-                        decl.line, decl.column,
+                        at=decl,
                     )
 
     # -- attributes & entry point -------------------------------------------
@@ -1569,7 +1570,7 @@ class Checker:
         decl = self._const_decls[name]
         if name in self._const_folding:
             raise TypeCheckError(
-                f"const '{name}' is defined in terms of itself", decl.line, decl.column
+                f"const '{name}' is defined in terms of itself", at=decl
             )
         self._const_folding.add(name)
         try:
@@ -1577,14 +1578,14 @@ class Checker:
                 declared = self._resolve(decl.declared_type)
                 if isinstance(declared, TypeParam):
                     raise TypeCheckError(
-                        "a const type must be concrete", decl.line, decl.column
+                        "a const type must be concrete", at=decl
                     )
                 vt = self._expect_value(decl.value, _Scope(), declared)
                 if vt != declared:
                     raise TypeCheckError(
                         f"const '{name}' is declared '{type_name(declared)}' but its "
                         f"value has type '{type_name(vt)}'",
-                        decl.value.line, decl.value.column,
+                        at=decl.value,
                     )
                 value = self._fold_const_expr(decl.value)
         finally:
@@ -1611,7 +1612,7 @@ class Checker:
             raise TypeCheckError(
                 f"'{expr.ident}' is not a constant and cannot appear in a const "
                 "initializer",
-                expr.line, expr.column,
+                at=expr,
             )
         if isinstance(expr, ast.Unary):
             v = self._fold_const_expr(expr.operand)
@@ -1631,7 +1632,7 @@ class Checker:
         raise TypeCheckError(
             "const initializer must be a constant expression (literals, other "
             "consts, and arithmetic/bitwise/comparison/cast operations over them)",
-            expr.line, expr.column,
+            at=expr,
         )
 
     def _fold_const_binary(self, expr: ast.Binary):
@@ -1665,7 +1666,7 @@ class Checker:
         if op in ("/", "%"):
             if right == 0:
                 raise TypeCheckError(
-                    f"const division by zero", expr.line, expr.column
+                    f"const division by zero", at=expr
                 )
             q = _const_idiv(left, right)
             return _wrap_int(q if op == "/" else left - q * right, t)
@@ -1693,7 +1694,7 @@ class Checker:
         if op == "!=":
             return left != right
         raise TypeCheckError(  # pragma: no cover - defensive
-            f"unsupported const operator '{op}'", expr.line, expr.column
+            f"unsupported const operator '{op}'", at=expr
         )
 
     def _check_attributes_and_entry(self) -> None:
@@ -1707,18 +1708,18 @@ class Checker:
                         continue
                     if attr.name not in ("main", "test"):
                         raise TypeCheckError(
-                            f"unknown attribute '#{attr.name}'", attr.line, attr.column
+                            f"unknown attribute '#{attr.name}'", at=attr
                         )
                     if not isinstance(decl, ast.FunDecl):
                         raise TypeCheckError(
                             f"attribute '#{attr.name}' may only be applied to functions",
-                            attr.line, attr.column,
+                            at=attr,
                         )
                     if decl.type_params:
                         raise TypeCheckError(
                             f"attribute '#{attr.name}' cannot be applied to a generic "
                             "function (it has no single concrete instantiation)",
-                            attr.line, attr.column,
+                            at=attr,
                         )
                     if attr.name == "main":
                         self._check_main_attr(decl, attr)
@@ -1731,46 +1732,46 @@ class Checker:
             with in_file(_source_path(named_main.decl)):
                 raise TypeCheckError(
                     "both a '#main' function and a function named 'main' are present",
-                    named_main.decl.line, named_main.decl.column,
+                    at=named_main.decl,
                 )
         if len(main_decls) > 1:
             with in_file(_source_path(main_decls[1])):
                 raise TypeCheckError(
-                    "more than one '#main' entry point", main_decls[1].line, main_decls[1].column
+                    "more than one '#main' entry point", at=main_decls[1]
                 )
         entry = main_decls[0] if main_decls else (named_main.decl if named_main else None)
         if entry is not None and entry.params:
             with in_file(_source_path(entry)):
                 raise TypeCheckError(
-                    "entry point must take no parameters in v0.0", entry.line, entry.column
+                    "entry point must take no parameters in v0.0", at=entry
                 )
         self.entry = entry
 
     def _check_main_attr(self, decl: ast.FunDecl, attr: ast.Attribute) -> None:
         if attr.args or attr.outputs is not None:
-            raise TypeCheckError("'#main' takes no arguments", attr.line, attr.column)
+            raise TypeCheckError("'#main' takes no arguments", at=attr)
 
     def _check_test_attr(self, decl: ast.FunDecl, attr: ast.Attribute) -> None:
         sig = self.functions[decl.name]
         if attr.outputs is None:
             raise TypeCheckError(
                 "'#test' requires an expected result, e.g. #test(args)[expected]",
-                attr.line, attr.column,
+                at=attr,
             )
         if sig.ret is None:
             raise TypeCheckError(
-                "'#test' requires the function to return a value", attr.line, attr.column
+                "'#test' requires the function to return a value", at=attr
             )
         if len(attr.args) != len(sig.params):
             raise TypeCheckError(
                 f"'#test' expects {len(sig.params)} argument(s), got {len(attr.args)}",
-                attr.line, attr.column,
+                at=attr,
             )
         for arg, ptype in zip(attr.args, sig.params):
             self._expect_value(arg, _Scope(), ptype)
         if len(attr.outputs) != 1:
             raise TypeCheckError(
-                "'#test' expects exactly one expected value in [...]", attr.line, attr.column
+                "'#test' expects exactly one expected value in [...]", at=attr
             )
         self._expect_value(attr.outputs[0], _Scope(), sig.ret)
 
@@ -1796,7 +1797,7 @@ class Checker:
                 raise TypeCheckError(
                     f"function '{decl.name}' may finish without returning a "
                     f"'{type_name(sig.ret)}'",
-                    decl.line, decl.column,
+                    at=decl,
                 )
         finally:
             self._type_params = frozenset()
@@ -1816,11 +1817,11 @@ class Checker:
                 raise TypeCheckError(
                     f"cannot assign value of type '{type_name(value_type)}' to "
                     f"binding of type '{type_name(declared)}'",
-                    stmt.line, stmt.column,
+                    at=stmt,
                 )
             if not scope.define(stmt.name, _Binding(final, mutable=(stmt.kind == "var"))):
                 raise TypeCheckError(
-                    f"'{stmt.name}' is already declared in this scope", stmt.line, stmt.column
+                    f"'{stmt.name}' is already declared in this scope", at=stmt
                 )
 
         elif isinstance(stmt, ast.DestructDecl):
@@ -1830,12 +1831,12 @@ class Checker:
                 raise TypeCheckError(
                     f"cannot assign value of type '{type_name(value_type)}' to "
                     f"binding of type '{type_name(declared)}'",
-                    stmt.line, stmt.column,
+                    at=stmt,
                 )
             if not isinstance(value_type, TupleType):
                 raise TypeCheckError(
                     f"cannot destructure non-tuple value of type '{type_name(value_type)}'",
-                    stmt.line, stmt.column,
+                    at=stmt,
                 )
             self._bind_pattern(stmt.binding, value_type, scope,
                                mutable=(stmt.kind == "var"))
@@ -1844,19 +1845,19 @@ class Checker:
             if isinstance(stmt.target, ast.Name) and stmt.target.ident == "self":
                 raise TypeCheckError(
                     "cannot reassign 'self'; mutate its fields or elements instead",
-                    stmt.line, stmt.column,
+                    at=stmt,
                 )
             target_type, mutable = self._check_lvalue(stmt.target, scope)
             if not mutable:
                 raise TypeCheckError(
                     "cannot assign to an immutable binding (declare it with 'var')",
-                    stmt.line, stmt.column,
+                    at=stmt,
                 )
             value_type = self._expect_value(stmt.value, scope, target_type)
             if value_type != target_type:
                 raise TypeCheckError(
                     f"cannot assign '{type_name(value_type)}' to '{type_name(target_type)}'",
-                    stmt.line, stmt.column,
+                    at=stmt,
                 )
 
         elif isinstance(stmt, ast.If):
@@ -1884,14 +1885,14 @@ class Checker:
                     raise TypeCheckError(
                         f"`for ... in` requires a list or map, found "
                         f"'{type_name(it)}'",
-                        stmt.iterable.line, stmt.iterable.column,
+                        at=stmt.iterable,
                     )
             else:  # `for v in start..end` — integer range
                 start_t = self._expect_value(stmt.start, scope, None)
                 end_t = self._expect_value(stmt.end, scope, None)
                 loop_t = self._unify(stmt.start, start_t, stmt.end, end_t)
                 if not isinstance(loop_t, IntType):
-                    raise TypeCheckError("for-range bounds must be integers", stmt.line, stmt.column)
+                    raise TypeCheckError("for-range bounds must be integers", at=stmt)
             body_scope = _Scope(scope)
             body_scope.define(stmt.var_name, _Binding(loop_t, mutable=False))
             self._loop_depth += 1
@@ -1902,7 +1903,7 @@ class Checker:
             if self._loop_depth == 0:
                 kw = "break" if isinstance(stmt, ast.Break) else "continue"
                 raise TypeCheckError(
-                    f"'{kw}' outside of a loop", stmt.line, stmt.column
+                    f"'{kw}' outside of a loop", at=stmt
                 )
 
         elif isinstance(stmt, ast.Return):
@@ -1914,20 +1915,20 @@ class Checker:
                     else:
                         raise TypeCheckError(
                             "cannot return a value from a function with no return type",
-                            stmt.line, stmt.column,
+                            at=stmt,
                         )
             else:
                 if stmt.value is None:
                     raise TypeCheckError(
                         f"expected a return value of type '{type_name(ret)}'",
-                        stmt.line, stmt.column,
+                        at=stmt,
                     )
                 vt = self._expect_value(stmt.value, scope, ret)
                 if vt != ret:
                     raise TypeCheckError(
                         f"return type mismatch: expected '{type_name(ret)}', "
                         f"found '{type_name(vt)}'",
-                        stmt.line, stmt.column,
+                        at=stmt,
                     )
 
         elif isinstance(stmt, ast.ExprStmt):
@@ -1937,7 +1938,7 @@ class Checker:
 
         else:  # pragma: no cover - defensive
             raise TypeCheckError(f"unsupported statement {type(stmt).__name__}",
-                                 stmt.line, stmt.column)
+                                 at=stmt)
 
     def _bind_pattern(self, binding, t: Type, scope: _Scope, mutable: bool) -> None:
         if isinstance(binding, ast.BindWildcard):
@@ -1947,46 +1948,46 @@ class Checker:
             if not scope.define(binding.name, _Binding(t, mutable)):
                 raise TypeCheckError(
                     f"'{binding.name}' is already declared in this scope",
-                    binding.line, binding.column,
+                    at=binding,
                 )
             return
         if isinstance(binding, ast.BindTuple):
             if not isinstance(t, TupleType):
                 raise TypeCheckError(
                     f"cannot destructure non-tuple value of type '{type_name(t)}'",
-                    binding.line, binding.column,
+                    at=binding,
                 )
             if len(binding.elems) != len(t.elems):
                 raise TypeCheckError(
                     f"tuple pattern expects {len(binding.elems)} element(s), "
                     f"but value has {len(t.elems)}",
-                    binding.line, binding.column,
+                    at=binding,
                 )
             for elem, et in zip(binding.elems, t.elems):
                 self._bind_pattern(elem, et, scope, mutable)
             return
         raise TypeCheckError(  # pragma: no cover - defensive
-            "invalid destructuring binding", binding.line, binding.column
+            "invalid destructuring binding", at=binding
         )
 
     def _check_lvalue(self, expr: ast.Expr, scope: _Scope) -> tuple[Type, bool]:
         if isinstance(expr, ast.Name):
             binding = scope.lookup(expr.ident)
             if binding is None:
-                raise TypeCheckError(f"unknown name '{expr.ident}'", expr.line, expr.column)
+                raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr)
             expr.resolved_type = binding.type
             return binding.type, binding.mutable
         if isinstance(expr, ast.FieldAccess):
             base_type, mutable = self._check_lvalue(expr.target, scope)
             if not isinstance(base_type, StructType):
                 raise TypeCheckError(
-                    f"type '{type_name(base_type)}' has no fields", expr.line, expr.column
+                    f"type '{type_name(base_type)}' has no fields", at=expr
                 )
             fields = self._struct_field_types(base_type)
             if expr.field_name not in fields:
                 raise TypeCheckError(
                     f"struct '{base_type.name}' has no field '{expr.field_name}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             ft = fields[expr.field_name]
             expr.resolved_type = ft
@@ -2000,23 +2001,23 @@ class Checker:
             if isinstance(base_type, StrType):
                 raise TypeCheckError(
                     "strings are immutable; `s[i]` cannot be assigned to",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             if not isinstance(base_type, ListType):
                 raise TypeCheckError(
                     f"type '{type_name(base_type)}' is not a list and cannot be "
                     f"indexed with `[...]`",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             it = self._expect_value(expr.index, scope, INT)
             if not isinstance(it, IntType):
                 raise TypeCheckError(
                     f"list index must be an integer, found '{type_name(it)}'",
-                    expr.index.line, expr.index.column,
+                    at=expr.index,
                 )
             expr.resolved_type = base_type.elem
             return base_type.elem, mutable
-        raise TypeCheckError("invalid assignment target", expr.line, expr.column)
+        raise TypeCheckError("invalid assignment target", at=expr)
 
     # -- expression typing ---------------------------------------------------
 
@@ -2025,13 +2026,13 @@ class Checker:
         if t != want:
             raise TypeCheckError(
                 f"{ctx} must be '{type_name(want)}', found '{type_name(t)}'",
-                expr.line, expr.column,
+                at=expr,
             )
 
     def _expect_value(self, expr: ast.Expr, scope: _Scope, expected: Type | None) -> Type:
         t = self._infer(expr, scope, expected)
         if t is None:
-            raise TypeCheckError("expression does not produce a value", expr.line, expr.column)
+            raise TypeCheckError("expression does not produce a value", at=expr)
         return t
 
     def _infer(self, expr: ast.Expr, scope: _Scope, expected: Type | None) -> Type | None:
@@ -2078,10 +2079,10 @@ class Checker:
         if isinstance(expr, ast.Hole):
             raise TypeCheckError(
                 "'_' placeholder is only valid as a call argument",
-                expr.line, expr.column,
+                at=expr,
             )
         raise TypeCheckError(  # pragma: no cover - defensive
-            f"unsupported expression {type(expr).__name__}", expr.line, expr.column
+            f"unsupported expression {type(expr).__name__}", at=expr
         )
 
     def _infer_lambda(self, expr: ast.Lambda, scope: _Scope,
@@ -2105,7 +2106,7 @@ class Checker:
                 raise TypeCheckError(
                     f"cannot infer the type of lambda parameter '{p.name}'; "
                     f"annotate it (e.g. '{p.name}: int')",
-                    p.line, p.column,
+                    at=p,
                 )
             ptypes.append(pt)
 
@@ -2113,7 +2114,7 @@ class Checker:
         for p, pt in zip(expr.params, ptypes):
             if not lam_scope.define(p.name, _Binding(pt, mutable=False)):
                 raise TypeCheckError(
-                    f"duplicate lambda parameter '{p.name}'", p.line, p.column
+                    f"duplicate lambda parameter '{p.name}'", at=p
                 )
         want_ret = exp.ret if exp is not None else None
         ctx = _LambdaCtx(lam_scope)
@@ -2128,7 +2129,7 @@ class Checker:
                         raise TypeCheckError(
                             f"lambda may finish without returning a "
                             f"'{type_name(want_ret)}'",
-                            expr.line, expr.column,
+                            at=expr,
                         )
                     ret_t = want_ret
                 else:
@@ -2147,7 +2148,7 @@ class Checker:
                             raise TypeCheckError(
                                 f"inconsistent lambda return types: '{type_name(ret_t)}' "
                                 f"vs '{type_name(vt)}'",
-                                stmt.line, stmt.column,
+                                at=stmt,
                             )
             else:
                 # a `?` in the body returns from the lambda (MYLA-72)
@@ -2186,12 +2187,12 @@ class Checker:
         if not isinstance(base, TupleType):
             raise TypeCheckError(
                 f"type '{type_name(base)}' is not a tuple and cannot be indexed with '.{expr.index}'",
-                expr.line, expr.column,
+                at=expr,
             )
         if not (0 <= expr.index < len(base.elems)):
             raise TypeCheckError(
                 f"tuple index {expr.index} out of range for '{type_name(base)}'",
-                expr.line, expr.column,
+                at=expr,
             )
         ft = base.elems[expr.index]
         expr.resolved_type = ft
@@ -2205,7 +2206,7 @@ class Checker:
                 raise TypeCheckError(
                     "cannot infer the element type of an empty list `[]`; "
                     "annotate it (e.g. `: [int]`)",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             t = ListType(exp_elem)
             expr.resolved_type = t
@@ -2232,7 +2233,7 @@ class Checker:
             if not isinstance(it, IntType):
                 raise TypeCheckError(
                     f"string index must be an integer, found '{type_name(it)}'",
-                    expr.index.line, expr.index.column,
+                    at=expr.index,
                 )
             expr.resolved_type = BYTE      # `s[i]` is the byte at index i
             return BYTE
@@ -2240,13 +2241,13 @@ class Checker:
             raise TypeCheckError(
                 f"type '{type_name(base)}' is not a list and cannot be indexed "
                 f"with `[...]`",
-                expr.line, expr.column,
+                at=expr,
             )
         it = self._expect_value(expr.index, scope, INT)
         if not isinstance(it, IntType):
             raise TypeCheckError(
                 f"list index must be an integer, found '{type_name(it)}'",
-                expr.index.line, expr.index.column,
+                at=expr.index,
             )
         expr.resolved_type = base.elem
         return base.elem
@@ -2261,7 +2262,7 @@ class Checker:
                 raise TypeCheckError(
                     "cannot infer the key/value types of an empty map `[:]`; "
                     "annotate it (e.g. `: [str: int]`)",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = exp
             return exp
@@ -2271,7 +2272,7 @@ class Checker:
             raise TypeCheckError(
                 f"map key type must be a primitive (integer, char, bool, or str), "
                 f"found '{type_name(key_t)}'",
-                k0.line, k0.column,
+                at=k0,
             )
         val_t = self._expect_value(v0, scope, exp_v)
         for k, v in expr.entries[1:]:
@@ -2312,12 +2313,12 @@ class Checker:
             if vtype is None:
                 raise TypeCheckError(
                     "this match is used as a value, so every arm must produce one",
-                    expr.line, expr.column,
+                    at=expr,
                 )
         if not value_bodies:
             raise TypeCheckError(
                 "this match is used as a value, but every arm diverges",
-                expr.line, expr.column,
+                at=expr,
             )
         result = self._unify_match_result(value_bodies)
         expr.resolved_type = result
@@ -2333,7 +2334,7 @@ class Checker:
                 "'?' in a lambda needs the lambda's result type: pass the lambda "
                 "where a function type is expected, or annotate the variable "
                 "(e.g. 'let f: (int) -> Option<int> = …')",
-                expr.line, expr.column,
+                at=expr,
             )
         if isinstance(ot, EnumType) and ot.name == "Result" and len(ot.args) == 2:
             ok_t, err_t = ot.args
@@ -2341,14 +2342,14 @@ class Checker:
                     and len(ret.args) == 2):
                 raise TypeCheckError(
                     f"'?' on a Result requires the enclosing {where} to return a "
-                    "Result", expr.line, expr.column,
+                    "Result", at=expr,
                 )
             if ret.args[1] != err_t:
                 raise TypeCheckError(
                     f"'?' propagates an error of type '{type_name(err_t)}', but the "
                     f"{where} returns 'Result<_, {type_name(ret.args[1])}>' "
                     "(there is no error conversion in v0.2)",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             result_t, succ, fail, fail_payload = ok_t, "Ok", "Err", True
         elif isinstance(ot, EnumType) and ot.name == "Option" and len(ot.args) == 1:
@@ -2356,13 +2357,13 @@ class Checker:
                     and len(ret.args) == 1):
                 raise TypeCheckError(
                     f"'?' on an Option requires the enclosing {where} to return an "
-                    "Option", expr.line, expr.column,
+                    "Option", at=expr,
                 )
             result_t, succ, fail, fail_payload = ot.args[0], "Some", "None", False
         else:
             raise TypeCheckError(
                 f"'?' can only be applied to an Option or Result, not "
-                f"'{type_name(ot)}'", expr.line, expr.column,
+                f"'{type_name(ot)}'", at=expr,
             )
         expr.desugared = self._build_try_match(expr, succ, fail, fail_payload)
         self._infer_match(expr.desugared, scope, result_t)
@@ -2447,7 +2448,7 @@ class Checker:
                         raise TypeCheckError(
                             f"match arms have incompatible types '{type_name(target)}' "
                             f"and '{type_name(t)}'",
-                            n.line, n.column,
+                            at=n,
                         )
             return target
         for t, n in bodies:
@@ -2455,7 +2456,7 @@ class Checker:
                 raise TypeCheckError(
                     f"match arms have incompatible types '{type_name(first)}' "
                     f"and '{type_name(t)}'",
-                    n.line, n.column,
+                    at=n,
                 )
         return first  # pragma: no cover
 
@@ -2473,7 +2474,7 @@ class Checker:
                     raise TypeCheckError(
                         f"variant '{t.name}.{pat.name}' carries a payload; "
                         f"write '{pat.name}(...)' to match it",
-                        pat.line, pat.column,
+                        at=pat,
                     )
                 pat.as_variant = (t.name, pat.name)
                 return
@@ -2481,7 +2482,7 @@ class Checker:
             if not scope.define(pat.name, _Binding(t, mutable=False)):
                 raise TypeCheckError(
                     f"'{pat.name}' is bound more than once in this pattern",
-                    pat.line, pat.column,
+                    at=pat,
                 )
             return
         if isinstance(pat, ast.PatLiteral):
@@ -2490,13 +2491,13 @@ class Checker:
             if not isinstance(t, (IntType, CharType, BoolType, StrType)):
                 raise TypeCheckError(
                     f"cannot match a literal against '{type_name(t)}'",
-                    pat.line, pat.column,
+                    at=pat,
                 )
             if lt != t:
                 raise TypeCheckError(
                     f"literal pattern of type '{type_name(lt)}' cannot match "
                     f"value of type '{type_name(t)}'",
-                    pat.line, pat.column,
+                    at=pat,
                 )
             value = _const_int(pat.literal)
             if isinstance(t, IntType) and value is not None and not _in_range(value, t):
@@ -2504,7 +2505,7 @@ class Checker:
                 # on `int8` could never match (MYLA-7).
                 raise TypeCheckError(
                     f"integer literal {value} does not fit in '{type_name(t)}'",
-                    pat.line, pat.column,
+                    at=pat,
                 )
             return
         if isinstance(pat, ast.PatEnum):
@@ -2514,13 +2515,13 @@ class Checker:
             if not isinstance(t, TupleType):
                 raise TypeCheckError(
                     f"tuple pattern cannot match value of type '{type_name(t)}'",
-                    pat.line, pat.column,
+                    at=pat,
                 )
             if len(pat.elems) != len(t.elems):
                 raise TypeCheckError(
                     f"tuple pattern expects {len(t.elems)} element(s), "
                     f"got {len(pat.elems)}",
-                    pat.line, pat.column,
+                    at=pat,
                 )
             for sub, et in zip(pat.elems, t.elems):
                 self._check_pattern(sub, et, scope)
@@ -2532,25 +2533,25 @@ class Checker:
             self._check_or_pattern(pat, t, scope)
             return
         raise TypeCheckError(  # pragma: no cover - defensive
-            "unsupported pattern", pat.line, pat.column
+            "unsupported pattern", at=pat
         )
 
     def _check_enum_pattern(self, pat: ast.PatEnum, t: Type, scope: _Scope) -> None:
         if not isinstance(t, EnumType):
             raise TypeCheckError(
                 f"enum pattern cannot match value of type '{type_name(t)}'",
-                pat.line, pat.column,
+                at=pat,
             )
         if pat.enum_name is not None and pat.enum_name != t.name:
             raise TypeCheckError(
                 f"pattern names enum '{pat.enum_name}' but the value is '{t.name}'",
-                pat.line, pat.column,
+                at=pat,
             )
         variants = self._enum_variant_types(t)
         if pat.variant not in variants:
             raise TypeCheckError(
                 f"enum '{t.name}' has no variant '{pat.variant}'",
-                pat.line, pat.column,
+                at=pat,
             )
         payload = variants[pat.variant]
         if pat.has_payload_syntax or pat.elems:
@@ -2558,7 +2559,7 @@ class Checker:
                 raise TypeCheckError(
                     f"variant '{t.name}.{pat.variant}' has {len(payload)} "
                     f"field(s), but the pattern binds {len(pat.elems)}",
-                    pat.line, pat.column,
+                    at=pat,
                 )
             for sub, ft in zip(pat.elems, payload):
                 self._check_pattern(sub, ft, scope)
@@ -2566,7 +2567,7 @@ class Checker:
             raise TypeCheckError(
                 f"variant '{t.name}.{pat.variant}' carries a payload; "
                 f"write '{pat.variant}(...)' to match it",
-                pat.line, pat.column,
+                at=pat,
             )
         pat.resolved_enum = t.name
 
@@ -2574,12 +2575,12 @@ class Checker:
         if not isinstance(t, StructType):
             raise TypeCheckError(
                 f"struct pattern cannot match value of type '{type_name(t)}'",
-                pat.line, pat.column,
+                at=pat,
             )
         if pat.type_name != t.name:
             raise TypeCheckError(
                 f"pattern names struct '{pat.type_name}' but the value is '{t.name}'",
-                pat.line, pat.column,
+                at=pat,
             )
         fields = self._struct_field_types(t)
         seen: set[str] = set()
@@ -2587,13 +2588,13 @@ class Checker:
             if fp.name in seen:
                 raise TypeCheckError(
                     f"field '{fp.name}' bound more than once in struct pattern",
-                    fp.line, fp.column,
+                    at=fp,
                 )
             seen.add(fp.name)
             if fp.name not in fields:
                 raise TypeCheckError(
                     f"struct '{t.name}' has no field '{fp.name}'",
-                    fp.line, fp.column,
+                    at=fp,
                 )
             self._check_pattern(fp.pattern, fields[fp.name], scope)
 
@@ -2609,13 +2610,13 @@ class Checker:
                 raise TypeCheckError(
                     "all alternatives of an or-pattern must bind the same names "
                     "with the same types",
-                    pat.line, pat.column,
+                    at=pat,
                 )
         for n, ty in base.items():
             if not scope.define(n, _Binding(ty, mutable=False)):
                 raise TypeCheckError(
                     f"'{n}' is bound more than once in this pattern",
-                    pat.line, pat.column,
+                    at=pat,
                 )
 
     # -- exhaustiveness & redundancy -----------------------------------------
@@ -2641,17 +2642,17 @@ class Checker:
             raise TypeCheckError(
                 f"non-exhaustive match on '{st.name}': missing variant(s) "
                 f"{', '.join(missing)} (add them or a '_' arm)",
-                expr.line, expr.column,
+                at=expr,
             )
         if isinstance(st, BoolType):
             raise TypeCheckError(
                 "non-exhaustive match on 'bool': cover both true and false "
                 "(or add a '_' arm)",
-                expr.line, expr.column,
+                at=expr,
             )
         raise TypeCheckError(
             f"non-exhaustive match on '{type_name(st)}': add a '_' arm",
-            expr.line, expr.column,
+            at=expr,
         )
 
     def _check_redundant(self, expr: ast.Match, st: Type) -> None:
@@ -2663,19 +2664,19 @@ class Checker:
                 raise TypeCheckError(
                     "unreachable match arm (a previous arm already matches "
                     "everything)",
-                    arm.line, arm.column,
+                    at=arm,
                 )
             row = [self._norm_pat(arm.pattern, st)]
             vs = self._covered_variants(arm.pattern, st) if isinstance(st, EnumType) else set()
             if arm.guard is None and vs and vs <= covered:
                 raise TypeCheckError(
                     "unreachable match arm (its variant(s) are already covered)",
-                    arm.line, arm.column,
+                    at=arm,
                 )
             if not self._useful(rows, row, [st]):
                 raise TypeCheckError(
                     "unreachable match arm (earlier arms already cover it)",
-                    arm.line, arm.column,
+                    at=arm,
                 )
             if arm.guard is not None:
                 continue
@@ -2805,7 +2806,7 @@ class Checker:
         if not int_fits(expr.value, t):
             raise TypeCheckError(
                 f"integer literal {expr.value} does not fit in '{type_name(t)}'",
-                expr.line, expr.column,
+                at=expr,
             )
         expr.resolved_type = t
         return t
@@ -2826,7 +2827,7 @@ class Checker:
         if expr.ident == "_":
             raise TypeCheckError(
                 "'_' placeholder is only valid as a call argument",
-                expr.line, expr.column,
+                at=expr,
             )
         binding = scope.lookup(expr.ident)
         if binding is None:
@@ -2843,9 +2844,9 @@ class Checker:
             if expr.ident in self.functions or expr.ident in _BUILTIN_FUNCS:
                 raise TypeCheckError(
                     f"'{expr.ident}' cannot be used as a value here",
-                    expr.line, expr.column,
+                    at=expr,
                 )
-            raise TypeCheckError(f"unknown name '{expr.ident}'", expr.line, expr.column)
+            raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr)
         self._record_capture(expr.ident, binding.type, scope)
         expr.resolved_type = binding.type
         return binding.type
@@ -2859,7 +2860,7 @@ class Checker:
             raise TypeCheckError(
                 f"generic function '{expr.ident}' cannot be used as a value "
                 f"(its type parameters are unresolved)",
-                expr.line, expr.column,
+                at=expr,
             )
         ft = FuncType(tuple(sig.params), sig.ret)
         expr.func_ref = expr.ident
@@ -2886,7 +2887,7 @@ class Checker:
         if payload:
             raise TypeCheckError(
                 f"variant '{variant}' carries a payload; call it like '{variant}(...)'",
-                expr.line, expr.column,
+                at=expr,
             )
         params = self.enum_decls[enum_name].type_params
         if (isinstance(expected, EnumType) and expected.name == enum_name
@@ -2896,7 +2897,7 @@ class Checker:
             raise TypeCheckError(
                 f"cannot infer type argument(s) for '{variant}'; annotate the "
                 f"binding (e.g. ': {enum_name}<...>')",
-                expr.line, expr.column,
+                at=expr,
             )
         expr.enum_ctor = (enum_name, variant)
         expr.resolved_type = et
@@ -2909,7 +2910,7 @@ class Checker:
                 expected if isinstance(expected, (IntType, FloatType)) else None)
             if not isinstance(t, (IntType, FloatType)):
                 raise TypeCheckError(
-                    "unary '-' requires a numeric operand", expr.line, expr.column)
+                    "unary '-' requires a numeric operand", at=expr)
             expr.resolved_type = t
             return t
         if expr.op == "!":
@@ -2919,10 +2920,10 @@ class Checker:
         if expr.op == "~":
             t = self._expect_value(expr.operand, scope, expected if isinstance(expected, IntType) else None)
             if not isinstance(t, IntType):
-                raise TypeCheckError("unary '~' requires an integer", expr.line, expr.column)
+                raise TypeCheckError("unary '~' requires an integer", at=expr)
             expr.resolved_type = t
             return t
-        raise TypeCheckError(f"unknown unary operator '{expr.op}'", expr.line, expr.column)
+        raise TypeCheckError(f"unknown unary operator '{expr.op}'", at=expr)
 
     def _infer_binary(self, expr: ast.Binary, scope: _Scope, expected: Type | None) -> Type:
         op = expr.op
@@ -2947,7 +2948,7 @@ class Checker:
             if not isinstance(common, (IntType, FloatType, CharType, BoolType, StrType)):
                 raise TypeCheckError(
                     f"cannot compare values of type '{type_name(common)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = BOOL
             return BOOL
@@ -2965,7 +2966,7 @@ class Checker:
             if not isinstance(common, (IntType, FloatType, CharType)):
                 raise TypeCheckError(
                     "comparison requires numeric or char operands",
-                    expr.line, expr.column)
+                    at=expr)
             expr.resolved_type = BOOL
             return BOOL
 
@@ -2981,20 +2982,20 @@ class Checker:
             if not isinstance(lt, IntType):
                 raise TypeCheckError(
                     f"operator '{op}' requires an integer left operand",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             rt = self._expect_value(expr.right, scope, None)
             if not isinstance(rt, IntType):
                 raise TypeCheckError(
                     f"shift amount for '{op}' must be an integer",
-                    expr.right.line, expr.right.column,
+                    at=expr.right,
                 )
             amount = _const_int(expr.right)
             if amount is not None and not (0 <= amount < lt.width):
                 raise TypeCheckError(
                     f"shift amount {amount} is out of range for "
                     f"'{type_name(lt)}' (valid range is 0..{lt.width - 1})",
-                    expr.right.line, expr.right.column,
+                    at=expr.right,
                 )
             expr.resolved_type = lt
             return lt
@@ -3014,7 +3015,7 @@ class Checker:
                 if not isinstance(rt, StrType):
                     raise TypeCheckError(
                         f"cannot concatenate 'str' with '{type_name(rt)}'",
-                        expr.line, expr.column,
+                        at=expr,
                     )
                 expr.resolved_type = STR
                 return STR
@@ -3025,7 +3026,7 @@ class Checker:
             if not isinstance(common, (IntType, FloatType)):
                 raise TypeCheckError(
                     f"operator '+' requires numeric or string operands",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = common
             return common
@@ -3046,13 +3047,13 @@ class Checker:
             # Floats support `+ - * / %` (D56) but not the bitwise operators.
             if op not in _ARITH_OP_TRAITS:
                 raise TypeCheckError(
-                    f"operator '{op}' is not defined for floats", expr.line, expr.column
+                    f"operator '{op}' is not defined for floats", at=expr
                 )
             expr.resolved_type = common
             return common
         if not isinstance(common, IntType):
             raise TypeCheckError(
-                f"operator '{op}' requires integer operands", expr.line, expr.column
+                f"operator '{op}' requires integer operands", at=expr
             )
         expr.resolved_type = common
         return common
@@ -3067,7 +3068,7 @@ class Checker:
             raise TypeCheckError(
                 f"composition with '>>' needs a one-argument function on the "
                 f"left, found '{type_name(lt)}'",
-                expr.line, expr.column,
+                at=expr,
             )
         rt = self._expect_value(expr.right, scope, None)
         if not isinstance(rt, FuncType):
@@ -3075,20 +3076,20 @@ class Checker:
                 f"cannot compose a function with a value of type "
                 f"'{type_name(rt)}' (both operands of '>>' must be functions, or "
                 f"both integers)",
-                expr.line, expr.column,
+                at=expr,
             )
         if len(rt.params) != 1:
             raise TypeCheckError(
                 f"composition with '>>' needs a one-argument function on the "
                 f"right, found '{type_name(rt)}'",
-                expr.line, expr.column,
+                at=expr,
             )
         if lt.ret != rt.params[0]:
             raise TypeCheckError(
                 f"cannot compose '{type_name(lt)}' with '{type_name(rt)}': the "
                 f"left result '{type_name(lt.ret)}' must match the right "
                 f"parameter '{type_name(rt.params[0])}'",
-                expr.line, expr.column,
+                at=expr,
             )
         ln, col = expr.line, expr.column
         x = ast.Name("__x").at(ln, col)
@@ -3120,14 +3121,14 @@ class Checker:
             raise TypeCheckError(
                 f"operator '{op}' is not defined for '{type_name(lt)}': it needs "
                 f"'impl {trait} for {type_name(lt)}'{hint}",
-                expr.line, expr.column,
+                at=expr,
             )
         rt = self._expect_value(expr.right, scope, None)
         if lt != rt:
             raise TypeCheckError(
                 f"operator '{op}' requires both operands to have the same type, "
                 f"found '{type_name(lt)}' and '{type_name(rt)}'",
-                expr.line, expr.column,
+                at=expr,
             )
         ln, col = expr.line, expr.column
         call = ast.Call(
@@ -3173,14 +3174,14 @@ class Checker:
             raise TypeCheckError(
                 f"operator '{op}' on a value of type parameter '{lt.name}' "
                 f"requires the bound '{lt.name}: {trait}'",
-                expr.line, expr.column,
+                at=expr,
             )
         rt = self._expect_value(expr.right, scope, None)
         if lt != rt:
             raise TypeCheckError(
                 f"operator '{op}' requires both operands to have the same type, "
                 f"found '{type_name(lt)}' and '{type_name(rt)}'",
-                expr.line, expr.column,
+                at=expr,
             )
         expr.resolved_type = result
         return result
@@ -3198,14 +3199,14 @@ class Checker:
             raise TypeCheckError(
                 f"cannot cast from '{type_name(src)}' to '{type_name(target)}' "
                 "('as' converts between numeric and char types only)",
-                expr.line, expr.column,
+                at=expr,
             )
         if ((isinstance(src, CharType) and isinstance(target, FloatType))
                 or (isinstance(src, FloatType) and isinstance(target, CharType))):
             raise TypeCheckError(
                 "cannot cast directly between 'char' and a float "
                 "(go through an integer type)",
-                expr.line, expr.column,
+                at=expr,
             )
         expr.resolved_type = target
         return target
@@ -3238,7 +3239,7 @@ class Checker:
         raise TypeCheckError(
             f"type mismatch: '{type_name(lt)}' vs '{type_name(rt)}' "
             "(no implicit conversion between numeric types)",
-            ln.line, ln.column,
+            at=ln,
         )
 
     def _infer_intrinsic(self, expr: ast.Call, name: str,
@@ -3251,7 +3252,7 @@ class Checker:
             if len(expr.args) not in (1, 2):
                 raise TypeCheckError(
                     "assert() takes a condition and an optional message",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             self._expect_type(expr.args[0], scope, BOOL, "assert condition")
             if len(expr.args) == 2:
@@ -3259,12 +3260,12 @@ class Checker:
         elif name == "panic":
             if len(expr.args) != 1:
                 raise TypeCheckError("panic() takes exactly one message",
-                                     expr.line, expr.column)
+                                     at=expr)
             self._expect_type(expr.args[0], scope, STR, "panic message")
         else:  # unreachable
             if expr.args:
                 raise TypeCheckError("unreachable() takes no arguments",
-                                     expr.line, expr.column)
+                                     at=expr)
         expr.resolved_type = None
         return None
 
@@ -3275,17 +3276,17 @@ class Checker:
         nargs = 2 if name == "push" else 1
         if len(expr.args) != nargs:
             raise TypeCheckError(
-                f"{name}() takes {nargs} argument(s)", expr.line, expr.column)
+                f"{name}() takes {nargs} argument(s)", at=expr)
         lst_t, mutable = self._check_lvalue(expr.args[0], scope)
         if not isinstance(lst_t, ListType):
             raise TypeCheckError(
                 f"{name}() requires a list, found '{type_name(lst_t)}'",
-                expr.args[0].line, expr.args[0].column,
+                at=expr.args[0],
             )
         if not mutable:
             raise TypeCheckError(
                 f"{name}() needs a mutable list (declare it with 'var')",
-                expr.args[0].line, expr.args[0].column,
+                at=expr.args[0],
             )
         if name == "push":
             self._expect_type(expr.args[1], scope, lst_t.elem, "push value")
@@ -3301,7 +3302,7 @@ class Checker:
         nargs = 1 if name == "keys" else 2
         if len(expr.args) != nargs:
             raise TypeCheckError(
-                f"{name}() takes {nargs} argument(s)", expr.line, expr.column)
+                f"{name}() takes {nargs} argument(s)", at=expr)
         if name == "remove":
             map_t, mutable = self._check_lvalue(expr.args[0], scope)
         else:
@@ -3310,7 +3311,7 @@ class Checker:
         if not isinstance(map_t, MapType):
             raise TypeCheckError(
                 f"{name}() requires a map, found '{type_name(map_t)}'",
-                expr.args[0].line, expr.args[0].column,
+                at=expr.args[0],
             )
         if name == "keys":
             t = ListType(map_t.key)
@@ -3323,7 +3324,7 @@ class Checker:
         if not mutable:                       # remove
             raise TypeCheckError(
                 "remove() needs a mutable map (declare it with 'var')",
-                expr.args[0].line, expr.args[0].column,
+                at=expr.args[0],
             )
         expr.resolved_type = None
         return None
@@ -3336,13 +3337,13 @@ class Checker:
         if not expr.args:
             raise TypeCheckError(
                 "format() needs a string literal format and its arguments",
-                expr.line, expr.column,
+                at=expr,
             )
         fmt = expr.args[0]
         if not isinstance(fmt, ast.StrLit):
             raise TypeCheckError(
                 "format()'s first argument must be a string literal",
-                fmt.line, fmt.column,
+                at=fmt,
             )
         holes = _count_format_holes(fmt.value, fmt.line, fmt.column)
         rest = expr.args[1:]
@@ -3350,14 +3351,14 @@ class Checker:
             raise TypeCheckError(
                 f"format() has {holes} placeholder(s) but {len(rest)} "
                 f"argument(s)",
-                expr.line, expr.column,
+                at=expr,
             )
         for arg in rest:
             at = self._expect_value(arg, scope, None)
             if not isinstance(at, (IntType, FloatType, CharType, BoolType, StrType)):
                 raise TypeCheckError(
                     f"format() cannot render a value of type '{type_name(at)}'",
-                    arg.line, arg.column,
+                    at=arg,
                 )
         expr.resolved_type = STR
         return STR
@@ -3371,18 +3372,18 @@ class Checker:
         if name == "StringBuilder":
             if expr.args:
                 raise TypeCheckError("StringBuilder() takes no arguments",
-                                     expr.line, expr.column)
+                                     at=expr)
             expr.resolved_type = STRING_BUILDER
             return STRING_BUILDER
         if name == "build":
             if len(expr.args) != 1:
                 raise TypeCheckError("build() takes exactly one argument",
-                                     expr.line, expr.column)
+                                     at=expr)
             at = self._expect_value(expr.args[0], scope, None)
             if not isinstance(at, StringBuilderType):
                 raise TypeCheckError(
                     f"build() requires a StringBuilder, found '{type_name(at)}'",
-                    expr.args[0].line, expr.args[0].column,
+                    at=expr.args[0],
                 )
             expr.resolved_type = STR
             return STR
@@ -3390,20 +3391,20 @@ class Checker:
         # start, end) appends the bytes s[start..end] (MYLA-85)
         if name == "append" and len(expr.args) not in (2, 4):
             raise TypeCheckError("append() takes 2 or 4 argument(s)",
-                                 expr.line, expr.column)
+                                 at=expr)
         if name == "append_byte" and len(expr.args) != 2:
             raise TypeCheckError(f"{name}() takes 2 argument(s)",
-                                 expr.line, expr.column)
+                                 at=expr)
         sb_t, mutable = self._check_lvalue(expr.args[0], scope)
         if not isinstance(sb_t, StringBuilderType):
             raise TypeCheckError(
                 f"{name}() requires a StringBuilder, found '{type_name(sb_t)}'",
-                expr.args[0].line, expr.args[0].column,
+                at=expr.args[0],
             )
         if not mutable:
             raise TypeCheckError(
                 f"{name}() needs a mutable StringBuilder (declare it with 'var')",
-                expr.args[0].line, expr.args[0].column,
+                at=expr.args[0],
             )
         if name == "append":
             self._expect_type(expr.args[1], scope, STR, "append value")
@@ -3437,7 +3438,7 @@ class Checker:
             raise TypeCheckError(
                 f"type '{type_name(recv_type)}' has no method "
                 f"'{callee.field_name}'",
-                expr.line, expr.column,
+                at=expr,
             )
         is_var_self = (sig.decl.receiver == "var self")
         if is_var_self:
@@ -3446,21 +3447,21 @@ class Checker:
                     f"method '{callee.field_name}' mutates its receiver ('var "
                     "self'); it needs a mutable variable (or one of its "
                     "fields/elements), not a temporary",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             _, mutable = self._check_lvalue(recv, scope)
             if not mutable:
                 raise TypeCheckError(
                     f"cannot call the mutating method '{callee.field_name}' on an "
                     "immutable receiver (declare it with 'var')",
-                    expr.line, expr.column,
+                    at=expr,
                 )
         nargs = len(sig.params) - 1
         if len(expr.args) != nargs:
             raise TypeCheckError(
                 f"method '{callee.field_name}' expects {nargs} argument(s), "
                 f"got {len(expr.args)}",
-                expr.line, expr.column,
+                at=expr,
             )
         expr.method_func = f"{key}.{callee.field_name}"
         expr.method_is_var_self = is_var_self
@@ -3472,7 +3473,7 @@ class Checker:
                 raise TypeCheckError(
                     f"argument type mismatch in call to '{callee.field_name}': "
                     f"expected '{type_name(ptype)}', found '{type_name(at)}'",
-                    arg.line, arg.column,
+                    at=arg,
                 )
         expr.resolved_type = sig.ret
         return sig.ret
@@ -3498,7 +3499,7 @@ class Checker:
             raise TypeCheckError(
                 f"cannot infer type parameter(s) {', '.join(missing)} for method "
                 f"'{method}'; add a type annotation to guide inference",
-                expr.line, expr.column,
+                at=expr,
             )
         for arg, ptype, at in zip(expr.args, sig.params[1:], arg_types):
             want = self._subst_type(ptype, subst)
@@ -3509,7 +3510,7 @@ class Checker:
                     raise TypeCheckError(
                         f"argument type mismatch in call to '{method}': expected "
                         f"'{type_name(want)}', found '{type_name(at)}'",
-                        arg.line, arg.column,
+                        at=arg,
                     )
         expr.type_args = tuple(subst[tp] for tp in sig.type_params)
         self._check_call_bounds(sig, subst, expr)
@@ -3543,126 +3544,126 @@ class Checker:
         if name == "print":
             if len(expr.args) != 1:
                 raise TypeCheckError("print() takes exactly one argument",
-                                     expr.line, expr.column)
+                                     at=expr)
             at = self._expect_value(expr.args[0], scope, None)
             if not isinstance(at, (IntType, FloatType, CharType, BoolType, StrType)):
                 raise TypeCheckError(
                     f"print() cannot print a value of type '{type_name(at)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = None
             return None
         if name == "__write":
             if len(expr.args) != 2:
                 raise TypeCheckError("__write() takes (fd: int32, s: str)",
-                                     expr.line, expr.column)
+                                     at=expr)
             fd_t = self._expect_value(expr.args[0], scope, INT)
             if not isinstance(fd_t, IntType):
                 raise TypeCheckError(
                     f"__write() fd must be an integer, found '{type_name(fd_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             s_t = self._expect_value(expr.args[1], scope, STR)
             if not isinstance(s_t, StrType):
                 raise TypeCheckError(
                     f"__write() expects a string, found '{type_name(s_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = None
             return None
         if name == "__exit":
             if len(expr.args) != 1:
                 raise TypeCheckError("__exit() takes exactly one argument",
-                                     expr.line, expr.column)
+                                     at=expr)
             code_t = self._expect_value(expr.args[0], scope, INT)
             if not isinstance(code_t, IntType):
                 raise TypeCheckError(
                     f"__exit() code must be an integer, found "
                     f"'{type_name(code_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = None
             return None
         if name == "__args":
             if expr.args:
                 raise TypeCheckError("__args() takes no arguments",
-                                     expr.line, expr.column)
+                                     at=expr)
             t = ListType(STR)
             expr.resolved_type = t
             return t
         if name == "__read_file":
             if len(expr.args) != 1:
                 raise TypeCheckError("__read_file() takes exactly one argument",
-                                     expr.line, expr.column)
+                                     at=expr)
             p_t = self._expect_value(expr.args[0], scope, STR)
             if not isinstance(p_t, StrType):
                 raise TypeCheckError(
                     f"__read_file() expects a string path, found "
                     f"'{type_name(p_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = STR
             return STR
         if name == "__read":
             if len(expr.args) != 2:
                 raise TypeCheckError("__read() takes (fd: int32, n: int32)",
-                                     expr.line, expr.column)
+                                     at=expr)
             fd_t = self._expect_value(expr.args[0], scope, INT)
             if not isinstance(fd_t, IntType):
                 raise TypeCheckError(
                     f"__read() fd must be an integer, found '{type_name(fd_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             n_t = self._expect_value(expr.args[1], scope, INT)
             if not isinstance(n_t, IntType):
                 raise TypeCheckError(
                     f"__read() n must be an integer, found '{type_name(n_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = STR
             return STR
         if name == "__poll":
             if len(expr.args) != 2:
                 raise TypeCheckError("__poll() takes (fd: int32, timeout_ms: int32)",
-                                     expr.line, expr.column)
+                                     at=expr)
             fd_t = self._expect_value(expr.args[0], scope, INT)
             if not isinstance(fd_t, IntType):
                 raise TypeCheckError(
                     f"__poll() fd must be an integer, found '{type_name(fd_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             t_t = self._expect_value(expr.args[1], scope, INT)
             if not isinstance(t_t, IntType):
                 raise TypeCheckError(
                     f"__poll() timeout must be an integer, found '{type_name(t_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = INT
             return INT
         if name == "__io_errno":
             if expr.args:
                 raise TypeCheckError("__io_errno() takes no arguments",
-                                     expr.line, expr.column)
+                                     at=expr)
             expr.resolved_type = INT
             return INT
         if name == "__write_file":
             if len(expr.args) != 2:
                 raise TypeCheckError(
                     "__write_file() takes (path: str, contents: str)",
-                    expr.line, expr.column)
+                    at=expr)
             p_t = self._expect_value(expr.args[0], scope, STR)
             if not isinstance(p_t, StrType):
                 raise TypeCheckError(
                     f"__write_file() path must be a string, found "
                     f"'{type_name(p_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             c_t = self._expect_value(expr.args[1], scope, STR)
             if not isinstance(c_t, StrType):
                 raise TypeCheckError(
                     f"__write_file() contents must be a string, found "
                     f"'{type_name(c_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = None
             return None
@@ -3670,19 +3671,19 @@ class Checker:
             if len(expr.args) != 2:
                 raise TypeCheckError(
                     "__run() takes (program: str, argv: [str])",
-                    expr.line, expr.column)
+                    at=expr)
             p_t = self._expect_value(expr.args[0], scope, STR)
             if not isinstance(p_t, StrType):
                 raise TypeCheckError(
                     f"__run() program must be a string, found "
                     f"'{type_name(p_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             a_t = self._expect_value(expr.args[1], scope, ListType(STR))
             if not (isinstance(a_t, ListType) and isinstance(a_t.elem, StrType)):
                 raise TypeCheckError(
                     f"__run() argv must be a [str], found '{type_name(a_t)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             t = ListType(BYTE)
             expr.resolved_type = t
@@ -3690,38 +3691,38 @@ class Checker:
         if name == "__run_stderr":
             if expr.args:
                 raise TypeCheckError("__run_stderr() takes no arguments",
-                                     expr.line, expr.column)
+                                     at=expr)
             t = ListType(BYTE)
             expr.resolved_type = t
             return t
         if name in ("__run_exit_code", "__run_signal", "__run_errno"):
             if expr.args:
                 raise TypeCheckError(f"{name}() takes no arguments",
-                                     expr.line, expr.column)
+                                     at=expr)
             expr.resolved_type = INT
             return INT
         if name == "len":
             if len(expr.args) != 1:
                 raise TypeCheckError("len() takes exactly one argument",
-                                     expr.line, expr.column)
+                                     at=expr)
             at = self._expect_value(expr.args[0], scope, None)
             if not isinstance(at, (ListType, MapType, StrType, StringBuilderType)):
                 raise TypeCheckError(
                     f"len() requires a list, map, string, or StringBuilder, found "
                     f"'{type_name(at)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.resolved_type = INT
             return INT
         if name == "chars":
             if len(expr.args) != 1:
                 raise TypeCheckError("chars() takes exactly one argument",
-                                     expr.line, expr.column)
+                                     at=expr)
             at = self._expect_value(expr.args[0], scope, None)
             if not isinstance(at, StrType):
                 raise TypeCheckError(
                     f"chars() requires a string, found '{type_name(at)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             t = ListType(CHAR)
             expr.resolved_type = t
@@ -3741,14 +3742,14 @@ class Checker:
             enum_name = _PRELUDE_VARIANTS.get(name)
             if enum_name is not None and scope.lookup(name) is None:
                 return self._infer_variant_ctor(expr, enum_name, name, scope, expected)
-            raise TypeCheckError(f"unknown function '{name}'", expr.line, expr.column)
+            raise TypeCheckError(f"unknown function '{name}'", at=expr)
         if sig.type_params:
             return self._infer_generic_call(expr, name, sig, scope)
         if len(expr.args) != len(sig.params):
             raise TypeCheckError(
                 f"function '{name}' expects {len(sig.params)} argument(s), "
                 f"got {len(expr.args)}",
-                expr.line, expr.column,
+                at=expr,
             )
         for arg, ptype in zip(expr.args, sig.params):
             at = self._expect_value(arg, scope, ptype)
@@ -3756,7 +3757,7 @@ class Checker:
                 raise TypeCheckError(
                     f"argument type mismatch in call to '{name}': expected "
                     f"'{type_name(ptype)}', found '{type_name(at)}'",
-                    arg.line, arg.column,
+                    at=arg,
                 )
         expr.resolved_type = sig.ret
         return sig.ret
@@ -3769,13 +3770,13 @@ class Checker:
         if not isinstance(ft, FuncType):
             raise TypeCheckError(
                 f"cannot call a value of type '{type_name(ft)}'",
-                expr.line, expr.column,
+                at=expr,
             )
         if len(expr.args) != len(ft.params):
             raise TypeCheckError(
                 f"this function value expects {len(ft.params)} argument(s), "
                 f"got {len(expr.args)}",
-                expr.line, expr.column,
+                at=expr,
             )
         for arg, ptype in zip(expr.args, ft.params):
             at = self._expect_value(arg, scope, ptype)
@@ -3783,7 +3784,7 @@ class Checker:
                 raise TypeCheckError(
                     f"argument type mismatch: expected '{type_name(ptype)}', "
                     f"found '{type_name(at)}'",
-                    arg.line, arg.column,
+                    at=arg,
                 )
         expr.indirect_call = True
         expr.resolved_type = ft.ret
@@ -3809,7 +3810,7 @@ class Checker:
                 f"partial application must list every argument position "
                 f"({len(param_types)} expected, found {len(expr.args)}); write "
                 f"'_' for each one to leave open (no implicit currying)",
-                expr.line, expr.column,
+                at=expr,
             )
         bound_params: list[ast.Param] = []   # the outer lambda's
         bound_args: list[ast.Expr] = []
@@ -3856,7 +3857,7 @@ class Checker:
             if not isinstance(ft, FuncType):
                 raise TypeCheckError(
                     f"cannot partially apply a value of type '{type_name(ft)}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             return list(ft.params), ft.ret
         # method `recv.m(_, …)` (or a function-typed field), receiver captured
@@ -3870,7 +3871,7 @@ class Checker:
                     raise TypeCheckError(
                         f"cannot partially apply the generic method "
                         f"'{callee.field_name}'",
-                        expr.line, expr.column,
+                        at=expr,
                     )
                 return list(sig.params[1:]), sig.ret
             if (isinstance(recv_type, StructType)
@@ -3881,7 +3882,7 @@ class Checker:
             raise TypeCheckError(
                 f"type '{type_name(recv_type)}' has no method "
                 f"'{callee.field_name}'",
-                expr.line, expr.column,
+                at=expr,
             )
         # named free function
         if isinstance(callee, ast.Name):
@@ -3890,18 +3891,18 @@ class Checker:
                 raise TypeCheckError(
                     f"cannot partially apply '{callee.ident}' with '_' "
                     f"(only functions, methods, and function values are supported)",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             if sig.type_params:
                 raise TypeCheckError(
                     f"cannot partially apply the generic function "
                     f"'{callee.ident}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             return list(sig.params), sig.ret
         raise TypeCheckError(
             "'_' partial application requires a function, method, or function "
-            "value", expr.line, expr.column,
+            "value", at=expr,
         )
 
     # -- generic call inference (D34) ----------------------------------------
@@ -3912,7 +3913,7 @@ class Checker:
             raise TypeCheckError(
                 f"function '{name}' expects {len(sig.params)} argument(s), "
                 f"got {len(expr.args)}",
-                expr.line, expr.column,
+                at=expr,
             )
         # Solve left-to-right, growing the substitution as we go: each argument
         # is typed with its parameter type as a hint once that type is fully
@@ -3931,7 +3932,7 @@ class Checker:
             raise TypeCheckError(
                 f"cannot infer type parameter(s) {', '.join(missing)} for '{name}' "
                 "from the arguments; add a type annotation to guide inference",
-                expr.line, expr.column,
+                at=expr,
             )
         # Verify each argument against its now-concrete parameter type, allowing
         # an unsuffixed integer literal to adopt the solved type.
@@ -3944,7 +3945,7 @@ class Checker:
                     raise TypeCheckError(
                         f"argument type mismatch in call to '{name}': expected "
                         f"'{type_name(want)}', found '{type_name(at)}'",
-                        arg.line, arg.column,
+                        at=arg,
                     )
         expr.type_args = tuple(subst[tp] for tp in sig.type_params)
         self._check_call_bounds(sig, subst, expr)
@@ -4079,7 +4080,7 @@ class Checker:
         if missing:
             raise TypeCheckError(
                 f"cannot infer type parameter(s) {', '.join(missing)}; "
-                "add a type annotation to guide inference", expr.line, expr.column)
+                "add a type annotation to guide inference", at=expr)
         for node, tt, vt in zip(nodes, template_types, value_types):
             want = self._subst_type(tt, subst)
             if vt != want:
@@ -4088,7 +4089,7 @@ class Checker:
                 else:
                     raise TypeCheckError(
                         f"{label}: expected '{type_name(want)}', found '{type_name(vt)}'",
-                        node.line, node.column)
+                        at=node)
         return tuple(subst[p] for p in params)
 
     def _infer_variant_ctor(self, expr: ast.Call, enum_name: str, variant: str,
@@ -4097,14 +4098,14 @@ class Checker:
         if variant not in variants:
             raise TypeCheckError(
                 f"enum '{enum_name}' has no variant '{variant}'",
-                expr.line, expr.column,
+                at=expr,
             )
         payload = variants[variant]
         if len(expr.args) != len(payload):
             raise TypeCheckError(
                 f"variant '{enum_name}.{variant}' expects {len(payload)} "
                 f"argument(s), got {len(expr.args)}",
-                expr.line, expr.column,
+                at=expr,
             )
         params = self.enum_decls[enum_name].type_params
         if not params:
@@ -4114,7 +4115,7 @@ class Checker:
                     raise TypeCheckError(
                         f"variant '{enum_name}.{variant}': expected "
                         f"'{type_name(pt)}', found '{type_name(at)}'",
-                        arg.line, arg.column,
+                        at=arg,
                     )
             et: Type = EnumType(enum_name)
         else:
@@ -4136,7 +4137,7 @@ class Checker:
             if expr.field_name not in variants:
                 raise TypeCheckError(
                     f"enum '{enum_name}' has no variant '{expr.field_name}'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             payload = variants[expr.field_name]
             if payload:
@@ -4144,7 +4145,7 @@ class Checker:
                     f"variant '{enum_name}.{expr.field_name}' takes "
                     f"{len(payload)} argument(s); call it like "
                     f"'{enum_name}.{expr.field_name}(...)'",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             params = self.enum_decls[enum_name].type_params
             if not params:
@@ -4156,7 +4157,7 @@ class Checker:
                 raise TypeCheckError(
                     f"cannot infer type argument(s) for '{enum_name}.{expr.field_name}'; "
                     f"annotate the binding (e.g. ': {enum_name}<...>')",
-                    expr.line, expr.column,
+                    at=expr,
                 )
             expr.enum_ctor = (enum_name, expr.field_name)
             expr.resolved_type = et
@@ -4165,13 +4166,13 @@ class Checker:
         base = self._expect_value(expr.target, scope, None)
         if not isinstance(base, StructType):
             raise TypeCheckError(
-                f"type '{type_name(base)}' has no fields", expr.line, expr.column
+                f"type '{type_name(base)}' has no fields", at=expr
             )
         fields = self._struct_field_types(base)
         if expr.field_name not in fields:
             raise TypeCheckError(
                 f"struct '{base.name}' has no field '{expr.field_name}'",
-                expr.line, expr.column,
+                at=expr,
             )
         ft = fields[expr.field_name]
         expr.resolved_type = ft
@@ -4180,25 +4181,25 @@ class Checker:
     def _infer_struct_lit(self, expr: ast.StructLit, scope: _Scope,
                           expected: Type | None = None) -> Type:
         if expr.type_name not in self.structs:
-            raise TypeCheckError(f"unknown struct '{expr.type_name}'", expr.line, expr.column)
+            raise TypeCheckError(f"unknown struct '{expr.type_name}'", at=expr)
         template = self.structs[expr.type_name]
         provided: dict[str, ast.FieldInit] = {}
         for init in expr.fields:
             if init.name in provided:
                 raise TypeCheckError(
-                    f"duplicate field '{init.name}' in struct literal", init.line, init.column
+                    f"duplicate field '{init.name}' in struct literal", at=init
                 )
             if init.name not in template:
                 raise TypeCheckError(
                     f"struct '{expr.type_name}' has no field '{init.name}'",
-                    init.line, init.column,
+                    at=init,
                 )
             provided[init.name] = init
         missing = [n for n in template if n not in provided]
         if missing:
             raise TypeCheckError(
                 f"missing field(s) in '{expr.type_name}' literal: {', '.join(missing)}",
-                expr.line, expr.column,
+                at=expr,
             )
         params = self.struct_decls[expr.type_name].type_params
         if not params:
@@ -4208,7 +4209,7 @@ class Checker:
                     raise TypeCheckError(
                         f"field '{init.name}': expected '{type_name(template[init.name])}', "
                         f"found '{type_name(vt)}'",
-                        init.line, init.column,
+                        at=init,
                     )
             st: Type = StructType(expr.type_name)
         else:

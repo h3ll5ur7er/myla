@@ -13,7 +13,7 @@ The language server is written in Myla ([[MYLA-80]]). A Python one built on pygl
 | `main.my` | Arguments, then the server loop |
 | `protocol.my` | JSON-RPC with Content-Length framing over `std.io`'s `Reader` and `std.json` |
 | `server.my` | Document store, debounce, checks, publishing |
-| `text.my` | Lines, UTF-16 positions, the squiggle's width, `file://` URIs (the rules of `positions.py`) |
+| `text.my` | Lines, UTF-16 positions, the squiggle's width for a diagnostic without a range, `file://` URIs (the rules of `positions.py`) |
 | `symbols.my` | The outline of one parsed file (`symbols.py`); selection ranges are name tokens (MYLA-48) |
 | `features.my` | The identifier under the cursor and its occurrences from the compiler's tokens, hover text, the member-completion context |
 | `semantic.my` | Semantic tokens from the compiler's lexer (D68) |

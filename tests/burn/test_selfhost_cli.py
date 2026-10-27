@@ -261,12 +261,16 @@ class TestRepl(_Layout):
         self.assertIn("runtime error: list index 3 out of bounds (len 1)", proc.stderr)
         self.assertIn("  --> <input>:1:", proc.stderr)
         self.assertEqual(proc.stderr.count("error"), 3, proc.stderr)
+        # the carets underline the offending range (MYLA-65)
+        self.assertIn('1 | twice("no")\n  |       ^^^^\n', proc.stderr)
 
     def test_errors_inside_a_multiline_input(self):
         proc = self.repl("fun f() -> int {\n    let a = 1\n    return b\n}\nf()\n1\n")
         self.assertEqual(proc.stdout, "1\n")
         self.assertIn("  --> <input>:3:", proc.stderr)
         self.assertIn("3 |     return b", proc.stderr)
+        proc = self.repl("1\nfun g() -> int {\n    let a = 1\n}\n")
+        self.assertIn("1 | fun g() -> int {\n  | ^^^^^^^^^^^^^^^^\n", proc.stderr)
 
     def test_exit_ends_the_session(self):
         proc = self.repl("from std.process import exit\nprint(1)\nexit(4)\nprint(2)\n")

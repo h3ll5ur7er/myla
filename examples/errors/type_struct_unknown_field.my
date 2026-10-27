@@ -1,4 +1,5 @@
 //~ type error: has no field
+//~ span: p.z
 struct P {
     x: int,
     y: int,

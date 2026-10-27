@@ -1,4 +1,5 @@
 //~ lex error: unterminated string literal
+//~ span: "oops
 // A string literal must close on the same line.
 fun main() {
     let s = "oops

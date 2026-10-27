@@ -162,6 +162,10 @@ class Token:
                  TRUE/FALSE); None otherwise.
         suffix:  for INT tokens, the type suffix (e.g. "u8"); for FLOAT tokens,
                  the float suffix (e.g. "f64"); otherwise None.
+        end_line, end_column: the position just past the token's last
+                 character (MYLA-65); NEWLINE and EOF are empty there. The
+                 tokens an f-string lowers to (`format`, its parentheses, commas
+                 and format string) all end where the f-string ends.
     """
 
     kind: TokenKind
@@ -170,6 +174,12 @@ class Token:
     column: int
     value: Any = None
     suffix: str | None = None
+    end_line: int = 0
+    end_column: int = 0
+
+    @property
+    def span(self) -> tuple[int, int, int, int]:
+        return (self.line, self.column, self.end_line, self.end_column)
 
     def __str__(self) -> str:  # pragma: no cover - debugging aid
         extra = ""

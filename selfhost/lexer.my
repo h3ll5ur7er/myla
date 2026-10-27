@@ -7,7 +7,7 @@
 
 from .util import cp_utf8, is_digit, is_ident_start, is_ident_continue
 from .util import digit_value, parse_value, is_blank, escape
-from .tokens import TokenKind, Token, Diag, keyword_kind, is_int_suffix, is_float_suffix, kind_name
+from .tokens import TokenKind, Token, Diag, SrcSpan, keyword_kind, is_int_suffix, is_float_suffix, kind_name
 
 pub struct Lexer {
     cps: [int32],
@@ -46,6 +46,7 @@ pub fun canonical_line(t: Token) -> str {
     } else if t.kind == TokenKind.CHAR {
         append(sb, format(" cp={}", t.ival))
     }
+    append(sb, format(" end={}:{}", t.eline, t.ecol))
     return build(sb)
 }
 
@@ -83,10 +84,15 @@ impl Lexer {
     }
 
     // Record the first error and stop: the scanners return after calling this,
-    // and at the end of the input every loop ends.
+    // and at the end of the input every loop ends. Its range runs to where the
+    // lexer stopped, as in the Python lexer.
     fun fail(var self, line: int32, col: int32, msg: str) {
+        self.fail_span(line, col, SrcSpan { sline: line, scol: col, eline: self.line, ecol: self.col }, msg)
+    }
+
+    fun fail_span(var self, line: int32, col: int32, sp: SrcSpan, msg: str) {
         match self.err {
-            None => { self.err = Some(Diag { kind: "lex error", line: line, col: col, msg: msg }) },
+            None => { self.err = Some(Diag { kind: "lex error", line: line, col: col, sp: sp, msg: msg }) },
             Some(e) => {},
         }
         self.pos = self.n
@@ -105,8 +111,9 @@ impl Lexer {
         return c
     }
 
+    // A scanner emits a token once it has consumed it: it ends at the cursor.
     fun emit(var self, kind: TokenKind, lexeme: str, line: int32, col: int32, ival: int64, suffix: str) {
-        push(self.toks, Token { kind: kind, lexeme: lexeme, line: line, column: col, ival: ival, suffix: suffix, big: "" })
+        push(self.toks, Token { kind: kind, lexeme: lexeme, line: line, column: col, eline: self.line, ecol: self.col, ival: ival, suffix: suffix, big: "" })
     }
 
     fun emit0(var self, kind: TokenKind, lexeme: str, line: int32, col: int32) {
@@ -270,7 +277,7 @@ impl Lexer {
     // An INT token: `value` holds the literal's 64 low bits, `big` its decimal
     // text when it is 2^63 or more (Python keeps the exact value).
     fun emit_int(var self, lexeme: str, line: int32, col: int32, value: int64, suffix: str, big: str) {
-        push(self.toks, Token { kind: TokenKind.INT, lexeme: lexeme, line: line, column: col, ival: value, suffix: suffix, big: big })
+        push(self.toks, Token { kind: TokenKind.INT, lexeme: lexeme, line: line, column: col, eline: self.line, ecol: self.col, ival: value, suffix: suffix, big: big })
     }
 
     fun scan_string(var self) {
@@ -544,7 +551,7 @@ impl Lexer {
         match sub.err {
             // reported in the slice's own coordinates, as the Python lexer does
             Some(e) => {
-                self.fail(e.line, e.col, e.msg)
+                self.fail_span(e.line, e.col, e.sp, e.msg)
                 return []
             },
             None => {},
@@ -553,7 +560,8 @@ impl Lexer {
         for t in sub_toks {
             if t.kind != TokenKind.EOF && t.kind != TokenKind.NEWLINE {
                 let col = slice_col + (t.column - 1)
-                push(out, Token { kind: t.kind, lexeme: t.lexeme, line: slice_line, column: col, ival: t.ival, suffix: t.suffix, big: t.big })
+                let ecol = slice_col + (t.ecol - 1)
+                push(out, Token { kind: t.kind, lexeme: t.lexeme, line: slice_line, column: col, eline: slice_line, ecol: ecol, ival: t.ival, suffix: t.suffix, big: t.big })
             }
         }
         return out

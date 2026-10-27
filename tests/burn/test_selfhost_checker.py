@@ -2,10 +2,10 @@
 
 `selfhost/checker.my` is the Myla-written type checker; `selfhost/check_main.my`
 lexes + parses + type-checks a single-file program and prints the stable
-accept/reject line (`ok`, else `err <line> <col> type: <message>`). This test
-asserts that, for every single-file source in the shared corpus and for every
-snippet of TYPE_ERRORS, that line is identical to the Python oracle's: the same
-verdict, position and message (MYLA-28). That is the v0.7 checker-parity gate
+accept/reject line (`ok`, else `err <line> <col> <span> type: <message>`). This
+test asserts that, for every single-file source in the shared corpus and for
+every snippet of TYPE_ERRORS, that line is identical to the Python oracle's: the
+same verdict, position, underlined range (MYLA-65) and message (MYLA-28). That is the v0.7 checker-parity gate
 from docs/Development/Testing.md.
 
 As with the lexer/parser gates, the Myla checker runs as a *native binary* when
@@ -29,6 +29,7 @@ import tempfile
 import unittest
 
 from myla.ast import ImportDecl
+from myla.canon import canonical_error
 from myla.errors import MylaError
 from myla.interpreter import Interpreter
 from myla.lexer import tokenize
@@ -243,9 +244,9 @@ def _corpus() -> list[str]:
 
 
 def _canonical(err: MylaError) -> str:
-    line = "-" if err.line is None else str(err.line)
-    col = "-" if err.column is None else str(err.column)
-    return f"err {line} {col} {err.kind.split()[0]}: {err.message}"
+    """`err <line> <col> <span> <kind>: <message>`: the range a diagnostic
+    underlines must agree too (MYLA-65)."""
+    return canonical_error(err)
 
 
 def _snippets() -> dict[str, str]:

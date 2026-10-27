@@ -16,15 +16,26 @@ pub enum TokenKind {
     NEWLINE, SEMI, EOF,
 }
 
+// A source range (MYLA-65): from `sline`:`scol` to just before `eline`:`ecol`
+// (1-based, columns in code points); `eline` 0 means there is none. Tokens and
+// syntax nodes know theirs, and a diagnostic underlines it.
+pub struct SrcSpan { sline: int32, scol: int32, eline: int32, ecol: int32 }
+
+pub fun no_span() -> SrcSpan {
+    return SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }
+}
+
 // A lex or parse error (`kind` is "lex error" or "parse error"), with the
-// message and 1-based position the Python front end reports.
-pub struct Diag { kind: str, line: int32, col: int32, msg: str }
+// message, 1-based position and range the Python front end reports.
+pub struct Diag { kind: str, line: int32, col: int32, sp: SrcSpan, msg: str }
 
 pub struct Token {
     kind: TokenKind,
     lexeme: str,
     line: int32,
     column: int32,
+    eline: int32,    // just past the token's last character (MYLA-65); the
+    ecol: int32,     // tokens an f-string lowers to end where it ends
     ival: int64,     // INT value (its 64 low bits) or CHAR codepoint; 0 otherwise
     suffix: str,     // "" when there is no suffix
     big: str,        // an INT value of 2^63 or more in decimal (MYLA-73); "" otherwise

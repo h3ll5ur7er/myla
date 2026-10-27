@@ -280,7 +280,8 @@ MODULE_PROJECTS = {
 
 # Programs the loader rejects (MYLA-30), and lex, parse and type errors in
 # imported modules (MYLA-28): the self-hosted compiler prints the Python CLI's
-# diagnostic (message, file, position, source line and caret).
+# diagnostic (message, file, position, source line and the carets underlining
+# the error's range, MYLA-65).
 MODULE_ERRORS = {
     "parse_error_in_module": {
         "main.my": "import lib\nfun main() {\n    print(lib.f())\n}\n",
@@ -322,6 +323,12 @@ MODULE_ERRORS = {
         "lib.my": "fun secret() -> int {\n    return 1\n}\n",
     },
     "unresolved": {"main.my": "fun f() {}\nimport nothere\nfun main() {}\n"},
+    # an error at a module member: positioned at the module's name, the whole
+    # member underlined (MYLA-65)
+    "error_at_module_member": {
+        "main.my": "import lib\nfun main() {\n    for x in lib.N {\n    }\n}\n",
+        "lib.my": "pub const N: int = 1\n",
+    },
     "module_as_value": {
         "main.my": "import lib\nfun main() {\n    let x = lib\n}\n",
         "lib.my": "pub fun f() -> int {\n    return 1\n}\n",
@@ -355,6 +362,20 @@ _MEASURE = (
     "_, status, usage = os.wait4(pid, 0)\n"
     "sys.stderr.write(f'{os.waitstatus_to_exitcode(status)} {usage.ru_maxrss}\\n')\n"
 )
+
+
+# Diagnostics whose ranges are not plain one-line ASCII (MYLA-65).
+DIAGNOSTICS = {
+    "declaration_spanning_lines": "fun größe(n: int) -> int {\n    print(n)\n}\nfun main() {}\n",
+    "characters_beyond_ascii": "fun main() {\n    let x = \"äö😀\" + 1\n}\n",
+    "in_an_interpolation": "fun main() {\n    print(f\"é {nope(1)}!\")\n}\n",
+    "unterminated_comment": "fun main() {}\n/* not\nclosed\n",
+    "unterminated_string": "fun main() {\n    let s = \"ü\n}\n",
+    "call_spanning_lines": "fun f(a: int, b: int) -> int {\n    return a\n}\nfun main() {\n    print(f(1,\n        \"x\"))\n}\n",
+    "chain_starting_on_an_earlier_line": "struct P { x: int }\nfun main() {\n    let p = [P { x: 1 },\n        P { x: 2 }][0].nope()\n}\n",
+    "newline_token": "fun main() {\n    let x = 1 +\n    print(x)\n}\n",
+    "end_of_input": "fun main() {\n    let x = (1",
+}
 
 
 def _write_project(root: str, files: dict[str, str]) -> str:
@@ -475,24 +496,44 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     expected, _ = self._linked_oracle(entry)
                     self.assertEqual((out, code), (expected, 0))
 
-    def test_module_errors_match_the_python_loader(self) -> None:
+    def _assert_diagnostic_matches(self, entry: str, stdlib: str) -> None:
+        """The self-hosted compiler rejects `entry` with exactly the Python
+        CLI's diagnostic, carets included."""
         from myla.errors import MylaError
 
+        with self.assertRaises(MylaError) as ctx:
+            check(link(entry, stdlib_root=stdlib))
+        err = ctx.exception
+        path = err.path or entry
+        with open(path, encoding="utf-8") as fh:
+            expected = err.render(fh.read(), path)
+        proc = subprocess.run(
+            [self._binary, entry, stdlib], capture_output=True, text=True
+        )
+        self.assertEqual((proc.returncode, proc.stderr), (1, expected + "\n"))
+
+    def test_module_errors_match_the_python_loader(self) -> None:
         stdlib = default_stdlib_root()
         with tempfile.TemporaryDirectory() as tmp:
             for name, files in MODULE_ERRORS.items():
                 with self.subTest(program=name):
                     entry = _write_project(os.path.join(tmp, name), files)
-                    with self.assertRaises(MylaError) as ctx:
-                        check(link(entry, stdlib_root=stdlib))
-                    err = ctx.exception
-                    path = err.path or entry
-                    with open(path, encoding="utf-8") as fh:
-                        expected = err.render(fh.read(), path)
-                    proc = subprocess.run(
-                        [self._binary, entry, stdlib], capture_output=True, text=True
-                    )
-                    self.assertEqual((proc.returncode, proc.stderr), (1, expected + "\n"))
+                    self._assert_diagnostic_matches(entry, stdlib)
+
+    def test_diagnostics_match_the_python_cli(self) -> None:
+        # every lex, parse, module and type error of the corpus, and ranges
+        # that run past their line, hold other characters or sit in an
+        # f-string: the same text, the same carets (MYLA-65)
+        stdlib = default_stdlib_root()
+        cases = {os.path.basename(p): p for p in glob.glob(os.path.join(_REPO, "examples", "errors", "*.my"))
+                 if not os.path.basename(p).startswith("runtime_")}
+        self.assertGreater(len(cases), 100)
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, source in DIAGNOSTICS.items():
+                cases[name] = _write_project(os.path.join(tmp, name), {"main.my": source})
+            for name, entry in sorted(cases.items()):
+                with self.subTest(case=name):
+                    self._assert_diagnostic_matches(entry, stdlib)
 
     def test_stress_programs_reclaim_memory(self) -> None:
         from . import test_compiler_parity

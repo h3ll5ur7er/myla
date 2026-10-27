@@ -126,7 +126,10 @@ class Lexer:
 
     def _add(self, kind: TokenKind, lexeme: str, line: int, column: int,
              value: object = None, suffix: str | None = None) -> None:
-        self.tokens.append(Token(kind, lexeme, line, column, value, suffix))
+        """Append a token that ends at the cursor (scanners add a token once
+        they have consumed it)."""
+        self.tokens.append(Token(kind, lexeme, line, column, value, suffix,
+                                 self.line, self.column))
 
     def _emit_newline(self) -> None:
         # Suppress a leading newline and collapse consecutive newlines.
@@ -137,6 +140,17 @@ class Lexer:
     # -- main loop -----------------------------------------------------------
 
     def tokenize(self) -> list[Token]:
+        try:
+            return self._tokenize()
+        except LexError as err:
+            # A lex error's range runs from its position to where the lexer
+            # stopped (the offending text so far, MYLA-65); an error from an
+            # f-string hole's lexer already has one, in the hole's coordinates.
+            if err.span is None and err.line is not None:
+                err.span = (err.line, err.column, self.line, self.column)
+            raise
+
+    def _tokenize(self) -> list[Token]:
         while not self._at_end():
             c = self._peek()
             if c == "\n":
@@ -309,7 +323,9 @@ class Lexer:
             # The slice is single-line, so every sub-token sits on `slice_line`;
             # shift its column to its true position in the original source.
             col = slice_col + (t.column - 1)
-            out.append(Token(t.kind, t.lexeme, slice_line, col, t.value, t.suffix))
+            end_col = slice_col + (t.end_column - 1)
+            out.append(Token(t.kind, t.lexeme, slice_line, col, t.value, t.suffix,
+                             slice_line, end_col))
         return out
 
     def _fstring_copy_quoted(self, buf: list[str], quote: str) -> None:

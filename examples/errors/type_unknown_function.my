@@ -1,4 +1,5 @@
 //~ type error: unknown function
+//~ span: nope(1)
 fun main() {
     let x = nope(1)
 }

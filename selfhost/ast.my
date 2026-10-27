@@ -2,19 +2,22 @@
 // (mirror of src/myla/canon.py:canonical_ast).
 //
 // Node families (Expr/Stmt/Pattern/TypeExpr/Decl) are wrapper structs
-// `{ id, line, col, kind }`: the `*Kind` enum carries the variant data, while
+// `{ id, line, col, sp, kind }`: the `*Kind` enum carries the variant data, while
 // the wrapper carries a unique NodeId and 1-based source position. This is the
 // locked AST-metadata model (plan: "NodeId + side tables"): the checker reads
 // `.line`/`.col` for diagnostics, and `.id` will key a resolved-type side table
-// for the interpreter/codegen (v0.8+). The canonical dump is *structural*: it
-// matches on `.kind` and ignores id/position (token parity already pins
-// positions), so the v0.6b AST-dump gate stays byte-identical.
+// for the interpreter/codegen (v0.8+). `sp` is the source range of the tokens
+// the parser consumed for the node (MYLA-65), which a diagnostic underlines;
+// the smaller records with a position have one too. The canonical dump is
+// *structural*: it matches on `.kind` and ignores id/position (token parity
+// already pins positions), so the v0.6b AST-dump gate stays byte-identical.
 
 from .util import escape
+from .tokens import SrcSpan
 
 // --- types ---------------------------------------------------------------
 
-pub struct TypeExpr { id: int32, line: int32, col: int32, kind: TypeKind }
+pub struct TypeExpr { id: int32, line: int32, col: int32, sp: SrcSpan, kind: TypeKind }
 
 pub enum TypeKind {
     TRef(str, [TypeExpr]),        // name, type arguments
@@ -26,11 +29,11 @@ pub enum TypeKind {
 
 // --- expressions ---------------------------------------------------------
 
-pub struct Expr { id: int32, line: int32, col: int32, kind: ExprKind }
+pub struct Expr { id: int32, line: int32, col: int32, sp: SrcSpan, kind: ExprKind }
 
-pub struct FieldInit { line: int32, col: int32, name: str, value: Expr }
+pub struct FieldInit { line: int32, col: int32, sp: SrcSpan, name: str, value: Expr }
 pub struct MapEntry { key: Expr, value: Expr }
-pub struct Param { line: int32, col: int32, name: str, ty: Option<TypeExpr> }
+pub struct Param { line: int32, col: int32, sp: SrcSpan, name: str, ty: Option<TypeExpr> }
 
 pub enum ExprOrBlock {
     EB_Expr(Expr),
@@ -62,9 +65,9 @@ pub enum ExprKind {
 
 // --- patterns ------------------------------------------------------------
 
-pub struct Pattern { id: int32, line: int32, col: int32, kind: PatternKind }
+pub struct Pattern { id: int32, line: int32, col: int32, sp: SrcSpan, kind: PatternKind }
 
-pub struct FieldPat { line: int32, col: int32, name: str, pattern: Pattern }
+pub struct FieldPat { line: int32, col: int32, sp: SrcSpan, name: str, pattern: Pattern }
 
 pub enum PatternKind {
     PWild,
@@ -76,29 +79,29 @@ pub enum PatternKind {
     POr([Pattern]),
 }
 
-pub struct MatchArm { line: int32, col: int32, pattern: Pattern, guard: Option<Expr>, body: ExprOrBlock }
+pub struct MatchArm { line: int32, col: int32, sp: SrcSpan, pattern: Pattern, guard: Option<Expr>, body: ExprOrBlock }
 
 // --- bindings (destructuring) --------------------------------------------
 
 pub enum BindElem {
-    BName(str, int32, int32),           // name, line, col
+    BName(str, int32, int32, SrcSpan),     // name, line, col, range
     BWild,
-    BTuple([BindElem], int32, int32),   // elements, position of the '('
+    BTuple([BindElem], int32, int32, SrcSpan),   // elements, position of the '(', range
 }
 
 // The elements of a destructuring binding (always a tuple at the top).
 pub fun bind_elems(b: BindElem) -> [BindElem] {
     return match b {
-        BindElem.BTuple(es, l, c) => es,
+        BindElem.BTuple(es, l, c, sp) => es,
         _ => [b],
     }
 }
 
 // --- statements ----------------------------------------------------------
 
-pub struct Stmt { id: int32, line: int32, col: int32, kind: StmtKind }
+pub struct Stmt { id: int32, line: int32, col: int32, sp: SrcSpan, kind: StmtKind }
 
-pub struct Block { line: int32, col: int32, stmts: [Stmt] }
+pub struct Block { line: int32, col: int32, sp: SrcSpan, stmts: [Stmt] }
 
 pub enum ElseTail {
     ElseBlock(Block),
@@ -120,16 +123,17 @@ pub enum StmtKind {
 
 // --- declarations --------------------------------------------------------
 
-pub struct TypeParam { line: int32, col: int32, name: str, bounds: [str] }
-pub struct Field { line: int32, col: int32, name: str, ty: TypeExpr }
-pub struct Variant { line: int32, col: int32, name: str, payload: [TypeExpr] }
-pub struct ImportPath { line: int32, col: int32, dots: int32, segments: [str] }
-pub struct ImportItem { line: int32, col: int32, name: str, alias: Option<str> }
-pub struct Attribute { line: int32, col: int32, name: str, args: [Expr], outputs: Option<[Expr]> }
+pub struct TypeParam { line: int32, col: int32, sp: SrcSpan, name: str, bounds: [str] }
+pub struct Field { line: int32, col: int32, sp: SrcSpan, name: str, ty: TypeExpr }
+pub struct Variant { line: int32, col: int32, sp: SrcSpan, name: str, payload: [TypeExpr] }
+pub struct ImportPath { line: int32, col: int32, sp: SrcSpan, dots: int32, segments: [str] }
+pub struct ImportItem { line: int32, col: int32, sp: SrcSpan, name: str, alias: Option<str> }
+pub struct Attribute { line: int32, col: int32, sp: SrcSpan, name: str, args: [Expr], outputs: Option<[Expr]> }
 
 pub struct FunData {
     line: int32,
     col: int32,
+    sp: SrcSpan,
     name: str,
     params: [Param],
     ret_type: Option<TypeExpr>,
@@ -140,7 +144,7 @@ pub struct FunData {
     is_pub: bool,
 }
 
-pub struct Decl { id: int32, line: int32, col: int32, kind: DeclKind }
+pub struct Decl { id: int32, line: int32, col: int32, sp: SrcSpan, kind: DeclKind }
 
 pub enum DeclKind {
     StructDecl(str, [Field], [Attribute], [TypeParam], bool),
@@ -296,9 +300,9 @@ pub fun dump_pattern(p: Pattern) -> str {
 
 fun dump_bindelem(b: BindElem) -> str {
     return match b {
-        BindElem.BName(n, l, c) => format("(bname {})", sstr(n)),
+        BindElem.BName(n, l, c, sp) => format("(bname {})", sstr(n)),
         BindElem.BWild => "(bwild)",
-        BindElem.BTuple(elems, l, c) => format("(btuple {})", join_map(elems, dump_bindelem)),
+        BindElem.BTuple(elems, l, c, sp) => format("(btuple {})", join_map(elems, dump_bindelem)),
     }
 }
 
