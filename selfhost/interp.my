@@ -10,7 +10,7 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
 from .checker import Checker, Type
 from .util import cp_utf8
-from .floatlit import f64_literal_bits, f32_round_bits
+from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2
 from std.io import write
 
 // =========================================================================
@@ -1011,7 +1011,7 @@ impl Interp {
     fun eval_float_lit(self, e: Expr, lex: str) -> Value {
         var bits = f64_literal_bits(lex)
         if is_float32_type(self.resolved_of(e.id)) { bits = f32_round_bits(bits) }
-        return Value.VFloat(f64_from_bits(bits))
+        return Value.VFloat(float_from_bits(bits))
     }
 
     fun eval_cast(var self, e: Expr, x: Expr) -> Value {
@@ -1617,46 +1617,6 @@ fun is_float32_type(t: Option<Type>) -> bool {
 fun round_float(f: float64, t: Option<Type>) -> float64 {
     if is_float32_type(t) { return (f as float32) as float64 }
     return f
-}
-
-// The float64 with IEEE bit pattern `bits` (from floatlit.my; literals are
-// never negative or NaN), built exactly as mantissa * 2^exp.
-fun f64_from_bits(bits: uint64) -> float64 {
-    let biased = ((bits >> 52) & 2047) as int32
-    if biased == 2047 {
-        return 1.0f64 / 0.0f64
-    }
-    var mant = bits & 4503599627370495
-    var e = -1074
-    if biased > 0 {
-        mant = mant | ((1 as uint64) << 52)
-        e = biased - 1075
-    }
-    let x = mant as float64             // exact: mant < 2^53
-    if e < -1000 {
-        // in two steps, so the intermediate stays a normal double
-        return x * pow2(e + 600) * pow2(-600)
-    }
-    return x * pow2(e)
-}
-
-// 2^k exactly, for -1022 <= k <= 1023 (repeated squaring)
-fun pow2(k: int32) -> float64 {
-    var base = 2.0f64
-    var n = k
-    if n < 0 {
-        base = 0.5f64
-        n = -n
-    }
-    var r = 1.0f64
-    while n > 0 {
-        if (n & 1) == 1 {
-            r = r * base
-        }
-        base = base * base
-        n = n >> 1
-    }
-    return r
 }
 
 fun format_value(v: Value) -> str {

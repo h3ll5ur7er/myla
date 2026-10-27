@@ -1,4 +1,4 @@
-"""The self-hosted compiler's float literal conversion (selfhost/floatlit.my,
+"""The self-hosted compiler's float literal conversion (std.num, which moved from selfhost/floatlit.my in MYLA-79;
 MYLA-29) against Python: the correctly rounded double of each literal, and that
 double rounded to float32, must be bit-identical to what the Python toolchain
 uses (`float(text)`, then `struct` single-precision rounding)."""

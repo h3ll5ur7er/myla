@@ -39,7 +39,7 @@ Myla has no global variables and no module-level maps, and everything is a value
 | --- | --- | --- |
 | Modules | Qualified names, privacy, packages | The same since [[MYLA-30]] (small differences on [[Architecture/Module-loader]]) |
 | Monomorphization | Separate pass, then a second check | During code generation, with a substitution list |
-| Floats | Full support | Full support since [[MYLA-29]]: literals converted with integer arithmetic (`selfhost/floatlit.my`), the float runtime generated from the Python backend's (`scripts/gen_selfhost_runtime.py`) |
+| Floats | Full support | Full support since [[MYLA-29]]: literals converted with integer arithmetic (`std.num`, moved there from `selfhost/floatlit.my` in [[MYLA-79]]), the float runtime generated from the Python backend's (`scripts/gen_selfhost_runtime.py`) |
 | Diagnostics | Messages with file positions | The same: lex, parse, module and type errors print exactly as in the Python CLI, file, source line and caret included ([[MYLA-28]]) |
 | Runtime errors | Messages | The interpreter (`myla run`/`test`): the same messages and rendering since [[MYLA-32]]; native binaries: `runtime error: <message>` on stderr and exit 1, without the position, as the Python backend's ([[MYLA-17]]) |
 | Heap | 1 GiB arena, size-class free lists up to 4 KiB | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]); maps leave a tombstone on `remove` and then rebuild, the Python backend rebuilds directly ([[MYLA-18]]) |

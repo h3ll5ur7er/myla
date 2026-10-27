@@ -114,3 +114,50 @@ fun main() {
 | `enum IoError { NotFound, PermissionDenied, Other(int32) }` | Mapped from the OS errno |
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
+
+`from_errno(code: int32) -> IoError` maps an errno; `std.io` uses it too.
+
+## std.num
+
+Numbers from text and back ([[MYLA-79]]). The conversions are exact, computed with big integers, so every implementation gives the same result; the self-hosted compiler converts its float literals with the same code.
+
+| Function | Result |
+| --- | --- |
+| `parse_int(s: str) -> Option<int64>` | A decimal integer with an optional `-`; `None` for anything else or out of range |
+| `parse_float(s: str) -> Option<float64>` | The nearest double to `-? digits (. digits)? ([eE] [+-]? digits)?`; too large is infinite |
+| `format_float(x: float64) -> str` | The shortest decimal that reads back as `x`, as Python's `repr` writes it: `1.0`, `0.1`, `1e+16`, `1.5e-07`, `-0.0`, `nan`, `inf` |
+| `pow2(k: int32) -> float64` | 2^k exactly, for -1022 <= k <= 1023 |
+| `f64_literal_bits(text) -> uint64`, `f32_round_bits(bits) -> uint64`, `float_from_bits(bits) -> float64` | The bit-level steps (for the compiler) |
+
+`format("{}", x)` writes a float with up to 17 significant digits (`0.10000000000000001`); `format_float` is the short form.
+
+## std.json
+
+JSON values, parsing and writing ([[MYLA-79]]), following Python's `json` module: the burn tests compare them on thousands of random and broken texts.
+
+```myla
+from std.json import Json, parse, to_string, field
+
+fun main() {
+    match parse("{\"id\": 1, \"method\": \"initialize\"}") {
+        Ok(msg) => {
+            match field(msg, "method") {
+                Some(Json.Str(m)) => { print(m) },
+                _ => { print("no method") },
+            }
+            print(to_string(Json.Array([Json.Int(1), Json.Null])))
+        },
+        Err(e) => { print(format("{}:{}: {}", e.line, e.col, e.msg)) },
+    }
+}
+```
+
+| Item | Meaning |
+| --- | --- |
+| `enum Json { Null, Bool(bool), Int(int64), Float(float64), Str(str), Array([Json]), Object([(str, Json)]) }` | A number without fraction or exponent that fits in int64 is an `Int`, any other a `Float`; an object keeps its members in order, duplicates included |
+| `parse(text: str) -> Result<Json, JsonError>` | One value, with whitespace around it allowed |
+| `struct JsonError { msg: str, line: int32, col: int32 }` | Python 3.13's messages and positions (the column counts characters) |
+| `to_string(j: Json) -> str` | Compact text, as `json.dumps(j, ensure_ascii=False, separators=(",", ":"))` writes it: floats in their shortest form, control characters escaped, other characters as they are |
+| `field(j: Json, key: str) -> Option<Json>` | An object's member (the last one with that key, as Python keeps it) |
+
+Like Python, `NaN`, `Infinity` and `-Infinity` are read and written. Unlike Python, a `\u` escape of a lone surrogate is an error, since a Myla string holds UTF-8, and nesting is limited to 500 levels.

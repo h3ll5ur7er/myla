@@ -11,7 +11,7 @@
 // build and run a `hello`-class program through `as`/`ld` with parity.
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem, bind_elems
-from .floatlit import f64_literal_bits, f32_round_bits
+from std.num import f64_literal_bits, f32_round_bits
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type
 
