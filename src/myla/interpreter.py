@@ -296,6 +296,9 @@ class Interpreter:
                 except MylaRuntimeError as err:
                     results.append(TestResult(decl.name, idx, False, f"runtime error: {err.message}"))
                     continue
+                except _ExitSignal as sig:   # fails this test, not the run (MYLA-81)
+                    results.append(TestResult(decl.name, idx, False, f"exited with status {sig.code}"))
+                    continue
                 if actual == expected:
                     results.append(TestResult(decl.name, idx, True, ""))
                 else:

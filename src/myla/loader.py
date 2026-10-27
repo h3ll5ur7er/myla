@@ -171,13 +171,33 @@ def _resolve_module_path(importer_path: str, path: ast.ImportPath,
     raise ModuleError(f"cannot resolve import '{dotted}'", line, col)
 
 
-def _module_id(abspath: str, entry_path: str, project_root: str) -> str:
+def _module_id(abspath: str, entry_path: str, project_root: str,
+               stdlib_root: str | None = None) -> str:
+    """The id prefixing a module's global names, by the self-hosted loader's
+    rules (selfhost/loader.my, `module_id`): "" for the entry, the path under
+    the stdlib root for the standard library, under the project root for the
+    project, and above it one `up` per level climbed (MYLA-81: `../x` and `x`
+    no longer collide, and both toolchains name things alike)."""
     if abspath == entry_path:
         return ""
-    rel = os.path.relpath(abspath, project_root)
+    parts = abspath.split(os.sep)
+    for root in ([stdlib_root] if stdlib_root else []) + [project_root]:
+        rs = root.rstrip(os.sep).split(os.sep)
+        if parts[:len(rs)] == rs:
+            return _module_tag(parts[len(rs):])
+    rs = project_root.rstrip(os.sep).split(os.sep)
+    common = 0
+    while common < min(len(parts), len(rs)) and parts[common] == rs[common]:
+        common += 1
+    return _module_tag(["up"] * (len(rs) - common) + parts[common:])
+
+
+def _module_tag(parts: list[str]) -> str:
+    """Path segments as a `$`-joined tag valid in qualified names and assembly
+    labels (`.my` dropped, each run of other characters one `$`)."""
+    rel = "/".join(parts)
     if rel.endswith(".my"):
         rel = rel[:-3]
-    # Sanitize into a `$`-joined tag valid in qualified names + asm labels.
     return re.sub(r"[^A-Za-z0-9_]+", "$", rel).strip("$")
 
 
@@ -600,7 +620,7 @@ def link(
                 raise ModuleError(f"cannot read module '{abspath}': {exc}")
         with in_file(abspath):
             program = parse(tokenize(source))
-        mid = _module_id(abspath, entry_abs, project_root)
+        mid = _module_id(abspath, entry_abs, project_root, stdlib_root)
         m = _Module(mid, abspath, program, source)
         modules[abspath] = m
         order.append(m)

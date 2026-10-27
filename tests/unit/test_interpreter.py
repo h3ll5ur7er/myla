@@ -142,6 +142,22 @@ class TestTestRunner(unittest.TestCase):
     def test_no_tests(self):
         self.assertEqual(self._run_tests("fun main() {\n    print(1)\n}\n"), [])
 
+    def test_exit_in_a_test_fails_it(self):
+        # `exit` in a test fails that test; the rest still run (MYLA-81)
+        src = ("from std.process import exit\n"
+               "#test()[1]\nfun quits() -> int {\n    exit(3)\n    return 1\n}\n"
+               "#test()[2]\nfun two() -> int {\n    return 2\n}\n")
+        import os, tempfile
+        from myla.loader import default_stdlib_root, link
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "quits.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src)
+            checker = check(link(path, stdlib_root=default_stdlib_root()))
+        results = Interpreter(checker, io.StringIO()).run_tests()
+        self.assertEqual([(r.function, r.passed, r.detail) for r in results],
+                         [("quits", False, "exited with status 3"), ("two", True, "")])
+
 
 if __name__ == "__main__":
     unittest.main()

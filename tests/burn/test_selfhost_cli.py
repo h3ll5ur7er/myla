@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import glob
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -89,3 +91,100 @@ class SelfHostedCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FAILING = """\
+from std.process import exit
+struct P { x: int, name: str }
+enum E { A, B(int, str) }
+#test()['b']
+fun ch() -> char { return 'a' }
+#test()[true]
+fun b() -> bool { return false }
+#test()["it's \\"q\\"\\n\\t\\\\ é😀"]
+fun s() -> str { return "say \\"hi\\"" }
+#test()["it's"]
+fun s2() -> str { return "x'y" }
+#test()[[1.5, 1.0e16, 1.0e-5, -0.0, 3.0]]
+fun f() -> [float64] { return [0.1 + 0.2] }
+#test()[0.5f32]
+fun f32() -> float32 { return 0.1f32 }
+#test()[P { x: 1, name: "a" }]
+fun p() -> P { return P { x: 2, name: "b'" } }
+#test()[E.B(1, "z")]
+fun e() -> E { return E.A }
+#test()[[1, 2]]
+fun l() -> [int] { return [3] }
+#test()[["a": [1]]]
+fun m() -> [str: [int]] { var e: [str: [int]] = [:]
+    return e }
+#test()[["k": 1, "j": 2]]
+fun m2() -> [str: int] { return ["j": 2, "k": 1] }
+#test()[(1, 'c', "d")]
+fun t() -> (int, char, str) { return (2, 'x', "y") }
+#test([1, 2], 5)[0]
+fun idx(xs: [int], i: int) -> int { return xs[i] }
+#test()[Some(1)]
+fun o() -> Option<int> { return None }
+#test()[1u8]
+fun u() -> uint8 { return 255u8 }
+#test()[1]
+fun pan() -> int { panic("boom")
+    return 1 }
+#test()[2]
+fun quits() -> int { exit(3)
+    return 2 }
+#test()[3]
+fun noisy() -> int { print("from a test")
+    return 4 }
+#test()[7]
+fun after() -> int { return 7 }
+"""
+
+
+def _sources_with_tests() -> list[str]:
+    files = (glob.glob(os.path.join(_REPO, "examples", "*.my")) + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
+             + glob.glob(os.path.join(_REPO, "tools", "*", "*.my"))
+             + glob.glob(os.path.join(_REPO, "src", "myla", "std", "*.my")))
+    out = []
+    for f in sorted(files):
+        with open(f, encoding="utf-8") as fh:
+            if "#test" in fh.read():
+                out.append(f)
+    return out
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestCommandParity(SelfHostedCli):
+    """`myla test` of the self-hosted CLI prints what the Python one prints,
+    with the same exit status (MYLA-81): on every source with `#test`s, and
+    on failures of every kind (values shown as the Python interpreter's repr,
+    runtime errors, `exit`, output from the tests)."""
+
+    def both(self, path: str) -> tuple:
+        py = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), "test", path], cwd=self.work,
+                            capture_output=True, text=True)
+        # the Python CLI's stdlib root, not the layout's symlink to it: module
+        # ids come from paths as written, and a stdlib module tested through
+        # another root would be named as a project module
+        my = self.myla_cmd("test", path, "--stdlib", os.path.join(_REPO, "src", "myla"))
+        return (py.stdout, py.returncode), (my.stdout, my.returncode)
+
+    def test_failures(self):
+        path = os.path.join(self.work, "failing.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(FAILING)
+        py, my = self.both(path)
+        self.assertEqual(py[1], 1, py)
+        self.assertIn("FAIL  quits #1: exited with status 3", py[0])
+        self.assertEqual(my, py)
+
+    def test_the_corpus(self):
+        files = _sources_with_tests()
+        self.assertGreater(len(files), 40)
+        for path in files:
+            with self.subTest(file=os.path.relpath(path, _REPO)):
+                py, my = self.both(path)
+                self.assertEqual(py[1], 0, py[0][-300:])
+                self.assertEqual(my, py)
+

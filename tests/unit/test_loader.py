@@ -226,6 +226,28 @@ class TestLinking(unittest.TestCase):
         self.assertEqual(out, "1\n")
 
 
+class TestModuleIds(unittest.TestCase):
+    """A module's id prefixes its global names. The rules are the self-hosted
+    loader's (selfhost/loader.my, `module_id`), so both toolchains name things
+    alike (MYLA-81): the standard library by its path under the stdlib root,
+    a project module by its path under the project root, a module above the
+    root with one `up` per level climbed (never colliding with one below)."""
+
+    def test_ids(self):
+        from myla.loader import _module_id
+        root, std = "/w/proj/app", "/w/lib/myla"
+        cases = {
+            "/w/proj/app/main.my": "",
+            "/w/proj/app/util/text.my": "util$text",
+            "/w/lib/myla/std/io.my": "std$io",
+            "/w/proj/selfhost/tokens.my": "up$selfhost$tokens",
+            "/w/other/x.my": "up$up$other$x",
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(_module_id(path, "/w/proj/app/main.my", root, std), expected)
+
+
 class TestLoaderErrors(unittest.TestCase):
     def _err(self, files, entry="main.my"):
         root = _project(files)

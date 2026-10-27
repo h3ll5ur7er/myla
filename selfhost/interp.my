@@ -10,7 +10,7 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
 from .checker import Checker, Type
 from .util import cp_utf8
-from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2
+from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write
 
 // =========================================================================
@@ -238,9 +238,13 @@ impl Interp {
     // Run every function's `#test(args…)[expected]` cases, printing a PASS/FAIL
     // line per case and a summary; returns 0 if all pass (or none exist), else 1.
     // Mirrors `Interpreter.run_tests` in src/myla/interpreter.py.
+    // Run every #test, then print a line for each (after whatever the tests
+    // printed) and the summary, as the Python CLI does (MYLA-81); the exit
+    // status.
     fun run_tests(var self) -> int32 {
         self.collect()
         self.eval_consts()
+        var report: [str] = []
         var total = 0
         var passed = 0
         var i = 0
@@ -261,16 +265,27 @@ impl Interp {
                     }
                     self.pop_scope()
                     let actual = self.call_func(i, argv)
-                    var ok = false
+                    var detail = ""
                     match self.ctrl {
-                        Ctrl.CExit => { self.ctrl = Ctrl.CNone },
-                        _ => { ok = value_eq(actual, expected) },
+                        Ctrl.CExit => {
+                            // a runtime error or `exit` fails this test only
+                            match self.rt_err {
+                                Some(r) => { detail = "runtime error: " + r.msg },
+                                None => { detail = format("exited with status {}", self.exit_code) },
+                            }
+                            self.ctrl = Ctrl.CNone
+                            self.rt_err = None
+                            self.exit_code = 0
+                        },
+                        _ => {
+                            if !value_eq(actual, expected) { detail = "expected " + py_repr(expected) + ", got " + py_repr(actual) }
+                        },
                     }
-                    if ok {
+                    if detail == "" {
                         passed = passed + 1
-                        write(1, format("PASS  {} #{}\n", fd.name, idx))
+                        push(report, format("PASS  {} #{}\n", fd.name, idx))
                     } else {
-                        write(1, format("FAIL  {} #{}\n", fd.name, idx))
+                        push(report, format("FAIL  {} #{}: {}\n", fd.name, idx, detail))
                     }
                 }
             }
@@ -280,6 +295,7 @@ impl Interp {
             write(1, "no #test cases found.\n")
             return 0
         }
+        for line in report { write(1, line) }
         write(1, format("\n{}/{} passed.\n", passed, total))
         if passed == total { return 0 }
         return 1
@@ -2189,8 +2205,136 @@ fun value_eq(a: Value, b: Value) -> bool {
         Value.VTuple(es) => match b { Value.VTuple(es2) => values_eq(es, es2), _ => false },
         Value.VEnum(en, vr, pl) => match b { Value.VEnum(en2, vr2, pl2) => en == en2 && vr == vr2 && values_eq(pl, pl2), _ => false },
         Value.VList(xs) => match b { Value.VList(ys) => values_eq(xs, ys), _ => false },
+        Value.VMap(ks, vs) => match b { Value.VMap(ks2, vs2) => maps_eq(ks, vs, ks2, vs2), _ => false },
         _ => false,
     }
+}
+
+// A value as the Python interpreter's repr shows it, for a failed #test:
+// chars as code points, `True`, `None`, strings quoted as Python quotes them,
+// `P { x: 1 }`, `E.B(1)`, `(a, b)`, `[a]`, `[k: v]`.
+#test(Value.VBool(true))["True"]
+#test(Value.VList([Value.VInt(1), Value.VChar(97)]))["[1, 97]"]
+#test(Value.VMap([], []))["[]"]
+#test(Value.VEnum("E", "B", [Value.VStr("it's")]))["E.B(\"it's\")"]
+// (Also the key in a "map key … not found" message.)
+#test(Value.VStr("a b"))["'a\\xa0b'"]
+pub fun py_repr(v: Value) -> str {
+    return match v {
+        Value.VInt(i) => format("{}", i),
+        Value.VChar(c) => format("{}", c),
+        Value.VBool(b) => bool_repr(b),
+        Value.VFloat(f) => format_float(f),
+        Value.VStr(t) => py_repr_str(t),
+        Value.VUnit => "None",
+        Value.VStruct(n, names, vals) => struct_repr(n, names, vals),
+        Value.VTuple(es) => "(" + reprs(es) + ")",
+        Value.VEnum(en, vr, pl) => enum_repr(en, vr, pl),
+        Value.VList(xs) => "[" + reprs(xs) + "]",
+        Value.VMap(ks, vs) => map_repr(ks, vs),
+        Value.VSB(bs) => "StringBuilder(" + bytes_repr(bs) + ")",
+        Value.VClosure(ps, body, cn, cv, fname, is_func) => format("<closure {} param(s), {} capture(s)>", len(ps), len(cn)),
+        _ => "<function>",
+    }
+}
+
+fun bool_repr(b: bool) -> str {
+    if b { return "True" }
+    return "False"
+}
+
+fun reprs(vs: [Value]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(vs) {
+        if i > 0 { append(sb, ", ") }
+        append(sb, py_repr(vs[i]))
+        i = i + 1
+    }
+    return build(sb)
+}
+
+fun struct_repr(n: str, names: [str], vals: [Value]) -> str {
+    var sb = StringBuilder()
+    append(sb, n + " { ")
+    var i = 0
+    while i < len(names) {
+        if i > 0 { append(sb, ", ") }
+        append(sb, names[i] + ": " + py_repr(vals[i]))
+        i = i + 1
+    }
+    append(sb, " }")
+    return build(sb)
+}
+
+fun enum_repr(en: str, vr: str, pl: [Value]) -> str {
+    if len(pl) == 0 { return en + "." + vr }
+    return en + "." + vr + "(" + reprs(pl) + ")"
+}
+
+fun map_repr(ks: [Value], vs: [Value]) -> str {
+    var sb = StringBuilder()
+    append(sb, "[")
+    var i = 0
+    while i < len(ks) {
+        if i > 0 { append(sb, ", ") }
+        append(sb, py_repr(ks[i]) + ": " + py_repr(vs[i]))
+        i = i + 1
+    }
+    append(sb, "]")
+    return build(sb)
+}
+
+// Python's repr of bytes: b'…' with printable ASCII as is.
+fun bytes_repr(bs: [int64]) -> str {
+    var has_single = false
+    var has_double = false
+    for b in bs {
+        if b == 39 { has_single = true }
+        if b == 34 { has_double = true }
+    }
+    var quote: int64 = 39
+    if has_single && !has_double { quote = 34 }
+    var sb = StringBuilder()
+    append(sb, "b" + cp_utf8(quote as int32))
+    for b in bs {
+        if b == quote || b == 92 {
+            append(sb, "\\" + cp_utf8(b as int32))
+        } else if b == 9 {
+            append(sb, "\\t")
+        } else if b == 10 {
+            append(sb, "\\n")
+        } else if b == 13 {
+            append(sb, "\\r")
+        } else if b < 32 || b >= 127 {
+            append(sb, "\\x" + hex2(b as int32))
+        } else {
+            append(sb, cp_utf8(b as int32))
+        }
+    }
+    append(sb, cp_utf8(quote as int32))
+    return build(sb)
+}
+
+// Two maps hold the same entries, in whatever order (a #test's expected map
+// against the actual one, as the Python interpreter compares dicts).
+fun maps_eq(ks: [Value], vs: [Value], ks2: [Value], vs2: [Value]) -> bool {
+    if len(ks) != len(ks2) { return false }
+    var i = 0
+    while i < len(ks) {
+        var found = false
+        var j = 0
+        while j < len(ks2) && !found {
+            if value_eq(ks[i], ks2[j]) {
+                if !value_eq(vs[i], vs2[j]) { return false }
+                found = true
+            }
+            j = j + 1
+        }
+        if !found { return false }
+        i = i + 1
+    }
+    return true
 }
 
 fun values_eq(a: [Value], b: [Value]) -> bool {
@@ -2253,21 +2397,6 @@ fun is_method_name(name: str) -> bool {
     return false
 }
 
-// A map key as Python's `repr` writes it (the "map key … not found" message).
-fun py_repr(v: Value) -> str {
-    return match v {
-        Value.VStr(s) => py_repr_str(s),
-        Value.VBool(b) => if_text(b, "True", "False"),
-        Value.VChar(c) => format("{}", c),
-        _ => format("{}", as_int(v)),
-    }
-}
-
-fun if_text(c: bool, a: str, b: str) -> str {
-    if c { return a }
-    return b
-}
-
 fun py_repr_str(s: str) -> str {
     var has_single = false
     var has_double = false
@@ -2286,7 +2415,7 @@ fun py_repr_str(s: str) -> str {
         else if cp == 10 { append(sb, "\\n") }
         else if cp == 9 { append(sb, "\\t") }
         else if cp == 13 { append(sb, "\\r") }
-        else if cp < 32 || (cp >= 127 && cp < 160) { append(sb, format("\\x{}", hex2(cp))) }
+        else if cp < 32 || (cp >= 127 && cp <= 160) || cp == 173 { append(sb, format("\\x{}", hex2(cp))) }
         else { append(sb, cp_utf8(cp)) }
     }
     append(sb, cp_utf8(quote as int32))
