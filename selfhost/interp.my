@@ -74,6 +74,10 @@ pub enum Ctrl {
 
 pub struct RtFrame { names: [str], vals: [Value] }
 
+// What an input of the REPL did: the variables afterwards, the value to
+// show, the runtime error, or the `exit` that ends the session.
+pub struct SessionStep { names: [str], vals: [Value], shown: Option<Value>, err: Option<RtError>, exited: bool, code: int32 }
+
 pub struct MatchRes { ok: bool, names: [str], vals: [Value] }
 
 // =========================================================================
@@ -221,6 +225,55 @@ impl Interp {
     }
 
     // -- program entry ----------------------------------------------------
+
+    // One input of the REPL (MYLA-82): run `stmts` in a scope holding the
+    // session's variables (`names`, `vals`, the latest of a name last), and
+    // keep the value of the last one when `show_last` and it is an expression
+    // giving one. The scope afterwards is the session's next.
+    fun session_step(var self, names: [str], vals: [Value], stmts: [Stmt], show_last: bool) -> SessionStep {
+        self.collect()
+        self.eval_consts()
+        self.scopes = []
+        self.push_scope()
+        var i = 0
+        while i < len(names) {
+            self.define(names[i], vals[i])
+            i = i + 1
+        }
+        var shown: Option<Value> = None
+        var k = 0
+        while k < len(stmts) && !self.stop() {
+            var done = false
+            if k == len(stmts) - 1 && show_last {
+                match stmts[k].kind {
+                    StmtKind.ExprStmt(e) => {
+                        let v = self.eval(e)
+                        if !self.stop() {
+                            match v {
+                                Value.VUnit => {},
+                                _ => { shown = Some(v) },
+                            }
+                        }
+                        done = true
+                    },
+                    _ => {},
+                }
+            }
+            if !done { self.exec_stmt(stmts[k]) }
+            k = k + 1
+        }
+        var exited = false
+        match self.ctrl {
+            Ctrl.CExit => {
+                match self.rt_err {
+                    Some(r) => {},
+                    None => { exited = true },
+                }
+            },
+            _ => {},
+        }
+        return SessionStep { names: self.scopes[0].names, vals: self.scopes[0].vals, shown: shown, err: self.rt_err, exited: exited, code: self.exit_code }
+    }
 
     fun run(var self) -> int32 {
         self.collect()

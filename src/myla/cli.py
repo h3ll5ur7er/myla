@@ -182,15 +182,11 @@ def _cmd_lsp(args: argparse.Namespace) -> int:
     return lsp_main()
 
 
-def _not_yet(name: str, milestone: str):
-    def handler(args: argparse.Namespace) -> int:
-        print(
-            f"`myla {name}` is not implemented yet (planned for {milestone}).",
-            file=sys.stderr,
-        )
-        return 2
-
-    return handler
+def _cmd_repl(args: argparse.Namespace) -> int:
+    """The REPL is written in Myla, in the self-hosted CLI (MYLA-82)."""
+    print("The REPL is part of the self-hosted CLI: build it with scripts/bootstrap.sh, "
+          "then run `build/myla repl`.", file=sys.stderr)
+    return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -218,8 +214,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_test.add_argument("file")
     p_test.set_defaults(func=_cmd_test)
 
-    p_repl = sub.add_parser("repl", help="start the interactive interpreter (planned: v0.0.2)")
-    p_repl.set_defaults(func=_not_yet("repl", "v0.0.2"))
+    p_repl = sub.add_parser("repl", help="the interactive interpreter: see `build/myla repl`")
+    p_repl.set_defaults(func=_cmd_repl)
 
     p_tok = sub.add_parser("tokenize", help="print the lexer's token stream for a .my file")
     p_tok.add_argument("file")

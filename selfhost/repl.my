@@ -1,0 +1,388 @@
+// repl.my -- `myla repl`, the interactive interpreter (MYLA-82).
+//
+// A session is a program text: the declarations typed so far, then a
+// function `__repl` whose body holds the statements typed so far, each
+// input in a block nested in the previous one's (so a later `let` may shadow
+// an earlier name). Every input is checked as part of that text, but only
+// its own statements run, in a scope holding the session's variables: what
+// ran before isn't run again. A declaration (an input starting with `fun`,
+// `struct`, `import`, ...) joins the declarations; a final expression's
+// value is shown as Myla source would write it. An input continues while it
+// has an open bracket. Errors are reported against the input's own lines and
+// leave the session as it was. The prompts go to stderr, values and the
+// program's output to stdout.
+
+from std.io import stdin, write, eprint, eprintln
+from std.num import format_float
+from .lexer import lex
+from .tokens import Token, TokenKind
+from .ast import Decl, DeclKind, Stmt, StmtKind, ElseTail
+from .loader import load_program_with, file_of, normalize, Loaded
+from .checker import build_checker_decls, Checker
+from .diag import render, type_report, Report
+from .interp import new_interp, Value, SessionStep
+from .util import cp_utf8
+
+const ENTRY: str = "__repl__.my"
+
+struct Session {
+    stdlib: str,
+    decls: str,              // the declarations typed so far
+    levels: [str],           // the statement inputs so far, outermost first
+    names: [str],            // the session's variables (the latest of a name last)
+    vals: [Value],
+}
+
+// A session's text with one more input; where that input starts (1-based).
+struct Text { source: str, start: int32 }
+
+// Run the REPL on stdin until its end (status 0) or an `exit` (its status).
+pub fun repl(stdlib: str) -> int32 {
+    var s = Session { stdlib: stdlib, decls: "", levels: [], names: [], vals: [] }
+    var input = stdin()
+    while true {
+        eprint("myla> ")
+        var text = ""
+        var more = true
+        var first = true
+        while more {
+            if !first { eprint("...   ") }
+            first = false
+            match input.read_line() {
+                Ok(Some(line)) => {
+                    if text != "" { text = text + "\n" }
+                    text = text + line
+                    more = open_brackets(text)
+                },
+                _ => {
+                    if text == "" {
+                        eprintln("")
+                        return 0
+                    }
+                    more = false
+                },
+            }
+        }
+        if !is_blank(text) {
+            let code = s.enter(text)
+            if code >= 0 { return code }
+        }
+    }
+    return 0
+}
+
+impl Session {
+    // Check and run one input; the exit status when it ends the session,
+    // else -1.
+    fun enter(var self, input: str) -> int32 {
+        let decl = starts_a_declaration(input)
+        var t = self.text("", input)
+        if decl { t = self.text(input, "") }
+        var overrides: [str: str] = [:]
+        overrides[ENTRY] = t.source
+        let prog = match load_program_with(ENTRY, self.stdlib, overrides) {
+            Ok(p) => p,
+            Err(r) => {
+                report(r, t, input)
+                return -1
+            },
+        }
+        let c = match build_checker_decls(prog.decls, prog.next_id) {
+            Ok(c) => c,
+            Err(e) => {
+                report(type_report(e.line, e.col, e.msg, file_of(prog, e.decl)), t, input)
+                return -1
+            },
+        }
+        if decl {
+            self.decls = self.decls + input + "\n"
+            return -1
+        }
+        var it = new_interp(c, ["<repl>"])
+        let step = it.session_step(self.names, self.vals, input_stmts(c, len(self.levels)), true)
+        match step.err {
+            Some(r) => {
+                report(Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col }, t, input)
+                return -1
+            },
+            None => {},
+        }
+        if step.exited { return step.code }
+        match step.shown {
+            Some(v) => { write(1, show(v) + "\n") },
+            None => {},
+        }
+        push(self.levels, input)
+        self.names = step.names
+        self.vals = step.vals
+        return -1
+    }
+
+    // The session's text with a new declaration or new statements (the
+    // other ""), and the line the new input starts on.
+    fun text(self, new_decl: str, new_stmts: str) -> Text {
+        var sb = StringBuilder()
+        append(sb, self.decls)
+        var start = 0
+        if new_decl != "" {
+            start = count_lines(self.decls) + 1
+            append(sb, new_decl + "\n")
+        }
+        append(sb, "fun __repl() {\n")
+        var all = self.levels
+        if new_stmts != "" { push(all, new_stmts) }
+        var i = 0
+        while i < len(all) {
+            if i > 0 { append(sb, "if true {\n") }
+            if i == len(all) - 1 && new_stmts != "" { start = count_lines(build(sb)) + 1 }
+            append(sb, all[i] + "\n")
+            i = i + 1
+        }
+        i = 1
+        while i < len(all) {
+            append(sb, "}\n")
+            i = i + 1
+        }
+        append(sb, "}\n")
+        return Text { source: build(sb), start: start }
+    }
+}
+
+// The statements of the innermost input of `__repl` in the checked program:
+// `depth` blocks in (each input's block is the last statement of the one
+// before).
+fun input_stmts(c: Checker, depth: int32) -> [Stmt] {
+    var stmts: [Stmt] = []
+    for d in c.decls {
+        match d.kind {
+            DeclKind.FunDecl(fd) => {
+                if fd.name == "__repl" {
+                    match fd.body {
+                        Some(b) => { stmts = b.stmts },
+                        None => {},
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+    var k = 0
+    while k < depth {
+        let last = stmts[len(stmts) - 1]
+        match last.kind {
+            StmtKind.IfS(cond, then, tail) => { stmts = then.stmts },
+            _ => {},
+        }
+        k = k + 1
+    }
+    return stmts
+}
+
+// Print `r`; when it is in the session's text and in the input, with the
+// input's own line numbers and source.
+fun report(r: Report, t: Text, input: str) {
+    if normalize(r.path) != normalize(ENTRY) || r.line < t.start || r.line >= t.start + count_lines(input) {
+        if normalize(r.path) == normalize(ENTRY) {
+            eprintln(format("{}: {}", r.kind, r.msg))
+        } else {
+            eprintln(render(r))
+        }
+        return
+    }
+    let line = r.line - t.start + 1
+    let src = input_line(input, line)
+    let gutter = format("{}", line)
+    var pad = StringBuilder()
+    for c in chars(gutter) { append_byte(pad, ' ') }
+    var caret = StringBuilder()
+    var k = 1
+    while k < r.col {
+        append_byte(caret, ' ')
+        k = k + 1
+    }
+    eprintln(format("{}: {}\n  --> <input>:{}:{}\n{} |\n{} | {}\n{} | {}^", r.kind, r.msg, line, r.col, build(pad), gutter, src, build(pad), build(caret)))
+}
+
+// Whether `text` leaves a bracket open (so the input goes on); a text that
+// doesn't lex is complete (its error is reported when it is entered).
+#test("fun f() {")[true]
+#test("f(1)")[false]
+#test("let s = \"{\"")[false]
+fun open_brackets(text: str) -> bool {
+    let toks = match lex(text) {
+        Ok(t) => t,
+        Err(d) => { return false },
+    }
+    var depth = 0
+    for t in toks {
+        if t.kind == TokenKind.LBRACE || t.kind == TokenKind.LPAREN || t.kind == TokenKind.LBRACKET { depth = depth + 1 }
+        if t.kind == TokenKind.RBRACE || t.kind == TokenKind.RPAREN || t.kind == TokenKind.RBRACKET { depth = depth - 1 }
+    }
+    return depth > 0
+}
+
+// Whether an input is a declaration: it starts with a declaration keyword
+// or an attribute.
+#test("fun f() {}")[true]
+#test("pub struct P {}")[true]
+#test("#test(1)[2]\nfun f(x: int) -> int { return x + 1 }")[true]
+#test("let x = 1")[false]
+#test("f(1)")[false]
+fun starts_a_declaration(text: str) -> bool {
+    let toks = match lex(text) {
+        Ok(t) => t,
+        Err(d) => { return false },
+    }
+    for t in toks {
+        if t.kind != TokenKind.NEWLINE {
+            let k = t.kind
+            return k == TokenKind.FUN || k == TokenKind.STRUCT || k == TokenKind.ENUM || k == TokenKind.IMPL || k == TokenKind.TRAIT || k == TokenKind.CONST || k == TokenKind.TYPEALIAS || k == TokenKind.IMPORT || k == TokenKind.FROM || k == TokenKind.PUB || k == TokenKind.HASH
+        }
+    }
+    return false
+}
+
+// A value as Myla source writes it: `"text"`, `'c'`, `true`, `1.5`,
+// `P { x: 1 }`, `Color.Red`, `Some(1)`, `[1, 2]`, `["a": 1]`, `[:]`, `(1, 2)`.
+#test(Value.VStr("a\"b"))["\"a\\\"b\""]
+#test(Value.VChar(10))["'\\n'"]
+#test(Value.VMap([], []))["[:]"]
+#test(Value.VEnum("Option", "Some", [Value.VFloat(1.5)]))["Some(1.5)"]
+#test(Value.VEnum("std$json$Json", "Null", []))["Json.Null"]
+pub fun show(v: Value) -> str {
+    return match v {
+        Value.VInt(i) => format("{}", i),
+        Value.VChar(c) => "'" + escaped(c, 39) + "'",
+        Value.VBool(b) => format("{}", b),
+        Value.VFloat(f) => format_float(f),
+        Value.VStr(t) => show_str(t),
+        Value.VUnit => "()",
+        Value.VStruct(n, names, vals) => show_struct(unqualified(n), names, vals),
+        Value.VTuple(es) => "(" + shows(es) + ")",
+        Value.VEnum(en, vr, pl) => show_enum(en, vr, pl),
+        Value.VList(xs) => "[" + shows(xs) + "]",
+        Value.VMap(ks, vs) => show_map(ks, vs),
+        Value.VSB(bs) => "StringBuilder",
+        _ => "<function>",
+    }
+}
+
+fun shows(vs: [Value]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(vs) {
+        if i > 0 { append(sb, ", ") }
+        append(sb, show(vs[i]))
+        i = i + 1
+    }
+    return build(sb)
+}
+
+fun show_struct(n: str, names: [str], vals: [Value]) -> str {
+    if len(names) == 0 { return n + " {}" }
+    var sb = StringBuilder()
+    append(sb, n + " { ")
+    var i = 0
+    while i < len(names) {
+        if i > 0 { append(sb, ", ") }
+        append(sb, names[i] + ": " + show(vals[i]))
+        i = i + 1
+    }
+    append(sb, " }")
+    return build(sb)
+}
+
+// Option and Result variants are written bare, others with their enum.
+fun show_enum(en: str, vr: str, pl: [Value]) -> str {
+    var head = unqualified(en) + "." + vr
+    if en == "Option" || en == "Result" { head = vr }
+    if len(pl) == 0 { return head }
+    return head + "(" + shows(pl) + ")"
+}
+
+fun show_map(ks: [Value], vs: [Value]) -> str {
+    if len(ks) == 0 { return "[:]" }
+    var sb = StringBuilder()
+    append(sb, "[")
+    var i = 0
+    while i < len(ks) {
+        if i > 0 { append(sb, ", ") }
+        append(sb, show(ks[i]) + ": " + show(vs[i]))
+        i = i + 1
+    }
+    append(sb, "]")
+    return build(sb)
+}
+
+fun show_str(t: str) -> str {
+    var sb = StringBuilder()
+    append(sb, "\"")
+    for c in chars(t) { append(sb, escaped(c as int64, 34)) }
+    append(sb, "\"")
+    return build(sb)
+}
+
+// The code point `c` inside quotes `quote` (39 or 34), escaped as needed.
+fun escaped(c: int64, quote: int64) -> str {
+    if c == quote || c == 92 { return "\\" + cp_utf8(c as int32) }
+    if c == 10 { return "\\n" }
+    if c == 9 { return "\\t" }
+    if c < 32 || c == 127 { return format("\\u{{{}}}", hex(c)) }
+    return cp_utf8(c as int32)
+}
+
+fun hex(n: int64) -> str {
+    let digits = "0123456789abcdef"
+    if n < 16 { return part(digits, n as int32, n as int32 + 1) }
+    return hex(n / 16) + part(digits, (n % 16) as int32, (n % 16) as int32 + 1)
+}
+
+// A declaration's name without its module prefix (`std$json$Json` -> `Json`).
+#test("std$json$Json")["Json"]
+#test("P")["P"]
+fun unqualified(n: str) -> str {
+    var start = 0
+    for i in 0..len(n) {
+        if n[i] == '$' { start = i + 1 }
+    }
+    return part(n, start, len(n))
+}
+
+fun part(s: str, a: int32, b: int32) -> str {
+    var sb = StringBuilder()
+    append(sb, s, a, b)
+    return build(sb)
+}
+
+// The number of lines of `s` (a last line without "\n" counts).
+#test("a\nb\n")[2]
+#test("a\nb")[2]
+#test("")[0]
+fun count_lines(s: str) -> int32 {
+    var n = 0
+    for i in 0..len(s) {
+        if s[i] == '\n' { n = n + 1 }
+    }
+    if len(s) > 0 && s[len(s) - 1] != '\n' { n = n + 1 }
+    return n
+}
+
+fun input_line(input: str, n: int32) -> str {
+    var line = 1
+    var start = 0
+    for i in 0..len(input) {
+        if input[i] == '\n' {
+            if line == n { return part(input, start, i) }
+            line = line + 1
+            start = i + 1
+        }
+    }
+    return part(input, start, len(input))
+}
+
+fun is_blank(s: str) -> bool {
+    for i in 0..len(s) {
+        if s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && s[i] != 13u8 { return false }
+    }
+    return true
+}

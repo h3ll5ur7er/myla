@@ -63,8 +63,8 @@ uv run myla.py run myscript.my
 uv run myla.py build myscript.my -o myscript
 # run inline #test cases
 uv run myla.py test myscript.my
-# repl (planned)
-uv run myla.py repl
+# repl (in the self-hosted CLI, which scripts/bootstrap.sh builds)
+build/myla repl
 ```
 
 ### Self-hosting (the Myla-written compiler)

@@ -5,6 +5,7 @@
 //   myla run   <file.my> [--stdlib <dir>] [args...]   interpret a program
 //   myla test  <file.my> [--stdlib <dir>]             run its #test cases
 //   myla build <file.my> [-o <out>] [-g] [--stdlib <dir>]  compile to a native binary
+//   myla repl  [--stdlib <dir>]                       the interactive interpreter (repl.my)
 //
 // `run` passes the arguments after the file to the program (its argv is the
 // file, then those), as the Python `myla run` does. `build` type-checks and
@@ -18,6 +19,7 @@
 from std.process import args, exit, run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file
+from .repl import repl
 from .loader import load_program, file_of, default_stdlib_root, Loaded
 from .diag import render, type_report, Report
 from .checker import build_checker_decls, Checker, CheckErr
@@ -155,11 +157,22 @@ fun usage() {
     eprintln("  run   <file.my> [--stdlib <dir>] [args...]  interpret a program with these arguments")
     eprintln("  test  <file.my> [--stdlib <dir>]            run its #test cases")
     eprintln("  build <file.my> [-o <out>] [-g] [--stdlib <dir>]  compile to a binary (-g: line tables for gdb)")
+    eprintln("  repl  [--stdlib <dir>]                      the interactive interpreter")
     eprintln("--stdlib: the directory holding std/ (default: src/myla next to this binary's build/ directory)")
 }
 
 fun main() {
     let argv = args()
+    if len(argv) >= 2 && argv[1] == "repl" {
+        var stdlib = default_stdlib_root(argv[0])
+        if len(argv) == 4 && argv[2] == "--stdlib" {
+            stdlib = argv[3]
+        } else if len(argv) != 2 {
+            usage()
+            exit(2)
+        }
+        exit(repl(stdlib))
+    }
     if len(argv) < 3 {
         usage()
         exit(2)

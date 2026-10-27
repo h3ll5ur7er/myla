@@ -39,8 +39,9 @@ fun main() {
 """
 
 
-@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-class SelfHostedCli(unittest.TestCase):
+class _Layout(unittest.TestCase):
+    """The CLI in a checkout's layout, run from a work directory (no tests)."""
+
     @classmethod
     def setUpClass(cls) -> None:
         cls._tmp = tempfile.TemporaryDirectory()
@@ -62,6 +63,9 @@ class SelfHostedCli(unittest.TestCase):
     def myla_cmd(self, *argv: str) -> subprocess.CompletedProcess:
         return subprocess.run([self.myla, *argv], cwd=self.work, capture_output=True, text=True)
 
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class SelfHostedCli(_Layout):
     def test_run_finds_the_stdlib_and_passes_arguments(self):
         proc = self.myla_cmd("run", "prog.my", "a", "b c")
         self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
@@ -155,7 +159,7 @@ def _sources_with_tests() -> list[str]:
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
-class TestCommandParity(SelfHostedCli):
+class TestCommandParity(_Layout):
     """`myla test` of the self-hosted CLI prints what the Python one prints,
     with the same exit status (MYLA-81): on every source with `#test`s, and
     on failures of every kind (values shown as the Python interpreter's repr,
@@ -187,4 +191,84 @@ class TestCommandParity(SelfHostedCli):
                 py, my = self.both(path)
                 self.assertEqual(py[1], 0, py[0][-300:])
                 self.assertEqual(my, py)
+
+
+SESSION = """\
+let x = 1 + 2
+x
+fun twice(n: int) -> int {
+    return n * 2
+}
+twice(x)
+struct P { x: int, name: str }
+var p = P { x: twice(5), name: "é\\"q" }
+p
+p.x = 7
+p.x
+[1, 2]
+["a": [1]]
+(1, 'c', true)
+Some(1.5)
+let x = "now a string"
+x
+print(x)
+y + 1
+let xs = [1]
+xs[3]
+xs
+for i in 0..3 {
+    print(i)
+}
+from std.num import format_float
+format_float(0.5)
+twice("no")
+"""
+
+SESSION_OUT = """\
+3
+6
+P { x: 10, name: "é\\"q" }
+7
+[1, 2]
+["a": [1]]
+(1, 'c', true)
+Some(1.5)
+"now a string"
+now a string
+[1]
+0
+1
+2
+"0.5"
+"""
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestRepl(_Layout):
+    """`myla repl` (MYLA-82): lines in, values out; declarations accumulate,
+    an open bracket continues the input, errors don't end the session."""
+
+    def repl(self, text: str) -> subprocess.CompletedProcess:
+        return subprocess.run([self.myla, "repl"], cwd=self.work, input=text, capture_output=True, text=True,
+                              timeout=120)
+
+    def test_a_session(self):
+        proc = self.repl(SESSION)
+        self.assertEqual(proc.stdout, SESSION_OUT)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # errors name the input's own line, and the session goes on
+        self.assertIn("unknown name 'y'", proc.stderr)
+        self.assertIn("runtime error: list index 3 out of bounds (len 1)", proc.stderr)
+        self.assertIn("  --> <input>:1:", proc.stderr)
+        self.assertEqual(proc.stderr.count("error"), 3, proc.stderr)
+
+    def test_errors_inside_a_multiline_input(self):
+        proc = self.repl("fun f() -> int {\n    let a = 1\n    return b\n}\nf()\n1\n")
+        self.assertEqual(proc.stdout, "1\n")
+        self.assertIn("  --> <input>:3:", proc.stderr)
+        self.assertIn("3 |     return b", proc.stderr)
+
+    def test_exit_ends_the_session(self):
+        proc = self.repl("from std.process import exit\nprint(1)\nexit(4)\nprint(2)\n")
+        self.assertEqual((proc.stdout, proc.returncode), ("1\n", 4))
 

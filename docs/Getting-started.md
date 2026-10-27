@@ -36,9 +36,21 @@ type error: cannot assign to an immutable binding (declare it with 'var')
 | `myla tokenize <file> [--canonical]` | Dump the token stream |
 | `myla parse <file> [--canonical]` | Dump the AST (`--canonical`: one S-expression per declaration) |
 | `myla lsp` | Start the language server on stdio (needs the `lsp` extra) |
-| `myla repl` | Not implemented yet; to be written in Myla ([[MYLA-82]]) |
+| `myla repl` | Points to the REPL written in Myla: `build/myla repl` (built by `scripts/bootstrap.sh`, [[MYLA-82]]) |
 
-All commands live in [[src/myla/cli.py]]; `myla.py` only puts `src/` on the import path.
+All commands live in [[src/myla/cli.py]]; `myla.py` only puts `src/` on the import path. The self-hosted CLI, `build/myla` ([[selfhost/main.my]]), has `run`, `test` and `build` (printing what the Python ones print, [[MYLA-81]]) and the REPL:
+
+```text
+$ build/myla repl
+myla> let xs = [1, 2]
+myla> fun twice(n: int) -> int {
+...       return n * 2
+...   }
+myla> twice(len(xs))
+4
+```
+
+Declarations accumulate, a final expression's value is shown as Myla source writes it, an open bracket continues the input, and an error is reported against the input's lines without ending the session ([[Architecture/Self-hosted-compiler]]).
 
 ## A first program
 
