@@ -1,0 +1,5 @@
+//~ module error: cannot resolve import 'nowhere.thing'
+// An import must name a module of the project or the standard library.
+import nowhere.thing
+
+fun main() {}

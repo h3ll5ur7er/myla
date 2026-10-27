@@ -1,0 +1,387 @@
+// symbols.my: the outline of a document (MYLA-80), the declarations of one
+// parsed file without linking or checking: a file that doesn't parse has
+// none.
+//
+// A symbol's selection range is its name token (for an impl, the last mention
+// of the target type in the header, MYLA-48). Its full range runs from the
+// declaration's start to its last token: the closing brace, or the end of a
+// field or variant.
+
+from ...selfhost.lexer import lex
+from ...selfhost.parser import parse_source
+from ...selfhost.tokens import Token, TokenKind
+from ...selfhost.ast import Decl, DeclKind, FunData, TypeExpr, TypeKind, Field, Variant, Program, TypeParam
+from .text import lines_of, to_lsp, code_points, Pos
+
+pub enum SymKind {
+    Struct,
+    Function,
+    Method,
+    Enum,
+    EnumMember,
+    Interface,
+    Impl,
+    Field,
+    Constant,
+    TypeAlias,
+}
+
+// A 0-based UTF-16 range.
+pub struct Range { start: Pos, end: Pos }
+
+// One declaration; `parent` is the index of the symbol it is a member of, -1
+// for a top-level one.
+pub struct Symbol {
+    name: str,
+    kind: SymKind,
+    detail: str,
+    range: Range,
+    selection: Range,
+    parent: int32,
+}
+
+pub fun range_eq(a: Range, b: Range) -> bool {
+    return a.start.line == b.start.line && a.start.character == b.start.character && a.end.line == b.end.line && a.end.character == b.end.character
+}
+
+// A key for an identifier's range (one token: its start tells it apart).
+pub fun start_key(r: Range) -> int {
+    return (r.start.line as int) * 1000000 + (r.start.character as int)
+}
+
+// The LSP SymbolKind number.
+pub fun lsp_kind(k: SymKind) -> int64 {
+    return match k {
+        SymKind.Struct => 23,
+        SymKind.Function => 12,
+        SymKind.Method => 6,
+        SymKind.Enum => 10,
+        SymKind.EnumMember => 22,
+        SymKind.Interface => 11,
+        SymKind.Impl => 19,
+        SymKind.Field => 8,
+        SymKind.Constant => 14,
+        SymKind.TypeAlias => 5,
+    }
+}
+
+// Lower is preferred when a name has several declarations.
+pub fun priority(k: SymKind) -> int32 {
+    return match k {
+        SymKind.Method => 1,
+        SymKind.EnumMember => 1,
+        SymKind.Field => 2,
+        SymKind.Impl => 3,
+        _ => 0,
+    }
+}
+
+pub fun is_member_kind(k: SymKind) -> bool {
+    return match k {
+        SymKind.Field => true,
+        SymKind.Method => true,
+        SymKind.EnumMember => true,
+        _ => false,
+    }
+}
+
+pub fun kind_eq(a: SymKind, b: SymKind) -> bool {
+    return lsp_kind(a) == lsp_kind(b)
+}
+
+// The highest-priority symbol named `name`, first in the list on a tie.
+pub fun best_match(symbols: [Symbol], name: str) -> Option<Symbol> {
+    var best: Option<Symbol> = None
+    var best_p = 1000
+    for s in symbols {
+        if s.name == name && priority(s.kind) < best_p {
+            best_p = priority(s.kind)
+            best = Some(s)
+        }
+    }
+    return best
+}
+
+// --- building ---------------------------------------------------------------------
+
+struct Builder {
+    lines: [str],
+    toks: [Token],
+    out: [Symbol],
+}
+
+// The symbols of `source`, depth first (a declaration before its members);
+// none when it doesn't lex or parse.
+pub fun document_symbols(source: str) -> [Symbol] {
+    return match outline(source) {
+        Some(s) => s,
+        None => [],
+    }
+}
+
+// The symbols of `source`; None when it doesn't lex or parse.
+pub fun outline(source: str) -> Option<[Symbol]> {
+    let toks = match lex(source) {
+        Ok(t) => t,
+        Err(d) => { return None },
+    }
+    let parsed = match parse_source(source, 0) {
+        Ok(p) => p,
+        Err(d) => { return None },
+    }
+    return Some(outline_parsed(source, toks, parsed.program))
+}
+
+// The symbols of `source`, given its tokens and its parsed program.
+pub fun outline_parsed(source: str, toks: [Token], program: Program) -> [Symbol] {
+    var b = Builder { lines: lines_of(source), toks: toks, out: [] }
+    for d in program.decls { b.decl(d) }
+    return b.out
+}
+
+impl Builder {
+    fun decl(var self, d: Decl) {
+        match d.kind {
+            DeclKind.StructDecl(name, fields, attrs, tps, is_pub) => {
+                let k = self.add(d.line, d.col, name, SymKind.Struct, header(is_pub, "struct", name, tps), name, false, -1, len(fields) > 0)
+                for f in fields { self.add(f.line, f.col, f.name, SymKind.Field, type_str(f.ty), f.name, false, k, false) }
+            },
+            DeclKind.EnumDecl(name, variants, attrs, tps, is_pub) => {
+                let k = self.add(d.line, d.col, name, SymKind.Enum, header(is_pub, "enum", name, tps), name, false, -1, len(variants) > 0)
+                for v in variants { self.add(v.line, v.col, v.name, SymKind.EnumMember, variant_detail(v), v.name, false, k, false) }
+            },
+            DeclKind.TraitDecl(name, methods, tps, is_pub) => {
+                let k = self.add(d.line, d.col, name, SymKind.Interface, header(is_pub, "trait", name, tps), name, false, -1, len(methods) > 0)
+                for m in methods { self.fun_symbol(m, k) }
+            },
+            DeclKind.ImplDecl(target, methods, tps, tr, targs) => {
+                let t = type_str(target)
+                let k = self.add(d.line, d.col, t, SymKind.Impl, impl_header(target, tps, tr, targs), type_head(target), true, -1, len(methods) > 0)
+                for m in methods { self.fun_symbol(m, k) }
+            },
+            DeclKind.FunDecl(fd) => { self.fun_symbol(fd, -1) },
+            DeclKind.ConstDecl(name, ty, value, attrs, is_pub) => {
+                self.add(d.line, d.col, name, SymKind.Constant, type_str(ty), name, false, -1, false)
+            },
+            DeclKind.TypeAliasDecl(name, target, attrs, is_pub) => {
+                self.add(d.line, d.col, name, SymKind.TypeAlias, type_str(target), name, false, -1, false)
+            },
+            DeclKind.ImportDecl(p, items, alias, is_pub) => {},
+        }
+    }
+
+    fun fun_symbol(var self, fd: FunData, parent: int32) {
+        var kind = SymKind.Function
+        match fd.receiver {
+            Some(r) => { kind = SymKind.Method },
+            None => {},
+        }
+        self.add(fd.line, fd.col, fd.name, kind, signature(fd), fd.name, false, parent, false)
+    }
+
+    // Add a symbol for the declaration at (line, col); its index.
+    fun add(var self, line0: int32, col0: int32, name: str, kind: SymKind, detail: str, sel_name: str, last: bool, parent: int32, has_children: bool) -> int32 {
+        var line = line0
+        var col = col0
+        if line < 1 { line = 1 }
+        if col < 1 { col = 1 }
+        let start = to_lsp(self.lines, line, col)
+        let first = self.token_index(line, col)
+        let sel_tok = self.name_token(first, line, sel_name, last)
+        var scan = first
+        if sel_tok >= 0 { scan = sel_tok }
+        let end_tok = self.last_token(scan)
+        var end = start
+        if end_tok >= 0 { end = self.token_end(end_tok) }
+        let full = Range { start: start, end: end }
+        var sel = Range { start: start, end: start }
+        if sel_tok >= 0 {
+            sel = Range { start: to_lsp(self.lines, self.toks[sel_tok].line, self.toks[sel_tok].column), end: self.token_end(sel_tok) }
+        } else if !has_children {
+            sel = full
+        }
+        var shown = name
+        if shown == "" { shown = "?" }
+        push(self.out, Symbol { name: shown, kind: kind, detail: detail, range: full, selection: sel, parent: parent })
+        return len(self.out) - 1
+    }
+
+    fun token_end(self, i: int32) -> Pos {
+        let t = self.toks[i]
+        return to_lsp(self.lines, t.line, t.column + code_points(t.lexeme))
+    }
+
+    // The first token at or after (line, col) (binary search).
+    fun token_index(self, line: int32, col: int32) -> int32 {
+        var lo = 0
+        var hi = len(self.toks)
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            let t = self.toks[mid]
+            if t.line < line || (t.line == line && t.column < col) { lo = mid + 1 } else { hi = mid }
+        }
+        return lo
+    }
+
+    // The first (with `last`, the last) token `name` from `i` to the header's
+    // end (`{`, a line break, `;`, the end), as symbols.py's _name_range: whole
+    // tokens only, so `fun un` never finds the `un` in `fun`; -1 for none.
+    fun name_token(self, i: int32, line: int32, name: str, last: bool) -> int32 {
+        var found = -1
+        var k = i
+        while k < len(self.toks) {
+            let t = self.toks[k]
+            let nl = t.kind == TokenKind.NEWLINE
+            if !(nl && t.line == line) {
+                if t.kind == TokenKind.LBRACE || nl || t.kind == TokenKind.SEMI || t.kind == TokenKind.EOF { return found }
+                if t.lexeme == name {
+                    found = k
+                    if !last { return found }
+                }
+            }
+            k = k + 1
+        }
+        return found
+    }
+
+    // The declaration's last token, scanning from `i`: the token before a line
+    // break, `;`, `,` or the end outside brackets, or before a closing bracket
+    // that closes an enclosing one.
+    fun last_token(self, i: int32) -> int32 {
+        var depth = 0
+        var last = -1
+        var k = i
+        while k < len(self.toks) {
+            let t = self.toks[k].kind
+            if t == TokenKind.LPAREN || t == TokenKind.LBRACKET || t == TokenKind.LBRACE {
+                depth = depth + 1
+            } else if t == TokenKind.RPAREN || t == TokenKind.RBRACKET || t == TokenKind.RBRACE {
+                if depth == 0 { return last }
+                depth = depth - 1
+            } else if t == TokenKind.EOF {
+                return last
+            } else if depth == 0 && (t == TokenKind.NEWLINE || t == TokenKind.SEMI || t == TokenKind.COMMA) {
+                return last
+            }
+            if t != TokenKind.NEWLINE { last = k }
+            k = k + 1
+        }
+        return last
+    }
+}
+
+// --- details ----------------------------------------------------------------------
+
+pub fun type_str(t: TypeExpr) -> str {
+    match t.kind {
+        TypeKind.TRef(name, args) => {
+            if len(args) == 0 { return name }
+            return name + "<" + type_list(args) + ">"
+        },
+        _ => {},
+    }
+    return match t.kind {
+        TypeKind.TRef(name, args) => name,
+        TypeKind.TTuple(es) => "(" + type_list(es) + ")",
+        TypeKind.TList(e) => "[" + type_str(e) + "]",
+        TypeKind.TMap(k, v) => "[" + type_str(k) + ": " + type_str(v) + "]",
+        TypeKind.TFn(ps, r) => "(" + type_list(ps) + ") -> " + type_str(r),
+    }
+}
+
+fun type_list(ts: [TypeExpr]) -> str {
+    var sb = StringBuilder()
+    var first = true
+    for t in ts {
+        if !first { append(sb, ", ") }
+        append(sb, type_str(t))
+        first = false
+    }
+    return build(sb)
+}
+
+// The bare name of an impl's target.
+fun type_head(t: TypeExpr) -> str {
+    return match t.kind {
+        TypeKind.TRef(name, args) => name,
+        _ => type_str(t),
+    }
+}
+
+// `<T: Eq + Ord, U>`, or "" for none.
+#test([])[""]
+fun type_params_str(tps: [TypeParam]) -> str {
+    if len(tps) == 0 { return "" }
+    var sb = StringBuilder()
+    append(sb, "<")
+    var i = 0
+    for tp in tps {
+        if i > 0 { append(sb, ", ") }
+        append(sb, tp.name)
+        var j = 0
+        for b in tp.bounds {
+            if j == 0 { append(sb, ": ") } else { append(sb, " + ") }
+            append(sb, b)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    append(sb, ">")
+    return build(sb)
+}
+
+// `pub struct Box<T>`: a type declaration's header.
+fun header(is_pub: bool, keyword: str, name: str, tps: [TypeParam]) -> str {
+    var out = keyword + " " + name + type_params_str(tps)
+    if is_pub { out = "pub " + out }
+    return out
+}
+
+// `impl<T> Show for Box<T>`
+fun impl_header(target: TypeExpr, tps: [TypeParam], tr: Option<str>, targs: [TypeExpr]) -> str {
+    var out = "impl" + type_params_str(tps) + " "
+    match tr {
+        Some(t) => {
+            out = out + t
+            if len(targs) > 0 { out = out + "<" + type_list(targs) + ">" }
+            out = out + " for "
+        },
+        None => {},
+    }
+    return out + type_str(target)
+}
+
+fun variant_detail(v: Variant) -> str {
+    if len(v.payload) == 0 { return "" }
+    return "(" + type_list(v.payload) + ")"
+}
+
+// `fun name(self, a: T) -> R`
+pub fun signature(fd: FunData) -> str {
+    var sb = StringBuilder()
+    if fd.is_pub { append(sb, "pub ") }
+    append(sb, "fun " + fd.name + type_params_str(fd.type_params) + "(")
+    var first = true
+    match fd.receiver {
+        Some(r) => {
+            append(sb, r)
+            first = false
+        },
+        None => {},
+    }
+    for p in fd.params {
+        if !first { append(sb, ", ") }
+        append(sb, p.name + ": ")
+        match p.ty {
+            Some(t) => { append(sb, type_str(t)) },
+            None => { append(sb, "?") },
+        }
+        first = false
+    }
+    append(sb, ")")
+    match fd.ret_type {
+        Some(t) => { append(sb, " -> " + type_str(t)) },
+        None => {},
+    }
+    return build(sb)
+}

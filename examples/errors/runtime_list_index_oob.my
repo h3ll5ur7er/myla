@@ -1,4 +1,5 @@
 //~ runtime error: out of bounds
+//~ native: runtime error: index out of bounds
 // Indexing past the end traps at runtime (D40); a safe accessor is left to the
 // stdlib (v0.5).
 #main

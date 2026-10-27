@@ -130,6 +130,107 @@ class TestEnumChecking(unittest.TestCase):
                 "    return match s { Shape.Circle(r) if r => r, _ => 0 }\n}\n"
             )
 
+    def test_arm_block_of_a_statement_match_may_end_in_a_match(self):
+        # MYLA-59: the inner match is a statement, like the outer one
+        src = ("fun main() {\n    let r: Result<int, str> = Ok(1)\n    match r {\n"
+               "        Ok(n) => {\n            print(n)\n            match n {\n"
+               "                1 => print(\"one\")\n                _ => print(\"other\")\n"
+               "            }\n        }\n        Err(e) => print(e)\n    }\n}\n")
+        self.assertEqual(run_src(src), "1\none\n")
+
+    def test_a_value_match_still_needs_values(self):
+        with self.assertRaises(TypeCheckError) as cm:
+            check_src("fun main() {\n    let v = match 1 {\n        1 => {\n"
+                      "            match 2 {\n                _ => print(1)\n            }\n"
+                      "        }\n        _ => 0\n    }\n}\n")
+        self.assertEqual(cm.exception.message,
+                         "this match is used as a value, so every arm must produce one")
+
+    def test_literal_patterns_must_fit_the_scrutinee(self):
+        # a pattern is compared as written, so -1 on uint8 or 128 on int8 can
+        # never match (MYLA-7)
+        def match_on(t: str, pattern: str) -> str:
+            return (f"fun f(x: {t}) -> int {{\n"
+                    f"    return match x {{ {pattern} => 1, _ => 0 }}\n}}\n")
+        for t, pattern, shown in (("uint8", "-1", "-1"), ("int8", "128", "128"),
+                                  ("int8", "-129", "129"), ("uint64", "-1u64", "-1"),
+                                  ("int64", "9223372036854775808", "9223372036854775808")):
+            with self.subTest(t=t, pattern=pattern):
+                with self.assertRaises(TypeCheckError) as cm:
+                    check_src(match_on(t, pattern))
+                self.assertEqual(cm.exception.message,
+                                 f"integer literal {shown} does not fit in '{t}'")
+        for t, pattern in (("int8", "-128"), ("int8", "127"), ("uint8", "255"), ("uint8", "-0"),
+                           ("int64", "-9223372036854775808"), ("uint64", "18446744073709551615"),
+                           ("uint8", "'a'")):
+            with self.subTest(t=t, pattern=pattern):
+                check_src(match_on(t, pattern))
+
+
+class TestExhaustiveness(unittest.TestCase):
+    """MYLA-14: exhaustiveness and redundancy by pattern matrices (Maranget's
+    usefulness), so nested patterns, or-patterns, tuples and structs count."""
+
+    def matches(self, scrutinee_type: str, arms: list[str], before: str = "") -> None:
+        body = "".join(f"        {a} => 0,\n" for a in arms)
+        check_src(f"{before}fun f(x: {scrutinee_type}) -> int {{\n"
+                  f"    return match x {{\n{body}    }}\n}}\n")
+
+    def rejected(self, scrutinee_type: str, arms: list[str], before: str = "") -> str:
+        with self.assertRaises(TypeCheckError) as cm:
+            self.matches(scrutinee_type, arms, before)
+        return cm.exception.message
+
+    def test_exhaustive(self):
+        P = "struct P { a: bool, b: int }\n"
+        for t, arms, before in (
+            ("bool", ["true | false"], ""),
+            ("Option<Result<int, str>>", ["Some(Ok(v))", "Some(Err(e))", "None"], ""),
+            ("(bool, bool)", ["(true, _)", "(false, true)", "(false, false)"], ""),
+            ("P", ["P { a: true }", "P { a: false, b: 1 }", "P { a: false }"], P),
+            ("Option<bool>", ["Some(true) | None", "Some(false)"], ""),
+            ("(Option<int>, bool)", ["(None, _)", "(Some(n), true)", "(_, false)"], ""),
+        ):
+            with self.subTest(t=t, arms=arms):
+                self.matches(t, arms, before)
+
+    def test_non_exhaustive(self):
+        for t, arms, message in (
+            ("Option<Result<int, str>>", ["Some(Ok(v))", "None"],
+             "non-exhaustive match on 'Option': missing variant(s) Some (add them or a '_' arm)"),
+            ("(bool, bool)", ["(true, _)", "(false, true)"],
+             "non-exhaustive match on '(bool, bool)': add a '_' arm"),
+            ("bool", ["true"],
+             "non-exhaustive match on 'bool': cover both true and false (or add a '_' arm)"),
+            ("Option<bool>", ["Some(true)", "None"],
+             "non-exhaustive match on 'Option': missing variant(s) Some (add them or a '_' arm)"),
+            ("int", ["1", "2"], "non-exhaustive match on 'int32': add a '_' arm"),
+        ):
+            with self.subTest(t=t, arms=arms):
+                self.assertEqual(self.rejected(t, arms), message)
+
+    def test_a_guarded_arm_does_not_cover(self):
+        with self.assertRaises(TypeCheckError):
+            check_src("fun f(x: bool) -> int {\n    return match x {\n"
+                      "        true => 1,\n        false if 1 > 0 => 2,\n    }\n}\n")
+
+    def test_redundant(self):
+        for t, arms, message in (
+            ("Option<Result<int, str>>", ["Some(Ok(v))", "Some(Ok(1))", "_"],
+             "unreachable match arm (earlier arms already cover it)"),
+            ("int", ["1", "1", "_"], "unreachable match arm (earlier arms already cover it)"),
+            ("(bool, bool)", ["(true, _)", "(_, true)", "(true, false)", "_"],
+             "unreachable match arm (earlier arms already cover it)"),
+            ("bool", ["true", "false", "_"],
+             "unreachable match arm (earlier arms already cover it)"),
+            ("Option<int>", ["None", "Some(n)", "None"],
+             "unreachable match arm (its variant(s) are already covered)"),
+            ("int", ["n", "2"],
+             "unreachable match arm (a previous arm already matches everything)"),
+        ):
+            with self.subTest(t=t, arms=arms):
+                self.assertEqual(self.rejected(t, arms), message)
+
 
 class TestEnumInterpreter(unittest.TestCase):
     def test_payload_and_guard(self):
@@ -183,6 +284,47 @@ class TestEnumInterpreter(unittest.TestCase):
             "    print(total(Tree.Node(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)), Tree.Leaf(7))))\n}\n"
         )
         self.assertEqual(out, "10\n")
+
+
+
+class TestTryInLambdas(unittest.TestCase):
+    """MYLA-72: `?` inside a lambda propagates out of the lambda, so it is
+    checked against the lambda's result type, not the enclosing function's."""
+
+    HALF = ("fun half(x: int) -> Option<int> {\n"
+            "    if x % 2 == 1 { return None }\n    return Some(x / 2)\n}\n")
+
+    def test_annotated_expression_lambda(self):
+        src = self.HALF + (
+            "fun main() {\n"
+            "    let g: (int) -> Option<int> = (x: int) => Some(half(x)? + 100)\n"
+            "    print(match g(4) { Some(v) => v, None => -1 })\n"
+            "    print(match g(3) { Some(v) => v, None => -1 })\n}\n")
+        self.assertEqual(run_src(src), "102\n-1\n")
+
+    def test_expression_lambda_passed_as_an_argument(self):
+        src = self.HALF + (
+            "fun apply(f: (int) -> Option<int>, x: int) -> int {\n"
+            "    return match f(x) { Some(v) => v, None => 0 }\n}\n"
+            "fun main() {\n"
+            "    print(apply((x) => Some(half(x)? * 10), 8))\n}\n")
+        self.assertEqual(run_src(src), "40\n")
+
+    def test_the_enclosing_function_type_no_longer_counts(self):
+        # main returns an Option, but the lambda returns a Result
+        src = self.HALF + (
+            "fun main() -> Option<int> {\n"
+            "    let g: (int) -> Result<int, str> = (x: int) => Ok(half(x)?)\n"
+            "    return None\n}\n")
+        with self.assertRaisesRegex(TypeCheckError, "lambda"):
+            check_src(src)
+
+    def test_a_lambda_of_unknown_result_type_says_so(self):
+        src = self.HALF + (
+            "fun main() {\n"
+            "    let g = (x: int) => Some(half(x)? + 1)\n}\n")
+        with self.assertRaisesRegex(TypeCheckError, "lambda's result type"):
+            check_src(src)
 
 
 if __name__ == "__main__":

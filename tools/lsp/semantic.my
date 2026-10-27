@@ -1,0 +1,488 @@
+// semantic.my: semantic tokens (MYLA-80), so editors color exactly what the
+// compiler's lexer sees.
+//
+// A token counts where the source text matches it (the lexer's f-string
+// lowering adds tokens that aren't in the source: `format`, `(`, `,`, `)`).
+// Strings get their extent from the source, an f-string in pieces around its
+// holes (whose tokens are real), and comments, which the lexer drops, are
+// found between the tokens. Identifiers are classified by what the outline
+// declares and by their neighbours: a call, a method call, a field after
+// `.`, an attribute after `#`, an import path, a PascalCase type name.
+
+from ...selfhost.lexer import lex
+from ...selfhost.tokens import Token, TokenKind
+from .symbols import Symbol, SymKind, document_symbols
+from .text import lines_of
+
+// The legend's token types, in order (the indices below).
+pub fun token_types() -> [str] {
+    return ["namespace", "type", "enum", "interface", "struct", "typeParameter", "parameter", "variable",
+            "property", "enumMember", "function", "method", "keyword", "comment", "string", "number",
+            "operator", "decorator"]
+}
+
+pub fun token_modifiers() -> [str] {
+    return ["declaration", "readonly"]
+}
+
+const T_NAMESPACE: int32 = 0
+const T_TYPE: int32 = 1
+const T_ENUM: int32 = 2
+const T_INTERFACE: int32 = 3
+const T_STRUCT: int32 = 4
+const T_VARIABLE: int32 = 7
+const T_PROPERTY: int32 = 8
+const T_ENUM_MEMBER: int32 = 9
+const T_FUNCTION: int32 = 10
+const T_METHOD: int32 = 11
+const T_KEYWORD: int32 = 12
+const T_COMMENT: int32 = 13
+const T_STRING: int32 = 14
+const T_NUMBER: int32 = 15
+const T_OPERATOR: int32 = 16
+const T_DECORATOR: int32 = 17
+const M_DECLARATION: int32 = 1
+const M_READONLY: int32 = 2
+
+// A colored piece of a line: bytes start..end of line `line` (0-based).
+struct Span { line: int32, start: int32, end: int32, ty: int32, mods: int32 }
+
+// A token with the byte range it covers in its line.
+struct Placed { tok: Token, line: int32, start: int32, end: int32 }
+
+// What the outline says about names.
+struct Names {
+    types: [str: int32],          // type name -> token type
+    variants: [str: bool],
+    consts: [str: bool],
+    fields: [str: bool],
+    decls: [str: int32],          // "line:col" of a declaration's name -> token type
+}
+
+// Whether `line` is all ASCII (its bytes, code points and UTF-16 units then
+// coincide).
+fun is_ascii(line: str) -> bool {
+    for i in 0..len(line) {
+        if line[i] >= 128u8 { return false }
+    }
+    return true
+}
+
+// The byte offset of the code point at 0-based index `cp` of `line`.
+fun byte_of(line: str, cp: int32) -> int32 {
+    var seen = 0
+    var i = 0
+    while i < len(line) {
+        let c = line[i]
+        if c < 128u8 || c >= 192u8 {
+            if seen == cp { return i }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return len(line)
+}
+
+// The UTF-16 length of the first `bytes` bytes of `line`.
+fun utf16_of(line: str, bytes: int32) -> int32 {
+    var units = 0
+    var i = 0
+    while i < bytes && i < len(line) {
+        let c = line[i]
+        if c >= 240u8 { units = units + 2 } else if c < 128u8 || c >= 192u8 { units = units + 1 }
+        i = i + 1
+    }
+    return units
+}
+
+fun at(line: str, i: int32, text: str) -> bool {
+    if i < 0 || i + len(text) > len(line) { return false }
+    var k = 0
+    while k < len(text) {
+        if line[i + k] != text[k] { return false }
+        k = k + 1
+    }
+    return true
+}
+
+// The end of the quoted literal starting at line[i] (quote `q`), just past
+// its closing quote.
+fun quoted_end(line: str, i: int32, q: uint8) -> int32 {
+    var j = i + 1
+    while j < len(line) {
+        if line[j] == '\\' { j = j + 2 } else if line[j] == q { return j + 1 } else { j = j + 1 }
+    }
+    return len(line)
+}
+
+fun type_of_symbol(k: SymKind) -> int32 {
+    return match k {
+        SymKind.Struct => T_STRUCT,
+        SymKind.Enum => T_ENUM,
+        SymKind.Interface => T_INTERFACE,
+        SymKind.TypeAlias => T_TYPE,
+        SymKind.Function => T_FUNCTION,
+        SymKind.Method => T_METHOD,
+        SymKind.Field => T_PROPERTY,
+        SymKind.EnumMember => T_ENUM_MEMBER,
+        SymKind.Constant => T_VARIABLE,
+        SymKind.Impl => -1,
+    }
+}
+
+fun names_of(source: str) -> Names {
+    var n = Names { types: [:], variants: [:], consts: [:], fields: [:], decls: [:] }
+    n.types["Option"] = T_ENUM
+    n.types["Result"] = T_ENUM
+    for v in ["Some", "None", "Ok", "Err"] { n.variants[v] = true }
+    for s in document_symbols(source) {
+        let t = type_of_symbol(s.kind)
+        if t >= 0 {
+            // selection ranges are UTF-16; the key uses the line and the UTF-16 start
+            n.decls[format("{}:{}", s.selection.start.line, s.selection.start.character)] = t
+        }
+        match s.kind {
+            SymKind.Struct => { n.types[s.name] = T_STRUCT },
+            SymKind.Enum => { n.types[s.name] = T_ENUM },
+            SymKind.Interface => { n.types[s.name] = T_INTERFACE },
+            SymKind.TypeAlias => { n.types[s.name] = T_TYPE },
+            SymKind.EnumMember => { n.variants[s.name] = true },
+            SymKind.Constant => { n.consts[s.name] = true },
+            SymKind.Field => { n.fields[s.name] = true },
+            _ => {},
+        }
+    }
+    return n
+}
+
+fun simple_type(k: TokenKind) -> int32 {
+    return match k {
+        TokenKind.INT | TokenKind.FLOAT => T_NUMBER,
+        TokenKind.CHAR => T_STRING,
+        TokenKind.BOOL | TokenKind.STR | TokenKind.INT8 | TokenKind.INT16 | TokenKind.INT32 | TokenKind.INT64 => T_TYPE,
+        TokenKind.UINT8 | TokenKind.UINT16 | TokenKind.UINT32 | TokenKind.UINT64 => T_TYPE,
+        TokenKind.LET | TokenKind.VAR | TokenKind.FUN | TokenKind.RETURN | TokenKind.STRUCT | TokenKind.ENUM => T_KEYWORD,
+        TokenKind.IMPL | TokenKind.TRAIT | TokenKind.SELF | TokenKind.MATCH | TokenKind.TYPEALIAS | TokenKind.AS => T_KEYWORD,
+        TokenKind.PUB | TokenKind.IMPORT | TokenKind.FROM | TokenKind.CONST | TokenKind.BREAK | TokenKind.CONTINUE => T_KEYWORD,
+        TokenKind.IF | TokenKind.ELSE | TokenKind.WHILE | TokenKind.FOR | TokenKind.IN | TokenKind.TRUE | TokenKind.FALSE => T_KEYWORD,
+        TokenKind.ARROW | TokenKind.FATARROW | TokenKind.PIPEGT | TokenKind.PIPE | TokenKind.DOTDOT | TokenKind.EQ => T_OPERATOR,
+        TokenKind.NE | TokenKind.LE | TokenKind.GE | TokenKind.AND | TokenKind.OR | TokenKind.PLUS | TokenKind.MINUS => T_OPERATOR,
+        TokenKind.STAR | TokenKind.SLASH | TokenKind.PERCENT | TokenKind.AMP | TokenKind.CARET | TokenKind.TILDE => T_OPERATOR,
+        TokenKind.LT | TokenKind.GT | TokenKind.BANG | TokenKind.ASSIGN | TokenKind.QUESTION => T_OPERATOR,
+        _ => -1,
+    }
+}
+
+fun is_upper(s: str) -> bool {
+    return len(s) > 0 && s[0] >= 'A' && s[0] <= 'Z'
+}
+
+fun is_builtin_type(s: str) -> bool {
+    return s == "int" || s == "char" || s == "float" || s == "float32" || s == "float64"
+}
+
+// The encoded semantic tokens of `source`; none when it doesn't lex.
+pub fun semantic_tokens(source: str) -> [int64] {
+    var none: [int64] = []
+    let toks = match lex(source) {
+        Ok(t) => t,
+        Err(d) => { return none },
+    }
+    let lines = lines_of(source)
+    var ascii: [bool] = []
+    for l in lines { push(ascii, is_ascii(l)) }
+    let names = names_of(source)
+    var spans: [Span] = []
+    var covered: [[Span]] = []          // per line: what tokens and literals cover
+    for l in lines {
+        var empty: [Span] = []
+        push(covered, empty)
+    }
+    // the tokens that are in the source, with their byte ranges
+    var real: [Placed] = []
+    for t in toks {
+        let ln = t.line - 1
+        if ln >= 0 && ln < len(lines) && t.kind != TokenKind.EOF && t.kind != TokenKind.NEWLINE {
+            let line = lines[ln]
+            var b = t.column - 1
+            if !ascii[ln] { b = byte_of(line, t.column - 1) }
+            if t.kind == TokenKind.STRING {
+                if at(line, b, "\"") {
+                    push(real, Placed { tok: t, line: ln, start: b, end: quoted_end(line, b, '"') })
+                } else if at(line, b, "f\"") {
+                    push(real, Placed { tok: t, line: ln, start: b, end: b })      // the f-string, split below
+                }
+            } else if at(line, b, t.lexeme) {
+                push(real, Placed { tok: t, line: ln, start: b, end: b + len(t.lexeme) })
+            }
+        }
+    }
+    var path_mode = false               // in the module path of an import
+    var item_mode = false               // in the names a `from` import lists
+    var mode_line = -1
+    var i = 0
+    while i < len(real) {
+        let p = real[i]
+        let k = p.tok.kind
+        if p.line != mode_line {
+            path_mode = false
+            item_mode = false
+        }
+        if k == TokenKind.FROM {
+            path_mode = true
+            mode_line = p.line
+        } else if k == TokenKind.IMPORT {
+            if path_mode {
+                path_mode = false
+                item_mode = true
+            } else {
+                path_mode = true
+            }
+            mode_line = p.line
+        } else if k == TokenKind.AS {
+            path_mode = false
+        }
+        if k == TokenKind.STRING && p.start == p.end {
+            for sp in fstring_spans(lines[p.line], p.line, p.start) { push(spans, sp) }
+            push(covered[p.line], Span { line: p.line, start: p.start, end: fstring_end(lines[p.line], p.start), ty: -1, mods: 0 })
+        } else {
+            push(covered[p.line], Span { line: p.line, start: p.start, end: p.end, ty: -1, mods: 0 })
+            var ty = simple_type(k)
+            var mods = 0
+            if k == TokenKind.STRING { ty = T_STRING }
+            if k == TokenKind.IDENT {
+                var prev = TokenKind.EOF
+                var next = TokenKind.EOF
+                if i > 0 { prev = real[i - 1].tok.kind }
+                if i + 1 < len(real) { next = real[i + 1].tok.kind }
+                let name = p.tok.lexeme
+                var u = p.start
+                if !ascii[p.line] { u = utf16_of(lines[p.line], p.start) }
+                let key = format("{}:{}", p.line, u)
+                if name == "_" {
+                    ty = T_KEYWORD
+                } else if contains(names.decls, key) {
+                    ty = names.decls[key]
+                    mods = M_DECLARATION
+                    if contains(names.consts, name) { mods = mods + M_READONLY }
+                } else if path_mode {
+                    ty = T_NAMESPACE
+                } else if prev == TokenKind.HASH {
+                    ty = T_DECORATOR
+                } else if is_builtin_type(name) {
+                    ty = T_TYPE
+                } else if contains(names.types, name) {
+                    ty = names.types[name]
+                } else if contains(names.variants, name) {
+                    ty = T_ENUM_MEMBER
+                } else if contains(names.consts, name) {
+                    ty = T_VARIABLE
+                    mods = M_READONLY
+                } else if next == TokenKind.LPAREN {
+                    if prev == TokenKind.DOT { ty = T_METHOD } else { ty = T_FUNCTION }
+                } else if prev == TokenKind.DOT {
+                    ty = T_PROPERTY
+                } else if next == TokenKind.COLON && contains(names.fields, name) {
+                    ty = T_PROPERTY
+                } else if item_mode {
+                    if is_upper(name) { ty = T_TYPE } else { ty = T_FUNCTION }
+                } else if is_upper(name) {
+                    ty = T_TYPE
+                } else {
+                    ty = T_VARIABLE
+                }
+            }
+            if ty >= 0 { push(spans, Span { line: p.line, start: p.start, end: p.end, ty: ty, mods: mods }) }
+        }
+        i = i + 1
+    }
+    for c in comment_spans(lines, covered) { push(spans, c) }
+    return encode(lines, ascii, sorted_spans(spans))
+}
+
+// The end of the f-string at line[i] (`f"`), just past its closing quote.
+fun fstring_end(line: str, i: int32) -> int32 {
+    var j = i + 2
+    while j < len(line) {
+        let c = line[j]
+        if c == '"' { return j + 1 }
+        if c == '\\' {
+            j = escape_end(line, j)
+        } else if c == '{' && j + 1 < len(line) && line[j + 1] == '{' {
+            j = j + 2
+        } else if c == '{' {
+            j = hole_end(line, j)
+        } else {
+            j = j + 1
+        }
+    }
+    return len(line)
+}
+
+// Just past the escape whose backslash is at line[j]: two bytes, or the whole
+// `\u{…}` (its brace isn't a hole, MYLA-86).
+#test("a\\u{20AC}b", 1)[9]
+#test("a\\nb", 1)[3]
+fun escape_end(line: str, j: int32) -> int32 {
+    if j + 2 < len(line) && line[j + 1] == 'u' && line[j + 2] == '{' {
+        var k = j + 3
+        while k < len(line) && line[k] != '}' { k = k + 1 }
+        if k < len(line) { return k + 1 }
+        return k
+    }
+    return j + 2
+}
+
+// Just past the `}` closing the hole whose `{` is at line[j].
+fun hole_end(line: str, j0: int32) -> int32 {
+    var depth = 1
+    var j = j0 + 1
+    while j < len(line) && depth > 0 {
+        let c = line[j]
+        if c == '{' {
+            depth = depth + 1
+            j = j + 1
+        } else if c == '}' {
+            depth = depth - 1
+            j = j + 1
+        } else if c == '"' || c == '\'' {
+            j = quoted_end(line, j, c)
+        } else {
+            j = j + 1
+        }
+    }
+    return j
+}
+
+// The literal pieces of the f-string at line[i]: from `f"` to the first
+// hole, between holes, and from the last hole to the closing quote.
+fun fstring_spans(line: str, ln: int32, i: int32) -> [Span] {
+    var out: [Span] = []
+    var seg = i
+    var j = i + 2
+    while j < len(line) {
+        let c = line[j]
+        if c == '"' {
+            push(out, Span { line: ln, start: seg, end: j + 1, ty: T_STRING, mods: 0 })
+            return out
+        }
+        if c == '\\' {
+            j = escape_end(line, j)
+        } else if c == '{' && j + 1 < len(line) && line[j + 1] == '{' {
+            j = j + 2
+        } else if c == '{' {
+            if j > seg { push(out, Span { line: ln, start: seg, end: j, ty: T_STRING, mods: 0 }) }
+            j = hole_end(line, j)
+            seg = j
+        } else {
+            j = j + 1
+        }
+    }
+    if len(line) > seg { push(out, Span { line: ln, start: seg, end: len(line), ty: T_STRING, mods: 0 }) }
+    return out
+}
+
+// The comments: `//` to the end of the line and `/* … */` (one span per
+// line), wherever they start outside what the tokens cover.
+fun comment_spans(lines: [str], covered: [[Span]]) -> [Span] {
+    var out: [Span] = []
+    var in_block = false
+    var ln = 0
+    while ln < len(lines) {
+        let line = lines[ln]
+        var j = 0
+        var start = 0
+        while j < len(line) {
+            if in_block {
+                if at(line, j, "*/") {
+                    push(out, Span { line: ln, start: start, end: j + 2, ty: T_COMMENT, mods: 0 })
+                    in_block = false
+                    j = j + 2
+                } else {
+                    j = j + 1
+                }
+            } else {
+                var skip = -1
+                for c in covered[ln] {
+                    if c.start <= j && j < c.end { skip = c.end }
+                }
+                if skip >= 0 {
+                    j = skip
+                } else if at(line, j, "//") {
+                    push(out, Span { line: ln, start: j, end: len(line), ty: T_COMMENT, mods: 0 })
+                    j = len(line)
+                } else if at(line, j, "/*") {
+                    in_block = true
+                    start = j
+                    j = j + 2
+                } else {
+                    j = j + 1
+                }
+            }
+        }
+        if in_block && len(line) > start { push(out, Span { line: ln, start: start, end: len(line), ty: T_COMMENT, mods: 0 }) }
+        ln = ln + 1
+    }
+    return out
+}
+
+fun span_before(a: Span, b: Span) -> bool {
+    return a.line < b.line || (a.line == b.line && a.start < b.start)
+}
+
+// `spans` by position (merge sort).
+fun sorted_spans(spans: [Span]) -> [Span] {
+    if len(spans) <= 1 { return spans }
+    var left: [Span] = []
+    var right: [Span] = []
+    var i = 0
+    while i < len(spans) {
+        if i < len(spans) / 2 { push(left, spans[i]) } else { push(right, spans[i]) }
+        i = i + 1
+    }
+    let l = sorted_spans(left)
+    let r = sorted_spans(right)
+    var out: [Span] = []
+    var a = 0
+    var b = 0
+    while a < len(l) || b < len(r) {
+        if b >= len(r) || (a < len(l) && !span_before(r[b], l[a])) {
+            push(out, l[a])
+            a = a + 1
+        } else {
+            push(out, r[b])
+            b = b + 1
+        }
+    }
+    return out
+}
+
+// LSP's relative encoding: per token, the line delta, the start (relative to
+// the previous token's on the same line), the length, the type and the
+// modifier bits, in UTF-16 units.
+fun encode(lines: [str], ascii: [bool], spans: [Span]) -> [int64] {
+    var out: [int64] = []
+    var prev_line = 0
+    var prev_start = 0
+    for s in spans {
+        let line = lines[s.line]
+        var start = s.start
+        var length = s.end - s.start
+        if !ascii[s.line] {
+            start = utf16_of(line, s.start)
+            length = utf16_of(line, s.end) - start
+        }
+        if length > 0 {
+            var ds = start
+            if s.line == prev_line { ds = start - prev_start }
+            push(out, (s.line - prev_line) as int64)
+            push(out, ds as int64)
+            push(out, length as int64)
+            push(out, s.ty as int64)
+            push(out, s.mods as int64)
+            prev_line = s.line
+            prev_start = start
+        }
+    }
+    return out
+}

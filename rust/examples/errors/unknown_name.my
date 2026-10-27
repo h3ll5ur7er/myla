@@ -1,4 +1,0 @@
-// Referencing an undeclared name is an error.
-fun main() {
-    print(mystery) //~ runtime error: unknown name
-}

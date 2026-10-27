@@ -1,7 +1,7 @@
 """Abstract syntax tree node definitions for Myla v0.0.
 
-One dataclass per grammar construct (see docs/architecture.md §4 and
-docs/grammar.md §2). Every node inherits from `Node`, which provides optional
+One dataclass per grammar construct (see docs/Architecture/Lexer-and-parser.md and
+docs/Language/Grammar.md). Every node inherits from `Node`, which provides optional
 1-based `line`/`column` source positions. Positions are stored as plain
 attributes (not dataclass fields), so they are excluded from equality and repr —
 this lets tests compare ASTs structurally without caring about positions.
@@ -202,7 +202,7 @@ class Try(Node):
 
 @dataclass
 class Cast(Node):
-    """`expr as T` — an explicit numeric conversion (D43).
+    """`expr as T` — an explicit numeric conversion (D26).
 
     Only numeric-to-numeric casts are allowed; the checker validates the target
     and records it on `resolved_type`. Backends apply the source/target widths to
@@ -225,9 +225,10 @@ class Lambda(Node):
     params: list["Param"] = field(default_factory=list["Param"])
     body: "Union[Expr, Block]" = None  # type: ignore[assignment]
     ret_type: "Optional[TypeExpr]" = None
-    # Filled in by the checker:
-    captures: list = field(default_factory=list)  # list[(name, Type)]
-    lifted_name: Optional[str] = None
+    # Filled in by the checker. Plain attributes, not dataclass fields, so they
+    # take no part in AST equality or dumps (like `resolved_type`).
+    captures = ()          # [(name, Type)]
+    lifted_name = None     # Optional[str]
 
 
 @dataclass
@@ -577,7 +578,6 @@ class ImportDecl(Node):
     alias: Optional[str] = None
     is_pub: bool = False
     attributes: list[Attribute] = field(default_factory=list[Attribute])
-""
 
 Decl = Union[
     StructDecl, FunDecl, EnumDecl, TypeAliasDecl, ConstDecl, ImplDecl, TraitDecl,

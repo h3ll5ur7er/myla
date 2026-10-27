@@ -1,31 +1,7 @@
 {
-    "tree-sitter-vscode.debug": true,
-    "tree-sitter-vscode.languageConfigs": [
-        {
-            "lang": "myla",
-            "parser": "/home/eknecht/code/myla/rust/editor/tree-sitter-myla",
-            "folds": "/home/eknecht/code/myla/rust/editor/tree-sitter-myla/queries/folds.scm",
-            "highlights": "/home/eknecht/code/myla/rust/editor/tree-sitter-myla/queries/highlights.scm",
-            "injections": "/home/eknecht/code/myla/rust/editor/tree-sitter-myla/queries/injections.scm",
-            "semanticTokenTypeMappings": {
-                "constant": {
-                    "targetTokenModifiers": ["declaration", "readonly"],
-                    "targetTokenType": "variable"
-                },
-                "module": {
-                    "targetTokenType": "namespace"
-                },
-                "variable.member": {
-                    "targetTokenType": "property"
-                },
-                "variable.parameter": {
-                    "targetTokenType": "parameter"
-                }
-            }
-        }
-    ],
-    "myla.compilerPath": "/home/coder/project/myla.py",
+    // The Myla extension finds myla.py and the project's .venv in the
+    // workspace by itself. Set these only to override; ${workspaceFolder} is
+    // expanded:
     // "myla.compilerPath": "${workspaceFolder}/myla.py",
-    "myla.pythonPath": "/home/coder/project/.venv/bin/python"
-    // "myla.pythonPath": "${workspaceFolder}/.venv/bin/python"
+    // "myla.pythonPath": "${workspaceFolder}/.venv/bin/python",
 }

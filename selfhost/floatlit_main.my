@@ -1,0 +1,17 @@
+// floatlit_main.my -- prints the double and float32 bit patterns of each float
+// literal given on the command line, as std.num converts them for the
+// self-hosted compiler, one `<f64 bits> <f32 bits>` line each
+// (tests/burn/test_selfhost_floatlit.py compares them with Python's).
+
+from std.process import args
+from std.num import f64_literal_bits, f32_round_bits
+
+fun main() {
+    let argv = args()
+    var i = 1
+    while i < len(argv) {
+        let bits = f64_literal_bits(argv[i])
+        print(f"{bits} {f32_round_bits(bits)}")
+        i = i + 1
+    }
+}

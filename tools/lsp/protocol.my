@@ -1,0 +1,131 @@
+// protocol.my: JSON-RPC over stdin/stdout with Content-Length framing, as
+// the language server protocol uses it (MYLA-80).
+
+from std.io import Reader, write
+from std.json import Json, parse, to_string, field
+from std.num import parse_int
+from .text import part
+
+// What came in: a message, a text that isn't one (answered with a parse
+// error), or the end of the input.
+pub enum Incoming {
+    Message(Json),
+    Malformed,
+    End,
+}
+
+pub struct Channel {
+    input: Reader,
+}
+
+// `s` in lower case (ASCII).
+#test("Content-Length")["content-length"]
+fun lower(s: str) -> str {
+    var sb = StringBuilder()
+    for i in 0..len(s) {
+        var c = s[i]
+        if c >= 'A' && c <= 'Z' { c = c + 32u8 }
+        append_byte(sb, c)
+    }
+    return build(sb)
+}
+
+// `s` without spaces, tabs and carriage returns around it.
+#test(" 12 ")["12"]
+fun trim(s: str) -> str {
+    var a = 0
+    var b = len(s)
+    while a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == 13u8) { a = a + 1 }
+    while b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == 13u8) { b = b - 1 }
+    return part(s, a, b)
+}
+
+// The length a header line declares, -1 for another header, -2 for the
+// empty line that ends the headers.
+#test("Content-Length: 42")[42]
+#test("content-length:7")[7]
+#test("Content-Type: x")[-1]
+#test("")[-2]
+fun header_length(line: str) -> int32 {
+    let t = trim(line)
+    if len(t) == 0 { return -2 }
+    let name = "content-length:"
+    if len(t) <= len(name) || lower(part(t, 0, len(name))) != name { return -1 }
+    return match parse_int(trim(part(t, len(name), len(t)))) {
+        Some(n) => n as int32,
+        None => -1,
+    }
+}
+
+impl Channel {
+    // The next message: header lines up to an empty one, then as many bytes
+    // as Content-Length says.
+    fun next(var self) -> Incoming {
+        var length = -1
+        while true {
+            let line = match self.input.read_line() {
+                Ok(Some(l)) => l,
+                _ => { return Incoming.End },
+            }
+            let n = header_length(line)
+            if n == -2 {
+                if length >= 0 { break }
+                // an empty line before any header: keep looking
+            } else if n >= 0 {
+                length = n
+            }
+        }
+        let body = match self.input.read_exact(length) {
+            Ok(Some(b)) => b,
+            _ => { return Incoming.End },
+        }
+        return match parse(body) {
+            Ok(j) => Incoming.Message(j),
+            Err(e) => Incoming.Malformed,
+        }
+    }
+
+    // Whether a message (or the end of the input) is there within
+    // `timeout_ms` milliseconds.
+    fun ready(self, timeout_ms: int32) -> bool {
+        return self.input.ready(timeout_ms)
+    }
+}
+
+// Write `msg` to stdout, framed.
+pub fun send(msg: Json) {
+    let body = to_string(msg)
+    var sb = StringBuilder()
+    append(sb, format("Content-Length: {}\r\n\r\n", len(body)))
+    append(sb, body)
+    write(1, build(sb))
+}
+
+pub fun response(id: Json, result: Json) -> Json {
+    return Json.Object([("jsonrpc", Json.Str("2.0")), ("id", id), ("result", result)])
+}
+
+pub fun error_response(id: Json, code: int64, message: str) -> Json {
+    let err = Json.Object([("code", Json.Int(code)), ("message", Json.Str(message))])
+    return Json.Object([("jsonrpc", Json.Str("2.0")), ("id", id), ("error", err)])
+}
+
+pub fun notification(method: str, params: Json) -> Json {
+    return Json.Object([("jsonrpc", Json.Str("2.0")), ("method", Json.Str(method)), ("params", params)])
+}
+
+// The string at `j`'s member `key`, or "".
+pub fun str_field(j: Json, key: str) -> str {
+    return match field(j, key) {
+        Some(Json.Str(s)) => s,
+        _ => "",
+    }
+}
+
+// The member `key`, or null.
+pub fun field_or_null(j: Json, key: str) -> Json {
+    return match field(j, key) {
+        Some(v) => v,
+        None => Json.Null,
+    }
+}

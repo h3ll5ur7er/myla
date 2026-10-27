@@ -1,4 +1,4 @@
-"""Unit tests for the Myla type checker (docs/architecture.md §5)."""
+"""Unit tests for the Myla type checker (docs/Architecture/Type-checker.md)."""
 import unittest
 
 from myla.errors import TypeCheckError

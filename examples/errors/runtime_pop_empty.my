@@ -1,4 +1,5 @@
 //~ runtime error: empty list
+//~ native: runtime error: pop from an empty list
 // `pop` on an empty list traps at runtime.
 #main
 fun main() {

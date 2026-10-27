@@ -1,17 +1,14 @@
 // checker.my - the Myla static type checker (mirror of src/myla/types.py),
 // self-hosting v0.7.
 //
-// The gate is accept/reject + diagnostic-position parity (plan §"diagnostic
-// position parity"), NOT byte-identical message text. So this port carries no
-// `type_name` / message machinery: every diagnostic is reduced to its source
-// position `(line, col)` (kind is always "type" for the checker), surfaced as a
-// `CheckErr` threaded through `Result<_, CheckErr>` and propagated with `?`
-// (dogfooding Myla's own error handling). The phase order and within-phase
-// iteration order mirror types.py exactly so the *first* error's position
-// matches the oracle.
+// A type error is a `CheckErr` (position and the Python checker's message, with
+// types written by `type_name` as types.py does), threaded through
+// `Result<_, CheckErr>` and propagated with `?`. The phase order and
+// within-phase iteration order mirror types.py exactly, so the *first* error
+// is the oracle's: same position, same message (MYLA-28).
 
-from .lexer import lex
-from .parser import parse
+from .parser import parse_source, Parsed
+from .ast import int_text
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
 from .ast import Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
@@ -38,9 +35,92 @@ pub enum Type {
     TSelf,
 }
 
-pub struct CheckErr { line: int32, col: int32 }
+// A type error: position, the Python checker's message, and the id of the
+// declaration being checked, whose module is the error's file (-1: unknown).
+pub struct CheckErr { line: int32, col: int32, msg: str, decl: int32 }
 
-fun mkerr(line: int32, col: int32) -> CheckErr { return CheckErr { line: line, col: col } }
+fun terr(line: int32, col: int32, msg: str) -> CheckErr { return CheckErr { line: line, col: col, msg: msg, decl: -1 } }
+
+// A type as the Python checker's messages write it (types.py: type_name).
+fun type_name(t: Type) -> str {
+    return match t {
+        Type.TInt(w, signed) => format("{}{}", if_str(signed, "int", "uint"), w),
+        Type.TFloat(w) => format("float{}", w),
+        Type.TChar => "char",
+        Type.TBool => "bool",
+        Type.TStr => "str",
+        Type.TSB => "StringBuilder",
+        Type.TStruct(n, args) => generic_name(n, args),
+        Type.TEnum(n, args) => generic_name(n, args),
+        Type.TParam(n) => n,
+        Type.TSelf => "Self",
+        Type.TTuple(es) => format("({}{})", type_names(es), if_str(len(es) == 1, ",", "")),
+        Type.TList(e) => format("[{}]", type_name(e)),
+        Type.TMap(k, v) => format("[{}: {}]", type_name(k), type_name(v)),
+        Type.TFunc(ps, r) => format("({}) -> {}", type_names(ps), opt_type_name(r)),
+    }
+}
+
+// `None` (no value) is written `()`.
+fun opt_type_name(t: Option<Type>) -> str {
+    return match t { Some(x) => type_name(x), None => "()" }
+}
+
+fun type_names(ts: [Type]) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(ts) {
+        if i > 0 { append(sb, ", ") }
+        append(sb, type_name(ts[i]))
+        i = i + 1
+    }
+    return build(sb)
+}
+
+fun generic_name(n: str, args: [Type]) -> str {
+    if len(args) == 0 { return n }
+    return format("{}<{}>", n, type_names(args))
+}
+
+fun join_strs(xs: [str], sep: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(xs) {
+        if i > 0 { append(sb, sep) }
+        append(sb, xs[i])
+        i = i + 1
+    }
+    return build(sb)
+}
+
+// Byte-wise `a < b` (Python's order for ASCII names).
+fun str_less(a: str, b: str) -> bool {
+    var i = 0
+    while i < len(a) && i < len(b) {
+        if a[i] != b[i] { return a[i] < b[i] }
+        i = i + 1
+    }
+    return len(a) < len(b)
+}
+
+fun sorted_strs(xs: [str]) -> [str] {
+    var out: [str] = []
+    for x in xs {
+        var k = len(out)
+        push(out, x)
+        while k > 0 && str_less(x, out[k - 1]) {
+            out[k] = out[k - 1]
+            k = k - 1
+        }
+        out[k] = x
+    }
+    return out
+}
+
+fun if_str(c: bool, a: str, b: str) -> str {
+    if c { return a }
+    return b
+}
 
 // type constructors / constants
 fun t_int() -> Type { return Type.TInt(32, true) }
@@ -144,6 +224,26 @@ fun float_suffix_type(s: str) -> Option<Type> {
 
 // half-open: signed permits magnitude up to 2**(width-1) (negation handled
 // separately); unsigned permits up to 2**width - 1.
+// Whether a literal fits a type, as types.int_fits: `big` is its decimal text
+// when it is 2^63 or more (`value` then holds only its low bits). A signed
+// type admits the magnitude 2^(w-1), so that `-128i8` is accepted.
+fun lit_fits(value: int64, big: str, w: int32, signed: bool) -> bool {
+    if big == "" { return int_fits(value, w, signed) }
+    if w < 64 { return false }
+    if signed { return big == "9223372036854775808" }
+    return len(big) < 20 || (len(big) == 20 && !text_greater(big, "18446744073709551615"))
+}
+
+// `a > b` for decimal texts of the same length.
+fun text_greater(a: str, b: str) -> bool {
+    var i = 0
+    while i < len(a) {
+        if a[i] != b[i] { return a[i] > b[i] }
+        i = i + 1
+    }
+    return false
+}
+
 fun int_fits(value: int64, w: int32, signed: bool) -> bool {
     if value < 0 { return false }
     if signed {
@@ -188,7 +288,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 }
 
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file"
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll"
 }
 
 fun is_diverging_builtin(name: str) -> bool {
@@ -334,19 +434,41 @@ fun func_ret_of(t: Type) -> Option<Type> {
     return None
 }
 
-fun pat_bool_value(pat: Pattern) -> Option<bool> {
-    match pat.kind {
-        PatternKind.PLit(litexpr) => {
-            match litexpr.kind {
-                ExprKind.BoolLit(b) => { return Some(b) },
-                _ => {},
-            }
-            return None
+// The value of an integer literal pattern that is not a value of `t`, as the
+// error shows it, or "": a pattern has no arithmetic to wrap, so `-1` on
+// `uint8` or `128` on `int8` could never match (MYLA-7). The literal check
+// already bounds the magnitude by 2^(w-1) (signed) or 2^w - 1 (unsigned).
+fun pattern_misfit(lit: Expr, t: Type) -> str {
+    let w = int_width(t)
+    if w == 0 { return "" }
+    let signed = match t { Type.TInt(tw, ts) => ts, _ => false }
+    match lit.kind {
+        ExprKind.IntLit(v, suf, isc, big) => {
+            if !signed { return "" }
+            if big != "" || (w < 64 && v == (1i64 << ((w - 1) as int64))) { return int_text(v, big) }
+            return ""
+        },
+        ExprKind.Unary(op, x) => {
+            if signed || op != "-" { return "" }
+            return negated_misfit(x)
         },
         _ => {},
     }
-    return None
+    return ""
 }
+
+// `-x` for an unsigned scrutinee: fine only for a zero literal.
+fun negated_misfit(x: Expr) -> str {
+    match x.kind {
+        ExprKind.IntLit(v, suf, isc, big) => {
+            if v == 0 && big == "" { return "" }
+            return "-" + int_text(v, big)
+        },
+        _ => {},
+    }
+    return ""
+}
+
 
 fun impl_eq_target_name(d: Decl) -> Option<str> {
     match d.kind {
@@ -517,10 +639,10 @@ fun unify_list(ps: [Type], ats: [Type], subst: [Subst]) -> UniRes {
 // =========================================================================
 
 pub struct FieldT { name: str, ty: Type }
-pub struct StructInfo { name: str, type_params: [str], fields: [FieldT], line: int32, col: int32 }
+pub struct StructInfo { name: str, type_params: [str], fields: [FieldT], line: int32, col: int32, id: int32 }
 
 pub struct VariantT { name: str, payload: [Type] }
-pub struct EnumInfo { name: str, type_params: [str], variants: [VariantT], line: int32, col: int32 }
+pub struct EnumInfo { name: str, type_params: [str], variants: [VariantT], line: int32, col: int32, id: int32 }
 
 pub struct Bound { tp: str, traits: [str] }
 pub struct FuncSig {
@@ -531,6 +653,7 @@ pub struct FuncSig {
     bounds: [Bound],
     decl: FunData,
     has_decl: bool,
+    decl_id: int32,                 // its declaration (the impl, for a method)
 }
 
 pub struct TraitMethodSig { name: str, params: [Type], ret: Option<Type>, receiver: str }
@@ -539,16 +662,16 @@ pub struct TraitInfo { name: str, methods: [TraitMethodSig], type_params: [str],
 pub struct MethodEntry { key: str, name: str, sig: FuncSig }
 pub struct TraitImplPair { trait_name: str, key: str }
 
-pub struct AliasRaw { name: str, target: TypeExpr, line: int32, col: int32 }
+pub struct AliasRaw { name: str, target: TypeExpr, line: int32, col: int32, id: int32 }
 pub struct AliasCached { name: str, ty: Type }
 
-pub struct ConstDeclT { name: str, declared: TypeExpr, value: Expr, line: int32, col: int32 }
+pub struct ConstDeclT { name: str, declared: TypeExpr, value: Expr, line: int32, col: int32, id: int32 }
 
 pub struct Binding { ty: Type, mutable: bool }
 pub struct Frame { names: [str], binds: [Binding] }
 
 // a checked match-arm body value (with its source node for re-inference)
-pub struct MatchVal { ty: Type, node: Option<Expr>, has_node: bool }
+pub struct MatchVal { ty: Type, node: Option<Expr> }
 pub enum ArmBody {
     ABDiverge,
     ABValue(Option<Type>, Option<Expr>),
@@ -567,6 +690,7 @@ pub struct Checker {
     methods: [MethodEntry],
     method_decls: [FunData],
     method_decl_keys: [str],
+    method_decl_ids: [int32],       // each method's impl declaration
     impl_decls: [Decl],
     traits: [TraitInfo],
     trait_decls: [Decl],
@@ -575,7 +699,8 @@ pub struct Checker {
     aliases: [AliasRaw],
     alias_cache: [AliasCached],
     const_decls: [ConstDeclT],
-    consts: [AliasCached],          // reuse {name, ty} (value not needed for gate)
+    consts: [AliasCached],          // folded consts: {name, ty}
+    const_values: [str: CV],        // ... and their values
     const_done: [str],
     const_folding: [str],
     allow_self: bool,
@@ -584,9 +709,10 @@ pub struct Checker {
     cur_ret: Option<Type>,
     has_cur_ret: bool,
     loop_depth: int32,
-    try_counter: int32,
     frames: [Frame],
     lambda_infer_active: bool,
+    lambda_depth: int32,            // lambdas being checked (`?` names "lambda" or "function")
+    cur_decl: int32,                // the declaration being checked, for CheckErr.decl
     lambda_infer: [MatchVal],
     stmt_match: bool,
     resolved: [int32: Type],        // expr node id -> resolved type (v0.8 interp side table)
@@ -596,12 +722,12 @@ fun new_checker(decls: [Decl]) -> Checker {
     return Checker {
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
-        functions: [], methods: [], method_decls: [], method_decl_keys: [],
+        functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
         impl_decls: [], traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
-        aliases: [], alias_cache: [], const_decls: [], consts: [], const_done: [], const_folding: [],
+        aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
-        cur_ret: None, has_cur_ret: false, loop_depth: 0, try_counter: 0,
-        frames: [], lambda_infer_active: false, lambda_infer: [], stmt_match: false,
+        cur_ret: None, has_cur_ret: false, loop_depth: 0,
+        frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
         resolved: [:],
     }
 }
@@ -637,26 +763,26 @@ fun block_returns(b: Block) -> bool {
 
 fun is_flexible_int_lit(e: Expr) -> bool {
     return match e.kind {
-        ExprKind.IntLit(v, suf, isc) => match suf { Some(x) => false, None => (!isc) || v <= 127 },
+        ExprKind.IntLit(v, suf, isc, big) => match suf { Some(x) => false, None => (!isc) || v <= 127 },
         _ => false,
     }
 }
 
 fun is_flexible_char_lit(e: Expr) -> bool {
-    return match e.kind { ExprKind.IntLit(v, suf, isc) => isc, _ => false }
+    return match e.kind { ExprKind.IntLit(v, suf, isc, big) => isc, _ => false }
 }
 
 fun is_flexible_float_lit(e: Expr) -> bool {
-    return match e.kind { ExprKind.FloatLit(suf) => match suf { Some(x) => false, None => true }, _ => false }
+    return match e.kind { ExprKind.FloatLit(lex, suf) => match suf { Some(x) => false, None => true }, _ => false }
 }
 
 fun int_lit_value(e: Expr) -> int64 {
-    return match e.kind { ExprKind.IntLit(v, suf, isc) => v, _ => 0 }
+    return match e.kind { ExprKind.IntLit(v, suf, isc, big) => v, _ => 0 }
 }
 
 fun const_int(e: Expr) -> Option<int64> {
     return match e.kind {
-        ExprKind.IntLit(v, suf, isc) => Some(v),
+        ExprKind.IntLit(v, suf, isc, big) => Some(v),
         ExprKind.Unary(op, x) => const_int_neg(op, x),
         _ => None,
     }
@@ -665,7 +791,7 @@ fun const_int(e: Expr) -> Option<int64> {
 fun const_int_neg(op: str, x: Expr) -> Option<int64> {
     if op != "-" { return None }
     return match x.kind {
-        ExprKind.IntLit(v, suf, isc) => Some(0 - v),
+        ExprKind.IntLit(v, suf, isc, big) => Some(0 - v),
         _ => None,
     }
 }
@@ -832,7 +958,7 @@ impl Checker {
                 let kt = self.resolve(k, visiting)?
                 let vt = self.resolve(v, visiting)?
                 if !is_map_key(kt) && !contains_type_param(kt) {
-                    return Err(mkerr(ln, cl))
+                    return Err(terr(ln, cl, format("map key type must be a primitive (integer, char, bool, or str), found '{}'", type_name(kt))))
                 }
                 Ok(Type.TMap(kt, vt))
             },
@@ -847,12 +973,12 @@ impl Checker {
 
     fun resolve_ref(var self, name: str, args: [TypeExpr], ln: int32, cl: int32, visiting: [str]) -> Result<Type, CheckErr> {
         if name == "Self" {
-            if !self.allow_self { return Err(mkerr(ln, cl)) }
-            if len(args) > 0 { return Err(mkerr(ln, cl)) }
+            if !self.allow_self { return Err(terr(ln, cl, "'Self' is only valid inside a trait declaration")) }
+            if len(args) > 0 { return Err(terr(ln, cl, "'Self' cannot take type arguments")) }
             return Ok(Type.TSelf)
         }
         if contains_str(self.type_params, name) {
-            if len(args) > 0 { return Err(mkerr(ln, cl)) }
+            if len(args) > 0 { return Err(terr(ln, cl, format("type parameter '{}' cannot take type arguments", name))) }
             return Ok(Type.TParam(name))
         }
         let si = self.struct_idx(name)
@@ -861,7 +987,7 @@ impl Checker {
             var params: [str] = []
             if si >= 0 { params = self.structs[si].type_params } else { params = self.enums[ei].type_params }
             if len(params) > 0 || len(args) > 0 {
-                if len(args) != len(params) { return Err(mkerr(ln, cl)) }
+                if len(args) != len(params) { return Err(terr(ln, cl, format("type '{}' expects {} type argument(s), got {}", name, len(params), len(args)))) }
                 let ra = self.resolve_list(args, visiting)?
                 if si >= 0 { return Ok(Type.TStruct(name, ra)) }
                 return Ok(Type.TEnum(name, ra))
@@ -870,11 +996,11 @@ impl Checker {
             if si >= 0 { return Ok(Type.TStruct(name, none_args)) }
             return Ok(Type.TEnum(name, none_args))
         }
-        if len(args) > 0 { return Err(mkerr(ln, cl)) }
+        if len(args) > 0 { return Err(terr(ln, cl, format("type '{}' is not generic (it takes no type arguments)", name))) }
         match prim_type(name) { Some(t) => { return Ok(t) }, None => {} }
         if self.alias_idx(name) >= 0 {
             match self.alias_cache_get(name) { Some(t) => { return Ok(t) }, None => {} }
-            if contains_str(visiting, name) { return Err(mkerr(ln, cl)) }
+            if contains_str(visiting, name) { return Err(terr(ln, cl, format("type alias cycle involving '{}'", name))) }
             let ai = self.alias_idx(name)
             var v2 = visiting
             push(v2, name)
@@ -884,7 +1010,7 @@ impl Checker {
         }
         if name == "int" { return Ok(t_int()) }
         if name == "float" { return Ok(t_float()) }
-        return Err(mkerr(ln, cl))
+        return Err(terr(ln, cl, format("unknown type '{}'", name)))
     }
 }
 
@@ -896,15 +1022,16 @@ impl Checker {
     fun collect_globals(var self) -> Result<int32, CheckErr> {
         var seen: [str] = []
         for decl in self.decls {
+            self.cur_decl = decl.id
             let ln = decl.line
             let cl = decl.col
             let handled = match decl.kind {
-                DeclKind.ImportDecl(p, items, alias, isp) => { return Err(mkerr(ln, cl)) },
+                DeclKind.ImportDecl(p, items, alias, isp) => { return Err(terr(ln, cl, "imports need the module loader: this file was type-checked on its own (use 'myla check' or 'myla run')")) },
                 DeclKind.ImplDecl(tg, m, tp, tn, ta) => { push(self.impl_decls, decl)
             true },
                 DeclKind.TraitDecl(n, m, tp, isp) => {
-                    if is_builtin_op_trait(n) { return Err(mkerr(ln, cl)) }
-                    for td in self.trait_decls { if decl_kind_name(td) == n { return Err(mkerr(ln, cl)) } }
+                    if is_builtin_op_trait(n) { return Err(terr(ln, cl, format("'{}' is a built-in operator trait and cannot be redeclared", n))) }
+                    for td in self.trait_decls { if decl_kind_name(td) == n { return Err(terr(ln, cl, format("duplicate trait '{}'", n))) } }
                     push(self.trait_decls, decl)
                     true
                 },
@@ -912,15 +1039,15 @@ impl Checker {
             }
             if handled { continue }
             let name = decl_kind_name(decl)
-            if is_builtin_func(name) { return Err(mkerr(ln, cl)) }
-            if contains_str(seen, name) { return Err(mkerr(ln, cl)) }
+            if is_builtin_func(name) { return Err(terr(ln, cl, format("cannot redefine builtin '{}'", name))) }
+            if contains_str(seen, name) { return Err(terr(ln, cl, format("duplicate top-level declaration '{}'", name))) }
             push(seen, name)
             match decl.kind {
-                DeclKind.StructDecl(n, fields, attrs, tps, isp) => { push(self.structs, StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl }) },
-                DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { push(self.enums, EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl }) },
-                DeclKind.TypeAliasDecl(n, target, attrs, isp) => { push(self.aliases, AliasRaw { name: n, target: target, line: ln, col: cl }) },
-                DeclKind.ConstDecl(n, ty, value, attrs, isp) => { push(self.const_decls, ConstDeclT { name: n, declared: ty, value: value, line: ln, col: cl }) },
-                DeclKind.FunDecl(fd) => { push(self.functions, FuncSig { name: fd.name, params: [], ret: None, type_params: [], bounds: [], decl: fd, has_decl: true }) },
+                DeclKind.StructDecl(n, fields, attrs, tps, isp) => { push(self.structs, StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl, id: decl.id }) },
+                DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { push(self.enums, EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl, id: decl.id }) },
+                DeclKind.TypeAliasDecl(n, target, attrs, isp) => { push(self.aliases, AliasRaw { name: n, target: target, line: ln, col: cl, id: decl.id }) },
+                DeclKind.ConstDecl(n, ty, value, attrs, isp) => { push(self.const_decls, ConstDeclT { name: n, declared: ty, value: value, line: ln, col: cl, id: decl.id }) },
+                DeclKind.FunDecl(fd) => { push(self.functions, FuncSig { name: fd.name, params: [], ret: None, type_params: [], bounds: [], decl: fd, has_decl: true, decl_id: decl.id }) },
                 _ => {},
             }
         }
@@ -931,9 +1058,9 @@ impl Checker {
     fun check_type_params(self, tps: [str], ln: int32, cl: int32) -> Result<int32, CheckErr> {
         var seen: [str] = []
         for tp in tps {
-            match prim_type(tp) { Some(x) => { return Err(mkerr(ln, cl)) }, None => {} }
-            if tp == "int" { return Err(mkerr(ln, cl)) }
-            if contains_str(seen, tp) { return Err(mkerr(ln, cl)) }
+            match prim_type(tp) { Some(x) => { return Err(terr(ln, cl, format("type parameter '{}' shadows a built-in type name", tp))) }, None => {} }
+            if tp == "int" { return Err(terr(ln, cl, format("type parameter '{}' shadows a built-in type name", tp))) }
+            if contains_str(seen, tp) { return Err(terr(ln, cl, format("duplicate type parameter '{}'", tp))) }
             push(seen, tp)
         }
         return Ok(0)
@@ -942,7 +1069,7 @@ impl Checker {
     fun param_type(var self, p: Param) -> Result<Type, CheckErr> {
         return match p.ty {
             Some(te) => self.resolve0(te),
-            None => Err(mkerr(p.line, p.col)),
+            None => Err(terr(p.line, p.col, format("parameter '{}' needs a type", p.name))),   // unreachable: the parser requires one
         }
     }
 }
@@ -969,6 +1096,7 @@ impl Checker {
         var ai = 0
         while ai < len(self.aliases) {
             let a = self.aliases[ai]
+            self.cur_decl = a.id
             self.resolve(a.target, [a.name])?
             ai = ai + 1
         }
@@ -976,18 +1104,19 @@ impl Checker {
         for decl in self.decls {
             match decl.kind {
                 DeclKind.StructDecl(n, fields, attrs, tps, isp) => {
+                    self.cur_decl = decl.id
                     self.check_type_params(tp_names(tps), decl.line, decl.col)?
                     self.type_params = tp_names(tps)
                     var fs: [FieldT] = []
                     for f in fields {
                         for prev in fs { if prev.name == f.name { self.type_params = []
-            return Err(mkerr(f.line, f.col)) } }
+            return Err(terr(f.line, f.col, format("duplicate field '{}' in struct '{}'", f.name, n))) } }
                         let ft = self.resolve0(f.ty)?
                         push(fs, FieldT { name: f.name, ty: ft })
                     }
                     self.type_params = []
                     let idx = self.struct_idx(n)
-                    self.structs[idx] = StructInfo { name: n, type_params: tp_names(tps), fields: fs, line: decl.line, col: decl.col }
+                    self.structs[idx] = StructInfo { name: n, type_params: tp_names(tps), fields: fs, line: decl.line, col: decl.col, id: decl.id }
                 },
                 _ => {},
             }
@@ -996,19 +1125,20 @@ impl Checker {
         for decl in self.decls {
             match decl.kind {
                 DeclKind.EnumDecl(n, variants, attrs, tps, isp) => {
+                    self.cur_decl = decl.id
                     self.check_type_params(tp_names(tps), decl.line, decl.col)?
                     self.type_params = tp_names(tps)
                     var vs: [VariantT] = []
                     for v in variants {
                         for prev in vs { if prev.name == v.name { self.type_params = []
-            return Err(mkerr(v.line, v.col)) } }
+            return Err(terr(v.line, v.col, format("duplicate variant '{}' in enum '{}'", v.name, n))) } }
                         var payload: [Type] = []
                         for p in v.payload { push(payload, self.resolve0(p)?) }
                         push(vs, VariantT { name: v.name, payload: payload })
                     }
                     self.type_params = []
                     let idx = self.enum_idx(n)
-                    self.enums[idx] = EnumInfo { name: n, type_params: tp_names(tps), variants: vs, line: decl.line, col: decl.col }
+                    self.enums[idx] = EnumInfo { name: n, type_params: tp_names(tps), variants: vs, line: decl.line, col: decl.col, id: decl.id }
                 },
                 _ => {},
             }
@@ -1018,6 +1148,7 @@ impl Checker {
         for decl in self.decls {
             match decl.kind {
                 DeclKind.FunDecl(fd) => {
+                    self.cur_decl = decl.id
                     self.check_type_params(tp_names(fd.type_params), fd.line, fd.col)?
                     self.type_params = tp_names(fd.type_params)
                     var ps: [Type] = []
@@ -1026,7 +1157,7 @@ impl Checker {
                     match fd.ret_type { Some(te) => { rt = Some(self.resolve0(te)?) }, None => {} }
                     self.type_params = []
                     let idx = self.func_idx(fd.name)
-                    self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), bounds: build_bounds(fd.type_params), decl: fd, has_decl: true }
+                    self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), bounds: build_bounds(fd.type_params), decl: fd, has_decl: true, decl_id: decl.id }
                 },
                 _ => {},
             }
@@ -1079,12 +1210,14 @@ impl Checker {
         }
         for e in self.enums {
             if self.find_cycle(e.name, e.name, [e.name], true) {
-                return Err(mkerr(e.line, e.col))
+                self.cur_decl = e.id
+                return Err(terr(e.line, e.col, format("recursive enum '{}' would have infinite size; only enums can be recursive (they are boxed) — wrap the cycle in an enum to introduce indirection", e.name)))
             }
         }
         for s in self.structs {
             if self.find_cycle(s.name, s.name, [s.name], true) {
-                return Err(mkerr(s.line, s.col))
+                self.cur_decl = s.id
+                return Err(terr(s.line, s.col, format("recursive struct '{}' would have infinite size; only enums can be recursive (they are boxed) — wrap the cycle in an enum to introduce indirection", s.name)))
             }
         }
         return Ok(0)
@@ -1122,18 +1255,19 @@ impl Checker {
     fun resolve_traits(var self) -> Result<int32, CheckErr> {
         self.register_builtin_op_traits()
         for decl in self.trait_decls {
+            self.cur_decl = decl.id
             match decl.kind {
                 DeclKind.TraitDecl(name, methods, tps, isp) => {
                     // check trait type params: no Self, no dup
                     var seen: [str] = []
                     for p in tps {
-                        if p.name == "Self" { return Err(mkerr(decl.line, decl.col)) }
-                        if contains_str(seen, p.name) { return Err(mkerr(decl.line, decl.col)) }
+                        if p.name == "Self" { return Err(terr(decl.line, decl.col, format("trait '{}' cannot use 'Self' as a type parameter", name))) }
+                        if contains_str(seen, p.name) { return Err(terr(decl.line, decl.col, format("duplicate type parameter '{}' on trait '{}'", p.name, name))) }
                         push(seen, p.name)
                     }
                     var msigs: [TraitMethodSig] = []
                     for m in methods {
-                        for prev in msigs { if prev.name == m.name { return Err(mkerr(m.line, m.col)) } }
+                        for prev in msigs { if prev.name == m.name { return Err(terr(m.line, m.col, format("duplicate method '{}' in trait '{}'", m.name, name))) } }
                         self.allow_self = true
                         self.type_params = tp_names(tps)
                         var params: [Type] = [Type.TSelf]
@@ -1195,6 +1329,7 @@ fun opt_subst_self(t: Option<Type>, target: Type, pmap: [Subst]) -> Option<Type>
 impl Checker {
     fun resolve_impls(var self) -> Result<int32, CheckErr> {
         for decl in self.impl_decls {
+            self.cur_decl = decl.id
             match decl.kind {
                 DeclKind.ImplDecl(target_te, methods, tps, trait_name, trait_args_te) => {
                     self.resolve_impl(decl, target_te, methods, tps, trait_name, trait_args_te)?
@@ -1222,17 +1357,17 @@ impl Checker {
             if len(tps) > 0 {
                 var want: [Type] = []
                 for p in tps { push(want, Type.TParam(p.name)) }
-                if !type_list_eq(targs, want) { return Err(mkerr(ln, cl)) }
+                if !type_list_eq(targs, want) { return Err(terr(ln, cl, format("a generic impl must apply to '{}<{}>' with its type parameters in order", key_or_none(key_opt), join_strs(tp_names(tps), ", ")))) }
             } else {
-                if len(targs) > 0 { return Err(mkerr(ln, cl)) }
+                if len(targs) > 0 { return Err(terr(ln, cl, format("cannot 'impl' on a concrete generic instantiation; write 'impl<T> {}<T> {{ ... }}' to cover every instance", key_or_none(key_opt)))) }
             }
         } else {
             match key_opt {
                 Some(k) => {
-                    if len(tps) > 0 { return Err(mkerr(ln, cl)) }
-                    for m in methods { if match m.receiver { Some(r) => r == "var self", None => false } { return Err(mkerr(m.line, m.col)) } }
+                    if len(tps) > 0 { return Err(terr(ln, cl, "generic impls on built-in types are not supported yet (v0.4.1 covers concrete built-in receivers)")) }
+                    for m in methods { if match m.receiver { Some(r) => r == "var self", None => false } { return Err(terr(m.line, m.col, "'var self' methods on built-in types are not supported yet; use a read-only 'self' receiver")) } }
                 },
-                None => { return Err(mkerr(ln, cl)) },
+                None => { return Err(terr(ln, cl, format("cannot 'impl' on type '{}'; v0.4.1 supports structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
             }
         }
         let key = match key_opt { Some(k) => k, None => "" }
@@ -1243,14 +1378,18 @@ impl Checker {
         match trait_name {
             Some(tn) => {
                 let ti = self.trait_idx(tn)
-                if ti < 0 { return Err(mkerr(ln, cl)) }
+                if ti < 0 { return Err(terr(ln, cl, format("unknown trait '{}' in 'impl {} for {}'", tn, tn, key))) }
                 tinfo = self.traits[ti]
                 have_trait = true
-                if len(trait_args) != len(tinfo.type_params) { return Err(mkerr(ln, cl)) }
+                if len(trait_args) != len(tinfo.type_params) {
+                    var expected = tn
+                    if len(tinfo.type_params) > 0 { expected = format("{}<{}>", tn, join_strs(tinfo.type_params, ", ")) }
+                    return Err(terr(ln, cl, format("trait '{}' expects {} type argument(s), got {} (use 'impl {} for {}')", tn, len(tinfo.type_params), len(trait_args), expected, key)))
+                }
                 var pi = 0
                 while pi < len(tinfo.type_params) { push(pmap, Subst { name: tinfo.type_params[pi], ty: trait_args[pi] })
             pi = pi + 1 }
-                for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { return Err(mkerr(ln, cl)) } }
+                for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { return Err(terr(ln, cl, format("duplicate impl of trait '{}' for type '{}' (at most one user impl per trait/type pair)", tn, key))) } }
                 push(self.user_trait_impls, TraitImplPair { trait_name: tn, key: key })
             },
             None => {},
@@ -1260,9 +1399,9 @@ impl Checker {
         let si = self.struct_idx(key)
         if si >= 0 { for f in self.structs[si].fields { push(field_names, f.name) } }
         for m in methods {
-            match self.method_sig(key, m.name) { Some(x) => { return Err(mkerr(m.line, m.col)) }, None => {} }
-            if contains_str(field_names, m.name) { return Err(mkerr(m.line, m.col)) }
-            self.register_method(target_te, key, tps, m)?
+            match self.method_sig(key, m.name) { Some(x) => { return Err(terr(m.line, m.col, format("duplicate method '{}' for type '{}'", m.name, key))) }, None => {} }
+            if contains_str(field_names, m.name) { return Err(terr(m.line, m.col, format("method '{}' collides with a field of '{}'", m.name, key))) }
+            self.register_method(target_te, key, tps, m, decl.id)?
         }
         if have_trait {
             var impl_names: [str] = []
@@ -1275,7 +1414,7 @@ impl Checker {
         return Ok(0)
     }
 
-    fun register_method(var self, target_te: TypeExpr, key: str, impl_tps: [TypeParam], m: FunData) -> Result<int32, CheckErr> {
+    fun register_method(var self, target_te: TypeExpr, key: str, impl_tps: [TypeParam], m: FunData, impl_id: int32) -> Result<int32, CheckErr> {
         let mangled = format("{}.{}", key, m.name)
         var combined_names: [str] = []
         for t in impl_tps { push(combined_names, t.name) }
@@ -1297,50 +1436,73 @@ impl Checker {
             ret_type: m.ret_type, body: m.body, attributes: [],
             type_params: synth_typarams(combined_names), receiver: m.receiver, is_pub: false,
         }
-        let sig = FuncSig { name: mangled, params: params, ret: rt, type_params: combined_names, bounds: combined_bounds, decl: fdecl, has_decl: true }
+        let sig = FuncSig { name: mangled, params: params, ret: rt, type_params: combined_names, bounds: combined_bounds, decl: fdecl, has_decl: true, decl_id: impl_id }
         push(self.functions, sig)
         push(self.methods, MethodEntry { key: key, name: m.name, sig: sig })
         push(self.method_decls, fdecl)
         push(self.method_decl_keys, key)
+        push(self.method_decl_ids, impl_id)
         return Ok(0)
     }
 
     fun check_trait_conformance(var self, ln: int32, cl: int32, key: str, target: Type, trinfo: TraitInfo, pmap: [Subst], impl_names: [str]) -> Result<int32, CheckErr> {
-        // missing: a trait method not provided by this impl
+        // missing: trait methods not provided by this impl
+        var missing: [str] = []
         for tm in trinfo.methods {
-            if !contains_str(impl_names, tm.name) { return Err(mkerr(ln, cl)) }
+            if !contains_str(impl_names, tm.name) && !contains_str(missing, tm.name) { push(missing, tm.name) }
         }
-        // extra: an impl method not declared by the trait
+        if len(missing) > 0 {
+            return Err(terr(ln, cl, format("impl of trait '{}' for '{}' is missing method(s): {}", trinfo.name, key, join_strs(sorted_strs(missing), ", "))))
+        }
+        // extra: impl methods not declared by the trait
+        var extra: [str] = []
         for nm in impl_names {
             var in_trait = false
             for tm in trinfo.methods { if tm.name == nm { in_trait = true } }
-            if !in_trait { return Err(mkerr(ln, cl)) }
+            if !in_trait && !contains_str(extra, nm) { push(extra, nm) }
+        }
+        if len(extra) > 0 {
+            return Err(terr(ln, cl, format("impl of trait '{}' for '{}' declares method(s) not in the trait: {}", trinfo.name, key, join_strs(sorted_strs(extra), ", "))))
         }
         for tm in trinfo.methods {
-            let sig = match self.method_sig(key, tm.name) { Some(x) => x, None => { return Err(mkerr(ln, cl)) } }
+            let sig = match self.method_sig(key, tm.name) { Some(x) => x, None => { return Err(terr(ln, cl, format("impl of trait '{}' for '{}' is missing method(s): {}", trinfo.name, key, tm.name))) } }
             let recv = match sig.decl.receiver { Some(r) => r, None => "self" }
-            if recv != tm.receiver { return Err(mkerr(sig.decl.line, sig.decl.col)) }
+            if recv != tm.receiver {
+                return Err(terr(sig.decl.line, sig.decl.col, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares '{}'", tm.name, trinfo.name, key, recv, tm.receiver)))
+            }
             var exp_params: [Type] = []
             for p in tm.params { push(exp_params, subst_self(p, target, pmap)) }
             let exp_ret = opt_subst_self(tm.ret, target, pmap)
             if !type_list_eq(sig.params, exp_params) || !opt_type_eq(sig.ret, exp_ret) {
-                return Err(mkerr(sig.decl.line, sig.decl.col))
+                var rest: [Type] = []
+                var k = 1
+                while k < len(exp_params) {
+                    push(rest, exp_params[k])
+                    k = k + 1
+                }
+                return Err(terr(sig.decl.line, sig.decl.col, format("method '{}' in impl of trait '{}' for '{}' does not match the trait signature (expected '({}) -> {}')", tm.name, trinfo.name, key, type_names(rest), opt_type_name(exp_ret))))
             }
         }
         return Ok(0)
     }
 
-    fun validate_bounds(self) -> Result<int32, CheckErr> {
+    fun validate_bounds(var self) -> Result<int32, CheckErr> {
         for sig in self.functions {
+            self.cur_decl = sig.decl_id
             for b in sig.bounds {
-                if !contains_str(sig.type_params, b.tp) { return Err(mkerr(sig.decl.line, sig.decl.col)) }
+                if !contains_str(sig.type_params, b.tp) { return Err(terr(sig.decl.line, sig.decl.col, format("bound on unknown type parameter '{}'", b.tp))) }
                 for tr in b.traits {
-                    if self.trait_idx(tr) < 0 { return Err(mkerr(sig.decl.line, sig.decl.col)) }
+                    if self.trait_idx(tr) < 0 { return Err(terr(sig.decl.line, sig.decl.col, format("unknown trait '{}' in bound '{}: {}'", tr, b.tp, tr))) }
                 }
             }
         }
         return Ok(0)
     }
+}
+
+// A method key as Python's f-strings print it (`None` for no key).
+fun key_or_none(k: Option<str>) -> str {
+    return match k { Some(x) => x, None => "None" }
 }
 
 fun merge_bounds(a: [Bound], b: [Bound]) -> [Bound] {
@@ -1426,12 +1588,14 @@ impl Checker {
     fun expect_value(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         return match self.infer(e, expected)? {
             Some(t) => Ok(t),
-            None => Err(mkerr(e.line, e.col)),
+            None => Err(terr(e.line, e.col, "expression does not produce a value")),
         }
     }
-    fun expect_type(var self, e: Expr, want: Type) -> Result<int32, CheckErr> {
+
+    // `e` must have type `want`; `ctx` names it in the message ("if condition").
+    fun expect_type(var self, e: Expr, want: Type, ctx: str) -> Result<int32, CheckErr> {
         let t = self.expect_value(e, Some(want))?
-        if !type_eq(t, want) { return Err(mkerr(e.line, e.col)) }
+        if !type_eq(t, want) { return Err(terr(e.line, e.col, format("{} must be '{}', found '{}'", ctx, type_name(want), type_name(t)))) }
         return Ok(0)
     }
 
@@ -1439,8 +1603,8 @@ impl Checker {
         let as_stmt = self.stmt_match
         self.stmt_match = false
         let r: Result<Option<Type>, CheckErr> = match e.kind {
-            ExprKind.IntLit(v, suf, isc) => Ok(Some(self.infer_int_lit(e, expected)?)),
-            ExprKind.FloatLit(suf) => Ok(Some(self.infer_float_lit(e, expected)?)),
+            ExprKind.IntLit(v, suf, isc, big) => Ok(Some(self.infer_int_lit(e, expected)?)),
+            ExprKind.FloatLit(lex, suf) => Ok(Some(self.infer_float_lit(e, expected)?)),
             ExprKind.StrLit(s) => Ok(Some(Type.TStr)),
             ExprKind.BoolLit(b) => Ok(Some(Type.TBool)),
             ExprKind.Name(n) => Ok(Some(self.infer_name(e, n, expected)?)),
@@ -1458,7 +1622,7 @@ impl Checker {
             ExprKind.Try(x) => Ok(Some(self.infer_try(e, x)?)),
             ExprKind.Cast(x, ty) => Ok(Some(self.infer_cast(e, x, ty)?)),
             ExprKind.Lambda(ps, ret, body) => Ok(Some(self.infer_lambda(e, ps, ret, body, expected)?)),
-            ExprKind.Hole => Err(mkerr(e.line, e.col)),
+            ExprKind.Hole => Err(terr(e.line, e.col, "'_' placeholder is only valid as a call argument")),
         }
         match r { Ok(om) => { self.record_type(e.id, om) }, Err(x) => {} }
         return r
@@ -1470,7 +1634,7 @@ impl Checker {
 
     fun infer_int_lit(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         return match e.kind {
-            ExprKind.IntLit(v, suf, isc) => {
+            ExprKind.IntLit(v, suf, isc, big) => {
                 var t = t_int()
                 if isc {
                     let useint = match expected { Some(et) => is_int(et) && v <= 127, None => false }
@@ -1480,7 +1644,7 @@ impl Checker {
                         Some(sx) => {
                             t = match int_suffix_type(sx) {
                                 Some(st) => st,
-                                None => { return Err(mkerr(e.line, e.col)) },
+                                None => { return Err(terr(e.line, e.col, format("invalid integer literal suffix '{}'", sx))) },   // unreachable: the lexer checks it
                             }
                         },
                         None => {
@@ -1490,21 +1654,21 @@ impl Checker {
                 }
                 let w = match t { Type.TInt(ww, ss) => ww, _ => 32 }
                 let sg = match t { Type.TInt(ww, ss) => ss, _ => true }
-                if !int_fits(v, w, sg) { return Err(mkerr(e.line, e.col)) }
+                if !lit_fits(v, big, w, sg) { return Err(terr(e.line, e.col, format("integer literal {} does not fit in '{}'", int_text(v, big), type_name(t)))) }
                 Ok(t)
             },
-            _ => Err(mkerr(e.line, e.col)),
+            _ => Err(terr(e.line, e.col, "expected an integer literal")),   // unreachable
         }
     }
 
     fun infer_float_lit(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         match e.kind {
-            ExprKind.FloatLit(suf) => {
+            ExprKind.FloatLit(lex, suf) => {
                 match suf {
                     Some(sx) => {
                         return match float_suffix_type(sx) {
                             Some(ft) => Ok(ft),
-                            None => Err(mkerr(e.line, e.col)),
+                            None => Err(terr(e.line, e.col, format("invalid float literal suffix '{}'", sx))),   // unreachable: the lexer checks it
                         }
                     },
                     None => {},
@@ -1519,11 +1683,11 @@ impl Checker {
             },
             _ => {},
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, "expected a float literal"))   // unreachable
     }
 
     fun infer_name(var self, e: Expr, ident: str, expected: Option<Type>) -> Result<Type, CheckErr> {
-        if ident == "_" { return Err(mkerr(e.line, e.col)) }
+        if ident == "_" { return Err(terr(e.line, e.col, "'_' placeholder is only valid as a call argument")) }
         match self.lookup(ident) {
             Some(b) => { return Ok(b.ty) },
             None => {},
@@ -1539,47 +1703,47 @@ impl Checker {
             // a non-method top-level function referenced as a value
             return self.infer_fun_value(e, ident)
         }
-        if is_builtin_func(ident) { return Err(mkerr(e.line, e.col)) }
-        return Err(mkerr(e.line, e.col))
+        if is_builtin_func(ident) { return Err(terr(e.line, e.col, format("'{}' cannot be used as a value here", ident))) }
+        return Err(terr(e.line, e.col, format("unknown name '{}'", ident)))
     }
 
     fun infer_fun_value(self, e: Expr, ident: str) -> Result<Type, CheckErr> {
         let idx = self.func_idx(ident)
         let sig = self.functions[idx]
-        if len(sig.type_params) > 0 { return Err(mkerr(e.line, e.col)) }
+        if len(sig.type_params) > 0 { return Err(terr(e.line, e.col, format("generic function '{}' cannot be used as a value (its type parameters are unresolved)", ident))) }
         return Ok(Type.TFunc(sig.params, sig.ret))
     }
 
     fun infer_bare_variant(var self, e: Expr, enum_name: str, variant: str, expected: Option<Type>) -> Result<Type, CheckErr> {
-        let payload = match self.enum_variant_payload(enum_name, [], variant) { Some(p) => p, None => { return Err(mkerr(e.line, e.col)) } }
-        if len(payload) > 0 { return Err(mkerr(e.line, e.col)) }
+        let payload = match self.enum_variant_payload(enum_name, [], variant) { Some(p) => p, None => { return Err(terr(e.line, e.col, format("enum '{}' has no variant '{}'", enum_name, variant))) } }
+        if len(payload) > 0 { return Err(terr(e.line, e.col, format("variant '{}' carries a payload; call it like '{}(...)'", variant, variant))) }
         let ei = self.enum_idx(enum_name)
         let nparams = len(self.enums[ei].type_params)
         match expected {
             Some(et) => { if enum_type_matches(et, enum_name, nparams) { return Ok(et) } },
             None => {},
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, format("cannot infer type argument(s) for '{}'; annotate the binding (e.g. ': {}<...>')", variant, enum_name)))
     }
 
     fun infer_unary(var self, e: Expr, op: str, x: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         if op == "-" {
             let hint = num_hint(expected)
             let t = self.expect_value(x, hint)?
-            if !(is_int(t) || is_float(t)) { return Err(mkerr(e.line, e.col)) }
+            if !(is_int(t) || is_float(t)) { return Err(terr(e.line, e.col, "unary '-' requires a numeric operand")) }
             return Ok(t)
         }
         if op == "!" {
-            self.expect_type(x, Type.TBool)?
+            self.expect_type(x, Type.TBool, "operand of '!'")?
             return Ok(Type.TBool)
         }
         if op == "~" {
             let hint = int_hint(expected)
             let t = self.expect_value(x, hint)?
-            if !is_int(t) { return Err(mkerr(e.line, e.col)) }
+            if !is_int(t) { return Err(terr(e.line, e.col, "unary '~' requires an integer")) }
             return Ok(t)
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, format("unknown unary operator '{}'", op)))
     }
 
     fun infer_cast(var self, e: Expr, x: Expr, ty: TypeExpr) -> Result<Type, CheckErr> {
@@ -1587,9 +1751,9 @@ impl Checker {
         let src = self.expect_value(x, None)?
         let src_ok = is_int(src) || is_float(src) || is_char(src)
         let tgt_ok = is_int(target) || is_float(target) || is_char(target)
-        if !src_ok || !tgt_ok { return Err(mkerr(e.line, e.col)) }
+        if !src_ok || !tgt_ok { return Err(terr(e.line, e.col, format("cannot cast from '{}' to '{}' ('as' converts between numeric and char types only)", type_name(src), type_name(target)))) }
         if (is_char(src) && is_float(target)) || (is_float(src) && is_char(target)) {
-            return Err(mkerr(e.line, e.col))
+            return Err(terr(e.line, e.col, "cannot cast directly between 'char' and a float (go through an integer type)"))
         }
         return Ok(target)
     }
@@ -1616,13 +1780,13 @@ impl Checker {
             else { if is_flexible_float_lit(rn) { rt = self.infer_float_lit(rn, Some(lt))? } }
             if type_eq(lt, rt) { return Ok(lt) }
         }
-        return Err(mkerr(ln.line, ln.col))
+        return Err(terr(ln.line, ln.col, format("type mismatch: '{}' vs '{}' (no implicit conversion between numeric types)", type_name(lt), type_name(rt))))
     }
 
     fun infer_binary(var self, e: Expr, op: str, l: Expr, r: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         if op == "&&" || op == "||" {
-            self.expect_type(l, Type.TBool)?
-            self.expect_type(r, Type.TBool)?
+            self.expect_type(l, Type.TBool, format("operand of '{}'", op))?
+            self.expect_type(r, Type.TBool, format("operand of '{}'", op))?
             return Ok(Type.TBool)
         }
         if op == "==" || op == "!=" {
@@ -1634,7 +1798,7 @@ impl Checker {
             let rt = self.expect_value(r, hint)?
             let common = self.unify(l, lt, r, rt)?
             if !(is_int(common) || is_float(common) || is_char(common) || is_bool(common) || is_str(common)) {
-                return Err(mkerr(e.line, e.col))
+                return Err(terr(e.line, e.col, format("cannot compare values of type '{}'", type_name(common))))
             }
             return Ok(Type.TBool)
         }
@@ -1646,7 +1810,7 @@ impl Checker {
             if is_int(lt) || is_float(lt) { hint = Some(lt) }
             let rt = self.expect_value(r, hint)?
             let common = self.unify(l, lt, r, rt)?
-            if !(is_int(common) || is_float(common) || is_char(common)) { return Err(mkerr(e.line, e.col)) }
+            if !(is_int(common) || is_float(common) || is_char(common)) { return Err(terr(e.line, e.col, "comparison requires numeric or char operands")) }
             return Ok(Type.TBool)
         }
         if op == "<<" || op == ">>" {
@@ -1655,13 +1819,13 @@ impl Checker {
             if op == ">>" {
                 match lt { Type.TFunc(ps, rr) => { return self.infer_compose(e, lt, r) }, _ => {} }
             }
-            if !is_int(lt) { return Err(mkerr(e.line, e.col)) }
+            if !is_int(lt) { return Err(terr(e.line, e.col, format("operator '{}' requires an integer left operand", op))) }
             let rt = self.expect_value(r, None)?
-            if !is_int(rt) { return Err(mkerr(r.line, r.col)) }
+            if !is_int(rt) { return Err(terr(r.line, r.col, format("shift amount for '{}' must be an integer", op))) }
             match const_int(r) {
                 Some(amt) => {
                     let w = int_width(lt)
-                    if !(amt >= 0 && amt < (w as int64)) { return Err(mkerr(r.line, r.col)) }
+                    if !(amt >= 0 && amt < (w as int64)) { return Err(terr(r.line, r.col, format("shift amount {} is out of range for '{}' (valid range is 0..{})", amt, type_name(lt), w - 1))) }
                 },
                 None => {},
             }
@@ -1674,14 +1838,14 @@ impl Checker {
             if is_type_param(lt) { return self.infer_bounded_op(e, op, l, r, lt) }
             if is_str(lt) {
                 let rt = self.expect_value(r, None)?
-                if !is_str(rt) { return Err(mkerr(e.line, e.col)) }
+                if !is_str(rt) { return Err(terr(e.line, e.col, format("cannot concatenate 'str' with '{}'", type_name(rt)))) }
                 return Ok(Type.TStr)
             }
             var hint2: Option<Type> = None
             if is_int(lt) || is_float(lt) { hint2 = Some(lt) }
             let rt = self.expect_value(r, hint2)?
             let common = self.unify(l, lt, r, rt)?
-            if !(is_int(common) || is_float(common)) { return Err(mkerr(e.line, e.col)) }
+            if !(is_int(common) || is_float(common)) { return Err(terr(e.line, e.col, "operator '+' requires numeric or string operands")) }
             return Ok(common)
         }
         // arithmetic & bitwise: - * / %  and  & | ^
@@ -1694,10 +1858,10 @@ impl Checker {
         let rt = self.expect_value(r, hint2)?
         let common = self.unify(l, lt, r, rt)?
         if is_float(common) {
-            if !is_arith_op(op) { return Err(mkerr(e.line, e.col)) }
+            if !is_arith_op(op) { return Err(terr(e.line, e.col, format("operator '{}' is not defined for floats", op))) }
             return Ok(common)
         }
-        if !is_int(common) { return Err(mkerr(e.line, e.col)) }
+        if !is_int(common) { return Err(terr(e.line, e.col, format("operator '{}' requires integer operands", op))) }
         return Ok(common)
     }
 
@@ -1710,9 +1874,11 @@ impl Checker {
             kind = "ord" }
         else { trnm = match arith_trait(op) { Some(t) => t, None => "" }
             kind = "arith" } }
-        if !self.type_implements(lt, trnm) { return Err(mkerr(e.line, e.col)) }
+        if !self.type_implements(lt, trnm) {
+            return Err(terr(e.line, e.col, format("operator '{}' is not defined for '{}': it needs 'impl {} for {}'{}", op, type_name(lt), trnm, type_name(lt), if_str(trnm == "Eq", " (or '#derive(Eq)')", ""))))
+        }
         let rt = self.expect_value(r, None)?
-        if !type_eq(lt, rt) { return Err(mkerr(e.line, e.col)) }
+        if !type_eq(lt, rt) { return Err(terr(e.line, e.col, format("operator '{}' requires both operands to have the same type, found '{}' and '{}'", op, type_name(lt), type_name(rt)))) }
         if kind == "arith" {
             // arith trait method returns Self == lt (enforced by conformance)
             let k = match self.type_key(lt) { Some(x) => x, None => "" }
@@ -1739,9 +1905,9 @@ impl Checker {
         else { trnm = match arith_trait(op) { Some(t) => t, None => "" }
             result = lt } }
         let pname = match lt { Type.TParam(n) => n, _ => "" }
-        if !self.bound_has(pname, trnm) { return Err(mkerr(e.line, e.col)) }
+        if !self.bound_has(pname, trnm) { return Err(terr(e.line, e.col, format("operator '{}' on a value of type parameter '{}' requires the bound '{}: {}'", op, pname, pname, trnm))) }
         let rt = self.expect_value(r, None)?
-        if !type_eq(lt, rt) { return Err(mkerr(e.line, e.col)) }
+        if !type_eq(lt, rt) { return Err(terr(e.line, e.col, format("operator '{}' requires both operands to have the same type, found '{}' and '{}'", op, type_name(lt), type_name(rt)))) }
         return Ok(result)
     }
 
@@ -1753,14 +1919,16 @@ impl Checker {
     fun infer_compose(var self, e: Expr, lt: Type, r: Expr) -> Result<Type, CheckErr> {
         let lparams = match lt { Type.TFunc(ps, rr) => ps, _ => empty_types() }
         let lret: Option<Type> = match lt { Type.TFunc(ps, rr) => rr, _ => None }
-        if len(lparams) != 1 { return Err(mkerr(e.line, e.col)) }
+        if len(lparams) != 1 { return Err(terr(e.line, e.col, format("composition with '>>' needs a one-argument function on the left, found '{}'", type_name(lt)))) }
         let rt = self.expect_value(r, None)?
-        match rt { Type.TFunc(ps, rr) => {}, _ => { return Err(mkerr(e.line, e.col)) } }
+        match rt { Type.TFunc(ps, rr) => {}, _ => { return Err(terr(e.line, e.col, format("cannot compose a function with a value of type '{}' (both operands of '>>' must be functions, or both integers)", type_name(rt)))) } }
         let rparams = match rt { Type.TFunc(ps, rr) => ps, _ => empty_types() }
         let rret: Option<Type> = match rt { Type.TFunc(ps, rr) => rr, _ => None }
-        if len(rparams) != 1 { return Err(mkerr(e.line, e.col)) }
-        let lrt = match lret { Some(x) => x, None => { return Err(mkerr(e.line, e.col)) } }
-        if !type_eq(lrt, rparams[0]) { return Err(mkerr(e.line, e.col)) }
+        if len(rparams) != 1 { return Err(terr(e.line, e.col, format("composition with '>>' needs a one-argument function on the right, found '{}'", type_name(rt)))) }
+        let matches = match lret { Some(x) => type_eq(x, rparams[0]), None => false }
+        if !matches {
+            return Err(terr(e.line, e.col, format("cannot compose '{}' with '{}': the left result '{}' must match the right parameter '{}'", type_name(lt), type_name(rt), opt_type_name(lret), type_name(rparams[0]))))
+        }
         return Ok(Type.TFunc([lparams[0]], rret))
     }
 
@@ -1789,18 +1957,18 @@ impl Checker {
         let base = self.expect_value(t, None)?
         match base {
             Type.TTuple(es) => {
-                if !(idx >= 0 && idx < (len(es) as int64)) { return Err(mkerr(e.line, e.col)) }
+                if !(idx >= 0 && idx < (len(es) as int64)) { return Err(terr(e.line, e.col, format("tuple index {} out of range for '{}'", idx, type_name(base)))) }
                 return Ok(es[idx as int32])
             },
             _ => {},
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, format("type '{}' is not a tuple and cannot be indexed with '.{}'", type_name(base), idx)))
     }
 
     fun infer_list_lit(var self, e: Expr, elems: [Expr], expected: Option<Type>) -> Result<Type, CheckErr> {
         var exp_elem: Option<Type> = list_elem_hint(expected)
         if len(elems) == 0 {
-            return match exp_elem { Some(el) => Ok(Type.TList(el)), None => Err(mkerr(e.line, e.col)) }
+            return match exp_elem { Some(el) => Ok(Type.TList(el)), None => Err(terr(e.line, e.col, "cannot infer the element type of an empty list `[]`; annotate it (e.g. `: [int]`)")) }
         }
         var elem_t = self.expect_value(elems[0], exp_elem)?
         var i = 1
@@ -1826,12 +1994,12 @@ impl Checker {
         }
         if len(entries) == 0 {
             if have_exp { return Ok(match expected { Some(et) => et, None => Type.TMap(Type.TStr, Type.TStr) }) }
-            return Err(mkerr(e.line, e.col))
+            return Err(terr(e.line, e.col, "cannot infer the key/value types of an empty map `[:]`; annotate it (e.g. `: [str: int]`)"))
         }
         let k0 = entries[0].key
         let v0 = entries[0].value
         var key_t = self.expect_value(k0, exp_k)?
-        if !is_map_key(key_t) { return Err(mkerr(k0.line, k0.col)) }
+        if !is_map_key(key_t) { return Err(terr(k0.line, k0.col, format("map key type must be a primitive (integer, char, bool, or str), found '{}'", type_name(key_t)))) }
         var val_t = self.expect_value(v0, exp_v)?
         var i = 1
         while i < len(entries) {
@@ -1847,29 +2015,29 @@ impl Checker {
     fun infer_index(var self, e: Expr, t: Expr, ix: Expr) -> Result<Type, CheckErr> {
         let base = self.expect_value(t, None)?
         match base {
-            Type.TMap(k, v) => { self.expect_type(ix, k)?
+            Type.TMap(k, v) => { self.expect_type(ix, k, "map key")?
             return Ok(v) },
             Type.TStr => {
                 let it = self.expect_value(ix, Some(t_int()))?
-                if !is_int(it) { return Err(mkerr(ix.line, ix.col)) }
+                if !is_int(it) { return Err(terr(ix.line, ix.col, format("string index must be an integer, found '{}'", type_name(it)))) }
                 return Ok(t_byte())
             },
             Type.TList(el) => {
                 let it = self.expect_value(ix, Some(t_int()))?
-                if !is_int(it) { return Err(mkerr(ix.line, ix.col)) }
+                if !is_int(it) { return Err(terr(ix.line, ix.col, format("list index must be an integer, found '{}'", type_name(it)))) }
                 return Ok(el)
             },
             _ => {},
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, format("type '{}' is not a list and cannot be indexed with `[...]`", type_name(base))))
     }
 
     fun infer_field(var self, e: Expr, target: Expr, field: str, expected: Option<Type>) -> Result<Type, CheckErr> {
         match self.enum_name_ref(target) {
             Some(enum_name) => {
-                if !self.enum_has_variant(enum_name, field) { return Err(mkerr(e.line, e.col)) }
+                if !self.enum_has_variant(enum_name, field) { return Err(terr(e.line, e.col, format("enum '{}' has no variant '{}'", enum_name, field))) }
                 let payload = match self.enum_variant_payload(enum_name, [], field) { Some(p) => p, None => empty_types() }
-                if len(payload) > 0 { return Err(mkerr(e.line, e.col)) }
+                if len(payload) > 0 { return Err(terr(e.line, e.col, format("variant '{}.{}' takes {} argument(s); call it like '{}.{}(...)'", enum_name, field, len(payload), enum_name, field))) }
                 let ei = self.enum_idx(enum_name)
                 let nparams = len(self.enums[ei].type_params)
                 if nparams == 0 { return Ok(Type.TEnum(enum_name, [])) }
@@ -1877,7 +2045,7 @@ impl Checker {
                     Some(et) => { if enum_type_matches(et, enum_name, nparams) { return Ok(et) } },
                     None => {},
                 }
-                return Err(mkerr(e.line, e.col))
+                return Err(terr(e.line, e.col, format("cannot infer type argument(s) for '{}.{}'; annotate the binding (e.g. ': {}<...>')", enum_name, field, enum_name)))
             },
             None => {},
         }
@@ -1885,33 +2053,35 @@ impl Checker {
         match base {
             Type.TStruct(n, args) => {
                 let fields = self.struct_field_types(n, args)
-                return match field_type_get(fields, field) { Some(ft) => Ok(ft), None => Err(mkerr(e.line, e.col)) }
+                return match field_type_get(fields, field) { Some(ft) => Ok(ft), None => Err(terr(e.line, e.col, format("struct '{}' has no field '{}'", n, field))) }
             },
             _ => {},
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, format("type '{}' has no fields", type_name(base))))
     }
 
-    fun infer_struct_lit(var self, e: Expr, type_name: str, fields: [FieldInit], expected: Option<Type>) -> Result<Type, CheckErr> {
-        if !self.is_struct(type_name) { return Err(mkerr(e.line, e.col)) }
-        let si = self.struct_idx(type_name)
+    fun infer_struct_lit(var self, e: Expr, sname: str, fields: [FieldInit], expected: Option<Type>) -> Result<Type, CheckErr> {
+        if !self.is_struct(sname) { return Err(terr(e.line, e.col, format("unknown struct '{}'", sname))) }
+        let si = self.struct_idx(sname)
         let info = self.structs[si]
         // duplicate / unknown provided fields
         var provided: [str] = []
         for init in fields {
-            if contains_str(provided, init.name) { return Err(mkerr(init.line, init.col)) }
-            if match field_type_get(info.fields, init.name) { Some(x) => false, None => true } { return Err(mkerr(init.line, init.col)) }
+            if contains_str(provided, init.name) { return Err(terr(init.line, init.col, format("duplicate field '{}' in struct literal", init.name))) }
+            if match field_type_get(info.fields, init.name) { Some(x) => false, None => true } { return Err(terr(init.line, init.col, format("struct '{}' has no field '{}'", sname, init.name))) }
             push(provided, init.name)
         }
         // missing fields
-        for f in info.fields { if !contains_str(provided, f.name) { return Err(mkerr(e.line, e.col)) } }
+        var missing: [str] = []
+        for f in info.fields { if !contains_str(provided, f.name) { push(missing, f.name) } }
+        if len(missing) > 0 { return Err(terr(e.line, e.col, format("missing field(s) in '{}' literal: {}", sname, join_strs(missing, ", ")))) }
         if len(info.type_params) == 0 {
             for init in fields {
                 let ft = match field_type_get(info.fields, init.name) { Some(x) => x, None => Type.TStr }
                 let vt = self.expect_value(init.value, Some(ft))?
-                if !type_eq(vt, ft) { return Err(mkerr(init.line, init.col)) }
+                if !type_eq(vt, ft) { return Err(terr(init.line, init.col, format("field '{}': expected '{}', found '{}'", init.name, type_name(ft), type_name(vt)))) }
             }
-            return Ok(Type.TStruct(type_name, []))
+            return Ok(Type.TStruct(sname, []))
         }
         // generic struct: solve type args from fields (declaration order)
         var nodes: [Expr] = []
@@ -1920,9 +2090,9 @@ impl Checker {
             for init in fields { if init.name == f.name { push(nodes, init.value) } }
             push(ttypes, f.ty)
         }
-        var exp_args: Option<[Type]> = struct_args_hint(expected, type_name)
-        let args = self.infer_type_args(info.type_params, ttypes, nodes, exp_args, e)?
-        return Ok(Type.TStruct(type_name, args))
+        var exp_args: Option<[Type]> = struct_args_hint(expected, sname)
+        let args = self.infer_type_args(info.type_params, ttypes, nodes, exp_args, e, format("struct '{}'", sname))?
+        return Ok(Type.TStruct(sname, args))
     }
 }
 
@@ -1945,7 +2115,8 @@ fun is_type_param(t: Type) -> bool { return match t { Type.TParam(n) => true, _ 
 // =========================================================================
 
 impl Checker {
-    fun infer_type_args(var self, params: [str], template_types: [Type], nodes: [Expr], expected_args: Option<[Type]>, e: Expr) -> Result<[Type], CheckErr> {
+    // `label` names the construct in a mismatch message ("struct 'Box'").
+    fun infer_type_args(var self, params: [str], template_types: [Type], nodes: [Expr], expected_args: Option<[Type]>, e: Expr, label: str) -> Result<[Type], CheckErr> {
         var subst: [Subst] = []
         match expected_args {
             Some(ea) => { if len(ea) == len(params) { var i = 0
@@ -1966,7 +2137,9 @@ impl Checker {
             subst = r.subst
             i = i + 1
         }
-        for p in params { if !subst_has(subst, p) { return Err(mkerr(e.line, e.col)) } }
+        var missing: [str] = []
+        for p in params { if !subst_has(subst, p) { push(missing, p) } }
+        if len(missing) > 0 { return Err(terr(e.line, e.col, format("cannot infer type parameter(s) {}; add a type annotation to guide inference", join_strs(missing, ", ")))) }
         var j = 0
         while j < len(nodes) {
             let want = subst_type(template_types[j], subst)
@@ -1974,7 +2147,7 @@ impl Checker {
                 if is_int(want) && is_flexible_int_lit(nodes[j]) {
                     self.infer_int_lit(nodes[j], Some(want))?
                 } else {
-                    return Err(mkerr(nodes[j].line, nodes[j].col))
+                    return Err(terr(nodes[j].line, nodes[j].col, format("{}: expected '{}', found '{}'", label, type_name(want), type_name(value_types[j]))))
                 }
             }
             j = j + 1
@@ -1996,8 +2169,8 @@ impl Checker {
         for arm in arms {
             self.push_scope()
             self.check_pattern(arm.pattern, st)?
-            match arm.guard { Some(g) => { self.expect_type(g, Type.TBool)? }, None => {} }
-            let ab = self.check_arm_body(arm.body, expected)?
+            match arm.guard { Some(g) => { self.expect_type(g, Type.TBool, "match guard")? }, None => {} }
+            let ab = self.check_arm_body(arm.body, expected, as_stmt)?
             self.pop_scope()
             push(bodies, ab)
         }
@@ -2010,26 +2183,29 @@ impl Checker {
             match ab {
                 ArmBody.ABDiverge => {},
                 ArmBody.ABValue(ot, node) => {
-                    let t = match ot { Some(x) => x, None => { return Err(mkerr(e.line, e.col)) } }
-                    push(vals, MatchVal { ty: t, node: node, has_node: match node { Some(x) => true, None => false } })
+                    let t = match ot { Some(x) => x, None => { return Err(terr(e.line, e.col, "this match is used as a value, so every arm must produce one")) } }
+                    push(vals, MatchVal { ty: t, node: node })
                 },
             }
         }
-        if len(vals) == 0 { return Err(mkerr(e.line, e.col)) }
+        if len(vals) == 0 { return Err(terr(e.line, e.col, "this match is used as a value, but every arm diverges")) }
         let result = self.unify_match_result(vals)?
         return Ok(Some(result))
     }
 
-    fun check_arm_body(var self, body: ExprOrBlock, expected: Option<Type>) -> Result<ArmBody, CheckErr> {
+    // The arms of a statement match (`as_stmt`) need no value, so their last
+    // statement is checked as a statement, and a match there is one too (MYLA-59).
+    fun check_arm_body(var self, body: ExprOrBlock, expected: Option<Type>, as_stmt: bool) -> Result<ArmBody, CheckErr> {
         match body {
             ExprOrBlock.EB_Expr(ex) => {
+                if as_stmt { match ex.kind { ExprKind.MatchE(sc, arms) => { self.stmt_match = true }, _ => {} } }
                 let t = self.infer(ex, expected)?
                 if is_diverging(ex) { return Ok(ArmBody.ABDiverge) }
                 return Ok(ArmBody.ABValue(t, Some(ex)))
             },
             ExprOrBlock.EB_Block(bl) => {
                 self.push_scope()
-                let res = self.check_arm_block(bl, expected)?
+                let res = self.check_arm_block(bl, expected, as_stmt)?
                 self.pop_scope()
                 return Ok(res)
             },
@@ -2037,12 +2213,12 @@ impl Checker {
         return Ok(ArmBody.ABDiverge)
     }
 
-    fun check_arm_block(var self, bl: Block, expected: Option<Type>) -> Result<ArmBody, CheckErr> {
+    fun check_arm_block(var self, bl: Block, expected: Option<Type>, as_stmt: bool) -> Result<ArmBody, CheckErr> {
         let n = len(bl.stmts)
         var i = 0
         while i < n {
             let s = bl.stmts[i]
-            if i == n - 1 {
+            if i == n - 1 && !as_stmt {
                 match s.kind {
                     StmtKind.ExprStmt(ex) => {
                         let t = self.infer(ex, expected)?
@@ -2080,7 +2256,7 @@ impl Checker {
             for v in vals {
                 if !type_eq(v.ty, target) {
                     match v.node {
-                        Some(nd) => { if is_flexible_int_lit(nd) { self.infer_int_lit(nd, Some(target))? } else { return Err(mkerr(nd.line, nd.col)) } },
+                        Some(nd) => { if is_flexible_int_lit(nd) { self.infer_int_lit(nd, Some(target))? } else { return Err(terr(nd.line, nd.col, format("match arms have incompatible types '{}' and '{}'", type_name(target), type_name(v.ty)))) } },
                         None => {},
                     }
                 }
@@ -2089,7 +2265,7 @@ impl Checker {
         }
         for v in vals {
             if !type_eq(v.ty, first) {
-                match v.node { Some(nd) => { return Err(mkerr(nd.line, nd.col)) }, None => {} }
+                match v.node { Some(nd) => { return Err(terr(nd.line, nd.col, format("match arms have incompatible types '{}' and '{}'", type_name(first), type_name(v.ty)))) }, None => {} }
             }
         }
         return Ok(first)
@@ -2103,14 +2279,14 @@ impl Checker {
                     Type.TEnum(en, args) => {
                         if self.enum_has_variant(en, n) {
                             let payload = match self.enum_variant_payload(en, args, n) { Some(p) => p, None => empty_types() }
-                            if len(payload) > 0 { return Err(mkerr(pat.line, pat.col)) }
+                            if len(payload) > 0 { return Err(terr(pat.line, pat.col, format("variant '{}.{}' carries a payload; write '{}(...)' to match it", en, n, n))) }
                             return Ok(0)
                         }
-                        if !self.define(n, t, false) { return Err(mkerr(pat.line, pat.col)) }
+                        if !self.define(n, t, false) { return Err(terr(pat.line, pat.col, format("'{}' is bound more than once in this pattern", n))) }
                         Ok(0)
                     },
                     _ => {
-                        if !self.define(n, t, false) { return Err(mkerr(pat.line, pat.col)) }
+                        if !self.define(n, t, false) { return Err(terr(pat.line, pat.col, format("'{}' is bound more than once in this pattern", n))) }
                         Ok(0)
                     },
                 }
@@ -2119,21 +2295,23 @@ impl Checker {
                 var hint: Option<Type> = None
                 if is_int(t) || is_char(t) { hint = Some(t) }
                 let lt = self.expect_value(litexpr, hint)?
-                if !(is_int(t) || is_char(t) || is_bool(t) || is_str(t)) { return Err(mkerr(pat.line, pat.col)) }
-                if !type_eq(lt, t) { return Err(mkerr(pat.line, pat.col)) }
+                if !(is_int(t) || is_char(t) || is_bool(t) || is_str(t)) { return Err(terr(pat.line, pat.col, format("cannot match a literal against '{}'", type_name(t)))) }
+                if !type_eq(lt, t) { return Err(terr(pat.line, pat.col, format("literal pattern of type '{}' cannot match value of type '{}'", type_name(lt), type_name(t)))) }
+                let misfit = pattern_misfit(litexpr, t)
+                if misfit != "" { return Err(terr(pat.line, pat.col, format("integer literal {} does not fit in '{}'", misfit, type_name(t)))) }
                 Ok(0)
             },
             PatternKind.PEnum(en, variant, elems, hp) => self.check_enum_pattern(pat, en, variant, elems, hp, t),
             PatternKind.PTuple(elems) => {
                 match t {
                     Type.TTuple(ets) => {
-                        if len(elems) != len(ets) { return Err(mkerr(pat.line, pat.col)) }
+                        if len(elems) != len(ets) { return Err(terr(pat.line, pat.col, format("tuple pattern expects {} element(s), got {}", len(ets), len(elems)))) }
                         var i = 0
                         while i < len(elems) { self.check_pattern(elems[i], ets[i])?
             i = i + 1 }
                         Ok(0)
                     },
-                    _ => Err(mkerr(pat.line, pat.col)),
+                    _ => Err(terr(pat.line, pat.col, format("tuple pattern cannot match value of type '{}'", type_name(t)))),
                 }
             },
             PatternKind.PStruct(name, fps) => self.check_struct_pattern(pat, name, fps, t),
@@ -2144,42 +2322,42 @@ impl Checker {
     fun check_enum_pattern(var self, pat: Pattern, en: Option<str>, variant: str, elems: [Pattern], hp: bool, t: Type) -> Result<int32, CheckErr> {
         match t {
             Type.TEnum(tn, args) => {
-                match en { Some(name) => { if name != tn { return Err(mkerr(pat.line, pat.col)) } }, None => {} }
-                let payload = match self.enum_variant_payload(tn, args, variant) { Some(p) => p, None => { return Err(mkerr(pat.line, pat.col)) } }
+                match en { Some(name) => { if name != tn { return Err(terr(pat.line, pat.col, format("pattern names enum '{}' but the value is '{}'", name, tn))) } }, None => {} }
+                let payload = match self.enum_variant_payload(tn, args, variant) { Some(p) => p, None => { return Err(terr(pat.line, pat.col, format("enum '{}' has no variant '{}'", tn, variant))) } }
                 if hp || len(elems) > 0 {
-                    if len(elems) != len(payload) { return Err(mkerr(pat.line, pat.col)) }
+                    if len(elems) != len(payload) { return Err(terr(pat.line, pat.col, format("variant '{}.{}' has {} field(s), but the pattern binds {}", tn, variant, len(payload), len(elems)))) }
                     var i = 0
                     while i < len(elems) { self.check_pattern(elems[i], payload[i])?
             i = i + 1 }
                     return Ok(0)
                 }
-                if len(payload) > 0 { return Err(mkerr(pat.line, pat.col)) }
+                if len(payload) > 0 { return Err(terr(pat.line, pat.col, format("variant '{}.{}' carries a payload; write '{}(...)' to match it", tn, variant, variant))) }
                 return Ok(0)
             },
             _ => {},
         }
-        return Err(mkerr(pat.line, pat.col))
+        return Err(terr(pat.line, pat.col, format("enum pattern cannot match value of type '{}'", type_name(t))))
     }
 
-    fun check_struct_pattern(var self, pat: Pattern, type_name: str, fps: [FieldPat], t: Type) -> Result<int32, CheckErr> {
+    fun check_struct_pattern(var self, pat: Pattern, sname: str, fps: [FieldPat], t: Type) -> Result<int32, CheckErr> {
         match t {
             Type.TStruct(tn, args) => {
-                if type_name != tn { return Err(mkerr(pat.line, pat.col)) }
+                if sname != tn { return Err(terr(pat.line, pat.col, format("pattern names struct '{}' but the value is '{}'", sname, tn))) }
                 let fields = self.struct_field_types(tn, args)
                 var seen: [str] = []
                 for fp in fps {
-                    if contains_str(seen, fp.name) { return Err(mkerr(fp.line, fp.col)) }
+                    if contains_str(seen, fp.name) { return Err(terr(fp.line, fp.col, format("field '{}' bound more than once in struct pattern", fp.name))) }
                     push(seen, fp.name)
                     match field_type_get(fields, fp.name) {
                         Some(ft) => { self.check_pattern(fp.pattern, ft)? },
-                        None => { return Err(mkerr(fp.line, fp.col)) },
+                        None => { return Err(terr(fp.line, fp.col, format("struct '{}' has no field '{}'", tn, fp.name))) },
                     }
                 }
                 return Ok(0)
             },
             _ => {},
         }
-        return Err(mkerr(pat.line, pat.col))
+        return Err(terr(pat.line, pat.col, format("struct pattern cannot match value of type '{}'", type_name(t))))
     }
 
     fun check_or_pattern(var self, pat: Pattern, alts: [Pattern], t: Type) -> Result<int32, CheckErr> {
@@ -2199,12 +2377,12 @@ impl Checker {
                 base_types = types
                 first = false
             } else {
-                if !bindmaps_eq(base_names, base_types, names, types) { return Err(mkerr(pat.line, pat.col)) }
+                if !bindmaps_eq(base_names, base_types, names, types) { return Err(terr(pat.line, pat.col, "all alternatives of an or-pattern must bind the same names with the same types")) }
             }
         }
         var i = 0
         while i < len(base_names) {
-            if !self.define(base_names[i], base_types[i], false) { return Err(mkerr(pat.line, pat.col)) }
+            if !self.define(base_names[i], base_types[i], false) { return Err(terr(pat.line, pat.col, format("'{}' is bound more than once in this pattern", base_names[i]))) }
             i = i + 1
         }
         return Ok(0)
@@ -2212,69 +2390,144 @@ impl Checker {
 
     // -- exhaustiveness & redundancy --------------------------------------
 
+    // Maranget's "usefulness" over pattern matrices (MYLA-14), as in the
+    // Python checker: a row of patterns is useful against earlier rows when
+    // some value matches it and none of them. Patterns are normalized to
+    // `NPat`s first; a constructor's key is an enum variant's name, or `#t` /
+    // `#f`, `#()` (a tuple), `#{}` (a struct), `#i<n>` / `#s<text>` (literals).
+
     fun irrefutable(self, pat: Pattern, t: Type) -> bool {
+        return !self.useful([[self.norm_pat(pat, t)]], [NPat.NWild], [t])
+    }
+
+    fun norm_pat(self, pat: Pattern, t: Type) -> NPat {
         match pat.kind {
-            PatternKind.PWild => { return true },
+            PatternKind.PWild => { return NPat.NWild },
             PatternKind.PBind(n) => {
                 match t {
-                    Type.TEnum(en, args) => { return !(self.enum_has_variant(en, n) && self.is_novpayload_variant(en, n)) },
+                    Type.TEnum(en, args) => {
+                        if self.enum_has_variant(en, n) && self.is_novpayload_variant(en, n) { return NPat.NCon(n, []) }
+                    },
                     _ => {},
                 }
-                return true
+                return NPat.NWild
+            },
+            PatternKind.PLit(e) => { return NPat.NCon(literal_key(e), []) },
+            PatternKind.POr(alts) => {
+                var out: [NPat] = []
+                for a in alts { push(out, self.norm_pat(a, t)) }
+                return NPat.NOr(out)
             },
             PatternKind.PTuple(elems) => {
                 match t {
                     Type.TTuple(ets) => {
+                        var out: [NPat] = []
                         var i = 0
-                        while i < len(elems) {
-                            if !self.irrefutable(elems[i], ets[i]) { return false }
+                        while i < len(elems) && i < len(ets) {
+                            push(out, self.norm_pat(elems[i], ets[i]))
                             i = i + 1
                         }
-                        return true
+                        return NPat.NCon("#()", out)
                     },
                     _ => {},
                 }
-                return false
             },
             PatternKind.PStruct(name, fps) => {
                 match t {
                     Type.TStruct(tn, args) => {
-                        let fields = self.struct_field_types(tn, args)
-                        for fp in fps {
-                            match field_type_get(fields, fp.name) {
-                                Some(ft) => { if !self.irrefutable(fp.pattern, ft) { return false } },
-                                None => {},
-                            }
+                        var out: [NPat] = []
+                        for f in self.struct_field_types(tn, args) {
+                            var sub = NPat.NWild
+                            for fp in fps { if fp.name == f.name { sub = self.norm_pat(fp.pattern, f.ty) } }
+                            push(out, sub)
                         }
-                        return true
+                        return NPat.NCon("#{}", out)
                     },
                     _ => {},
                 }
-                return false
             },
             PatternKind.PEnum(en, variant, elems, hp) => {
                 match t {
                     Type.TEnum(tn, args) => {
-                        if len(self.enum_variant_names(tn)) != 1 { return false }
                         let payload = match self.enum_variant_payload(tn, args, variant) { Some(p) => p, None => empty_types() }
+                        var out: [NPat] = []
                         var i = 0
-                        while i < len(elems) {
-                            if !self.irrefutable(elems[i], payload[i]) { return false }
+                        while i < len(payload) {
+                            if i < len(elems) { push(out, self.norm_pat(elems[i], payload[i])) } else { push(out, NPat.NWild) }
                             i = i + 1
                         }
-                        return true
+                        return NPat.NCon(variant, out)
                     },
                     _ => {},
                 }
-                return false
             },
-            PatternKind.POr(altl) => {
-                for a in altl { if self.irrefutable(a, t) { return true } }
-                return false
-            },
-            _ => { return false },
         }
-        return false
+        return NPat.NWild
+    }
+
+    // All constructors of `t` with their field types; none for values that
+    // can't be enumerated (integers, strings, chars).
+    fun signature(self, t: Type) -> Option<[SigCon]> {
+        var out: [SigCon] = []
+        match t {
+            Type.TEnum(tn, args) => {
+                for v in self.enum_variant_names(tn) {
+                    let payload = match self.enum_variant_payload(tn, args, v) { Some(p) => p, None => empty_types() }
+                    push(out, SigCon { key: v, types: payload })
+                }
+            },
+            Type.TBool => {
+                push(out, SigCon { key: "#t", types: empty_types() })
+                push(out, SigCon { key: "#f", types: empty_types() })
+            },
+            Type.TTuple(ets) => { push(out, SigCon { key: "#()", types: ets }) },
+            Type.TStruct(tn, args) => {
+                var ts: [Type] = []
+                for f in self.struct_field_types(tn, args) { push(ts, f.ty) }
+                push(out, SigCon { key: "#{}", types: ts })
+            },
+            _ => { return None },
+        }
+        return Some(out)
+    }
+
+    fun useful(self, rows0: [[NPat]], q: [NPat], types: [Type]) -> bool {
+        if len(q) == 0 { return len(rows0) == 0 }
+        let rows = expand_or(rows0)
+        let rest = list_tail(q)
+        let trest = list_tail(types)
+        match q[0] {
+            NPat.NOr(alts) => {
+                for alt in alts { if self.useful(rows, list_concat([alt], rest), types) { return true } }
+                return false
+            },
+            NPat.NCon(key, subs) => {
+                var sub_types: [Type] = []
+                match self.signature(types[0]) {
+                    Some(sig) => { for c in sig { if c.key == key { sub_types = c.types } } },
+                    None => {},
+                }
+                if len(sub_types) != len(subs) { sub_types = repeat_type(types[0], len(subs)) }
+                return self.useful(specialize(rows, key, len(subs)), list_concat(subs, rest), list_concat(sub_types, trest))
+            },
+            NPat.NWild => {},
+        }
+        match self.signature(types[0]) {
+            Some(sig) => {
+                var complete = true
+                for c in sig { if !head_has_key(rows, c.key) { complete = false } }
+                if complete {
+                    for c in sig {
+                        if self.useful(specialize(rows, c.key, len(c.types)), list_concat(wilds(len(c.types)), rest), list_concat(c.types, trest)) { return true }
+                    }
+                    return false
+                }
+            },
+            None => {},
+        }
+        var def: [[NPat]] = []
+        for row in rows { if is_nwild(row[0]) { push(def, list_tail(row)) } }
+        return self.useful(def, rest, trest)
     }
 
     fun covered_variants(self, pat: Pattern, tn: str, args: [Type]) -> [str] {
@@ -2310,59 +2563,168 @@ impl Checker {
     }
 
     fun check_exhaustive(self, e: Expr, st: Type, arms: [MatchArm]) -> Result<int32, CheckErr> {
-        var noguard: [MatchArm] = []
-        for a in arms { match a.guard { Some(g) => {}, None => push(noguard, a) } }
-        for a in noguard { if self.irrefutable(a.pattern, st) { return Ok(0) } }
+        var rows: [[NPat]] = []
+        for a in arms { match a.guard { Some(g) => {}, None => push(rows, [self.norm_pat(a.pattern, st)]) } }
+        if !self.useful(rows, [NPat.NWild], [st]) { return Ok(0) }
         match st {
             Type.TEnum(tn, args) => {
-                var covered: [str] = []
-                for a in noguard { for v in self.covered_variants(a.pattern, tn, args) { if !contains_str(covered, v) { push(covered, v) } } }
-                for v in self.enum_variant_names(tn) { if !contains_str(covered, v) { return Err(mkerr(e.line, e.col)) } }
-                return Ok(0)
-            },
-            Type.TBool => {
-                var saw_true = false
-                var saw_false = false
-                for a in noguard {
-                    match pat_bool_value(a.pattern) {
-                        Some(b) => {
-                            if b { saw_true = true }
-                            if !b { saw_false = true }
-                        },
-                        None => {},
-                    }
+                var missing: [str] = []
+                for v in self.enum_variant_names(tn) {
+                    let payload = match self.enum_variant_payload(tn, args, v) { Some(p) => p, None => empty_types() }
+                    if self.useful(specialize(rows, v, len(payload)), wilds(len(payload)), payload) { push(missing, v) }
                 }
-                if saw_true && saw_false { return Ok(0) }
-                return Err(mkerr(e.line, e.col))
+                return Err(terr(e.line, e.col, format("non-exhaustive match on '{}': missing variant(s) {} (add them or a '_' arm)", tn, join_strs(missing, ", "))))
             },
+            Type.TBool => { return Err(terr(e.line, e.col, "non-exhaustive match on 'bool': cover both true and false (or add a '_' arm)")) },
             _ => {},
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, format("non-exhaustive match on '{}': add a '_' arm", type_name(st))))
     }
 
     fun check_redundant(self, arms: [MatchArm], st: Type) -> Result<int32, CheckErr> {
         var saw_irrefutable = false
-        var covered: [str] = []
+        var covered: [str] = []        // enum variants covered in full so far
+        var rows: [[NPat]] = []
         for arm in arms {
-            if saw_irrefutable { return Err(mkerr(arm.line, arm.col)) }
+            if saw_irrefutable { return Err(terr(arm.line, arm.col, "unreachable match arm (a previous arm already matches everything)")) }
             let has_guard = match arm.guard { Some(g) => true, None => false }
-            if has_guard { continue }
-            match st {
-                Type.TEnum(tn, args) => {
-                    let vs = self.covered_variants(arm.pattern, tn, args)
-                    if len(vs) > 0 {
-                        var subset = true
-                        for v in vs { if !contains_str(covered, v) { subset = false } }
-                        if subset { return Err(mkerr(arm.line, arm.col)) }
-                    }
-                    for v in vs { if !contains_str(covered, v) { push(covered, v) } }
-                },
-                _ => {},
+            let row = [self.norm_pat(arm.pattern, st)]
+            var vs: [str] = []
+            match st { Type.TEnum(tn, args) => { vs = self.covered_variants(arm.pattern, tn, args) }, _ => {} }
+            if !has_guard && len(vs) > 0 {
+                var subset = true
+                for v in vs { if !contains_str(covered, v) { subset = false } }
+                if subset { return Err(terr(arm.line, arm.col, "unreachable match arm (its variant(s) are already covered)")) }
             }
+            if !self.useful(rows, row, [st]) { return Err(terr(arm.line, arm.col, "unreachable match arm (earlier arms already cover it)")) }
+            if has_guard { continue }
+            for v in vs { if !contains_str(covered, v) { push(covered, v) } }
+            push(rows, row)
             if self.irrefutable(arm.pattern, st) { saw_irrefutable = true }
         }
         return Ok(0)
     }
+}
+
+// A pattern normalized for exhaustiveness: a wildcard, a constructor with its
+// subpatterns, or an or-pattern (MYLA-14).
+enum NPat { NWild, NCon(str, [NPat]), NOr([NPat]) }
+
+// A constructor of a type and its field types.
+struct SigCon { key: str, types: [Type] }
+
+fun literal_key(e: Expr) -> str {
+    match e.kind {
+        ExprKind.BoolLit(b) => {
+            if b { return "#t" }
+            return "#f"
+        },
+        ExprKind.StrLit(t) => { return "#s" + t },
+        ExprKind.IntLit(v, suf, isc, big) => { return "#i" + int_text(v, big) },
+        ExprKind.Unary(op, x) => {
+            let k = literal_key(x)            // "#i<n>"
+            if k == "#i0" { return k }        // -0 is 0
+            return "#i-" + slice_from(k, 2)
+        },
+        _ => {},
+    }
+    return "#?"
+}
+
+fun slice_from(s: str, start: int) -> str {
+    var sb = StringBuilder()
+    var i = start
+    while i < len(s) {
+        append_byte(sb, s[i])
+        i = i + 1
+    }
+    return build(sb)
+}
+
+fun is_nwild(p: NPat) -> bool {
+    return match p { NPat.NWild => true, _ => false }
+}
+
+fun head_has_key(rows: [[NPat]], key: str) -> bool {
+    for row in rows {
+        match row[0] {
+            NPat.NCon(k, subs) => { if k == key { return true } },
+            _ => {},
+        }
+    }
+    return false
+}
+
+fun repeat_type(t: Type, n: int) -> [Type] {
+    var out: [Type] = []
+    var i = 0
+    while i < n {
+        push(out, t)
+        i = i + 1
+    }
+    return out
+}
+
+fun wilds(n: int) -> [NPat] {
+    var out: [NPat] = []
+    var i = 0
+    while i < n {
+        push(out, NPat.NWild)
+        i = i + 1
+    }
+    return out
+}
+
+fun list_tail<T>(xs: [T]) -> [T] {
+    var out: [T] = []
+    var i = 1
+    while i < len(xs) {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun list_concat<T>(a: [T], b: [T]) -> [T] {
+    var out = a
+    for x in b { push(out, x) }
+    return out
+}
+
+// Rows with a leading or-pattern split into one row per alternative.
+fun expand_or(rows: [[NPat]]) -> [[NPat]] {
+    var out: [[NPat]] = []
+    for row in rows {
+        var split = false
+        if len(row) == 0 {
+            push(out, row)
+            continue
+        }
+        match row[0] {
+            NPat.NOr(alts) => {
+                split = true
+                var alt_rows: [[NPat]] = []
+                for alt in alts { push(alt_rows, list_concat([alt], list_tail(row))) }
+                for r in expand_or(alt_rows) { push(out, r) }
+            },
+            _ => {},
+        }
+        if !split { push(out, row) }
+    }
+    return out
+}
+
+// The rows that match constructor `key`, with its subpatterns in front.
+fun specialize(rows: [[NPat]], key: str, arity: int) -> [[NPat]] {
+    var out: [[NPat]] = []
+    for row in expand_or(rows) {
+        match row[0] {
+            NPat.NWild => { push(out, list_concat(wilds(arity), list_tail(row))) },
+            NPat.NCon(k, subs) => { if k == key { push(out, list_concat(subs, list_tail(row))) } },
+            NPat.NOr(alts) => {},
+        }
+    }
+    return out
 }
 
 fun bindmaps_eq(an: [str], at: [Type], bn: [str], bt: [Type]) -> bool {
@@ -2404,40 +2766,37 @@ impl Checker {
                 var final_t = value_type
                 match declared {
                     Some(d) => {
-                        if !type_eq(value_type, d) { return Err(mkerr(s.line, s.col)) }
+                        if !type_eq(value_type, d) { return Err(terr(s.line, s.col, format("cannot assign value of type '{}' to binding of type '{}'", type_name(value_type), type_name(d)))) }
                         final_t = d
                     },
                     None => {},
                 }
-                if !self.define(name, final_t, kind == "var") { return Err(mkerr(s.line, s.col)) }
+                if !self.define(name, final_t, kind == "var") { return Err(terr(s.line, s.col, format("'{}' is already declared in this scope", name))) }
                 Ok(0)
             },
             StmtKind.DestructDecl(kind, binding, ty, init) => {
                 var declared: Option<Type> = None
                 match ty { Some(te) => { declared = Some(self.resolve0(te)?) }, None => {} }
                 let value_type = self.expect_value(init, declared)?
-                match declared { Some(d) => { if !type_eq(value_type, d) { return Err(mkerr(s.line, s.col)) } }, None => {} }
+                match declared { Some(d) => { if !type_eq(value_type, d) { return Err(terr(s.line, s.col, format("cannot assign value of type '{}' to binding of type '{}'", type_name(value_type), type_name(d)))) } }, None => {} }
                 match value_type {
                     Type.TTuple(ets) => {
-                        if len(binding) != len(ets) { return Err(mkerr(s.line, s.col)) }
-                        var i = 0
-                        while i < len(binding) { self.bind_elem(binding[i], ets[i], kind == "var", s.line, s.col)?
-            i = i + 1 }
+                        self.bind_elem(binding, value_type, kind == "var")?
                         Ok(0)
                     },
-                    _ => Err(mkerr(s.line, s.col)),
+                    _ => Err(terr(s.line, s.col, format("cannot destructure non-tuple value of type '{}'", type_name(value_type)))),
                 }
             },
             StmtKind.Assign(target, value) => {
-                match target.kind { ExprKind.Name(n) => { if n == "self" { return Err(mkerr(s.line, s.col)) } }, _ => {} }
+                match target.kind { ExprKind.Name(n) => { if n == "self" { return Err(terr(s.line, s.col, "cannot reassign 'self'; mutate its fields or elements instead")) } }, _ => {} }
                 let lv = self.check_lvalue(target)?
-                if !lv.mutable { return Err(mkerr(s.line, s.col)) }
+                if !lv.mutable { return Err(terr(s.line, s.col, "cannot assign to an immutable binding (declare it with 'var')")) }
                 let vt = self.expect_value(value, Some(lv.ty))?
-                if !type_eq(vt, lv.ty) { return Err(mkerr(s.line, s.col)) }
+                if !type_eq(vt, lv.ty) { return Err(terr(s.line, s.col, format("cannot assign '{}' to '{}'", type_name(vt), type_name(lv.ty)))) }
                 Ok(0)
             },
             StmtKind.IfS(cond, then, otherwise) => {
-                self.expect_type(cond, Type.TBool)?
+                self.expect_type(cond, Type.TBool, "if condition")?
                 self.check_block(then)?
                 match otherwise {
                     Some(et) => match et {
@@ -2449,7 +2808,7 @@ impl Checker {
                 Ok(0)
             },
             StmtKind.WhileS(cond, body) => {
-                self.expect_type(cond, Type.TBool)?
+                self.expect_type(cond, Type.TBool, "while condition")?
                 self.loop_depth = self.loop_depth + 1
                 self.check_block(body)?
                 self.loop_depth = self.loop_depth - 1
@@ -2458,11 +2817,11 @@ impl Checker {
             StmtKind.ForS(var_name, start, end, body, iter) => self.check_for(s, var_name, start, end, body, iter),
             StmtKind.ReturnS(v) => self.check_return(s, v),
             StmtKind.BreakS => {
-                if self.loop_depth == 0 { return Err(mkerr(s.line, s.col)) }
+                if self.loop_depth == 0 { return Err(terr(s.line, s.col, "'break' outside of a loop")) }
                 Ok(0)
             },
             StmtKind.ContinueS => {
-                if self.loop_depth == 0 { return Err(mkerr(s.line, s.col)) }
+                if self.loop_depth == 0 { return Err(terr(s.line, s.col, "'continue' outside of a loop")) }
                 Ok(0)
             },
             StmtKind.ExprStmt(ex) => {
@@ -2481,16 +2840,16 @@ impl Checker {
                 loop_t = match it {
                     Type.TList(el) => el,
                     Type.TMap(k, v) => k,
-                    _ => { return Err(mkerr(it_expr.line, it_expr.col)) },
+                    _ => { return Err(terr(it_expr.line, it_expr.col, format("`for ... in` requires a list or map, found '{}'", type_name(it)))) },
                 }
             },
             None => {
-                let se = match start { Some(x) => x, None => { return Err(mkerr(s.line, s.col)) } }
-                let ee = match end { Some(x) => x, None => { return Err(mkerr(s.line, s.col)) } }
+                let se = match start { Some(x) => x, None => { return Err(terr(s.line, s.col, "for-range bounds must be integers")) } }
+                let ee = match end { Some(x) => x, None => { return Err(terr(s.line, s.col, "for-range bounds must be integers")) } }
                 let st = self.expect_value(se, None)?
                 let et = self.expect_value(ee, None)?
                 loop_t = self.unify(se, st, ee, et)?
-                if !is_int(loop_t) { return Err(mkerr(s.line, s.col)) }
+                if !is_int(loop_t) { return Err(terr(s.line, s.col, "for-range bounds must be integers")) }
             },
         }
         self.push_scope()
@@ -2508,9 +2867,10 @@ impl Checker {
                 Some(ve) => {
                     if self.lambda_infer_active {
                         let vt = self.expect_value(ve, None)?
-                        push(self.lambda_infer, MatchVal { ty: vt, node: Some(ve), has_node: true })
+                        // positioned at the `return`, where Python reports a mismatch
+                        push(self.lambda_infer, MatchVal { ty: vt, node: Some(Expr { id: ve.id, line: s.line, col: s.col, kind: ve.kind }) })
                     } else {
-                        return Err(mkerr(s.line, s.col))
+                        return Err(terr(s.line, s.col, "cannot return a value from a function with no return type"))
                     }
                 },
                 None => {},
@@ -2519,32 +2879,32 @@ impl Checker {
         }
         let ret = match self.cur_ret { Some(r) => r, None => t_int() }
         match v {
-            None => { return Err(mkerr(s.line, s.col)) },
+            None => { return Err(terr(s.line, s.col, format("expected a return value of type '{}'", type_name(ret)))) },
             Some(ve) => {
                 let vt = self.expect_value(ve, Some(ret))?
-                if !type_eq(vt, ret) { return Err(mkerr(s.line, s.col)) }
+                if !type_eq(vt, ret) { return Err(terr(s.line, s.col, format("return type mismatch: expected '{}', found '{}'", type_name(ret), type_name(vt)))) }
             },
         }
         return Ok(0)
     }
 
-    fun bind_elem(var self, be: BindElem, t: Type, mutable: bool, ln: int32, cl: int32) -> Result<int32, CheckErr> {
+    fun bind_elem(var self, be: BindElem, t: Type, mutable: bool) -> Result<int32, CheckErr> {
         return match be {
             BindElem.BWild => Ok(0),
-            BindElem.BName(n) => {
-                if !self.define(n, t, mutable) { return Err(mkerr(ln, cl)) }
+            BindElem.BName(n, ln, cl) => {
+                if !self.define(n, t, mutable) { return Err(terr(ln, cl, format("'{}' is already declared in this scope", n))) }
                 Ok(0)
             },
-            BindElem.BTuple(elems) => {
+            BindElem.BTuple(elems, ln, cl) => {
                 match t {
                     Type.TTuple(ets) => {
-                        if len(elems) != len(ets) { return Err(mkerr(ln, cl)) }
+                        if len(elems) != len(ets) { return Err(terr(ln, cl, format("tuple pattern expects {} element(s), but value has {}", len(elems), len(ets)))) }
                         var i = 0
-                        while i < len(elems) { self.bind_elem(elems[i], ets[i], mutable, ln, cl)?
+                        while i < len(elems) { self.bind_elem(elems[i], ets[i], mutable)?
             i = i + 1 }
                         Ok(0)
                     },
-                    _ => Err(mkerr(ln, cl)),
+                    _ => Err(terr(ln, cl, format("cannot destructure non-tuple value of type '{}'", type_name(t)))),
                 }
             },
         }
@@ -2553,33 +2913,33 @@ impl Checker {
     fun check_lvalue(var self, e: Expr) -> Result<LValue, CheckErr> {
         return match e.kind {
             ExprKind.Name(n) => {
-                match self.lookup(n) { Some(b) => Ok(LValue { ty: b.ty, mutable: b.mutable }), None => Err(mkerr(e.line, e.col)) }
+                match self.lookup(n) { Some(b) => Ok(LValue { ty: b.ty, mutable: b.mutable }), None => Err(terr(e.line, e.col, format("unknown name '{}'", n))) }
             },
             ExprKind.GetField(target, field) => {
                 let base = self.check_lvalue(target)?
                 match base.ty {
                     Type.TStruct(nm, args) => {
                         let fields = self.struct_field_types(nm, args)
-                        match field_type_get(fields, field) { Some(ft) => Ok(LValue { ty: ft, mutable: base.mutable }), None => Err(mkerr(e.line, e.col)) }
+                        match field_type_get(fields, field) { Some(ft) => Ok(LValue { ty: ft, mutable: base.mutable }), None => Err(terr(e.line, e.col, format("struct '{}' has no field '{}'", nm, field))) }
                     },
-                    _ => Err(mkerr(e.line, e.col)),
+                    _ => Err(terr(e.line, e.col, format("type '{}' has no fields", type_name(base.ty)))),
                 }
             },
             ExprKind.Index(target, index) => {
                 let base = self.check_lvalue(target)?
                 match base.ty {
-                    Type.TMap(k, v) => { self.expect_type(index, k)?
+                    Type.TMap(k, v) => { self.expect_type(index, k, "map key")?
             Ok(LValue { ty: v, mutable: base.mutable }) },
-                    Type.TStr => Err(mkerr(e.line, e.col)),
+                    Type.TStr => Err(terr(e.line, e.col, "strings are immutable; `s[i]` cannot be assigned to")),
                     Type.TList(el) => {
                         let it = self.expect_value(index, Some(t_int()))?
-                        if !is_int(it) { return Err(mkerr(index.line, index.col)) }
+                        if !is_int(it) { return Err(terr(index.line, index.col, format("list index must be an integer, found '{}'", type_name(it)))) }
                         Ok(LValue { ty: el, mutable: base.mutable })
                     },
-                    _ => Err(mkerr(e.line, e.col)),
+                    _ => Err(terr(e.line, e.col, format("type '{}' is not a list and cannot be indexed with `[...]`", type_name(base.ty)))),
                 }
             },
-            _ => Err(mkerr(e.line, e.col)),
+            _ => Err(terr(e.line, e.col, "invalid assignment target")),
         }
     }
 
@@ -2605,7 +2965,7 @@ impl Checker {
                 if self.has_cur_ret && !block_returns(b) {
                     self.type_params = []
                     self.bounds_cur = []
-                    return Err(mkerr(fd.line, fd.col))
+                    return Err(terr(fd.line, fd.col, format("function '{}' may finish without returning a '{}'", fd.name, opt_type_name(sig.ret))))
                 }
             },
             None => {},
@@ -2625,6 +2985,8 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
         Type.TInt(w, s) => true,
         Type.TBool => true,
         Type.TStr => true,
+        Type.TChar => true,
+        Type.TFloat(w) => true,
         Type.TStruct(n, a) => contains_str(eq_names, n),
         Type.TEnum(n, a) => contains_str(eq_names, n),
         _ => false,
@@ -2635,17 +2997,18 @@ impl Checker {
     fun synthesize_derives(var self) -> Result<int32, CheckErr> {
         var targets: [Decl] = []
         for decl in self.decls {
+            self.cur_decl = decl.id
             let attrs = decl_attrs(decl)
             for attr in attrs {
                 if attr.name != "derive" { continue }
                 let is_se = match decl.kind { DeclKind.StructDecl(n, f, a, t, p) => true, DeclKind.EnumDecl(n, v, a, t, p) => true, _ => false }
-                if !is_se { return Err(mkerr(attr.line, attr.col)) }
+                if !is_se { return Err(terr(attr.line, attr.col, "'#derive' may only be applied to a struct or enum")) }
                 let has_tps = match decl.kind {
                     DeclKind.StructDecl(n, f, a, t, p) => len(t) > 0,
                     DeclKind.EnumDecl(n, v, a, t, p) => len(t) > 0,
                     _ => false,
                 }
-                if has_tps { return Err(mkerr(attr.line, attr.col)) }
+                if has_tps { return Err(terr(attr.line, attr.col, "deriving on generic types is not supported yet (v0.4.4 derives Eq for concrete structs/enums)")) }
                 self.validate_derive_attr(attr)?
                 var present = false
                 for d in targets { if d.line == decl.line && d.col == decl.col { present = true } }
@@ -2662,11 +3025,12 @@ impl Checker {
             }
         }
         for decl in targets {
+            self.cur_decl = decl.id
             let name = decl_kind_name(decl)
             // explicit `impl Eq for name`?
             for d in self.impl_decls {
                 match impl_eq_target_name(d) {
-                    Some(nm) => { if nm == name { return Err(mkerr(decl.line, decl.col)) } },
+                    Some(nm) => { if nm == name { return Err(terr(decl.line, decl.col, format("type '{}' both derives Eq and has an explicit 'impl Eq for {}'", name, name))) } },
                     None => {},
                 }
             }
@@ -2675,7 +3039,7 @@ impl Checker {
             var self_t = Type.TEnum(name, [])
             if self.is_struct(name) { self_t = Type.TStruct(name, []) }
             let fdecl = FunData { line: decl.line, col: decl.col, name: format("{}.eq", name), params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: Some("self"), is_pub: false }
-            let sig = FuncSig { name: format("{}.eq", name), params: [self_t, self_t], ret: Some(Type.TBool), type_params: [], bounds: [], decl: fdecl, has_decl: true }
+            let sig = FuncSig { name: format("{}.eq", name), params: [self_t, self_t], ret: Some(Type.TBool), type_params: [], bounds: [], decl: fdecl, has_decl: true, decl_id: decl.id }
             push(self.methods, MethodEntry { key: name, name: "eq", sig: sig })
             push(self.trait_impls, TraitImplPair { trait_name: "Eq", key: name })
             push(self.user_trait_impls, TraitImplPair { trait_name: "Eq", key: name })
@@ -2684,12 +3048,12 @@ impl Checker {
     }
 
     fun validate_derive_attr(self, attr: Attribute) -> Result<int32, CheckErr> {
-        match attr.outputs { Some(x) => { return Err(mkerr(attr.line, attr.col)) }, None => {} }
-        if len(attr.args) == 0 { return Err(mkerr(attr.line, attr.col)) }
+        match attr.outputs { Some(x) => { return Err(terr(attr.line, attr.col, "'#derive' takes trait names in parentheses, e.g. #derive(Eq)")) }, None => {} }
+        if len(attr.args) == 0 { return Err(terr(attr.line, attr.col, "'#derive' needs at least one trait, e.g. #derive(Eq)")) }
         for a in attr.args {
             match a.kind {
-                ExprKind.Name(id) => { if id != "Eq" { return Err(mkerr(a.line, a.col)) } },
-                _ => { return Err(mkerr(a.line, a.col)) },
+                ExprKind.Name(id) => { if id != "Eq" { return Err(terr(a.line, a.col, format("cannot derive '{}'; only 'Eq' is derivable in v0.4.4 (Ord is the planned next addition)", id))) } },
+                _ => { return Err(terr(a.line, a.col, "'#derive' arguments must be trait names")) },
             }
         }
         return Ok(0)
@@ -2698,12 +3062,18 @@ impl Checker {
     fun check_derivable_eq(self, decl: Decl, name: str, eq_names: [str]) -> Result<int32, CheckErr> {
         let si = self.struct_idx(name)
         if si >= 0 {
-            for f in self.structs[si].fields { if !is_eq_type(f.ty, eq_names) { return Err(mkerr(decl.line, decl.col)) } }
+            for f in self.structs[si].fields { if !is_eq_type(f.ty, eq_names) { return Err(terr(decl.line, decl.col, format("cannot derive Eq for struct '{}': field '{}' has type '{}', which is not Eq", name, f.name, type_name(f.ty)))) } }
             return Ok(0)
         }
         let ei = self.enum_idx(name)
         if ei >= 0 {
-            for v in self.enums[ei].variants { for pt in v.payload { if !is_eq_type(pt, eq_names) { return Err(mkerr(decl.line, decl.col)) } } }
+            for v in self.enums[ei].variants {
+                var i = 0
+                for pt in v.payload {
+                    if !is_eq_type(pt, eq_names) { return Err(terr(decl.line, decl.col, format("cannot derive Eq for enum '{}': payload #{} of variant '{}' has type '{}', which is not Eq", name, i, v.name, type_name(pt)))) }
+                    i = i + 1
+                }
+            }
         }
         return Ok(0)
     }
@@ -2724,7 +3094,8 @@ fun decl_attrs(d: Decl) -> [Attribute] {
 // const folding
 // =========================================================================
 
-pub enum CV { CVInt(int64), CVFloat, CVBool(bool), CVStr(str) }
+// A folded const value; float values and values derived from them are not tracked.
+pub enum CV { CVInt(int64), CVFloat, CVBool(bool), CVStr(str), CVUnknown }
 
 impl Checker {
     fun fold_consts(var self) -> Result<int32, CheckErr> {
@@ -2747,77 +3118,176 @@ impl Checker {
         if di >= 0 { return Ok(self.consts[di].ty) }
         let ci = self.const_decl_idx(name)
         let decl = self.const_decls[ci]
-        if contains_str(self.const_folding, name) { return Err(mkerr(decl.line, decl.col)) }
+        // errors folding it are in the const's file, wherever it is used from
+        let outer_decl = self.cur_decl
+        self.cur_decl = decl.id
+        if contains_str(self.const_folding, name) { return Err(terr(decl.line, decl.col, format("const '{}' is defined in terms of itself", name))) }
         push(self.const_folding, name)
         let declared = self.resolve0(decl.declared)?
         if is_type_param(declared) { self.const_folding = remove_str(self.const_folding, name)
-            return Err(mkerr(decl.line, decl.col)) }
+            return Err(terr(decl.line, decl.col, "a const type must be concrete")) }
         self.push_scope()
         let vt = self.expect_value(decl.value, Some(declared))?
         self.pop_scope()
         if !type_eq(vt, declared) { self.const_folding = remove_str(self.const_folding, name)
-            return Err(mkerr(decl.value.line, decl.value.col)) }
-        self.fold_const_expr(decl.value)?
+            return Err(terr(decl.value.line, decl.value.col, format("const '{}' is declared '{}' but its value has type '{}'", name, type_name(declared), type_name(vt)))) }
+        let value = self.fold_const_expr(decl.value)?
+        self.const_values[name] = value
         self.const_folding = remove_str(self.const_folding, name)
         push(self.consts, AliasCached { name: name, ty: declared })
+        self.cur_decl = outer_decl
         return Ok(declared)
     }
 
+    // The value of a const initializer, as types.py folds it: integers wrapped
+    // to each node's type. Float values aren't tracked (`CVFloat`), so a float
+    // cast to an integer folds to an unknown value (`CVUnknown`).
     fun fold_const_expr(var self, e: Expr) -> Result<CV, CheckErr> {
+        let t = self.node_type(e)
         return match e.kind {
-            ExprKind.IntLit(v, suf, isc) => Ok(CV.CVInt(v)),
-            ExprKind.FloatLit(suf) => Ok(CV.CVFloat),
+            ExprKind.IntLit(v, suf, isc, big) => {
+                if is_char(t) { return Ok(CV.CVInt(v)) }      // a char folds to its codepoint
+                Ok(CV.CVInt(wrap_int(v, t)))
+            },
+            ExprKind.FloatLit(lex, suf) => Ok(CV.CVFloat),
             ExprKind.BoolLit(b) => Ok(CV.CVBool(b)),
             ExprKind.StrLit(s) => Ok(CV.CVStr(s)),
             ExprKind.Name(n) => {
-                if self.const_decl_idx(n) < 0 { return Err(mkerr(e.line, e.col)) }
+                if self.const_decl_idx(n) < 0 { return Err(terr(e.line, e.col, format("'{}' is not a constant and cannot appear in a const initializer", n))) }
                 self.ensure_const(n)?
-                let di = self.const_done_idx(n)
-                return Ok(CV.CVInt(0))
+                return match get(self.const_values, n) { Some(v) => Ok(v), None => Ok(CV.CVUnknown) }
             },
-            ExprKind.Unary(op, x) => self.fold_const_expr(x),
-            ExprKind.Cast(x, ty) => self.fold_const_expr(x),
-            ExprKind.Binary(op, l, r) => self.fold_const_binary(e, op, l, r),
-            _ => Err(mkerr(e.line, e.col)),
+            ExprKind.Unary(op, x) => {
+                let v = self.fold_const_expr(x)?
+                if op == "!" { return Ok(CV.CVBool(!cv_bool(v))) }
+                if is_float(t) { return Ok(CV.CVFloat) }
+                return match v {
+                    CV.CVInt(i) => Ok(CV.CVInt(wrap_int(if_neg(op == "-", i), t))),
+                    _ => Ok(CV.CVUnknown),
+                }
+            },
+            ExprKind.Cast(x, ty) => {
+                let v = self.fold_const_expr(x)?
+                let src = self.node_type(x)
+                if is_float(t) { return Ok(CV.CVFloat) }
+                return match v {
+                    CV.CVInt(i) => {
+                        if is_char(t) { return Ok(CV.CVInt(i)) }
+                        Ok(CV.CVInt(wrap_int(i, t)))
+                    },
+                    _ => Ok(CV.CVUnknown),
+                }
+            },
+            ExprKind.Binary(op, l, r) => self.fold_const_binary(e, op, l, r, t),
+            _ => Err(terr(e.line, e.col, "const initializer must be a constant expression (literals, other consts, and arithmetic/bitwise/comparison/cast operations over them)")),
         }
     }
 
-    fun fold_const_binary(var self, e: Expr, op: str, l: Expr, r: Expr) -> Result<CV, CheckErr> {
-        if op == "&&" || op == "||" {
-            self.fold_const_expr(l)?
-            self.fold_const_expr(r)?
-            return Ok(CV.CVBool(true))
+    fun node_type(self, e: Expr) -> Type {
+        return match get(self.resolved, e.id) { Some(t) => t, None => t_int() }
+    }
+
+    fun fold_const_binary(var self, e: Expr, op: str, l: Expr, r: Expr, t: Type) -> Result<CV, CheckErr> {
+        if op == "&&" {
+            let lv = self.fold_const_expr(l)?
+            if !cv_bool(lv) { return Ok(CV.CVBool(false)) }
+            return Ok(CV.CVBool(cv_bool(self.fold_const_expr(r)?)))
+        }
+        if op == "||" {
+            let lv = self.fold_const_expr(l)?
+            if cv_bool(lv) { return Ok(CV.CVBool(true)) }
+            return Ok(CV.CVBool(cv_bool(self.fold_const_expr(r)?)))
         }
         let lv = self.fold_const_expr(l)?
         let rv = self.fold_const_expr(r)?
-        let li = match lv { CV.CVInt(x) => x, _ => 0 }
-        let ri = match rv { CV.CVInt(x) => x, _ => 0 }
-        var l_int = false
-        var r_int = false
-        match lv { CV.CVInt(x) => { l_int = true }, _ => {} }
-        match rv { CV.CVInt(y) => { r_int = true }, _ => {} }
-        if l_int && r_int {
-            if op == "+" { return Ok(CV.CVInt(li + ri)) }
-            if op == "-" { return Ok(CV.CVInt(li - ri)) }
-            if op == "*" { return Ok(CV.CVInt(li * ri)) }
-            if op == "/" || op == "%" {
-                if ri == 0 { return Err(mkerr(e.line, e.col)) }
-                if op == "/" { return Ok(CV.CVInt(li / ri)) }
-                return Ok(CV.CVInt(li % ri))
+        if op == "==" || op == "!=" {
+            return match cv_equal(lv, rv) {
+                Some(eq) => Ok(CV.CVBool(eq == (op == "=="))),
+                None => Ok(CV.CVUnknown),
             }
-            if op == "&" { return Ok(CV.CVInt(li & ri)) }
-            if op == "|" { return Ok(CV.CVInt(li | ri)) }
-            if op == "^" { return Ok(CV.CVInt(li ^ ri)) }
-            if op == "<<" { return Ok(CV.CVInt(li << ri)) }
-            if op == ">>" { return Ok(CV.CVInt(li >> ri)) }
-            if op == "<" { return Ok(CV.CVBool(li < ri)) }
-            if op == "<=" { return Ok(CV.CVBool(li <= ri)) }
-            if op == ">" { return Ok(CV.CVBool(li > ri)) }
-            if op == ">=" { return Ok(CV.CVBool(li >= ri)) }
-            if op == "==" { return Ok(CV.CVBool(li == ri)) }
-            if op == "!=" { return Ok(CV.CVBool(li != ri)) }
         }
-        return Ok(lv)
+        if is_float(t) { return Ok(CV.CVFloat) }
+        if op == "+" {
+            // strings concatenate (the code generator emits a str const's value)
+            match (lv, rv) {
+                (CV.CVStr(x), CV.CVStr(y)) => { return Ok(CV.CVStr(x + y)) },
+                _ => {},
+            }
+        }
+        let li = match lv { CV.CVInt(x) => x, _ => { return Ok(CV.CVUnknown) } }
+        let ri = match rv { CV.CVInt(x) => x, _ => { return Ok(CV.CVUnknown) } }
+        if op == "+" { return Ok(CV.CVInt(wrap_int(li + ri, t))) }
+        if op == "-" { return Ok(CV.CVInt(wrap_int(li - ri, t))) }
+        if op == "*" { return Ok(CV.CVInt(wrap_int(li * ri, t))) }
+        if op == "/" || op == "%" {
+            if ri == 0 { return Err(terr(e.line, e.col, "const division by zero")) }
+            if is_u64(t) {
+                let q = ((li as uint64) / (ri as uint64)) as int64
+                if op == "/" { return Ok(CV.CVInt(q)) }
+                return Ok(CV.CVInt(li - q * ri))
+            }
+            let q = li / ri                                  // truncates toward zero, like _const_idiv
+            if op == "/" { return Ok(CV.CVInt(wrap_int(q, t))) }
+            return Ok(CV.CVInt(wrap_int(li - q * ri, t)))
+        }
+        if op == "&" { return Ok(CV.CVInt(wrap_int(li & ri, t))) }
+        if op == "|" { return Ok(CV.CVInt(wrap_int(li | ri, t))) }
+        if op == "^" { return Ok(CV.CVInt(wrap_int(li ^ ri, t))) }
+        let w = int_width(t) as int64
+        if op == "<<" { return Ok(CV.CVInt(wrap_int(li << (ri & (w - 1)), t))) }
+        if op == ">>" {
+            let lw = wrap_int(li, self.node_type(l))
+            if is_u64(t) { return Ok(CV.CVInt(((lw as uint64) >> ((ri & (w - 1)) as uint64)) as int64)) }
+            return Ok(CV.CVInt(wrap_int(lw >> (ri & (w - 1)), t)))
+        }
+        // comparisons, unsigned for uint64 (stored as int64)
+        let lt_ = int_less(li, ri, self.node_type(l))
+        let gt_ = int_less(ri, li, self.node_type(l))
+        if op == "<" { return Ok(CV.CVBool(lt_)) }
+        if op == "<=" { return Ok(CV.CVBool(!gt_)) }
+        if op == ">" { return Ok(CV.CVBool(gt_)) }
+        if op == ">=" { return Ok(CV.CVBool(!lt_)) }
+        return Ok(CV.CVUnknown)
+    }
+}
+
+// `v` wrapped into integer type `t` (two's complement); other types unchanged.
+fun wrap_int(v: int64, t: Type) -> int64 {
+    return match t {
+        Type.TInt(w, signed) => {
+            if w >= 64 { return v }
+            let m = v & (((1 as int64) << (w as int64)) - 1)
+            if signed && ((m >> ((w - 1) as int64)) & 1) == 1 { return m - ((1 as int64) << (w as int64)) }
+            m
+        },
+        _ => v,
+    }
+}
+
+fun is_u64(t: Type) -> bool {
+    return match t { Type.TInt(w, signed) => w == 64 && !signed, _ => false }
+}
+
+fun int_less(a: int64, b: int64, t: Type) -> bool {
+    if is_u64(t) { return (a as uint64) < (b as uint64) }
+    return a < b
+}
+
+fun if_neg(neg: bool, v: int64) -> int64 {
+    if neg { return 0 - v }
+    return ~v
+}
+
+fun cv_bool(v: CV) -> bool {
+    return match v { CV.CVBool(b) => b, _ => false }
+}
+
+fun cv_equal(a: CV, b: CV) -> Option<bool> {
+    return match (a, b) {
+        (CV.CVInt(x), CV.CVInt(y)) => Some(x == y),
+        (CV.CVBool(x), CV.CVBool(y)) => Some(x == y),
+        (CV.CVStr(x), CV.CVStr(y)) => Some(x == y),
+        _ => None,
     }
 }
 
@@ -2836,22 +3306,25 @@ impl Checker {
         var main_lines: [int32] = []
         var main_cols: [int32] = []
         var main_names: [str] = []
+        var main_ids: [int32] = []
         for decl in self.decls {
+            self.cur_decl = decl.id
             let attrs = decl_attrs(decl)
             let is_fun = match decl.kind { DeclKind.FunDecl(fd) => true, _ => false }
             for attr in attrs {
                 if attr.name == "derive" { continue }
-                if attr.name != "main" && attr.name != "test" { return Err(mkerr(attr.line, attr.col)) }
-                if !is_fun { return Err(mkerr(attr.line, attr.col)) }
+                if attr.name != "main" && attr.name != "test" { return Err(terr(attr.line, attr.col, format("unknown attribute '#{}'", attr.name))) }
+                if !is_fun { return Err(terr(attr.line, attr.col, format("attribute '#{}' may only be applied to functions", attr.name))) }
                 match decl.kind {
                     DeclKind.FunDecl(fd) => {
-                        if len(fd.type_params) > 0 { return Err(mkerr(attr.line, attr.col)) }
+                        if len(fd.type_params) > 0 { return Err(terr(attr.line, attr.col, format("attribute '#{}' cannot be applied to a generic function (it has no single concrete instantiation)", attr.name))) }
                         if attr.name == "main" {
-                            match attr.outputs { Some(x) => { return Err(mkerr(attr.line, attr.col)) }, None => {} }
-                            if len(attr.args) > 0 { return Err(mkerr(attr.line, attr.col)) }
+                            match attr.outputs { Some(x) => { return Err(terr(attr.line, attr.col, "'#main' takes no arguments")) }, None => {} }
+                            if len(attr.args) > 0 { return Err(terr(attr.line, attr.col, "'#main' takes no arguments")) }
                             push(main_lines, fd.line)
                             push(main_cols, fd.col)
                             push(main_names, fd.name)
+                            push(main_ids, decl.id)
                         } else {
                             self.check_test_attr(decl, fd, attr)?
                         }
@@ -2862,17 +3335,23 @@ impl Checker {
         }
         let named_main = self.func_idx("main")
         if len(main_lines) > 0 && named_main >= 0 && !contains_str(main_names, "main") {
-            return Err(mkerr(self.functions[named_main].decl.line, self.functions[named_main].decl.col))
+            self.cur_decl = self.functions[named_main].decl_id
+            return Err(terr(self.functions[named_main].decl.line, self.functions[named_main].decl.col, "both a '#main' function and a function named 'main' are present"))
         }
-        if len(main_lines) > 1 { return Err(mkerr(main_lines[1], main_cols[1])) }
+        if len(main_lines) > 1 {
+            self.cur_decl = main_ids[1]
+            return Err(terr(main_lines[1], main_cols[1], "more than one '#main' entry point"))
+        }
         // entry param check
         if len(main_lines) > 0 {
             // entry is main_decls[0]; need its params - find decl by name
             let en = main_names[0]
             let ei = self.func_idx(en)
-            if ei >= 0 { if len(self.functions[ei].decl.params) > 0 { return Err(mkerr(self.functions[ei].decl.line, self.functions[ei].decl.col)) } }
+            if ei >= 0 { if len(self.functions[ei].decl.params) > 0 { self.cur_decl = self.functions[ei].decl_id
+            return Err(terr(self.functions[ei].decl.line, self.functions[ei].decl.col, "entry point must take no parameters in v0.0")) } }
         } else {
-            if named_main >= 0 { if len(self.functions[named_main].decl.params) > 0 { return Err(mkerr(self.functions[named_main].decl.line, self.functions[named_main].decl.col)) } }
+            if named_main >= 0 { if len(self.functions[named_main].decl.params) > 0 { self.cur_decl = self.functions[named_main].decl_id
+            return Err(terr(self.functions[named_main].decl.line, self.functions[named_main].decl.col, "entry point must take no parameters in v0.0")) } }
         }
         return Ok(0)
     }
@@ -2880,15 +3359,15 @@ impl Checker {
     fun check_test_attr(var self, decl: Decl, fd: FunData, attr: Attribute) -> Result<int32, CheckErr> {
         let idx = self.func_idx(fd.name)
         let sig = self.functions[idx]
-        let outs = match attr.outputs { Some(x) => x, None => { return Err(mkerr(attr.line, attr.col)) } }
-        match sig.ret { Some(x) => {}, None => { return Err(mkerr(attr.line, attr.col)) } }
-        if len(attr.args) != len(sig.params) { return Err(mkerr(attr.line, attr.col)) }
+        let outs = match attr.outputs { Some(x) => x, None => { return Err(terr(attr.line, attr.col, "'#test' requires an expected result, e.g. #test(args)[expected]")) } }
+        match sig.ret { Some(x) => {}, None => { return Err(terr(attr.line, attr.col, "'#test' requires the function to return a value")) } }
+        if len(attr.args) != len(sig.params) { return Err(terr(attr.line, attr.col, format("'#test' expects {} argument(s), got {}", len(sig.params), len(attr.args)))) }
         self.push_scope()
         var i = 0
         while i < len(attr.args) { self.expect_value(attr.args[i], Some(sig.params[i]))?
             i = i + 1 }
         if len(outs) != 1 { self.pop_scope()
-            return Err(mkerr(attr.line, attr.col)) }
+            return Err(terr(attr.line, attr.col, "'#test' expects exactly one expected value in [...]")) }
         let rt = match sig.ret { Some(x) => x, None => t_int() }
         self.expect_value(outs[0], Some(rt))?
         self.pop_scope()
@@ -2897,6 +3376,13 @@ impl Checker {
 
     // -- driver -----------------------------------------------------------
     fun run_all(var self) -> Result<int32, CheckErr> {
+        return match self.run_phases() {
+            Ok(x) => Ok(x),
+            Err(e) => Err(CheckErr { line: e.line, col: e.col, msg: e.msg, decl: self.cur_decl }),
+        }
+    }
+
+    fun run_phases(var self) -> Result<int32, CheckErr> {
         self.collect_globals()?
         self.resolve_signatures()?
         self.resolve_traits()?
@@ -2906,11 +3392,15 @@ impl Checker {
         self.fold_consts()?
         self.check_attributes_and_entry()?
         for decl in self.decls {
+            self.cur_decl = decl.id
             match decl.kind { DeclKind.FunDecl(fd) => { self.check_function(fd)? }, _ => {} }
         }
         var i = 0
-        while i < len(self.method_decls) { self.check_function(self.method_decls[i])?
-            i = i + 1 }
+        while i < len(self.method_decls) {
+            self.cur_decl = self.method_decl_ids[i]
+            self.check_function(self.method_decls[i])?
+            i = i + 1
+        }
         return Ok(0)
     }
 }
@@ -2919,21 +3409,32 @@ fun prelude_src() -> str {
     return "enum Option<T> { Some(T), None }\nenum Result<T, E> { Ok(T), Err(E) }\nfun get<K, V>(m: [K: V], k: K) -> Option<V> {\n    if contains(m, k) {\n        return Some(m[k])\n    }\n    return None\n}\n"
 }
 
+// The prelude's declarations, with node ids from `first_id`.
+fun prelude(first_id: int32) -> Parsed {
+    return match parse_source(prelude_src(), first_id) {
+        Ok(p) => p,
+        Err(d) => { panic("the prelude does not parse") },
+    }
+}
+
 pub fun check_program(user: Program) -> Result<int32, CheckErr> {
-    let pre = parse(lex(prelude_src()))
+    let pre = prelude(0)
     var decls: [Decl] = []
-    for d in pre.decls { push(decls, d) }
+    for d in pre.program.decls { push(decls, d) }
     for d in user.decls { push(decls, d) }
     var c = new_checker(decls)
     return c.run_all()
 }
 
-// Self-hosting v0.8: type-check `src` (prelude + user parsed as one stream so
-// node ids are globally unique) and return the populated checker, whose
-// `decls`/`resolved`/`functions` tables drive the tree-walking interpreter.
-pub fun build_checker_src(src: str) -> Result<Checker, CheckErr> {
-    let prog = parse(lex(prelude_src() + src))
-    var c = new_checker(prog.decls)
+// Type-check a linked program (selfhost/loader.my: its declarations, whose node
+// ids are below `next_id`), with the prelude parsed after it so every id stays
+// unique, and return the populated checker (MYLA-30).
+pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, CheckErr> {
+    let pre = prelude(next_id)
+    var all: [Decl] = []
+    for d in pre.program.decls { push(all, d) }
+    for d in decls { push(all, d) }
+    var c = new_checker(all)
     let r = c.run_all()
     match r { Ok(x) => {}, Err(e) => { return Err(e) } }
     return Ok(c)
@@ -2956,12 +3457,12 @@ fun count_format_holes(fmt: str, line: int32, col: int32) -> Result<int32, Check
             if i + 1 < n && cs[i + 1] == '}' { holes = holes + 1
             i = i + 2
             continue }
-            return Err(mkerr(line, col))
+            return Err(terr(line, col, "format(): a single '{' must be a '{}' placeholder or an escaped '{{'"))
         }
         if c == '}' {
             if i + 1 < n && cs[i + 1] == '}' { i = i + 2
             continue }
-            return Err(mkerr(line, col))
+            return Err(terr(line, col, "format(): a single '}' must close a '{}' placeholder or be an escaped '}}'"))
         }
         i = i + 1
     }
@@ -2989,7 +3490,7 @@ impl Checker {
                     Some(en) => { return Ok(Some(self.infer_variant_ctor(e, en, field, args, expected)?)) },
                     None => {},
                 }
-                return self.infer_method_call(e, target, field, args, expected)
+                return self.infer_method_call(e, callee, target, field, args, expected)
             },
             _ => {},
         }
@@ -2997,75 +3498,91 @@ impl Checker {
         if name == "" { return self.infer_indirect_call(e, callee, args) }
 
         if name == "print" {
-            if len(args) != 1 { return Err(mkerr(e.line, e.col)) }
+            if len(args) != 1 { return Err(terr(e.line, e.col, "print() takes exactly one argument")) }
             let at = self.expect_value(args[0], None)?
-            if !is_printable(at) { return Err(mkerr(e.line, e.col)) }
+            if !is_printable(at) { return Err(terr(e.line, e.col, format("print() cannot print a value of type '{}'", type_name(at)))) }
             return Ok(None)
         }
         if name == "__write" {
-            if len(args) != 2 { return Err(mkerr(e.line, e.col)) }
+            if len(args) != 2 { return Err(terr(e.line, e.col, "__write() takes (fd: int32, s: str)")) }
             let fd_t = self.expect_value(args[0], Some(t_int()))?
-            if !is_int(fd_t) { return Err(mkerr(e.line, e.col)) }
+            if !is_int(fd_t) { return Err(terr(e.line, e.col, format("__write() fd must be an integer, found '{}'", type_name(fd_t)))) }
             let s_t = self.expect_value(args[1], Some(Type.TStr))?
-            if !is_str(s_t) { return Err(mkerr(e.line, e.col)) }
+            if !is_str(s_t) { return Err(terr(e.line, e.col, format("__write() expects a string, found '{}'", type_name(s_t)))) }
             return Ok(None)
         }
         if name == "__exit" {
-            if len(args) != 1 { return Err(mkerr(e.line, e.col)) }
+            if len(args) != 1 { return Err(terr(e.line, e.col, "__exit() takes exactly one argument")) }
             let c_t = self.expect_value(args[0], Some(t_int()))?
-            if !is_int(c_t) { return Err(mkerr(e.line, e.col)) }
+            if !is_int(c_t) { return Err(terr(e.line, e.col, format("__exit() code must be an integer, found '{}'", type_name(c_t)))) }
             return Ok(None)
         }
         if name == "__args" {
-            if len(args) > 0 { return Err(mkerr(e.line, e.col)) }
+            if len(args) > 0 { return Err(terr(e.line, e.col, "__args() takes no arguments")) }
             return Ok(Some(Type.TList(Type.TStr)))
         }
         if name == "__read_file" {
-            if len(args) != 1 { return Err(mkerr(e.line, e.col)) }
+            if len(args) != 1 { return Err(terr(e.line, e.col, "__read_file() takes exactly one argument")) }
             let p_t = self.expect_value(args[0], Some(Type.TStr))?
-            if !is_str(p_t) { return Err(mkerr(e.line, e.col)) }
+            if !is_str(p_t) { return Err(terr(e.line, e.col, format("__read_file() expects a string path, found '{}'", type_name(p_t)))) }
             return Ok(Some(Type.TStr))
         }
+        if name == "__read" {
+            if len(args) != 2 { return Err(terr(e.line, e.col, "__read() takes (fd: int32, n: int32)")) }
+            let fd_t = self.expect_value(args[0], Some(t_int()))?
+            if !is_int(fd_t) { return Err(terr(e.line, e.col, format("__read() fd must be an integer, found '{}'", type_name(fd_t)))) }
+            let n_t = self.expect_value(args[1], Some(t_int()))?
+            if !is_int(n_t) { return Err(terr(e.line, e.col, format("__read() n must be an integer, found '{}'", type_name(n_t)))) }
+            return Ok(Some(Type.TStr))
+        }
+        if name == "__poll" {
+            if len(args) != 2 { return Err(terr(e.line, e.col, "__poll() takes (fd: int32, timeout_ms: int32)")) }
+            let fd_t = self.expect_value(args[0], Some(t_int()))?
+            if !is_int(fd_t) { return Err(terr(e.line, e.col, format("__poll() fd must be an integer, found '{}'", type_name(fd_t)))) }
+            let t_t = self.expect_value(args[1], Some(t_int()))?
+            if !is_int(t_t) { return Err(terr(e.line, e.col, format("__poll() timeout must be an integer, found '{}'", type_name(t_t)))) }
+            return Ok(Some(t_int()))
+        }
         if name == "__io_errno" {
-            if len(args) > 0 { return Err(mkerr(e.line, e.col)) }
+            if len(args) > 0 { return Err(terr(e.line, e.col, "__io_errno() takes no arguments")) }
             return Ok(Some(t_int()))
         }
         if name == "__write_file" {
-            if len(args) != 2 { return Err(mkerr(e.line, e.col)) }
+            if len(args) != 2 { return Err(terr(e.line, e.col, "__write_file() takes (path: str, contents: str)")) }
             let p_t = self.expect_value(args[0], Some(Type.TStr))?
-            if !is_str(p_t) { return Err(mkerr(e.line, e.col)) }
+            if !is_str(p_t) { return Err(terr(e.line, e.col, format("__write_file() path must be a string, found '{}'", type_name(p_t)))) }
             let c_t = self.expect_value(args[1], Some(Type.TStr))?
-            if !is_str(c_t) { return Err(mkerr(e.line, e.col)) }
+            if !is_str(c_t) { return Err(terr(e.line, e.col, format("__write_file() contents must be a string, found '{}'", type_name(c_t)))) }
             return Ok(None)
         }
         if name == "__run" {
-            if len(args) != 2 { return Err(mkerr(e.line, e.col)) }
+            if len(args) != 2 { return Err(terr(e.line, e.col, "__run() takes (program: str, argv: [str])")) }
             let p_t = self.expect_value(args[0], Some(Type.TStr))?
-            if !is_str(p_t) { return Err(mkerr(e.line, e.col)) }
+            if !is_str(p_t) { return Err(terr(e.line, e.col, format("__run() program must be a string, found '{}'", type_name(p_t)))) }
             let a_t = self.expect_value(args[1], Some(Type.TList(Type.TStr)))?
             let a_ok = match a_t { Type.TList(el) => is_str(el), _ => false }
-            if !a_ok { return Err(mkerr(e.line, e.col)) }
+            if !a_ok { return Err(terr(e.line, e.col, format("__run() argv must be a [str], found '{}'", type_name(a_t)))) }
             return Ok(Some(Type.TList(t_byte())))
         }
         if name == "__run_stderr" {
-            if len(args) > 0 { return Err(mkerr(e.line, e.col)) }
+            if len(args) > 0 { return Err(terr(e.line, e.col, "__run_stderr() takes no arguments")) }
             return Ok(Some(Type.TList(t_byte())))
         }
         if name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" {
-            if len(args) > 0 { return Err(mkerr(e.line, e.col)) }
+            if len(args) > 0 { return Err(terr(e.line, e.col, format("{}() takes no arguments", name))) }
             return Ok(Some(t_int()))
         }
         if name == "len" {
-            if len(args) != 1 { return Err(mkerr(e.line, e.col)) }
+            if len(args) != 1 { return Err(terr(e.line, e.col, "len() takes exactly one argument")) }
             let at = self.expect_value(args[0], None)?
             let ok = match at { Type.TList(x) => true, Type.TMap(k, v) => true, Type.TStr => true, Type.TSB => true, _ => false }
-            if !ok { return Err(mkerr(e.line, e.col)) }
+            if !ok { return Err(terr(e.line, e.col, format("len() requires a list, map, string, or StringBuilder, found '{}'", type_name(at)))) }
             return Ok(Some(t_int()))
         }
         if name == "chars" {
-            if len(args) != 1 { return Err(mkerr(e.line, e.col)) }
+            if len(args) != 1 { return Err(terr(e.line, e.col, "chars() takes exactly one argument")) }
             let at = self.expect_value(args[0], None)?
-            if !is_str(at) { return Err(mkerr(e.line, e.col)) }
+            if !is_str(at) { return Err(terr(e.line, e.col, format("chars() requires a string, found '{}'", type_name(at)))) }
             return Ok(Some(Type.TList(Type.TChar)))
         }
         if name == "push" || name == "pop" { return self.infer_list_mutation(e, name, args) }
@@ -3083,15 +3600,15 @@ impl Checker {
                 },
                 None => {},
             }
-            return Err(mkerr(e.line, e.col))
+            return Err(terr(e.line, e.col, format("unknown function '{}'", name)))
         }
         let sig = self.functions[fi]
         if len(sig.type_params) > 0 { return self.infer_generic_call(e, name, sig, args) }
-        if len(args) != len(sig.params) { return Err(mkerr(e.line, e.col)) }
+        if len(args) != len(sig.params) { return Err(terr(e.line, e.col, format("function '{}' expects {} argument(s), got {}", name, len(sig.params), len(args)))) }
         var i = 0
         while i < len(args) {
             let at = self.expect_value(args[i], Some(sig.params[i]))?
-            if !type_eq(at, sig.params[i]) { return Err(mkerr(args[i].line, args[i].col)) }
+            if !type_eq(at, sig.params[i]) { return Err(terr(args[i].line, args[i].col, format("argument type mismatch in call to '{}': expected '{}', found '{}'", name, type_name(sig.params[i]), type_name(at)))) }
             i = i + 1
         }
         return Ok(sig.ret)
@@ -3100,12 +3617,12 @@ impl Checker {
     fun infer_list_mutation(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         var nargs = 1
         if name == "push" { nargs = 2 }
-        if len(args) != nargs { return Err(mkerr(e.line, e.col)) }
+        if len(args) != nargs { return Err(terr(e.line, e.col, format("{}() takes {} argument(s)", name, nargs))) }
         let lv = self.check_lvalue(args[0])?
-        let elem = match lv.ty { Type.TList(el) => el, _ => { return Err(mkerr(args[0].line, args[0].col)) } }
-        if !lv.mutable { return Err(mkerr(args[0].line, args[0].col)) }
+        let elem = match lv.ty { Type.TList(el) => el, _ => { return Err(terr(args[0].line, args[0].col, format("{}() requires a list, found '{}'", name, type_name(lv.ty)))) } }
+        if !lv.mutable { return Err(terr(args[0].line, args[0].col, format("{}() needs a mutable list (declare it with 'var')", name))) }
         if name == "push" {
-            self.expect_type(args[1], elem)?
+            self.expect_type(args[1], elem, "push value")?
             return Ok(None)
         }
         return Ok(Some(elem))
@@ -3114,7 +3631,7 @@ impl Checker {
     fun infer_map_builtin(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         var nargs = 2
         if name == "keys" { nargs = 1 }
-        if len(args) != nargs { return Err(mkerr(e.line, e.col)) }
+        if len(args) != nargs { return Err(terr(e.line, e.col, format("{}() takes {} argument(s)", name, nargs))) }
         var map_t = Type.TStr
         var mutable = true
         if name == "remove" {
@@ -3125,27 +3642,27 @@ impl Checker {
             map_t = self.expect_value(args[0], None)?
         }
         let kv: Option<Type> = match map_t { Type.TMap(k, v) => Some(Type.TTuple([k, v])), _ => None }
-        match kv { Some(x) => {}, None => { return Err(mkerr(args[0].line, args[0].col)) } }
+        match kv { Some(x) => {}, None => { return Err(terr(args[0].line, args[0].col, format("{}() requires a map, found '{}'", name, type_name(map_t)))) } }
         let mk = match map_t { Type.TMap(k, v) => k, _ => Type.TStr }
         let mv = match map_t { Type.TMap(k, v) => v, _ => Type.TStr }
         if name == "keys" { return Ok(Some(Type.TList(mk))) }
-        self.expect_type(args[1], mk)?
+        self.expect_type(args[1], mk, "map key")?
         if name == "contains" { return Ok(Some(Type.TBool)) }
-        if !mutable { return Err(mkerr(args[0].line, args[0].col)) }
+        if !mutable { return Err(terr(args[0].line, args[0].col, "remove() needs a mutable map (declare it with 'var')")) }
         return Ok(None)
     }
 
     fun infer_format(var self, e: Expr, args: [Expr]) -> Result<Type, CheckErr> {
-        if len(args) == 0 { return Err(mkerr(e.line, e.col)) }
+        if len(args) == 0 { return Err(terr(e.line, e.col, "format() needs a string literal format and its arguments")) }
         let fmt = args[0]
-        let fval = match fmt.kind { ExprKind.StrLit(s) => s, _ => { return Err(mkerr(fmt.line, fmt.col)) } }
+        let fval = match fmt.kind { ExprKind.StrLit(s) => s, _ => { return Err(terr(fmt.line, fmt.col, "format()'s first argument must be a string literal")) } }
         let holes = count_format_holes(fval, fmt.line, fmt.col)?
         let rest = len(args) - 1
-        if holes != rest { return Err(mkerr(e.line, e.col)) }
+        if holes != rest { return Err(terr(e.line, e.col, format("format() has {} placeholder(s) but {} argument(s)", holes, rest))) }
         var i = 1
         while i < len(args) {
             let at = self.expect_value(args[i], None)?
-            if !is_printable(at) { return Err(mkerr(args[i].line, args[i].col)) }
+            if !is_printable(at) { return Err(terr(args[i].line, args[i].col, format("format() cannot render a value of type '{}'", type_name(at)))) }
             i = i + 1
         }
         return Ok(Type.TStr)
@@ -3153,76 +3670,86 @@ impl Checker {
 
     fun infer_string_builder(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         if name == "StringBuilder" {
-            if len(args) > 0 { return Err(mkerr(e.line, e.col)) }
+            if len(args) > 0 { return Err(terr(e.line, e.col, "StringBuilder() takes no arguments")) }
             return Ok(Some(Type.TSB))
         }
         if name == "build" {
-            if len(args) != 1 { return Err(mkerr(e.line, e.col)) }
+            if len(args) != 1 { return Err(terr(e.line, e.col, "build() takes exactly one argument")) }
             let at = self.expect_value(args[0], None)?
-            if !is_sb(at) { return Err(mkerr(args[0].line, args[0].col)) }
+            if !is_sb(at) { return Err(terr(args[0].line, args[0].col, format("build() requires a StringBuilder, found '{}'", type_name(at)))) }
             return Ok(Some(Type.TStr))
         }
-        if len(args) != 2 { return Err(mkerr(e.line, e.col)) }
+        // append(sb, s, start, end) appends the bytes s[start..end] (MYLA-85)
+        if name == "append" && len(args) != 2 && len(args) != 4 { return Err(terr(e.line, e.col, "append() takes 2 or 4 argument(s)")) }
+        if name == "append_byte" && len(args) != 2 { return Err(terr(e.line, e.col, format("{}() takes 2 argument(s)", name))) }
         let lv = self.check_lvalue(args[0])?
-        if !is_sb(lv.ty) { return Err(mkerr(args[0].line, args[0].col)) }
-        if !lv.mutable { return Err(mkerr(args[0].line, args[0].col)) }
-        if name == "append" { self.expect_type(args[1], Type.TStr)? } else { self.expect_type(args[1], t_byte())? }
+        if !is_sb(lv.ty) { return Err(terr(args[0].line, args[0].col, format("{}() requires a StringBuilder, found '{}'", name, type_name(lv.ty)))) }
+        if !lv.mutable { return Err(terr(args[0].line, args[0].col, format("{}() needs a mutable StringBuilder (declare it with 'var')", name))) }
+        if name == "append" {
+            self.expect_type(args[1], Type.TStr, "append value")?
+            if len(args) == 4 {
+                self.expect_type(args[2], t_int(), "append start")?
+                self.expect_type(args[3], t_int(), "append end")?
+            }
+        } else {
+            self.expect_type(args[1], t_byte(), "append_byte value")?
+        }
         return Ok(None)
     }
 
     fun infer_intrinsic(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         if name == "assert" {
-            if !(len(args) == 1 || len(args) == 2) { return Err(mkerr(e.line, e.col)) }
-            self.expect_type(args[0], Type.TBool)?
-            if len(args) == 2 { self.expect_type(args[1], Type.TStr)? }
+            if !(len(args) == 1 || len(args) == 2) { return Err(terr(e.line, e.col, "assert() takes a condition and an optional message")) }
+            self.expect_type(args[0], Type.TBool, "assert condition")?
+            if len(args) == 2 { self.expect_type(args[1], Type.TStr, "assert message")? }
             return Ok(None)
         }
         if name == "panic" {
-            if len(args) != 1 { return Err(mkerr(e.line, e.col)) }
-            self.expect_type(args[0], Type.TStr)?
+            if len(args) != 1 { return Err(terr(e.line, e.col, "panic() takes exactly one message")) }
+            self.expect_type(args[0], Type.TStr, "panic message")?
             return Ok(None)
         }
         // unreachable
-        if len(args) > 0 { return Err(mkerr(e.line, e.col)) }
+        if len(args) > 0 { return Err(terr(e.line, e.col, "unreachable() takes no arguments")) }
         return Ok(None)
     }
 
     fun infer_indirect_call(var self, e: Expr, callee: Expr, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         let ft = self.expect_value(callee, None)?
-        let ps = match ft { Type.TFunc(p, r) => p, _ => { return Err(mkerr(e.line, e.col)) } }
+        let ps = match ft { Type.TFunc(p, r) => p, _ => { return Err(terr(e.line, e.col, format("cannot call a value of type '{}'", type_name(ft)))) } }
         let rr: Option<Type> = match ft { Type.TFunc(p, r) => r, _ => None }
-        if len(args) != len(ps) { return Err(mkerr(e.line, e.col)) }
+        if len(args) != len(ps) { return Err(terr(e.line, e.col, format("this function value expects {} argument(s), got {}", len(ps), len(args)))) }
         var i = 0
         while i < len(args) {
             let at = self.expect_value(args[i], Some(ps[i]))?
-            if !type_eq(at, ps[i]) { return Err(mkerr(args[i].line, args[i].col)) }
+            if !type_eq(at, ps[i]) { return Err(terr(args[i].line, args[i].col, format("argument type mismatch: expected '{}', found '{}'", type_name(ps[i]), type_name(at)))) }
             i = i + 1
         }
         return Ok(rr)
     }
 
     fun infer_variant_ctor(var self, e: Expr, enum_name: str, variant: str, args: [Expr], expected: Option<Type>) -> Result<Type, CheckErr> {
-        if !self.enum_has_variant(enum_name, variant) { return Err(mkerr(e.line, e.col)) }
+        if !self.enum_has_variant(enum_name, variant) { return Err(terr(e.line, e.col, format("enum '{}' has no variant '{}'", enum_name, variant))) }
         let payload = match self.enum_variant_payload(enum_name, [], variant) { Some(p) => p, None => empty_types() }
-        if len(args) != len(payload) { return Err(mkerr(e.line, e.col)) }
+        if len(args) != len(payload) { return Err(terr(e.line, e.col, format("variant '{}.{}' expects {} argument(s), got {}", enum_name, variant, len(payload), len(args)))) }
         let ei = self.enum_idx(enum_name)
         let params = self.enums[ei].type_params
         if len(params) == 0 {
             var i = 0
             while i < len(args) {
                 let at = self.expect_value(args[i], Some(payload[i]))?
-                if !type_eq(at, payload[i]) { return Err(mkerr(args[i].line, args[i].col)) }
+                if !type_eq(at, payload[i]) { return Err(terr(args[i].line, args[i].col, format("variant '{}.{}': expected '{}', found '{}'", enum_name, variant, type_name(payload[i]), type_name(at)))) }
                 i = i + 1
             }
             return Ok(Type.TEnum(enum_name, []))
         }
         var exp_args: Option<[Type]> = enum_args_hint(expected, enum_name)
-        let args_t = self.infer_type_args(params, payload, args, exp_args, e)?
+        let args_t = self.infer_type_args(params, payload, args, exp_args, e, format("variant '{}.{}'", enum_name, variant))?
         return Ok(Type.TEnum(enum_name, args_t))
     }
 
     fun infer_generic_call(var self, e: Expr, name: str, sig: FuncSig, args: [Expr]) -> Result<Option<Type>, CheckErr> {
-        if len(args) != len(sig.params) { return Err(mkerr(e.line, e.col)) }
+        if len(args) != len(sig.params) { return Err(terr(e.line, e.col, format("function '{}' expects {} argument(s), got {}", name, len(sig.params), len(args)))) }
         var subst: [Subst] = []
         var arg_types: [Type] = []
         var i = 0
@@ -3236,13 +3763,15 @@ impl Checker {
             subst = r.subst
             i = i + 1
         }
-        for tp in sig.type_params { if !subst_has(subst, tp) { return Err(mkerr(e.line, e.col)) } }
+        var missing: [str] = []
+        for tp in sig.type_params { if !subst_has(subst, tp) { push(missing, tp) } }
+        if len(missing) > 0 { return Err(terr(e.line, e.col, format("cannot infer type parameter(s) {} for '{}' from the arguments; add a type annotation to guide inference", join_strs(missing, ", "), name))) }
         var j = 0
         while j < len(args) {
             let want = subst_type(sig.params[j], subst)
             if !type_eq(arg_types[j], want) {
                 if is_int(want) && is_flexible_int_lit(args[j]) { self.infer_int_lit(args[j], Some(want))? }
-                else { return Err(mkerr(args[j].line, args[j].col)) }
+                else { return Err(terr(args[j].line, args[j].col, format("argument type mismatch in call to '{}': expected '{}', found '{}'", name, type_name(want), type_name(arg_types[j])))) }
             }
             j = j + 1
         }
@@ -3257,7 +3786,7 @@ impl Checker {
                     for tr in b.traits {
                         var ok = false
                         match concrete { Type.TParam(pn) => { ok = self.bound_has(pn, tr) }, _ => { ok = self.type_implements(concrete, tr) } }
-                        if !ok { return Err(mkerr(e.line, e.col)) }
+                        if !ok { return Err(terr(e.line, e.col, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, tr, sig.decl.name))) }
                     }
                 },
                 None => {},
@@ -3266,7 +3795,9 @@ impl Checker {
         return Ok(0)
     }
 
-    fun infer_method_call(var self, e: Expr, target: Expr, field: str, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
+    // `callee` is the `target.field` node itself (a function-valued field is
+    // typed through it, MYLA-33).
+    fun infer_method_call(var self, e: Expr, callee: Expr, target: Expr, field: str, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         let recv_type = self.expect_value(target, None)?
         let key_opt = self.type_key(recv_type)
         var sig_opt: Option<FuncSig> = None
@@ -3282,36 +3813,36 @@ impl Checker {
                             Some(ft) => match ft { Type.TFunc(p, r) => true, _ => false },
                             None => false,
                         }
-                        if is_func { return self.infer_indirect_call(e, struct_field_callee(target, field, e), args) }
+                        if is_func { return self.infer_indirect_call(e, callee, args) }
                     },
                     _ => {},
                 }
-                return Err(mkerr(e.line, e.col))
+                return Err(terr(e.line, e.col, format("type '{}' has no method '{}'", type_name(recv_type), field)))
             },
             Some(sig) => {
                 let recv = match sig.decl.receiver { Some(r) => r, None => "self" }
                 if recv == "var self" {
-                    if !is_lvalue_shape(target) { return Err(mkerr(e.line, e.col)) }
+                    if !is_lvalue_shape(target) { return Err(terr(e.line, e.col, format("method '{}' mutates its receiver ('var self'); it needs a mutable variable (or one of its fields/elements), not a temporary", field))) }
                     let lv = self.check_lvalue(target)?
-                    if !lv.mutable { return Err(mkerr(e.line, e.col)) }
+                    if !lv.mutable { return Err(terr(e.line, e.col, format("cannot call the mutating method '{}' on an immutable receiver (declare it with 'var')", field))) }
                 }
                 let nargs = len(sig.params) - 1
-                if len(args) != nargs { return Err(mkerr(e.line, e.col)) }
-                if len(sig.type_params) > 0 { return self.infer_generic_method(e, sig, recv_type, args) }
+                if len(args) != nargs { return Err(terr(e.line, e.col, format("method '{}' expects {} argument(s), got {}", field, nargs, len(args)))) }
+                if len(sig.type_params) > 0 { return self.infer_generic_method(e, sig, field, recv_type, args) }
                 var i = 0
                 while i < len(args) {
                     let pt = sig.params[i + 1]
                     let at = self.expect_value(args[i], Some(pt))?
-                    if !type_eq(at, pt) { return Err(mkerr(args[i].line, args[i].col)) }
+                    if !type_eq(at, pt) { return Err(terr(args[i].line, args[i].col, format("argument type mismatch in call to '{}': expected '{}', found '{}'", field, type_name(pt), type_name(at)))) }
                     i = i + 1
                 }
                 return Ok(sig.ret)
             },
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, format("type '{}' has no method '{}'", type_name(recv_type), field)))
     }
 
-    fun infer_generic_method(var self, e: Expr, sig: FuncSig, recv_type: Type, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+    fun infer_generic_method(var self, e: Expr, sig: FuncSig, method: str, recv_type: Type, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         var subst: [Subst] = []
         let r0 = unify_param(sig.params[0], recv_type, subst)
         subst = r0.subst
@@ -3328,14 +3859,16 @@ impl Checker {
             subst = r.subst
             i = i + 1
         }
-        for tp in sig.type_params { if !subst_has(subst, tp) { return Err(mkerr(e.line, e.col)) } }
+        var missing: [str] = []
+        for tp in sig.type_params { if !subst_has(subst, tp) { push(missing, tp) } }
+        if len(missing) > 0 { return Err(terr(e.line, e.col, format("cannot infer type parameter(s) {} for method '{}'; add a type annotation to guide inference", join_strs(missing, ", "), method))) }
         var j = 0
         while j < len(args) {
             let pt = sig.params[j + 1]
             let want = subst_type(pt, subst)
             if !type_eq(arg_types[j], want) {
                 if is_int(want) && is_flexible_int_lit(args[j]) { self.infer_int_lit(args[j], Some(want))? }
-                else { return Err(mkerr(args[j].line, args[j].col)) }
+                else { return Err(terr(args[j].line, args[j].col, format("argument type mismatch in call to '{}': expected '{}', found '{}'", method, type_name(want), type_name(arg_types[j])))) }
             }
             j = j + 1
         }
@@ -3345,35 +3878,37 @@ impl Checker {
 
     fun infer_try(var self, e: Expr, operand: Expr) -> Result<Type, CheckErr> {
         let ot = self.expect_value(operand, None)?
+        // `?` returns from the innermost function or lambda (MYLA-72)
+        let where = if_str(self.lambda_depth > 0, "lambda", "function")
+        if !self.has_cur_ret && self.lambda_depth > 0 {
+            return Err(terr(e.line, e.col, "'?' in a lambda needs the lambda's result type: pass the lambda where a function type is expected, or annotate the variable (e.g. 'let f: (int) -> Option<int> = …')"))
+        }
+        let ret_is = match self.cur_ret {
+            Some(r) => match r {
+                Type.TEnum(rn, rargs) => if_str(rn == "Result" && len(rargs) == 2, "Result", if_str(rn == "Option" && len(rargs) == 1, "Option", "")),
+                _ => "",
+            },
+            None => "",
+        }
         match ot {
             Type.TEnum(nm, oargs) => {
                 if nm == "Result" && len(oargs) == 2 {
                     let err_t = oargs[1]
-                    if !self.has_cur_ret { return Err(mkerr(e.line, e.col)) }
-                    let ret = match self.cur_ret { Some(r) => r, None => Type.TStr }
-                    match ret {
-                        Type.TEnum(rn, rargs) => {
-                            if !(rn == "Result" && len(rargs) == 2) { return Err(mkerr(e.line, e.col)) }
-                            if !type_eq(rargs[1], err_t) { return Err(mkerr(e.line, e.col)) }
-                        },
-                        _ => { return Err(mkerr(e.line, e.col)) },
+                    if ret_is != "Result" { return Err(terr(e.line, e.col, format("'?' on a Result requires the enclosing {} to return a Result", where))) }
+                    let ret_err = match self.cur_ret { Some(r) => match r { Type.TEnum(rn, rargs) => rargs[1], _ => err_t }, None => err_t }
+                    if !type_eq(ret_err, err_t) {
+                        return Err(terr(e.line, e.col, format("'?' propagates an error of type '{}', but the {} returns 'Result<_, {}>' (there is no error conversion in v0.2)", type_name(err_t), where, type_name(ret_err))))
                     }
                     return Ok(oargs[0])
                 }
                 if nm == "Option" && len(oargs) == 1 {
-                    if !self.has_cur_ret { return Err(mkerr(e.line, e.col)) }
-                    let ret = match self.cur_ret { Some(r) => r, None => Type.TStr }
-                    match ret {
-                        Type.TEnum(rn, rargs) => { if !(rn == "Option" && len(rargs) == 1) { return Err(mkerr(e.line, e.col)) } },
-                        _ => { return Err(mkerr(e.line, e.col)) },
-                    }
+                    if ret_is != "Option" { return Err(terr(e.line, e.col, format("'?' on an Option requires the enclosing {} to return an Option", where))) }
                     return Ok(oargs[0])
                 }
-                return Err(mkerr(e.line, e.col))
             },
             _ => {},
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, format("'?' can only be applied to an Option or Result, not '{}'", type_name(ot))))
     }
 
     fun infer_lambda(var self, e: Expr, params: [Param], ret_ann: Option<TypeExpr>, body: ExprOrBlock, expected: Option<Type>) -> Result<Type, CheckErr> {
@@ -3393,7 +3928,7 @@ impl Checker {
         while i < len(params) {
             match params[i].ty {
                 Some(te) => push(ptypes, self.resolve0(te)?),
-                None => { if have_exp { push(ptypes, exp_params[i]) } else { return Err(mkerr(params[i].line, params[i].col)) } },
+                None => { if have_exp { push(ptypes, exp_params[i]) } else { return Err(terr(params[i].line, params[i].col, format("cannot infer the type of lambda parameter '{}'; annotate it (e.g. '{}: int')", params[i].name, params[i].name))) } },
             }
             i = i + 1
         }
@@ -3401,7 +3936,7 @@ impl Checker {
         var k = 0
         while k < len(params) {
             if !self.define(params[k].name, ptypes[k], false) { self.pop_scope()
-            return Err(mkerr(params[k].line, params[k].col)) }
+            return Err(terr(params[k].line, params[k].col, format("duplicate lambda parameter '{}'", params[k].name))) }
             k = k + 1
         }
         var want_ret: Option<Type> = None
@@ -3411,6 +3946,7 @@ impl Checker {
         let saved_has = self.has_cur_ret
         let saved_active = self.lambda_infer_active
         let saved_infer = self.lambda_infer
+        self.lambda_depth = self.lambda_depth + 1
         var ret_t: Option<Type> = None
         match body {
             ExprOrBlock.EB_Block(bl) => {
@@ -3421,7 +3957,7 @@ impl Checker {
                         self.check_block(bl)?
                         if !block_returns(bl) { self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer)
             self.pop_scope()
-            return Err(mkerr(e.line, e.col)) }
+            return Err(terr(e.line, e.col, format("lambda may finish without returning a '{}'", type_name(wr)))) }
                         ret_t = Some(wr)
                     },
                     None => {
@@ -3439,16 +3975,20 @@ impl Checker {
                                 if !type_eq(collected[m].ty, collected[0].ty) {
                                     self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer)
                                     self.pop_scope()
-                                    return Err(mkerr(match collected[m].node { Some(nd) => nd.line, None => e.line }, match collected[m].node { Some(nd) => nd.col, None => e.col }))
+                                    let ln = match collected[m].node { Some(nd) => nd.line, None => e.line }
+                                    let cl = match collected[m].node { Some(nd) => nd.col, None => e.col }
+                                    return Err(terr(ln, cl, format("inconsistent lambda return types: '{}' vs '{}'", type_name(collected[0].ty), type_name(collected[m].ty))))
                                 }
                                 m = m + 1
                             }
                         }
                     },
                 }
-                ret_t = ret_t
             },
             ExprOrBlock.EB_Expr(ex) => {
+                // a `?` in the body returns from the lambda (MYLA-72)
+                self.cur_ret = want_ret
+                self.has_cur_ret = match want_ret { Some(w) => true, None => false }
                 ret_t = self.infer(ex, want_ret)?
             },
         }
@@ -3458,6 +3998,7 @@ impl Checker {
     }
 
     fun restore_lambda(var self, r: Option<Type>, h: bool, a: bool, inf: [MatchVal]) {
+        self.lambda_depth = self.lambda_depth - 1
         self.cur_ret = r
         self.has_cur_ret = h
         self.lambda_infer_active = a
@@ -3467,7 +4008,9 @@ impl Checker {
     fun infer_partial(var self, e: Expr, callee: Expr, args: [Expr]) -> Result<Type, CheckErr> {
         let pt = self.partial_target(e, callee)?
         let param_types = pt.params
-        if len(args) != len(param_types) { return Err(mkerr(e.line, e.col)) }
+        if len(args) != len(param_types) {
+            return Err(terr(e.line, e.col, format("partial application must list every argument position ({} expected, found {}); write '_' for each one to leave open (no implicit currying)", len(param_types), len(args))))
+        }
         var hole_types: [Type] = []
         var i = 0
         while i < len(args) {
@@ -3475,7 +4018,12 @@ impl Checker {
                 ExprKind.Hole => push(hole_types, param_types[i]),
                 _ => {
                     let at = self.expect_value(args[i], Some(param_types[i]))?
-                    if !type_eq(at, param_types[i]) { return Err(mkerr(args[i].line, args[i].col)) }
+                    if !type_eq(at, param_types[i]) {
+                        // as the call in Python's synthesized lambda reports it
+                        var call_to = ""
+                        if pt.name != "" { call_to = format(" in call to '{}'", pt.name) }
+                        return Err(terr(args[i].line, args[i].col, format("argument type mismatch{}: expected '{}', found '{}'", call_to, type_name(param_types[i]), type_name(at))))
+                    }
                 },
             }
             i = i + 1
@@ -3489,7 +4037,7 @@ impl Checker {
             ExprKind.GetField(target, field) => { return self.partial_field(e, target, field) },
             _ => {},
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, "'_' partial application requires a function, method, or function value"))
     }
 
     fun partial_name(var self, e: Expr, nm: str) -> Result<PartialTgt, CheckErr> {
@@ -3498,10 +4046,10 @@ impl Checker {
             None => {},
         }
         let fi = self.func_idx(nm)
-        if fi < 0 { return Err(mkerr(e.line, e.col)) }
+        if fi < 0 { return Err(terr(e.line, e.col, format("cannot partially apply '{}' with '_' (only functions, methods, and function values are supported)", nm))) }
         let sig = self.functions[fi]
-        if len(sig.type_params) > 0 { return Err(mkerr(e.line, e.col)) }
-        return Ok(PartialTgt { params: sig.params, ret: sig.ret })
+        if len(sig.type_params) > 0 { return Err(terr(e.line, e.col, format("cannot partially apply the generic function '{}'", nm))) }
+        return Ok(PartialTgt { params: sig.params, ret: sig.ret, name: nm })
     }
 
     fun partial_field(var self, e: Expr, target: Expr, field: str) -> Result<PartialTgt, CheckErr> {
@@ -3513,11 +4061,13 @@ impl Checker {
         match recv {
             Type.TStruct(nm, sargs) => {
                 let fields = self.struct_field_types(nm, sargs)
-                return struct_field_partial_res(fields, field, e)
+                let ft = match field_type_get(fields, field) { Some(x) => x, None => Type.TBool }
+                let is_fn = match ft { Type.TFunc(p, r) => true, _ => false }
+                if is_fn { return func_to_partial_res(ft, e) }
             },
             _ => {},
         }
-        return Err(mkerr(e.line, e.col))
+        return Err(terr(e.line, e.col, format("type '{}' has no method '{}'", type_name(recv), field)))
     }
 
     fun method_partial(self, recv: Type, field: str, e: Expr) -> Result<Option<PartialTgt>, CheckErr> {
@@ -3525,14 +4075,14 @@ impl Checker {
             Some(k) => {
                 match self.method_sig(k, field) {
                     Some(sig) => {
-                        if len(sig.type_params) > 0 { return Err(mkerr(e.line, e.col)) }
+                        if len(sig.type_params) > 0 { return Err(terr(e.line, e.col, format("cannot partially apply the generic method '{}'", field))) }
                         var rest: [Type] = []
                         var i = 1
                         while i < len(sig.params) {
                             push(rest, sig.params[i])
                             i = i + 1
                         }
-                        return Ok(Some(PartialTgt { params: rest, ret: sig.ret }))
+                        return Ok(Some(PartialTgt { params: rest, ret: sig.ret, name: field }))
                     },
                     None => {},
                 }
@@ -3546,23 +4096,14 @@ impl Checker {
 
 fun func_to_partial_res(t: Type, e: Expr) -> Result<PartialTgt, CheckErr> {
     match t {
-        Type.TFunc(p, r) => { return Ok(PartialTgt { params: p, ret: r }) },
+        Type.TFunc(p, r) => { return Ok(PartialTgt { params: p, ret: r, name: "" }) },
         _ => {},
     }
-    return Err(mkerr(e.line, e.col))
+    return Err(terr(e.line, e.col, format("cannot partially apply a value of type '{}'", type_name(t))))
 }
 
-fun struct_field_partial_res(fields: [FieldT], field: str, e: Expr) -> Result<PartialTgt, CheckErr> {
-    match field_type_get(fields, field) {
-        Some(ft) => { return func_to_partial_res(ft, e) },
-        None => {},
-    }
-    return Err(mkerr(e.line, e.col))
-}
+// A partially applied callee: its parameter and return types, and the name a
+// call to it reports ("" for a function value).
+pub struct PartialTgt { params: [Type], ret: Option<Type>, name: str }
 
-pub struct PartialTgt { params: [Type], ret: Option<Type> }
-
-fun struct_field_callee(target: Expr, field: str, e: Expr) -> Expr {
-    return Expr { id: 0, line: e.line, col: e.col, kind: ExprKind.GetField(target, field) }
-}
 

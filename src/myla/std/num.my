@@ -1,0 +1,702 @@
+// std.num — numbers from text (MYLA-79).
+//
+// `parse_int` and `parse_float` read decimal numbers such as `-42` and
+// `1.5e-3`. A float is the correctly rounded double, computed with big
+// integers, so the result is the same in every implementation; the
+// self-hosted compiler converts its float literals with the same code
+// (`f64_literal_bits`, `f32_round_bits`), so it needs no float arithmetic
+// (MYLA-29).
+//
+// A big integer is a list of 32-bit limbs held in uint64, least significant
+// first, with no high zero limbs (zero is the empty list).
+
+const LIMB: uint64 = 4294967296
+const F64_INF: uint64 = 9218868437227405312     // 0x7ff0000000000000
+
+fun big_norm(a: [uint64]) -> [uint64] {
+    var r = a
+    while len(r) > 0 && r[len(r) - 1] == 0 {
+        pop(r)
+    }
+    return r
+}
+
+fun big_from_u64(x: uint64) -> [uint64] {
+    return big_norm([x % LIMB, x / LIMB])
+}
+
+// a * m + add, for m, add < 2^32
+fun big_mul_add(a: [uint64], m: uint64, add: uint64) -> [uint64] {
+    var out: [uint64] = []
+    var carry = add
+    for limb in a {
+        let t = limb * m + carry
+        push(out, t % LIMB)
+        carry = t / LIMB
+    }
+    if carry > 0 {
+        push(out, carry)
+    }
+    return big_norm(out)
+}
+
+fun u64_bitlen(x: uint64) -> int32 {
+    var n = 0
+    var v = x
+    while v > 0 {
+        v = v >> 1
+        n = n + 1
+    }
+    return n
+}
+
+fun big_bitlen(a: [uint64]) -> int32 {
+    if len(a) == 0 {
+        return 0
+    }
+    return (len(a) as int32 - 1) * 32 + u64_bitlen(a[len(a) - 1])
+}
+
+fun big_bit(a: [uint64], i: int32) -> bool {
+    let limb = i / 32
+    if limb >= len(a) as int32 {
+        return false
+    }
+    return ((a[limb] >> ((i % 32) as uint64)) & 1) == 1
+}
+
+// whether any of the low `n` bits of `a` is set
+fun big_low_bits_set(a: [uint64], n: int32) -> bool {
+    var i = 0
+    while i < n {
+        if big_bit(a, i) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fun big_shl(a: [uint64], s: int32) -> [uint64] {
+    if len(a) == 0 {
+        return a
+    }
+    var out: [uint64] = []
+    var i = 0
+    while i < s / 32 {
+        push(out, 0)
+        i = i + 1
+    }
+    let bits = (s % 32) as uint64
+    var carry: uint64 = 0
+    for limb in a {
+        let t = (limb << bits) | carry
+        push(out, t % LIMB)
+        carry = t / LIMB
+    }
+    if carry > 0 {
+        push(out, carry)
+    }
+    return big_norm(out)
+}
+
+fun big_shr(a: [uint64], s: int32) -> [uint64] {
+    let skip = s / 32
+    let bits = (s % 32) as uint64
+    var out: [uint64] = []
+    var i = skip
+    while i < len(a) as int32 {
+        var t = a[i] >> bits
+        if i + 1 < len(a) as int32 && bits > 0 {
+            t = t | ((a[i + 1] << (32 - bits)) % LIMB)
+        }
+        push(out, t)
+        i = i + 1
+    }
+    return big_norm(out)
+}
+
+fun big_cmp(a: [uint64], b: [uint64]) -> int32 {
+    if len(a) != len(b) {
+        return match len(a) < len(b) { true => -1, false => 1 }
+    }
+    var i = len(a) as int32 - 1
+    while i >= 0 {
+        if a[i] != b[i] {
+            return match a[i] < b[i] { true => -1, false => 1 }
+        }
+        i = i - 1
+    }
+    return 0
+}
+
+// a - b, for a >= b
+fun big_sub(a: [uint64], b: [uint64]) -> [uint64] {
+    var out: [uint64] = []
+    var borrow: uint64 = 0
+    var i = 0
+    while i < len(a) {
+        var sub = borrow
+        if i < len(b) {
+            sub = sub + b[i]
+        }
+        if a[i] >= sub {
+            push(out, a[i] - sub)
+            borrow = 0
+        } else {
+            push(out, a[i] + LIMB - sub)
+            borrow = 1
+        }
+        i = i + 1
+    }
+    return big_norm(out)
+}
+
+fun big_to_u64(a: [uint64]) -> uint64 {
+    var r: uint64 = 0
+    if len(a) > 0 {
+        r = a[0]
+    }
+    if len(a) > 1 {
+        r = r | (a[1] << 32)
+    }
+    return r
+}
+
+struct DivMod { q: [uint64], r: [uint64] }
+
+// schoolbook binary long division; the quotients here have about 64 bits
+fun big_divmod(n: [uint64], d: [uint64]) -> DivMod {
+    var q: [uint64] = []
+    var r: [uint64] = []
+    var i = big_bitlen(n) - 1
+    while i >= 0 {
+        r = big_shl(r, 1)
+        if big_bit(n, i) {
+            r = big_mul_add(r, 1, 1)
+        }
+        q = big_shl(q, 1)
+        if big_cmp(r, d) >= 0 {
+            r = big_sub(r, d)
+            q = big_mul_add(q, 1, 1)
+        }
+        i = i - 1
+    }
+    return DivMod { q: q, r: r }
+}
+
+// A rounded binary value: mant * 2^exp, or infinity.
+struct Rounded { mant: uint64, exp: int32, inf: bool }
+
+// Round v * 2^e0 (plus a nonzero tail below it when `sticky`) to nearest, ties
+// to even, keeping at most `prec` significant bits and no bit below 2^emin
+// (which makes subnormals come out right); infinity above 2^(emax+1).
+fun round_binary(v: [uint64], e0: int32, sticky: bool, prec: int32, emin: int32, emax: int32) -> Rounded {
+    let bl = big_bitlen(v)
+    if bl == 0 {
+        return Rounded { mant: 0, exp: 0, inf: false }
+    }
+    var drop = bl - prec
+    if emin - e0 > drop {
+        drop = emin - e0
+    }
+    var mant: uint64 = 0
+    var e = e0
+    if drop <= 0 {
+        mant = big_to_u64(v)     // exact; a sticky tail alone rounds down
+    } else {
+        mant = big_to_u64(big_shr(v, drop))
+        let half = big_bit(v, drop - 1)
+        let rest = sticky || big_low_bits_set(v, drop - 1)
+        if half && (rest || (mant & 1) == 1) {
+            mant = mant + 1
+        }
+        e = e0 + drop
+        if mant == (1 as uint64) << (prec as uint64) {
+            mant = mant >> 1
+            e = e + 1
+        }
+    }
+    if mant != 0 && u64_bitlen(mant) - 1 + e > emax {
+        return Rounded { mant: 0, exp: 0, inf: true }
+    }
+    return Rounded { mant: mant, exp: e, inf: false }
+}
+
+// The double bits of the exact value mant * 2^e (representable as a double).
+fun f64_bits_exact(r: Rounded) -> uint64 {
+    if r.inf {
+        return F64_INF
+    }
+    if r.mant == 0 {
+        return 0
+    }
+    let bl = u64_bitlen(r.mant)
+    let top = bl - 1 + r.exp
+    if top >= -1022 {
+        let m53 = r.mant << ((53 - bl) as uint64)
+        return (((top + 1023) as uint64) << 52) | (m53 - ((1 as uint64) << 52))
+    }
+    return r.mant << ((r.exp + 1074) as uint64)    // subnormal
+}
+
+// The correctly rounded double of a float literal's lexeme, such as
+// `3.25`, `1_000.5e-3`, `2f32` (underscores and the suffix are ignored).
+#test("0.5")[4602678819172646912u64]
+#test("0.1")[4591870180066957722u64]
+#test("2f32")[4611686018427387904u64]
+#test("1e400")[9218868437227405312u64]
+pub fun f64_literal_bits(lexeme: str) -> uint64 {
+    var n: [uint64] = []
+    var digits = 0               // significant digits seen (for the zero test)
+    var frac = 0                 // digits after the point
+    var in_frac = false
+    var exp = 0
+    var exp_neg = false
+    var in_exp = false
+    var i = 0
+    while i < len(lexeme) {
+        let c = lexeme[i]
+        if c == 'f' {
+            break                // the suffix
+        } else if c == '_' {
+            i = i + 1
+            continue
+        } else if c == '.' {
+            in_frac = true
+        } else if c == 'e' || c == 'E' {
+            in_exp = true
+        } else if c == '-' {
+            exp_neg = true
+        } else if c == '+' {
+            exp_neg = false
+        } else if in_exp {
+            if exp < 100000 {
+                exp = exp * 10 + (c - '0') as int32
+            }
+        } else {
+            n = big_mul_add(n, 10, (c - '0') as uint64)
+            if len(n) > 0 {
+                digits = digits + 1
+            }
+            if in_frac {
+                frac = frac + 1
+            }
+        }
+        i = i + 1
+    }
+    if len(n) == 0 {
+        return 0
+    }
+    if exp_neg {
+        exp = -exp
+    }
+    let e10 = exp - frac
+    if e10 >= 0 {
+        if e10 > 400 {
+            return F64_INF
+        }
+        return f64_bits_exact(round_binary(big_mul_pow10(n, e10), 0, false, 53, -1074, 1023))
+    }
+    if digits + e10 < -400 {
+        return 0
+    }
+    let d = big_mul_pow10([1], -e10)
+    var s = 64 + big_bitlen(d) - big_bitlen(n)
+    if s < 0 {
+        s = 0
+    }
+    let qr = big_divmod(big_shl(n, s), d)
+    return f64_bits_exact(round_binary(qr.q, -s, len(qr.r) > 0, 53, -1074, 1023))
+}
+
+fun big_mul_pow10(n: [uint64], k: int32) -> [uint64] {
+    var r = n
+    var i = 0
+    while i < k {
+        r = big_mul_add(r, 10, 0)
+        i = i + 1
+    }
+    return r
+}
+
+// Round a double (given as bits) to single precision and widen it back: the
+// double bits of the float32 nearest to it, as the Python toolchain does.
+#test(4591870180066957722u64)[4591870180174331904u64]
+#test(9218868437227405312u64)[9218868437227405312u64]
+pub fun f32_round_bits(bits: uint64) -> uint64 {
+    let sign = bits & 9223372036854775808u64
+    let biased = ((bits >> 52) & 2047) as int32
+    if biased == 2047 {
+        return bits                  // inf / nan stay as they are
+    }
+    var mant = bits & 4503599627370495
+    var e = -1074
+    if biased > 0 {
+        mant = mant | ((1 as uint64) << 52)
+        e = biased - 1075
+    }
+    return sign | f64_bits_exact(round_binary(big_from_u64(mant), e, false, 24, -149, 127))
+}
+
+// The float64 with IEEE bit pattern `bits`, which must be non-negative and
+// not NaN (as `f64_literal_bits` gives), built exactly as mantissa * 2^exp.
+#test(4602678819172646912u64)[0.5]
+#test(0u64)[0.0]
+pub fun float_from_bits(bits: uint64) -> float64 {
+    let biased = ((bits >> 52) & 2047) as int32
+    if biased == 2047 {
+        return 1.0f64 / 0.0f64
+    }
+    var mant = bits & 4503599627370495
+    var e = -1074
+    if biased > 0 {
+        mant = mant | ((1 as uint64) << 52)
+        e = biased - 1075
+    }
+    let x = mant as float64             // exact: mant < 2^53
+    if e < -1000 {
+        // in two steps, so the intermediate stays a normal double
+        return x * pow2(e + 600) * pow2(-600)
+    }
+    return x * pow2(e)
+}
+
+// 2^k exactly, for -1022 <= k <= 1023 (repeated squaring)
+#test(10)[1024.0]
+#test(-2)[0.25]
+pub fun pow2(k: int32) -> float64 {
+    var base = 2.0f64
+    var n = k
+    if n < 0 {
+        base = 0.5f64
+        n = -n
+    }
+    var r = 1.0f64
+    while n > 0 {
+        if (n & 1) == 1 {
+            r = r * base
+        }
+        base = base * base
+        n = n >> 1
+    }
+    return r
+}
+
+// The number of decimal digits at `s[i..]`.
+fun digits_at(s: str, i: int32) -> int32 {
+    var j = i
+    while j < len(s) && s[j] >= '0' && s[j] <= '9' { j = j + 1 }
+    return j - i
+}
+
+// The int64 written in decimal in `s`, with an optional leading "-"; None if
+// `s` is anything else or out of range.
+#test("42")[Some(42i64)]
+#test("-9223372036854775808")[Some(-9223372036854775807i64 - 1i64)]
+#test("9223372036854775808")[None]
+#test("")[None]
+#test("-")[None]
+#test("1.0")[None]
+#test("+1")[None]
+pub fun parse_int(s: str) -> Option<int64> {
+    var i = 0
+    let negative = len(s) > 0 && s[0] == '-'
+    if negative { i = 1 }
+    if digits_at(s, i) == 0 || digits_at(s, i) != len(s) - i { return None }
+    var limit: uint64 = 9223372036854775807u64
+    if negative { limit = limit + 1u64 }
+    var n: uint64 = 0u64
+    while i < len(s) {
+        let d = (s[i] - '0') as uint64
+        if n > (limit - d) / 10u64 { return None }
+        n = n * 10u64 + d
+        i = i + 1
+    }
+    if negative {
+        if n == 9223372036854775808u64 { return Some(-9223372036854775807i64 - 1i64) }
+        return Some(-(n as int64))
+    }
+    return Some(n as int64)
+}
+
+// The float64 nearest the decimal number in `s`: an optional "-", digits,
+// optionally "." and digits, optionally "e" or "E", a sign and digits. None
+// if `s` is anything else. Too large a number is infinite.
+#test("1.5")[Some(1.5)]
+#test("-2e-3")[Some(-0.002)]
+#test("1E+2")[Some(100.0)]
+#test("7")[Some(7.0)]
+#test(".5")[None]
+#test("1.")[None]
+#test("1e")[None]
+#test("1x")[None]
+pub fun parse_float(s: str) -> Option<float64> {
+    var i = 0
+    let negative = len(s) > 0 && s[0] == '-'
+    if negative { i = 1 }
+    var n = digits_at(s, i)
+    if n == 0 { return None }
+    i = i + n
+    if i < len(s) && s[i] == '.' {
+        n = digits_at(s, i + 1)
+        if n == 0 { return None }
+        i = i + 1 + n
+    }
+    if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+        i = i + 1
+        if i < len(s) && (s[i] == '+' || s[i] == '-') { i = i + 1 }
+        n = digits_at(s, i)
+        if n == 0 { return None }
+        i = i + n
+    }
+    if i != len(s) { return None }
+    var text = s
+    if negative {
+        var sb = StringBuilder()
+        append(sb, s, 1, len(s))
+        text = build(sb)
+    }
+    let x = float_from_bits(f64_literal_bits(text))
+    if negative { return Some(-x) }
+    return Some(x)
+}
+
+// --- Floats to text -------------------------------------------------------------
+
+// a / d and a % d, for 0 < d < 2^32
+fun big_divmod_small(a: [uint64], d: uint64) -> ([uint64], uint64) {
+    var q: [uint64] = []
+    for x in a { push(q, 0) }
+    var rem: uint64 = 0
+    var i = len(a) - 1
+    while i >= 0 {
+        let cur = (rem << 32) | a[i]
+        q[i] = cur / d
+        rem = cur % d
+        i = i - 1
+    }
+    return (big_norm(q), rem)
+}
+
+// The decimal digits of `a` ("0" for zero).
+fun big_to_decimal(a: [uint64]) -> str {
+    if len(a) == 0 { return "0" }
+    var chunks: [uint64] = []                // base 10^9, least significant first
+    var n = a
+    while len(n) > 0 {
+        let qr = big_divmod_small(n, 1000000000)
+        push(chunks, qr.1)
+        n = qr.0
+    }
+    var sb = StringBuilder()
+    var i = len(chunks) - 1
+    append(sb, format("{}", chunks[i]))
+    i = i - 1
+    while i >= 0 {
+        let part = format("{}", chunks[i])
+        var pad = 9 - len(part)
+        while pad > 0 {
+            append_byte(sb, '0')
+            pad = pad - 1
+        }
+        append(sb, part)
+        i = i - 1
+    }
+    return build(sb)
+}
+
+// a * 5^k
+fun big_mul_pow5(a: [uint64], k: int32) -> [uint64] {
+    var r = a
+    var n = k
+    while n >= 13 {
+        r = big_mul_add(r, 1220703125, 0)      // 5^13
+        n = n - 13
+    }
+    while n > 0 {
+        r = big_mul_add(r, 5, 0)
+        n = n - 1
+    }
+    return r
+}
+
+// A finite x > 0 as mant * 2^exp exactly, with mant < 2^53.
+struct Binary { mant: uint64, exp: int32 }
+
+fun decompose(x: float64) -> Binary {
+    var v = x
+    var e = 0
+    let two53 = pow2(53)
+    while v >= pow2(117) {
+        v = v * pow2(-64)
+        e = e + 64
+    }
+    while v >= two53 {
+        v = v * 0.5f64
+        e = e + 1
+    }
+    // scaling up by a power of two is exact; a subnormal stops at 2^-1074
+    while v < pow2(-12) && e - 64 >= -1074 {
+        v = v * pow2(64)
+        e = e - 64
+    }
+    while v < pow2(52) && e > -1074 {
+        v = v * 2.0f64
+        e = e - 1
+    }
+    return Binary { mant: v as uint64, exp: e }
+}
+
+// `digits` (no leading zero) rounded to nearest, ties to even, to at most `p`
+// digits; the result's decimal point moves one place right when 9s carry.
+struct Decimal { digits: str, point: int32 }   // the value 0.digits * 10^point
+
+fun round_digits(d: Decimal, p: int32) -> Decimal {
+    if len(d.digits) <= p { return d }
+    var sb = StringBuilder()
+    append(sb, d.digits, 0, p)
+    var kept = build(sb)
+    let next = d.digits[p]
+    var rest = false
+    var i = p + 1
+    while i < len(d.digits) {
+        if d.digits[i] != '0' { rest = true }
+        i = i + 1
+    }
+    let odd = (kept[p - 1] - '0') % 2 == 1
+    if next > '5' || (next == '5' && (rest || odd)) {
+        // add one in the last place
+        var out: [uint8] = []
+        var carry = true
+        var j = p - 1
+        while j >= 0 {
+            var c = kept[j]
+            if carry {
+                if c == '9' { c = '0' } else {
+                    c = c + 1
+                    carry = false
+                }
+            }
+            push(out, c)
+            j = j - 1
+        }
+        var sb2 = StringBuilder()
+        if carry { append_byte(sb2, '1') }
+        var k = len(out) - 1
+        while k >= 0 {
+            append_byte(sb2, out[k])
+            k = k - 1
+        }
+        var point = d.point
+        if carry { point = point + 1 }
+        return Decimal { digits: strip_zeros(build(sb2)), point: point }
+    }
+    return Decimal { digits: strip_zeros(kept), point: d.point }
+}
+
+// `s` without trailing "0"s (at least one digit stays).
+#test("1200")["12"]
+#test("0")["0"]
+fun strip_zeros(s: str) -> str {
+    var n = len(s)
+    while n > 1 && s[n - 1] == '0' { n = n - 1 }
+    var sb = StringBuilder()
+    append(sb, s, 0, n)
+    return build(sb)
+}
+
+// "d.ddd" (or "d") followed by "e" and the exponent: a literal that
+// f64_literal_bits reads.
+fun scientific(d: Decimal) -> str {
+    var sb = StringBuilder()
+    append(sb, d.digits, 0, 1)
+    if len(d.digits) > 1 {
+        append_byte(sb, '.')
+        append(sb, d.digits, 1, len(d.digits))
+    }
+    append(sb, format("e{}", d.point - 1))
+    return build(sb)
+}
+
+// The shortest decimal that reads back as `x`, written as Python's repr
+// writes floats: "1.0", "0.1", "1e+16", "1.5e-07", "-0.0", "nan", "inf".
+// Exponents below -4 or from 16 on use scientific notation.
+#test(1.0)["1.0"]
+#test(0.1)["0.1"]
+#test(-2.5)["-2.5"]
+#test(1e16)["1e+16"]
+#test(1.5e-7)["1.5e-07"]
+#test(123456789012345680000.0)["1.2345678901234568e+20"]
+#test(1e15)["1000000000000000.0"]
+#test(0.0001)["0.0001"]
+#test(5e-324)["5e-324"]
+#test(-0.0)["-0.0"]
+pub fun format_float(x: float64) -> str {
+    if x != x { return "nan" }
+    var v = x
+    var sign = ""
+    if v < 0.0f64 || (v == 0.0f64 && 1.0f64 / v < 0.0f64) {
+        sign = "-"
+        v = -v
+    }
+    if v == 0.0f64 { return sign + "0.0" }
+    if v > 1.7976931348623157e308f64 { return sign + "inf" }
+    // the exact decimal expansion of v
+    let b = decompose(v)
+    var exact = Decimal { digits: "", point: 0 }
+    if b.exp >= 0 {
+        let digits = big_to_decimal(big_shl(big_from_u64(b.mant), b.exp))
+        exact = Decimal { digits: strip_zeros(digits), point: len(digits) }
+    } else {
+        let digits = big_to_decimal(big_mul_pow5(big_from_u64(b.mant), -b.exp))
+        exact = Decimal { digits: strip_zeros(digits), point: len(digits) + b.exp }
+    }
+    // the fewest digits that read back as v: 17 always do, and if p digits
+    // do, so do more (they are closer), so a binary search finds it
+    var lo = 1
+    var hi = 17
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if float_from_bits(f64_literal_bits(scientific(round_digits(exact, mid)))) == v { hi = mid } else { lo = mid + 1 }
+    }
+    let d = round_digits(exact, lo)
+    let e10 = d.point - 1
+    var sb = StringBuilder()
+    append(sb, sign)
+    if e10 >= -4 && e10 < 16 {
+        if d.point <= 0 {
+            append(sb, "0.")
+            var z = -d.point
+            while z > 0 {
+                append_byte(sb, '0')
+                z = z - 1
+            }
+            append(sb, d.digits)
+        } else if d.point >= len(d.digits) {
+            append(sb, d.digits)
+            var z = d.point - len(d.digits)
+            while z > 0 {
+                append_byte(sb, '0')
+                z = z - 1
+            }
+            append(sb, ".0")
+        } else {
+            append(sb, d.digits, 0, d.point)
+            append_byte(sb, '.')
+            append(sb, d.digits, d.point, len(d.digits))
+        }
+    } else {
+        append(sb, d.digits, 0, 1)
+        if len(d.digits) > 1 {
+            append_byte(sb, '.')
+            append(sb, d.digits, 1, len(d.digits))
+        }
+        if e10 < 0 { append(sb, "e-") } else { append(sb, "e+") }
+        var mag = e10
+        if mag < 0 { mag = -mag }
+        if mag < 10 { append_byte(sb, '0') }
+        append(sb, format("{}", mag))
+    }
+    return build(sb)
+}

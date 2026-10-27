@@ -1,6 +1,6 @@
 """Token definitions for the Myla lexer.
 
-See docs/grammar.md §1 for the lexical grammar this implements. Note that `int`
+See docs/Language/Lexical-structure.md for the lexical grammar this implements. Note that `int`
 is deliberately NOT a keyword: it is a built-in type alias for `int32` and is
 lexed as an ordinary identifier, then resolved during type checking.
 """
@@ -96,6 +96,7 @@ class TokenKind(Enum):
 
     # structural
     NEWLINE = auto()      # statement separator
+    SEMI = auto()         # ; (may stand for a separating NEWLINE, D61)
     EOF = auto()
 
 
@@ -138,12 +139,12 @@ KEYWORDS: dict[str, TokenKind] = {
     "uint64": TokenKind.UINT64,
 }
 
-# Valid integer-literal type suffixes (docs/grammar.md: int_suffix).
+# Valid integer-literal type suffixes (docs/Language/Lexical-structure.md: int_suffix).
 INT_SUFFIXES: frozenset[str] = frozenset(
     {"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
 )
 
-# Valid float-literal type suffixes (docs/grammar.md: float_suffix).
+# Valid float-literal type suffixes (docs/Language/Lexical-structure.md: float_suffix).
 FLOAT_SUFFIXES: frozenset[str] = frozenset({"f32", "f64"})
 
 

@@ -1,172 +1,1044 @@
-// loader.my — minimal module loader for the self-hosted toolchain (self-hosting
-// v0.10).
+// loader.my -- the self-hosted module loader (MYLA-30): links a program's
+// modules the way src/myla/loader.py does (wiki: Architecture/Module-loader).
 //
-// Resolves a program's `import` / `from … import …` graph and amalgamates every
-// reachable module into one source string (with the import lines removed). The
-// front end then lexes+parses that single stream, so node ids stay globally
-// unique — the property `build_checker_src` relies on (separately-parsed
-// modules would reuse ids and corrupt the per-node type/layout tables).
-//
-// This is deliberately simpler than the Python loader: the compiler's modules
-// all have globally-unique top-level names, so no `$`-qualification or
-// reference rewriting is needed — concatenation is enough. Resolution covers
-// the two shapes the compiler uses: relative imports (`.x`, `..x`, resolved
-// against the importer's directory) and the reserved `std.*` root (resolved
-// against a caller-provided stdlib root).
+//   1. Load: read, lex and parse each reachable module once, following imports
+//      depth-first. parse_ids threads node ids through the modules, so they
+//      stay unique across the program (the checker keys its tables by them).
+//   2. Module ids: "" for the entry module; otherwise the module's path
+//      relative to the project root (or to the stdlib root, `std$…`), every
+//      run of other characters turned into `$`.
+//   3. Exports: a module's `pub` declarations, plus `pub from` / `pub import …
+//      as` re-exports, iterated until nothing changes.
+//   4. Bindings: each module's own declarations and what its imports bind.
+//   5. Renaming: each reference to a module-level name becomes `id$name`, and
+//      an `alias.member` chain folds into the qualified name; local variables
+//      and type parameters shadow module names.
+//   6. Merge: every module's declarations (imports removed), in load order.
 
 from std.fs import read_to_string
-from std.io import eprintln
-from .lexer import lex
-from .parser import parse
-from .ast import Program, Decl, DeclKind, ImportPath, ImportItem
-from .util import cp_utf8
+from .parser import parse_source
+from .diag import Report, report
+from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
+from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
+from .ast import MapEntry, Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock, Attribute
+from .ast import Pattern, PatternKind, FieldPat, MatchArm
 
-struct Loader { stdlib_root: str, visited: [str], parts: [str] }
+// What a name visible in a module refers to: a declaration (`value` is its
+// qualified name) or a module (`value` is the module id).
+struct Binding { is_module: bool, value: str }
 
-fun new_loader(stdlib_root: str) -> Loader {
-    return Loader { stdlib_root: stdlib_root, visited: [], parts: [] }
+struct Module {
+    id: str,
+    path: str,
+    imports: [Decl],
+    targets: [int32],          // index of each import's module
+    decls: [Decl],
+    exports: [str: Binding],
+    bindings: [str: Binding],
 }
 
-fun has_str(xs: [str], s: str) -> bool {
+// The linked program: every module's declarations, the next free node id
+// (the checker parses the prelude from there), and where each module's node ids
+// start, in increasing order (`file_of`).
+pub struct Loaded { decls: [Decl], next_id: int32, spans: [Span] }
+
+pub struct Span { first_id: int32, path: str }
+
+// The file of node `id` (a declaration a type error names); the entry file for
+// an unknown one (-1).
+pub fun file_of(prog: Loaded, id: int32) -> str {
+    var path = prog.spans[0].path
+    for sp in prog.spans {
+        if sp.first_id <= id { path = sp.path }
+    }
+    return path
+}
+
+struct Loader {
+    stdlib_root: str,
+    project_root: str,
+    entry: str,
+    modules: [Module],
+    next_id: int32,
+    spans: [Span],
+    overrides: [str: str],     // path -> text used instead of the file (an editor's unsaved buffers)
+}
+
+// -- paths ------------------------------------------------------------------
+
+fun has(xs: [str], s: str) -> bool {
     for x in xs {
         if x == s { return true }
     }
     return false
 }
 
-fun has_int(xs: [int32], v: int32) -> bool {
-    for x in xs {
-        if x == v { return true }
+fun split_on(s: str, sep: uint8) -> [str] {
+    var parts: [str] = []
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(s) {
+        if s[i] == sep {
+            push(parts, build(sb))
+            sb = StringBuilder()
+        } else {
+            append_byte(sb, s[i])
+        }
+        i = i + 1
     }
-    return false
+    push(parts, build(sb))
+    return parts
 }
 
-// `cs[start..end]` rebuilt as a string (codepoints re-encoded as UTF-8).
-fun substr(cs: [char], start: int32, end: int32) -> str {
+fun join(parts: [str], sep: str) -> str {
     var sb = StringBuilder()
-    var k = start
-    while k < end {
-        append(sb, cp_utf8(cs[k] as int32))
-        k = k + 1
+    var i = 0
+    while i < len(parts) {
+        if i > 0 { append(sb, sep) }
+        append(sb, parts[i])
+        i = i + 1
     }
     return build(sb)
 }
 
-// Everything before the last '/', or "." when the path has no directory part.
+// `p` with `.` segments, empty segments and `x/..` pairs removed.
+pub fun normalize(p: str) -> str {
+    let absolute = len(p) > 0 && p[0] == '/'
+    var out: [str] = []
+    for seg in split_on(p, '/') {
+        if seg == "" || seg == "." {
+            continue
+        }
+        if seg == ".." && len(out) > 0 && out[len(out) - 1] != ".." {
+            pop(out)
+        } else if seg != ".." || !absolute {
+            push(out, seg)
+        }
+    }
+    let joined = join(out, "/")
+    if absolute { return "/" + joined }
+    if joined == "" { return "." }
+    return joined
+}
+
+fun segments(p: str) -> [str] {
+    if p == "." { return [] }
+    var out: [str] = []
+    for seg in split_on(p, '/') {
+        if seg != "" { push(out, seg) }
+    }
+    return out
+}
+
 fun dirname(p: str) -> str {
-    let cs = chars(p)
-    let n = len(cs)
-    var last = -1
-    var i = 0
-    while i < n {
-        if (cs[i] as int32) == 47 { last = i }
-        i = i + 1
-    }
-    if last < 0 { return "." }
-    return substr(cs, 0, last)
+    return normalize(p + "/..")
 }
 
-fun split_lines(s: str) -> [str] {
-    let cs = chars(s)
-    let n = len(cs)
-    var lines: [str] = []
-    var start = 0
-    var i = 0
-    while i < n {
-        if (cs[i] as int32) == 10 {
-            push(lines, substr(cs, start, i))
-            start = i + 1
-        }
-        i = i + 1
-    }
-    push(lines, substr(cs, start, n))
-    return lines
+fun join_path(a: str, b: str) -> str {
+    return normalize(a + "/" + b)
 }
 
-// Re-emit `src` with the 1-based line numbers in `skip` (the import lines)
-// dropped, so the concatenated stream carries only real declarations.
-fun strip_lines(src: str, skip: [int32]) -> str {
-    let lines = split_lines(src)
-    let n = len(lines)
+fun readable(path: str) -> bool {
+    return match read_to_string(path) { Ok(s) => true, Err(e) => false }
+}
+
+fun dotted(p: ImportPath) -> str {
     var sb = StringBuilder()
     var i = 0
-    while i < n {
-        if !has_int(skip, i + 1) {
-            append(sb, lines[i])
-            append(sb, "\n")
-        }
+    while i < p.dots {
+        append(sb, ".")
         i = i + 1
+    }
+    append(sb, join(p.segments, "."))
+    return build(sb)
+}
+
+// The segments of normalized `path` below normalized `root`, if it is below.
+fun rel_under(path: str, root: str) -> Option<[str]> {
+    let ps = segments(path)
+    let rs = segments(root)
+    if len(rs) > len(ps) { return None }
+    var i = 0
+    while i < len(rs) {
+        if ps[i] != rs[i] { return None }
+        i = i + 1
+    }
+    var rest: [str] = []
+    while i < len(ps) {
+        push(rest, ps[i])
+        i = i + 1
+    }
+    return Some(rest)
+}
+
+// The module id for path segments `parts` (`.my` dropped): every run of
+// characters other than letters, digits and `_` becomes one `$`, with none at
+// either end.
+fun module_tag(parts: [str]) -> str {
+    var sb = StringBuilder()
+    var pending = false
+    for c in chars(strip_ext(join(parts, "/"))) {
+        let ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+        if ok {
+            if pending && len(build(sb)) > 0 { append_byte(sb, '$') }
+            pending = false
+            append_byte(sb, c as uint8)
+        } else {
+            pending = true
+        }
     }
     return build(sb)
 }
 
-fun seg_join(segs: [str]) -> str {
-    var sb = StringBuilder()
-    var i = 0
-    let n = len(segs)
-    while i < n {
-        if i > 0 { append(sb, "/") }
-        append(sb, segs[i])
-        i = i + 1
+fun strip_ext(s: str) -> str {
+    let n = len(s)
+    if n > 3 && s[n - 3] == '.' && s[n - 2] == 'm' && s[n - 1] == 'y' {
+        var sb = StringBuilder()
+        var i = 0
+        while i < n - 3 {
+            append_byte(sb, s[i])
+            i = i + 1
+        }
+        return build(sb)
     }
-    return build(sb)
+    return s
 }
 
-// Map an import path (relative to `importer`) to a module file path. `std.*`
-// (dots == 0) resolves under `stdlib_root`; `.x` / `..x` climb from the
-// importer's directory.
-fun resolve_path(importer: str, p: ImportPath, stdlib_root: str) -> str {
-    if p.dots == 0 {
-        return stdlib_root + "/" + seg_join(p.segments) + ".my"
+fun qualify(mid: str, name: str) -> str {
+    if mid == "" { return name }
+    return mid + "$" + name
+}
+
+// The name and `pub` flag of a named top-level declaration (all but `impl`
+// and imports).
+struct NamedDecl { name: str, is_pub: bool }
+
+fun named(d: Decl) -> Option<NamedDecl> {
+    return match d.kind {
+        DeclKind.StructDecl(n, f, a, t, p) => Some(NamedDecl { name: n, is_pub: p }),
+        DeclKind.FunDecl(fd) => Some(NamedDecl { name: fd.name, is_pub: fd.is_pub }),
+        DeclKind.EnumDecl(n, v, a, t, p) => Some(NamedDecl { name: n, is_pub: p }),
+        DeclKind.TypeAliasDecl(n, t, a, p) => Some(NamedDecl { name: n, is_pub: p }),
+        DeclKind.TraitDecl(n, m, t, p) => Some(NamedDecl { name: n, is_pub: p }),
+        DeclKind.ConstDecl(n, t, v, a, p) => Some(NamedDecl { name: n, is_pub: p }),
+        _ => None,
     }
-    var base = dirname(importer)
-    var k = 1
-    while k < p.dots {
-        base = dirname(base)
-        k = k + 1
-    }
-    return base + "/" + seg_join(p.segments) + ".my"
+}
+
+fun same_binding(a: Binding, b: Binding) -> bool {
+    return a.is_module == b.is_module && a.value == b.value
+}
+
+fun at(path: str, line: int32, col: int32, msg: str) -> Report {
+    return Report { kind: "module error", msg: msg, path: path, line: line, col: col }
 }
 
 impl Loader {
-    // Load `path` and (depth-first) all of its imports, appending each module's
-    // import-stripped source to `parts`. Dependencies are appended before their
-    // importer; order is otherwise irrelevant (the checker collects all globals
-    // before checking any body).
-    fun load(var self, path: str) -> Result<int32, str> {
-        if has_str(self.visited, path) { return Ok(0) }
-        push(self.visited, path)
-        var src = ""
-        match read_to_string(path) {
-            Ok(s) => { src = s },
-            Err(e) => { return Err("cannot read module: " + path) },
+    fun readable(self, path: str) -> bool {
+        return contains(self.overrides, path) || readable(path)
+    }
+
+    fun module_id(self, path: str) -> str {
+        if path == self.entry { return "" }
+        if self.stdlib_root != "" {
+            match rel_under(path, self.stdlib_root) {
+                Some(rest) => { return module_tag(rest) },
+                None => {},
+            }
         }
-        let toks = lex(src)
-        let prog = parse(toks)
-        var skip: [int32] = []
-        for d in prog.decls {
+        match rel_under(path, self.project_root) {
+            Some(rest) => { return module_tag(rest) },
+            None => {},
+        }
+        // above the project root (`..` imports): one `up` per level climbed
+        let ps = segments(path)
+        let rs = segments(self.project_root)
+        var common = 0
+        while common < len(ps) && common < len(rs) && ps[common] == rs[common] {
+            common = common + 1
+        }
+        var parts: [str] = []
+        var i = common
+        while i < len(rs) {
+            push(parts, "up")
+            i = i + 1
+        }
+        i = common
+        while i < len(ps) {
+            push(parts, ps[i])
+            i = i + 1
+        }
+        return module_tag(parts)
+    }
+
+    // The module file for `p` imported from `importer`: `x.my`, or the package
+    // root `x/x.my`. No dots: the project root, then the stdlib root (`std.*`
+    // only the stdlib root); one dot: the importer's directory; more dots
+    // climb one level each.
+    fun resolve(self, importer: str, p: ImportPath) -> Result<str, Report> {
+        var bases: [str] = []
+        if p.dots == 0 {
+            if p.segments[0] != "std" { push(bases, self.project_root) }
+            if self.stdlib_root != "" { push(bases, self.stdlib_root) }
+        } else {
+            var base = dirname(importer)
+            var k = 1
+            while k < p.dots {
+                base = dirname(base)
+                k = k + 1
+            }
+            push(bases, base)
+        }
+        for base in bases {
+            var dir = base
+            var i = 0
+            while i < len(p.segments) - 1 {
+                dir = join_path(dir, p.segments[i])
+                i = i + 1
+            }
+            let last = p.segments[len(p.segments) - 1]
+            let file = join_path(dir, last + ".my")
+            let pkg = join_path(join_path(dir, last), last + ".my")
+            let has_file = self.readable(file)
+            let has_pkg = self.readable(pkg)
+            if has_file && has_pkg {
+                return Err(at(importer, p.line, p.col, format("ambiguous import '{}': both '{}.my' and a package '{}/' exist in {}", dotted(p), last, last, dir)))
+            }
+            if has_file { return Ok(file) }
+            if has_pkg { return Ok(pkg) }
+        }
+        if p.dots == 0 && p.segments[0] == "std" && self.stdlib_root == "" {
+            return Err(at(importer, p.line, p.col, format("cannot resolve import '{}': no standard library root was given", dotted(p))))
+        }
+        return Err(at(importer, p.line, p.col, format("cannot resolve import '{}'", dotted(p))))
+    }
+
+    // Load `path` and its imports (depth first) once each; its module index.
+    fun load(var self, path: str) -> Result<int32, Report> {
+        var k = 0
+        while k < len(self.modules) {
+            if self.modules[k].path == path { return Ok(k) }
+            k = k + 1
+        }
+        var src = ""
+        match get(self.overrides, path) {
+            Some(text) => { src = text },
+            None => {
+                match read_to_string(path) {
+                    Ok(s) => { src = s },
+                    Err(e) => { return Err(Report { kind: "module error", msg: format("cannot read module '{}'", path), path: path, line: 0, col: 0 }) },
+                }
+            },
+        }
+        push(self.spans, Span { first_id: self.next_id, path: path })
+        var parsed = match parse_source(src, self.next_id) {
+            Ok(x) => x,
+            Err(d) => { return Err(report(d, path)) },
+        }
+        self.next_id = parsed.next_id
+        var imports: [Decl] = []
+        var decls: [Decl] = []
+        for d in parsed.program.decls {
             match d.kind {
+                DeclKind.ImportDecl(p, items, alias, isp) => { push(imports, d) },
+                _ => { push(decls, d) },
+            }
+        }
+        let idx = len(self.modules) as int32
+        push(self.modules, Module { id: self.module_id(path), path: path, imports: imports, targets: [], decls: decls, exports: [:], bindings: [:] })
+        var targets: [int32] = []
+        for imp in imports {
+            match imp.kind {
                 DeclKind.ImportDecl(p, items, alias, isp) => {
-                    push(skip, d.line)
-                    self.load(resolve_path(path, p, self.stdlib_root))?
+                    let target = self.resolve(path, p)?
+                    push(targets, self.load(target)?)
                 },
                 _ => {},
             }
         }
-        push(self.parts, strip_lines(src, skip))
+        var m = self.modules[idx]
+        m.targets = targets
+        self.modules[idx] = m
+        return Ok(idx)
+    }
+
+    fun check_ids(self) -> Result<int32, Report> {
+        var seen: [str: str] = [:]
+        for m in self.modules {
+            if m.id == "" { continue }
+            match get(seen, m.id) {
+                Some(other) => { return Err(at(m.path, 0, 0, format("module id collision '{}' between {} and {}", m.id, other, m.path))) },
+                None => {},
+            }
+            seen[m.id] = m.path
+        }
+        return Ok(0)
+    }
+
+    fun build_exports(var self) {
+        var i = 0
+        while i < len(self.modules) {
+            var m = self.modules[i]
+            for d in m.decls {
+                match named(d) {
+                    Some(nd) => {
+                        if nd.is_pub { m.exports[nd.name] = Binding { is_module: false, value: qualify(m.id, nd.name) } }
+                    },
+                    None => {},
+                }
+            }
+            self.modules[i] = m
+            i = i + 1
+        }
+        // re-exports, until chains of them settle
+        var changed = true
+        while changed {
+            changed = false
+            i = 0
+            while i < len(self.modules) {
+                var m = self.modules[i]
+                var k = 0
+                while k < len(m.imports) {
+                    let src = self.modules[m.targets[k]]
+                    match m.imports[k].kind {
+                        DeclKind.ImportDecl(p, items, alias, isp) => {
+                            if isp {
+                                for b in reexports(src, items, alias) {
+                                    let cur = get(m.exports, b.name)
+                                    let fresh = match cur { Some(c) => !same_binding(c, b.binding), None => true }
+                                    if fresh {
+                                        m.exports[b.name] = b.binding
+                                        changed = true
+                                    }
+                                }
+                            }
+                        },
+                        _ => {},
+                    }
+                    k = k + 1
+                }
+                self.modules[i] = m
+                i = i + 1
+            }
+        }
+    }
+
+    fun build_bindings(var self) -> Result<int32, Report> {
+        var i = 0
+        while i < len(self.modules) {
+            var m = self.modules[i]
+            var bindings: [str: Binding] = [:]
+            for d in m.decls {
+                match named(d) {
+                    Some(nd) => { bindings[nd.name] = Binding { is_module: false, value: qualify(m.id, nd.name) } },
+                    None => {},
+                }
+            }
+            var k = 0
+            while k < len(m.imports) {
+                let imp = m.imports[k]
+                let src = self.modules[m.targets[k]]
+                match imp.kind {
+                    DeclKind.ImportDecl(p, items, alias, isp) => {
+                        for nb in import_bindings(src, p, items, alias) {
+                            if nb.missing {
+                                return Err(at(m.path, imp.line, imp.col, format("module '{}' does not export '{}' (declarations are private unless marked 'pub')", dotted(p), nb.name)))
+                            }
+                            let clash = match get(bindings, nb.name) { Some(c) => !same_binding(c, nb.binding), None => false }
+                            if clash {
+                                return Err(at(m.path, imp.line, imp.col, format("import of '{}' collides with an existing name in this module — rename with 'as'", nb.name)))
+                            }
+                            bindings[nb.name] = nb.binding
+                        }
+                    },
+                    _ => {},
+                }
+                k = k + 1
+            }
+            m.bindings = bindings
+            self.modules[i] = m
+            i = i + 1
+        }
         return Ok(0)
     }
 }
 
-// Amalgamate the module graph rooted at `entry` into a single source string
-// (imports removed). `std.*` imports resolve under `stdlib_root`.
-pub fun amalgamate(entry: str, stdlib_root: str) -> Result<str, str> {
-    var ld = new_loader(stdlib_root)
-    ld.load(entry)?
-    var sb = StringBuilder()
-    for part in ld.parts {
-        append(sb, part)
-        append(sb, "\n")
+// A name an import binds; `missing` when the imported module doesn't export it.
+struct NameBinding { name: str, binding: Binding, missing: bool }
+
+// What `pub from src import items` / `pub import src as alias` re-exports
+// (names `src` doesn't export yet are skipped: they may settle later).
+fun reexports(src: Module, items: Option<[ImportItem]>, alias: Option<str>) -> [NameBinding] {
+    var out: [NameBinding] = []
+    match items {
+        None => {
+            let a = alias_or(alias, "")
+            if a != "" { push(out, NameBinding { name: a, binding: Binding { is_module: true, value: src.id }, missing: false }) }
+        },
+        Some(its) => {
+            for it in its {
+                match get(src.exports, it.name) {
+                    Some(b) => { push(out, NameBinding { name: alias_or(it.alias, it.name), binding: b, missing: false }) },
+                    None => {},
+                }
+            }
+        },
     }
-    return Ok(build(sb))
+    return out
+}
+
+// What an import binds in the importing module.
+fun import_bindings(src: Module, p: ImportPath, items: Option<[ImportItem]>, alias: Option<str>) -> [NameBinding] {
+    var out: [NameBinding] = []
+    match items {
+        None => {
+            // `import a.b.c [as x]`: the module, for member access
+            let key = alias_or(alias, join(p.segments, "."))
+            push(out, NameBinding { name: key, binding: Binding { is_module: true, value: src.id }, missing: false })
+        },
+        Some(its) => {
+            for it in its {
+                match get(src.exports, it.name) {
+                    Some(b) => { push(out, NameBinding { name: alias_or(it.alias, it.name), binding: b, missing: false }) },
+                    None => { push(out, NameBinding { name: it.name, binding: Binding { is_module: false, value: "" }, missing: true }) },
+                }
+            }
+        },
+    }
+    return out
+}
+
+fun alias_or(alias: Option<str>, name: str) -> str {
+    return match alias { Some(a) => a, None => name }
+}
+
+// -- renaming ---------------------------------------------------------------
+
+struct Renamer {
+    env: [str: str],                    // name -> qualified, for declarations
+    aliases: [str: str],                // module access key -> module id
+    exports: [str: [str: Binding]],     // module id -> its exports
+    vals: [str],                        // local value names in scope
+    tys: [str],                         // type parameter names in scope
+    path: str,
+    err: Option<Report>,
+}
+
+fun mk_expr(e: Expr, k: ExprKind) -> Expr {
+    return Expr { id: e.id, line: e.line, col: e.col, kind: k }
+}
+
+fun tp_names(tps: [TypeParam]) -> [str] {
+    var out: [str] = []
+    for tp in tps { push(out, tp.name) }
+    return out
+}
+
+fun bind_names(bs: [BindElem]) -> [str] {
+    var out: [str] = []
+    for b in bs {
+        match b {
+            BindElem.BName(n, l, c) => { push(out, n) },
+            BindElem.BTuple(sub, l, c) => { for n in bind_names(sub) { push(out, n) } },
+            _ => {},
+        }
+    }
+    return out
+}
+
+fun pattern_binds(p: Pattern) -> [str] {
+    var out: [str] = []
+    match p.kind {
+        PatternKind.PBind(n) => { push(out, n) },
+        PatternKind.PEnum(en, v, elems, hp) => { for q in elems { for n in pattern_binds(q) { push(out, n) } } },
+        PatternKind.PTuple(elems) => { for q in elems { for n in pattern_binds(q) { push(out, n) } } },
+        PatternKind.PStruct(t, fps) => { for fp in fps { for n in pattern_binds(fp.pattern) { push(out, n) } } },
+        PatternKind.POr(alts) => { if len(alts) > 0 { out = pattern_binds(alts[0]) } },
+        _ => {},
+    }
+    return out
+}
+
+impl Renamer {
+    fun fail(var self, line: int32, col: int32, msg: str) {
+        match self.err {
+            None => { self.err = Some(at(self.path, line, col, msg)) },
+            Some(e) => {},
+        }
+    }
+
+    fun type_name(self, n: str) -> str {
+        if !has(self.tys, n) {
+            match get(self.env, n) { Some(q) => { return q }, None => {} }
+        }
+        return n
+    }
+
+    // -- declarations --
+
+    fun decl(var self, d: Decl, mid: str) -> Decl {
+        let k = match d.kind {
+            DeclKind.StructDecl(n, fields, attrs, tps, isp) => {
+                self.tys = tp_names(tps)
+                var fs: [Field] = []
+                for f in fields { push(fs, Field { line: f.line, col: f.col, name: f.name, ty: self.ty(f.ty) }) }
+                self.tys = []
+                DeclKind.StructDecl(qualify(mid, n), fs, attrs, tps, isp)
+            },
+            DeclKind.EnumDecl(n, variants, attrs, tps, isp) => {
+                self.tys = tp_names(tps)
+                var vs: [Variant] = []
+                for v in variants { push(vs, Variant { line: v.line, col: v.col, name: v.name, payload: self.ty_list(v.payload) }) }
+                self.tys = []
+                DeclKind.EnumDecl(qualify(mid, n), vs, attrs, tps, isp)
+            },
+            DeclKind.TypeAliasDecl(n, t, attrs, isp) => DeclKind.TypeAliasDecl(qualify(mid, n), self.ty(t), attrs, isp),
+            DeclKind.ConstDecl(n, t, v, attrs, isp) => {
+                self.vals = []
+                DeclKind.ConstDecl(qualify(mid, n), self.ty(t), self.expr(v), attrs, isp)
+            },
+            DeclKind.FunDecl(fd) => DeclKind.FunDecl(self.function(fd, qualify(mid, fd.name), false, [])),
+            DeclKind.TraitDecl(n, methods, tps, isp) => {
+                var ms: [FunData] = []
+                for m in methods { push(ms, self.signature(m)) }
+                DeclKind.TraitDecl(qualify(mid, n), ms, tps, isp)
+            },
+            DeclKind.ImplDecl(target, methods, tps, itrait, targs) => {
+                self.tys = tp_names(tps)
+                push(self.tys, "Self")
+                let target2 = self.ty(target)
+                let targs2 = self.ty_list(targs)
+                var trait2 = itrait
+                match itrait { Some(tn) => { trait2 = Some(self.type_name(tn)) }, None => {} }
+                let tps2 = self.bounds(tps)
+                self.tys = []
+                var ms: [FunData] = []
+                for m in methods { push(ms, self.function(m, m.name, true, tp_names(tps))) }
+                DeclKind.ImplDecl(target2, ms, tps2, trait2, targs2)
+            },
+            _ => d.kind,
+        }
+        return Decl { id: d.id, line: d.line, col: d.col, kind: k }
+    }
+
+    // type parameters with their bounds (trait names) renamed
+    fun bounds(self, tps: [TypeParam]) -> [TypeParam] {
+        var out: [TypeParam] = []
+        for tp in tps {
+            var bs: [str] = []
+            for b in tp.bounds { push(bs, self.type_name(b)) }
+            push(out, TypeParam { line: tp.line, col: tp.col, name: tp.name, bounds: bs })
+        }
+        return out
+    }
+
+    fun params(self, ps: [Param]) -> [Param] {
+        var out: [Param] = []
+        for p in ps { push(out, Param { line: p.line, col: p.col, name: p.name, ty: self.opt_ty(p.ty) }) }
+        return out
+    }
+
+    // a trait method: only its signature has names to rename
+    fun signature(var self, m: FunData) -> FunData {
+        let saved = self.tys
+        self.tys = tp_names(m.type_params)
+        push(self.tys, "Self")
+        let ps = self.params(m.params)
+        let rt = self.opt_ty(m.ret_type)
+        self.tys = saved
+        return FunData { line: m.line, col: m.col, name: m.name, params: ps, ret_type: rt, body: m.body, attributes: m.attributes, type_params: m.type_params, receiver: m.receiver, is_pub: m.is_pub }
+    }
+
+    fun function(var self, fd: FunData, name: str, receiver: bool, impl_params: [str]) -> FunData {
+        let saved = self.tys
+        self.tys = tp_names(fd.type_params)
+        for t in impl_params { push(self.tys, t) }
+        push(self.tys, "Self")
+        let ps = self.params(fd.params)
+        let rt = self.opt_ty(fd.ret_type)
+        let tps = self.bounds(fd.type_params)
+        self.vals = []
+        let attrs = self.attributes(fd.attributes)
+        for p in fd.params { push(self.vals, p.name) }
+        if receiver { push(self.vals, "self") }
+        var body = fd.body
+        match fd.body { Some(b) => { body = Some(self.block(b)) }, None => {} }
+        self.vals = []
+        self.tys = saved
+        return FunData { line: fd.line, col: fd.col, name: name, params: ps, ret_type: rt, body: body, attributes: attrs, type_params: tps, receiver: fd.receiver, is_pub: fd.is_pub }
+    }
+
+    // `#test` cases are expressions in the module's scope (MYLA-11)
+    fun attributes(var self, attrs: [Attribute]) -> [Attribute] {
+        var out: [Attribute] = []
+        for a in attrs {
+            if a.name != "test" {
+                push(out, a)
+                continue
+            }
+            var args: [Expr] = []
+            for x in a.args { push(args, self.expr(x)) }
+            var outputs: Option<[Expr]> = None
+            match a.outputs {
+                Some(os) => {
+                    var renamed: [Expr] = []
+                    for o in os { push(renamed, self.expr(o)) }
+                    outputs = Some(renamed)
+                },
+                None => {},
+            }
+            push(out, Attribute { line: a.line, col: a.col, name: a.name, args: args, outputs: outputs })
+        }
+        return out
+    }
+
+    // -- types --
+
+    fun ty(self, t: TypeExpr) -> TypeExpr {
+        let k = match t.kind {
+            TypeKind.TRef(n, args) => TypeKind.TRef(self.type_name(n), self.ty_list(args)),
+            TypeKind.TTuple(es) => TypeKind.TTuple(self.ty_list(es)),
+            TypeKind.TList(e) => TypeKind.TList(self.ty(e)),
+            TypeKind.TMap(a, b) => TypeKind.TMap(self.ty(a), self.ty(b)),
+            TypeKind.TFn(ps, r) => TypeKind.TFn(self.ty_list(ps), self.ty(r)),
+        }
+        return TypeExpr { id: t.id, line: t.line, col: t.col, kind: k }
+    }
+
+    fun ty_list(self, ts: [TypeExpr]) -> [TypeExpr] {
+        var out: [TypeExpr] = []
+        for t in ts { push(out, self.ty(t)) }
+        return out
+    }
+
+    fun opt_ty(self, t: Option<TypeExpr>) -> Option<TypeExpr> {
+        return match t { Some(x) => Some(self.ty(x)), None => None }
+    }
+
+    // -- statements --
+
+    fun block(var self, b: Block) -> Block {
+        let saved = self.vals
+        var out: [Stmt] = []
+        for s in b.stmts { push(out, self.stmt(s)) }
+        self.vals = saved
+        return Block { line: b.line, col: b.col, stmts: out }
+    }
+
+    fun stmt(var self, s: Stmt) -> Stmt {
+        let k = match s.kind {
+            StmtKind.VarDecl(kind, n, t, init) => {
+                let init2 = self.expr(init)
+                let t2 = self.opt_ty(t)
+                push(self.vals, n)
+                StmtKind.VarDecl(kind, n, t2, init2)
+            },
+            StmtKind.DestructDecl(kind, bs, t, init) => {
+                let init2 = self.expr(init)
+                let t2 = self.opt_ty(t)
+                for n in bind_names([bs]) { push(self.vals, n) }
+                StmtKind.DestructDecl(kind, bs, t2, init2)
+            },
+            StmtKind.Assign(target, value) => {
+                let t2 = self.expr(target)
+                StmtKind.Assign(t2, self.expr(value))
+            },
+            StmtKind.IfS(c, then, otherwise) => {
+                let c2 = self.expr(c)
+                let then2 = self.block(then)
+                StmtKind.IfS(c2, then2, self.else_tail(otherwise))
+            },
+            StmtKind.WhileS(c, body) => {
+                let c2 = self.expr(c)
+                StmtKind.WhileS(c2, self.block(body))
+            },
+            StmtKind.ForS(v, start, end, body, iter) => {
+                let start2 = self.opt_expr(start)
+                let end2 = self.opt_expr(end)
+                let iter2 = self.opt_expr(iter)
+                let saved = self.vals
+                push(self.vals, v)
+                let body2 = self.block(body)
+                self.vals = saved
+                StmtKind.ForS(v, start2, end2, body2, iter2)
+            },
+            StmtKind.ReturnS(v) => StmtKind.ReturnS(self.opt_expr(v)),
+            StmtKind.ExprStmt(x) => StmtKind.ExprStmt(self.expr(x)),
+            _ => s.kind,
+        }
+        return Stmt { id: s.id, line: s.line, col: s.col, kind: k }
+    }
+
+    fun else_tail(var self, t: Option<ElseTail>) -> Option<ElseTail> {
+        return match t {
+            Some(ElseTail.ElseBlock(b)) => Some(ElseTail.ElseBlock(self.block(b))),
+            Some(ElseTail.ElseIf(s)) => Some(ElseTail.ElseIf(self.stmt(s))),
+            _ => None,
+        }
+    }
+
+    fun body(var self, b: ExprOrBlock) -> ExprOrBlock {
+        return match b {
+            ExprOrBlock.EB_Expr(x) => ExprOrBlock.EB_Expr(self.expr(x)),
+            ExprOrBlock.EB_Block(bl) => ExprOrBlock.EB_Block(self.block(bl)),
+        }
+    }
+
+    // -- expressions --
+
+    fun exprs(var self, es: [Expr]) -> [Expr] {
+        var out: [Expr] = []
+        for e in es { push(out, self.expr(e)) }
+        return out
+    }
+
+    fun opt_expr(var self, e: Option<Expr>) -> Option<Expr> {
+        return match e { Some(x) => Some(self.expr(x)), None => None }
+    }
+
+    fun expr(var self, e: Expr) -> Expr {
+        match e.kind {
+            ExprKind.Name(n) => {
+                if !has(self.vals, n) {
+                    match get(self.env, n) { Some(q) => { return mk_expr(e, ExprKind.Name(q)) }, None => {} }
+                    match get(self.aliases, n) {
+                        Some(m) => { self.fail(e.line, e.col, format("module '{}' cannot be used as a value — access a member with '{}.<name>'", n, n)) },
+                        None => {},
+                    }
+                }
+                return e
+            },
+            ExprKind.GetField(target, f) => {
+                match self.module_access(e) { Some(r) => { return r }, None => {} }
+                return mk_expr(e, ExprKind.GetField(self.expr(target), f))
+            },
+            ExprKind.MatchE(scrut, arms) => {
+                let scrut2 = self.expr(scrut)
+                var arms2: [MatchArm] = []
+                for a in arms {
+                    let saved = self.vals
+                    let pat = self.pattern(a.pattern)
+                    for n in pattern_binds(a.pattern) { push(self.vals, n) }
+                    let guard = self.opt_expr(a.guard)
+                    let body = self.body(a.body)
+                    self.vals = saved
+                    push(arms2, MatchArm { line: a.line, col: a.col, pattern: pat, guard: guard, body: body })
+                }
+                return mk_expr(e, ExprKind.MatchE(scrut2, arms2))
+            },
+            ExprKind.Lambda(ps, rt, body) => {
+                let saved = self.vals
+                var ps2: [Param] = []
+                for p in ps {
+                    push(ps2, Param { line: p.line, col: p.col, name: p.name, ty: self.opt_ty(p.ty) })
+                    push(self.vals, p.name)
+                }
+                let rt2 = self.opt_ty(rt)
+                let body2 = self.body(body)
+                self.vals = saved
+                return mk_expr(e, ExprKind.Lambda(ps2, rt2, body2))
+            },
+            _ => {},
+        }
+        let k = match e.kind {
+            ExprKind.Unary(op, x) => ExprKind.Unary(op, self.expr(x)),
+            ExprKind.Binary(op, a, b) => {
+                let a2 = self.expr(a)
+                ExprKind.Binary(op, a2, self.expr(b))
+            },
+            ExprKind.Call(c, args) => {
+                let c2 = self.expr(c)
+                ExprKind.Call(c2, self.exprs(args))
+            },
+            ExprKind.StructLit(n, fields) => {
+                var fs: [FieldInit] = []
+                for f in fields { push(fs, FieldInit { line: f.line, col: f.col, name: f.name, value: self.expr(f.value) }) }
+                ExprKind.StructLit(self.type_name(n), fs)
+            },
+            ExprKind.TupleLit(es) => ExprKind.TupleLit(self.exprs(es)),
+            ExprKind.TupleIndex(t, i) => ExprKind.TupleIndex(self.expr(t), i),
+            ExprKind.ListLit(es) => ExprKind.ListLit(self.exprs(es)),
+            ExprKind.MapLit(entries) => {
+                var es: [MapEntry] = []
+                for en in entries {
+                    let key = self.expr(en.key)
+                    push(es, MapEntry { key: key, value: self.expr(en.value) })
+                }
+                ExprKind.MapLit(es)
+            },
+            ExprKind.Index(t, i) => {
+                let t2 = self.expr(t)
+                ExprKind.Index(t2, self.expr(i))
+            },
+            ExprKind.Try(x) => ExprKind.Try(self.expr(x)),
+            ExprKind.Cast(x, t) => {
+                let x2 = self.expr(x)
+                ExprKind.Cast(x2, self.ty(t))
+            },
+            _ => e.kind,
+        }
+        return mk_expr(e, k)
+    }
+
+    // `alias.member[.field…]`: the module prefix (the longest one that names a
+    // module) folds into the qualified member; what follows stays field
+    // accesses. The new nodes reuse the ids of the ones they replace.
+    fun module_access(var self, e: Expr) -> Option<Expr> {
+        var names: [str] = []       // field names, outermost first
+        var nodes: [Expr] = []      // their GetField nodes
+        var cur = e
+        var walking = true
+        while walking {
+            match cur.kind {
+                ExprKind.GetField(t, f) => {
+                    push(names, f)
+                    push(nodes, cur)
+                    cur = t
+                },
+                _ => { walking = false },
+            }
+        }
+        var root = ""
+        match cur.kind { ExprKind.Name(n) => { root = n }, _ => { return None } }
+        if has(self.vals, root) { return None }
+        let cnt = len(names) as int32
+        // segment s (innermost first) is names[cnt - 1 - s]
+        var k = cnt
+        var key = ""
+        var mid = ""
+        var found = false
+        while k >= 0 && !found {
+            key = root
+            var s = 0
+            while s < k {
+                key = key + "." + names[cnt - 1 - s]
+                s = s + 1
+            }
+            match get(self.aliases, key) {
+                Some(m) => {
+                    mid = m
+                    found = true
+                },
+                None => { k = k - 1 },
+            }
+        }
+        if !found { return None }
+        if k == cnt {
+            self.fail(cur.line, cur.col, format("module '{}' cannot be used as a value — access a member with '.<name>'", key))
+            return Some(e)
+        }
+        var s = k
+        var qualified = ""
+        while s < cnt && qualified == "" {
+            let name = names[cnt - 1 - s]
+            var exports: [str: Binding] = [:]
+            match get(self.exports, mid) { Some(x) => { exports = x }, None => {} }
+            match get(exports, name) {
+                Some(b) => {
+                    if b.is_module { mid = b.value } else { qualified = b.value }
+                },
+                None => {
+                    self.fail(cur.line, cur.col, format("module does not export '{}' (declarations are private unless marked 'pub')", name))
+                    return Some(e)
+                },
+            }
+            s = s + 1
+        }
+        if qualified == "" {
+            self.fail(cur.line, cur.col, "a module reference must end in a member access")
+            return Some(e)
+        }
+        var node = mk_expr(nodes[cnt - s], ExprKind.Name(qualified))
+        while s < cnt {
+            node = mk_expr(nodes[cnt - 1 - s], ExprKind.GetField(node, names[cnt - 1 - s]))
+            s = s + 1
+        }
+        return Some(node)
+    }
+
+    // -- patterns: enum and struct names --
+
+    fun patterns(var self, ps: [Pattern]) -> [Pattern] {
+        var out: [Pattern] = []
+        for p in ps { push(out, self.pattern(p)) }
+        return out
+    }
+
+    fun pattern(var self, p: Pattern) -> Pattern {
+        let k = match p.kind {
+            PatternKind.PLit(x) => PatternKind.PLit(self.expr(x)),
+            PatternKind.PEnum(en, v, elems, hp) => {
+                var en2 = en
+                match en { Some(n) => { en2 = Some(self.type_name(n)) }, None => {} }
+                PatternKind.PEnum(en2, v, self.patterns(elems), hp)
+            },
+            PatternKind.PTuple(elems) => PatternKind.PTuple(self.patterns(elems)),
+            PatternKind.PStruct(n, fps) => {
+                var fps2: [FieldPat] = []
+                for fp in fps { push(fps2, FieldPat { line: fp.line, col: fp.col, name: fp.name, pattern: self.pattern(fp.pattern) }) }
+                PatternKind.PStruct(self.type_name(n), fps2)
+            },
+            PatternKind.POr(alts) => PatternKind.POr(self.patterns(alts)),
+            _ => p.kind,
+        }
+        return Pattern { id: p.id, line: p.line, col: p.col, kind: k }
+    }
+}
+
+fun decl_env(bindings: [str: Binding]) -> [str: str] {
+    var out: [str: str] = [:]
+    for k in keys(bindings) {
+        let b = bindings[k]
+        if !b.is_module { out[k] = b.value }
+    }
+    return out
+}
+
+fun module_env(bindings: [str: Binding]) -> [str: str] {
+    var out: [str: str] = [:]
+    for k in keys(bindings) {
+        let b = bindings[k]
+        if b.is_module { out[k] = b.value }
+    }
+    return out
+}
+
+// The stdlib root for a tool started as `argv0` (MYLA-31): `src/myla` next
+// to the `build/` directory the tools live in, so `build/myla` works from any
+// directory; plain `src/myla` when argv0 has no directory part.
+pub fun default_stdlib_root(argv0: str) -> str {
+    var has_dir = false
+    for c in chars(argv0) { if c == '/' { has_dir = true } }
+    if !has_dir { return "src/myla" }
+    return normalize(join_path(dirname(argv0), "../src/myla"))
+}
+
+// Load and link the program rooted at `entry`; `std.*` imports resolve under
+// `stdlib_root` ("" for none).
+pub fun load_program(entry: str, stdlib_root: str) -> Result<Loaded, Report> {
+    return load_program_with(entry, stdlib_root, [:])
+}
+
+// The same, reading the files in `overrides` (path -> text) from there
+// instead: an editor's unsaved buffers (MYLA-80).
+pub fun load_program_with(entry: str, stdlib_root: str, overrides: [str: str]) -> Result<Loaded, Report> {
+    let e = normalize(entry)
+    var stdlib = ""
+    if stdlib_root != "" { stdlib = normalize(stdlib_root) }
+    var normalized: [str: str] = [:]
+    for p in keys(overrides) { normalized[normalize(p)] = overrides[p] }
+    var ld = Loader { stdlib_root: stdlib, project_root: dirname(e), entry: e, modules: [], next_id: 0, spans: [], overrides: normalized }
+    ld.load(e)?
+    ld.check_ids()?
+    ld.build_exports()
+    ld.build_bindings()?
+    var exports: [str: [str: Binding]] = [:]
+    for m in ld.modules { exports[m.id] = m.exports }
+    var decls: [Decl] = []
+    for m in ld.modules {
+        var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: None }
+        for d in m.decls { push(decls, r.decl(d, m.id)) }
+        match r.err { Some(e) => { return Err(e) }, None => {} }
+    }
+    return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans })
 }

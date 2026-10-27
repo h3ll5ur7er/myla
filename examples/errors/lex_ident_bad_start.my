@@ -1,0 +1,6 @@
+//~ lex error: unexpected character
+// An identifier starts with `_` or a letter (Unicode XID_Start); a middle
+// dot may continue one but not start it.
+fun main() {
+    let ·count = 1
+}

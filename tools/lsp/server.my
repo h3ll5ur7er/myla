@@ -1,0 +1,747 @@
+// server.my: the language server's state and its handling of messages
+// (MYLA-80).
+//
+// Documents are synced in full. Opening or saving a document checks it as
+// soon as no other message is waiting; a change waits until no message has
+// come for DEBOUNCE_MS, so a burst of keystrokes is checked once. A check
+// runs the self-hosted loader and checker with the text of every open
+// document, and publishes the error, if any, for the file it is in (MYLA-10);
+// files that showed an error from an earlier check of the same document are
+// cleared.
+
+from std.io import stdin
+from std.json import Json, field
+from std.fs import read_to_string
+from ...selfhost.loader import load_program_with, file_of, normalize
+from ...selfhost.diag import Report, type_report
+from ...selfhost.checker import build_checker_decls
+from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
+from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
+from .symbols import Symbol, SymKind, Range, document_symbols, outline, best_match, lsp_kind, start_key, is_member_kind, kind_eq
+from .features import Location, identifier_at, identifier_ranges, render, is_member_access, completion_keywords, lexes, completion_attempts
+from .workspace import Workspace, Entry, new_workspace
+from .semantic import semantic_tokens, token_types, token_modifiers
+from .resolve import Resolution, Outline, Completion, Def, DefKind, resolve, resolve_at, at_position, same_def, is_global, render_local
+
+const DEBOUNCE_MS: int32 = 400
+
+// JSON-RPC error codes.
+const PARSE_ERROR: int64 = -32700
+const METHOD_NOT_FOUND: int64 = -32601
+
+pub struct Server {
+    ch: Channel,
+    stdlib: str,
+    docs: [str: str],              // uri -> text of each open document
+    dirty: [str],                  // uris to check
+    urgent: bool,                  // check them without waiting (open, save)
+    elsewhere: [str: [str]],       // checked uri -> other uris it published errors for
+    shut_down: bool,
+    ws: Workspace,                 // the files under the workspace roots
+    good: [str: Good],             // uri -> the last text that parsed, and its outline (MYLA-51)
+    resolved: [str: Resolved],     // uri -> its last resolution
+    known: [str: Outline],         // module path -> its outline, for resolving imports
+    stamp: int,                    // counts notifications: any may change what a name means
+}
+
+// A document's resolution, while its text and the stamp are the same.
+struct Resolved { text: str, stamp: int, res: Resolution }
+
+// The last text of a document that parsed, and its outline.
+struct Good { text: str, symbols: [Symbol] }
+
+pub fun new_server(stdlib: str) -> Server {
+    return Server { ch: Channel { input: stdin() }, stdlib: stdlib, docs: [:], dirty: [], urgent: false,
+                    elsewhere: [:], shut_down: false, ws: new_workspace(), good: [:], resolved: [:], known: [:], stamp: 0 }
+}
+
+impl Server {
+    // Serve until `exit` or the end of the input; the exit status.
+    fun run(var self) -> int32 {
+        while true {
+            if len(self.dirty) > 0 {
+                var wait = DEBOUNCE_MS
+                if self.urgent { wait = 0 }
+                if !self.ch.ready(wait) { self.check_dirty() }
+            }
+            if len(self.dirty) == 0 || self.ch.ready(0) {
+                match self.ch.next() {
+                    Incoming.Message(msg) => {
+                        if !self.handle(msg) {
+                            if self.shut_down { return 0 }
+                            return 1
+                        }
+                    },
+                    Incoming.Malformed => { send(error_response(Json.Null, PARSE_ERROR, "the message isn't JSON")) },
+                    Incoming.End => { return 0 },
+                }
+            }
+        }
+        unreachable()
+    }
+
+    // Handle one message; false for `exit`.
+    fun handle(var self, msg: Json) -> bool {
+        let method = str_field(msg, "method")
+        let params = field_or_null(msg, "params")
+        let id = field(msg, "id")
+        if method == "" { return true }                 // a response to us
+        if method == "exit" { return false }
+        match id {
+            Some(i) => {},
+            None => { self.stamp = self.stamp + 1 },
+        }
+        if method == "initialize" {
+            self.ws.roots = workspace_roots(params)
+            self.reply(id, initialize_result())
+        } else if method == "shutdown" {
+            self.shut_down = true
+            self.reply(id, Json.Null)
+        } else if method == "textDocument/didOpen" {
+            let doc = field_or_null(params, "textDocument")
+            self.docs[str_field(doc, "uri")] = str_field(doc, "text")
+            self.remember(str_field(doc, "uri"))
+            self.mark(str_field(doc, "uri"), true)
+        } else if method == "textDocument/didChange" {
+            let uri = str_field(field_or_null(params, "textDocument"), "uri")
+            match field(params, "contentChanges") {
+                Some(Json.Array(changes)) => {
+                    if len(changes) > 0 {
+                        self.docs[uri] = str_field(changes[len(changes) - 1], "text")
+                        self.mark(uri, false)
+                    }
+                },
+                _ => {},
+            }
+        } else if method == "textDocument/didSave" {
+            self.mark(str_field(field_or_null(params, "textDocument"), "uri"), true)
+        } else if method == "workspace/didChangeWorkspaceFolders" {
+            self.change_folders(field_or_null(params, "event"))
+        } else if method == "workspace/didChangeWatchedFiles" {
+            // nothing more to do (the stamp changed): workspace files are read
+            // again on each request, and their declarations kept only while
+            // their text is the same
+        } else if method == "textDocument/didClose" {
+            let uri = str_field(field_or_null(params, "textDocument"), "uri")
+            remove(self.docs, uri)
+            if contains(self.good, uri) { remove(self.good, uri) }
+            if contains(self.resolved, uri) { remove(self.resolved, uri) }
+            var still: [str] = []
+            for u in self.dirty {
+                if u != uri { push(still, u) }
+            }
+            self.dirty = still
+            publish(uri, [])
+        } else if method == "textDocument/documentSymbol" {
+            self.reply(id, self.document_symbol(params))
+        } else if method == "textDocument/definition" {
+            self.reply(id, self.definition(params))
+        } else if method == "textDocument/hover" {
+            self.reply(id, self.hover(params))
+        } else if method == "textDocument/references" {
+            self.reply(id, self.references(params))
+        } else if method == "textDocument/completion" {
+            self.reply(id, self.completion(params))
+        } else if method == "textDocument/semanticTokens/full" {
+            self.reply(id, self.semantic(params))
+        } else {
+            match id {
+                Some(i) => { send(error_response(i, METHOD_NOT_FOUND, format("unhandled method {}", method))) },
+                None => {},                              // a notification we don't need
+            }
+        }
+        return true
+    }
+
+    fun reply(var self, id: Option<Json>, result: Json) {
+        match id {
+            Some(i) => { send(response(i, result)) },
+            None => {},
+        }
+    }
+
+    // Queue `uri` for a check.
+    fun mark(var self, uri: str, urgent: bool) {
+        var queued = false
+        for u in self.dirty {
+            if u == uri { queued = true }
+        }
+        if !queued { push(self.dirty, uri) }
+        if urgent { self.urgent = true }
+    }
+
+    fun check_dirty(var self) {
+        let uris = self.dirty
+        self.dirty = []
+        self.urgent = false
+        for uri in uris {
+            if contains(self.docs, uri) { self.check(uri) }
+        }
+    }
+
+    // Check the document `uri` and publish what was found.
+    fun check(var self, uri: str) {
+        let path = uri_path(uri)
+        if path == "" { return }
+        var overrides: [str: str] = [:]
+        for u in keys(self.docs) {
+            let p = uri_path(u)
+            if p != "" { overrides[p] = self.docs[u] }
+        }
+        var found: Option<Report> = None
+        match load_program_with(path, self.stdlib, overrides) {
+            Err(r) => { found = Some(r) },
+            Ok(prog) => {
+                match build_checker_decls(prog.decls, prog.next_id) {
+                    Ok(c) => {},
+                    Err(e) => { found = Some(type_report(e.line, e.col, e.msg, file_of(prog, e.decl))) },
+                }
+            },
+        }
+        // no lex or parse error in the document: its text is a good one
+        var parsed = true
+        match found {
+            Some(r) => {
+                if (r.kind == "lex error" || r.kind == "parse error") && normalize(r.path) == normalize(path) { parsed = false }
+            },
+            None => {},
+        }
+        if parsed { self.remember(uri) }
+        // the checked document always gets a (maybe empty) list, which clears it
+        var groups: [str: [Json]] = [:]
+        groups[uri] = []
+        match found {
+            Some(r) => {
+                let target = self.uri_of(r.path, path, uri)
+                let text = match get(overrides, normalize(r.path)) {
+                    Some(t) => t,
+                    None => match read_to_string(r.path) {
+                        Ok(t) => t,
+                        Err(e) => "",
+                    },
+                }
+                groups[target] = [diagnostic(r, text)]
+            },
+            None => {},
+        }
+        var stale: [str] = []
+        match get(self.elsewhere, uri) {
+            Some(us) => { stale = us },
+            None => {},
+        }
+        for u in stale {
+            if !contains(groups, u) { groups[u] = [] }
+        }
+        var shown: [str] = []
+        for u in keys(groups) {
+            if u != uri && len(groups[u]) > 0 { push(shown, u) }
+        }
+        self.elsewhere[uri] = shown
+        // the checked document first, then the others
+        publish(uri, groups[uri])
+        for u in keys(groups) {
+            if u != uri { publish(u, groups[u]) }
+        }
+    }
+
+    // --- requests (MYLA-80 step 2) ---------------------------------------------
+
+    // The text of every open document, by path.
+    fun overrides(self) -> [str: str] {
+        var out: [str: str] = [:]
+        for u in keys(self.docs) {
+            let p = uri_path(u)
+            if p != "" { out[normalize(p)] = self.docs[u] }
+        }
+        return out
+    }
+
+    // The open document a request is about. When its text doesn't parse,
+    // the outline is the last good text's, and when it doesn't lex, so are
+    // the identifiers (MYLA-51: an edit in progress shouldn't switch off the
+    // features; positions after the edit may be off until it parses again).
+    fun doc_of(var self, params: Json) -> Option<Doc> {
+        let uri = str_field(field_or_null(params, "textDocument"), "uri")
+        let text = match get(self.docs, uri) {
+            Some(t) => t,
+            None => { return None },
+        }
+        let path = normalize(uri_path(uri))
+        match get(self.good, uri) {
+            Some(g) => {
+                if g.text == text { return Some(Doc { uri: uri, path: path, text: text, symbols: g.symbols }) }
+            },
+            None => {},
+        }
+        match outline(text) {
+            Some(symbols) => {
+                self.good[uri] = Good { text: text, symbols: symbols }
+                return Some(Doc { uri: uri, path: path, text: text, symbols: symbols })
+            },
+            None => {},
+        }
+        return match get(self.good, uri) {
+            Some(g) => {
+                var t = text
+                if !lexes(text) { t = g.text }
+                Some(Doc { uri: uri, path: path, text: t, symbols: g.symbols })
+            },
+            None => Some(Doc { uri: uri, path: path, text: text, symbols: [] }),
+        }
+    }
+
+    // Keep the document's current text as its last good one if it parses.
+    fun remember(var self, uri: str) {
+        let text = match get(self.docs, uri) {
+            Some(t) => t,
+            None => { return },
+        }
+        match get(self.good, uri) {
+            Some(g) => {
+                if g.text == text { return }
+            },
+            None => {},
+        }
+        match outline(text) {
+            Some(symbols) => { self.good[uri] = Good { text: text, symbols: symbols } },
+            None => {},
+        }
+    }
+
+    // Add and remove workspace roots.
+    fun change_folders(var self, event: Json) {
+        var removed: [str] = []
+        match field(event, "removed") {
+            Some(Json.Array(fs)) => {
+                for f in fs { push(removed, normalize(uri_path(str_field(f, "uri")))) }
+            },
+            _ => {},
+        }
+        var roots: [str] = []
+        for r in self.ws.roots {
+            var gone = false
+            for x in removed {
+                if x == r { gone = true }
+            }
+            if !gone { push(roots, r) }
+        }
+        match field(event, "added") {
+            Some(Json.Array(fs)) => {
+                for f in fs {
+                    let p = uri_path(str_field(f, "uri"))
+                    if p != "" { push(roots, normalize(p)) }
+                }
+            },
+            _ => {},
+        }
+        self.ws.roots = roots
+    }
+
+    // What the document's identifiers refer to (MYLA-51), by scope and
+    // through the imports as the loader finds them; made again when its text
+    // changed or a notification came.
+    fun resolution(var self, d: Doc) -> Resolution {
+        match get(self.resolved, d.uri) {
+            Some(r) => {
+                if r.stamp == self.stamp && r.text == d.text { return r.res }
+            },
+            None => {},
+        }
+        let res = resolve(d.path, d.text, self.stdlib, self.overrides(), self.known)
+        self.known = res.known
+        self.resolved[d.uri] = Resolved { text: d.text, stamp: self.stamp, res: res }
+        return res
+    }
+
+    // The declaration the identifier at `pos` refers to, when resolved.
+    fun resolved_at(var self, d: Doc, pos: Pos) -> Option<Def> {
+        let r = self.resolution(d)
+        if !r.ok { return None }
+        return at_position(r, pos)
+    }
+
+    fun document_symbol(var self, params: Json) -> Json {
+        return match self.doc_of(params) {
+            Some(d) => symbol_tree(d.symbols, -1),
+            None => Json.Array([]),
+        }
+    }
+
+    fun definition(var self, params: Json) -> Json {
+        let d = match self.doc_of(params) {
+            Some(x) => x,
+            None => { return Json.Null },
+        }
+        let pos = position_of(params)
+        let ident = match identifier_at(d.text, pos.line, pos.character) {
+            Some(n) => n,
+            None => { return Json.Null },
+        }
+        match self.resolved_at(d, pos) {
+            Some(def) => { return location(def.path, def.range) },
+            None => {},
+        }
+        match best_match(d.symbols, ident) {
+            Some(s) => { return location(d.path, s.selection) },
+            None => {},
+        }
+        let matches = self.ws.lookup(ident, self.overrides())
+        if len(matches) == 0 { return Json.Null }
+        return location(matches[0].path, matches[0].range)
+    }
+
+    fun hover(var self, params: Json) -> Json {
+        let d = match self.doc_of(params) {
+            Some(x) => x,
+            None => { return Json.Null },
+        }
+        let pos = position_of(params)
+        let ident = match identifier_at(d.text, pos.line, pos.character) {
+            Some(n) => n,
+            None => { return Json.Null },
+        }
+        var text = ""
+        match self.resolved_at(d, pos) {
+            Some(def) => {
+                match def.kind {
+                    DefKind.Global(k) => { text = render(def.name, k, def.detail) },
+                    _ => { text = render_local(def) },
+                }
+            },
+            None => {
+                match best_match(d.symbols, ident) {
+                    Some(s) => { text = render(s.name, s.kind, s.detail) },
+                    None => {
+                        let matches = self.ws.lookup(ident, self.overrides())
+                        if len(matches) == 0 { return Json.Null }
+                        text = render(matches[0].name, matches[0].kind, matches[0].detail)
+                    },
+                }
+            },
+        }
+        let contents = Json.Object([("kind", Json.Str("markdown")), ("value", Json.Str("```myla\n" + text + "\n```"))])
+        return Json.Object([("contents", contents)])
+    }
+
+    fun references(var self, params: Json) -> Json {
+        var none: [Json] = []
+        let d = match self.doc_of(params) {
+            Some(x) => x,
+            None => { return Json.Array(none) },
+        }
+        let pos = position_of(params)
+        let ident = match identifier_at(d.text, pos.line, pos.character) {
+            Some(n) => n,
+            None => { return Json.Array(none) },
+        }
+        let include_decl = match field(field_or_null(params, "context"), "includeDeclaration") {
+            Some(Json.Bool(b)) => b,
+            _ => true,
+        }
+        let res = self.resolution(d)
+        var target: Option<Def> = None
+        if res.ok { target = at_position(res, pos) }
+        var found: [Location] = []
+        var decls: [Location] = []
+        match target {
+            Some(def) => {
+                // by declaration: a local's uses are in this document; a
+                // global's occurrences are those of its name, less those that
+                // mean something else here and the locals of other files
+                var other: [int: bool] = [:]
+                for u in res.uses {
+                    if !same_def(u.def, def) { other[start_key(u.range)] = true }
+                }
+                for x in res.defs {
+                    if !same_def(x, def) { other[start_key(x.range)] = true }
+                }
+                if !include_decl { push(decls, Location { path: def.path, range: def.range }) }
+                if !is_global(def) {
+                    push(found, Location { path: def.path, range: def.range })
+                    for u in res.uses {
+                        if same_def(u.def, def) { push(found, Location { path: d.path, range: u.range }) }
+                    }
+                } else {
+                    for r in identifier_ranges(d.text, ident) {
+                        if !contains(other, start_key(r)) { push(found, Location { path: d.path, range: r }) }
+                    }
+                    for l in self.ws.references(ident, self.overrides()) {
+                        if l.path != d.path { push(found, l) }
+                    }
+                }
+            },
+            None => {
+                for r in identifier_ranges(d.text, ident) { push(found, Location { path: d.path, range: r }) }
+                for l in self.ws.references(ident, self.overrides()) { push(found, l) }
+                if !include_decl {
+                    for s in d.symbols {
+                        if s.name == ident { push(decls, Location { path: d.path, range: s.selection }) }
+                    }
+                }
+            },
+        }
+        var seen: [str: bool] = [:]
+        for x in decls { seen[f"{x.path}:{start_key(x.range)}"] = true }
+        var out: [Json] = []
+        for l in found {
+            let key = f"{l.path}:{start_key(l.range)}"
+            if !contains(seen, key) {
+                seen[key] = true
+                push(out, location(l.path, l.range))
+            }
+        }
+        return Json.Array(out)
+    }
+
+    fun semantic(self, params: Json) -> Json {
+        var data: [Json] = []
+        // the current text, even when it doesn't lex (none then): the last
+        // good text's tokens would be in the wrong places
+        match get(self.docs, str_field(field_or_null(params, "textDocument"), "uri")) {
+            Some(text) => {
+                for n in semantic_tokens(text) { push(data, Json.Int(n)) }
+            },
+            None => {},
+        }
+        return Json.Object([("data", Json.Array(data))])
+    }
+
+    fun completion(var self, params: Json) -> Json {
+        var items: [Json] = []
+        let d = match self.doc_of(params) {
+            Some(x) => x,
+            None => { return completion_list(items) },
+        }
+        let pos = position_of(params)
+        let ctx = self.completion_context(d, pos)
+        var seen: [str: bool] = [:]
+        if ctx.found && (ctx.known || !ctx.member) {
+            // the receiver's members; or the locals in scope, then the rest
+            for m in ctx.items {
+                if !contains(seen, m.name) {
+                    seen[m.name] = true
+                    push(items, def_item(m))
+                }
+            }
+            if ctx.member { return completion_list(items) }
+        }
+        let member = is_member_access(d.text, pos.line, pos.character)
+        var pool: [Entry] = []
+        for s in d.symbols {
+            push(pool, Entry { name: s.name, kind: s.kind, detail: s.detail, path: d.path, range: s.selection })
+        }
+        for e in self.ws.all_entries(self.overrides()) { push(pool, e) }
+        if !member {
+            for kw in completion_keywords() {
+                if !contains(seen, "kw:" + kw) {
+                    seen["kw:" + kw] = true
+                    push(items, Json.Object([("label", Json.Str(kw)), ("kind", Json.Int(14))]))
+                }
+            }
+        }
+        for e in pool {
+            let key = format("{}:{}", lsp_kind(e.kind), e.name)
+            if is_member_kind(e.kind) == member && !kind_eq(e.kind, SymKind.Impl) && !contains(seen, key) {
+                seen[key] = true
+                push(items, completion_item(e))
+            }
+        }
+        return completion_list(items)
+    }
+
+    // What completes at `pos` in the document's current text (see
+    // completion_attempts): nothing found when no attempt parses.
+    fun completion_context(var self, d: Doc, pos: Pos) -> Completion {
+        let text = match get(self.docs, d.uri) {
+            Some(t) => t,
+            None => d.text,
+        }
+        for a in completion_attempts(text, pos.line, pos.character) {
+            let r = resolve_at(d.path, a.text, self.stdlib, self.overrides(), self.known, a.want)
+            if r.ok {
+                self.known = r.known
+                if r.completion.found { return r.completion }
+            }
+        }
+        return Completion { found: false, member: false, known: false, items: [] }
+    }
+
+    // The URI to publish an error in `file` under: the checked document's
+    // own, an open document's, or one made from the path.
+    fun uri_of(self, file: str, checked_path: str, checked_uri: str) -> str {
+        let f = normalize(file)
+        if f == normalize(checked_path) { return checked_uri }
+        for u in keys(self.docs) {
+            let p = uri_path(u)
+            if p != "" && normalize(p) == f { return u }
+        }
+        return path_uri(f)
+    }
+}
+
+fun publish(uri: str, diagnostics: [Json]) {
+    let params = Json.Object([("uri", Json.Str(uri)), ("diagnostics", Json.Array(diagnostics))])
+    send(notification("textDocument/publishDiagnostics", params))
+}
+
+fun position(p: Pos) -> Json {
+    return Json.Object([("line", Json.Int(p.line as int64)), ("character", Json.Int(p.character as int64))])
+}
+
+// A diagnostic for report `r` in a file whose text is `text`: from the
+// reported column to the end of the word there, on the same line.
+fun diagnostic(r: Report, text: str) -> Json {
+    var start = Pos { line: 0, character: 0 }
+    var end = Pos { line: 0, character: 1 }
+    if r.line > 0 {
+        let lines = lines_of(text)
+        var col = r.col
+        if col < 1 { col = 1 }
+        start = to_lsp(lines, r.line, col)
+        var line_text = ""
+        if start.line < len(lines) { line_text = lines[start.line] }
+        end = to_lsp(lines, r.line, word_end(line_text, col))
+    }
+    let range = Json.Object([("start", position(start)), ("end", position(end))])
+    return Json.Object([("range", range), ("message", Json.Str(r.msg)), ("severity", Json.Int(1)),
+                        ("source", Json.Str("myla")), ("code", Json.Str(kind_code(r.kind)))])
+}
+
+// "type error" -> "type"
+#test("type error")["type"]
+#test("module error")["module"]
+fun kind_code(kind: str) -> str {
+    var sb = StringBuilder()
+    for i in 0..len(kind) {
+        if kind[i] == ' ' { return build(sb) }
+        append_byte(sb, kind[i])
+    }
+    return build(sb)
+}
+
+fun initialize_result() -> Json {
+    let sync = Json.Object([("openClose", Json.Bool(true)), ("change", Json.Int(1)),
+                            ("save", Json.Object([("includeText", Json.Bool(false))]))])
+    let caps = Json.Object([("positionEncoding", Json.Str("utf-16")), ("textDocumentSync", sync),
+                            ("completionProvider", Json.Object([("triggerCharacters", strings(["."]))])), ("hoverProvider", Json.Bool(true)),
+                            ("definitionProvider", Json.Bool(true)), ("referencesProvider", Json.Bool(true)),
+                            ("documentSymbolProvider", Json.Bool(true)), ("semanticTokensProvider", semantic_provider()),
+                            ("workspace", Json.Object([("workspaceFolders", Json.Object([("supported", Json.Bool(true)), ("changeNotifications", Json.Bool(true))]))]))])
+    let info = Json.Object([("name", Json.Str("myla")), ("version", Json.Str("0.1"))])
+    return Json.Object([("capabilities", caps), ("serverInfo", info)])
+}
+
+// The open document a request is about: `text` is what to look up tokens in
+// and `symbols` its outline (both maybe the last good text's, see doc_of).
+struct Doc { uri: str, path: str, text: str, symbols: [Symbol] }
+
+// The workspace roots the client named: its folders, else rootUri, else
+// rootPath.
+fun workspace_roots(params: Json) -> [str] {
+    var roots: [str] = []
+    match field(params, "workspaceFolders") {
+        Some(Json.Array(folders)) => {
+            for f in folders {
+                let p = uri_path(str_field(f, "uri"))
+                if p != "" { push(roots, normalize(p)) }
+            }
+        },
+        _ => {},
+    }
+    if len(roots) == 0 {
+        let p = uri_path(str_field(params, "rootUri"))
+        if p != "" { push(roots, normalize(p)) }
+    }
+    if len(roots) == 0 && str_field(params, "rootPath") != "" { push(roots, normalize(str_field(params, "rootPath"))) }
+    return roots
+}
+
+fun position_of(params: Json) -> Pos {
+    let p = field_or_null(params, "position")
+    var line = 0
+    var character = 0
+    match field(p, "line") { Some(Json.Int(n)) => { line = n as int32 }, _ => {} }
+    match field(p, "character") { Some(Json.Int(n)) => { character = n as int32 }, _ => {} }
+    return Pos { line: line, character: character }
+}
+
+fun range_json(r: Range) -> Json {
+    return Json.Object([("start", position(r.start)), ("end", position(r.end))])
+}
+
+fun location(path: str, r: Range) -> Json {
+    return Json.Object([("uri", Json.Str(path_uri(path))), ("range", range_json(r))])
+}
+
+// The symbols whose parent is `parent`, as DocumentSymbols with their members.
+fun symbol_tree(symbols: [Symbol], parent: int32) -> Json {
+    var out: [Json] = []
+    var i = 0
+    while i < len(symbols) {
+        let s = symbols[i]
+        if s.parent == parent {
+            var members: [(str, Json)] = [("name", Json.Str(s.name)), ("kind", Json.Int(lsp_kind(s.kind))),
+                                         ("range", range_json(s.range)), ("selectionRange", range_json(s.selection))]
+            if s.detail != "" { push(members, ("detail", Json.Str(s.detail))) }
+            push(members, ("children", symbol_tree(symbols, i)))
+            push(out, Json.Object(members))
+        }
+        i = i + 1
+    }
+    return Json.Array(out)
+}
+
+// The LSP CompletionItemKind of a declaration.
+fun completion_kind(k: SymKind) -> int64 {
+    return match k {
+        SymKind.Function => 3,
+        SymKind.Method => 2,
+        SymKind.Struct => 22,
+        SymKind.Enum => 13,
+        SymKind.EnumMember => 20,
+        SymKind.Interface => 8,
+        SymKind.Field => 5,
+        SymKind.Constant => 21,
+        SymKind.TypeAlias => 7,
+        SymKind.Impl => 1,
+    }
+}
+
+fun completion_item(e: Entry) -> Json {
+    var members: [(str, Json)] = [("label", Json.Str(e.name)), ("kind", Json.Int(completion_kind(e.kind)))]
+    if e.detail != "" { push(members, ("detail", Json.Str(e.detail))) }
+    return Json.Object(members)
+}
+
+// A completion item for a declaration the resolver found.
+fun def_item(d: Def) -> Json {
+    var kind: int64 = 6                       // Variable
+    var detail = d.ty
+    match d.kind {
+        DefKind.Global(k) => {
+            kind = completion_kind(k)
+            detail = d.detail
+        },
+        DefKind.TypeParam => { kind = 25 },
+        DefKind.Module => { kind = 9 },
+        _ => {},
+    }
+    var members: [(str, Json)] = [("label", Json.Str(d.name)), ("kind", Json.Int(kind))]
+    if detail != "" { push(members, ("detail", Json.Str(detail))) }
+    return Json.Object(members)
+}
+
+fun completion_list(items: [Json]) -> Json {
+    return Json.Object([("isIncomplete", Json.Bool(false)), ("items", Json.Array(items))])
+}
+
+fun strings(xs: [str]) -> Json {
+    var out: [Json] = []
+    for x in xs { push(out, Json.Str(x)) }
+    return Json.Array(out)
+}
+
+fun semantic_provider() -> Json {
+    let legend = Json.Object([("tokenTypes", strings(token_types())), ("tokenModifiers", strings(token_modifiers()))])
+    return Json.Object([("legend", legend), ("full", Json.Bool(true))])
+}

@@ -1,4 +1,5 @@
 //~ runtime error: string index 5 out of bounds
+//~ native: runtime error: index out of bounds
 // Byte indexing past the end traps at runtime (D40), like a list index.
 #main
 fun main() {

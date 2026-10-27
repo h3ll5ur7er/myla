@@ -1,0 +1,210 @@
+// workspace.my: the declarations and identifiers of every `.my` file under
+// the workspace roots (MYLA-80), for cross-file definition, references,
+// hover and completion. Files come from
+// `find` (Myla has no directory listing), sorted; open documents count with
+// their unsaved text. A file's declarations are kept until its text changes.
+
+from std.process import run, Output
+from std.fs import read_to_string
+from ...selfhost.lexer import lex
+from ...selfhost.parser import parse_source
+from ...selfhost.loader import normalize
+from .symbols import Symbol, SymKind, Range, outline_parsed, priority, start_key
+from .features import Location, index_identifiers
+from .resolve import local_ranges
+from .text import lines_of
+
+// A declaration in some file.
+pub struct Entry { name: str, kind: SymKind, detail: str, path: str, range: Range }
+
+// What a file's text gives, kept while the text stays the same: its
+// declarations, its identifiers by name, and which of them are locals.
+struct Cached { text: str, entries: [Entry], idents: [str: [Range]], locals: [int: bool] }
+
+pub struct Workspace {
+    roots: [str],
+    cache: [str: Cached],
+}
+
+pub fun new_workspace() -> Workspace {
+    return Workspace { roots: [], cache: [:] }
+}
+
+fun indexable(k: SymKind) -> bool {
+    return match k {
+        SymKind.Field => false,
+        SymKind.Impl => false,
+        _ => true,
+    }
+}
+
+// What the text of the file `path` gives, from one lexing and parsing: the
+// declarations worth finding from other files (not fields or impls), the
+// identifiers (when it lexes) and which are locals (when it parses).
+fun analyse(path: str, text: str) -> Cached {
+    var entries: [Entry] = []
+    var locals: [int: bool] = [:]
+    let toks = match lex(text) {
+        Ok(t) => t,
+        Err(d) => { return Cached { text: text, entries: entries, idents: [:], locals: locals } },
+    }
+    match parse_source(text, 0) {
+        Ok(parsed) => {
+            for s in outline_parsed(text, toks, parsed.program) {
+                if indexable(s.kind) { push(entries, Entry { name: s.name, kind: s.kind, detail: s.detail, path: path, range: s.selection }) }
+            }
+            for r in local_ranges(path, text, toks, parsed.program) { locals[start_key(r)] = true }
+        },
+        Err(d) => {},
+    }
+    return Cached { text: text, entries: entries, idents: index_identifiers(lines_of(text), toks), locals: locals }
+}
+
+// `a` sorts before `b` (by bytes).
+#test("a", "b")[true]
+#test("ab", "a")[false]
+#test("a", "a")[false]
+fun before(a: str, b: str) -> bool {
+    var i = 0
+    while i < len(a) && i < len(b) {
+        if a[i] != b[i] { return a[i] < b[i] }
+        i = i + 1
+    }
+    return len(a) < len(b)
+}
+
+// `xs` sorted (merge sort).
+#test(["b", "c", "a"])[["a", "b", "c"]]
+fun sorted(xs: [str]) -> [str] {
+    if len(xs) <= 1 { return xs }
+    var left: [str] = []
+    var right: [str] = []
+    var i = 0
+    while i < len(xs) {
+        if i < len(xs) / 2 { push(left, xs[i]) } else { push(right, xs[i]) }
+        i = i + 1
+    }
+    let l = sorted(left)
+    let r = sorted(right)
+    var out: [str] = []
+    var a = 0
+    var b = 0
+    while a < len(l) || b < len(r) {
+        if b >= len(r) || (a < len(l) && !before(r[b], l[a])) {
+            push(out, l[a])
+            a = a + 1
+        } else {
+            push(out, r[b])
+            b = b + 1
+        }
+    }
+    return out
+}
+
+fun decode(bytes: [uint8]) -> str {
+    var sb = StringBuilder()
+    for b in bytes { append_byte(sb, b) }
+    return build(sb)
+}
+
+impl Workspace {
+    // The `.my` files under the roots, skipping the directories
+    // workspace.py skips.
+    fun files(self) -> [str] {
+        var seen: [str: bool] = [:]
+        var out: [str] = []
+        for root in self.roots {
+            let argv = ["find", root, "(", "-name", ".git", "-o", "-name", ".venv", "-o", "-name", "node_modules", "-o", "-name", "__pycache__", "-o", "-name", "build", "-o", "-name", "out", ")", "-prune", "-o", "-type", "f", "-name", "*.my", "-print"]
+            match run("/usr/bin/env", argv) {
+                Ok(o) => {
+                    var sb = StringBuilder()
+                    for b in o.stdout {
+                        if b == '\n' {
+                            let p = normalize(build(sb))
+                            sb = StringBuilder()
+                            if !contains(seen, p) {
+                                seen[p] = true
+                                push(out, p)
+                            }
+                        } else {
+                            append_byte(sb, b)
+                        }
+                    }
+                },
+                Err(e) => {},
+            }
+        }
+        return sorted(out)
+    }
+
+    // The text of `path`: its open document's, else the file's ("" when it
+    // can't be read).
+    fun text_of(self, path: str, overrides: [str: str]) -> str {
+        return match get(overrides, path) {
+            Some(t) => t,
+            None => match read_to_string(path) {
+                Ok(t) => t,
+                Err(e) => "",
+            },
+        }
+    }
+
+    // The cache entry for `path`, made again when its text changed.
+    fun cached(var self, path: str, overrides: [str: str]) -> Cached {
+        let text = self.text_of(path, overrides)
+        match get(self.cache, path) {
+            Some(c) => {
+                if c.text == text { return c }
+            },
+            None => {},
+        }
+        let c = analyse(path, text)
+        self.cache[path] = c
+        return c
+    }
+
+    fun entries_for(var self, path: str, overrides: [str: str]) -> [Entry] {
+        return self.cached(path, overrides).entries
+    }
+
+    fun all_entries(var self, overrides: [str: str]) -> [Entry] {
+        var out: [Entry] = []
+        for path in self.files() {
+            for e in self.entries_for(path, overrides) { push(out, e) }
+        }
+        return out
+    }
+
+    // The declarations named `name`, highest priority first (stable).
+    fun lookup(var self, name: str, overrides: [str: str]) -> [Entry] {
+        var matches: [Entry] = []
+        for e in self.all_entries(overrides) {
+            if e.name == name { push(matches, e) }
+        }
+        var out: [Entry] = []
+        for p in 0..4 {
+            for e in matches {
+                if priority(e.kind) == p { push(out, e) }
+            }
+        }
+        return out
+    }
+
+    // Every identifier `name` in the workspace's files that isn't a local
+    // (MYLA-51: a parameter `total` is no reference to a function `total`).
+    fun references(var self, name: str, overrides: [str: str]) -> [Location] {
+        var out: [Location] = []
+        for path in self.files() {
+            let c = self.cached(path, overrides)
+            match get(c.idents, name) {
+                Some(ranges) => {
+                    for r in ranges {
+                        if !contains(c.locals, start_key(r)) { push(out, Location { path: path, range: r }) }
+                    }
+                },
+                None => {},
+            }
+        }
+        return out
+    }
+}

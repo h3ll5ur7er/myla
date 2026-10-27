@@ -1,6 +1,6 @@
 """The Myla lexer: source text -> list of Tokens.
 
-Implements the lexical grammar in docs/grammar.md §1. The lexer is a single
+Implements the lexical grammar in docs/Language/Lexical-structure.md The lexer is a single
 forward pass that tracks 1-based line/column positions, skips whitespace and
 comments, coalesces runs of blank lines into a single NEWLINE separator, and
 emits a trailing EOF token.
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from .errors import LexError
 from .tokens import FLOAT_SUFFIXES, INT_SUFFIXES, KEYWORDS, Token, TokenKind
+from .unicode_ident import is_ident_start, is_ident_continue
 
 # Multi-character operators, longest first so the scanner matches greedily.
 _TWO_CHAR_OPS: dict[str, TokenKind] = {
@@ -53,30 +54,25 @@ _ONE_CHAR_OPS: dict[str, TokenKind] = {
     ".": TokenKind.DOT,
     "#": TokenKind.HASH,
     "?": TokenKind.QUESTION,
+    ";": TokenKind.SEMI,
 }
 
-_STRING_ESCAPES: dict[str, str] = {
-    "n": "\n",
-    "t": "\t",
-    "\\": "\\",
-    '"': '"',
-}
-
-# Char-literal escapes -> the Unicode scalar they denote. `'\''` and `'\0'` are
-# char-only; `'\u{…}'` (handled separately) names an arbitrary scalar (v0.5.3).
-_CHAR_ESCAPES: dict[str, int] = {
+# Escapes -> the Unicode scalar they denote, the same in chars, strings and
+# f-strings (D72, MYLA-86); `\u{…}` (handled separately) names any scalar.
+_ESCAPES: dict[str, int] = {
     "n": 10,
     "t": 9,
     "r": 13,
-    "\\": 92,
-    "'": 39,
     "0": 0,
+    "\\": 92,
+    '"': 34,
+    "'": 39,
 }
 
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
-# Digit alphabets per integer base (docs/grammar.md: int_lit).
+# Digit alphabets per integer base (docs/Language/Lexical-structure.md: int_lit).
 _BASE_DIGITS: dict[int, str] = {
     2: "01",
     8: "01234567",
@@ -86,12 +82,15 @@ _BASE_DIGITS: dict[int, str] = {
 _BASE_PREFIX: dict[str, int] = {"x": 16, "b": 2, "o": 8}
 
 
-def _is_ident_start(c: str) -> bool:
-    return c.isalpha() or c == "_"
+# Identifiers are `_` or XID_Start, then XID_Continue (D72, MYLA-84), from a
+# generated table rather than this Python's Unicode version.
+_is_ident_start = is_ident_start
+_is_ident_continue = is_ident_continue
 
 
-def _is_ident_continue(c: str) -> bool:
-    return c.isalnum() or c == "_"
+def _is_digit(c: str) -> bool:
+    """An ASCII digit: literals are ASCII (`str.isdigit` also takes `١`)."""
+    return "0" <= c <= "9" and len(c) == 1
 
 
 class Lexer:
@@ -155,7 +154,7 @@ class Lexer:
                 self._string()
             elif c == "'":
                 self._char()
-            elif c.isdigit():
+            elif _is_digit(c):
                 self._number()
             elif _is_ident_start(c):
                 self._identifier()
@@ -200,12 +199,7 @@ class Lexer:
                 esc_line, esc_col = self.line, self.column
                 if self._at_end():
                     raise LexError("unterminated string literal", start_line, start_col)
-                esc = self._advance()
-                if esc not in _STRING_ESCAPES:
-                    raise LexError(
-                        f"invalid escape sequence '\\{esc}'", esc_line, esc_col
-                    )
-                chars.append(_STRING_ESCAPES[esc])
+                chars.append(chr(self._escape(esc_line, esc_col, "string")))
             else:
                 chars.append(c)
         value = "".join(chars)
@@ -261,12 +255,9 @@ class Lexer:
                     raise LexError(
                         "unterminated f-string literal", start_line, start_col
                     )
-                esc = self._advance()
-                if esc not in _STRING_ESCAPES:
-                    raise LexError(
-                        f"invalid escape sequence '\\{esc}'", esc_line, esc_col
-                    )
-                fmt_chars.append(_STRING_ESCAPES[esc])
+                ch = chr(self._escape(esc_line, esc_col, "string"))
+                # an escaped brace is text: doubled, `format` keeps it
+                fmt_chars.append(ch * 2 if ch in "{}" else ch)
                 continue
             self._advance()
             fmt_chars.append(c)
@@ -361,13 +352,7 @@ class Lexer:
             esc_line, esc_col = self.line, self.column
             if self._at_end():
                 raise LexError("unterminated char literal", start_line, start_col)
-            esc = self._advance()
-            if esc == "u":
-                cp = self._unicode_escape(esc_line, esc_col)
-            elif esc in _CHAR_ESCAPES:
-                cp = _CHAR_ESCAPES[esc]
-            else:
-                raise LexError(f"invalid escape sequence '\\{esc}'", esc_line, esc_col)
+            cp = self._escape(esc_line, esc_col, "char")
         else:
             cp = ord(c)
         if self._at_end() or self._peek() != "'":
@@ -379,12 +364,22 @@ class Lexer:
         lexeme = self.source[start_pos:self.pos]
         self._add(TokenKind.CHAR, lexeme, start_line, start_col, value=cp)
 
-    def _unicode_escape(self, line: int, col: int) -> int:
-        """Parse the body of a `\\u{HEX}` char escape (the cursor is just past the
+    def _escape(self, line: int, col: int, literal: str) -> int:
+        """The scalar of the escape whose letter is at the cursor (just past the
+        backslash, at `line`:`col`), in a `literal` ("char" or "string")."""
+        esc = self._advance()
+        if esc == "u":
+            return self._unicode_escape(line, col, literal)
+        if esc not in _ESCAPES:
+            raise LexError(f"invalid escape sequence '\\{esc}'", line, col)
+        return _ESCAPES[esc]
+
+    def _unicode_escape(self, line: int, col: int, literal: str) -> int:
+        """Parse the body of a `\\u{HEX}` escape (the cursor is just past the
         `u`). Returns the Unicode scalar; rejects empty/oversized values and the
         surrogate range."""
         if self._at_end() or self._advance() != "{":
-            raise LexError("expected '{' after '\\u' in char literal", line, col)
+            raise LexError(f"expected '{{' after '\\u' in {literal} literal", line, col)
         digits: list[str] = []
         while not self._at_end() and self._peek() != "}":
             d = self._advance()
@@ -400,7 +395,7 @@ class Lexer:
         cp = int("".join(digits), 16)
         if cp > 0x10FFFF or 0xD800 <= cp <= 0xDFFF:
             raise LexError(
-                f"invalid Unicode scalar U+{cp:X} in char literal "
+                f"invalid Unicode scalar U+{cp:X} in {literal} literal "
                 "(must be 0..0x10FFFF and not a surrogate)",
                 line, col,
             )
@@ -470,7 +465,7 @@ class Lexer:
 
         # Fractional part: only when a digit follows the dot, so `2..10` stays a
         # range (`INT DOTDOT INT`) and `t.0` tuple indexing is unaffected.
-        if self._peek() == "." and self._peek(1).isdigit():
+        if self._peek() == "." and _is_digit(self._peek(1)):
             self._advance()  # .
             frac_digits = self._scan_digits(10)
             is_float = True
@@ -478,7 +473,7 @@ class Lexer:
         # Exponent: `e`/`E` with an optional sign, then digits.
         if self._peek() in ("e", "E"):
             nxt = self._peek(1)
-            if nxt.isdigit() or (nxt in ("+", "-") and self._peek(2).isdigit()):
+            if _is_digit(nxt) or (nxt in ("+", "-") and _is_digit(self._peek(2))):
                 self._advance()  # e / E
                 sign = ""
                 if self._peek() in ("+", "-"):
@@ -491,7 +486,7 @@ class Lexer:
         if self._peek() == "f":
             suffix_pos = self.pos
             self._advance()  # f
-            while self._peek().isdigit():
+            while _is_digit(self._peek()):
                 self._advance()
             candidate = self.source[suffix_pos:self.pos]
             if candidate not in FLOAT_SUFFIXES:
@@ -530,7 +525,7 @@ class Lexer:
         if self._peek() in ("i", "u"):
             suffix_pos = self.pos
             self._advance()  # i / u
-            while self._peek().isdigit():
+            while _is_digit(self._peek()):
                 self._advance()
             candidate = self.source[suffix_pos:self.pos]
             if candidate not in INT_SUFFIXES:

@@ -3,7 +3,7 @@
 Myla modules are an entirely *front-end* concern: this stage turns an entry file
 plus its `import` graph into a single, flat `ast.Program` with globally-unique
 declaration names, which the existing checker / interpreter / compiler consume
-unchanged (docs/v0.5-modules-and-runtime.md §1).
+unchanged (docs/Architecture/Module-loader.md).
 
 Pipeline:
     link(entry) -> load every reachable module once (memoized by canonical path)
@@ -29,11 +29,12 @@ A *binding* (the thing a name resolves to) is one of:
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 
 from . import ast
-from .errors import ModuleError
+from .errors import ModuleError, in_file
 from .lexer import tokenize
 from .parser import parse
 
@@ -170,13 +171,33 @@ def _resolve_module_path(importer_path: str, path: ast.ImportPath,
     raise ModuleError(f"cannot resolve import '{dotted}'", line, col)
 
 
-def _module_id(abspath: str, entry_path: str, project_root: str) -> str:
+def _module_id(abspath: str, entry_path: str, project_root: str,
+               stdlib_root: str | None = None) -> str:
+    """The id prefixing a module's global names, by the self-hosted loader's
+    rules (selfhost/loader.my, `module_id`): "" for the entry, the path under
+    the stdlib root for the standard library, under the project root for the
+    project, and above it one `up` per level climbed (MYLA-81: `../x` and `x`
+    no longer collide, and both toolchains name things alike)."""
     if abspath == entry_path:
         return ""
-    rel = os.path.relpath(abspath, project_root)
+    parts = abspath.split(os.sep)
+    for root in ([stdlib_root] if stdlib_root else []) + [project_root]:
+        rs = root.rstrip(os.sep).split(os.sep)
+        if parts[:len(rs)] == rs:
+            return _module_tag(parts[len(rs):])
+    rs = project_root.rstrip(os.sep).split(os.sep)
+    common = 0
+    while common < min(len(parts), len(rs)) and parts[common] == rs[common]:
+        common += 1
+    return _module_tag(["up"] * (len(rs) - common) + parts[common:])
+
+
+def _module_tag(parts: list[str]) -> str:
+    """Path segments as a `$`-joined tag valid in qualified names and assembly
+    labels (`.my` dropped, each run of other characters one `$`)."""
+    rel = "/".join(parts)
     if rel.endswith(".my"):
         rel = rel[:-3]
-    # Sanitize into a `$`-joined tag valid in qualified names + asm labels.
     return re.sub(r"[^A-Za-z0-9_]+", "$", rel).strip("$")
 
 
@@ -264,6 +285,13 @@ class _Renamer:
         saved_t = self.type_locals
         self.type_locals = set(fn.type_params) | set(impl_params or []) | {"Self"}
         self._signature_types(fn)
+        # `#test` cases are expressions in the module's scope (MYLA-11)
+        self.value_locals = set()
+        for attr in fn.attributes:
+            if attr.name == "test":
+                attr.args = [self._expr(a) for a in attr.args]
+                if attr.outputs is not None:
+                    attr.outputs = [self._expr(o) for o in attr.outputs]
         self.value_locals = {p.name for p in fn.params}
         if receiver:
             self.value_locals.add("self")
@@ -590,15 +618,17 @@ def link(
                     source = fh.read()
             except OSError as exc:
                 raise ModuleError(f"cannot read module '{abspath}': {exc}")
-        program = parse(tokenize(source))
-        mid = _module_id(abspath, entry_abs, project_root)
+        with in_file(abspath):
+            program = parse(tokenize(source))
+        mid = _module_id(abspath, entry_abs, project_root, stdlib_root)
         m = _Module(mid, abspath, program, source)
         modules[abspath] = m
         order.append(m)
         for imp in m.imports:
-            target = _resolve_module_path(
-                abspath, imp.path, project_root, stdlib_root
-            )
+            with in_file(abspath):
+                target = _resolve_module_path(
+                    abspath, imp.path, project_root, stdlib_root
+                )
             load(target)
         return m
 
@@ -609,12 +639,39 @@ def link(
 
     module_exports = {m.id: m.exports for m in order}
     for m in order:
-        _Renamer(m.env_decl(), m.module_aliases(), module_exports).rename_module(m)
+        with in_file(m.path):
+            _Renamer(m.env_decl(), m.module_aliases(), module_exports).rename_module(m)
 
     merged: list[ast.Decl] = []
     for m in order:
+        _mark_source_path(m)
         merged.extend(m.decls)
     return ast.Program(merged)
+
+
+def _mark_source_path(m: _Module) -> None:
+    """Record the file each declaration (and method) comes from as
+    `source_path`: the checker and interpreter attribute errors to it (MYLA-10),
+    the native backend emits debug line tables against it (MYLA-71)."""
+    for d in m.decls:
+        d.source_path = m.path
+        if isinstance(d, ast.ImplDecl):
+            for method in d.methods:
+                method.source_path = m.path
+        for lam in _lambdas(d):
+            lam.source_path = m.path
+
+
+def _lambdas(node):
+    """Every lambda in `node`'s subtree."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _lambdas(item)
+    elif isinstance(node, ast.Node):
+        if isinstance(node, ast.Lambda):
+            yield node
+        for f in dataclasses.fields(node):
+            yield from _lambdas(getattr(node, f.name))
 
 
 def _check_id_collisions(order: list[_Module]) -> None:
@@ -678,8 +735,9 @@ def _build_bindings(modules, order, project_root, stdlib_root) -> None:
         bindings: dict[str, tuple] = {}
         for d in _named_decls(m):
             bindings[d.name] = ("decl", m.qualify(d.name))
-        for imp in m.imports:
-            _apply_import(m, imp, bindings, modules, project_root, stdlib_root)
+        with in_file(m.path):
+            for imp in m.imports:
+                _apply_import(m, imp, bindings, modules, project_root, stdlib_root)
         m.bindings = bindings
 
 

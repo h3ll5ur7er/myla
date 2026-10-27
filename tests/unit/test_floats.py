@@ -142,6 +142,26 @@ class TestFormatFloat(unittest.TestCase):
             v = random.uniform(-1e6, 1e6) * (10 ** random.randint(-9, 9))
             self.assertEqual(float(format_float(v, self.F64)), v)
 
+    def test_roundtrip_f64_over_the_whole_range(self):
+        import random
+        random.seed(29)
+        for _ in range(20000):
+            v = struct.unpack("<d", struct.pack("<Q", random.getrandbits(63)))[0]
+            if v != v or v == math.inf:
+                continue
+            self.assertEqual(float(format_float(v, self.F64)), v, repr(v))
+
+    def test_largest_magnitudes_print_correctly_rounded_digits(self):
+        # Dekker's split overflowed for operands above ~1.3e300 (the largest
+        # doubles, and tiny ones scaled by 10^300..10^308), so the correction
+        # term was dropped (the interpreter) or turned into garbage (native
+        # code) (MYLA-29).
+        for v in (1.7976931348623157e308, 3e300, 9.999999999999999e299, 1e-290,
+                  1.2345678901234567e-288):
+            expected = ("%.16e" % v).split("e")[0].replace(".", "").rstrip("0")
+            got = format_float(v, self.F64).lstrip("0.").replace(".", "").rstrip("0")
+            self.assertEqual(got, expected, repr(v))
+
     def test_roundtrip_f32(self):
         import random
         random.seed(13)
@@ -172,6 +192,40 @@ class TestFloatInterpreter(unittest.TestCase):
     def test_casts(self):
         self.assertEqual(run("fun main() { print(3.9 as int32) }\n"), "3\n")
         self.assertEqual(run("fun main() { print(5 as float64) }\n"), "5\n")
+
+    def test_float_to_int_casts_saturate(self):
+        # D59 (MYLA-6): truncate toward zero, clamp to the target's range, NaN -> 0
+        src = (
+            "fun main() {\n"
+            "    let z: float64 = 0.0\n"
+            "    let big: float64 = 1e19\n"
+            "    let huge: float64 = 3e19\n"
+            "    print((z / z) as int32)\n"
+            "    print((1.0f64 / z) as int32)\n"
+            "    print((-1.0f64 / z) as int64)\n"
+            "    print(big as uint64)\n"
+            "    print(big as int64)\n"
+            "    print(huge as uint64)\n"
+            "    print(300.0 as uint8)\n"
+            "    print(-300.0 as int8)\n"
+            "    print(-1.5 as uint8)\n"
+            "    print(-2.9 as int8)\n"
+            "}\n"
+        )
+        self.assertEqual(run(src).split(), [
+            "0", "2147483647", "-9223372036854775808", "10000000000000000000",
+            "9223372036854775807", "18446744073709551615", "255", "-128", "0", "-2"])
+
+    def test_const_float_to_int_casts_saturate(self):
+        src = (
+            "const BIG: float64 = 1e19\n"
+            "const A: uint64 = BIG as uint64\n"
+            "const B: int64 = BIG as int64\n"
+            "const C: uint8 = 300.0 as uint8\n"
+            "const D: int32 = (0.0f64 / 0.0f64) as int32\n"
+            "fun main() {\n    print(A)\n    print(B)\n    print(C)\n    print(D)\n}\n"
+        )
+        self.assertEqual(run(src).split(), ["10000000000000000000", "9223372036854775807", "255", "0"])
 
 
 if __name__ == "__main__":

@@ -2,8 +2,8 @@
   "Function": {
     "prefix": "fun",
     "body": [
-      "fun ${1:name}(${2:params}) -> ${3:Type} {",
-      "    ${0}",
+      "fun ${1:name}(${2:x}: ${3:int}) -> ${4:int} {",
+      "    ${0:return x}",
       "}"
     ],
     "description": "Create a Myla function"
@@ -11,26 +11,17 @@
   "Function without return type": {
     "prefix": "funv",
     "body": [
-      "fun ${1:name}(${2:params}) {",
+      "fun ${1:name}(${2:x}: ${3:int}) {",
       "    ${0}",
       "}"
     ],
     "description": "Create a Myla function without an explicit return type"
   },
-  "Async function": {
-    "prefix": "async fun",
-    "body": [
-      "async fun ${1:name}(${2:params}) -> ${3:Type} {",
-      "    ${0}",
-      "}"
-    ],
-    "description": "Create an async Myla function"
-  },
   "Struct": {
     "prefix": "struct",
     "body": [
       "struct ${1:Name} {",
-      "    ${2:field}: ${3:Type}",
+      "    ${2:field}: ${3:int},",
       "}"
     ],
     "description": "Create a Myla struct"
@@ -49,19 +40,17 @@
     "prefix": "trait",
     "body": [
       "trait ${1:Name} {",
-      "    fun ${2:method}(${3:params}) -> ${4:Type} {",
-      "        ${0}",
-      "    }",
+      "    fun ${2:method}(self) -> ${3:int}",
       "}"
     ],
-    "description": "Create a Myla trait"
+    "description": "Create a Myla trait (method signatures only)"
   },
   "Impl": {
     "prefix": "impl",
     "body": [
       "impl ${1:Type} {",
-      "    fun ${2:method}(${3:params}) -> ${4:Type} {",
-      "        ${0}",
+      "    fun ${2:method}(self) -> ${3:int} {",
+      "        ${0:return 0}",
       "    }",
       "}"
     ],
@@ -71,62 +60,37 @@
     "prefix": "implfor",
     "body": [
       "impl ${1:Trait} for ${2:Type} {",
-      "    fun ${3:method}(${4:params}) -> ${5:Type} {",
-      "        ${0}",
+      "    fun ${3:method}(self) -> ${4:int} {",
+      "        ${0:return 0}",
       "    }",
       "}"
     ],
     "description": "Create a Myla trait implementation"
   },
-  "Actor": {
-    "prefix": "actor",
-    "body": [
-      "actor ${1:Name} {",
-      "    ${2:field}: ${3:Type}",
-      "",
-      "    fun ${4:method}(${5:params}) -> ${6:Type} {",
-      "        ${0}",
-      "    }",
-      "}"
-    ],
-    "description": "Create a Myla actor"
-  },
   "Type alias": {
     "prefix": "typealias",
-    "body": "typealias ${1:Name} = ${2:Type}",
+    "body": "typealias ${1:Name} = ${2:int}",
     "description": "Create a Myla type alias"
   },
   "Constant": {
     "prefix": "const",
-    "body": "const ${1:NAME}: ${2:Type} = ${0:value}",
+    "body": "const ${1:NAME}: ${2:int} = ${0:0}",
     "description": "Create a Myla constant"
   },
   "Match": {
     "prefix": "match",
     "body": [
       "match ${1:value} {",
-      "    ${2:pattern} => ${3:expr},",
-      "    ${0}",
+      "    ${2:_} => ${3:0},",
       "}"
     ],
     "description": "Create a match expression"
   },
-  "If expression": {
-    "prefix": "if",
-    "body": [
-      "if ${1:condition} {",
-      "    ${2}",
-      "} else {",
-      "    ${0}",
-      "}"
-    ],
-    "description": "Create an if expression"
-  },
   "While loop": {
     "prefix": "while",
     "body": [
-      "while ${1:condition} {",
-      "    ${0}",
+      "while ${1:true} {",
+      "    ${0:break}",
       "}"
     ],
     "description": "Create a while loop"
@@ -142,27 +106,38 @@
   },
   "Lambda": {
     "prefix": "lambda",
-    "body": "(${1:params}) => ${0:expr}",
-    "description": "Create a lambda expression"
+    "body": "let ${1:f} = (${2:x}: ${3:int}) => ${0:x}",
+    "description": "Create a lambda"
   },
   "Import": {
     "prefix": "import",
-    "body": "import ${1:module.path}",
+    "body": "import ${1:std.io} as ${0:io}",
     "description": "Import a Myla module"
   },
   "From import": {
     "prefix": "from",
-    "body": "from ${1:module.path} import ${0:name}",
+    "body": "from ${1:std.io} import ${0:println}",
     "description": "Import names from a Myla module"
   },
   "Test attribute": {
     "prefix": "test",
     "body": [
-      "#test",
-      "fun ${1:name}() {",
+      "#test(${1:2})[${2:4}]",
+      "fun ${3:double}(${4:x}: ${5:int}) -> ${6:int} {",
+      "    ${0:return x * 2}",
+      "}"
+    ],
+    "description": "A function with a test case: #test(arguments)[expected result]"
+  },
+  "If statement": {
+    "prefix": "if",
+    "body": [
+      "if ${1:true} {",
+      "    ${2}",
+      "} else {",
       "    ${0}",
       "}"
     ],
-    "description": "Create a test function"
+    "description": "Create an if statement"
   }
 }

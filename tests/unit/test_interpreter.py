@@ -1,8 +1,8 @@
-"""Unit tests for the Myla tree-walking interpreter (docs/architecture.md §6)."""
+"""Unit tests for the Myla tree-walking interpreter (docs/Architecture/Interpreter.md)."""
 import io
 import unittest
 
-from myla.errors import MylaRuntimeError
+from myla.errors import MylaRuntimeError, TypeCheckError
 from myla.interpreter import Interpreter
 from myla.lexer import tokenize
 from myla.parser import parse
@@ -87,6 +87,24 @@ class TestFunctions(unittest.TestCase):
         self.assertEqual(run_src(src + "fun main() {\n    print(fact(5))\n}\n"), "120\n")
 
 
+class TestPartialApplication(unittest.TestCase):
+    def test_filled_arguments_are_evaluated_once_when_made(self):
+        # D51, D60 (MYLA-75): callee, receiver and filled arguments run once,
+        # left to right, when the partial is made; a variable is its value then
+        pre = ("struct C { n: int }\nimpl C {\n    fun add(self, a: int, b: int) -> int {\n"
+               "        return self.n + a + b\n    }\n}\n"
+               "fun f(x: int) -> int {\n    print(x)\n    return x\n}\n"
+               "fun c(n: int) -> C {\n    print(n)\n    return C { n: n }\n}\n"
+               "fun g(a: int, b: int, c: int) -> int {\n    return a * 100 + b * 10 + c\n}\n")
+        body = ("let p = g(f(1), _, f(2))\n    print(0)\n    print(p(f(3)))\n    print(p(4))\n"
+                "    let m = c(5).add(f(6), _)\n    print(0)\n    print(m(7))\n    print(m(8))\n"
+                "    var x = 1\n    let r = g(x, _, 3)\n    x = 2\n    print(r(0))")
+        self.assertEqual(run_main(body, pre).split(), [
+            "1", "2", "0", "3", "132", "142",
+            "5", "6", "0", "18", "19",
+            "103"])
+
+
 class TestStructValueSemantics(unittest.TestCase):
     PRE = "struct P {\n    x: int,\n    y: int,\n}\n"
 
@@ -124,6 +142,62 @@ class TestTestRunner(unittest.TestCase):
     def test_no_tests(self):
         self.assertEqual(self._run_tests("fun main() {\n    print(1)\n}\n"), [])
 
+    def test_exit_in_a_test_fails_it(self):
+        # `exit` in a test fails that test; the rest still run (MYLA-81)
+        src = ("from std.process import exit\n"
+               "#test()[1]\nfun quits() -> int {\n    exit(3)\n    return 1\n}\n"
+               "#test()[2]\nfun two() -> int {\n    return 2\n}\n")
+        import os, tempfile
+        from myla.loader import default_stdlib_root, link
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "quits.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src)
+            checker = check(link(path, stdlib_root=default_stdlib_root()))
+        results = Interpreter(checker, io.StringIO()).run_tests()
+        self.assertEqual([(r.function, r.passed, r.detail) for r in results],
+                         [("quits", False, "exited with status 3"), ("two", True, "")])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAppendRange(unittest.TestCase):
+    """`append(sb, s, start, end)` appends the bytes s[start..end] (MYLA-85)."""
+
+    def test_appends_the_range(self):
+        self.assertEqual(run_main(
+            'var sb = StringBuilder()\n'
+            '    append(sb, "hello world", 6, 11)\n'
+            '    append(sb, "hello world", 0, 0)\n'
+            '    append(sb, "-", 0, 1)\n'
+            '    append(sb, "hello world", 0, 5)\n'
+            '    print(build(sb))'), "world-hello\n")
+
+    def test_a_split_character_is_whole_again_when_joined(self):
+        self.assertEqual(run_main(
+            'var sb = StringBuilder()\n'
+            '    append(sb, "aö", 0, 2)\n'
+            '    append(sb, "aö", 2, 3)\n'
+            '    let s = build(sb)\n'
+            '    print(s == "aö")\n'
+            '    print(s)'), "true\naö\n")
+
+    def test_out_of_bounds(self):
+        for start, end in [(-1, 2), (2, 1), (0, 6), (6, 6)]:
+            with self.subTest(start=start, end=end):
+                with self.assertRaises(MylaRuntimeError) as cm:
+                    run_main(f'var sb = StringBuilder()\n    append(sb, "hello", {start}, {end})')
+                self.assertIn(f"string range {start}..{end} out of bounds (len 5)", str(cm.exception))
+
+    def test_type_errors(self):
+        for args, message in [('"x", 0', "append() takes 2 or 4 argument(s)"),
+                              ('"x", "0", 1', "append start"),
+                              ('"x", 0, 1u8', "append end"),
+                              ('42, 0, 1', "append value")]:
+            with self.subTest(args=args):
+                with self.assertRaises(TypeCheckError) as cm:
+                    run_main(f'var sb = StringBuilder()\n    append(sb, {args})')
+                self.assertIn(message, str(cm.exception))
+

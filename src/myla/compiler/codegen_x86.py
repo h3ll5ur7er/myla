@@ -1,4 +1,4 @@
-"""x86-64 code generator for Myla v0.0 (docs/architecture.md §7).
+"""x86-64 code generator for Myla v0.0 (docs/Architecture/Native-backend.md).
 
 Emits GAS / AT&T-syntax assembly for Linux x86-64, with no libc dependency:
 I/O is done with raw `write`/`exit` syscalls. The generator is a single,
@@ -21,20 +21,68 @@ Conventions chosen for v0.0 (internal; we never call into C):
 """
 from __future__ import annotations
 
+import dataclasses
 import struct
 
 from .. import ast
 from ..types import (
     BoolType, CharType, Checker, EnumType, FloatType, FuncSig, FuncType, IntType,
     ListType, MapType, StrType, StringBuilderType, StructType, TupleType, Type,
-    type_name,
-    _FF_MINK, _FF_MAXK, _FF_POW10_DD, _FF_SPLIT, round_float,
+    type_name, _is_diverging, _is_literal_expr as _is_literal,
+    _FF_MINK, _FF_MAXK, _FF_POW10_DD, _FF_SPLIT, _FF_BIG, _FF_UP, _FF_DOWN, round_float,
 )
+from .monomorphize import type_token
+
+
+# The runtime-error entries and their messages (MYLA-17); the same in the
+# self-hosted code generator.
+_TRAPS = [
+    ("__trap", "runtime error"),
+    ("__trap_index", "index out of bounds"),
+    ("__trap_key", "map key not found"),
+    ("__trap_pop", "pop from an empty list"),
+    ("__trap_div", "division by zero"),
+    ("__trap_mod", "modulo by zero"),
+    ("__trap_match", "no match arm matched"),
+    ("__trap_oom", "out of memory"),
+]
+
+# The refcount of a `str` cell in the binary: retains and drops change it like
+# any other, but it never reaches zero, so it is never freed (MYLA-18).
+STATIC_RC = 1 << 62
+
+# The float renderer's constant results.
+_FLOAT_STRS = [
+    (".Lstr_nan", b"nan"),
+    (".Lstr_inf", b"inf"),
+    (".Lstr_ninf", b"-inf"),
+    (".Lstr_fzero", b"0"),
+    (".Lstr_fnzero", b"-0"),
+]
+
+# Heap cells whose pointer is the value: `_owns_heap`, retained and dropped as
+# one pointer.
+_CELL_TYPES = (ListType, MapType, StringBuilderType, StrType)
+
+
+def _static_str(label: str, data: bytes) -> list[str]:
+    """A `str` cell in the data section: the heap's `[size][refcount]` header,
+    then `[len][bytes]` at `label` (MYLA-18)."""
+    out = ["\t.balign 8", f"\t.quad {8 + len(data)}", f"\t.quad {STATIC_RC}",
+           f"{label}:", f"\t.quad {len(data)}"]
+    if data:
+        out.append("\t.byte " + ", ".join(str(b) for b in data))
+    return out
 
 
 def _f64_bits(x: float) -> int:
     """The unsigned 64-bit pattern of `x` as an IEEE-754 double."""
     return struct.unpack("<Q", struct.pack("<d", x))[0]
+
+
+def _f64_imm(x: float) -> int:
+    """The pattern of `x` as a signed 64-bit immediate (for `movabsq`)."""
+    return struct.unpack("<q", struct.pack("<d", x))[0]
 
 
 # Size of the heap arena reserved on first allocation (1 GiB). Generous for a
@@ -43,6 +91,12 @@ def _f64_bits(x: float) -> int:
 # anonymous mmap, so an unused tail costs nothing until touched. Kept <2 GiB so
 # the `addq $_ARENA_BYTES` immediate fits a signed imm32.)
 _ARENA_BYTES = 1 << 30
+
+# Freed cells up to this value size (bytes) go onto one exact-size free list per
+# 8-byte size class, so allocating and freeing them never scans (MYLA-16). Larger
+# cells share one list that is searched for an exact fit. The self-hosted
+# runtime uses the same limit.
+_SMALL_CELL_LIMIT = 4096
 
 
 def _is_struct(t: Type | None) -> bool:
@@ -66,16 +120,28 @@ _SET_MNEMONIC = {
 
 
 class CodeGen:
-    def __init__(self, checker: Checker):
+    def __init__(self, checker: Checker, debug: bool = False):
         self.checker = checker
         self.text: list[str] = []
+        # debug line tables (MYLA-71): source path -> `.file` number, the number
+        # of the file being generated (None: no line info for this function, e.g.
+        # the prelude), and the file of each lambda, set where it is created.
+        self._debug = debug
+        self._files: dict[str, int] = {}
+        self._cur_file: int | None = None
+        self._last_loc = ""
+        self._lambda_files: dict[int, int | None] = {}
         self.rodata: list[str] = []
+        self.strdata: list[str] = []        # static `str` cells (_static_str)
         self._label_n = 0
         self._str_n = 0
         self._strings: dict[str, str] = {}  # raw text -> label
         # per-function state
         self._locals: dict[int, int] = {}   # id(node) -> rbp offset (negative)
         self._scopes: list[dict[str, tuple]] = []
+        # per staged value not yet committed: drop emitters for what an early
+        # return must release (see _stage_value)
+        self._staged_drops: list[list] = []
         self._epilogue = ""
         self._struct_ret = False
         # top-level `fun`s referenced as values: each needs an env-ignoring thunk
@@ -101,6 +167,15 @@ class CodeGen:
         # set once `std.fs.write_to_file` (`__write_file`) is used, gating the
         # file-write helper (shares the `__io_errno_val` global).
         self._uses_write_file = False
+        # set once `std.io`'s reader (`__read`) is used, gating the read helper
+        # (MYLA-78; shares the `__io_errno_val` global).
+        self._uses_read = False
+        # set once `Reader.ready` (`__poll`) is used, gating the poll helper
+        # (MYLA-80; shares the `__io_errno_val` global).
+        self._uses_poll = False
+        # set once `__io_errno` is used, gating the `__io_errno_val` global
+        # (also emitted for the helpers that set it).
+        self._uses_io_errno = False
         # set once `std.process.run`/`Command` (`__run`/`__run_*`) is used, gating
         # the subprocess runtime (fork/execve/pipe/poll/wait4) + its result globals.
         self._uses_run = False
@@ -122,7 +197,7 @@ class CodeGen:
         pointer, i.e. it participates in reference counting."""
         if self._is_boxed(t):
             return True
-        if isinstance(t, (ListType, MapType, StringBuilderType)):  # refcounted cell
+        if isinstance(t, _CELL_TYPES):           # refcounted cell
             return True
         if isinstance(t, FuncType):  # owns a (possibly null) refcounted env cell
             return True
@@ -181,23 +256,12 @@ class CodeGen:
     # -- list layout: a heap cell [len:8][cap:8][elem0][elem1]...] ------------
 
     def _type_mangle(self, t: Type) -> str:
-        """A stable identifier fragment for `t`, used to name per-type helpers."""
-        if isinstance(t, ListType):
-            return "L_" + self._type_mangle(t.elem)
-        if isinstance(t, MapType):
-            return "M_" + self._type_mangle(t.key) + "_" + self._type_mangle(t.value)
+        """A stable, injective identifier fragment for `t`, used to name
+        per-type helpers (MYLA-9). Structs and enums are already concrete,
+        with mangled names, after monomorphization."""
         if isinstance(t, (StructType, EnumType)):
             return t.name
-        if isinstance(t, TupleType):
-            return "T" + str(len(t.elems)) + "".join(
-                "_" + self._type_mangle(e) for e in t.elems)
-        if isinstance(t, StringBuilderType):
-            return "SB"
-        if isinstance(t, FuncType):
-            params = "_".join(self._type_mangle(p) for p in t.params)
-            ret = self._type_mangle(t.ret) if t.ret is not None else "void"
-            return "Fn" + str(len(t.params)) + "_" + params + "_R_" + ret
-        return type_name(t)  # int32 / bool / str
+        return type_token(t, self._type_mangle)
 
     def _list_drop_name(self, t: ListType) -> str:
         return "__drop_list_" + self._type_mangle(t.elem)
@@ -212,7 +276,7 @@ class CodeGen:
     # [state:8][key:8][value:vs] with state 0=empty / 1=occupied / 2=tombstone --
 
     def _map_suffix(self, t: MapType) -> str:
-        return self._type_mangle(t.key) + "_" + self._type_mangle(t.value)
+        return self._type_mangle(t)
 
     def _map_slot_size(self, t: MapType) -> int:
         return 16 + self._stored_size(t.value)
@@ -247,57 +311,60 @@ class CodeGen:
         return self._map_clone_name(t) if isinstance(t, MapType) \
             else self._list_clone_name(t)
 
-    def _gather_list_types(self, t: Type | None, into: dict,
-                           seen: frozenset = frozenset()) -> None:
+    def _gather_list_types(self, t: Type | None, into: dict, visited: set) -> None:
+        """Add every list/map/builder type reachable from `t` to `into` (keyed by
+        mangle, in discovery order). `visited` holds the types already expanded
+        during this collection, so each type is walked once however many paths
+        lead to it (MYLA-60); it also breaks recursive (boxed) type cycles."""
+        if t is None or t in visited:
+            return
+        visited.add(t)
         if isinstance(t, StringBuilderType):
             into.setdefault("SB", t)
         elif isinstance(t, ListType):
             into.setdefault(self._type_mangle(t), t)
-            self._gather_list_types(t.elem, into, seen)
+            self._gather_list_types(t.elem, into, visited)
         elif isinstance(t, MapType):
             into.setdefault(self._type_mangle(t), t)
-            self._gather_list_types(t.key, into, seen)
-            self._gather_list_types(t.value, into, seen)
+            self._gather_list_types(t.key, into, visited)
+            self._gather_list_types(t.value, into, visited)
         elif isinstance(t, StructType):
-            if t.name in seen:  # break recursive (boxed) type cycles
-                return
             for ft in self.checker.structs.get(t.name, {}).values():
-                self._gather_list_types(ft, into, seen | {t.name})
+                self._gather_list_types(ft, into, visited)
         elif isinstance(t, EnumType):
-            if t.name in seen:
-                return
             for payload in self.checker.enums.get(t.name, {}).values():
                 for ft in payload:
-                    self._gather_list_types(ft, into, seen | {t.name})
+                    self._gather_list_types(ft, into, visited)
         elif isinstance(t, TupleType):
             for e in t.elems:
-                self._gather_list_types(e, into, seen)
+                self._gather_list_types(e, into, visited)
         elif isinstance(t, FuncType):
             for p in t.params:
-                self._gather_list_types(p, into, seen)
-            self._gather_list_types(t.ret, into, seen)
+                self._gather_list_types(p, into, visited)
+            self._gather_list_types(t.ret, into, visited)
 
     def _collect_list_types(self) -> dict:
         """Every concrete list type used anywhere in the program (keyed by mangle),
         so we can emit one `__drop_list_<elem>` routine per element type."""
         found: dict = {}
+        visited: set = set()
         for fields in self.checker.structs.values():
             for ft in fields.values():
-                self._gather_list_types(ft, found)
+                self._gather_list_types(ft, found, visited)
         for variants in self.checker.enums.values():
             for payload in variants.values():
                 for ft in payload:
-                    self._gather_list_types(ft, found)
+                    self._gather_list_types(ft, found, visited)
         for sig in self.checker.functions.values():
             for p in sig.params:
-                self._gather_list_types(p, found)
-            self._gather_list_types(sig.ret, found)
+                self._gather_list_types(p, found, visited)
+            self._gather_list_types(sig.ret, found, visited)
         for info in self.checker.consts.values():
-            self._gather_list_types(info.type, found)
+            self._gather_list_types(info.type, found, visited)
 
         def walk(node) -> None:
             import dataclasses
-            self._gather_list_types(getattr(node, "resolved_type", None), found)
+            self._gather_list_types(getattr(node, "resolved_type", None), found, visited)
             if not dataclasses.is_dataclass(node):
                 return
             for f in dataclasses.fields(node):
@@ -328,11 +395,7 @@ class CodeGen:
         label = f".Lstr{self._str_n}"
         self._str_n += 1
         self._strings[text] = label
-        data = text.encode("utf-8")
-        self.rodata.append(f"{label}:")
-        self.rodata.append(f"\t.quad {len(data)}")
-        if data:
-            self.rodata.append("\t.byte " + ", ".join(str(b) for b in data))
+        self.strdata.extend(_static_str(label, text.encode("utf-8")))
         return label
 
     # -- public --------------------------------------------------------------
@@ -367,6 +430,10 @@ class CodeGen:
             self._emit_read_file_runtime()
         if self._uses_write_file:
             self._emit_write_file_runtime()
+        if self._uses_read:
+            self._emit_read_runtime()
+        if self._uses_poll:
+            self._emit_poll_runtime()
         if self._uses_run:
             self._emit_run_runtime()
         return self._assemble_source()
@@ -374,18 +441,30 @@ class CodeGen:
     def _assemble_source(self) -> str:
         out: list[str] = []
         out.append("\t.text")
+        for path, number in self._files.items():
+            out.append(f'\t.file {number} "{_asm_string(path)}"')
         out.extend(self.text)
         out.append("")
         out.append("\t.section .rodata")
         out.append('.Lbool_true:\n\t.ascii "true"')
         out.append('.Lbool_false:\n\t.ascii "false"')
-        # length-prefixed `str` cells used by format()'s runtime renderers
-        out.append('.Lstr_true:\n\t.quad 4\n\t.ascii "true"')
-        out.append('.Lstr_false:\n\t.quad 5\n\t.ascii "false"')
-        out.append('.Lstr_minus:\n\t.quad 1\n\t.ascii "-"')
+        for label, message in _TRAPS:
+            text = "runtime error: " + message
+            out.append(f'.Lmsg{label}:\n\t.quad {len(text)}\n\t.ascii "{text}"')
         if self._uses_float:
             out.extend(self._float_rodata())
         out.extend(self.rodata)
+        out.append("")
+        # `str` values that live in the binary (literals, the renderers'
+        # constants): cells with a count that never reaches zero (MYLA-18)
+        out.append("\t.data")
+        out.extend(_static_str(".Lstr_true", b"true"))
+        out.extend(_static_str(".Lstr_false", b"false"))
+        out.extend(_static_str(".Lstr_minus", b"-"))
+        if self._uses_float:
+            for label, text in _FLOAT_STRS:
+                out.extend(_static_str(label, text))
+        out.extend(self.strdata)
         out.append("")
         # heap bookkeeping for __alloc (zero-initialized)
         out.append("\t.bss")
@@ -394,8 +473,10 @@ class CodeGen:
         out.append("\t.skip 8")
         out.append("__heap_end:")
         out.append("\t.skip 8")
-        out.append("__free_list:")
-        out.append("\t.skip 8")
+        # one list head per 8-byte size class up to _SMALL_CELL_LIMIT, then one
+        # per power of two (indexed by its exponent) for larger cells
+        out.append("__free_buckets:")
+        out.append(f"\t.skip {_SMALL_CELL_LIMIT + 8 + 8 * 64}")
         # argc/argv captured at `_start` for `std.process.args` (D29)
         out.append("__argc:")
         out.append("\t.skip 8")
@@ -415,13 +496,10 @@ class CodeGen:
             out.append("\t.skip 8")
             out.append("__run_errno_val:")
             out.append("\t.skip 8")
-        if self._uses_read_file:
-            # errno of the last `__read_file` (0 on success), read by `__io_errno`
-            out.append("__io_errno_val:")
-            out.append("\t.skip 8")
-        elif self._uses_write_file:
-            # `__write_file` shares the same errno global when `__read_file` is
-            # itself unused.
+        if (self._uses_read_file or self._uses_write_file or self._uses_read or self._uses_poll
+                or self._uses_io_errno):
+            # errno of the last `__read_file`, `__write_file`, `__read` or `__poll` (0 on
+            # success), read by `__io_errno`
             out.append("__io_errno_val:")
             out.append("\t.skip 8")
         out.append("")
@@ -449,27 +527,48 @@ class CodeGen:
         e("\txorq %rdi, %rdi")
         e("\tsyscall")
         e("")
-        # __trap: exit(1) for runtime errors (e.g. divide by zero)
-        e("__trap:")
-        e("\tmovq $60, %rax")
-        e("\tmovq $1, %rdi")
+        # Runtime errors: `runtime error: <message>` on stderr, then exit(1)
+        # (MYLA-17). Each kind has its own entry; the message is the
+        # interpreter's, without the values.
+        for label, _message in _TRAPS:
+            e(f"{label}:")
+            e(f"\tleaq .Lmsg{label}(%rip), %rdi")
+            e("\tjmp __panic")
+        e("")
+        # __write_all: write rdx bytes at rsi to fd rdi, however many write
+        # calls it takes: a short write continues, EINTR and EAGAIN (a full
+        # non-blocking pipe) retry, another error gives up (MYLA-17).
+        e("__write_all:")
+        e(".Lwa_loop:")
+        e("\ttestq %rdx, %rdx")
+        e("\tjz .Lwa_done")
+        e("\tmovq $1, %rax")            # write
         e("\tsyscall")
+        e("\tcmpq $-4, %rax")           # EINTR
+        e("\tje .Lwa_loop")
+        e("\tcmpq $-11, %rax")          # EAGAIN
+        e("\tje .Lwa_loop")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lwa_done")
+        e("\taddq %rax, %rsi")
+        e("\tsubq %rax, %rdx")
+        e("\tjmp .Lwa_loop")
+        e(".Lwa_done:")
+        e("\tret")
         e("")
         # __panic: %rdi -> [len:8][bytes]; write the message + newline to stderr,
-        # then exit(1). Used by assert/panic/unreachable (§7).
+        # then exit(1). Used by assert/panic/unreachable (§7) and the traps.
         e("__panic:")
         e("\tmovq (%rdi), %rdx")        # len
         e("\tleaq 8(%rdi), %rsi")       # data
-        e("\tmovq $1, %rax")            # write
         e("\tmovq $2, %rdi")            # stderr
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\tsubq $16, %rsp")           # newline to stderr
         e("\tmovb $10, (%rsp)")
-        e("\tmovq $1, %rax")
         e("\tmovq $2, %rdi")
         e("\tmovq %rsp, %rsi")
         e("\tmovq $1, %rdx")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\taddq $16, %rsp")
         e("\tmovq $60, %rax")           # exit(1)
         e("\tmovq $1, %rdi")
@@ -479,11 +578,10 @@ class CodeGen:
         e("__print_nl:")
         e("\tsubq $16, %rsp")
         e("\tmovb $10, (%rsp)")
-        e("\tmovq $1, %rax")
         e("\tmovq $1, %rdi")
         e("\tmovq %rsp, %rsi")
         e("\tmovq $1, %rdx")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\taddq $16, %rsp")
         e("\tret")
         e("")
@@ -491,11 +589,10 @@ class CodeGen:
         e("__print_minus:")
         e("\tsubq $16, %rsp")
         e("\tmovb $45, (%rsp)")
-        e("\tmovq $1, %rax")
         e("\tmovq $1, %rdi")
         e("\tmovq %rsp, %rsi")
         e("\tmovq $1, %rdx")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\taddq $16, %rsp")
         e("\tret")
         e("")
@@ -525,9 +622,8 @@ class CodeGen:
         e("\tincq %rsi")               # rsi -> first digit
         e("\tmovq %rbp, %rdx")
         e("\tsubq %rsi, %rdx")         # length = rbp - rsi
-        e("\tmovq $1, %rax")
         e("\tmovq $1, %rdi")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\tcall __print_nl")
         e("\tleave")
         e("\tret")
@@ -558,9 +654,8 @@ class CodeGen:
         e("\tleaq .Lbool_false(%rip), %rsi")
         e("\tmovq $5, %rdx")
         e(".Lpb_write:")
-        e("\tmovq $1, %rax")
         e("\tmovq $1, %rdi")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\tcall __print_nl")
         e("\tret")
         e("")
@@ -568,9 +663,8 @@ class CodeGen:
         e("__print_str:")
         e("\tmovq (%rdi), %rdx")       # len
         e("\tleaq 8(%rdi), %rsi")      # data
-        e("\tmovq $1, %rax")
         e("\tmovq $1, %rdi")
-        e("\tsyscall")
+        e("\tcall __write_all")
         e("\tcall __print_nl")
         e("\tret")
         e("")
@@ -697,30 +791,53 @@ class CodeGen:
         e("\tcall __uint_to_str")      # rax = digits of the magnitude
         e("\ttestq %rbx, %rbx")
         e("\tjz .Li2s_done")
-        e("\tmovq %rax, %rsi")          # magnitude
+        e("\tmovq %rax, %rbx")          # magnitude (the sign is no longer needed)
+        e("\tmovq %rax, %rsi")
         e("\tleaq .Lstr_minus(%rip), %rdi")
         e("\tcall __str_concat")       # '-' + magnitude
+        e("\tmovq %rbx, %rdi")
+        e("\tmovq %rax, %rbx")
+        e("\tcall __str_drop")         # release the magnitude
+        e("\tmovq %rbx, %rax")
         e(".Li2s_done:")
         e("\tpopq %rbx")
         e("\tleave")
         e("\tret")
         e("")
-        # __bool_to_str: rdi != 0 -> ptr to the static "true"/"false" str cell.
+        # __bool_to_str: rdi != 0 -> a new reference to the static "true"/"false"
+        # str cell.
         e("__bool_to_str:")
         e("\ttestq %rdi, %rdi")
         e("\tjz .Lb2s_false")
         e("\tleaq .Lstr_true(%rip), %rax")
+        e("\tincq -8(%rax)")           # a new reference, like the other renderers
         e("\tret")
         e(".Lb2s_false:")
         e("\tleaq .Lstr_false(%rip), %rax")
+        e("\tincq -8(%rax)")
+        e("\tret")
+        e("")
+        # __str_drop: rdi = str cell. Decrement the refcount; free at zero (a
+        # str owns nothing else). Static cells never reach zero (MYLA-18).
+        # Clobbers only %rax, like __free.
+        e("__str_drop:")
+        e("\tdecq -8(%rdi)")
+        e("\tjnz .Lsdrop_keep")
+        e("\tjmp __free")
+        e(".Lsdrop_keep:")
         e("\tret")
         e("")
         # --- heap: reference-counted cells over a lazily-mmap'd arena (v0.2.3b) ---
         # Each cell is  [size:8][refcount:8][value bytes...]  and the pointer we
         # hand around points at the value bytes, so size is at -16 and the refcount
-        # at -8. Cells are freed onto a size-segregated (exact-fit, LIFO) free list
-        # and reused, so a program that allocates and drops in a loop runs in
-        # bounded memory. The arena itself is anonymous mmap memory, zero-filled.
+        # at -8. Freed cells are reused, so a program that allocates and drops in
+        # a loop runs in bounded memory: cells up to _SMALL_CELL_LIMIT bytes go on
+        # LIFO free lists, one per 8-byte size class (`__free_buckets`, indexed by
+        # byte offset = size). A larger cell is rounded up to a power of two and
+        # goes on that power's list after them, so a freed cell serves any later
+        # request of its class: an exact-fit list kept every cell of a new size
+        # forever (MYLA-80). The same scheme as the self-hosted runtime. The arena
+        # itself is anonymous mmap memory, zero-filled.
         #
         # __heap_init: reserve the arena (preserves %rdi).
         e("__heap_init:")
@@ -734,7 +851,7 @@ class CodeGen:
         e("\txorq %r9, %r9")            # offset
         e("\tsyscall")
         e("\tcmpq $-4096, %rax")        # mmap error? (return in [-4095,-1])
-        e("\tja __trap")
+        e("\tja __trap_oom")
         e("\tmovq %rax, __heap_ptr(%rip)")
         e(f"\taddq ${_ARENA_BYTES}, %rax")
         e("\tmovq %rax, __heap_end(%rip)")
@@ -742,27 +859,41 @@ class CodeGen:
         e("\tret")
         e("")
         # __alloc: in %rdi = value-size in bytes; out %rax = value pointer (rc = 1).
+        # Clobbers %rcx, %rsi, %r8 and %rdi.
         e("__alloc:")
         e("\taddq $7, %rdi")            # round value size up to a multiple of 8
         e("\tandq $-8, %rdi")
+        e("\tmovq $8, %rax")            # at least 8: a free cell's value area
+        e("\tcmpq %rax, %rdi")          # holds the free-list link
+        e("\tcmovbq %rax, %rdi")
         e("\tmovq __heap_end(%rip), %rax")
         e("\ttestq %rax, %rax")
         e("\tjnz .Lalloc_search")
         e("\tcall __heap_init")
-        e(".Lalloc_search:")            # exact-fit search of the free list
-        e("\tleaq __free_list(%rip), %r8")  # %r8 = address of the link to update
-        e("\tmovq __free_list(%rip), %rsi") # %rsi = current node (value ptr) or 0
-        e(".Lalloc_scan:")
+        e(".Lalloc_search:")
+        e(f"\tcmpq ${_SMALL_CELL_LIMIT}, %rdi")
+        e("\tja .Lalloc_large")
+        e("\tleaq __free_buckets(%rip), %r8")
+        e("\tmovq (%r8,%rdi), %rsi")    # head of this size's list, or 0
         e("\ttestq %rsi, %rsi")
         e("\tjz .Lalloc_bump")
-        e("\tcmpq %rdi, -16(%rsi)")     # node value-size == requested?
-        e("\tje .Lalloc_reuse")
-        e("\tmovq %rsi, %r8")           # advance: link = &node.next (node's value area)
-        e("\tmovq (%rsi), %rsi")        # node = node.next
-        e("\tjmp .Lalloc_scan")
-        e(".Lalloc_reuse:")
-        e("\tmovq (%rsi), %rax")        # node.next
-        e("\tmovq %rax, (%r8)")         # unlink node
+        e("\tmovq (%rsi), %rax")        # pop: head = node.next
+        e("\tmovq %rax, (%r8,%rdi)")
+        e("\tmovq $1, -8(%rsi)")        # refcount = 1
+        e("\tmovq %rsi, %rax")
+        e("\tret")
+        e(".Lalloc_large:")             # round up to 2^k, k = bitlen(size - 1)
+        e("\tleaq -1(%rdi), %rcx")
+        e("\tbsrq %rcx, %rcx")
+        e("\taddq $1, %rcx")
+        e("\tmovq $1, %rdi")
+        e("\tshlq %cl, %rdi")           # the class size
+        e(f"\tleaq __free_buckets+{_SMALL_CELL_LIMIT + 8}(%rip), %r8")
+        e("\tmovq (%r8,%rcx,8), %rsi")  # head of this power's list, or 0
+        e("\ttestq %rsi, %rsi")
+        e("\tjz .Lalloc_bump")
+        e("\tmovq (%rsi), %rax")        # pop
+        e("\tmovq %rax, (%r8,%rcx,8)")
         e("\tmovq $1, -8(%rsi)")        # refcount = 1
         e("\tmovq %rsi, %rax")
         e("\tret")
@@ -770,18 +901,36 @@ class CodeGen:
         e("\tmovq __heap_ptr(%rip), %rax")
         e("\tleaq 16(%rax,%rdi), %rcx") # new top = base + header(16) + size
         e("\tcmpq __heap_end(%rip), %rcx")
-        e("\tja __trap")                # out of arena
+        e("\tja __trap_oom")            # out of arena
         e("\tmovq %rcx, __heap_ptr(%rip)")
         e("\tmovq %rdi, (%rax)")        # header: size
         e("\tmovq $1, 8(%rax)")         # header: refcount
         e("\tleaq 16(%rax), %rax")      # value pointer = base + 16
         e("\tret")
         e("")
-        # __free: in %rdi = value pointer; push the cell onto the free list.
+        # __free: in %rdi = value pointer; push the cell onto its free list.
+        # Clobbers only %rax: drop sequences walk aggregates through other
+        # caller-saved registers (e.g. %rcx) across calls that end in __free.
         e("__free:")
-        e("\tmovq __free_list(%rip), %rax")
-        e("\tmovq %rax, (%rdi)")        # node.next = old head (stored in value area)
-        e("\tmovq %rdi, __free_list(%rip)")
+        e("\tpushq %rcx")
+        e("\tmovq -16(%rdi), %rcx")     # value size
+        e(f"\tcmpq ${_SMALL_CELL_LIMIT}, %rcx")
+        e("\tja .Lfree_large")
+        e("\tleaq __free_buckets(%rip), %rax")
+        e("\taddq %rcx, %rax")          # &bucket for this size
+        e("\tmovq (%rax), %rcx")
+        e("\tmovq %rcx, (%rdi)")        # node.next = old head
+        e("\tmovq %rdi, (%rax)")        # head = node
+        e("\tpopq %rcx")
+        e("\tret")
+        e(".Lfree_large:")              # its size is a power of two: 2^k
+        e("\tbsrq %rcx, %rcx")          # k
+        e(f"\tleaq __free_buckets+{_SMALL_CELL_LIMIT + 8}(%rip), %rax")
+        e("\tleaq (%rax,%rcx,8), %rax") # &list head for 2^k
+        e("\tmovq (%rax), %rcx")
+        e("\tmovq %rcx, (%rdi)")        # node.next = old head
+        e("\tmovq %rdi, (%rax)")        # head = node
+        e("\tpopq %rcx")
         e("\tret")
         e("")
         # __func_retain: in %rdi = a closure env pointer (may be null). Bumps the
@@ -818,14 +967,17 @@ class CodeGen:
         self._locals = {}
         self._scopes = []
         self._drop_scopes = []
+        self._staged_drops = []
         self._loops = []   # (continue_label, break_label, drop_scope_depth)
         self._struct_ret = _is_aggregate(sig.ret)
         self._ret_type = sig.ret
 
         frame = self._layout_frame(decl)
         self._epilogue = f".Lret_{decl.name}"
+        self._cur_file = self._file_number(getattr(decl, "source_path", None))
 
         self._emit(f"myla_{decl.name}:")
+        self._emit_loc(decl)
         self._emit("pushq %rbp")
         self._emit("movq %rsp, %rbp")
         if frame:
@@ -840,14 +992,51 @@ class CodeGen:
             offset = 16 + 8 * (param_base + i)
             self._scopes[-1][param.name] = ("param", offset, ptype)
 
-        self._gen_block(decl.body)
+        if getattr(decl, "tag_eq", False):
+            # derived `eq` of an enum without payloads (MYLA-87): self and
+            # other arrive by address; equal tags, equal values
+            self._emit("movq 16(%rbp), %rax")
+            self._emit("movq (%rax), %rax")
+            self._emit("movq 24(%rbp), %rcx")
+            self._emit("cmpq (%rcx), %rax")
+            self._emit("sete %al")
+            self._emit("movzbq %al, %rax")
+        else:
+            self._gen_block(decl.body)
 
         self._emit(f"{self._epilogue}:")
         self._emit("leave")
         self._emit("ret")
+        self._end_loc()
         self._emit("")
         self._drop_scopes.pop()
         self._scopes.pop()
+
+    # -- debug line tables (MYLA-71) ------------------------------------------
+
+    def _file_number(self, path: str | None) -> int | None:
+        """The `.file` number of `path`, registering it on first use; None when
+        line tables are off or the code has no source file."""
+        if not self._debug or path is None:
+            return None
+        return self._files.setdefault(path, len(self._files) + 1)
+
+    def _emit_loc(self, node: ast.Node) -> None:
+        """Attribute the code that follows to `node`'s source position."""
+        if self._cur_file is None or node.line <= 0:
+            return
+        loc = f".loc {self._cur_file} {node.line} {node.column}"
+        if loc != self._last_loc:
+            self._emit(loc)
+            self._last_loc = loc
+
+    def _end_loc(self) -> None:
+        """Mark the code that follows as having no source line (line 0), so
+        runtime helpers emitted after a function aren't attributed to it."""
+        if self._cur_file is not None:
+            self._emit(f".loc {self._cur_file} 0 0")
+        self._cur_file = None
+        self._last_loc = ""
 
     def _layout_frame(self, decl: ast.FunDecl) -> int:
         """Assign a unique stack slot to every local/temp; return frame size."""
@@ -856,6 +1045,11 @@ class CodeGen:
         def alloc(node, size: int) -> None:
             cursor[0] += size
             self._locals[id(node)] = -cursor[0]
+
+        def stage(node, t: Type, inline: bool = False) -> None:
+            # a value staged before it is stored (_stage_value)
+            cursor[0] += self._size(t) if inline else self._stored_size(t)
+            self._locals[f"staged:{id(node)}"] = -cursor[0]
 
         def visit_stmt(stmt: ast.Stmt) -> None:
             if isinstance(stmt, ast.VarDecl):
@@ -873,8 +1067,11 @@ class CodeGen:
                 tgt = stmt.target
                 if (isinstance(tgt, ast.Index)
                         and isinstance(tgt.target.resolved_type, MapType)):
+                    stage(stmt, tgt.resolved_type)
                     cursor[0] += 8       # scratch for the map lvalue holder address
                     self._locals[f"mutholder:{id(stmt)}"] = -cursor[0]
+                elif self._owns_heap(tgt.resolved_type):
+                    stage(stmt, tgt.resolved_type, isinstance(tgt, ast.Name))
             elif isinstance(stmt, ast.If):
                 visit_expr(stmt.cond)
                 for s in stmt.then.statements:
@@ -952,6 +1149,8 @@ class CodeGen:
             elif isinstance(expr, ast.Binary):
                 visit_expr(expr.left)
                 visit_expr(expr.right)
+                if isinstance(expr.resolved_type, StrType):
+                    alloc(expr, 8)     # the concatenation's temp (MYLA-18)
             elif isinstance(expr, ast.Call):
                 if getattr(expr, "indirect_call", False):
                     visit_expr(expr.callee)
@@ -970,6 +1169,8 @@ class CodeGen:
                                                   "append", "append_byte")):
                     cursor[0] += 8       # scratch to hold the lvalue holder address
                     self._locals[f"mutholder:{id(expr)}"] = -cursor[0]
+                    if expr.callee.ident == "push":
+                        stage(expr, expr.args[0].resolved_type.elem)
             elif isinstance(expr, ast.FieldAccess):
                 if getattr(expr, "enum_ctor", None) is not None:
                     alloc(expr, self._size(expr.resolved_type))  # no-payload variant
@@ -989,6 +1190,7 @@ class CodeGen:
                     visit_expr(k)
                     visit_expr(v)
                 alloc(expr, 8)  # frame temp holding the cell pointer
+                stage(expr, expr.resolved_type.value)
             elif isinstance(expr, ast.StructLit):
                 for fi in expr.fields:
                     visit_expr(fi.value)
@@ -1048,6 +1250,7 @@ class CodeGen:
         self._close_scope()
 
     def _gen_stmt(self, stmt: ast.Stmt) -> None:
+        self._emit_loc(stmt)
         if isinstance(stmt, ast.VarDecl):
             off = self._locals[id(stmt)]
             t = stmt.init.resolved_type
@@ -1078,7 +1281,7 @@ class CodeGen:
         elif isinstance(stmt, ast.While):
             start, end = self._label(), self._label()
             self._emit(f"{start}:")
-            self._eval(stmt.cond)
+            self._eval_scalar(stmt.cond)
             self._emit("testq %rax, %rax")
             self._emit(f"jz {end}")
             self._loops.append((start, end, len(self._drop_scopes)))
@@ -1134,83 +1337,52 @@ class CodeGen:
             self._drop_expr_temps(stmt.expr)
 
     def _gen_assign(self, stmt: ast.Assign) -> None:
-        t = stmt.target.resolved_type
-        if isinstance(stmt.target, ast.Index):
-            if isinstance(stmt.target.target.resolved_type, MapType):
-                self._gen_map_set(stmt)           # m[k] = v (insert/update, CoW)
-                return
-            self._mut_elem_addr(stmt.target)      # rax = &element (CoW, bounds-checked)
-            self._emit("pushq %rax")
-            self._store_into_elem(stmt.value, t, drop_old=True)
-            self._drop_expr_temps(stmt.value)
+        target = stmt.target
+        t = target.resolved_type
+        if isinstance(target, ast.Index) and isinstance(target.target.resolved_type, MapType):
+            self._gen_map_set(stmt)               # m[k] = v (insert/update, CoW)
             return
-        if self._is_boxed(t) and not isinstance(stmt.target, ast.Name):
-            # assigning into a boxed member: drop the old cell, store a fresh one
-            self._box(stmt.value, t)                  # rax = new pointer (rc=1)
-            self._emit("pushq %rax")
-            self._addr_of_lvalue(stmt.target)         # rax = address of the slot
+        if self._owns_heap(t):
+            # Take the new value (one reference) before releasing the old one,
+            # which it may share or be part of (`p = p`, `o.a = o.a`).
+            inline = isinstance(target, ast.Name)  # a variable holds even a boxed enum inline
+            staged = self._locals[f"staged:{id(stmt)}"]
+            self._stage_value(stmt.value, t, staged, inline)
+            self._mut_place_addr(target)          # rax = &place (CoW, bounds-checked)
             self._emit("movq %rax, %rcx")
-            self._emit("movq (%rcx), %rsi")           # old pointer
-            self._emit("popq %rax")
-            self._emit("movq %rax, (%rcx)")           # store new pointer
-            self._emit("movq %rsi, %rdi")
-            self._emit(f"call __dropb_{t.name}")      # release old subtree
-            self._drop_expr_temps(stmt.value)
-        elif _is_aggregate(t) and self._owns_heap(t):
-            if not isinstance(stmt.target, ast.Name):
-                raise NotImplementedError(
-                    "reference-counted aggregate assignment is only supported "
-                    "for simple variables")
-            kind, off, _ = self._lookup(stmt.target.ident)
-            self._addr_of_aggregate(stmt.value)       # build new value first
-            self._emit("pushq %rax")                  # (may read the old value)
-            self._drop_value("rbp", off, t)           # release the old value
-            self._emit("popq %rsi")
-            self._emit(f"leaq {off}(%rbp), %rdi")
-            self._emit_copy(self._size(t))
-            self._retain("rbp", off, t)
-            self._drop_expr_temps(stmt.value)
+            self._drop_stored(t, inline)
+            self._commit_staged(t, staged, inline)
         elif _is_aggregate(t):
             self._addr_of_aggregate(stmt.value)
-            self._emit("movq %rax, %rsi")
-            self._addr_of_lvalue(stmt.target)
+            self._emit("pushq %rax")
+            self._mut_place_addr(target)
             self._emit("movq %rax, %rdi")
+            self._emit("popq %rsi")
             self._emit_copy(self._size(t))
-            self._drop_expr_temps(stmt.value)
-        elif self._owns_heap(t):  # reassigning a heap-owning scalar (list/map/SB)
-            if isinstance(stmt.target, ast.Name):
-                kind, off, _ = self._lookup(stmt.target.ident)
-                self._eval(stmt.value)            # new cell pointer -> rax
-                self._emit("pushq %rax")
-                self._emit("incq -8(%rax)")       # the variable takes a reference
-                self._drop_value("rbp", off, t)   # release the old list
-                self._emit("popq %rax")
-                self._emit(f"movq %rax, {off}(%rbp)")
-            else:
-                # `place.field = list` / `place[i] = map` …: same retain-new /
-                # drop-old / store dance, but against a computed slot address.
-                self._eval(stmt.value)            # new cell pointer -> rax
-                self._emit("pushq %rax")          # save new pointer
-                self._emit("incq -8(%rax)")       # the slot takes a reference
-                self._addr_of_lvalue(stmt.target)  # rax = &slot
-                self._emit("pushq %rax")
-                self._emit("movq %rax, %rcx")
-                self._drop_box(0, "rcx", t)       # release the old cell at the slot
-                self._emit("popq %rcx")           # &slot
-                self._emit("popq %rax")           # new pointer
-                self._emit("movq %rax, (%rcx)")
-            self._drop_expr_temps(stmt.value)
         else:
             self._eval(stmt.value)
             self._emit("pushq %rax")
-            self._addr_of_lvalue(stmt.target)
+            self._mut_place_addr(target)
             self._emit("popq %rcx")
             self._emit("movq %rcx, (%rax)")
-            self._drop_expr_temps(stmt.value)
+        self._drop_expr_temps(stmt.value)
+
+    def _eval_scalar(self, expr: ast.Expr) -> None:
+        """Evaluate a scalar `expr` that no statement end follows (a condition,
+        a guard, a range bound) into %rax, and release its temporaries
+        (MYLA-74)."""
+        self._eval(expr)
+        temps: list = []
+        self._collect_expr_temps(expr, temps)
+        if temps:
+            self._emit("pushq %rax")
+            for slot, t in temps:
+                self._drop_value("rbp", slot, t)
+            self._emit("popq %rax")
 
     def _gen_if(self, stmt: ast.If) -> None:
         end = self._label()
-        self._eval(stmt.cond)
+        self._eval_scalar(stmt.cond)
         self._emit("testq %rax, %rax")
         if stmt.otherwise is None:
             self._emit(f"jz {end}")
@@ -1251,6 +1423,9 @@ class CodeGen:
         self._retain("rbp", mp, mt)             # hold a reference for the loop
         self._drop_expr_temps(stmt.iterable)
         self._emit(f"movq $0, {si}(%rbp)")      # slot index
+        # the reference is an owner a `return` from the body releases (break
+        # and continue stop at the body scope; the loop's end releases it)
+        self._drop_scopes.append([(mp, mt)])
 
         start, cont, after = self._label(), self._label(), self._label()
         self._emit(f"{start}:")
@@ -1283,6 +1458,7 @@ class CodeGen:
         self._emit(f"movq %rax, {si}(%rbp)")
         self._emit(f"jmp {start}")
         self._emit(f"{after}:")
+        self._drop_scopes.pop()
         self._drop_value("rbp", mp, mt)         # release the loop reference
 
     def _gen_for_list(self, stmt: ast.For) -> None:
@@ -1298,6 +1474,10 @@ class CodeGen:
         self._retain("rbp", lp, lt)             # hold a reference for the loop
         self._drop_expr_temps(stmt.iterable)    # release a literal/temp iterable
         self._emit(f"movq $0, {li}(%rbp)")
+        # the reference is an owner a `return` from the body releases (break
+        # and continue stop at the body scope; the loop's end releases it,
+        # MYLA-80)
+        self._drop_scopes.append([(lp, lt)])
 
         start, cont, after = self._label(), self._label(), self._label()
         self._emit(f"{start}:")
@@ -1332,15 +1512,16 @@ class CodeGen:
         self._emit(f"movq %rax, {li}(%rbp)")
         self._emit(f"jmp {start}")
         self._emit(f"{after}:")
+        self._drop_scopes.pop()
         self._drop_value("rbp", lp, lt)         # release the loop reference
 
     def _gen_for_range(self, stmt: ast.For) -> None:
         loop_t = stmt.start.resolved_type
         lv = self._loopvar_off(stmt)
         fe = self._forend_off(stmt)
-        self._eval(stmt.start)
+        self._eval_scalar(stmt.start)
         self._emit(f"movq %rax, {lv}(%rbp)")
-        self._eval(stmt.end)
+        self._eval_scalar(stmt.end)
         self._emit(f"movq %rax, {fe}(%rbp)")
 
         start, cont, end = self._label(), self._label(), self._label()
@@ -1373,20 +1554,6 @@ class CodeGen:
         self._emit(f"{end}:")
 
     # -- lvalues & struct addresses ------------------------------------------
-
-    def _addr_of_lvalue(self, expr: ast.Expr) -> None:
-        """Leave the *address* of a scalar lvalue in %rax."""
-        if isinstance(expr, ast.Name):
-            kind, off, _ = self._lookup(expr.ident)
-            # scalar params are immutable, so an assignable Name is always local
-            self._emit(f"leaq {off}(%rbp), %rax")
-        elif isinstance(expr, ast.FieldAccess):
-            self._addr_of_aggregate(expr.target)
-            foff = self._field_offset(expr.target.resolved_type.name, expr.field_name)
-            if foff:
-                self._emit(f"addq ${foff}, %rax")
-        else:  # pragma: no cover - checker guarantees a valid lvalue
-            raise ValueError("invalid lvalue")
 
     def _addr_of_aggregate(self, expr: ast.Expr) -> None:
         """Leave the *base address* of an aggregate (struct/tuple/enum) value in %rax."""
@@ -1524,73 +1691,97 @@ class CodeGen:
         self._emit(f"movq ${cap}, %rdi")
         self._emit(f"call {self._map_new_name(mt)}")
         self._emit(f"movq %rax, {slot}(%rbp)")
+        staged = self._locals[f"staged:{id(expr)}"]
         for key, value in expr.entries:
-            self._emit(f"movq {slot}(%rbp), %rax")
-            self._emit("pushq %rax")             # cell
-            self._eval(key)                      # key -> rax
-            self._emit("movq %rax, %rsi")
-            self._emit("popq %rdi")              # cell
-            self._emit(f"call {self._map_put_name(mt)}")  # rax=&value, rdx=found
-            self._emit("pushq %rdx")             # found
-            self._emit("pushq %rax")             # &value
-            self._store_map_value(value, vt)
-
-    def _store_map_value(self, value: ast.Expr, vt: Type) -> None:
-        """Store `value` into the value slot whose address is on the stack top,
-        with the `found` flag pushed just below it. When `found`, the previous
-        value is released first; heap references the new value brings in are
-        retained (mirrors `_store_into_elem`, but the drop is conditional)."""
-        if self._is_boxed(vt):
-            self._box(value, vt)                 # rax = fresh heap copy (rc=1)
-            self._emit("popq %rcx")              # &value
-            self._emit("popq %rdx")              # found
-            skip = self._label()
-            self._emit("testq %rdx, %rdx")
-            self._emit(f"jz {skip}")
+            self._eval(key)                      # key, then value (MYLA-8)
             self._emit("pushq %rax")
-            self._emit("pushq %rcx")
-            self._emit("movq (%rcx), %rdi")
-            self._emit(f"call __dropb_{vt.name}")
-            self._emit("popq %rcx")
-            self._emit("popq %rax")
-            self._emit(f"{skip}:")
-            self._emit("movq %rax, (%rcx)")
-        elif _is_aggregate(vt):
+            self._stage_value(value, vt, staged)
+            self._emit("popq %rsi")
+            self._emit(f"movq {slot}(%rbp), %rdi")  # cell
+            self._emit(f"call {self._map_put_name(mt)}")  # rax=&value, rdx=found
+            self._commit_map_value(vt, staged)
+
+    # -- storing into containers ----------------------------------------------
+    # A store into a list element, map value or builder evaluates the value
+    # first and only then touches the container, as the interpreter does
+    # (MYLA-4): the value may return early (`?`) or change the same container
+    # (`push(xs, pop(xs))`), and neither may see a half-made slot. The new value
+    # is also taken before the old one is released, so `xs[i] = xs[i]` is safe.
+
+    def _stage_value(self, value: ast.Expr, t: Type, slot: int,
+                     inline: bool = False) -> None:
+        """Evaluate `value` into frame slot `slot` in its stored form
+        (`_stored_size(t)` bytes), owning one reference to every heap cell it
+        holds: a fresh box for a boxed enum, a retained copy of an inline
+        aggregate, or a scalar or retained cell pointer. With `inline`, for a
+        variable, even a boxed enum is staged as an inline copy."""
+        if self._is_boxed(t) and not inline:
+            self._box(value, t)                  # rax = fresh heap copy (rc=1)
+            self._emit(f"movq %rax, {slot}(%rbp)")
+        elif _is_aggregate(t):
             self._addr_of_aggregate(value)       # rax = src
-            self._emit("popq %rcx")              # dest = &value
-            self._emit("popq %rdx")              # found
-            skip = self._label()
-            self._emit("testq %rdx, %rdx")
-            self._emit(f"jz {skip}")
-            self._emit("pushq %rax")             # save src
-            self._emit("pushq %rcx")             # save dest
-            self._walk_member("rcx", 0, vt, self._drop_box)
-            self._emit("popq %rcx")
-            self._emit("popq %rax")
-            self._emit(f"{skip}:")
-            self._emit("movq %rax, %rsi")        # src
-            self._emit("pushq %rcx")
-            self._emit("movq %rcx, %rdi")        # dest
-            self._emit_copy(self._size(vt))
-            self._emit("popq %rcx")
-            self._retain("rcx", 0, vt)
-        else:                                    # scalar or list/map pointer
-            self._eval(value)                    # rax = new value
-            self._emit("popq %rcx")              # &value
-            self._emit("popq %rdx")              # found
-            if self._owns_heap(vt):
-                self._emit("incq -8(%rax)")      # store copies a reference
-                skip = self._label()
-                self._emit("testq %rdx, %rdx")
-                self._emit(f"jz {skip}")
-                self._emit("pushq %rax")
-                self._emit("pushq %rcx")
-                self._emit("movq (%rcx), %rdi")
-                self._emit(f"call {self._map_drop_name(vt) if isinstance(vt, MapType) else self._list_drop_name(vt)}")
-                self._emit("popq %rcx")
-                self._emit("popq %rax")
-                self._emit(f"{skip}:")
+            self._emit("movq %rax, %rsi")
+            self._emit(f"leaq {slot}(%rbp), %rdi")
+            self._emit_copy(self._size(t))
+            self._retain("rbp", slot, t)
+        else:
+            self._eval(value)
+            if self._owns_heap(t):
+                self._emit("incq -8(%rax)")      # the container gets a reference
+            self._emit(f"movq %rax, {slot}(%rbp)")
+        # Until _commit_staged hands the value over, an early return (a `?` in
+        # the key, the index or the container expression) must release it, and
+        # the value's temporaries, which the statement's end would have dropped.
+        temps: list = []
+        self._collect_expr_temps(value, temps)
+        drops = [lambda off=off, tt=tt: self._drop_value("rbp", off, tt)
+                 for off, tt in temps]
+        if self._owns_heap(t):
+            drops.append(lambda: self._release(slot, t, inline))
+        self._staged_drops.append(drops)
+
+    def _commit_staged(self, t: Type, slot: int, inline: bool = False) -> None:
+        """Move the value staged in `slot` into the storage at %rcx, which takes
+        over its references."""
+        self._staged_drops.pop()
+        if _is_aggregate(t) and (inline or not self._is_boxed(t)):
+            self._emit(f"leaq {slot}(%rbp), %rsi")
+            self._emit("movq %rcx, %rdi")
+            self._emit_copy(self._size(t))
+        else:
+            self._emit(f"movq {slot}(%rbp), %rax")
             self._emit("movq %rax, (%rcx)")
+
+    def _drop_stored(self, t: Type, inline: bool = False) -> None:
+        """Release the value of type `t` stored at %rcx (preserved). The walk
+        keeps the address in callee-saved %rbx across the drop calls."""
+        if self._owns_heap(t):
+            self._emit("pushq %rbx")
+            self._emit("movq %rcx, %rbx")
+            self._release(0, t, inline, base="rbx")
+            self._emit("movq %rbx, %rcx")
+            self._emit("popq %rbx")
+
+    def _release(self, off: int, t: Type, inline: bool, base: str = "rbp") -> None:
+        """Release the value of type `t` at `off(%base)`: stored as a member
+        (a boxed enum as its pointer) or, with `inline`, as a variable holds it."""
+        if inline:
+            self._drop_value(base, off, t)
+        else:
+            self._walk_member(base, off, t, self._drop_box)
+
+    def _commit_map_value(self, vt: Type, slot: int) -> None:
+        """After a map put (%rax = &value slot, %rdx = key already present):
+        release the previous value if there was one, then move the staged value
+        in."""
+        self._emit("movq %rax, %rcx")
+        if self._owns_heap(vt):
+            fresh = self._label()
+            self._emit("testq %rdx, %rdx")
+            self._emit(f"jz {fresh}")
+            self._drop_stored(vt)
+            self._emit(f"{fresh}:")
+        self._commit_staged(vt, slot)
 
     def _map_find_addr(self, expr: ast.Index) -> None:
         """Leave the address of the value for `m[key]` in %rax, trapping when the
@@ -1603,7 +1794,7 @@ class CodeGen:
         self._emit("popq %rdi")              # cell
         self._emit(f"call {self._map_find_name(mt)}")
         self._emit("testq %rax, %rax")
-        self._emit("jz __trap")              # key absent
+        self._emit("jz __trap_key")          # key absent
         self._emit("addq $16, %rax")         # &value (skip state + key)
 
     def _gen_str_index(self, expr: ast.Index) -> None:
@@ -1616,7 +1807,7 @@ class CodeGen:
         self._emit("popq %rcx")              # str pointer
         self._emit("movq (%rcx), %rdx")      # byte length (offset 0)
         self._emit("cmpq %rdx, %rax")
-        self._emit("jae __trap")             # i < 0 (huge unsigned) or i >= len
+        self._emit("jae __trap_index")       # i < 0 (huge unsigned) or i >= len
         self._emit("movzbq 8(%rcx,%rax), %rax")
 
     def _index_addr(self, expr: ast.Index) -> None:
@@ -1633,7 +1824,7 @@ class CodeGen:
         self._emit("popq %rcx")              # cell pointer
         self._emit("movq (%rcx), %rdx")      # length
         self._emit("cmpq %rdx, %rax")
-        self._emit("jae __trap")             # i < 0 (huge unsigned) or i >= len
+        self._emit("jae __trap_index")       # i < 0 (huge unsigned) or i >= len
         self._emit(f"imulq ${stride}, %rax")
         self._emit("leaq 16(%rcx,%rax), %rax")
 
@@ -1672,7 +1863,7 @@ class CodeGen:
         self._emit("popq %rcx")                 # cell
         self._emit("movq (%rcx), %rdx")         # len
         self._emit("cmpq %rdx, %rax")
-        self._emit("jae __trap")
+        self._emit("jae __trap_index")
         self._emit(f"imulq ${stride}, %rax")
         self._emit("leaq 16(%rcx,%rax), %rax")
 
@@ -1688,7 +1879,7 @@ class CodeGen:
         self._emit("popq %rdi")                 # cell
         self._emit(f"call {self._map_find_name(mt)}")
         self._emit("testq %rax, %rax")
-        self._emit("jz __trap")
+        self._emit("jz __trap_key")
         self._emit("addq $16, %rax")            # &value
 
     def _mut_index_addr(self, expr: ast.Index) -> None:
@@ -1706,7 +1897,7 @@ class CodeGen:
             _, off, _ = self._lookup(expr.ident)
             self._emit(f"leaq {off}(%rbp), %rax")
         elif isinstance(expr, ast.FieldAccess):
-            self._mut_addr_of_struct(expr.target)
+            self._mut_place_addr(expr.target)
             foff = self._field_offset(expr.target.resolved_type.name, expr.field_name)
             if foff:
                 self._emit(f"addq ${foff}, %rax")
@@ -1715,9 +1906,11 @@ class CodeGen:
         else:  # pragma: no cover - checker guarantees a valid lvalue
             raise ValueError("invalid list lvalue")
 
-    def _mut_addr_of_struct(self, expr: ast.Expr) -> None:
-        """Leave the address of inline-struct lvalue `expr` in %rax (CoW-ing any
-        list/map cell on the path)."""
+    def _mut_place_addr(self, expr: ast.Expr) -> None:
+        """Leave the address of place `expr` (a variable, a field or a list
+        element / map value, at any depth) in %rax, unsharing (CoW) every list
+        and map cell on the path, so the write that follows doesn't reach other
+        owners of the container (MYLA-3)."""
         if isinstance(expr, ast.Name):
             kind, off, _ = self._lookup(expr.ident)
             if kind == "local":
@@ -1726,7 +1919,7 @@ class CodeGen:
                 # the caller's storage, so mutations write straight back to it.
                 self._emit(f"movq {off}(%rbp), %rax")
         elif isinstance(expr, ast.FieldAccess):
-            self._mut_addr_of_struct(expr.target)
+            self._mut_place_addr(expr.target)
             foff = self._field_offset(expr.target.resolved_type.name, expr.field_name)
             if foff:
                 self._emit(f"addq ${foff}, %rax")
@@ -1735,57 +1928,14 @@ class CodeGen:
         else:  # pragma: no cover
             raise ValueError("invalid struct lvalue")
 
-    def _store_into_elem(self, value: ast.Expr, et: Type, drop_old: bool) -> None:
-        """Store `value` into the element whose address is on the stack top
-        (consumed), taking ownership of heap references it brings in and, when
-        `drop_old`, releasing whatever the slot held before."""
-        if self._is_boxed(et):
-            self._box(value, et)                  # rax = fresh heap copy (rc=1)
-            self._emit("popq %rcx")               # &elem
-            if drop_old:
-                self._emit("pushq %rax")
-                self._emit("pushq %rcx")
-                self._emit("movq (%rcx), %rdi")
-                self._emit(f"call __dropb_{et.name}")
-                self._emit("popq %rcx")
-                self._emit("popq %rax")
-            self._emit("movq %rax, (%rcx)")
-        elif _is_aggregate(et):
-            self._addr_of_aggregate(value)        # rax = src
-            self._emit("popq %rcx")               # dest = &elem
-            self._emit("pushq %rcx")              # keep dest
-            if drop_old:
-                self._emit("pushq %rax")          # save src
-                self._walk_member("rcx", 0, et, self._drop_box)
-                self._emit("popq %rax")           # src
-            self._emit("movq %rax, %rsi")
-            self._emit("movq (%rsp), %rdi")       # dest (peek)
-            self._emit_copy(self._size(et))
-            self._emit("popq %rcx")               # dest
-            self._retain("rcx", 0, et)
-        elif self._owns_heap(et):                 # list element (scalar pointer)
-            self._eval(value)                     # rax = new cell pointer
-            self._emit("popq %rcx")               # &elem
-            self._emit("incq -8(%rax)")           # store copies a reference
-            if drop_old:
-                self._emit("pushq %rax")
-                self._emit("pushq %rcx")
-                self._emit("movq (%rcx), %rdi")
-                self._emit(f"call {self._list_drop_name(et)}")
-                self._emit("popq %rcx")
-                self._emit("popq %rax")
-            self._emit("movq %rax, (%rcx)")
-        else:                                     # plain scalar (int/bool/str)
-            self._eval(value)
-            self._emit("popq %rcx")
-            self._emit("movq %rax, (%rcx)")
-
     def _gen_push(self, expr: ast.Call) -> None:
         arg0 = expr.args[0]
         lt = arg0.resolved_type
         et = lt.elem
         stride = self._stored_size(et)
         holder = self._locals[f"mutholder:{id(expr)}"]
+        staged = self._locals[f"staged:{id(expr)}"]
+        self._stage_value(expr.args[1], et, staged)
         self._mut_addr_of_list_holder(arg0)       # rax = &holder
         self._emit(f"movq %rax, {holder}(%rbp)")
         self._cow_unique(lt)                      # rax = unique cell (rc==1)
@@ -1803,18 +1953,19 @@ class CodeGen:
         self._emit("leaq 1(%rdx), %rcx")
         self._emit("movq %rcx, (%rax)")           # length += 1
         self._emit(f"imulq ${stride}, %rdx")
-        self._emit("leaq 16(%rax,%rdx), %rax")    # &elem (the fresh slot)
-        self._emit("pushq %rax")
-        self._store_into_elem(expr.args[1], et, drop_old=False)
+        self._emit("leaq 16(%rax,%rdx), %rcx")    # &elem (the fresh slot)
+        self._commit_staged(et, staged)
         # The value temp (if any) is released by the enclosing statement's
         # `_drop_expr_temps`, which recurses into call arguments; dropping it
         # here too would double-free an owning temp (e.g. a closure or list).
 
     def _gen_sb_append_byte(self, expr: ast.Call) -> None:
-        """`append_byte(sb, b)`: make `sb` unique (CoW), grow if full, store one
-        packed byte and bump the length."""
+        """`append_byte(sb, b)`: evaluate the byte, make `sb` unique (CoW), grow
+        if full, store the packed byte and bump the length."""
         arg0 = expr.args[0]
         holder = self._locals[f"mutholder:{id(expr)}"]
+        self._eval(expr.args[1])                  # byte value -> rax, first (MYLA-4)
+        self._emit("pushq %rax")
         self._mut_addr_of_list_holder(arg0)       # rax = &holder
         self._emit(f"movq %rax, {holder}(%rbp)")
         self._cow_unique(arg0.resolved_type)      # rax = unique cell (rc==1)
@@ -1831,11 +1982,8 @@ class CodeGen:
         self._emit("movq (%rax), %rdx")           # current length (append index)
         self._emit("leaq 1(%rdx), %rcx")
         self._emit("movq %rcx, (%rax)")           # length += 1
-        self._emit("leaq 16(%rax,%rdx), %rax")    # &byte (packed, stride 1)
-        self._emit("pushq %rax")
-        self._eval(expr.args[1])                  # byte value -> rax
-        self._emit("popq %rcx")                   # &byte
-        self._emit("movb %al, (%rcx)")
+        self._emit("popq %rcx")                   # byte value
+        self._emit("movb %cl, 16(%rax,%rdx)")     # packed, stride 1
         # Arg temp released by the enclosing statement (see _gen_push).
 
     def _gen_sb_append(self, expr: ast.Call) -> None:
@@ -1848,9 +1996,21 @@ class CodeGen:
         self._cow_unique(arg0.resolved_type)      # rax = unique cell (rc==1)
         self._emit("pushq %rax")
         self._eval(expr.args[1])                  # str ptr -> rax
-        self._emit("movq %rax, %rsi")
-        self._emit("popq %rdi")                   # builder cell
-        self._emit("call __sb_extend")            # rax = (maybe reallocated) cell
+        if len(expr.args) == 4:                   # append(sb, s, start, end) (MYLA-85)
+            self._emit("pushq %rax")
+            self._eval(expr.args[2])              # start -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[3])              # end -> rax
+            self._emit("movslq %eax, %rcx")       # (int32, sign-extended)
+            self._emit("popq %rdx")
+            self._emit("movslq %edx, %rdx")
+            self._emit("popq %rsi")               # str
+            self._emit("popq %rdi")               # builder cell
+            self._emit("call __sb_extend_range")  # rax = (maybe reallocated) cell
+        else:
+            self._emit("movq %rax, %rsi")
+            self._emit("popq %rdi")               # builder cell
+            self._emit("call __sb_extend")        # rax = (maybe reallocated) cell
         self._emit(f"movq {holder}(%rbp), %rcx")
         self._emit("movq %rax, (%rcx)")           # publish the cell
         # Arg temp released by the enclosing statement (see _gen_push).
@@ -1863,12 +2023,23 @@ class CodeGen:
         self._mut_container_cell(arg0)            # rax = unique cell
         self._emit("movq (%rax), %rdx")           # len
         self._emit("testq %rdx, %rdx")
-        self._emit("jz __trap")                   # pop from an empty list traps
+        self._emit("jz __trap_pop")               # pop from an empty list traps
         self._emit("decq %rdx")
         self._emit("movq %rdx, (%rax)")           # len -= 1
         self._emit(f"imulq ${stride}, %rdx")
         self._emit("leaq 16(%rax,%rdx), %rax")    # &elem (removed last element)
-        if _is_aggregate(et):                     # copy out (ownership transfers)
+        if self._is_boxed(et):
+            # The list held a box: copy the value out, give the copy its own
+            # references, then release the box (MYLA-74).
+            slot = self._locals[id(expr)]
+            self._emit("movq (%rax), %rsi")
+            self._emit("pushq %rsi")
+            self._emit(f"leaq {slot}(%rbp), %rdi")
+            self._emit_copy(self._size(et))
+            self._retain("rbp", slot, et)
+            self._emit("popq %rdi")
+            self._emit(f"call __dropb_{et.name}")
+        elif _is_aggregate(et):                   # copy out (ownership transfers)
             slot = self._locals[id(expr)]
             self._emit("movq %rax, %rsi")
             self._emit(f"leaq {slot}(%rbp), %rdi")
@@ -1908,13 +2079,15 @@ class CodeGen:
         # Arg temp released by the enclosing statement (see _gen_push).
 
     def _gen_map_set(self, stmt: ast.Assign) -> None:
-        """`m[key] = value` (insert or update): make the map unique (CoW), grow it
-        if inserting would exceed the load factor, then store the value, releasing
-        the previous one if the key already existed."""
+        """`m[key] = value` (insert or update): evaluate the value, make the map
+        unique (CoW), grow it if inserting would exceed the load factor, then
+        store the value, releasing the previous one if the key already existed."""
         target = stmt.target
         mt = target.target.resolved_type
         vt = mt.value
         holder = self._locals[f"mutholder:{id(stmt)}"]
+        staged = self._locals[f"staged:{id(stmt)}"]
+        self._stage_value(stmt.value, vt, staged)
         self._mut_addr_of_list_holder(target.target)  # rax = &holder
         self._emit(f"movq %rax, {holder}(%rbp)")
         self._cow_unique(mt)                          # rax = unique cell (rc==1)
@@ -1936,9 +2109,7 @@ class CodeGen:
         self._emit("movq %rax, %rsi")
         self._emit("popq %rdi")                       # cell
         self._emit(f"call {self._map_put_name(mt)}")  # rax=&value, rdx=found
-        self._emit("pushq %rdx")                      # found
-        self._emit("pushq %rax")                      # &value
-        self._store_map_value(stmt.value, vt)
+        self._commit_map_value(vt, staged)
         self._drop_expr_temps(target.index)
         self._drop_expr_temps(stmt.value)
 
@@ -1963,6 +2134,7 @@ class CodeGen:
             else:
                 self._emit("movq (%rsi), %rax")
                 self._emit(f"movq %rax, {leaf_off}(%rbp)")
+                self._retain("rbp", leaf_off, t)   # a list/map/builder leaf owns a reference
             self._scopes[-1][leaf.name] = ("local", leaf_off, t)
             self._register_owner(leaf_off, t)
         self._drop_expr_temps(stmt.init)
@@ -2001,6 +2173,24 @@ class CodeGen:
         else:
             self._eval(expr.scrutinee)
             self._emit(f"movq %rax, {root}(%rbp)")
+        # When an arm may write to the variable the scrutinee comes from
+        # (`match xs { ys => push(xs, 1) }`), the copy holds its own references
+        # (MYLA-2): the bindings borrow from the copy, and the write copies on
+        # write instead of changing or freeing what they see. It is released
+        # after the match, or by an early exit from an arm. Otherwise (no arm
+        # writes it, or it is a temporary such as a `?` operand) the bindings
+        # can safely borrow from the scrutinee itself.
+        root_var = _place_root(expr.scrutinee)
+        owns_copy = (root_var is not None and self._owns_heap(sst)
+                     and any(_may_write([arm.guard, arm.body], root_var) for arm in expr.arms))
+        if owns_copy:
+            self._retain("rbp", root, sst)
+        # The scrutinee's temporaries (a call's result, say) are dropped when
+        # the statement ends; an arm that leaves early (`return`, `break`,
+        # `continue`, a failing `?`) skips that, so it drops them (MYLA-74).
+        temps: list = []
+        self._collect_expr_temps(expr.scrutinee, temps)
+        self._drop_scopes.append(([(root, sst)] if owns_copy else []) + temps)
 
         result_off = self._locals.get(f"matchres:{id(expr)}")
         result_type = expr.resolved_type
@@ -2008,12 +2198,11 @@ class CodeGen:
         for arm in expr.arms:
             arm_fail = self._label()
             self._match_pat(arm.pattern, root, sst, arm, arm_fail)
-            # bindings and the scrutinee copy borrow from the scrutinee, which
-            # outlives the match, so they introduce no owners of their own.
+            # bindings borrow from the scrutinee copy: no owners of their own
             self._scopes.append(self._arm_scope(arm))
             self._drop_scopes.append([])
             if arm.guard is not None:
-                self._eval(arm.guard)
+                self._eval_scalar(arm.guard)
                 self._emit("testq %rax, %rax")
                 self._emit(f"jz {arm_fail}")
             self._gen_arm_body(arm.body, result_off, result_type)
@@ -2021,8 +2210,11 @@ class CodeGen:
             self._drop_scopes.pop()
             self._scopes.pop()
             self._emit(f"{arm_fail}:")
-        self._emit("jmp __trap")   # unreachable when the match is exhaustive
+        self._emit("jmp __trap_match")   # unreachable when the match is exhaustive
         self._emit(f"{end}:")
+        self._drop_scopes.pop()
+        if owns_copy:
+            self._drop_value("rbp", root, sst)
 
     def _arm_scope(self, arm: ast.MatchArm) -> dict:
         binds: dict = {}
@@ -2120,20 +2312,24 @@ class CodeGen:
         self._emit(f"jne {fail}")
 
     def _gen_arm_body(self, body, result_off, result_type) -> None:
+        # An arm ending in `panic`/`unreachable` never produces the match's
+        # value: generate the call alone, with nothing to store.
         if isinstance(body, ast.Block):
             self._open_scope()
             stmts = body.statements
             for i, s in enumerate(stmts):
-                if i == len(stmts) - 1 and isinstance(s, ast.ExprStmt) and result_off is not None:
+                if (i == len(stmts) - 1 and isinstance(s, ast.ExprStmt)
+                        and result_off is not None and not _is_diverging(s.expr)):
                     self._store_value(s.expr, result_off, result_type)
                     self._drop_expr_temps(s.expr)
                 else:
                     self._gen_stmt(s)
             self._close_scope()
-        elif result_off is not None:
+        elif result_off is not None and not _is_diverging(body):
+            self._emit_loc(body)
             self._store_value(body, result_off, result_type)
             self._drop_expr_temps(body)
-        elif _is_aggregate(body.resolved_type):
+        elif _is_aggregate(body.resolved_type) and not _is_diverging(body):
             self._addr_of_aggregate(body)
             self._drop_expr_temps(body)
         else:
@@ -2205,6 +2401,8 @@ class CodeGen:
             self._emit(f"call {self._map_drop_name(t)}")
         elif isinstance(t, StringBuilderType):
             self._emit("call __sb_drop")
+        elif isinstance(t, StrType):
+            self._emit("call __str_drop")
         else:
             self._emit(f"call __dropb_{t.name}")
 
@@ -2242,7 +2440,7 @@ class CodeGen:
     def _walk_member(self, base: str, off: int, ft: Type, on_box) -> None:
         # Heap-pointer leaves (boxed enum, list, map) hand the action the *type*
         # so it can pick the right routine; inline aggregates recurse.
-        if self._is_boxed(ft) or isinstance(ft, (ListType, MapType, StringBuilderType)):
+        if self._is_boxed(ft) or isinstance(ft, _CELL_TYPES):
             on_box(off, base, ft)
         elif isinstance(ft, FuncType):
             # the refcounted env pointer is the second word of the fat value
@@ -2251,7 +2449,7 @@ class CodeGen:
             self._emit_owned_walk(base, off, ft, on_box)
 
     def _retain(self, base: str, off: int, t: Type) -> None:
-        if isinstance(t, (ListType, MapType, StringBuilderType)):  # cell ptr at off
+        if isinstance(t, _CELL_TYPES):           # cell ptr at off
             self._inc_box(off, base, t)
         elif isinstance(t, FuncType):
             self._inc_box(off + 8, base, t)
@@ -2259,7 +2457,7 @@ class CodeGen:
             self._emit_owned_walk(base, off, t, self._inc_box)
 
     def _drop_value(self, base: str, off: int, t: Type) -> None:
-        if isinstance(t, (ListType, MapType, StringBuilderType)):
+        if isinstance(t, _CELL_TYPES):
             self._drop_box(off, base, t)
         elif isinstance(t, FuncType):
             self._drop_box(off + 8, base, t)
@@ -2284,7 +2482,11 @@ class CodeGen:
             self._drop_scopes[-1].append((slot, t))
 
     def _emit_return_drops(self) -> None:
-        """Drop every owning local currently in scope (for an early `return`)."""
+        """Drop every owning local currently in scope (for an early `return`),
+        and any value staged for a container store that hasn't been committed."""
+        for drops in reversed(self._staged_drops):
+            for drop in drops:
+                drop()
         for scope in reversed(self._drop_scopes):
             for slot, t in reversed(scope):
                 self._drop_value("rbp", slot, t)
@@ -2308,8 +2510,9 @@ class CodeGen:
         if isinstance(expr, (ast.Unary, ast.Cast)):
             self._collect_expr_temps(expr.operand, out)
         elif isinstance(expr, ast.Binary):
-            self._collect_expr_temps(expr.left, out)
-            self._collect_expr_temps(expr.right, out)
+            if expr.op not in ("&&", "||"):       # those release their own
+                self._collect_expr_temps(expr.left, out)
+                self._collect_expr_temps(expr.right, out)
         elif isinstance(expr, ast.Call):
             if getattr(expr, "indirect_call", False):
                 self._collect_expr_temps(expr.callee, out)
@@ -2338,6 +2541,10 @@ class CodeGen:
                 self._collect_expr_temps(e, out)
         elif isinstance(expr, ast.Match):
             self._collect_expr_temps(expr.scrutinee, out)
+            # the arm's value is retained into the result slot (MYLA-74)
+            res = self._locals.get(f"matchres:{id(expr)}")
+            if res is not None and self._owns_heap(expr.resolved_type):
+                out.append((res, expr.resolved_type))
 
     def _drop_expr_temps(self, expr: ast.Expr) -> None:
         temps: list = []
@@ -2602,6 +2809,17 @@ class CodeGen:
         # reallocated) with the string's bytes appended; len grows by the string
         # length. Grows repeatedly until the appended bytes fit.
         e("__sb_extend:")
+        e("\txorq %rdx, %rdx")             # the whole string: 0..slen
+        e("\tmovq (%rsi), %rcx")
+        # __sb_extend_range: the same for the bytes str[rdx..rcx]; traps unless
+        # 0 <= start <= end <= slen (MYLA-85).
+        e("__sb_extend_range:")
+        e("\ttestq %rdx, %rdx")
+        e("\tjl __trap_index")             # start < 0
+        e("\tcmpq %rdx, %rcx")
+        e("\tjl __trap_index")             # end < start
+        e("\tcmpq (%rsi), %rcx")
+        e("\tjg __trap_index")             # end > slen
         e("\tpushq %rbp")
         e("\tmovq %rsp, %rbp")
         e("\tpushq %rbx")
@@ -2609,8 +2827,9 @@ class CodeGen:
         e("\tpushq %r13")
         e("\tpushq %r14")
         e("\tmovq %rdi, %rbx")             # cell
-        e("\tmovq %rsi, %r12")             # str
-        e("\tmovq (%r12), %r13")           # slen
+        e("\tleaq (%rsi,%rdx), %r12")      # str shifted by start: its bytes at 8(%r12)
+        e("\tmovq %rcx, %r13")
+        e("\tsubq %rdx, %r13")             # count = end - start
         e("\tmovq (%rbx), %r14")           # len
         grow, fit = self._label(), self._label()
         e(f"{grow}:")
@@ -2749,8 +2968,9 @@ class CodeGen:
 
     def _emit_map_put_helper(self, t: MapType) -> None:
         """`__put_map_<m>`: %rdi = cell, %rsi = key -> %rax = &value slot, %rdx = 1
-        if the key already existed else 0 (newly inserted, len incremented). A
-        free slot is guaranteed by the load factor invariant (< 0.75)."""
+        if the key already existed else 0 (newly inserted, len incremented, and
+        a `str` key retained). A free slot is guaranteed by the load factor
+        invariant (< 0.75)."""
         ss = self._map_slot_size(t)
         probe, insert, found, ret = (self._label(), self._label(),
                                      self._label(), self._label())
@@ -2781,6 +3001,8 @@ class CodeGen:
         self._emit(f"{insert}:")
         self._emit("movq $1, (%r9)")             # state = occupied
         self._emit("movq %r13, 8(%r9)")          # key
+        if self._owns_heap(t.key):               # the map holds a reference (MYLA-18)
+            self._emit("incq -8(%r13)")
         self._emit("incq (%r12)")                # len += 1
         self._emit("leaq 16(%r9), %rax")         # &value
         self._emit("xorq %rdx, %rdx")            # found = 0
@@ -2842,7 +3064,8 @@ class CodeGen:
 
     def _emit_map_clone_helper(self, t: MapType) -> None:
         """`__clone_map_<m>`: %rdi = shared cell -> %rax = an independent copy
-        (rc=1); retain each occupied value, decrement the original's refcount."""
+        (rc=1); retain each occupied key and value, decrement the original's
+        refcount."""
         ss = self._map_slot_size(t)
         vt = t.value
         self._emit(f"{self._map_clone_name(t)}:")
@@ -2863,7 +3086,7 @@ class CodeGen:
         self._emit("shrq $3, %rcx")
         self._emit("cld")
         self._emit("rep movsq")                  # copy old -> new
-        if self._owns_heap(vt):
+        if self._owns_heap(vt) or self._owns_heap(t.key):
             self._emit("movq 8(%r13), %r12")     # cap
             self._emit("xorq %r14, %r14")        # i = 0
             loop, done, skip = self._label(), self._label(), self._label()
@@ -2876,6 +3099,7 @@ class CodeGen:
             self._emit("movq (%rcx), %rax")          # state
             self._emit("cmpq $1, %rax")
             self._emit(f"jne {skip}")
+            self._walk_member("rcx", 8, t.key, self._inc_box)
             self._walk_member("rcx", 16, vt, self._inc_box)
             self._emit(f"{skip}:")
             self._emit("incq %r14")
@@ -2924,6 +3148,7 @@ class CodeGen:
         self._emit("movq %r13, %rdi")
         self._emit("movq 8(%r15), %rsi")         # key
         self._emit(f"call {self._map_put_name(t)}")   # rax = &new value slot
+        self._move_key_from(t, "r15")
         self._emit("leaq 16(%r15), %rsi")        # &old value
         self._emit("movq %rax, %rdi")
         self._emit(f"movq ${vs // 8}, %rcx")
@@ -2945,16 +3170,24 @@ class CodeGen:
         self._emit("ret")
         self._emit("")
 
+    def _move_key_from(self, t: MapType, slot: str) -> None:
+        """After `__put_map` inserted the key of the old slot at `(%slot)` into a
+        new cell, give back the reference put took: the key moved (MYLA-18).
+        Preserves %rax."""
+        if self._owns_heap(t.key):
+            self._emit(f"movq 8(%{slot}), %rcx")
+            self._emit("decq -8(%rcx)")          # the new cell still holds one
+
     def _emit_map_drop_helper(self, t: MapType) -> None:
         """`__drop_map_<m>`: %rdi = cell. Decrement the refcount; at zero, drop each
-        occupied value (keys are non-owning primitives) and free the cell."""
+        occupied entry's key (a `str`) and value, and free the cell."""
         ss = self._map_slot_size(t)
         vt = t.value
         keep = self._label()
         self._emit(f"{self._map_drop_name(t)}:")
         self._emit("decq -8(%rdi)")
         self._emit(f"jnz {keep}")
-        if self._owns_heap(vt):
+        if self._owns_heap(vt) or self._owns_heap(t.key):
             self._emit("pushq %rbp")
             self._emit("movq %rsp, %rbp")
             self._emit("pushq %rbx")
@@ -2974,6 +3207,7 @@ class CodeGen:
             self._emit("movq (%r14), %rax")          # state
             self._emit("cmpq $1, %rax")
             self._emit(f"jne {skip}")
+            self._walk_member("r14", 8, t.key, self._drop_box)
             self._walk_member("r14", 16, vt, self._drop_box)
             self._emit(f"{skip}:")
             self._emit("incq %r13")
@@ -2994,8 +3228,8 @@ class CodeGen:
 
     def _emit_map_keys_helper(self, t: MapType) -> None:
         """`__keys_map_<m>`: %rdi = map cell -> %rax = a fresh `[K]` list (rc=1) of
-        the occupied keys (any order). Keys are non-owning primitives, so no
-        retain is needed."""
+        the occupied keys (any order); the list holds a reference to each `str`
+        key."""
         ss = self._map_slot_size(t)
         self._emit(f"{self._map_keys_name(t)}:")
         self._emit("pushq %rbp")
@@ -3025,6 +3259,8 @@ class CodeGen:
         self._emit("cmpq $1, %rcx")
         self._emit(f"jne {skip}")
         self._emit("movq 8(%rax), %rcx")         # key
+        if self._owns_heap(t.key):
+            self._emit("incq -8(%rcx)")
         self._emit("movq %rcx, (%rdx)")          # append to list
         self._emit("addq $8, %rdx")
         self._emit(f"{skip}:")
@@ -3089,6 +3325,7 @@ class CodeGen:
         self._emit("movq %r13, %rdi")
         self._emit("movq 8(%r15), %rsi")          # key
         self._emit(f"call {self._map_put_name(t)}")   # rax = &new value slot
+        self._move_key_from(t, "r15")
         self._emit("leaq 16(%r15), %rsi")         # &old value
         self._emit("movq %rax, %rdi")
         self._emit(f"movq ${vs // 8}, %rcx")
@@ -3096,6 +3333,8 @@ class CodeGen:
         self._emit("rep movsq")                   # move the value bytes over
         self._emit(f"jmp {skip}")
         self._emit(f"{drop}:")                     # the removed entry: release it
+        if self._owns_heap(t.key):
+            self._drop_value("r15", 8, t.key)
         if self._owns_heap(vt):
             self._drop_value("r15", 16, vt)
         self._emit(f"{skip}:")
@@ -3251,13 +3490,48 @@ class CodeGen:
                     self._emit("cvtsi2sdq %rax, %xmm0")
                 self._round_xmm0(target)
                 self._emit("movq %xmm0, %rax")
-        elif isinstance(src, FloatType):  # float -> int (truncate toward zero)
-            self._uses_float = True
-            self._emit("movq %rax, %xmm0")
-            self._emit("cvttsd2si %xmm0, %rax")
-            self._wrap(target)
+        elif isinstance(src, FloatType):
+            self._float_to_int(target)
         else:  # int -> int
             self._wrap(target)
+
+    def _float_to_int(self, t: IntType) -> None:
+        """The float in %rax `as t`: truncate toward zero, clamp to the range
+        of `t`, NaN gives 0 (D59, `types.float_to_int`). cvttsd2si alone
+        returns 2^63 for anything outside the int64 range."""
+        self._uses_float = True
+        low = -(1 << (t.width - 1)) if t.signed else 0
+        high = (1 << (t.width - 1 if t.signed else t.width)) - 1
+        high_imm = high - (1 << 64) if high >= 1 << 63 else high   # all ones for uint64
+        done = self._label()
+        self._emit("movq %rax, %xmm0")
+        self._emit("xorl %eax, %eax")
+        self._emit("ucomisd %xmm0, %xmm0")
+        self._emit(f"jp {done}")                     # NaN -> 0
+        self._emit(f"movabsq ${_f64_imm(float(high + 1))}, %rcx")
+        self._emit("movq %rcx, %xmm1")
+        self._emit(f"movabsq ${high_imm}, %rax")
+        self._emit("ucomisd %xmm1, %xmm0")
+        self._emit(f"jae {done}")                    # x >= high + 1 -> high
+        self._emit(f"movabsq ${_f64_imm(float(low))}, %rcx")
+        self._emit("movq %rcx, %xmm1")
+        self._emit(f"movabsq ${low}, %rax")
+        self._emit("ucomisd %xmm1, %xmm0")
+        self._emit(f"jbe {done}")                    # x <= low -> low
+        if t.width == 64 and not t.signed:
+            # 2^63 <= x < 2^64: convert x - 2^63, then set the top bit
+            small = self._label()
+            self._emit(f"movabsq ${_f64_imm(2.0 ** 63)}, %rcx")
+            self._emit("movq %rcx, %xmm1")
+            self._emit("ucomisd %xmm1, %xmm0")
+            self._emit(f"jb {small}")
+            self._emit("subsd %xmm1, %xmm0")
+            self._emit("cvttsd2si %xmm0, %rax")
+            self._emit("btcq $63, %rax")
+            self._emit(f"jmp {done}")
+            self._emit(f"{small}:")
+        self._emit("cvttsd2si %xmm0, %rax")
+        self._emit(f"{done}:")
 
     def _eval_unary(self, expr: ast.Unary) -> None:
         if expr.op == "-" and isinstance(expr.resolved_type, FloatType):
@@ -3292,11 +3566,9 @@ class CodeGen:
             return
 
         if op in ("==", "!=") and isinstance(ltype, StrType):
-            self._eval(expr.right)
-            self._emit("pushq %rax")
-            self._eval(expr.left)
+            self._eval_operands(expr)
             self._emit("movq %rax, %rdi")
-            self._emit("popq %rsi")
+            self._emit("movq %rcx, %rsi")
             self._emit("call __str_eq")
             if op == "!=":
                 self._emit("testq %rax, %rax")
@@ -3305,19 +3577,15 @@ class CodeGen:
             return
 
         if op == "+" and isinstance(ltype, StrType):
-            self._eval(expr.right)
-            self._emit("pushq %rax")
-            self._eval(expr.left)
+            self._eval_operands(expr)
             self._emit("movq %rax, %rdi")        # A
-            self._emit("popq %rsi")              # B
+            self._emit("movq %rcx, %rsi")        # B
             self._emit("call __str_concat")      # rax = A + B (fresh heap str)
+            # its temp: the statement's end releases it unless it's consumed
+            self._emit(f"movq %rax, {self._locals[id(expr)]}(%rbp)")
             return
 
-        # evaluate right, push; evaluate left into rax; pop right into rcx
-        self._eval(expr.right)
-        self._emit("pushq %rax")
-        self._eval(expr.left)
-        self._emit("popq %rcx")
+        self._eval_operands(expr)
 
         if op == "+":
             self._emit("addq %rcx, %rax")
@@ -3330,15 +3598,26 @@ class CodeGen:
             self._wrap(expr.resolved_type)
         elif op in ("/", "%"):
             self._emit("testq %rcx, %rcx")
-            self._emit("jz __trap")
+            self._emit("jz __trap_div" if op == "/" else "jz __trap_mod")
             if ltype.signed:
+                # x / -1 is -x and x % -1 is 0; idivq would trap on the
+                # minimum (its quotient overflows), the language wraps (MYLA-5)
+                divide, done = self._label(), self._label()
+                self._emit("cmpq $-1, %rcx")
+                self._emit(f"jne {divide}")
+                self._emit("negq %rax" if op == "/" else "xorl %eax, %eax")
+                self._emit(f"jmp {done}")
+                self._emit(f"{divide}:")
                 self._emit("cqo")
                 self._emit("idivq %rcx")
+                if op == "%":
+                    self._emit("movq %rdx, %rax")
+                self._emit(f"{done}:")
             else:
                 self._emit("xorq %rdx, %rdx")
                 self._emit("divq %rcx")
-            if op == "%":
-                self._emit("movq %rdx, %rax")
+                if op == "%":
+                    self._emit("movq %rdx, %rax")
             self._wrap(expr.resolved_type)
         elif op in _SET_MNEMONIC:
             signed_set, unsigned_set = _SET_MNEMONIC[op]
@@ -3388,16 +3667,28 @@ class CodeGen:
     }
     _FARITH = {"+": "addsd", "-": "subsd", "*": "mulsd", "/": "divsd"}
 
+    def _eval_operands(self, expr: ast.Binary) -> None:
+        """Evaluate the left operand into %rax and the right into %rcx, left
+        to right (MYLA-8). With a literal operand the order can't be observed,
+        and the right-first sequence is one instruction shorter."""
+        if _is_literal(expr.left) or _is_literal(expr.right):
+            self._eval(expr.right)
+            self._emit("pushq %rax")
+            self._eval(expr.left)
+            self._emit("popq %rcx")
+            return
+        self._eval(expr.left)
+        self._emit("pushq %rax")
+        self._eval(expr.right)
+        self._emit("movq %rax, %rcx")
+        self._emit("popq %rax")
+
     def _eval_binary_float(self, expr: ast.Binary) -> None:
         """Float arithmetic/comparison (D56): operands are carried as f64 images
         in %rax; compute in XMM, then narrow `float32` results."""
         self._uses_float = True
         op = expr.op
-        # right -> push; left -> rax; pop right -> rcx (same shape as the int path)
-        self._eval(expr.right)
-        self._emit("pushq %rax")
-        self._eval(expr.left)
-        self._emit("popq %rcx")
+        self._eval_operands(expr)
         self._emit("movq %rax, %xmm0")        # left
         self._emit("movq %rcx, %xmm1")        # right
         if op in self._FARITH:
@@ -3417,11 +3708,13 @@ class CodeGen:
     def _eval_logical(self, expr: ast.Binary) -> None:
         short = self._label()
         end = self._label()
+        # Each operand releases its own temporaries: the right one may not run,
+        # so the statement's end can't (MYLA-74).
         if expr.op == "&&":
-            self._eval(expr.left)
+            self._eval_scalar(expr.left)
             self._emit("testq %rax, %rax")
             self._emit(f"jz {short}")
-            self._eval(expr.right)
+            self._eval_scalar(expr.right)
             self._emit("testq %rax, %rax")
             self._emit(f"jz {short}")
             self._emit("movq $1, %rax")
@@ -3430,10 +3723,10 @@ class CodeGen:
             self._emit("xorq %rax, %rax")
             self._emit(f"{end}:")
         else:  # "||"
-            self._eval(expr.left)
+            self._eval_scalar(expr.left)
             self._emit("testq %rax, %rax")
             self._emit(f"jnz {short}")
-            self._eval(expr.right)
+            self._eval_scalar(expr.right)
             self._emit("testq %rax, %rax")
             self._emit(f"jnz {short}")
             self._emit("xorq %rax, %rax")
@@ -3446,13 +3739,14 @@ class CodeGen:
 
     def _capture_layout(self, lam: ast.Lambda):
         """Env-cell layout for a lambda: returns (offsets, env_size, owns_any).
-        Slot 0 (8 bytes) holds the drop fn; captures follow."""
+        Slot 0 (8 bytes) holds the drop fn; captures follow, each stored inline
+        like a variable (a recursive enum too, not as a pointer)."""
         offsets: list[int] = []
         cur = 8
         owns = False
         for _name, t in lam.captures:
             offsets.append(cur)
-            cur += self._stored_size(t)
+            cur += self._size(t)
             if self._owns_heap(t):
                 owns = True
         return offsets, cur, owns
@@ -3463,6 +3757,7 @@ class CodeGen:
         refcounted env cell and copies/retains each captured value (D15)."""
         off = self._locals[id(lam)]
         code_label = "myla_" + lam.lifted_name
+        self._lambda_files[id(lam)] = self._cur_file   # its body is generated later
         if not lam.captures:
             self._emit(f"leaq {code_label}(%rip), %rax")
             self._emit(f"movq %rax, {off}(%rbp)")
@@ -3510,6 +3805,7 @@ class CodeGen:
         self._locals = {}
         self._scopes = []
         self._drop_scopes = []
+        self._staged_drops = []
         self._loops = []
         self._struct_ret = _is_aggregate(ret)
         self._ret_type = ret
@@ -3521,8 +3817,10 @@ class CodeGen:
         synth = ast.FunDecl(lam.lifted_name, list(lam.params), None, body)
         frame = self._layout_frame(synth)
         self._epilogue = f".Lret_{lam.lifted_name}"
+        self._cur_file = self._lambda_files.get(id(lam))
 
         self._emit(f"myla_{lam.lifted_name}:")
+        self._emit_loc(lam)
         self._emit("pushq %rbp")
         self._emit("movq %rsp, %rbp")
         if frame:
@@ -3544,6 +3842,7 @@ class CodeGen:
         self._emit(f"{self._epilogue}:")
         self._emit("leave")
         self._emit("ret")
+        self._end_loc()
         self._emit("")
         self._drop_scopes.pop()
         self._scopes.pop()
@@ -3614,19 +3913,7 @@ class CodeGen:
         logical.append(("env", env_off))
         for i, arg in enumerate(expr.args):
             logical.append(("arg", arg, ft.params[i]))
-
-        for item in reversed(logical):
-            if item[0] == "sret":
-                self._emit(f"leaq {item[1]}(%rbp), %rax")
-            elif item[0] == "env":
-                self._emit(f"movq {item[1]}(%rbp), %rax")
-            else:
-                _, arg, ptype = item
-                if _is_aggregate(ptype):
-                    self._addr_of_aggregate(arg)
-                else:
-                    self._eval(arg)
-            self._emit("pushq %rax")
+        self._store_call_words(logical)
         self._emit(f"call *{code_off}(%rbp)")
         self._emit(f"addq ${8 * len(logical)}, %rsp")
 
@@ -3644,11 +3931,12 @@ class CodeGen:
 
         if name == "__write":
             self._uses_write = True
-            self._eval(expr.args[1])             # str cell pointer -> rax
-            self._emit("pushq %rax")
             self._eval(expr.args[0])             # fd -> rax
-            self._emit("movl %eax, %edi")        # fd (int32, zero-extended)
-            self._emit("popq %rsi")              # str cell pointer
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # str cell pointer -> rax
+            self._emit("movq %rax, %rsi")
+            self._emit("popq %rdi")              # fd
+            self._emit("movl %edi, %edi")        # (int32, zero-extended)
             self._emit("call __write")
             return
         if name == "__exit":
@@ -3668,27 +3956,46 @@ class CodeGen:
             self._emit("call __read_file")       # rax = contents str (errno -> global)
             return
         if name == "__io_errno":
-            self._uses_read_file = True
+            self._uses_io_errno = True
             self._emit("movq __io_errno_val(%rip), %rax")
+            return
+        if name == "__poll":
+            self._uses_poll = True
+            self._eval(expr.args[0])             # fd -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # timeout -> rax
+            self._emit("movslq %eax, %rsi")      # (int32, sign-extended)
+            self._emit("popq %rdi")              # fd
+            self._emit("call __poll")            # rax = 1, 0 or -1 (errno -> global)
+            return
+        if name == "__read":
+            self._uses_read = True
+            self._eval(expr.args[0])             # fd -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # n -> rax
+            self._emit("movslq %eax, %rsi")      # (int32, sign-extended)
+            self._emit("popq %rdi")              # fd
+            self._emit("movl %edi, %edi")        # (int32, zero-extended)
+            self._emit("call __read")            # rax = fresh str (errno -> global)
             return
 
         if name == "__write_file":
             self._uses_write_file = True
-            self._eval(expr.args[1])             # contents str cell -> rax
-            self._emit("pushq %rax")
             self._eval(expr.args[0])             # path str cell -> rax
-            self._emit("movq %rax, %rdi")        # path
-            self._emit("popq %rsi")              # contents
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # contents str cell -> rax
+            self._emit("movq %rax, %rsi")        # contents
+            self._emit("popq %rdi")              # path
             self._emit("call __write_file")      # errno -> global
             return
 
         if name == "__run":
             self._uses_run = True
-            self._eval(expr.args[1])             # argv [str] list cell -> rax
-            self._emit("pushq %rax")
             self._eval(expr.args[0])             # program str cell -> rax
-            self._emit("movq %rax, %rdi")        # program
-            self._emit("popq %rsi")              # argv list cell
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # argv [str] list cell -> rax
+            self._emit("movq %rax, %rsi")        # argv list cell
+            self._emit("popq %rdi")              # program
             self._emit("call __run")             # rax = stdout [uint8] cell
             return
         if name == "__run_stderr":
@@ -3763,27 +4070,41 @@ class CodeGen:
         sig = self._sig(name)
         struct_ret = _is_aggregate(sig.ret)
 
-        # build the logical argument list and push it in reverse
         logical: list = []
         if struct_ret:
             logical.append(("sret", self._locals[id(expr)]))
         for i, arg in enumerate(expr.args):
-            logical.append(("arg", i, arg, sig.params[i]))
+            logical.append(("arg", arg, sig.params[i]))
+        self._store_call_words(logical)
+        self._emit(f"call myla_{name}")
+        if logical:
+            self._emit(f"addq ${8 * len(logical)}, %rsp")
 
-        for item in reversed(logical):
+    def _store_call_words(self, logical: list) -> None:
+        """Put the outgoing argument words on the stack, the first at the
+        lowest address, evaluating the arguments left to right (MYLA-8): the
+        words are reserved, then filled in source order. When at most one word
+        has effects or reads state (the others are literals, the sret pointer
+        or the env), pushing them last to first is the same and shorter.
+        Items: ("sret", slot), ("env", slot) or ("arg", expr, type)."""
+        if not logical:
+            return
+        ordered = sum(1 for item in logical if item[0] == "arg" and not _is_literal(item[1])) > 1
+        if ordered:
+            self._emit(f"subq ${8 * len(logical)}, %rsp")
+        for k in range(len(logical)) if ordered else reversed(range(len(logical))):
+            item = logical[k]
             if item[0] == "sret":
                 self._emit(f"leaq {item[1]}(%rbp), %rax")
+            elif item[0] == "env":
+                self._emit(f"movq {item[1]}(%rbp), %rax")
             else:
-                _, _, arg, ptype = item
+                _, arg, ptype = item
                 if _is_aggregate(ptype):
                     self._addr_of_aggregate(arg)
                 else:
                     self._eval(arg)
-            self._emit("pushq %rax")
-
-        self._emit(f"call myla_{name}")
-        if logical:
-            self._emit(f"addq ${8 * len(logical)}, %rsp")
+            self._emit(f"movq %rax, {8 * k}(%rsp)" if ordered else "pushq %rax")
 
     def _gen_intrinsic(self, expr: ast.Call) -> None:
         """`assert`/`panic`/`unreachable`: write a message to stderr and exit(1)
@@ -3841,23 +4162,35 @@ class CodeGen:
             self._uses_float = True
             self._emit(f"movq ${9 if t.width == 32 else 17}, %rsi")  # sig digits
             self._emit("call __float_to_str")
-            self._emit("movq %rax, %rdi")
-            self._emit("call __print_str")
+            self._print_and_drop_str()
         elif isinstance(t, CharType):
             self._uses_char = True
             self._emit("call __char_to_str")     # rdi = codepoint -> rax = str
-            self._emit("movq %rax, %rdi")
-            self._emit("call __print_str")
+            self._print_and_drop_str()
         else:  # pragma: no cover - checker restricts print()
             raise ValueError("unprintable type")
 
-    def _gen_render_to_str(self, arg: ast.Expr) -> None:
+    def _print_and_drop_str(self) -> None:
+        """Print the fresh `str` in %rax, then release it."""
+        self._emit("pushq %rax")
+        self._emit("movq %rax, %rdi")
+        self._emit("call __print_str")
+        self._emit("popq %rdi")
+        self._emit("call __str_drop")
+
+    def _gen_render_to_str(self, arg: ast.Expr) -> bool:
         """Evaluate `arg` and leave a `str` pointer for its `print` rendering in
-        %rax (used by format(): str passes through, int/bool are converted)."""
+        %rax (used by format(): str passes through, int/bool are converted).
+        True if the pointer is a fresh reference the caller must release."""
         self._eval(arg)
         t = arg.resolved_type
         if isinstance(t, StrType):
-            return
+            return False                         # borrowed: the arg's own temp
+        self._render_scalar(t)
+        return True
+
+    def _render_scalar(self, t: Type) -> None:
+        """Convert the non-`str` value in %rax to a fresh `str` in %rax."""
         if isinstance(t, FloatType):
             self._uses_float = True
             self._emit("movq %rax, %rdi")
@@ -3878,26 +4211,44 @@ class CodeGen:
     def _gen_format(self, expr: ast.Call) -> None:
         """Build the `format(fmt, args…)` result by folding the literal segments
         and rendered arguments together with `__str_concat`. The running result
-        is kept on the stack between pieces."""
+        is kept on the stack between pieces; a piece or running result that is
+        a fresh reference is released once it has been concatenated (MYLA-18).
+        The result is always a fresh reference."""
         fmt = expr.args[0].value
         pieces = _format_pieces(fmt)         # ('lit', text) | ('arg', index)
         rest = expr.args[1:]
 
-        def emit_piece(piece) -> None:
+        def emit_piece(piece) -> bool:
             kind, payload = piece
             if kind == "lit":
                 label = self._string_label(payload)
                 self._emit(f"leaq {label}(%rip), %rax")
-            else:
-                self._gen_render_to_str(rest[payload])
+                return False
+            return self._gen_render_to_str(rest[payload])
 
-        emit_piece(pieces[0])                # result = first piece -> rax
+        owned = emit_piece(pieces[0])        # result = first piece -> rax
+        if len(pieces) == 1 and not owned:
+            self._emit("incq -8(%rax)")      # the result is a new reference
         for piece in pieces[1:]:
-            self._emit("pushq %rax")         # save running result
-            emit_piece(piece)                # next piece -> rax
-            self._emit("movq %rax, %rsi")    # B = next piece
-            self._emit("popq %rdi")          # A = running result
+            self._emit("pushq %rax")         # save running result (A)
+            piece_owned = emit_piece(piece)  # next piece (B) -> rax
+            self._emit("pushq %rax")
+            self._emit("movq %rax, %rsi")    # B
+            self._emit("movq 8(%rsp), %rdi") # A
             self._emit("call __str_concat")  # rax = A + B
+            self._emit("popq %rdi")          # B
+            if piece_owned:
+                self._drop_str_keeping_rax()
+            self._emit("popq %rdi")          # A
+            if owned:
+                self._drop_str_keeping_rax()
+            owned = True
+
+    def _drop_str_keeping_rax(self) -> None:
+        """Release the `str` in %rdi, preserving %rax."""
+        self._emit("pushq %rax")
+        self._emit("call __str_drop")
+        self._emit("popq %rax")
 
     # -- integer wrapping ----------------------------------------------------
 
@@ -3927,11 +4278,9 @@ class CodeGen:
         out.append("__pow10_lo:")          # the double-double low corrections
         out += [f"\t.quad {_f64_bits(lo)}" for _hi, lo in _FF_POW10_DD]
         out.append(f"__fsplit:\n\t.quad {_f64_bits(_FF_SPLIT)}")  # 2**27 + 1
-        out.append('.Lstr_nan:\n\t.quad 3\n\t.ascii "nan"')
-        out.append('.Lstr_inf:\n\t.quad 3\n\t.ascii "inf"')
-        out.append('.Lstr_ninf:\n\t.quad 4\n\t.ascii "-inf"')
-        out.append('.Lstr_fzero:\n\t.quad 1\n\t.ascii "0"')
-        out.append('.Lstr_fnzero:\n\t.quad 2\n\t.ascii "-0"')
+        out.append(f"__fbig:\n\t.quad {_f64_bits(_FF_BIG)}")      # 2**996
+        out.append(f"__fup:\n\t.quad {_f64_bits(_FF_UP)}")        # 2**64
+        out.append(f"__fdown:\n\t.quad {_f64_bits(_FF_DOWN)}")    # 2**-64
         return out
 
     def _emit_float_runtime(self) -> None:
@@ -3957,8 +4306,22 @@ class CodeGen:
         e("\tret")
         e("")
         # __two_prod: xmm0=a, xmm1=b -> xmm0=p, xmm1=e with p+e == a*b exactly
-        # (Dekker). Clobbers xmm2..xmm7; preserves xmm8.
+        # (Dekker). Clobbers xmm2..xmm7; preserves xmm8. An operand above 2^996
+        # would overflow the split: scale it down by 2^64 and the other up
+        # (exact; mirrors types._ff_two_prod).
         e("__two_prod:")
+        e("\tmovsd __fbig(%rip), %xmm7")
+        e("\tucomisd %xmm7, %xmm0")
+        e("\tjbe .Ltp_b")                   # a <= 2^996
+        e("\tmulsd __fdown(%rip), %xmm0")
+        e("\tmulsd __fup(%rip), %xmm1")
+        e("\tjmp .Ltp_split")
+        e(".Ltp_b:")
+        e("\tucomisd %xmm7, %xmm1")
+        e("\tjbe .Ltp_split")               # b <= 2^996
+        e("\tmulsd __fup(%rip), %xmm0")
+        e("\tmulsd __fdown(%rip), %xmm1")
+        e(".Ltp_split:")
         e("\tmovsd __fsplit(%rip), %xmm7")  # S
         e("\tmovsd %xmm0, %xmm2")           # split a
         e("\tmulsd %xmm7, %xmm2")           # ca = S*a
@@ -3991,21 +4354,23 @@ class CodeGen:
         e("\tret")
         e("")
         # __fscale: xmm8 = m (magnitude), r12 = idx -> rax = round(m * 10**idx)
-        # as an int64, using double-double scaling (split for very small m).
+        # as an int64, using double-double scaling (split for very small m;
+        # mirrors types._ff_scaled_int). Clobbers xmm0..xmm9.
         e("__fscale:")
+        e("\txorpd %xmm9, %xmm9")           # e1 = 0
         e("\tcmpq $308, %r12")              # idx > _FF_MAXK ?
         e("\tjle .Lfsc_direct")
         e("\tmovsd %xmm8, %xmm0")           # a = m
         e("\tleaq __pow10_hi(%rip), %rax")
         e("\tmovsd 4184(%rax), %xmm1")      # hi(10**200), index 523
         e("\tcall __two_prod")
-        e("\taddsd %xmm1, %xmm0")           # p + e
         e("\tleaq __pow10_lo(%rip), %rax")
         e("\tmovsd 4184(%rax), %xmm2")      # lo(10**200)
         e("\tmovsd %xmm8, %xmm3")
         e("\tmulsd %xmm2, %xmm3")           # m * lo
-        e("\taddsd %xmm3, %xmm0")           # m2 = p+e + m*lo
-        e("\tmovsd %xmm0, %xmm8")           # m <- m2
+        e("\taddsd %xmm3, %xmm1")           # e1 = e + m*lo
+        e("\tmovsd %xmm1, %xmm9")
+        e("\tmovsd %xmm0, %xmm8")           # m <- p (double-double (p, e1))
         e("\tsubq $200, %r12")              # idx -= 200
         e(".Lfsc_direct:")
         e("\tleaq 323(%r12), %r11")         # table index = idx - _FF_MINK
@@ -4018,6 +4383,10 @@ class CodeGen:
         e("\tmovsd %xmm8, %xmm3")
         e("\tmulsd %xmm2, %xmm3")           # m * lo
         e("\taddsd %xmm3, %xmm1")           # e += m*lo
+        e("\tleaq __pow10_hi(%rip), %rax")
+        e("\tmovsd (%rax,%r11,8), %xmm4")   # hi(10**idx)
+        e("\tmulsd %xmm9, %xmm4")           # e1 * hi
+        e("\taddsd %xmm4, %xmm1")           # e += e1*hi
         e("\tcvtsd2si %xmm0, %rax")         # llrint(p)
         e("\tcvtsd2si %xmm1, %rcx")         # llrint(e)
         e("\taddq %rcx, %rax")              # D = llrint(p) + llrint(e)
@@ -4207,22 +4576,24 @@ class CodeGen:
         e("\tjmp .Lf_ret")
         e(".Lf_nan:")
         e("\tleaq .Lstr_nan(%rip), %rax")
-        e("\tjmp .Lf_ret")
+        e("\tjmp .Lf_static")
         e(".Lf_inf:")
         e("\ttestq %rbx, %rbx")
         e("\tjs .Lf_ninf")
         e("\tleaq .Lstr_inf(%rip), %rax")
-        e("\tjmp .Lf_ret")
+        e("\tjmp .Lf_static")
         e(".Lf_ninf:")
         e("\tleaq .Lstr_ninf(%rip), %rax")
-        e("\tjmp .Lf_ret")
+        e("\tjmp .Lf_static")
         e(".Lf_zero:")
         e("\ttestq %rbx, %rbx")
         e("\tjs .Lf_nzero")
         e("\tleaq .Lstr_fzero(%rip), %rax")
-        e("\tjmp .Lf_ret")
+        e("\tjmp .Lf_static")
         e(".Lf_nzero:")
         e("\tleaq .Lstr_fnzero(%rip), %rax")
+        e(".Lf_static:")
+        e("\tincq -8(%rax)")                # a new reference, like the heap path
         e(".Lf_ret:")
         e("\tleaq -40(%rbp), %rsp")
         e("\tpopq %r15")
@@ -4325,9 +4696,11 @@ class CodeGen:
 
     def _emit_str_chars_runtime(self) -> None:
         """`__str_chars`: rdi = str cell [len:8][bytes] -> rax = a fresh `[char]`
-        list cell [len:8][cap:8][cp:8 …], one element per UTF-8 scalar. Assumes
-        well-formed UTF-8 (every Myla `str` is). Capacity is the byte length (an
-        upper bound on the scalar count); length is the exact scalar count."""
+        list cell [len:8][cap:8][cp:8 …]: the scalar of each well-formed UTF-8
+        sequence, and U+FFFD for each byte that isn't part of one (a `str` read
+        from a file needn't be UTF-8, MYLA-12; `_decode_chars` in the
+        interpreter). Capacity is the byte length (an upper bound on the
+        element count); length is the exact count."""
         e = self.text.append
         e("")
         e("__str_chars:")
@@ -4355,50 +4728,63 @@ class CodeGen:
         e("\tmovzbq (%rbx,%r14), %rax")     # b0
         e("\tcmpq $0x80, %rax")
         e("\tjb .Lsc_1")
+        # a lead byte: rdx = sequence length, rcx = its payload bits,
+        # r8 = the least scalar of that length (shorter is overlong)
+        e("\tcmpq $0xC2, %rax")
+        e("\tjb .Lsc_bad")
         e("\tcmpq $0xE0, %rax")
-        e("\tjb .Lsc_2")
+        e("\tjb .Lsc_lead2")
         e("\tcmpq $0xF0, %rax")
-        e("\tjb .Lsc_3")
-        # 4-byte: cp = (b0&07)<<18 | (b1&3F)<<12 | (b2&3F)<<6 | (b3&3F)
-        e("\tandq $0x07, %rax")
-        e("\tshlq $18, %rax")
+        e("\tjb .Lsc_lead3")
+        e("\tcmpq $0xF5, %rax")
+        e("\tjae .Lsc_bad")
         e("\tmovq %rax, %rcx")
-        e("\tmovzbq 1(%rbx,%r14), %rax")
+        e("\tandq $0x07, %rcx")
+        e("\tmovq $4, %rdx")
+        e("\tmovq $0x10000, %r8")
+        e("\tjmp .Lsc_seq")
+        e(".Lsc_lead3:")
+        e("\tmovq %rax, %rcx")
+        e("\tandq $0x0F, %rcx")
+        e("\tmovq $3, %rdx")
+        e("\tmovq $0x800, %r8")
+        e("\tjmp .Lsc_seq")
+        e(".Lsc_lead2:")
+        e("\tmovq %rax, %rcx")
+        e("\tandq $0x1F, %rcx")
+        e("\tmovq $2, %rdx")
+        e("\tmovq $0x80, %r8")
+        e(".Lsc_seq:")
+        e("\tleaq (%r14,%rdx), %r9")        # end of the sequence
+        e("\tcmpq %r12, %r9")
+        e("\tja .Lsc_bad")                  # cut off by the end of the string
+        e("\tleaq (%rbx,%r14), %r11")
+        e("\tmovq $1, %r10")
+        e(".Lsc_cont:")
+        e("\tmovzbq (%r11,%r10), %rax")
+        e("\tmovq %rax, %rsi")
+        e("\tandq $0xC0, %rsi")
+        e("\tcmpq $0x80, %rsi")
+        e("\tjne .Lsc_bad")                 # not a continuation byte
+        e("\tshlq $6, %rcx")
         e("\tandq $0x3F, %rax")
-        e("\tshlq $12, %rax")
         e("\torq %rax, %rcx")
-        e("\tmovzbq 2(%rbx,%r14), %rax")
-        e("\tandq $0x3F, %rax")
-        e("\tshlq $6, %rax")
-        e("\torq %rax, %rcx")
-        e("\tmovzbq 3(%rbx,%r14), %rax")
-        e("\tandq $0x3F, %rax")
-        e("\torq %rax, %rcx")
-        e("\taddq $4, %r14")
+        e("\tincq %r10")
+        e("\tcmpq %rdx, %r10")
+        e("\tjb .Lsc_cont")
+        e("\tcmpq %r8, %rcx")
+        e("\tjb .Lsc_bad")                  # overlong
+        e("\tcmpq $0x10FFFF, %rcx")
+        e("\tja .Lsc_bad")
+        e("\tmovq %rcx, %rax")
+        e("\tandq $-2048, %rax")
+        e("\tcmpq $0xD800, %rax")
+        e("\tje .Lsc_bad")                  # a surrogate
+        e("\tmovq %r9, %r14")
         e("\tjmp .Lsc_store")
-        e(".Lsc_3:")
-        # 3-byte: cp = (b0&0F)<<12 | (b1&3F)<<6 | (b2&3F)
-        e("\tandq $0x0F, %rax")
-        e("\tshlq $12, %rax")
-        e("\tmovq %rax, %rcx")
-        e("\tmovzbq 1(%rbx,%r14), %rax")
-        e("\tandq $0x3F, %rax")
-        e("\tshlq $6, %rax")
-        e("\torq %rax, %rcx")
-        e("\tmovzbq 2(%rbx,%r14), %rax")
-        e("\tandq $0x3F, %rax")
-        e("\torq %rax, %rcx")
-        e("\taddq $3, %r14")
-        e("\tjmp .Lsc_store")
-        e(".Lsc_2:")
-        # 2-byte: cp = (b0&1F)<<6 | (b1&3F)
-        e("\tandq $0x1F, %rax")
-        e("\tshlq $6, %rax")
-        e("\tmovq %rax, %rcx")
-        e("\tmovzbq 1(%rbx,%r14), %rax")
-        e("\tandq $0x3F, %rax")
-        e("\torq %rax, %rcx")
-        e("\taddq $2, %r14")
+        e(".Lsc_bad:")
+        e("\tmovq $0xFFFD, %rcx")           # U+FFFD for this byte
+        e("\tincq %r14")
         e("\tjmp .Lsc_store")
         e(".Lsc_1:")
         e("\tmovq %rax, %rcx")              # cp = b0
@@ -4431,9 +4817,7 @@ class CodeGen:
         e("__write:")
         e("\tmovq (%rsi), %rdx")        # len
         e("\tleaq 8(%rsi), %rsi")       # data pointer
-        e("\tmovq $1, %rax")            # write syscall, rdi = fd already set
-        e("\tsyscall")
-        e("\tret")
+        e("\tjmp __write_all")          # rdi = fd already set
         e("")
 
     def _emit_args_runtime(self) -> None:
@@ -4607,6 +4991,93 @@ class CodeGen:
         e("\tpopq %r12")
         e("\tpopq %rbx")
         e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_read_runtime(self) -> None:
+        """`__read`: rdi = fd, rsi = n -> rax = a fresh `str` cell (rc=1) with
+        what one read(0) of at most n bytes returned (retried on EINTR): empty
+        at the end of the input, when n <= 0, or on an error, which sets
+        `__io_errno_val` (0 otherwise). Backs `std.io`'s reader (MYLA-78)."""
+        e = self.text.append
+        e("__read:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        e("\tmovq %rdi, %rbx")                 # fd
+        e("\tmovq %rsi, %r12")                 # n
+        e("\ttestq %r12, %r12")
+        e("\tjg .Lrd_alloc")
+        e("\txorq %r12, %r12")                 # n <= 0: read nothing
+        e(".Lrd_alloc:")
+        e("\tleaq 8(%r12), %rdi")              # str cell: 8 (len) + n
+        e("\tcall __alloc")                    # rax = cell (rc=1)
+        e("\tmovq %rax, %r13")
+        e("\tmovq $0, (%r13)")                 # len = 0 until the read
+        e("\ttestq %r12, %r12")
+        e("\tjz .Lrd_done")
+        e(".Lrd_retry:")
+        e("\txorq %rax, %rax")                 # sys_read
+        e("\tmovq %rbx, %rdi")
+        e("\tleaq 8(%r13), %rsi")
+        e("\tmovq %r12, %rdx")
+        e("\tsyscall")
+        e("\tcmpq $-4, %rax")                  # EINTR: try again
+        e("\tje .Lrd_retry")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lrd_err")
+        e("\tmovq %rax, (%r13)")               # len = bytes read (0 at EOF)
+        e("\tjmp .Lrd_done")
+        e(".Lrd_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e(".Lrd_done:")
+        e("\tmovq %r13, %rax")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_poll_runtime(self) -> None:
+        """`__poll`: rdi = fd, rsi = timeout in ms (negative: none) -> rax = 1
+        when a read of fd won't block (input, its end, or an error such as a
+        bad descriptor), 0 when the time ran out, -1 when poll(7) failed, which
+        sets `__io_errno_val` (0 otherwise); retried on EINTR. Backs
+        `std.io`'s `Reader.ready` (MYLA-80)."""
+        e = self.text.append
+        e("__poll:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tsubq $16, %rsp")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        e("\tmovl %edi, (%rsp)")              # struct pollfd: fd
+        e("\tmovw $1, 4(%rsp)")               # events = POLLIN
+        e("\tmovw $0, 6(%rsp)")               # revents
+        e("\tmovq %rsi, 8(%rsp)")             # timeout
+        e(".Lpl_retry:")
+        e("\tmovq $7, %rax")                  # sys_poll
+        e("\tmovq %rsp, %rdi")
+        e("\tmovq $1, %rsi")                  # one descriptor
+        e("\tmovq 8(%rsp), %rdx")
+        e("\tsyscall")
+        e("\tcmpq $-4, %rax")                 # EINTR: try again
+        e("\tje .Lpl_retry")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lpl_err")
+        e("\tjz .Lpl_done")                   # timed out: 0
+        e("\tmovq $1, %rax")
+        e("\tjmp .Lpl_done")
+        e(".Lpl_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e("\tmovq $-1, %rax")
+        e(".Lpl_done:")
+        e("\tleave")
         e("\tret")
         e("")
 
@@ -5201,5 +5672,46 @@ def _const_scalar(literal) -> int:
     raise ValueError(f"unsupported literal pattern {type(literal).__name__}")  # pragma: no cover
 
 
-def generate(checker: Checker) -> str:
-    return CodeGen(checker).generate()
+def _asm_string(text: str) -> str:
+    """Escape `text` for a double-quoted GAS string."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _place_root(expr: ast.Expr) -> str | None:
+    """The variable a place (`x`, `x.f`, `x[i].g`) starts from, or None when
+    `expr` is not a place."""
+    while isinstance(expr, (ast.FieldAccess, ast.TupleIndex, ast.Index)):
+        if getattr(expr, "enum_ctor", None) is not None:
+            return None
+        expr = expr.target
+    if isinstance(expr, ast.Name) and getattr(expr, "func_ref", None) is None:
+        return expr.ident
+    return None
+
+
+_MUTATING_BUILTINS = ("push", "pop", "remove", "append", "append_byte")
+
+
+def _may_write(node, name: str) -> bool:
+    """Whether running `node` may write to variable `name`, conservatively: an
+    assignment to or into it, a mutating builtin on it, or a method call on it
+    (the method may take `var self`). Myla has no references and closures
+    capture by value, so nothing else can."""
+    if isinstance(node, list):
+        return any(_may_write(n, name) for n in node)
+    if not isinstance(node, ast.Node):
+        return False
+    if isinstance(node, ast.Assign) and _place_root(node.target) == name:
+        return True
+    if isinstance(node, ast.Call):
+        callee = node.callee
+        if isinstance(callee, ast.FieldAccess) and _place_root(callee.target) == name:
+            return True
+        if (isinstance(callee, ast.Name) and callee.ident in _MUTATING_BUILTINS
+                and node.args and _place_root(node.args[0]) == name):
+            return True
+    return any(_may_write(getattr(node, f.name), name) for f in dataclasses.fields(node))
+
+
+def generate(checker: Checker, debug: bool = False) -> str:
+    return CodeGen(checker, debug=debug).generate()

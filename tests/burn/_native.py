@@ -38,13 +38,14 @@ def interpret_checker(checker) -> str:
     return out.getvalue()
 
 
-def build_and_run_checker(checker) -> tuple[str, int]:
+def build_and_run_checker(checker, timeout: float | None = None) -> tuple[str, int]:
     """Compile an already-checked program to a native binary, run it, and return
-    (stdout, exit code)."""
+    (stdout, exit code). With `timeout` (seconds), a run that takes longer raises
+    `subprocess.TimeoutExpired`."""
     with tempfile.TemporaryDirectory() as tmp:
         binary = os.path.join(tmp, "prog")
         build(checker, binary)
-        proc = subprocess.run([binary], capture_output=True, text=True)
+        proc = subprocess.run([binary], capture_output=True, text=True, timeout=timeout)
         return proc.stdout, proc.returncode
 
 
@@ -52,9 +53,9 @@ def interpret(source: str) -> str:
     return interpret_checker(check(parse(tokenize(source))))
 
 
-def build_and_run(source: str) -> tuple[str, int]:
+def build_and_run(source: str, timeout: float | None = None) -> tuple[str, int]:
     """Compile `source` to a native binary, run it, return (stdout, exit code)."""
-    return build_and_run_checker(check(parse(tokenize(source))))
+    return build_and_run_checker(check(parse(tokenize(source))), timeout)
 
 
 # -- stdlib-aware helpers (v0.5.4) -----------------------------------------

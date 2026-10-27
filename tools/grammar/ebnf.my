@@ -1,0 +1,504 @@
+// ebnf.my: the grammar description format of grammar/myla.ebnf (MYLA-77):
+// EBNF with annotations, read into rules and directives. The file's header
+// comment documents the notation.
+
+pub enum GExpr {
+    GTerm(str),             // "x": a terminal
+    GClass(str),            // /…/: a character class, regex syntax without the slashes
+    GRef(str),              // a rule name
+    GSeq([GExpr]),
+    GAlt([GExpr]),
+    GOpt(GExpr),
+    GStar(GExpr),
+    GPlus(GExpr),
+    GLabel(GExpr, str),     // `e @name`: e is a syntax-tree node called name
+}
+
+// A rule `name @label @immediate = body ;`
+pub struct GRule { name: str, label: str, immediate: bool, body: GExpr, line: int32 }
+
+// A directive `@name args… ;`; an argument is a terminal, a class or a name.
+pub struct Directive { name: str, args: [GExpr], line: int32 }
+
+pub struct Grammar { rules: [GRule], directives: [Directive] }
+
+// A token of the grammar file: kind is "name", "at" (`@name`, text without
+// the `@`), "term", "class", "punct" or "eof".
+struct GTok { kind: str, text: str, line: int32, col: int32 }
+
+// -- strings ---------------------------------------------------------------
+
+#test("grammar", 1, 4)["ram"]
+#test("ab", 1, 1)[""]
+pub fun substr(s: str, start: int32, end: int32) -> str {
+    var sb = StringBuilder()
+    append(sb, s, start, end)
+    return build(sb)
+}
+
+#test("```ebnf", "```")[true]
+#test("``", "```")[false]
+pub fun starts_with(s: str, prefix: str) -> bool {
+    if len(prefix) > len(s) { return false }
+    var i = 0
+    while i < len(prefix) {
+        if s[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+#test("x.md", ".md")[true]
+#test("md", ".md")[false]
+pub fun ends_with(s: str, suffix: str) -> bool {
+    if len(suffix) > len(s) { return false }
+    return substr(s, len(s) - len(suffix), len(s)) == suffix
+}
+
+#test("a \"b\" c", "\"b\"")[true]
+#test("abc", "abd")[false]
+pub fun contains_str(s: str, part: str) -> bool {
+    var i = 0
+    while i + len(part) <= len(s) {
+        var j = 0
+        while j < len(part) && s[i + j] == part[j] { j = j + 1 }
+        if j == len(part) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+#test("  ebnf \t")["ebnf"]
+#test("")[""]
+pub fun trim(s: str) -> str {
+    var a = 0
+    var b = len(s)
+    while a < b && is_space(s[a]) { a = a + 1 }
+    while b > a && is_space(s[b - 1]) { b = b - 1 }
+    return substr(s, a, b)
+}
+
+#test(32u8)[true]
+#test(97u8)[false]
+fun is_space(c: uint8) -> bool {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+#test(95u8)[true]
+#test(57u8)[false]
+fun is_name_start(c: uint8) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+#test(57u8)[true]
+#test(45u8)[false]
+fun is_name_char(c: uint8) -> bool {
+    return is_name_start(c) || (c >= '0' && c <= '9')
+}
+
+#test(124u8)[true]
+#test(64u8)[false]
+fun is_punct(c: uint8) -> bool {
+    return c == '=' || c == ';' || c == '|' || c == '(' || c == ')' || c == '?' || c == '*' || c == '+'
+}
+
+// The byte at `i` as an integer, or -1 past the end.
+#test("ab", 1)[98]
+#test("ab", 2)[-1]
+fun byte_at(s: str, i: int32) -> int32 {
+    if i < 0 || i >= len(s) { return -1 }
+    return s[i] as int32
+}
+
+// -- reading ---------------------------------------------------------------
+
+fun lex_grammar(src: str) -> Result<[GTok], str> {
+    var toks: [GTok] = []
+    var i = 0
+    var line = 1
+    var col = 1
+    let n = len(src)
+    while i < n {
+        let c = src[i]
+        if c == '\n' {
+            line = line + 1
+            col = 1
+            i = i + 1
+        } else if is_space(c) {
+            i = i + 1
+            col = col + 1
+        } else if c == '(' && byte_at(src, i + 1) == 42 {          // (* … *)
+            let sl = line
+            let sc = col
+            i = i + 2
+            col = col + 2
+            while i < n && !(src[i] == '*' && byte_at(src, i + 1) == 41) {
+                if src[i] == '\n' {
+                    line = line + 1
+                    col = 1
+                } else {
+                    col = col + 1
+                }
+                i = i + 1
+            }
+            if i >= n { return Err(format("{}:{}: unterminated comment", sl, sc)) }
+            i = i + 2
+            col = col + 2
+        } else if is_name_start(c) {
+            let start = i
+            while i < n && is_name_char(src[i]) { i = i + 1 }
+            push(toks, GTok { kind: "name", text: substr(src, start, i), line: line, col: col })
+            col = col + (i - start)
+        } else if c == '@' {
+            let start = i + 1
+            i = i + 1
+            while i < n && is_name_char(src[i]) { i = i + 1 }
+            if i == start { return Err(format("{}:{}: expected a name after '@'", line, col)) }
+            push(toks, GTok { kind: "at", text: substr(src, start, i), line: line, col: col })
+            col = col + (i - start) + 1
+        } else if c == '"' || c == '\'' {
+            let start = i + 1
+            i = i + 1
+            while i < n && src[i] != c && src[i] != '\n' { i = i + 1 }
+            if i >= n || src[i] != c { return Err(format("{}:{}: unterminated terminal", line, col)) }
+            push(toks, GTok { kind: "term", text: substr(src, start, i), line: line, col: col })
+            col = col + (i - start) + 2
+            i = i + 1
+        } else if c == '/' {
+            let start = i + 1
+            i = i + 1
+            while i < n && src[i] != '/' && src[i] != '\n' {
+                if src[i] == '\\' { i = i + 1 }
+                i = i + 1
+            }
+            if i >= n || src[i] != '/' { return Err(format("{}:{}: unterminated class", line, col)) }
+            push(toks, GTok { kind: "class", text: substr(src, start, i), line: line, col: col })
+            col = col + (i - start) + 2
+            i = i + 1
+        } else if is_punct(c) {
+            push(toks, GTok { kind: "punct", text: substr(src, i, i + 1), line: line, col: col })
+            i = i + 1
+            col = col + 1
+        } else {
+            return Err(format("{}:{}: unexpected character", line, col))
+        }
+    }
+    push(toks, GTok { kind: "eof", text: "", line: line, col: col })
+    return Ok(toks)
+}
+
+struct GParser { toks: [GTok], pos: int32 }
+
+impl GParser {
+    fun peek(self) -> GTok {
+        return self.toks[self.pos]
+    }
+
+    fun at(self, kind: str, text: str) -> bool {
+        let t = self.toks[self.pos]
+        return t.kind == kind && t.text == text
+    }
+
+    fun next(var self) -> GTok {
+        let t = self.toks[self.pos]
+        if t.kind != "eof" { self.pos = self.pos + 1 }
+        return t
+    }
+
+    fun fail(self, what: str) -> str {
+        let t = self.toks[self.pos]
+        var found = t.text
+        if t.kind == "eof" { found = "end of file" }
+        return format("{}:{}: expected {}, found '{}'", t.line, t.col, what, found)
+    }
+
+    fun expect(var self, text: str) -> Result<GTok, str> {
+        if self.at("punct", text) { return Ok(self.next()) }
+        return Err(self.fail(format("'{}'", text)))
+    }
+
+    fun starts_atom(self) -> bool {
+        let t = self.toks[self.pos]
+        return t.kind == "name" || t.kind == "term" || t.kind == "class" || (t.kind == "punct" && t.text == "(")
+    }
+
+    // alternatives = sequence ( "|" sequence )*
+    fun alternatives(var self) -> Result<GExpr, str> {
+        var alts: [GExpr] = []
+        push(alts, self.sequence()?)
+        while self.at("punct", "|") {
+            self.next()
+            push(alts, self.sequence()?)
+        }
+        if len(alts) == 1 { return Ok(alts[0]) }
+        return Ok(GExpr.GAlt(alts))
+    }
+
+    // sequence = item+ label?
+    fun sequence(var self) -> Result<GExpr, str> {
+        var items: [GExpr] = []
+        while self.starts_atom() {
+            push(items, self.item()?)
+        }
+        if len(items) == 0 { return Err(self.fail("a terminal, a class, a rule name or '('")) }
+        var e = items[0]
+        if len(items) > 1 { e = GExpr.GSeq(items) }
+        if self.peek().kind == "at" {
+            let label = self.next()
+            e = GExpr.GLabel(e, label.text)
+        }
+        return Ok(e)
+    }
+
+    // item = atom ( "?" | "*" | "+" )*
+    fun item(var self) -> Result<GExpr, str> {
+        var e = self.atom()?
+        while true {
+            if self.at("punct", "?") {
+                self.next()
+                e = GExpr.GOpt(e)
+            } else if self.at("punct", "*") {
+                self.next()
+                e = GExpr.GStar(e)
+            } else if self.at("punct", "+") {
+                self.next()
+                e = GExpr.GPlus(e)
+            } else {
+                return Ok(e)
+            }
+        }
+        unreachable()
+    }
+
+    fun atom(var self) -> Result<GExpr, str> {
+        let t = self.peek()
+        if t.kind == "name" {
+            self.next()
+            return Ok(GExpr.GRef(t.text))
+        }
+        if t.kind == "term" {
+            self.next()
+            return Ok(GExpr.GTerm(t.text))
+        }
+        if t.kind == "class" {
+            self.next()
+            return Ok(GExpr.GClass(t.text))
+        }
+        self.expect("(")?
+        let e = self.alternatives()?
+        self.expect(")")?
+        return Ok(e)
+    }
+}
+
+// Read a grammar description; the error is "line:col: message".
+pub fun parse_grammar(src: str) -> Result<Grammar, str> {
+    let toks = lex_grammar(src)?
+    var p = GParser { toks: toks, pos: 0 }
+    var rules: [GRule] = []
+    var directives: [Directive] = []
+    while p.peek().kind != "eof" {
+        let t = p.next()
+        if t.kind == "at" {
+            var args: [GExpr] = []
+            while !p.at("punct", ";") {
+                let a = p.peek()
+                if a.kind == "name" {
+                    push(args, GExpr.GRef(a.text))
+                } else if a.kind == "term" {
+                    push(args, GExpr.GTerm(a.text))
+                } else if a.kind == "class" {
+                    push(args, GExpr.GClass(a.text))
+                } else {
+                    return Err(p.fail("a directive argument or ';'"))
+                }
+                p.next()
+            }
+            p.next()
+            push(directives, Directive { name: t.text, args: args, line: t.line })
+        } else if t.kind == "name" {
+            var label = ""
+            var immediate = false
+            while p.peek().kind == "at" {
+                let a = p.next()
+                if a.text == "immediate" { immediate = true } else { label = a.text }
+            }
+            p.expect("=")?
+            let body = p.alternatives()?
+            p.expect(";")?
+            push(rules, GRule { name: t.text, label: label, immediate: immediate, body: body, line: t.line })
+        } else {
+            return Err(format("{}:{}: expected a rule or a directive, found '{}'", t.line, t.col, t.text))
+        }
+    }
+    return Ok(Grammar { rules: rules, directives: directives })
+}
+
+// The text of the ```ebnf code blocks of a Markdown page.
+#test("x\n```ebnf\na = b ;\n```\n```myla\nfun\n```\n")["a = b ;\n"]
+pub fun ebnf_blocks(md: str) -> str {
+    var out = StringBuilder()
+    var inside = false
+    var i = 0
+    let n = len(md)
+    while i < n {
+        var j = i
+        while j < n && md[j] != '\n' { j = j + 1 }
+        let line = substr(md, i, j)
+        if starts_with(line, "```") {
+            inside = !inside && trim(substr(line, 3, len(line))) == "ebnf"
+        } else if inside {
+            append(out, line)
+            append(out, "\n")
+        }
+        i = j + 1
+    }
+    return build(out)
+}
+
+// -- lookups ---------------------------------------------------------------
+
+// The index of rule `name`, or -1.
+pub fun rule_index(g: Grammar, name: str) -> int32 {
+    var i = 0
+    while i < len(g.rules) {
+        if g.rules[i].name == name { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// The arguments of every `@name` directive, in order.
+pub fun directive_args(g: Grammar, name: str) -> [[GExpr]] {
+    var out: [[GExpr]] = []
+    for d in g.directives {
+        if d.name == name { push(out, d.args) }
+    }
+    return out
+}
+
+// The text of a directive argument (a terminal, a class or a name).
+pub fun arg_text(e: GExpr) -> str {
+    return match e {
+        GExpr.GTerm(t) => t,
+        GExpr.GClass(c) => c,
+        GExpr.GRef(n) => n,
+        _ => "",
+    }
+}
+
+#test("SEP")[true]
+#test("sep")[false]
+pub fun is_upper_name(n: str) -> bool {
+    return len(n) > 0 && n[0] >= 'A' && n[0] <= 'Z'
+}
+
+// Every rule name `e` refers to, in order, with repeats.
+pub fun refs_of(e: GExpr) -> [str] {
+    var out: [str] = []
+    for x in children(e) {
+        for r in refs_of(x) { push(out, r) }
+    }
+    match e {
+        GExpr.GRef(n) => { push(out, n) },
+        _ => {},
+    }
+    return out
+}
+
+// The direct subexpressions of `e`.
+pub fun children(e: GExpr) -> [GExpr] {
+    var out: [GExpr] = []
+    match e {
+        GExpr.GSeq(xs) => { out = xs },
+        GExpr.GAlt(xs) => { out = xs },
+        GExpr.GOpt(x) => { push(out, x) },
+        GExpr.GStar(x) => { push(out, x) },
+        GExpr.GPlus(x) => { push(out, x) },
+        GExpr.GLabel(x, l) => { push(out, x) },
+        _ => {},
+    }
+    return out
+}
+
+// -- canonical form ----------------------------------------------------------
+
+// A rule in canonical form, without annotations: the wiki page's EBNF and the
+// grammar file are compared in this form.
+pub fun canon_rule(r: GRule) -> str {
+    return format("{} = {} ;", r.name, canon(r.body, 0))
+}
+
+// `e` in canonical form, labels dropped: one space between items, groups
+// only where needed. `level` is 0 for a whole alternative list, 1 inside an
+// alternative, 2 inside a sequence or under a postfix operator.
+pub fun canon(e: GExpr, level: int32) -> str {
+    return match e {
+        GExpr.GTerm(t) => quote(t),
+        GExpr.GClass(c) => "/" + c + "/",
+        GExpr.GRef(n) => n,
+        GExpr.GLabel(x, l) => canon(x, level),
+        GExpr.GSeq(xs) => paren_if(join_canon(flat_seq(xs), " ", 2), level > 1),
+        GExpr.GAlt(xs) => paren_if(join_canon(flat_alt(xs), " | ", 1), level > 0),
+        GExpr.GOpt(x) => canon(x, 2) + "?",
+        GExpr.GStar(x) => canon(x, 2) + "*",
+        GExpr.GPlus(x) => canon(x, 2) + "+",
+    }
+}
+
+#test("x")["\"x\""]
+#test("f\"")["'f\"'"]
+fun quote(t: str) -> str {
+    if contains_str(t, "\"") { return "'" + t + "'" }
+    return "\"" + t + "\""
+}
+
+#test("a b", true)["( a b )"]
+#test("a", false)["a"]
+fun paren_if(s: str, wrap: bool) -> str {
+    if wrap { return "( " + s + " )" }
+    return s
+}
+
+fun join_canon(xs: [GExpr], sep: str, level: int32) -> str {
+    var sb = StringBuilder()
+    var first = true
+    for x in xs {
+        if !first { append(sb, sep) }
+        append(sb, canon(x, level))
+        first = false
+    }
+    return build(sb)
+}
+
+// The items of a sequence, with nested groups that are sequences spliced in.
+fun flat_seq(xs: [GExpr]) -> [GExpr] {
+    var out: [GExpr] = []
+    for x in xs {
+        match unlabel(x) {
+            GExpr.GSeq(ys) => { for y in flat_seq(ys) { push(out, y) } },
+            _ => { push(out, x) },
+        }
+    }
+    return out
+}
+
+// The alternatives of a choice, with nested choices spliced in.
+fun flat_alt(xs: [GExpr]) -> [GExpr] {
+    var out: [GExpr] = []
+    for x in xs {
+        match unlabel(x) {
+            GExpr.GAlt(ys) => { for y in flat_alt(ys) { push(out, y) } },
+            _ => { push(out, x) },
+        }
+    }
+    return out
+}
+
+// `e` without its label.
+pub fun unlabel(e: GExpr) -> GExpr {
+    return match e {
+        GExpr.GLabel(x, l) => unlabel(x),
+        _ => e,
+    }
+}

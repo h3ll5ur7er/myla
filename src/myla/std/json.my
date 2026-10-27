@@ -1,0 +1,434 @@
+// std.json — JSON values, parsing and serialization (MYLA-79).
+//
+// `parse` reads a JSON text into a `Json` value and `to_string` writes one
+// compactly. Both follow Python's `json` module, which the tests compare them
+// with: the same values, the same error messages and positions (Python
+// 3.13's wording), and `to_string` writes what
+// `json.dumps(v, ensure_ascii=False, separators=(",", ":"))` writes. Like
+// Python, they accept and write `NaN`, `Infinity` and `-Infinity`. Unlike
+// Python, a `\u` escape of a lone surrogate is an error, since a Myla string
+// holds UTF-8.
+
+from .num import parse_int, parse_float, format_float
+
+// A JSON value. A number without a fraction or exponent that fits in int64 is
+// an `Int`, any other number a `Float`. An object keeps its members in order,
+// duplicates included (`field` finds the last one, as Python keeps it).
+pub enum Json {
+    Null,
+    Bool(bool),
+    Int(int64),
+    Float(float64),
+    Str(str),
+    Array([Json]),
+    Object([(str, Json)]),
+}
+
+// Why a text isn't JSON, and where: line and column count from 1, the column
+// in characters.
+pub struct JsonError {
+    msg: str,
+    line: int32,
+    col: int32,
+}
+
+// The member `key` of an object (the last one with that key); None if `j`
+// isn't an object or has no such member.
+pub fun field(j: Json, key: str) -> Option<Json> {
+    var found: Option<Json> = None
+    match j {
+        Json.Object(members) => {
+            for m in members {
+                if m.0 == key { found = Some(m.1) }
+            }
+        },
+        _ => {},
+    }
+    return found
+}
+
+// --- Parsing ------------------------------------------------------------------
+
+// How deeply arrays and objects may nest.
+const MAX_DEPTH: int32 = 500
+
+struct Parser {
+    s: str,
+    i: int32,
+}
+
+// The JSON value that `text` holds, with optional whitespace around it.
+pub fun parse(text: str) -> Result<Json, JsonError> {
+    var p = Parser { s: text, i: 0 }
+    let v = p.value(0)?
+    p.skip_ws()
+    if p.i < len(text) { return Err(p.error("Extra data", p.i)) }
+    return Ok(v)
+}
+
+impl Parser {
+    // An error at byte offset `at`.
+    fun error(self, msg: str, at: int32) -> JsonError {
+        var line = 1
+        var col = 1
+        var k = 0
+        while k < at {
+            let c = self.s[k]
+            if c == '\n' {
+                line = line + 1
+                col = 1
+            } else if c < 128u8 || c >= 192u8 {
+                col = col + 1                  // not a UTF-8 continuation byte
+            }
+            k = k + 1
+        }
+        return JsonError { msg: msg, line: line, col: col }
+    }
+
+    fun at_end(self) -> bool {
+        return self.i >= len(self.s)
+    }
+
+    fun skip_ws(var self) {
+        while !self.at_end() {
+            let c = self.s[self.i]
+            if c == ' ' || c == '\t' || c == '\n' || c == '\r' { self.i = self.i + 1 } else { return }
+        }
+    }
+
+    // Whether the text at the current position starts with `word`.
+    fun looking_at(self, word: str) -> bool {
+        if self.i + len(word) > len(self.s) { return false }
+        var k = 0
+        while k < len(word) {
+            if self.s[self.i + k] != word[k] { return false }
+            k = k + 1
+        }
+        return true
+    }
+
+    // Move past `word` if the text continues with it.
+    fun take(var self, word: str) -> bool {
+        if !self.looking_at(word) { return false }
+        self.i = self.i + len(word)
+        return true
+    }
+
+    fun value(var self, depth: int32) -> Result<Json, JsonError> {
+        self.skip_ws()
+        if self.at_end() { return Err(self.error("Expecting value", self.i)) }
+        let c = self.s[self.i]
+        if c == '"' { return Ok(Json.Str(self.string()?)) }
+        if c == '{' || c == '[' {
+            if depth >= MAX_DEPTH { return Err(self.error("Too deeply nested", self.i)) }
+            if c == '{' { return self.object(depth + 1) }
+            return self.array(depth + 1)
+        }
+        if self.take("null") { return Ok(Json.Null) }
+        if self.take("true") { return Ok(Json.Bool(true)) }
+        if self.take("false") { return Ok(Json.Bool(false)) }
+        if self.take("NaN") { return Ok(Json.Float(0.0f64 / 0.0f64)) }
+        if self.take("Infinity") { return Ok(Json.Float(1.0f64 / 0.0f64)) }
+        if self.take("-Infinity") { return Ok(Json.Float(-1.0f64 / 0.0f64)) }
+        return self.number()
+    }
+
+    fun digits(var self) -> int32 {
+        let start = self.i
+        while !self.at_end() && self.s[self.i] >= '0' && self.s[self.i] <= '9' { self.i = self.i + 1 }
+        return self.i - start
+    }
+
+    // -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)? ; an optional part that
+    // is incomplete is left for the caller, as Python's scanner does.
+    fun number(var self) -> Result<Json, JsonError> {
+        let start = self.i
+        if self.s[self.i] == '-' { self.i = self.i + 1 }
+        if self.at_end() || self.s[self.i] < '0' || self.s[self.i] > '9' {
+            return Err(self.error("Expecting value", start))
+        }
+        if self.s[self.i] == '0' { self.i = self.i + 1 } else { self.digits() }
+        var integral = true
+        if self.i + 1 < len(self.s) && self.s[self.i] == '.' && self.s[self.i + 1] >= '0' && self.s[self.i + 1] <= '9' {
+            self.i = self.i + 1
+            self.digits()
+            integral = false
+        }
+        if !self.at_end() && (self.s[self.i] == 'e' || self.s[self.i] == 'E') {
+            let mark = self.i
+            self.i = self.i + 1
+            if !self.at_end() && (self.s[self.i] == '+' || self.s[self.i] == '-') { self.i = self.i + 1 }
+            if self.digits() == 0 { self.i = mark } else { integral = false }
+        }
+        var sb = StringBuilder()
+        append(sb, self.s, start, self.i)
+        let text = build(sb)
+        if integral {
+            match parse_int(text) {
+                Some(n) => { return Ok(Json.Int(n)) },
+                None => {},                       // too large for int64
+            }
+        }
+        return match parse_float(text) {
+            Some(f) => Ok(Json.Float(f)),
+            None => Err(self.error("Expecting value", start)),
+        }
+    }
+
+    // The value of the hex digits s[i..i+4], or -1.
+    fun hex4(self, i: int32) -> int32 {
+        if i + 4 > len(self.s) { return -1 }
+        var v = 0
+        var k = i
+        while k < i + 4 {
+            let c = self.s[k]
+            var d = -1
+            if c >= '0' && c <= '9' { d = (c - '0') as int32 }
+            if c >= 'a' && c <= 'f' { d = (c - 'a') as int32 + 10 }
+            if c >= 'A' && c <= 'F' { d = (c - 'A') as int32 + 10 }
+            if d < 0 { return -1 }
+            v = v * 16 + d
+            k = k + 1
+        }
+        return v
+    }
+
+    // A string, the current position at its opening quote.
+    fun string(var self) -> Result<str, JsonError> {
+        let quote = self.i
+        self.i = self.i + 1
+        var sb = StringBuilder()
+        var run = self.i                         // start of bytes to copy as they are
+        while true {
+            if self.at_end() { return Err(self.error("Unterminated string starting at", quote)) }
+            let c = self.s[self.i]
+            if c == '"' {
+                append(sb, self.s, run, self.i)
+                self.i = self.i + 1
+                return Ok(build(sb))
+            }
+            if c < 32u8 { return Err(self.error("Invalid control character at", self.i)) }
+            if c != '\\' {
+                self.i = self.i + 1
+            } else {
+                append(sb, self.s, run, self.i)
+                if self.i + 1 >= len(self.s) { return Err(self.error("Unterminated string starting at", quote)) }
+                let e = self.s[self.i + 1]
+                if e == 'u' {
+                    let cp = self.unicode_escape()?
+                    append(sb, format("{}", cp as char))
+                } else {
+                    if e == '"' { append_byte(sb, '"') }
+                    else if e == '\\' { append_byte(sb, '\\') }
+                    else if e == '/' { append_byte(sb, '/') }
+                    else if e == 'b' { append_byte(sb, 8u8) }
+                    else if e == 'f' { append_byte(sb, 12u8) }
+                    else if e == 'n' { append_byte(sb, '\n') }
+                    else if e == 'r' { append_byte(sb, 13u8) }
+                    else if e == 't' { append_byte(sb, '\t') }
+                    else { return Err(self.error("Invalid \\escape", self.i)) }
+                    self.i = self.i + 2
+                }
+                run = self.i
+            }
+        }
+        unreachable()
+    }
+
+    // The code point of a `\uXXXX` escape (a surrogate pair is two), the
+    // current position at its backslash; moves past it.
+    fun unicode_escape(var self) -> Result<uint32, JsonError> {
+        let u = self.i + 1
+        let hi = self.hex4(u + 1)
+        if hi < 0 { return Err(self.error("Invalid \\uXXXX escape", u)) }
+        self.i = u + 5
+        if hi >= 56320 && hi < 57344 { return Err(self.error("Lone surrogate in \\uXXXX escape", u)) }
+        if hi < 55296 || hi >= 56320 { return Ok(hi as uint32) }
+        // a high surrogate: a low one must follow
+        if !self.looking_at("\\u") { return Err(self.error("Lone surrogate in \\uXXXX escape", u)) }
+        let lo = self.hex4(self.i + 2)
+        if lo < 0 { return Err(self.error("Invalid \\uXXXX escape", self.i + 1)) }
+        if lo < 56320 || lo >= 57344 { return Err(self.error("Lone surrogate in \\uXXXX escape", u)) }
+        self.i = self.i + 6
+        return Ok((65536 + (hi - 55296) * 1024 + (lo - 56320)) as uint32)
+    }
+
+    // An array, the current position at its "[".
+    fun array(var self, depth: int32) -> Result<Json, JsonError> {
+        self.i = self.i + 1
+        var items: [Json] = []
+        self.skip_ws()
+        if !self.at_end() && self.s[self.i] == ']' {
+            self.i = self.i + 1
+            return Ok(Json.Array(items))
+        }
+        while true {
+            push(items, self.value(depth)?)
+            self.skip_ws()
+            if self.at_end() { return Err(self.error("Expecting ',' delimiter", self.i)) }
+            let c = self.s[self.i]
+            if c == ']' {
+                self.i = self.i + 1
+                return Ok(Json.Array(items))
+            }
+            if c != ',' { return Err(self.error("Expecting ',' delimiter", self.i)) }
+            let comma = self.i
+            self.i = self.i + 1
+            self.skip_ws()
+            if !self.at_end() && self.s[self.i] == ']' {
+                return Err(self.error("Illegal trailing comma before end of array", comma))
+            }
+        }
+        unreachable()
+    }
+
+    // An object, the current position at its "{".
+    fun object(var self, depth: int32) -> Result<Json, JsonError> {
+        self.i = self.i + 1
+        var members: [(str, Json)] = []
+        self.skip_ws()
+        if !self.at_end() && self.s[self.i] == '}' {
+            self.i = self.i + 1
+            return Ok(Json.Object(members))
+        }
+        while true {
+            if self.at_end() || self.s[self.i] != '"' {
+                return Err(self.error("Expecting property name enclosed in double quotes", self.i))
+            }
+            let key = self.string()?
+            self.skip_ws()
+            if self.at_end() || self.s[self.i] != ':' { return Err(self.error("Expecting ':' delimiter", self.i)) }
+            self.i = self.i + 1
+            let v = self.value(depth)?
+            push(members, (key, v))
+            self.skip_ws()
+            if self.at_end() { return Err(self.error("Expecting ',' delimiter", self.i)) }
+            let c = self.s[self.i]
+            if c == '}' {
+                self.i = self.i + 1
+                return Ok(Json.Object(members))
+            }
+            if c != ',' { return Err(self.error("Expecting ',' delimiter", self.i)) }
+            let comma = self.i
+            self.i = self.i + 1
+            self.skip_ws()
+            if !self.at_end() && self.s[self.i] == '}' {
+                return Err(self.error("Illegal trailing comma before end of object", comma))
+            }
+        }
+        unreachable()
+    }
+}
+
+// --- Writing ------------------------------------------------------------------
+
+// `j` as compact JSON text.
+#test(Json.Array([Json.Int(1), Json.Float(2.5), Json.Str("a\"b"), Json.Null]))["[1,2.5,\"a\\\"b\",null]"]
+#test(Json.Object([("k", Json.Bool(true)), ("e", Json.Object([]))]))["{\"k\":true,\"e\":{}}"]
+pub fun to_string(j: Json) -> str {
+    var w = Writer { sb: StringBuilder() }
+    w.value(j)
+    return build(w.sb)
+}
+
+struct Writer {
+    sb: StringBuilder,
+}
+
+impl Writer {
+    fun value(var self, j: Json) {
+        match j {
+            Json.Null => { append(self.sb, "null") },
+            Json.Bool(b) => {
+                if b { append(self.sb, "true") } else { append(self.sb, "false") }
+            },
+            Json.Int(n) => { append(self.sb, format("{}", n)) },
+            Json.Float(f) => { append(self.sb, float_text(f)) },
+            Json.Str(s) => { self.string(s) },
+            Json.Array(items) => {
+                append_byte(self.sb, '[')
+                var first = true
+                for item in items {
+                    if !first { append_byte(self.sb, ',') }
+                    self.value(item)
+                    first = false
+                }
+                append_byte(self.sb, ']')
+            },
+            Json.Object(members) => {
+                append_byte(self.sb, '{')
+                var first = true
+                for m in members {
+                    if !first { append_byte(self.sb, ',') }
+                    self.string(m.0)
+                    append_byte(self.sb, ':')
+                    self.value(m.1)
+                    first = false
+                }
+                append_byte(self.sb, '}')
+            },
+        }
+    }
+
+    // `s` quoted: '"' and '\\' escaped, control characters as \n, \t … or
+    // \u00XX; everything else (non-ASCII included) as it is.
+    fun string(var self, s: str) {
+        append_byte(self.sb, '"')
+        var run = 0
+        var i = 0
+        while i < len(s) {
+            let c = s[i]
+            if c == '"' || c == '\\' || c < 32u8 {
+                append(self.sb, s, run, i)
+                if c == '"' { append(self.sb, "\\\"") }
+                else if c == '\\' { append(self.sb, "\\\\") }
+                else if c == '\n' { append(self.sb, "\\n") }
+                else if c == '\t' { append(self.sb, "\\t") }
+                else if c == 13u8 { append(self.sb, "\\r") }
+                else if c == 8u8 { append(self.sb, "\\b") }
+                else if c == 12u8 { append(self.sb, "\\f") }
+                else {
+                    append(self.sb, "\\u00")
+                    append_byte(self.sb, HEX[(c >> 4u8) as int32])
+                    append_byte(self.sb, HEX[(c & 15u8) as int32])
+                }
+                run = i + 1
+            }
+            i = i + 1
+        }
+        append(self.sb, s, run, len(s))
+        append_byte(self.sb, '"')
+    }
+}
+
+const HEX: str = "0123456789abcdef"
+
+// A float as Python's json writes it: its shortest repr, with NaN and the
+// infinities spelled as JavaScript does.
+#test(0.1)["0.1"]
+#test(1e16)["1e+16"]
+fun float_text(f: float64) -> str {
+    let t = format_float(f)
+    if t == "nan" { return "NaN" }
+    if t == "inf" { return "Infinity" }
+    if t == "-inf" { return "-Infinity" }
+    return t
+}
+
+// `text` parsed and written again, or the error (for the #test cases).
+#test(" [1, 2.5, \"x\", true, null, {\"a\": {}}] ")["[1,2.5,\"x\",true,null,{\"a\":{}}]"]
+#test("\"\\u00e9\\ud83d\\ude00\\n\"")["\"é😀\\n\""]
+#test("[-0, -0.0, 1E2, 1e400, NaN]")["[0,-0.0,100.0,Infinity,NaN]"]
+#test("[1,]")["1:3: Illegal trailing comma before end of array"]
+#test("{\"a\" 1}")["1:6: Expecting ':' delimiter"]
+#test("[\"abc")["1:2: Unterminated string starting at"]
+#test("[\"a\n")["1:4: Invalid control character at"]
+#test("\"\\ud800\"")["1:3: Lone surrogate in \\uXXXX escape"]
+#test("")["1:1: Expecting value"]
+fun round_trip(text: str) -> str {
+    return match parse(text) {
+        Ok(v) => to_string(v),
+        Err(e) => format("{}:{}: {}", e.line, e.col, e.msg),
+    }
+}
+

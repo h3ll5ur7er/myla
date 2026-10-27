@@ -1,0 +1,18 @@
+{
+  "grammars": [
+    {
+      "name": "myla",
+      "camelcase": "Myla",
+      "scope": "source.myla",
+      "path": ".",
+      "file-types": ["my"],
+      "highlights": "queries/highlights.scm",
+      "injections": "queries/injections.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Myla grammar for tree-sitter, generated from grammar/myla.ebnf"
+  }
+}

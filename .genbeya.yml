@@ -1,0 +1,11 @@
+name: Myla
+wikiRoot: docs
+wikiHome: Home.md
+taskRoot: tasks
+taskPrefix: MYLA
+statuses:
+  - backlog
+  - todo
+  - in-progress
+  - review
+  - done

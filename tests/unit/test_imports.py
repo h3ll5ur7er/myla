@@ -124,11 +124,11 @@ class TestImportErrors(unittest.TestCase):
 
 
 class TestCheckerGuard(unittest.TestCase):
-    def test_import_rejected_by_checker_until_loader(self):
-        # v0.5.1a: imports parse but the loader is not wired yet.
+    def test_import_rejected_without_the_loader(self):
+        # the loader resolves imports; checking such a file on its own can't
         with self.assertRaises(TypeCheckError) as cm:
             check(parse_src("import a.b\nfun main() {}\n"))
-        self.assertIn("not supported yet", str(cm.exception))
+        self.assertIn("imports need the module loader", str(cm.exception))
 
 
 if __name__ == "__main__":

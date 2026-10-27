@@ -26,6 +26,7 @@ EXPECTED = {
     "structs.my": "3\n4\n7\n100\n3\n",
     "attributes.my": "5\n0\n",
     "tuples.my": "7\nseven\n42\n3\n2\n6\n100\n15\n25\n5\n",
+    "unicode.my": "6\n6\u20ac\n{6}\n3\ntrue\n\"\nit's \U0001F600\n",
     "enums.my": "12\n12\n0\nwarm\ncool\nbig circle\nsmall circle\nother\n",
     "types_and_aliases.my": "0\n42\n9\n",
     "recursion.my": "6\n6\n3\n12\n10\n10\nbalanced pair\nbranch\n",
@@ -44,14 +45,15 @@ EXPECTED = {
     "closures.my": ("36\n15\nhi, world\n24\n16\n18\n107\n60\n"
                     "6\n100\n42\n"),
     "pipelines.my": "11\n8\n21\n14\n15\n42\n18\n11\n12\n20\n",
-    "traits.my": "4\n6\ntrue\ntrue\nvec\ntrue\nfalse\ntrue\n60\n3\n4\n8\n3\n",
+    "traits.my": "4\n6\ntrue\ntrue\nvec\ntrue\nfalse\ntrue\ntrue\n60\n3\n4\n8\n3\n",
     "floats.my": ("0.5\n3.1415926535897931\n3.75\n3.5\n1.5\n-3.1415926535897931\n"
                   "0.30000000000000004\n0.300000012\ninf\ntrue\nfalse\n9\n3\n3\n"),
     "chars.my": "a\nλ\n😀\ntrue\nfalse\n65\nλ\ntrue\n2\n1\n5\n3\n104\n233\n955\n",
     "generic_traits.my": "0\n1\n-1\n0\n1\n-1\n",
     "interpolation.my": ("myla scored 42\n2 + 3 = 5\nset is { 1, 2 }\n"
                          "main.my:3:12: there is no error, this is just a test\n"),
-    "playground.my": ("49\nhaha 67\n42\nI'm a teapot\nThis is not the error you are looking for. It is the answer to life, the universe, and everything.\nThis is not the error you are looking for. It is 13\nThis is not the error you are looking for. It is 15\nSuccess\n"),
+    "traits_on_builtins.my": ("49\nhaha 67\n42\nI'm a teapot\nThis is not the error you are looking for. It is the answer to life, the universe, and everything.\nThis is not the error you are looking for. It is 13\nThis is not the error you are looking for. It is 15\nSuccess\n"),
+    "semicolons.my": "12\nsize\n7\n15\n21\n42\n",
 }
 
 def run_file(path: str) -> str:

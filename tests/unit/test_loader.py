@@ -3,12 +3,14 @@
 Each test writes a tiny multi-file project into a temp directory, links it, and
 inspects the merged program (or runs it through the interpreter for behaviour).
 """
+import contextlib
 import io
 import os
 import tempfile
 import unittest
 
-from myla.errors import ModuleError
+from myla.cli import main as cli_main
+from myla.errors import ModuleError, MylaError
 from myla.interpreter import Interpreter
 from myla.loader import link
 from myla.types import check
@@ -47,6 +49,24 @@ class TestLinking(unittest.TestCase):
             "lib.my": "pub fun twice(n: int32) -> int32 { return n + n }\n",
         })
         self.assertEqual(out, "42\n")
+
+    def test_test_attributes_name_their_modules_declarations(self):
+        # `#test` cases are expressions in the module's scope (MYLA-11)
+        files = {
+            "main.my": "from .lib import double\nfun main() { print(double(4)) }\n",
+            "lib.my": ("pub const LIMIT: int = 10\n"
+                       "struct P { x: int }\n"
+                       "enum E { A(int), B }\n"
+                       "fun val(e: E) -> int {\n"
+                       "    return match e { A(n) => n, B => 0 }\n}\n"
+                       "#test(LIMIT)[20]\n"
+                       "#test(P { x: LIMIT }.x)[val(E.A(20))]\n"
+                       "pub fun double(x: int) -> int {\n    return x * 2\n}\n"),
+        }
+        self.assertEqual(run_project(files), "8\n")
+        checker = check(link(os.path.join(_project(files), "main.my")))
+        results = Interpreter(checker, io.StringIO()).run_tests()
+        self.assertEqual([(r.function, r.passed) for r in results], [("lib$double", True)] * 2)
 
     def test_entry_names_unqualified_imports_qualified(self):
         ns = names({
@@ -206,6 +226,28 @@ class TestLinking(unittest.TestCase):
         self.assertEqual(out, "1\n")
 
 
+class TestModuleIds(unittest.TestCase):
+    """A module's id prefixes its global names. The rules are the self-hosted
+    loader's (selfhost/loader.my, `module_id`), so both toolchains name things
+    alike (MYLA-81): the standard library by its path under the stdlib root,
+    a project module by its path under the project root, a module above the
+    root with one `up` per level climbed (never colliding with one below)."""
+
+    def test_ids(self):
+        from myla.loader import _module_id
+        root, std = "/w/proj/app", "/w/lib/myla"
+        cases = {
+            "/w/proj/app/main.my": "",
+            "/w/proj/app/util/text.my": "util$text",
+            "/w/lib/myla/std/io.my": "std$io",
+            "/w/proj/selfhost/tokens.my": "up$selfhost$tokens",
+            "/w/other/x.my": "up$up$other$x",
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(_module_id(path, "/w/proj/app/main.my", root, std), expected)
+
+
 class TestLoaderErrors(unittest.TestCase):
     def _err(self, files, entry="main.my"):
         root = _project(files)
@@ -260,6 +302,86 @@ class TestLoaderErrors(unittest.TestCase):
             "b.my": "pub fun f() {}\n",
         })
         self.assertIn("collides", msg)
+
+
+
+class TestErrorPaths(unittest.TestCase):
+    """MYLA-10: an error carries the path of the module it comes from, and the
+    CLI shows that file's line."""
+
+    MAIN = "from .bad import f\nfun main() {\n    print(f())\n}\n"
+
+    def error_in(self, bad_src: str, main_src: str = MAIN, run: bool = False) -> MylaError:
+        root = _project({"main.my": main_src, "bad.my": bad_src})
+        with self.assertRaises(MylaError) as ctx:
+            checker = check(link(os.path.join(root, "main.my")))
+            if run:
+                Interpreter(checker, io.StringIO()).run()
+        self.root = root
+        return ctx.exception
+
+    def assert_in_bad(self, err: MylaError, line: int) -> None:
+        self.assertEqual(err.path, os.path.realpath(os.path.join(self.root, "bad.my")))
+        self.assertEqual(err.line, line)
+
+    def test_lex_error(self):
+        self.assert_in_bad(self.error_in("// one\npub fun f() -> int {\n    return $\n}\n"), 3)
+
+    def test_parse_error(self):
+        self.assert_in_bad(self.error_in("// one\npub fun f() -> int {\n    return (1\n}\n"), 4)
+
+    def test_type_error_in_a_function(self):
+        self.assert_in_bad(self.error_in(
+            "// one\n// two\npub fun f() -> int {\n    return \"oops\"\n}\n"), 4)
+
+    def test_type_error_in_a_declaration(self):
+        self.assert_in_bad(self.error_in(
+            "pub fun f() -> int {\n    return 1\n}\nstruct S {\n    x: Nope,\n}\n"), 5)
+
+    def test_recursive_type(self):
+        # raised after the per-declaration passes, so it needs its own file (MYLA-28)
+        self.assert_in_bad(self.error_in(
+            "pub fun f() -> int {\n    return 1\n}\nstruct S {\n    next: S,\n}\n"), 4)
+
+    def test_entry_point_errors(self):
+        self.assert_in_bad(self.error_in(
+            "pub fun f() -> int {\n    return 1\n}\n#main\nfun g(x: int) {}\n",
+            main_src="from .bad import f\n"), 5)
+        self.assert_in_bad(self.error_in(
+            "pub fun f() -> int {\n    return 1\n}\n#main\nfun g() {}\n#main\nfun h() {}\n",
+            main_src="from .bad import f\n"), 7)
+
+    def test_module_error(self):
+        self.assert_in_bad(self.error_in(
+            "// one\nfrom .missing import g\npub fun f() -> int {\n    return 1\n}\n"), 2)
+
+    def test_runtime_error(self):
+        self.assert_in_bad(self.error_in(
+            "pub fun f() -> int {\n    let xs: [int] = []\n    return xs[1]\n}\n",
+            run=True), 3)
+
+    def test_runtime_error_in_a_lambda_called_elsewhere(self):
+        err = self.error_in(
+            "pub fun f() -> (int) -> int {\n    let xs: [int] = []\n"
+            "    return (i: int) => xs[i]\n}\n",
+            main_src="from .bad import f\nfun main() {\n    let g = f()\n    print(g(1))\n}\n",
+            run=True)
+        self.assert_in_bad(err, 3)
+
+    def test_errors_in_the_entry_file_name_it(self):
+        err = self.error_in("pub fun f() -> int {\n    return 1\n}\n",
+                            main_src="from .bad import f\nfun main() {\n    let x: str = f()\n}\n")
+        self.assertEqual(err.path, os.path.realpath(os.path.join(self.root, "main.my")))
+
+    def test_cli_shows_the_imported_file_and_line(self):
+        root = _project({"main.my": self.MAIN,
+                         "bad.my": "// one\n// two\npub fun f() -> int {\n    return \"oops\"\n}\n"})
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = cli_main(["run", os.path.join(root, "main.my")])
+        self.assertEqual(code, 1)
+        self.assertIn("bad.my:4:", stderr.getvalue())
+        self.assertIn('4 |     return "oops"', stderr.getvalue())
 
 
 if __name__ == "__main__":

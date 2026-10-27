@@ -3,7 +3,10 @@
 // These exist because value semantics means a helper can't mutate a
 // StringBuilder passed by value, so byte/codepoint assembly returns fresh
 // strings; and because there are no module-level maps, so classification is
-// done arithmetically on codepoints.
+// done arithmetically on codepoints (identifier characters beyond ASCII by
+// the generated ranges of unicode.my).
+
+from .unicode import is_xid_start, is_xid_continue
 
 // One Unicode scalar as a UTF-8 string (returned, since a passed-in
 // StringBuilder couldn't be mutated through a call).
@@ -54,12 +57,13 @@ pub fun is_digit(c: int32) -> bool {
     return c >= 48 && c <= 57
 }
 
+// Identifiers are `_` or XID_Start, then XID_Continue (D72, MYLA-84).
 pub fun is_ident_start(c: int32) -> bool {
-    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+    return is_xid_start(c)
 }
 
 pub fun is_ident_continue(c: int32) -> bool {
-    return is_ident_start(c) || is_digit(c)
+    return is_xid_continue(c)
 }
 
 // Hex/decimal digit value, or -1 for a non-digit.

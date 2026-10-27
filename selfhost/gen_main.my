@@ -1,27 +1,30 @@
 // gen_main.my -- `compile` tool, written in Myla (self-hosting v0.9).
 //
-// Reads a .my file, lexes + parses + type-checks it (prepending the same
-// prelude `myla run` injects), generates x86-64 assembly, and writes that
-// assembly to stdout. A thin host wrapper runs `as`/`ld` over it (§4 of
-// docs/self-hosting.md), so this stays a pure front-end + codegen with no
+// Reads a .my file, loads and links its modules, type-checks the program
+// (with the same prelude `myla run` injects), generates x86-64 assembly, and writes that
+// assembly to stdout. A thin host wrapper runs `as`/`ld` over it (see
+// docs/Architecture/Self-hosted-compiler.md), so this stays a pure front-end + codegen with no
 // process spawning of its own.
 
 from std.process import args, exit
 from std.io import write, eprintln
-from .checker import build_checker_src
+from .checker import build_checker_decls
 from .codegen import new_codegen
-from .loader import amalgamate
+from .loader import load_program, Loaded, file_of, default_stdlib_root
+from .diag import render, type_report
 
-fun emit_asm(src: str) -> int32 {
-    return match build_checker_src(src) {
+// `debug`: DWARF line tables, so gdb steps through the Myla source (MYLA-71).
+fun emit_asm(prog: Loaded, debug: bool) -> int32 {
+    return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
             var g = new_codegen(c)
+            if debug { g.enable_line_tables(prog.spans, prog.next_id) }
             let asm = g.generate()
             write(1, asm)
             0
         },
         Err(e) => {
-            eprintln(format("gen_main: type-check failed at {}:{}", e.line, e.col))
+            eprintln(render(type_report(e.line, e.col, e.msg, file_of(prog, e.decl))))
             1
         },
     }
@@ -30,20 +33,23 @@ fun emit_asm(src: str) -> int32 {
 fun main() {
     let argv = args()
     if len(argv) < 2 {
-        eprintln("usage: gen_main <file.my> [stdlib_root]")
+        eprintln("usage: gen_main <file.my> [stdlib_root] [-g]")
         exit(2)
     }
-    var stdlib = ""
-    if len(argv) >= 3 {
-        stdlib = argv[2]
+    var stdlib = default_stdlib_root(argv[0])
+    var debug = false
+    var j = 2
+    while j < len(argv) {
+        if argv[j] == "-g" { debug = true } else { stdlib = argv[j] }
+        j = j + 1
     }
-    match amalgamate(argv[1], stdlib) {
-        Ok(src) => {
-            let code = emit_asm(src)
+    match load_program(argv[1], stdlib) {
+        Ok(prog) => {
+            let code = emit_asm(prog, debug)
             exit(code)
         },
-        Err(e) => {
-            eprintln("gen_main: " + e)
+        Err(r) => {
+            eprintln(render(r))
             exit(1)
         },
     }

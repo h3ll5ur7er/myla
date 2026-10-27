@@ -7,8 +7,10 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
+import { chooseServer } from "./server";
 
 let client: LanguageClient | undefined;
+let watcher: vscode.FileSystemWatcher | undefined;
 let output: vscode.OutputChannel;
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -21,11 +23,6 @@ export async function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand("myla.restartLanguageServer", async () => {
       await restartServer(context);
-    }),
-    vscode.commands.registerCommand("myla.formatFile", () => {
-      vscode.window.showInformationMessage(
-        "Myla formatter is not wired up yet. It will be provided by the language server in a later phase."
-      );
     })
   );
 
@@ -33,7 +30,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (
-        e.affectsConfiguration("myla.pythonPath") ||
+        e.affectsConfiguration("myla.serverPath") ||
         e.affectsConfiguration("myla.compilerPath") ||
         e.affectsConfiguration("myla.diagnostics.enable")
       ) {
@@ -46,54 +43,62 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate(): Thenable<void> | undefined {
+  watcher?.dispose();
   return client?.stop();
 }
 
 async function startServer(context: vscode.ExtensionContext): Promise<void> {
   const config = vscode.workspace.getConfiguration("myla");
 
-  if (config.get<boolean>("diagnostics.enable", true) === false) {
-    output.appendLine(
-      "Myla diagnostics are disabled (myla.diagnostics.enable = false)."
-    );
+  const choice = chooseServer(
+    {
+      serverPath: expandPath(config.get<string>("serverPath", "")),
+      compilerEntry: resolveCompilerEntry(config),
+    },
+    fs.existsSync
+  );
+  if ("missing" in choice) {
+    output.appendLine(choice.missing);
+    vscode.window.showWarningMessage(choice.missing);
     return;
   }
 
-  const entry = resolveCompilerEntry(config);
-  if (!entry) {
-    const msg =
-      "Could not locate the Myla compiler (myla.py). Set 'myla.compilerPath' to the repository root.";
-    output.appendLine(msg);
-    vscode.window.showWarningMessage(msg);
-    return;
-  }
-
-  const python = resolvePythonPath(config, entry);
-
-  output.appendLine("Starting Myla language server:");
-  output.appendLine(`  python:   ${python}`);
-  output.appendLine(`  compiler: ${entry}`);
+  output.appendLine("Starting the Myla language server:");
+  output.appendLine(`  ${[choice.command, ...choice.args].join(" ")}`);
 
   const serverOptions: ServerOptions = {
-    command: python,
-    args: [entry, "lsp"],
+    command: choice.command,
+    args: choice.args,
     transport: TransportKind.stdio,
-    options: { cwd: path.dirname(entry) },
+    options: { cwd: choice.cwd },
   };
+
+  // The server takes file changes from the editor (didChangeWatchedFiles).
+  watcher = vscode.workspace.createFileSystemWatcher("**/*.my");
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: "file", language: "myla" },
       { scheme: "untitled", language: "myla" },
     ],
-    synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.my"),
-    },
     outputChannel: output,
+    synchronize: { fileEvents: watcher },
+    middleware: {
+      // `myla.diagnostics.enable = false` hides the diagnostics only; hover,
+      // definition and the rest keep working.
+      handleDiagnostics: (uri, diagnostics, next) => {
+        const enabled = vscode.workspace
+          .getConfiguration("myla")
+          .get<boolean>("diagnostics.enable", true);
+        next(uri, enabled ? diagnostics : []);
+      },
+    },
   };
 
+  // The id is the settings prefix: vscode-languageclient reads the trace level
+  // from `<id>.trace.server`, i.e. `myla.trace.server`.
   client = new LanguageClient(
-    "mylaLanguageServer",
+    "myla",
     "Myla Language Server",
     serverOptions,
     clientOptions
@@ -105,7 +110,7 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
   } catch (err) {
     output.appendLine(`Failed to start Myla language server: ${err}`);
     vscode.window.showErrorMessage(
-      "Could not start the Myla language server. Check 'myla.pythonPath' and 'myla.compilerPath', and see the Myla output channel."
+      "Could not start the Myla language server. Check 'myla.serverPath' and 'myla.compilerPath', and see the Myla output channel."
     );
     client = undefined;
   }
@@ -117,6 +122,8 @@ async function restartServer(context: vscode.ExtensionContext): Promise<void> {
     await client.stop();
     client = undefined;
   }
+  watcher?.dispose();
+  watcher = undefined;
   await startServer(context);
 }
 
@@ -128,7 +135,7 @@ async function restartServer(context: vscode.ExtensionContext): Promise<void> {
 function resolveCompilerEntry(
   config: vscode.WorkspaceConfiguration
 ): string | undefined {
-  const configured = config.get<string>("compilerPath", "").trim();
+  const configured = expandPath(config.get<string>("compilerPath", ""));
   if (configured) {
     if (configured.endsWith(".py") && fs.existsSync(configured)) {
       return configured;
@@ -150,27 +157,18 @@ function resolveCompilerEntry(
 }
 
 /**
- * Resolve the Python interpreter. When `myla.pythonPath` is empty, prefer the
- * project's uv-managed `.venv` (which contains pygls) next to `myla.py`, then
- * fall back to `python` on PATH.
+ * A path setting with `${workspaceFolder}` (the first workspace folder),
+ * `${userHome}` and a leading `~` expanded, as VS Code does for its own
+ * settings but not for an extension's.
  */
-function resolvePythonPath(
-  config: vscode.WorkspaceConfiguration,
-  entry: string
-): string {
-  const configured = config.get<string>("pythonPath", "").trim();
-  if (configured) {
-    return configured;
+function expandPath(value: string): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+  let out = value.trim();
+  if (out.startsWith("~/")) {
+    out = path.join(home, out.slice(2));
   }
-
-  const repoRoot = path.dirname(entry);
-  const venvUnix = path.join(repoRoot, ".venv", "bin", "python");
-  const venvWin = path.join(repoRoot, ".venv", "Scripts", "python.exe");
-  if (fs.existsSync(venvUnix)) {
-    return venvUnix;
-  }
-  if (fs.existsSync(venvWin)) {
-    return venvWin;
-  }
-  return "python";
+  return out
+    .replace(/\$\{workspaceFolder\}/g, folder)
+    .replace(/\$\{userHome\}/g, home);
 }

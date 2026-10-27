@@ -4,7 +4,7 @@
 every source file in the shared corpus, its canonical token dump is byte-for-byte
 identical to the Python oracle's (`myla tokenize --canonical`, i.e.
 `canon.canonical_tokens`). That is the v0.6a differential gate from
-docs/self-hosting.md §5.
+docs/Development/Testing.md
 
 The Myla lexer is exercised as a *native binary* when the host can build one
 (x86-64 Linux with `as`/`ld`), which also checks interpreter/compiler parity of
@@ -26,6 +26,7 @@ from myla.lexer import tokenize
 from myla.loader import default_stdlib_root, link
 
 from ._native import CAN_BUILD_NATIVE
+from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -48,16 +49,15 @@ def _corpus() -> list[str]:
     return files
 
 
-def _oracle(path: str) -> str | None:
-    """Canonical token dump from the Python lexer, or None if the file does not
-    lex cleanly (those are exercised elsewhere; the differential gate compares
-    only successful token streams)."""
+def _oracle(path: str) -> str:
+    """Canonical token dump from the Python lexer, or its error as
+    `err <line> <col> lex: <message>` (what `lex_main` prints)."""
     with open(path, "r", encoding="utf-8") as fh:
         source = fh.read()
     try:
         return canonical_tokens(tokenize(source))
-    except MylaError:
-        return None
+    except MylaError as err:
+        return f"err {err.line} {err.column} {err.kind.split()[0]}: {err.message}"
 
 
 def _check_file(path: str):
@@ -66,23 +66,12 @@ def _check_file(path: str):
 
 class SelfHostedLexerParity(unittest.TestCase):
     _binary: str | None = None
-    _tmp: tempfile.TemporaryDirectory | None = None
 
     @classmethod
     def setUpClass(cls) -> None:
         if not CAN_BUILD_NATIVE:
             return
-        from myla.compiler import build
-        from myla.types import check
-
-        cls._tmp = tempfile.TemporaryDirectory()
-        cls._binary = os.path.join(cls._tmp.name, "lexer_tool")
-        build(check(_check_file(LEXER_TOOL)), cls._binary)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        if cls._tmp is not None:
-            cls._tmp.cleanup()
+        cls._binary = selfhost_tool("lex_main")
 
     def _myla_lex(self, path: str) -> str:
         if self._binary is not None:
@@ -100,12 +89,40 @@ class SelfHostedLexerParity(unittest.TestCase):
         ).run()
         return out.getvalue().rstrip("\n")
 
+    def test_big_integer_literals(self) -> None:
+        # the token dump shows the value of literals of 2^63 and above (MYLA-73)
+        from .test_selfhost_parser import BIG_LITERALS
+
+        with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", delete=False) as fh:
+            fh.write(BIG_LITERALS)
+        try:
+            with open(fh.name, encoding="utf-8") as src:
+                expected = canonical_tokens(tokenize(src.read()))
+            self.assertEqual(self._myla_lex(fh.name), expected)
+        finally:
+            os.unlink(fh.name)
+
+    def test_unicode_identifiers_and_escapes(self) -> None:
+        # XID identifiers and the escapes strings share with chars (MYLA-84, MYLA-86)
+        source = ("fun größe(π: int, x\u0301: int, a\u00b7b: int) -> int {\n"
+                  "    let 日本 = \"\\r\\n\\0\\'\\u{41}\\u{1F600}\"\n"
+                  "    let s = f\"\\u{7B}{π}\\r\"\n"
+                  "    let c = '\\\"'\n"
+                  "    return π + Ⅻ + ℘\n"
+                  "}\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", delete=False) as fh:
+            fh.write(source)
+        try:
+            expected = canonical_tokens(tokenize(source))
+            self.assertIn("größe", expected)
+            self.assertEqual(self._myla_lex(fh.name), expected)
+        finally:
+            os.unlink(fh.name)
+
     def test_corpus_token_parity(self) -> None:
         checked = 0
         for path in _corpus():
             expected = _oracle(path)
-            if expected is None:
-                continue  # lex-error file: not part of the token-parity gate
             with self.subTest(file=os.path.relpath(path, _REPO)):
                 actual = self._myla_lex(path)
                 self.assertEqual(actual, expected)

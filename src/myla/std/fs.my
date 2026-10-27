@@ -14,8 +14,9 @@ pub enum IoError {
     Other(int32),
 }
 
-// Map a (nonzero) OS errno to an `IoError`. ENOENT/EACCES on Linux.
-fun from_errno(code: int32) -> IoError {
+// Map a (nonzero) OS errno to an `IoError`. ENOENT/EACCES on Linux. Also
+// used by `std.io`.
+pub fun from_errno(code: int32) -> IoError {
     if code == 2 {
         return IoError.NotFound
     }

@@ -1,0 +1,54 @@
+// main.my: the Myla language server (MYLA-80), speaking the language server
+// protocol over stdin and stdout.
+//
+//   lsp [--stdlib <dir>]
+//   lsp [--stdlib <dir>] --resolve <file>...
+//
+// The standard library is found next to the build/ directory the binary is
+// in, as for build/myla, unless --stdlib names it. --resolve prints what each
+// identifier of the files refers to (see resolve.my) instead of serving.
+
+from std.process import args, exit
+from std.fs import read_to_string
+from std.io import eprintln
+from ...selfhost.loader import default_stdlib_root, normalize
+from .server import new_server
+from .resolve import resolve, describe
+
+fun main() {
+    let argv = args()
+    var stdlib = default_stdlib_root(argv[0])
+    var files: [str] = []
+    var resolving = false
+    var i = 1
+    while i < len(argv) {
+        if argv[i] == "--stdlib" && i + 1 < len(argv) {
+            stdlib = argv[i + 1]
+            i = i + 1
+        } else if argv[i] == "--resolve" {
+            resolving = true
+        } else if resolving {
+            push(files, argv[i])
+        }
+        i = i + 1
+    }
+    if resolving {
+        var status = 0
+        for f in files {
+            let path = normalize(f)
+            match read_to_string(path) {
+                Ok(text) => {
+                    print(f"file {path}")
+                    for line in describe(resolve(path, text, stdlib, [:], [:])) { print(line) }
+                },
+                Err(e) => {
+                    eprintln(f"cannot read {path}")
+                    status = 1
+                },
+            }
+        }
+        exit(status)
+    }
+    var server = new_server(stdlib)
+    exit(server.run())
+}

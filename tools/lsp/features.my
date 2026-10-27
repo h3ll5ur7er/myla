@@ -1,0 +1,224 @@
+// features.my: identifiers under the cursor, their occurrences, hover text
+// and the completion context (MYLA-80), by name: what resolve.my can't tell
+// by scope and type falls back to these. Lexing the buffer with the
+// compiler's lexer means comments, strings and keywords never match.
+
+from ...selfhost.lexer import lex
+from ...selfhost.tokens import Token, TokenKind
+from .symbols import Symbol, SymKind, Range
+from .text import lines_of, to_lsp, code_points, utf16_units, is_word, Pos
+
+// A range in a file.
+pub struct Location { path: str, range: Range }
+
+fun token_range(lines: [str], t: Token) -> Range {
+    return Range { start: to_lsp(lines, t.line, t.column), end: to_lsp(lines, t.line, t.column + code_points(t.lexeme)) }
+}
+
+// Whether `source` lexes.
+pub fun lexes(source: str) -> bool {
+    return match lex(source) {
+        Ok(t) => true,
+        Err(d) => false,
+    }
+}
+
+// The identifier covering the 0-based UTF-16 position, if any.
+pub fun identifier_at(source: str, line: int32, character: int32) -> Option<str> {
+    let toks = match lex(source) {
+        Ok(t) => t,
+        Err(d) => { return None },
+    }
+    let lines = lines_of(source)
+    for t in toks {
+        if t.kind == TokenKind.IDENT && t.line - 1 == line {
+            let r = token_range(lines, t)
+            if r.start.character <= character && character <= r.end.character { return Some(t.lexeme) }
+        }
+    }
+    return None
+}
+
+// The range of every identifier token `name`.
+pub fun identifier_ranges(source: str, name: str) -> [Range] {
+    var out: [Range] = []
+    let toks = match lex(source) {
+        Ok(t) => t,
+        Err(d) => { return out },
+    }
+    let lines = lines_of(source)
+    for t in toks {
+        if t.kind == TokenKind.IDENT && t.lexeme == name { push(out, token_range(lines, t)) }
+    }
+    return out
+}
+
+// The ranges of the identifiers among `toks` (of a text with `lines`), by name.
+pub fun index_identifiers(lines: [str], toks: [Token]) -> [str: [Range]] {
+    var out: [str: [Range]] = [:]
+    for t in toks {
+        if t.kind == TokenKind.IDENT {
+            if !contains(out, t.lexeme) {
+                var empty: [Range] = []
+                out[t.lexeme] = empty
+            }
+            push(out[t.lexeme], token_range(lines, t))
+        }
+    }
+    return out
+}
+
+// A declaration as hover shows it.
+#test("get", SymKind.Function, "fun get() -> int")["fun get() -> int"]
+#test("x", SymKind.Field, "int")["x: int"]
+#test("B", SymKind.EnumMember, "(int)")["B(int)"]
+pub fun render(name: str, kind: SymKind, detail: str) -> str {
+    return match kind {
+        SymKind.Function => detail,
+        SymKind.Method => detail,
+        SymKind.Struct => detail,
+        SymKind.Enum => detail,
+        SymKind.Interface => detail,
+        SymKind.Impl => detail,
+        SymKind.EnumMember => name + detail,
+        SymKind.Field => name + ": " + detail,
+        SymKind.Constant => "const " + name + ": " + detail,
+        SymKind.TypeAlias => "typealias " + name + " = " + detail,
+    }
+}
+
+// The index of the code point at the 0-based UTF-16 offset `character` of
+// `cps` (inside a surrogate pair: the code point it belongs to), clamped.
+#test("ab", 1)[1]
+#test("a😀b", 2)[1]
+#test("a😀b", 3)[2]
+#test("ab", 9)[2]
+pub fun from_lsp_character(text: str, character: int32) -> int32 {
+    let cps = chars(text)
+    var units = 0
+    var i = 0
+    while i < len(cps) {
+        if (cps[i] as uint32) > 65535u32 { units = units + 2 } else { units = units + 1 }
+        if units > character { return i }
+        i = i + 1
+    }
+    return len(cps)
+}
+
+
+// Whether the cursor is in a member name: after a `.` and word characters.
+#test("p.x", 0, 3)[true]
+#test("p.", 0, 2)[true]
+#test("p x", 0, 3)[false]
+pub fun is_member_access(source: str, line: int32, character: int32) -> bool {
+    let lines = lines_of(source)
+    if line < 0 || line >= len(lines) { return false }
+    let cps = chars(lines[line])
+    var i = from_lsp_character(lines[line], character)
+    while i > 0 && is_word(cps[i - 1]) { i = i - 1 }
+    return i > 0 && cps[i - 1] == '.'
+}
+
+// A text to resolve for completion, and where the identifier being
+// completed starts in it.
+pub struct Attempt { text: str, want: Pos }
+
+// The placeholder standing for a word not typed yet.
+const PLACEHOLDER: str = "__complete"
+
+// Texts in which the identifier at the cursor (or a placeholder for it)
+// parses, to try in order: the text with the placeholder inserted at the
+// cursor when no word is typed; then the line replaced by just the receiver
+// chain before the cursor (`ps[0].`, for `print(ps[0].`) and the word.
+pub fun completion_attempts(source: str, line: int32, character: int32) -> [Attempt] {
+    var out: [Attempt] = []
+    let lines = lines_of(source)
+    if line < 0 || line >= len(lines) { return out }
+    let cps = chars(lines[line])
+    let cursor = from_lsp_character(lines[line], character)
+    // the identifier the cursor is in or touches
+    var start = cursor
+    while start > 0 && is_word(cps[start - 1]) { start = start - 1 }
+    var end = cursor
+    while end < len(cps) && is_word(cps[end]) { end = end + 1 }
+    var word = PLACEHOLDER
+    if start < end { word = cps_text(cps, start, end) }
+    let member = start > 0 && cps[start - 1] == '.'
+    let prefix = cps_text(cps, 0, start)
+    let rest = cps_text(cps, end, len(cps))
+    var first = source
+    if start == end { first = with_line(lines, line, prefix + word + rest) }
+    push(out, Attempt { text: first, want: Pos { line: line, character: utf16_units(prefix, start) } })
+    var chain = ""
+    if member { chain = receiver_chain(cps_text(cps, 0, start - 1)) + "." }
+    push(out, Attempt { text: with_line(lines, line, chain + word), want: Pos { line: line, character: utf16_units(chain, code_points(chain)) } })
+    return out
+}
+
+// The receiver expression ending `s`: names joined by `.`, each possibly
+// followed by calls and indexing (`ps[0].scaled(2)` of `print(ps[0].scaled(2)`).
+#test("print(ps[0].scaled(2)")["ps[0].scaled(2)"]
+#test("    x + self")["self"]
+#test("f(a, b)")["f(a, b)"]
+#test("1 + ")[""]
+#test("print(größe")["größe"]
+pub fun receiver_chain(s: str) -> str {
+    let cps = chars(s)
+    var i = len(cps)
+    while true {
+        // calls and indexing
+        while i > 0 && (cps[i - 1] == ')' || cps[i - 1] == ']') {
+            var depth = 0
+            var j = i - 1
+            while j >= 0 {
+                let c = cps[j]
+                if c == ')' || c == ']' { depth = depth + 1 }
+                if c == '(' || c == '[' { depth = depth - 1 }
+                if depth == 0 { break }
+                j = j - 1
+            }
+            if j < 0 { return cps_text(cps, i, len(cps)) }
+            i = j
+        }
+        let end = i
+        while i > 0 && is_word(cps[i - 1]) { i = i - 1 }
+        if i == end { return cps_text(cps, i, len(cps)) }
+        if i > 0 && cps[i - 1] == '.' {
+            i = i - 1
+        } else {
+            return cps_text(cps, i, len(cps))
+        }
+    }
+    return ""
+}
+
+fun cps_text(cps: [char], start: int32, end: int32) -> str {
+    var sb = StringBuilder()
+    var i = start
+    while i < end {
+        append(sb, format("{}", cps[i]))
+        i = i + 1
+    }
+    return build(sb)
+}
+
+// `lines` joined by line breaks, line `n` replaced by `text`.
+fun with_line(lines: [str], n: int32, text: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(lines) {
+        if i == n { append(sb, text) } else { append(sb, lines[i]) }
+        append(sb, "\n")
+        i = i + 1
+    }
+    return build(sb)
+}
+
+// The reserved words and built-in type names completion offers.
+pub fun completion_keywords() -> [str] {
+    return ["fun", "struct", "enum", "trait", "impl", "typealias", "const",
+            "import", "from", "as", "pub", "let", "var", "return", "if", "else",
+            "match", "while", "for", "in", "break", "continue", "self", "true", "false",
+            "bool", "str", "char", "int", "int8", "int16", "int32", "int64",
+            "uint8", "uint16", "uint32", "uint64", "float", "float32", "float64"]
+}

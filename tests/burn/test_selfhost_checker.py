@@ -2,10 +2,11 @@
 
 `selfhost/checker.my` is the Myla-written type checker; `selfhost/check_main.my`
 lexes + parses + type-checks a single-file program and prints the stable
-accept/reject + diagnostic-position line (`ok`, else `err <line> <col> type`),
-the same canonical contract as `myla check --canonical`. This test asserts that,
-for every single-file source in the shared corpus, that line is identical to the
-Python oracle's. That is the v0.7 checker-parity gate from docs/self-hosting.md.
+accept/reject line (`ok`, else `err <line> <col> type: <message>`). This test
+asserts that, for every single-file source in the shared corpus and for every
+snippet of TYPE_ERRORS, that line is identical to the Python oracle's: the same
+verdict, position and message (MYLA-28). That is the v0.7 checker-parity gate
+from docs/Development/Testing.md.
 
 As with the lexer/parser gates, the Myla checker runs as a *native binary* when
 the host can build one (which also exercises interpreter/compiler parity of the
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import glob
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -35,11 +37,195 @@ from myla.parser import parse
 from myla.types import check
 
 from ._native import CAN_BUILD_NATIVE
+from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 )
 CHECK_TOOL = os.path.join(_REPO, "selfhost", "check_main.my")
+
+# Programs the Python unit tests expect to fail type checking, collected by
+# scripts/harvest_type_errors.py, then snippets for the messages they don't
+# reach (named after the message).
+_SNIPPETS = os.path.join(os.path.dirname(__file__), "data", "type_error_snippets.json")
+def _main(*lines: str, before: str = "") -> str:
+    """A program whose `main` body is `lines`, after the declarations `before`."""
+    body = "".join(f"    {line}\n" for line in lines)
+    return f"{before}fun main() {{\n{body}}}\n"
+
+
+_S = "struct S { a: int }\n"
+_SM = ("struct S { a: int }\nimpl S {\n    fun f(self, x: int) -> int {\n        return x\n    }\n"
+       "    fun g<U>(self, x: U, y: U) -> int {\n        return 1\n    }\n"
+       "    fun h<U>(self) -> int {\n        return 1\n    }\n}\n")
+_E = "enum E { A, B }\nenum F { C }\n"
+_P = "enum E { A(int) }\nenum G<T> { K(int) }\n"
+TYPE_ERRORS: dict[str, str] = {
+    "module_import": "import foo\nfun main() {}\n",
+    "duplicate_trait": "trait T {\n    fun f(self) -> int\n}\ntrait T {\n    fun g(self) -> int\n}\nfun main() {}\n",
+    "duplicate_field": "struct S { a: int, a: int }\nfun main() {}\n",
+    "duplicate_variant": "enum E { A, A }\nfun main() {}\n",
+    "type_param_shadows_builtin": "fun f<char>(x: char) {}\nfun main() {}\n",
+    "type_param_shadows_int": "fun f<int>(x: int) {}\nfun main() {}\n",
+    "duplicate_type_param": "fun f<T, T>(x: T) {}\nfun main() {}\n",
+    "duplicate_trait_method": "trait T {\n    fun f(self) -> int\n    fun f(self) -> int\n}\nfun main() {}\n",
+    "duplicate_trait_type_param": "trait T<A, A> {\n    fun f(self) -> A\n}\nfun main() {}\n",
+    "trait_self_type_param": "trait T<Self> {\n    fun f(self) -> int\n}\nfun main() {}\n",
+    "impl_extra_method": ("struct S { a: int }\ntrait T {\n    fun f(self) -> int\n}\nimpl T for S {\n"
+                          "    fun f(self) -> int {\n        return 1\n    }\n    fun g(self) -> int {\n        return 2\n    }\n}\nfun main() {}\n"),
+    "impl_receiver_mismatch": ("struct S { a: int }\ntrait T {\n    fun f(var self)\n}\nimpl T for S {\n"
+                               "    fun f(self) {}\n}\nfun main() {}\n"),
+    "derive_on_function": "#derive(Eq)\nfun f() {}\nfun main() {}\n",
+    "derive_on_generic": "#derive(Eq)\nstruct B<T> { x: T }\nfun main() {}\n",
+    "derive_and_impl": ("#derive(Eq)\nstruct S { a: int }\nimpl Eq for S {\n    fun eq(self, o: S) -> bool {\n"
+                        "        return true\n    }\n}\nfun main() {}\n"),
+    "derive_with_outputs": "#derive(Eq)[1]\nstruct S { a: int }\nfun main() {}\n",
+    "derive_without_traits": "#derive\nstruct S { a: int }\nfun main() {}\n",
+    "derive_non_name": "#derive(1)\nstruct S { a: int }\nfun main() {}\n",
+    "derive_enum_payload": "#derive(Eq)\nenum E { A([int]) }\nfun main() {}\n",
+    "generic_impl_order": ("struct P<A, B> { a: A, b: B }\nimpl<A, B> P<B, A> {\n    fun f(self) -> int {\n"
+                           "        return 1\n    }\n}\nfun main() {}\n"),
+    "generic_impl_on_builtin": "impl<T> int {\n    fun f(self) -> int {\n        return 1\n    }\n}\nfun main() {}\n",
+    "impl_on_list": "impl [int] {\n    fun f(self) -> int {\n        return 1\n    }\n}\nfun main() {}\n",
+    "self_type_args": "trait T {\n    fun f(self) -> Self<int>\n}\nfun main() {}\n",
+    "type_param_args": "fun f<T>(x: T<int>) {}\nfun main() {}\n",
+    "not_generic": "struct S { a: int }\nfun f(x: S<int>) {}\nfun main() {}\n",
+    "const_value_type": "const X: int = \"s\"\nfun main() {}\n",
+    "const_not_constant": "fun g() -> int {\n    return 1\n}\nconst F: () -> int = g\nfun main() {}\n",
+    "test_on_struct": "#test(1)[1]\nstruct S { a: int }\nfun main() {}\n",
+    "two_mains": "#main\nfun a() {}\n#main\nfun b() {}\n",
+    "test_without_return": "#test()[1]\nfun f() {}\nfun main() {}\n",
+    "test_two_expected": "#test()[1, 2]\nfun f() -> int {\n    return 1\n}\nfun main() {}\n",
+    "destructure_declared_type": _main("let (a, b): (int, int) = (1, \"s\")"),
+    "assign_mismatch": _main("var x = 1", "x = \"s\""),
+    "range_of_strings": _main("for i in \"a\"..\"b\" {", "}"),
+    "destructure_duplicate": _main("let (a, a) = (1, 2)"),
+    "destructure_nested_non_tuple": _main("let ((a, b), c) = (1, 2)"),
+    "assign_unknown": _main("y = 1"),
+    "assign_field_of_int": _main("var x = 1", "x.f = 2"),
+    "assign_missing_field": _main("var s = S { a: 1 }", "s.b = 2", before=_S),
+    "assign_index_of_int": _main("var x = 1", "x[0] = 2"),
+    "assign_list_index_str": _main("var xs = [1]", "xs[\"a\"] = 2"),
+    "push_onto_call": _main("push(g(), 1)", before="fun g() -> [int] {\n    return [1]\n}\n"),
+    "no_value": _main("let x = print(1)"),
+    "placeholder_value": _main("let x = _"),
+    "lambda_param_type": _main("let f = (x) => x"),
+    "lambda_duplicate_param": _main("let f = (x: int, x: int) => x"),
+    "lambda_may_finish": _main("let f: (int) -> int = (x: int) => {", "    if x > 0 {", "        return 1", "    }", "}"),
+    "lambda_inconsistent_returns": _main("let f = (x: int) => {", "    if x > 0 {", "        return 1", "    }",
+                                         "    return \"s\"", "}"),
+    "map_literal_key": _main("let m = [[1]: 2]"),
+    "match_arm_without_value": _main("let x = match 1 {", "    1 => { print(1) },", "    _ => 2,", "}"),
+    "match_all_arms_diverge": "fun f() -> int {\n    let x = match 1 {\n        _ => { return 1 },\n    }\n    return x\n}\nfun main() {}\n",
+    "match_arm_types": _main("let x = match 1 {", "    1 => 1,", "    _ => \"s\",", "}"),
+    "pattern_binds_twice": _main("match (1, 2) {", "    (a, a) => {},", "}"),
+    "literal_against_list": _main("match [1] {", "    1 => {},", "    _ => {},", "}"),
+    "literal_type": _main("match 1 {", "    \"s\" => {},", "    _ => {},", "}"),
+    "tuple_pattern_on_int": _main("match 1 {", "    (a, b) => {},", "}"),
+    "tuple_pattern_arity": _main("match (1, 2) {", "    (a, b, c) => {},", "}"),
+    "enum_pattern_on_int": _main("match 1 {", "    Some(x) => {},", "    _ => {},", "}"),
+    "pattern_other_enum": _main("match E.A {", "    F.C => {},", "    _ => {},", "}", before=_E),
+    "pattern_unknown_variant": _main("match E.A {", "    E.D => {},", "    _ => {},", "}", before=_E),
+    "pattern_payload_count": _main("match Some(1) {", "    Some(a, b) => {},", "    None => {},", "}"),
+    "pattern_needs_payload": _main("match Some(1) {", "    Option.Some => {},", "    _ => {},", "}"),
+    "struct_pattern_on_int": _main("match 1 {", "    S { a } => {},", "}", before=_S),
+    "struct_pattern_other": _main("let t = T { b: 1 }", "match t {", "    S { a } => {},", "}", before=_S + "struct T { b: int }\n"),
+    "struct_pattern_field_twice": _main("let s = S { a: 1 }", "match s {", "    S { a, a } => {},", "}", before=_S),
+    "struct_pattern_unknown_field": _main("let s = S { a: 1 }", "match s {", "    S { b } => {},", "}", before=_S),
+    "bool_not_exhaustive": _main("match true {", "    true => {},", "}"),
+    "int_not_exhaustive": _main("match 1 {", "    1 => {},", "}"),
+    "variant_arm_unreachable": _main("match Some(1) {", "    Some(x) => {},", "    None => {},", "    None => {},", "}"),
+    "builtin_as_value": _main("let f = print"),
+    "generic_function_as_value": _main("let f = id", before="fun id<T>(x: T) -> T {\n    return x\n}\n"),
+    "negate_string": _main("let x = -\"s\""),
+    "complement_float": _main("let x = ~1.5"),
+    "compare_strings": _main("let b = \"a\" < \"b\""),
+    "shift_float": _main("let x = 1.5 << 1"),
+    "shift_by_float": _main("let x = 1 << 1.5"),
+    "compose_two_args_left": _main("let f = (a: int, b: int) => a", "let g = (x: int) => x", "let h = f >> g"),
+    "compose_two_args_right": _main("let f = (x: int) => x", "let g = (a: int, b: int) => a", "let h = f >> g"),
+    "overload_operand_types": _main("let x = S { a: 1 } + 1", before=_S + "impl Add for S {\n    fun add(self, o: S) -> S {\n        return o\n    }\n}\n"),
+    "bounded_operand_types": "fun f<T: Add>(a: T, b: int) -> T {\n    return a + b\n}\nfun main() {}\n",
+    "assert_arity": _main("assert()"),
+    "panic_arity": _main("panic()"),
+    "push_arity": _main("var xs = [1]", "push(xs)"),
+    "contains_arity": _main("let b = contains([1: 2])"),
+    "contains_on_list": _main("let b = contains([1], 1)"),
+    "remove_immutable": _main("let m = [1: 2]", "remove(m, 1)"),
+    "format_without_args": _main("let s = format()"),
+    "build_arity": _main("let s = build()"),
+    "append_arity": _main("var sb = StringBuilder()", "append(sb)"),
+    "append_to_int": _main("var x = 1", "append(x, \"s\")"),
+    "method_arity": _main("let s = S { a: 1 }", "let n = s.f()", before=_SM),
+    "method_argument": _main("let s = S { a: 1 }", "let n = s.f(\"x\")", before=_SM),
+    "method_type_param": _main("let s = S { a: 1 }", "let n = s.h()", before=_SM),
+    "generic_method_argument": _main("let s = S { a: 1 }", "let n = s.g(1, \"x\")", before=_SM),
+    "exit_arity": _main("__exit()"),
+    "len_arity": _main("let n = len()"),
+    "len_of_int": _main("let n = len(1)"),
+    "chars_arity": _main("let c = chars()"),
+    "function_value_arity": _main("let f = (x: int) => x", "let y = f(1, 2)"),
+    "partial_of_int": _main("let x = 1", "let f = x(_)"),
+    "partial_generic_method": _main("let s = S { a: 1 }", "let f = s.g(_, 1)", before=_SM),
+    "partial_missing_method": _main("let x = 1", "let f = x.foo(_)"),
+    "partial_unknown": _main("let f = nothing(_)"),
+    "partial_of_index": _main("let fs = [(x: int) => x]", "let f = fs[0](_)"),
+    "partial_generic_function": _main("let f = id(_)", before="fun id<T>(x: T) -> T {\n    return x\n}\n"),
+    "partial_arity": _main("let f = g(_)", before="fun g(a: int, b: int) -> int {\n    return a\n}\n"),
+    "partial_argument": _main("let f = g(_, \"s\")", before="fun g(a: int, b: int) -> int {\n    return a\n}\n"),
+    "function_arity": _main("g()", before="fun g(a: int) {}\n"),
+    "generic_call_inference": _main("let n = g()", before="fun g<T>() -> int {\n    return 1\n}\n"),
+    "generic_call_argument": _main("g(1, \"s\")", before="fun g<T>(a: T, b: T) {}\n"),
+    "variant_type_inference": _main("let e = G.K(1)", before=_P),
+    "variant_argument": _main("let e = E.A(\"s\")", before=_P),
+    "unknown_variant": _main("let e = E.C", before=_E),
+    "variant_needs_arguments": _main("let e = E.A", before=_P),
+    "field_of_int": _main("let x = 1", "let y = x.f"),
+    "unknown_struct": _main("let s = Nope { a: 1 }"),
+    "struct_literal_duplicate": _main("let s = S { a: 1, a: 2 }", before=_S),
+    "struct_literal_field_type": _main("let s = S { a: \"x\" }", before=_S),
+    "format_lone_close": _main("let s = format(\"a}\")"),
+    "alias_not_generic": "typealias A = int\nfun f(x: A<int>) {}\nfun main() {}\n",
+    "match_arm_int_types": _main("let x = match 1 {", "    1 => 1u8,", "    _ => 2i64,", "}"),
+    "const_division_through_a_const": "const Z: int = 0\nconst Q: int = 1 / Z\nfun main() {}\n",
+    "const_division_by_wrapped_zero": "const A: uint8 = 128\nconst Z: uint8 = A + A\nconst Q: int = 1 / (Z as int)\nfun main() {}\n",
+    "const_division_by_negated_zero": "const A: int = 0\nconst Q: int = 1 % -A\nfun main() {}\n",
+    "const_cycle": "const A: int = B\nconst B: int = A\nfun main() {}\n",
+    "literal_above_uint64": _main("let x = 18446744073709551616u64"),
+    "literal_above_int64": _main("let x = 9223372036854775809i64"),
+    "literal_at_int64_magnitude_is_fine_but_wrong_type": _main("let x: int32 = 9223372036854775808i64"),
+    "literal_above_int32_default": _main("let x = 9223372036854775808"),
+    "huge_hex_literal": _main("let x: uint8 = 0x1_0000_0000_0000_0000"),
+    "shift_by_huge_literal": _main("let x = 1 << 9223372036854775808"),
+    "or_pattern_rebinds": _main("match (1, 2) {", "    (x, x | x) => {},", "}"),
+    # literal patterns outside the scrutinee's range (MYLA-7)
+    "negative_pattern_on_unsigned": _main("let b: uint8 = 255", "match b {", "    -1 => {},", "    _ => {},", "}"),
+    "pattern_above_signed_max": _main("let c: int8 = 0", "match c {", "    128 => {},", "    _ => {},", "}"),
+    "pattern_below_signed_min": _main("let c: int8 = 0", "match c {", "    -129 => {},", "    _ => {},", "}"),
+    "big_pattern_on_int64": _main("let c: int64 = 0", "match c {", "    9223372036854775808 => {},", "    _ => {},", "}"),
+    "big_negative_pattern_on_uint64": _main("let c: uint64 = 0", "match c {", "    -9223372036854775808 => {},", "    _ => {},", "}"),
+    # exhaustiveness and redundancy by pattern matrices (MYLA-14)
+    "nested_match_missing_a_variant": _main("let x: Option<Result<int, str>> = None", "let n = match x {",
+                                            "    Some(Ok(v)) => v,", "    None => 0,", "}"),
+    "tuple_of_bools_not_covered": _main("let x = (true, false)", "let n = match x {",
+                                        "    (true, _) => 1,", "    (false, true) => 2,", "}"),
+    "redundant_nested_arm": _main("let x: Option<Result<int, str>> = None", "let n = match x {",
+                                  "    Some(Ok(v)) => v,", "    Some(Ok(1)) => 1,", "    _ => 0,", "}"),
+    "redundant_literal_arm": _main("let x = 3", "let n = match x {", "    1 => 1,", "    1 => 2,", "    _ => 0,", "}"),
+    "redundant_after_true_false": _main("let x = true", "let n = match x {", "    true => 1,", "    false => 2,",
+                                        "    _ => 0,", "}"),
+    # (exhaustive, so the error is the last line)
+    "exhaustive_nested_and_or_patterns": _main(
+        "let x: Option<Result<int, str>> = None", "let a = match x {", "    Some(Ok(v)) => v,",
+        "    Some(Err(e)) => 0,", "    None => 1,", "}", "let b = match (x, true) {", "    (None, _) => 0,",
+        "    (Some(r), true) => 1,", "    (_, false) => 2,", "}", "let c = match true {", "    true | false => 1,", "}",
+        "let z: bool = 1"),
+    # (these fit; the error is the last line)
+    "patterns_at_the_bounds_fit": _main("let c: int64 = 0", "match c {", "    -9223372036854775808 => {},",
+                                        "    9223372036854775807 => {},", "    -0 => {},", "    _ => {},", "}",
+                                        "let u: uint64 = 0", "match u {", "    18446744073709551615 => {},",
+                                        "    -0 => {},", "    _ => {},", "}", "let z: bool = 1"),
+}
 
 
 def _corpus() -> list[str]:
@@ -59,7 +245,23 @@ def _corpus() -> list[str]:
 def _canonical(err: MylaError) -> str:
     line = "-" if err.line is None else str(err.line)
     col = "-" if err.column is None else str(err.column)
-    return f"err {line} {col} {err.kind.split()[0]}"
+    return f"err {line} {col} {err.kind.split()[0]}: {err.message}"
+
+
+def _snippets() -> dict[str, str]:
+    with open(_SNIPPETS, encoding="utf-8") as fh:
+        harvested = json.load(fh)
+    cases = {f"unit_test_{i}": src for i, src in enumerate(harvested)}
+    cases.update(TYPE_ERRORS)
+    return cases
+
+
+def _oracle_source(source: str) -> str:
+    try:
+        check(parse(tokenize(source)))
+    except MylaError as err:
+        return _canonical(err)
+    return "ok"
 
 
 def _oracle(path: str) -> str | None:
@@ -90,34 +292,14 @@ def _check_file(path: str):
 
 class SelfHostedCheckerParity(unittest.TestCase):
     _binary: str | None = None
-    _tmp: tempfile.TemporaryDirectory | None = None
 
     @classmethod
     def setUpClass(cls) -> None:
         if not CAN_BUILD_NATIVE:
             return
-        from myla.compiler import build
-
-        # Build the Myla checker to a native binary when we can, so the gate also
-        # exercises codegen parity of the toolchain. The x86 backend does not yet
-        # support every construct `checker.my` uses (e.g. assigning a heap-owning
-        # value to a struct field — that's v0.9a codegen work), so fall back to
-        # the interpreter rather than failing the v0.7 *checker* gate on a codegen
-        # gap. Once codegen catches up this path upgrades to native automatically.
-        tmp = tempfile.TemporaryDirectory()
-        binary = os.path.join(tmp.name, "check_tool")
-        try:
-            build(check(_check_file(CHECK_TOOL)), binary)
-        except Exception:
-            tmp.cleanup()
-            return
-        cls._tmp = tmp
-        cls._binary = binary
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        if cls._tmp is not None:
-            cls._tmp.cleanup()
+        # The Myla checker, built natively by the Python backend (cached), so
+        # the gate also exercises the codegen parity of the toolchain.
+        cls._binary = selfhost_tool("check_main")
 
     def _myla_check(self, path: str) -> str:
         if self._binary is not None:
@@ -145,6 +327,17 @@ class SelfHostedCheckerParity(unittest.TestCase):
                 checked += 1
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 60)
+
+    def test_type_errors_match_the_oracle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, source in _snippets().items():
+                with self.subTest(case=name):
+                    expected = _oracle_source(source)
+                    self.assertIn(" type: ", expected, "not a type error in Python")
+                    path = os.path.join(tmp, name + ".my")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(source)
+                    self.assertEqual(self._myla_check(path), expected)
 
 
 if __name__ == "__main__":

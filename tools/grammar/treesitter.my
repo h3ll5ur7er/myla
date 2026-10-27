@@ -1,0 +1,840 @@
+// treesitter.my: the tree-sitter grammar and highlight queries generated from
+// the grammar description (MYLA-77), and the checks that tie the description
+// to the compiler's lexer.
+//
+// How the description maps to tree-sitter:
+// - A token rule becomes token(/regex/), its fragments inlined; @immediate
+//   makes it token.immediate with a lexical precedence over the extras.
+// - A syntactic rule becomes a rule of the same name, hidden ("_name") when
+//   it only chooses between other symbols and labelled alternatives, when it
+//   has the suffix form below, or when its name is in capitals (SEP).
+//   Single-symbol rules (expression = pipe) are also inlined.
+// - A labelled alternative `… @l` becomes a rule l. When several rules or
+//   alternatives make the same node (binary_expression), each is a hidden
+//   helper rule aliased to the node name.
+// - `R = H ( A @l | … )*` becomes left-recursive: each suffix wraps what
+//   precedes it in a node l, so the tree nests like the parser's AST.
+// - `X*` and `X+` of a single rule X share one helper `_x_rep`, so every
+//   repetition of NL or SEP shifts the same symbol.
+// - @word, @extras and @conflict become the grammar's word, extras and
+//   conflicts.
+
+from .ebnf import Grammar, GRule, GExpr, rule_index, directive_args, arg_text, is_upper_name, refs_of, children, unlabel, contains_str, starts_with, substr
+from ...selfhost.lexer import lex
+from ...selfhost.tokens import TokenKind, keyword_kind, keywords
+
+// -- classification ----------------------------------------------------------
+
+// The kind of each rule, by index: "token" (capitals, only terminals, classes
+// and fragments), "fragment" (a lowercase helper of tokens) or "syntax".
+pub fun rule_kinds(g: Grammar) -> [str] {
+    var kinds: [str] = []
+    for r in g.rules {
+        if is_pure(g, r.body, 0) {
+            if is_upper_name(r.name) { push(kinds, "token") } else { push(kinds, "fragment") }
+        } else {
+            push(kinds, "syntax")
+        }
+    }
+    // a lowercase rule that a syntactic rule uses is syntactic itself (prim_type)
+    var changed = true
+    while changed {
+        changed = false
+        var i = 0
+        while i < len(g.rules) {
+            if kinds[i] == "syntax" {
+                for n in refs_of(g.rules[i].body) {
+                    let k = rule_index(g, n)
+                    if k >= 0 && kinds[k] == "fragment" {
+                        kinds[k] = "syntax"
+                        changed = true
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    return kinds
+}
+
+// Whether `e` uses only terminals, classes and lowercase rules that do too.
+fun is_pure(g: Grammar, e: GExpr, depth: int32) -> bool {
+    if depth > 64 { return false }
+    match e {
+        GExpr.GRef(n) => {
+            if is_upper_name(n) { return false }
+            let k = rule_index(g, n)
+            return k >= 0 && is_pure(g, g.rules[k].body, depth + 1)
+        },
+        GExpr.GLabel(x, l) => { return false },
+        _ => {},
+    }
+    for x in children(e) {
+        if !is_pure(g, x, depth + 1) { return false }
+    }
+    return true
+}
+
+// The index of the start rule: the first syntactic rule.
+pub fun start_rule(kinds: [str]) -> int32 {
+    var k = 0
+    while k < len(kinds) {
+        if kinds[k] == "syntax" { return k }
+        k = k + 1
+    }
+    return 0
+}
+
+// The node a syntactic rule makes: its label, else its name.
+fun node_name(r: GRule) -> str {
+    if r.label != "" { return r.label }
+    return r.name
+}
+
+// Whether a syntactic rule makes no node of its own (see the header).
+pub fun is_hidden(r: GRule) -> bool {
+    return is_upper_name(r.name) || is_transparent(r.body) || len(suffix_alts(r.body)) > 0
+}
+
+fun is_transparent(e: GExpr) -> bool {
+    return match e {
+        GExpr.GRef(n) => true,
+        GExpr.GAlt(xs) => all_refs_or_labels(xs),
+        _ => false,
+    }
+}
+
+fun all_refs_or_labels(xs: [GExpr]) -> bool {
+    for x in xs {
+        match x {
+            GExpr.GRef(n) => {},
+            GExpr.GLabel(y, l) => {},
+            _ => { return false },
+        }
+    }
+    return true
+}
+
+fun is_single_ref(e: GExpr) -> bool {
+    return match e {
+        GExpr.GRef(n) => true,
+        _ => false,
+    }
+}
+
+// For `H ( A @l | … )*`, the labelled alternatives; otherwise none.
+pub fun suffix_alts(e: GExpr) -> [GExpr] {
+    var none: [GExpr] = []
+    match e {
+        GExpr.GSeq(xs) => {
+            if len(xs) != 2 { return none }
+            match xs[1] {
+                GExpr.GStar(rep) => {
+                    var alts: [GExpr] = [rep]
+                    match rep {
+                        GExpr.GAlt(ys) => { alts = ys },
+                        _ => {},
+                    }
+                    for a in alts {
+                        match a {
+                            GExpr.GLabel(x, l) => {},
+                            _ => { return none },
+                        }
+                    }
+                    return alts
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+    return none
+}
+
+// Every label in `e`, with repeats.
+pub fun labels_of(e: GExpr) -> [str] {
+    var out: [str] = []
+    match e {
+        GExpr.GLabel(x, l) => { push(out, l) },
+        _ => {},
+    }
+    for x in children(e) {
+        for l in labels_of(x) { push(out, l) }
+    }
+    return out
+}
+
+// Every node name, with repeats: visible syntactic rules', labelled tokens'
+// and labelled alternatives'.
+fun node_names(g: Grammar, kinds: [str]) -> [str] {
+    var out: [str] = []
+    var k = 0
+    while k < len(g.rules) {
+        let r = g.rules[k]
+        if kinds[k] == "token" && r.label != "" { push(out, r.label) }
+        if kinds[k] == "syntax" {
+            if !is_hidden(r) { push(out, node_name(r)) }
+            for l in labels_of(r.body) { push(out, l) }
+        }
+        k = k + 1
+    }
+    return out
+}
+
+#test(["a", "b", "a"], "a")[2]
+fun count_of(xs: [str], x: str) -> int32 {
+    var n = 0
+    for y in xs {
+        if y == x { n = n + 1 }
+    }
+    return n
+}
+
+#test(["a"], "a")[true]
+#test(["a"], "b")[false]
+pub fun list_has(xs: [str], x: str) -> bool {
+    return count_of(xs, x) > 0
+}
+
+#test(["a", "b"], ", ")["a, b"]
+pub fun join_strs(xs: [str], sep: str) -> str {
+    var sb = StringBuilder()
+    var first = true
+    for x in xs {
+        if !first { append(sb, sep) }
+        append(sb, x)
+        first = false
+    }
+    return build(sb)
+}
+
+#test("SEP_x")["sep_x"]
+fun lower(s: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(s) {
+        var c = s[i]
+        if c >= 'A' && c <= 'Z' { c = c + 32 }
+        append_byte(sb, c)
+        i = i + 1
+    }
+    return build(sb)
+}
+
+// A JavaScript string literal.
+#test("it's")["'it\\'s'"]
+#test("\\")["'\\\\'"]
+fun js_string(t: str) -> str {
+    var sb = StringBuilder()
+    append(sb, "'")
+    var i = 0
+    while i < len(t) {
+        if t[i] == '\\' || t[i] == '\'' { append(sb, "\\") }
+        append_byte(sb, t[i])
+        i = i + 1
+    }
+    append(sb, "'")
+    return build(sb)
+}
+
+// `t` as a regex matching it literally (inside /…/).
+#test("\\u{")["\\\\u\\{"]
+#test("/*")["\\/\\*"]
+fun regex_escape(t: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(t) {
+        if contains_str("\\^$.|?*+()[]{}/", substr(t, i, i + 1)) { append(sb, "\\") }
+        append_byte(sb, t[i])
+        i = i + 1
+    }
+    return build(sb)
+}
+
+// The regex of a token rule's body, fragments inlined.
+pub fun token_regex(g: Grammar, e: GExpr) -> str {
+    return match e {
+        GExpr.GTerm(t) => regex_escape(t),
+        GExpr.GClass(c) => c,
+        GExpr.GRef(n) => "(?:" + token_regex(g, g.rules[rule_index(g, n)].body) + ")",
+        GExpr.GSeq(xs) => token_regex_list(g, xs, ""),
+        GExpr.GAlt(xs) => "(?:" + token_regex_list(g, xs, "|") + ")",
+        GExpr.GOpt(x) => "(?:" + token_regex(g, x) + ")?",
+        GExpr.GStar(x) => "(?:" + token_regex(g, x) + ")*",
+        GExpr.GPlus(x) => "(?:" + token_regex(g, x) + ")+",
+        GExpr.GLabel(x, l) => token_regex(g, x),
+    }
+}
+
+fun token_regex_list(g: Grammar, xs: [GExpr], sep: str) -> str {
+    var parts: [str] = []
+    for x in xs { push(parts, token_regex(g, x)) }
+    return join_strs(parts, sep)
+}
+
+// -- generation --------------------------------------------------------------
+
+struct Gen {
+    g: Grammar,
+    kinds: [str],
+    names: [str],          // node names with repeats (node_names)
+    defs: [str],           // helper rules, in the order they were made
+    label_n: int32,
+    made: [str],           // "label body" of each shared-label helper, with
+    made_names: [str],     // its name: identical alternatives share one
+    reps: [str],           // the `_…_rep` helpers made so far
+}
+
+impl Gen {
+    fun shared(self, name: str) -> bool {
+        return count_of(self.names, name) > 1
+    }
+
+    // The name rule k is defined under in grammar.js.
+    fun def_name(self, k: int32) -> str {
+        let r = self.g.rules[k]
+        if self.kinds[k] == "token" {
+            if r.label != "" && !self.shared(r.label) { return r.label }
+            return "_" + lower(r.name)
+        }
+        if is_hidden(r) || self.shared(node_name(r)) { return "_" + lower(r.name) }
+        return node_name(r)
+    }
+
+    // A reference to rule `name`: its symbol, aliased to its node name when
+    // other rules or alternatives make the same node.
+    fun ref(self, name: str) -> str {
+        let k = rule_index(self.g, name)
+        let r = self.g.rules[k]
+        let sym = "$." + self.def_name(k)
+        if self.kinds[k] == "token" {
+            if r.label != "" && self.shared(r.label) { return format("alias({}, $.{})", sym, r.label) }
+            return sym
+        }
+        if !is_hidden(r) && self.shared(node_name(r)) { return format("alias({}, $.{})", sym, node_name(r)) }
+        return sym
+    }
+
+    // The symbol of rule or (unique) label `name`, for word, extras and
+    // conflicts.
+    fun symbol(self, name: str) -> str {
+        let k = rule_index(self.g, name)
+        if k >= 0 { return "$." + self.def_name(k) }
+        return "$." + name
+    }
+
+    // A rule for a labelled alternative with this body; returns its reference.
+    // Identical alternatives share their rule ("self" in place and primary),
+    // or the parser couldn't tell which of two equal rules to reduce.
+    fun label_ref(var self, label: str, body: str) -> str {
+        if self.shared(label) {
+            let key = label + " " + body
+            var i = 0
+            while i < len(self.made) {
+                if self.made[i] == key { return format("alias($.{}, $.{})", self.made_names[i], label) }
+                i = i + 1
+            }
+            self.label_n = self.label_n + 1
+            let name = format("_{}_{}", label, self.label_n)
+            push(self.defs, format("    {}: $ => {},", name, body))
+            push(self.made, key)
+            push(self.made_names, name)
+            return format("alias($.{}, $.{})", name, label)
+        }
+        push(self.defs, format("    {}: $ => {},", label, body))
+        return "$." + label
+    }
+
+    // `X+` for a single rule X, through a shared helper.
+    fun rep_ref(var self, name: str) -> str {
+        let k = rule_index(self.g, name)
+        var base = self.def_name(k)
+        if starts_with(base, "_") { base = substr(base, 1, len(base)) }
+        let helper = "_" + base + "_rep"
+        if !list_has(self.reps, helper) {
+            push(self.reps, helper)
+            push(self.defs, format("    {}: $ => repeat1({}),", helper, self.ref(name)))
+        }
+        return "$." + helper
+    }
+
+    fun emit(var self, e: GExpr) -> str {
+        return match e {
+            GExpr.GTerm(t) => js_string(t),
+            GExpr.GClass(c) => "/" + c + "/",
+            GExpr.GRef(n) => self.ref(n),
+            GExpr.GSeq(xs) => "seq(" + self.emit_list(xs) + ")",
+            GExpr.GAlt(xs) => "choice(" + self.emit_list(xs) + ")",
+            GExpr.GOpt(x) => "optional(" + self.emit(x) + ")",
+            GExpr.GStar(x) => self.emit_star(x),
+            GExpr.GPlus(x) => self.emit_plus(x),
+            GExpr.GLabel(x, l) => self.label_ref(l, self.emit(x)),
+        }
+    }
+
+    fun emit_star(var self, x: GExpr) -> str {
+        match x {
+            GExpr.GRef(n) => { return "optional(" + self.rep_ref(n) + ")" },
+            _ => {},
+        }
+        return "repeat(" + self.emit(x) + ")"
+    }
+
+    fun emit_plus(var self, x: GExpr) -> str {
+        match x {
+            GExpr.GRef(n) => { return self.rep_ref(n) },
+            _ => {},
+        }
+        return "repeat1(" + self.emit(x) + ")"
+    }
+
+    fun emit_list(var self, xs: [GExpr]) -> str {
+        var parts: [str] = []
+        for x in xs { push(parts, self.emit(x)) }
+        return join_strs(parts, ", ")
+    }
+
+    // The items of `e` as arguments of seq(): a sequence is spliced in.
+    fun emit_items(var self, e: GExpr) -> str {
+        return match unlabel(e) {
+            GExpr.GSeq(xs) => self.emit_list(xs),
+            _ => self.emit(unlabel(e)),
+        }
+    }
+
+    // The definition of rule k.
+    fun emit_rule(var self, k: int32) -> str {
+        let r = self.g.rules[k]
+        let name = self.def_name(k)
+        if self.kinds[k] == "token" {
+            let re = token_regex(self.g, r.body)
+            if r.immediate { return format("    {}: $ => token.immediate(prec(1, /{}/)),", name, re) }
+            return format("    {}: $ => token(/{}/),", name, re)
+        }
+        let alts = suffix_alts(r.body)
+        if len(alts) == 0 { return format("    {}: $ => {},", name, self.emit(r.body)) }
+        // The precedence makes an operator extend the expression before it
+        // rather than end an enclosing construct (a lambda's body), as the
+        // recursive-descent parser does.
+        var parts: [str] = []
+        match r.body {
+            GExpr.GSeq(xs) => { push(parts, self.emit(xs[0])) },
+            _ => {},
+        }
+        for a in alts {
+            match a {
+                GExpr.GLabel(x, l) => {
+                    let body = format("prec.left(1, seq($.{}, {}))", name, self.emit_items(x))
+                    push(parts, self.label_ref(l, body))
+                },
+                _ => {},
+            }
+        }
+        return format("    {}: $ => choice({}),", name, join_strs(parts, ", "))
+    }
+}
+
+// The tree-sitter grammar (grammar.js) of a checked grammar description.
+pub fun grammar_js(g: Grammar) -> str {
+    let kinds = rule_kinds(g)
+    var gen = Gen { g: g, kinds: kinds, names: node_names(g, kinds), defs: [], label_n: 0, made: [], made_names: [], reps: [] }
+    var rules: [str] = []
+    let start = start_rule(kinds)
+    push(rules, gen.emit_rule(start))           // the root comes first
+    var inline: [str] = []
+    var k = 0
+    while k < len(g.rules) {
+        if k != start && kinds[k] != "fragment" {
+            push(rules, gen.emit_rule(k))
+            if kinds[k] == "syntax" && is_single_ref(g.rules[k].body) { push(inline, gen.symbol(g.rules[k].name)) }
+        }
+        k = k + 1
+    }
+    var out = StringBuilder()
+    append(out, "// Generated by tools/grammar from grammar/myla.ebnf (MYLA-77); do not edit.\n")
+    append(out, "// To regenerate, see README.md.\n\n")
+    append(out, "module.exports = grammar({\n  name: 'myla',\n")
+    for args in directive_args(g, "word") {
+        append(out, format("  word: $ => {},\n", gen.symbol(arg_text(args[0]))))
+    }
+    for args in directive_args(g, "extras") {
+        var items: [str] = []
+        for a in args {
+            match a {
+                GExpr.GClass(c) => { push(items, "/" + c + "/") },
+                _ => { push(items, gen.symbol(arg_text(a))) },
+            }
+        }
+        append(out, format("  extras: $ => [{}],\n", join_strs(items, ", ")))
+    }
+    append(out, format("  inline: $ => [{}],\n", join_strs(inline, ", ")))
+    append(out, "  conflicts: $ => [\n")
+    for args in directive_args(g, "conflict") {
+        var syms: [str] = []
+        for a in args { push(syms, gen.symbol(arg_text(a))) }
+        append(out, format("    [{}],\n", join_strs(syms, ", ")))
+    }
+    append(out, "  ],\n  rules: {\n")
+    for line in rules {
+        append(out, line)
+        append(out, "\n")
+    }
+    for line in gen.defs {
+        append(out, line)
+        append(out, "\n")
+    }
+    append(out, "  },\n});\n")
+    return build(out)
+}
+
+// -- highlight queries -------------------------------------------------------
+
+// The terminals of `e` that make anonymous nodes: not those that are a whole
+// labelled alternative (`"true" @boolean`), which become named nodes.
+fun anonymous_terms(e: GExpr) -> [str] {
+    var out: [str] = []
+    match e {
+        GExpr.GTerm(t) => { push(out, t) },
+        GExpr.GLabel(x, l) => {
+            match x {
+                GExpr.GTerm(t) => { return out },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+    for x in children(e) {
+        for t in anonymous_terms(x) { push(out, t) }
+    }
+    return out
+}
+
+// The labels of the alternatives that are a single word terminal.
+fun word_labels(e: GExpr) -> [str] {
+    var out: [str] = []
+    match e {
+        GExpr.GLabel(x, l) => {
+            match x {
+                GExpr.GTerm(t) => {
+                    if is_word(t) { push(out, l) }
+                    return out
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+    for x in children(e) {
+        for l in word_labels(x) { push(out, l) }
+    }
+    return out
+}
+
+#test("fun")[true]
+#test("->")[false]
+fun is_word(t: str) -> bool {
+    if len(t) == 0 { return false }
+    let c = t[0]
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+// A query string literal.
+#test("f\"")["\"f\\\"\""]
+fun query_string(t: str) -> str {
+    var sb = StringBuilder()
+    append(sb, "\"")
+    var i = 0
+    while i < len(t) {
+        if t[i] == '\\' || t[i] == '"' { append(sb, "\\") }
+        append_byte(sb, t[i])
+        i = i + 1
+    }
+    append(sb, "\"")
+    return build(sb)
+}
+
+fun capture_list(terms: [str], capture: str) -> str {
+    if len(terms) == 0 { return "" }
+    var quoted: [str] = []
+    for t in terms { push(quoted, "  " + query_string(t)) }
+    return "[\n" + join_strs(quoted, "\n") + "\n] @" + capture + "\n\n"
+}
+
+// highlights.scm: the structural `template`, then the keywords, operators and
+// punctuation of the grammar. Left to the template (so that no two patterns
+// capture the same node): a terminal it captures itself (`"self" @…`), the
+// terminals of a rule whose whole node it captures (`(prim_type) @…`), and a
+// labelled terminal whose node it names (`(boolean)`).
+pub fun highlights(g: Grammar, template: str) -> str {
+    let kinds = rule_kinds(g)
+    var lexical: [str] = []
+    for args in directive_args(g, "lexical") {
+        for a in args { push(lexical, arg_text(a)) }
+    }
+    var words: [str] = []
+    var brackets: [str] = []
+    var delimiters: [str] = []
+    var specials: [str] = []
+    var operators: [str] = []
+    var labels: [str] = []
+    var k = 0
+    while k < len(g.rules) {
+        let r = g.rules[k]
+        let whole = !is_hidden(r) && contains_str(template, "(" + node_name(r) + ")")
+        if kinds[k] == "syntax" && !list_has(lexical, r.name) && !whole {
+            for t in anonymous_terms(r.body) {
+                let seen = list_has(words, t) || list_has(brackets, t) || list_has(delimiters, t) || list_has(specials, t) || list_has(operators, t)
+                if !seen && !contains_str(template, query_string(t) + " @") {
+                    if is_word(t) {
+                        push(words, t)
+                    } else if t == "(" || t == ")" || t == "[" || t == "]" || t == "{" || t == "}" {
+                        push(brackets, t)
+                    } else if t == "," || t == ";" || t == ":" || t == "." {
+                        push(delimiters, t)
+                    } else if t == "#" {
+                        push(specials, t)
+                    } else {
+                        push(operators, t)
+                    }
+                }
+            }
+            for l in word_labels(r.body) {
+                if !list_has(labels, l) && !contains_str(template, "(" + l + ")") { push(labels, l) }
+            }
+        }
+        k = k + 1
+    }
+    var out = StringBuilder()
+    append(out, template)
+    append(out, "\n; Generated by tools/grammar from grammar/myla.ebnf (MYLA-77).\n\n")
+    append(out, capture_list(words, "keyword"))
+    for l in labels { append(out, format("({}) @keyword\n", l)) }
+    if len(labels) > 0 { append(out, "\n") }
+    append(out, capture_list(operators, "operator"))
+    append(out, capture_list(brackets, "punctuation.bracket"))
+    append(out, capture_list(delimiters, "punctuation.delimiter"))
+    append(out, capture_list(specials, "punctuation.special"))
+    return trim_end(build(out)) + "\n"
+}
+
+fun trim_end(s: str) -> str {
+    var n = len(s)
+    while n > 0 && (s[n - 1] == '\n' || s[n - 1] == ' ') { n = n - 1 }
+    return substr(s, 0, n)
+}
+
+// -- checks ------------------------------------------------------------------
+
+// What is wrong with a grammar description, if anything: duplicate,
+// undefined, unused or empty-matching rules, tokens that use syntactic rules,
+// and terminals that aren't tokens of the compiler's lexer.
+pub fun check_grammar(g: Grammar) -> [str] {
+    var errors: [str] = []
+    let kinds = rule_kinds(g)
+    var used: [str] = []
+    var k = 0
+    while k < len(g.rules) {
+        let r = g.rules[k]
+        if rule_index(g, r.name) != k { push(errors, format("line {}: rule {} is defined twice", r.line, r.name)) }
+        for n in refs_of(r.body) {
+            push(used, n)
+            let j = rule_index(g, n)
+            if j < 0 {
+                push(errors, format("line {}: rule {} uses undefined {}", r.line, r.name, n))
+            } else if kinds[k] != "syntax" && kinds[j] == "syntax" {
+                push(errors, format("line {}: token {} uses syntactic rule {}", r.line, r.name, n))
+            }
+        }
+        k = k + 1
+    }
+    for name in ["word", "extras", "conflict"] {
+        for n in directive_words(g, name) { push(used, n) }
+    }
+    let start = start_rule(kinds)
+    let nullable = nullable_rules(g)
+    k = 0
+    while k < len(g.rules) {
+        let r = g.rules[k]
+        if k != start && !list_has(used, r.name) { push(errors, format("line {}: rule {} is never used", r.line, r.name)) }
+        if k != start && kinds[k] != "fragment" && nullable[k] {
+            push(errors, format("line {}: rule {} matches the empty string", r.line, r.name))
+        }
+        k = k + 1
+    }
+    for msg in check_terminals(g, kinds) { push(errors, msg) }
+    for msg in check_samples_directives(g, kinds) { push(errors, msg) }
+    return errors
+}
+
+// Which rules match the empty string, by index.
+fun nullable_rules(g: Grammar) -> [bool] {
+    var out: [bool] = []
+    for r in g.rules { push(out, false) }
+    var changed = true
+    while changed {
+        changed = false
+        var k = 0
+        while k < len(g.rules) {
+            if !out[k] && is_nullable(g, out, g.rules[k].body) {
+                out[k] = true
+                changed = true
+            }
+            k = k + 1
+        }
+    }
+    return out
+}
+
+fun is_nullable(g: Grammar, nullable: [bool], e: GExpr) -> bool {
+    return match e {
+        GExpr.GTerm(t) => len(t) == 0,
+        GExpr.GClass(c) => false,
+        GExpr.GRef(n) => rule_index(g, n) >= 0 && nullable[rule_index(g, n)],
+        GExpr.GSeq(xs) => all_nullable(g, nullable, xs),
+        GExpr.GAlt(xs) => any_nullable(g, nullable, xs),
+        GExpr.GOpt(x) => true,
+        GExpr.GStar(x) => true,
+        GExpr.GPlus(x) => is_nullable(g, nullable, x),
+        GExpr.GLabel(x, l) => is_nullable(g, nullable, x),
+    }
+}
+
+fun all_nullable(g: Grammar, nullable: [bool], xs: [GExpr]) -> bool {
+    for x in xs {
+        if !is_nullable(g, nullable, x) { return false }
+    }
+    return true
+}
+
+fun any_nullable(g: Grammar, nullable: [bool], xs: [GExpr]) -> bool {
+    for x in xs {
+        if is_nullable(g, nullable, x) { return true }
+    }
+    return false
+}
+
+// The arguments of every `@name` directive, as text.
+pub fun directive_words(g: Grammar, name: str) -> [str] {
+    var out: [str] = []
+    for args in directive_args(g, name) {
+        for a in args { push(out, arg_text(a)) }
+    }
+    return out
+}
+
+// Every terminal of a syntactic rule must be one token of the self-hosted
+// lexer with the same text, a keyword when it is a word (except @soft words,
+// which lex as identifiers), unless it is @adjacent or in a @lexical rule;
+// and every keyword of the lexer must be a terminal.
+fun check_terminals(g: Grammar, kinds: [str]) -> [str] {
+    var errors: [str] = []
+    let adjacent = directive_words(g, "adjacent")
+    let soft = directive_words(g, "soft")
+    let lexical = directive_words(g, "lexical")
+    var terms: [str] = []
+    var k = 0
+    while k < len(g.rules) {
+        if kinds[k] == "syntax" && !list_has(lexical, g.rules[k].name) {
+            for t in all_terms(g.rules[k].body) {
+                if !list_has(terms, t) { push(terms, t) }
+            }
+        }
+        k = k + 1
+    }
+    for t in terms {
+        if !list_has(adjacent, t) {
+            match lex(t) {
+                Ok(toks) => {
+                    // the lexer ends the list with EOF
+                    if len(toks) != 2 || toks[0].lexeme != t {
+                        push(errors, format("terminal \"{}\" is not one token of the lexer", t))
+                    } else if is_word(t) && list_has(soft, t) != (toks[0].kind == TokenKind.IDENT) {
+                        if list_has(soft, t) {
+                            push(errors, format("@soft word \"{}\" is a keyword of the lexer", t))
+                        } else {
+                            push(errors, format("word \"{}\" is not a keyword of the lexer", t))
+                        }
+                    }
+                },
+                Err(d) => { push(errors, format("terminal \"{}\": lex error: {}", t, d.msg)) },
+            }
+        }
+    }
+    for kw in keywords() {
+        if !list_has(terms, kw) { push(errors, format("keyword \"{}\" is missing from the grammar", kw)) }
+    }
+    return errors
+}
+
+// Every terminal in `e`, labelled or not, with repeats.
+fun all_terms(e: GExpr) -> [str] {
+    var out: [str] = []
+    match e {
+        GExpr.GTerm(t) => { push(out, t) },
+        _ => {},
+    }
+    for x in children(e) {
+        for t in all_terms(x) { push(out, t) }
+    }
+    return out
+}
+
+// Every token a syntactic rule uses needs @sample lexemes (except a newline
+// token), and each sample of a token that the lexer produces (one not only
+// used inside @lexical rules) must lex as one token.
+fun check_samples_directives(g: Grammar, kinds: [str]) -> [str] {
+    var errors: [str] = []
+    let lexical = directive_words(g, "lexical")
+    var used: [str] = []                   // tokens used outside @lexical rules
+    var all_used: [str] = []
+    var k = 0
+    while k < len(g.rules) {
+        if kinds[k] == "syntax" {
+            for n in refs_of(g.rules[k].body) {
+                let j = rule_index(g, n)
+                if j >= 0 && kinds[j] == "token" && !is_newline_token(g.rules[j]) {
+                    push(all_used, n)
+                    if !list_has(lexical, g.rules[k].name) { push(used, n) }
+                }
+            }
+        }
+        k = k + 1
+    }
+    var sampled: [str] = []
+    for args in directive_args(g, "sample") {
+        if len(args) < 2 {
+            push(errors, "@sample needs a token and at least one lexeme")
+        } else {
+            let tok = arg_text(args[0])
+            push(sampled, tok)
+            var i = 1
+            while i < len(args) {
+                let s = arg_text(args[i])
+                if list_has(used, tok) {
+                    match lex(s) {
+                        Ok(toks) => {
+                            if len(toks) != 2 { push(errors, format("sample {} of {} is not one token", s, tok)) }
+                        },
+                        Err(d) => { push(errors, format("sample {} of {}: lex error: {}", s, tok, d.msg)) },
+                    }
+                }
+                i = i + 1
+            }
+        }
+    }
+    for n in all_used {
+        if !list_has(sampled, n) {
+            push(errors, format("token {} has no @sample", n))
+            push(sampled, n)
+        }
+    }
+    return errors
+}
+
+// Whether a token rule is the newline (its body is the class \n).
+pub fun is_newline_token(r: GRule) -> bool {
+    return match r.body {
+        GExpr.GClass(c) => c == "\\n",
+        _ => false,
+    }
+}

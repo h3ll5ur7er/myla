@@ -296,6 +296,102 @@ PROGRAMS = {
         "    var b = a\n    append(b, \" more\")\n"
         "    print(build(a))\n    print(build(b))\n}\n"
     ),
+    # MYLA-85: append(sb, s, start, end) appends a byte range
+    "string_builder_append_range": (
+        "fun field(line: str, n: int) -> str {\n"
+        "    var start = 0\n    var k = 0\n    var i = 0\n"
+        "    while i <= len(line) {\n"
+        "        if i == len(line) || line[i] == ',' {\n"
+        "            if k == n {\n"
+        "                var sb = StringBuilder()\n"
+        "                append(sb, line, start, i)\n"
+        "                return build(sb)\n            }\n"
+        "            k = k + 1\n            start = i + 1\n        }\n"
+        "        i = i + 1\n    }\n"
+        "    return \"\"\n}\n"
+        "#main\nfun main() {\n"
+        "    let line = \"alpha,,λ ö,omega\"\n"
+        "    for n in 0..5 { print(format(\"[{}]\", field(line, n))) }\n"
+        "    var sb = StringBuilder()\n"
+        "    append(sb, line, 0, 0)\n"
+        "    append(sb, line, len(line) - 5, len(line))\n"
+        "    append(sb, \"aö\", 0, 2)\n"
+        "    append(sb, \"aö\", 2, 3)\n"
+        "    let s = build(sb)\n"
+        "    print(s)\n    print(len(s))\n"
+        "    var copy = sb\n    append(copy, line, 0, 5)\n"
+        "    print(build(sb))\n    print(build(copy))\n}\n"
+    ),
+    # MYLA-84: a const string made with `+` read inside a function: the
+    # self-hosted backend evaluated the concatenation at each use, into a
+    # temporary its frame had no slot for, and the function's return crashed
+    "const_string_concatenation_in_functions": (
+        "const TABLE: str = \"ab\" + \"cd\" + \"ef\"\n"
+        "const N: int32 = 2 + 3\n"
+        "fun at(i: int32) -> uint8 {\n    return TABLE[i]\n}\n"
+        "fun size() -> int32 {\n    return len(TABLE) + N\n}\n"
+        "#main\nfun main() {\n"
+        "    var total = 0\n"
+        "    for i in 0..100000 {\n"
+        "        total = total + (at(i % 6) as int32) + size()\n"
+        "    }\n"
+        "    print(total)\n"
+        "    print(TABLE)\n"
+        "}\n"
+    ),
+    # MYLA-87: `==` on an enum without payloads compares tags; a hand-written
+    # `impl Eq` on one is still called
+    "derived_eq_on_plain_enums": (
+        "#derive(Eq)\nenum K { A, B, C }\n"
+        "enum Loose { X, Y }\n"
+        "impl Eq for Loose {\n    fun eq(self, other: Loose) -> bool { return true }\n}\n"
+        "#derive(Eq)\nstruct Tok { kind: K, n: int }\n"
+        "fun same<T: Eq>(a: T, b: T) -> bool {\n    return a == b\n}\n"
+        "#main\nfun main() {\n"
+        "    let ks = [K.A, K.B, K.C]\n"
+        "    for a in ks {\n"
+        "        for b in ks {\n"
+        "            print(f\"{a == b} {a != b} {same(a, b)}\")\n"
+        "        }\n"
+        "    }\n"
+        "    print(Loose.X == Loose.Y)\n"
+        "    print(Tok { kind: K.B, n: 1 } == Tok { kind: K.B, n: 1 })\n"
+        "    print(Tok { kind: K.B, n: 1 } == Tok { kind: K.C, n: 1 })\n"
+        "    var count = 0\n"
+        "    for i in 0..300000 {\n"
+        "        if ks[i % 3] == K.C { count = count + 1 }\n"
+        "    }\n"
+        "    print(count)\n"
+        "}\n"
+    ),
+    # MYLA-80: `?` whose operand is larger than the function's result: the
+    # self-hosted backend copied the whole operand into the result and
+    # overwrote the caller's frame (`myla build` crashed after a type error)
+    "try_with_a_larger_success_payload": (
+        "struct C { a: int, b: int, c: int, d: int, e: int }\n"
+        "fun load(ok: bool) -> Result<C, int> {\n"
+        "    if ok { return Ok(C { a: 1, b: 2, c: 3, d: 4, e: 5 }) }\n"
+        "    return Err(7)\n}\n"
+        "fun compile(ok: bool) -> Result<int, int> {\n"
+        "    let c = load(ok)?\n"
+        "    return Ok(c.a + c.e)\n}\n"
+        "fun first(xs: [int]) -> Option<(int, int, int, int)> {\n"
+        "    if len(xs) == 0 { return None }\n"
+        "    return Some((xs[0], 0, 0, 0))\n}\n"
+        "fun head(xs: [int]) -> Option<int> {\n"
+        "    let t = first(xs)?\n"
+        "    return Some(t.0)\n}\n"
+        "fun describe(ok: bool) -> Result<str, str> {\n"
+        "    let c = match load(ok) { Ok(c) => c, Err(e) => { return Err(format(\"error {}\", e)) } }\n"
+        "    return Ok(format(\"{}\", c.b))\n}\n"
+        "#main\nfun main() {\n"
+        "    for i in 0..3 {\n"
+        "        match compile(i == 1) { Ok(v) => { print(v) }, Err(e) => { print(e) } }\n"
+        "        match head([]) { Some(v) => { print(v) }, None => { print(-1) } }\n"
+        "        match head([9]) { Some(v) => { print(v) }, None => { print(-1) } }\n"
+        "        match describe(i == 2) { Ok(s) => { print(s) }, Err(s) => { print(s) } }\n"
+        "    }\n}\n"
+    ),
     "string_char_literals_and_match": (
         "fun count_byte(s: str, b: uint8) -> int {\n"
         "    var n = 0\n    var i = 0\n"
@@ -805,6 +901,908 @@ PROGRAMS = {
         "    print(vowels(\"education\"))\n"   # 5
         "    print(len(chars(\"\")))\n}\n"     # 0
     ),
+    # MYLA-4: a mutating builtin evaluates its value argument before it touches
+    # the container. A `?` that returns early from inside the argument must
+    # leave the container as it was (no zeroed slot to drop or to leak to the
+    # caller through `var self`).
+    "try_inside_push_leaves_the_list_intact": (
+        "struct P { name: str, tags: [int] }\n"
+        "enum Tree { Leaf(int), Node(Tree, Tree) }\n"
+        "struct Bag { items: [[int]] }\n"
+        "fun upto(n: int, limit: int) -> Result<int, str> {\n"
+        "    if n >= limit { return Err(\"stop\") }\n    return Ok(n)\n}\n"
+        "impl Bag {\n"
+        "    fun fill(var self, n: int) -> Result<int, str> {\n"
+        "        var i = 0\n"
+        "        while i < n {\n"
+        "            push(self.items, [upto(i, 2)?])\n"
+        "            i = i + 1\n        }\n"
+        "        return Ok(len(self.items))\n    }\n}\n"
+        "fun lists(n: int) -> Result<int, str> {\n"
+        "    var xs: [[int]] = []\n"
+        "    for i in 0..n { push(xs, [upto(i, 2)?]) }\n"
+        "    return Ok(len(xs))\n}\n"
+        "fun structs(n: int) -> Result<int, str> {\n"
+        "    var ps: [P] = []\n"
+        "    for i in 0..n { push(ps, P { name: \"p\", tags: [upto(i, 2)?] }) }\n"
+        "    return Ok(len(ps))\n}\n"
+        "fun trees(n: int) -> Result<int, str> {\n"
+        "    var ts: [Tree] = []\n"
+        "    for i in 0..n { push(ts, Tree.Leaf(upto(i, 2)?)) }\n"
+        "    return Ok(len(ts))\n}\n"
+        "fun show(r: Result<int, str>) {\n"
+        "    match r { Ok(k) => print(k), Err(e) => print(e) }\n}\n"
+        "#main\nfun main() {\n"
+        "    var b = Bag { items: [] }\n"
+        "    show(b.fill(5))\n"
+        "    print(len(b.items))\n"            # 2: no half-pushed third item
+        "    show(lists(2))\n    show(lists(5))\n"
+        "    show(structs(2))\n    show(structs(5))\n"
+        "    show(trees(2))\n    show(trees(5))\n}\n"
+    ),
+    "try_inside_map_insert_leaves_the_map_intact": (
+        "struct Index { m: [int: [int]] }\n"
+        "fun upto(n: int, limit: int) -> Result<int, str> {\n"
+        "    if n >= limit { return Err(\"stop\") }\n    return Ok(n)\n}\n"
+        "impl Index {\n"
+        "    fun fill(var self, n: int) -> Result<int, str> {\n"
+        "        for i in 0..n { self.m[i] = [upto(i, 2)?] }\n"
+        "        return Ok(len(self.m))\n    }\n}\n"
+        "#main\nfun main() {\n"
+        "    var ix = Index { m: [:] }\n"
+        "    match ix.fill(5) { Ok(k) => print(k), Err(e) => print(e) }\n"
+        "    print(len(ix.m))\n"
+        "    for k in keys(ix.m) { print(len(ix.m[k])) }\n}\n"
+    ),
+    "try_inside_append_byte_leaves_the_builder_intact": (
+        "struct Out { sb: StringBuilder }\n"
+        "fun upto(n: int, limit: int) -> Result<int, str> {\n"
+        "    if n >= limit { return Err(\"stop\") }\n    return Ok(n)\n}\n"
+        "impl Out {\n"
+        "    fun fill(var self, n: int) -> Result<int, str> {\n"
+        "        for i in 0..n { append_byte(self.sb, (65 + upto(i, 2)?) as uint8) }\n"
+        "        return Ok(n)\n    }\n}\n"
+        "#main\nfun main() {\n"
+        "    var o = Out { sb: StringBuilder() }\n"
+        "    match o.fill(5) { Ok(k) => print(k), Err(e) => print(e) }\n"
+        "    print(build(o.sb))\n}\n"
+    ),
+    "push_evaluates_its_value_before_the_list": (
+        "#main\nfun main() {\n"
+        "    var xs = [1, 2, 3]\n"
+        "    push(xs, pop(xs) * 10)\n"         # [1, 2, 30]
+        "    print(len(xs))\n"
+        "    for x in xs { print(x) }\n"
+        "    var m: [int: int] = [:]\n"
+        "    m[1] = 5\n"
+        "    m[2] = len(m) * 100\n"            # the size before the insert
+        "    print(m[2])\n}\n"
+    ),
+    # MYLA-72: `?` in a lambda is checked against the lambda's result type,
+    # so the enclosing function needn't return an Option
+    "try_in_lambdas_checks_against_the_lambda": (
+        "fun half(x: int) -> Option<int> {\n"
+        "    if x % 2 == 1 { return None }\n    return Some(x / 2)\n}\n"
+        "fun parse(s: str) -> Result<int, str> {\n"
+        "    if s == \"\" { return Err(\"empty\") }\n    return Ok(len(s))\n}\n"
+        "fun apply(f: (int) -> Option<int>, x: int) -> int {\n"
+        "    return match f(x) { Some(v) => v, None => -1 }\n}\n"
+        "#main\nfun main() {\n"
+        "    let g: (int) -> Option<int> = (x: int) => Some(half(x)? + 100)\n"
+        "    print(apply(g, 4))\n    print(apply(g, 3))\n"
+        "    print(apply((x) => Some(half(half(x)?)? * 10), 8))\n"
+        "    let total: (str, str) -> Result<int, str> = (a: str, b: str) => Ok(parse(a)? + parse(b)?)\n"
+        "    print(match total(\"ab\", \"cde\") { Ok(n) => n, Err(e) => -1 })\n"
+        "    print(match total(\"ab\", \"\") { Ok(n) => n, Err(e) => -1 })\n}\n"
+    ),
+    # MYLA-29: floats beyond examples/floats.my (also run through the
+    # self-hosted compiler)
+    "floats_in_depth": (
+        "struct P { x: float64, y: float32 }\n"
+        "const SCALE: float64 = 2.5f64\n"
+        "fun hyp(p: P) -> float64 {\n    return p.x * p.x + (p.y as float64) * (p.y as float64)\n}\n"
+        "#main\nfun main() {\n"
+        "    let a = 0.1f32 * 3.0f32\n"            # float32 rounding after each op
+        "    print(a)\n"
+        "    print(1.0f32 / 3.0f32)\n"
+        "    print(16777217.0f32)\n"               # rounds to 16777216
+        "    let nan = 0.0f64 / 0.0f64\n"
+        "    print(nan < 1.0f64)\n    print(nan <= 1.0f64)\n    print(nan > 1.0f64)\n"
+        "    print(nan >= 1.0f64)\n    print(nan == nan)\n    print(nan != nan)\n"
+        "    print(-7.5f64 % 2.0f64)\n"            # fmod keeps the dividend's sign
+        "    print(-0.0f64)\n    print(0.0f64 * -1.0f64)\n"
+        "    print(-1.0f64 / 0.0f64)\n    print(nan)\n"
+        "    print(-3.9f64 as int32)\n"            # truncates toward zero
+        "    print(300.7f64 as uint8)\n"           # then wraps
+        "    let umax = 18446744073709551615u64\n"
+        "    print(umax as float64)\n"
+        "    print(9007199254740993i64 as float64)\n" # an int64 above 2^53
+        "    print((1.5f64 as float32) + 0.1f32)\n"
+        "    print(1e300f64 * 1e10f64)\n"
+        "    print(5e-324f64)\n    print(1.7976931348623157e308f64)\n"
+        "    print(1e-290f64)\n    print(3e300f64)\n    print(3.690843807971407e-302f64)\n"
+        "    print(SCALE * 4.0f64)\n"
+        "    let p = P { x: 3.0f64, y: 4.0f32 }\n"
+        "    print(hyp(p))\n"
+        "    var xs: [float64] = [0.5f64, 1.25f64]\n"
+        "    push(xs, -2.0f64)\n"
+        "    var total = 0.0f64\n"
+        "    for x in xs { total = total + x }\n"
+        "    print(total)\n"
+        "    var m: [int: float32] = [1: 0.5f32]\n"
+        "    m[2] = m[1] * 3.0f32\n"
+        "    print(m[2])\n"
+        "    print(format(\"{} and {}\", 2.5f64, 0.1f32))\n"
+        "    let c = 'z'\n"
+        "    print(f\"x={p.x} c={c} q={1.0f64 / 8.0f64}\")\n"
+        "    print(2.0f64 < 3.0f64 && 3.0f32 >= 3.0f32)\n}\n"
+    ),
+    # MYLA-22: a closure environment owns its captures (and a composition or
+    # partial application its parts): they outlive the variables they came from.
+    "closure_environments_own_their_captures": (
+        "enum Tree { Leaf(int), Node(Tree, Tree) }\n"
+        "fun count(t: Tree) -> int {\n"
+        "    return match t {\n"
+        "        Leaf(n) => n\n        Node(a, b) => count(a) + count(b)\n    }\n}\n"
+        "fun make_adder(xs: [int]) -> (int) -> int {\n"
+        "    let k = len(xs)\n"
+        "    return (i: int) => xs[i] + k\n}\n"
+        "fun pick(xs: [int], i: int) -> int {\n    return xs[i]\n}\n"
+        "fun double(x: int) -> int {\n    return x * 2\n}\n"
+        "fun churn() {\n"                       # reuses freed cells, if any
+        "    var big: [[int]] = []\n"
+        "    for i in 0..50 { push(big, [i, i, i, i, i, i]) }\n}\n"
+        "#main\nfun main() {\n"
+        "    var f = make_adder([10, 20, 30])\n"
+        "    churn()\n"
+        "    print(f(1))\n"
+        "    var ys = [1, 2, 3]\n"
+        "    let g = (i: int) => ys[i]\n"
+        "    ys = [7]\n"
+        "    churn()\n"
+        "    print(g(2))\n"
+        "    var fs: [(int) -> int] = []\n"
+        "    push(fs, make_adder([4, 5]))\n"
+        "    churn()\n"
+        "    print(fs[0](0))\n"
+        "    let h = make_adder([1, 1]) >> double\n"
+        "    churn()\n"
+        "    print(h(0))\n"
+        "    var zs = [6, 7, 8]\n"
+        "    let p = pick(zs, _)\n"
+        "    zs = []\n"
+        "    churn()\n"
+        "    print(p(2))\n"
+        "    let t = Tree.Node(Tree.Leaf(1), Tree.Leaf(2))\n"
+        "    let k = 40\n"
+        "    let c = (x: int) => count(t) + k + x\n"   # a recursive enum capture is stored inline
+        "    churn()\n"
+        "    print(c(100))\n"
+        "    for r in 0..20000 {\n"           # environments are reclaimed
+        "        let q = make_adder([r, r, r])\n"
+        "        if r == 19999 { print(q(0)) }\n    }\n}\n"
+    ),
+    # MYLA-21: destructuring reads a boxed (recursive) enum leaf through its
+    # pointer, and the leaves own their heap values.
+    "destructure_boxed_enum_and_list_leaves": (
+        "enum V { VI(int), VP(V), VU }\n"
+        "fun pair() -> (V, int) {\n    return (V.VI(5), 1)\n}\n"
+        "fun nested() -> ((V, [int]), str) {\n"
+        "    return ((V.VP(V.VI(2)), [1, 2, 3]), \"s\")\n}\n"
+        "fun show(v: V) -> int {\n"
+        "    return match v {\n"
+        "        VI(n) => n\n        VP(w) => 10 + show(w)\n        VU => 0\n    }\n}\n"
+        "#main\nfun main() {\n"
+        "    let (a, b) = pair()\n"
+        "    print(show(a))\n    print(b)\n"
+        "    let ((c, xs), s) = nested()\n"
+        "    print(show(c))\n    print(len(xs))\n    print(s)\n"
+        "    var keep: [[int]] = []\n"
+        "    for i in 0..3 {\n"
+        "        let (v, n) = (V.VI(i), [i, i])\n"
+        "        push(keep, n)\n"
+        "        print(show(v))\n    }\n"
+        "    print(len(keep[2]))\n}\n"
+    ),
+    "try_in_an_expression_lambda_returns_from_the_lambda": (
+        # the interpreter let the `?` escape the lambda and return from its
+        # caller (found with MYLA-10)
+        "fun half(x: int) -> Option<int> {\n"
+        "    if x % 2 == 1 { return None }\n    return Some(x / 2)\n}\n"
+        "fun twice(f: (int) -> Option<int>, x: int) -> int {\n"
+        "    let r = match f(x) { Some(v) => v, None => -1 }\n"
+        "    print(r)\n    return r\n}\n"
+        "fun run() -> Option<int> {\n"
+        "    let g: (int) -> Option<int> = (x: int) => Some(half(x)? + 100)\n"
+        "    print(twice(g, 4))\n    print(twice(g, 3))\n    return Some(7)\n}\n"
+        "#main\nfun main() {\n"
+        "    match run() { Some(v) => print(v), None => print(0) }\n}\n"
+    ),
+    # MYLA-2: a match binding is a value: writing to the scrutinee's variable
+    # in an arm must not change (or free) what the binding sees.
+    "match_binding_survives_writes_to_the_scrutinee": (
+        "struct Bag { items: [int], name: str }\n"
+        "enum Box { Full([int]), Empty }\n"
+        "fun churn() {\n"                       # reuses freed cells, if any
+        "    var big: [[int]] = []\n"
+        "    for i in 0..50 { push(big, [i, i, i, i]) }\n}\n"
+        "#main\nfun main() {\n"
+        "    var xs = [1]\n"
+        "    match xs {\n"
+        "        ys => {\n"
+        "            push(xs, 2)\n            push(xs, 3)\n"
+        "            push(xs, 4)\n            push(xs, 5)\n"
+        "            churn()\n"
+        "            print(len(ys))\n"
+        "            print(ys[0])\n        }\n    }\n"
+        "    var b = Bag { items: [1, 2], name: \"b\" }\n"
+        "    match b {\n"
+        "        Bag { items, name } => {\n"
+        "            b.items = [9]\n"
+        "            churn()\n"
+        "            print(len(items))\n"
+        "            print(items[1])\n        }\n    }\n"
+        "    var m: [int: int] = [1: 10]\n"
+        "    match m {\n"
+        "        mm => {\n"
+        "            m[2] = 20\n            m[3] = 30\n"
+        "            m[4] = 40\n            m[5] = 50\n            m[6] = 60\n"
+        "            churn()\n"
+        "            print(len(mm))\n        }\n    }\n"
+        "    var bx = Box.Full([7, 7, 7])\n"
+        "    match bx {\n"
+        "        Full(vs) => {\n"
+        "            bx = Box.Empty\n"
+        "            churn()\n"
+        "            print(len(vs))\n        },\n"
+        "        Empty => print(0),\n    }\n"
+        "    print(len(xs))\n}\n"
+    ),
+    # MYLA-3: a heap-owning aggregate can be assigned to any place; the new
+    # value is taken before the old one is released.
+    "assign_heap_owning_struct_to_any_place": (
+        "struct Inner { xs: [int] }\n"
+        "struct Outer { inner: Inner, tag: int }\n"
+        "struct Deep { outer: Outer }\n"
+        "#main\nfun main() {\n"
+        "    var o = Outer { inner: Inner { xs: [1] }, tag: 1 }\n"
+        "    o.inner = Inner { xs: [2, 3] }\n"
+        "    print(len(o.inner.xs))\n"
+        "    var d = Deep { outer: o }\n"
+        "    d.outer.inner = Inner { xs: [4, 5, 6] }\n"
+        "    print(len(d.outer.inner.xs))\n"
+        "    print(len(o.inner.xs))\n"          # value semantics: still 2
+        "    var os = [o, o]\n"
+        "    os[1].inner = Inner { xs: [7, 7, 7, 7] }\n"
+        "    print(len(os[0].inner.xs))\n"
+        "    print(len(os[1].inner.xs))\n"
+        "    var m: [int: Outer] = [1: o]\n"
+        "    m[1].inner = Inner { xs: [8] }\n"
+        "    print(len(m[1].inner.xs))\n"
+        "    print(len(o.inner.xs))\n}\n"
+    ),
+    "assign_to_a_field_of_a_shared_element_copies_it": (
+        # value semantics: writing a field through a list element or map value
+        # unshares the container first (the native code wrote into the cell
+        # both variables shared)
+        "struct P { x: int, ys: [int] }\n"
+        "struct W { p: P }\n"
+        "#main\nfun main() {\n"
+        "    var a = [P { x: 1, ys: [1] }]\n"
+        "    var b = a\n"
+        "    b[0].x = 5\n"
+        "    print(a[0].x)\n"
+        "    print(b[0].x)\n"
+        "    b[0].ys = [4, 4]\n"
+        "    print(len(a[0].ys))\n"
+        "    var m: [int: P] = [1: P { x: 1, ys: [] }]\n"
+        "    var m2 = m\n"
+        "    m2[1].x = 7\n"
+        "    print(m[1].x)\n"
+        "    var ws = [W { p: P { x: 1, ys: [] } }]\n"
+        "    var ws2 = ws\n"
+        "    ws2[0].p.x = 9\n"
+        "    print(ws[0].p.x)\n"
+        "    print(ws2[0].p.x)\n}\n"
+    ),
+    "assign_heap_owning_struct_to_itself": (
+        "struct Inner { xs: [int] }\n"
+        "struct Outer { inner: Inner }\n"
+        "fun churn() {\n"                       # reuses freed cells, if any
+        "    var big: [[int]] = []\n"
+        "    for i in 0..50 { push(big, [i, i, i, i]) }\n}\n"
+        "#main\nfun main() {\n"
+        "    var p = Inner { xs: [9, 9, 9] }\n"
+        "    p = p\n"
+        "    churn()\n"
+        "    print(len(p.xs))\n"
+        "    var o = Outer { inner: Inner { xs: [1, 2] } }\n"
+        "    o.inner = o.inner\n"
+        "    churn()\n"
+        "    print(len(o.inner.xs))\n}\n"
+    ),
+    "assign_replaces_map_and_builder_elements": (
+        # replacing an element releases the old one with its own type's drop
+        # routine (the native compiler used to assume every element was a list)
+        "struct P { tags: [int] }\n"
+        "#main\nfun main() {\n"
+        "    var ms: [[int: int]] = [[1: 2]]\n"
+        "    ms[0] = [3: 4, 5: 6]\n"
+        "    print(len(ms[0]))\n"
+        "    var bs = [StringBuilder()]\n"
+        "    bs[0] = StringBuilder()\n"
+        "    append(bs[0], \"hi\")\n"
+        "    print(build(bs[0]))\n"
+        # the new value is taken before the old one is released, so a struct
+        # assigned to its own slot keeps its list alive
+        "    var ps = [P { tags: [7, 8] }]\n"
+        "    ps[0] = ps[0]\n"
+        "    var big: [int] = []\n"
+        "    for i in 0..64 { push(big, i) }\n"   # reuses a freed cell, if any
+        "    print(len(ps[0].tags))\n"
+        "    print(ps[0].tags[1])\n}\n"
+    ),
+    # const references fold to the referenced value; unary operators fold (MYLA-27)
+    "consts_fold_through_references": (
+        'const A: int = 4\n'
+        'const B: int = 100 / A\n'
+        'const C: int = -A\n'
+        'const D: int = ~A\n'
+        'const E: bool = !(A > 3)\n'
+        'const F: int = B - C\n'
+        'const G: uint8 = 200\n'
+        'const H: uint8 = G + G\n'
+        '#main\n'
+        'fun main() {\n'
+        '    print(B)\n'
+        '    print(C)\n'
+        '    print(D)\n'
+        '    print(E)\n'
+        '    print(F)\n'
+        '    print(H)\n'
+        '}\n'
+    ),
+    # operands, arguments and literal elements evaluate left to right; an
+    # assignment evaluates its value first, then the place (MYLA-8)
+    "evaluation_order_is_left_to_right": (
+        "#derive(Eq)\n"
+        "struct P { x: int, y: int }\n"
+        "\n"
+        "enum E { A(int, int), B(str, P) }\n"
+        "\n"
+        "struct Ctr { n: int }\n"
+        "\n"
+        "impl Ctr {\n"
+        "    fun add(self, a: int, b: int) -> int {\n"
+        "        return self.n + a + b\n"
+        "    }\n"
+        "    fun bump(var self, a: int) -> int {\n"
+        "        self.n = self.n + a\n"
+        "        return self.n\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "impl Add for P {\n"
+        "    fun add(self, o: P) -> P {\n"
+        "        return P { x: self.x + o.x, y: self.y + o.y }\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "fun f(x: int) -> int {\n"
+        "    print(x)\n"
+        "    return x\n"
+        "}\n"
+        "\n"
+        "fun s(x: str) -> str {\n"
+        "    print(x)\n"
+        "    return x\n"
+        "}\n"
+        "\n"
+        "fun fl(x: float64) -> float64 {\n"
+        "    print(x)\n"
+        "    return x\n"
+        "}\n"
+        "\n"
+        "fun pt(x: int) -> P {\n"
+        "    print(x)\n"
+        "    return P { x: x, y: x }\n"
+        "}\n"
+        "\n"
+        "fun lst(x: int) -> [int] {\n"
+        "    print(x)\n"
+        "    return [10, 20, 30, 40]\n"
+        "}\n"
+        "\n"
+        "fun mp(x: int) -> [str: int] {\n"
+        "    print(x)\n"
+        "    return [\"a\": 1, \"b\": 2]\n"
+        "}\n"
+        "\n"
+        "fun ctr(x: int) -> Ctr {\n"
+        "    print(x)\n"
+        "    return Ctr { n: x }\n"
+        "}\n"
+        "\n"
+        "fun g(a: int, b: int) -> int {\n"
+        "    return a + b\n"
+        "}\n"
+        "\n"
+        "fun g3(a: int, b: P, c: int) -> P {\n"
+        "    return P { x: a + b.x, y: c + b.y }\n"
+        "}\n"
+        "\n"
+        "fun pick(x: int) -> (int, int) -> int {\n"
+        "    print(x)\n"
+        "    return (a: int, b: int) => a - b\n"
+        "}\n"
+        "\n"
+        "fun id<T>(a: T, b: T) -> T {\n"
+        "    return a\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    print(\"-- binary\")\n"
+        "    let a = f(1) - f(2)\n"
+        "    let b = f(3) * f(4) + f(5) / f(6)\n"
+        "    let c = f(7) < f(8)\n"
+        "    let d = f(9) == f(10)\n"
+        "    let e = s(\"s1\") + s(\"s2\")\n"
+        "    let e2 = s(\"s3\") == s(\"s4\")\n"
+        "    let h = fl(1.5f64) - fl(2.5f64)\n"
+        "    let h2 = fl(3.5f64) < fl(4.5f64)\n"
+        "    let i = pt(11) == pt(12)\n"
+        "    let j = pt(13) + pt(14)\n"
+        "    let k = f(15) << f(1)\n"
+        "    let k2 = f(16) & f(17)\n"
+        "    print(\"-- calls\")\n"
+        "    let l = g(f(18), f(19))\n"
+        "    let m = g3(f(20), pt(21), f(22))\n"
+        "    let n = id(f(23), f(24))\n"
+        "    let n2 = id(pt(25), pt(26))\n"
+        "    print(\"-- methods\")\n"
+        "    let o = ctr(27).add(f(28), f(29))\n"
+        "    var cc = Ctr { n: 0 }\n"
+        "    let o2 = cc.bump(f(30)) + cc.bump(f(31))\n"
+        "    print(\"-- literals\")\n"
+        "    let q = P { x: f(32), y: f(33) }\n"
+        "    let q2 = P { y: f(34), x: f(35) }\n"
+        "    let r = [f(36), f(37), f(38)]\n"
+        "    let t = (f(39), s(\"s5\"), pt(40))\n"
+        "    let u = [s(\"k1\"): f(41), s(\"k2\"): f(42)]\n"
+        "    let v = E.A(f(43), f(44))\n"
+        "    let v2 = E.B(s(\"s6\"), pt(45))\n"
+        "    print(\"-- index\")\n"
+        "    let w = lst(46)[f(1)]\n"
+        "    let w2 = mp(47)[s(\"a\")]\n"
+        "    let w3 = s(\"hello\")[f(2)]\n"
+        "    print(\"-- format\")\n"
+        "    let x = format(\"{} {}\", f(48), s(\"s7\"))\n"
+        "    let x2 = f\"{f(49)} {s(\"s8\")}\"\n"
+        "    print(\"-- closures\")\n"
+        "    let y = pick(50)(f(51), f(52))\n"
+        "    let fy = (p: int, q: int) => p * q\n"
+        "    let y2 = fy(f(53), f(54))\n"
+        "    let p55 = f(55)\n"
+        "    let part = g(p55, _)\n"
+        "    let y3 = part(f(56))\n"
+        "    let y4 = f(57) |> g(f(58))\n"
+        "    print(\"-- assign\")\n"
+        "    var xs = [0, 0, 0]\n"
+        "    xs[f(1)] = f(59)\n"
+        "    var ms = [\"a\": 0]\n"
+        "    ms[s(\"b\")] = f(60)\n"
+        "    var pp = P { x: 0, y: 0 }\n"
+        "    pp.x = f(61)\n"
+        "    print(\"-- builtins\")\n"
+        "    push(xs, f(62))\n"
+        "    let z = contains(ms, s(\"s9\"))\n"
+        "    var sb = StringBuilder()\n"
+        "    append(sb, s(\"s10\"))\n"
+        "    for ii in f(63)..f(65) {\n"
+        "        print(ii)\n"
+        "    }\n"
+        "    print(\"-- done\")\n"
+        "    print(a + b + l + o + o2 + n + w + w2 + y + y2 + y3 + y4 + k + k2)\n"
+        "    print(m.x + n2.x + j.x + q.x + q2.y + r[0] + t.0 + u[\"k1\"] + pp.x)\n"
+        "    print(c && d && e2 && h2 && i && z)\n"
+        "    print(e + x + x2 + build(sb))\n"
+        "    print(h)\n"
+        "    print(w3)\n"
+        "    match v {\n"
+        "        A(p1, p2) => print(p1 + p2),\n"
+        "        _ => {},\n"
+        "    }\n"
+        "    match v2 {\n"
+        "        B(p1, p2) => print(p1),\n"
+        "        _ => {},\n"
+        "    }\n"
+        "}\n"
+    ),
+    # a partial application evaluates its callee, receiver and filled
+    # arguments once, when it is made (D51, D60, MYLA-75)
+    "partial_application_evaluates_its_arguments_once": (
+        "struct Ctr { n: int }\n"
+        "\n"
+        "impl Ctr {\n"
+        "    fun add(self, a: int, b: int) -> int {\n"
+        "        return self.n + a + b\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "fun f(x: int) -> int {\n"
+        "    print(x)\n"
+        "    return x\n"
+        "}\n"
+        "\n"
+        "fun g(a: int, b: int, c: int) -> int {\n"
+        "    return a * 100 + b * 10 + c\n"
+        "}\n"
+        "\n"
+        "fun ctr(n: int) -> Ctr {\n"
+        "    print(n)\n"
+        "    return Ctr { n: n }\n"
+        "}\n"
+        "\n"
+        "fun pick(n: int) -> (int, int) -> int {\n"
+        "    print(n)\n"
+        "    return (a: int, b: int) => a - b\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    let p = g(f(1), _, f(2))\n"
+        "    print(\"made\")\n"
+        "    print(p(f(3)))\n"
+        "    print(p(f(4)))\n"
+        "    let m = ctr(5).add(f(6), _)\n"
+        "    print(\"made\")\n"
+        "    print(m(f(7)))\n"
+        "    print(m(f(8)))\n"
+        "    let fv = pick(9)\n"
+        "    let q = fv(_, f(10))\n"
+        "    print(\"made\")\n"
+        "    print(q(f(11)))\n"
+        "    var x = 1\n"
+        "    let r = g(x, _, 3)\n"
+        "    x = 2\n"
+        "    print(r(0))\n"
+        "    let lit = g(1, _, 2)\n"
+        "    print(lit(5))\n"
+        "}\n"
+    ),
+    # #derive(Eq) on char and float fields compares like `==`: NaN is not
+    # equal to itself, 0.0 equals -0.0 (MYLA-13)
+    "derived_eq_on_char_and_float_fields": (
+        "#derive(Eq)\n"
+        "struct P { c: char, f: float64, g: float }\n"
+        "\n"
+        "#derive(Eq)\n"
+        "enum E { A(char), B(float64), N }\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    let z: float64 = 0.0\n"
+        "    let nan = z / z\n"
+        "    let a = P { c: 'x', f: 1.5f64, g: 2.5 }\n"
+        "    print(a == P { c: 'x', f: 1.5f64, g: 2.5 })\n"
+        "    print(a == P { c: 'y', f: 1.5f64, g: 2.5 })\n"
+        "    print(a != P { c: 'x', f: 1.25f64, g: 2.5 })\n"
+        "    print(P { c: 'x', f: nan, g: 0.0 } == P { c: 'x', f: nan, g: 0.0 })\n"
+        "    print(P { c: 'x', f: 0.0, g: 0.0 } == P { c: 'x', f: -z, g: -0.0 })\n"
+        "    print(E.A('\\u{1F600}') == E.A('\\u{1F600}'))\n"
+        "    print(E.B(nan) == E.B(nan))\n"
+        "    print(E.B(-z) == E.B(z))\n"
+        "    print(E.A('a') == E.N)\n"
+        "}\n"
+    ),
+    # a statement match's arms need no value, so an arm block may end in a
+    # match statement (MYLA-59)
+    "match_statement_ending_an_arm_block": (
+        "enum Shape { Dot, Box(int, int) }\n"
+        "\n"
+        "fun describe(s: Shape, verbose: bool) {\n"
+        "    match s {\n"
+        "        Dot => {\n"
+        "            print(\"dot\")\n"
+        "            match verbose {\n"
+        "                true => print(\"  a point\")\n"
+        "                false => {}\n"
+        "            }\n"
+        "        }\n"
+        "        Box(w, h) => match w == h {\n"
+        "            true => print(\"square\")\n"
+        "            false => {\n"
+        "                print(\"box\")\n"
+        "                match h {\n"
+        "                    0 => print(\"  flat\")\n"
+        "                    _ => print(w * h)\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    let r: Result<int, str> = Ok(1)\n"
+        "    match r {\n"
+        "        Ok(n) => {\n"
+        "            print(n)\n"
+        "            match n {\n"
+        "                1 => print(\"one\")\n"
+        "                _ => print(\"other\")\n"
+        "            }\n"
+        "        }\n"
+        "        Err(e) => print(e)\n"
+        "    }\n"
+        "    describe(Shape.Dot, true)\n"
+        "    describe(Shape.Box(2, 2), false)\n"
+        "    describe(Shape.Box(2, 3), false)\n"
+        "    describe(Shape.Box(4, 0), false)\n"
+        "    let v = match r {\n"
+        "        Ok(n) => {\n"
+        "            match n {\n"
+        "                1 => print(\"still a value\")\n"
+        "                _ => {}\n"
+        "            }\n"
+        "            n * 10\n"
+        "        }\n"
+        "        Err(e) => 0\n"
+        "    }\n"
+        "    print(v)\n"
+        "}\n"
+    ),
+    # instantiations with type arguments that share a mangled spelling, or
+    # that differ only in function types, are distinct (MYLA-9, MYLA-33)
+    "generic_instantiations_get_distinct_names": (
+        "struct A_B { v: int }\n"
+        "struct C { v: int }\n"
+        "struct A { s: str, v: int }\n"
+        "struct B_C { v: int }\n"
+        "struct Pair<X, Y> { x: X, y: Y }\n"
+        "\n"
+        "fun first<X, Y>(p: Pair<X, Y>) -> X {\n"
+        "    return p.x\n"
+        "}\n"
+        "\n"
+        "fun ident<T>(x: T) -> T {\n"
+        "    return x\n"
+        "}\n"
+        "\n"
+        "fun call<T>(f: T, describe: str) -> str {\n"
+        "    return describe\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    let p1 = Pair { x: A_B { v: 1 }, y: C { v: 2 } }\n"
+        "    let p2 = Pair { x: A { s: \"three\", v: 3 }, y: B_C { v: 4 } }\n"
+        "    print(first(p1).v + first(p2).v)\n"
+        "    let inc = ident((a: int) => a + 1)\n"
+        "    let size = ident((s: str) => len(s))\n"
+        "    print(inc(41))\n"
+        "    print(size(\"four\"))\n"
+        "    print(call((a: int) => a, \"int to int\"))\n"
+        "    print(call((s: str) => s, \"str to str\"))\n"
+        "    let t1 = ident((1, A_B { v: 5 }))\n"
+        "    let t2 = ident((A { s: \"six\", v: 6 }, 2))\n"
+        "    print(t1.1.v + t2.0.v)\n"
+        "}\n"
+    ),
+    # float -> integer casts saturate, NaN gives 0 (D59, MYLA-6)
+    "float_to_int_casts_saturate": (
+        "const BIG: float64 = 1e19\n"
+        "const CA: uint64 = BIG as uint64\n"
+        "const CB: int16 = (0.0f64 / 0.0f64) as int16\n"
+        "fun to_u64(x: float64) -> uint64 {\n    return x as uint64\n}\n"
+        "fun to_i64(x: float64) -> int64 {\n    return x as int64\n}\n"
+        "fun to_i32(x: float64) -> int32 {\n    return x as int32\n}\n"
+        "fun to_u32(x: float64) -> uint32 {\n    return x as uint32\n}\n"
+        "fun to_u8(x: float64) -> uint8 {\n    return x as uint8\n}\n"
+        "fun to_i8(x: float64) -> int8 {\n    return x as int8\n}\n"
+        "#main\nfun main() {\n"
+        "    let z: float64 = 0.0\n"
+        "    let xs: [float64] = [z / z, 1.0f64 / z, -1.0f64 / z, 0.0, -0.0, 0.9, -0.9, 1.5, -1.5,"
+        " 2.9, -2.9, 127.9, 128.0, -128.9, -129.0, 255.9, 256.0, 300.0, -300.0,"
+        " 2147483647.5, 2147483648.0, -2147483648.9, -2147483649.0, 4294967295.5, 4294967296.0,"
+        " 9223372036854775807.0, -9223372036854775808.0, -1e19, 1e19, 1.8e19,"
+        " 18446744073709549568.0, 18446744073709551616.0, 3e19]\n"
+        "    for x in xs {\n"
+        "        print(f\"{to_u64(x)} {to_i64(x)} {to_i32(x)} {to_u32(x)} {to_u8(x)} {to_i8(x)}\")\n"
+        "    }\n"
+        "    let f: float32 = 3e9\n"
+        "    print(f as int32)\n    print(f as uint32)\n"
+        "    let n: float32 = 0.0 / 0.0\n    print(n as uint64)\n"
+        "    print(CA)\n    print(CB)\n"
+        "}\n"
+    ),
+    # the int64 minimum divided by -1 wraps instead of trapping (MYLA-5)
+    "int64_min_divided_by_minus_one": (
+        'const MIN: int64 = -9223372036854775807 - 1\n'
+        'const Q: int64 = MIN / -1\n'
+        'const R: int64 = MIN % -1\n'
+        'fun div(a: int64, b: int64) -> int64 {\n'
+        '    return a / b\n'
+        '}\n'
+        'fun rem(a: int64, b: int64) -> int64 {\n'
+        '    return a % b\n'
+        '}\n'
+        '#main\n'
+        'fun main() {\n'
+        '    let a: int64 = -9223372036854775807 - 1\n'
+        '    var b: int64 = -1\n'
+        '    print(a / b)\n'
+        '    print(a % b)\n'
+        '    print(div(a, -1))\n'
+        '    print(rem(a, -1))\n'
+        '    print(div(-7, -1))\n'
+        '    print(rem(-7, -1))\n'
+        '    print(div(7, -2))\n'
+        '    print(rem(7, -2))\n'
+        '    let c: int32 = -2147483647 - 1\n'
+        '    var d: int32 = -1\n'
+        '    print(c / d)\n'
+        '    print(c % d)\n'
+        '    print(Q)\n'
+        '    print(R)\n'
+        '}\n'
+    ),
+    # integer literals of 2^63 and above (MYLA-73)
+    "big_integer_literals": (
+        '#main\n'
+        'fun main() {\n'
+        '    let max: uint64 = 18446744073709551615u64\n'
+        '    print(max)\n'
+        '    print(max >> 60)\n'
+        '    let top: uint64 = 9223372036854775808\n'
+        '    print(top)\n'
+        '    print(top == (1u64 << 63))\n'
+        '    let low: int64 = -9223372036854775808i64\n'
+        '    print(low)\n'
+        '    print(0xFFFF_FFFF_FFFF_FFFFu64 == max)\n'
+        '    let x: uint64 = 12345678901234567890\n'
+        '    print(x & 9223372036854775808u64)\n'
+        '    print(x % 1000)\n'
+        '    match max {\n'
+        '        18446744073709551615 => { print("max") },\n'
+        '        _ => { print("other") },\n'
+        '    }\n'
+        '}\n'
+    ),
+    # `remove` unshares the map first and drops the removed value (MYLA-25)
+    "remove_leaves_map_copies_alone": (
+        '#main\n'
+        'fun main() {\n'
+        '    var a = ["x": [1, 2], "y": [3]]\n'
+        '    var b = a\n'
+        '    remove(b, "x")\n'
+        '    print(len(a))\n'
+        '    print(contains(a, "x"))\n'
+        '    print(len(b))\n'
+        '    print(len(a["x"]))\n'
+        '    var c = a\n'
+        '    remove(c, "y")\n'
+        '    remove(c, "nope")\n'
+        '    print(len(c))\n'
+        '    print(len(a))\n'
+        '}\n'
+    ),
+    # partial application of functions, methods and function values with
+    # aggregate results and arguments (MYLA-26)
+    "partial_application_of_aggregates": (
+        'struct P { x: int, y: int }\n'
+        'struct H { f: (P, int) -> P }\n'
+        'impl P {\n'
+        '    fun moved(self, d: int, q: P) -> P {\n'
+        '        return P { x: self.x + d + q.x, y: self.y + d + q.y }\n'
+        '    }\n'
+        '}\n'
+        'fun mk(a: int, b: int) -> P {\n'
+        '    return P { x: a, y: b }\n'
+        '}\n'
+        'fun shift(p: P, d: int) -> P {\n'
+        '    return P { x: p.x + d, y: p.y + d }\n'
+        '}\n'
+        'fun pair(a: int, s: str) -> (int, str) {\n'
+        '    return (a * 2, s)\n'
+        '}\n'
+        '#main\n'
+        'fun main() {\n'
+        '    let f = mk(3, _)\n'
+        '    let p = f(5)\n'
+        '    print(p.x)\n'
+        '    print(p.y)\n'
+        '    let g = shift(_, 10)\n'
+        '    let q = g(P { x: 1, y: 2 })\n'
+        '    print(q.x)\n'
+        '    print(q.y)\n'
+        '    let h = pair(_, "hi")\n'
+        '    let t = h(21)\n'
+        '    print(t.0)\n'
+        '    print(t.1)\n'
+        '    let base = P { x: 100, y: 200 }\n'
+        '    let m = base.moved(_, P { x: 1, y: 1 })\n'
+        '    let r = m(5)\n'
+        '    print(r.x)\n'
+        '    print(r.y)\n'
+        '    let lam = (a: int, s: P) => P { x: a * s.x, y: a * s.y }\n'
+        '    let twice = lam(2, _)\n'
+        '    let u = twice(P { x: 3, y: 4 })\n'
+        '    print(u.x)\n'
+        '    print(u.y)\n'
+        '    let holder = H { f: shift }\n'
+        '    let viafield = holder.f(_, 7)\n'
+        '    let w = viafield(P { x: 0, y: 1 })\n'
+        '    print(w.x)\n'
+        '    print(w.y)\n'
+        '}\n'
+    ),
+    # `#derive(Eq)` compares boxed payloads structurally (MYLA-23)
+    "derived_eq_on_recursive_enums": (
+        '#derive(Eq)\n'
+        'enum L { Nil, Cons(int, L) }\n'
+        '#derive(Eq)\n'
+        'enum T { Leaf(str), Node(T, T) }\n'
+        '#main\n'
+        'fun main() {\n'
+        '    let a = L.Cons(1, L.Cons(2, L.Nil))\n'
+        '    let b = L.Cons(1, L.Cons(2, L.Nil))\n'
+        '    let c = L.Cons(1, L.Cons(3, L.Nil))\n'
+        '    print(a == b)\n'
+        '    print(a == c)\n'
+        '    print(a != c)\n'
+        '    let t1 = T.Node(T.Leaf("x"), T.Node(T.Leaf("y"), T.Leaf("z")))\n'
+        '    let t2 = T.Node(T.Leaf("x"), T.Node(T.Leaf("y"), T.Leaf("z")))\n'
+        '    let t3 = T.Node(T.Leaf("x"), T.Leaf("y"))\n'
+        '    print(t1 == t2)\n'
+        '    print(t1 == t3)\n'
+        '}\n'
+    ),
+    "diverging_arm_of_an_aggregate_match": (
+        # an arm ending in `panic`/`unreachable` has no value to store (the
+        # native compiler used to look for its aggregate result and crash)
+        "struct P { a: int, b: str }\n"
+        "fun mk(ok: bool) -> Result<P, str> {\n"
+        "    if ok { return Ok(P { a: 1, b: \"x\" }) }\n    return Err(\"no\")\n}\n"
+        "fun block_arm(ok: bool) -> P {\n"
+        "    return match mk(ok) {\n        Ok(p) => p,\n"
+        "        Err(d) => { panic(\"cannot happen\") },\n    }\n}\n"
+        "fun expr_arm(ok: bool) -> P {\n"
+        "    return match mk(ok) {\n        Ok(p) => p,\n        Err(d) => unreachable(),\n    }\n}\n"
+        "#main\nfun main() {\n"
+        "    print(block_arm(true).b)\n    print(expr_arm(true).a)\n"
+        "    let t = match mk(true) {\n        Ok(p) => (p.a, p.b),\n"
+        "        Err(d) => { panic(d) },\n    }\n    print(t.1)\n}\n"
+    ),
+    "remove_many_distinct_keys": (
+        # the self-hosted map left a tombstone per `remove` and counted only
+        # occupied slots, so after enough distinct keys no slot was empty and
+        # looking up a missing key never ended (MYLA-18)
+        "#main\nfun main() {\n"
+        "    var m: [int: int] = [:]\n    var r = 0\n"
+        "    while r < 1000 {\n        m[r] = r\n"
+        "        if len(m) > 5 {\n            for k in keys(m) {\n                remove(m, k)\n            }\n        }\n"
+        "        r = r + 1\n    }\n"
+        "    print(len(m))\n    print(contains(m, 3))\n    print(m[999])\n}\n"
+    ),
+    "pop_a_boxed_enum": (
+        # a list of a recursive enum holds boxes; `pop` copies the value out of
+        # the box and releases it (both compilers used to hand out the box
+        # pointer itself, MYLA-74)
+        "enum T {\n    Leaf(int),\n    Node(T, [T]),\n}\n"
+        "fun show(t: T) -> str {\n"
+        "    return match t {\n        T.Leaf(n) => f\"leaf {n}\",\n"
+        "        T.Node(l, kids) => f\"node({show(l)}, {len(kids)} kids)\",\n    }\n}\n"
+        "struct Stack { items: [T] }\n"
+        "impl Stack {\n    fun take(var self) -> T {\n        return pop(self.items)\n    }\n}\n"
+        "#main\nfun main() {\n"
+        "    var xs: [T] = [T.Leaf(1), T.Node(T.Leaf(2), [T.Leaf(3)]), T.Leaf(4)]\n"
+        "    let a = pop(xs)\n    print(show(a))\n"
+        "    print(show(pop(xs)))\n"
+        "    var s = Stack { items: xs }\n    print(show(s.take()))\n"
+        "    print(len(s.items))\n    print(len(xs))\n}\n"
+    ),
 }
 
 # A program that allocates far more recursive-enum cells (~12M) than the heap
@@ -923,6 +1921,21 @@ STRESS_MAP_SRC = (
 )
 
 
+# `remove` releases the value it takes out of the map (the self-hosted compiler
+# leaked it, MYLA-25): 600k removals of a fresh 8-element list from one map.
+STRESS_MAP_REMOVE_SRC = (
+    "#main\nfun main() {\n"
+    "    var m: [int: [int]] = [:]\n"
+    "    var total = 0\n"
+    "    for r in 0..600000 {\n"
+    "        m[r % 7] = [r, r, r, r, r, r, r, r]\n"
+    "        remove(m, (r + 3) % 7)\n"
+    "        total = total + len(m)\n"
+    "    }\n"
+    "    print(total)\n}\n"
+)
+
+
 # StringBuilders are reference-counted, copy-on-write byte buffers that
 # reallocate as they grow. This churns millions of builder cells through the
 # finite arena — building (with repeated grows), sharing (forcing a CoW clone),
@@ -1007,8 +2020,285 @@ STRESS_TRAIT_DISPATCH_SRC = (
 )
 
 
+_BIG_LIST = "[" + ", ".join(["i"] * 64) + "]"   # a fresh 544-byte cell per use
+
+STRESS_TRY_AFTER_STAGED_VALUE_SRC = (
+    # A container store evaluates its value first (MYLA-4); a `?` that fails
+    # later, in the map key, the list index or the pushed-to list's expression,
+    # must release that value. 2.5 million leaked 64-element lists would need
+    # 1.4 GB, more than the 1 GiB arena.
+    "fun fail(i: int) -> Result<int, str> {\n    return Err(\"no\")\n}\n"
+    "fun by_key(i: int) -> Result<int, str> {\n"
+    "    var m: [int: [int]] = [:]\n"
+    f"    m[fail(i)?] = {_BIG_LIST}\n"
+    "    return Ok(len(m))\n}\n"
+    "fun by_index(i: int) -> Result<int, str> {\n"
+    "    var xs: [[int]] = [[]]\n"
+    f"    xs[fail(i)?] = {_BIG_LIST}\n"
+    "    return Ok(len(xs))\n}\n"
+    "fun by_holder(i: int) -> Result<int, str> {\n"
+    "    var xss: [[[int]]] = [[]]\n"
+    f"    push(xss[fail(i)?], {_BIG_LIST})\n"
+    "    return Ok(len(xss))\n}\n"
+    "#main\nfun main() {\n"
+    "    var fails = 0\n"
+    "    for i in 0..2500000 {\n"
+    "        match by_key(i) { Ok(n) => {}, Err(e) => { fails = fails + 1 } }\n"
+    "        match by_index(i) { Ok(n) => {}, Err(e) => { fails = fails + 1 } }\n"
+    "        match by_holder(i) { Ok(n) => {}, Err(e) => { fails = fails + 1 } }\n"
+    "    }\n    print(fails)\n}\n"
+)
+
+
+# Strings are reference-counted cells like lists (MYLA-18): results of `+`,
+# `format`, f-strings and `build`, strings held by structs, lists and as map
+# keys (inserted, removed, listed by `keys`) are all released. About 2 GB of
+# strings go through the 1 GiB arena.
+STRESS_STR_SRC = (
+    "struct Named {\n    name: str,\n    n: int,\n}\n"
+    "fun label(i: int) -> str {\n"
+    "    return format(\"item-{}-{}-{}\", i, i % 7 == 0, 'x') + \"-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding\"\n}\n"
+    "#main\nfun main() {\n"
+    "    var total = 0\n"
+    "    var m: [str: int] = [:]\n"
+    "    for r in 0..600000 {\n"
+    "        let a = label(r)\n"
+    "        let b = a + \"-\" + a\n"
+    "        let c = Named { name: b, n: r }\n"
+    "        var xs = [c.name, a]\n"
+    "        push(xs, f\"{r}:{c.n}\")\n"
+    "        let key = f\"k{r}\"\n"
+    "        m[key] = len(b)\n"
+    "        let v = m[key]\n"
+    "        if len(m) > 50 {\n"
+    "            for k in keys(m) {\n                remove(m, k)\n            }\n"
+    "        }\n"
+    "        var sb = StringBuilder()\n"
+    "        append(sb, b)\n"
+    "        let built = build(sb)\n"
+    "        total = total + len(xs) + len(built) - v\n"
+    "    }\n"
+    "    print(total)\n}\n"
+)
+
+# The temporaries of an `if` or `while` condition, a range bound and a match
+# guard have no statement end to release them; they must be dropped right after
+# the value is computed. An `&&`/`||` operand drops its own, since the right one
+# may not run (here it ran in the previous iteration, so its slot holds a
+# dropped list) (MYLA-74).
+STRESS_CONDITION_TEMPS_SRC = (
+    "fun make(n: int) -> [int] {\n"
+    "    var out: [int] = []\n    for i in 0..n {\n        push(out, i)\n    }\n    return out\n}\n"
+    "fun nonempty(xs: [int]) -> bool {\n    return len(xs) > 0\n}\n"
+    "#main\nfun main() {\n"
+    "    var acc = 0\n"
+    "    for r in 0..600000 {\n"
+    "        if nonempty(make(200)) {\n            acc = acc + 1\n        }\n"
+    "        var k = 0\n"
+    "        while k < len(make(30)) {\n            k = k + 10\n        }\n"
+    "        for i in 0..len(make(100)) - 99 {\n            acc = acc + k\n        }\n"
+    "        match r {\n            x if nonempty(make(50)) => {\n                acc = acc + 1\n            },\n            _ => {},\n        }\n"
+    "        if r % 2 == 0 && nonempty(make(20)) {\n            acc = acc + 1\n        }\n"
+    "        let b = r % 3 == 0 || len(make(10)) > 5\n"
+    "        if b {\n            acc = acc + 1\n        }\n"
+    "    }\n"
+    "    print(acc)\n}\n"
+)
+
+# A match's scrutinee temporaries (here the `Option` a call returns, holding a
+# list) are dropped when the statement ends; an arm that leaves early with
+# `return`, `continue` or `break` must drop them itself. A leak keeps the lists
+# alive and exhausts the arena (MYLA-74).
+STRESS_MATCH_EARLY_EXIT_SRC = (
+    "fun make(n: int) -> [int] {\n"
+    "    var out: [int] = []\n    for i in 0..n {\n        push(out, i)\n    }\n    return out\n}\n"
+    "fun find(xs: [[int]], i: int) -> Option<[int]> {\n"
+    "    if i < len(xs) {\n        return Some(xs[i])\n    }\n    return None\n}\n"
+    "fun first(xs: [[int]]) -> [int] {\n"
+    "    match find(xs, 0) {\n        Some(v) => {\n            return v\n        },\n        None => {},\n    }\n"
+    "    return []\n}\n"
+    "fun total(xs: [[int]]) -> int {\n"
+    "    var n = 0\n    var i = 0\n"
+    "    while true {\n"
+    "        match find(xs, i) {\n"
+    "            Some(v) => {\n"
+    "                i = i + 1\n"
+    "                if len(v) == 100 {\n                    continue\n                }\n"
+    "                n = n + len(v)\n"
+    "            },\n"
+    "            None => {\n                break\n            },\n"
+    "        }\n"
+    "    }\n"
+    "    return n\n}\n"
+    "#main\nfun main() {\n"
+    "    var acc = 0\n"
+    "    for r in 0..600000 {\n"
+    "        let xs = [make(200), make(100), make(50)]\n"
+    "        acc = acc + len(first(xs)) + total(xs)\n"
+    "    }\n"
+    "    print(acc)\n}\n"
+)
+
+# A match expression's value owns a reference (the arm's value is retained into
+# the result slot); the statement that uses it must release it like any other
+# temporary. Here a list comes out of a match through `return`, a `let` and a
+# call argument, 600,000 times: a leaked reference keeps every list alive and
+# exhausts the arena (MYLA-74).
+STRESS_MATCH_RESULT_SRC = (
+    "enum Box {\n    Full([int]),\n    Empty,\n}\n"
+    "fun items(b: Box) -> [int] {\n"
+    "    return match b {\n        Box.Full(xs) => xs,\n        Box.Empty => [],\n    }\n}\n"
+    "fun make(n: int) -> [int] {\n"
+    "    var out: [int] = []\n    for i in 0..n {\n        push(out, i)\n    }\n    return out\n}\n"
+    "#main\nfun main() {\n"
+    "    var acc = 0\n"
+    "    for r in 0..600000 {\n"
+    "        let b = Box.Full(make(200))\n"
+    "        let xs = items(b)\n"
+    "        let ys = match b {\n            Box.Full(zs) => zs,\n            Box.Empty => xs,\n        }\n"
+    "        acc = acc + len(xs) + len(ys) - len(match b {\n            Box.Full(ws) => ws,\n            Box.Empty => xs,\n        })\n"
+    "    }\n"
+    "    print(acc)\n}\n"
+)
+
+
+STRESS_FRAGMENTED_FREE_SRC = (
+    # Leaves 8000 freed cells of 8000 different sizes behind (each `keys(m)` on
+    # a growing map frees a list one slot longer than the last), then allocates
+    # 30000 small lists that none of those cells fit. An allocator that scans
+    # one free list on every allocation does 240 million probes here (about
+    # 14 s); size-class free lists find "nothing free" at once (MYLA-16).
+    "#main\nfun main() {\n"
+    "    var m: [int: int] = [:]\n"
+    "    var i = 0\n"
+    "    while i < 8000 {\n"
+    "        m[i] = i\n"
+    "        let ks = keys(m)\n"
+    "        i = i + 1\n"
+    "    }\n"
+    "    var keep: [[int]] = []\n"
+    "    var j = 0\n"
+    "    while j < 30000 {\n"
+    "        push(keep, [j, j])\n"
+    "        j = j + 1\n"
+    "    }\n"
+    "    print(len(keep) + len(m))\n}\n"
+)
+
+STRESS_LARGE_SIZES_SRC = (
+    # Builds and drops 20000 strings of 20000 different sizes above 4 KiB
+    # (1.7 GB in all). A freed large cell kept for an allocation of exactly its
+    # size is never used again and the 1 GiB arena runs out; size classes for
+    # large cells reuse them (MYLA-80, found as the language server's memory
+    # growing with every check).
+    "#main\nfun main() {\n"
+    "    var sb = StringBuilder()\n"
+    "    for k in 0..170000 { append_byte(sb, 'x') }\n"
+    "    let big = build(sb)\n"
+    "    var total = 0\n"
+    "    for i in 0..20000 {\n"
+    "        var part = StringBuilder()\n"
+    "        append(part, big, 0, 4100 + 8 * i)\n"
+    "        let s = build(part)\n"
+    "        total = total + len(s) % 7\n"
+    "    }\n"
+    "    print(total)\n}\n"
+)
+
+STRESS_FOR_EARLY_RETURN_SRC = (
+    # Returns from inside `for` loops over fresh lists and maps a million
+    # times. The loop holds a reference to what it iterates; a `return` from
+    # its body left it held, so every list and map stayed allocated (MYLA-80,
+    # the language server's checker leaking 7 MB per check).
+    "fun first_big(xs: [int]) -> int {\n"
+    "    for x in xs {\n        if x > 1 { return x }\n    }\n"
+    "    return 0\n}\n"
+    "fun any_key(m: [int: int]) -> int {\n"
+    "    for k in m { return k }\n"
+    "    return -1\n}\n"
+    "fun nested(xs: [[int]]) -> int {\n"
+    "    for row in xs {\n        for x in row {\n            if x == 3 { return x }\n        }\n    }\n"
+    "    return 0\n}\n"
+    "#main\nfun main() {\n"
+    "    var total = 0\n"
+    "    for i in 0..1000000 {\n"
+    "        var xs = [1, i, 5]\n"
+    "        for k in 0..250 { push(xs, k) }\n"       # 1 KB a list: a leak exhausts the arena
+    "        var m: [int: int] = [:]\n"
+    "        m[i % 7] = 1\n"
+    "        total = total + first_big(xs) % 3 + any_key(m) + nested([[1, 2], [3, i]])\n"
+    "    }\n"
+    "    print(total)\n}\n"
+)
+
+STRESS_MAP_OVERWRITE_SRC = (
+    # Overwrites map entries holding strings, lists and maps a million times.
+    # The self-hosted backend stored the new value without releasing the old
+    # one, so every overwrite leaked it (MYLA-80, the language server keeping
+    # every version of a document).
+    "#main\nfun main() {\n"
+    "    var docs: [str: str] = [:]\n"
+    "    var lists: [int: [int]] = [:]\n"
+    "    var nested: [str: [str: int]] = [:]\n"
+    "    var total = 0\n"
+    "    for i in 0..1000000 {\n"
+    "        docs[\"a\"] = format(\"version {}\", i)\n"
+    "        lists[i % 3] = [i, i, i]\n"
+    "        var inner: [str: int] = [:]\n"
+    "        inner[\"k\"] = i\n"
+    "        nested[\"x\"] = inner\n"
+    "        total = total + len(docs[\"a\"]) % 2 + lists[i % 3][0] % 2 + nested[\"x\"][\"k\"] % 2\n"
+    "    }\n"
+    "    print(total)\n}\n"
+)
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
+    def test_overwritten_map_values_are_released(self):
+        out, code = build_and_run(STRESS_MAP_OVERWRITE_SRC, timeout=60)
+        self.assertEqual(code, 0)
+        expected = sum(len(f"version {i}") % 2 + 2 * (i % 2) for i in range(1000000))
+        self.assertEqual(out.strip(), str(expected))
+
+    def test_returning_from_a_for_loop_releases_its_iterable(self):
+        out, code = build_and_run(STRESS_FOR_EARLY_RETURN_SRC, timeout=60)
+        self.assertEqual(code, 0, "arena exhausted — loops leaked what they iterate")
+        expected = sum((i if i > 1 else 5) % 3 + i % 7 + 3 for i in range(1000000))
+        self.assertEqual(out.strip(), str(expected))
+
+    def test_large_cells_of_new_sizes_are_reused(self):
+        out, code = build_and_run(STRESS_LARGE_SIZES_SRC, timeout=60)
+        self.assertEqual(code, 0, "arena exhausted — large cells were not reused")
+        self.assertEqual(out.strip(), str(sum((4100 + 8 * i) % 7 for i in range(20000))))
+
+    def test_allocation_does_not_scan_unusable_free_cells(self):
+        # Must finish far below the 5 s limit: the linear free-list scan took
+        # about 14 s, size-class free lists take milliseconds.
+        out, code = build_and_run(STRESS_FRAGMENTED_FREE_SRC, timeout=5)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "38000")
+
+    def test_strings_are_reclaimed(self):
+        out, code = build_and_run(STRESS_STR_SRC)
+        self.assertEqual(code, 0, "arena exhausted — strings were not reclaimed")
+        self.assertEqual(out.strip(), "1800000")
+
+    def test_condition_temporaries_are_released(self):
+        out, code = build_and_run(STRESS_CONDITION_TEMPS_SRC)
+        self.assertEqual(code, 0, "arena exhausted — condition temporaries leaked")
+        self.assertEqual(out.strip(), "20100000")
+
+    def test_early_exits_from_match_arms_drop_the_scrutinee(self):
+        out, code = build_and_run(STRESS_MATCH_EARLY_EXIT_SRC)
+        self.assertEqual(code, 0, "arena exhausted — scrutinee temporaries leaked")
+        self.assertEqual(out.strip(), "270000000")
+
+    def test_match_results_are_released(self):
+        out, code = build_and_run(STRESS_MATCH_RESULT_SRC)
+        self.assertEqual(code, 0, "arena exhausted — match results leaked")
+        self.assertEqual(out.strip(), "120000000")
+
     def test_trait_dispatch_reference_counting_reclaims_heap(self):
         # millions of list cells allocated through a bounded-generic operator
         # that dispatches to a user `Add` impl: the results must be refcounted.
@@ -1034,6 +2324,10 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_SB_SRC)
         self.assertEqual(code, 0, "arena exhausted — builder cells were not reclaimed")
         self.assertEqual(out.strip(), "0")
+
+    def test_map_remove_reclaims_heap(self):
+        out, code = build_and_run(STRESS_MAP_REMOVE_SRC)
+        self.assertEqual((out.strip(), code), ("2399994", 0))
 
     def test_map_reference_counting_reclaims_heap(self):
         # millions of map cells (build/grow/share/CoW/remove) through a finite arena.
@@ -1064,6 +2358,11 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_TRY_SRC)
         self.assertEqual(code, 0, "arena exhausted — `?` early return leaked locals")
         self.assertEqual(out.strip(), "100000")
+
+    def test_try_after_a_staged_value_releases_it(self):
+        out, code = build_and_run(STRESS_TRY_AFTER_STAGED_VALUE_SRC)
+        self.assertEqual(code, 0, "arena exhausted — staged container values leaked")
+        self.assertEqual(out.strip(), "7500000")
 
     def test_break_continue_drop_live_heap(self):
         # `break`/`continue` must drop heap owners bound in the loop body scope.

@@ -1,4 +1,4 @@
-"""The Myla tree-walking interpreter (docs/architecture.md §6).
+"""The Myla tree-walking interpreter (docs/Architecture/Interpreter.md).
 
 Runs a type-checked `Program`: it relies on the `resolved_type` annotations the
 checker attaches to expressions (for integer wrapping and for formatting values
@@ -11,10 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import ast
-from .errors import MylaRuntimeError
+from .errors import MylaError, MylaRuntimeError
 from .types import (
     BoolType, CharType, Checker, FloatType, IntType, StrType, Type,
-    char_utf8_bytes, float_div, float_rem, format_float, round_float,
+    char_utf8_bytes, float_div, float_rem, float_to_int, format_float, round_float,
 )
 
 # Overloadable binary operators → the operator-trait method dispatched on a
@@ -186,15 +186,17 @@ class ClosureValue:
     Mirrors the native `(code_ptr, env_ptr)` fat value. `params` are the lambda
     (or referenced `fun`) parameters, `body` is an expression or a `Block`, and
     `env` maps each captured name to its by-value snapshot taken at creation
-    (D15). A plain `fun` reference has an empty `env`."""
+    (D15). A plain `fun` reference has an empty `env`. `path` is the file the
+    body was written in, for attributing runtime errors (MYLA-10)."""
 
-    __slots__ = ("params", "body", "env", "is_block")
+    __slots__ = ("params", "body", "env", "is_block", "path")
 
-    def __init__(self, params, body, env: dict, is_block: bool):
+    def __init__(self, params, body, env: dict, is_block: bool, path: str | None):
         self.params = params
         self.body = body
         self.env = env
         self.is_block = is_block
+        self.path = path
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<closure {len(self.params)} param(s), {len(self.env)} capture(s)>"
@@ -242,7 +244,7 @@ class TestResult:
 
 
 class Interpreter:
-    def __init__(self, checker: Checker, out=None, err=None, argv=None):
+    def __init__(self, checker: Checker, out=None, err=None, argv=None, stdin=None):
         self.checker = checker
         self.functions = checker.functions  # name -> FuncSig
         self._consts = {name: info.value for name, info in checker.consts.items()}
@@ -251,7 +253,10 @@ class Interpreter:
         self._err = err if err is not None else sys.stderr
         # process command-line arguments handed back by `std.process.args`.
         self._argv = list(argv) if argv is not None else []
-        # errno of the last `__read_file` (0 on success); read by `__io_errno`.
+        # stdin for `__read(0, …)`: a binary stream (tests), else the real fd 0.
+        self._in = stdin
+        # errno of the last `__read_file`, `__write_file` or `__read` (0 on
+        # success); read by `__io_errno`.
         self._io_errno = 0
         # captured result of the last `__run` (see `std.process.run`): stderr
         # bytes, the normal exit code, the terminating signal (0 if none), and
@@ -291,6 +296,9 @@ class Interpreter:
                 except MylaRuntimeError as err:
                     results.append(TestResult(decl.name, idx, False, f"runtime error: {err.message}"))
                     continue
+                except _ExitSignal as sig:   # fails this test, not the run (MYLA-81)
+                    results.append(TestResult(decl.name, idx, False, f"exited with status {sig.code}"))
+                    continue
                 if actual == expected:
                     results.append(TestResult(decl.name, idx, True, ""))
                 else:
@@ -310,6 +318,10 @@ class Interpreter:
             self._exec_block(decl.body, frame)
         except _ReturnSignal as ret:
             return ret.value
+        except MylaError as err:   # attribute it to this function's file (MYLA-10)
+            if err.path is None:
+                err.path = getattr(decl, "source_path", None)
+            raise
         return None
 
     def _exec_block(self, block: ast.Block, parent: _Env) -> None:
@@ -523,7 +535,8 @@ class Interpreter:
             fref = getattr(expr, "func_ref", None)
             if fref is not None:  # a top-level `fun` used as a value (v0.4.2)
                 decl = self.functions[fref].decl
-                return ClosureValue(decl.params, decl.body, {}, True)
+                return ClosureValue(decl.params, decl.body, {}, True,
+                                    getattr(decl, "source_path", None))
             return env.get(expr.ident)
         if isinstance(expr, ast.Unary):
             return self._eval_unary(expr, env)
@@ -550,7 +563,8 @@ class Interpreter:
         if isinstance(expr, ast.MapLit):
             m = MapValue()
             for k, v in expr.entries:
-                m.entries[self._eval(k, env)] = _copy(self._eval(v, env))
+                key = self._eval(k, env)         # key, then value (MYLA-8)
+                m.entries[key] = _copy(self._eval(v, env))
             return m
         if isinstance(expr, ast.Index):
             return self._index_read(expr, env)
@@ -562,7 +576,8 @@ class Interpreter:
         if isinstance(expr, ast.Lambda):
             captured = {name: _copy(env.get(name)) for name, _t in expr.captures}
             return ClosureValue(expr.params, expr.body, captured,
-                                isinstance(expr.body, ast.Block))
+                                isinstance(expr.body, ast.Block),
+                                getattr(expr, "source_path", None))
         raise MylaRuntimeError(  # pragma: no cover
             f"cannot evaluate {type(expr).__name__}", expr.line, expr.column
         )
@@ -573,19 +588,23 @@ class Interpreter:
             frame.define(name, value)
         for param, value in zip(clo.params, args):
             frame.define(param.name, _copy(value))
-        if not clo.is_block:
-            return self._eval(clo.body, frame)
         try:
+            if not clo.is_block:
+                return self._eval(clo.body, frame)
             self._exec_block(clo.body, frame)
         except _ReturnSignal as ret:
             return ret.value
+        except MylaError as err:   # attribute it to the lambda's file (MYLA-10)
+            if err.path is None:
+                err.path = clo.path
+            raise
         return None
 
     def _index_read(self, expr: ast.Index, env: _Env):
         target = self._eval(expr.target, env)
         key = self._eval(expr.index, env)
         if isinstance(target, str):
-            data = target.encode("utf-8")
+            data = _str_bytes(target)
             if key < 0 or key >= len(data):
                 raise MylaRuntimeError(
                     f"string index {key} out of bounds (len {len(data)})",
@@ -632,7 +651,7 @@ class Interpreter:
 
         if op == "+":
             if isinstance(expr.resolved_type, StrType):
-                return left + right          # string concatenation (D41)
+                return _concat(left, right)  # string concatenation (D41)
             return _wrap(left + right, expr.resolved_type)
         if op == "-":
             return _wrap(left - right, expr.resolved_type)
@@ -775,7 +794,7 @@ class Interpreter:
                 self._err.write(s)
             else:
                 import os
-                os.write(fd, s.encode("utf-8"))
+                os.write(fd, _str_bytes(s))
             return None
         if callee.ident == "__exit":
             raise _ExitSignal(self._eval(expr.args[0], env))
@@ -787,12 +806,47 @@ class Interpreter:
                 with open(path, "rb") as fh:
                     data = fh.read()
                 self._io_errno = 0
-                # decode like the native backend treats the bytes as UTF-8; the
-                # byte length (what `len` reports) is preserved for valid UTF-8.
-                return data.decode("utf-8", errors="surrogateescape")
+                return _bytes_str(data)          # any bytes, kept exactly
             except OSError as err:
                 self._io_errno = err.errno or 0
                 return ""
+        if callee.ident == "__read":
+            fd = self._eval(expr.args[0], env)
+            n = self._eval(expr.args[1], env)
+            # what was written must be out before the program waits for input
+            # (a request/response protocol would deadlock otherwise)
+            self._out.flush()
+            self._err.flush()
+            try:
+                if n <= 0:
+                    data = b""
+                elif fd == 0 and self._in is not None:
+                    data = self._in.read(n)
+                else:
+                    import os
+                    data = os.read(fd, n)
+                self._io_errno = 0
+                return _bytes_str(data)
+            except OSError as err:
+                self._io_errno = err.errno or 0
+                return ""
+        if callee.ident == "__poll":
+            fd = self._eval(expr.args[0], env)
+            timeout = self._eval(expr.args[1], env)
+            self._out.flush()
+            self._err.flush()
+            if fd == 0 and self._in is not None:
+                return 1                       # a stream never blocks
+            import select
+            poller = select.poll()
+            poller.register(fd, select.POLLIN)
+            try:
+                ready = poller.poll(timeout)
+            except OSError as err:
+                self._io_errno = err.errno or 0
+                return -1
+            self._io_errno = 0
+            return 1 if ready else 0
         if callee.ident == "__io_errno":
             return self._io_errno
         if callee.ident == "__write_file":
@@ -800,7 +854,7 @@ class Interpreter:
             data = self._eval(expr.args[1], env)
             try:
                 with open(path, "wb") as fh:
-                    fh.write(data.encode("utf-8", errors="surrogateescape"))
+                    fh.write(_str_bytes(data))
                 self._io_errno = 0
             except OSError as err:
                 self._io_errno = err.errno or 0
@@ -820,7 +874,7 @@ class Interpreter:
         if callee.ident == "len":
             target = self._eval(expr.args[0], env)
             if isinstance(target, str):
-                return len(target.encode("utf-8"))
+                return len(_str_bytes(target))
             if isinstance(target, MapValue):
                 return len(target.entries)
             if isinstance(target, StringBuilderValue):
@@ -838,7 +892,7 @@ class Interpreter:
             return lst.elems.pop()
         if callee.ident == "chars":
             s = self._eval(expr.args[0], env)
-            return ListValue([ord(c) for c in s])   # one codepoint per scalar
+            return ListValue(_decode_chars(s))
 
         if callee.ident == "contains":
             m = self._eval(expr.args[0], env)
@@ -851,12 +905,22 @@ class Interpreter:
             fmt = expr.args[0].value          # checked to be a string literal
             parts = [_format_value(self._eval(a, env), a.resolved_type)
                      for a in expr.args[1:]]
-            return _render_format(fmt, parts)
+            return _normalize(_render_format(fmt, parts))
         if callee.ident == "StringBuilder":
             return StringBuilderValue()
         if callee.ident == "append":
             sb = self._eval(expr.args[0], env)
-            sb.buf.extend(self._eval(expr.args[1], env).encode("utf-8"))
+            data = _str_bytes(self._eval(expr.args[1], env))
+            if len(expr.args) == 4:
+                start = self._eval(expr.args[2], env)
+                end = self._eval(expr.args[3], env)
+                if not 0 <= start <= end <= len(data):
+                    raise MylaRuntimeError(
+                        f"string range {start}..{end} out of bounds (len {len(data)})",
+                        expr.line, expr.column,
+                    )
+                data = data[start:end]
+            sb.buf.extend(data)
             return None
         if callee.ident == "append_byte":
             sb = self._eval(expr.args[0], env)
@@ -864,7 +928,7 @@ class Interpreter:
             return None
         if callee.ident == "build":
             sb = self._eval(expr.args[0], env)
-            return bytes(sb.buf).decode("utf-8", errors="surrogateescape")
+            return _bytes_str(bytes(sb.buf))
         if callee.ident == "keys":
             m = self._eval(expr.args[0], env)
             return ListValue([_copy(k) for k in m.entries.keys()])
@@ -933,7 +997,7 @@ def _wrap(value, t: Type):
 def _cast_value(v, src: Type, target: Type):
     """Apply an `as` numeric conversion at runtime (mirrors the native backend
     and const folding): int↔int wrap, int→float round, float→int truncate
-    toward zero, float→float widen/round."""
+    toward zero and saturate (D59), float→float widen/round."""
     if isinstance(target, CharType):
         return int(v)                  # int -> char: the codepoint (unchecked)
     if isinstance(src, CharType):
@@ -941,7 +1005,7 @@ def _cast_value(v, src: Type, target: Type):
     if isinstance(target, FloatType):
         return round_float(float(v), target)
     if isinstance(src, FloatType):
-        return _wrap(int(v), target)   # float -> int: truncate toward zero
+        return float_to_int(v, target)
     return _wrap(v, target)
 
 
@@ -967,6 +1031,68 @@ def _format_value(value, t: Type | None) -> str:
     if isinstance(t, CharType):
         return char_utf8_bytes(value).decode("utf-8")   # render as its glyph
     return str(value)  # pragma: no cover - print() is restricted by the checker
+
+
+# A Myla `str` is bytes, which needn't be UTF-8 (a file, `append_byte`). The
+# interpreter keeps it as a Python str in which each byte that isn't part of
+# valid UTF-8 is a lone surrogate U+DC80..U+DCFF (Python's "surrogateescape"),
+# so all byte-level work goes through these helpers (MYLA-12).
+
+def _str_bytes(s: str) -> bytes:
+    return s.encode("utf-8", "surrogateescape")
+
+
+def _bytes_str(data: bytes) -> str:
+    return data.decode("utf-8", "surrogateescape")
+
+
+def _normalize(s: str) -> str:
+    """`s` with the bytes of a sequence that was split across pieces (each
+    escaped on its own) decoded again, so equal bytes make equal strings."""
+    return s if s.isascii() else _bytes_str(_str_bytes(s))
+
+
+def _concat(a: str, b: str) -> str:
+    if a.isascii() or b.isascii():       # no sequence can be split between them
+        return a + b
+    return _normalize(a + b)
+
+
+def _decode_chars(s: str) -> list[int]:
+    """`chars(s)`: the scalar of each well-formed UTF-8 sequence, and U+FFFD
+    for each byte that isn't part of one (as the native `__str_chars`)."""
+    try:
+        s.encode("utf-8")                # valid: no escaped bytes
+        return [ord(c) for c in s]
+    except UnicodeEncodeError:
+        pass
+    data = _str_bytes(s)
+    out: list[int] = []
+    i, n = 0, len(data)
+    while i < n:
+        b0 = data[i]
+        if b0 < 0x80:
+            out.append(b0)
+            i += 1
+            continue
+        if 0xC2 <= b0 <= 0xDF:
+            size, cp, least = 2, b0 & 0x1F, 0x80
+        elif 0xE0 <= b0 <= 0xEF:
+            size, cp, least = 3, b0 & 0x0F, 0x800
+        elif 0xF0 <= b0 <= 0xF4:
+            size, cp, least = 4, b0 & 0x07, 0x10000
+        else:
+            size = 0
+        if 0 < size and i + size <= n and all(data[i + k] & 0xC0 == 0x80 for k in range(1, size)):
+            for k in range(1, size):
+                cp = (cp << 6) | (data[i + k] & 0x3F)
+            if least <= cp <= 0x10FFFF and not 0xD800 <= cp <= 0xDFFF:
+                out.append(cp)
+                i += size
+                continue
+        out.append(0xFFFD)
+        i += 1
+    return out
 
 
 def _render_format(fmt: str, parts: list[str]) -> str:
