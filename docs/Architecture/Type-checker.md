@@ -27,6 +27,8 @@ flowchart TD
 
 Declaration order never matters, because every table is built before any body is checked.
 
+An error in the passes up to `_fold_consts` ends the check: the tables would be incomplete. After that each declaration's attributes, the entry point, each function body and then each method body is checked on its own (`_on_its_own`, from a clean state: loop depth, lambda stack, return type), and its first error is recorded; checking goes on with the next one, up to 20 errors (D80, [[MYLA-65]]). A function's errors cannot affect another's, since signatures come from the tables, so this needs no error type. `check` raises the first error found, with the others in its `more`, in that order: attribute and entry-point errors, then free functions, then methods, each in declaration order (the entry file's declarations before the modules it imports). The self-hosted checker collects them the same way (`run_all`, `check_body`, `note`).
+
 ## Inference
 
 Inference is local and bidirectional: `_infer(expr, scope, expected)` returns the expression's type and records it as `expr.resolved_type`. The `expected` type is a hint, not a constraint; the caller compares the result.

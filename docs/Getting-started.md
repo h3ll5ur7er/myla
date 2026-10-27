@@ -24,6 +24,8 @@ type error: cannot assign to an immutable binding (declare it with 'var')
   |     ^^^^^
 ```
 
+A run reports up to 20 errors: after a syntax error the parser goes on at the next statement or declaration, and once the declarations are consistent every function is checked on its own, reporting its first error. The errors are printed in the order they were found, a blank line apart, followed by `error: aborting due to 3 previous errors`.
+
 ## The commands
 
 | Command | What it does |
