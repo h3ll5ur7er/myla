@@ -3,7 +3,7 @@
 The design of `myla` as a project tool like cargo ([[MYLA-64]]): a manifest, dependencies from paths and Git, and the commands `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` in the self-hosted CLI. The decisions behind it are D73 on [[Project/Decisions]]; this page fills in the details.
 
 > [!NOTE]
-> **Status: approved, being built.** The design and the answers to its [questions](#settled-questions) were approved on 2026-10-27. Built so far: the file-system functions ([[MYLA-88]], [[MYLA-98]]), the TOML parser ([[MYLA-89]]) and the project model ([[MYLA-93]]); the loaders ([[MYLA-92]]), the commands ([[MYLA-94]]) and Git dependencies ([[MYLA-95]]) follow.
+> **Status: approved, being built.** The design and the answers to its [questions](#settled-questions) were approved on 2026-10-27. Built so far: the file-system functions ([[MYLA-88]], [[MYLA-98]]), the TOML parser ([[MYLA-89]]), the loaders' `--package` ([[MYLA-92]]) and the project model ([[MYLA-93]]); the commands ([[MYLA-94]]) and Git dependencies ([[MYLA-95]]) follow.
 
 [TOC]
 
@@ -52,7 +52,7 @@ A dependency named `geo`, whose package directory is `G`, behaves as if `G/src/`
 | --- | --- |
 | `import geo` | `G/src/geo.my` (the root module, like `geo/geo.my`) |
 | `from geo.shapes import Circle` | `G/src/shapes.my` |
-| `import geo.shapes.round as round` | `G/src/shapes/round.my` (or the package root `G/src/shapes/round/round.my`) |
+| `import geo.curves.round as round` | `G/src/curves/round.my` (or the package root `G/src/curves/round/round.my`); a file `G/src/curves.my` next to the directory would make `geo.curves` ambiguous, as in a project (D57) |
 
 Inside a library, modules import each other relatively (`from .shapes import Circle`): an absolute `import shapes` would be looked up in the project that is being built, which is the consumer's when the library is a dependency. See [question 2](#settled-questions).
 
@@ -299,7 +299,7 @@ The follow-up tasks in the epic `Project tool`:
 | --- | --- |
 | [[MYLA-88]] | File-system functions: `list_dir`, `make_dir`, `make_dir_all`, `exists`, `is_dir`, `is_file` (done, in review) |
 | [[MYLA-89]] | `std.toml`: the subset above, tested against Python's `tomllib` (done, in review) |
-| [[MYLA-92]] | Both loaders: `--package name=dir`, the resolution order, the shadowing error, package module ids, a project root parameter; parity tests between the toolchains |
+| [[MYLA-92]] | Both loaders: `--package name=dir`, the resolution order, the shadowing error, package module ids, a project root parameter; parity tests between the toolchains (done, in review) |
 | [[MYLA-93]] | The project model in Myla: read and check `myla.toml` and `myla.lock`, resolve path dependencies transitively, the one-version rule, the `--package` list (done, in review: [the project model](#the-project-model)) |
 | [[MYLA-98]] | `std.fs.current_dir` and its primitive `__getcwd`, for finding the manifest and absolute paths (done, in review) |
 | [[MYLA-94]] | The commands `new`, `build`, `run`, `test`, `check` and `clean` in `build/myla`, with path dependencies; [[Getting started]] and [[Language/Modules]] describe projects |
