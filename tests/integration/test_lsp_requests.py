@@ -32,9 +32,10 @@ COMPLETION_SOURCE = ("struct P { x: int }\nenum E { A, B }\nfun get(p: P) -> int
                      "fun main() {\n    let p = P { x: 1 }\n    print(p.x)\n}\n")
 
 
-class LspRequestScenarios:
-    """A subclass names the server (`server_command`) and mixes in
-    unittest.TestCase. Each test runs in a workspace of its own."""
+class LspRequestHelpers:
+    """Starts the server named by `server_command` in a workspace of its own
+    (`self.root`) for each test, with helpers to open documents and send
+    requests. Mixed in with unittest.TestCase."""
 
     def server_command(self) -> list:
         raise NotImplementedError
@@ -81,6 +82,11 @@ class LspRequestScenarios:
             out.setdefault(s["name"], s)
             out.update({k: v for k, v in self.flat(s.get("children", [])).items() if k not in out})
         return out
+
+
+
+class LspRequestScenarios(LspRequestHelpers):
+    """The cases of tests/unit/test_lsp_features.py as requests."""
 
     # -- capabilities --------------------------------------------------------
 

@@ -62,4 +62,12 @@ Evidence:
 
 - `tests/burn/test_lsp.py`, `SemanticTokenScenarios` on both builds: a 13-line sample with 64 expected (text, type, modifiers) triples, UTF-16 offsets after astral characters, no tokens for a file that doesn't lex, and the corpus property test on all 47 example and compiler files. With comment detection switched off, all 47 fail the coverage check.
 
-Next: the MYLA-51 improvements (scopes and imports through the checker, keeping the last good parse, member completion by type, `didChangeWatchedFiles`), then the VS Code extension.
+### Step 4: robustness (MYLA-51, part 1)
+
+- The last good parse: when a document doesn't parse, requests use the outline of the last text that did (remembered at open, after a check that found no lex or parse error in it, and at each request that parsed it); when it doesn't lex, identifier lookups use that text too. Semantic tokens stay on the current text.
+- Completion triggers on `.`; `workspace/didChangeWorkspaceFolders` adds and removes roots (advertised under `workspace.workspaceFolders`); `workspace/didChangeWatchedFiles` is accepted and needs nothing, as workspace files are read at each request.
+- Caches: a document's outline is reused while its text is the same; each workspace file keeps its declarations and an index of its identifiers while its text is the same, so `references` no longer lexes every file every time.
+
+Evidence: `RobustnessScenarios` (5 tests, on both builds): a half-typed string keeps the outline, definition and hover; a parse error keeps the outline and completion; the trigger character; a folder added and removed; a workspace file edited on disk is seen. `references` on `selfhost/checker.my` (workspace: the repository): 365 ms per request before the caches, 65 ms after the first. Full run: 491 unit, 29 integration and 502 burn tests pass; the bootstrap builds the server.
+
+Next: resolution by scope and imports (MYLA-51's main point), member completion by receiver type, fuller signatures, then the VS Code extension.

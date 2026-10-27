@@ -17,8 +17,8 @@ from ...selfhost.diag import Report, type_report
 from ...selfhost.checker import build_checker_decls
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
 from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
-from .symbols import Symbol, SymKind, Range, document_symbols, best_match, lsp_kind, range_eq, is_member_kind, kind_eq
-from .features import Location, identifier_at, identifier_ranges, render, is_member_access, completion_keywords
+from .symbols import Symbol, SymKind, Range, document_symbols, outline, best_match, lsp_kind, range_eq, is_member_kind, kind_eq
+from .features import Location, identifier_at, identifier_ranges, render, is_member_access, completion_keywords, lexes
 from .workspace import Workspace, Entry, new_workspace
 from .semantic import semantic_tokens, token_types, token_modifiers
 
@@ -37,11 +37,15 @@ pub struct Server {
     elsewhere: [str: [str]],       // checked uri -> other uris it published errors for
     shut_down: bool,
     ws: Workspace,                 // the files under the workspace roots
+    good: [str: Good],             // uri -> the last text that parsed, and its outline (MYLA-51)
 }
+
+// The last text of a document that parsed, and its outline.
+struct Good { text: str, symbols: [Symbol] }
 
 pub fun new_server(stdlib: str) -> Server {
     return Server { ch: Channel { input: stdin() }, stdlib: stdlib, docs: [:], dirty: [], urgent: false,
-                    elsewhere: [:], shut_down: false, ws: new_workspace() }
+                    elsewhere: [:], shut_down: false, ws: new_workspace(), good: [:] }
 }
 
 impl Server {
@@ -85,6 +89,7 @@ impl Server {
         } else if method == "textDocument/didOpen" {
             let doc = field_or_null(params, "textDocument")
             self.docs[str_field(doc, "uri")] = str_field(doc, "text")
+            self.remember(str_field(doc, "uri"))
             self.mark(str_field(doc, "uri"), true)
         } else if method == "textDocument/didChange" {
             let uri = str_field(field_or_null(params, "textDocument"), "uri")
@@ -99,9 +104,15 @@ impl Server {
             }
         } else if method == "textDocument/didSave" {
             self.mark(str_field(field_or_null(params, "textDocument"), "uri"), true)
+        } else if method == "workspace/didChangeWorkspaceFolders" {
+            self.change_folders(field_or_null(params, "event"))
+        } else if method == "workspace/didChangeWatchedFiles" {
+            // nothing to do: workspace files are read again on each request, and
+            // their declarations kept only while their text is the same
         } else if method == "textDocument/didClose" {
             let uri = str_field(field_or_null(params, "textDocument"), "uri")
             remove(self.docs, uri)
+            if contains(self.good, uri) { remove(self.good, uri) }
             var still: [str] = []
             for u in self.dirty {
                 if u != uri { push(still, u) }
@@ -174,6 +185,15 @@ impl Server {
                 }
             },
         }
+        // no lex or parse error in the document: its text is a good one
+        var parsed = true
+        match found {
+            Some(r) => {
+                if (r.kind == "lex error" || r.kind == "parse error") && normalize(r.path) == normalize(path) { parsed = false }
+            },
+            None => {},
+        }
+        if parsed { self.remember(uri) }
         // the checked document always gets a (maybe empty) list, which clears it
         var groups: [str: [Json]] = [:]
         groups[uri] = []
@@ -223,18 +243,90 @@ impl Server {
         return out
     }
 
-    // The open document a request is about: its URI, path and text.
-    fun doc_of(self, params: Json) -> Option<Doc> {
+    // The open document a request is about. When its text doesn't parse,
+    // the outline is the last good text's, and when it doesn't lex, so are
+    // the identifiers (MYLA-51: an edit in progress shouldn't switch off the
+    // features; positions after the edit may be off until it parses again).
+    fun doc_of(var self, params: Json) -> Option<Doc> {
         let uri = str_field(field_or_null(params, "textDocument"), "uri")
-        return match get(self.docs, uri) {
-            Some(text) => Some(Doc { uri: uri, path: normalize(uri_path(uri)), text: text }),
-            None => None,
+        let text = match get(self.docs, uri) {
+            Some(t) => t,
+            None => { return None },
+        }
+        let path = normalize(uri_path(uri))
+        match get(self.good, uri) {
+            Some(g) => {
+                if g.text == text { return Some(Doc { uri: uri, path: path, text: text, symbols: g.symbols }) }
+            },
+            None => {},
+        }
+        match outline(text) {
+            Some(symbols) => {
+                self.good[uri] = Good { text: text, symbols: symbols }
+                return Some(Doc { uri: uri, path: path, text: text, symbols: symbols })
+            },
+            None => {},
+        }
+        return match get(self.good, uri) {
+            Some(g) => {
+                var t = text
+                if !lexes(text) { t = g.text }
+                Some(Doc { uri: uri, path: path, text: t, symbols: g.symbols })
+            },
+            None => Some(Doc { uri: uri, path: path, text: text, symbols: [] }),
         }
     }
 
-    fun document_symbol(self, params: Json) -> Json {
+    // Keep the document's current text as its last good one if it parses.
+    fun remember(var self, uri: str) {
+        let text = match get(self.docs, uri) {
+            Some(t) => t,
+            None => { return },
+        }
+        match get(self.good, uri) {
+            Some(g) => {
+                if g.text == text { return }
+            },
+            None => {},
+        }
+        match outline(text) {
+            Some(symbols) => { self.good[uri] = Good { text: text, symbols: symbols } },
+            None => {},
+        }
+    }
+
+    // Add and remove workspace roots.
+    fun change_folders(var self, event: Json) {
+        var removed: [str] = []
+        match field(event, "removed") {
+            Some(Json.Array(fs)) => {
+                for f in fs { push(removed, normalize(uri_path(str_field(f, "uri")))) }
+            },
+            _ => {},
+        }
+        var roots: [str] = []
+        for r in self.ws.roots {
+            var gone = false
+            for x in removed {
+                if x == r { gone = true }
+            }
+            if !gone { push(roots, r) }
+        }
+        match field(event, "added") {
+            Some(Json.Array(fs)) => {
+                for f in fs {
+                    let p = uri_path(str_field(f, "uri"))
+                    if p != "" { push(roots, normalize(p)) }
+                }
+            },
+            _ => {},
+        }
+        self.ws.roots = roots
+    }
+
+    fun document_symbol(var self, params: Json) -> Json {
         return match self.doc_of(params) {
-            Some(d) => symbol_tree(document_symbols(d.text), -1),
+            Some(d) => symbol_tree(d.symbols, -1),
             None => Json.Array([]),
         }
     }
@@ -249,7 +341,7 @@ impl Server {
             Some(n) => n,
             None => { return Json.Null },
         }
-        match best_match(document_symbols(d.text), ident) {
+        match best_match(d.symbols, ident) {
             Some(s) => { return location(d.path, s.selection) },
             None => {},
         }
@@ -269,7 +361,7 @@ impl Server {
             None => { return Json.Null },
         }
         var text = ""
-        match best_match(document_symbols(d.text), ident) {
+        match best_match(d.symbols, ident) {
             Some(s) => { text = render(s.name, s.kind, s.detail) },
             None => {
                 let matches = self.ws.lookup(ident, self.overrides())
@@ -301,7 +393,7 @@ impl Server {
         }
         var decls: [Range] = []
         if !include_decl {
-            for s in document_symbols(d.text) {
+            for s in d.symbols {
                 if s.name == ident { push(decls, s.selection) }
             }
         }
@@ -328,9 +420,11 @@ impl Server {
 
     fun semantic(self, params: Json) -> Json {
         var data: [Json] = []
-        match self.doc_of(params) {
-            Some(d) => {
-                for n in semantic_tokens(d.text) { push(data, Json.Int(n)) }
+        // the current text, even when it doesn't lex (none then): the last
+        // good text's tokens would be in the wrong places
+        match get(self.docs, str_field(field_or_null(params, "textDocument"), "uri")) {
+            Some(text) => {
+                for n in semantic_tokens(text) { push(data, Json.Int(n)) }
             },
             None => {},
         }
@@ -346,7 +440,7 @@ impl Server {
         let pos = position_of(params)
         let member = is_member_access(d.text, pos.line, pos.character)
         var pool: [Entry] = []
-        for s in document_symbols(d.text) {
+        for s in d.symbols {
             push(pool, Entry { name: s.name, kind: s.kind, detail: s.detail, path: d.path, range: s.selection })
         }
         for e in self.ws.all_entries(self.overrides()) { push(pool, e) }
@@ -426,15 +520,17 @@ fun initialize_result() -> Json {
     let sync = Json.Object([("openClose", Json.Bool(true)), ("change", Json.Int(1)),
                             ("save", Json.Object([("includeText", Json.Bool(false))]))])
     let caps = Json.Object([("positionEncoding", Json.Str("utf-16")), ("textDocumentSync", sync),
-                            ("completionProvider", Json.Object([])), ("hoverProvider", Json.Bool(true)),
+                            ("completionProvider", Json.Object([("triggerCharacters", strings(["."]))])), ("hoverProvider", Json.Bool(true)),
                             ("definitionProvider", Json.Bool(true)), ("referencesProvider", Json.Bool(true)),
-                            ("documentSymbolProvider", Json.Bool(true)), ("semanticTokensProvider", semantic_provider())])
+                            ("documentSymbolProvider", Json.Bool(true)), ("semanticTokensProvider", semantic_provider()),
+                            ("workspace", Json.Object([("workspaceFolders", Json.Object([("supported", Json.Bool(true)), ("changeNotifications", Json.Bool(true))]))]))])
     let info = Json.Object([("name", Json.Str("myla")), ("version", Json.Str("0.1"))])
     return Json.Object([("capabilities", caps), ("serverInfo", info)])
 }
 
-// The open document a request is about.
-struct Doc { uri: str, path: str, text: str }
+// The open document a request is about: `text` is what to look up tokens in
+// and `symbols` its outline (both maybe the last good text's, see doc_of).
+struct Doc { uri: str, path: str, text: str, symbols: [Symbol] }
 
 // The workspace roots the client named: its folders, else rootUri, else
 // rootPath.

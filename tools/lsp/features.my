@@ -15,6 +15,14 @@ fun token_range(lines: [str], t: Token) -> Range {
     return Range { start: to_lsp(lines, t.line, t.column), end: to_lsp(lines, t.line, t.column + code_points(t.lexeme)) }
 }
 
+// Whether `source` lexes.
+pub fun lexes(source: str) -> bool {
+    return match lex(source) {
+        Ok(t) => true,
+        Err(d) => false,
+    }
+}
+
 // The identifier covering the 0-based UTF-16 position, if any.
 pub fun identifier_at(source: str, line: int32, character: int32) -> Option<str> {
     let toks = match lex(source) {
@@ -41,6 +49,26 @@ pub fun identifier_ranges(source: str, name: str) -> [Range] {
     let lines = lines_of(source)
     for t in toks {
         if t.kind == TokenKind.IDENT && t.lexeme == name { push(out, token_range(lines, t)) }
+    }
+    return out
+}
+
+// The ranges of every identifier of `source`, by name.
+pub fun identifier_index(source: str) -> [str: [Range]] {
+    var out: [str: [Range]] = [:]
+    let toks = match lex(source) {
+        Ok(t) => t,
+        Err(d) => { return out },
+    }
+    let lines = lines_of(source)
+    for t in toks {
+        if t.kind == TokenKind.IDENT {
+            if !contains(out, t.lexeme) {
+                var empty: [Range] = []
+                out[t.lexeme] = empty
+            }
+            push(out[t.lexeme], token_range(lines, t))
+        }
     }
     return out
 }

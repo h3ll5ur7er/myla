@@ -22,7 +22,7 @@ from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 from ._tools import myla_tool, selfhost_tool
 from tests.integration.test_lsp_diagnostics import HAVE_PYGLS, LspScenarios, _Client, _uri
-from tests.integration.test_lsp_requests import LspRequestScenarios
+from tests.integration.test_lsp_requests import LspRequestHelpers, LspRequestScenarios, rng
 
 
 _TMP = tempfile.TemporaryDirectory()
@@ -134,6 +134,78 @@ class TestMylaLspRequests(LspRequestScenarios, unittest.TestCase):
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestMylaLspRequestsSelfHosted(TestMylaLspRequests):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = _self_hosted_build()
+
+
+class RobustnessScenarios(LspRequestHelpers):
+    """What the Myla server does beyond the Python one (MYLA-51, step 4)."""
+
+    GOOD = "struct P { x: int }\nfun get(p: P) -> int {\n    return p.x\n}\nfun main() {\n    print(get(P { x: 1 }))\n}\n"
+
+    def change(self, uri, text, version=2):
+        self.client.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": version},
+                                                     "contentChanges": [{"text": text}]})
+
+    def test_a_lex_error_keeps_the_last_good_parse(self):
+        uri = self.open(self.GOOD)
+        self.assertEqual([s["name"] for s in self.request("textDocument/documentSymbol", uri)], ["P", "get", "main"])
+        # a half-typed string on a new last line: the file no longer lexes
+        self.change(uri, self.GOOD + "fun later() {\n    let s = \"unfinished\n")
+        self.assertEqual([s["name"] for s in self.request("textDocument/documentSymbol", uri)], ["P", "get", "main"])
+        self.assertEqual(self.at("textDocument/definition", uri, 5, 11), {"uri": uri, "range": rng(1, 4, 7)})
+        hover = self.at("textDocument/hover", uri, 5, 11)
+        self.assertEqual(hover["contents"]["value"], "```myla\nfun get(p: P) -> int\n```")
+
+    def test_a_parse_error_keeps_the_last_good_outline(self):
+        uri = self.open(self.GOOD)
+        self.change(uri, self.GOOD.replace("fun main() {", "fun main( {"))
+        self.assertEqual([s["name"] for s in self.request("textDocument/documentSymbol", uri)], ["P", "get", "main"])
+        labels = {i["label"] for i in self.at("textDocument/completion", uri, 5, 4)["items"]}
+        self.assertIn("get", labels)
+
+    def test_completion_triggers_on_a_dot(self):
+        self.assertEqual(self.capabilities["completionProvider"].get("triggerCharacters"), ["."])
+
+    def test_added_workspace_folders_are_searched(self):
+        self.assertTrue(self.capabilities["workspace"]["workspaceFolders"]["changeNotifications"])
+        other = tempfile.mkdtemp(prefix="myla_lsp_other_")
+        self.addCleanup(__import__("shutil").rmtree, other, True)
+        with open(os.path.join(other, "lib.my"), "w", encoding="utf-8") as fh:
+            fh.write("pub fun helper() -> int {\n    return 1\n}\n")
+        uri = self.open("fun main() {\n    print(helper())\n}\n")
+        self.assertIsNone(self.at("textDocument/definition", uri, 1, 11))
+        self.client.send("workspace/didChangeWorkspaceFolders", {"event": {
+            "added": [{"uri": _uri(other), "name": "other"}], "removed": []}})
+        self.assertEqual(self.at("textDocument/definition", uri, 1, 11),
+                         {"uri": _uri(os.path.join(other, "lib.my")), "range": rng(0, 8, 14)})
+        self.client.send("workspace/didChangeWorkspaceFolders", {"event": {
+            "added": [], "removed": [{"uri": _uri(other), "name": "other"}]}})
+        self.assertIsNone(self.at("textDocument/definition", uri, 1, 11))
+
+    def test_watched_file_changes_are_seen(self):
+        lib = self.write("lib.my", "pub fun helper() -> int {\n    return 1\n}\n")
+        uri = self.open("fun main() {\n    print(helper())\n}\n")
+        self.assertEqual(self.at("textDocument/definition", uri, 1, 11)["range"], rng(0, 8, 14))
+        with open(lib, "w", encoding="utf-8") as fh:
+            fh.write("\n\npub fun helper() -> int {\n    return 2\n}\n")
+        self.client.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": _uri(lib), "type": 2}]})
+        self.assertEqual(self.at("textDocument/definition", uri, 1, 11)["range"], rng(2, 8, 14))
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspRobustness(RobustnessScenarios, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = myla_tool("tools/lsp/main.my", "lsp")
+
+    def server_command(self) -> list[str]:
+        return [self.binary, "--stdlib", default_stdlib_root()]
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspRobustnessSelfHosted(TestMylaLspRobustness):
     @classmethod
     def setUpClass(cls) -> None:
         cls.binary = _self_hosted_build()

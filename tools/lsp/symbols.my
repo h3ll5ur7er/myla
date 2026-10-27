@@ -109,18 +109,25 @@ struct Builder {
 // The symbols of `source`, depth first (a declaration before its members);
 // none when it doesn't lex or parse.
 pub fun document_symbols(source: str) -> [Symbol] {
-    var none: [Symbol] = []
+    return match outline(source) {
+        Some(s) => s,
+        None => [],
+    }
+}
+
+// The symbols of `source`; None when it doesn't lex or parse.
+pub fun outline(source: str) -> Option<[Symbol]> {
     let toks = match lex(source) {
         Ok(t) => t,
-        Err(d) => { return none },
+        Err(d) => { return None },
     }
     let parsed = match parse_source(source, 0) {
         Ok(p) => p,
-        Err(d) => { return none },
+        Err(d) => { return None },
     }
     var b = Builder { lines: lines_of(source), toks: toks, out: [] }
     for d in parsed.program.decls { b.decl(d) }
-    return b.out
+    return Some(b.out)
 }
 
 impl Builder {

@@ -8,12 +8,13 @@ from std.process import run, Output
 from std.fs import read_to_string
 from ...selfhost.loader import normalize
 from .symbols import Symbol, SymKind, Range, document_symbols, priority
-from .features import Location, identifier_ranges
+from .features import Location, identifier_index
 
 // A declaration in some file.
 pub struct Entry { name: str, kind: SymKind, detail: str, path: str, range: Range }
 
-struct Cached { text: str, entries: [Entry] }
+// What a file's text gives, kept while the text stays the same.
+struct Cached { text: str, entries: [Entry], idents: [str: [Range]] }
 
 pub struct Workspace {
     roots: [str],
@@ -130,17 +131,22 @@ impl Workspace {
         }
     }
 
-    fun entries_for(var self, path: str, overrides: [str: str]) -> [Entry] {
+    // The cache entry for `path`, made again when its text changed.
+    fun cached(var self, path: str, overrides: [str: str]) -> Cached {
         let text = self.text_of(path, overrides)
         match get(self.cache, path) {
             Some(c) => {
-                if c.text == text { return c.entries }
+                if c.text == text { return c }
             },
             None => {},
         }
-        let entries = entries_of(path, text)
-        self.cache[path] = Cached { text: text, entries: entries }
-        return entries
+        let c = Cached { text: text, entries: entries_of(path, text), idents: identifier_index(text) }
+        self.cache[path] = c
+        return c
+    }
+
+    fun entries_for(var self, path: str, overrides: [str: str]) -> [Entry] {
+        return self.cached(path, overrides).entries
     }
 
     fun all_entries(var self, overrides: [str: str]) -> [Entry] {
@@ -167,10 +173,15 @@ impl Workspace {
     }
 
     // Every identifier `name` in the workspace's files.
-    fun references(self, name: str, overrides: [str: str]) -> [Location] {
+    fun references(var self, name: str, overrides: [str: str]) -> [Location] {
         var out: [Location] = []
         for path in self.files() {
-            for r in identifier_ranges(self.text_of(path, overrides), name) { push(out, Location { path: path, range: r }) }
+            match get(self.cached(path, overrides).idents, name) {
+                Some(ranges) => {
+                    for r in ranges { push(out, Location { path: path, range: r }) }
+                },
+                None => {},
+            }
         }
         return out
     }
