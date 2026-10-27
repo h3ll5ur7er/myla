@@ -20,6 +20,7 @@ from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
 from .symbols import Symbol, SymKind, Range, document_symbols, best_match, lsp_kind, range_eq, is_member_kind, kind_eq
 from .features import Location, identifier_at, identifier_ranges, render, is_member_access, completion_keywords
 from .workspace import Workspace, Entry, new_workspace
+from .semantic import semantic_tokens, token_types, token_modifiers
 
 const DEBOUNCE_MS: int32 = 400
 
@@ -117,6 +118,8 @@ impl Server {
             self.reply(id, self.references(params))
         } else if method == "textDocument/completion" {
             self.reply(id, self.completion(params))
+        } else if method == "textDocument/semanticTokens/full" {
+            self.reply(id, self.semantic(params))
         } else {
             match id {
                 Some(i) => { send(error_response(i, METHOD_NOT_FOUND, format("unhandled method {}", method))) },
@@ -323,6 +326,17 @@ impl Server {
         return Json.Array(out)
     }
 
+    fun semantic(self, params: Json) -> Json {
+        var data: [Json] = []
+        match self.doc_of(params) {
+            Some(d) => {
+                for n in semantic_tokens(d.text) { push(data, Json.Int(n)) }
+            },
+            None => {},
+        }
+        return Json.Object([("data", Json.Array(data))])
+    }
+
     fun completion(var self, params: Json) -> Json {
         var items: [Json] = []
         let d = match self.doc_of(params) {
@@ -414,7 +428,7 @@ fun initialize_result() -> Json {
     let caps = Json.Object([("positionEncoding", Json.Str("utf-16")), ("textDocumentSync", sync),
                             ("completionProvider", Json.Object([])), ("hoverProvider", Json.Bool(true)),
                             ("definitionProvider", Json.Bool(true)), ("referencesProvider", Json.Bool(true)),
-                            ("documentSymbolProvider", Json.Bool(true))])
+                            ("documentSymbolProvider", Json.Bool(true)), ("semanticTokensProvider", semantic_provider())])
     let info = Json.Object([("name", Json.Str("myla")), ("version", Json.Str("0.1"))])
     return Json.Object([("capabilities", caps), ("serverInfo", info)])
 }
@@ -502,4 +516,15 @@ fun completion_item(e: Entry) -> Json {
 
 fun completion_list(items: [Json]) -> Json {
     return Json.Object([("isIncomplete", Json.Bool(false)), ("items", Json.Array(items))])
+}
+
+fun strings(xs: [str]) -> Json {
+    var out: [Json] = []
+    for x in xs { push(out, Json.Str(x)) }
+    return Json.Array(out)
+}
+
+fun semantic_provider() -> Json {
+    let legend = Json.Object([("tokenTypes", strings(token_types())), ("tokenModifiers", strings(token_modifiers()))])
+    return Json.Object([("legend", legend), ("full", Json.Bool(true))])
 }

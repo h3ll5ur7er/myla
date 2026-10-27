@@ -15,7 +15,7 @@ The self-hosted front end (lexer, parser, checker, loader, diagnostics in [[self
 - [x] Positions in UTF-16 (the rules of [[src/myla/lsp/positions.py]])
 - [x] Document symbols, definition, references, hover, completion: port [[src/myla/lsp/]] and use its tests ([[tests/unit/test_lsp_features.py]], [[tests/integration/test_lsp_diagnostics.py]]) as parity tests against the Myla server
 - [ ] From [[MYLA-51]]: keep the last good parse when the buffer doesn't lex or parse; resolve names through scopes and imports (the checker) instead of by name across the workspace; member completion triggered by `.`; refresh the workspace index on `didChangeWatchedFiles`
-- [ ] Semantic tokens from the compiler's own lexer, so editors highlight exactly what the compiler sees
+- [x] Semantic tokens from the compiler's own lexer, so editors highlight exactly what the compiler sees
 - [ ] The VS Code extension starts the Myla server ([[MYLA-53]]), and registers its `**/*.my` file watcher again once the server handles `didChangeWatchedFiles` (removed in [[MYLA-53]] because the Python server ignores it)
 
 ## Progress
@@ -51,4 +51,15 @@ Evidence:
 - Speed on `selfhost/checker.my`, workspace the whole repository (Python / Myla): documentSymbol 487 / 134 ms, definition 664 / 189, hover 480 / 147, references 994 / 160, completion 1,974 / 826 ms, the same number of results each.
 - Full run: 491 unit, 29 integration and 484 burn tests pass; the bootstrap reaches its fixed point (unchanged, 7,794,199 bytes) and builds the server.
 
-Next: semantic tokens from the compiler's lexer, the MYLA-51 improvements (scopes and imports through the checker, keeping the last good parse, member completion by type, `didChangeWatchedFiles`), then the VS Code extension.
+### Step 3: semantic tokens
+
+D68 on [[Project/Decisions]]; described on [[Architecture/Editor-tooling]].
+
+- `tools/lsp/semantic.my` answers `textDocument/semanticTokens/full`: token kinds from the compiler's lexer; strings and f-strings (split around their holes) measured in the source, since string tokens carry decoded text and the f-string lowering adds tokens that aren't in the source; comments found between tokens (block comments one span per line); identifiers classified from the outline and their neighbours.
+- Profiling with callgrind took a request on `selfhost/checker.my` from about 500 ms to about 280 ms (token kinds by one `match` instead of comparison loops, an ASCII fast path for offsets). What remains is mostly the compiler's lexer and parser, a third of it in the derived `==` on `TokenKind`, a chain of 70 comparisons: filed as [[MYLA-87]].
+
+Evidence:
+
+- `tests/burn/test_lsp.py`, `SemanticTokenScenarios` on both builds: a 13-line sample with 64 expected (text, type, modifiers) triples, UTF-16 offsets after astral characters, no tokens for a file that doesn't lex, and the corpus property test on all 47 example and compiler files. With comment detection switched off, all 47 fail the coverage check.
+
+Next: the MYLA-51 improvements (scopes and imports through the checker, keeping the last good parse, member completion by type, `didChangeWatchedFiles`), then the VS Code extension.

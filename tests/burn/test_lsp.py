@@ -139,6 +139,154 @@ class TestMylaLspRequestsSelfHosted(TestMylaLspRequests):
         cls.binary = _self_hosted_build()
 
 
+LEGEND_TYPES = ["namespace", "type", "enum", "interface", "struct", "typeParameter", "parameter", "variable",
+                "property", "enumMember", "function", "method", "keyword", "comment", "string", "number",
+                "operator", "decorator"]
+
+SEMANTIC_SOURCE = (
+    "from std.io import println   // a comment\n"
+    "/* a block\n"
+    "   comment */\n"
+    "struct Point { x: int, y: int }\n"
+    "enum Shape { Dot, Box(int) }\n"
+    "const MAX: int = 255u8 as int\n"
+    "#test(1)[2]\n"
+    "fun twice(n: int) -> int {\n"
+    "    let p = Point { x: n, y: 2 }\n"
+    "    let s = Shape.Box(p.x)\n"
+    "    println(f\"😀 {p.y} of {MAX}\")\n"
+    "    return p.len() + 'a' as int\n"
+    "}\n"
+)
+
+
+def decode_tokens(data: list, lines: list) -> list:
+    """(line, start, length, type, modifiers, text) for LSP semantic tokens
+    (UTF-16 offsets; `text` sliced from the line by code points, the lines
+    here being in the BMP except where a test says otherwise)."""
+    out = []
+    line = start = 0
+    for i in range(0, len(data), 5):
+        dl, ds, length, typ, mods = data[i:i + 5]
+        line += dl
+        start = start + ds if dl == 0 else ds
+        units = lines[line].encode("utf-16-le")
+        text = units[2 * start:2 * (start + length)].decode("utf-16-le")
+        mod_names = [m for b, m in enumerate(["declaration", "readonly"]) if mods & (1 << b)]
+        out.append((line, start, length, LEGEND_TYPES[typ], mod_names, text))
+    return out
+
+
+class SemanticTokenScenarios:
+    """Semantic tokens (step 3): a subclass names the server binary."""
+
+    def semantic(self, text: str, name: str = "sem.my") -> list:
+        root = tempfile.mkdtemp(prefix="myla_sem_")
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+        path = os.path.join(root, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        c = _Client([self.binary, "--stdlib", default_stdlib_root()])
+        self.addCleanup(c.close)
+        rid = c.send("initialize", {"processId": None, "rootUri": _uri(root), "capabilities": {}}, request=True)
+        caps = c.response(rid)["result"]["capabilities"]
+        self.assertEqual(caps["semanticTokensProvider"]["legend"]["tokenTypes"], LEGEND_TYPES)
+        self.assertEqual(caps["semanticTokensProvider"]["legend"]["tokenModifiers"], ["declaration", "readonly"])
+        c.send("textDocument/didOpen", {"textDocument": {"uri": _uri(path), "languageId": "myla", "version": 1,
+                                                          "text": text}})
+        rid = c.send("textDocument/semanticTokens/full", {"textDocument": {"uri": _uri(path)}}, request=True)
+        return decode_tokens(c.response(rid)["result"]["data"], text.splitlines())
+
+    def kinds(self, tokens: list) -> list:
+        return [(t[5], t[3], t[4]) for t in tokens]
+
+    def test_classification(self) -> None:
+        got = self.kinds(self.semantic(SEMANTIC_SOURCE))
+        expect = [
+            ("from", "keyword", []), ("std", "namespace", []), ("io", "namespace", []),
+            ("import", "keyword", []), ("println", "function", []), ("// a comment", "comment", []),
+            ("/* a block", "comment", []), ("   comment */", "comment", []),
+            ("struct", "keyword", []), ("Point", "struct", ["declaration"]), ("x", "property", ["declaration"]),
+            ("int", "type", []), ("y", "property", ["declaration"]), ("int", "type", []),
+            ("enum", "keyword", []), ("Shape", "enum", ["declaration"]), ("Dot", "enumMember", ["declaration"]),
+            ("Box", "enumMember", ["declaration"]), ("int", "type", []),
+            ("const", "keyword", []), ("MAX", "variable", ["declaration", "readonly"]), ("int", "type", []),
+            ("=", "operator", []), ("255u8", "number", []), ("as", "keyword", []), ("int", "type", []),
+            ("test", "decorator", []), ("1", "number", []), ("2", "number", []),
+            ("fun", "keyword", []), ("twice", "function", ["declaration"]), ("n", "variable", []),
+            ("int", "type", []), ("->", "operator", []), ("int", "type", []),
+            ("let", "keyword", []), ("p", "variable", []), ("=", "operator", []), ("Point", "struct", []),
+            ("x", "property", []), ("n", "variable", []), ("y", "property", []), ("2", "number", []),
+            ("let", "keyword", []), ("s", "variable", []), ("=", "operator", []), ("Shape", "enum", []),
+            ("Box", "enumMember", []), ("p", "variable", []), ("x", "property", []),
+            ("println", "function", []), ('f"😀 ', "string", []), ("p", "variable", []), ("y", "property", []),
+            (" of ", "string", []), ("MAX", "variable", ["readonly"]), ('"', "string", []),
+            ("return", "keyword", []), ("p", "variable", []), ("len", "method", []), ("+", "operator", []),
+            ("'a'", "string", []), ("as", "keyword", []), ("int", "type", []),
+        ]
+        self.assertEqual(got, expect)
+
+    def test_utf16_offsets(self) -> None:
+        tokens = self.semantic('fun f() {\n    let s = "😀😀"; let t = s\n}\n')
+        t = [x for x in tokens if x[5] == "t"][0]
+        self.assertEqual((t[0], t[1], t[2]), (1, 24, 1))   # code point 22, after two astral characters: +2
+
+    def test_a_lex_error_gives_no_tokens(self) -> None:
+        self.assertEqual(self.semantic('fun f() {\n    let s = "open\n}\n'), [])
+
+    def test_the_corpus_is_covered(self) -> None:
+        import glob, re
+        keywords = set(open(os.path.join(_REPO, "selfhost", "tokens.my")).read().split("keywords() -> [str] {")[1]
+                       .split("]")[0].replace('"', "").replace("return [", "").replace(",", " ").split())
+        files = sorted(glob.glob(os.path.join(_REPO, "examples", "*.my")) + glob.glob(os.path.join(_REPO, "selfhost", "*.my")))
+        for path in files:
+            with self.subTest(file=os.path.relpath(path, _REPO)):
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+                lines = text.splitlines()
+                tokens = self.semantic(text, os.path.basename(path))
+                self.assertTrue(tokens)
+                covered = [bytearray(len(l.encode("utf-16-le")) // 2) for l in lines]
+                last = (-1, -1)
+                for line, start, length, typ, mods, tok in tokens:
+                    self.assertGreater((line, start), last, "tokens out of order")
+                    self.assertGreater(length, 0)
+                    self.assertLessEqual(start + length, len(covered[line]), "past the end of the line")
+                    self.assertFalse(any(covered[line][start:start + length]), f"overlap at {line}:{start}")
+                    covered[line][start:start + length] = b"\x01" * length
+                    last = (line, start + length - 1)
+                    if typ == "keyword":
+                        self.assertIn(tok, keywords | {"_"})
+                    elif typ == "number":
+                        self.assertRegex(tok, r"^[0-9]")
+                    elif typ == "comment":
+                        self.assertNotEqual(tok.strip(), "")
+                    elif typ in ("variable", "function", "method", "property", "type", "struct", "enum",
+                                 "enumMember", "interface", "namespace", "decorator"):
+                        self.assertRegex(tok, r"^[A-Za-z_][A-Za-z0-9_]*$")
+                # every character that isn't white space or punctuation has a token
+                for n, line in enumerate(lines):
+                    units = line.encode("utf-16-le")
+                    for k in range(len(covered[n])):
+                        ch = units[2 * k:2 * k + 2].decode("utf-16-le", "replace")
+                        if not covered[n][k] and not ch.isspace() and ch not in "()[]{},.:;#\ufffd":
+                            self.fail(f"line {n + 1} column {k + 1}: {ch!r} has no token: {line!r}")
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestSemanticTokens(SemanticTokenScenarios, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = myla_tool("tools/lsp/main.my", "lsp")
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestSemanticTokensSelfHosted(TestSemanticTokens):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = _self_hosted_build()
+
+
 class TestOwnTests(unittest.TestCase):
     def test_the_server_s_own_tests_pass(self) -> None:
         # server.my imports every other module of tools/lsp (and std.json, std.num)
