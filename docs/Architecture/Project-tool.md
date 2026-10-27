@@ -3,7 +3,7 @@
 The design of `myla` as a project tool like cargo ([[MYLA-64]]): a manifest, dependencies from paths and Git, and the commands `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` in the self-hosted CLI. The decisions behind it are D73 on [[Project/Decisions]]; this page fills in the details.
 
 > [!NOTE]
-> **Status: built.** The design and the answers to its [questions](#settled-questions) were approved on 2026-10-27 and built the same day: the file-system functions ([[MYLA-88]], [[MYLA-98]]), the TOML parser ([[MYLA-89]]), the loaders' `--package` ([[MYLA-92]]), the project model ([[MYLA-93]]), the commands ([[MYLA-94]]) and Git dependencies with `myla fetch` ([[MYLA-95]]). Still open: the language server reading projects ([[MYLA-97]]).
+> **Status: built.** The design and the answers to its [questions](#settled-questions) were approved on 2026-10-27 and built the same day: the file-system functions ([[MYLA-88]], [[MYLA-98]]), the TOML parser ([[MYLA-89]]), the loaders' `--package` ([[MYLA-92]]), the project model ([[MYLA-93]]), the commands ([[MYLA-94]]) and Git dependencies with `myla fetch` ([[MYLA-95]]), and the language server reading projects ([[MYLA-97]], D81).
 
 [TOC]
 
@@ -305,6 +305,6 @@ The follow-up tasks in the epic `Project tool`:
 | [[MYLA-94]] | The commands `new`, `build`, `run`, `test`, `check` and `clean` in `build/myla`, with path dependencies; [[Getting started]] and [[Language/Modules]] describe projects (done, in review) |
 | [[MYLA-95]] | Git dependencies: `myla fetch`, `.myla/deps/`, the lock file (done, in review) |
 | [[MYLA-96]] | Not needed for now (question 4 was settled for `rm -rf` and `mv` through `std.process`): `std.fs` primitives to remove and rename files and directories |
-| [[MYLA-97]] | The language server: index files with `list_dir`, and find packages so definitions in dependencies resolve |
+| [[MYLA-97]] | The language server: index files with `list_dir`, and find packages so definitions in dependencies resolve (done, in review: a document in a project is checked and resolved with its packages and `src/` as the root, Git dependencies as far as they are checked out, manifest errors on `myla.toml`; [[Architecture/Editor-tooling]], D81) |
 
 [[MYLA-64]] is done when a fresh `myla new` project with one path dependency builds, runs and tests ([[MYLA-94]]).
