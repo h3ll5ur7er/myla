@@ -2,13 +2,15 @@
 //
 // Loads and links a program's modules, type-checks it, then interprets it,
 // producing the same stdout/exit status as `myla run` (the Python interpreter)
-// for differential burn testing.
+// for differential burn testing. `--package name=dir` adds a dependency, as
+// in `myla run` (MYLA-92); `--root dir` sets the project root (default: the
+// file's directory), as the project tool does for files under `src/`.
 
 from std.process import args, exit
 from std.io import eprintln
 from .checker import build_checker_decls
 from .interp import new_interp, RtError
-from .loader import load_program, Loaded, file_of
+from .loader import load_program_opts, load_options, parse_package_flag, Loaded, file_of
 from .diag import render, type_report, Report
 
 fun run_program(prog: Loaded, file: str) -> int32 {
@@ -34,14 +36,30 @@ fun runtime_report(r: RtError, prog: Loaded) -> Report {
 fun main() {
     let argv = args()
     if len(argv) < 2 {
-        eprintln("usage: interp_main <file.my> [stdlib_root]")
+        eprintln("usage: interp_main <file.my> [stdlib_root] [--package name=dir]... [--root dir]")
         exit(2)
     }
-    var stdlib = ""
-    if len(argv) >= 3 {
-        stdlib = argv[2]
+    var opts = load_options("")
+    var j = 2
+    while j < len(argv) {
+        if argv[j] == "--package" && j + 1 < len(argv) {
+            match parse_package_flag(argv[j + 1]) {
+                Ok(pkg) => { push(opts.packages, pkg) },
+                Err(r) => {
+                    eprintln(render(r))
+                    exit(1)
+                },
+            }
+            j = j + 1
+        } else if argv[j] == "--root" && j + 1 < len(argv) {
+            opts.root = argv[j + 1]
+            j = j + 1
+        } else {
+            opts.stdlib_root = argv[j]
+        }
+        j = j + 1
     }
-    match load_program(argv[1], stdlib) {
+    match load_program_opts(argv[1], opts) {
         Ok(prog) => {
             let code = run_program(prog, argv[1])
             exit(code)

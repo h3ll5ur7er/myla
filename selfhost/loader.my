@@ -14,11 +14,21 @@
 //      an `alias.member` chain folds into the qualified name; local variables
 //      and type parameters shadow module names.
 //   6. Merge: every module's declarations (imports removed), in load order.
+//
+// Entry points: `load_program(entry, stdlib_root)` for a single program;
+// `load_program_packages(entry, stdlib_root, packages, root)` with the
+// build's dependencies as (name, directory) pairs, the `--package name=dir`
+// flags (MYLA-92), and a project root ("" for the entry's directory); and
+// `load_program_opts(entry, opts)` with every option (`LoadOptions`, from
+// `load_options(stdlib_root)`), editor buffers included. An import without
+// dots resolves `std.*` in the stdlib root, a package's name in its
+// directory as if that were `<name>/` in the project root, anything else in
+// the project root and then the stdlib root.
 
-from std.fs import read_to_string
+from std.fs import read_to_string, exists, is_dir
 from .parser import parse_source
 from .diag import Report, report
-from .tokens import SrcSpan, no_span
+from .tokens import SrcSpan, no_span, keywords
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
 from .ast import MapEntry, Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock, Attribute
@@ -55,9 +65,22 @@ pub fun file_of(prog: Loaded, id: int32) -> str {
     return path
 }
 
+// How to load a program: the stdlib root ("" for none); the packages, each a
+// name and its directory (the project tool passes a package's `src/`); the
+// project root, the base of imports without dots ("" for the entry file's
+// directory, D57); and texts read instead of files (an editor's unsaved
+// buffers, path -> text).
+pub struct LoadOptions { stdlib_root: str, packages: [(str, str)], root: str, overrides: [str: str] }
+
+// The options for a program without packages, rooted at its entry's directory.
+pub fun load_options(stdlib_root: str) -> LoadOptions {
+    return LoadOptions { stdlib_root: stdlib_root, packages: [], root: "", overrides: [:] }
+}
+
 struct Loader {
     stdlib_root: str,
     project_root: str,
+    packages: [(str, str)],    // name, normalized directory
     entry: str,
     modules: [Module],
     next_id: int32,
@@ -247,6 +270,21 @@ impl Loader {
                 None => {},
             }
         }
+        // a package's module: as if its directory were `<name>/` in the
+        // project root (no fetch paths in names); the innermost one wins
+        var best: [str] = []
+        for pkg in self.packages {
+            match rel_under(path, pkg.1) {
+                Some(rest) => {
+                    if len(best) == 0 || len(rest) + 1 < len(best) {
+                        best = [pkg.0]
+                        for r in rest { push(best, r) }
+                    }
+                },
+                None => {},
+            }
+        }
+        if len(best) > 0 { return module_tag(best) }
         match rel_under(path, self.project_root) {
             Some(rest) => { return module_tag(rest) },
             None => {},
@@ -272,14 +310,31 @@ impl Loader {
         return module_tag(parts)
     }
 
+    // The directory of package `name`, if there is one.
+    fun package_dir(self, name: str) -> Option<str> {
+        for pkg in self.packages {
+            if pkg.0 == name { return Some(pkg.1) }
+        }
+        return None
+    }
+
+    fun exists(self, path: str) -> bool {
+        return contains(self.overrides, path) || exists(path)
+    }
+
     // The module file for `p` imported from `importer`: `x.my`, or the package
     // root `x/x.my`. No dots: the project root, then the stdlib root (`std.*`
-    // only the stdlib root); one dot: the importer's directory; more dots
-    // climb one level each.
+    // only the stdlib root, a package's name only its directory); one dot:
+    // the importer's directory; more dots climb one level each.
     fun resolve(self, importer: str, p: ImportPath) -> Result<str, Report> {
         var bases: [str] = []
         if p.dots == 0 {
-            if p.segments[0] != "std" { push(bases, self.project_root) }
+            let first = p.segments[0]
+            match self.package_dir(first) {
+                Some(dir) => { return self.resolve_in_package(importer, p, dir) },
+                None => {},
+            }
+            if first != "std" { push(bases, self.project_root) }
             if self.stdlib_root != "" { push(bases, self.stdlib_root) }
         } else {
             var base = dirname(importer)
@@ -291,27 +346,58 @@ impl Loader {
             push(bases, base)
         }
         for base in bases {
-            var dir = base
-            var i = 0
-            while i < len(p.segments) - 1 {
-                dir = join_path(dir, p.segments[i])
-                i = i + 1
+            match self.descend(importer, p, base, 0)? {
+                Some(file) => { return Ok(file) },
+                None => {},
             }
-            let last = p.segments[len(p.segments) - 1]
-            let file = join_path(dir, last + ".my")
-            let pkg = join_path(join_path(dir, last), last + ".my")
-            let has_file = self.readable(file)
-            let has_pkg = self.readable(pkg)
-            if has_file && has_pkg {
-                return Err(at(importer, p.line, p.col, p.sp, format("ambiguous import '{}': both '{}.my' and a package '{}/' exist in {}", dotted(p), last, last, dir)))
-            }
-            if has_file { return Ok(file) }
-            if has_pkg { return Ok(pkg) }
         }
         if p.dots == 0 && p.segments[0] == "std" && self.stdlib_root == "" {
             return Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}': no standard library root was given", dotted(p))))
         }
         return Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}'", dotted(p))))
+    }
+
+    // `p` in the package whose directory is `dir`, as if that were the
+    // directory `<name>/` in the project root, which therefore may not have
+    // one (MYLA-92): `name` is `dir/name.my`, `name.b.c` is `dir/b/c.my` or
+    // `dir/b/c/c.my`.
+    fun resolve_in_package(self, importer: str, p: ImportPath, dir: str) -> Result<str, Report> {
+        let name = p.segments[0]
+        if self.exists(join_path(self.project_root, name)) || self.exists(join_path(self.project_root, name + ".my")) {
+            return Err(at(importer, p.line, p.col, p.sp, format("'{}' is a dependency and cannot be shadowed by a project file or directory", name)))
+        }
+        if len(p.segments) == 1 {
+            let root = join_path(dir, name + ".my")
+            if self.readable(root) { return Ok(root) }
+            return Err(at(importer, p.line, p.col, p.sp, format("package '{}' has no root module '{}.my' in {}", name, name, dir)))
+        }
+        return match self.descend(importer, p, dir, 1)? {
+            Some(file) => Ok(file),
+            None => Err(at(importer, p.line, p.col, p.sp, format("cannot resolve import '{}'", dotted(p)))),
+        }
+    }
+
+    // The module `base/seg/…/last` for the segments of `p` from index
+    // `first`: the file `last.my` or the package root `last/last.my`, None if
+    // neither exists; both is an error.
+    fun descend(self, importer: str, p: ImportPath, base: str, first: int32) -> Result<Option<str>, Report> {
+        var dir = base
+        var i = first
+        while i < len(p.segments) - 1 {
+            dir = join_path(dir, p.segments[i])
+            i = i + 1
+        }
+        let last = p.segments[len(p.segments) - 1]
+        let file = join_path(dir, last + ".my")
+        let pkg = join_path(join_path(dir, last), last + ".my")
+        let has_file = self.readable(file)
+        let has_pkg = self.readable(pkg)
+        if has_file && has_pkg {
+            return Err(at(importer, p.line, p.col, p.sp, format("ambiguous import '{}': both '{}.my' and a package '{}/' exist in {}", dotted(p), last, last, dir)))
+        }
+        if has_file { return Ok(Some(file)) }
+        if has_pkg { return Ok(Some(pkg)) }
+        return Ok(None)
     }
 
     // Load `path` and its imports (depth first) once each; its module index.
@@ -1021,21 +1107,103 @@ pub fun default_stdlib_root(argv0: str) -> str {
     return normalize(join_path(dirname(argv0), "../src/myla"))
 }
 
+// A module error without a position (the package list's).
+fun list_error(msg: str) -> Report {
+    return Report { kind: "module error", msg: msg, path: "", line: 0, col: 0, sp: no_span() }
+}
+
+// `name=dir`, the value of a `--package` flag, as a (name, dir) pair for
+// `LoadOptions.packages`; the name ends at the first `=`. Loading checks the
+// pair.
+#test("geo=a=b")[Ok(("geo", "a=b"))]
+pub fun parse_package_flag(text: str) -> Result<(str, str), Report> {
+    var i = 0
+    while i < len(text) {
+        if text[i] == '=' {
+            var name = StringBuilder()
+            append(name, text, 0, i)
+            var dir = StringBuilder()
+            append(dir, text, i + 1, len(text))
+            return Ok((build(name), build(dir)))
+        }
+        i = i + 1
+    }
+    return Err(list_error(format("malformed --package '{}': expected name=dir", text)))
+}
+
+// Whether `name` can name a package: an ASCII letter, then ASCII letters,
+// digits and `_`, and not a keyword (the manifest's rule).
+#test("geo_2")[true]
+#test("2geo")[false]
+#test("")[false]
+#test("match")[false]
+fun valid_package_name(name: str) -> bool {
+    if len(name) == 0 || has(keywords(), name) { return false }
+    var i = 0
+    while i < len(name) {
+        let c = name[i]
+        let letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        if !letter && (i == 0 || !((c >= '0' && c <= '9') || c == '_')) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// The packages with normalized directories, or the first error in the list:
+// a package named `std`, a name that can't start an import, a name given
+// twice, a missing directory.
+fun check_packages(packages: [(str, str)]) -> Result<[(str, str)], Report> {
+    var out: [(str, str)] = []
+    var names: [str] = []
+    for pkg in packages {
+        let (name, dir) = pkg
+        if name == "std" { return Err(list_error("a package cannot be named 'std': it is the standard library")) }
+        if !valid_package_name(name) { return Err(list_error(format("invalid package name '{}'", name))) }
+        if has(names, name) { return Err(list_error(format("package '{}' is given twice", name))) }
+        if dir == "" { return Err(list_error(format("package '{}' has no directory", name))) }
+        if !is_dir(dir) { return Err(list_error(format("package '{}': '{}' is not a directory", name, dir))) }
+        push(names, name)
+        push(out, (name, normalize(dir)))
+    }
+    return Ok(out)
+}
+
 // Load and link the program rooted at `entry`; `std.*` imports resolve under
 // `stdlib_root` ("" for none).
 pub fun load_program(entry: str, stdlib_root: str) -> Result<Loaded, Report> {
-    return load_program_with(entry, stdlib_root, [:])
+    return load_program_opts(entry, load_options(stdlib_root))
 }
 
 // The same, reading the files in `overrides` (path -> text) from there
 // instead: an editor's unsaved buffers (MYLA-80).
 pub fun load_program_with(entry: str, stdlib_root: str, overrides: [str: str]) -> Result<Loaded, Report> {
+    var opts = load_options(stdlib_root)
+    opts.overrides = overrides
+    return load_program_opts(entry, opts)
+}
+
+// The program rooted at `entry` with the build's dependencies, each a name
+// and its directory, and the project root `root` ("" for the entry's
+// directory): what the project tool loads for `src/main.my`, and with root
+// `src` for every file under `src/` (MYLA-92).
+pub fun load_program_packages(entry: str, stdlib_root: str, packages: [(str, str)], root: str) -> Result<Loaded, Report> {
+    var opts = load_options(stdlib_root)
+    opts.packages = packages
+    opts.root = root
+    return load_program_opts(entry, opts)
+}
+
+// The program rooted at `entry`, loaded as `opts` says.
+pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Report> {
     let e = normalize(entry)
     var stdlib = ""
-    if stdlib_root != "" { stdlib = normalize(stdlib_root) }
+    if opts.stdlib_root != "" { stdlib = normalize(opts.stdlib_root) }
+    var project_root = dirname(e)
+    if opts.root != "" { project_root = normalize(opts.root) }
+    let packages = check_packages(opts.packages)?
     var normalized: [str: str] = [:]
-    for p in keys(overrides) { normalized[normalize(p)] = overrides[p] }
-    var ld = Loader { stdlib_root: stdlib, project_root: dirname(e), entry: e, modules: [], next_id: 0, spans: [], overrides: normalized }
+    for p in keys(opts.overrides) { normalized[normalize(p)] = opts.overrides[p] }
+    var ld = Loader { stdlib_root: stdlib, project_root: project_root, packages: packages, entry: e, modules: [], next_id: 0, spans: [], overrides: normalized }
     ld.load(e)?
     ld.check_ids()?
     ld.build_exports()
