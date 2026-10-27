@@ -6,7 +6,7 @@ status: backlog
 priority: medium
 labels: [loader, selfhost, tooling]
 ---
-Step 3 of the project tool ([[MYLA-64]]): the loaders find dependencies through a list of packages, so the compilers never read a manifest (D73 (6)). The rules are on [[Architecture/Project-tool]] (section "The loaders"); start once its open questions 2 and 3 are answered.
+Step 3 of the project tool ([[MYLA-64]]): the loaders find dependencies through a list of packages, so the compilers never read a manifest (D73 (6)). The rules are on [[Architecture/Project-tool]] (section "The loaders"); its questions 2 and 3 were settled as proposed.
 
 - [ ] Python loader ([[src/myla/loader.py]]): `link(…, packages=…)`; resolution project, packages, standard library; a package's path looked up as if its directory were `<name>/` in the project root
 - [ ] The shadowing error: `'geo' is a dependency and cannot be shadowed by a project file or directory`; errors for a package named `std`, a name given twice, a malformed flag
