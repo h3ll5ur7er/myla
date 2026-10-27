@@ -3,7 +3,7 @@
 The design of `myla` as a project tool like cargo ([[MYLA-64]]): a manifest, dependencies from paths and Git, and the commands `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` in the self-hosted CLI. The decisions behind it are D73 on [[Project/Decisions]]; this page fills in the details.
 
 > [!IMPORTANT]
-> **Status: proposed, waiting for approval.** Nothing on this page is built yet except the file-system functions it needs ([[MYLA-88]]). The [open questions](#open-questions) need an answer before the loaders change ([[MYLA-92]]).
+> **Status: proposed, waiting for approval.** Nothing on this page is built yet except the file-system functions ([[MYLA-88]]) and the TOML parser ([[MYLA-89]]) it needs. The [open questions](#open-questions) need an answer before the loaders change ([[MYLA-92]]).
 
 [TOC]
 
@@ -245,7 +245,7 @@ Proposed as follow-up tasks in the epic `Project tool`:
 | Task | Step |
 | --- | --- |
 | [[MYLA-88]] | File-system functions: `list_dir`, `make_dir`, `make_dir_all`, `exists`, `is_dir`, `is_file` (done, in review) |
-| [[MYLA-89]] | `std.toml`: the subset above, tested against Python's `tomllib` |
+| [[MYLA-89]] | `std.toml`: the subset above, tested against Python's `tomllib` (done, in review) |
 | [[MYLA-92]] | Both loaders: `--package name=dir`, the resolution order, the shadowing error, package module ids, a project root parameter; parity tests between the toolchains |
 | [[MYLA-93]] | The project model in Myla: read and check `myla.toml` and `myla.lock`, resolve path dependencies transitively, the one-version rule, the `--package` list |
 | [[MYLA-94]] | The commands `new`, `build`, `run`, `test`, `check` and `clean` in `build/myla`, with path dependencies; [[Getting started]] and [[Language/Modules]] describe projects |

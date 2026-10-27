@@ -642,6 +642,7 @@ impl Interp {
             },
             StmtKind.DestructDecl(kind, binding, ty, init) => {
                 let v = self.eval(init)
+                if self.stop() { return }           // `?` returned early: nothing to bind
                 self.bind_destructure(bind_elems(binding), v)
             },
             StmtKind.Assign(target, value) => {
@@ -1886,21 +1887,20 @@ fun scmp(a: str, b: str) -> int32 {
     return 0
 }
 
+// `a / b` truncated toward zero; the int64 minimum divided by -1 wraps to
+// itself instead of trapping (MYLA-5).
+#test(-7, 2)[-3]
+#test(-9223372036854775807 - 1, 10)[-922337203685477580]
+#test(-9223372036854775807 - 1, -1)[-9223372036854775807 - 1]
 fun idiv(a: int64, b: int64) -> int64 {
     if b == 0 { return 0 }
-    var q = iabs(a) / iabs(b)
-    if (a < 0) != (b < 0) { return -q }
-    return q
+    if b == -1 { return -a }
+    return a / b
 }
 
 fun imod(a: int64, b: int64) -> int64 {
     if b == 0 { return 0 }
     return a - idiv(a, b) * b
-}
-
-fun iabs(a: int64) -> int64 {
-    if a < 0 { return -a }
-    return a
 }
 
 fun width_of(rt: Option<Type>) -> int32 {

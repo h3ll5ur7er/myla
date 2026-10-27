@@ -1,0 +1,575 @@
+// std.toml — the TOML subset of `myla.toml` and `myla.lock` (MYLA-89, D73).
+//
+// `parse` reads a document into a `Toml` table. The subset, specified on the
+// wiki page Architecture/Project-tool, is TOML 1.0 without floats, dates and
+// times, hexadecimal, octal and binary integers, multi-line strings, dotted
+// keys and arrays of tables; arrays hold strings only. Every document it
+// accepts means the same in TOML: the tests compare it with Python's
+// `tomllib`. A construct outside the subset is an error that names it.
+
+// A TOML value. A table keeps its keys in the order they were defined (a
+// table that a header like `[a.b]` creates on the way counts from there).
+pub enum Toml {
+    Str(str),
+    Int(int64),
+    Bool(bool),
+    Array([Toml]),
+    Table([(str, Toml)]),
+}
+
+// Why a text isn't in the subset, and where: line and column count from 1,
+// the column in characters.
+pub struct TomlError {
+    msg: str,
+    line: int32,
+    col: int32,
+}
+
+// The value of `key` in the table `t`; None if `t` isn't a table or has no
+// such key.
+pub fun field(t: Toml, key: str) -> Option<Toml> {
+    match t {
+        Toml.Table(members) => {
+            for m in members {
+                if m.0 == key { return Some(m.1) }
+            }
+        },
+        _ => {},
+    }
+    return None
+}
+
+// The table that `text` holds.
+pub fun parse(text: str) -> Result<Toml, TomlError> {
+    var p = Parser { s: text, i: 0, root: Toml.Table([]), kinds: [:], table: [] }
+    p.document()?
+    return Ok(p.root)
+}
+
+// --- Parsing ------------------------------------------------------------------
+
+// What a key path names, so far: a table a header opened, a table a header
+// created on the way to another, or something closed (a value or an inline
+// table, which nothing may add to).
+const OPENED: int32 = 1
+const IMPLIED: int32 = 2
+const CLOSED: int32 = 3
+
+struct Parser {
+    s: str,
+    i: int32,
+    root: Toml,
+    // what each key path names (see `path_key`)
+    kinds: [str: int32],
+    // the path of the table that key/value lines go to
+    table: [str],
+}
+
+// One string for a key path, unambiguous whatever the keys hold.
+fun path_key(path: [str]) -> str {
+    var sb = StringBuilder()
+    for k in path {
+        append(sb, format("{}:", len(k)))
+        append(sb, k)
+    }
+    return build(sb)
+}
+
+fun with_key(path: [str], key: str) -> [str] {
+    var out = path
+    push(out, key)
+    return out
+}
+
+// A key path as TOML writes it, for messages: keys that aren't bare quoted,
+// with '"', '\' and control characters escaped, so a message is one line.
+fun dotted(path: [str]) -> str {
+    var sb = StringBuilder()
+    for k in path {
+        if len(sb) > 0 { append_byte(sb, '.') }
+        if is_bare_key(k) {
+            append(sb, k)
+        } else {
+            append_byte(sb, '"')
+            var i = 0
+            while i < len(k) {
+                let c = k[i]
+                if c == '"' || c == '\\' {
+                    append_byte(sb, '\\')
+                    append_byte(sb, c)
+                } else if is_control(c) || c == '\t' {
+                    append(sb, format("\\u{}", hex4(c as int32)))
+                } else {
+                    append_byte(sb, c)
+                }
+                i = i + 1
+            }
+            append_byte(sb, '"')
+        }
+    }
+    return build(sb)
+}
+
+// `n` (below 65536) as four hex digits.
+fun hex4(n: int32) -> str {
+    let digits = "0123456789ABCDEF"
+    var sb = StringBuilder()
+    var shift = 12
+    while shift >= 0 {
+        append_byte(sb, digits[(n >> shift) & 15])
+        shift = shift - 4
+    }
+    return build(sb)
+}
+
+fun is_bare_char(c: uint8) -> bool {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
+}
+
+fun is_bare_key(k: str) -> bool {
+    if len(k) == 0 { return false }
+    var i = 0
+    while i < len(k) {
+        if !is_bare_char(k[i]) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fun is_digit(c: uint8) -> bool {
+    return c >= '0' && c <= '9'
+}
+
+// A control character TOML allows nowhere but in multi-line strings (tab is
+// allowed everywhere).
+fun is_control(c: uint8) -> bool {
+    return (c < 32u8 && c != '\t') || c == 127u8
+}
+
+// `t` (a table) with `v` added as `key` to the table at `path[at..]` below it.
+fun insert(t: Toml, path: [str], at: int32, key: str, v: Toml) -> Toml {
+    match t {
+        Toml.Table(members) => {
+            var ms = members
+            if at == len(path) {
+                push(ms, (key, v))
+                return Toml.Table(ms)
+            }
+            var k = 0
+            while k < len(ms) {
+                if ms[k].0 == path[at] {
+                    ms[k] = (path[at], insert(ms[k].1, path, at + 1, key, v))
+                    return Toml.Table(ms)
+                }
+                k = k + 1
+            }
+        },
+        _ => {},
+    }
+    return t
+}
+
+impl Parser {
+    // An error at byte offset `at`.
+    fun error(self, msg: str, at: int32) -> TomlError {
+        var line = 1
+        var col = 1
+        var k = 0
+        while k < at && k < len(self.s) {
+            let c = self.s[k]
+            if c == '\n' {
+                line = line + 1
+                col = 1
+            } else if c < 128u8 || c >= 192u8 {
+                col = col + 1                  // not a UTF-8 continuation byte
+            }
+            k = k + 1
+        }
+        return TomlError { msg: msg, line: line, col: col }
+    }
+
+    fun at_end(self) -> bool {
+        return self.i >= len(self.s)
+    }
+
+    // The byte at the current position, or 0 at the end.
+    fun peek(self) -> uint8 {
+        if self.at_end() { return 0u8 }
+        return self.s[self.i]
+    }
+
+    // The byte `k` places ahead, or 0 past the end.
+    fun ahead(self, k: int32) -> uint8 {
+        if self.i + k >= len(self.s) { return 0u8 }
+        return self.s[self.i + k]
+    }
+
+    fun skip_ws(var self) {
+        while self.peek() == ' ' || self.peek() == '\t' { self.i = self.i + 1 }
+    }
+
+    // A comment, the current position at its "#"; up to the line's end.
+    fun comment(var self) -> Result<int32, TomlError> {
+        while !self.at_end() && self.peek() != '\n' {
+            if self.peek() == 13u8 && self.ahead(1) == '\n' { return Ok(0) }
+            if is_control(self.peek()) { return Err(self.error("control character in a comment", self.i)) }
+            self.i = self.i + 1
+        }
+        return Ok(0)
+    }
+
+    // A line break ("\n" or "\r\n") at the current position, if any.
+    fun newline(var self) -> Result<bool, TomlError> {
+        if self.peek() == '\n' {
+            self.i = self.i + 1
+            return Ok(true)
+        }
+        if self.peek() == 13u8 {
+            if self.ahead(1) != '\n' { return Err(self.error("a carriage return must be followed by a line feed", self.i)) }
+            self.i = self.i + 2
+            return Ok(true)
+        }
+        return Ok(false)
+    }
+
+    // White space, comments and line breaks (inside an array).
+    fun skip_blank(var self) -> Result<int32, TomlError> {
+        while true {
+            self.skip_ws()
+            if self.peek() == '#' { self.comment()? }
+            if !self.newline()? { return Ok(0) }
+        }
+        return Ok(0)
+    }
+
+    // The rest of a line after a statement: white space and a comment.
+    fun end_of_line(var self) -> Result<int32, TomlError> {
+        self.skip_ws()
+        if self.peek() == '#' { self.comment()? }
+        if self.at_end() || self.newline()? { return Ok(0) }
+        return Err(self.error("expected the end of the line", self.i))
+    }
+
+    fun document(var self) -> Result<int32, TomlError> {
+        while true {
+            self.skip_ws()
+            if self.at_end() { return Ok(0) }
+            let c = self.peek()
+            if c == '#' {
+                self.comment()?
+                self.end_of_line()?
+            } else if c == '\n' || c == 13u8 {
+                self.newline()?
+            } else if c == '[' {
+                self.header()?
+                self.end_of_line()?
+            } else {
+                self.key_value()?
+                self.end_of_line()?
+            }
+        }
+        return Ok(0)
+    }
+
+    // A table header, the current position at its "[".
+    fun header(var self) -> Result<int32, TomlError> {
+        let start = self.i
+        if self.ahead(1) == '[' { return Err(self.error("arrays of tables are not supported", start)) }
+        self.i = self.i + 1
+        var path: [str] = []
+        while true {
+            self.skip_ws()
+            push(path, self.key()?)
+            self.skip_ws()
+            if self.peek() == ']' {
+                self.i = self.i + 1
+                return self.open_table(path, start)
+            }
+            if self.peek() != '.' { return Err(self.error("expected '.' or ']' in a table header", self.i)) }
+            self.i = self.i + 1
+        }
+        return Ok(0)
+    }
+
+    // Open the table `path` for the key/value lines that follow, creating the
+    // tables on the way.
+    fun open_table(var self, path: [str], at: int32) -> Result<int32, TomlError> {
+        var prefix: [str] = []
+        var k = 0
+        while k < len(path) {
+            let parent = prefix
+            prefix = with_key(prefix, path[k])
+            let last = k == len(path) - 1
+            let pk = path_key(prefix)
+            match get(self.kinds, pk) {
+                Some(kind) => {
+                    if kind == CLOSED { return Err(self.error(format("'{}' is not a table that can be extended", dotted(prefix)), at)) }
+                    if last {
+                        if kind == OPENED { return Err(self.error(format("table '{}' is defined twice", dotted(prefix)), at)) }
+                        self.kinds[pk] = OPENED
+                    }
+                },
+                None => {
+                    self.root = insert(self.root, parent, 0, path[k], Toml.Table([]))
+                    self.kinds[pk] = match last { true => OPENED, false => IMPLIED }
+                },
+            }
+            k = k + 1
+        }
+        self.table = path
+        return Ok(0)
+    }
+
+    // A key/value line, the current position at the key.
+    fun key_value(var self) -> Result<int32, TomlError> {
+        let at = self.i
+        let (key, v) = self.pair()?
+        let path = with_key(self.table, key)
+        let pk = path_key(path)
+        if contains(self.kinds, pk) { return Err(self.error(format("'{}' is defined twice", dotted(path)), at)) }
+        self.kinds[pk] = CLOSED
+        self.root = insert(self.root, self.table, 0, key, v)
+        return Ok(0)
+    }
+
+    // `key = value`.
+    fun pair(var self) -> Result<(str, Toml), TomlError> {
+        let key = self.key()?
+        self.skip_ws()
+        if self.peek() == '.' { return Err(self.error("dotted keys are not supported", self.i)) }
+        if self.peek() != '=' { return Err(self.error("expected '=' after a key", self.i)) }
+        self.i = self.i + 1
+        self.skip_ws()
+        let v = self.value()?
+        return Ok((key, v))
+    }
+
+    fun key(var self) -> Result<str, TomlError> {
+        let c = self.peek()
+        if c == '"' || c == '\'' {
+            if self.ahead(1) == c && self.ahead(2) == c { return Err(self.error("a key can't be a multi-line string", self.i)) }
+            if c == '"' { return self.basic_string() }
+            return self.literal_string()
+        }
+        let start = self.i
+        while is_bare_char(self.peek()) { self.i = self.i + 1 }
+        if self.i == start { return Err(self.error("expected a key", self.i)) }
+        var sb = StringBuilder()
+        append(sb, self.s, start, self.i)
+        return Ok(build(sb))
+    }
+
+    fun value(var self) -> Result<Toml, TomlError> {
+        let c = self.peek()
+        if c == '"' || c == '\'' {
+            if self.ahead(1) == c && self.ahead(2) == c { return Err(self.error("multi-line strings are not supported", self.i)) }
+            if c == '"' { return Ok(Toml.Str(self.basic_string()?)) }
+            return Ok(Toml.Str(self.literal_string()?))
+        }
+        if c == '[' { return self.array() }
+        if c == '{' { return self.inline_table() }
+        if self.word("true") { return Ok(Toml.Bool(true)) }
+        if self.word("false") { return Ok(Toml.Bool(false)) }
+        if self.word("inf") || self.word("nan") || self.word("+inf") || self.word("-inf") || self.word("+nan") || self.word("-nan") {
+            return Err(self.error("floats are not supported", self.i))
+        }
+        if c == '+' || c == '-' || is_digit(c) { return self.number() }
+        return Err(self.error("expected a value", self.i))
+    }
+
+    // Whether the text continues with `w`, not followed by a key character;
+    // moves past it if so (only for true and false).
+    fun word(var self, w: str) -> bool {
+        if self.i + len(w) > len(self.s) { return false }
+        var k = 0
+        while k < len(w) {
+            if self.s[self.i + k] != w[k] { return false }
+            k = k + 1
+        }
+        if is_bare_char(self.ahead(len(w))) { return false }
+        if w == "true" || w == "false" { self.i = self.i + len(w) }
+        return true
+    }
+
+    // A decimal integer; floats, dates and times, and other bases are named
+    // in the error.
+    fun number(var self) -> Result<Toml, TomlError> {
+        let start = self.i
+        var negative = false
+        if self.peek() == '+' || self.peek() == '-' {
+            negative = self.peek() == '-'
+            self.i = self.i + 1
+        }
+        let first = self.i
+        if self.peek() == '0' && (self.ahead(1) == 'x' || self.ahead(1) == 'o' || self.ahead(1) == 'b') {
+            return Err(self.error("hexadecimal, octal and binary integers are not supported", start))
+        }
+        var digits = StringBuilder()
+        var last_digit = false
+        while is_digit(self.peek()) || self.peek() == '_' {
+            if self.peek() == '_' {
+                if !last_digit || !is_digit(self.ahead(1)) { return Err(self.error("'_' must stand between digits", self.i)) }
+                last_digit = false
+            } else {
+                append_byte(digits, self.peek())
+                last_digit = true
+            }
+            self.i = self.i + 1
+        }
+        let c = self.peek()
+        if c == '.' || c == 'e' || c == 'E' { return Err(self.error("floats are not supported", start)) }
+        if (c == '-' || c == ':') && self.i > first && start == first { return Err(self.error("dates and times are not supported", start)) }
+        let text = build(digits)
+        if len(text) == 0 { return Err(self.error("expected a value", start)) }
+        if len(text) > 1 && text[0] == '0' { return Err(self.error("leading zeros are not allowed", first)) }
+        // accumulate negatively, so the int64 minimum fits
+        var n: int64 = 0
+        var k = 0
+        while k < len(text) {
+            let d = (text[k] - '0') as int64
+            if n < (-9223372036854775807i64 - 1i64 + d) / 10i64 { return Err(self.error("integer out of range", start)) }
+            n = n * 10i64 - d
+            k = k + 1
+        }
+        if negative { return Ok(Toml.Int(n)) }
+        if n == -9223372036854775807i64 - 1i64 { return Err(self.error("integer out of range", start)) }
+        return Ok(Toml.Int(-n))
+    }
+
+    // The value of the `count` hex digits at the current position, or -1.
+    fun hex(self, count: int32) -> int64 {
+        if self.i + count > len(self.s) { return -1i64 }
+        var v: int64 = 0
+        var k = 0
+        while k < count {
+            let c = self.s[self.i + k]
+            var d: int64 = -1
+            if c >= '0' && c <= '9' { d = (c - '0') as int64 }
+            if c >= 'a' && c <= 'f' { d = (c - 'a') as int64 + 10i64 }
+            if c >= 'A' && c <= 'F' { d = (c - 'A') as int64 + 10i64 }
+            if d < 0i64 { return -1i64 }
+            v = v * 16i64 + d
+            k = k + 1
+        }
+        return v
+    }
+
+    // A basic string, the current position at its opening quote.
+    fun basic_string(var self) -> Result<str, TomlError> {
+        let quote = self.i
+        self.i = self.i + 1
+        var sb = StringBuilder()
+        var run = self.i                         // start of bytes to copy as they are
+        while true {
+            if self.at_end() || self.peek() == '\n' { return Err(self.error("unterminated string", quote)) }
+            let c = self.peek()
+            if c == '"' {
+                append(sb, self.s, run, self.i)
+                self.i = self.i + 1
+                return Ok(build(sb))
+            }
+            if is_control(c) { return Err(self.error("control character in a string", self.i)) }
+            if c != '\\' {
+                self.i = self.i + 1
+            } else {
+                append(sb, self.s, run, self.i)
+                let esc = self.i
+                let e = self.ahead(1)
+                self.i = self.i + 2
+                if e == 'u' || e == 'U' {
+                    let count = match e == 'u' { true => 4, false => 8 }
+                    let cp = self.hex(count)
+                    if cp < 0i64 || (cp >= 55296i64 && cp < 57344i64) || cp > 1114111i64 {
+                        return Err(self.error("invalid unicode escape", esc))
+                    }
+                    append(sb, format("{}", cp as uint32 as char))
+                    self.i = self.i + count
+                } else if e == '"' { append_byte(sb, '"') }
+                else if e == '\\' { append_byte(sb, '\\') }
+                else if e == 'b' { append_byte(sb, 8u8) }
+                else if e == 'f' { append_byte(sb, 12u8) }
+                else if e == 'n' { append_byte(sb, '\n') }
+                else if e == 'r' { append_byte(sb, 13u8) }
+                else if e == 't' { append_byte(sb, '\t') }
+                else { return Err(self.error("invalid escape in a string", esc)) }
+                run = self.i
+            }
+        }
+        return Ok("")
+    }
+
+    // A literal string, the current position at its opening quote.
+    fun literal_string(var self) -> Result<str, TomlError> {
+        let quote = self.i
+        self.i = self.i + 1
+        let start = self.i
+        while true {
+            if self.at_end() || self.peek() == '\n' { return Err(self.error("unterminated string", quote)) }
+            let c = self.peek()
+            if c == '\'' {
+                var sb = StringBuilder()
+                append(sb, self.s, start, self.i)
+                self.i = self.i + 1
+                return Ok(build(sb))
+            }
+            if is_control(c) { return Err(self.error("control character in a string", self.i)) }
+            self.i = self.i + 1
+        }
+        return Ok("")
+    }
+
+    // An array of strings, the current position at its "[".
+    fun array(var self) -> Result<Toml, TomlError> {
+        self.i = self.i + 1
+        var items: [Toml] = []
+        while true {
+            self.skip_blank()?
+            if self.peek() == ']' {
+                self.i = self.i + 1
+                return Ok(Toml.Array(items))
+            }
+            let c = self.peek()
+            if c != '"' && c != '\'' {
+                if c == ',' || self.at_end() { return Err(self.error("expected a value", self.i)) }
+                return Err(self.error("arrays may only hold strings", self.i))
+            }
+            push(items, self.value()?)
+            self.skip_blank()?
+            if self.peek() == ',' {
+                self.i = self.i + 1
+            } else if self.peek() != ']' {
+                return Err(self.error("expected ',' or ']' in an array", self.i))
+            }
+        }
+        return Ok(Toml.Array(items))
+    }
+
+    // An inline table, the current position at its "{".
+    fun inline_table(var self) -> Result<Toml, TomlError> {
+        self.i = self.i + 1
+        var members: [(str, Toml)] = []
+        self.skip_ws()
+        if self.peek() == '}' {
+            self.i = self.i + 1
+            return Ok(Toml.Table(members))
+        }
+        while true {
+            self.skip_ws()
+            let at = self.i
+            if self.peek() == '}' { return Err(self.error("a trailing comma is not allowed in an inline table", at)) }
+            let (key, v) = self.pair()?
+            for m in members {
+                if m.0 == key { return Err(self.error(format("'{}' is defined twice", dotted([key])), at)) }
+            }
+            push(members, (key, v))
+            self.skip_ws()
+            if self.peek() == '}' {
+                self.i = self.i + 1
+                return Ok(Toml.Table(members))
+            }
+            if self.peek() != ',' { return Err(self.error("expected ',' or '}' in an inline table", self.i)) }
+            self.i = self.i + 1
+        }
+        return Ok(Toml.Table(members))
+    }
+}

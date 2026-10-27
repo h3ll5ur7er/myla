@@ -119,6 +119,20 @@ INTERP_PROGRAMS = {
                                         "print(len(xs[1]))", before=_TRACE),
     "string_comparison": _main("let s = \"\"", "print(s == \"\")", "print(\"ab\" != \"ab\")", "print(\"a\" + \"b\" == \"ab\")"),
     "map_store_inserts": _main("var m = [\"a\": [1]]", "m[\"b\"] = [2, 3]", "print(len(m[\"b\"]))"),
+    # the int64 minimum divided by anything but -1 (found by std.toml, MYLA-89)
+    "int64_min_divided": _main("let a: int64 = -9223372036854775807 - 1", "print(a / 10)", "print(a % 10)",
+                               "print(a / -10)", "print(a % -7)", "print(a / 3)", "print(a / -1)"),
+    # `?` returning early out of a destructuring `let` (found by std.toml, MYLA-89)
+    "try_in_destructuring_let": _main("match first(true) { Ok(n) => print(n), Err(e) => print(e) }",
+                                      "match first(false) { Ok(n) => print(n), Err(e) => print(e) }", before=(
+        "fun pair(ok: bool) -> Result<(int, str), str> {\n"
+        "    if ok { return Ok((1, \"one\")) }\n"
+        "    return Err(\"no pair\")\n"
+        "}\n"
+        "fun first(ok: bool) -> Result<int, str> {\n"
+        "    let (n, s) = pair(ok)?\n"
+        "    return Ok(n)\n"
+        "}\n")),
 }
 
 

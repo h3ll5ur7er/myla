@@ -23,7 +23,7 @@ Decided as D73 on [[Project/Decisions]]; the details, with the open questions to
 - [x] Manifest format and resolution rules recorded on [[Project/Decisions]] (D73) and [[Architecture/Project-tool]]
 - [ ] The design page approved, its open questions answered
 - [ ] [[MYLA-88]] File-system functions in `std.fs` (in review)
-- [ ] [[MYLA-89]] `std.toml`
+- [ ] [[MYLA-89]] `std.toml` (in review)
 - [ ] [[MYLA-92]] `--package name=dir` in both loaders
 - [ ] [[MYLA-93]] The project model: manifest, lock file, path dependencies
 - [ ] [[MYLA-94]] The commands, with path dependencies
