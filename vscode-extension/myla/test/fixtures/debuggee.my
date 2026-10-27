@@ -1,0 +1,57 @@
+// The program the debug adapter's integration test debugs (MYLA-99). The test
+// finds its breakpoint lines by the `// bp:<name>` markers. With the argument
+// `panic` it divides by zero, with `exit` it exits with status 3.
+from std.process import args, exit
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+struct Bag {
+    items: [int],
+    label: str,
+}
+
+enum Shape {
+    Circle(Point, int),
+    Rect(Point, Point),
+}
+
+#test(Point { x: 1, y: 2 }, 3)[4]
+fun shifted_x(p: Point, dx: int) -> int {
+    let moved = p.x + dx  // bp:callee
+    return moved
+}
+
+#test(7, 1)[7]
+fun ratio(a: int, b: int) -> int {
+    return a / b  // bp:divide
+}
+
+fun main() {
+    let origin = Point { x: 1, y: 2 }
+    let name = "héllo"
+    let xs = [1, -2, 3]
+    let s = Shape.Circle(origin, 5)
+    let t = (7, true)
+    let bag = Bag { items: [4, 5], label: "two" }
+    var total = 0  // bp:locals
+    total = total + shifted_x(origin, 3)  // bp:call
+    print(total)  // bp:after
+    print(name)
+    let argv = args()
+    if len(argv) > 1 {
+        if argv[1] == "panic" {
+            print(ratio(7, len(argv) - 2))
+        }
+        if argv[1] == "exit" {
+            exit(3)
+        }
+    }
+    print(len(xs) + len(bag.items))
+    match s {
+        Circle(_, r) => print(r)
+        Rect(_, _) => print(t.0)
+    }
+}

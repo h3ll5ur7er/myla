@@ -35,12 +35,59 @@ Writing it found four bugs, fixed in [[MYLA-80]]: a `return` from inside a `for`
 
 ## VS Code extension
 
-`vscode-extension/myla/` contributes the `myla` language for `.my` files: a TextMate grammar, snippets, a language configuration and a language client.
+`vscode-extension/myla/` contributes the `myla` language for `.my` files: a TextMate grammar, snippets, a language configuration, a language client, commands and tasks to run, test and build, and a debugger ([[MYLA-100]], [[MYLA-99]]). Its README is the user's guide.
 
-- The client starts the language server: `myla.serverPath`, else `build/myla-lsp` in the repository (found by its `myla.py`: setting `myla.compilerPath`, then the workspace folders), with `--stdlib <repo>/src/myla`, and registers a `**/*.my` file watcher whose changes the server takes (`workspace/didChangeWatchedFiles`). When there is no binary, it says how to build it (`scripts/bootstrap.sh`). The command is `chooseServer` in `src/server.ts`, which needs nothing from VS Code. `${workspaceFolder}`, `${userHome}` and `~` are expanded in the path settings. Changing a setting restarts the server.
-- Settings: `myla.serverPath`, `myla.compilerPath`, `myla.diagnostics.enable` (hides diagnostics through a client middleware; the server keeps running), `myla.trace.server` (the client id is `myla`).
-- `npm run package` builds the `.vsix`; it isn't committed. `.vscodeignore` keeps sources out of it.
-- `tests/unit/test_vscode_extension.py` checks the grammar against the lexer's keywords and the built-in type names, and parses every snippet ([[MYLA-54]]). `tests/burn/test_lsp.py` runs `chooseServer` under node (types stripped, no `node_modules` needed): the repository's built server, a configured binary, a message when there is none, and the command it picks for a built server answers `initialize`.
+| Module (`src/`) | Role | Needs VS Code |
+| --- | --- | --- |
+| `extension.ts` | Activation: the language client, the language status item, the output channel | yes |
+| `tasks.ts` | *Run/Test/Build Current File* and the `myla` task provider | yes |
+| `debugProvider.ts` | The `myla` debug type: configurations, the build with `-g`, the in-process adapter | yes |
+| `server.ts` | `chooseServer`: the language server's command line | no |
+| `toolchain.ts` | Path settings, the repository's `myla.py`, `chooseCli`, the CLI's command lines | no |
+| `build.ts` | Debug builds (`debugTarget`, `debugOutputPath`, `runBuild`) and the compiler's diagnostics | no |
+| `debug/` | The debug adapter: `session.ts` (DAP ↔ gdb), `gdb.ts` (the gdb process), `mi.ts` (GDB/MI), `dap.ts` (framing), `present.ts` (names, stops, values), `adapterMain.ts` (stdio) | no |
+
+- **Language server.** The client starts `myla.serverPath`, else `build/myla-lsp` in the repository (found by its `myla.py`: setting `myla.compilerPath`, then the workspace folders), with `--stdlib <repo>/src/myla`, and registers a `**/*.my` file watcher whose changes the server takes (`workspace/didChangeWatchedFiles`). When there is no binary, it says how to build it (`scripts/bootstrap.sh`). Changing a setting restarts the server. A language status item shows whether it runs and restarts it.
+- **Run, test, build.** The commands run tasks of type `myla` (`ProcessExecution` of `myla run|test|build <file>` in a terminal, so programs can read input) with the `$myla` problem matcher, which reads `<stage> error: <message>` followed by `  --> file:line:col`. The CLI is `myla.cliPath`, else `build/myla`, else `python3 myla.py`.
+- **Settings:** `myla.compilerPath`, `myla.serverPath`, `myla.cliPath`, `myla.debug.gdbPath`, `myla.diagnostics.enable` (hides diagnostics through a client middleware; the server keeps running), `myla.trace.server` (the client id is `myla`). `${workspaceFolder}`, `${userHome}` and `~` are expanded in the path settings; in untrusted workspaces they come from user settings only.
+- **Build.** esbuild bundles `extension.ts` (with `vscode-languageclient`) into `out/extension.js` and `debug/adapterMain.ts` into `out/debugAdapter.js`; tsc only typechecks. Imports name `.ts` files and only erasable TypeScript is used (`erasableSyntaxOnly`), so node runs sources and tests with `--experimental-strip-types`, without compiling and without `node_modules`. `npx vsce package` makes the `.vsix` (126 KB: the two bundles, the manifest, grammar, snippets, language configuration, icon, README, CHANGELOG, LICENSE; `.vscodeignore` lists them). CI builds it on every run ([[MYLA-101]], [[Development/Testing]]).
+- **Tests.** `npm test` runs `test/unit/*.test.ts` (MI parsing, DAP framing, presentation, the CLI and diagnostics, the adapter against a fake gdb, the bundle activating against a stand-in `vscode`) and `test/integration/adapter.test.ts` (the adapter on stdio against real gdb, skipped without gdb or a Myla toolchain). `tests/unit/test_vscode_extension.py` checks the grammar against the lexer's keywords and the built-in type names, parses every snippet ([[MYLA-54]]) and runs the unit tests under node; `tests/burn/test_vscode_debugger.py` runs the integration test with both CLIs; `tests/burn/test_lsp.py` runs `chooseServer` under node and checks that the command it picks answers `initialize`.
+
+### Debugger
+
+`F5` on a `.my` file debugs it with gdb (D78, [[MYLA-99]]). The adapter is the extension's own: it speaks the Debug Adapter Protocol to VS Code and gdb's machine interface (`gdb --interpreter=mi3`) to gdb, and needs no other extension.
+
+```mermaid
+sequenceDiagram
+    participant VS as VS Code
+    participant P as debugProvider.ts
+    participant A as MylaDebugSession
+    participant G as gdb (MI)
+    participant B as the program
+    VS->>P: resolve configuration (F5)
+    P->>P: myla build file.my -o <storage>/file-<hash> -g
+    P-->>VS: config + executable
+    VS->>A: initialize, launch
+    A->>G: -file-exec-and-symbols, set args … > out 2> err
+    A-->>VS: initialized
+    VS->>A: setBreakpoints, setExceptionBreakpoints, configurationDone
+    A->>G: -break-insert --source … --line …, -break-insert *__panic, -exec-run
+    G->>B: runs it through /bin/sh
+    B-->>A: output files, read every 100 ms and at each stop
+    G-->>A: *stopped,reason="breakpoint-hit"
+    A-->>VS: stopped
+    VS->>A: stackTrace, scopes, variables, evaluate
+    A->>G: -stack-list-frames, -stack-list-variables, -var-create, -var-list-children, -data-evaluate-expression
+```
+
+- **Configurations.** Without a `launch.json`, `F5` debugs the active file; the Run and Debug view also offers *Debug &lt;file&gt;* for it. `program` may be a `.my` file, a binary built with `-g`, or a project (a directory with `myla.toml`, or the manifest): `debugTarget` in `build.ts` debugs a project's `src/main.my` as a single file for now; once project-mode `myla build` exists ([[MYLA-94]]), that is the place to build the project and debug `build/<name>`.
+- **The build** goes to the extension's storage folder, named after the file and a hash of its path; dirty `.my` editors are saved first; a failed build stops the launch with the first diagnostic and *Go to Error*. The file is passed to the compiler with its absolute path, so the binary's line table names it absolutely and breakpoints match by full path (a binary built from a relative path is matched by the file's base name).
+- **Program I/O.** gdb starts the program through `/bin/sh` (`SHELL` is set for gdb, and restored for the program), so `set args` ends in `< stdin > out 2> err`; the adapter forwards what is new in the files as `stdout`/`stderr` output, every 100 ms and at every stop and the exit, so output before a stop is shown before it. `stdin` defaults to `/dev/null`.
+- **Breakpoints.** `-break-insert --source <file> --line <n>` with `-c` for a condition and `-i` for a hit count; the line gdb reports is the verified line (a line without code moves to the next one). Function breakpoints try `myla_<name>`, then `myla_<module>$<name>`. Breakpoints can be set while the program runs (gdb runs in async mode).
+- **Stops.** `stopReason` in `present.ts` maps `*stopped` records: a hit on the `__panic` breakpoint is an `exception` (the *Runtime errors* filter, on by default) whose message the adapter reads from `%rdi` and position from `%rsi` (D75); the `stopOnEntry` breakpoint on `myla_main` is `entry`; `SIGINT` after *pause* is `pause`; other signals are exceptions; exits report the code (gdb writes it in octal). Frames without Myla source (`__panic`, `_start`, runtime helpers) are `subtle`, so VS Code shows the Myla frame below them; a step that ends in `_start` continues to the exit.
+- **Values.** Scopes are *Locals* and *Arguments* from `-stack-list-variables` (types from `--simple-values`, gdb's printed values from `--all-values`; a shadowed name is marked). Expanding a value creates its gdb variable object; `present.ts` decides what expands, hides an enum's `<tag>` and shows the active variant's fields, shows a list cell's items, and gives each child its expression in gdb's Rust syntax (`s.0`, `xs[2]`, `(*bag.items).items[0]`), used for *Copy as Expression* and to print a child gdb's variable object only summarizes (`{...}`). Heap strings inside aggregates are read from memory and shown as text, list cells as their items. Variable objects are deleted before the program resumes.
+- **Evaluate** passes the expression to `-data-evaluate-expression` in the selected frame (hover, watch and the Debug Console alike); a value with children gets a variable object. `-exec <command>` (or a leading backquote) in the Debug Console runs a gdb command and shows what it printed.
+- **Run Without Debugging** (`noDebug`) runs the built program directly, with its output in the Debug Console and its exit code.
 
 ## tree-sitter grammar
 

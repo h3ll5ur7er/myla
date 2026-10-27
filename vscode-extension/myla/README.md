@@ -1,32 +1,74 @@
-# Myla Language Support
+# Myla for VS Code
 
-VS Code support for the [Myla](https://github.com/h3ll5ur7er/myla) programming language (`.my` files).
+Support for the [Myla](https://github.com/h3ll5ur7er/myla) programming language (`.my` files): highlighting, the Myla language server, commands to run, test and build, and a debugger built on gdb.
 
 ## Features
 
-- Syntax highlighting (a TextMate grammar) and snippets; a unit test in the Myla repository (`tests/unit/test_vscode_extension.py`) keeps both in step with the compiler
-- Comment toggling, bracket matching and auto-closing pairs, `// region` folding
-- The Myla language server: compiler diagnostics (for the file an error is in), document outline, go to definition, find references and hover resolved by scope, imports and type, completion of a receiver's members after `.` and of the locals in scope, and semantic highlighting from the compiler's lexer
+- **Editing:** syntax highlighting (a TextMate grammar, plus semantic highlighting from the language server), snippets, comment toggling, bracket matching and auto-closing, `// region` folding.
+- **Language server** (`build/myla-lsp`, written in Myla): the compiler's diagnostics, document outline, go to definition, find references and hover resolved by scope, imports and type, and completion of members after `.` and of the names in scope.
+- **Run, test, build:** *Myla: Run Current File*, *Myla: Run Tests in Current File* and *Myla: Build Current File* (also the ▷ menu in the editor title) run `myla run`, `myla test` and `myla build` in a terminal; errors land in the Problems view. The same commands are tasks of type `myla` for `tasks.json`.
+- **Debugger:** `F5` on a `.my` file builds it with `myla build -g` and debugs it with gdb, no launch configuration needed:
+  - line breakpoints (conditions and hit counts too), function breakpoints such as `main` or `Point.len`;
+  - continue, step over, step in, step out, pause; the call stack with Myla function names;
+  - locals and arguments, with structs, tuples, enums and lists to expand, and strings and lists inside structs shown as values;
+  - evaluate in the Debug Console and on hover (gdb's Rust syntax, which is close to Myla's: `xs[1] * 10`, `p.x`); `-exec <command>` runs a gdb command;
+  - stop where a runtime error happens (division by zero, an index out of range, `panic`, `assert`) with its message, the program's output in the Debug Console, and its exit code.
+
+## Requirements
+
+- x86-64 Linux: Myla compiles to native Linux binaries.
+- The Myla toolchain: a checkout of the repository with `scripts/bootstrap.sh` run, which builds `build/myla` and `build/myla-lsp`. Without `build/myla`, the commands fall back to `python3 myla.py`.
+- For debugging: gdb (`sudo apt install gdb`), and GNU `as`/`ld` for the build.
 
 ## Settings
 
 | Setting | Meaning |
 | --- | --- |
-| `myla.serverPath` | The language server's binary. Empty: `build/myla-lsp` in the repository. |
-| `myla.compilerPath` | The repository root or `myla.py`. Empty: the `myla.py` of a workspace folder. |
+| `myla.compilerPath` | The repository root or its `myla.py`. Empty: the workspace folder that has a `myla.py`. |
+| `myla.serverPath` | The language server. Empty: `build/myla-lsp` in the repository. |
+| `myla.cliPath` | The `myla` CLI for run, test, build and debugging. Empty: `build/myla` in the repository, else `python3 myla.py`. |
+| `myla.debug.gdbPath` | The gdb to debug with (default `gdb`). |
 | `myla.diagnostics.enable` | Show the compiler's diagnostics (the server keeps running when off). |
-| `myla.trace.server` | Trace the protocol in the Myla output channel. |
+| `myla.trace.server` | Trace the language server protocol in the Myla output channel. |
 
-`${workspaceFolder}`, `${userHome}` and `~` are expanded in the path settings.
+`${workspaceFolder}`, `${userHome}` and `~` are expanded in the path settings. In an untrusted workspace, the path settings are read from your user settings only.
 
-The language server is written in Myla; `scripts/bootstrap.sh` builds it as `build/myla-lsp` (x86-64 Linux). When it isn't built, the extension says so. The extension reports changes to `.my` files on disk to it.
+## Debugging
+
+Without a `launch.json`, `F5` (or *Myla: Debug Current File*) debugs the active file. A launch configuration can name the program, its arguments and more:
+
+```json
+{
+  "type": "myla",
+  "request": "launch",
+  "name": "Debug main.my",
+  "program": "${workspaceFolder}/main.my",
+  "args": ["input.txt"],
+  "cwd": "${workspaceFolder}",
+  "stopOnEntry": false
+}
+```
+
+| Attribute | Meaning |
+| --- | --- |
+| `program` | The `.my` file to build and debug (a binary built with `-g` works too). |
+| `args`, `cwd`, `env` | The program's arguments, working directory and extra environment variables. |
+| `stdin` | A file the program reads as standard input (default: none). |
+| `stopOnEntry` | Stop at the first line of `main`. |
+| `gdbPath` | The gdb for this configuration. |
+| `trace` | Show the adapter's conversation with gdb (GDB/MI) in the Debug Console. |
+
+The debug build goes to the extension's storage folder, not into your workspace. Runtime errors stop the program by default; untick *Runtime errors* in the Breakpoints view to let them end it.
 
 ## Development
 
 ```bash
-npm install
-npm run compile      # or: npm run watch
-npm run package      # builds the .vsix (not committed)
+npm ci
+npm run build        # bundle src/ into out/ with esbuild (npm run watch to rebuild on change)
+npm run typecheck    # tsc, no output
+npm run lint         # eslint
+npm test             # unit tests and the debugger against real gdb
+npx vsce package     # myla-language-support-<version>.vsix
 ```
 
-Open this folder in VS Code and press `F5` to start an Extension Development Host. `Developer: Inspect Editor Tokens and Scopes` shows how a token is highlighted.
+Open this folder in VS Code and press `F5` to start an Extension Development Host. The debug adapter also runs on its own, speaking DAP on stdio: `node out/debugAdapter.js`.

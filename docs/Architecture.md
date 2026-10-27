@@ -61,7 +61,7 @@ type error: unknown function 'nope'
 
 - [[Architecture/Self-hosted-compiler]]: the same pipeline in Myla.
 - [[Architecture/Rust-edition]]: a separate dialect and toolchain in Rust, removed in October 2026 (history note).
-- [[Architecture/Editor-tooling]]: language server, VS Code extension, the grammar description and the tree-sitter grammar generated from it.
+- [[Architecture/Editor-tooling]]: language server, VS Code extension and its debugger, the grammar description and the tree-sitter grammar generated from it.
 
 ## Designs not built yet
 

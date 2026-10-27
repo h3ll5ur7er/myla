@@ -2,6 +2,51 @@
 
 [TOC]
 
+## In VS Code
+
+With the VS Code extension and gdb installed, `F5` on a `.my` file builds it with `myla build -g` and debugs it: breakpoints (conditions, hit counts, functions), stepping, the call stack, locals and arguments to expand, evaluation in the Debug Console and on hover, and a stop where a runtime error happens, with its message. The extension's own debug adapter drives gdb through its machine interface (D78, [[MYLA-99]]); how it works is on [[Architecture/Editor-tooling]], the launch attributes in the extension's README.
+
+- No `launch.json` is needed: `F5` debugs the active file. With one, a configuration of type `myla` names the `program` (a `.my` file, or a binary built with `-g`), its `args`, `cwd`, `env`, a `stdin` file and `stopOnEntry`.
+- The Variables view shows heap strings and lists inside structs, tuples and enums as values (`label: "two"`, `items: [4, 5]`), where plain gdb shows pointers to their cells; enums show the active variant's fields.
+- Expressions are gdb's (Rust syntax, as below); `-exec <command>` in the Debug Console runs any gdb command, e.g. `-exec info registers`.
+- *Runtime errors* in the Breakpoints view (on by default) stops at `__panic` and shows the frame that failed; the `__panic` frame itself is greyed out.
+- `"trace": true` in the configuration shows the adapter's MI conversation with gdb in the Debug Console.
+
+The adapter also runs on its own, speaking DAP on stdin/stdout (`node vscode-extension/myla/out/debugAdapter.js` after `npm run build`), for other editors. An excerpt of a session from its integration test (`DAP_TRANSCRIPT=<file> npm test` writes the whole one; paths shortened):
+
+```
+-> {"command":"setBreakpoints","arguments":{"source":{"path":"…/debuggee.my"},"breakpoints":[{"line":39},{"line":20}]}}
+<- {"command":"setBreakpoints","success":true,"body":{"breakpoints":[{"id":1,"verified":true,"line":39,…},{"id":2,"verified":true,"line":23,…}]}}
+   … (a second setBreakpoints for lines 39 and 23 replaces them: ids 3 and 4)
+-> {"command":"configurationDone"}
+<- {"event":"stopped","body":{"reason":"breakpoint","threadId":1,"allThreadsStopped":true,"hitBreakpointIds":[3]}}
+-> {"command":"variables","arguments":{"variablesReference":3}}
+<- {"body":{"variables":[{"name":"bag","value":"Bag {items: 0x7ffef7e00048, label: 0x4051b0}","type":"Bag","variablesReference":5},
+                         {"name":"t","value":"(7, true)",…},{"name":"s","value":"Shape::Circle(Point {x: 1, y: 2}, 5)",…},
+                         {"name":"xs","value":"[1, -2, 3]",…},{"name":"name","value":"\"héllo\"",…},{"name":"origin","value":"Point {x: 1, y: 2}",…}]}}
+-> {"command":"variables","arguments":{"variablesReference":5}}
+<- {"body":{"variables":[{"name":"items","value":"[4, 5]","type":"*mut [int32]","evaluateName":"bag.items",…},
+                         {"name":"label","value":"\"two\"","type":"*mut str","evaluateName":"bag.label",…}]}}
+-> {"command":"evaluate","arguments":{"expression":"xs[1] * 10","frameId":1,"context":"repl"}}
+<- {"body":{"result":"-20","type":"long","variablesReference":0}}
+-> {"command":"stepIn","arguments":{"threadId":1}}
+<- {"event":"stopped","body":{"reason":"breakpoint","threadId":1,"allThreadsStopped":true,"hitBreakpointIds":[4]}}
+```
+
+and a runtime error (`debuggee.my panic`):
+
+```
+<- {"event":"stopped","body":{"reason":"exception","description":"Runtime error: division by zero","text":"division by zero",…}}
+-> {"command":"stackTrace","arguments":{"threadId":1,"startFrame":0,"levels":20}}
+<- {"body":{"stackFrames":[{"name":"__panic","line":0,"presentationHint":"subtle",…},
+                           {"name":"ratio","source":{"name":"debuggee.my",…},"line":29,"column":1,"presentationHint":"normal",…},
+                           {"name":"main",…,"line":46,…},{"name":"_start",…,"presentationHint":"subtle"}],"totalFrames":4}}
+-> {"command":"continue","arguments":{"threadId":1}}
+<- {"event":"output","body":{"category":"stderr","output":"runtime error: division by zero\n  --> …/debuggee.my:29:14\n"}}
+<- {"event":"exited","body":{"exitCode":1}}
+<- {"event":"terminated"}
+```
+
 ## gdb on native binaries
 
 Build with `-g` to get DWARF debug information: a line table ([[MYLA-71]]) and the parameters and variables of every function with their types ([[MYLA-66]]):
@@ -156,7 +201,7 @@ $3 = 2
 
 ## What doesn't work yet
 
-- **Heap values inside aggregates** show as pointers to their cells (`print *x`), and a `float32` inside one as a double: a gdb pretty-printer script (Python) could show them as values, at the price of loading it.
+- **Heap values inside aggregates** show as pointers to their cells in gdb (`print *x`), and a `float32` inside one as a double: a gdb pretty-printer script (Python) could show them as values, at the price of loading it. The VS Code debugger shows strings and lists inside aggregates as values in its Variables view (it reads them through the cell), but a struct's one-line summary still has the pointers.
 - **Return values**: subprograms have no return type, so `finish` doesn't print the value returned.
 - Expressions use gdb's Rust syntax: `print xs[i]` works, Myla's `len(xs)` doesn't (`print xs` shows the elements, `print x.len` a cell's length).
 

@@ -2,7 +2,8 @@
 # Everything here uses only the standard library plus GNU binutils (as/ld), which
 # the Ubuntu runners already have; the burn job also installs Node, for the
 # tree-sitter CLI of the editor-grammar tests and the VS Code extension's
-# server choice. See docs/Development/Testing.md.
+# server choice. The vscode-extension job typechecks, lints and tests the VS
+# Code extension and uploads its .vsix. See docs/Development/Testing.md.
 name: CI
 
 on:
@@ -75,3 +76,45 @@ jobs:
           as --64 -o build/hello.o build/hello.s
           ld -o build/hello build/hello.o
           build/hello
+
+  vscode-extension:
+    name: VS Code extension (typecheck, lint, tests, .vsix)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: vscode-extension/myla
+    steps:
+      - uses: actions/checkout@v4
+      # the debugger's integration test builds Myla programs with the Python
+      # CLI (python3 myla.py build -g) and debugs them with gdb
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: vscode-extension/myla/package-lock.json
+      - name: gdb for the debugger tests (MYLA-99)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdb
+          gdb --version | head -1
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Tests (unit, the bundle, the debug adapter against gdb)
+        run: npm test
+      - name: Package the .vsix
+        run: npx vsce package
+      - name: List the .vsix
+        run: unzip -l *.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: myla-vscode-extension
+          path: vscode-extension/myla/*.vsix
+          if-no-files-found: error

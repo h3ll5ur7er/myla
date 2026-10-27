@@ -47,7 +47,7 @@ The repository holds four implementations of the language and its tools:
 | --- | --- | --- |
 | **Python toolchain** | `src/myla/`, `myla.py` | Bootstrap compiler ("stage 0") and the reference: interpreter, `#test` runner and native x86-64 compiler. See [[Architecture/Lexer-and-parser]] onward. |
 | **Self-hosted compiler** | `selfhost/` | The same pipeline written in Myla; compiles itself. See [[Architecture/Self-hosted-compiler]]. |
-| **Editor tooling** | `tools/lsp/`, `vscode-extension/`, `editor/`, `grammar/`, `tools/` | Language server (written in Myla), VS Code extension, the grammar description and the tree-sitter grammar generated from it by a tool written in Myla. See [[Architecture/Editor-tooling]]. |
+| **Editor tooling** | `tools/lsp/`, `vscode-extension/`, `editor/`, `grammar/`, `tools/` | Language server (written in Myla), VS Code extension (with a gdb debugger), the grammar description and the tree-sitter grammar generated from it by a tool written in Myla. See [[Architecture/Editor-tooling]]. |
 
 ```mermaid
 flowchart LR
