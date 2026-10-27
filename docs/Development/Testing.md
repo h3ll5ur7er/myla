@@ -34,9 +34,9 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 
 | Suite | Tests | Result |
 | --- | --- | --- |
-| Unit | 479 | All pass, about 2 s |
+| Unit | 519 | All pass, about 4 s |
 | Integration | 2 | Pass |
-| Burn | 544 (plus subtests) | All pass, about 190 s with cached tools (green since [[MYLA-4]]) |
+| Burn | 573 (plus subtests, 5 skipped) | All pass, about 230 s with cached tools (green since [[MYLA-4]]) |
 
 ## Unit tests
 
@@ -95,7 +95,7 @@ fun main() {
 }
 ```
 
-The corpus has 133 files: 10 lex, 9 parse, 2 module, 108 type, 4 runtime. More module errors (cycles, which file an error is attributed to) are covered by `tests/unit/test_loader.py`.
+The corpus has 143 files: 12 lex, 9 parse, 2 module, 108 type, 12 runtime. More module errors (cycles, which file an error is attributed to) are covered by `tests/unit/test_loader.py`.
 
 ## Adding tests
 
