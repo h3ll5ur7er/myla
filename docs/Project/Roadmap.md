@@ -43,7 +43,7 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
    - ~~standard-library groundwork: reading stdin and JSON~~: done ([[MYLA-78]], [[MYLA-79]], with byte ranges of strings, [[MYLA-85]]);
    - ~~a language server written in Myla on the self-hosted front end, with the Python server's tests as parity tests~~: done, with resolution by scope, imports and type and semantic tokens from the compiler's own lexer; the VS Code extension starts it ([[MYLA-80]]);
    - ~~`myla test` parity in the self-hosted CLI and a REPL~~: done ([[MYLA-81]], [[MYLA-82]]);
-   - finally retiring each Python tool once its Myla replacement passes the parity tests ([[MYLA-83]]).
+   - ~~finally retiring each Python tool once its Myla replacement passes the parity tests~~: done, the Python language server is removed and the Python toolchain stays as the bootstrap and the semantics reference (D71, [[MYLA-83]]).
 
 ## Ideas
 

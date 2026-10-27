@@ -46,6 +46,6 @@ Language and design decisions are numbered (D1–D58 so far) and recorded with d
 
 ## Style
 
-- Python: standard library only (the language server's pygls is an optional extra), type hints, dataclasses for AST nodes, docstrings that explain why.
+- Python: standard library only, type hints, dataclasses for AST nodes, docstrings that explain why.
 - Myla: `snake_case` values and functions, `PascalCase` types, four-space indentation, braces on the same line.
 - Commit and push work on a branch; keep generated files (`build/`, `.venv/`, `__pycache__`) out of version control.

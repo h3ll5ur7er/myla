@@ -21,7 +21,7 @@ flowchart LR
 
 | Module | Lines | Role | Page |
 | --- | --- | --- | --- |
-| `cli.py` | 250 | Commands `run`, `test`, `build`, `check`, `tokenize`, `parse`, `lsp` | [[Getting started]] |
+| `cli.py` | 240 | Commands `run`, `test`, `build`, `check`, `tokenize`, `parse` (and `repl`, which points to the self-hosted one) | [[Getting started]] |
 | `tokens.py`, `lexer.py` | 760 | Source → tokens; f-strings lowered here | [[Architecture/Lexer-and-parser]] |
 | `ast.py`, `parser.py` | 1770 | Tokens → AST; `|>` and `return a, b` lowered here | [[Architecture/Lexer-and-parser]] |
 | `loader.py` | 710 | Import graph → one program with qualified names | [[Architecture/Module-loader]] |
@@ -33,9 +33,8 @@ flowchart LR
 | `canon.py` | 320 | Canonical token and AST dumps for differential tests | [[Architecture/Self-hosted-compiler]] |
 | `errors.py` | 100 | `MylaError` and its subclasses, caret rendering | below |
 | `std/*.my` | 200 | The standard library, in Myla | [[Language/Standard-library]] |
-| `lsp/` | 1350 | Language server | [[Architecture/Editor-tooling]] |
 
-The whole toolchain uses only the Python standard library (the language server is an optional extra).
+The whole toolchain uses only the Python standard library. The tools beyond the compiler (the language server, the grammar generator) are written in Myla, in `tools/` (D71).
 
 ## Principles
 

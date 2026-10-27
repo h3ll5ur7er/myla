@@ -12,16 +12,14 @@ VS Code support for the [Myla](https://github.com/h3ll5ur7er/myla) programming l
 
 | Setting | Meaning |
 | --- | --- |
-| `myla.server` | `myla` (default): the server written in Myla, `build/myla-lsp`; `python`: the Python server. |
-| `myla.serverPath` | The Myla server's binary. Empty: `build/myla-lsp` in the repository. |
+| `myla.serverPath` | The language server's binary. Empty: `build/myla-lsp` in the repository. |
 | `myla.compilerPath` | The repository root or `myla.py`. Empty: the `myla.py` of a workspace folder. |
-| `myla.pythonPath` | The Python that runs the Python server. Empty: the `.venv` next to `myla.py`, then `python`. |
 | `myla.diagnostics.enable` | Show the compiler's diagnostics (the server keeps running when off). |
 | `myla.trace.server` | Trace the protocol in the Myla output channel. |
 
 `${workspaceFolder}`, `${userHome}` and `~` are expanded in the path settings.
 
-The default server is the one written in Myla, which `scripts/bootstrap.sh` builds as `build/myla-lsp` (x86-64 Linux). When it isn't built, the extension says so and starts the Python server (`myla.py lsp`, needs `pygls`: `uv sync --extra lsp`). With the Myla server, the extension reports changes to `.my` files on disk.
+The language server is written in Myla; `scripts/bootstrap.sh` builds it as `build/myla-lsp` (x86-64 Linux). When it isn't built, the extension says so. The extension reports changes to `.my` files on disk to it.
 
 ## Development
 

@@ -6,11 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
-[project.optional-dependencies]
-lsp = [
-    "pygls>=2.1.1",
-]
-
 # No third-party runtime dependencies, by design (see README "Visions / Short
 # Term"). The tests are standard-library `unittest`s: `python3 -m unittest
 # discover -s tests/unit -t .` (or `scripts/test.sh`) needs nothing else. pytest

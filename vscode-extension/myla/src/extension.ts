@@ -30,9 +30,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (
-        e.affectsConfiguration("myla.server") ||
         e.affectsConfiguration("myla.serverPath") ||
-        e.affectsConfiguration("myla.pythonPath") ||
         e.affectsConfiguration("myla.compilerPath") ||
         e.affectsConfiguration("myla.diagnostics.enable")
       ) {
@@ -52,29 +50,20 @@ export function deactivate(): Thenable<void> | undefined {
 async function startServer(context: vscode.ExtensionContext): Promise<void> {
   const config = vscode.workspace.getConfiguration("myla");
 
-  const entry = resolveCompilerEntry(config);
   const choice = chooseServer(
     {
-      server: config.get<string>("server", "myla"),
       serverPath: expandPath(config.get<string>("serverPath", "")),
-      compilerEntry: entry,
-      python: entry ? resolvePythonPath(config, entry) : "python",
+      compilerEntry: resolveCompilerEntry(config),
     },
     fs.existsSync
   );
-  if (!choice) {
-    const msg =
-      "Could not locate the Myla language server. Set 'myla.compilerPath' to the repository root (the folder containing myla.py), or 'myla.serverPath' to a built myla-lsp.";
-    output.appendLine(msg);
-    vscode.window.showWarningMessage(msg);
+  if ("missing" in choice) {
+    output.appendLine(choice.missing);
+    vscode.window.showWarningMessage(choice.missing);
     return;
   }
-  if (choice.note) {
-    output.appendLine(choice.note);
-    vscode.window.showInformationMessage(choice.note);
-  }
 
-  output.appendLine(`Starting the ${choice.kind === "myla" ? "Myla" : "Python"} language server:`);
+  output.appendLine("Starting the Myla language server:");
   output.appendLine(`  ${[choice.command, ...choice.args].join(" ")}`);
 
   const serverOptions: ServerOptions = {
@@ -84,11 +73,8 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
     options: { cwd: choice.cwd },
   };
 
-  // The Myla server takes file changes from the editor; the Python one
-  // ignores them (MYLA-53).
-  if (choice.watchFiles) {
-    watcher = vscode.workspace.createFileSystemWatcher("**/*.my");
-  }
+  // The server takes file changes from the editor (didChangeWatchedFiles).
+  watcher = vscode.workspace.createFileSystemWatcher("**/*.my");
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
@@ -96,7 +82,7 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
       { scheme: "untitled", language: "myla" },
     ],
     outputChannel: output,
-    synchronize: watcher ? { fileEvents: watcher } : undefined,
+    synchronize: { fileEvents: watcher },
     middleware: {
       // `myla.diagnostics.enable = false` hides the diagnostics only; hover,
       // definition and the rest keep working.
@@ -124,7 +110,7 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
   } catch (err) {
     output.appendLine(`Failed to start Myla language server: ${err}`);
     vscode.window.showErrorMessage(
-      "Could not start the Myla language server. Check 'myla.pythonPath' and 'myla.compilerPath', and see the Myla output channel."
+      "Could not start the Myla language server. Check 'myla.serverPath' and 'myla.compilerPath', and see the Myla output channel."
     );
     client = undefined;
   }
@@ -168,32 +154,6 @@ function resolveCompilerEntry(
     }
   }
   return undefined;
-}
-
-/**
- * Resolve the Python interpreter. When `myla.pythonPath` is empty, prefer the
- * project's uv-managed `.venv` (which contains pygls) next to `myla.py`, then
- * fall back to `python` on PATH.
- */
-function resolvePythonPath(
-  config: vscode.WorkspaceConfiguration,
-  entry: string
-): string {
-  const configured = expandPath(config.get<string>("pythonPath", ""));
-  if (configured) {
-    return configured;
-  }
-
-  const repoRoot = path.dirname(entry);
-  const venvUnix = path.join(repoRoot, ".venv", "bin", "python");
-  const venvWin = path.join(repoRoot, ".venv", "Scripts", "python.exe");
-  if (fs.existsSync(venvUnix)) {
-    return venvUnix;
-  }
-  if (fs.existsSync(venvWin)) {
-    return venvWin;
-  }
-  return "python";
 }
 
 /**

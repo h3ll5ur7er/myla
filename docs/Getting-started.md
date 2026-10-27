@@ -6,7 +6,6 @@
 
 - **Python 3.12 or newer.** The Python toolchain has no third-party dependencies; `uv` is optional.
 - **GNU `as` and `ld`** (binutils) on x86-64 Linux, for native builds and the bootstrap.
-- Optional: **pygls** (`uv sync --extra lsp`) for the language server.
 
 ## Run a program
 
@@ -35,7 +34,6 @@ type error: cannot assign to an immutable binding (declare it with 'var')
 | `myla check <file> [--canonical]` | Type-check only; `--canonical` prints `ok` or `err <line> <col> <kind>` for differential tests |
 | `myla tokenize <file> [--canonical]` | Dump the token stream |
 | `myla parse <file> [--canonical]` | Dump the AST (`--canonical`: one S-expression per declaration) |
-| `myla lsp` | Start the language server on stdio (needs the `lsp` extra) |
 | `myla repl` | Points to the REPL written in Myla: `build/myla repl` (built by `scripts/bootstrap.sh`, [[MYLA-82]]) |
 
 All commands live in [[src/myla/cli.py]]; `myla.py` only puts `src/` on the import path. The self-hosted CLI, `build/myla` ([[selfhost/main.my]]), has `run`, `test` and `build` (printing what the Python ones print, [[MYLA-81]]) and the REPL:
@@ -106,4 +104,4 @@ What each suite guarantees and the current results: [[Development/Testing]].
 
 ## Editor support
 
-The VS Code extension in `vscode-extension/myla/` starts `python myla.py lsp` and offers diagnostics, outline, go to definition, hover, references and completion. See [[Architecture/Editor-tooling]] for setup and limits.
+The VS Code extension in `vscode-extension/myla/` starts the language server written in Myla, `build/myla-lsp` (built by `scripts/bootstrap.sh`), and offers diagnostics, outline, go to definition, hover, references, completion and semantic highlighting. See [[Architecture/Editor-tooling]] for setup and limits.

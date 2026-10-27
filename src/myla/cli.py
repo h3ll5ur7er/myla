@@ -162,26 +162,6 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_lsp(args: argparse.Namespace) -> int:
-    """Start the Myla language server over stdio (LSP).
-
-    Imported lazily so the optional `pygls` dependency (installed via the `lsp`
-    extra) is only required when this command is actually used; the rest of the
-    toolchain stays dependency-free."""
-    try:
-        # the server module itself, since it is what imports pygls/lsprotocol
-        from .lsp.server import main as lsp_main
-    except ImportError as err:
-        print(
-            "error: the Myla language server requires the optional 'lsp' extra.\n"
-            "       install it with: uv sync --extra lsp\n"
-            f"       ({err})",
-            file=sys.stderr,
-        )
-        return 1
-    return lsp_main()
-
-
 def _cmd_repl(args: argparse.Namespace) -> int:
     """The REPL is written in Myla, in the self-hosted CLI (MYLA-82)."""
     print("The REPL is part of the self-hosted CLI: build it with scripts/bootstrap.sh, "
@@ -238,18 +218,6 @@ def build_parser() -> argparse.ArgumentParser:
                               "line (for self-hosting differential tests)")
     p_check.set_defaults(func=_cmd_check)
 
-    p_lsp = sub.add_parser(
-        "lsp", help="start the Myla language server over stdio (LSP)"
-    )
-    # LSP clients (e.g. vscode-languageclient) append a transport flag such as
-    # `--stdio` to the server command. The server only speaks stdio, so accept
-    # and ignore these rather than erroring on "unrecognized arguments".
-    p_lsp.add_argument("--stdio", action="store_true", help=argparse.SUPPRESS)
-    p_lsp.add_argument("--node-ipc", action="store_true", help=argparse.SUPPRESS)
-    p_lsp.add_argument("--socket", default=None, help=argparse.SUPPRESS)
-    p_lsp.add_argument("--pipe", default=None, help=argparse.SUPPRESS)
-    p_lsp.add_argument("--clientProcessId", default=None, help=argparse.SUPPRESS)
-    p_lsp.set_defaults(func=_cmd_lsp)
 
     return parser
 

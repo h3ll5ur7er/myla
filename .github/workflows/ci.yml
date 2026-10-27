@@ -1,9 +1,8 @@
 # Continuous integration for the Python toolchain and the self-hosted compiler.
 # Everything here uses only the standard library plus GNU binutils (as/ld), which
-# the Ubuntu runners already have; the unit job also installs pygls (the `lsp`
-# extra) so the language server test runs, and the burn job pygls too (the Myla
-# language server is compared with the Python one) and the tree-sitter CLI for
-# the editor-grammar tests. See docs/Development/Testing.md.
+# the Ubuntu runners already have; the burn job also installs Node, for the
+# tree-sitter CLI of the editor-grammar tests and the VS Code extension's
+# server choice. See docs/Development/Testing.md.
 name: CI
 
 on:
@@ -29,8 +28,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Language server dependency (the lsp extra)
-        run: python -m pip install "pygls>=2.1.1"
       - name: Unit tests
         run: python -m unittest discover -s tests/unit -t .
       - name: Integration tests
@@ -45,8 +42,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: The Python language server, which the Myla one is compared with (MYLA-80)
-        run: python -m pip install "pygls>=2.1.1"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

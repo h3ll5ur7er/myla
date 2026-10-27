@@ -1,9 +1,9 @@
 """Burn tests: the language server written in Myla (`tools/lsp`, MYLA-80).
 
-It runs the scenarios the Python server runs (tests/integration/
-test_lsp_diagnostics.py), plus what only it promises: a malformed message gets
-a parse error, a burst of changes is checked once (the debounce), and its
-memory stays flat over hundreds of checks. Both builds run them: by the
+It runs the shared scenarios (tests/burn/_lsp_scenarios.py, once also run
+against the retired Python server, MYLA-83), plus what only it promises: a
+malformed message gets a parse error, a burst of changes is checked once (the
+debounce), and its memory stays flat over hundreds of checks. Both builds run them: by the
 Python backend and by the self-hosted one (as scripts/bootstrap.sh builds
 build/myla-lsp), which leaked where the other didn't.
 """
@@ -22,8 +22,7 @@ from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 from ._tools import myla_tool, selfhost_tool
-from tests.integration.test_lsp_diagnostics import HAVE_PYGLS, LspScenarios, _Client, _uri
-from tests.integration.test_lsp_requests import LspRequestHelpers, LspRequestScenarios, rng
+from ._lsp_scenarios import LspScenarios, LspRequestHelpers, LspRequestScenarios, _Client, _uri, rng
 
 
 _TMP = tempfile.TemporaryDirectory()
@@ -124,8 +123,6 @@ class TestMylaLspSelfHosted(TestMylaLsp):
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestMylaLspRequests(LspRequestScenarios, unittest.TestCase):
     """Symbols, definition, references, hover and completion (step 2)."""
-
-    MEMBERS_OF_P = {"x"}
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -773,9 +770,10 @@ _EXTENSION = os.path.join(_REPO, "vscode-extension", "myla")
 
 @unittest.skipUnless(CAN_BUILD_NATIVE and _node_strips_types(), "needs a native toolchain and node 22.6+")
 class TestExtensionStartsTheServer(unittest.TestCase):
-    """The VS Code extension's choice of server (`vscode-extension/myla/src/
-    server.ts`, run by node with its types stripped): the Myla server where
-    it is built, else the Python one; and the command it picks serves (step 7)."""
+    """The VS Code extension's server command (`vscode-extension/myla/src/
+    server.ts`, run by node with its types stripped): the Myla server, from
+    `myla.serverPath` or the repository's build/, or why there is none; and the
+    command it picks serves (MYLA-80 step 7, MYLA-83)."""
 
     def choose(self, settings: dict, existing: list) -> dict | None:
         script = ("import { chooseServer } from " + json.dumps(os.path.join(_EXTENSION, "src", "server.ts")) + ";\n"
@@ -786,27 +784,22 @@ class TestExtensionStartsTheServer(unittest.TestCase):
         return json.loads(out)
 
     def settings(self, **over) -> dict:
-        s = {"server": "myla", "serverPath": "", "compilerEntry": "/r/myla.py", "python": "/r/.venv/bin/python"}
+        s = {"serverPath": "", "compilerEntry": "/r/myla.py"}
         s.update(over)
         return s
 
-    def test_the_built_server_is_preferred(self):
+    def test_the_built_server(self):
         c = self.choose(self.settings(), ["/r/build/myla-lsp", "/r/src/myla/std"])
-        self.assertEqual((c["kind"], c["command"], c["args"]), ("myla", "/r/build/myla-lsp", ["--stdlib", "/r/src/myla"]))
-        self.assertTrue(c["watchFiles"])
+        self.assertEqual((c["command"], c["args"]), ("/r/build/myla-lsp", ["--stdlib", "/r/src/myla"]))
 
     def test_a_configured_binary(self):
         c = self.choose(self.settings(serverPath="/opt/myla-lsp", compilerEntry=None), ["/opt/myla-lsp"])
-        self.assertEqual((c["kind"], c["command"], c["args"]), ("myla", "/opt/myla-lsp", []))
+        self.assertEqual((c["command"], c["args"]), ("/opt/myla-lsp", []))
 
-    def test_falls_back_to_the_python_server(self):
-        c = self.choose(self.settings(), [])
-        self.assertEqual((c["kind"], c["command"], c["args"]), ("python", "/r/.venv/bin/python", ["/r/myla.py", "lsp"]))
-        self.assertIn("scripts/bootstrap.sh", c["note"])
-        self.assertFalse(c["watchFiles"])
-        c = self.choose(self.settings(server="python"), ["/r/build/myla-lsp"])
-        self.assertEqual(c["kind"], "python")
-        self.assertIsNone(self.choose(self.settings(compilerEntry=None), []))
+    def test_no_server_says_what_to_do(self):
+        # the Python server it fell back to is gone (MYLA-83)
+        self.assertIn("scripts/bootstrap.sh", self.choose(self.settings(), [])["missing"])
+        self.assertIn("myla.serverPath", self.choose(self.settings(compilerEntry=None), [])["missing"])
 
     def test_the_chosen_command_serves(self):
         binary = myla_tool("tools/lsp/main.my", "lsp")
@@ -830,173 +823,6 @@ class TestOwnTests(unittest.TestCase):
         proc = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), "test",
                                os.path.join(_REPO, "tools", "lsp", "server.my")], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-
-
-def _python_detail(detail: str) -> str:
-    """A Myla server signature or header as the Python server writes it,
-    without `pub`, type parameters and an impl's trait (MYLA-80 step 6)."""
-    import re
-    d = detail.removeprefix("pub ")
-    m = re.match(r"(fun|struct|enum|trait) (\w+)<[^(]*?>(.*)$", d)
-    if m:
-        d = f"{m[1]} {m[2]}{m[3]}"
-    m = re.match(r"impl(<[^>]*>)? (.* for )?(.*)$", d)
-    if m:
-        d = f"impl {m[3]}"
-    return d
-
-
-def _strip_range_ends(symbols: list, mine: bool = False) -> list:
-    """Document symbols without the end of `range`, where the servers differ
-    on purpose: the Python one ends it at the last line an AST node is on,
-    the Myla one at the declaration's last token. The Myla server's details
-    (`mine`) are written as the Python server's: a type's detail is just its
-    keyword there."""
-    out = []
-    for s in symbols:
-        s = dict(s)
-        s["range"] = {"start": s["range"]["start"]}
-        if mine and "detail" in s:
-            s["detail"] = _python_detail(s["detail"])
-            if s["detail"].split(" ")[0] in ("struct", "enum", "trait"):
-                s["detail"] = s["detail"].split(" ")[0]
-        s["children"] = _strip_range_ends(s.get("children", []), mine)
-        out.append(s)
-    return out
-
-
-@unittest.skipUnless(CAN_BUILD_NATIVE and HAVE_PYGLS, "needs a native toolchain and the lsp extra (pygls)")
-class TestAgainstThePythonServer(unittest.TestCase):
-    """The Myla server answers what the Python server answers, on real files:
-    document symbols for every example and compiler source, and definition,
-    hover, references and completion at sampled positions in the examples
-    (with examples/ as the workspace). Where it resolves by scope (MYLA-51,
-    step 5), it answers where the Python server doesn't (locals) and finds
-    fewer references (only those meaning the same declaration)."""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        import sys
-        cls.root = os.path.join(_REPO, "examples")
-        cls.servers = []
-        for argv in ([sys.executable, os.path.join(_REPO, "myla.py"), "lsp"],
-                     [myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", default_stdlib_root()]):
-            c = _Client(argv)
-            c.TIMEOUT = 60
-            rid = c.send("initialize", {"processId": None, "rootUri": _uri(cls.root), "capabilities": {}},
-                         request=True)
-            c.response(rid)
-            c.send("initialized", {})
-            cls.servers.append(c)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        for c in cls.servers:
-            c.close()
-
-    def ask(self, method: str, params: dict) -> list:
-        answers = []
-        for c in self.servers:
-            rid = c.send(method, params, request=True)
-            answers.append(c.response(rid).get("result"))
-        return answers
-
-    def open(self, path: str) -> tuple[str, str]:
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-        for c in self.servers:
-            c.send("textDocument/didOpen", {"textDocument": {
-                "uri": _uri(path), "languageId": "myla", "version": 1, "text": text}})
-        return _uri(path), text
-
-    def close_doc(self, uri: str) -> None:
-        for c in self.servers:
-            c.send("textDocument/didClose", {"textDocument": {"uri": uri}})
-
-    def test_document_symbols(self) -> None:
-        import glob
-        files = sorted(glob.glob(os.path.join(self.root, "*.my")) + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
-                       + glob.glob(os.path.join(_REPO, "tools", "*", "*.my"))
-                       + glob.glob(os.path.join(_REPO, "src", "myla", "std", "*.my")))
-        self.assertGreater(len(files), 50)
-        for path in files:
-            with self.subTest(file=os.path.relpath(path, _REPO)):
-                uri, _ = self.open(path)
-                py, my = self.ask("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
-                self.assertTrue(py, "no symbols")
-                self.assertEqual(_strip_range_ends(my, mine=True), _strip_range_ends(py))
-                self.close_doc(uri)
-
-    def declares(self, location: dict, name: str) -> bool:
-        """Whether `location` is the name of a declaration of `name`."""
-        from tests.integration.test_lsp_diagnostics import _uri as to_uri
-        path = location["uri"][len("file://"):]
-        with open(path, encoding="utf-8") as fh:
-            line = fh.read().splitlines()[location["range"]["start"]["line"]]
-        r = location["range"]
-        # the range counts UTF-16 units; the examples are ASCII where names are
-        return line[r["start"]["character"]:r["end"]["character"]] == name
-
-    def test_requests_at_identifiers(self) -> None:
-        import glob, re
-        files = sorted(glob.glob(os.path.join(self.root, "*.my")))
-        checked = 0
-        for path in files:
-            uri, text = self.open(path)
-            lines = text.splitlines()
-            idents = [(i, m.start(), m.group()) for i, line in enumerate(lines)
-                      for m in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", line) if line.isascii()]
-            for n, (line, col, name) in enumerate(idents[::max(1, len(idents) // 12)]):
-                with self.subTest(file=os.path.basename(path), line=line, name=name):
-                    pos = {"textDocument": {"uri": uri}, "position": {"line": line, "character": col}}
-                    py, my = self.ask("textDocument/definition", pos)
-                    if py is None and my is not None:
-                        # a local, parameter or type parameter (MYLA-51): the
-                        # Python server resolves only declarations by name
-                        self.assertEqual(my["uri"], uri)
-                        self.assertTrue(self.declares(my, name), my)
-                    elif py != my:
-                        # a name declared in several places: the Myla server
-                        # takes the one in scope, the Python server the first
-                        self.assertIsNotNone(py)
-                        self.assertIsNotNone(my)
-                        self.assertTrue(self.declares(my, name), my)
-                    hp, hm = self.ask("textDocument/hover", pos)
-                    if py == my and hp is not None:
-                        value = hm["contents"]["value"].removeprefix("```myla\n").removesuffix("\n```")
-                        self.assertEqual("```myla\n" + _python_detail(value) + "\n```", hp["contents"]["value"])
-                    if n % 4 == 0:
-                        rp, rm = self.ask("textDocument/references", dict(pos, context={"includeDeclaration": n % 8 == 0}))
-                        key = lambda locs: sorted((l["uri"], str(l["range"])) for l in (locs or []))
-                        # every occurrence of the name for the Python server;
-                        # those meaning the same declaration for the Myla one
-                        self.assertLessEqual(set(key(rm)), set(key(rp)))
-                        here = [l for l in rm or [] if l["uri"] == uri and l["range"]["start"]["line"] == line
-                                and l["range"]["start"]["character"] == col]
-                        is_decl = my is not None and my["uri"] == uri and my["range"]["start"] == {"line": line, "character": col}
-                        if my is not None and (n % 8 == 0 or not is_decl):
-                            self.assertTrue(here, f"{name} is not among its references")
-                    checked += 1
-            for line in (0, len(lines) // 2):
-                with self.subTest(file=os.path.basename(path), completion=line):
-                    cp, cm = self.ask("textDocument/completion", {"textDocument": {"uri": uri},
-                                                                  "position": {"line": line, "character": 0}})
-                    labels = lambda c: {(i["label"], i["kind"]) for i in c["items"]}
-                    # the Myla server adds the locals in scope (variables, type parameters)
-                    self.assertLessEqual(labels(cp), labels(cm))
-                    self.assertEqual({kind for _, kind in labels(cm) - labels(cp)} - {6, 25}, set())
-            for line, text_line in enumerate(lines):
-                dot = text_line.find(".")
-                if dot > 0 and text_line.isascii() and not text_line.lstrip().startswith(("//", "#")):
-                    with self.subTest(file=os.path.basename(path), member_completion=line):
-                        cp, cm = self.ask("textDocument/completion", {"textDocument": {"uri": uri},
-                                                                      "position": {"line": line, "character": dot + 1}})
-                        labels = lambda c: {(i["label"], i["kind"]) for i in c["items"]}
-                        # every member for the Python server, the receiver's for the Myla one
-                        self.assertLessEqual(labels(cm), labels(cp))
-                    break
-            self.close_doc(uri)
-        self.assertGreater(checked, 200)
 
 
 if __name__ == "__main__":
