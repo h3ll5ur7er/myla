@@ -16,7 +16,7 @@ Debug Myla programs in VS Code: `F5` on a `.my` file builds it with `myla build 
 - [x] Evaluate in the Debug Console and on hover; `-exec <gdb command>`
 - [x] Runtime errors stop as exceptions with their message and position; program output in the Debug Console; the exit code; Run Without Debugging
 - [x] Unit tests (MI, DAP, presentation, the session against a fake gdb) and an integration test against real gdb, built by both CLIs
-- [x] A hook for projects: `debugTarget` debugs a project's `src/main.my` until project-mode `myla build` exists ([[MYLA-94]])
+- [x] Projects: a project (its directory or `myla.toml`) is built by its own `myla build -g` and `build/<name>` debugged (`projectBuild`, since [[MYLA-94]]; the integration test debugs into a path dependency)
 
 ## How
 

@@ -60,16 +60,13 @@ export function buildCommand(cli: Toolchain, file: string, output: string, debug
 export type DebugTarget =
   | { kind: "file"; file: string }
   | { kind: "binary"; path: string }
-  | { kind: "project"; root: string; main: string }
+  | { kind: "project"; root: string }
   | { kind: "missing"; message: string };
 
 /**
  * `program` is a `.my` file to build, a binary built with `-g`, or a project
- * (its directory or `myla.toml`, D73). A project is debugged through its
- * `src/main.my` built as a single file for now: that covers projects without
- * dependencies. Once the project tool's `myla build` exists (MYLA-94), build
- * the project with it instead (it passes the `--package` flags dependencies
- * need) and debug `build/<name>`: this is the place to do that.
+ * (its directory or `myla.toml`, D73), which `projectBuild` builds with the
+ * project's own `myla build` (MYLA-94).
  */
 export function debugTarget(
   program: string,
@@ -83,12 +80,53 @@ export function debugTarget(
   if (projectRoot !== undefined) {
     const main = path.join(projectRoot, "src", "main.my");
     if (fs.isFile(path.join(projectRoot, "myla.toml")) && fs.isFile(main)) {
-      return { kind: "project", root: projectRoot, main };
+      return { kind: "project", root: projectRoot };
     }
     return { kind: "missing", message: `${program} is not a Myla project with a src/main.my.` };
   }
   if (!fs.isFile(program)) return { kind: "missing", message: `The program to debug doesn't exist: ${program}` };
   return program.endsWith(".my") ? { kind: "file", file: program } : { kind: "binary", path: program };
+}
+
+/** How to build a project for the debugger: the command, where to run it, and the binary it writes. */
+export interface ProjectBuild {
+  command: Toolchain;
+  cwd: string;
+  executable: string;
+}
+
+/**
+ * A project is built by `myla build -g` in its directory, which resolves its
+ * dependencies and writes `build/<name>` (MYLA-94); only the self-hosted CLI
+ * has the project commands (D71). `manifest` is the text of its `myla.toml`.
+ */
+export function projectBuild(cli: Toolchain, root: string, manifest: string): ProjectBuild | { missing: string } {
+  if ([cli.command, ...cli.args].some((a) => path.basename(a) === "myla.py")) {
+    return { missing: "Debugging a project needs the self-hosted CLI (build/myla, built by scripts/bootstrap.sh): the Python CLI has no project commands." };
+  }
+  const name = packageName(manifest);
+  if (name === undefined) return { missing: `${path.join(root, "myla.toml")} has no package.name.` };
+  return {
+    command: { command: cli.command, args: [...cli.args, "build", "-g"] },
+    cwd: root,
+    executable: path.join(root, "build", name),
+  };
+}
+
+/** The `name` of a manifest's `[package]` table (a basic or literal string), if it has one. */
+export function packageName(manifest: string): string | undefined {
+  let table = "";
+  for (const raw of manifest.split(/\r?\n/)) {
+    const line = raw.trim();
+    const header = /^\[\s*([^\]]*?)\s*\]/.exec(line);
+    if (header) {
+      table = header[1];
+      continue;
+    }
+    const entry = /^name\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(line);
+    if (table === "package" && entry) return entry[1] ?? entry[2];
+  }
+  return undefined;
 }
 
 /** Where the debug build of `file` goes: `<dir>/<name>-<hash of its path>`. */

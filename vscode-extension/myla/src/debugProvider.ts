@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { DebugProtocol } from "@vscode/debugprotocol";
-import { buildCommand, debugOutputPath, debugTarget, runBuild, type CompilerDiagnostic } from "./build.ts";
+import { buildCommand, debugOutputPath, debugTarget, projectBuild, runBuild, type CompilerDiagnostic } from "./build.ts";
 import { MylaDebugSession } from "./debug/session.ts";
 import type { Toolchain, ToolMissing } from "./toolchain.ts";
 
@@ -110,23 +110,36 @@ class ConfigurationProvider implements vscode.DebugConfigurationProvider {
       config.executable = target.path;
       return config;
     }
-    const file = target.kind === "file" ? target.file : target.main;
     const cli = this.deps.resolveCli();
     if ("missing" in cli) {
       await showBuildError(this.deps.output, cli.missing);
       return undefined;
     }
+    // a file is built on its own into the extension's storage, a project by
+    // its own `myla build` into its build/ (MYLA-94)
+    let build;
+    if (target.kind === "project") {
+      const pb = projectBuild(cli, target.root, fs.readFileSync(path.join(target.root, "myla.toml"), "utf8"));
+      if ("missing" in pb) {
+        await showBuildError(this.deps.output, pb.missing);
+        return undefined;
+      }
+      build = pb;
+    } else {
+      fs.mkdirSync(this.buildDir, { recursive: true });
+      const executable = debugOutputPath(this.buildDir, target.file);
+      build = { command: buildCommand(cli, target.file, executable, true), cwd: path.dirname(target.file), executable };
+    }
+    const file = target.kind === "project" ? target.root : target.file;
     // build what the editor shows
     for (const doc of vscode.workspace.textDocuments) {
       if (doc.isDirty && doc.languageId === "myla" && !doc.isUntitled) await doc.save();
     }
-    fs.mkdirSync(this.buildDir, { recursive: true });
-    const executable = debugOutputPath(this.buildDir, file);
-    const command = buildCommand(cli, file, executable, true);
+    const { command, cwd, executable } = build;
     this.deps.output.appendLine(`Building for the debugger: ${[command.command, ...command.args].join(" ")}`);
     const result = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Window, title: `Myla: building ${path.basename(file)} with -g` },
-      () => runBuild(command, path.dirname(file)),
+      () => runBuild(command, cwd),
     );
     if (result.output) this.deps.output.append(result.output);
     if (!result.ok) {

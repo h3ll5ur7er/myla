@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { buildCommand, debugOutputPath, debugTarget, runBuild } from "../build.ts";
+import { buildCommand, debugOutputPath, debugTarget, projectBuild, runBuild } from "../build.ts";
 import { chooseCli } from "../toolchain.ts";
 import { Gdb, MiError, type MiTransport } from "./gdb.ts";
 import { miList, miQuote, miString, miTuple, type MiRecord, type MiTuple } from "./mi.ts";
@@ -322,13 +322,21 @@ export class MylaDebugSession {
     });
     if (target.kind === "missing") throw new Error(target.message);
     if (target.kind === "binary") return target.path;
-    const file = target.kind === "file" ? target.file : target.main;
     const cli = chooseCli({ cliPath: cliPath || "myla", compilerEntry: undefined }, fs.existsSync);
     if ("missing" in cli) throw new Error(cli.missing);
-    const output = debugOutputPath(this.tempDir!, file);
-    const command = buildCommand(cli, file, output, true);
+    let build;
+    if (target.kind === "project") {
+      // the project's own `myla build` resolves its dependencies (MYLA-94)
+      const pb = projectBuild(cli, target.root, fs.readFileSync(path.join(target.root, "myla.toml"), "utf8"));
+      if ("missing" in pb) throw new Error(pb.missing);
+      build = pb;
+    } else {
+      const executable = debugOutputPath(this.tempDir!, target.file);
+      build = { command: buildCommand(cli, target.file, executable, true), cwd: path.dirname(target.file), executable };
+    }
+    const { command, cwd, executable: output } = build;
     this.output(`${[command.command, ...command.args].join(" ")}\n`);
-    const result = await runBuild(command, path.dirname(file));
+    const result = await runBuild(command, cwd);
     if (!result.ok) {
       this.output(result.output, "stderr");
       const first = result.diagnostics[0];

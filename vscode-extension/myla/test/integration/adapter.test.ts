@@ -271,3 +271,43 @@ test("run without debugging", { skip }, async () => {
   await dap.event("terminated");
   assert.equal(dap.output("stdout"), "4\nhéllo\n");
 });
+
+test("a project is built by its own `myla build` and debugged (MYLA-94)", { skip }, async () => {
+  // a project with a path dependency: only the project build passes the --package flags it needs
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "myla-dap-"));
+  const put = (rel: string, text: string) => {
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), text);
+  };
+  put("geo/myla.toml", '[package]\nname = "geo"\nversion = "1"\n');
+  put("geo/src/geo.my", "pub fun area(w: int, h: int) -> int {\n    let a = w * h\n    return a\n}\n");
+  put("app/myla.toml", '[package]\nname = "app"\nversion = "1"\n\n[dependencies]\ngeo = { path = "../geo" }\n');
+  put("app/src/main.my", "import geo\n\nfun main() {\n    print(geo.area(3, 4))\n}\n");
+  const geoFile = path.join(dir, "geo", "src", "geo.my");
+  const dap = client();
+  const r = await dap.start({ program: path.join(dir, "app") });
+  if (cli.endsWith(".py")) {
+    // the Python CLI has no project commands (D71)
+    assert.equal(r.success, false);
+    assert.match(r.message ?? "", /needs the self-hosted CLI/);
+  } else {
+    assert.ok(r.success, r.message);
+    const bp = await dap.ok("setBreakpoints", { source: { path: geoFile }, breakpoints: [{ line: 3 }] });
+    assert.equal(bp.breakpoints[0].verified, true);
+    await dap.ok("configurationDone");
+    const stopped = await dap.event("stopped");
+    assert.equal(stopped.reason, "breakpoint");
+    const frames = await topFrame(dap, stopped.threadId);
+    assert.equal(path.basename(frames[0].source.path), "geo.my");
+    assert.equal(frames[0].line, 3);
+    const scopes = (await dap.ok("scopes", { frameId: frames[0].id })).scopes;
+    const locals = await variables(dap, scopes[0].variablesReference);
+    assert.equal(locals.a.value, "12");
+    await dap.ok("continue", { threadId: stopped.threadId });
+    assert.equal((await dap.event("exited")).exitCode, 0);
+    await dap.event("terminated");
+    assert.equal(dap.output("stdout"), "12\n");
+    assert.ok(fs.existsSync(path.join(dir, "app", "build", "app")));
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+});

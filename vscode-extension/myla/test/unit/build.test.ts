@@ -2,7 +2,7 @@
 // (src/build.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseDiagnostics, buildCommand, debugTarget, debugOutputPath } from "../../src/build.ts";
+import { parseDiagnostics, buildCommand, debugTarget, debugOutputPath, projectBuild, packageName } from "../../src/build.ts";
 
 test("a type error with its range", () => {
   const out = [
@@ -67,9 +67,9 @@ test("what a launch configuration's program names", () => {
   const fs = { isFile: (p: string) => files.has(p), isDirectory: (p: string) => dirs.has(p) };
   assert.deepEqual(debugTarget("/w/a.my", fs), { kind: "file", file: "/w/a.my" });
   assert.deepEqual(debugTarget("/w/bin/prog", fs), { kind: "binary", path: "/w/bin/prog" });
-  // the project hook: a project directory or its manifest debugs src/main.my
-  assert.deepEqual(debugTarget("/w/app", fs), { kind: "project", root: "/w/app", main: "/w/app/src/main.my" });
-  assert.deepEqual(debugTarget("/w/app/myla.toml", fs), { kind: "project", root: "/w/app", main: "/w/app/src/main.my" });
+  // a project directory or its manifest: the project, which needs a src/main.my
+  assert.deepEqual(debugTarget("/w/app", fs), { kind: "project", root: "/w/app" });
+  assert.deepEqual(debugTarget("/w/app/myla.toml", fs), { kind: "project", root: "/w/app" });
   const missing = debugTarget("/w/nope.my", fs);
   assert.equal(missing.kind, "missing");
 });
@@ -80,4 +80,23 @@ test("debug builds of different files don't collide", () => {
   assert.notEqual(a, b);
   assert.match(a, /^\/tmp\/d\/main-[0-9a-f]{8}$/);
   assert.equal(a, debugOutputPath("/tmp/d", "/w/x/main.my"));
+});
+
+test("a project is built by the project's `myla build` (MYLA-94)", () => {
+  const cli = { command: "/r/build/myla", args: [] };
+  assert.deepEqual(projectBuild(cli, "/w/app", '[package]\nname = "app"\nversion = "1"\n'), {
+    command: { command: "/r/build/myla", args: ["build", "-g"] },
+    cwd: "/w/app",
+    executable: "/w/app/build/app",
+  });
+  const python = { command: "python3", args: ["/r/myla.py"] };
+  assert.match((projectBuild(python, "/w/app", '[package]\nname = "app"\n') as { missing: string }).missing, /build\/myla/);
+  assert.match((projectBuild(cli, "/w/app", "[dependencies]\n") as { missing: string }).missing, /package\.name/);
+});
+
+test("the package name is the [package] table's", () => {
+  assert.equal(packageName('[package]\nname = "app"\n'), "app");
+  assert.equal(packageName("[dependencies.geo]\nname = 'x'\n\n[package]\nversion = \"1\"\nname = 'app2'  # a comment\n"), "app2");
+  assert.equal(packageName(' [ package ] \r\n name="spaced"\r\n'), "spaced");
+  assert.equal(packageName("[package]\nversion = \"1\"\n[other]\nname = \"no\"\n"), undefined);
 });
