@@ -735,6 +735,28 @@ class Interpreter:
         count = right & (t.width - 1)
         return _wrap(_wrap(left, t) >> count, t)
 
+    def _directory_primitive(self, name: str, expr: ast.Call, env):
+        """`__list_dir(path)`, `__mkdir(path, mode)` and `__stat(path)`
+        (MYLA-88), as the native helpers behave: the path ends at its first NUL
+        byte (it is a C string there), and each call sets `__io_errno`.
+        `__list_dir` gives every name followed by a NUL byte (`os.listdir`
+        leaves out "." and "..", which `std.fs` drops anyway); `__stat` the
+        `st_mode`, or -1; `__mkdir` nothing."""
+        import os
+        path = _str_bytes(self._eval(expr.args[0], env)).split(b"\0")[0]
+        mode = self._eval(expr.args[1], env) if name == "__mkdir" else 0
+        self._io_errno = 0
+        try:
+            if name == "__list_dir":
+                return _bytes_str(b"".join(n + b"\0" for n in os.listdir(path)))
+            if name == "__stat":
+                return os.stat(path).st_mode
+            os.mkdir(path, mode)
+            return None
+        except OSError as err:
+            self._io_errno = err.errno or 0
+            return {"__list_dir": "", "__stat": -1}.get(name)
+
     def _run_process(self, program: str, argv: list[str]) -> "ListValue":
         """Spawn `program` with `argv`, wait for it, and capture its output.
 
@@ -859,6 +881,8 @@ class Interpreter:
             except OSError as err:
                 self._io_errno = err.errno or 0
             return None
+        if callee.ident in ("__list_dir", "__mkdir", "__stat"):
+            return self._directory_primitive(callee.ident, expr, env)
         if callee.ident == "__run":
             program = self._eval(expr.args[0], env)
             argv = [str(a) for a in self._eval(expr.args[1], env).elems]

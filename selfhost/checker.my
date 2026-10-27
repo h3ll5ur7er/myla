@@ -288,7 +288,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 }
 
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll"
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat"
 }
 
 fun is_diverging_builtin(name: str) -> bool {
@@ -3553,6 +3553,21 @@ impl Checker {
             if !is_str(p_t) { return Err(terr(e.line, e.col, format("__write_file() path must be a string, found '{}'", type_name(p_t)))) }
             let c_t = self.expect_value(args[1], Some(Type.TStr))?
             if !is_str(c_t) { return Err(terr(e.line, e.col, format("__write_file() contents must be a string, found '{}'", type_name(c_t)))) }
+            return Ok(None)
+        }
+        if name == "__list_dir" || name == "__stat" {
+            if len(args) != 1 { return Err(terr(e.line, e.col, format("{}() takes (path: str)", name))) }
+            let p_t = self.expect_value(args[0], Some(Type.TStr))?
+            if !is_str(p_t) { return Err(terr(e.line, e.col, format("{}() path must be a string, found '{}'", name, type_name(p_t)))) }
+            if name == "__list_dir" { return Ok(Some(Type.TStr)) }
+            return Ok(Some(t_int()))
+        }
+        if name == "__mkdir" {
+            if len(args) != 2 { return Err(terr(e.line, e.col, "__mkdir() takes (path: str, mode: int32)")) }
+            let p_t = self.expect_value(args[0], Some(Type.TStr))?
+            if !is_str(p_t) { return Err(terr(e.line, e.col, format("__mkdir() path must be a string, found '{}'", type_name(p_t)))) }
+            let m_t = self.expect_value(args[1], Some(t_int()))?
+            if !is_int(m_t) { return Err(terr(e.line, e.col, format("__mkdir() mode must be an integer, found '{}'", type_name(m_t)))) }
             return Ok(None)
         }
         if name == "__run" {

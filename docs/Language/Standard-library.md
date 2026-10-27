@@ -20,7 +20,7 @@ These names are reserved: no declaration may reuse them.
 | `StringBuilder()`, `append(sb, s)`, `append(sb, s, start, end)`, `append_byte(sb, b)`, `build(sb)` | | The four-argument `append` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
-The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal` and `__run_errno` exist for the standard library; call the `std` functions instead.
+The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal` and `__run_errno` exist for the standard library; call the `std` functions instead.
 
 ## std.io
 
@@ -112,11 +112,47 @@ fun main() {
 | --- | --- |
 | `read_to_string(path: str) -> Result<str, IoError>` | The whole file |
 | `write_to_file(path: str, contents: str) -> Result<int32, IoError>` | Creates or truncates (mode 0644); `Ok` holds the number of bytes |
+| `list_dir(path: str) -> Result<[str], IoError>` | The names of the directory's entries, without `.` and `..`, sorted by their bytes |
+| `make_dir(path: str) -> Result<int32, IoError>` | Makes one directory (mode 0755 less the umask); its parent must exist; `Ok` holds 0 |
+| `make_dir_all(path: str) -> Result<int32, IoError>` | Makes the directory and the parents it lacks, like `mkdir -p`; an existing directory is fine; `Ok` holds 0 |
+| `exists(path: str) -> bool` | Whether the path names anything (symbolic links followed, so a dangling one doesn't count) |
+| `is_dir(path: str) -> bool`, `is_file(path: str) -> bool` | Whether it names a directory, a regular file (links followed) |
 | `enum IoError { NotFound, PermissionDenied, Other(int32) }` | Mapped from the OS errno |
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
 
-`from_errno(code: int32) -> IoError` maps an errno; `std.io` uses it too.
+`from_errno(code: int32) -> IoError` maps an errno; `std.io` uses it too. Errors without a variant of their own keep their errno in `Other`: a path that exists already is `Other(17)` (EEXIST), a file where a directory should be `Other(20)` (ENOTDIR).
+
+```myla
+from std.fs import list_dir, make_dir_all, is_dir, IoError
+
+fun main() {
+    match make_dir_all("build/out") {
+        Ok(n) => {},
+        Err(e) => { print("could not make build/out") },
+    }
+    match list_dir("src") {
+        Ok(names) => {
+            for n in names {
+                if is_dir("src/" + n) { print(n + "/") } else { print(n) }
+            }
+        },
+        Err(e) => { print("no src directory") },
+    }
+}
+```
+
+### Directory primitives
+
+The directory functions rest on three primitives (D64's pattern: a small system call per implementation, the rest shared Myla code; [[MYLA-88]]):
+
+| Primitive | Does | Result |
+| --- | --- | --- |
+| `__list_dir(path: str) -> str` | open(2) with `O_DIRECTORY`, getdents64(2) until the end, close(2) | Every name the directory lists, each followed by a NUL byte, in the file system's order (`.` and `..` may be among them); `""` on an error |
+| `__mkdir(path: str, mode: int32)` | mkdir(2) | Nothing |
+| `__stat(path: str) -> int32` | stat(2) | `st_mode` (file type and permission bits), or -1 on an error |
+
+Each sets the errno that `__io_errno()` reads (0 on success). A name can't hold a NUL byte, so NUL separates them. `list_dir` drops `.` and `..` and sorts the names by their bytes, so the Python interpreter (`os.listdir`), the native helpers and every file system give the same list.
 
 ## std.num
 

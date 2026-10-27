@@ -1393,6 +1393,13 @@ impl Interp {
             __write_file(as_str(self.eval(args[0])), as_str(self.eval(args[1])))
             return Value.VUnit
         }
+        if nm == "__list_dir" { return Value.VStr(__list_dir(as_str(self.eval(args[0])))) }
+        if nm == "__stat" { return Value.VInt(__stat(as_str(self.eval(args[0]))) as int64) }
+        if nm == "__mkdir" {
+            let path = as_str(self.eval(args[0]))
+            __mkdir(path, as_int(self.eval(args[1])) as int32)
+            return Value.VUnit
+        }
         if nm == "__args" {
             var out: [Value] = []
             for a in self.argv { push(out, Value.VStr(a)) }

@@ -70,7 +70,7 @@ A capturing lambda allocates an environment cell: word 0 holds a drop function (
 | Strings | `__str_eq`, `__str_concat`, `__int_to_str`, `__uint_to_str`, `__bool_to_str`, `__str_chars` (UTF-8 decode; U+FFFD for each byte outside a well-formed sequence) |
 | Heap | `__heap_init`, `__alloc`, `__free`, `__func_retain`, `__func_drop` |
 | Collections | per type: `__drop_list_T`, `__clone_list_T`, `__grow_list_T` (doubling, minimum 4); `__new_map_*`, `__put_map_*`, `__find_map_*`, `__clone_map_*`, `__grow_map_*`, `__drop_map_*`, `__keys_map_*`, `__remove_map_*` (rebuilds the table); `__sb_new`, `__sb_drop`, `__sb_clone`, `__sb_grow`, `__sb_extend`, `__sb_build` |
-| I/O | `__write`, `__read` (one read into a fresh str cell of capacity n, retried on EINTR; [[MYLA-78]]), `__args`, `__read_file` (open/fstat/read loop/close), `__write_file` (open O_WRONLY\|O_CREAT\|O_TRUNC 0644, write loop) |
+| I/O | `__write`, `__read` (one read into a fresh str cell of capacity n, retried on EINTR; [[MYLA-78]]), `__args`, `__read_file` (open/fstat/read loop/close), `__write_file` (open O_WRONLY\|O_CREAT\|O_TRUNC 0644, write loop), `__list_dir` (open O_DIRECTORY, getdents64 into a 4 KB stack buffer, names appended to a str cell that doubles when full), `__mkdir`, `__stat` (`st_mode` from stat(2)); the three share a path copy onto the stack ([[MYLA-88]]) |
 | Processes | `__run`: builds a C argv, creates stdout, stderr and an O_CLOEXEC "exec error" pipe, forks, `dup2`s and `execve`s in the child; the parent drains both pipes with `poll`, reads the exec-error pipe to learn execve's errno, and decodes the `wait4` status into exit code or signal |
 | Floats | `__fmod` (x87 `fprem`), `__two_prod` (Dekker), `__fscale`, and the power-of-ten tables `__pow10_hi`/`__pow10_lo` |
 

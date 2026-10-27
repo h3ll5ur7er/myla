@@ -655,7 +655,8 @@ _BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop
                   # lives in `std.io` / `std.process` / `std.fs` and wraps these.
                   "__write", "__exit", "__args", "__read_file", "__io_errno",
                   "__run", "__run_stderr", "__run_exit_code", "__run_signal",
-                  "__run_errno", "__write_file", "__read", "__poll"}
+                  "__run_errno", "__write_file", "__read", "__poll",
+                  "__list_dir", "__mkdir", "__stat"}
 
 # builtin calls that never return (the checker treats them like a `return`)
 _DIVERGING_BUILTINS = {"panic", "unreachable", "__exit"}
@@ -3662,6 +3663,39 @@ class Checker:
                 raise TypeCheckError(
                     f"__write_file() contents must be a string, found "
                     f"'{type_name(c_t)}'",
+                    expr.line, expr.column,
+                )
+            expr.resolved_type = None
+            return None
+        if name in ("__list_dir", "__stat"):
+            # directory primitives (MYLA-88): the names of a directory's
+            # entries, each followed by a NUL byte; the st_mode of a path or -1
+            if len(expr.args) != 1:
+                raise TypeCheckError(f"{name}() takes (path: str)",
+                                     expr.line, expr.column)
+            p_t = self._expect_value(expr.args[0], scope, STR)
+            if not isinstance(p_t, StrType):
+                raise TypeCheckError(
+                    f"{name}() path must be a string, found '{type_name(p_t)}'",
+                    expr.line, expr.column,
+                )
+            t = STR if name == "__list_dir" else INT
+            expr.resolved_type = t
+            return t
+        if name == "__mkdir":
+            if len(expr.args) != 2:
+                raise TypeCheckError("__mkdir() takes (path: str, mode: int32)",
+                                     expr.line, expr.column)
+            p_t = self._expect_value(expr.args[0], scope, STR)
+            if not isinstance(p_t, StrType):
+                raise TypeCheckError(
+                    f"__mkdir() path must be a string, found '{type_name(p_t)}'",
+                    expr.line, expr.column,
+                )
+            m_t = self._expect_value(expr.args[1], scope, INT)
+            if not isinstance(m_t, IntType):
+                raise TypeCheckError(
+                    f"__mkdir() mode must be an integer, found '{type_name(m_t)}'",
                     expr.line, expr.column,
                 )
             expr.resolved_type = None

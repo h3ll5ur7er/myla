@@ -173,6 +173,12 @@ class CodeGen:
         # set once `Reader.ready` (`__poll`) is used, gating the poll helper
         # (MYLA-80; shares the `__io_errno_val` global).
         self._uses_poll = False
+        # set once `std.fs`'s directory functions use `__list_dir`, `__mkdir`
+        # or `__stat`, gating their helpers (MYLA-88; they share the
+        # `__io_errno_val` global).
+        self._uses_list_dir = False
+        self._uses_mkdir = False
+        self._uses_stat = False
         # set once `__io_errno` is used, gating the `__io_errno_val` global
         # (also emitted for the helpers that set it).
         self._uses_io_errno = False
@@ -434,6 +440,12 @@ class CodeGen:
             self._emit_read_runtime()
         if self._uses_poll:
             self._emit_poll_runtime()
+        if self._uses_list_dir:
+            self._emit_list_dir_runtime()
+        if self._uses_mkdir:
+            self._emit_mkdir_runtime()
+        if self._uses_stat:
+            self._emit_stat_runtime()
         if self._uses_run:
             self._emit_run_runtime()
         return self._assemble_source()
@@ -497,9 +509,11 @@ class CodeGen:
             out.append("__run_errno_val:")
             out.append("\t.skip 8")
         if (self._uses_read_file or self._uses_write_file or self._uses_read or self._uses_poll
+                or self._uses_list_dir or self._uses_mkdir or self._uses_stat
                 or self._uses_io_errno):
-            # errno of the last `__read_file`, `__write_file`, `__read` or `__poll` (0 on
-            # success), read by `__io_errno`
+            # errno of the last `__read_file`, `__write_file`, `__read`, `__poll`,
+            # `__list_dir`, `__mkdir` or `__stat` (0 on success), read by
+            # `__io_errno`
             out.append("__io_errno_val:")
             out.append("\t.skip 8")
         out.append("")
@@ -3988,6 +4002,24 @@ class CodeGen:
             self._emit("popq %rdi")              # path
             self._emit("call __write_file")      # errno -> global
             return
+        if name in ("__list_dir", "__stat"):
+            if name == "__list_dir":
+                self._uses_list_dir = True
+            else:
+                self._uses_stat = True
+            self._eval(expr.args[0])             # path str cell -> rax
+            self._emit("movq %rax, %rdi")
+            self._emit(f"call {name}")           # rax = names str / st_mode (errno -> global)
+            return
+        if name == "__mkdir":
+            self._uses_mkdir = True
+            self._eval(expr.args[0])             # path str cell -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # mode -> rax
+            self._emit("movl %eax, %esi")        # (int32)
+            self._emit("popq %rdi")              # path
+            self._emit("call __mkdir")           # errno -> global
+            return
 
         if name == "__run":
             self._uses_run = True
@@ -5078,6 +5110,218 @@ class CodeGen:
         e("\tmovq $-1, %rax")
         e(".Lpl_done:")
         e("\tleave")
+        e("\tret")
+        e("")
+
+    def _emit_c_path(self, label: str, dst: str) -> None:
+        """Copy the str cell in %rdi onto the stack as a NUL-terminated path
+        (16-byte aligned, below the current %rsp) and leave its address in
+        `dst`. Clobbers %rax, %rcx and %rdx; the helper restores %rsp from %rbp
+        when it returns. Used by the directory helpers (MYLA-88)."""
+        e = self.text.append
+        e("\tmovq (%rdi), %rcx")               # path length
+        e("\tleaq 16(%rcx), %rax")             # >= len + 1, with slack
+        e("\tandq $-16, %rax")
+        e("\tsubq %rax, %rsp")
+        e(f"\tmovq %rsp, {dst}")
+        e("\txorq %rax, %rax")
+        e(f"{label}:")
+        e("\tcmpq %rcx, %rax")
+        e(f"\tjae {label}_end")
+        e("\tmovb 8(%rdi,%rax), %dl")
+        e(f"\tmovb %dl, ({dst},%rax)")
+        e("\tincq %rax")
+        e(f"\tjmp {label}")
+        e(f"{label}_end:")
+        e(f"\tmovb $0, ({dst},%rcx)")          # NUL terminator
+
+    def _emit_list_dir_runtime(self) -> None:
+        """`__list_dir`: rdi = path str cell -> rax = a fresh `str` cell (rc=1)
+        holding the name of every entry of the directory, each followed by a
+        NUL byte, in getdents64(217) order ("." and ".." included). Opens the
+        path with O_RDONLY|O_DIRECTORY|O_CLOEXEC, reads 4 KB of records at a
+        time into a stack buffer and appends their names to the result, which
+        is reallocated at twice the size when full; then closes it. On an
+        error the result is empty and `__io_errno_val` holds the errno (0
+        otherwise). Backs `std.fs.list_dir` (MYLA-88)."""
+        e = self.text.append
+        e("__list_dir:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tpushq %r14")
+        e("\tpushq %r15")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        self._emit_c_path(".Lld_path", "%r12")
+        e("\tmovq $2, %rax")                   # sys_open
+        e("\tmovq %r12, %rdi")
+        e("\tmovq $0x90000, %rsi")             # O_RDONLY|O_DIRECTORY|O_CLOEXEC
+        e("\txorq %rdx, %rdx")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lld_open_err")
+        e("\tmovq %rax, %rbx")                 # fd
+        e("\tmovq $4096, %rdi")                # the result: a str cell
+        e("\tcall __alloc")
+        e("\tmovq %rax, %r13")
+        e("\tmovq $0, (%r13)")                 # len = 0
+        e("\tsubq $4096, %rsp")                # record buffer (the path is done)
+        e("\tmovq %rsp, %r12")
+        e(".Lld_fill:")
+        e("\tmovq $217, %rax")                 # sys_getdents64
+        e("\tmovq %rbx, %rdi")
+        e("\tmovq %r12, %rsi")
+        e("\tmovq $4096, %rdx")
+        e("\tsyscall")
+        e("\tcmpq $-4, %rax")                  # EINTR: try again
+        e("\tje .Lld_fill")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lld_read_err")
+        e("\tjz .Lld_close")                   # 0: no more entries
+        e("\tmovq %rax, %r14")                 # bytes of records
+        e("\txorq %r15, %r15")                 # offset of the next record
+        e(".Lld_entry:")
+        e("\tcmpq %r14, %r15")
+        e("\tjae .Lld_fill")
+        e("\tleaq 19(%r12,%r15), %rsi")        # d_name, NUL-terminated
+        e("\txorq %rdx, %rdx")
+        e(".Lld_nlen:")
+        e("\tcmpb $0, (%rsi,%rdx)")
+        e("\tje .Lld_room")
+        e("\tincq %rdx")
+        e("\tjmp .Lld_nlen")
+        e(".Lld_room:")
+        e("\tmovq (%r13), %rcx")
+        e("\tleaq 1(%rcx,%rdx), %rcx")         # length with this name and NUL
+        e("\tmovq -16(%r13), %rax")
+        e("\tsubq $8, %rax")                   # capacity (cell size - len word)
+        e("\tcmpq %rax, %rcx")
+        e("\tjbe .Lld_copy")
+        e("\tpushq %rsi")                      # grow to twice that length
+        e("\tpushq %rdx")
+        e("\tleaq 8(%rcx,%rcx), %rdi")
+        e("\tcall __alloc")                    # rax = the bigger cell
+        e("\tmovq (%r13), %rcx")
+        e("\tmovq %rcx, (%rax)")
+        e("\txorq %rdx, %rdx")
+        e(".Lld_move:")
+        e("\tcmpq %rcx, %rdx")
+        e("\tjae .Lld_moved")
+        e("\tmovb 8(%r13,%rdx), %r8b")
+        e("\tmovb %r8b, 8(%rax,%rdx)")
+        e("\tincq %rdx")
+        e("\tjmp .Lld_move")
+        e(".Lld_moved:")
+        e("\tmovq %r13, %rdi")
+        e("\tmovq %rax, %r13")
+        e("\tcall __free")                     # the old cell
+        e("\tpopq %rdx")
+        e("\tpopq %rsi")
+        e(".Lld_copy:")
+        e("\tmovq (%r13), %rcx")
+        e("\tleaq 8(%r13,%rcx), %rdi")         # append at the end
+        e("\txorq %rax, %rax")
+        e(".Lld_name:")
+        e("\tcmpq %rdx, %rax")
+        e("\tjae .Lld_named")
+        e("\tmovb (%rsi,%rax), %r8b")
+        e("\tmovb %r8b, (%rdi,%rax)")
+        e("\tincq %rax")
+        e("\tjmp .Lld_name")
+        e(".Lld_named:")
+        e("\tmovb $0, (%rdi,%rdx)")            # the NUL after the name
+        e("\tleaq 1(%rcx,%rdx), %rcx")
+        e("\tmovq %rcx, (%r13)")
+        e("\tmovzwq 16(%r12,%r15), %rax")      # d_reclen
+        e("\taddq %rax, %r15")
+        e("\tjmp .Lld_entry")
+        e(".Lld_read_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e("\tmovq $0, (%r13)")                 # no names on an error
+        e(".Lld_close:")
+        e("\tmovq $3, %rax")                   # close(fd)
+        e("\tmovq %rbx, %rdi")
+        e("\tsyscall")
+        e("\tmovq %r13, %rax")
+        e("\tjmp .Lld_ret")
+        e(".Lld_open_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e("\tmovq $8, %rdi")                   # an empty str cell
+        e("\tcall __alloc")
+        e("\tmovq $0, (%rax)")
+        e(".Lld_ret:")
+        e("\tleaq -40(%rbp), %rsp")
+        e("\tpopq %r15")
+        e("\tpopq %r14")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_mkdir_runtime(self) -> None:
+        """`__mkdir`: rdi = path str cell, esi = mode -> void; mkdir(83) sets
+        `__io_errno_val` to 0 or the errno. Backs `std.fs.make_dir`
+        (MYLA-88)."""
+        e = self.text.append
+        e("__mkdir:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")
+        e("\tpushq %r12")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        e("\tmovl %esi, %ebx")                 # mode
+        self._emit_c_path(".Lmd_path", "%r12")
+        e("\tmovq $83, %rax")                  # sys_mkdir
+        e("\tmovq %r12, %rdi")
+        e("\tmovq %rbx, %rsi")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjns .Lmd_ret")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e(".Lmd_ret:")
+        e("\tleaq -16(%rbp), %rsp")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_stat_runtime(self) -> None:
+        """`__stat`: rdi = path str cell -> rax = the `st_mode` that stat(4)
+        gives (symbolic links followed), or -1 with the errno in
+        `__io_errno_val` (0 otherwise). Backs `std.fs.exists`, `is_dir` and
+        `is_file` (MYLA-88)."""
+        e = self.text.append
+        e("__stat:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %r12")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        self._emit_c_path(".Lst_path", "%r12")
+        e("\tsubq $144, %rsp")                 # struct stat
+        e("\tmovq $4, %rax")                   # sys_stat
+        e("\tmovq %r12, %rdi")
+        e("\tmovq %rsp, %rsi")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lst_err")
+        e("\tmovl 24(%rsp), %eax")             # st_mode
+        e("\tjmp .Lst_ret")
+        e(".Lst_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e("\tmovq $-1, %rax")
+        e(".Lst_ret:")
+        e("\tleaq -8(%rbp), %rsp")
+        e("\tpopq %r12")
+        e("\tpopq %rbp")
         e("\tret")
         e("")
 
