@@ -1182,6 +1182,10 @@ class Checker:
             "eq", [other], ast.TypeRef("bool").at(ln, col),
             self._make_eq_body(decl), receiver="self",
         ).at(ln, col)
+        # Without payloads, equality is the tag comparison: the native backend
+        # emits that instead of the body's match, a chain as long as the enum
+        # (MYLA-87). The body stays for the interpreter and the checker.
+        eq.tag_eq = isinstance(decl, ast.EnumDecl) and all(not v.payload for v in decl.variants)
         return ast.ImplDecl(target, [eq], trait_name="Eq").at(ln, col)
 
     def _make_eq_body(self, decl) -> ast.Block:
@@ -1368,6 +1372,7 @@ class Checker:
             receiver=m.receiver,
         ).at(m.line, m.column)
         fdecl.source_path = getattr(m, "source_path", None)
+        fdecl.tag_eq = getattr(m, "tag_eq", False)
         self._check_type_params(fdecl)
         self._type_params = frozenset(combined_tps)
         try:

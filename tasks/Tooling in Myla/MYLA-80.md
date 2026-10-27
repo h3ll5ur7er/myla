@@ -89,4 +89,6 @@ Evidence:
 - Timing on `selfhost/checker.my` (4,100 lines): resolving it cold with its imports 363 ms → 212 ms after caching module outlines; in the server a request takes about 20 ms when the resolution is cached and 330 ms after an edit. `references` to `TokenKind` in `selfhost/parser.my` (workspace `selfhost/`, 468 locations): 22 ms warm (28 ms before this step), 897 ms for the first request (730 ms before: the locals of each file).
 - Full run: 491 unit, 29 integration and 514 burn tests pass; the bootstrap fixed point stays at 7,794,199 bytes and stage 3 builds the server.
 
-Next: member completion by receiver type and fuller signatures (step 6), then the VS Code extension (step 7). [[MYLA-87]] would cut about a third of the remaining lexing and parsing time.
+Next: member completion by receiver type and fuller signatures (step 6), then the VS Code extension (step 7).
+
+After [[MYLA-87]] (derived `==` on `TokenKind` as a tag comparison): on `selfhost/checker.my`, semantic tokens 280 → 174 ms, a request after an edit 322 → 193 ms, `--resolve` 217 → 127 ms.

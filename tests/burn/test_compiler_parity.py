@@ -322,6 +322,31 @@ PROGRAMS = {
         "    var copy = sb\n    append(copy, line, 0, 5)\n"
         "    print(build(sb))\n    print(build(copy))\n}\n"
     ),
+    # MYLA-87: `==` on an enum without payloads compares tags; a hand-written
+    # `impl Eq` on one is still called
+    "derived_eq_on_plain_enums": (
+        "#derive(Eq)\nenum K { A, B, C }\n"
+        "enum Loose { X, Y }\n"
+        "impl Eq for Loose {\n    fun eq(self, other: Loose) -> bool { return true }\n}\n"
+        "#derive(Eq)\nstruct Tok { kind: K, n: int }\n"
+        "fun same<T: Eq>(a: T, b: T) -> bool {\n    return a == b\n}\n"
+        "#main\nfun main() {\n"
+        "    let ks = [K.A, K.B, K.C]\n"
+        "    for a in ks {\n"
+        "        for b in ks {\n"
+        "            print(f\"{a == b} {a != b} {same(a, b)}\")\n"
+        "        }\n"
+        "    }\n"
+        "    print(Loose.X == Loose.Y)\n"
+        "    print(Tok { kind: K.B, n: 1 } == Tok { kind: K.B, n: 1 })\n"
+        "    print(Tok { kind: K.B, n: 1 } == Tok { kind: K.C, n: 1 })\n"
+        "    var count = 0\n"
+        "    for i in 0..300000 {\n"
+        "        if ks[i % 3] == K.C { count = count + 1 }\n"
+        "    }\n"
+        "    print(count)\n"
+        "}\n"
+    ),
     # MYLA-80: `?` whose operand is larger than the function's result: the
     # self-hosted backend copied the whole operand into the result and
     # overwrote the caller's frame (`myla build` crashed after a type error)

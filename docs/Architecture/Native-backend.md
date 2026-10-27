@@ -33,7 +33,7 @@ Internal and stack-based (never called from C):
 | `str` | Pointer to `[len:8][bytes…]`, a reference-counted heap cell (D62, [[MYLA-18]]). Literals and the renderers' constants (`true`, `nan`, …) are cells in `.data` with the same header and a count of 2^62 (`STATIC_RC`), which retains and drops change but never bring to zero, so they need no special case |
 | struct | Fields inline, each in its stored size, in declaration order |
 | tuple | Elements inline |
-| enum | `[tag:8][payload union]`: the tag is the variant's index; the payload area is as large as the largest variant |
+| enum | `[tag:8][payload union]`: the tag is the variant's index; the payload area is as large as the largest variant. A derived `eq` compares tags first; on an enum without payloads both backends emit only that comparison (the Python backend replaces the checker's synthesized `match`, [[MYLA-87]]) |
 | boxed (recursive) enum, as a member | An 8-byte pointer to a heap cell holding the inline enum value |
 | function value | 16 bytes: `(code_ptr, env_ptr)`; `env_ptr` is 0 when nothing is captured |
 | list `[T]` | Pointer to a heap cell `[len:8][cap:8][elem…]`, stride = the element's stored size |

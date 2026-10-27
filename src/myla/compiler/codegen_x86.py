@@ -992,7 +992,17 @@ class CodeGen:
             offset = 16 + 8 * (param_base + i)
             self._scopes[-1][param.name] = ("param", offset, ptype)
 
-        self._gen_block(decl.body)
+        if getattr(decl, "tag_eq", False):
+            # derived `eq` of an enum without payloads (MYLA-87): self and
+            # other arrive by address; equal tags, equal values
+            self._emit("movq 16(%rbp), %rax")
+            self._emit("movq (%rax), %rax")
+            self._emit("movq 24(%rbp), %rcx")
+            self._emit("cmpq (%rcx), %rax")
+            self._emit("sete %al")
+            self._emit("movzbq %al, %rax")
+        else:
+            self._gen_block(decl.body)
 
         self._emit(f"{self._epilogue}:")
         self._emit("leave")

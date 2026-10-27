@@ -218,6 +218,39 @@ class TestMatchScrutineeOwnership(unittest.TestCase):
 
 
 
+PLAIN_ENUM_EQ = (
+    "#derive(Eq)\nenum K { " + ", ".join(f"V{i}" for i in range(40)) + " }\n"
+    "#derive(Eq)\nenum P { A(int), B }\n"
+    "fun main() {\n    print(K.V3 == K.V39)\n    print(P.A(1) == P.B)\n}\n"
+)
+
+
+def function_body(asm: str, label: str) -> list[str]:
+    """The instruction lines of the function at `label`, up to its `ret`."""
+    lines = asm.splitlines()
+    start = lines.index(label + ":")
+    body = []
+    for line in lines[start + 1:]:
+        line = line.strip()
+        if not line or line.startswith("."):
+            continue
+        body.append(line)
+        if line == "ret":
+            return body
+    raise AssertionError(f"no ret after {label}")
+
+
+class TestDerivedEqOnPlainEnums(unittest.TestCase):
+    """`#derive(Eq)` on an enum without payloads compares tags, whatever the
+    number of variants (MYLA-87); with payloads it stays a match."""
+
+    def test_the_comparison_is_a_few_instructions(self):
+        asm = asm_for(PLAIN_ENUM_EQ)
+        body = function_body(asm, "myla_K.eq")
+        self.assertLess(len(body), 15, "\n".join(body))
+        self.assertGreater(len(function_body(asm, "myla_P.eq")), 15)
+
+
 class TestSelfHostedFloatRuntime(unittest.TestCase):
     def test_generated_runtime_matches_the_python_backend(self):
         # selfhost/codegen.my embeds the Python backend's float runtime and

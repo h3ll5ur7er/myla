@@ -97,6 +97,7 @@ PARITY_PROGRAMS = (
     "remove_many_distinct_keys",
     "string_builder_append_range",
     "try_with_a_larger_success_payload",
+    "derived_eq_on_plain_enums",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -431,6 +432,18 @@ class SelfHostedCodegenParity(unittest.TestCase):
             )
             code, peak_kb = proc.stderr.split()[-2:]
             return proc.stdout, int(code), int(peak_kb) / 1024
+
+    def test_derived_eq_on_a_plain_enum_compares_tags(self) -> None:
+        # MYLA-87: a few instructions, however many variants
+        from tests.unit.test_compiler import PLAIN_ENUM_EQ, function_body
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "eq.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(PLAIN_ENUM_EQ)
+            asm = self._emit_asm(path)
+        body = function_body(asm, "myla_K.eq")
+        self.assertLess(len(body), 15, "\n".join(body))
+        self.assertGreater(len(function_body(asm, "myla_P.eq")), 15)
 
     def test_corpus_codegen_parity(self) -> None:
         checked = 0
