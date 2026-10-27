@@ -186,8 +186,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--keep-asm", action="store_true",
                          help="keep the generated .s assembly next to the output")
     p_build.add_argument("-g", "--debug", action="store_true",
-                         help="emit a DWARF line table so debuggers such as gdb "
-                              "can break on and step through Myla source lines")
+                         help="emit DWARF debug information so debuggers such as gdb "
+                              "can break on and step through Myla source lines and "
+                              "show variables")
     p_build.set_defaults(func=_cmd_build)
 
     p_test = sub.add_parser("test", help="run #test cases in a .my file")

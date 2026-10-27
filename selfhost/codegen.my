@@ -13,7 +13,8 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem, bind_elems
 from std.num import f64_literal_bits, f32_round_bits
 from .loader import Span
-from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV
+from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
+from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
 // `capoff` is the byte offset within the closure env for a "capture" binding.
@@ -21,6 +22,16 @@ pub struct CgBinding { name: str, kind: str, offset: int32, ty: Type, capoff: in
 
 // A by-value captured variable in a closure environment cell.
 pub struct Cap { name: str, ty: Type, off: int32 }
+
+// A Myla scope for the debug information: the label its lexical blocks end
+// at, and how many it opened (MYLA-66).
+pub struct DbgScope { end: str, blocks: int32 }
+
+// A type DIE still to emit (MYLA-66): its label, what it describes (`kind`:
+// base, byte, ptr, voidptr, slice, array, cell or agg), the Myla type, the
+// label it points at, and two numbers (a base type's size; an array's stride
+// and header).
+pub struct DbgType { label: str, kind: str, ty: Type, target: str, n: int32, m: int32 }
 
 // A lifted lambda body to emit as a top-level function (monomorphized per stamp).
 pub struct LamJob { lifted: str, params: [Param], ftype: Type, body: ExprOrBlock, caps: [Cap], subst: [Subst], id: int32, line: int32, col: int32 }
@@ -126,6 +137,18 @@ pub struct CodeGen {
     line_files: [str],
     cur_file: int32,
     last_loc: str,
+    // Variables and types (`-g`, MYLA-66): whether the function being
+    // generated gets them, the subprograms' DIEs, each type DIE's label by key
+    // and the type DIEs to emit, the open scopes, the function's end label,
+    // where the last lexical block opened, and a label counter.
+    dbg_fn: bool,
+    dbg_lines: [str],
+    dbg_types: [str: str],
+    dbg_pending: [DbgType],
+    dbg_scopes: [DbgScope],
+    dbg_fn_end: str,
+    dbg_mark: str,
+    dbg_n: int32,
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -162,6 +185,8 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         line_spans: [], prelude_id: 0,
         cur_path: "<input>", pos_labels: [:], posdata: [],
         debug: false, line_files: [], cur_file: 0, last_loc: "",
+        dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
+        dbg_fn_end: "", dbg_mark: "", dbg_n: 0,
     }
 }
 
@@ -173,7 +198,8 @@ impl CodeGen {
         self.prelude_id = next_id
     }
 
-    // Emit DWARF debug information (`-g`): line tables (MYLA-71).
+    // Emit DWARF debug information (`-g`): line tables (MYLA-71), variables
+    // and types (MYLA-66).
     fun enable_debug_info(var self) {
         self.debug = true
     }
@@ -228,6 +254,409 @@ impl CodeGen {
         self.load_position(line, col, "rsi")
         self.emit(format("call {}", trap))
         if skip != "" { self.emit(format("{}:", skip)) }
+    }
+
+    // -- debug information: variables and types (`-g`, MYLA-66) ----------
+    //
+    // As src/myla/compiler/dwarf.py: a subprogram per function with its
+    // parameters and captures, its locals in lexical blocks (one opens where a
+    // binding starts and ends with the Myla scope), and the types they use.
+
+    fun dbg_label(var self, kind: str) -> str {
+        self.dbg_n = self.dbg_n + 1
+        return format(".Ld{}{}", kind, self.dbg_n)
+    }
+
+    fun dbg_line(var self, line: str) { push(self.dbg_lines, line) }
+
+    // Open the subprogram of the function at label `symbol`, if the function
+    // has a line table.
+    fun dbg_begin_function(var self, symbol: str) {
+        self.dbg_fn = self.cur_file != 0
+        if !self.dbg_fn { return }
+        self.dbg_fn_end = self.dbg_label("f")
+        self.dbg_scopes = []
+        self.dbg_line(format("\t.uleb128 {}", AB_SUBPROGRAM))
+        self.dbg_line(dw_string(symbol))
+        self.dbg_line(format("\t.quad {}", symbol))
+        self.dbg_line(format("\t.quad {} - {}", self.dbg_fn_end, symbol))
+        self.dbg_line("\t.uleb128 1")
+        self.dbg_line(format("\t.byte {}", OP_REG6))
+    }
+
+    // Close the subprogram; its end label goes after the function's code.
+    fun dbg_end_function(var self) {
+        if !self.dbg_fn { return }
+        self.emit(format("{}:", self.dbg_fn_end))
+        self.dbg_line("\t.byte 0")
+        self.dbg_fn = false
+    }
+
+    fun dbg_push_scope(var self) {
+        if self.dbg_fn { push(self.dbg_scopes, DbgScope { end: self.dbg_label("e"), blocks: 0 }) }
+    }
+
+    fun dbg_pop_scope(var self) {
+        if !self.dbg_fn { return }
+        let top = pop(self.dbg_scopes)
+        if top.blocks > 0 {
+            self.emit(format("{}:", top.end))
+            var i = 0
+            while i < top.blocks {
+                self.dbg_line("\t.byte 0")
+                i = i + 1
+            }
+        }
+    }
+
+    // Describe binding `b` for gdb. A parameter or a capture (`whole`) is
+    // visible in the whole function; another binding from here to the end of
+    // its scope, in a lexical block that starts at a label emitted now.
+    fun dbg_variable(var self, b: CgBinding, whole: bool, param: bool) {
+        if !self.dbg_fn || is_internal_name(b.name) { return }
+        if !whole {
+            let si = len(self.dbg_scopes) - 1
+            let end = self.dbg_scopes[si].end
+            if format("{}:{}", end, len(self.text)) != self.dbg_mark {
+                let start = self.dbg_label("b")
+                self.emit(format("{}:", start))
+                self.dbg_line(format("\t.uleb128 {}", AB_BLOCK))
+                self.dbg_line(format("\t.quad {}", start))
+                self.dbg_line(format("\t.quad {} - {}", end, start))
+                self.dbg_scopes[si].blocks = self.dbg_scopes[si].blocks + 1
+                self.dbg_mark = format("{}:{}", end, len(self.text))
+            }
+        }
+        // the address of the value
+        var addr: [int32] = [OP_FBREG]
+        for x in sleb(b.offset) { push(addr, x) }
+        if b.kind == "capture" {
+            push(addr, OP_DEREF)
+            if b.capoff != 0 {
+                push(addr, OP_PLUS_UCONST)
+                for x in uleb(b.capoff) { push(addr, x) }
+            }
+        } else if b.kind == "param" && is_aggregate(b.ty) {
+            push(addr, OP_DEREF)               // passed (or borrowed) by address
+        }
+        var ty = ""
+        var loc: [str] = []
+        match b.ty {
+            Type.TStr => {
+                ty = self.dbg_slice()
+                loc = exprloc(str_pieces(addr, 8))
+            },
+            Type.TSB => {
+                ty = self.dbg_slice()
+                loc = exprloc(str_pieces(addr, 16))
+            },
+            Type.TList(e) => {
+                ty = self.dbg_items(e)
+                push(addr, OP_DEREF)
+                push(addr, OP_PLUS_UCONST)
+                push(addr, 16)
+                loc = exprloc(addr)
+            },
+            Type.TFloat(w) => {
+                if w == 32 {
+                    ty = self.dbg_base(b.ty, 4)
+                    loc = self.dbg_convert(addr, ty)
+                } else {
+                    ty = self.dbg_base(b.ty, 8)
+                    loc = exprloc(addr)
+                }
+            },
+            Type.TEnum(n, a) => {
+                ty = self.dbg_aggregate(b.ty)  // a variable holds even a boxed enum inline
+                loc = exprloc(addr)
+            },
+            _ => {
+                ty = self.dbg_element(b.ty)
+                loc = exprloc(addr)
+            },
+        }
+        var tag = AB_VAR
+        if param { tag = AB_PARAM }
+        self.dbg_line(format("\t.uleb128 {}", tag))
+        self.dbg_line(dw_string(b.name))
+        self.dbg_line(dw_ref(ty))
+        for l in loc { self.dbg_line(l) }
+    }
+
+    // The location of a float32 variable: the double it is kept as, converted
+    // to the type `f32`.
+    fun dbg_convert(var self, addr: [int32], f32: str) -> [str] {
+        let f64 = self.dbg_base(Type.TFloat(64), 8)
+        let start = self.dbg_label("x")
+        let end = self.dbg_label("x")
+        var out = [format("\t.uleb128 {} - {}", end, start), format("{}:", start), bytes_line(addr)]
+        push(out, format("\t.byte {}, 8", OP_GNU_DEREF_TYPE))
+        push(out, format("\t.uleb128 {} - .Ldebug_info0", f64))
+        push(out, format("\t.byte {}", OP_GNU_CONVERT))
+        push(out, format("\t.uleb128 {} - .Ldebug_info0", f32))
+        push(out, format("\t.byte {}", OP_STACK_VALUE))
+        push(out, format("{}:", end))
+        return out
+    }
+
+    // The label of the type DIE `key` names, registered the first time.
+    fun dbg_type(var self, key: str, kind: str, ty: Type, target: str, n: int32, m: int32) -> str {
+        match get(self.dbg_types, key) {
+            Some(l) => { return l },
+            None => {},
+        }
+        let label = format(".Ldty{}", len(self.dbg_types))
+        self.dbg_types[key] = label
+        push(self.dbg_pending, DbgType { label: label, kind: kind, ty: ty, target: target, n: n, m: m })
+        return label
+    }
+
+    // A scalar's base type, `size` bytes wide.
+    fun dbg_base(var self, t: Type, size: int32) -> str {
+        return self.dbg_type(format("base:{}:{}", type_name(t), size), "base", t, "", size, 0)
+    }
+
+    // A string's byte, shown with its character.
+    fun dbg_byte(var self) -> str { return self.dbg_type("byte", "byte", Type.TBool, "", 0, 0) }
+
+    fun dbg_pointer(var self, target: str) -> str {
+        return self.dbg_type(format("ptr:{}", target), "ptr", Type.TBool, target, 0, 0)
+    }
+
+    fun dbg_void_pointer(var self) -> str { return self.dbg_type("voidptr", "voidptr", Type.TBool, "", 0, 0) }
+
+    // A Rust `&str`, which gdb prints as a string literal.
+    fun dbg_slice(var self) -> str { return self.dbg_type("slice", "slice", Type.TBool, "", 0, 0) }
+
+    // An array of `elem`s `stride` bytes apart, as many as the 8 bytes
+    // `header` bytes before the first say (a cell's length).
+    fun dbg_array(var self, elem: str, stride: int32, header: int32) -> str {
+        return self.dbg_type(format("array:{}:{}:{}", elem, stride, header), "array", Type.TBool, elem, stride, header)
+    }
+
+    // The elements of a list of `e`s, at its cell + 16.
+    fun dbg_items(var self, e: Type) -> str {
+        let elem = self.dbg_element(e)
+        return self.dbg_array(elem, self.stored_size(e), 16)
+    }
+
+    // The heap cell of a `str`, list, builder or map, for a pointer to it.
+    fun dbg_cell(var self, t: Type) -> str {
+        return self.dbg_type(format("cell:{}", type_name(t)), "cell", t, "", 0, 0)
+    }
+
+    fun dbg_aggregate(var self, t: Type) -> str {
+        return self.dbg_type(format("agg:{}", type_name(t)), "agg", t, "", 0, 0)
+    }
+
+    // The type of a value inside an aggregate or a list (or of a scalar
+    // variable): types of a fixed size only.
+    fun dbg_element(var self, t: Type) -> str {
+        match t {
+            Type.TInt(w, sg) => {
+                // a signed integer is its whole sign-extended slot, so that `set
+                // var` writes a canonical value (an unsigned one's upper bytes stay 0)
+                if sg { return self.dbg_base(t, 8) }
+                return self.dbg_base(t, w / 8)
+            },
+            Type.TBool => { return self.dbg_base(t, 1) },
+            Type.TChar => { return self.dbg_base(t, 4) },
+            Type.TFloat(w) => { return self.dbg_base(t, 8) },   // a float32 is kept as a double
+            Type.TStr => {},
+            Type.TSB => {},
+            Type.TList(e) => {},
+            Type.TMap(k, v) => {},
+            _ => {
+                let agg = self.dbg_aggregate(t)
+                if self.is_boxed(t) { return self.dbg_pointer(agg) }
+                return agg
+            },
+        }
+        let cell = self.dbg_cell(t)
+        return self.dbg_pointer(cell)
+    }
+
+    // A structure type's lines: `members` of `types` at `offs`.
+    fun dbg_struct_lines(self, name: str, size: int32, members: [str], types: [str], offs: [int32]) -> [str] {
+        var out = [format("\t.uleb128 {}", AB_STRUCT), dw_string(name), format("\t.uleb128 {}", size)]
+        var i = 0
+        while i < len(members) {
+            push(out, format("\t.uleb128 {}", AB_MEMBER))
+            push(out, dw_string(members[i]))
+            push(out, dw_ref(types[i]))
+            push(out, format("\t.uleb128 {}", offs[i]))
+            i = i + 1
+        }
+        push(out, "\t.byte 0")
+        return out
+    }
+
+    // The lines of the type DIE `p` describes.
+    fun dbg_build(var self, p: DbgType) -> [str] {
+        let i64 = Type.TInt(64, true)
+        if p.kind == "base" {
+            return [format("\t.uleb128 {}", AB_BASE), dw_string(type_name(p.ty)), format("\t.byte {}", ate_of(p.ty)), format("\t.byte {}", p.n)]
+        }
+        if p.kind == "byte" {
+            return [format("\t.uleb128 {}", AB_BASE), dw_string("uint8"), format("\t.byte {}", ATE_UTF), "\t.byte 1"]
+        }
+        if p.kind == "ptr" { return [format("\t.uleb128 {}", AB_PTR), "\t.byte 8", dw_ref(p.target)] }
+        if p.kind == "voidptr" { return [format("\t.uleb128 {}", AB_VOIDPTR), "\t.byte 8"] }
+        if p.kind == "slice" {
+            let byte = self.dbg_byte()
+            let data = self.dbg_pointer(byte)
+            let length = self.dbg_base(i64, 8)
+            return self.dbg_struct_lines("&str", 16, ["data_ptr", "length"], [data, length], [0, 8])
+        }
+        if p.kind == "array" {
+            var out = [format("\t.uleb128 {}", AB_ARRAY), dw_ref(p.target), format("\t.uleb128 {}", p.n), format("\t.uleb128 {}", AB_SUBRANGE)]
+            for l in exprloc([OP_PUSH_OBJECT_ADDRESS, OP_LIT0 + p.m, OP_MINUS, OP_DEREF]) { push(out, l) }
+            push(out, "\t.byte 0")
+            return out
+        }
+        if p.kind == "cell" { return self.dbg_cell_lines(p.ty) }
+        return self.dbg_aggregate_lines(p.ty)
+    }
+
+    fun dbg_cell_lines(var self, t: Type) -> [str] {
+        let len_t = self.dbg_base(Type.TInt(64, true), 8)
+        match t {
+            Type.TStr => {
+                let byte = self.dbg_byte()
+                let bytes = self.dbg_array(byte, 1, 8)
+                return self.dbg_struct_lines("str", 8, ["len", "bytes"], [len_t, bytes], [0, 8])
+            },
+            Type.TSB => {
+                let byte = self.dbg_byte()
+                let bytes = self.dbg_array(byte, 1, 16)
+                return self.dbg_struct_lines("StringBuilder", 16, ["len", "cap", "bytes"], [len_t, len_t, bytes], [0, 8, 16])
+            },
+            Type.TList(e) => {
+                let items = self.dbg_items(e)
+                return self.dbg_struct_lines(type_name(t), 16, ["len", "cap", "items"], [len_t, len_t, items], [0, 8, 16])
+            },
+            _ => {},
+        }
+        return self.dbg_struct_lines(type_name(t), 16, ["len", "cap"], [len_t, len_t], [0, 8])
+    }
+
+    fun dbg_aggregate_lines(var self, t: Type) -> [str] {
+        let name = type_name(t)
+        let size = self.size(t)
+        var members: [str] = []
+        var types: [str] = []
+        var offs: [int32] = []
+        var off = 0
+        match t {
+            Type.TStruct(n, a) => {
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                for f in info.fields {
+                    let ft = subst_type(f.ty, sub)
+                    push(members, f.name)
+                    push(types, self.dbg_element(ft))
+                    push(offs, off)
+                    off = off + self.stored_size(ft)
+                }
+            },
+            Type.TTuple(es) => {
+                var i = 0
+                for et in es {
+                    push(members, format("__{}", i))
+                    push(types, self.dbg_element(et))
+                    push(offs, off)
+                    off = off + self.stored_size(et)
+                    i = i + 1
+                }
+            },
+            Type.TFunc(ps, r) => {
+                // `fn…`: a name starting with `(` would make gdb take it for a tuple
+                let vp = self.dbg_void_pointer()
+                return self.dbg_struct_lines("fn" + name, 16, ["code_ptr", "env_ptr"], [vp, vp], [0, 8])
+            },
+            Type.TEnum(n, a) => { return self.dbg_enum_lines(t, n, name, size) },
+            _ => {},
+        }
+        return self.dbg_struct_lines(name, size, members, types, offs)
+    }
+
+    // An enum as Rust describes one: a variant part whose discriminant is the
+    // tag, a variant per tag value holding a struct of the payload (fields
+    // `__0`, `__1`, ... at their offsets in the whole value).
+    fun dbg_enum_lines(var self, t: Type, n: str, name: str, size: int32) -> [str] {
+        let variants = self.enum_info(n).variants
+        let tag = self.dbg_label("g")
+        let tag_t = self.dbg_base(Type.TInt(64, false), 8)
+        var out = [format("\t.uleb128 {}", AB_STRUCT), dw_string(name), format("\t.uleb128 {}", size)]
+        push(out, format("\t.uleb128 {}", AB_VARIANT_PART))
+        push(out, dw_ref(tag))
+        push(out, format("{}:", tag))
+        push(out, format("\t.uleb128 {}", AB_TAG))
+        push(out, dw_string("<tag>"))
+        push(out, dw_ref(tag_t))
+        push(out, "\t.uleb128 0")
+        var labels: [str] = []
+        for v in variants { push(labels, self.dbg_label("v")) }
+        var i = 0
+        for v in variants {
+            push(out, format("\t.uleb128 {}", AB_VARIANT))
+            push(out, format("\t.uleb128 {}", i))
+            push(out, format("\t.uleb128 {}", AB_MEMBER))
+            push(out, dw_string(v.name))
+            push(out, dw_ref(labels[i]))
+            push(out, "\t.uleb128 0")
+            push(out, "\t.byte 0")
+            i = i + 1
+        }
+        push(out, "\t.byte 0")                  // end of the variant part
+        i = 0
+        for v in variants {
+            push(out, format("{}:", labels[i]))
+            push(out, format("\t.uleb128 {}", AB_STRUCT))
+            push(out, dw_string(v.name))
+            push(out, format("\t.uleb128 {}", size))
+            var off = 8
+            var j = 0
+            for ft in self.variant_payload(t, v.name) {
+                let ty = self.dbg_element(ft)
+                push(out, format("\t.uleb128 {}", AB_MEMBER))
+                push(out, dw_string(format("__{}", j)))
+                push(out, dw_ref(ty))
+                push(out, format("\t.uleb128 {}", off))
+                off = off + self.stored_size(ft)
+                j = j + 1
+            }
+            push(out, "\t.byte 0")
+            i = i + 1
+        }
+        push(out, "\t.byte 0")
+        return out
+    }
+
+    // `.debug_abbrev`, `.debug_info`, and the start of `.debug_line` (the
+    // assembler appends the line table it builds from `.loc` there). The
+    // compile directory is `.`: Myla can't read the working directory yet.
+    fun dbg_sections(var self) -> [str] {
+        var types: [str] = []
+        var i = 0
+        while i < len(self.dbg_pending) {
+            let p = self.dbg_pending[i]
+            push(types, format("{}:", p.label))
+            for l in self.dbg_build(p) { push(types, l) }
+            i = i + 1
+        }
+        var out = abbrev_section()
+        for l in ["\t.section .debug_info,\"\",@progbits", ".Ldebug_info0:", "\t.long .Ldebug_info_end - .Ldebug_info_start", ".Ldebug_info_start:", "\t.value 4", "\t.long .Ldebug_abbrev0", "\t.byte 8"] { push(out, l) }
+        push(out, format("\t.uleb128 {}", AB_CU))
+        push(out, dw_string("myla (self-hosted)"))
+        push(out, format("\t.value {}", LANG_RUST))
+        push(out, dw_string(self.line_files[0]))
+        push(out, dw_string("."))
+        for l in ["\t.quad .Ltext0", "\t.quad .Letext0 - .Ltext0", "\t.long .Ldebug_line0"] { push(out, l) }
+        for l in self.dbg_lines { push(out, l) }
+        for l in types { push(out, l) }
+        for l in ["\t.byte 0", ".Ldebug_info_end:", "\t.section .debug_line,\"\",@progbits", ".Ldebug_line0:"] { push(out, l) }
+        return out
     }
 
     // -- debug line tables (MYLA-71) --------------------------------------
@@ -371,7 +800,17 @@ impl CodeGen {
 
     fun bind(var self, name: str, kind: str, offset: int32, ty: Type) {
         let top = len(self.scopes) - 1
-        push(self.scopes[top], CgBinding { name: name, kind: kind, offset: offset, ty: ty, capoff: 0 })
+        let b = CgBinding { name: name, kind: kind, offset: offset, ty: ty, capoff: 0 }
+        push(self.scopes[top], b)
+        self.dbg_variable(b, false, false)
+    }
+
+    // Bind a parameter (visible in the whole function, for gdb too).
+    fun bind_param(var self, name: str, offset: int32, ty: Type) {
+        let top = len(self.scopes) - 1
+        let b = CgBinding { name: name, kind: "param", offset: offset, ty: ty, capoff: 0 }
+        push(self.scopes[top], b)
+        self.dbg_variable(b, true, true)
     }
 
     fun lookup(self, name: str) -> CgBinding {
@@ -392,6 +831,7 @@ impl CodeGen {
     fun open_scope(var self) {
         push(self.scopes, [])
         push(self.drop_scopes, [])
+        self.dbg_push_scope()
     }
 
     // Drop the owning locals declared in the innermost scope (reverse order),
@@ -405,6 +845,7 @@ impl CodeGen {
         }
         self.drop_scopes = drop_last(self.drop_scopes)
         self.scopes = drop_last(self.scopes)
+        self.dbg_pop_scope()
     }
 
     // Record an owning local at `off(%rbp)` so it is released when its scope ends.
@@ -1042,7 +1483,9 @@ impl CodeGen {
             push(out, format("\t.file {} \"{}\"", fi + 1, asm_string(self.line_files[fi])))
             fi = fi + 1
         }
+        if len(self.line_files) > 0 { push(out, ".Ltext0:") }     // the compile unit's code (MYLA-66)
         for line in self.text { push(out, line) }
+        if len(self.line_files) > 0 { push(out, ".Letext0:") }
         push(out, "")
         push(out, "\t.section .rodata")
         push(out, ".Lbool_true:\n\t.ascii \"true\"")
@@ -1101,6 +1544,7 @@ impl CodeGen {
         push(out, "__run_errno_val:")
         push(out, "\t.skip 8")
         push(out, "")
+        if len(self.line_files) > 0 { for l in self.dbg_sections() { push(out, l) } }
         push(out, "\t.section .note.GNU-stack,\"\",@progbits")
         push(out, "")
         return join_lines(out)
@@ -1139,6 +1583,7 @@ impl CodeGen {
         self.cur_file = self.file_number(sig.decl_id)
         self.cur_path = self.path_of(sig.decl_id)
         self.emit(format("myla_{}:", mangled))
+        self.dbg_begin_function(format("myla_{}", mangled))
         self.emit_loc(fd.line, fd.col)
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
@@ -1150,7 +1595,7 @@ impl CodeGen {
         var i = 0
         while i < len(fd.params) {
             let offset = 16 + 8 * (param_base + i)
-            self.bind(fd.params[i].name, "param", offset, subst_type(sig.params[i], self.subst))
+            self.bind_param(fd.params[i].name, offset, subst_type(sig.params[i], self.subst))
             i = i + 1
         }
 
@@ -1160,8 +1605,9 @@ impl CodeGen {
         self.emit("leave")
         self.emit("ret")
         self.end_loc()
-        self.emit("")
         self.close_scope()
+        self.dbg_end_function()
+        self.emit("")
     }
 
     // Assign every local/temp a unique stack slot; return the frame size.
@@ -3150,7 +3596,9 @@ impl CodeGen {
             let arm_fail = self.label()
             self.match_pat(arm.pattern, root, sst, arm.pattern.id, arm_fail)
             // bindings borrow from the scrutinee copy: no owners of their own
-            push(self.scopes, self.arm_scope(arm, sst))
+            push(self.scopes, [])
+            self.dbg_push_scope()
+            for b in self.arm_scope(arm, sst) { self.bind(b.name, b.kind, b.offset, b.ty) }
             push(self.drop_scopes, [])
             match arm.guard {
                 Some(g) => {
@@ -3164,6 +3612,7 @@ impl CodeGen {
             self.emit(format("jmp {}", end))
             self.drop_scopes = drop_last(self.drop_scopes)
             self.scopes = drop_last(self.scopes)
+            self.dbg_pop_scope()
             self.emit(format("{}:", arm_fail))
         }
         self.trap("jmp", "__trap_match", e.line, e.col)
@@ -3898,6 +4347,7 @@ impl CodeGen {
         self.cur_file = self.file_number(job.id)
         self.cur_path = self.path_of(job.id)
         self.emit(format("myla_{}:", job.lifted))
+        self.dbg_begin_function(format("myla_{}", job.lifted))
         self.emit_loc(job.line, job.col)
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
@@ -3911,12 +4361,14 @@ impl CodeGen {
         var i = 0
         while i < len(job.params) {
             let offset = 16 + 8 * (param_base + 1 + i)
-            self.bind(job.params[i].name, "param", offset, ptypes[i])
+            self.bind_param(job.params[i].name, offset, ptypes[i])
             i = i + 1
         }
         let top = len(self.scopes) - 1
         for c in job.caps {
-            push(self.scopes[top], CgBinding { name: c.name, kind: "capture", offset: env_off, ty: c.ty, capoff: c.off })
+            let b = CgBinding { name: c.name, kind: "capture", offset: env_off, ty: c.ty, capoff: c.off }
+            push(self.scopes[top], b)
+            self.dbg_variable(b, true, false)
         }
 
         match job.body {
@@ -3954,8 +4406,9 @@ impl CodeGen {
         self.emit("leave")
         self.emit("ret")
         self.end_loc()
-        self.emit("")
         self.close_scope()
+        self.dbg_end_function()
+        self.emit("")
         var owned: [DropEntry] = []
         for c in job.caps { if self.owns_heap(c.ty) { push(owned, DropEntry { off: c.off, ty: c.ty }) } }
         if len(owned) > 0 { self.emit_env_drop(job.lifted, owned) }
@@ -7275,6 +7728,29 @@ fun trap_labels() -> [str] {
 
 fun trap_messages() -> [str] {
     return ["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory"]
+}
+
+// The DW_ATE encoding of a scalar type (MYLA-66).
+#test(Type.TInt(32, true))[5]
+#test(Type.TInt(8, false))[7]
+#test(Type.TBool)[2]
+#test(Type.TChar)[16]
+#test(Type.TFloat(32))[4]
+fun ate_of(t: Type) -> int32 {
+    return match t {
+        Type.TInt(w, signed) => match signed { true => ATE_SIGNED, false => ATE_UNSIGNED },
+        Type.TBool => ATE_BOOLEAN,
+        Type.TChar => ATE_UTF,
+        _ => ATE_FLOAT,
+    }
+}
+
+// Whether `name` is the compiler's own (`__…`), not shown to gdb.
+#test("__tmp")[true]
+#test("x")[false]
+#test("_")[false]
+fun is_internal_name(name: str) -> bool {
+    return len(name) >= 2 && name[0] == '_' && name[1] == '_'
 }
 
 // The conditional jump that skips a trap call, for each jump to a trap.

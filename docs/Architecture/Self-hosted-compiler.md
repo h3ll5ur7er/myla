@@ -15,11 +15,12 @@
 | `ast.my` | 380 | AST nodes as wrapper structs `{id, line, col, kind}` around `enum …Kind`; unique node ids; the canonical S-expression dump |
 | `parser.my` | 1430 | Recursive descent with the same precedence levels and desugarings as `parser.py` |
 | `checker.my` | 3760 | Name tables, inference, generics, traits, exhaustiveness, const folding; records each expression's type in `resolved: [int32: Type]` keyed by node id; type errors carry the Python checker's messages |
-| `codegen.my` | 6200 | Monomorphizing code generator and the whole runtime, as assembly text |
+| `codegen.my` | 7800 | Monomorphizing code generator and the whole runtime, as assembly text; with `-g` also the DWARF line table, variables and types ([[MYLA-71]], [[MYLA-66]]) |
 | `interp.my` | 2480 | Tree-walking interpreter over checked declarations; updates containers in place ([[MYLA-74]]); `run_tests` and `py_repr` for `myla test` ([[MYLA-81]]), `session_step` for the REPL |
 | `loader.my` | 990 | Module loader: resolves imports, parses each module once, qualifies module-level names (`id$name`), checks `pub`, folds `alias.member` ([[Architecture/Module-loader]]) |
+| `dwarf.my` | 190 | The fixed parts of the `-g` debug information: LEB128, the abbreviation table (the Python backend's), strings and references; `codegen.my` builds the DIEs with them (`dbg_*`, [[MYLA-66]]) |
 | `diag.my` | 85 | Renders a diagnostic like the Python CLI: message, `--> file:line:col`, source line and caret |
-| `gen_main.my` | 60 | The bootstrap compiler: `gen_main <file.my> <stdlib_root> [-g]` → assembly on stdout (`-g`: DWARF line tables, [[MYLA-71]]) |
+| `gen_main.my` | 60 | The bootstrap compiler: `gen_main <file.my> <stdlib_root> [-g]` → assembly on stdout (`-g`: DWARF line tables and variables, [[MYLA-71]], [[MYLA-66]]) |
 | `main.my` | 230 | The self-hosted CLI: `myla run <file> [args…]`, `test`, `build <file> [-o out] [-g]`, `repl`, each with `--stdlib <dir>`; `build` runs `as`/`ld` through `std.process.run`; `test` prints what the Python CLI prints ([[MYLA-81]]) |
 | `repl.my` | 390 | `myla repl` ([[MYLA-82]]): a session is a program text, the declarations typed so far and a function whose body nests each statement input in a block inside the previous one's (so a `let` may shadow an earlier one); each input is loaded and checked as part of that text (`load_program_with`, the text as an override), then only its statements run (`Interp.session_step`) in a scope holding the session's variables, so nothing runs twice. A final expression's value is shown as Myla source writes it; errors are mapped to the input's lines and leave the session as it was; prompts go to stderr |
 | `lex_main.my`, `parse_main.my`, `check_main.my`, `interp_main.my` | 30–50 each | Drivers for the differential tests (canonical tokens, canonical AST, `ok` or `err line col kind: message`, interpreted output; `interp_main` goes through the loader and prints runtime errors like the Python CLI) |

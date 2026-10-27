@@ -42,7 +42,7 @@ pub struct CheckErr { line: int32, col: int32, msg: str, decl: int32 }
 fun terr(line: int32, col: int32, msg: str) -> CheckErr { return CheckErr { line: line, col: col, msg: msg, decl: -1 } }
 
 // A type as the Python checker's messages write it (types.py: type_name).
-fun type_name(t: Type) -> str {
+pub fun type_name(t: Type) -> str {
     return match t {
         Type.TInt(w, signed) => format("{}{}", if_str(signed, "int", "uint"), w),
         Type.TFloat(w) => format("float{}", w),

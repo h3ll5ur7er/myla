@@ -25,13 +25,14 @@ import dataclasses
 import os
 import struct
 
-from .. import ast
+from .. import __version__, ast
 from ..types import (
     BoolType, CharType, Checker, EnumType, FloatType, FuncSig, FuncType, IntType,
     ListType, MapType, StrType, StringBuilderType, StructType, TupleType, Type,
     type_name, _is_diverging, _is_literal_expr as _is_literal,
     _FF_MINK, _FF_MAXK, _FF_POW10_DD, _FF_SPLIT, _FF_BIG, _FF_UP, _FF_DOWN, round_float,
 )
+from .dwarf import DebugInfo
 from .monomorphize import type_token
 
 
@@ -144,6 +145,10 @@ class CodeGen:
         self._cur_file: int | None = None
         self._last_loc = ""
         self._lambda_files: dict[int, int | None] = {}
+        # variables and types (MYLA-66): the compile unit's debug information,
+        # and the same while generating a function with line info (else None)
+        self._dbg: DebugInfo | None = None
+        self._fn_dbg: DebugInfo | None = None
         self.rodata: list[str] = []
         self.strdata: list[str] = []        # static `str` cells (_static_str)
         self._label_n = 0
@@ -418,6 +423,9 @@ class CodeGen:
         if entry is None:
             raise ValueError("no entry point to compile")
 
+        if self._debug:
+            self._dbg = DebugInfo(self, self._emit,
+                                  getattr(self.checker, "type_display_names", {}))
         self._emit_runtime_prelude(entry.name)
         self._emit_drop_helpers()
         for decl in self.checker.program.decls:
@@ -456,7 +464,11 @@ class CodeGen:
         out.append("\t.text")
         for path, number in self._files.items():
             out.append(f'\t.file {number} "{_asm_string(path)}"')
+        if self._files:
+            out.append(".Ltext0:")            # the compile unit's code (MYLA-66)
         out.extend(self.text)
+        if self._files:
+            out.append(".Letext0:")
         out.append("")
         out.append("\t.section .rodata")
         out.append('.Lbool_true:\n\t.ascii "true"')
@@ -516,6 +528,9 @@ class CodeGen:
             out.append("__io_errno_val:")
             out.append("\t.skip 8")
         out.append("")
+        if self._files:
+            out.extend(self._dbg.sections(f"myla {__version__}", next(iter(self._files)),
+                                          os.getcwd()))
         # mark the stack non-executable to silence the linker
         out.append('\t.section .note.GNU-stack,"",@progbits')
         out.append("")
@@ -1044,8 +1059,11 @@ class CodeGen:
         self._epilogue = f".Lret_{decl.name}"
         self._cur_file = self._file_number(getattr(decl, "source_path", None))
         self._cur_path = self._display_path(getattr(decl, "source_path", None))
+        self._fn_dbg = self._dbg if self._cur_file is not None else None
 
         self._emit(f"myla_{decl.name}:")
+        if self._fn_dbg:
+            self._fn_dbg.begin_function(f"myla_{decl.name}")
         self._emit_loc(decl)
         self._emit("pushq %rbp")
         self._emit("movq %rsp, %rbp")
@@ -1054,12 +1072,12 @@ class CodeGen:
 
         # bind parameters to their incoming stack slots (parameters are borrowed,
         # so they are never dropped — the caller owns the argument)
-        self._scopes.append({})
+        self._push_scope()
         self._drop_scopes.append([])
         param_base = 1 if self._struct_ret else 0
         for i, (param, ptype) in enumerate(zip(decl.params, sig.params)):
             offset = 16 + 8 * (param_base + i)
-            self._scopes[-1][param.name] = ("param", offset, ptype)
+            self._bind(param.name, ("param", offset, ptype), whole_function=True, param=True)
 
         if getattr(decl, "tag_eq", False):
             # derived `eq` of an enum without payloads (MYLA-87): self and
@@ -1077,9 +1095,10 @@ class CodeGen:
         self._emit("leave")
         self._emit("ret")
         self._end_loc()
-        self._emit("")
         self._drop_scopes.pop()
-        self._scopes.pop()
+        self._pop_scope()
+        self._end_debug_function()
+        self._emit("")
 
     # -- debug line tables (MYLA-71) ------------------------------------------
 
@@ -1380,7 +1399,7 @@ class CodeGen:
                 self._emit(f"movq %rax, {off}(%rbp)")
                 if self._owns_heap(t):                # list pointer: new reference
                     self._retain("rbp", off, t)
-            self._scopes[-1][stmt.name] = ("local", off, t)
+            self._bind(stmt.name, ("local", off, t))
             self._register_owner(off, t)
             self._drop_expr_temps(stmt.init)
 
@@ -1556,7 +1575,7 @@ class CodeGen:
         self._emit("movq 8(%rdx), %rax")        # key
         self._emit(f"movq %rax, {lv}(%rbp)")    # bind loop var (borrowed)
 
-        self._scopes.append({stmt.var_name: ("local", lv, mt.key)})
+        self._push_scope({stmt.var_name: ("local", lv, mt.key)})
         self._drop_scopes.append([])            # loop var is a non-owning key
         self._loops.append((cont, after, len(self._drop_scopes) - 1))
         for s in stmt.body.statements:
@@ -1565,7 +1584,7 @@ class CodeGen:
         for slot, t in reversed(self._drop_scopes[-1]):
             self._drop_value("rbp", slot, t)
         self._drop_scopes.pop()
-        self._scopes.pop()
+        self._pop_scope()
 
         self._emit(f"{cont}:")
         self._emit(f"movq {si}(%rbp), %rax")
@@ -1610,7 +1629,7 @@ class CodeGen:
             self._emit(f"movq %rdx, {lv}(%rbp)")
             kind = "param" if self._is_boxed(elem_t) else "local"
 
-        self._scopes.append({stmt.var_name: (kind, lv, elem_t)})
+        self._push_scope({stmt.var_name: (kind, lv, elem_t)})
         self._drop_scopes.append([])            # loop var is borrowed: no owners
         self._loops.append((cont, after, len(self._drop_scopes) - 1))
         for s in stmt.body.statements:
@@ -1619,7 +1638,7 @@ class CodeGen:
         for slot, t in reversed(self._drop_scopes[-1]):
             self._drop_value("rbp", slot, t)
         self._drop_scopes.pop()
-        self._scopes.pop()
+        self._pop_scope()
 
         self._emit(f"{cont}:")
         self._emit(f"movq {li}(%rbp), %rax")
@@ -1647,7 +1666,7 @@ class CodeGen:
         stop = "jge" if loop_t.signed else "jae"
         self._emit(f"{stop} {end}")
 
-        self._scopes.append({stmt.var_name: ("local", lv, loop_t)})
+        self._push_scope({stmt.var_name: ("local", lv, loop_t)})
         self._drop_scopes.append([])
         # `continue` lands on the increment (after this scope's drops); `break`
         # lands on the exit. Both first release any heap owners they jump past.
@@ -1658,7 +1677,7 @@ class CodeGen:
         for slot, t in reversed(self._drop_scopes[-1]):  # release per iteration
             self._drop_value("rbp", slot, t)
         self._drop_scopes.pop()
-        self._scopes.pop()
+        self._pop_scope()
 
         self._emit(f"{cont}:")
         self._emit(f"movq {lv}(%rbp), %rax")
@@ -2251,7 +2270,7 @@ class CodeGen:
                 self._emit("movq (%rsi), %rax")
                 self._emit(f"movq %rax, {leaf_off}(%rbp)")
                 self._retain("rbp", leaf_off, t)   # a list/map/builder leaf owns a reference
-            self._scopes[-1][leaf.name] = ("local", leaf_off, t)
+            self._bind(leaf.name, ("local", leaf_off, t))
             self._register_owner(leaf_off, t)
         self._drop_expr_temps(stmt.init)
 
@@ -2315,7 +2334,7 @@ class CodeGen:
             arm_fail = self._label()
             self._match_pat(arm.pattern, root, sst, arm, arm_fail)
             # bindings borrow from the scrutinee copy: no owners of their own
-            self._scopes.append(self._arm_scope(arm))
+            self._push_scope(self._arm_scope(arm))
             self._drop_scopes.append([])
             if arm.guard is not None:
                 self._eval_scalar(arm.guard)
@@ -2324,7 +2343,7 @@ class CodeGen:
             self._gen_arm_body(arm.body, result_off, result_type)
             self._emit(f"jmp {end}")
             self._drop_scopes.pop()
-            self._scopes.pop()
+            self._pop_scope()
             self._emit(f"{arm_fail}:")
         self._trap("jmp", "__trap_match", expr)  # unreachable when the match is exhaustive
         self._emit(f"{end}:")
@@ -2441,8 +2460,9 @@ class CodeGen:
                 else:
                     self._gen_stmt(s)
             self._close_scope()
-        elif result_off is not None and not _is_diverging(body):
-            self._emit_loc(body)
+            return
+        self._emit_loc(body)        # a line of its own, in a statement too (MYLA-66)
+        if result_off is not None and not _is_diverging(body):
             self._store_value(body, result_off, result_type)
             self._drop_expr_temps(body)
         elif _is_aggregate(body.resolved_type) and not _is_diverging(body):
@@ -2583,7 +2603,7 @@ class CodeGen:
     # -- ownership scopes & temporaries --------------------------------------
 
     def _open_scope(self) -> None:
-        self._scopes.append({})
+        self._push_scope()
         self._drop_scopes.append([])
 
     def _close_scope(self) -> None:
@@ -2591,7 +2611,35 @@ class CodeGen:
         for slot, t in reversed(self._drop_scopes[-1]):
             self._drop_value("rbp", slot, t)
         self._drop_scopes.pop()
+        self._pop_scope()
+
+    def _push_scope(self, names: dict | None = None) -> None:
+        """Open a scope of names, binding `names` (name -> scope entry)."""
+        self._scopes.append({})
+        if self._fn_dbg:
+            self._fn_dbg.push_scope()
+        for name, entry in (names or {}).items():
+            self._bind(name, entry)
+
+    def _pop_scope(self) -> None:
         self._scopes.pop()
+        if self._fn_dbg:
+            self._fn_dbg.pop_scope()
+
+    def _bind(self, name: str, entry: tuple, whole_function: bool = False,
+              param: bool = False) -> None:
+        """Bind `name` in the innermost scope to `entry`: `("local", off, t)`
+        (the value at `off(%rbp)`), `("param", off, t)` (an aggregate's
+        address there, or a scalar) or `("capture", env_off, cap_off, t)`. With
+        `-g`, gdb sees it from here on (or in the whole function)."""
+        self._scopes[-1][name] = entry
+        if self._fn_dbg:
+            self._fn_dbg.variable(name, entry, entry[-1], whole_function, param)
+
+    def _end_debug_function(self) -> None:
+        if self._fn_dbg:
+            self._fn_dbg.end_function()
+        self._fn_dbg = None
 
     def _register_owner(self, slot: int, t: Type) -> None:
         if self._owns_heap(t):
@@ -3939,24 +3987,27 @@ class CodeGen:
         self._epilogue = f".Lret_{lam.lifted_name}"
         self._cur_file = self._lambda_files.get(id(lam))
         self._cur_path = self._lambda_paths.get(id(lam), "<input>")
+        self._fn_dbg = self._dbg if self._cur_file is not None else None
 
         self._emit(f"myla_{lam.lifted_name}:")
+        if self._fn_dbg:
+            self._fn_dbg.begin_function(f"myla_{lam.lifted_name}")
         self._emit_loc(lam)
         self._emit("pushq %rbp")
         self._emit("movq %rsp, %rbp")
         if frame:
             self._emit(f"subq ${frame}, %rsp")
 
-        self._scopes.append({})
+        self._push_scope()
         self._drop_scopes.append([])
         param_base = 1 if self._struct_ret else 0
         env_off = 16 + 8 * param_base          # the hidden env pointer
         for i, (param, ptype) in enumerate(zip(lam.params, ft.params)):
             offset = 16 + 8 * (param_base + 1 + i)
-            self._scopes[-1][param.name] = ("param", offset, ptype)
+            self._bind(param.name, ("param", offset, ptype), whole_function=True, param=True)
         offsets, _env_size, owns = self._capture_layout(lam)
         for (cname, ctype), capoff in zip(lam.captures, offsets):
-            self._scopes[-1][cname] = ("capture", env_off, capoff, ctype)
+            self._bind(cname, ("capture", env_off, capoff, ctype), whole_function=True)
 
         self._gen_block(body)
 
@@ -3964,9 +4015,10 @@ class CodeGen:
         self._emit("leave")
         self._emit("ret")
         self._end_loc()
-        self._emit("")
         self._drop_scopes.pop()
-        self._scopes.pop()
+        self._pop_scope()
+        self._end_debug_function()
+        self._emit("")
 
         if owns:
             self._emit_lambda_env_drop(lam, offsets)

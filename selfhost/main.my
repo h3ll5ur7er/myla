@@ -9,7 +9,8 @@
 //
 // `run` passes the arguments after the file to the program (its argv is the
 // file, then those), as the Python `myla run` does. `build` type-checks and
-// generates x86-64 assembly (with `-g`, DWARF line tables for gdb, MYLA-71),
+// generates x86-64 assembly (with `-g`, DWARF debug information for gdb: line
+// tables and variables, MYLA-71, MYLA-66),
 // writes it to `<out>.s`, then shells out to the system assembler and linker
 // (`as`/`ld`, located via `/usr/bin/env` so PATH is honored) to produce the
 // executable `<out>`, and removes the intermediate files. The stdlib root
@@ -50,7 +51,7 @@ fun load_and_check(file: str, stdlib: str) -> Result<Checked, str> {
 }
 
 // Type-check `file`, then generate its x86-64 assembly (`debug`: with DWARF
-// line tables, MYLA-71).
+// debug information, MYLA-71, MYLA-66).
 fun compile_asm(file: str, stdlib: str, debug: bool) -> Result<str, str> {
     let ch = load_and_check(file, stdlib)?
     var g = new_codegen(ch.checker)
@@ -157,7 +158,7 @@ fun usage() {
     eprintln("commands:")
     eprintln("  run   <file.my> [--stdlib <dir>] [args...]  interpret a program with these arguments")
     eprintln("  test  <file.my> [--stdlib <dir>]            run its #test cases")
-    eprintln("  build <file.my> [-o <out>] [-g] [--stdlib <dir>]  compile to a binary (-g: line tables for gdb)")
+    eprintln("  build <file.my> [-o <out>] [-g] [--stdlib <dir>]  compile to a binary (-g: debug information for gdb)")
     eprintln("  repl  [--stdlib <dir>]                      the interactive interpreter")
     eprintln("--stdlib: the directory holding std/ (default: src/myla next to this binary's build/ directory)")
 }
