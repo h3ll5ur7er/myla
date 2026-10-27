@@ -167,6 +167,12 @@ class CodeGen:
         # set once `std.fs.write_to_file` (`__write_file`) is used, gating the
         # file-write helper (shares the `__io_errno_val` global).
         self._uses_write_file = False
+        # set once `std.io`'s reader (`__read`) is used, gating the read helper
+        # (MYLA-78; shares the `__io_errno_val` global).
+        self._uses_read = False
+        # set once `__io_errno` is used, gating the `__io_errno_val` global
+        # (also emitted for the helpers that set it).
+        self._uses_io_errno = False
         # set once `std.process.run`/`Command` (`__run`/`__run_*`) is used, gating
         # the subprocess runtime (fork/execve/pipe/poll/wait4) + its result globals.
         self._uses_run = False
@@ -421,6 +427,8 @@ class CodeGen:
             self._emit_read_file_runtime()
         if self._uses_write_file:
             self._emit_write_file_runtime()
+        if self._uses_read:
+            self._emit_read_runtime()
         if self._uses_run:
             self._emit_run_runtime()
         return self._assemble_source()
@@ -483,13 +491,9 @@ class CodeGen:
             out.append("\t.skip 8")
             out.append("__run_errno_val:")
             out.append("\t.skip 8")
-        if self._uses_read_file:
-            # errno of the last `__read_file` (0 on success), read by `__io_errno`
-            out.append("__io_errno_val:")
-            out.append("\t.skip 8")
-        elif self._uses_write_file:
-            # `__write_file` shares the same errno global when `__read_file` is
-            # itself unused.
+        if self._uses_read_file or self._uses_write_file or self._uses_read or self._uses_io_errno:
+            # errno of the last `__read_file`, `__write_file` or `__read` (0 on
+            # success), read by `__io_errno`
             out.append("__io_errno_val:")
             out.append("\t.skip 8")
         out.append("")
@@ -3899,8 +3903,18 @@ class CodeGen:
             self._emit("call __read_file")       # rax = contents str (errno -> global)
             return
         if name == "__io_errno":
-            self._uses_read_file = True
+            self._uses_io_errno = True
             self._emit("movq __io_errno_val(%rip), %rax")
+            return
+        if name == "__read":
+            self._uses_read = True
+            self._eval(expr.args[0])             # fd -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # n -> rax
+            self._emit("movslq %eax, %rsi")      # (int32, sign-extended)
+            self._emit("popq %rdi")              # fd
+            self._emit("movl %edi, %edi")        # (int32, zero-extended)
+            self._emit("call __read")            # rax = fresh str (errno -> global)
             return
 
         if name == "__write_file":
@@ -4911,6 +4925,55 @@ class CodeGen:
         e("\tleaq -40(%rbp), %rsp")            # discard path buffer/statbuf
         e("\tpopq %r15")
         e("\tpopq %r14")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
+        e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_read_runtime(self) -> None:
+        """`__read`: rdi = fd, rsi = n -> rax = a fresh `str` cell (rc=1) with
+        what one read(0) of at most n bytes returned (retried on EINTR): empty
+        at the end of the input, when n <= 0, or on an error, which sets
+        `__io_errno_val` (0 otherwise). Backs `std.io`'s reader (MYLA-78)."""
+        e = self.text.append
+        e("__read:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %rbx")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        e("\tmovq %rdi, %rbx")                 # fd
+        e("\tmovq %rsi, %r12")                 # n
+        e("\ttestq %r12, %r12")
+        e("\tjg .Lrd_alloc")
+        e("\txorq %r12, %r12")                 # n <= 0: read nothing
+        e(".Lrd_alloc:")
+        e("\tleaq 8(%r12), %rdi")              # str cell: 8 (len) + n
+        e("\tcall __alloc")                    # rax = cell (rc=1)
+        e("\tmovq %rax, %r13")
+        e("\tmovq $0, (%r13)")                 # len = 0 until the read
+        e("\ttestq %r12, %r12")
+        e("\tjz .Lrd_done")
+        e(".Lrd_retry:")
+        e("\txorq %rax, %rax")                 # sys_read
+        e("\tmovq %rbx, %rdi")
+        e("\tleaq 8(%r13), %rsi")
+        e("\tmovq %r12, %rdx")
+        e("\tsyscall")
+        e("\tcmpq $-4, %rax")                  # EINTR: try again
+        e("\tje .Lrd_retry")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lrd_err")
+        e("\tmovq %rax, (%r13)")               # len = bytes read (0 at EOF)
+        e("\tjmp .Lrd_done")
+        e(".Lrd_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e(".Lrd_done:")
+        e("\tmovq %r13, %rax")
         e("\tpopq %r13")
         e("\tpopq %r12")
         e("\tpopq %rbx")

@@ -244,7 +244,7 @@ class TestResult:
 
 
 class Interpreter:
-    def __init__(self, checker: Checker, out=None, err=None, argv=None):
+    def __init__(self, checker: Checker, out=None, err=None, argv=None, stdin=None):
         self.checker = checker
         self.functions = checker.functions  # name -> FuncSig
         self._consts = {name: info.value for name, info in checker.consts.items()}
@@ -253,7 +253,10 @@ class Interpreter:
         self._err = err if err is not None else sys.stderr
         # process command-line arguments handed back by `std.process.args`.
         self._argv = list(argv) if argv is not None else []
-        # errno of the last `__read_file` (0 on success); read by `__io_errno`.
+        # stdin for `__read(0, …)`: a binary stream (tests), else the real fd 0.
+        self._in = stdin
+        # errno of the last `__read_file`, `__write_file` or `__read` (0 on
+        # success); read by `__io_errno`.
         self._io_errno = 0
         # captured result of the last `__run` (see `std.process.run`): stderr
         # bytes, the normal exit code, the terminating signal (0 if none), and
@@ -801,6 +804,26 @@ class Interpreter:
                     data = fh.read()
                 self._io_errno = 0
                 return _bytes_str(data)          # any bytes, kept exactly
+            except OSError as err:
+                self._io_errno = err.errno or 0
+                return ""
+        if callee.ident == "__read":
+            fd = self._eval(expr.args[0], env)
+            n = self._eval(expr.args[1], env)
+            # what was written must be out before the program waits for input
+            # (a request/response protocol would deadlock otherwise)
+            self._out.flush()
+            self._err.flush()
+            try:
+                if n <= 0:
+                    data = b""
+                elif fd == 0 and self._in is not None:
+                    data = self._in.read(n)
+                else:
+                    import os
+                    data = os.read(fd, n)
+                self._io_errno = 0
+                return _bytes_str(data)
             except OSError as err:
                 self._io_errno = err.errno or 0
                 return ""

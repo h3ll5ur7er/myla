@@ -20,7 +20,7 @@ These names are reserved: no declaration may reuse them.
 | `StringBuilder()`, `append(sb, s)`, `append_byte(sb, b)`, `build(sb)` | | |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
-The low-level primitives `__write`, `__exit`, `__args`, `__read_file`, `__write_file`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal` and `__run_errno` exist for the standard library; call the `std` functions instead.
+The low-level primitives `__write`, `__read`, `__exit`, `__args`, `__read_file`, `__write_file`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal` and `__run_errno` exist for the standard library; call the `std` functions instead.
 
 ## std.io
 
@@ -39,6 +39,41 @@ fun main() {
 | `write(fd: int32, s: str)` | Writes the bytes of `s` to file descriptor `fd` |
 | `println(s)` | `s` and a newline to stdout |
 | `eprint(s)`, `eprintln(s)` | To stderr, without / with a newline |
+
+Output isn't buffered: what a program wrote is out before it waits for input.
+
+### Reading
+
+Reading goes through a buffered `Reader` ([[MYLA-78]]). Keep it in a `var`, or in a field of a struct whose `var self` methods read from it (Myla has no references, so a function can't take a reader to read from). A read blocks until there is input or the input ends; the bytes come back verbatim, and an error is the errno as an `IoError` from `std.fs`.
+
+| Item | Result |
+| --- | --- |
+| `stdin() -> Reader` | A reader of the standard input |
+| `reader(fd: int32) -> Reader` | A reader of file descriptor `fd` |
+| `r.read_line() -> Result<Option<str>, IoError>` | The next line without its `"\n"` (a `"\r"` before it stays); a last line without `"\n"` counts; `None` at the end |
+| `r.read_exact(n: int32) -> Result<Option<str>, IoError>` | Exactly the next `n` bytes (`""` for `n <= 0`); `None` if the input ends first (those bytes stay unread) |
+| `r.read_to_end() -> Result<str, IoError>` | The rest of the input (`""` once it has ended) |
+
+```myla
+from std.io import stdin, println
+
+fun main() {
+    var input = stdin()
+    var n = 0
+    while true {
+        match input.read_line() {
+            Ok(Some(line)) => {
+                n = n + 1
+                println(format("{}: {}", n, line))
+            },
+            Ok(None) => { break },
+            Err(e) => { break },
+        }
+    }
+}
+```
+
+A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/unit/test_stdio.py` has an example (`FRAMED`).
 
 ## std.process
 

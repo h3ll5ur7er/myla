@@ -3336,6 +3336,7 @@ impl CodeGen {
                 else if nm == "__read_file" { self.gen_io_read_file(args) }
                 else if nm == "__io_errno" { self.emit("movq __io_errno_val(%rip), %rax") }
                 else if nm == "__write_file" { self.gen_io_write_file(args) }
+                else if nm == "__read" { self.gen_io_read(args) }
                 else if nm == "__run" { self.gen_io_run(args) }
                 else if nm == "__run_stderr" { self.emit("movq __run_stderr_val(%rip), %rax") }
                 else if nm == "__run_exit_code" { self.emit("movslq __run_exit_val(%rip), %rax") }
@@ -3373,6 +3374,18 @@ impl CodeGen {
         self.eval(args[0])
         self.emit("movq %rax, %rdi")
         self.emit("call __read_file")
+    }
+
+    // `__read(fd, n)`: rdi = fd, rsi = n -> rax = a fresh str cell with what
+    // one read(2) returned (errno in __io_errno_val).
+    fun gen_io_read(var self, args: [Expr]) {
+        self.eval(args[0])
+        self.emit("pushq %rax")
+        self.eval(args[1])
+        self.emit("movslq %eax, %rsi")
+        self.emit("popq %rdi")
+        self.emit("movl %edi, %edi")
+        self.emit("call __read")
     }
 
     // `__write_file(path, contents)`: rdi = path str cell, rsi = contents str
@@ -4712,7 +4725,57 @@ impl CodeGen {
         self.raw("\tret")
         self.raw("")
         self.emit_write_file_runtime()
+        self.emit_read_runtime()
         self.emit_run_runtime()
+    }
+
+    // `__read`: rdi = fd, rsi = n -> rax = a fresh str cell (rc=1) with what
+    // one read(0) of at most n bytes returned (retried on EINTR): empty at the
+    // end of the input, when n <= 0, or on an error, which sets
+    // `__io_errno_val` (0 otherwise). Backs `std.io`'s reader (MYLA-78).
+    fun emit_read_runtime(var self) {
+        self.raw("__read:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r12")
+        self.raw("\ttestq %r12, %r12")
+        self.raw("\tjg .Lrd_alloc")
+        self.raw("\txorq %r12, %r12")
+        self.raw(".Lrd_alloc:")
+        self.raw("\tleaq 8(%r12), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tmovq $0, (%r13)")
+        self.raw("\ttestq %r12, %r12")
+        self.raw("\tjz .Lrd_done")
+        self.raw(".Lrd_retry:")
+        self.raw("\txorq %rax, %rax")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tleaq 8(%r13), %rsi")
+        self.raw("\tmovq %r12, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\tcmpq $-4, %rax")
+        self.raw("\tje .Lrd_retry")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lrd_err")
+        self.raw("\tmovq %rax, (%r13)")
+        self.raw("\tjmp .Lrd_done")
+        self.raw(".Lrd_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(".Lrd_done:")
+        self.raw("\tmovq %r13, %rax")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
     }
 
     // `__write_file`: rdi = path str cell, rsi = contents str cell -> void;
@@ -6742,7 +6805,7 @@ fun is_builtin_call_name(nm: str) -> bool {
     if nm == "StringBuilder" || nm == "append" || nm == "append_byte" || nm == "build" { return true }
     if nm == "contains" || nm == "remove" || nm == "keys" { return true }
     if nm == "__write" || nm == "__exit" || nm == "__args" || nm == "__read_file" || nm == "__io_errno" { return true }
-    if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" { return true }
+    if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" { return true }
     if nm == "__run_signal" || nm == "__run_errno" { return true }
     return false
 }

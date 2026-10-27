@@ -1,9 +1,13 @@
-// std.io — freestanding console/stream output (v0.5.4, D29).
+// std.io — freestanding console/stream I/O (v0.5.4, D29; reading MYLA-78).
 //
-// Thin wrappers over the runtime's raw `write` primitive (the Linux `write`
-// syscall natively; Python `os.write` in the interpreter). String bytes are
-// written verbatim (UTF-8), so `print`/`println` are byte-for-byte identical
-// across the interpreter and the native backend.
+// Thin wrappers over the runtime's raw `write` and `read` primitives (the
+// Linux syscalls natively; Python `os.write`/`os.read` in the interpreter).
+// String bytes are written verbatim (UTF-8), so `print`/`println` are
+// byte-for-byte identical across the interpreter and the native backend.
+// Output is not buffered, so whatever a program wrote is out before it waits
+// for input.
+
+from .fs import IoError, from_errno
 
 // Write `s`'s bytes to file descriptor `fd` (1 = stdout, 2 = stderr).
 pub fun write(fd: int32, s: str) {
@@ -25,4 +29,115 @@ pub fun eprint(s: str) {
 pub fun eprintln(s: str) {
     __write(2, s)
     __write(2, "\n")
+}
+
+// --- Reading ------------------------------------------------------------------
+
+// How many bytes one `read` asks for at least.
+const CHUNK: int32 = 4096
+
+// A buffered reader over a file descriptor. Keep it in a `var` (or a field of
+// one) and read through its methods; the bytes they return are verbatim, and
+// a read blocks until input is there or the input ends.
+pub struct Reader {
+    fd: int32,
+    buf: str,      // bytes read but not returned yet: buf[pos..]
+    pos: int32,
+    eof: bool,     // the input has ended
+}
+
+// A reader of the standard input.
+pub fun stdin() -> Reader {
+    return reader(0)
+}
+
+// A reader of file descriptor `fd`.
+pub fun reader(fd: int32) -> Reader {
+    return Reader { fd: fd, buf: "", pos: 0, eof: false }
+}
+
+// The bytes of `s` from `start` up to `end`.
+fun slice(s: str, start: int32, end: int32) -> str {
+    var sb = StringBuilder()
+    var i = start
+    while i < end {
+        append_byte(sb, s[i])
+        i = i + 1
+    }
+    return build(sb)
+}
+
+impl Reader {
+    // Read at least `want` more bytes if the input has them (one `read` of at
+    // least CHUNK bytes, which may return fewer); false at the end of the
+    // input. The bytes already returned are dropped from the buffer.
+    fun fill(var self, want: int32) -> Result<bool, IoError> {
+        if self.eof { return Ok(false) }
+        var n = CHUNK
+        if want > n { n = want }
+        let chunk = __read(self.fd, n)
+        let err = __io_errno()
+        if err != 0 { return Err(from_errno(err)) }
+        if len(chunk) == 0 {
+            self.eof = true
+            return Ok(false)
+        }
+        if self.pos > 0 {
+            self.buf = slice(self.buf, self.pos, len(self.buf))
+            self.pos = 0
+        }
+        self.buf = self.buf + chunk
+        return Ok(true)
+    }
+
+    // The next line, without its "\n" (a "\r" before it is kept); a last line
+    // without "\n" counts too. None at the end of the input.
+    fun read_line(var self) -> Result<Option<str>, IoError> {
+        var scanned = 0                    // bytes after pos known not to be "\n"
+        var found = -1
+        while found < 0 {
+            var i = self.pos + scanned
+            while found < 0 && i < len(self.buf) {
+                if self.buf[i] == '\n' { found = i }
+                i = i + 1
+            }
+            if found < 0 {
+                scanned = len(self.buf) - self.pos
+                if !self.fill(1)? {
+                    if scanned == 0 { return Ok(None) }
+                    found = len(self.buf)
+                }
+            }
+        }
+        let line = slice(self.buf, self.pos, found)
+        if found < len(self.buf) { self.pos = found + 1 } else { self.pos = found }     // past the "\n"
+        return Ok(Some(line))
+    }
+
+    // Exactly the next `n` bytes ("" for n <= 0); None if the input ends
+    // first (the bytes that were there stay unread).
+    fun read_exact(var self, n: int32) -> Result<Option<str>, IoError> {
+        if n <= 0 { return Ok(Some("")) }
+        while len(self.buf) - self.pos < n {
+            if !self.fill(n - (len(self.buf) - self.pos))? { return Ok(None) }
+        }
+        let out = slice(self.buf, self.pos, self.pos + n)
+        self.pos = self.pos + n
+        return Ok(Some(out))
+    }
+
+    // Everything up to the end of the input ("" if it has ended).
+    fun read_to_end(var self) -> Result<str, IoError> {
+        var sb = StringBuilder()
+        append(sb, slice(self.buf, self.pos, len(self.buf)))
+        while !self.eof {
+            let chunk = __read(self.fd, CHUNK)
+            let err = __io_errno()
+            if err != 0 { return Err(from_errno(err)) }      // the buffer stays as it was
+            if len(chunk) == 0 { self.eof = true } else { append(sb, chunk) }
+        }
+        self.buf = ""
+        self.pos = 0
+        return Ok(build(sb))
+    }
 }

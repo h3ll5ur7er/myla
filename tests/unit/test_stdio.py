@@ -23,17 +23,18 @@ def check_src(src: str):
     return check(parse(tokenize(src)))
 
 
-def link_and_run(src: str, argv=None) -> tuple[str, str, int]:
+def link_and_run(src: str, argv=None, stdin: bytes | None = None) -> tuple[str, str, int]:
     """Write `src` to a temp module, link it against the bundled stdlib, then run
     it through the interpreter; return (stdout, stderr, exit code). `argv` is the
-    program command line seen by `std.process.args`."""
+    program command line seen by `std.process.args`, `stdin` its input."""
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "main.my")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(src)
         checker = check(link(path, stdlib_root=default_stdlib_root()))
         out, err = io.StringIO(), io.StringIO()
-        code = Interpreter(checker, out, err, argv=argv).run()
+        inp = io.BytesIO(stdin) if stdin is not None else None
+        code = Interpreter(checker, out, err, argv=argv, stdin=inp).run()
         return out.getvalue(), err.getvalue(), code
 
 
@@ -170,3 +171,210 @@ class TestStdSurface(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# -- reading (MYLA-78) ---------------------------------------------------------
+
+# Prints each line of stdin with its length, then the count.
+LINES = """from std.io import stdin
+fun main() {
+    var r = stdin()
+    var n = 0
+    while true {
+        match r.read_line() {
+            Ok(Some(line)) => {
+                n = n + 1
+                print(format("{}: [{}] {}", n, line, len(line)))
+            },
+            Ok(None) => { break },
+            Err(e) => {
+                print("error")
+                break
+            },
+        }
+    }
+    print(format("{} lines", n))
+}
+"""
+
+# Reads messages framed by a Content-Length header, as the language server
+# protocol does, through a struct that owns the reader.
+FRAMED = """from std.io import stdin, Reader
+from std.fs import IoError
+
+struct Channel { input: Reader }
+
+impl Channel {
+    // The next message's body; None at the end of the input.
+    fun next(var self) -> Result<Option<str>, IoError> {
+        var length = -1
+        while true {
+            match self.input.read_line()? {
+                Some(line) => {
+                    if len(line) <= 1 { break }       // "" or "\\r"
+                    length = digits_of(line)
+                },
+                None => { return Ok(None) },
+            }
+        }
+        return self.input.read_exact(length)
+    }
+}
+
+fun digits_of(s: str) -> int32 {
+    var n = 0
+    for c in chars(s) {
+        if c >= '0' && c <= '9' { n = n * 10 + ((c as int32) - 48) }
+    }
+    return n
+}
+
+fun main() {
+    var ch = Channel { input: stdin() }
+    while true {
+        match ch.next() {
+            Ok(Some(body)) => { print(format("<{}>", body)) },
+            Ok(None) => { break },
+            Err(e) => {
+                print("error")
+                break
+            },
+        }
+    }
+}
+"""
+
+
+class TestReadPrimitive(unittest.TestCase):
+    def test_read_takes_fd_and_count(self):
+        check_src("fun main() { let s: str = __read(0, 10) }\n")
+
+    def test_read_rejects_wrong_arity(self):
+        with self.assertRaises(TypeCheckError):
+            check_src("fun main() { __read(0) }\n")
+
+    def test_read_rejects_non_integer_fd(self):
+        with self.assertRaises(TypeCheckError):
+            check_src('fun main() { __read("0", 1) }\n')
+
+    def test_read_rejects_non_integer_count(self):
+        with self.assertRaises(TypeCheckError):
+            check_src('fun main() { __read(0, "1") }\n')
+
+    def test_read_returns_at_most_n_bytes_then_empty(self):
+        out, _, _ = link_and_run(
+            'fun main() {\n'
+            '    print(__read(0, 3))\n'
+            '    print(__read(0, 100))\n'
+            '    print(len(__read(0, 100)))\n'
+            '    print(__io_errno())\n'
+            '}\n', stdin=b"abcdef")
+        self.assertEqual(out, "abc\ndef\n0\n0\n")
+
+    def test_read_from_a_bad_fd_sets_errno(self):
+        out, _, _ = link_and_run(
+            'fun main() {\n'
+            '    print(len(__read(99, 10)))\n'
+            '    print(__io_errno())\n'
+            '}\n')
+        self.assertEqual(out, "0\n9\n")      # EBADF
+
+
+class TestReader(unittest.TestCase):
+    def test_lines(self):
+        out, _, code = link_and_run(LINES, stdin=b"one\ntwo\n\nthree\n")
+        self.assertEqual(out, "1: [one] 3\n2: [two] 3\n3: [] 0\n4: [three] 5\n4 lines\n")
+        self.assertEqual(code, 0)
+
+    def test_last_line_without_newline(self):
+        out, _, _ = link_and_run(LINES, stdin=b"a\nb")
+        self.assertEqual(out, "1: [a] 1\n2: [b] 1\n2 lines\n")
+
+    def test_empty_input(self):
+        out, _, _ = link_and_run(LINES, stdin=b"")
+        self.assertEqual(out, "0 lines\n")
+
+    def test_carriage_return_is_kept(self):
+        out, _, _ = link_and_run(LINES, stdin=b"a\r\n")
+        self.assertEqual(out, "1: [a\r] 2\n1 lines\n")
+
+    def test_lines_longer_than_a_chunk(self):
+        long = b"x" * 10000
+        out, _, _ = link_and_run(LINES, stdin=long + b"\n" + long)
+        lines = out.splitlines()
+        self.assertEqual(lines[-1], "2 lines")
+        self.assertTrue(lines[0].endswith("] 10000"))
+        self.assertTrue(lines[1].endswith("] 10000"))
+
+    def test_utf8_split_across_chunks(self):
+        # 4,095 bytes of "x" put the two bytes of "ö" into different chunks
+        out, _, _ = link_and_run(
+            'from std.io import stdin\n'
+            'fun main() {\n'
+            '    var r = stdin()\n'
+            '    match r.read_line() {\n'
+            '        Ok(Some(s)) => {\n'
+            '            var last = \' \'\n'
+            '            for c in chars(s) { last = c }\n'
+            '            print(len(s))\n'
+            '            print(last)\n'
+            '        },\n'
+            '        _ => { print("error") },\n'
+            '    }\n'
+            '}\n', stdin=b"x" * 4095 + "ö\n".encode())
+        self.assertEqual(out, "4097\nö\n")
+
+    def test_read_to_end(self):
+        out, _, _ = link_and_run(
+            'from std.io import stdin, write\n'
+            'fun main() {\n'
+            '    var r = stdin()\n'
+            '    match r.read_line() {\n'
+            '        Ok(Some(first)) => { print(first) },\n'
+            '        _ => {},\n'
+            '    }\n'
+            '    match r.read_to_end() {\n'
+            '        Ok(rest) => { print(len(rest)) },\n'
+            '        Err(e) => { print("error") },\n'
+            '    }\n'
+            '    match r.read_to_end() {\n'
+            '        Ok(rest) => { print(len(rest)) },\n'
+            '        Err(e) => { print("error") },\n'
+            '    }\n'
+            '}\n', stdin=b"head\n" + b"y" * 20000)
+        self.assertEqual(out, "head\n20000\n0\n")
+
+    def test_framed_messages(self):
+        data = b"Content-Length: 5\r\n\r\nhello" + b"Content-Length: 12\r\n\r\n{\"a\": [1,2]}"
+        out, _, _ = link_and_run(FRAMED, stdin=data)
+        self.assertEqual(out, '<hello>\n<{"a": [1,2]}>\n')
+
+    def test_read_exact_at_a_premature_end(self):
+        out, _, _ = link_and_run(FRAMED, stdin=b"Content-Length: 10\r\n\r\nshort")
+        self.assertEqual(out, "")
+
+    def test_errors_are_io_errors(self):
+        out, _, _ = link_and_run(
+            'from std.io import reader\n'
+            'from std.fs import IoError\n'
+            'fun main() {\n'
+            '    var r = reader(99)\n'
+            '    match r.read_line() {\n'
+            '        Err(IoError.Other(code)) => { print(code) },\n'
+            '        _ => { print("no error") },\n'
+            '    }\n'
+            '}\n')
+        self.assertEqual(out, "9\n")
+
+    def test_read_exact_of_nothing(self):
+        out, _, _ = link_and_run(
+            'from std.io import stdin\n'
+            'fun main() {\n'
+            '    var r = stdin()\n'
+            '    match r.read_exact(2) { Ok(Some(s)) => { print(s) }, _ => {} }\n'
+            '    match r.read_exact(-3) { Ok(Some(s)) => { print(len(s)) }, _ => {} }\n'
+            '    match r.read_exact(0) { Ok(Some(s)) => { print(len(s)) }, _ => {} }\n'
+            '    match r.read_exact(2) { Ok(Some(s)) => { print(s) }, _ => {} }\n'
+            '}\n', stdin=b"abcd")
+        self.assertEqual(out, "ab\n0\n0\ncd\n")
+

@@ -655,7 +655,7 @@ _BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop
                   # lives in `std.io` / `std.process` / `std.fs` and wraps these.
                   "__write", "__exit", "__args", "__read_file", "__io_errno",
                   "__run", "__run_stderr", "__run_exit_code", "__run_signal",
-                  "__run_errno", "__write_file"}
+                  "__run_errno", "__write_file", "__read"}
 
 # builtin calls that never return (the checker treats them like a `return`)
 _DIVERGING_BUILTINS = {"panic", "unreachable", "__exit"}
@@ -3587,6 +3587,24 @@ class Checker:
                 raise TypeCheckError(
                     f"__read_file() expects a string path, found "
                     f"'{type_name(p_t)}'",
+                    expr.line, expr.column,
+                )
+            expr.resolved_type = STR
+            return STR
+        if name == "__read":
+            if len(expr.args) != 2:
+                raise TypeCheckError("__read() takes (fd: int32, n: int32)",
+                                     expr.line, expr.column)
+            fd_t = self._expect_value(expr.args[0], scope, INT)
+            if not isinstance(fd_t, IntType):
+                raise TypeCheckError(
+                    f"__read() fd must be an integer, found '{type_name(fd_t)}'",
+                    expr.line, expr.column,
+                )
+            n_t = self._expect_value(expr.args[1], scope, INT)
+            if not isinstance(n_t, IntType):
+                raise TypeCheckError(
+                    f"__read() n must be an integer, found '{type_name(n_t)}'",
                     expr.line, expr.column,
                 )
             expr.resolved_type = STR
