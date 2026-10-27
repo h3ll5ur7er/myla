@@ -47,7 +47,7 @@ Evidence:
 Evidence:
 
 - `tests/integration/test_lsp_requests.py`: the 19 cases of `tests/unit/test_lsp_features.py` (selection ranges, outline, definition with workspace fallback, references with and without the declaration and across files, hover, completion after a dot and after astral characters) as protocol requests; the Python server passes them, and so do both builds of the Myla server (38 tests in `tests/burn/test_lsp.py`), all on the first run.
-- A comparison with the Python server (`TestAgainstThePythonServer`, needs pygls; CI's burn job now installs it): document symbols of 63 files (examples, compiler, tools, std) equal except for range ends, and definition, hover, references and completion at about 360 sampled identifiers and 60 completion points in `examples/`. Changing `[K: V]` to `[K:V]` in the type rendering makes 7 files fail.
+- A comparison with the Python server (`TestAgainstThePythonServer`, needs pygls; CI's burn job now installs it): document symbols of 63 files (examples, compiler, tools, std) equal except for range ends, and definition and hover at 391 sampled identifiers (references at every fourth) and completion at 86 points in `examples/`. Changing `[K: V]` to `[K:V]` in the type rendering makes 7 files fail.
 - Speed on `selfhost/checker.my`, workspace the whole repository (Python / Myla): documentSymbol 487 / 134 ms, definition 664 / 189, hover 480 / 147, references 994 / 160, completion 1,974 / 826 ms, the same number of results each.
 - Full run: 491 unit, 29 integration and 484 burn tests pass; the bootstrap reaches its fixed point (unchanged, 7,794,199 bytes) and builds the server.
 
