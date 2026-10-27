@@ -12,8 +12,8 @@ from std.process import args, exit
 from std.io import write, eprintln
 from .checker import build_checker_decls
 from .codegen import new_codegen
-from .loader import load_program_opts, load_options, parse_package_flag, Loaded, file_of, default_stdlib_root
-from .diag import render, type_report
+from .loader import load_program_opts, load_options, parse_package_flag, Loaded, default_stdlib_root, type_errors
+from .diag import render
 
 // `debug`: DWARF debug information, so gdb steps through the Myla source and
 // shows its variables (MYLA-71, MYLA-66).
@@ -27,8 +27,8 @@ fun emit_asm(prog: Loaded, debug: bool) -> int32 {
             write(1, asm)
             0
         },
-        Err(e) => {
-            eprintln(render(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl))))
+        Err(errs) => {
+            eprintln(render(type_errors(prog, errs)))
             1
         },
     }

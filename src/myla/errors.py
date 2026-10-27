@@ -11,8 +11,10 @@ underlined on the position's line, e.g.::
     3 |     let x = "a" + 1
       |             ^^^^^^^
 
-v0.0 uses panic-mode error handling: the first error in a stage aborts that
-stage (see docs/Architecture.md).
+A stage may find more than one error (MYLA-65, D80): the parser resumes at the
+next statement or declaration, the checker checks every function on its own.
+It raises the first one, the error a single-error run would report, with the
+others in its `more` list, in the order they were found.
 """
 from __future__ import annotations
 
@@ -31,6 +33,11 @@ class Position:
         return f"{self.line}:{self.column}"
 
 
+# At most this many errors per run (MYLA-65, D80): the parser and the checker
+# stop at the limit.
+MAX_ERRORS = 20
+
+
 # A source range: start line and column, then the line and column just past its
 # end (all 1-based, columns in code points).
 Span = tuple[int, int, int, int]
@@ -45,7 +52,8 @@ class MylaError(Exception):
     (then the rendering marks just the column). `at` takes both from a token or
     a syntax node, which know their range. `path` is the file the position
     refers to, when known (set by `in_file` as the error leaves the module or
-    declaration it came from; MYLA-10).
+    declaration it came from; MYLA-10). `more` holds the errors the same stage
+    found after this one (D80); only the first error of a run has any.
     """
 
     kind = "error"
@@ -60,6 +68,7 @@ class MylaError(Exception):
         self.column = column
         self.span = span
         self.path: str | None = None
+        self.more: list[MylaError] = []
 
     def caret_range(self, text: str) -> tuple[int, int]:
         """The columns to underline on `text`, the error's line: (first, one
@@ -100,13 +109,14 @@ class MylaError(Exception):
 
 @contextlib.contextmanager
 def in_file(path: str | None):
-    """Attribute a MylaError raised inside the block to `path`, unless an inner
-    block already did."""
+    """Attribute a MylaError raised inside the block (and the errors in its
+    `more`) to `path`, unless an inner block already did."""
     try:
         yield
     except MylaError as err:
-        if err.path is None:
-            err.path = path
+        for e in (err, *err.more):
+            if e.path is None:
+                e.path = path
         raise
 
 

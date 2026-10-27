@@ -1,30 +1,31 @@
 // check_main.my — `check --canonical` tool, written in Myla (self-hosting v0.7).
 //
 // Reads a .my file, lexes + parses + type-checks it, and prints the stable
-// accept/reject + diagnostic-position line for differential comparison against
+// accept/reject + diagnostic-position lines for differential comparison against
 // the Python checker: `ok` on success, else `err <line> <col> <span> type:
-// <message>` (diag.canonical).
+// <message>` (diag.canonical) for each error, in the order found (MYLA-65,
+// D80).
 // (The checker gate covers single-file programs that lex + parse cleanly; the
 // only diagnostic class it emits is `type`.)
 
 from std.process import args, exit
 from std.fs import read_to_string
 from std.io import println, eprintln
-from .parser import parse_source
+from .parser import parse_source_all
 from .checker import check_program
 from .diag import canonical_err, canonical
 
 fun check_and_report(src: str) {
-    let parsed = match parse_source(src, 0) {
+    let parsed = match parse_source_all(src, 0) {
         Ok(p) => p,
-        Err(d) => {
-            println(canonical_err(d))
+        Err(ds) => {
+            for d in ds { println(canonical_err(d)) }
             return
         },
     }
     match check_program(parsed.program) {
         Ok(x) => println("ok"),
-        Err(e) => println(canonical(e.line, e.col, e.sp, "type", e.msg)),
+        Err(errs) => { for e in errs { println(canonical(e.line, e.col, e.sp, "type", e.msg)) } },
     }
 }
 

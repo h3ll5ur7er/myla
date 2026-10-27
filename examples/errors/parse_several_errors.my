@@ -1,0 +1,38 @@
+//~ parse error: expected variable name
+//~ span: =
+//~ errors: 5
+//~ next: expected an expression, found ')'
+//~ next: expected ':', found 'int'
+//~ next: expected a method ('fun ...') in impl block, found 'let'
+//~ next: expected an expression, found 'fun'
+// The parser resumes after an error (MYLA-65, D80): at the next statement of
+// a block, the next member of an impl body or the next declaration. A
+// statement spanning lines is skipped whole, and a block missing its `}` ends
+// at the next line starting a declaration.
+struct P { x: int }
+
+fun main() {
+    let = 1
+    let total = add(1,
+        2)
+    print(total +)
+}
+
+fun add(a int, b: int) -> int {
+    return a + b
+}
+
+impl P {
+    let y = 2
+    fun shifted(self, dx: int) -> P {
+        return P { x: self.x + dx }
+    }
+}
+
+fun broken() {
+    if true {
+        print(1)
+
+fun after() {
+    print(2)
+}

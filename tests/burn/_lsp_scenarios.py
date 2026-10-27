@@ -181,6 +181,26 @@ class LspScenarios:
         self.assertEqual(got[0]["code"], "parse")
         self.assertEqual(got[0]["range"]["start"], {"line": 1, "character": 8})
 
+    def test_every_error_is_published(self):
+        # every function is checked on its own (MYLA-65, D80)
+        src = "fun f() -> int {\n    return \"s\"\n}\nfun main() {\n    let x: int = true\n}\n"
+        self.open(self.main, src)
+        got = self.client.diagnostics(1, full=True)[_uri(self.main)]
+        self.assertEqual([(d["range"]["start"]["line"], d["code"]) for d in got], [(1, "type"), (4, "type")])
+
+    def test_every_parse_error_is_published(self):
+        self.open(self.main, "fun main() {\n    let = 1\n    print(1 +)\n}\n")
+        got = self.client.diagnostics(1, full=True)[_uri(self.main)]
+        self.assertEqual([(d["range"]["start"]["line"], d["code"]) for d in got], [(1, "parse"), (2, "parse")])
+
+    def test_errors_in_two_files_are_published_for_each(self):
+        self.open(self.main, "from .bad import f\nfun main() {\n    print(f())\n    let x: int = true\n}\n")
+        got = self.client.diagnostics(2)
+        self.assertEqual(len(got[_uri(self.main)]), 1)
+        self.assertIn("cannot assign", got[_uri(self.main)][0])
+        self.assertEqual(len(got[_uri(self.bad)]), 1)
+        self.assertIn("return type mismatch", got[_uri(self.bad)][0])
+
     def test_an_unknown_request_is_an_error(self):
         rid = self.client.send("myla/noSuchThing", {}, request=True)
         self.assertEqual(self.client.response(rid)["error"]["code"], -32601)

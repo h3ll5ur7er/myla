@@ -10,6 +10,11 @@ interpretation/compilation. It:
 - type-checks every function body, annotating each value expression with a
   `resolved_type` attribute that the interpreter and compiler rely on.
 
+An error while building the tables ends the check. Once they are built, each
+function's attributes and each body are checked on their own: the first error
+of each is recorded and checking goes on, up to MAX_ERRORS (MYLA-65, D80).
+`check` raises the first error found, with the others in its `more`.
+
 Integer literals are "flexible": an unsuffixed literal adopts the type required
 by its context (annotation, parameter, return, or the other operand of a binary
 op), defaulting to `int` (`int32`).
@@ -23,7 +28,7 @@ import struct
 from dataclasses import dataclass
 
 from . import ast
-from .errors import TypeCheckError, in_file
+from .errors import MAX_ERRORS, MylaError, TypeCheckError, in_file
 
 
 # --- type representations --------------------------------------------------
@@ -686,6 +691,10 @@ _PRELUDE_VARIANTS = {
 }
 
 
+class _Stop(Exception):
+    """MAX_ERRORS errors were recorded: the check ends."""
+
+
 class Checker:
     def __init__(self, program: ast.Program):
         self.program = program
@@ -742,6 +751,8 @@ class Checker:
         # pass); each is assigned a unique `lifted_name`
         self._lambdas: list[ast.Lambda] = []
         self._lambda_ids: set[int] = set()
+        # the errors of the functions checked so far (MYLA-65, D80)
+        self._errors: list[MylaError] = []
 
     # -- public entry --------------------------------------------------------
 
@@ -753,15 +764,41 @@ class Checker:
         self._resolve_impls()
         self._validate_bounds()
         self._fold_consts()
-        self._check_attributes_and_entry()
-        for decl in self.program.decls:
-            if isinstance(decl, ast.FunDecl):
-                with in_file(_source_path(decl)):
-                    self._check_function(decl)
-        for mdecl in self._method_decls:
-            with in_file(_source_path(mdecl)):
-                self._check_function(mdecl)
+        try:
+            self._check_attributes_and_entry()
+            for decl in self.program.decls:
+                if isinstance(decl, ast.FunDecl):
+                    self._on_its_own(decl, lambda d=decl: self._check_function(d))
+            for mdecl in self._method_decls:
+                self._on_its_own(mdecl, lambda d=mdecl: self._check_function(d))
+        except _Stop:
+            pass
+        if self._errors:
+            first = self._errors[0]
+            first.more = self._errors[1:]
+            raise first
         return self
+
+    def _on_its_own(self, decl: ast.Decl, check) -> None:
+        """Run `check`, about `decl`, from a clean state; record its error
+        (with `decl`'s file) and go on (MYLA-65, D80)."""
+        self._loop_depth = 0
+        self._lambda_stack = []
+        self._lambda_infer = None
+        self._current_ret = None
+        try:
+            with in_file(_source_path(decl)):
+                check()
+        except MylaError as err:
+            self._errors.append(err)
+            if len(self._errors) >= MAX_ERRORS:
+                raise _Stop() from None
+
+    def _fail_at(self, decl: ast.Decl, message: str, node: ast.Node) -> None:
+        """Record an error about `decl` at `node`."""
+        def fail() -> None:
+            raise TypeCheckError(message, at=node)
+        self._on_its_own(decl, fail)
 
     # -- global collection ---------------------------------------------------
 
@@ -1701,52 +1738,47 @@ class Checker:
     def _check_attributes_and_entry(self) -> None:
         main_decls: list[ast.FunDecl] = []
         for decl in self.program.decls:
-            with in_file(_source_path(decl)):
-                for attr in decl.attributes:
-                    # `#derive` (v0.4.4) is validated and lowered by
-                    # `_synthesize_derives`; skip it here.
-                    if attr.name == "derive":
-                        continue
-                    if attr.name not in ("main", "test"):
-                        raise TypeCheckError(
-                            f"unknown attribute '#{attr.name}'", at=attr
-                        )
-                    if not isinstance(decl, ast.FunDecl):
-                        raise TypeCheckError(
-                            f"attribute '#{attr.name}' may only be applied to functions",
-                            at=attr,
-                        )
-                    if decl.type_params:
-                        raise TypeCheckError(
-                            f"attribute '#{attr.name}' cannot be applied to a generic "
-                            "function (it has no single concrete instantiation)",
-                            at=attr,
-                        )
-                    if attr.name == "main":
-                        self._check_main_attr(decl, attr)
-                        main_decls.append(decl)
-                    else:
-                        self._check_test_attr(decl, attr)
+            self._on_its_own(decl, lambda d=decl: self._check_attributes(d, main_decls))
 
         named_main = self.functions.get("main")
-        if main_decls and named_main is not None and named_main.decl not in main_decls:
-            with in_file(_source_path(named_main.decl)):
-                raise TypeCheckError(
-                    "both a '#main' function and a function named 'main' are present",
-                    at=named_main.decl,
-                )
-        if len(main_decls) > 1:
-            with in_file(_source_path(main_decls[1])):
-                raise TypeCheckError(
-                    "more than one '#main' entry point", at=main_decls[1]
-                )
         entry = main_decls[0] if main_decls else (named_main.decl if named_main else None)
-        if entry is not None and entry.params:
-            with in_file(_source_path(entry)):
-                raise TypeCheckError(
-                    "entry point must take no parameters in v0.0", at=entry
-                )
+        if main_decls and named_main is not None and named_main.decl not in main_decls:
+            self._fail_at(named_main.decl,
+                          "both a '#main' function and a function named 'main' are present",
+                          named_main.decl)
+        elif len(main_decls) > 1:
+            self._fail_at(main_decls[1], "more than one '#main' entry point", main_decls[1])
+        elif entry is not None and entry.params:
+            self._fail_at(entry, "entry point must take no parameters in v0.0", entry)
         self.entry = entry
+
+    def _check_attributes(self, decl: ast.Decl, main_decls: list[ast.FunDecl]) -> None:
+        """Check `decl`'s attributes; add it to `main_decls` for each `#main`."""
+        for attr in decl.attributes:
+            # `#derive` (v0.4.4) is validated and lowered by
+            # `_synthesize_derives`; skip it here.
+            if attr.name == "derive":
+                continue
+            if attr.name not in ("main", "test"):
+                raise TypeCheckError(
+                    f"unknown attribute '#{attr.name}'", at=attr
+                )
+            if not isinstance(decl, ast.FunDecl):
+                raise TypeCheckError(
+                    f"attribute '#{attr.name}' may only be applied to functions",
+                    at=attr,
+                )
+            if decl.type_params:
+                raise TypeCheckError(
+                    f"attribute '#{attr.name}' cannot be applied to a generic "
+                    "function (it has no single concrete instantiation)",
+                    at=attr,
+                )
+            if attr.name == "main":
+                self._check_main_attr(decl, attr)
+                main_decls.append(decl)
+            else:
+                self._check_test_attr(decl, attr)
 
     def _check_main_attr(self, decl: ast.FunDecl, attr: ast.Attribute) -> None:
         if attr.args or attr.outputs is not None:

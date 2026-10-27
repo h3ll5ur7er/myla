@@ -32,8 +32,8 @@ def _read_source(path: str) -> str:
         return fh.read()
 
 
-def _report(err: MylaError, entry: str, entry_source: str) -> None:
-    """Print `err` with the line it points at, from the file it comes from: the
+def _render_in_file(err: MylaError, entry: str, entry_source: str) -> str:
+    """`err` with the line it points at, from the file it comes from: the
     entry file, or the imported module the error names (MYLA-10)."""
     name, source = entry, entry_source
     if err.path is not None and os.path.realpath(err.path) != os.path.realpath(entry):
@@ -42,7 +42,22 @@ def _report(err: MylaError, entry: str, entry_source: str) -> None:
             source = _read_source(err.path)
         except OSError:
             source = None
-    print(err.render(source, name), file=sys.stderr)
+    return err.render(source, name)
+
+
+def report_text(err: MylaError, entry: str, entry_source: str) -> str:
+    """What the CLI prints for `err`: it and the errors in its `more`, each in
+    its file, a blank line apart, then a summary line when there are several
+    (MYLA-65, D80)."""
+    errors = [err, *err.more]
+    text = "\n\n".join(_render_in_file(e, entry, entry_source) for e in errors)
+    if len(errors) > 1:
+        text += f"\n\nerror: aborting due to {len(errors)} previous errors"
+    return text
+
+
+def _report(err: MylaError, entry: str, entry_source: str) -> None:
+    print(report_text(err, entry, entry_source), file=sys.stderr)
 
 
 def _cmd_tokenize(args: argparse.Namespace) -> int:
@@ -70,7 +85,7 @@ def _cmd_parse(args: argparse.Namespace) -> int:
         tokens = lex_source(source)
         program = parse_tokens(tokens)
     except MylaError as err:
-        print(err.render(source, args.file), file=sys.stderr)
+        _report(err, args.file, source)
         return 1
     if getattr(args, "canonical", False):
         from .canon import canonical_ast
@@ -163,18 +178,19 @@ def _cmd_build(args: argparse.Namespace) -> int:
 def _cmd_check(args: argparse.Namespace) -> int:
     """Type-check a program. With --canonical, emit the stable accept/reject +
     diagnostic-position line for self-hosting differential tests (v0.7): `ok` on
-    success, else `err <line> <col> <kind>` (a missing position is `-`, and
-    `kind` is the first word of the diagnostic class, e.g. `type`/`module`)."""
+    success, else `err <line> <col> <kind>` for each error (a missing position
+    is `-`, and `kind` is the first word of the diagnostic class, e.g.
+    `type`/`module`)."""
     source = _read_source(args.file)
     canonical = getattr(args, "canonical", False)
     try:
         _front_end(args.file, args)
     except MylaError as err:
         if canonical:
-            line = "-" if err.line is None else str(err.line)
-            col = "-" if err.column is None else str(err.column)
-            kind = err.kind.split()[0]
-            print(f"err {line} {col} {kind}")
+            for e in (err, *err.more):
+                line = "-" if e.line is None else str(e.line)
+                col = "-" if e.column is None else str(e.column)
+                print(f"err {line} {col} {e.kind.split()[0]}")
             return 0
         _report(err, args.file, source)
         return 1

@@ -4,7 +4,9 @@
 + parses a file and prints the canonical AST dump (`canon.canonical_ast`). This
 test asserts that, for every source file in the shared corpus, that dump is
 byte-for-byte identical to the Python oracle's (`myla parse --canonical`). That
-is the v0.6b structural-AST gate from docs/Development/Testing.md
+is the v0.6b structural-AST gate from docs/Development/Testing.md. For a source
+with syntax errors, both report every error the parser recovers from, in order
+(MYLA-65, D80).
 
 As with the lexer gate, the Myla parser runs as a *native binary* when the host
 can build one (which also checks interpreter/compiler parity of the toolchain
@@ -15,11 +17,12 @@ from __future__ import annotations
 import glob
 import io
 import os
+import random
 import subprocess
 import tempfile
 import unittest
 
-from myla.canon import canonical_ast, canonical_error
+from myla.canon import canonical_ast, canonical_errors
 from myla.errors import MylaError
 from myla.interpreter import Interpreter
 from myla.lexer import tokenize
@@ -129,6 +132,29 @@ SYNTAX_ERRORS = {
     # `>=` closing type arguments is split into `>` and `=` (MYLA-15)
     "split_ge_then_missing_value": "fun main() {\n    let x: Option<int>=\n}\n",
     "split_ge_in_a_parameter": "fun f(x: Option<int>= 1) {}\n",
+    # several errors: the parser resumes at the next statement, member or
+    # declaration (MYLA-65, D80)
+    "several_statements": "fun main() {\n    let = 1\n    let y = 2\n    y = = 3\n}\nfun g() {\n    print(1 +)\n}\n",
+    "several_on_a_line": "fun main() {\n    let x = = = 1; let = 2\n}\n",
+    "header_then_body": "fun f(a int) -> int {\n    return a\n}\nfun main() {\n    let = 1\n}\n",
+    "statement_spanning_lines": "fun main() {\n    print(f(1 +,\n        2))\n    let = 1\n}\n",
+    "unclosed_parenthesis": "fun main() {\n    let x = (1 + 2\n    let y = = 3\n}\n",
+    "missing_brace": "fun f() {\n    if true {\n        let x = 1\n}\nfun g() {\n    let = 2\n}\n",
+    "missing_brace_after_an_error": "fun f() {\n    let = 1\n    if true {\n        print(1)\n\nfun g() {\n    let = 2\n}\n",
+    "missing_brace_in_a_method": ("struct S { a: int }\nimpl S {\n    fun f(self) {\n        if true {\n    }\n"
+                                  "    fun g(self) {\n        let = 1\n    }\n}\nfun main() {\n    let = 2\n}\n"),
+    "impl_members": ("struct S { a: int }\nimpl S {\n    fun f(self) -> int {\n        return = 1\n    }\n"
+                     "    let x = 1\n    fun g(self) -> int {\n        return self.a +\n    }\n}\n"
+                     "fun main() {\n    let = 1\n}\n"),
+    "trait_members": "trait T {\n    fun f(self) -> \n    let x = 1\n    fun g(x: int)\n}\nfun main() {\n    let = 1\n}\n",
+    "struct_body": "struct P {\n    x int,\n    y: int,\n}\nfun main() {\n    let = 1\n}\n",
+    "top_level_statements": "let x = 1\nx = 2\nfun main() {}\nprint(x)\n",
+    "nested_blocks": ("fun main() {\n    while true {\n        if x { y = = 1 } else { z = = 2 }\n"
+                      "        for i in 0..+ {\n            break\n        }\n    }\n    let = 3\n}\n"),
+    "lambda_and_match_bodies": ("fun main() {\n    let f = (x: int) => {\n        return = x\n    }\n"
+                                "    let y = match 1 {\n        1 => { let = 2 }\n        _ => 3\n    }\n}\n"),
+    "stray_closers": "fun main() {\n    let x = 1 ) ]\n    let = 2\n}\n}\nfun g() {\n    let = 3\n}\n",
+    "too_many": "fun main() {\n" + "    let = 1\n" * 25 + "}\n",
 }
 
 # Integer literals of 2^63 and above (MYLA-73): the canonical AST and token
@@ -151,18 +177,41 @@ BIG_LITERALS = (
 
 # Files whose every prefix (cut at each line end and in the middle of each
 # line) is parsed by both front ends: they must agree, and the self-hosted one
-# must stop after its first error instead of looping.
+# must not loop.
 TRUNCATED = ["closures.my", "enums.my", "interpolation.my", "traits.my", "generics.my", "chars.my"]
+
+# Garbled copies of every example, with a few lines broken in one of these
+# ways: both parsers must recover alike (MYLA-65, D80).
+GARBLINGS = [
+    lambda line: line + " )",
+    lambda line: line.replace("(", "", 1),
+    lambda line: line.replace(")", "", 1),
+    lambda line: line.replace("=", "= =", 1),
+    lambda line: line.replace("{", "", 1),
+    lambda line: line.replace("}", "", 1),
+    lambda line: line.replace(":", "", 1),
+    lambda line: line.replace(",", ",,", 1),
+    lambda line: "fun " + line,
+    lambda line: line + " {",
+]
+
+
+def _garbled(source: str, rng: random.Random, n: int) -> str:
+    """`source` with `n` of its lines garbled (GARBLINGS)."""
+    lines = source.split("\n")
+    for i in rng.sample(range(len(lines)), min(n, len(lines))):
+        lines[i] = rng.choice(GARBLINGS)(lines[i])
+    return "\n".join(lines)
 
 
 def _canonical(source: str) -> str:
-    """Canonical AST dump from the Python parser, or its error as
-    `err <line> <col> <span> <kind>: <message>` (what `parse_main` prints):
-    the range a diagnostic underlines must agree too (MYLA-65)."""
+    """Canonical AST dump from the Python parser, or its errors as
+    `err <line> <col> <span> <kind>: <message>` lines (what `parse_main`
+    prints): the range a diagnostic underlines must agree too (MYLA-65)."""
     try:
         return canonical_ast(parse(tokenize(source)))
     except MylaError as err:
-        return canonical_error(err)
+        return canonical_errors(err)
 
 
 def _oracle(path: str) -> str:
@@ -229,6 +278,20 @@ class SelfHostedParserParity(unittest.TestCase):
 
     def test_big_integer_literals_match_the_oracle(self) -> None:
         self.assertEqual(self._myla_parse_source(BIG_LITERALS), _canonical(BIG_LITERALS))
+
+    def test_garbled_sources_match_the_oracle(self) -> None:
+        several = 0
+        for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
+            with open(path, encoding="utf-8") as fh:
+                source = fh.read()
+            for seed in range(4):
+                garbled = _garbled(source, random.Random(f"{os.path.basename(path)}/{seed}"), 1 + 2 * seed)
+                with self.subTest(file=os.path.basename(path), seed=seed):
+                    expected = _canonical(garbled)
+                    self.assertEqual(self._myla_parse_source(garbled), expected)
+                    several += expected.count("\nerr ") > 0
+        # most garbled sources have several errors
+        self.assertGreater(several, 50)
 
     def test_truncated_sources_match_the_oracle(self) -> None:
         for name in TRUNCATED:

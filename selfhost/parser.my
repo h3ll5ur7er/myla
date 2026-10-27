@@ -1,8 +1,12 @@
 // parser.my — the Myla parser (mirror of src/myla/parser.py).
 //
-// Recursive descent with a layered precedence grammar. Like Python's ParseError,
-// the first syntax error ends the parse: `fail` records it (message and position
-// as in parser.py) and jumps to EOF, where every loop ends. Every node is stamped with a unique NodeId and the
+// Recursive descent with a layered precedence grammar. A syntax error is
+// Python's ParseError: `fail` keeps it as pending (message and position as in
+// parser.py) and jumps to EOF, where every loop ends, so the parse unwinds as
+// Python's exception does. A block, an impl or trait body and the program are
+// where Python catches it: after the statement, member or declaration, they
+// record the pending error, go back to where it was found and skip to the next
+// one (`recovered`, `sync`), up to MAX_ERRORS errors (MYLA-65, D80). Every node is stamped with a unique NodeId and the
 // 1-based source position of the token Python's `.at(...)` uses, so the checker
 // reproduces diagnostic positions byte-for-byte, and with the range of the
 // tokens consumed for it (MYLA-65): from its position, or from where its left
@@ -10,7 +14,7 @@
 // Parser desugarings are preserved exactly: `|>` -> Call, `return a, b` -> Return(TupleLit), adjacent
 // `<`/`>` -> shift Binary, char literal -> IntLit(is_char=true).
 
-from .tokens import Token, TokenKind, Diag, SrcSpan
+from .tokens import Token, TokenKind, Diag, SrcSpan, MAX_ERRORS
 from .lexer import lex
 from .ast import TypeExpr, TypeKind, Expr, ExprKind, Stmt, StmtKind
 from .ast import Pattern, PatternKind, Decl, DeclKind, Block, ExprOrBlock, ElseTail
@@ -23,11 +27,71 @@ pub struct Parser {
     pos: int32,
     allow_struct_lit: bool,
     next_id: int32,
-    err: Option<Diag>,
+    errs: [Diag],               // the errors recorded (MYLA-65, D80)
+    pending: Option<Diag>,      // an error the parse is unwinding from (at EOF)
+    resume: int32,              // where it, or the unwinding, left off
+    unwinding: bool,            // leaving a declaration without an error (Python's _Unwind)
+    stopped: bool,              // MAX_ERRORS were recorded (Python's _Stop)
 }
 
 pub fun new_parser(toks: [Token]) -> Parser {
-    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, err: None }
+    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false }
+}
+
+// What `sync` skips to: the next statement of a block, the next member of an
+// impl or trait body, the next top-level declaration.
+const SYNC_STMT: int32 = 0
+const SYNC_MEMBER: int32 = 1
+const SYNC_DECL: int32 = 2
+
+// The tokens that begin a declaration.
+#test(TokenKind.HASH)[true]
+#test(TokenKind.LET)[false]
+fun is_decl_start(k: TokenKind) -> bool {
+    return k == TokenKind.FUN || k == TokenKind.STRUCT || k == TokenKind.ENUM || k == TokenKind.IMPL || k == TokenKind.TRAIT || k == TokenKind.TYPEALIAS || k == TokenKind.CONST || k == TokenKind.IMPORT || k == TokenKind.FROM || k == TokenKind.PUB || k == TokenKind.HASH
+}
+
+// The tokens that begin a statement other than an expression.
+#test(TokenKind.RETURN)[true]
+#test(TokenKind.IDENT)[false]
+fun is_stmt_start(k: TokenKind) -> bool {
+    return k == TokenKind.LET || k == TokenKind.VAR || k == TokenKind.IF || k == TokenKind.WHILE || k == TokenKind.FOR || k == TokenKind.RETURN || k == TokenKind.BREAK || k == TokenKind.CONTINUE
+}
+
+#test([TokenKind.LPAREN], TokenKind.LBRACE)[false]
+#test([TokenKind.LBRACE, TokenKind.LPAREN], TokenKind.LBRACE)[true]
+fun has_kind(ks: [TokenKind], k: TokenKind) -> bool {
+    for x in ks { if x == k { return true } }
+    return false
+}
+
+// `opens`, the brackets open while skipping tokens, after `k`: an opening
+// one is pushed; a closing one pops back to its partner, or is ignored
+// without one (parser.py: _nest).
+#test([TokenKind.LBRACE], TokenKind.LPAREN)[[TokenKind.LBRACE, TokenKind.LPAREN]]
+#test([TokenKind.LBRACE, TokenKind.LPAREN], TokenKind.RBRACE)[[]]
+#test([TokenKind.LBRACE], TokenKind.RPAREN)[[TokenKind.LBRACE]]
+fun nest(opens: [TokenKind], k: TokenKind) -> [TokenKind] {
+    var out = opens
+    if k == TokenKind.LPAREN || k == TokenKind.LBRACKET || k == TokenKind.LBRACE {
+        push(out, k)
+        return out
+    }
+    var partner = TokenKind.EOF
+    if k == TokenKind.RPAREN { partner = TokenKind.LPAREN }
+    if k == TokenKind.RBRACKET { partner = TokenKind.LBRACKET }
+    if k == TokenKind.RBRACE { partner = TokenKind.LBRACE }
+    if partner != TokenKind.EOF && has_kind(out, partner) {
+        while pop(out) != partner {}
+    }
+    return out
+}
+
+// Whether `d` is after `last`; one that is not follows from it.
+#test(Diag { kind: "", line: 2, col: 1, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "" }, Diag { kind: "", line: 1, col: 9, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "" })[true]
+#test(Diag { kind: "", line: 1, col: 9, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "" }, Diag { kind: "", line: 1, col: 9, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "" })[false]
+fun is_after(d: Diag, last: Diag) -> bool {
+    return d.line > last.line || (d.line == last.line && d.col > last.col)
 }
 
 fun suffix_opt(s: str) -> Option<str> {
@@ -143,14 +207,108 @@ impl Parser {
         return false
     }
 
-    // Record the first error and skip to EOF (the callers carry on with
-    // placeholder nodes, which are discarded).
+    // Raise a parse error: keep it as pending, unless one is (or the parse is
+    // unwinding or stopped), and skip to EOF (the callers carry on with
+    // placeholder nodes, which are discarded) until a recovery point
+    // (`recovered`) records it and goes back to where it was found.
     fun fail(var self, line: int32, col: int32, sp: SrcSpan, msg: str) {
-        match self.err {
-            None => { self.err = Some(Diag { kind: "parse error", line: line, col: col, sp: sp, msg: msg }) },
-            Some(e) => {},
+        if !self.unwinding && !self.stopped {
+            match self.pending {
+                None => {
+                    self.pending = Some(Diag { kind: "parse error", line: line, col: col, sp: sp, msg: msg })
+                    self.resume = self.pos
+                },
+                Some(e) => {},
+            }
         }
         self.pos = len(self.toks) - 1
+    }
+
+    // Python's _Unwind: leave the declaration without an error, to go on at
+    // the current token.
+    fun unwind(var self) {
+        self.unwinding = true
+        self.resume = self.pos
+        self.pos = len(self.toks) - 1
+    }
+
+    // A recovery point after parsing from token `start` (parser.py: the
+    // `except ParseError` around a statement, member or declaration and
+    // _recover): record the pending error, unless it is not after the last
+    // one, go back to where it was found and skip to where a `mode` can begin
+    // (`sync`), past `start` unless a block or body ends there. Whether the
+    // parse went wrong: also while unwinding or stopped.
+    fun recovered(var self, start: int32, mode: int32) -> bool {
+        match self.pending {
+            Some(d) => {
+                self.pending = None
+                self.pos = self.resume
+                let n = len(self.errs)
+                if n == 0 || is_after(d, self.errs[n - 1]) {
+                    push(self.errs, d)
+                    if len(self.errs) >= MAX_ERRORS {
+                        self.stopped = true
+                        self.pos = len(self.toks) - 1
+                        return true
+                    }
+                }
+                self.sync(start, mode)
+                if self.pos == start && (mode == SYNC_DECL || !(self.check(TokenKind.RBRACE) || self.resuming_at_declaration())) {
+                    self.advance()
+                }
+                return true
+            },
+            None => {},
+        }
+        return self.unwinding || self.stopped
+    }
+
+    fun at_line_start(self) -> bool {
+        if self.pos == 0 { return true }
+        let k = self.toks[self.pos - 1].kind
+        return k == TokenKind.NEWLINE || k == TokenKind.SEMI
+    }
+
+    // Skip from the error to where a `mode` can begin (parser.py: _sync). The
+    // brackets opened since `start` and not closed are tracked, so a
+    // construct spanning lines is skipped whole. It stops at EOF; at a line
+    // starting a declaration (for a member or a declaration only with no
+    // brace open, or at column 1); at a `}` closing the enclosing block or
+    // body; for a statement, at a newline or `;` with no brace open, when no
+    // bracket is open either or the next line starts a statement, a
+    // declaration or with `}`.
+    fun sync(var self, start: int32, mode: int32) {
+        var opens: [TokenKind] = []
+        var i = start
+        while i < self.pos {
+            opens = nest(opens, self.toks[i].kind)
+            i = i + 1
+        }
+        while !self.at_end() {
+            let tok = self.peek()
+            let k = tok.kind
+            let brace = has_kind(opens, TokenKind.LBRACE)
+            if is_decl_start(k) && self.at_line_start() {
+                if mode == SYNC_STMT || !brace || tok.column == 1 { return }
+            }
+            if k == TokenKind.RBRACE && !brace && mode != SYNC_DECL { return }
+            if mode == SYNC_STMT && (k == TokenKind.NEWLINE || k == TokenKind.SEMI) && !brace {
+                let nxt = self.peek_at(1).kind
+                if len(opens) == 0 || is_stmt_start(nxt) || is_decl_start(nxt) || nxt == TokenKind.RBRACE { return }
+            }
+            opens = nest(opens, k)
+            self.advance()
+        }
+    }
+
+    // Whether the last error is at the next token, which starts a declaration
+    // on its line: then the block or body being parsed is missing its `}`,
+    // and the parse resumes at the declaration.
+    fun resuming_at_declaration(self) -> bool {
+        let tok = self.peek()
+        let n = len(self.errs)
+        if n == 0 || !is_decl_start(tok.kind) || !self.at_line_start() { return false }
+        return self.errs[n - 1].line == tok.line && self.errs[n - 1].col == tok.column
     }
 
     // An error about the token `tok`, which it underlines.
@@ -190,8 +348,18 @@ impl Parser {
         var decls: [Decl] = []
         self.skip_separators()
         while !self.at_end() {
-            push(decls, self.declaration())
-            self.terminate("declaration")
+            let start = self.pos
+            let d = self.declaration()
+            if !self.recovered(start, SYNC_DECL) {
+                push(decls, d)
+                self.terminate("declaration")
+                self.recovered(start, SYNC_DECL)
+            }
+            if self.unwinding && !self.stopped {
+                self.unwinding = false
+                self.pos = self.resume
+            }
+            self.skip_separators()
         }
         return Program { decls: decls }
     }
@@ -464,11 +632,15 @@ impl Parser {
         self.skip_separators()
         var methods: [FunData] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
-            if !self.check(TokenKind.FUN) {
+            if self.leaves_body() { break }
+            let start = self.pos
+            if self.check(TokenKind.FUN) {
+                push(methods, self.method_decl())
+            } else {
                 let tok = self.peek()
                 self.fail_at(tok, format("expected a method ('fun ...') in impl block, found '{}'", tok.lexeme))
             }
-            push(methods, self.method_decl())
+            self.member_recovered(start)
             self.skip_separators()
         }
         self.expect(TokenKind.RBRACE, "'}' to close impl block")
@@ -483,15 +655,45 @@ impl Parser {
         self.skip_separators()
         var methods: [FunData] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
-            if !self.check(TokenKind.FUN) {
+            if self.leaves_body() { break }
+            let start = self.pos
+            if self.check(TokenKind.FUN) {
+                push(methods, self.method_sig())
+            } else {
                 let tok = self.peek()
                 self.fail_at(tok, format("expected a method signature ('fun ...') in trait body, found '{}'", tok.lexeme))
             }
-            push(methods, self.method_sig())
+            self.member_recovered(start)
             self.skip_separators()
         }
         self.expect(TokenKind.RBRACE, "'}' to close trait body")
         return self.mk_decl(kw.line, kw.column, DeclKind.TraitDecl(name, methods, tps, is_pub))
+    }
+
+    // Before a member of an impl or trait body (parser.py: _member): after an
+    // error, a line starting another declaration, or one at column 1, leaves
+    // the body (unwinding).
+    fun leaves_body(var self) -> bool {
+        let tok = self.peek()
+        if self.resuming_at_declaration() && (tok.kind != TokenKind.FUN || tok.column == 1) {
+            self.unwind()
+            return true
+        }
+        return false
+    }
+
+    // After a member parsed from `start`: recover from its error; a method
+    // whose block unwound to a `fun` (not at column 1) is followed by the next
+    // member.
+    fun member_recovered(var self, start: int32) {
+        self.recovered(start, SYNC_MEMBER)
+        if self.unwinding && !self.stopped {
+            let at = self.toks[self.resume]
+            if at.kind == TokenKind.FUN && at.column > 1 {
+                self.unwinding = false
+                self.pos = self.resume
+            }
+        }
     }
 
     // Returns a FunData with body filled by the caller (method vs signature).
@@ -657,15 +859,25 @@ impl Parser {
         var stmts: [Stmt] = []
         self.skip_separators()
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
-            push(stmts, self.statement())
-            if self.at_separator() {
-                self.skip_separators()
-            } else if self.check(TokenKind.RBRACE) {
+            if self.resuming_at_declaration() {
+                self.unwind()
                 break
-            } else {
-                let tok = self.peek()
-                self.fail_at(tok, format("expected newline, ';' or '}}', found '{}'", tok.lexeme))
             }
+            let start = self.pos
+            let st = self.statement()
+            if !self.recovered(start, SYNC_STMT) {
+                push(stmts, st)
+                if self.at_separator() {
+                    self.skip_separators()
+                } else if self.check(TokenKind.RBRACE) {
+                    break
+                } else {
+                    let tok = self.peek()
+                    self.fail_at(tok, format("expected newline, ';' or '}}', found '{}'", tok.lexeme))
+                    self.recovered(start, SYNC_STMT)
+                }
+            }
+            self.skip_separators()
         }
         self.expect(TokenKind.RBRACE, "'}'")
         return Block { line: lbrace.line, col: lbrace.column, sp: self.span_from(lbrace.line, lbrace.column), stmts: stmts }
@@ -1467,8 +1679,10 @@ impl Parser {
 
 // The program `toks` spell, or its first parse error.
 pub fun parse(toks: [Token]) -> Result<Program, Diag> {
-    let parsed = parse_ids(toks, 0)?
-    return Ok(parsed.program)
+    return match parse_ids(toks, 0) {
+        Ok(parsed) => Ok(parsed.program),
+        Err(ds) => Err(ds[0]),
+    }
 }
 
 // A parsed module and the next unused node id.
@@ -1477,17 +1691,28 @@ pub struct Parsed { program: Program, next_id: int32 }
 // Parse with node ids starting at `first_id`, so separately parsed modules
 // (and the prelude) get ids unique across the whole program: the checker's
 // type tables are keyed by node id (MYLA-30).
-pub fun parse_ids(toks: [Token], first_id: int32) -> Result<Parsed, Diag> {
+// Err: the parse errors, in the order found (MYLA-65, D80).
+pub fun parse_ids(toks: [Token], first_id: int32) -> Result<Parsed, [Diag]> {
     var p = new_parser(toks)
     p.next_id = first_id
     let prog = p.parse_program()
-    return match p.err {
-        Some(e) => Err(e),
-        None => Ok(Parsed { program: prog, next_id: p.next_id }),
+    if len(p.errs) > 0 { return Err(p.errs) }
+    return Ok(Parsed { program: prog, next_id: p.next_id })
+}
+
+// Lex and parse `src` (node ids from `first_id`): its lex error, or its parse
+// errors.
+pub fun parse_source_all(src: str, first_id: int32) -> Result<Parsed, [Diag]> {
+    return match lex(src) {
+        Ok(toks) => parse_ids(toks, first_id),
+        Err(d) => Err([d]),
     }
 }
 
 // Lex and parse `src` (node ids from `first_id`): its first lex or parse error.
 pub fun parse_source(src: str, first_id: int32) -> Result<Parsed, Diag> {
-    return parse_ids(lex(src)?, first_id)
+    return match parse_source_all(src, first_id) {
+        Ok(p) => Ok(p),
+        Err(ds) => Err(ds[0]),
+    }
 }

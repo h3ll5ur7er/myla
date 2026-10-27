@@ -17,9 +17,9 @@ from std.num import format_float
 from .lexer import lex
 from .tokens import Token, TokenKind
 from .ast import Decl, DeclKind, Stmt, StmtKind, ElseTail
-from .loader import load_program_opts, load_options, file_of, normalize, Loaded
+from .loader import load_program_opts, load_options, file_of, normalize, Loaded, type_errors
 from .checker import build_checker_decls, Checker
-from .diag import render, type_report, Report, carets
+from .diag import render_one, Report, carets
 from .tokens import SrcSpan
 from .interp import new_interp, Value, SessionStep
 from .util import cp_utf8
@@ -87,14 +87,14 @@ impl Session {
         let prog = match load_program_opts(ENTRY, opts) {
             Ok(p) => p,
             Err(r) => {
-                report(r, t, input)
+                report_all(r, t, input)
                 return -1
             },
         }
         let c = match build_checker_decls(prog.decls, prog.next_id) {
             Ok(c) => c,
-            Err(e) => {
-                report(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl)), t, input)
+            Err(errs) => {
+                report_all(type_errors(prog, errs), t, input)
                 return -1
             },
         }
@@ -106,7 +106,7 @@ impl Session {
         let step = it.session_step(self.names, self.vals, input_stmts(c, len(self.levels)), true)
         match step.err {
             Some(r) => {
-                report(Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp }, t, input)
+                report(Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp, more: [] }, t, input)
                 return -1
             },
             None => {},
@@ -182,14 +182,25 @@ fun input_stmts(c: Checker, depth: int32) -> [Stmt] {
     return stmts
 }
 
-// Print `r`; when it is in the session's text and in the input, with the
-// input's own line numbers and source.
+// Print `r` and the errors after it, a blank line apart, then a summary
+// line when there are several (MYLA-65, D80).
+fun report_all(r: Report, t: Text, input: str) {
+    report(r, t, input)
+    for m in r.more {
+        eprintln("")
+        report(m, t, input)
+    }
+    if len(r.more) > 0 { eprintln(format("\nerror: aborting due to {} previous errors", len(r.more) + 1)) }
+}
+
+// Print `r` (not its `more`); when it is in the session's text and in the
+// input, with the input's own line numbers and source.
 fun report(r: Report, t: Text, input: str) {
     if normalize(r.path) != normalize(ENTRY) || r.line < t.start || r.line >= t.start + count_lines(input) {
         if normalize(r.path) == normalize(ENTRY) {
             eprintln(format("{}: {}", r.kind, r.msg))
         } else {
-            eprintln(render(r))
+            eprintln(render_one(r))
         }
         return
     }
