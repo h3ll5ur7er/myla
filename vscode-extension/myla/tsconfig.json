@@ -1,15 +1,24 @@
 {
+  // Type checking only: esbuild bundles src/ into out/ (esbuild.mjs), and node
+  // runs the sources and tests directly with their types stripped, so imports
+  // name the .ts files and only erasable TypeScript syntax is allowed.
   "compilerOptions": {
-    "module": "Node16",
     "target": "ES2022",
     "lib": ["ES2022"],
-    "outDir": "out",
-    "rootDir": "src",
-    "sourceMap": true,
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
     "strict": true,
-    "moduleResolution": "node16",
-    "esModuleInterop": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
     "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": ["src", "test"]
 }

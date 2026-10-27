@@ -16,7 +16,7 @@ The assembler already supports line tables: emitting GAS `.file` and `.loc` dire
 
 - [x] Variable locations: every local has a fixed `%rbp` offset (one slot per local, never reused), which maps directly onto DWARF `DW_OP_fbreg` locations; types need DWARF type descriptions (structs, enums with tags, lists through their cell layout) or a gdb pretty-printer script. Done with DWARF types, no script (D75): see How.
 - [ ] Interpreter-level debugging: a step/breakpoint hook in the tree-walking interpreter is easy and gives a debugger for `myla run`.
-- [ ] An editor front end: the Debug Adapter Protocol in the VS Code extension, next to the language server.
+- [x] An editor front end: the Debug Adapter Protocol in the VS Code extension, next to the language server. Done in [[MYLA-99]] (D78): an own adapter over gdb's MI; `F5` builds the file with `-g` and debugs it, and the Variables view shows heap strings and lists inside aggregates as values.
 - [x] Runtime traps print the failing source position ([[MYLA-65]]): not through the line table, which only `-g` builds have, but from a static position record each check passes to its trap, in every build (D75).
 - [ ] Heap values inside aggregates and lists as values instead of pointers to their cells, and `float32` fields as floats: a gdb pretty-printer script (gdb can't give array elements or fields value-dependent types).
 - [ ] Return values: a return type on each subprogram, so `finish` prints the value.
