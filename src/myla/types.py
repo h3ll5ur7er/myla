@@ -656,7 +656,7 @@ _BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop
                   "__write", "__exit", "__args", "__read_file", "__io_errno",
                   "__run", "__run_stderr", "__run_exit_code", "__run_signal",
                   "__run_errno", "__write_file", "__read", "__poll",
-                  "__list_dir", "__mkdir", "__stat"}
+                  "__list_dir", "__mkdir", "__stat", "__getcwd"}
 
 # builtin calls that never return (the checker treats them like a `return`)
 _DIVERGING_BUILTINS = {"panic", "unreachable", "__exit"}
@@ -3647,6 +3647,13 @@ class Checker:
                                      at=expr)
             expr.resolved_type = INT
             return INT
+        if name == "__getcwd":
+            # the working directory (MYLA-98); "" on an error, see __io_errno
+            if expr.args:
+                raise TypeCheckError("__getcwd() takes no arguments",
+                                     at=expr)
+            expr.resolved_type = STR
+            return STR
         if name == "__write_file":
             if len(expr.args) != 2:
                 raise TypeCheckError(

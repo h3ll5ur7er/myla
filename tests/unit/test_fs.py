@@ -4,7 +4,8 @@ Covers the low-level `__read_file`/`__io_errno` primitives as the type checker
 sees them, and the public `std.fs.read_to_string -> Result<str, IoError>`
 surface run through the interpreter (real file IO, errno-keyed errors). The
 directory primitives `__list_dir`, `__mkdir` and `__stat` and their `std.fs`
-wrappers (MYLA-88) are covered the same way; `FS_TOUR` is also run by every
+wrappers (MYLA-88) are covered the same way, and so are `__getcwd` and
+`current_dir` (MYLA-98); `FS_TOUR` and `CWD_PROGRAM` are also run by every
 implementation in `tests/burn/test_fs.py`."""
 import io
 import os
@@ -417,6 +418,75 @@ class TestDirectoryFunctions(unittest.TestCase):
             '    match count("x") { Ok(n) => print(n), Err(e) => print(-2) }\n'
             "}\n")
         self.assertEqual(out, "0\n-2\n")
+
+
+# Prints the working directory twice: `current_dir`'s result, and whether it
+# names a directory (MYLA-98). `tests/burn/test_fs.py` runs it in all four
+# implementations, in a directory that exists and in one that was removed.
+CWD_PROGRAM = """from std.io import println
+from std.fs import current_dir, is_dir, IoError
+
+fun main() {
+    match current_dir() {
+        Ok(d) => { println(format("{} {}", d, is_dir(d))) },
+        Err(e) => {
+            match e {
+                IoError.NotFound => { println("not found") },
+                IoError.PermissionDenied => { println("permission denied") },
+                IoError.Other(code) => { println(format("errno {}", code)) },
+            }
+        },
+    }
+}
+"""
+
+
+class TestCurrentDir(unittest.TestCase):
+    """`__getcwd` and `std.fs.current_dir` (MYLA-98)."""
+
+    def test_type_rules(self):
+        check_src('fun main() { let s: str = __getcwd() }\n')
+        with self.assertRaises(TypeCheckError) as ctx:
+            check_src('fun main() { let s = __getcwd(".") }\n')
+        self.assertIn("__getcwd() takes no arguments", str(ctx.exception))
+
+    def test_primitive_gives_the_working_directory(self):
+        with tempfile.TemporaryDirectory() as work:
+            cwd = os.getcwd()
+            os.chdir(work)
+            try:
+                out, _, _ = link_and_run(
+                    "fun main() {\n"
+                    "    let d = __getcwd()\n"
+                    "    print(__io_errno())\n"
+                    "    print(d)\n"
+                    "}\n")
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(out, f"0\n{os.path.realpath(work)}\n")
+
+    def test_current_dir(self):
+        with tempfile.TemporaryDirectory() as work:
+            cwd = os.getcwd()
+            os.chdir(work)
+            try:
+                out, err, code = link_and_run(CWD_PROGRAM)
+            finally:
+                os.chdir(cwd)
+            self.assertEqual((out, err, code), (f"{os.path.realpath(work)} true\n", "", 0))
+
+    def test_removed_directory_is_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gone = os.path.join(tmp, "gone")
+            os.mkdir(gone)
+            cwd = os.getcwd()
+            os.chdir(gone)
+            os.rmdir(gone)
+            try:
+                out, err, code = link_and_run(CWD_PROGRAM)
+            finally:
+                os.chdir(cwd)
+            self.assertEqual((out, err, code), ("not found\n", "", 0))
 
 
 if __name__ == "__main__":

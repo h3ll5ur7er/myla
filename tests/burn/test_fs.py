@@ -9,7 +9,8 @@ process exit status — including the errno-keyed `IoError` paths.
 The directory functions (`list_dir`, `make_dir`, `make_dir_all`, `exists`,
 `is_dir`, `is_file`; MYLA-88) are run in all four implementations: the Python
 interpreter, the Python native backend, the self-hosted interpreter and the
-self-hosted native backend, each in a fresh working directory."""
+self-hosted native backend, each in a fresh working directory; so is
+`current_dir` (MYLA-98), also in a working directory that was removed."""
 import os
 import subprocess
 import sys
@@ -28,7 +29,7 @@ from ._native import (
     write_program,
 )
 from ._tools import selfhost_tool
-from tests.unit.test_fs import FS_TOUR, FS_TOUR_OUTPUT
+from tests.unit.test_fs import CWD_PROGRAM, FS_TOUR, FS_TOUR_OUTPUT
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -257,15 +258,22 @@ class DirectoryParity(unittest.TestCase):
             "self-hosted native": [sh_native],
         }
 
-    def run_all(self, name: str, source: str, prepare=None) -> dict[str, tuple[str, str, int]]:
+    def work_dir(self, name: str, impl: str) -> str:
+        """The working directory `run_all` gives the implementation `impl`."""
+        return os.path.join(self.tmp.name, name, impl.replace(" ", "-"))
+
+    def run_all(self, name: str, source: str, prepare=None, wrap=None) -> dict[str, tuple[str, str, int]]:
         """Run `source` in each implementation, each in its own empty working
-        directory (filled by `prepare(dir)` first)."""
+        directory (filled by `prepare(dir)` first; the command is `wrap(argv)`
+        if given)."""
         results = {}
         for impl, argv in self.commands(name, source).items():
-            work = os.path.join(self.tmp.name, name, impl.replace(" ", "-"))
+            work = self.work_dir(name, impl)
             os.makedirs(work)
             if prepare is not None:
                 prepare(work)
+            if wrap is not None:
+                argv = wrap(argv)
             proc = subprocess.run(argv, cwd=work, capture_output=True, timeout=120)
             results[impl] = (proc.stdout.decode(), proc.stderr.decode(), proc.returncode)
         return results
@@ -274,6 +282,22 @@ class DirectoryParity(unittest.TestCase):
         for impl, result in self.run_all("tour", FS_TOUR).items():
             with self.subTest(implementation=impl):
                 self.assertEqual(result, (FS_TOUR_OUTPUT, "", 0))
+
+    def test_current_dir(self) -> None:
+        for impl, result in self.run_all("cwd", CWD_PROGRAM).items():
+            with self.subTest(implementation=impl):
+                work = os.path.realpath(self.work_dir("cwd", impl))
+                self.assertEqual(result, (f"{work} true\n", "", 0))
+
+    def test_current_dir_removed(self) -> None:
+        # The program starts in a directory that was removed: getcwd fails
+        # with ENOENT.
+        def wrap(argv: list[str]) -> list[str]:
+            return ["sh", "-c", 'mkdir gone && cd gone && rmdir ../gone && exec "$@"', "sh", *argv]
+
+        for impl, result in self.run_all("cwd-removed", CWD_PROGRAM, wrap=wrap).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, ("not found\n", "", 0))
 
     def test_many_long_names(self) -> None:
         names = [f"{i:03d}" + "x" * (i - 3) if i >= 3 else "n" * i for i in range(1, 256)]

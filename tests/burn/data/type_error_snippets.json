@@ -45,6 +45,7 @@
  "fun main() { let x = __mkdir(\"d\", \"x\") }\n",
  "fun main() { let x = __stat(\"a\", \"b\") }\n",
  "fun main() { let x = __stat(true) }\n",
+ "fun main() { let s = __getcwd(\".\") }\n",
  "fun main() { let e = __io_errno(1) }\n",
  "fun main() { let s = __read_file(42) }\n",
  "fun main() { let s = __read_file() }\n",

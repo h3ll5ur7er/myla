@@ -197,6 +197,9 @@ class CodeGen:
         self._uses_list_dir = False
         self._uses_mkdir = False
         self._uses_stat = False
+        # set once `std.fs.current_dir` uses `__getcwd`, gating its helper
+        # (MYLA-98; it shares the `__io_errno_val` global).
+        self._uses_getcwd = False
         # set once `__io_errno` is used, gating the `__io_errno_val` global
         # (also emitted for the helpers that set it).
         self._uses_io_errno = False
@@ -467,6 +470,8 @@ class CodeGen:
             self._emit_mkdir_runtime()
         if self._uses_stat:
             self._emit_stat_runtime()
+        if self._uses_getcwd:
+            self._emit_getcwd_runtime()
         if self._uses_run:
             self._emit_run_runtime()
         return self._assemble_source()
@@ -535,10 +540,10 @@ class CodeGen:
             out.append("\t.skip 8")
         if (self._uses_read_file or self._uses_write_file or self._uses_read or self._uses_poll
                 or self._uses_list_dir or self._uses_mkdir or self._uses_stat
-                or self._uses_io_errno):
+                or self._uses_getcwd or self._uses_io_errno):
             # errno of the last `__read_file`, `__write_file`, `__read`, `__poll`,
-            # `__list_dir`, `__mkdir` or `__stat` (0 on success), read by
-            # `__io_errno`
+            # `__list_dir`, `__mkdir`, `__stat` or `__getcwd` (0 on success),
+            # read by `__io_errno`
             out.append("__io_errno_val:")
             out.append("\t.skip 8")
         out.append("")
@@ -4146,6 +4151,10 @@ class CodeGen:
             self._uses_io_errno = True
             self._emit("movq __io_errno_val(%rip), %rax")
             return
+        if name == "__getcwd":
+            self._uses_getcwd = True
+            self._emit("call __getcwd")          # rax = the directory str (errno -> global)
+            return
         if name == "__poll":
             self._uses_poll = True
             self._eval(expr.args[0])             # fd -> rax
@@ -5497,6 +5506,53 @@ class CodeGen:
         e("\tmovq $-1, %rax")
         e(".Lst_ret:")
         e("\tleaq -8(%rbp), %rsp")
+        e("\tpopq %r12")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_getcwd_runtime(self) -> None:
+        """`__getcwd`: -> rax = a fresh `str` cell (rc=1) holding the working
+        directory that getcwd(79) writes into a 4 KB stack buffer, without its
+        NUL. On an error (ENOENT for a removed directory, ERANGE for one longer
+        than the buffer) the result is empty and `__io_errno_val` holds the
+        errno (0 otherwise). Backs `std.fs.current_dir` (MYLA-98)."""
+        e = self.text.append
+        e("__getcwd:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        e("\tsubq $4096, %rsp")                 # the buffer
+        e("\tmovq %rsp, %r12")
+        e("\tmovq $79, %rax")                   # sys_getcwd
+        e("\tmovq %r12, %rdi")
+        e("\tmovq $4096, %rsi")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lgc_err")
+        e("\tleaq -1(%rax), %r13")              # length without the NUL
+        e("\tleaq 8(%r13), %rdi")
+        e("\tcall __alloc")
+        e("\tmovq %r13, (%rax)")
+        e("\txorq %rcx, %rcx")
+        e(".Lgc_copy:")
+        e("\tcmpq %r13, %rcx")
+        e("\tjae .Lgc_ret")
+        e("\tmovb (%r12,%rcx), %dl")
+        e("\tmovb %dl, 8(%rax,%rcx)")
+        e("\tincq %rcx")
+        e("\tjmp .Lgc_copy")
+        e(".Lgc_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e("\tmovq $8, %rdi")                    # an empty str cell
+        e("\tcall __alloc")
+        e("\tmovq $0, (%rax)")
+        e(".Lgc_ret:")
+        e("\tleaq -16(%rbp), %rsp")
+        e("\tpopq %r13")
         e("\tpopq %r12")
         e("\tpopq %rbp")
         e("\tret")

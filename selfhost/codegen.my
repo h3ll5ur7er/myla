@@ -13,6 +13,7 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem, bind_elems
 from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
+from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
@@ -636,7 +637,8 @@ impl CodeGen {
 
     // `.debug_abbrev`, `.debug_info`, and the start of `.debug_line` (the
     // assembler appends the line table it builds from `.loc` there). The
-    // compile directory is `.`: Myla can't read the working directory yet.
+    // compile directory is the working directory, as in the Python backend
+    // (`.` if it can't be read).
     fun dbg_sections(var self) -> [str] {
         var types: [str] = []
         var i = 0
@@ -652,7 +654,11 @@ impl CodeGen {
         push(out, dw_string("myla (self-hosted)"))
         push(out, format("\t.value {}", LANG_RUST))
         push(out, dw_string(self.line_files[0]))
-        push(out, dw_string("."))
+        let comp_dir = match current_dir() {
+            Ok(d) => d
+            Err(e) => "."
+        }
+        push(out, dw_string(comp_dir))
         for l in ["\t.quad .Ltext0", "\t.quad .Letext0 - .Ltext0", "\t.long .Ldebug_line0"] { push(out, l) }
         for l in self.dbg_lines { push(out, l) }
         for l in types { push(out, l) }
@@ -3922,6 +3928,7 @@ impl CodeGen {
                 else if nm == "__args" { self.emit("call __args") }
                 else if nm == "__read_file" { self.gen_io_read_file(args) }
                 else if nm == "__io_errno" { self.emit("movq __io_errno_val(%rip), %rax") }
+                else if nm == "__getcwd" { self.emit("call __getcwd") }
                 else if nm == "__write_file" { self.gen_io_write_file(args) }
                 else if nm == "__read" { self.gen_io_read(args) }
                 else if nm == "__poll" { self.gen_io_poll(args) }
@@ -5412,6 +5419,7 @@ impl CodeGen {
         self.emit_list_dir_runtime()
         self.emit_mkdir_runtime()
         self.emit_stat_runtime()
+        self.emit_getcwd_runtime()
         self.emit_run_runtime()
     }
 
@@ -5626,6 +5634,53 @@ impl CodeGen {
         self.raw("\tleaq -16(%rbp), %rsp")
         self.raw("\tpopq %r12")
         self.raw("\tpopq %rbx")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // `__getcwd`: -> rax = a fresh str cell (rc=1) holding the working
+    // directory that getcwd(79) writes into a 4 KB stack buffer, without its
+    // NUL. On an error (ENOENT for a removed directory, ERANGE for one longer
+    // than the buffer) the result is empty and `__io_errno_val` holds the
+    // errno (0 otherwise). Backs `std.fs.current_dir` (MYLA-98).
+    fun emit_getcwd_runtime(var self) {
+        self.raw("__getcwd:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw("\tsubq $4096, %rsp")
+        self.raw("\tmovq %rsp, %r12")
+        self.raw("\tmovq $79, %rax")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq $4096, %rsi")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lgc_err")
+        self.raw("\tleaq -1(%rax), %r13")
+        self.raw("\tleaq 8(%r13), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %r13, (%rax)")
+        self.raw("\txorq %rcx, %rcx")
+        self.raw(".Lgc_copy:")
+        self.raw("\tcmpq %r13, %rcx")
+        self.raw("\tjae .Lgc_ret")
+        self.raw("\tmovb (%r12,%rcx), %dl")
+        self.raw("\tmovb %dl, 8(%rax,%rcx)")
+        self.raw("\tincq %rcx")
+        self.raw("\tjmp .Lgc_copy")
+        self.raw(".Lgc_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw("\tmovq $8, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq $0, (%rax)")
+        self.raw(".Lgc_ret:")
+        self.raw("\tleaq -16(%rbp), %rsp")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
         self.raw("\tpopq %rbp")
         self.raw("\tret")
         self.raw("")
@@ -7743,7 +7798,7 @@ fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__write" || nm == "__exit" || nm == "__args" || nm == "__read_file" || nm == "__io_errno" { return true }
     if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" || nm == "__poll" { return true }
     if nm == "__run_signal" || nm == "__run_errno" { return true }
-    if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" { return true }
+    if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" || nm == "__getcwd" { return true }
     return false
 }
 

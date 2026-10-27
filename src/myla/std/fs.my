@@ -54,12 +54,13 @@ pub fun write_to_file(path: str, contents: str) -> Result<int32, IoError> {
 
 // --- directories (MYLA-88) ---------------------------------------------------
 //
-// Three primitives make the system calls, the rest is Myla (D64):
+// Four primitives make the system calls, the rest is Myla (D64):
 // `__list_dir(path)` gives every name the directory lists, each followed by a
 // NUL byte, in the file system's order ("." and ".." may be among them);
 // `__mkdir(path, mode)` makes one directory; `__stat(path)` gives the
-// `st_mode` of what the path names (symbolic links followed), or -1. Each sets
-// the errno that `__io_errno` reads.
+// `st_mode` of what the path names (symbolic links followed), or -1;
+// `__getcwd()` gives the working directory, or "" (MYLA-98). Each sets the
+// errno that `__io_errno` reads.
 //
 // The helpers below have no `#test` cases: `myla test` runs the cases of every
 // linked module, and every program that prints links this one through
@@ -68,6 +69,18 @@ pub fun write_to_file(path: str, contents: str) -> Result<int32, IoError> {
 const S_IFMT: int32 = 0xF000
 const S_IFDIR: int32 = 0x4000
 const S_IFREG: int32 = 0x8000
+
+// The working directory, as an absolute path without symbolic links (the
+// kernel's getcwd, through the primitive `__getcwd`, MYLA-98). A directory
+// that was removed is `NotFound`.
+pub fun current_dir() -> Result<str, IoError> {
+    let dir = __getcwd()
+    let err = __io_errno()
+    if err == 0 {
+        return Ok(dir)
+    }
+    return Err(from_errno(err))
+}
 
 // The names of the entries of the directory `path`, without "." and "..",
 // sorted by their bytes, so every implementation and file system gives the

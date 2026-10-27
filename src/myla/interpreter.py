@@ -875,6 +875,16 @@ class Interpreter:
             return 1 if ready else 0
         if callee.ident == "__io_errno":
             return self._io_errno
+        if callee.ident == "__getcwd":
+            # the working directory as the kernel's getcwd gives it (MYLA-98)
+            import os
+            try:
+                cwd = os.getcwdb()
+            except OSError as err:
+                self._io_errno = err.errno or 0
+                return ""
+            self._io_errno = 0
+            return _bytes_str(cwd)
         if callee.ident == "__write_file":
             path = self._eval(expr.args[0], env)
             data = self._eval(expr.args[1], env)

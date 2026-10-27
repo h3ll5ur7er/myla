@@ -6,6 +6,9 @@
 // keys and arrays of tables; arrays hold strings only. Every document it
 // accepts means the same in TOML: the tests compare it with Python's
 // `tomllib`. A construct outside the subset is an error that names it.
+//
+// `parse_doc` also keeps where each key and its value are, so a program that
+// checks the document (the project tool, MYLA-93) can point at them.
 
 // A TOML value. A table keeps its keys in the order they were defined (a
 // table that a header like `[a.b]` creates on the way counts from there).
@@ -25,6 +28,25 @@ pub struct TomlError {
     col: int32,
 }
 
+// Where something is in the text: from `line`:`col` to just before
+// `end_line`:`end_col` (lines and columns count from 1, columns in
+// characters).
+pub struct TomlPos {
+    line: int32,
+    col: int32,
+    end_line: int32,
+    end_col: int32,
+}
+
+// A parsed document: its table, and where each key path was defined (see
+// `key_pos` and `value_pos`).
+pub struct TomlDoc {
+    root: Toml,
+    text: str,
+    // byte offsets of the key and of the value, by `path_key`
+    spans: [str: (int32, int32, int32, int32)],
+}
+
 // The value of `key` in the table `t`; None if `t` isn't a table or has no
 // such key.
 pub fun field(t: Toml, key: str) -> Option<Toml> {
@@ -41,9 +63,58 @@ pub fun field(t: Toml, key: str) -> Option<Toml> {
 
 // The table that `text` holds.
 pub fun parse(text: str) -> Result<Toml, TomlError> {
-    var p = Parser { s: text, i: 0, root: Toml.Table([]), kinds: [:], table: [] }
+    let d = parse_doc(text)?
+    return Ok(d.root)
+}
+
+// The table that `text` holds, with the positions of its keys and values.
+pub fun parse_doc(text: str) -> Result<TomlDoc, TomlError> {
+    var p = Parser { s: text, i: 0, root: Toml.Table([]), kinds: [:], table: [], spans: [:] }
     p.document()?
-    return Ok(p.root)
+    return Ok(TomlDoc { root: p.root, text: text, spans: p.spans })
+}
+
+// Where the key of the key path `path` is: the key of a key/value pair (also
+// inside an inline table), or the header that opened the table (the first
+// header on the way to it, if none opened it). None if nothing defined it.
+pub fun key_pos(d: TomlDoc, path: [str]) -> Option<TomlPos> {
+    return match get(d.spans, path_key(path)) {
+        Some(sp) => Some(pos_of(d.text, sp.0, sp.1))
+        None => None
+    }
+}
+
+// Where the value of the key path `path` is (for a table opened by a header,
+// the header).
+pub fun value_pos(d: TomlDoc, path: [str]) -> Option<TomlPos> {
+    return match get(d.spans, path_key(path)) {
+        Some(sp) => Some(pos_of(d.text, sp.2, sp.3))
+        None => None
+    }
+}
+
+fun pos_of(text: str, start: int32, end: int32) -> TomlPos {
+    let (line, col) = line_col(text, start)
+    let (end_line, end_col) = line_col(text, end)
+    return TomlPos { line: line, col: col, end_line: end_line, end_col: end_col }
+}
+
+// The line and column of byte offset `at` in `s`.
+fun line_col(s: str, at: int32) -> (int32, int32) {
+    var line = 1
+    var col = 1
+    var k = 0
+    while k < at && k < len(s) {
+        let c = s[k]
+        if c == '\n' {
+            line = line + 1
+            col = 1
+        } else if c < 128u8 || c >= 192u8 {
+            col = col + 1                  // not a UTF-8 continuation byte
+        }
+        k = k + 1
+    }
+    return (line, col)
 }
 
 // --- Parsing ------------------------------------------------------------------
@@ -63,6 +134,9 @@ struct Parser {
     kinds: [str: int32],
     // the path of the table that key/value lines go to
     table: [str],
+    // where each key path was defined: the byte offsets of the key's start
+    // and end and of the value's (see `TomlDoc`)
+    spans: [str: (int32, int32, int32, int32)],
 }
 
 // One string for a key path, unambiguous whatever the keys hold.
@@ -172,19 +246,7 @@ fun insert(t: Toml, path: [str], at: int32, key: str, v: Toml) -> Toml {
 impl Parser {
     // An error at byte offset `at`.
     fun error(self, msg: str, at: int32) -> TomlError {
-        var line = 1
-        var col = 1
-        var k = 0
-        while k < at && k < len(self.s) {
-            let c = self.s[k]
-            if c == '\n' {
-                line = line + 1
-                col = 1
-            } else if c < 128u8 || c >= 192u8 {
-                col = col + 1                  // not a UTF-8 continuation byte
-            }
-            k = k + 1
-        }
+        let (line, col) = line_col(self.s, at)
         return TomlError { msg: msg, line: line, col: col }
     }
 
@@ -283,7 +345,7 @@ impl Parser {
             self.skip_ws()
             if self.peek() == ']' {
                 self.i = self.i + 1
-                return self.open_table(path, start)
+                return self.open_table(path, start, self.i)
             }
             if self.peek() != '.' { return Err(self.error("expected '.' or ']' in a table header", self.i)) }
             self.i = self.i + 1
@@ -292,8 +354,8 @@ impl Parser {
     }
 
     // Open the table `path` for the key/value lines that follow, creating the
-    // tables on the way.
-    fun open_table(var self, path: [str], at: int32) -> Result<int32, TomlError> {
+    // tables on the way; the header is the text from `at` to `end`.
+    fun open_table(var self, path: [str], at: int32, end: int32) -> Result<int32, TomlError> {
         var prefix: [str] = []
         var k = 0
         while k < len(path) {
@@ -307,11 +369,13 @@ impl Parser {
                     if last {
                         if kind == OPENED { return Err(self.error(format("table '{}' is defined twice", dotted(prefix)), at)) }
                         self.kinds[pk] = OPENED
+                        self.spans[pk] = (at, end, at, end)
                     }
                 },
                 None => {
                     self.root = insert(self.root, parent, 0, path[k], Toml.Table([]))
                     self.kinds[pk] = match last { true => OPENED, false => IMPLIED }
+                    self.spans[pk] = (at, end, at, end)
                 },
             }
             k = k + 1
@@ -323,7 +387,7 @@ impl Parser {
     // A key/value line, the current position at the key.
     fun key_value(var self) -> Result<int32, TomlError> {
         let at = self.i
-        let (key, v) = self.pair()?
+        let (key, v) = self.pair(self.table)?
         let path = with_key(self.table, key)
         let pk = path_key(path)
         if contains(self.kinds, pk) { return Err(self.error(format("'{}' is defined twice", dotted(path)), at)) }
@@ -332,15 +396,20 @@ impl Parser {
         return Ok(0)
     }
 
-    // `key = value`.
-    fun pair(var self) -> Result<(str, Toml), TomlError> {
+    // `key = value`, in the table `base` (whose path the spans record).
+    fun pair(var self, base: [str]) -> Result<(str, Toml), TomlError> {
+        let key_start = self.i
         let key = self.key()?
+        let key_end = self.i
         self.skip_ws()
         if self.peek() == '.' { return Err(self.error("dotted keys are not supported", self.i)) }
         if self.peek() != '=' { return Err(self.error("expected '=' after a key", self.i)) }
         self.i = self.i + 1
         self.skip_ws()
-        let v = self.value()?
+        let path = with_key(base, key)
+        let value_start = self.i
+        let v = self.value(path)?
+        self.spans[path_key(path)] = (key_start, key_end, value_start, self.i)
         return Ok((key, v))
     }
 
@@ -359,7 +428,9 @@ impl Parser {
         return Ok(build(sb))
     }
 
-    fun value(var self) -> Result<Toml, TomlError> {
+    // A value, of the key path `path` (for the spans of an inline table's
+    // keys).
+    fun value(var self, path: [str]) -> Result<Toml, TomlError> {
         let c = self.peek()
         if c == '"' || c == '\'' {
             if self.ahead(1) == c && self.ahead(2) == c { return Err(self.error("multi-line strings are not supported", self.i)) }
@@ -367,7 +438,7 @@ impl Parser {
             return Ok(Toml.Str(self.literal_string()?))
         }
         if c == '[' { return self.array() }
-        if c == '{' { return self.inline_table() }
+        if c == '{' { return self.inline_table(path) }
         if self.word("true") { return Ok(Toml.Bool(true)) }
         if self.word("false") { return Ok(Toml.Bool(false)) }
         if self.word("inf") || self.word("nan") || self.word("+inf") || self.word("-inf") || self.word("+nan") || self.word("-nan") {
@@ -533,7 +604,7 @@ impl Parser {
                 if c == ',' || self.at_end() { return Err(self.error("expected a value", self.i)) }
                 return Err(self.error("arrays may only hold strings", self.i))
             }
-            push(items, self.value()?)
+            push(items, self.value([])?)
             self.skip_blank()?
             if self.peek() == ',' {
                 self.i = self.i + 1
@@ -544,8 +615,8 @@ impl Parser {
         return Ok(Toml.Array(items))
     }
 
-    // An inline table, the current position at its "{".
-    fun inline_table(var self) -> Result<Toml, TomlError> {
+    // An inline table, the value of `path`, the current position at its "{".
+    fun inline_table(var self, path: [str]) -> Result<Toml, TomlError> {
         self.i = self.i + 1
         var members: [(str, Toml)] = []
         self.skip_ws()
@@ -557,7 +628,7 @@ impl Parser {
             self.skip_ws()
             let at = self.i
             if self.peek() == '}' { return Err(self.error("a trailing comma is not allowed in an inline table", at)) }
-            let (key, v) = self.pair()?
+            let (key, v) = self.pair(path)?
             for m in members {
                 if m.0 == key { return Err(self.error(format("'{}' is defined twice", dotted([key])), at)) }
             }
