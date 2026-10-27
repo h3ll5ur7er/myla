@@ -108,6 +108,23 @@ pub struct Interp {
 // `line` 0 for none.
 pub struct RtError { msg: str, line: int32, col: int32, sp: SrcSpan, node: int32 }
 
+// The results of a run of `#test` cases: a PASS/FAIL line for each case, and
+// how many passed of how many (run_test_cases).
+pub struct TestRun { report: [str], passed: int32, total: int32 }
+
+// Whether the loader qualified `name` with a module id (`geo$area`,
+// `geo$Point.eq`): it isn't declared in the entry module.
+#test("area")[false]
+#test("Point.eq")[false]
+#test("geo$area")[true]
+#test("util$strings$Point.eq")[true]
+fun is_qualified(name: str) -> bool {
+    for c in chars(name) {
+        if c == '$' { return true }
+    }
+    return false
+}
+
 // A step of an assignable place: a struct field, or an index (evaluated once)
 // with the expression it came from.
 enum Step {
@@ -290,13 +307,27 @@ impl Interp {
         return 0
     }
 
-    // Run every function's `#test(args…)[expected]` cases, printing a PASS/FAIL
-    // line per case and a summary; returns 0 if all pass (or none exist), else 1.
-    // Mirrors `Interpreter.run_tests` in src/myla/interpreter.py.
-    // Run every #test, then print a line for each (after whatever the tests
-    // printed) and the summary, as the Python CLI does (MYLA-81); the exit
-    // status.
+    // Run every function's `#test(args…)[expected]` cases, then print a
+    // PASS/FAIL line for each (after whatever the tests printed) and the
+    // summary, as the Python CLI does (`Interpreter.run_tests`, MYLA-81); the
+    // exit status: 0 if all pass (or none exist), else 1.
     fun run_tests(var self) -> int32 {
+        let r = self.run_test_cases(false)
+        if r.total == 0 {
+            write(1, "no #test cases found.\n")
+            return 0
+        }
+        for line in r.report { write(1, line) }
+        write(1, format("\n{}/{} passed.\n", r.passed, r.total))
+        if r.passed == r.total { return 0 }
+        return 1
+    }
+
+    // Run the `#test` cases, of the entry module's own functions only when
+    // `own_only` (`myla test` in a project, MYLA-94: the entry's names are the
+    // ones the loader doesn't qualify with a module id), and collect a
+    // PASS/FAIL line for each.
+    fun run_test_cases(var self, own_only: bool) -> TestRun {
         self.collect()
         self.eval_consts()
         var report: [str] = []
@@ -307,7 +338,7 @@ impl Interp {
             let fd = self.func_decls[i]
             var idx = 0
             for attr in fd.attributes {
-                if attr.name == "test" {
+                if attr.name == "test" && (!own_only || !is_qualified(fd.name)) {
                     idx = idx + 1
                     total = total + 1
                     self.push_scope()
@@ -346,14 +377,7 @@ impl Interp {
             }
             i = i + 1
         }
-        if total == 0 {
-            write(1, "no #test cases found.\n")
-            return 0
-        }
-        for line in report { write(1, line) }
-        write(1, format("\n{}/{} passed.\n", passed, total))
-        if passed == total { return 0 }
-        return 1
+        return TestRun { report: report, passed: passed, total: total }
     }
 
     fun eval_consts(var self) {

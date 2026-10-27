@@ -310,6 +310,51 @@ pub fun is_inside(dir: str, p: str) -> bool {
     return true
 }
 
+// The normalised absolute path `p` as seen from the directory `base` (also
+// absolute and normalised): below it without a prefix, elsewhere with one
+// `..` per level up to their common directory.
+#test("/a/b", "/a/b/src/main.my")["src/main.my"]
+#test("/a/b", "/a/b")["."]
+#test("/a/b/src/util", "/a/b/src/main.my")["../main.my"]
+#test("/a/b", "/a/c/d")["../c/d"]
+#test("/", "/a")["a"]
+#test("/a", "/")[".."]
+pub fun relative_path(base: str, p: str) -> str {
+    if p == base { return "." }
+    if is_inside(base, p) {
+        if base == "/" { return part_from(p, 1) }
+        return part_from(p, len(base) + 1)
+    }
+    let fs = split_path(base)
+    let ps = split_path(p)
+    var common = 0
+    while common < len(fs) && common < len(ps) && fs[common] == ps[common] { common = common + 1 }
+    var parts: [str] = []
+    var i = common
+    while i < len(fs) {
+        if fs[i] != "" { push(parts, "..") }
+        i = i + 1
+    }
+    i = common
+    while i < len(ps) {
+        if ps[i] != "" { push(parts, ps[i]) }
+        i = i + 1
+    }
+    var sb = StringBuilder()
+    for q in parts {
+        if len(sb) > 0 { append(sb, "/") }
+        append(sb, q)
+    }
+    return build(sb)
+}
+
+// `s` from the byte `start` on.
+fun part_from(s: str, start: int32) -> str {
+    var sb = StringBuilder()
+    append(sb, s, start, len(s))
+    return build(sb)
+}
+
 // `p` as an absolute, normalised path (a relative one is taken from the
 // working directory); None if the working directory can't be found.
 pub fun absolute_path(p: str) -> Option<str> {

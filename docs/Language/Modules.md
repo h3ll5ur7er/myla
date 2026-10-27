@@ -9,7 +9,7 @@ Modules are resolved by the loader before type checking ([[Architecture/Module-l
 - A `.my` file is a **module**; a directory is a **package**.
 - A package can have a root module named after it: `geometry/geometry.my` is what `import geometry` means. It defines the package's public surface with `pub` imports (there is no implicit re-export).
 - A file and a directory with the same name in one folder (`util.my` and `util/`) make an import of that name ambiguous: a module error.
-- The **project root** is the directory of the entry file. There is no manifest yet; projects with a `myla.toml` and dependencies are designed in [[Architecture/Project-tool]] (D73). The project tool will load files under `src/` with `src/` as their project root, nested ones included; the loaders take the root as a parameter for that ([[Architecture/Module-loader]]).
+- The **project root** is the directory of the entry file. In a project with a `myla.toml` ([[Architecture/Project-tool]], D73), the project commands load files under `src/` with `src/` as their project root, nested ones included; the loaders take the root as a parameter for that ([[Architecture/Module-loader]]).
 
 ## Import forms
 
@@ -31,7 +31,7 @@ pub import .geometry.vector as vector  // re-export a module (needs `as`)
 
 ## Packages (dependencies)
 
-A build can have packages: libraries, each with a name and a directory, given as `--package name=dir` to the commands that compile (`run`, `test`, `build` and `check` of the Python CLI; `run`, `test`, `build` and `repl` of `build/myla`; D73 (6), D76, [[MYLA-92]]); the project tool will compute them from `myla.toml` ([[Architecture/Project-tool]]). A package `geo` with directory `G` behaves as if `G` were a directory `geo/` in the project root:
+A build can have packages: libraries, each with a name and a directory, given as `--package name=dir` to the commands that compile (`run`, `test`, `build` and `check` of the Python CLI; `run`, `test`, `build`, `check` and `repl` of `build/myla`; D73 (6), D76, [[MYLA-92]]); the project commands of `build/myla` compute them from `myla.toml` ([[Architecture/Project-tool]], [[MYLA-94]]). A package `geo` with directory `G` behaves as if `G` were a directory `geo/` in the project root:
 
 | Import | File |
 | --- | --- |

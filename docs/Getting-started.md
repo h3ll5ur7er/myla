@@ -36,7 +36,7 @@ type error: cannot assign to an immutable binding (declare it with 'var')
 | `myla parse <file> [--canonical]` | Dump the AST (`--canonical`: one S-expression per declaration) |
 | `myla repl` | Points to the REPL written in Myla: `build/myla repl` (built by `scripts/bootstrap.sh`, [[MYLA-82]]) |
 
-`run`, `test`, `build` and `check` take `--package name=dir` (repeatable), before or after the file: a dependency whose modules `import name` and `from name.shapes import …` find in `dir`, as if it were a directory `name/` next to the entry file ([[Language/Modules]]). The project tool will pass these flags itself ([[Architecture/Project-tool]]).
+`run`, `test`, `build` and `check` take `--package name=dir` (repeatable), before or after the file: a dependency whose modules `import name` and `from name.shapes import …` find in `dir`, as if it were a directory `name/` next to the entry file ([[Language/Modules]]). The project commands below pass these flags themselves.
 
 All commands live in [[src/myla/cli.py]]; `myla.py` only puts `src/` on the import path. The self-hosted CLI, `build/myla` ([[selfhost/main.my]]), has `run`, `test` and `build` (printing what the Python ones print, [[MYLA-81]], and taking `--stdlib <dir>` and `--package name=dir` like the REPL) and the REPL:
 
@@ -51,6 +51,39 @@ myla> twice(len(xs))
 ```
 
 Declarations accumulate, a final expression's value is shown as Myla source writes it, an open bracket continues the input, and an error is reported against the input's lines without ending the session ([[Architecture/Self-hosted-compiler]]).
+
+## Projects
+
+The self-hosted CLI also works on projects: a directory with a manifest `myla.toml`, the program in `src/main.my`, and dependencies on other projects ([[Architecture/Project-tool]], D73). Without a file argument, its commands work on the project around the working directory:
+
+```text
+$ build/myla new hello
+created package 'hello' in hello/
+$ cd hello
+$ myla run                 # interpret src/main.my (arguments go to the program)
+Hello from hello!
+$ myla test                # the #test cases of every file under src/, each file's own
+== src/main.my
+PASS  greeting #1
+
+1/1 passed in 1 file.
+$ myla build               # build/hello (-g: with debug information)
+$ myla check               # type-check every file under src/
+$ myla clean               # remove build/
+```
+
+A dependency on another project by its directory goes into the manifest; its library `src/<name>.my` is then `import <name>`:
+
+```toml
+[package]
+name = "hello"
+version = "0.1.0"
+
+[dependencies]
+geo = { path = "../geo" }
+```
+
+A command given a `.my` file works on that file alone and reads no manifest.
 
 ## A first program
 

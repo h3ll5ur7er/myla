@@ -1,0 +1,289 @@
+// project_cmd.my -- the project commands of `myla` (MYLA-94, D73): `new`,
+// `build`, `run`, `test`, `check` and `clean`, which main.my runs when no
+// `.my` file is given (wiki: Architecture/Project-tool, "Commands").
+//
+// Every command but `new` finds `myla.toml` in the working directory or above
+// it, works out the packages with the project model (project.my, MYLA-93) and
+// hands them to the loader as `--package` pairs (MYLA-92), with `src/` as the
+// project root. Paths are shown relative to the working directory, as a file
+// given on the command line would be: `src/main.my`.
+
+from std.io import write, eprintln
+from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir
+from .loader import LoadOptions
+from .driver import cmd_build, cmd_interp, own_tests, load_and_check, run_step
+from .project import find_manifest, load_project, loader_packages, render_project_error, relative_path, name_error
+from .project import Project, GitPackage, ref_text
+
+// The project found from the working directory `cwd`.
+struct Here { cwd: str, project: Project }
+
+// The project around the working directory, or the message to print.
+fun locate() -> Result<Here, str> {
+    let cwd = match current_dir() {
+        Ok(d) => d
+        Err(e) => { return Err("myla: cannot find the working directory") }
+    }
+    let manifest = match find_manifest(cwd) {
+        Some(m) => m
+        None => { return Err("myla: no myla.toml in this directory or above it") }
+    }
+    let p = match load_project(manifest) {
+        Ok(p) => p
+        Err(e) => { return Err(render_project_error(e)) }
+    }
+    if len(p.missing) > 0 { return Err(not_checked_out(p.missing)) }
+    return Ok(Here { cwd: cwd, project: p })
+}
+
+// The message for Git dependencies whose locked commit isn't checked out.
+fun not_checked_out(gs: [GitPackage]) -> str {
+    var sb = StringBuilder()
+    for g in gs {
+        if len(sb) > 0 { append(sb, "\n") }
+        append(sb, format("myla: dependency '{}' ({}{}) is not checked out: run `myla fetch`", g.name, g.git.url, ref_text(g.git.reference)))
+    }
+    return build(sb)
+}
+
+// `path` (absolute) as the commands show it.
+fun shown(h: Here, path: str) -> str {
+    return relative_path(h.cwd, path)
+}
+
+// The load options of a build of the project: those of the command line (the
+// standard library, extra `--package` flags) with the project's packages
+// first and `src/` as the project root.
+fun options(h: Here, base: LoadOptions) -> LoadOptions {
+    var opts = base
+    var packages = loader_packages(h.project)
+    for pkg in base.packages { push(packages, pkg) }
+    opts.packages = packages
+    opts.root = shown(h, h.project.root.dir + "/src")
+    return opts
+}
+
+// The project around the working directory, if it has a program; else None,
+// with the message printed.
+fun with_program() -> Option<Here> {
+    let h = match locate() {
+        Ok(h) => h
+        Err(msg) => {
+            eprintln(msg)
+            return None
+        }
+    }
+    if !h.project.root.has_program {
+        eprintln(format("myla: '{}' has no program (src/main.my); `myla check` checks its library", h.project.root.name))
+        return None
+    }
+    return Some(h)
+}
+
+// `myla build [-g]`: `src/main.my` to `build/<name>`.
+pub fun project_build(base: LoadOptions, debug: bool) -> int32 {
+    let h = match with_program() {
+        Some(h) => h
+        None => { return 1 }
+    }
+    let out_dir = h.project.root.dir + "/build"
+    match make_dir_all(out_dir) {
+        Ok(n) => {},
+        Err(e) => {
+            eprintln("myla: cannot create " + shown(h, out_dir))
+            return 1
+        },
+    }
+    let entry = shown(h, h.project.root.dir + "/src/main.my")
+    return cmd_build(entry, shown(h, out_dir + "/" + h.project.root.name), options(h, base), debug)
+}
+
+// `myla run [args…]`: interpret `src/main.my` with the arguments.
+pub fun project_run(base: LoadOptions, prog_args: [str]) -> int32 {
+    let h = match with_program() {
+        Some(h) => h
+        None => { return 1 }
+    }
+    return cmd_interp(shown(h, h.project.root.dir + "/src/main.my"), options(h, base), false, prog_args)
+}
+
+// `myla test`: the `#test` cases of every file under `src/`, each file's own
+// once, a block of results per file that has any, and the total.
+pub fun project_test(base: LoadOptions) -> int32 {
+    let h = match locate() {
+        Ok(h) => h
+        Err(msg) => {
+            eprintln(msg)
+            return 1
+        }
+    }
+    let opts = options(h, base)
+    var passed = 0
+    var total = 0
+    var files = 0
+    var broken = 0
+    for path in source_files(h.project.root.dir + "/src") {
+        let file = shown(h, path)
+        match own_tests(file, opts) {
+            Ok(r) => {
+                if r.total > 0 {
+                    write(1, "== " + file + "\n")
+                    for line in r.report { write(1, line) }
+                    passed = passed + r.passed
+                    total = total + r.total
+                    files = files + 1
+                }
+            },
+            Err(msg) => {
+                eprintln(msg)
+                broken = broken + 1
+            },
+        }
+    }
+    if total == 0 {
+        write(1, "no #test cases found.\n")
+    } else {
+        write(1, format("\n{}/{} passed in {}.\n", passed, total, count(files, "file")))
+    }
+    if broken > 0 {
+        eprintln(format("myla: {} not compiled", count(broken, "file")))
+    }
+    if passed == total && broken == 0 { return 0 }
+    return 1
+}
+
+// `myla check`: type-check every file under `src/`, printing each one's
+// first error.
+pub fun project_check(base: LoadOptions) -> int32 {
+    let h = match locate() {
+        Ok(h) => h
+        Err(msg) => {
+            eprintln(msg)
+            return 1
+        }
+    }
+    let opts = options(h, base)
+    var status = 0
+    for path in source_files(h.project.root.dir + "/src") {
+        match load_and_check(shown(h, path), opts) {
+            Ok(ch) => {},
+            Err(msg) => {
+                eprintln(msg)
+                status = 1
+            },
+        }
+    }
+    return status
+}
+
+// `myla clean [--deps]`: remove `build/` (and `.myla/`, the fetched
+// dependencies).
+pub fun project_clean(deps: bool) -> int32 {
+    let h = match locate() {
+        Ok(h) => h
+        Err(msg) => {
+            eprintln(msg)
+            return 1
+        }
+    }
+    var dirs = [h.project.root.dir + "/build"]
+    if deps { push(dirs, h.project.root.dir + "/.myla") }
+    for d in dirs {
+        if exists(d) && run_step("/usr/bin/env", ["rm", "-rf", d], "myla: cannot remove " + shown(h, d)) {
+            return 1
+        }
+    }
+    return 0
+}
+
+// `myla new <name>`: a directory `<name>` with a manifest, a program that
+// greets and tests its greeting, and a `.gitignore`.
+pub fun project_new(name: str) -> int32 {
+    let problem = name_error(name)
+    if problem != "" {
+        eprintln("myla: " + problem)
+        return 1
+    }
+    if exists(name) {
+        eprintln(format("myla: '{}' exists already", name))
+        return 1
+    }
+    match make_dir_all(name + "/src") {
+        Ok(n) => {},
+        Err(e) => {
+            eprintln(format("myla: cannot create '{}'", name))
+            return 1
+        },
+    }
+    let files = [
+        (name + "/myla.toml", format("[package]\nname = \"{}\"\nversion = \"0.1.0\"\n\n[dependencies]\n", name)),
+        (name + "/.gitignore", "build/\n.myla/\n"),
+        (name + "/src/main.my", main_template(name)),
+    ]
+    for f in files {
+        let (path, text) = f
+        match write_to_file(path, text) {
+            Ok(n) => {},
+            Err(e) => {
+                eprintln("myla: cannot write " + path)
+                return 1
+            },
+        }
+    }
+    write(1, format("created package '{}' in {}/\n", name, name))
+    return 0
+}
+
+// The `src/main.my` that `myla new` writes.
+fun main_template(name: str) -> str {
+    var sb = StringBuilder()
+    append(sb, "// The greeting `main` prints.\n")
+    append(sb, format("#test(\"{}\")[\"Hello from {}!\"]\n", name, name))
+    append(sb, "fun greeting(name: str) -> str {\n")
+    append(sb, "    return f\"Hello from {name}!\"\n")
+    append(sb, "}\n\n")
+    append(sb, "fun main() {\n")
+    append(sb, format("    print(greeting(\"{}\"))\n", name))
+    append(sb, "}\n")
+    return build(sb)
+}
+
+// The `.my` files under the directory `dir` and its subdirectories, sorted
+// (names starting with `.` skipped).
+fun source_files(dir: str) -> [str] {
+    var out: [str] = []
+    let names = match list_dir(dir) {
+        Ok(ns) => ns
+        Err(e) => { return out }
+    }
+    for n in names {
+        if n[0] != '.' {
+            let path = dir + "/" + n
+            if is_dir(path) {
+                for p in source_files(path) { push(out, p) }
+            } else if ends_with(n, ".my") {
+                push(out, path)
+            }
+        }
+    }
+    return out
+}
+
+#test(1, "file")["1 file"]
+#test(2, "file")["2 files"]
+fun count(n: int32, noun: str) -> str {
+    if n == 1 { return format("1 {}", noun) }
+    return format("{} {}s", n, noun)
+}
+
+#test("a.my", ".my")[true]
+#test("my", ".my")[false]
+pub fun ends_with(s: str, suffix: str) -> bool {
+    if len(suffix) > len(s) { return false }
+    var i = 0
+    while i < len(suffix) {
+        if s[len(s) - len(suffix) + i] != suffix[i] { return false }
+        i = i + 1
+    }
+    return true
+}
