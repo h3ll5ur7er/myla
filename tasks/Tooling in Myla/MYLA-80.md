@@ -12,8 +12,8 @@ The self-hosted front end (lexer, parser, checker, loader, diagnostics in [[self
 
 - [x] JSON-RPC over stdin/stdout with `Content-Length` framing; initialize/shutdown/exit; a document store with unsaved text passed to the loader for every open buffer (not just the current one, [[MYLA-49]])
 - [x] Diagnostics published for the file the error is in ([[MYLA-10]]); debounce in the main loop (no threads)
-- [ ] Positions in UTF-16 (the rules of [[src/myla/lsp/positions.py]])
-- [ ] Document symbols, definition, references, hover, completion: port [[src/myla/lsp/]] and use its tests ([[tests/unit/test_lsp_features.py]], [[tests/integration/test_lsp_diagnostics.py]]) as parity tests against the Myla server
+- [x] Positions in UTF-16 (the rules of [[src/myla/lsp/positions.py]])
+- [x] Document symbols, definition, references, hover, completion: port [[src/myla/lsp/]] and use its tests ([[tests/unit/test_lsp_features.py]], [[tests/integration/test_lsp_diagnostics.py]]) as parity tests against the Myla server
 - [ ] From [[MYLA-51]]: keep the last good parse when the buffer doesn't lex or parse; resolve names through scopes and imports (the checker) instead of by name across the workspace; member completion triggered by `.`; refresh the workspace index on `didChangeWatchedFiles`
 - [ ] Semantic tokens from the compiler's own lexer, so editors highlight exactly what the compiler sees
 - [ ] The VS Code extension starts the Myla server ([[MYLA-53]]), and registers its `**/*.my` file watcher again once the server handles `didChangeWatchedFiles` (removed in [[MYLA-53]] because the Python server ignores it)
@@ -39,4 +39,16 @@ Evidence:
 - Checks: 0.5 ms for `examples/hello.my`, about 230 ms for `selfhost/checker.my` (5,000 lines and its imports); RSS flat at 25.2 MB over repeated checks of it (before the fixes: +7.4 MB a check, 772 MB after 100).
 - Full run: 491 unit, 10 integration and 443 burn tests pass; the bootstrap reaches its fixed point at 7,794,199 bytes, then builds and smoke-tests the CLI and the server.
 
-Next: symbols, definition, references, hover and completion (porting `src/myla/lsp/` with `tests/unit/test_lsp_features.py` as parity tests), then semantic tokens and the VS Code extension.
+### Step 2: symbols, definition, references, hover, completion
+
+- `tools/lsp/symbols.my` (the outline; selection ranges from the name token as in MYLA-48, full ranges to the declaration's last token), `features.my` (identifiers from the compiler's tokens, hover text, member-completion context, UTF-16 offsets back to code points), `workspace.my` (every `.my` file under the roots via `find`, skipping the directories the Python index skips, sorted, declarations cached by file content); the server answers `documentSymbol`, `definition`, `hover`, `references` and `completion` and advertises them.
+- Deliberate differences from the Python server: a symbol's full range ends at its last token rather than at the last line an AST node is on (which drops the closing brace), and workspace files are visited sorted rather than in file-system order.
+
+Evidence:
+
+- `tests/integration/test_lsp_requests.py`: the 19 cases of `tests/unit/test_lsp_features.py` (selection ranges, outline, definition with workspace fallback, references with and without the declaration and across files, hover, completion after a dot and after astral characters) as protocol requests; the Python server passes them, and so do both builds of the Myla server (38 tests in `tests/burn/test_lsp.py`), all on the first run.
+- A comparison with the Python server (`TestAgainstThePythonServer`, needs pygls; CI's burn job now installs it): document symbols of 63 files (examples, compiler, tools, std) equal except for range ends, and definition, hover, references and completion at about 360 sampled identifiers and 60 completion points in `examples/`. Changing `[K: V]` to `[K:V]` in the type rendering makes 7 files fail.
+- Speed on `selfhost/checker.my`, workspace the whole repository (Python / Myla): documentSymbol 487 / 134 ms, definition 664 / 189, hover 480 / 147, references 994 / 160, completion 1,974 / 826 ms, the same number of results each.
+- Full run: 491 unit, 29 integration and 484 burn tests pass; the bootstrap reaches its fixed point (unchanged, 7,794,199 bytes) and builds the server.
+
+Next: semantic tokens from the compiler's lexer, the MYLA-51 improvements (scopes and imports through the checker, keeping the last good parse, member completion by type, `didChangeWatchedFiles`), then the VS Code extension.

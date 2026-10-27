@@ -17,6 +17,9 @@ from ...selfhost.diag import Report, type_report
 from ...selfhost.checker import build_checker_decls
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
 from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
+from .symbols import Symbol, SymKind, Range, document_symbols, best_match, lsp_kind, range_eq, is_member_kind, kind_eq
+from .features import Location, identifier_at, identifier_ranges, render, is_member_access, completion_keywords
+from .workspace import Workspace, Entry, new_workspace
 
 const DEBOUNCE_MS: int32 = 400
 
@@ -32,11 +35,12 @@ pub struct Server {
     urgent: bool,                  // check them without waiting (open, save)
     elsewhere: [str: [str]],       // checked uri -> other uris it published errors for
     shut_down: bool,
+    ws: Workspace,                 // the files under the workspace roots
 }
 
 pub fun new_server(stdlib: str) -> Server {
     return Server { ch: Channel { input: stdin() }, stdlib: stdlib, docs: [:], dirty: [], urgent: false,
-                    elsewhere: [:], shut_down: false }
+                    elsewhere: [:], shut_down: false, ws: new_workspace() }
 }
 
 impl Server {
@@ -72,6 +76,7 @@ impl Server {
         if method == "" { return true }                 // a response to us
         if method == "exit" { return false }
         if method == "initialize" {
+            self.ws.roots = workspace_roots(params)
             self.reply(id, initialize_result())
         } else if method == "shutdown" {
             self.shut_down = true
@@ -102,6 +107,16 @@ impl Server {
             }
             self.dirty = still
             publish(uri, [])
+        } else if method == "textDocument/documentSymbol" {
+            self.reply(id, self.document_symbol(params))
+        } else if method == "textDocument/definition" {
+            self.reply(id, self.definition(params))
+        } else if method == "textDocument/hover" {
+            self.reply(id, self.hover(params))
+        } else if method == "textDocument/references" {
+            self.reply(id, self.references(params))
+        } else if method == "textDocument/completion" {
+            self.reply(id, self.completion(params))
         } else {
             match id {
                 Some(i) => { send(error_response(i, METHOD_NOT_FOUND, format("unhandled method {}", method))) },
@@ -193,6 +208,153 @@ impl Server {
         }
     }
 
+    // --- requests (MYLA-80 step 2) ---------------------------------------------
+
+    // The text of every open document, by path.
+    fun overrides(self) -> [str: str] {
+        var out: [str: str] = [:]
+        for u in keys(self.docs) {
+            let p = uri_path(u)
+            if p != "" { out[normalize(p)] = self.docs[u] }
+        }
+        return out
+    }
+
+    // The open document a request is about: its URI, path and text.
+    fun doc_of(self, params: Json) -> Option<Doc> {
+        let uri = str_field(field_or_null(params, "textDocument"), "uri")
+        return match get(self.docs, uri) {
+            Some(text) => Some(Doc { uri: uri, path: normalize(uri_path(uri)), text: text }),
+            None => None,
+        }
+    }
+
+    fun document_symbol(self, params: Json) -> Json {
+        return match self.doc_of(params) {
+            Some(d) => symbol_tree(document_symbols(d.text), -1),
+            None => Json.Array([]),
+        }
+    }
+
+    fun definition(var self, params: Json) -> Json {
+        let d = match self.doc_of(params) {
+            Some(x) => x,
+            None => { return Json.Null },
+        }
+        let pos = position_of(params)
+        let ident = match identifier_at(d.text, pos.line, pos.character) {
+            Some(n) => n,
+            None => { return Json.Null },
+        }
+        match best_match(document_symbols(d.text), ident) {
+            Some(s) => { return location(d.path, s.selection) },
+            None => {},
+        }
+        let matches = self.ws.lookup(ident, self.overrides())
+        if len(matches) == 0 { return Json.Null }
+        return location(matches[0].path, matches[0].range)
+    }
+
+    fun hover(var self, params: Json) -> Json {
+        let d = match self.doc_of(params) {
+            Some(x) => x,
+            None => { return Json.Null },
+        }
+        let pos = position_of(params)
+        let ident = match identifier_at(d.text, pos.line, pos.character) {
+            Some(n) => n,
+            None => { return Json.Null },
+        }
+        var text = ""
+        match best_match(document_symbols(d.text), ident) {
+            Some(s) => { text = render(s.name, s.kind, s.detail) },
+            None => {
+                let matches = self.ws.lookup(ident, self.overrides())
+                if len(matches) == 0 { return Json.Null }
+                text = render(matches[0].name, matches[0].kind, matches[0].detail)
+            },
+        }
+        let contents = Json.Object([("kind", Json.Str("markdown")), ("value", Json.Str("```myla\n" + text + "\n```"))])
+        return Json.Object([("contents", contents)])
+    }
+
+    fun references(var self, params: Json) -> Json {
+        var none: [Json] = []
+        let d = match self.doc_of(params) {
+            Some(x) => x,
+            None => { return Json.Array(none) },
+        }
+        let pos = position_of(params)
+        let ident = match identifier_at(d.text, pos.line, pos.character) {
+            Some(n) => n,
+            None => { return Json.Array(none) },
+        }
+        var found: [Location] = []
+        for r in identifier_ranges(d.text, ident) { push(found, Location { path: d.path, range: r }) }
+        for l in self.ws.references(ident, self.overrides()) { push(found, l) }
+        let include_decl = match field(field_or_null(params, "context"), "includeDeclaration") {
+            Some(Json.Bool(b)) => b,
+            _ => true,
+        }
+        var decls: [Range] = []
+        if !include_decl {
+            for s in document_symbols(d.text) {
+                if s.name == ident { push(decls, s.selection) }
+            }
+        }
+        var unique: [Location] = []
+        var out: [Json] = []
+        for l in found {
+            var dup = false
+            for u in unique {
+                if u.path == l.path && range_eq(u.range, l.range) { dup = true }
+            }
+            var is_decl = false
+            if l.path == d.path {
+                for r in decls {
+                    if range_eq(r, l.range) { is_decl = true }
+                }
+            }
+            if !dup {
+                push(unique, l)
+                if !is_decl { push(out, location(l.path, l.range)) }
+            }
+        }
+        return Json.Array(out)
+    }
+
+    fun completion(var self, params: Json) -> Json {
+        var items: [Json] = []
+        let d = match self.doc_of(params) {
+            Some(x) => x,
+            None => { return completion_list(items) },
+        }
+        let pos = position_of(params)
+        let member = is_member_access(d.text, pos.line, pos.character)
+        var pool: [Entry] = []
+        for s in document_symbols(d.text) {
+            push(pool, Entry { name: s.name, kind: s.kind, detail: s.detail, path: d.path, range: s.selection })
+        }
+        for e in self.ws.all_entries(self.overrides()) { push(pool, e) }
+        var seen: [str: bool] = [:]
+        if !member {
+            for kw in completion_keywords() {
+                if !contains(seen, "kw:" + kw) {
+                    seen["kw:" + kw] = true
+                    push(items, Json.Object([("label", Json.Str(kw)), ("kind", Json.Int(14))]))
+                }
+            }
+        }
+        for e in pool {
+            let key = format("{}:{}", lsp_kind(e.kind), e.name)
+            if is_member_kind(e.kind) == member && !kind_eq(e.kind, SymKind.Impl) && !contains(seen, key) {
+                seen[key] = true
+                push(items, completion_item(e))
+            }
+        }
+        return completion_list(items)
+    }
+
     // The URI to publish an error in `file` under: the checked document's
     // own, an open document's, or one made from the path.
     fun uri_of(self, file: str, checked_path: str, checked_uri: str) -> str {
@@ -249,7 +411,95 @@ fun kind_code(kind: str) -> str {
 fun initialize_result() -> Json {
     let sync = Json.Object([("openClose", Json.Bool(true)), ("change", Json.Int(1)),
                             ("save", Json.Object([("includeText", Json.Bool(false))]))])
-    let caps = Json.Object([("textDocumentSync", sync)])
+    let caps = Json.Object([("positionEncoding", Json.Str("utf-16")), ("textDocumentSync", sync),
+                            ("completionProvider", Json.Object([])), ("hoverProvider", Json.Bool(true)),
+                            ("definitionProvider", Json.Bool(true)), ("referencesProvider", Json.Bool(true)),
+                            ("documentSymbolProvider", Json.Bool(true))])
     let info = Json.Object([("name", Json.Str("myla")), ("version", Json.Str("0.1"))])
     return Json.Object([("capabilities", caps), ("serverInfo", info)])
+}
+
+// The open document a request is about.
+struct Doc { uri: str, path: str, text: str }
+
+// The workspace roots the client named: its folders, else rootUri, else
+// rootPath.
+fun workspace_roots(params: Json) -> [str] {
+    var roots: [str] = []
+    match field(params, "workspaceFolders") {
+        Some(Json.Array(folders)) => {
+            for f in folders {
+                let p = uri_path(str_field(f, "uri"))
+                if p != "" { push(roots, normalize(p)) }
+            }
+        },
+        _ => {},
+    }
+    if len(roots) == 0 {
+        let p = uri_path(str_field(params, "rootUri"))
+        if p != "" { push(roots, normalize(p)) }
+    }
+    if len(roots) == 0 && str_field(params, "rootPath") != "" { push(roots, normalize(str_field(params, "rootPath"))) }
+    return roots
+}
+
+fun position_of(params: Json) -> Pos {
+    let p = field_or_null(params, "position")
+    var line = 0
+    var character = 0
+    match field(p, "line") { Some(Json.Int(n)) => { line = n as int32 }, _ => {} }
+    match field(p, "character") { Some(Json.Int(n)) => { character = n as int32 }, _ => {} }
+    return Pos { line: line, character: character }
+}
+
+fun range_json(r: Range) -> Json {
+    return Json.Object([("start", position(r.start)), ("end", position(r.end))])
+}
+
+fun location(path: str, r: Range) -> Json {
+    return Json.Object([("uri", Json.Str(path_uri(path))), ("range", range_json(r))])
+}
+
+// The symbols whose parent is `parent`, as DocumentSymbols with their members.
+fun symbol_tree(symbols: [Symbol], parent: int32) -> Json {
+    var out: [Json] = []
+    var i = 0
+    while i < len(symbols) {
+        let s = symbols[i]
+        if s.parent == parent {
+            var members: [(str, Json)] = [("name", Json.Str(s.name)), ("kind", Json.Int(lsp_kind(s.kind))),
+                                         ("range", range_json(s.range)), ("selectionRange", range_json(s.selection))]
+            if s.detail != "" { push(members, ("detail", Json.Str(s.detail))) }
+            push(members, ("children", symbol_tree(symbols, i)))
+            push(out, Json.Object(members))
+        }
+        i = i + 1
+    }
+    return Json.Array(out)
+}
+
+// The LSP CompletionItemKind of a declaration.
+fun completion_kind(k: SymKind) -> int64 {
+    return match k {
+        SymKind.Function => 3,
+        SymKind.Method => 2,
+        SymKind.Struct => 22,
+        SymKind.Enum => 13,
+        SymKind.EnumMember => 20,
+        SymKind.Interface => 8,
+        SymKind.Field => 5,
+        SymKind.Constant => 21,
+        SymKind.TypeAlias => 7,
+        SymKind.Impl => 1,
+    }
+}
+
+fun completion_item(e: Entry) -> Json {
+    var members: [(str, Json)] = [("label", Json.Str(e.name)), ("kind", Json.Int(completion_kind(e.kind)))]
+    if e.detail != "" { push(members, ("detail", Json.Str(e.detail))) }
+    return Json.Object(members)
+}
+
+fun completion_list(items: [Json]) -> Json {
+    return Json.Object([("isIncomplete", Json.Bool(false)), ("items", Json.Array(items))])
 }

@@ -1,8 +1,9 @@
 # Continuous integration for the Python toolchain and the self-hosted compiler.
 # Everything here uses only the standard library plus GNU binutils (as/ld), which
 # the Ubuntu runners already have; the unit job also installs pygls (the `lsp`
-# extra) so the language server test runs, and the burn job the tree-sitter CLI
-# for the editor-grammar tests. See docs/Development/Testing.md.
+# extra) so the language server test runs, and the burn job pygls too (the Myla
+# language server is compared with the Python one) and the tree-sitter CLI for
+# the editor-grammar tests. See docs/Development/Testing.md.
 name: CI
 
 on:
@@ -44,6 +45,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: The Python language server, which the Myla one is compared with (MYLA-80)
+        run: python -m pip install "pygls>=2.1.1"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
