@@ -378,3 +378,30 @@ class TestReader(unittest.TestCase):
             '}\n', stdin=b"abcd")
         self.assertEqual(out, "ab\n0\n0\ncd\n")
 
+
+class TestPoll(unittest.TestCase):
+    """`__poll(fd, timeout_ms)` and `Reader.ready` (MYLA-80)."""
+
+    def test_poll_takes_fd_and_timeout(self):
+        check_src("fun main() { let n: int32 = __poll(0, 10) }\n")
+
+    def test_poll_rejects_wrong_arguments(self):
+        for call in ["__poll(0)", '__poll("0", 1)', '__poll(0, "1")']:
+            with self.subTest(call=call):
+                with self.assertRaises(TypeCheckError):
+                    check_src(f"fun main() {{ {call} }}\n")
+
+    def test_a_stream_is_always_ready(self):
+        out, _, _ = link_and_run(
+            'from std.io import stdin\n'
+            'fun main() {\n'
+            '    print(__poll(0, 0))\n'
+            '    var r = stdin()\n'
+            '    print(r.ready(0))\n'
+            '}\n', stdin=b"")
+        self.assertEqual(out, "1\ntrue\n")
+
+    def test_a_bad_fd(self):
+        out, _, _ = link_and_run('fun main() {\n    print(__poll(99, 0))\n}\n')
+        self.assertEqual(out, "1\n")      # poll(2) reports POLLNVAL: a read would not block
+

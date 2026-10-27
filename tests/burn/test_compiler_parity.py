@@ -322,6 +322,34 @@ PROGRAMS = {
         "    var copy = sb\n    append(copy, line, 0, 5)\n"
         "    print(build(sb))\n    print(build(copy))\n}\n"
     ),
+    # MYLA-80: `?` whose operand is larger than the function's result: the
+    # self-hosted backend copied the whole operand into the result and
+    # overwrote the caller's frame (`myla build` crashed after a type error)
+    "try_with_a_larger_success_payload": (
+        "struct C { a: int, b: int, c: int, d: int, e: int }\n"
+        "fun load(ok: bool) -> Result<C, int> {\n"
+        "    if ok { return Ok(C { a: 1, b: 2, c: 3, d: 4, e: 5 }) }\n"
+        "    return Err(7)\n}\n"
+        "fun compile(ok: bool) -> Result<int, int> {\n"
+        "    let c = load(ok)?\n"
+        "    return Ok(c.a + c.e)\n}\n"
+        "fun first(xs: [int]) -> Option<(int, int, int, int)> {\n"
+        "    if len(xs) == 0 { return None }\n"
+        "    return Some((xs[0], 0, 0, 0))\n}\n"
+        "fun head(xs: [int]) -> Option<int> {\n"
+        "    let t = first(xs)?\n"
+        "    return Some(t.0)\n}\n"
+        "fun describe(ok: bool) -> Result<str, str> {\n"
+        "    let c = match load(ok) { Ok(c) => c, Err(e) => { return Err(format(\"error {}\", e)) } }\n"
+        "    return Ok(format(\"{}\", c.b))\n}\n"
+        "#main\nfun main() {\n"
+        "    for i in 0..3 {\n"
+        "        match compile(i == 1) { Ok(v) => { print(v) }, Err(e) => { print(e) } }\n"
+        "        match head([]) { Some(v) => { print(v) }, None => { print(-1) } }\n"
+        "        match head([9]) { Some(v) => { print(v) }, None => { print(-1) } }\n"
+        "        match describe(i == 2) { Ok(s) => { print(s) }, Err(s) => { print(s) } }\n"
+        "    }\n}\n"
+    ),
     "string_char_literals_and_match": (
         "fun count_byte(s: str, b: uint8) -> int {\n"
         "    var n = 0\n    var i = 0\n"
@@ -2115,9 +2143,93 @@ STRESS_FRAGMENTED_FREE_SRC = (
     "    print(len(keep) + len(m))\n}\n"
 )
 
+STRESS_LARGE_SIZES_SRC = (
+    # Builds and drops 20000 strings of 20000 different sizes above 4 KiB
+    # (1.7 GB in all). A freed large cell kept for an allocation of exactly its
+    # size is never used again and the 1 GiB arena runs out; size classes for
+    # large cells reuse them (MYLA-80, found as the language server's memory
+    # growing with every check).
+    "#main\nfun main() {\n"
+    "    var sb = StringBuilder()\n"
+    "    for k in 0..170000 { append_byte(sb, 'x') }\n"
+    "    let big = build(sb)\n"
+    "    var total = 0\n"
+    "    for i in 0..20000 {\n"
+    "        var part = StringBuilder()\n"
+    "        append(part, big, 0, 4100 + 8 * i)\n"
+    "        let s = build(part)\n"
+    "        total = total + len(s) % 7\n"
+    "    }\n"
+    "    print(total)\n}\n"
+)
+
+STRESS_FOR_EARLY_RETURN_SRC = (
+    # Returns from inside `for` loops over fresh lists and maps a million
+    # times. The loop holds a reference to what it iterates; a `return` from
+    # its body left it held, so every list and map stayed allocated (MYLA-80,
+    # the language server's checker leaking 7 MB per check).
+    "fun first_big(xs: [int]) -> int {\n"
+    "    for x in xs {\n        if x > 1 { return x }\n    }\n"
+    "    return 0\n}\n"
+    "fun any_key(m: [int: int]) -> int {\n"
+    "    for k in m { return k }\n"
+    "    return -1\n}\n"
+    "fun nested(xs: [[int]]) -> int {\n"
+    "    for row in xs {\n        for x in row {\n            if x == 3 { return x }\n        }\n    }\n"
+    "    return 0\n}\n"
+    "#main\nfun main() {\n"
+    "    var total = 0\n"
+    "    for i in 0..1000000 {\n"
+    "        var xs = [1, i, 5]\n"
+    "        for k in 0..250 { push(xs, k) }\n"       # 1 KB a list: a leak exhausts the arena
+    "        var m: [int: int] = [:]\n"
+    "        m[i % 7] = 1\n"
+    "        total = total + first_big(xs) % 3 + any_key(m) + nested([[1, 2], [3, i]])\n"
+    "    }\n"
+    "    print(total)\n}\n"
+)
+
+STRESS_MAP_OVERWRITE_SRC = (
+    # Overwrites map entries holding strings, lists and maps a million times.
+    # The self-hosted backend stored the new value without releasing the old
+    # one, so every overwrite leaked it (MYLA-80, the language server keeping
+    # every version of a document).
+    "#main\nfun main() {\n"
+    "    var docs: [str: str] = [:]\n"
+    "    var lists: [int: [int]] = [:]\n"
+    "    var nested: [str: [str: int]] = [:]\n"
+    "    var total = 0\n"
+    "    for i in 0..1000000 {\n"
+    "        docs[\"a\"] = format(\"version {}\", i)\n"
+    "        lists[i % 3] = [i, i, i]\n"
+    "        var inner: [str: int] = [:]\n"
+    "        inner[\"k\"] = i\n"
+    "        nested[\"x\"] = inner\n"
+    "        total = total + len(docs[\"a\"]) % 2 + lists[i % 3][0] % 2 + nested[\"x\"][\"k\"] % 2\n"
+    "    }\n"
+    "    print(total)\n}\n"
+)
+
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
+    def test_overwritten_map_values_are_released(self):
+        out, code = build_and_run(STRESS_MAP_OVERWRITE_SRC, timeout=60)
+        self.assertEqual(code, 0)
+        expected = sum(len(f"version {i}") % 2 + 2 * (i % 2) for i in range(1000000))
+        self.assertEqual(out.strip(), str(expected))
+
+    def test_returning_from_a_for_loop_releases_its_iterable(self):
+        out, code = build_and_run(STRESS_FOR_EARLY_RETURN_SRC, timeout=60)
+        self.assertEqual(code, 0, "arena exhausted — loops leaked what they iterate")
+        expected = sum((i if i > 1 else 5) % 3 + i % 7 + 3 for i in range(1000000))
+        self.assertEqual(out.strip(), str(expected))
+
+    def test_large_cells_of_new_sizes_are_reused(self):
+        out, code = build_and_run(STRESS_LARGE_SIZES_SRC, timeout=60)
+        self.assertEqual(code, 0, "arena exhausted — large cells were not reused")
+        self.assertEqual(out.strip(), str(sum((4100 + 8 * i) % 7 for i in range(20000))))
+
     def test_allocation_does_not_scan_unusable_free_cells(self):
         # Must finish far below the 5 s limit: the linear free-list scan took
         # about 14 s, size-class free lists take milliseconds.

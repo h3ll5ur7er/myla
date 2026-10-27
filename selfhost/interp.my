@@ -1315,6 +1315,10 @@ impl Interp {
             let fd = as_int(self.eval(args[0])) as int32
             return Value.VStr(__read(fd, as_int(self.eval(args[1])) as int32))
         }
+        if nm == "__poll" {
+            let fd = as_int(self.eval(args[0])) as int32
+            return Value.VInt(__poll(fd, as_int(self.eval(args[1])) as int32) as int64)
+        }
         if nm == "__io_errno" { return Value.VInt(__io_errno() as int64) }
         if nm == "__write_file" {
             __write_file(as_str(self.eval(args[0])), as_str(self.eval(args[1])))

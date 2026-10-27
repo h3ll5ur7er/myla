@@ -1,0 +1,255 @@
+// server.my: the language server's state and its handling of messages
+// (MYLA-80).
+//
+// Documents are synced in full. Opening or saving a document checks it as
+// soon as no other message is waiting; a change waits until no message has
+// come for DEBOUNCE_MS, so a burst of keystrokes is checked once. A check
+// runs the self-hosted loader and checker with the text of every open
+// document, and publishes the error, if any, for the file it is in (MYLA-10);
+// files that showed an error from an earlier check of the same document are
+// cleared.
+
+from std.io import stdin
+from std.json import Json, field
+from std.fs import read_to_string
+from ...selfhost.loader import load_program_with, file_of, normalize
+from ...selfhost.diag import Report, type_report
+from ...selfhost.checker import build_checker_decls
+from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
+from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
+
+const DEBOUNCE_MS: int32 = 400
+
+// JSON-RPC error codes.
+const PARSE_ERROR: int64 = -32700
+const METHOD_NOT_FOUND: int64 = -32601
+
+pub struct Server {
+    ch: Channel,
+    stdlib: str,
+    docs: [str: str],              // uri -> text of each open document
+    dirty: [str],                  // uris to check
+    urgent: bool,                  // check them without waiting (open, save)
+    elsewhere: [str: [str]],       // checked uri -> other uris it published errors for
+    shut_down: bool,
+}
+
+pub fun new_server(stdlib: str) -> Server {
+    return Server { ch: Channel { input: stdin() }, stdlib: stdlib, docs: [:], dirty: [], urgent: false,
+                    elsewhere: [:], shut_down: false }
+}
+
+impl Server {
+    // Serve until `exit` or the end of the input; the exit status.
+    fun run(var self) -> int32 {
+        while true {
+            if len(self.dirty) > 0 {
+                var wait = DEBOUNCE_MS
+                if self.urgent { wait = 0 }
+                if !self.ch.ready(wait) { self.check_dirty() }
+            }
+            if len(self.dirty) == 0 || self.ch.ready(0) {
+                match self.ch.next() {
+                    Incoming.Message(msg) => {
+                        if !self.handle(msg) {
+                            if self.shut_down { return 0 }
+                            return 1
+                        }
+                    },
+                    Incoming.Malformed => { send(error_response(Json.Null, PARSE_ERROR, "the message isn't JSON")) },
+                    Incoming.End => { return 0 },
+                }
+            }
+        }
+        unreachable()
+    }
+
+    // Handle one message; false for `exit`.
+    fun handle(var self, msg: Json) -> bool {
+        let method = str_field(msg, "method")
+        let params = field_or_null(msg, "params")
+        let id = field(msg, "id")
+        if method == "" { return true }                 // a response to us
+        if method == "exit" { return false }
+        if method == "initialize" {
+            self.reply(id, initialize_result())
+        } else if method == "shutdown" {
+            self.shut_down = true
+            self.reply(id, Json.Null)
+        } else if method == "textDocument/didOpen" {
+            let doc = field_or_null(params, "textDocument")
+            self.docs[str_field(doc, "uri")] = str_field(doc, "text")
+            self.mark(str_field(doc, "uri"), true)
+        } else if method == "textDocument/didChange" {
+            let uri = str_field(field_or_null(params, "textDocument"), "uri")
+            match field(params, "contentChanges") {
+                Some(Json.Array(changes)) => {
+                    if len(changes) > 0 {
+                        self.docs[uri] = str_field(changes[len(changes) - 1], "text")
+                        self.mark(uri, false)
+                    }
+                },
+                _ => {},
+            }
+        } else if method == "textDocument/didSave" {
+            self.mark(str_field(field_or_null(params, "textDocument"), "uri"), true)
+        } else if method == "textDocument/didClose" {
+            let uri = str_field(field_or_null(params, "textDocument"), "uri")
+            remove(self.docs, uri)
+            var still: [str] = []
+            for u in self.dirty {
+                if u != uri { push(still, u) }
+            }
+            self.dirty = still
+            publish(uri, [])
+        } else {
+            match id {
+                Some(i) => { send(error_response(i, METHOD_NOT_FOUND, format("unhandled method {}", method))) },
+                None => {},                              // a notification we don't need
+            }
+        }
+        return true
+    }
+
+    fun reply(var self, id: Option<Json>, result: Json) {
+        match id {
+            Some(i) => { send(response(i, result)) },
+            None => {},
+        }
+    }
+
+    // Queue `uri` for a check.
+    fun mark(var self, uri: str, urgent: bool) {
+        var queued = false
+        for u in self.dirty {
+            if u == uri { queued = true }
+        }
+        if !queued { push(self.dirty, uri) }
+        if urgent { self.urgent = true }
+    }
+
+    fun check_dirty(var self) {
+        let uris = self.dirty
+        self.dirty = []
+        self.urgent = false
+        for uri in uris {
+            if contains(self.docs, uri) { self.check(uri) }
+        }
+    }
+
+    // Check the document `uri` and publish what was found.
+    fun check(var self, uri: str) {
+        let path = uri_path(uri)
+        if path == "" { return }
+        var overrides: [str: str] = [:]
+        for u in keys(self.docs) {
+            let p = uri_path(u)
+            if p != "" { overrides[p] = self.docs[u] }
+        }
+        var found: Option<Report> = None
+        match load_program_with(path, self.stdlib, overrides) {
+            Err(r) => { found = Some(r) },
+            Ok(prog) => {
+                match build_checker_decls(prog.decls, prog.next_id) {
+                    Ok(c) => {},
+                    Err(e) => { found = Some(type_report(e.line, e.col, e.msg, file_of(prog, e.decl))) },
+                }
+            },
+        }
+        // the checked document always gets a (maybe empty) list, which clears it
+        var groups: [str: [Json]] = [:]
+        groups[uri] = []
+        match found {
+            Some(r) => {
+                let target = self.uri_of(r.path, path, uri)
+                let text = match get(overrides, normalize(r.path)) {
+                    Some(t) => t,
+                    None => match read_to_string(r.path) {
+                        Ok(t) => t,
+                        Err(e) => "",
+                    },
+                }
+                groups[target] = [diagnostic(r, text)]
+            },
+            None => {},
+        }
+        var stale: [str] = []
+        match get(self.elsewhere, uri) {
+            Some(us) => { stale = us },
+            None => {},
+        }
+        for u in stale {
+            if !contains(groups, u) { groups[u] = [] }
+        }
+        var shown: [str] = []
+        for u in keys(groups) {
+            if u != uri && len(groups[u]) > 0 { push(shown, u) }
+        }
+        self.elsewhere[uri] = shown
+        // the checked document first, then the others
+        publish(uri, groups[uri])
+        for u in keys(groups) {
+            if u != uri { publish(u, groups[u]) }
+        }
+    }
+
+    // The URI to publish an error in `file` under: the checked document's
+    // own, an open document's, or one made from the path.
+    fun uri_of(self, file: str, checked_path: str, checked_uri: str) -> str {
+        let f = normalize(file)
+        if f == normalize(checked_path) { return checked_uri }
+        for u in keys(self.docs) {
+            let p = uri_path(u)
+            if p != "" && normalize(p) == f { return u }
+        }
+        return path_uri(f)
+    }
+}
+
+fun publish(uri: str, diagnostics: [Json]) {
+    let params = Json.Object([("uri", Json.Str(uri)), ("diagnostics", Json.Array(diagnostics))])
+    send(notification("textDocument/publishDiagnostics", params))
+}
+
+fun position(p: Pos) -> Json {
+    return Json.Object([("line", Json.Int(p.line as int64)), ("character", Json.Int(p.character as int64))])
+}
+
+// A diagnostic for report `r` in a file whose text is `text`: from the
+// reported column to the end of the word there, on the same line.
+fun diagnostic(r: Report, text: str) -> Json {
+    var start = Pos { line: 0, character: 0 }
+    var end = Pos { line: 0, character: 1 }
+    if r.line > 0 {
+        let lines = lines_of(text)
+        var col = r.col
+        if col < 1 { col = 1 }
+        start = to_lsp(lines, r.line, col)
+        var line_text = ""
+        if start.line < len(lines) { line_text = lines[start.line] }
+        end = to_lsp(lines, r.line, word_end(line_text, col))
+    }
+    let range = Json.Object([("start", position(start)), ("end", position(end))])
+    return Json.Object([("range", range), ("message", Json.Str(r.msg)), ("severity", Json.Int(1)),
+                        ("source", Json.Str("myla")), ("code", Json.Str(kind_code(r.kind)))])
+}
+
+// "type error" -> "type"
+#test("type error")["type"]
+#test("module error")["module"]
+fun kind_code(kind: str) -> str {
+    var sb = StringBuilder()
+    for i in 0..len(kind) {
+        if kind[i] == ' ' { return build(sb) }
+        append_byte(sb, kind[i])
+    }
+    return build(sb)
+}
+
+fun initialize_result() -> Json {
+    let sync = Json.Object([("openClose", Json.Bool(true)), ("change", Json.Int(1)),
+                            ("save", Json.Object([("includeText", Json.Bool(false))]))])
+    let caps = Json.Object([("textDocumentSync", sync)])
+    let info = Json.Object([("name", Json.Str("myla")), ("version", Json.Str("0.1"))])
+    return Json.Object([("capabilities", caps), ("serverInfo", info)])
+}

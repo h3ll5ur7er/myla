@@ -61,3 +61,38 @@ echo "==> cli: stage3 builds the myla command-line tool"
 "$OUT_DIR/stage3" selfhost/main.my "$STDLIB_ROOT" > "$OUT_DIR/myla.s"
 asm_to_bin "$OUT_DIR/myla.s" "$OUT_DIR/myla"
 echo "Self-hosted CLI: $OUT_DIR/myla (run / test / build)"
+
+echo "==> cli: it reports a type error with exit status 1"
+# (MYLA-80: `build` crashed here, as only the self-compiled CLI handles `?` in
+# its own code generator, which no other test runs)
+err_file=examples/errors/type_str_index_assign.my
+for cmd in build run; do
+    set +e
+    if [ "$cmd" = build ]; then
+        "$OUT_DIR/myla" build "$err_file" -o "$OUT_DIR/err_out" > /dev/null 2> "$OUT_DIR/err.txt"
+    else
+        "$OUT_DIR/myla" run "$err_file" > /dev/null 2> "$OUT_DIR/err.txt"
+    fi
+    code=$?
+    set -e
+    if [ "$code" != 1 ] || ! grep -q "^type error:" "$OUT_DIR/err.txt"; then
+        echo "FAIL: myla $cmd on a type error exited with $code" >&2
+        cat "$OUT_DIR/err.txt" >&2
+        exit 1
+    fi
+done
+echo "OK: build and run report it and exit with 1"
+
+echo "==> lsp: stage3 builds the language server (MYLA-80)"
+"$OUT_DIR/stage3" tools/lsp/main.my "$STDLIB_ROOT" > "$OUT_DIR/myla-lsp.s"
+asm_to_bin "$OUT_DIR/myla-lsp.s" "$OUT_DIR/myla-lsp"
+frame() { printf 'Content-Length: %d\r\n\r\n%s' "${#1}" "$1"; }
+reply="$({ frame '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}'
+           frame '{"jsonrpc":"2.0","id":2,"method":"shutdown"}'
+           frame '{"jsonrpc":"2.0","method":"exit"}'; } | "$OUT_DIR/myla-lsp")"
+if ! printf '%s' "$reply" | grep -q '"id":2,"result":null'; then
+    echo "FAIL: the language server did not answer initialize and shutdown" >&2
+    printf '%s\n' "$reply" >&2
+    exit 1
+fi
+echo "Language server: $OUT_DIR/myla-lsp"

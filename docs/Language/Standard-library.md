@@ -20,7 +20,7 @@ These names are reserved: no declaration may reuse them.
 | `StringBuilder()`, `append(sb, s)`, `append(sb, s, start, end)`, `append_byte(sb, b)`, `build(sb)` | | The four-argument `append` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
-The low-level primitives `__write`, `__read`, `__exit`, `__args`, `__read_file`, `__write_file`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal` and `__run_errno` exist for the standard library; call the `std` functions instead.
+The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal` and `__run_errno` exist for the standard library; call the `std` functions instead.
 
 ## std.io
 
@@ -53,6 +53,7 @@ Reading goes through a buffered `Reader` ([[MYLA-78]]). Keep it in a `var`, or i
 | `r.read_line() -> Result<Option<str>, IoError>` | The next line without its `"\n"` (a `"\r"` before it stays); a last line without `"\n"` counts; `None` at the end |
 | `r.read_exact(n: int32) -> Result<Option<str>, IoError>` | Exactly the next `n` bytes (`""` for `n <= 0`); `None` if the input ends first (those bytes stay unread) |
 | `r.read_to_end() -> Result<str, IoError>` | The rest of the input (`""` once it has ended) |
+| `r.ready(timeout_ms: int32) -> bool` | Whether a read won't block: bytes are buffered, or within `timeout_ms` milliseconds input arrives, the input ends or reading fails (0: don't wait; negative: wait as long as it takes) |
 
 ```myla
 from std.io import stdin, println

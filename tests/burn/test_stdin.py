@@ -62,6 +62,22 @@ fun main() {
 }
 """
 
+# Waits for input with a timeout (MYLA-80): nothing has been sent at first,
+# then a line, then the end of the input.
+WAIT = """from std.io import stdin, println
+fun main() {
+    var r = stdin()
+    println(format("{}", r.ready(200)))
+    println("go")
+    println(format("{}", r.ready(20000)))
+    match r.read_line() {
+        Ok(Some(line)) => { println(line) },
+        _ => { println("none") },
+    }
+    println(format("{}", r.ready(20000)))
+}
+"""
+
 # Answers each line at once, so the driver can wait for the answer before it
 # sends the next one.
 PING = """from std.io import stdin, println
@@ -96,7 +112,7 @@ class StdinParity(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.programs: dict[str, dict[str, list[str]]] = {}
         for name, source in [("lines", LINES), ("framed", FRAMED), ("echo", ECHO_ALL),
-                             ("bad_fd", BAD_FD), ("ping", PING)]:
+                             ("bad_fd", BAD_FD), ("ping", PING), ("wait", WAIT)]:
             cls.programs[name] = cls._commands(name, source)
 
     @classmethod
@@ -184,6 +200,25 @@ class StdinParity(unittest.TestCase):
                         self.assertEqual(_read_line(proc, 30), f"got {word}\n".encode())
                     proc.stdin.close()
                     self.assertEqual(_read_line(proc, 30), b"bye\n")
+                    self.assertEqual(proc.wait(30), 0)
+                finally:
+                    proc.kill()
+                    proc.wait()
+                    proc.stdout.close()
+
+    def test_waiting_for_input(self) -> None:
+        for impl, argv in self.programs["wait"].items():
+            with self.subTest(implementation=impl):
+                proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=_ENV)
+                try:
+                    self.assertEqual(_read_line(proc, 30), b"false\n")   # timed out
+                    self.assertEqual(_read_line(proc, 30), b"go\n")
+                    proc.stdin.write(b"hello\n")
+                    proc.stdin.flush()
+                    self.assertEqual(_read_line(proc, 30), b"true\n")
+                    self.assertEqual(_read_line(proc, 30), b"hello\n")
+                    proc.stdin.close()
+                    self.assertEqual(_read_line(proc, 30), b"true\n")    # the end of the input
                     self.assertEqual(proc.wait(30), 0)
                 finally:
                     proc.kill()

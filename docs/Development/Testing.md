@@ -34,13 +34,13 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 
 | Suite | Tests | Result |
 | --- | --- | --- |
-| Unit | 487 | All pass, about 2 s |
-| Integration | 4 | Pass (2 need pygls) |
-| Burn | 416 (plus subtests) | All pass, about 47 s with cached tools (green since [[MYLA-4]]) |
+| Unit | 491 | All pass, about 2 s |
+| Integration | 10 | Pass (8 need pygls) |
+| Burn | 443 (plus subtests) | All pass, about 110 s with cached tools (green since [[MYLA-4]]) |
 
 ## Unit tests
 
-`tests/unit/` has one file per area: lexer, parser, types, enums/match, tuples, methods, traits, generic traits, floats, chars, interpolation, imports, loader (including module errors and which file an error is attributed to), interpreter, stdio, fs, process, the language server's compiler adapter and its features (positions, symbols, definition, references, completion: `test_lsp_features.py`, no pygls needed), and assembly-text checks for the compiler. `tests/integration/test_lsp_diagnostics.py` starts the language server and checks its diagnostics over stdio (skipped without pygls; CI installs it).
+`tests/unit/` has one file per area: lexer, parser, types, enums/match, tuples, methods, traits, generic traits, floats, chars, interpolation, imports, loader (including module errors and which file an error is attributed to), interpreter, stdio, fs, process, the language server's compiler adapter and its features (positions, symbols, definition, references, completion: `test_lsp_features.py`, no pygls needed), and assembly-text checks for the compiler. `tests/integration/test_lsp_diagnostics.py` starts the Python language server and runs the diagnostics scenarios over stdio (skipped without pygls; CI installs it); `tests/burn/test_lsp.py` runs the same scenarios against the Myla server.
 
 ## Burn tests
 
@@ -55,6 +55,7 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 | `test_modules.py` | `examples/modules` in both back ends |
 | `test_stdio.py`, `test_fs.py`, `test_process.py` | Parity of stdout, stderr, exit status, argv, file contents, errno mapping, signals and spawn errors |
 | `test_json.py` | `std.json` and `std.num` against Python's `json` ([[MYLA-79]]): a Myla driver parses length-framed texts from stdin and writes them back; on 3,000 random values (compact UTF-8 and indented ASCII with `\u` escapes, strings with escapes and astral characters, int64 limits, random float bit patterns) its output equals Python's re-serialization, so floats come out in their shortest repr; on 3,000 broken texts it fails where Python does, with Python 3.13's message, line and column; 5,000 floats; the nesting limit; both native builds, and a small corpus in both interpreters; and the modules' own `#test` cases |
+| `test_lsp.py` | The language server written in Myla ([[MYLA-80]]), built by the Python backend and by the self-hosted one: the diagnostics scenarios of `tests/integration/test_lsp_diagnostics.py` (errors in imported modules published for them and cleared, unsaved text of the document and of other open documents, UTF-16 ranges, parse errors, unknown methods, shutdown and exit), a malformed message, a burst of 38 changes checked once, and RSS flat over 200 checks |
 | `test_stdin.py` | Reading with `std.io` ([[MYLA-78]]): the Python interpreter, the Python native backend, the self-hosted interpreter and the self-hosted native backend print the same for the same bytes on a pipe (lines, CRLF, no input, 100 KB across chunk boundaries, Content-Length framing with a cut-off message, binary input echoed back, a bad descriptor), and each answers an interactive exchange line by line, run without `PYTHONUNBUFFERED`, so output is out before a read |
 | `test_grammar.py` | [[grammar/myla.ebnf]] and what is generated from it ([[MYLA-77]]): the wiki page [[Language/Grammar]] shows the same rules; `grammar.js` and `highlights.scm` in `editor/tree-sitter-myla/` are current; the self-hosted parser accepts 10,000 programs sampled from the grammar; `keywords()` in `selfhost/tokens.my`, which the grammar must use in full, matches the Python lexer's table; the grammar tool's `#test` cases pass. With the tree-sitter CLI (`npm install` in `editor/tree-sitter-myla`, or `TREE_SITTER`) and `cc`, also: `src/` is current, tree-sitter parses every `.my` file of the repository and 2,000 samples without an ERROR or MISSING node, every lex and parse error of the error corpus gives one, and the queries compile; skipped without the CLI, CI installs it |
 | `test_selfhost_floatlit.py` | The self-hosted float literal conversion (`std.num`'s `f64_literal_bits`, through `selfhost/floatlit_main.my`) gives the same double and float32 bits as Python on tricky and 800 random literals |

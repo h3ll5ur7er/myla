@@ -65,7 +65,7 @@ EXCLUDED: set[str] = set()
 # partial application evaluating its arguments once (MYLA-75), derived Eq on
 # char and float fields (MYLA-13), a match statement ending an arm block (MYLA-59),
 # distinct names for generic instantiations (MYLA-9, MYLA-33), byte-range
-# appends (MYLA-85).
+# appends (MYLA-85), `?` on an operand larger than the result (MYLA-80).
 PARITY_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
@@ -96,6 +96,7 @@ PARITY_PROGRAMS = (
     "pop_a_boxed_enum",
     "remove_many_distinct_keys",
     "string_builder_append_range",
+    "try_with_a_larger_success_payload",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -120,6 +121,9 @@ STRESS_PROGRAMS = {
     "STRESS_MATCH_EARLY_EXIT_SRC": "270000000",
     "STRESS_CONDITION_TEMPS_SRC": "20100000",
     "STRESS_STR_SRC": "1800000",
+    "STRESS_FOR_EARLY_RETURN_SRC": "6999999",
+    "STRESS_LARGE_SIZES_SRC": "60002",
+    "STRESS_MAP_OVERWRITE_SRC": "1090910",
 }
 PEAK_LIMIT_MB = 30
 

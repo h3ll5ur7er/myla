@@ -4,6 +4,8 @@
 
 ## Language server
 
+There are two: the Python one described first, which the VS Code extension starts today, and the one written in Myla that will replace it ([[MYLA-80]], in progress; see below).
+
 `src/myla/lsp/` is a language server built on pygls 2 over stdio. It is an optional extra, so the rest of the toolchain stays dependency-free.
 
 ```bash
@@ -32,6 +34,23 @@ A declaration's selection range (the target of go-to-definition, and the token `
 An error in an imported module is published for that module's URI (it shows in the Problems panel and in that file), and cleared there once a later check of the importing document no longer finds it (MYLA-10); other open buffers are checked with their unsaved text. `tests/integration/test_lsp_diagnostics.py` drives the real server over stdio when pygls is installed; `tests/unit/test_lsp_features.py` covers positions, symbols, definition, references and completion without it (MYLA-52).
 
 The Python server is to be replaced by one written in Myla ([[MYLA-80]]), which takes the open findings of [[MYLA-49]], [[MYLA-50]] and [[MYLA-51]] as requirements.
+
+### The language server in Myla
+
+`tools/lsp/` is a language server written in Myla on the self-hosted front end; `scripts/bootstrap.sh` builds it with the stage 3 compiler as `build/myla-lsp` (`--stdlib <dir>` overrides the standard library root it finds next to `build/`). So far it publishes diagnostics; the other features are the next steps of [[MYLA-80]].
+
+| Module | Role |
+| --- | --- |
+| `main.my` | Arguments, then the server loop |
+| `protocol.my` | JSON-RPC with Content-Length framing over `std.io`'s `Reader` and `std.json` |
+| `server.my` | Document store, debounce, checks, publishing |
+| `text.my` | Lines, UTF-16 positions, the squiggle's width, `file://` URIs (the rules of `positions.py`) |
+
+- **Sync and checks.** Documents are synced in full. Opening or saving checks a document as soon as no other message is waiting; a change waits until nothing has arrived for 0.4 s, using `Reader.ready`, which polls stdin with a timeout (`__poll`, D67), so there are no threads. A check runs the self-hosted loader and checker with the text of every open document as overrides (`load_program_with`), so unsaved imports count ([[MYLA-49]]); the error is published for the file it is in and cleared there when a later check no longer finds it ([[MYLA-10]]).
+- **Protocol.** `initialize`, `initialized`, `shutdown`, `exit` (status 0 after `shutdown`, else 1), `didOpen`/`didChange`/`didSave`/`didClose`; other requests get MethodNotFound, a body that isn't JSON a ParseError with a null id.
+- **Tests.** The diagnostics scenarios in `tests/integration/test_lsp_diagnostics.py` run against both servers; `tests/burn/test_lsp.py` runs them against the Myla server built by each backend, and adds a malformed message, a burst of changes checked once, and memory that stays flat over 200 checks of `std/json.my`.
+
+Writing it found four bugs, fixed in [[MYLA-80]]: a `return` from inside a `for` loop left the iterated list or map referenced (both backends), the Python backend never reused a freed cell over 4 KiB unless one of exactly its size was requested, the self-hosted backend's `?` copied the whole operand into a smaller result (overwriting the caller's frame: `build/myla build` crashed after a type error), and the self-hosted backend didn't release a map value it overwrote. A check of `selfhost/checker.my` (5,000 lines and its imports) takes about 230 ms, and the server stays at 25 MB.
 
 ## VS Code extension
 

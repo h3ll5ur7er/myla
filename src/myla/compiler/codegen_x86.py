@@ -170,6 +170,9 @@ class CodeGen:
         # set once `std.io`'s reader (`__read`) is used, gating the read helper
         # (MYLA-78; shares the `__io_errno_val` global).
         self._uses_read = False
+        # set once `Reader.ready` (`__poll`) is used, gating the poll helper
+        # (MYLA-80; shares the `__io_errno_val` global).
+        self._uses_poll = False
         # set once `__io_errno` is used, gating the `__io_errno_val` global
         # (also emitted for the helpers that set it).
         self._uses_io_errno = False
@@ -429,6 +432,8 @@ class CodeGen:
             self._emit_write_file_runtime()
         if self._uses_read:
             self._emit_read_runtime()
+        if self._uses_poll:
+            self._emit_poll_runtime()
         if self._uses_run:
             self._emit_run_runtime()
         return self._assemble_source()
@@ -468,10 +473,10 @@ class CodeGen:
         out.append("\t.skip 8")
         out.append("__heap_end:")
         out.append("\t.skip 8")
-        out.append("__free_list:")
-        out.append("\t.skip 8")
-        out.append("__free_buckets:")   # one list head per 8-byte size class
-        out.append(f"\t.skip {_SMALL_CELL_LIMIT + 8}")
+        # one list head per 8-byte size class up to _SMALL_CELL_LIMIT, then one
+        # per power of two (indexed by its exponent) for larger cells
+        out.append("__free_buckets:")
+        out.append(f"\t.skip {_SMALL_CELL_LIMIT + 8 + 8 * 64}")
         # argc/argv captured at `_start` for `std.process.args` (D29)
         out.append("__argc:")
         out.append("\t.skip 8")
@@ -491,8 +496,9 @@ class CodeGen:
             out.append("\t.skip 8")
             out.append("__run_errno_val:")
             out.append("\t.skip 8")
-        if self._uses_read_file or self._uses_write_file or self._uses_read or self._uses_io_errno:
-            # errno of the last `__read_file`, `__write_file` or `__read` (0 on
+        if (self._uses_read_file or self._uses_write_file or self._uses_read or self._uses_poll
+                or self._uses_io_errno):
+            # errno of the last `__read_file`, `__write_file`, `__read` or `__poll` (0 on
             # success), read by `__io_errno`
             out.append("__io_errno_val:")
             out.append("\t.skip 8")
@@ -827,8 +833,11 @@ class CodeGen:
         # at -8. Freed cells are reused, so a program that allocates and drops in
         # a loop runs in bounded memory: cells up to _SMALL_CELL_LIMIT bytes go on
         # LIFO free lists, one per 8-byte size class (`__free_buckets`, indexed by
-        # byte offset = size), larger ones on `__free_list`, searched for an exact
-        # fit. The arena itself is anonymous mmap memory, zero-filled.
+        # byte offset = size). A larger cell is rounded up to a power of two and
+        # goes on that power's list after them, so a freed cell serves any later
+        # request of its class: an exact-fit list kept every cell of a new size
+        # forever (MYLA-80). The same scheme as the self-hosted runtime. The arena
+        # itself is anonymous mmap memory, zero-filled.
         #
         # __heap_init: reserve the arena (preserves %rdi).
         e("__heap_init:")
@@ -873,20 +882,18 @@ class CodeGen:
         e("\tmovq $1, -8(%rsi)")        # refcount = 1
         e("\tmovq %rsi, %rax")
         e("\tret")
-        e(".Lalloc_large:")             # exact-fit search of the large-cell list
-        e("\tleaq __free_list(%rip), %r8")  # %r8 = address of the link to update
-        e("\tmovq __free_list(%rip), %rsi") # %rsi = current node (value ptr) or 0
-        e(".Lalloc_scan:")
+        e(".Lalloc_large:")             # round up to 2^k, k = bitlen(size - 1)
+        e("\tleaq -1(%rdi), %rcx")
+        e("\tbsrq %rcx, %rcx")
+        e("\taddq $1, %rcx")
+        e("\tmovq $1, %rdi")
+        e("\tshlq %cl, %rdi")           # the class size
+        e(f"\tleaq __free_buckets+{_SMALL_CELL_LIMIT + 8}(%rip), %r8")
+        e("\tmovq (%r8,%rcx,8), %rsi")  # head of this power's list, or 0
         e("\ttestq %rsi, %rsi")
         e("\tjz .Lalloc_bump")
-        e("\tcmpq %rdi, -16(%rsi)")     # node value-size == requested?
-        e("\tje .Lalloc_reuse")
-        e("\tmovq %rsi, %r8")           # advance: link = &node.next (node's value area)
-        e("\tmovq (%rsi), %rsi")        # node = node.next
-        e("\tjmp .Lalloc_scan")
-        e(".Lalloc_reuse:")
-        e("\tmovq (%rsi), %rax")        # node.next
-        e("\tmovq %rax, (%r8)")         # unlink node
+        e("\tmovq (%rsi), %rax")        # pop
+        e("\tmovq %rax, (%r8,%rcx,8)")
         e("\tmovq $1, -8(%rsi)")        # refcount = 1
         e("\tmovq %rsi, %rax")
         e("\tret")
@@ -916,11 +923,14 @@ class CodeGen:
         e("\tmovq %rdi, (%rax)")        # head = node
         e("\tpopq %rcx")
         e("\tret")
-        e(".Lfree_large:")
+        e(".Lfree_large:")              # its size is a power of two: 2^k
+        e("\tbsrq %rcx, %rcx")          # k
+        e(f"\tleaq __free_buckets+{_SMALL_CELL_LIMIT + 8}(%rip), %rax")
+        e("\tleaq (%rax,%rcx,8), %rax") # &list head for 2^k
+        e("\tmovq (%rax), %rcx")
+        e("\tmovq %rcx, (%rdi)")        # node.next = old head
+        e("\tmovq %rdi, (%rax)")        # head = node
         e("\tpopq %rcx")
-        e("\tmovq __free_list(%rip), %rax")
-        e("\tmovq %rax, (%rdi)")        # node.next = old head (stored in value area)
-        e("\tmovq %rdi, __free_list(%rip)")
         e("\tret")
         e("")
         # __func_retain: in %rdi = a closure env pointer (may be null). Bumps the
@@ -1403,6 +1413,9 @@ class CodeGen:
         self._retain("rbp", mp, mt)             # hold a reference for the loop
         self._drop_expr_temps(stmt.iterable)
         self._emit(f"movq $0, {si}(%rbp)")      # slot index
+        # the reference is an owner a `return` from the body releases (break
+        # and continue stop at the body scope; the loop's end releases it)
+        self._drop_scopes.append([(mp, mt)])
 
         start, cont, after = self._label(), self._label(), self._label()
         self._emit(f"{start}:")
@@ -1435,6 +1448,7 @@ class CodeGen:
         self._emit(f"movq %rax, {si}(%rbp)")
         self._emit(f"jmp {start}")
         self._emit(f"{after}:")
+        self._drop_scopes.pop()
         self._drop_value("rbp", mp, mt)         # release the loop reference
 
     def _gen_for_list(self, stmt: ast.For) -> None:
@@ -1450,6 +1464,10 @@ class CodeGen:
         self._retain("rbp", lp, lt)             # hold a reference for the loop
         self._drop_expr_temps(stmt.iterable)    # release a literal/temp iterable
         self._emit(f"movq $0, {li}(%rbp)")
+        # the reference is an owner a `return` from the body releases (break
+        # and continue stop at the body scope; the loop's end releases it,
+        # MYLA-80)
+        self._drop_scopes.append([(lp, lt)])
 
         start, cont, after = self._label(), self._label(), self._label()
         self._emit(f"{start}:")
@@ -1484,6 +1502,7 @@ class CodeGen:
         self._emit(f"movq %rax, {li}(%rbp)")
         self._emit(f"jmp {start}")
         self._emit(f"{after}:")
+        self._drop_scopes.pop()
         self._drop_value("rbp", lp, lt)         # release the loop reference
 
     def _gen_for_range(self, stmt: ast.For) -> None:
@@ -3930,6 +3949,15 @@ class CodeGen:
             self._uses_io_errno = True
             self._emit("movq __io_errno_val(%rip), %rax")
             return
+        if name == "__poll":
+            self._uses_poll = True
+            self._eval(expr.args[0])             # fd -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # timeout -> rax
+            self._emit("movslq %eax, %rsi")      # (int32, sign-extended)
+            self._emit("popq %rdi")              # fd
+            self._emit("call __poll")            # rax = 1, 0 or -1 (errno -> global)
+            return
         if name == "__read":
             self._uses_read = True
             self._eval(expr.args[0])             # fd -> rax
@@ -5002,6 +5030,44 @@ class CodeGen:
         e("\tpopq %r12")
         e("\tpopq %rbx")
         e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_poll_runtime(self) -> None:
+        """`__poll`: rdi = fd, rsi = timeout in ms (negative: none) -> rax = 1
+        when a read of fd won't block (input, its end, or an error such as a
+        bad descriptor), 0 when the time ran out, -1 when poll(7) failed, which
+        sets `__io_errno_val` (0 otherwise); retried on EINTR. Backs
+        `std.io`'s `Reader.ready` (MYLA-80)."""
+        e = self.text.append
+        e("__poll:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tsubq $16, %rsp")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        e("\tmovl %edi, (%rsp)")              # struct pollfd: fd
+        e("\tmovw $1, 4(%rsp)")               # events = POLLIN
+        e("\tmovw $0, 6(%rsp)")               # revents
+        e("\tmovq %rsi, 8(%rsp)")             # timeout
+        e(".Lpl_retry:")
+        e("\tmovq $7, %rax")                  # sys_poll
+        e("\tmovq %rsp, %rdi")
+        e("\tmovq $1, %rsi")                  # one descriptor
+        e("\tmovq 8(%rsp), %rdx")
+        e("\tsyscall")
+        e("\tcmpq $-4, %rax")                 # EINTR: try again
+        e("\tje .Lpl_retry")
+        e("\ttestq %rax, %rax")
+        e("\tjs .Lpl_err")
+        e("\tjz .Lpl_done")                   # timed out: 0
+        e("\tmovq $1, %rax")
+        e("\tjmp .Lpl_done")
+        e(".Lpl_err:")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e("\tmovq $-1, %rax")
+        e(".Lpl_done:")
+        e("\tleave")
         e("\tret")
         e("")
 

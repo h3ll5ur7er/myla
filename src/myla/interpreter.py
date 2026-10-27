@@ -827,6 +827,23 @@ class Interpreter:
             except OSError as err:
                 self._io_errno = err.errno or 0
                 return ""
+        if callee.ident == "__poll":
+            fd = self._eval(expr.args[0], env)
+            timeout = self._eval(expr.args[1], env)
+            self._out.flush()
+            self._err.flush()
+            if fd == 0 and self._in is not None:
+                return 1                       # a stream never blocks
+            import select
+            poller = select.poll()
+            poller.register(fd, select.POLLIN)
+            try:
+                ready = poller.poll(timeout)
+            except OSError as err:
+                self._io_errno = err.errno or 0
+                return -1
+            self._io_errno = 0
+            return 1 if ready else 0
         if callee.ident == "__io_errno":
             return self._io_errno
         if callee.ident == "__write_file":

@@ -1574,6 +1574,8 @@ impl CodeGen {
         self.emit(format("movq %rax, {}(%rbp)", iptr))
         self.retain("rbp", iptr, itt)             // hold a reference for the loop
         self.drop_expr_temps(it)
+        // a `return` inside the loop releases the reference too (MYLA-80)
+        push(self.drop_scopes, [DropEntry { off: iptr, ty: itt }])
         self.emit(format("movq $0, {}(%rbp)", idx))
         let lstart = self.label()
         let lcont = self.label()
@@ -1616,6 +1618,7 @@ impl CodeGen {
         self.emit(format("movq %rax, {}(%rbp)", idx))
         self.emit(format("jmp {}", lstart))
         self.emit(format("{}:", lend))
+        self.drop_scopes = drop_last(self.drop_scopes)
         self.drop_value("rbp", iptr, itt)         // release the loop reference
     }
 
@@ -2712,8 +2715,16 @@ impl CodeGen {
         self.emit(format("movq {}(%rsp), %rsi", key_at))
         self.emit(format("movq ${}, %rdx", self.map_slot_size(mt)))
         self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
-        self.emit("call __map_set_slot")
+        self.emit("call __map_set_slot")    // rax = &slot, rdx = 1 if the key was there
         self.emit("leaq 16(%rax), %rcx")     // &value
+        if self.owns_heap(map_val(mt)) {
+            // release the value being replaced (MYLA-80: it leaked)
+            let fresh = self.label()
+            self.emit("testq %rdx, %rdx")
+            self.emit(format("jz {}", fresh))
+            self.drop_stored(map_val(mt), false)
+            self.emit(format("{}:", fresh))
+        }
         self.commit_staged(map_val(mt), staged, false)
         self.emit("addq $16, %rsp")
     }
@@ -3316,14 +3327,22 @@ impl CodeGen {
         }
         self.emit(format("jmp {}", cont))
         self.emit(format("{}:", propagate))
+        // Copy the tag and the None/Err payload only: the function's result
+        // can be smaller than the operand, whose Ok/Some payload may be larger
+        // (MYLA-80: copying the whole operand overwrote the caller's frame).
+        var nbytes = 8
+        for ft in self.variant_payload(carrier, failure_variant(en)) { nbytes = nbytes + self.stored_size(ft) }
         self.emit("movq %r10, %rsi")
         self.emit("movq 16(%rbp), %rdi")
-        self.emit_copy(self.size(carrier))
+        self.emit_copy(nbytes)
         // The None/Err escapes to the caller with its own references; then
         // release the operand's temporaries and the function's owners, as a
         // `return` does (MYLA-22).
         self.emit("movq 16(%rbp), %r8")
-        self.retain("r8", 0, carrier)
+        match self.ret_type {
+            Some(rt) => { self.retain("r8", 0, rt) },
+            None => { self.retain("r8", 0, carrier) },
+        }
         self.drop_expr_temps(inner)
         self.emit_return_drops()
         self.emit("movq 16(%rbp), %rax")
@@ -3359,6 +3378,7 @@ impl CodeGen {
                 else if nm == "__io_errno" { self.emit("movq __io_errno_val(%rip), %rax") }
                 else if nm == "__write_file" { self.gen_io_write_file(args) }
                 else if nm == "__read" { self.gen_io_read(args) }
+                else if nm == "__poll" { self.gen_io_poll(args) }
                 else if nm == "__run" { self.gen_io_run(args) }
                 else if nm == "__run_stderr" { self.emit("movq __run_stderr_val(%rip), %rax") }
                 else if nm == "__run_exit_code" { self.emit("movslq __run_exit_val(%rip), %rax") }
@@ -3408,6 +3428,17 @@ impl CodeGen {
         self.emit("popq %rdi")
         self.emit("movl %edi, %edi")
         self.emit("call __read")
+    }
+
+    // `__poll(fd, timeout_ms)`: rdi = fd, rsi = timeout -> rax = 1, 0 or -1
+    // (errno in __io_errno_val).
+    fun gen_io_poll(var self, args: [Expr]) {
+        self.eval(args[0])
+        self.emit("pushq %rax")
+        self.eval(args[1])
+        self.emit("movslq %eax, %rsi")
+        self.emit("popq %rdi")
+        self.emit("call __poll")
     }
 
     // `__write_file(path, contents)`: rdi = path str cell, rsi = contents str
@@ -4748,7 +4779,45 @@ impl CodeGen {
         self.raw("")
         self.emit_write_file_runtime()
         self.emit_read_runtime()
+        self.emit_poll_runtime()
         self.emit_run_runtime()
+    }
+
+    // `__poll`: rdi = fd, rsi = timeout in ms (negative: none) -> rax = 1 when
+    // a read of fd won't block (input, its end, or an error), 0 when the time
+    // ran out, -1 when poll(7) failed, which sets `__io_errno_val` (0
+    // otherwise); retried on EINTR. Backs `std.io`'s `Reader.ready` (MYLA-80).
+    fun emit_poll_runtime(var self) {
+        self.raw("__poll:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tsubq $16, %rsp")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw("\tmovl %edi, (%rsp)")
+        self.raw("\tmovw $1, 4(%rsp)")
+        self.raw("\tmovw $0, 6(%rsp)")
+        self.raw("\tmovq %rsi, 8(%rsp)")
+        self.raw(".Lpl_retry:")
+        self.raw("\tmovq $7, %rax")
+        self.raw("\tmovq %rsp, %rdi")
+        self.raw("\tmovq $1, %rsi")
+        self.raw("\tmovq 8(%rsp), %rdx")
+        self.raw("\tsyscall")
+        self.raw("\tcmpq $-4, %rax")
+        self.raw("\tje .Lpl_retry")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lpl_err")
+        self.raw("\tjz .Lpl_done")
+        self.raw("\tmovq $1, %rax")
+        self.raw("\tjmp .Lpl_done")
+        self.raw(".Lpl_err:")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw("\tmovq $-1, %rax")
+        self.raw(".Lpl_done:")
+        self.raw("\tleave")
+        self.raw("\tret")
+        self.raw("")
     }
 
     // `__read`: rdi = fd, rsi = n -> rax = a fresh str cell (rc=1) with what
@@ -5838,7 +5907,8 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
-        // __map_set_slot: rdi=cell, rsi=key, rdx=slot_size, rcx=is_str -> rax=slot.
+        // __map_set_slot: rdi=cell, rsi=key, rdx=slot_size, rcx=is_str -> rax=slot,
+        // rdx=1 when the key was already there (its value is being replaced).
         // Returns an existing match, else claims an empty/tombstone slot (sets
         // state+key, bumps count, retains a str key: MYLA-18). Assumes room
         // exists (caller reserved).
@@ -5880,6 +5950,7 @@ impl CodeGen {
         self.raw("\ttestq %rax, %rax")
         self.raw("\tjz .Lss_next")
         self.raw("\tmovq -56(%rbp), %rax")
+        self.raw("\tmovq $1, %rdx")             // the key was there: its value is replaced
         self.raw("\tjmp .Lss_done")
         self.raw(".Lss_tomb:")
         self.raw("\tcmpq $0, -48(%rbp)")
@@ -5899,6 +5970,7 @@ impl CodeGen {
         self.raw("\tjnz .Lss_claim")
         self.raw("\tmovq %r8, %rax")
         self.raw(".Lss_claim:")
+        self.raw("\txorq %rdx, %rdx")           // a new key
         self.raw("\tmovq $1, (%rax)")
         self.raw("\tmovq %r12, 8(%rax)")
         self.raw("\tincq (%rbx)")
@@ -6827,7 +6899,7 @@ fun is_builtin_call_name(nm: str) -> bool {
     if nm == "StringBuilder" || nm == "append" || nm == "append_byte" || nm == "build" { return true }
     if nm == "contains" || nm == "remove" || nm == "keys" { return true }
     if nm == "__write" || nm == "__exit" || nm == "__args" || nm == "__read_file" || nm == "__io_errno" { return true }
-    if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" { return true }
+    if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" || nm == "__poll" { return true }
     if nm == "__run_signal" || nm == "__run_errno" { return true }
     return false
 }
@@ -6877,6 +6949,11 @@ fun getfield_name(callee: Expr) -> str {
 fun success_variant(enum_name: str) -> str {
     if enum_name == "Option" { return "Some" }
     return "Ok"
+}
+
+fun failure_variant(enum_name: str) -> str {
+    if enum_name == "Option" { return "None" }
+    return "Err"
 }
 
 fun is_pwild(p: Pattern) -> bool {

@@ -1,0 +1,166 @@
+// text.my: positions and URIs for the language server (MYLA-80).
+//
+// The compiler counts lines and columns from 1, a column in code points; LSP
+// counts from 0, a character in UTF-16 code units (a code point above U+FFFF
+// is two). The rules are those of src/myla/lsp/positions.py.
+
+// The lines of `text`, split at "\n", "\r\n" and "\r" (without them).
+#test("a\nb\nc")[["a", "b", "c"]]
+#test("a\n")[["a"]]
+#test("")[[]]
+pub fun lines_of(text: str) -> [str] {
+    var out: [str] = []
+    var start = 0
+    var i = 0
+    while i < len(text) {
+        let c = text[i]
+        if c == '\n' || c == 13u8 {
+            push(out, part(text, start, i))
+            if c == 13u8 && i + 1 < len(text) && text[i + 1] == '\n' { i = i + 1 }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < len(text) { push(out, part(text, start, len(text))) }
+    return out
+}
+
+// lines_of on "a\r\nb\rc" (string literals have no "\r").
+#test()["a|b|c"]
+fun crlf_lines() -> str {
+    var sb = StringBuilder()
+    append(sb, "a")
+    append_byte(sb, 13u8)
+    append(sb, "\nb")
+    append_byte(sb, 13u8)
+    append(sb, "c")
+    var out = StringBuilder()
+    for l in lines_of(build(sb)) {
+        if len(out) > 0 { append(out, "|") }
+        append(out, l)
+    }
+    return build(out)
+}
+
+// The bytes of `s` from `start` up to `end`.
+pub fun part(s: str, start: int32, end: int32) -> str {
+    var sb = StringBuilder()
+    append(sb, s, start, end)
+    return build(sb)
+}
+
+// The UTF-16 length of the first `n` code points of `line`.
+#test("a😀b", 2)[3]
+#test("é", 5)[1]
+pub fun utf16_units(line: str, n: int32) -> int32 {
+    var units = 0
+    var seen = 0
+    var i = 0
+    while i < len(line) && seen < n {
+        let c = line[i]
+        if c < 128u8 || c >= 192u8 {           // the first byte of a code point
+            seen = seen + 1
+            if c >= 240u8 { units = units + 2 } else { units = units + 1 }
+        }
+        i = i + 1
+    }
+    // past the end of the line (a caret after it): one unit per code point
+    return units
+}
+
+// The number of code points of `line`.
+pub fun code_points(line: str) -> int32 {
+    var n = 0
+    for b in 0..len(line) {
+        let c = line[b]
+        if c < 128u8 || c >= 192u8 { n = n + 1 }
+    }
+    return n
+}
+
+// A 0-based UTF-16 (line, character) for the compiler's 1-based (line, col),
+// clamped to the document; the start of the document when it's empty.
+pub struct Pos { line: int32, character: int32 }
+
+pub fun to_lsp(lines: [str], line: int32, col: int32) -> Pos {
+    if len(lines) == 0 { return Pos { line: 0, character: 0 } }
+    var l = line - 1
+    if l < 0 { l = 0 }
+    if l > len(lines) - 1 { l = len(lines) - 1 }
+    let text = lines[l]
+    var c = col - 1
+    if c < 0 { c = 0 }
+    let n = code_points(text)
+    if c > n { c = n }
+    return Pos { line: l, character: utf16_units(text, c) }
+}
+
+// The 1-based column just past the identifier or number starting at `col`
+// (a squiggle as wide as the word), or col + 1.
+#test("  return x", 3)[9]
+#test("a + b", 2)[3]
+#test("ab", 5)[6]
+pub fun word_end(line: str, col: int32) -> int32 {
+    let cps = chars(line)
+    var i = col - 1
+    if i < 0 { i = 0 }
+    if i >= len(cps) || !is_word(cps[i]) { return col + 1 }
+    while i < len(cps) && is_word(cps[i]) { i = i + 1 }
+    return i + 1
+}
+
+fun is_word(c: char) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+// --- URIs -----------------------------------------------------------------------
+
+// The path of a `file://` URI, percent-decoded; "" for another scheme.
+#test("file:///tmp/a%20b/c.my")["/tmp/a b/c.my"]
+#test("untitled:1")[""]
+pub fun uri_path(uri: str) -> str {
+    let prefix = "file://"
+    if len(uri) < len(prefix) || part(uri, 0, len(prefix)) != prefix { return "" }
+    var sb = StringBuilder()
+    var i = len(prefix)
+    while i < len(uri) {
+        let c = uri[i]
+        if c == '%' && i + 2 < len(uri) && hex(uri[i + 1]) >= 0 && hex(uri[i + 2]) >= 0 {
+            append_byte(sb, (hex(uri[i + 1]) * 16 + hex(uri[i + 2])) as uint8)
+            i = i + 3
+        } else {
+            append_byte(sb, c)
+            i = i + 1
+        }
+    }
+    return build(sb)
+}
+
+fun hex(c: uint8) -> int32 {
+    if c >= '0' && c <= '9' { return (c - '0') as int32 }
+    if c >= 'a' && c <= 'f' { return (c - 'a') as int32 + 10 }
+    if c >= 'A' && c <= 'F' { return (c - 'A') as int32 + 10 }
+    return -1
+}
+
+const HEX_DIGITS: str = "0123456789ABCDEF"
+
+// The `file://` URI of an absolute path, percent-encoding all but letters,
+// digits, "-._~" and "/" (as Python's urllib.parse.quote does).
+#test("/tmp/a b/é.my")["file:///tmp/a%20b/%C3%A9.my"]
+pub fun path_uri(path: str) -> str {
+    var sb = StringBuilder()
+    append(sb, "file://")
+    for i in 0..len(path) {
+        let c = path[i]
+        let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+        if alnum || c == '-' || c == '.' || c == '_' || c == '~' || c == '/' {
+            append_byte(sb, c)
+        } else {
+            append_byte(sb, '%')
+            append_byte(sb, HEX_DIGITS[(c >> 4u8) as int32])
+            append_byte(sb, HEX_DIGITS[(c & 15u8) as int32])
+        }
+    }
+    return build(sb)
+}

@@ -655,7 +655,7 @@ _BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop
                   # lives in `std.io` / `std.process` / `std.fs` and wraps these.
                   "__write", "__exit", "__args", "__read_file", "__io_errno",
                   "__run", "__run_stderr", "__run_exit_code", "__run_signal",
-                  "__run_errno", "__write_file", "__read"}
+                  "__run_errno", "__write_file", "__read", "__poll"}
 
 # builtin calls that never return (the checker treats them like a `return`)
 _DIVERGING_BUILTINS = {"panic", "unreachable", "__exit"}
@@ -3616,6 +3616,24 @@ class Checker:
                 )
             expr.resolved_type = STR
             return STR
+        if name == "__poll":
+            if len(expr.args) != 2:
+                raise TypeCheckError("__poll() takes (fd: int32, timeout_ms: int32)",
+                                     expr.line, expr.column)
+            fd_t = self._expect_value(expr.args[0], scope, INT)
+            if not isinstance(fd_t, IntType):
+                raise TypeCheckError(
+                    f"__poll() fd must be an integer, found '{type_name(fd_t)}'",
+                    expr.line, expr.column,
+                )
+            t_t = self._expect_value(expr.args[1], scope, INT)
+            if not isinstance(t_t, IntType):
+                raise TypeCheckError(
+                    f"__poll() timeout must be an integer, found '{type_name(t_t)}'",
+                    expr.line, expr.column,
+                )
+            expr.resolved_type = INT
+            return INT
         if name == "__io_errno":
             if expr.args:
                 raise TypeCheckError("__io_errno() takes no arguments",

@@ -61,6 +61,7 @@ struct Loader {
     modules: [Module],
     next_id: int32,
     spans: [Span],
+    overrides: [str: str],     // path -> text used instead of the file (an editor's unsaved buffers)
 }
 
 // -- paths ------------------------------------------------------------------
@@ -101,7 +102,7 @@ fun join(parts: [str], sep: str) -> str {
 }
 
 // `p` with `.` segments, empty segments and `x/..` pairs removed.
-fun normalize(p: str) -> str {
+pub fun normalize(p: str) -> str {
     let absolute = len(p) > 0 && p[0] == '/'
     var out: [str] = []
     for seg in split_on(p, '/') {
@@ -233,6 +234,10 @@ fun at(path: str, line: int32, col: int32, msg: str) -> Report {
 }
 
 impl Loader {
+    fun readable(self, path: str) -> bool {
+        return contains(self.overrides, path) || readable(path)
+    }
+
     fun module_id(self, path: str) -> str {
         if path == self.entry { return "" }
         if self.stdlib_root != "" {
@@ -294,8 +299,8 @@ impl Loader {
             let last = p.segments[len(p.segments) - 1]
             let file = join_path(dir, last + ".my")
             let pkg = join_path(join_path(dir, last), last + ".my")
-            let has_file = readable(file)
-            let has_pkg = readable(pkg)
+            let has_file = self.readable(file)
+            let has_pkg = self.readable(pkg)
             if has_file && has_pkg {
                 return Err(at(importer, p.line, p.col, format("ambiguous import '{}': both '{}.my' and a package '{}/' exist in {}", dotted(p), last, last, dir)))
             }
@@ -316,9 +321,14 @@ impl Loader {
             k = k + 1
         }
         var src = ""
-        match read_to_string(path) {
-            Ok(s) => { src = s },
-            Err(e) => { return Err(Report { kind: "module error", msg: format("cannot read module '{}'", path), path: path, line: 0, col: 0 }) },
+        match get(self.overrides, path) {
+            Some(text) => { src = text },
+            None => {
+                match read_to_string(path) {
+                    Ok(s) => { src = s },
+                    Err(e) => { return Err(Report { kind: "module error", msg: format("cannot read module '{}'", path), path: path, line: 0, col: 0 }) },
+                }
+            },
         }
         push(self.spans, Span { first_id: self.next_id, path: path })
         var parsed = match parse_source(src, self.next_id) {
@@ -1006,10 +1016,18 @@ pub fun default_stdlib_root(argv0: str) -> str {
 // Load and link the program rooted at `entry`; `std.*` imports resolve under
 // `stdlib_root` ("" for none).
 pub fun load_program(entry: str, stdlib_root: str) -> Result<Loaded, Report> {
+    return load_program_with(entry, stdlib_root, [:])
+}
+
+// The same, reading the files in `overrides` (path -> text) from there
+// instead: an editor's unsaved buffers (MYLA-80).
+pub fun load_program_with(entry: str, stdlib_root: str, overrides: [str: str]) -> Result<Loaded, Report> {
     let e = normalize(entry)
     var stdlib = ""
     if stdlib_root != "" { stdlib = normalize(stdlib_root) }
-    var ld = Loader { stdlib_root: stdlib, project_root: dirname(e), entry: e, modules: [], next_id: 0, spans: [] }
+    var normalized: [str: str] = [:]
+    for p in keys(overrides) { normalized[normalize(p)] = overrides[p] }
+    var ld = Loader { stdlib_root: stdlib, project_root: dirname(e), entry: e, modules: [], next_id: 0, spans: [], overrides: normalized }
     ld.load(e)?
     ld.check_ids()?
     ld.build_exports()
