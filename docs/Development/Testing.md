@@ -36,7 +36,7 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 | --- | --- | --- |
 | Unit | 466 | All pass, about 2 s |
 | Integration | 4 | Pass (2 need pygls) |
-| Burn | 389 (plus subtests) | All pass, about 42 s with cached tools (green since [[MYLA-4]]) |
+| Burn | 391 (plus subtests) | All pass, about 47 s with cached tools (green since [[MYLA-4]]) |
 
 ## Unit tests
 
@@ -50,7 +50,7 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 | `test_examples_compile.py` | Each listed example builds natively, exits 0 and prints what the interpreter prints; the list must match the directory |
 | `test_examples_tests.py` | Every `#test` case in the examples passes, and every non-generic value-returning top-level function has at least one |
 | `test_error_corpus.py` | Each file in `examples/errors/` fails in the stage its directive names, with a message containing its text; runtime errors also fail natively with the message their `native` directive names |
-| `test_compiler_parity.py` | 102 targeted programs (wrapping, division, structs, methods, consts, collections and copy-on-write, stores into containers, strings, enums and reference counting, generics, `?`, closures, pipelines, traits, floats, chars) produce identical output natively; plus stress tests that allocate and drop millions of cells (lists, maps, builders, closures, partial application, trait dispatch, `?` early returns, values staged for a container store, `break`/`continue`, match results, temporaries of a match scrutinee left early and of conditions, guards and `&&`/`||` operands) to prove memory is reclaimed, a timing guard that allocation never scans unusable free cells (MYLA-16), and trap tests for division by zero, `panic`, `assert` and `unreachable` |
+| `test_compiler_parity.py` | 103 targeted programs (wrapping, division, structs, methods, consts, collections and copy-on-write, stores into containers, strings, enums and reference counting, generics, `?`, closures, pipelines, traits, floats, chars) produce identical output natively; plus stress tests that allocate and drop millions of cells (lists, maps, builders, closures, partial application, trait dispatch, `?` early returns, values staged for a container store, `break`/`continue`, strings (concatenation, `format`, builders, map keys), match results, temporaries of a match scrutinee left early and of conditions, guards and `&&`/`||` operands) to prove memory is reclaimed, a timing guard that allocation never scans unusable free cells (MYLA-16), and trap tests for division by zero, `panic`, `assert` and `unreachable` |
 | `test_debug_info.py` | `myla build -g` binaries carry a line table readelf reads, behave exactly like plain builds, and (where gdb is installed) stop on a Myla source line |
 | `test_modules.py` | `examples/modules` in both back ends |
 | `test_stdio.py`, `test_fs.py`, `test_process.py` | Parity of stdout, stderr, exit status, argv, file contents, errno mapping, signals and spawn errors |

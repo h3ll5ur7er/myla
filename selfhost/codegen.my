@@ -64,6 +64,7 @@ pub struct CodeGen {
     funcs: [FuncSig],
     text: [str],
     rodata: [str],
+    strdata: [str],                 // static `str` cells (static_str)
     label_n: int32,
     str_n: int32,
     str_texts: [str],
@@ -125,7 +126,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         enums: c.enums,
         recursive_enums: c.recursive_enums,
         funcs: c.functions,
-        text: [], rodata: [],
+        text: [], rodata: [], strdata: [],
         label_n: 0, str_n: 0,
         str_texts: [], str_labels: [],
         locals: [:], for_lv: [:], for_end: [:],
@@ -217,7 +218,7 @@ impl CodeGen {
         return -1
     }
 
-    // Intern a string literal, emitting a length-prefixed `str` cell in rodata.
+    // Intern a string literal, emitting a static `str` cell (MYLA-18).
     fun string_label(var self, text: str) -> str {
         let existing = self.str_index(text)
         if existing >= 0 { return self.str_labels[existing] }
@@ -225,10 +226,7 @@ impl CodeGen {
         self.str_n = self.str_n + 1
         push(self.str_texts, text)
         push(self.str_labels, lab)
-        push(self.rodata, format("{}:", lab))
-        let n = len(text)
-        push(self.rodata, format("\t.quad {}", n))
-        if n > 0 { push(self.rodata, "\t.byte " + byte_list(text)) }
+        for line in static_str(lab, text) { push(self.strdata, line) }
         return lab
     }
 
@@ -492,6 +490,7 @@ impl CodeGen {
             Type.TList(e) => { return true },
             Type.TMap(k, v) => { return true },
             Type.TSB => { return true },
+            Type.TStr => { return true },
             Type.TFunc(ps, r) => { return true },
             Type.TStruct(n, a) => {
                 if list_has_str(seen, n) { return false }
@@ -534,6 +533,7 @@ impl CodeGen {
             Type.TList(e) => "__drop_list_" + mono_token(e),
             Type.TMap(k, v) => "__drop_map_" + map_token(k, v),
             Type.TSB => "__sb_drop",
+            Type.TStr => "__str_drop",
             _ => "__dropb_" + mono_token(t),
         }
     }
@@ -569,6 +569,7 @@ impl CodeGen {
             self.need_sb = true
             return
         }
+        if is_str_t(t) { return }                // `__str_drop` is always there
         let tok = mono_token(t)
         if list_has_str(self.drop_emitted, tok) { return }
         for p in self.need_drop { if mono_token(p) == tok { return } }
@@ -658,7 +659,7 @@ impl CodeGen {
     // Apply the retain/drop action to a single member of type `ft` at `off(base)`:
     // heap-pointer leaves trigger the action directly; inline aggregates recurse.
     fun walk_member(var self, base: str, off: int32, ft: Type, retain: bool) {
-        if self.is_boxed(ft) || is_list_t(ft) || is_map_t(ft) || is_sb_t(ft) {
+        if self.is_boxed(ft) || is_cell_t(ft) {
             if retain { self.inc_box(off, base, ft) } else { self.drop_box(off, base, ft) }
         } else if is_tfunc(ft) {
             if retain { self.inc_box(off + 8, base, ft) } else { self.drop_box(off + 8, base, ft) }
@@ -670,14 +671,14 @@ impl CodeGen {
     // Retain every heap reference an inline value of `t` at `off(base)` brings in
     // (the slot becomes a new co-owner).
     fun retain(var self, base: str, off: int32, t: Type) {
-        if is_list_t(t) || is_map_t(t) || is_sb_t(t) { self.inc_box(off, base, t) }
+        if is_cell_t(t) { self.inc_box(off, base, t) }
         else if is_tfunc(t) { self.inc_box(off + 8, base, t) }
         else if self.owns_heap(t) { self.owned_walk(base, off, t, true) }
     }
 
     // Release every heap reference an inline value of `t` at `off(base)` holds.
     fun drop_value(var self, base: str, off: int32, t: Type) {
-        if is_list_t(t) || is_map_t(t) || is_sb_t(t) { self.drop_box(off, base, t) }
+        if is_cell_t(t) { self.drop_box(off, base, t) }
         else if is_tfunc(t) { self.drop_box(off + 8, base, t) }
         else if self.owns_heap(t) { self.owned_walk(base, off, t, false) }
     }
@@ -970,9 +971,6 @@ impl CodeGen {
         push(out, "\t.section .rodata")
         push(out, ".Lbool_true:\n\t.ascii \"true\"")
         push(out, ".Lbool_false:\n\t.ascii \"false\"")
-        push(out, ".Lstr_true:\n\t.quad 4\n\t.ascii \"true\"")
-        push(out, ".Lstr_false:\n\t.quad 5\n\t.ascii \"false\"")
-        push(out, ".Lstr_minus:\n\t.quad 1\n\t.ascii \"-\"")
         let messages = trap_messages()
         var ti = 0
         for label in trap_labels() {
@@ -982,6 +980,22 @@ impl CodeGen {
         }
         for line in self.rodata { push(out, line) }
         if self.uses_float { for chunk in self.float_rodata_text() { push(out, chunk) } }
+        push(out, "")
+        // `str` values that live in the binary (literals, the renderers'
+        // constants): cells with a count that never reaches zero (MYLA-18)
+        push(out, "\t.data")
+        var statics = ["true", "false", "-"]
+        var slabels = [".Lstr_true", ".Lstr_false", ".Lstr_minus"]
+        if self.uses_float {
+            for t in ["nan", "inf", "-inf", "0", "-0"] { push(statics, t) }
+            for l in [".Lstr_nan", ".Lstr_inf", ".Lstr_ninf", ".Lstr_fzero", ".Lstr_fnzero"] { push(slabels, l) }
+        }
+        var si = 0
+        while si < len(statics) {
+            for line in static_str(slabels[si], statics[si]) { push(out, line) }
+            si = si + 1
+        }
+        for line in self.strdata { push(out, line) }
         push(out, "")
         push(out, "\t.bss")
         push(out, "\t.align 8")
@@ -1192,6 +1206,8 @@ impl CodeGen {
                     self.alloc(e.id, 16)
                 } else if is_overloadable_op(op) && is_struct_or_enum_t(self.type_of(l.id)) && is_aggregate(bt) {
                     self.alloc(e.id, self.size(bt))
+                } else if is_str_t(bt) {
+                    self.alloc(e.id, 8)          // the concatenation's temp (MYLA-18)
                 }
             },
             ExprKind.Call(c, args) => {
@@ -1614,9 +1630,12 @@ impl CodeGen {
         self.emit("movq %rax, %rdi")
         self.emit(format("movq ${}, %rsi", self.map_slot_size(mt)))
         self.emit(format("movq ${}, %rdx", stride))
+        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
         self.emit("call __map_keys")
         self.emit(format("movq %rax, {}(%rbp)", iptr))
         self.drop_expr_temps(it)                   // release a temp map (keys copied out)
+        // a `return` inside the loop releases the keys list too
+        push(self.drop_scopes, [DropEntry { off: iptr, ty: Type.TList(kt) }])
         self.emit(format("movq $0, {}(%rbp)", idx))
         let lstart = self.label()
         let lcont = self.label()
@@ -1647,6 +1666,7 @@ impl CodeGen {
         self.emit(format("movq %rax, {}(%rbp)", idx))
         self.emit(format("jmp {}", lstart))
         self.emit(format("{}:", lend))
+        self.drop_scopes = drop_last(self.drop_scopes)
         self.drop_value("rbp", iptr, Type.TList(kt))   // free the keys list
     }
 
@@ -1809,6 +1829,8 @@ impl CodeGen {
             self.emit("movq %rax, %rdi")
             self.emit("movq %rcx, %rsi")
             self.emit("call __str_concat")
+            // its temp: the statement's end releases it unless it's consumed
+            self.emit(format("movq %rax, {}(%rbp)", self.local_of(e.id)))
             return
         }
         self.eval_operands(l, r)
@@ -2745,11 +2767,15 @@ impl CodeGen {
         self.emit("movzbl %al, %eax")
     }
 
-    // `remove(m, key)`: make the map unique (copies of it keep the entry), then
-    // turn the key's slot into a tombstone and release its value (MYLA-25).
+    // `remove(m, key)`: make the map unique (copies of it keep the entry), turn
+    // the key's slot into a tombstone, release its key and value (MYLA-25),
+    // then rebuild the table without the tombstone: with tombstones left
+    // behind, a map that saw many distinct keys had no empty slot left and a
+    // lookup of a missing key never ended (MYLA-18).
     fun gen_map_remove(var self, m: Expr, k: Expr) {
         let mt = self.place_type(m)
         self.mut_addr_of_list_holder(m)      // &holder -> rax
+        self.emit("pushq %rax")
         self.cow_unique(mt)                  // unique cell, written back to holder
         self.emit("pushq %rax")
         self.eval(k)
@@ -2764,9 +2790,23 @@ impl CodeGen {
         self.emit(format("jz {}", done))
         self.emit("movq $2, (%rax)")         // tombstone
         self.emit("decq (%rdx)")             // len -= 1
+        if is_str_t(map_key(mt)) {           // the key's reference (MYLA-18)
+            self.emit("pushq %rax")
+            self.emit("movq 8(%rax), %rdi")
+            self.emit("call __str_drop")
+            self.emit("popq %rax")
+        }
         self.emit("leaq 16(%rax), %rcx")     // &value
         self.drop_stored(map_val(mt), false)
+        self.emit("movq (%rsp), %rax")       // &holder
+        self.emit("movq (%rax), %rdi")
+        self.emit(format("movq ${}, %rsi", self.map_slot_size(mt)))
+        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
+        self.emit("call __map_rebuild")
+        self.emit("movq (%rsp), %rcx")
+        self.emit("movq %rax, (%rcx)")       // publish the rebuilt cell
         self.emit(format("{}:", done))
+        self.emit("addq $8, %rsp")           // &holder
     }
 
     fun gen_map_keys(var self, e: Expr, m: Expr) {
@@ -2775,6 +2815,7 @@ impl CodeGen {
         self.emit("movq %rax, %rdi")
         self.emit(format("movq ${}, %rsi", self.map_slot_size(mt)))
         self.emit(format("movq ${}, %rdx", self.stored_size(map_key(mt))))
+        self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
         self.emit("call __map_keys")
     }
     fun gen_chars(var self, s: Expr) {
@@ -2786,34 +2827,63 @@ impl CodeGen {
     // -- strings: format + StringBuilder ----------------------------------
 
     // `format(fmt, args…)`: fmt is a literal; concatenate its segments with each
-    // argument rendered by its print form. Result string cell in %rax.
+    // argument rendered by its print form. Result string cell in %rax, always a
+    // fresh reference; each fresh piece and running result is released once
+    // it has been concatenated (MYLA-18).
     fun gen_format(var self, e: Expr, args: [Expr]) {
         let fmt = match args[0].kind { ExprKind.StrLit(s) => s, _ => "" }
         let segs = format_segments(fmt)
         let s0 = self.string_label(segs[0])
         self.emit(format("leaq {}(%rip), %rax", s0))
+        if len(args) == 1 { self.emit("incq -8(%rax)") }   // a new reference
+        var owned = false
         var k = 1
         while k < len(args) {
-            self.emit("pushq %rax")
-            self.render_arg(args[k])
+            self.emit("pushq %rax")              // running result (A)
+            let piece_owned = self.render_arg(args[k])
+            self.emit("pushq %rax")              // B
             self.emit("movq %rax, %rsi")
-            self.emit("popq %rdi")
+            self.emit("movq 8(%rsp), %rdi")
             self.emit("call __str_concat")
+            self.emit("popq %rdi")
+            if piece_owned { self.drop_str_keeping_rax() }
+            self.emit("popq %rdi")
+            if owned { self.drop_str_keeping_rax() }
             self.emit("pushq %rax")
             let sl = self.string_label(segs[k])
             self.emit(format("leaq {}(%rip), %rsi", sl))
-            self.emit("popq %rdi")
+            self.emit("movq (%rsp), %rdi")
             self.emit("call __str_concat")
+            self.emit("popq %rdi")
+            self.drop_str_keeping_rax()
+            owned = true
             k = k + 1
         }
     }
 
-    // Render a printable value as a fresh str cell in %rax.
-    fun render_arg(var self, arg: Expr) {
+    // Release the `str` in %rdi, preserving %rax.
+    fun drop_str_keeping_rax(var self) {
+        self.emit("pushq %rax")
+        self.emit("call __str_drop")
+        self.emit("popq %rax")
+    }
+
+    // Print the fresh `str` in %rax, then release it.
+    fun print_and_drop_str(var self) {
+        self.emit("pushq %rax")
+        self.emit("movq %rax, %rdi")
+        self.emit("call __print_str")
+        self.emit("popq %rdi")
+        self.emit("call __str_drop")
+    }
+
+    // Render a printable value as a str cell in %rax: true if it is a fresh
+    // reference the caller releases, false for a `str` argument (borrowed).
+    fun render_arg(var self, arg: Expr) -> bool {
         let at = self.type_of(arg.id)
         self.eval(arg)
         match at {
-            Type.TStr => {},
+            Type.TStr => { return false },
             Type.TBool => {
                 self.emit("movq %rax, %rdi")
                 self.emit("call __bool_to_str")
@@ -2833,6 +2903,7 @@ impl CodeGen {
             },
             _ => {},
         }
+        return true
     }
 
     fun gen_sb_new(var self, e: Expr) {
@@ -4043,8 +4114,7 @@ impl CodeGen {
             },
             Type.TFloat(w) => {
                 self.float_to_str(w)
-                self.emit("movq %rax, %rdi")
-                self.emit("call __print_str")
+                self.print_and_drop_str()
             },
             _ => {},
         }
@@ -4325,9 +4395,14 @@ impl CodeGen {
         self.raw("\tcall __uint_to_str")
         self.raw("\ttestq %rbx, %rbx")
         self.raw("\tjz .Li2s_done")
+        self.raw("\tmovq %rax, %rbx")
         self.raw("\tmovq %rax, %rsi")
         self.raw("\tleaq .Lstr_minus(%rip), %rdi")
         self.raw("\tcall __str_concat")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tmovq %rax, %rbx")
+        self.raw("\tcall __str_drop")         // release the magnitude
+        self.raw("\tmovq %rbx, %rax")
         self.raw(".Li2s_done:")
         self.raw("\tpopq %rbx")
         self.raw("\tleave")
@@ -4337,9 +4412,20 @@ impl CodeGen {
         self.raw("\ttestq %rdi, %rdi")
         self.raw("\tjz .Lb2s_false")
         self.raw("\tleaq .Lstr_true(%rip), %rax")
+        self.raw("\tincq -8(%rax)")           // a new reference, like the other renderers
         self.raw("\tret")
         self.raw(".Lb2s_false:")
         self.raw("\tleaq .Lstr_false(%rip), %rax")
+        self.raw("\tincq -8(%rax)")
+        self.raw("\tret")
+        self.raw("")
+        // __str_drop: rdi = str cell. Decrement; free at zero (a str owns nothing
+        // else); static cells never reach zero. Clobbers only %rax (MYLA-18).
+        self.raw("__str_drop:")
+        self.raw("\tdecq -8(%rdi)")
+        self.raw("\tjnz .Lsdrop_keep")
+        self.raw("\tjmp __free")
+        self.raw(".Lsdrop_keep:")
         self.raw("\tret")
         self.raw("")
         self.raw("__heap_init:")
@@ -5169,8 +5255,8 @@ impl CodeGen {
             "\tjns .Lf_pos\n\tmovq $1, %r14\n.Lf_pos:\n\tmovq %rax, %xmm8\n\txorq %r8, %r8\n\tmovq $631, %r9\n\tmovq $-1, %r10\n\tleaq __pow10_hi(%rip), %r13\n.Lf_bs:\n\tcmpq %r9, %r8\n\tjg .Lf_bsd\n\tleaq (%r8,%r9), %r11\n\tsarq $1, %r11\n\tmovsd (%r13,%r11,8), %xmm0\n\tucomisd %xmm0, %xmm8\n\tjb .Lf_bs_lo\n\tmovq %r11, %r10\n\tleaq 1(%r11), %r8\n\tjmp .Lf_bs\n.Lf_bs_lo:\n\tleaq -1(%r11), %r9\n\tjmp .Lf_bs\n.Lf_bsd:\n\tmovq %r15, %r12\n\tdecq %r12\n\taddq $323, %r12\n\tsubq %r10, %r12\n\tcall __fscale\n\tmovq $1, %r8\n\tmovq %r15, %rcx\n\tdecq %rcx\n.Lf_p10:\n\ttestq %rcx, %rcx\n\tjz .Lf_p10d\n\timulq $10, %r8\n\tdecq %rcx\n\tjmp .Lf_p10\n.Lf_p10d:\n\tleaq (%r8,%r8,4), %r9\n\taddq %r9, %r9",
             "\tcmpq %r9, %rax\n\tjb .Lf_norm2\n\txorq %rdx, %rdx\n\tmovq $10, %rcx\n\tdivq %rcx\n\tincq %r10\n.Lf_norm2:\n\tcmpq %r8, %rax\n\tjae .Lf_digits\n\tmovq %r8, %rax\n.Lf_digits:\n\tleaq -1088(%rbp), %rdi\n\tmovq %r15, %rcx\n\tleaq -1(%rdi,%rcx), %rsi\n\tmovq $10, %r11\n.Lf_dg:\n\txorq %rdx, %rdx\n\tdivq %r11\n\taddb $48, %dl\n\tmovb %dl, (%rsi)\n\tdecq %rsi\n\tdecq %rcx\n\tjnz .Lf_dg\n\tmovq %r15, %rcx\n\tleaq -1088(%rbp), %rdi\n.Lf_trim:\n\tcmpq $1, %rcx\n\tjle .Lf_trimd\n\tmovzbl -1(%rdi,%rcx), %eax\n\tcmpb $48, %al\n\tjne .Lf_trimd\n\tdecq %rcx\n\tjmp .Lf_trim\n.Lf_trimd:\n\tmovq %rcx, %r8\n\tleaq -323(%r10), %r13\n\tleaq -512(%rbp), %r12\n\tmovq %r12, %rdi\n\ttestq %r14, %r14\n\tjz .Lf_nosign",
             "\tmovb $45, (%rdi)\n\tincq %rdi\n.Lf_nosign:\n\tleaq -1088(%rbp), %rsi\n\tcld\n\tmovq %r8, %rax\n\tdecq %rax\n\tcmpq %rax, %r13\n\tjge .Lf_brA\n\ttestq %r13, %r13\n\tjs .Lf_brC\n\tleaq 1(%r13), %rcx\n\trep movsb\n\tmovb $46, (%rdi)\n\tincq %rdi\n\tmovq %r8, %rcx\n\tsubq %r13, %rcx\n\tdecq %rcx\n\trep movsb\n\tjmp .Lf_emit\n.Lf_brA:\n\tmovq %r8, %rcx\n\trep movsb\n\tmovq %r13, %rcx\n\tsubq %r8, %rcx\n\tincq %rcx\n.Lf_zA:\n\ttestq %rcx, %rcx\n\tjz .Lf_emit\n\tmovb $48, (%rdi)\n\tincq %rdi\n\tdecq %rcx\n\tjmp .Lf_zA\n.Lf_brC:\n\tmovb $48, (%rdi)\n\tincq %rdi\n\tmovb $46, (%rdi)\n\tincq %rdi\n\tmovq %r13, %rcx\n\tnegq %rcx",
-            "\tdecq %rcx\n.Lf_zC:\n\ttestq %rcx, %rcx\n\tjz .Lf_cC\n\tmovb $48, (%rdi)\n\tincq %rdi\n\tdecq %rcx\n\tjmp .Lf_zC\n.Lf_cC:\n\tmovq %r8, %rcx\n\trep movsb\n.Lf_emit:\n\tmovq %rdi, %r8\n\tsubq %r12, %r8\n\tleaq 8(%r8), %rdi\n\tpushq %r8\n\tpushq %r12\n\tcall __alloc\n\tpopq %r12\n\tpopq %r8\n\tmovq %r8, (%rax)\n\tleaq 8(%rax), %rdi\n\tmovq %r12, %rsi\n\tmovq %r8, %rcx\n\tcld\n\tpushq %rax\n\trep movsb\n\tpopq %rax\n\tjmp .Lf_ret\n.Lf_nan:\n\tleaq .Lstr_nan(%rip), %rax\n\tjmp .Lf_ret\n.Lf_inf:\n\ttestq %rbx, %rbx\n\tjs .Lf_ninf\n\tleaq .Lstr_inf(%rip), %rax\n\tjmp .Lf_ret\n.Lf_ninf:\n\tleaq .Lstr_ninf(%rip), %rax\n\tjmp .Lf_ret",
-            ".Lf_zero:\n\ttestq %rbx, %rbx\n\tjs .Lf_nzero\n\tleaq .Lstr_fzero(%rip), %rax\n\tjmp .Lf_ret\n.Lf_nzero:\n\tleaq .Lstr_fnzero(%rip), %rax\n.Lf_ret:\n\tleaq -40(%rbp), %rsp\n\tpopq %r15\n\tpopq %r14\n\tpopq %r13\n\tpopq %r12\n\tpopq %rbx\n\tpopq %rbp\n\tret\n",
+            "\tdecq %rcx\n.Lf_zC:\n\ttestq %rcx, %rcx\n\tjz .Lf_cC\n\tmovb $48, (%rdi)\n\tincq %rdi\n\tdecq %rcx\n\tjmp .Lf_zC\n.Lf_cC:\n\tmovq %r8, %rcx\n\trep movsb\n.Lf_emit:\n\tmovq %rdi, %r8\n\tsubq %r12, %r8\n\tleaq 8(%r8), %rdi\n\tpushq %r8\n\tpushq %r12\n\tcall __alloc\n\tpopq %r12\n\tpopq %r8\n\tmovq %r8, (%rax)\n\tleaq 8(%rax), %rdi\n\tmovq %r12, %rsi\n\tmovq %r8, %rcx\n\tcld\n\tpushq %rax\n\trep movsb\n\tpopq %rax\n\tjmp .Lf_ret\n.Lf_nan:\n\tleaq .Lstr_nan(%rip), %rax\n\tjmp .Lf_static\n.Lf_inf:\n\ttestq %rbx, %rbx\n\tjs .Lf_ninf\n\tleaq .Lstr_inf(%rip), %rax\n\tjmp .Lf_static\n.Lf_ninf:\n\tleaq .Lstr_ninf(%rip), %rax\n\tjmp .Lf_static",
+            ".Lf_zero:\n\ttestq %rbx, %rbx\n\tjs .Lf_nzero\n\tleaq .Lstr_fzero(%rip), %rax\n\tjmp .Lf_static\n.Lf_nzero:\n\tleaq .Lstr_fnzero(%rip), %rax\n.Lf_static:\n\tincq -8(%rax)\n.Lf_ret:\n\tleaq -40(%rbp), %rsp\n\tpopq %r15\n\tpopq %r14\n\tpopq %r13\n\tpopq %r12\n\tpopq %rbx\n\tpopq %rbp\n\tret\n",
         ]
     }
 
@@ -5209,8 +5295,7 @@ impl CodeGen {
             "\t.quad 6788024849156054516\n\t.quad 6802936600622187889\n\t.quad 16018336534649448017\n\t.quad 6836307205845535296\n\t.quad 6847526947788242129\n\t.quad 16083162576329208827\n\t.quad 6878180288986781571\n\t.quad 6893112902273744228\n\t.quad 16127511124838167363\n\t.quad 6920755653331083244\n\t.quad 16163091271436723213\n\t.quad 16166283706280145984\n\t.quad 16191591948408621610\n\t.quad 6982518012130186060\n\t.quad 16207083560356724492\n\t.quad 16222234571101812584\n\t.quad 16249733129449727144\n\t.quad 7035010233023956060\n\t.quad 16268284616197813531\n\t.quad 7074250895573587892\n\t.quad 16310916199304077919\n\t.quad 7101326876339410185\n\t.quad 16332176588905073514\n\t.quad 7125055747823104222\n\t.quad 7139782730942803221\n\t.quad 7164875495204004375\n\t.quad 16393981423484742343\n\t.quad 16408837817237730681\n\t.quad 16431233932633314486\n\t.quad 16446396254418704867\n\t.quad 16457467857302544476\n\t.quad 16475552148681415738\n\t.quad 7265953008968961208\n\t.quad 7275178623440543692\n\t.quad 7295308312253184992\n\t.quad 7310141167574771052\n\t.quad 16541975800264376947\n\t.quad 16567978094457343172\n\t.quad 7351786928465428502\n\t.quad 16591754666720184306",
             "\t.quad 7389535513882014473\n\t.quad 7390553214977507116\n\t.quad 7405226470382092023\n\t.quad 16646175145755994278\n\t.quad 16666677697909592424\n\t.quad 16681743592819276513\n\t.quad 7468193549396569294\n\t.quad 16715571514660638208\n\t.quad 7507486656686235264\n\t.quad 7518742175219566113\n\t.quad 7538733424569326548\n\t.quad 7542067617601162022\n\t.quad 7563901724670788476\n\t.quad 7583846641578979885\n\t.quad 16812475236256400015\n\t.quad 7607932478437570151\n\t.quad 16851061413286473216\n\t.quad 7637122349227797761\n\t.quad 7637285979349467656\n\t.quad 16892362498314867415\n\t.quad 16907239086085770183\n\t.quad 16922057306108956344\n\t.quad 7710998379181313434\n\t.quad 7731514096036767872\n\t.quad 7742481479065600672\n\t.quad 16986518769728265820\n\t.quad 7776788537546717709\n\t.quad 7777443566502298754\n\t.quad 17031931430614575782\n\t.quad 17043019839657841999\n\t.quad 17058006250868767395\n\t.quad 7844839795278712168\n\t.quad 17080440031303470910\n\t.quad 17102447111357623491\n\t.quad 17117653641704540148\n\t.quad 7909777184276130567\n\t.quad 17146761182853081655\n\t.quad 7927555536158797039\n\t.quad 17168648009404892139\n\t.quad 17191936599390661945",
             "\t.quad 17206997503608985736\n\t.quad 17224357254426754901\n\t.quad 17239642023056203562\n\t.quad 17250866684495116021\n\t.quad 17268663991083225689\n\t.quad 8057988658405415185\n\t.quad 17295889112523735211\n\t.quad 8091113990793215893\n\t.quad 8106412954591121275\n\t.quad 17341193333534809255\n\t.quad 17361146943751997928\n\t.quad 8149550550428492702\n\t.quad 8164821955346263173\n\t.quad 8168508878667849369\n\t.quad 17412924023456548464\n\t.quad 17428062688256055308\n\t.quad 17447236697115546500\n\t.quad 8240096742328358811\n\t.quad 17478081573710770814\n\t.quad 8269977678330400881\n\t.quad 17498647939198266825\n\t.quad 17513825484703193404\n\t.quad 17535117640951489507\n\t.quad 17552718380065087086\n\t.quad 17562759727809539090\n\t.quad 8353524032627828969\n\t.quad 8368405709970948498\n\t.quad 17610314891431048965\n\t.quad 17625261677323105478\n\t.quad 8417243843776749316\n\t.quad 17657468063736256827\n\t.quad 8447933695112687735\n\t.quad 8465129395903213130\n\t.quad 8475978919083309533\n\t.quad 17715779508703643564\n\t.quad 17712050424774629749\n\t.quad 8520154222361446403\n\t.quad 17761481200832101118\n\t.quad 17772561267521243582\n\t.quad 17787537250789514285",
-            "\t.quad 17802804428574947740\n\t.quad 8596151911769212925\n\t.quad 17838394584658356994\n\t.quad 8620798535177573499\n\t.quad 17862396941767623475\n\t.quad 17882805782688123392\n\t.quad 17882917943541818368\n\t.quad 17911450954185925072\n\t.quad 17926246462008244804\n\t.quad 8715443047340349227\n\t.quad 17946459272806599721\n\t.quad 8749146895201199642\n\t.quad 17986809087878668384\n\t.quad 8769928034088087312\n\t.quad 8784919622776474324\n\t.quad 18023157971702243959\n\t.quad 8819814338074970427\n\t.quad 18060019438313740859\n\t.quad 18074802370242207946\n\t.quad 18089903335432263933\n\t.quad 18107187971928035230\n\t.quad 18082348143375254873\n\t.quad 8912599740500244377\n\t.quad 8927245410063936192\n\t.quad 18157462554107144769\n\t.quad 8947714589084859183\n\t.quad 18184455833633773061\n__fsplit:\n\t.quad 4728779608772575232\n__fbig:\n\t.quad 9092767647661031424\n__fup:\n\t.quad 4895412794951729152\n__fdown:\n\t.quad 4318952042648305664\n.Lstr_nan:\n\t.quad 3\n\t.ascii \"nan\"\n.Lstr_inf:\n\t.quad 3",
-            "\t.ascii \"inf\"\n.Lstr_ninf:\n\t.quad 4\n\t.ascii \"-inf\"\n.Lstr_fzero:\n\t.quad 1\n\t.ascii \"0\"\n.Lstr_fnzero:\n\t.quad 2\n\t.ascii \"-0\"",
+            "\t.quad 17802804428574947740\n\t.quad 8596151911769212925\n\t.quad 17838394584658356994\n\t.quad 8620798535177573499\n\t.quad 17862396941767623475\n\t.quad 17882805782688123392\n\t.quad 17882917943541818368\n\t.quad 17911450954185925072\n\t.quad 17926246462008244804\n\t.quad 8715443047340349227\n\t.quad 17946459272806599721\n\t.quad 8749146895201199642\n\t.quad 17986809087878668384\n\t.quad 8769928034088087312\n\t.quad 8784919622776474324\n\t.quad 18023157971702243959\n\t.quad 8819814338074970427\n\t.quad 18060019438313740859\n\t.quad 18074802370242207946\n\t.quad 18089903335432263933\n\t.quad 18107187971928035230\n\t.quad 18082348143375254873\n\t.quad 8912599740500244377\n\t.quad 8927245410063936192\n\t.quad 18157462554107144769\n\t.quad 8947714589084859183\n\t.quad 18184455833633773061\n__fsplit:\n\t.quad 4728779608772575232\n__fbig:\n\t.quad 9092767647661031424\n__fup:\n\t.quad 4895412794951729152\n__fdown:\n\t.quad 4318952042648305664",
         ]
     }
 
@@ -5670,7 +5755,8 @@ impl CodeGen {
         self.raw("")
         // __map_set_slot: rdi=cell, rsi=key, rdx=slot_size, rcx=is_str -> rax=slot.
         // Returns an existing match, else claims an empty/tombstone slot (sets
-        // state+key, bumps count). Assumes room exists (caller reserved).
+        // state+key, bumps count, retains a str key: MYLA-18). Assumes room
+        // exists (caller reserved).
         self.raw("__map_set_slot:")
         self.raw("\tpushq %rbp")
         self.raw("\tmovq %rsp, %rbp")
@@ -5731,6 +5817,9 @@ impl CodeGen {
         self.raw("\tmovq $1, (%rax)")
         self.raw("\tmovq %r12, 8(%rax)")
         self.raw("\tincq (%rbx)")
+        self.raw("\ttestq %r14, %r14")
+        self.raw("\tjz .Lss_done")
+        self.raw("\tincq -8(%r12)")             // the map holds a reference
         self.raw(".Lss_done:")
         self.raw("\taddq $32, %rsp")
         self.raw("\tpopq %r14")
@@ -5784,6 +5873,11 @@ impl CodeGen {
         self.raw("\tmovq %r8, -56(%rbp)")
         self.raw("\tcall __map_set_slot")
         self.raw("\tmovq -56(%rbp), %r8")
+        self.raw("\ttestq %r14, %r14")
+        self.raw("\tjz .Lmg_moved")
+        self.raw("\tmovq 8(%r8), %rcx")
+        self.raw("\tdecq -8(%rcx)")             // the key moved: the new cell holds one
+        self.raw(".Lmg_moved:")
         self.raw("\tleaq 16(%rax), %rdi")
         self.raw("\tleaq 16(%r8), %rsi")
         self.raw("\tmovq %r13, %rcx")
@@ -5808,6 +5902,25 @@ impl CodeGen {
         self.raw("\tpopq %rbx")
         self.raw("\tleave")
         self.raw("\tret")
+        self.raw("")
+        // __map_rebuild: rdi=cell, rsi=slot_size, rcx=is_str -> rax = a cell of
+        // the same capacity without tombstones, so a probe always ends at an
+        // empty slot (`remove` rebuilds, like the Python backend's, MYLA-18).
+        // Same frame as __map_grow, whose body it shares.
+        self.raw("__map_rebuild:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw("\tsubq $24, %rsp")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq %rsi, %r13")
+        self.raw("\tmovq %rcx, %r14")
+        self.raw("\tmovq 8(%rbx), %r12")
+        self.raw("\tjmp .Lmg_new")
         self.raw("")
         // __map_reserve: rdi=&holder, rsi=slot_size, rcx=is_str. Grows (writing
         // the new cell back through the holder) when empty or above 0.75 load.
@@ -5844,7 +5957,8 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
-        // __map_keys: rdi=cell, rsi=slot_size, rdx=key_stride -> rax=[K] list cell.
+        // __map_keys: rdi=cell, rsi=slot_size, rdx=key_stride, rcx=is_str -> rax=[K]
+        // list cell, which holds a reference to each str key (MYLA-18).
         self.raw("__map_keys:")
         self.raw("\tpushq %rbp")
         self.raw("\tmovq %rsp, %rbp")
@@ -5857,6 +5971,7 @@ impl CodeGen {
         self.raw("\tmovq %rdi, %rbx")
         self.raw("\tmovq %rsi, %r13")
         self.raw("\tmovq %rdx, %r14")
+        self.raw("\tmovq %rcx, -64(%rbp)")
         self.raw("\tmovq (%rbx), %rax")
         self.raw("\tmovq %rax, %r12")
         self.raw("\timulq %r14, %rax")
@@ -5879,6 +5994,10 @@ impl CodeGen {
         self.raw("\tcmpq $1, %rcx")
         self.raw("\tjne .Lmk_skip")
         self.raw("\tmovq 8(%r8), %rcx")
+        self.raw("\tcmpq $0, -64(%rbp)")
+        self.raw("\tje .Lmk_noinc")
+        self.raw("\tincq -8(%rcx)")
+        self.raw(".Lmk_noinc:")
         self.raw("\tmovq -56(%rbp), %rax")
         self.raw("\tmovq %rax, %r9")
         self.raw("\timulq %r14, %r9")
@@ -6426,6 +6545,19 @@ fun is_list_t(t: Type) -> bool { return match t { Type.TList(e) => true, _ => fa
 fun is_map_t(t: Type) -> bool { return match t { Type.TMap(k, v) => true, _ => false } }
 fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => false } }
 fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
+
+// A heap cell whose pointer is the value: retained and dropped as one pointer.
+fun is_cell_t(t: Type) -> bool { return is_list_t(t) || is_map_t(t) || is_sb_t(t) || is_str_t(t) }
+
+// A `str` cell in the data section: the heap's `[size][refcount]` header, then
+// `[len][bytes]` at `label`; its count never reaches zero (MYLA-18, the Python
+// backend's `_static_str` and STATIC_RC).
+fun static_str(label: str, text: str) -> [str] {
+    var out = ["\t.balign 8", format("\t.quad {}", 8 + len(text)), "\t.quad 4611686018427387904",
+               format("{}:", label), format("\t.quad {}", len(text))]
+    if len(text) > 0 { push(out, "\t.byte " + byte_list(text)) }
+    return out
+}
 
 // The variable a place (`x`, `x.f`, `x[i].g`) starts from, or "" when `e` is
 // not a place.

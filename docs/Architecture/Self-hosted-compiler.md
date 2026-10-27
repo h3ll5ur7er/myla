@@ -42,7 +42,7 @@ Myla has no global variables and no module-level maps, and everything is a value
 | Floats | Full support | Full support since [[MYLA-29]]: literals converted with integer arithmetic (`selfhost/floatlit.my`), the float runtime generated from the Python backend's (`scripts/gen_selfhost_runtime.py`) |
 | Diagnostics | Messages with file positions | The same: lex, parse, module and type errors print exactly as in the Python CLI, file, source line and caret included ([[MYLA-28]]) |
 | Runtime errors | Messages | The interpreter (`myla run`/`test`): the same messages and rendering since [[MYLA-32]]; native binaries: `runtime error: <message>` on stderr and exit 1, without the position, as the Python backend's ([[MYLA-17]]) |
-| Heap | 1 GiB arena, size-class free lists up to 4 KiB | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]) |
+| Heap | 1 GiB arena, size-class free lists up to 4 KiB | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]); maps leave a tombstone on `remove` and then rebuild, the Python backend rebuilds directly ([[MYLA-18]]) |
 | Closure environments | `[drop fn][captures…]`, captures retained and dropped | The same since [[MYLA-22]]; compositions and partial applications own their parts too |
 | Stdlib root | Built in | Found from the binary's location (`build/myla` → `src/myla`), or `--stdlib <dir>` ([[MYLA-31]]) |
 
@@ -62,7 +62,7 @@ The burn tests `tests/burn/test_selfhost_*.py` keep these gates; note they build
 
 ## Current state
 
-- The three-stage fixed point holds: stage 2 and stage 3 output are identical (6.3 MB of assembly); stage 3 compiles the compiler in 2.3 s with a 211 MB peak (243 MB before match results and condition temporaries were released, [[MYLA-74]]; 359 MB while `free` was disabled, [[MYLA-22]]).
+- The three-stage fixed point holds: stage 2 and stage 3 output are identical (7.5 MB of assembly); stage 3 compiles the compiler in 2.1 s with an 80 MB peak (211 MB while strings were never freed, [[MYLA-18]]; 243 MB before match results and condition temporaries were released, [[MYLA-74]]; 359 MB while `free` was disabled, [[MYLA-22]]).
 - Against the interpreter, the stage 3 compiler matches on 33 of 34 examples (`args` differs only in argv[0]: the binary's path instead of the source file's).
 - The stage 4 CLI's `myla run` (the Myla interpreter, compiled) prints byte for byte what the Python CLI prints (stdout, stderr, exit code) on all 34 examples and the whole error corpus: lex, parse, type and runtime errors ([[MYLA-28]], [[MYLA-32]]). The program's `args()` is the file followed by the arguments after it, as under the Python `myla run`. Since [[MYLA-74]] it updates containers in place, so a loop of a million `push`es takes 4 s (the Python interpreter: 10 s).
 - Further bugs: [[MYLA-23]] … [[MYLA-27]], [[MYLA-32]], [[MYLA-33]]. See [[Project/Known-issues]].

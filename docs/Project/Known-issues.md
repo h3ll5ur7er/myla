@@ -8,9 +8,7 @@ Open bugs and gaps found by the October 2026 review, by component. Each has a ta
 
 The reference implementation. Most problems are places where the native backend and the interpreter disagree.
 
-| Task | Problem | Priority |
-| --- | --- | --- |
-| [[MYLA-18]] | Strings are never freed | low |
+No open issues.
 
 ## Self-hosted compiler
 

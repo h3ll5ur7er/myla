@@ -93,6 +93,7 @@ PARITY_PROGRAMS = (
     "match_statement_ending_an_arm_block",
     "generic_instantiations_get_distinct_names",
     "pop_a_boxed_enum",
+    "remove_many_distinct_keys",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -116,6 +117,7 @@ STRESS_PROGRAMS = {
     "STRESS_MATCH_RESULT_SRC": "120000000",
     "STRESS_MATCH_EARLY_EXIT_SRC": "270000000",
     "STRESS_CONDITION_TEMPS_SRC": "20100000",
+    "STRESS_STR_SRC": "1800000",
 }
 PEAK_LIMIT_MB = 30
 

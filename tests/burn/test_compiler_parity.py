@@ -1679,6 +1679,17 @@ PROGRAMS = {
         "    let t = match mk(true) {\n        Ok(p) => (p.a, p.b),\n"
         "        Err(d) => { panic(d) },\n    }\n    print(t.1)\n}\n"
     ),
+    "remove_many_distinct_keys": (
+        # the self-hosted map left a tombstone per `remove` and counted only
+        # occupied slots, so after enough distinct keys no slot was empty and
+        # looking up a missing key never ended (MYLA-18)
+        "#main\nfun main() {\n"
+        "    var m: [int: int] = [:]\n    var r = 0\n"
+        "    while r < 1000 {\n        m[r] = r\n"
+        "        if len(m) > 5 {\n            for k in keys(m) {\n                remove(m, k)\n            }\n        }\n"
+        "        r = r + 1\n    }\n"
+        "    print(len(m))\n    print(contains(m, 3))\n    print(m[999])\n}\n"
+    ),
     "pop_a_boxed_enum": (
         # a list of a recursive enum holds boxes; `pop` copies the value out of
         # the box and releases it (both compilers used to hand out the box
@@ -1943,6 +1954,37 @@ STRESS_TRY_AFTER_STAGED_VALUE_SRC = (
 )
 
 
+# Strings are reference-counted cells like lists (MYLA-18): results of `+`,
+# `format`, f-strings and `build`, strings held by structs, lists and as map
+# keys (inserted, removed, listed by `keys`) are all released. About 2 GB of
+# strings go through the 1 GiB arena.
+STRESS_STR_SRC = (
+    "struct Named {\n    name: str,\n    n: int,\n}\n"
+    "fun label(i: int) -> str {\n"
+    "    return format(\"item-{}-{}-{}\", i, i % 7 == 0, 'x') + \"-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding\"\n}\n"
+    "#main\nfun main() {\n"
+    "    var total = 0\n"
+    "    var m: [str: int] = [:]\n"
+    "    for r in 0..600000 {\n"
+    "        let a = label(r)\n"
+    "        let b = a + \"-\" + a\n"
+    "        let c = Named { name: b, n: r }\n"
+    "        var xs = [c.name, a]\n"
+    "        push(xs, f\"{r}:{c.n}\")\n"
+    "        let key = f\"k{r}\"\n"
+    "        m[key] = len(b)\n"
+    "        let v = m[key]\n"
+    "        if len(m) > 50 {\n"
+    "            for k in keys(m) {\n                remove(m, k)\n            }\n"
+    "        }\n"
+    "        var sb = StringBuilder()\n"
+    "        append(sb, b)\n"
+    "        let built = build(sb)\n"
+    "        total = total + len(xs) + len(built) - v\n"
+    "    }\n"
+    "    print(total)\n}\n"
+)
+
 # The temporaries of an `if` or `while` condition, a range bound and a match
 # guard have no statement end to release them; they must be dropped right after
 # the value is computed. An `&&`/`||` operand drops its own, since the right one
@@ -2056,6 +2098,11 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_FRAGMENTED_FREE_SRC, timeout=5)
         self.assertEqual(code, 0)
         self.assertEqual(out.strip(), "38000")
+
+    def test_strings_are_reclaimed(self):
+        out, code = build_and_run(STRESS_STR_SRC)
+        self.assertEqual(code, 0, "arena exhausted — strings were not reclaimed")
+        self.assertEqual(out.strip(), "1800000")
 
     def test_condition_temporaries_are_released(self):
         out, code = build_and_run(STRESS_CONDITION_TEMPS_SRC)
