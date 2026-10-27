@@ -9,7 +9,7 @@ Modules are resolved by the loader before type checking ([[Architecture/Module-l
 - A `.my` file is a **module**; a directory is a **package**.
 - A package can have a root module named after it: `geometry/geometry.my` is what `import geometry` means. It defines the package's public surface with `pub` imports (there is no implicit re-export).
 - A file and a directory with the same name in one folder (`util.my` and `util/`) make an import of that name ambiguous: a module error.
-- The **project root** is the directory of the entry file. There is no manifest.
+- The **project root** is the directory of the entry file. There is no manifest yet; projects with a `myla.toml` and dependencies are designed in [[Architecture/Project-tool]] (D73).
 
 ## Import forms
 
