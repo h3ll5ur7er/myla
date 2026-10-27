@@ -27,7 +27,7 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 | Job | Runs |
 | --- | --- |
 | `unit` | Unit and integration tests on Python 3.12 and 3.13, with pygls for the language server test |
-| `burn` | The burn suite (native builds with the runner's binutils), with Node and the tree-sitter CLI for `test_grammar.py` |
+| `burn` | The burn suite (native builds with the runner's binutils), with Node and the tree-sitter CLI for `test_grammar.py` (Node also runs the VS Code extension's server choice in `test_lsp.py`) |
 | `bootstrap` | `scripts/bootstrap.sh`, then the stage 3 compiler builds and runs `examples/hello.my` |
 
 ## Results (October 2026)
@@ -36,7 +36,7 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 | --- | --- | --- |
 | Unit | 492 | All pass, about 2 s |
 | Integration | 29 | Pass (27 need pygls) |
-| Burn | 529 (plus subtests) | All pass, about 170 s with cached tools (green since [[MYLA-4]]) |
+| Burn | 533 (plus subtests) | All pass, about 170 s with cached tools (green since [[MYLA-4]]) |
 
 ## Unit tests
 

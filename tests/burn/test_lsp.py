@@ -761,6 +761,68 @@ class TestSemanticTokensSelfHosted(TestSemanticTokens):
         cls.binary = _self_hosted_build()
 
 
+def _node_strips_types() -> bool:
+    import shutil
+    if shutil.which("node") is None:
+        return False
+    return subprocess.run(["node", "--experimental-strip-types", "-e", "0"], capture_output=True).returncode == 0
+
+
+_EXTENSION = os.path.join(_REPO, "vscode-extension", "myla")
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE and _node_strips_types(), "needs a native toolchain and node 22.6+")
+class TestExtensionStartsTheServer(unittest.TestCase):
+    """The VS Code extension's choice of server (`vscode-extension/myla/src/
+    server.ts`, run by node with its types stripped): the Myla server where
+    it is built, else the Python one; and the command it picks serves (step 7)."""
+
+    def choose(self, settings: dict, existing: list) -> dict | None:
+        script = ("import { chooseServer } from " + json.dumps(os.path.join(_EXTENSION, "src", "server.ts")) + ";\n"
+                  "const [settings, existing] = JSON.parse(process.argv[1]);\n"
+                  "console.log(JSON.stringify(chooseServer(settings, (p) => existing.includes(p)) ?? null));\n")
+        out = subprocess.run(["node", "--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", script,
+                              json.dumps([settings, existing])], capture_output=True, text=True, check=True).stdout
+        return json.loads(out)
+
+    def settings(self, **over) -> dict:
+        s = {"server": "myla", "serverPath": "", "compilerEntry": "/r/myla.py", "python": "/r/.venv/bin/python"}
+        s.update(over)
+        return s
+
+    def test_the_built_server_is_preferred(self):
+        c = self.choose(self.settings(), ["/r/build/myla-lsp", "/r/src/myla/std"])
+        self.assertEqual((c["kind"], c["command"], c["args"]), ("myla", "/r/build/myla-lsp", ["--stdlib", "/r/src/myla"]))
+        self.assertTrue(c["watchFiles"])
+
+    def test_a_configured_binary(self):
+        c = self.choose(self.settings(serverPath="/opt/myla-lsp", compilerEntry=None), ["/opt/myla-lsp"])
+        self.assertEqual((c["kind"], c["command"], c["args"]), ("myla", "/opt/myla-lsp", []))
+
+    def test_falls_back_to_the_python_server(self):
+        c = self.choose(self.settings(), [])
+        self.assertEqual((c["kind"], c["command"], c["args"]), ("python", "/r/.venv/bin/python", ["/r/myla.py", "lsp"]))
+        self.assertIn("scripts/bootstrap.sh", c["note"])
+        self.assertFalse(c["watchFiles"])
+        c = self.choose(self.settings(server="python"), ["/r/build/myla-lsp"])
+        self.assertEqual(c["kind"], "python")
+        self.assertIsNone(self.choose(self.settings(compilerEntry=None), []))
+
+    def test_the_chosen_command_serves(self):
+        binary = myla_tool("tools/lsp/main.my", "lsp")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "build"))
+            os.symlink(binary, os.path.join(tmp, "build", "myla-lsp"))
+            os.symlink(os.path.join(_REPO, "src"), os.path.join(tmp, "src"))
+            entry = os.path.join(tmp, "myla.py")
+            c = self.choose(self.settings(compilerEntry=entry),
+                            [os.path.join(tmp, "build", "myla-lsp"), os.path.join(tmp, "src", "myla", "std")])
+            client = _Client([c["command"], *c["args"]])
+            self.addCleanup(client.close)
+            rid = client.send("initialize", {"processId": None, "rootUri": _uri(tmp), "capabilities": {}}, request=True)
+            self.assertIn("completionProvider", client.response(rid)["result"]["capabilities"])
+
+
 class TestOwnTests(unittest.TestCase):
     def test_the_server_s_own_tests_pass(self) -> None:
         # server.my imports every other module of tools/lsp (and std.json, std.num)

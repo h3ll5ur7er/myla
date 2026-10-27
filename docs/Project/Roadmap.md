@@ -41,7 +41,7 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
 5. **Tooling in Myla**: in the end, all tooling should be written in Myla, not only the compiler. The steps are tasks in the `Tooling in Myla` epic:
    - ~~a machine-readable grammar description, from which a generator written in Myla emits the tree-sitter grammar, tied to the compiler by tests~~: done, [[grammar/myla.ebnf]] and `tools/grammar` ([[MYLA-77]]). The parsers stay hand-written for their error messages; the grammar can't be derived from their code, so the description is the source and the tests keep both in step;
    - ~~standard-library groundwork: reading stdin and JSON~~: done ([[MYLA-78]], [[MYLA-79]], with byte ranges of strings, [[MYLA-85]]);
-   - a language server written in Myla on the self-hosted front end, with the Python server's tests as parity tests ([[MYLA-80]]), and semantic tokens from the compiler's own lexer;
+   - ~~a language server written in Myla on the self-hosted front end, with the Python server's tests as parity tests~~: done, with resolution by scope, imports and type and semantic tokens from the compiler's own lexer; the VS Code extension starts it ([[MYLA-80]]);
    - `myla test` parity in the self-hosted CLI ([[MYLA-81]]) and a REPL ([[MYLA-82]]);
    - finally retiring each Python tool once its Myla replacement passes the parity tests ([[MYLA-83]]).
 

@@ -7,8 +7,10 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
+import { chooseServer } from "./server";
 
 let client: LanguageClient | undefined;
+let watcher: vscode.FileSystemWatcher | undefined;
 let output: vscode.OutputChannel;
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -28,6 +30,8 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (
+        e.affectsConfiguration("myla.server") ||
+        e.affectsConfiguration("myla.serverPath") ||
         e.affectsConfiguration("myla.pythonPath") ||
         e.affectsConfiguration("myla.compilerPath") ||
         e.affectsConfiguration("myla.diagnostics.enable")
@@ -41,6 +45,7 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate(): Thenable<void> | undefined {
+  watcher?.dispose();
   return client?.stop();
 }
 
@@ -48,26 +53,42 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
   const config = vscode.workspace.getConfiguration("myla");
 
   const entry = resolveCompilerEntry(config);
-  if (!entry) {
+  const choice = chooseServer(
+    {
+      server: config.get<string>("server", "myla"),
+      serverPath: expandPath(config.get<string>("serverPath", "")),
+      compilerEntry: entry,
+      python: entry ? resolvePythonPath(config, entry) : "python",
+    },
+    fs.existsSync
+  );
+  if (!choice) {
     const msg =
-      "Could not locate the Myla compiler (myla.py). Set 'myla.compilerPath' to the repository root.";
+      "Could not locate the Myla language server. Set 'myla.compilerPath' to the repository root (the folder containing myla.py), or 'myla.serverPath' to a built myla-lsp.";
     output.appendLine(msg);
     vscode.window.showWarningMessage(msg);
     return;
   }
+  if (choice.note) {
+    output.appendLine(choice.note);
+    vscode.window.showInformationMessage(choice.note);
+  }
 
-  const python = resolvePythonPath(config, entry);
-
-  output.appendLine("Starting Myla language server:");
-  output.appendLine(`  python:   ${python}`);
-  output.appendLine(`  compiler: ${entry}`);
+  output.appendLine(`Starting the ${choice.kind === "myla" ? "Myla" : "Python"} language server:`);
+  output.appendLine(`  ${[choice.command, ...choice.args].join(" ")}`);
 
   const serverOptions: ServerOptions = {
-    command: python,
-    args: [entry, "lsp"],
+    command: choice.command,
+    args: choice.args,
     transport: TransportKind.stdio,
-    options: { cwd: path.dirname(entry) },
+    options: { cwd: choice.cwd },
   };
+
+  // The Myla server takes file changes from the editor; the Python one
+  // ignores them (MYLA-53).
+  if (choice.watchFiles) {
+    watcher = vscode.workspace.createFileSystemWatcher("**/*.my");
+  }
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
@@ -75,6 +96,7 @@ async function startServer(context: vscode.ExtensionContext): Promise<void> {
       { scheme: "untitled", language: "myla" },
     ],
     outputChannel: output,
+    synchronize: watcher ? { fileEvents: watcher } : undefined,
     middleware: {
       // `myla.diagnostics.enable = false` hides the diagnostics only; hover,
       // definition and the rest keep working.
@@ -114,6 +136,8 @@ async function restartServer(context: vscode.ExtensionContext): Promise<void> {
     await client.stop();
     client = undefined;
   }
+  watcher?.dispose();
+  watcher = undefined;
   await startServer(context);
 }
 

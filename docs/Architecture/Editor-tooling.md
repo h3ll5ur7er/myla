@@ -4,7 +4,7 @@
 
 ## Language server
 
-There are two: the Python one described first, which the VS Code extension starts today, and the one written in Myla that will replace it ([[MYLA-80]], in progress; see below).
+There are two: the Python one described first, and the one written in Myla that replaces it ([[MYLA-80]], see below), which the VS Code extension starts when it is built.
 
 `src/myla/lsp/` is a language server built on pygls 2 over stdio. It is an optional extra, so the rest of the toolchain stays dependency-free.
 
@@ -68,10 +68,10 @@ Writing it found four bugs, fixed in [[MYLA-80]]: a `return` from inside a `for`
 
 `vscode-extension/myla/` contributes the `myla` language for `.my` files: a TextMate grammar, snippets, a language configuration and a language client.
 
-- The client looks for `myla.py` (setting `myla.compilerPath`, then the workspace folders) and for Python (`myla.pythonPath`, then `<repo>/.venv`, then `python`), and starts `python myla.py lsp` with the repository as working directory. `${workspaceFolder}`, `${userHome}` and `~` are expanded in the two path settings. Changing a setting restarts the server.
-- Settings: `myla.compilerPath`, `myla.pythonPath`, `myla.diagnostics.enable` (hides diagnostics through a client middleware; the server keeps running), `myla.trace.server` (the client id is `myla`).
+- The client looks for `myla.py` (setting `myla.compilerPath`, then the workspace folders). With `myla.server` at `myla` (the default) it starts the server written in Myla: `myla.serverPath`, else `<repo>/build/myla-lsp`, with `--stdlib <repo>/src/myla`, and a `**/*.my` file watcher whose changes the server takes (`workspace/didChangeWatchedFiles`). When that binary doesn't exist, or with `myla.server` at `python`, it starts `python myla.py lsp` (Python from `myla.pythonPath`, then `<repo>/.venv`, then `python`) and says why. The choice is `chooseServer` in `src/server.ts`, which needs nothing from VS Code. `${workspaceFolder}`, `${userHome}` and `~` are expanded in the path settings. Changing a setting restarts the server.
+- Settings: `myla.server`, `myla.serverPath`, `myla.compilerPath`, `myla.pythonPath`, `myla.diagnostics.enable` (hides diagnostics through a client middleware; the server keeps running), `myla.trace.server` (the client id is `myla`).
 - `npm run package` builds the `.vsix`; it isn't committed. `.vscodeignore` keeps sources out of it.
-- `tests/unit/test_vscode_extension.py` checks the grammar against the lexer's keywords and the built-in type names, and parses every snippet ([[MYLA-54]]).
+- `tests/unit/test_vscode_extension.py` checks the grammar against the lexer's keywords and the built-in type names, and parses every snippet ([[MYLA-54]]). `tests/burn/test_lsp.py` runs `chooseServer` under node (types stripped, no `node_modules` needed): the built server is preferred, a configured binary is used, the Python server is the fallback, and the command it picks for a built server answers `initialize`.
 
 ## tree-sitter grammar
 

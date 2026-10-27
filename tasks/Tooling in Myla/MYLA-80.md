@@ -2,7 +2,7 @@
 id: MYLA-80
 title: Language server written in Myla
 type: feature
-status: in-progress
+status: review
 priority: medium
 labels: [lsp, selfhost, editor]
 ---
@@ -16,7 +16,7 @@ The self-hosted front end (lexer, parser, checker, loader, diagnostics in [[self
 - [x] Document symbols, definition, references, hover, completion: port [[src/myla/lsp/]] and use its tests ([[tests/unit/test_lsp_features.py]], [[tests/integration/test_lsp_diagnostics.py]]) as parity tests against the Myla server
 - [x] From [[MYLA-51]]: keep the last good parse when the buffer doesn't lex or parse; resolve names through scopes and imports (the checker) instead of by name across the workspace; member completion triggered by `.`; refresh the workspace index on `didChangeWatchedFiles`
 - [x] Semantic tokens from the compiler's own lexer, so editors highlight exactly what the compiler sees
-- [ ] The VS Code extension starts the Myla server ([[MYLA-53]]), and registers its `**/*.my` file watcher again once the server handles `didChangeWatchedFiles` (removed in [[MYLA-53]] because the Python server ignores it)
+- [x] The VS Code extension starts the Myla server ([[MYLA-53]]), and registers its `**/*.my` file watcher again once the server handles `didChangeWatchedFiles` (removed in [[MYLA-53]] because the Python server ignores it)
 
 ## Progress
 
@@ -111,3 +111,17 @@ Evidence:
 Full run: 492 unit, 29 integration and 529 burn tests pass; the bootstrap fixed point stays at 7,794,199 bytes and stage 3 builds the server.
 
 Next: the VS Code extension starts the Myla server (step 7).
+
+### Step 7: the VS Code extension starts it (MYLA-53)
+
+- `vscode-extension/myla/src/server.ts`, `chooseServer`: the Myla server when its binary exists (`myla.serverPath`, else `build/myla-lsp` in the repository, with `--stdlib` for the repository's standard library), else the Python server, with a note saying why (shown in the output channel and as a message). New settings `myla.server` (`myla` by default, or `python`) and `myla.serverPath`; changing them restarts the server.
+- With the Myla server the client registers the `**/*.my` file watcher again (`synchronize.fileEvents`); the server takes `workspace/didChangeWatchedFiles` (step 4).
+- README, CHANGELOG and setting descriptions describe the two servers.
+
+Evidence:
+
+- `TestExtensionStartsTheServer` (4 tests) runs `chooseServer` under node 22 with types stripped; all failed before `server.ts` existed. The built server is preferred (with `--stdlib`), a configured binary needs no repository, the Python server is the fallback (with the note naming `scripts/bootstrap.sh`, no file watcher) and is chosen when asked for, nothing without either; the command picked for a repository with a built server starts it and it answers `initialize`.
+- `npx tsc -p ./` compiles; `vsce ls` packages `out/server.js` with `out/extension.js`.
+- Not tried in a running VS Code (no GUI here).
+
+All steps are done.

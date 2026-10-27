@@ -50,10 +50,28 @@
     "configuration": {
       "title": "Myla",
       "properties": {
+        "myla.server": {
+          "type": "string",
+          "enum": [
+            "myla",
+            "python"
+          ],
+          "enumDescriptions": [
+            "The language server written in Myla (build/myla-lsp, built by scripts/bootstrap.sh); the Python one when it isn't built",
+            "The Python language server (`myla.py lsp`, needs pygls)"
+          ],
+          "default": "myla",
+          "description": "Which language server to start."
+        },
+        "myla.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Myla language server binary. Leave empty to use `build/myla-lsp` in the repository. `${workspaceFolder}`, `${userHome}` and `~` are expanded."
+        },
         "myla.pythonPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the Python interpreter used to run the Myla language server. Leave empty to auto-detect the project's `.venv` (created by `uv`), falling back to `python` on PATH. `${workspaceFolder}`, `${userHome}` and `~` are expanded."
+          "description": "Path to the Python interpreter used to run the Python language server (`myla.server` = `python`, or when the Myla server isn't built). Leave empty to auto-detect the project's `.venv` (created by `uv`), falling back to `python` on PATH. `${workspaceFolder}`, `${userHome}` and `~` are expanded."
         },
         "myla.compilerPath": {
           "type": "string",
