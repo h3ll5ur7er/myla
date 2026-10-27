@@ -478,6 +478,37 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # Guard against the corpus silently going empty.
         self.assertGreater(checked, 20)
 
+    def test_runtime_errors_match_the_python_backend(self) -> None:
+        # Every runtime error of the error corpus: the same stdout, stderr
+        # (`runtime error: <message>` and `  --> file:line:col`) and exit
+        # status as the Python backend's binary, at the interpreter's position
+        # (MYLA-65, MYLA-66).
+        from myla.compiler import build
+        from myla.errors import MylaRuntimeError
+
+        runtime = sorted(glob.glob(os.path.join(_REPO, "examples", "errors", "runtime_*.my")))
+        self.assertGreater(len(runtime), 8)
+        for path in runtime:
+            with self.subTest(file=os.path.basename(path)), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(MylaRuntimeError) as ctx:
+                    Interpreter(check(link(path, stdlib_root=default_stdlib_root())),
+                                io.StringIO()).run()
+                err = ctx.exception
+                binary = os.path.join(tmp, "py")
+                build(check(link(path, stdlib_root=default_stdlib_root())), binary, entry_path=path)
+                py = subprocess.run([binary], capture_output=True, text=True)
+                asm = os.path.join(tmp, "self.s")
+                with open(asm, "w", encoding="utf-8") as fh:
+                    fh.write(self._emit_asm(path))
+                subprocess.run(["as", "--64", "-o", asm + ".o", asm], check=True)
+                subprocess.run(["ld", "-o", asm + ".bin", asm + ".o"], check=True)
+                sh = subprocess.run([asm + ".bin"], capture_output=True, text=True)
+                self.assertEqual((sh.stdout, sh.stderr, sh.returncode),
+                                 (py.stdout, py.stderr, py.returncode))
+                self.assertEqual(sh.returncode, 1)
+                self.assertTrue(sh.stderr.endswith(f"\n  --> {path}:{err.line}:{err.column}\n"),
+                                sh.stderr)
+
     def _linked_oracle(self, path: str) -> tuple[str, int]:
         out = io.StringIO()
         checker = check(link(path, stdlib_root=default_stdlib_root()))

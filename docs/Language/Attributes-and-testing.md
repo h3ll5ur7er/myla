@@ -62,7 +62,22 @@ There are no global variables.
 
 ## Runtime errors
 
-Both report on stderr and exit 1. The interpreter gives the message with its values and the source position; a native binary prints `runtime error: <message>` without the values or position ([[MYLA-17]]):
+Both report on stderr and exit 1. The interpreter gives the message with its values, the source position, the source line and a caret; a native binary prints the first two lines, `runtime error: <message>` without the values, then the same position ([[MYLA-17]], [[MYLA-65]]):
+
+```
+$ myla run examples/errors/runtime_list_index_oob.my
+runtime error: list index 3 out of bounds (len 3)
+  --> examples/errors/runtime_list_index_oob.my:8:13
+  |
+8 |     print(xs[3])
+  |             ^
+$ myla build examples/errors/runtime_list_index_oob.my -o oob && ./oob
+wrote oob
+runtime error: index out of bounds
+  --> examples/errors/runtime_list_index_oob.my:8:13
+```
+
+The position is that of the expression that fails: an index's `[`, a call's `(` (`pop`, `append`, `assert`, `panic`, `unreachable`), a division's operator. A binary names the file as `myla build` named it when it was compiled: the entry file as given on the command line, an imported module relative to the working directory (D75).
 
 | Error | Interpreter | Native |
 | --- | --- | --- |
@@ -71,4 +86,4 @@ Both report on stderr and exit 1. The interpreter gives the message with its val
 | Missing map key (`m[k]`) | `map key 'b' not found` | `map key not found` |
 | `pop` on an empty list | `pop from an empty list` | the same |
 | `assert`, `panic`, `unreachable` | the message | the same |
-| Heap arena exhausted | — | `out of memory` |
+| Heap arena exhausted | — | `out of memory` (no position) |

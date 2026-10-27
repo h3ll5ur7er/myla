@@ -30,7 +30,7 @@ type error: cannot assign to an immutable binding (declare it with 'var')
 | --- | --- |
 | `myla run <file> [args…]` | Load modules, type-check, interpret |
 | `myla test <file>` | Run every `#test(args)[expected]` case; prints `PASS`/`FAIL` per case and exits 1 on a failure |
-| `myla build <file> [-o out] [--keep-asm] [-g]` | Compile to a static x86-64 ELF (`a.out` by default) through `as` and `ld`; `-g` adds a DWARF line table for gdb ([[Development/Debugging]]) |
+| `myla build <file> [-o out] [--keep-asm] [-g]` | Compile to a static x86-64 ELF (`a.out` by default) through `as` and `ld`; `-g` adds DWARF debug information for gdb: line table, variables and types ([[Development/Debugging]]) |
 | `myla check <file> [--canonical]` | Type-check only; `--canonical` prints `ok` or `err <line> <col> <kind>` for differential tests |
 | `myla tokenize <file> [--canonical]` | Dump the token stream |
 | `myla parse <file> [--canonical]` | Dump the AST (`--canonical`: one S-expression per declaration) |

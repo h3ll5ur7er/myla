@@ -368,6 +368,27 @@ class TestErrorPaths(unittest.TestCase):
             run=True)
         self.assert_in_bad(err, 3)
 
+    def test_runtime_error_in_a_method(self):
+        # a method's body is run by the method call, not `_call` (MYLA-66: the
+        # native backends name the method's file, so the interpreter must too)
+        err = self.error_in(
+            "pub struct B { xs: [int] }\nimpl B {\n    fun get(self) -> int {\n"
+            "        return self.xs[3]\n    }\n}\npub fun f() -> int {\n    return 1\n}\n",
+            main_src="from .bad import B\nfun main() {\n    let b = B { xs: [] }\n"
+                     "    print(b.get())\n}\n",
+            run=True)
+        self.assert_in_bad(err, 4)
+
+    def test_runtime_error_in_an_operator_method(self):
+        err = self.error_in(
+            "pub struct P { x: int }\nimpl Add for P {\n    fun add(self, other: P) -> P {\n"
+            "        return P { x: self.x / other.x }\n    }\n}\npub fun f() -> int {\n"
+            "    return 1\n}\n",
+            main_src="from .bad import P\nfun main() {\n    let p = P { x: 1 } + P { x: 0 }\n"
+                     "    print(p.x)\n}\n",
+            run=True)
+        self.assert_in_bad(err, 4)
+
     def test_errors_in_the_entry_file_name_it(self):
         err = self.error_in("pub fun f() -> int {\n    return 1\n}\n",
                             main_src="from .bad import f\nfun main() {\n    let x: str = f()\n}\n")

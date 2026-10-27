@@ -171,6 +171,31 @@ class TestLineTables(unittest.TestCase):
         for label in ("myla_main:", "myla_lib$twice:", "myla___lambda_0:"):
             self.assertRegex(self.function(asm, label)[-1], r"^\t\.loc \d+ 0 0$")
 
+    def test_no_debug_info_by_default(self):
+        asm = self.asm(debug=False)
+        for directive in (".debug_info", ".debug_abbrev", ".Ldb", ".Ltext0"):
+            self.assertNotIn(directive, asm)
+
+    def test_debug_info_describes_functions_and_variables(self):
+        # MYLA-66: a subprogram per function, its parameters and locals
+        asm = self.asm(debug=True)
+        info = asm[asm.index(".section .debug_info"):asm.index(".section .debug_line")]
+        for name in ("myla_main", "myla_lib$twice", "myla___lambda_0", "x", "f", "n", "int32"):
+            self.assertIn(f'\t.string "{name}"', info)
+        self.assertIn("\t.value 0x1c", info)              # the language: Rust
+        # a local's lexical block starts after its value is stored
+        body = self.function(asm, "myla_main:")
+        store = next(i for i, l in enumerate(body) if l.startswith("\tmovq %rax, -"))
+        self.assertRegex(body[store + 1], r"^\.Ldb\d+:$")
+
+    def test_debug_info_leaves_the_code_alone(self):
+        # without the directives and labels `-g` adds, the code is the same
+        def code(asm: str) -> list[str]:
+            text = asm[:asm.index(".section .rodata")]
+            return [l for l in text.splitlines()
+                    if not l.startswith(("\t.loc", "\t.file", ".Ld", ".Ltext0", ".Letext0"))]
+        self.assertEqual(code(self.asm(debug=True)), code(self.asm(debug=False)))
+
 
 
 class TestMatchScrutineeOwnership(unittest.TestCase):

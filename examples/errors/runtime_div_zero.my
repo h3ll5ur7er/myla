@@ -1,0 +1,10 @@
+//~ runtime error: division by zero
+//~ native: runtime error: division by zero
+// Integer division by zero traps at runtime; the position is the operator.
+fun ratio(a: int, b: int) -> int {
+    return a / b
+}
+
+fun main() {
+    print(ratio(7, 0))
+}

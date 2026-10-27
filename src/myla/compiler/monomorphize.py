@@ -113,7 +113,14 @@ class _Monomorphizer:
         out.extend(self.emitted_fns.values())
         # The program is already concrete, desugared, and prelude-free — re-check
         # it without re-injecting the prelude (its generic templates are gone).
-        return check(ast.Program(out), with_prelude=False)
+        result = check(ast.Program(out), with_prelude=False)
+        # how each stamped type is spelled in Myla (`Option<int32>` for
+        # `Option__6.int32`), for debug information (MYLA-66)
+        result.type_display_names = {
+            mangled: type_name((EnumType if name in self.checker.enum_decls else StructType)(name, args))
+            for (name, args), mangled in self.type_mono_name.items()
+        }
+        return result
 
     # -- function specialization --------------------------------------------
 

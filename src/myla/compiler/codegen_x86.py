@@ -22,22 +22,23 @@ Conventions chosen for v0.0 (internal; we never call into C):
 from __future__ import annotations
 
 import dataclasses
+import os
 import struct
 
-from .. import ast
+from .. import __version__, ast
 from ..types import (
     BoolType, CharType, Checker, EnumType, FloatType, FuncSig, FuncType, IntType,
     ListType, MapType, StrType, StringBuilderType, StructType, TupleType, Type,
     type_name, _is_diverging, _is_literal_expr as _is_literal,
     _FF_MINK, _FF_MAXK, _FF_POW10_DD, _FF_SPLIT, _FF_BIG, _FF_UP, _FF_DOWN, round_float,
 )
+from .dwarf import DebugInfo
 from .monomorphize import type_token
 
 
 # The runtime-error entries and their messages (MYLA-17); the same in the
-# self-hosted code generator.
+# self-hosted code generator. `__panic` prints them after `runtime error: `.
 _TRAPS = [
-    ("__trap", "runtime error"),
     ("__trap_index", "index out of bounds"),
     ("__trap_key", "map key not found"),
     ("__trap_pop", "pop from an empty list"),
@@ -46,6 +47,9 @@ _TRAPS = [
     ("__trap_match", "no match arm matched"),
     ("__trap_oom", "out of memory"),
 ]
+
+# The conditional jump that skips a trap call, for each jump to a trap.
+_SKIP_TRAP = {"jae": "jb", "jz": "jnz", "jl": "jge", "jg": "jle"}
 
 # The refcount of a `str` cell in the binary: retains and drops change it like
 # any other, but it never reaches zero, so it is never freed (MYLA-18).
@@ -120,9 +124,19 @@ _SET_MNEMONIC = {
 
 
 class CodeGen:
-    def __init__(self, checker: Checker, debug: bool = False):
+    def __init__(self, checker: Checker, debug: bool = False,
+                 entry_path: str | None = None):
         self.checker = checker
         self.text: list[str] = []
+        # runtime-error positions (MYLA-65, MYLA-66): the entry file as the user
+        # named it, the file of the function being generated as diagnostics name
+        # it (`_display_path`), each lambda's file, and one 16-byte record per
+        # position a trap can report, `[file str][line:4][col:4]`, in .rodata
+        self._entry_path = entry_path
+        self._cur_path = "<input>"
+        self._lambda_paths: dict[int, str] = {}
+        self._positions: dict[tuple[str, int, int], str] = {}
+        self.posdata: list[str] = []
         # debug line tables (MYLA-71): source path -> `.file` number, the number
         # of the file being generated (None: no line info for this function, e.g.
         # the prelude), and the file of each lambda, set where it is created.
@@ -131,6 +145,10 @@ class CodeGen:
         self._cur_file: int | None = None
         self._last_loc = ""
         self._lambda_files: dict[int, int | None] = {}
+        # variables and types (MYLA-66): the compile unit's debug information,
+        # and the same while generating a function with line info (else None)
+        self._dbg: DebugInfo | None = None
+        self._fn_dbg: DebugInfo | None = None
         self.rodata: list[str] = []
         self.strdata: list[str] = []        # static `str` cells (_static_str)
         self._label_n = 0
@@ -411,6 +429,9 @@ class CodeGen:
         if entry is None:
             raise ValueError("no entry point to compile")
 
+        if self._debug:
+            self._dbg = DebugInfo(self, self._emit,
+                                  getattr(self.checker, "type_display_names", {}))
         self._emit_runtime_prelude(entry.name)
         self._emit_drop_helpers()
         for decl in self.checker.program.decls:
@@ -455,14 +476,18 @@ class CodeGen:
         out.append("\t.text")
         for path, number in self._files.items():
             out.append(f'\t.file {number} "{_asm_string(path)}"')
+        if self._files:
+            out.append(".Ltext0:")            # the compile unit's code (MYLA-66)
         out.extend(self.text)
+        if self._files:
+            out.append(".Letext0:")
         out.append("")
         out.append("\t.section .rodata")
         out.append('.Lbool_true:\n\t.ascii "true"')
         out.append('.Lbool_false:\n\t.ascii "false"')
-        for label, message in _TRAPS:
-            text = "runtime error: " + message
-            out.append(f'.Lmsg{label}:\n\t.quad {len(text)}\n\t.ascii "{text}"')
+        for label, text in _TRAPS + [("_rterr", "runtime error: "), ("_at", "\n  --> ")]:
+            out.append(f'.Lmsg{label}:\n\t.quad {len(text)}\n\t.ascii "{_asm_string(text)}"')
+        out.extend(self.posdata)
         if self._uses_float:
             out.extend(self._float_rodata())
         out.extend(self.rodata)
@@ -517,6 +542,9 @@ class CodeGen:
             out.append("__io_errno_val:")
             out.append("\t.skip 8")
         out.append("")
+        if self._files:
+            out.extend(self._dbg.sections(f"myla {__version__}", next(iter(self._files)),
+                                          os.getcwd()))
         # mark the stack non-executable to silence the linker
         out.append('\t.section .note.GNU-stack,"",@progbits')
         out.append("")
@@ -543,9 +571,12 @@ class CodeGen:
         e("")
         # Runtime errors: `runtime error: <message>` on stderr, then exit(1)
         # (MYLA-17). Each kind has its own entry; the message is the
-        # interpreter's, without the values.
+        # interpreter's, without the values. The caller passes the position
+        # record in %rsi (`_trap`); running out of memory has none.
         for label, _message in _TRAPS:
             e(f"{label}:")
+            if label == "__trap_oom":
+                e("\txorl %esi, %esi")
             e(f"\tleaq .Lmsg{label}(%rip), %rdi")
             e("\tjmp __panic")
         e("")
@@ -570,13 +601,34 @@ class CodeGen:
         e(".Lwa_done:")
         e("\tret")
         e("")
-        # __panic: %rdi -> [len:8][bytes]; write the message + newline to stderr,
-        # then exit(1). Used by assert/panic/unreachable (§7) and the traps.
+        # __panic: %rdi -> the message [len:8][bytes], %rsi -> the position
+        # record [file str:8][line:4][col:4] or 0. Writes `runtime error:
+        # <message>`, then `  --> file:line:col` on the next line, the first two
+        # lines of the interpreter's report (MYLA-65), to stderr and exits with
+        # 1. Used by assert/panic/unreachable (§7) and the traps.
         e("__panic:")
-        e("\tmovq (%rdi), %rdx")        # len
-        e("\tleaq 8(%rdi), %rsi")       # data
-        e("\tmovq $2, %rdi")            # stderr
-        e("\tcall __write_all")
+        e("\tpushq %rsi")
+        e("\tpushq %rdi")
+        e("\tleaq .Lmsg_rterr(%rip), %rdi")
+        e("\tcall __write_err")
+        e("\tpopq %rdi")
+        e("\tcall __write_err")
+        e("\tpopq %rsi")
+        e("\ttestq %rsi, %rsi")
+        e("\tjz .Lpanic_nl")
+        e("\tpushq %rsi")
+        e("\tleaq .Lmsg_at(%rip), %rdi")
+        e("\tcall __write_err")
+        e("\tmovq (%rsp), %rsi")
+        e("\tmovq (%rsi), %rdi")        # the file
+        e("\tcall __write_err")
+        e("\tmovq (%rsp), %rsi")
+        e("\tmovl 8(%rsi), %edi")       # :line
+        e("\tcall __write_err_num")
+        e("\tpopq %rsi")
+        e("\tmovl 12(%rsi), %edi")      # :col
+        e("\tcall __write_err_num")
+        e(".Lpanic_nl:")
         e("\tsubq $16, %rsp")           # newline to stderr
         e("\tmovb $10, (%rsp)")
         e("\tmovq $2, %rdi")
@@ -587,6 +639,37 @@ class CodeGen:
         e("\tmovq $60, %rax")           # exit(1)
         e("\tmovq $1, %rdi")
         e("\tsyscall")
+        e("")
+        # __write_err: write the [len:8][bytes] at %rdi to stderr
+        e("__write_err:")
+        e("\tmovq (%rdi), %rdx")
+        e("\tleaq 8(%rdi), %rsi")
+        e("\tmovq $2, %rdi")
+        e("\tjmp __write_all")
+        e("")
+        # __write_err_num: write ':' and %rdi in decimal to stderr
+        e("__write_err_num:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tsubq $32, %rsp")
+        e("\tmovq %rdi, %rax")
+        e("\tleaq -1(%rbp), %rsi")      # digits backwards from rbp-1
+        e("\tmovq $10, %rcx")
+        e(".Lwen_loop:")
+        e("\txorq %rdx, %rdx")
+        e("\tdivq %rcx")
+        e("\taddb $48, %dl")
+        e("\tmovb %dl, (%rsi)")
+        e("\tdecq %rsi")
+        e("\ttestq %rax, %rax")
+        e("\tjnz .Lwen_loop")
+        e("\tmovb $58, (%rsi)")         # ':'
+        e("\tmovq %rbp, %rdx")
+        e("\tsubq %rsi, %rdx")          # bytes from rsi up to rbp
+        e("\tmovq $2, %rdi")
+        e("\tcall __write_all")
+        e("\tleave")
+        e("\tret")
         e("")
         # __print_nl: write a single newline to stdout
         e("__print_nl:")
@@ -989,8 +1072,12 @@ class CodeGen:
         frame = self._layout_frame(decl)
         self._epilogue = f".Lret_{decl.name}"
         self._cur_file = self._file_number(getattr(decl, "source_path", None))
+        self._cur_path = self._display_path(getattr(decl, "source_path", None))
+        self._fn_dbg = self._dbg if self._cur_file is not None else None
 
         self._emit(f"myla_{decl.name}:")
+        if self._fn_dbg:
+            self._fn_dbg.begin_function(f"myla_{decl.name}")
         self._emit_loc(decl)
         self._emit("pushq %rbp")
         self._emit("movq %rsp, %rbp")
@@ -999,12 +1086,12 @@ class CodeGen:
 
         # bind parameters to their incoming stack slots (parameters are borrowed,
         # so they are never dropped — the caller owns the argument)
-        self._scopes.append({})
+        self._push_scope()
         self._drop_scopes.append([])
         param_base = 1 if self._struct_ret else 0
         for i, (param, ptype) in enumerate(zip(decl.params, sig.params)):
             offset = 16 + 8 * (param_base + i)
-            self._scopes[-1][param.name] = ("param", offset, ptype)
+            self._bind(param.name, ("param", offset, ptype), whole_function=True, param=True)
 
         if getattr(decl, "tag_eq", False):
             # derived `eq` of an enum without payloads (MYLA-87): self and
@@ -1022,9 +1109,10 @@ class CodeGen:
         self._emit("leave")
         self._emit("ret")
         self._end_loc()
-        self._emit("")
         self._drop_scopes.pop()
-        self._scopes.pop()
+        self._pop_scope()
+        self._end_debug_function()
+        self._emit("")
 
     # -- debug line tables (MYLA-71) ------------------------------------------
 
@@ -1051,6 +1139,52 @@ class CodeGen:
             self._emit(f".loc {self._cur_file} 0 0")
         self._cur_file = None
         self._last_loc = ""
+
+    # -- runtime-error positions (MYLA-65, MYLA-66) ---------------------------
+
+    def _display_path(self, path: str | None) -> str:
+        """`path` as `myla build` names it in diagnostics (`cli._report`): the
+        entry file as the user wrote it, another module relative to the working
+        directory. Without an entry path (API callers), the path as recorded;
+        a program built from text has none (`<input>`, as `MylaError.render`)."""
+        if path is None:
+            return "<input>"
+        if self._entry_path is None:
+            return path
+        if os.path.realpath(path) == os.path.realpath(self._entry_path):
+            return self._entry_path
+        return os.path.relpath(path)
+
+    def _load_position(self, node: ast.Node, reg: str) -> None:
+        """Load the address of the record of `node`'s position into `reg` (0
+        for a node without a position): `[file str:8][line:4][col:4]`, one per
+        distinct position, which `__panic` prints as `  --> file:line:col`."""
+        if node.line <= 0:
+            self._emit(f"movq $0, %{reg}")
+            return
+        key = (self._cur_path, node.line, node.column)
+        label = self._positions.get(key)
+        if label is None:
+            label = f".Lpos{len(self._positions)}"
+            self._positions[key] = label
+            self.posdata.extend(["\t.balign 8", f"{label}:",
+                                 f"\t.quad {self._string_label(self._cur_path)}",
+                                 f"\t.long {node.line}, {node.column}"])
+        self._emit(f"leaq {label}(%rip), %{reg}")
+
+    def _trap(self, jump: str, trap: str, node: ast.Node) -> None:
+        """Take the runtime-error entry `trap` when `jump` (`jae`, `jz`, …, or
+        `jmp`) would jump, reporting `node`'s position: the interpreter's for
+        the same error. The call skipped over in the common case leaves a return
+        address, so gdb's backtrace from `__panic` shows the Myla frame."""
+        skip = None
+        if jump != "jmp":
+            skip = self._label()
+            self._emit(f"{_SKIP_TRAP[jump]} {skip}")
+        self._load_position(node, "rsi")
+        self._emit(f"call {trap}")
+        if skip is not None:
+            self._emit(f"{skip}:")
 
     def _layout_frame(self, decl: ast.FunDecl) -> int:
         """Assign a unique stack slot to every local/temp; return frame size."""
@@ -1279,7 +1413,7 @@ class CodeGen:
                 self._emit(f"movq %rax, {off}(%rbp)")
                 if self._owns_heap(t):                # list pointer: new reference
                     self._retain("rbp", off, t)
-            self._scopes[-1][stmt.name] = ("local", off, t)
+            self._bind(stmt.name, ("local", off, t))
             self._register_owner(off, t)
             self._drop_expr_temps(stmt.init)
 
@@ -1455,7 +1589,7 @@ class CodeGen:
         self._emit("movq 8(%rdx), %rax")        # key
         self._emit(f"movq %rax, {lv}(%rbp)")    # bind loop var (borrowed)
 
-        self._scopes.append({stmt.var_name: ("local", lv, mt.key)})
+        self._push_scope({stmt.var_name: ("local", lv, mt.key)})
         self._drop_scopes.append([])            # loop var is a non-owning key
         self._loops.append((cont, after, len(self._drop_scopes) - 1))
         for s in stmt.body.statements:
@@ -1464,7 +1598,7 @@ class CodeGen:
         for slot, t in reversed(self._drop_scopes[-1]):
             self._drop_value("rbp", slot, t)
         self._drop_scopes.pop()
-        self._scopes.pop()
+        self._pop_scope()
 
         self._emit(f"{cont}:")
         self._emit(f"movq {si}(%rbp), %rax")
@@ -1509,7 +1643,7 @@ class CodeGen:
             self._emit(f"movq %rdx, {lv}(%rbp)")
             kind = "param" if self._is_boxed(elem_t) else "local"
 
-        self._scopes.append({stmt.var_name: (kind, lv, elem_t)})
+        self._push_scope({stmt.var_name: (kind, lv, elem_t)})
         self._drop_scopes.append([])            # loop var is borrowed: no owners
         self._loops.append((cont, after, len(self._drop_scopes) - 1))
         for s in stmt.body.statements:
@@ -1518,7 +1652,7 @@ class CodeGen:
         for slot, t in reversed(self._drop_scopes[-1]):
             self._drop_value("rbp", slot, t)
         self._drop_scopes.pop()
-        self._scopes.pop()
+        self._pop_scope()
 
         self._emit(f"{cont}:")
         self._emit(f"movq {li}(%rbp), %rax")
@@ -1546,7 +1680,7 @@ class CodeGen:
         stop = "jge" if loop_t.signed else "jae"
         self._emit(f"{stop} {end}")
 
-        self._scopes.append({stmt.var_name: ("local", lv, loop_t)})
+        self._push_scope({stmt.var_name: ("local", lv, loop_t)})
         self._drop_scopes.append([])
         # `continue` lands on the increment (after this scope's drops); `break`
         # lands on the exit. Both first release any heap owners they jump past.
@@ -1557,7 +1691,7 @@ class CodeGen:
         for slot, t in reversed(self._drop_scopes[-1]):  # release per iteration
             self._drop_value("rbp", slot, t)
         self._drop_scopes.pop()
-        self._scopes.pop()
+        self._pop_scope()
 
         self._emit(f"{cont}:")
         self._emit(f"movq {lv}(%rbp), %rax")
@@ -1808,7 +1942,7 @@ class CodeGen:
         self._emit("popq %rdi")              # cell
         self._emit(f"call {self._map_find_name(mt)}")
         self._emit("testq %rax, %rax")
-        self._emit("jz __trap_key")          # key absent
+        self._trap("jz", "__trap_key", expr)  # key absent
         self._emit("addq $16, %rax")         # &value (skip state + key)
 
     def _gen_str_index(self, expr: ast.Index) -> None:
@@ -1821,7 +1955,7 @@ class CodeGen:
         self._emit("popq %rcx")              # str pointer
         self._emit("movq (%rcx), %rdx")      # byte length (offset 0)
         self._emit("cmpq %rdx, %rax")
-        self._emit("jae __trap_index")       # i < 0 (huge unsigned) or i >= len
+        self._trap("jae", "__trap_index", expr)  # i < 0 (huge unsigned) or i >= len
         self._emit("movzbq 8(%rcx,%rax), %rax")
 
     def _index_addr(self, expr: ast.Index) -> None:
@@ -1838,7 +1972,7 @@ class CodeGen:
         self._emit("popq %rcx")              # cell pointer
         self._emit("movq (%rcx), %rdx")      # length
         self._emit("cmpq %rdx, %rax")
-        self._emit("jae __trap_index")       # i < 0 (huge unsigned) or i >= len
+        self._trap("jae", "__trap_index", expr)  # i < 0 (huge unsigned) or i >= len
         self._emit(f"imulq ${stride}, %rax")
         self._emit("leaq 16(%rcx,%rax), %rax")
 
@@ -1877,7 +2011,7 @@ class CodeGen:
         self._emit("popq %rcx")                 # cell
         self._emit("movq (%rcx), %rdx")         # len
         self._emit("cmpq %rdx, %rax")
-        self._emit("jae __trap_index")
+        self._trap("jae", "__trap_index", expr)
         self._emit(f"imulq ${stride}, %rax")
         self._emit("leaq 16(%rcx,%rax), %rax")
 
@@ -1893,7 +2027,7 @@ class CodeGen:
         self._emit("popq %rdi")                 # cell
         self._emit(f"call {self._map_find_name(mt)}")
         self._emit("testq %rax, %rax")
-        self._emit("jz __trap_key")
+        self._trap("jz", "__trap_key", expr)
         self._emit("addq $16, %rax")            # &value
 
     def _mut_index_addr(self, expr: ast.Index) -> None:
@@ -2020,6 +2154,7 @@ class CodeGen:
             self._emit("movslq %edx, %rdx")
             self._emit("popq %rsi")               # str
             self._emit("popq %rdi")               # builder cell
+            self._load_position(expr, "r8")       # where a bad range is reported
             self._emit("call __sb_extend_range")  # rax = (maybe reallocated) cell
         else:
             self._emit("movq %rax, %rsi")
@@ -2037,7 +2172,7 @@ class CodeGen:
         self._mut_container_cell(arg0)            # rax = unique cell
         self._emit("movq (%rax), %rdx")           # len
         self._emit("testq %rdx, %rdx")
-        self._emit("jz __trap_pop")               # pop from an empty list traps
+        self._trap("jz", "__trap_pop", expr)      # pop from an empty list traps
         self._emit("decq %rdx")
         self._emit("movq %rdx, (%rax)")           # len -= 1
         self._emit(f"imulq ${stride}, %rdx")
@@ -2149,7 +2284,7 @@ class CodeGen:
                 self._emit("movq (%rsi), %rax")
                 self._emit(f"movq %rax, {leaf_off}(%rbp)")
                 self._retain("rbp", leaf_off, t)   # a list/map/builder leaf owns a reference
-            self._scopes[-1][leaf.name] = ("local", leaf_off, t)
+            self._bind(leaf.name, ("local", leaf_off, t))
             self._register_owner(leaf_off, t)
         self._drop_expr_temps(stmt.init)
 
@@ -2213,7 +2348,7 @@ class CodeGen:
             arm_fail = self._label()
             self._match_pat(arm.pattern, root, sst, arm, arm_fail)
             # bindings borrow from the scrutinee copy: no owners of their own
-            self._scopes.append(self._arm_scope(arm))
+            self._push_scope(self._arm_scope(arm))
             self._drop_scopes.append([])
             if arm.guard is not None:
                 self._eval_scalar(arm.guard)
@@ -2222,9 +2357,9 @@ class CodeGen:
             self._gen_arm_body(arm.body, result_off, result_type)
             self._emit(f"jmp {end}")
             self._drop_scopes.pop()
-            self._scopes.pop()
+            self._pop_scope()
             self._emit(f"{arm_fail}:")
-        self._emit("jmp __trap_match")   # unreachable when the match is exhaustive
+        self._trap("jmp", "__trap_match", expr)  # unreachable when the match is exhaustive
         self._emit(f"{end}:")
         self._drop_scopes.pop()
         if owns_copy:
@@ -2339,8 +2474,9 @@ class CodeGen:
                 else:
                     self._gen_stmt(s)
             self._close_scope()
-        elif result_off is not None and not _is_diverging(body):
-            self._emit_loc(body)
+            return
+        self._emit_loc(body)        # a line of its own, in a statement too (MYLA-66)
+        if result_off is not None and not _is_diverging(body):
             self._store_value(body, result_off, result_type)
             self._drop_expr_temps(body)
         elif _is_aggregate(body.resolved_type) and not _is_diverging(body):
@@ -2481,7 +2617,7 @@ class CodeGen:
     # -- ownership scopes & temporaries --------------------------------------
 
     def _open_scope(self) -> None:
-        self._scopes.append({})
+        self._push_scope()
         self._drop_scopes.append([])
 
     def _close_scope(self) -> None:
@@ -2489,7 +2625,35 @@ class CodeGen:
         for slot, t in reversed(self._drop_scopes[-1]):
             self._drop_value("rbp", slot, t)
         self._drop_scopes.pop()
+        self._pop_scope()
+
+    def _push_scope(self, names: dict | None = None) -> None:
+        """Open a scope of names, binding `names` (name -> scope entry)."""
+        self._scopes.append({})
+        if self._fn_dbg:
+            self._fn_dbg.push_scope()
+        for name, entry in (names or {}).items():
+            self._bind(name, entry)
+
+    def _pop_scope(self) -> None:
         self._scopes.pop()
+        if self._fn_dbg:
+            self._fn_dbg.pop_scope()
+
+    def _bind(self, name: str, entry: tuple, whole_function: bool = False,
+              param: bool = False) -> None:
+        """Bind `name` in the innermost scope to `entry`: `("local", off, t)`
+        (the value at `off(%rbp)`), `("param", off, t)` (an aggregate's
+        address there, or a scalar) or `("capture", env_off, cap_off, t)`. With
+        `-g`, gdb sees it from here on (or in the whole function)."""
+        self._scopes[-1][name] = entry
+        if self._fn_dbg:
+            self._fn_dbg.variable(name, entry, entry[-1], whole_function, param)
+
+    def _end_debug_function(self) -> None:
+        if self._fn_dbg:
+            self._fn_dbg.end_function()
+        self._fn_dbg = None
 
     def _register_owner(self, slot: int, t: Type) -> None:
         if self._owns_heap(t):
@@ -2826,14 +2990,14 @@ class CodeGen:
         e("\txorq %rdx, %rdx")             # the whole string: 0..slen
         e("\tmovq (%rsi), %rcx")
         # __sb_extend_range: the same for the bytes str[rdx..rcx]; traps unless
-        # 0 <= start <= end <= slen (MYLA-85).
+        # 0 <= start <= end <= slen (MYLA-85), at the position record in %r8.
         e("__sb_extend_range:")
         e("\ttestq %rdx, %rdx")
-        e("\tjl __trap_index")             # start < 0
+        e("\tjl .Lsbx_trap")               # start < 0
         e("\tcmpq %rdx, %rcx")
-        e("\tjl __trap_index")             # end < start
+        e("\tjl .Lsbx_trap")               # end < start
         e("\tcmpq (%rsi), %rcx")
-        e("\tjg __trap_index")             # end > slen
+        e("\tjg .Lsbx_trap")               # end > slen
         e("\tpushq %rbp")
         e("\tmovq %rsp, %rbp")
         e("\tpushq %rbx")
@@ -2869,6 +3033,9 @@ class CodeGen:
         e("\tpopq %rbx")
         e("\tleave")
         e("\tret")
+        e(".Lsbx_trap:")                    # the caller's return address is on top
+        e("\tmovq %r8, %rsi")
+        e("\tjmp __trap_index")
         e("")
         # __sb_build: rdi = builder cell -> rax = a fresh str [len:8][bytes] holding
         # a snapshot of the builder's bytes.
@@ -3612,7 +3779,7 @@ class CodeGen:
             self._wrap(expr.resolved_type)
         elif op in ("/", "%"):
             self._emit("testq %rcx, %rcx")
-            self._emit("jz __trap_div" if op == "/" else "jz __trap_mod")
+            self._trap("jz", "__trap_div" if op == "/" else "__trap_mod", expr)
             if ltype.signed:
                 # x / -1 is -x and x % -1 is 0; idivq would trap on the
                 # minimum (its quotient overflows), the language wraps (MYLA-5)
@@ -3772,6 +3939,7 @@ class CodeGen:
         off = self._locals[id(lam)]
         code_label = "myla_" + lam.lifted_name
         self._lambda_files[id(lam)] = self._cur_file   # its body is generated later
+        self._lambda_paths[id(lam)] = self._cur_path
         if not lam.captures:
             self._emit(f"leaq {code_label}(%rip), %rax")
             self._emit(f"movq %rax, {off}(%rbp)")
@@ -3832,24 +4000,28 @@ class CodeGen:
         frame = self._layout_frame(synth)
         self._epilogue = f".Lret_{lam.lifted_name}"
         self._cur_file = self._lambda_files.get(id(lam))
+        self._cur_path = self._lambda_paths.get(id(lam), "<input>")
+        self._fn_dbg = self._dbg if self._cur_file is not None else None
 
         self._emit(f"myla_{lam.lifted_name}:")
+        if self._fn_dbg:
+            self._fn_dbg.begin_function(f"myla_{lam.lifted_name}")
         self._emit_loc(lam)
         self._emit("pushq %rbp")
         self._emit("movq %rsp, %rbp")
         if frame:
             self._emit(f"subq ${frame}, %rsp")
 
-        self._scopes.append({})
+        self._push_scope()
         self._drop_scopes.append([])
         param_base = 1 if self._struct_ret else 0
         env_off = 16 + 8 * param_base          # the hidden env pointer
         for i, (param, ptype) in enumerate(zip(lam.params, ft.params)):
             offset = 16 + 8 * (param_base + 1 + i)
-            self._scopes[-1][param.name] = ("param", offset, ptype)
+            self._bind(param.name, ("param", offset, ptype), whole_function=True, param=True)
         offsets, _env_size, owns = self._capture_layout(lam)
         for (cname, ctype), capoff in zip(lam.captures, offsets):
-            self._scopes[-1][cname] = ("capture", env_off, capoff, ctype)
+            self._bind(cname, ("capture", env_off, capoff, ctype), whole_function=True)
 
         self._gen_block(body)
 
@@ -3857,9 +4029,10 @@ class CodeGen:
         self._emit("leave")
         self._emit("ret")
         self._end_loc()
-        self._emit("")
         self._drop_scopes.pop()
-        self._scopes.pop()
+        self._pop_scope()
+        self._end_debug_function()
+        self._emit("")
 
         if owns:
             self._emit_lambda_env_drop(lam, offsets)
@@ -4140,16 +4313,19 @@ class CodeGen:
 
     def _gen_intrinsic(self, expr: ast.Call) -> None:
         """`assert`/`panic`/`unreachable`: write a message to stderr and exit(1)
-        (D-, §7). `__panic` takes %rdi -> [len:8][bytes]."""
+        (D-, §7). `__panic` takes %rdi -> [len:8][bytes] and %rsi -> the
+        position record."""
         name = expr.callee.ident
         if name == "panic":
             self._eval(expr.args[0])  # message pointer -> %rax
             self._emit("movq %rax, %rdi")
+            self._load_position(expr, "rsi")
             self._emit("call __panic")
             return
         if name == "unreachable":
             label = self._string_label("reached unreachable code")
             self._emit(f"leaq {label}(%rip), %rdi")
+            self._load_position(expr, "rsi")
             self._emit("call __panic")
             return
         # assert(cond[, msg]): fall through (pass) when the condition holds.
@@ -4163,6 +4339,7 @@ class CodeGen:
         else:
             label = self._string_label("assertion failed")
             self._emit(f"leaq {label}(%rip), %rdi")
+        self._load_position(expr, "rsi")
         self._emit("call __panic")
         self._emit(f"{ok}:")
 
@@ -5918,7 +6095,7 @@ def _const_scalar(literal) -> int:
 
 def _asm_string(text: str) -> str:
     """Escape `text` for a double-quoted GAS string."""
-    return text.replace("\\", "\\\\").replace('"', '\\"')
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 def _place_root(expr: ast.Expr) -> str | None:
@@ -5957,5 +6134,5 @@ def _may_write(node, name: str) -> bool:
     return any(_may_write(getattr(node, f.name), name) for f in dataclasses.fields(node))
 
 
-def generate(checker: Checker, debug: bool = False) -> str:
-    return CodeGen(checker, debug=debug).generate()
+def generate(checker: Checker, debug: bool = False, entry_path: str | None = None) -> str:
+    return CodeGen(checker, debug=debug, entry_path=entry_path).generate()

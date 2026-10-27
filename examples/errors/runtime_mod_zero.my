@@ -1,0 +1,7 @@
+//~ runtime error: modulo by zero
+//~ native: runtime error: modulo by zero
+// The remainder by zero traps like the division.
+fun main() {
+    let n = 0
+    print(10 % n)
+}
