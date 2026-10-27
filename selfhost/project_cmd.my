@@ -1,49 +1,62 @@
 // project_cmd.my -- the project commands of `myla` (MYLA-94, D73): `new`,
-// `build`, `run`, `test`, `check` and `clean`, which main.my runs when no
-// `.my` file is given (wiki: Architecture/Project-tool, "Commands").
+// `build`, `run`, `test`, `check`, `clean` and `fetch` (MYLA-95), which
+// main.my runs when no `.my` file is given (wiki: Architecture/Project-tool,
+// "Commands").
 //
 // Every command but `new` finds `myla.toml` in the working directory or above
 // it, works out the packages with the project model (project.my, MYLA-93) and
 // hands them to the loader as `--package` pairs (MYLA-92), with `src/` as the
-// project root. Paths are shown relative to the working directory, as a file
+// project root; locked Git commits that aren't checked out yet are checked
+// out first (fetch.my). Paths are shown relative to the working directory, as a file
 // given on the command line would be: `src/main.my`.
 
 from std.io import write, eprintln
 from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir
 from .loader import LoadOptions
 from .driver import cmd_build, cmd_interp, own_tests, load_and_check, run_step
-from .project import find_manifest, load_project, loader_packages, render_project_error, relative_path, name_error
-from .project import Project, GitPackage, ref_text
+from .project import find_manifest, loader_packages, relative_path, name_error, Project
+from .fetch import checked_out_project, fetch
 
 // The project found from the working directory `cwd`.
 struct Here { cwd: str, project: Project }
 
-// The project around the working directory, or the message to print.
-fun locate() -> Result<Here, str> {
+// The manifest around the working directory, with that directory.
+fun find_here() -> Result<(str, str), str> {
     let cwd = match current_dir() {
         Ok(d) => d
         Err(e) => { return Err("myla: cannot find the working directory") }
     }
-    let manifest = match find_manifest(cwd) {
-        Some(m) => m
-        None => { return Err("myla: no myla.toml in this directory or above it") }
+    return match find_manifest(cwd) {
+        Some(m) => Ok((cwd, m))
+        None => Err("myla: no myla.toml in this directory or above it")
     }
-    let p = match load_project(manifest) {
-        Ok(p) => p
-        Err(e) => { return Err(render_project_error(e)) }
-    }
-    if len(p.missing) > 0 { return Err(not_checked_out(p.missing)) }
+}
+
+// The project around the working directory, its locked Git commits checked
+// out, or the message to print.
+fun locate() -> Result<Here, str> {
+    let (cwd, manifest) = find_here()?
+    let p = checked_out_project(manifest)?
     return Ok(Here { cwd: cwd, project: p })
 }
 
-// The message for Git dependencies whose locked commit isn't checked out.
-fun not_checked_out(gs: [GitPackage]) -> str {
-    var sb = StringBuilder()
-    for g in gs {
-        if len(sb) > 0 { append(sb, "\n") }
-        append(sb, format("myla: dependency '{}' ({}{}) is not checked out: run `myla fetch`", g.name, g.git.url, ref_text(g.git.reference)))
+// `myla fetch [--update]`: resolve the Git dependencies and write `myla.lock`.
+pub fun project_fetch(update: bool) -> int32 {
+    let found = find_here()
+    let manifest = match found {
+        Ok(pair) => pair.1
+        Err(msg) => {
+            eprintln(msg)
+            return 1
+        }
     }
-    return build(sb)
+    return match fetch(manifest, update) {
+        Ok(n) => 0
+        Err(msg) => {
+            eprintln(msg)
+            1
+        }
+    }
 }
 
 // `path` (absolute) as the commands show it.

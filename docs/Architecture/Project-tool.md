@@ -3,7 +3,7 @@
 The design of `myla` as a project tool like cargo ([[MYLA-64]]): a manifest, dependencies from paths and Git, and the commands `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` in the self-hosted CLI. The decisions behind it are D73 on [[Project/Decisions]]; this page fills in the details.
 
 > [!NOTE]
-> **Status: approved, being built.** The design and the answers to its [questions](#settled-questions) were approved on 2026-10-27. Built so far: the file-system functions ([[MYLA-88]], [[MYLA-98]]), the TOML parser ([[MYLA-89]]), the loaders' `--package` ([[MYLA-92]]), the project model ([[MYLA-93]]) and the commands with path dependencies ([[MYLA-94]]); Git dependencies and `myla fetch` ([[MYLA-95]]) follow.
+> **Status: built.** The design and the answers to its [questions](#settled-questions) were approved on 2026-10-27 and built the same day: the file-system functions ([[MYLA-88]], [[MYLA-98]]), the TOML parser ([[MYLA-89]]), the loaders' `--package` ([[MYLA-92]]), the project model ([[MYLA-93]]), the commands ([[MYLA-94]]) and Git dependencies with `myla fetch` ([[MYLA-95]]). Still open: the language server reading projects ([[MYLA-97]]).
 
 [TOC]
 
@@ -246,7 +246,7 @@ The self-hosted CLI `build/myla` runs a command in **project mode** when it is g
 | `myla fetch [--update]` | Resolves the Git dependencies of the whole build: for each one without a current lock entry (or each one, with `--update`), asks the remote for the commit, checks it out into `.myla/deps/<name>-<commit>/` if that directory doesn't exist, and writes `myla.lock` | Git isn't installed; Git fails (its stderr is shown with the dependency's name and URL); a reference doesn't exist; a dependency error as for `build` |
 | `myla clean` | Removes `build/` (with `--deps` also `.myla/`) | A file can't be removed |
 
-`myla test` and `myla check` load each file as an entry with `src/` as the project root, so a nested file such as `src/geo/round.my` resolves absolute imports from `src/` as `src/main.my` does. The loaders therefore get a project root parameter that defaults to the entry's directory ([[MYLA-92]]). `myla test` runs only the cases declared in the file itself (its functions' names are the ones the loader doesn't qualify with a module id), while `myla test file.my` still runs every linked module's cases, as the Python CLI does. Paths in messages and the program's `argv[0]` are relative to the working directory (`src/main.my`, or `../main.my` from `src/util/`). Until [[MYLA-95]], a Git dependency whose locked commit isn't checked out stops a build with ``run `myla fetch` ``. The commands are [[selfhost/project_cmd.my]]; what they share with the file commands is [[selfhost/driver.my]].
+`myla test` and `myla check` load each file as an entry with `src/` as the project root, so a nested file such as `src/geo/round.my` resolves absolute imports from `src/` as `src/main.my` does. The loaders therefore get a project root parameter that defaults to the entry's directory ([[MYLA-92]]). `myla test` runs only the cases declared in the file itself (its functions' names are the ones the loader doesn't qualify with a module id), while `myla test file.my` still runs every linked module's cases, as the Python CLI does. Paths in messages and the program's `argv[0]` are relative to the working directory (`src/main.my`, or `../main.my` from `src/util/`). A Git dependency whose locked commit isn't checked out yet is checked out first (printing `fetching …` on stderr); one without a current lock entry stops the command with ``run `myla fetch` ``. The commands are [[selfhost/project_cmd.my]], Git is [[selfhost/fetch.my]]; what they share with the file commands is [[selfhost/driver.my]].
 
 ### Messages
 
@@ -303,7 +303,7 @@ The follow-up tasks in the epic `Project tool`:
 | [[MYLA-93]] | The project model in Myla: read and check `myla.toml` and `myla.lock`, resolve path dependencies transitively, the one-version rule, the `--package` list (done, in review: [the project model](#the-project-model)) |
 | [[MYLA-98]] | `std.fs.current_dir` and its primitive `__getcwd`, for finding the manifest and absolute paths (done, in review) |
 | [[MYLA-94]] | The commands `new`, `build`, `run`, `test`, `check` and `clean` in `build/myla`, with path dependencies; [[Getting started]] and [[Language/Modules]] describe projects (done, in review) |
-| [[MYLA-95]] | Git dependencies: `myla fetch`, `.myla/deps/`, the lock file |
+| [[MYLA-95]] | Git dependencies: `myla fetch`, `.myla/deps/`, the lock file (done, in review) |
 | [[MYLA-96]] | Not needed for now (question 4 was settled for `rm -rf` and `mv` through `std.process`): `std.fs` primitives to remove and rename files and directories |
 | [[MYLA-97]] | The language server: index files with `list_dir`, and find packages so definitions in dependencies resolve |
 

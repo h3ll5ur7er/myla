@@ -32,7 +32,7 @@ Step 5 of the project tool ([[MYLA-64]]): `myla new`, `build`, `run`, `test`, `c
 - **`myla check`:** with a file, it prints `ok` like the Python CLI. In a project it prints only errors, each file's first.
 - **`myla new`:** writes a program whose greeting a `#test` case checks, so `myla test` has something to run in a new project.
 - **`myla clean`:** runs `rm -rf` through `std.process` (settled question 4).
-- **Git dependencies:** until [[MYLA-95]], a Git dependency whose locked commit isn't checked out stops the command with ``run `myla fetch` ``.
+- **Git dependencies:** a Git dependency whose locked commit wasn't checked out stopped the command with ``run `myla fetch` ``; since [[MYLA-95]] the commands check it out.
 
 ## Evidence
 

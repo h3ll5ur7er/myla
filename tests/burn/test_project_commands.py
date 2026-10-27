@@ -256,18 +256,19 @@ class TestProjectErrors(_Layout):
         self.assertIn("--> src/bad.my:2:5", proc.stderr)
         self.assertEqual(proc.stdout, "no #test cases found.\n")
 
-    def test_a_git_dependency_not_checked_out(self):
+    def test_a_locked_git_dependency_that_cannot_be_checked_out(self):
         commit = "4f3c2a1e9b0d5c6a7e8f9a0b1c2d3e4f5a6b7c8d"
+        url = "file://" + os.path.join(self.work, "no-such-repository")
         root = self.project("gitdep", {
             "myla.toml": '[package]\nname = "gitdep"\nversion = "1"\n\n[dependencies]\n'
-                         'json5 = { git = "https://example.org/json5.git", tag = "v1" }\n',
-            "myla.lock": f'version = 1\n\n[git.json5]\nurl = "https://example.org/json5.git"\ntag = "v1"\ncommit = "{commit}"\n',
+                         f'json5 = {{ git = "{url}", tag = "v1" }}\n',
+            "myla.lock": f'version = 1\n\n[git.json5]\nurl = "{url}"\ntag = "v1"\ncommit = "{commit}"\n',
             "src/main.my": "fun main() {}\n",
         })
         proc = self.run_in(root, "build")
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("json5", proc.stderr)
-        self.assertIn("myla fetch", proc.stderr)
+        self.assertIn(f"myla: dependency 'json5': cannot check out commit {commit} from {url}", proc.stderr)
+        self.assertFalse(os.path.exists(os.path.join(root, ".myla", "deps", "json5-" + commit)))
 
     def test_usage_mentions_the_project_commands(self):
         proc = self.myla_cmd("nonsense")

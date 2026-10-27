@@ -13,7 +13,8 @@
 // `myla.toml` (project_cmd.my, MYLA-94, D73): `myla build [-g]` writes
 // `build/<name>`, `myla run [args...]` interprets `src/main.my`, `myla test` and
 // `myla check` take every file under `src/`; and `myla new <name>` creates a
-// project, `myla clean [--deps]` removes `build/` (and `.myla/`).
+// project, `myla clean [--deps]` removes `build/` (and `.myla/`), `myla fetch
+// [--update]` resolves the Git dependencies and writes `myla.lock` (MYLA-95).
 //
 // The options, before or after the file: `--stdlib <dir>`, and `--package
 // name=dir` (repeatable), a dependency whose modules `import name…` finds in
@@ -29,7 +30,7 @@ from .repl import repl
 from .loader import load_options, LoadOptions, parse_package_flag, default_stdlib_root
 from .diag import render
 from .driver import cmd_build, cmd_interp, load_and_check
-from .project_cmd import project_build, project_run, project_test, project_check, project_clean, project_new, ends_with
+from .project_cmd import project_build, project_run, project_test, project_check, project_clean, project_new, project_fetch, ends_with
 
 fun usage() {
     eprintln("usage: myla <command> [<file.my>] [options]")
@@ -46,28 +47,29 @@ fun usage() {
     eprintln("  test  [options]                      run the #test cases of every file under src/")
     eprintln("  check [options]                      type-check every file under src/")
     eprintln("  clean [--deps]                       remove build/ (--deps: and the fetched dependencies, .myla/)")
+    eprintln("  fetch [--update]                     resolve the Git dependencies, check them out and write myla.lock")
     eprintln("options:")
     eprintln("  --stdlib <dir>        the directory holding std/ (default: src/myla next to this binary's build/ directory)")
     eprintln("  --package <name=dir>  a dependency: imports of <name> resolve in <dir> (repeatable)")
 }
 
 // A command's arguments: its file ("" in project mode), the load options,
-// `build`'s output and `-g`, `clean`'s `--deps`, `new`'s name, and the
-// program's arguments (`run`).
-struct CommandLine { file: str, opts: LoadOptions, output: str, debug: bool, deps: bool, name: str, rest: [str] }
+// `build`'s output and `-g`, `clean`'s `--deps`, `fetch`'s `--update`, `new`'s
+// name, and the program's arguments (`run`).
+struct CommandLine { file: str, opts: LoadOptions, output: str, debug: bool, deps: bool, update: bool, name: str, rest: [str] }
 
 // A command line that can't be run: the message, and whether the usage
 // follows it (exit status 2; else 1).
 struct CliError { msg: str, usage: bool }
 
 // The arguments after the command; `--stdlib` and `--package` anywhere, `-o`
-// and `-g` for `build`, `--deps` for `clean`. The first other argument is the
+// and `-g` for `build`, `--deps` for `clean`, `--update` for `fetch`. The first other argument is the
 // file if it ends in `.my` (else there is none: project mode); then `run`
 // passes the rest to the program, `test` too with a file, `new` takes one
 // name, and other commands reject them.
 fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
     let cmd = argv[1]
-    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root(argv[0])), output: "a.out", debug: false, deps: false, name: "", rest: [] }
+    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root(argv[0])), output: "a.out", debug: false, deps: false, update: false, name: "", rest: [] }
     var positional = 0
     var j = 2
     while j < len(argv) {
@@ -91,10 +93,13 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
         } else if cmd == "clean" && a == "--deps" {
             cl.deps = true
             j = j + 1
+        } else if cmd == "fetch" && a == "--update" {
+            cl.update = true
+            j = j + 1
         } else if cmd == "new" && cl.name == "" {
             cl.name = a
             j = j + 1
-        } else if positional == 0 && cmd != "repl" && cmd != "new" && cmd != "clean" && ends_with(a, ".my") {
+        } else if positional == 0 && cmd != "repl" && cmd != "new" && cmd != "clean" && cmd != "fetch" && ends_with(a, ".my") {
             cl.file = a
             positional = 1
             j = j + 1
@@ -116,7 +121,7 @@ fun main() {
         exit(2)
     }
     let cmd = argv[1]
-    let known = ["run", "test", "build", "check", "repl", "new", "clean"]
+    let known = ["run", "test", "build", "check", "repl", "new", "clean", "fetch"]
     var ok = false
     for k in known { if k == cmd { ok = true } }
     if !ok {
@@ -124,7 +129,7 @@ fun main() {
         usage()
         exit(2)
     }
-    var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, deps: false, name: "", rest: [] }
+    var cl = CommandLine { file: "", opts: load_options(""), output: "", debug: false, deps: false, update: false, name: "", rest: [] }
     match parse_command_line(argv) {
         Ok(c) => { cl = c },
         Err(e) => {
@@ -147,6 +152,7 @@ fun main() {
         exit(project_new(cl.name))
     }
     if cmd == "clean" { exit(project_clean(cl.deps)) }
+    if cmd == "fetch" { exit(project_fetch(cl.update)) }
     if cl.file == "" {
         // project mode (MYLA-94)
         if cmd == "build" { exit(project_build(cl.opts, cl.debug)) }

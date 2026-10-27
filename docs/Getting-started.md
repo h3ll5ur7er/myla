@@ -69,7 +69,7 @@ PASS  greeting #1
 1/1 passed in 1 file.
 $ myla build               # build/hello (-g: with debug information)
 $ myla check               # type-check every file under src/
-$ myla clean               # remove build/
+$ myla clean               # remove build/ (--deps: also .myla/)
 ```
 
 A dependency on another project by its directory goes into the manifest; its library `src/<name>.my` is then `import <name>`:
@@ -81,6 +81,13 @@ version = "0.1.0"
 
 [dependencies]
 geo = { path = "../geo" }
+```
+
+A dependency from Git names a tag, a branch or a commit (`rev`), or none for the default branch. `myla fetch` resolves it to a commit, checks it out into `.myla/deps/`, and pins it in `myla.lock`, which you commit; the other commands use the pinned commits (checking them out if needed), and `myla fetch --update` moves them:
+
+```toml
+[dependencies]
+json5 = { git = "https://github.com/example/json5-myla.git", tag = "v1.2.0" }
 ```
 
 A command given a `.my` file works on that file alone and reads no manifest.
