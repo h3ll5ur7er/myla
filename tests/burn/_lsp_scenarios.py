@@ -414,3 +414,161 @@ class LspRequestScenarios(LspRequestHelpers):
         self.assertTrue(all(item.get("kind") != 14 for item in result["items"]))
         uri = self.open('fun main() {\n    let s = "😀" .x\n}\n', "doc2.my")
         self.assertIn("fun", self.labels(uri, 1, 17))               # before the `.`
+
+
+GEO = "// geo\npub fun area(n: int) -> int {\n    return n * n\n}\n"
+SHAPES = ("from .geo import area\npub struct Square { side: int }\n"
+          "pub fun square_area(s: Square) -> int {\n    return area(s.side)\n}\n")
+APP_MAIN = ("import geo\nfrom geo.shapes import Square, square_area\nfun main() {\n"
+            "    print(geo.area(2) + square_area(Square { side: 3 }))\n}\n")
+
+
+class ProjectScenarios(LspRequestHelpers):
+    """Documents inside a project (MYLA-97): the workspace root holds
+    `myla.toml` for a package `app` with a path dependency `geo`, which lies
+    outside the workspace. A document is checked and resolved as `myla check`
+    loads it: with the project's packages and `src/` as the project root."""
+
+    def setUp(self):
+        super().setUp()
+        self.geo = tempfile.mkdtemp(prefix="myla_lsp_geo_")
+        self.addCleanup(shutil.rmtree, self.geo, True)
+        self.write_in(self.geo, "myla.toml", '[package]\nname = "geo"\nversion = "0.1.0"\n')
+        self.write_in(self.geo, "src/geo.my", GEO)
+        self.write_in(self.geo, "src/shapes.my", SHAPES)
+        self.manifest = self.write("myla.toml", '[package]\nname = "app"\nversion = "0.1.0"\n\n[dependencies]\n'
+                                   'geo = { path = "%s" }\n' % os.path.relpath(self.geo, self.root))
+
+    def write_in(self, base, name, text):
+        path = os.path.join(base, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def open_src(self, name, text):
+        os.makedirs(os.path.dirname(os.path.join(self.root, name)), exist_ok=True)
+        return self.open(text, name)
+
+    def geo_file(self, name):
+        return _uri(os.path.join(self.geo, "src", name))
+
+    def labels(self, uri, line, character):
+        return sorted(i["label"] for i in self.at("textDocument/completion", uri, line, character)["items"])
+
+    def test_imports_of_a_dependency_check_clean(self):
+        uri = self.open_src("src/main.my", APP_MAIN)
+        self.assertEqual(self.client.diagnostics(1), {uri: []})
+
+    def test_an_error_in_a_dependency_is_published_for_its_file(self):
+        self.write_in(self.geo, "src/shapes.my", SHAPES.replace("return area(s.side)", 'return "side"'))
+        uri = self.open_src("src/main.my", APP_MAIN)
+        got = self.client.diagnostics(2)
+        self.assertEqual(got[uri], [])
+        [msg] = got[self.geo_file("shapes.my")]
+        self.assertIn("return type mismatch", msg)
+
+    def test_definition_and_hover_reach_into_the_dependency(self):
+        uri = self.open_src("src/main.my", APP_MAIN)
+        self.assertEqual(self.at("textDocument/definition", uri, 3, 15),
+                         {"uri": self.geo_file("geo.my"), "range": rng(1, 8, 12)})
+        self.assertEqual(self.at("textDocument/definition", uri, 1, 33),
+                         {"uri": self.geo_file("shapes.my"), "range": rng(2, 8, 19)})
+        self.assertEqual(self.at("textDocument/definition", uri, 3, 11),
+                         {"uri": self.geo_file("geo.my"), "range": rng(0, 0, 0)})      # the module
+        hover = self.at("textDocument/hover", uri, 3, 15)["contents"]["value"]
+        self.assertEqual(hover, "```myla\npub fun area(n: int) -> int\n```")
+
+    def test_references_include_the_dependency_s_files(self):
+        uri = self.open_src("src/main.my", APP_MAIN)
+        found = self.at("textDocument/references", uri, 3, 15, context={"includeDeclaration": True})
+        spots = sorted((l["uri"], l["range"]["start"]["line"], l["range"]["start"]["character"]) for l in found)
+        self.assertEqual(spots, sorted([(uri, 3, 14), (self.geo_file("geo.my"), 1, 8),
+                                        (self.geo_file("shapes.my"), 0, 17), (self.geo_file("shapes.my"), 3, 11)]))
+
+    def test_completion_after_a_package_module(self):
+        uri = self.open_src("src/main.my", APP_MAIN)
+        self.client.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [
+            {"text": APP_MAIN.replace("print(geo.area(2) + square_area(Square { side: 3 }))", "print(geo.")}]})
+        self.assertEqual(self.labels(uri, 3, len("    print(geo.")), ["area"])
+
+    def test_a_nested_file_imports_from_src(self):
+        helpers = self.write_in(self.root, "src/helpers.my", "pub fun double(n: int) -> int {\n    return n * 2\n}\n")
+        uri = self.open_src("src/util/round.my", "import helpers\nimport geo\npub fun twice(n: int) -> int {\n"
+                                                 "    return helpers.double(geo.area(n))\n}\n")
+        self.assertEqual(self.client.diagnostics(1), {uri: []})
+        self.assertEqual(self.at("textDocument/definition", uri, 3, 20),
+                         {"uri": _uri(helpers), "range": rng(0, 8, 14)})
+
+    def test_a_checked_out_git_dependency(self):
+        commit = "0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c"
+        checkout = os.path.join(self.root, ".myla", "deps", "color-" + commit)
+        self.write_in(checkout, "myla.toml", '[package]\nname = "color"\nversion = "1.0.0"\n')
+        color = self.write_in(checkout, "src/color.my", "pub fun red() -> int {\n    return 1\n}\n")
+        self.write("myla.toml", '[package]\nname = "app"\nversion = "0.1.0"\n\n[dependencies]\n'
+                                'color = { git = "https://example.org/color.git" }\n')
+        self.write("myla.lock", 'version = 1\n\n[git.color]\nurl = "https://example.org/color.git"\n'
+                                'commit = "%s"\n' % commit)
+        uri = self.open_src("src/main.my", "import color\nfun main() {\n    print(color.red())\n}\n")
+        self.assertEqual(self.client.diagnostics(1), {uri: []})
+        self.assertEqual(self.at("textDocument/definition", uri, 2, 16),
+                         {"uri": _uri(color), "range": rng(0, 8, 11)})
+
+    def test_a_git_dependency_that_is_not_checked_out(self):
+        # the server never fetches: the import fails, and the manifest says why
+        self.write("myla.toml", '[package]\nname = "app"\nversion = "0.1.0"\n\n[dependencies]\n'
+                                'geo = { path = "%s" }\n' % os.path.relpath(self.geo, self.root)
+                                + 'color = { git = "https://example.org/color.git" }\n')
+        self.write("myla.lock", 'version = 1\n\n[git.color]\nurl = "https://example.org/color.git"\n'
+                                'commit = "0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c"\n')
+        uri = self.open_src("src/main.my", "import color\nimport geo\nfun main() {\n    print(color.red() + geo.area(1))\n}\n")
+        got = self.client.diagnostics(2, full=True)
+        self.assertEqual([d["message"] for d in got[uri]], ["cannot resolve import 'color'"])   # geo still resolves
+        [d] = got[_uri(self.manifest)]
+        self.assertEqual(d["message"], "dependency 'color' is not checked out: run `myla fetch`")
+        self.assertEqual(d["range"], rng(6, 0, 5))  # under its key
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".myla")))
+
+    def test_a_manifest_error_is_published_for_the_manifest(self):
+        self.write("myla.toml", '[package]\nname = "app"\n')
+        uri = self.open_src("src/main.my", "fun main() {\n    print(1)\n}\n")
+        got = self.client.diagnostics(2, full=True)
+        self.assertEqual(got[uri], [])              # checked as a single file
+        [d] = got[_uri(self.manifest)]
+        self.assertEqual((d["message"], d["code"]), ("missing 'version' in [package]", "manifest"))
+        self.assertEqual(d["range"], rng(0, 0, 9))  # under `[package]`
+        # fixed on disk: the open documents are checked again
+        self.write("myla.toml", '[package]\nname = "app"\nversion = "0.1.0"\n')
+        self.client.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": _uri(self.manifest), "type": 2}]})
+        self.assertEqual(self.client.diagnostics(2), {uri: [], _uri(self.manifest): []})
+
+
+class WorkspaceScanScenarios(LspRequestHelpers):
+    """The workspace's files are listed with std.fs (MYLA-97), skipping the
+    directories that hold builds, fetched dependencies and tools' data."""
+
+    def test_the_scan_skips_build_and_dependency_directories(self):
+        for d in ("sub/deeper", "build", ".myla/deps/x/src", ".git", "node_modules"):
+            os.makedirs(os.path.join(self.root, d), exist_ok=True)
+        self.write("sub/deeper/ok.my", "pub fun in_sub() {}\n")
+        self.write("build/gen.my", "pub fun in_build() {}\n")
+        self.write(".myla/deps/x/src/x.my", "pub fun in_deps() {}\n")
+        self.write(".git/hook.my", "pub fun in_git() {}\n")
+        self.write("node_modules/mod.my", "pub fun in_node() {}\n")
+        line = "    in_sub(); in_build(); in_deps(); in_git(); in_node()"
+        uri = self.open("fun main() {\n" + line + "\n}\n")
+        self.assertEqual(self.at("textDocument/definition", uri, 1, 4),
+                         {"uri": _uri(os.path.join(self.root, "sub", "deeper", "ok.my")), "range": rng(0, 8, 14)})
+        for name in ("in_build", "in_deps", "in_git", "in_node"):
+            with self.subTest(name=name):
+                self.assertIsNone(self.at("textDocument/definition", uri, 1, line.index(name)))
+
+    def test_files_are_listed_in_sorted_order(self):
+        # the first declaration of a name in sorted path order wins
+        os.makedirs(os.path.join(self.root, "a"))
+        self.write("a/z.my", "\npub fun twin() {}\n")
+        self.write("a.my", "pub fun twin() {}\n")
+        self.write("b.my", "\n\npub fun twin() {}\n")
+        uri = self.open("fun main() {\n    twin()\n}\n", "main.my")
+        self.assertEqual(self.at("textDocument/definition", uri, 1, 4),
+                         {"uri": _uri(os.path.join(self.root, "a.my")), "range": rng(0, 8, 12)})

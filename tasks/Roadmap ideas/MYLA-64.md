@@ -29,7 +29,7 @@ Decided as D73 on [[Project/Decisions]]; the details, with the questions settled
 - [x] [[MYLA-94]] The commands, with path dependencies (in review)
 - [x] [[MYLA-95]] Git dependencies and `myla fetch` (in review)
 - [ ] [[MYLA-96]] Removing and renaming files in `std.fs` (not needed for now: `rm -rf`/`mv` through `std.process`)
-- [ ] [[MYLA-97]] The language server finds files with `list_dir` and resolves into packages
+- [x] [[MYLA-97]] The language server finds files with `list_dir` and resolves into packages (in review)
 
 ## Depends on
 

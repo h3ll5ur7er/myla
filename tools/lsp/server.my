@@ -12,7 +12,7 @@
 from std.io import stdin
 from std.json import Json, field
 from std.fs import read_to_string
-from ...selfhost.loader import load_program_with, file_of, normalize
+from ...selfhost.loader import load_program_opts, file_of, normalize
 from ...selfhost.diag import Report, type_report, caret_range
 from ...selfhost.checker import build_checker_decls
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
@@ -22,6 +22,7 @@ from .features import Location, identifier_at, identifier_ranges, render, is_mem
 from .workspace import Workspace, Entry, new_workspace
 from .semantic import semantic_tokens, token_types, token_modifiers
 from .resolve import Resolution, Outline, Completion, Def, DefKind, resolve, resolve_at, at_position, same_def, is_global, render_local
+from .projects import Context, context_of
 
 const DEBOUNCE_MS: int32 = 400
 
@@ -118,9 +119,12 @@ impl Server {
         } else if method == "workspace/didChangeWorkspaceFolders" {
             self.change_folders(field_or_null(params, "event"))
         } else if method == "workspace/didChangeWatchedFiles" {
-            // nothing more to do (the stamp changed): workspace files are read
-            // again on each request, and their declarations kept only while
-            // their text is the same
+            // workspace files are read again on each request (the stamp
+            // changed), their declarations kept only while their text is the
+            // same; a changed manifest or lock file can change every check
+            if project_changed(params) {
+                for u in keys(self.docs) { self.mark(u, false) }
+            }
         } else if method == "textDocument/didClose" {
             let uri = str_field(field_or_null(params, "textDocument"), "uri")
             remove(self.docs, uri)
@@ -183,13 +187,10 @@ impl Server {
     fun check(var self, uri: str) {
         let path = uri_path(uri)
         if path == "" { return }
-        var overrides: [str: str] = [:]
-        for u in keys(self.docs) {
-            let p = uri_path(u)
-            if p != "" { overrides[p] = self.docs[u] }
-        }
+        let ctx = self.context(path)
+        let overrides = ctx.opts.overrides
         var found: Option<Report> = None
-        match load_program_with(path, self.stdlib, overrides) {
+        match load_program_opts(path, ctx.opts) {
             Err(r) => { found = Some(r) },
             Ok(prog) => {
                 match build_checker_decls(prog.decls, prog.next_id) {
@@ -213,15 +214,14 @@ impl Server {
         match found {
             Some(r) => {
                 let target = self.uri_of(r.path, path, uri)
-                let text = match get(overrides, normalize(r.path)) {
-                    Some(t) => t,
-                    None => match read_to_string(r.path) {
-                        Ok(t) => t,
-                        Err(e) => "",
-                    },
-                }
-                groups[target] = [diagnostic(r, text)]
+                groups[target] = [diagnostic(r, file_text(r.path, overrides))]
             },
+            None => {},
+        }
+        // a problem of the project (MYLA-97): a manifest that doesn't load
+        // (the document was checked alone), a dependency not checked out
+        match ctx.problem {
+            Some(r) => { groups[self.uri_of(r.path, path, uri)] = [diagnostic(r, file_text(r.path, overrides))] },
             None => {},
         }
         var stale: [str] = []
@@ -245,6 +245,12 @@ impl Server {
     }
 
     // --- requests (MYLA-80 step 2) ---------------------------------------------
+
+    // How to load the document at `path`: inside a project with its packages
+    // (MYLA-97), else alone.
+    fun context(self, path: str) -> Context {
+        return context_of(normalize(path), self.stdlib, self.overrides())
+    }
 
     // The text of every open document, by path.
     fun overrides(self) -> [str: str] {
@@ -347,7 +353,7 @@ impl Server {
             },
             None => {},
         }
-        let res = resolve(d.path, d.text, self.stdlib, self.overrides(), self.known)
+        let res = resolve(d.path, d.text, self.context(d.path).opts, self.known)
         self.known = res.known
         self.resolved[d.uri] = Resolved { text: d.text, stamp: self.stamp, res: res }
         return res
@@ -385,7 +391,7 @@ impl Server {
             Some(s) => { return location(d.path, s.selection) },
             None => {},
         }
-        let matches = self.ws.lookup(ident, self.overrides())
+        let matches = self.ws.lookup(ident, self.overrides(), self.context(d.path).package_dirs)
         if len(matches) == 0 { return Json.Null }
         return location(matches[0].path, matches[0].range)
     }
@@ -412,7 +418,7 @@ impl Server {
                 match best_match(d.symbols, ident) {
                     Some(s) => { text = render(s.name, s.kind, s.detail) },
                     None => {
-                        let matches = self.ws.lookup(ident, self.overrides())
+                        let matches = self.ws.lookup(ident, self.overrides(), self.context(d.path).package_dirs)
                         if len(matches) == 0 { return Json.Null }
                         text = render(matches[0].name, matches[0].kind, matches[0].detail)
                     },
@@ -465,14 +471,14 @@ impl Server {
                     for r in identifier_ranges(d.text, ident) {
                         if !contains(other, start_key(r)) { push(found, Location { path: d.path, range: r }) }
                     }
-                    for l in self.ws.references(ident, self.overrides()) {
+                    for l in self.ws.references(ident, self.overrides(), self.context(d.path).package_dirs) {
                         if l.path != d.path { push(found, l) }
                     }
                 }
             },
             None => {
                 for r in identifier_ranges(d.text, ident) { push(found, Location { path: d.path, range: r }) }
-                for l in self.ws.references(ident, self.overrides()) { push(found, l) }
+                for l in self.ws.references(ident, self.overrides(), self.context(d.path).package_dirs) { push(found, l) }
                 if !include_decl {
                     for s in d.symbols {
                         if s.name == ident { push(decls, Location { path: d.path, range: s.selection }) }
@@ -530,7 +536,7 @@ impl Server {
         for s in d.symbols {
             push(pool, Entry { name: s.name, kind: s.kind, detail: s.detail, path: d.path, range: s.selection })
         }
-        for e in self.ws.all_entries(self.overrides()) { push(pool, e) }
+        for e in self.ws.all_entries(self.overrides(), self.context(d.path).package_dirs) { push(pool, e) }
         if !member {
             for kw in completion_keywords() {
                 if !contains(seen, "kw:" + kw) {
@@ -556,8 +562,9 @@ impl Server {
             Some(t) => t,
             None => d.text,
         }
+        let opts = self.context(d.path).opts
         for a in completion_attempts(text, pos.line, pos.character) {
-            let r = resolve_at(d.path, a.text, self.stdlib, self.overrides(), self.known, a.want)
+            let r = resolve_at(d.path, a.text, opts, self.known, a.want)
             if r.ok {
                 self.known = r.known
                 if r.completion.found { return r.completion }
@@ -577,6 +584,45 @@ impl Server {
         }
         return path_uri(f)
     }
+}
+
+// The text of `path`: an open document's, else the file's ("" if unreadable).
+fun file_text(path: str, overrides: [str: str]) -> str {
+    return match get(overrides, normalize(path)) {
+        Some(t) => t,
+        None => match read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => "",
+        },
+    }
+}
+
+// Whether a didChangeWatchedFiles notification names a manifest or a lock
+// file.
+fun project_changed(params: Json) -> bool {
+    match field(params, "changes") {
+        Some(Json.Array(changes)) => {
+            for c in changes {
+                let name = base_name(str_field(c, "uri"))
+                if name == "myla.toml" || name == "myla.lock" { return true }
+            }
+        },
+        _ => {},
+    }
+    return false
+}
+
+// The last component of a path or URI.
+#test("file:///a/myla.toml")["myla.toml"]
+#test("x")["x"]
+fun base_name(p: str) -> str {
+    var start = 0
+    for i in 0..len(p) {
+        if p[i] == '/' { start = i + 1 }
+    }
+    var sb = StringBuilder()
+    append(sb, p, start, len(p))
+    return build(sb)
 }
 
 fun publish(uri: str, diagnostics: [Json]) {

@@ -1,0 +1,93 @@
+// projects.my: how the language server loads a document (MYLA-97). A
+// document inside a project (a `myla.toml` in its directory or above) is
+// loaded as `myla check` loads it: with the project's packages and, under
+// `src/`, with `src/` as the project root (the project model of
+// selfhost/project.my, MYLA-93). Git dependencies count as far as they are
+// checked out in `.myla/deps/`: the server never fetches. A manifest that
+// doesn't load is reported on the manifest, and the document is loaded
+// alone, as outside a project; a locked dependency that isn't checked out is
+// reported there too, and the document keeps the other packages.
+
+from std.fs import read_to_string
+from std.toml import TomlPos
+from ...selfhost.loader import LoadOptions, load_options
+from ...selfhost.project import find_manifest, load_project, loader_packages, parse_manifest, is_inside, parent_dir, ProjectError
+from ...selfhost.diag import Report
+from ...selfhost.tokens import SrcSpan
+
+// How to load and resolve a document: the loader's options (with the open
+// documents as overrides), the directories of its packages, and a problem
+// of its project to report on the manifest.
+pub struct Context { opts: LoadOptions, package_dirs: [str], problem: Option<Report> }
+
+// The context of the document at the absolute path `path`.
+pub fun context_of(path: str, stdlib: str, overrides: [str: str]) -> Context {
+    var opts = load_options(stdlib)
+    opts.overrides = overrides
+    var dirs: [str] = []
+    let manifest = match find_manifest(parent_dir(path)) {
+        Some(m) => m,
+        None => { return Context { opts: opts, package_dirs: dirs, problem: None } },
+    }
+    let p = match load_project(manifest) {
+        Ok(p) => p,
+        Err(e) => { return Context { opts: opts, package_dirs: dirs, problem: Some(project_report(e, manifest)) } },
+    }
+    opts.packages = loader_packages(p)
+    for pkg in opts.packages { push(dirs, pkg.1) }
+    let src = p.root.dir + "/src"
+    if is_inside(src, path) { opts.root = src }
+    // a locked Git dependency that isn't checked out: its imports fail, and
+    // the manifest says why
+    var problem: Option<Report> = None
+    if len(p.missing) > 0 {
+        let name = p.missing[0].name
+        let pos = dependency_pos(manifest, name)
+        let e = ProjectError { msg: format("dependency '{}' is not checked out: run `myla fetch`", name), path: manifest, line: pos.line, col: pos.col, end_line: pos.end_line, end_col: pos.end_col }
+        problem = Some(project_report(e, manifest))
+    }
+    return Context { opts: opts, package_dirs: dirs, problem: problem }
+}
+
+// Where the manifest at `manifest` declares the dependency `name` (line 0
+// when it doesn't: a dependency of a dependency).
+fun dependency_pos(manifest: str, name: str) -> TomlPos {
+    let none = TomlPos { line: 0, col: 0, end_line: 0, end_col: 0 }
+    let text = match read_to_string(manifest) {
+        Ok(t) => t,
+        Err(e) => { return none },
+    }
+    let m = match parse_manifest(text, manifest) {
+        Ok(m) => m,
+        Err(e) => { return none },
+    }
+    for d in m.deps {
+        if d.name == name { return d.pos }
+    }
+    return none
+}
+
+// A project error as a report on the file it is about (the manifest when it
+// names none), with its position.
+#test(ProjectError { msg: "m", path: "/p/myla.lock", line: 2, col: 1, end_line: 2, end_col: 5 }, "/p/myla.toml")[Report { kind: "lock file error", msg: "m", path: "/p/myla.lock", line: 2, col: 1, sp: SrcSpan { sline: 2, scol: 1, eline: 2, ecol: 5 } }]
+#test(ProjectError { msg: "m", path: "", line: 0, col: 0, end_line: 0, end_col: 0 }, "/p/myla.toml")[Report { kind: "manifest error", msg: "m", path: "/p/myla.toml", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]
+fun project_report(e: ProjectError, manifest: str) -> Report {
+    var path = e.path
+    if path == "" { path = manifest }
+    var kind = "manifest error"
+    if ends_with(path, "/myla.lock") { kind = "lock file error" }
+    let sp = SrcSpan { sline: e.line, scol: e.col, eline: e.end_line, ecol: e.end_col }
+    return Report { kind: kind, msg: e.msg, path: path, line: e.line, col: e.col, sp: sp }
+}
+
+#test("/a/myla.lock", "/myla.lock")[true]
+#test("lock", "/myla.lock")[false]
+fun ends_with(s: str, suffix: str) -> bool {
+    if len(suffix) > len(s) { return false }
+    var i = 0
+    while i < len(suffix) {
+        if s[len(s) - len(suffix) + i] != suffix[i] { return false }
+        i = i + 1
+    }
+    return true
+}
