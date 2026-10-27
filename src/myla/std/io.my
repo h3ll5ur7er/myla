@@ -59,11 +59,7 @@ pub fun reader(fd: int32) -> Reader {
 // The bytes of `s` from `start` up to `end`.
 fun slice(s: str, start: int32, end: int32) -> str {
     var sb = StringBuilder()
-    var i = start
-    while i < end {
-        append_byte(sb, s[i])
-        i = i + 1
-    }
+    append(sb, s, start, end)
     return build(sb)
 }
 
@@ -96,10 +92,16 @@ impl Reader {
         var scanned = 0                    // bytes after pos known not to be "\n"
         var found = -1
         while found < 0 {
+            let buf = self.buf
+            let n = len(buf)
             var i = self.pos + scanned
-            while found < 0 && i < len(self.buf) {
-                if self.buf[i] == '\n' { found = i }
-                i = i + 1
+            while i < n {
+                if buf[i] == '\n' {
+                    found = i
+                    i = n
+                } else {
+                    i = i + 1
+                }
             }
             if found < 0 {
                 scanned = len(self.buf) - self.pos

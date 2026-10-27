@@ -890,7 +890,17 @@ class Interpreter:
             return StringBuilderValue()
         if callee.ident == "append":
             sb = self._eval(expr.args[0], env)
-            sb.buf.extend(_str_bytes(self._eval(expr.args[1], env)))
+            data = _str_bytes(self._eval(expr.args[1], env))
+            if len(expr.args) == 4:
+                start = self._eval(expr.args[2], env)
+                end = self._eval(expr.args[3], env)
+                if not 0 <= start <= end <= len(data):
+                    raise MylaRuntimeError(
+                        f"string range {start}..{end} out of bounds (len {len(data)})",
+                        expr.line, expr.column,
+                    )
+                data = data[start:end]
+            sb.buf.extend(data)
             return None
         if callee.ident == "append_byte":
             sb = self._eval(expr.args[0], env)

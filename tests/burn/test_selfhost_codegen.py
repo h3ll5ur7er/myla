@@ -64,7 +64,8 @@ EXCLUDED: set[str] = set()
 # saturating float -> integer casts (MYLA-6), left-to-right evaluation (MYLA-8),
 # partial application evaluating its arguments once (MYLA-75), derived Eq on
 # char and float fields (MYLA-13), a match statement ending an arm block (MYLA-59),
-# distinct names for generic instantiations (MYLA-9, MYLA-33).
+# distinct names for generic instantiations (MYLA-9, MYLA-33), byte-range
+# appends (MYLA-85).
 PARITY_PROGRAMS = (
     "try_inside_push_leaves_the_list_intact",
     "try_inside_map_insert_leaves_the_map_intact",
@@ -94,6 +95,7 @@ PARITY_PROGRAMS = (
     "generic_instantiations_get_distinct_names",
     "pop_a_boxed_enum",
     "remove_many_distinct_keys",
+    "string_builder_append_range",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),

@@ -32,11 +32,7 @@ struct GTok { kind: str, text: str, line: int32, col: int32 }
 #test("ab", 1, 1)[""]
 pub fun substr(s: str, start: int32, end: int32) -> str {
     var sb = StringBuilder()
-    var i = start
-    while i < end {
-        append_byte(sb, s[i])
-        i = i + 1
-    }
+    append(sb, s, start, end)
     return build(sb)
 }
 

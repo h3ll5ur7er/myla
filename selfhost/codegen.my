@@ -2913,14 +2913,36 @@ impl CodeGen {
         self.emit("movq $0, 8(%rax)")
     }
 
-    fun gen_sb_append(var self, sb: Expr, s: Expr) {
-        self.mut_addr_of_list_holder(sb)   // &holder -> rax
+    // `append(sb, s)`, or `append(sb, s, start, end)` for the bytes
+    // s[start..end], which traps unless 0 <= start <= end <= len(s) (MYLA-85).
+    fun gen_sb_append(var self, args: [Expr]) {
+        self.mut_addr_of_list_holder(args[0])   // &holder -> rax
         self.emit("pushq %rax")
         self.cow_unique(Type.TSB)          // unique cell, written back to holder
-        self.eval(s)
-        self.emit("movq %rax, %rsi")
-        self.emit("movq (%rsi), %rdx")
-        self.emit("addq $8, %rsi")
+        self.eval(args[1])
+        if len(args) == 4 {
+            self.emit("pushq %rax")
+            self.eval(args[2])
+            self.emit("pushq %rax")
+            self.eval(args[3])
+            self.emit("movslq %eax, %rcx")     // end
+            self.emit("popq %rdx")
+            self.emit("movslq %edx, %rdx")     // start
+            self.emit("popq %rsi")             // str
+            self.emit("testq %rdx, %rdx")
+            self.emit("jl __trap_index")
+            self.emit("cmpq %rdx, %rcx")
+            self.emit("jl __trap_index")
+            self.emit("cmpq (%rsi), %rcx")
+            self.emit("jg __trap_index")
+            self.emit("leaq 8(%rsi,%rdx), %rsi")   // &bytes[start]
+            self.emit("subq %rdx, %rcx")
+            self.emit("movq %rcx, %rdx")       // count
+        } else {
+            self.emit("movq %rax, %rsi")
+            self.emit("movq (%rsi), %rdx")
+            self.emit("addq $8, %rsi")
+        }
         self.emit("popq %rdi")             // &holder
         self.emit("call __sb_append_bytes")
     }
@@ -3324,7 +3346,7 @@ impl CodeGen {
                 else if nm == "chars" { self.gen_chars(args[0]) }
                 else if nm == "format" { self.gen_format(e, args) }
                 else if nm == "StringBuilder" { self.gen_sb_new(e) }
-                else if nm == "append" { self.gen_sb_append(args[0], args[1]) }
+                else if nm == "append" { self.gen_sb_append(args) }
                 else if nm == "append_byte" { self.gen_sb_append_byte(args[0], args[1]) }
                 else if nm == "build" { self.gen_sb_build(args[0]) }
                 else if nm == "contains" { self.gen_map_contains(args[0], args[1]) }

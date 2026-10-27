@@ -1967,9 +1967,21 @@ class CodeGen:
         self._cow_unique(arg0.resolved_type)      # rax = unique cell (rc==1)
         self._emit("pushq %rax")
         self._eval(expr.args[1])                  # str ptr -> rax
-        self._emit("movq %rax, %rsi")
-        self._emit("popq %rdi")                   # builder cell
-        self._emit("call __sb_extend")            # rax = (maybe reallocated) cell
+        if len(expr.args) == 4:                   # append(sb, s, start, end) (MYLA-85)
+            self._emit("pushq %rax")
+            self._eval(expr.args[2])              # start -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[3])              # end -> rax
+            self._emit("movslq %eax, %rcx")       # (int32, sign-extended)
+            self._emit("popq %rdx")
+            self._emit("movslq %edx, %rdx")
+            self._emit("popq %rsi")               # str
+            self._emit("popq %rdi")               # builder cell
+            self._emit("call __sb_extend_range")  # rax = (maybe reallocated) cell
+        else:
+            self._emit("movq %rax, %rsi")
+            self._emit("popq %rdi")               # builder cell
+            self._emit("call __sb_extend")        # rax = (maybe reallocated) cell
         self._emit(f"movq {holder}(%rbp), %rcx")
         self._emit("movq %rax, (%rcx)")           # publish the cell
         # Arg temp released by the enclosing statement (see _gen_push).
@@ -2768,6 +2780,17 @@ class CodeGen:
         # reallocated) with the string's bytes appended; len grows by the string
         # length. Grows repeatedly until the appended bytes fit.
         e("__sb_extend:")
+        e("\txorq %rdx, %rdx")             # the whole string: 0..slen
+        e("\tmovq (%rsi), %rcx")
+        # __sb_extend_range: the same for the bytes str[rdx..rcx]; traps unless
+        # 0 <= start <= end <= slen (MYLA-85).
+        e("__sb_extend_range:")
+        e("\ttestq %rdx, %rdx")
+        e("\tjl __trap_index")             # start < 0
+        e("\tcmpq %rdx, %rcx")
+        e("\tjl __trap_index")             # end < start
+        e("\tcmpq (%rsi), %rcx")
+        e("\tjg __trap_index")             # end > slen
         e("\tpushq %rbp")
         e("\tmovq %rsp, %rbp")
         e("\tpushq %rbx")
@@ -2775,8 +2798,9 @@ class CodeGen:
         e("\tpushq %r13")
         e("\tpushq %r14")
         e("\tmovq %rdi, %rbx")             # cell
-        e("\tmovq %rsi, %r12")             # str
-        e("\tmovq (%r12), %r13")           # slen
+        e("\tleaq (%rsi,%rdx), %r12")      # str shifted by start: its bytes at 8(%r12)
+        e("\tmovq %rcx, %r13")
+        e("\tsubq %rdx, %r13")             # count = end - start
         e("\tmovq (%rbx), %r14")           # len
         grow, fit = self._label(), self._label()
         e(f"{grow}:")

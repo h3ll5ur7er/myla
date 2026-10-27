@@ -1395,7 +1395,19 @@ impl Interp {
         if nm == "StringBuilder" { return Value.VSB(empty_bytes()) }
         if nm == "append" {
             let p = self.place_of(args[0])
-            let piece = as_str(self.eval(args[1]))
+            var piece = as_str(self.eval(args[1]))
+            if len(args) == 4 {                    // append(sb, s, start, end) (MYLA-85)
+                let start = as_int(self.eval(args[2]))
+                let end = as_int(self.eval(args[3]))
+                if self.stop() { return Value.VUnit }
+                if start < 0 || start > end || end > (len(piece) as int64) {
+                    self.fail(e, format("string range {}..{} out of bounds (len {})", start, end, len(piece)))
+                    return Value.VUnit
+                }
+                var sb = StringBuilder()
+                append(sb, piece, start as int32, end as int32)
+                piece = build(sb)
+            }
             self.read_place(p)
             if self.stop() { return Value.VUnit }
             self.update_place(p, PlaceOp.OAppend(piece))

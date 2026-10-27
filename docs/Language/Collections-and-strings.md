@@ -106,3 +106,13 @@ fun main() {
 ```
 
 `StringBuilder()` creates an empty builder; `append(sb, s)` and `append_byte(sb, b: uint8)` add to it (a `var` place is needed); `len(sb)` is its byte length; `build(sb)` returns a new `str`. Use it instead of `+` in loops, which copies the whole string each time.
+
+`append(sb, s, start, end)` adds the bytes of `s` from `start` up to `end` (both `int32`), which is how to take part of a string ([[MYLA-85]]). The range must lie within `s` (`0 <= start <= end <= len(s)`), else it is a runtime error, like an index out of bounds. A range may split a multi-byte character; the bytes are kept, and joined again they make the same string.
+
+```myla
+fun substring(s: str, start: int, end: int) -> str {
+    var sb = StringBuilder()
+    append(sb, s, start, end)
+    return build(sb)
+}
+```

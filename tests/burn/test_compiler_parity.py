@@ -296,6 +296,32 @@ PROGRAMS = {
         "    var b = a\n    append(b, \" more\")\n"
         "    print(build(a))\n    print(build(b))\n}\n"
     ),
+    # MYLA-85: append(sb, s, start, end) appends a byte range
+    "string_builder_append_range": (
+        "fun field(line: str, n: int) -> str {\n"
+        "    var start = 0\n    var k = 0\n    var i = 0\n"
+        "    while i <= len(line) {\n"
+        "        if i == len(line) || line[i] == ',' {\n"
+        "            if k == n {\n"
+        "                var sb = StringBuilder()\n"
+        "                append(sb, line, start, i)\n"
+        "                return build(sb)\n            }\n"
+        "            k = k + 1\n            start = i + 1\n        }\n"
+        "        i = i + 1\n    }\n"
+        "    return \"\"\n}\n"
+        "#main\nfun main() {\n"
+        "    let line = \"alpha,,λ ö,omega\"\n"
+        "    for n in 0..5 { print(format(\"[{}]\", field(line, n))) }\n"
+        "    var sb = StringBuilder()\n"
+        "    append(sb, line, 0, 0)\n"
+        "    append(sb, line, len(line) - 5, len(line))\n"
+        "    append(sb, \"aö\", 0, 2)\n"
+        "    append(sb, \"aö\", 2, 3)\n"
+        "    let s = build(sb)\n"
+        "    print(s)\n    print(len(s))\n"
+        "    var copy = sb\n    append(copy, line, 0, 5)\n"
+        "    print(build(sb))\n    print(build(copy))\n}\n"
+    ),
     "string_char_literals_and_match": (
         "fun count_byte(s: str, b: uint8) -> int {\n"
         "    var n = 0\n    var i = 0\n"

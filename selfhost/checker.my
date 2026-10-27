@@ -3664,11 +3664,21 @@ impl Checker {
             if !is_sb(at) { return Err(terr(args[0].line, args[0].col, format("build() requires a StringBuilder, found '{}'", type_name(at)))) }
             return Ok(Some(Type.TStr))
         }
-        if len(args) != 2 { return Err(terr(e.line, e.col, format("{}() takes 2 argument(s)", name))) }
+        // append(sb, s, start, end) appends the bytes s[start..end] (MYLA-85)
+        if name == "append" && len(args) != 2 && len(args) != 4 { return Err(terr(e.line, e.col, "append() takes 2 or 4 argument(s)")) }
+        if name == "append_byte" && len(args) != 2 { return Err(terr(e.line, e.col, format("{}() takes 2 argument(s)", name))) }
         let lv = self.check_lvalue(args[0])?
         if !is_sb(lv.ty) { return Err(terr(args[0].line, args[0].col, format("{}() requires a StringBuilder, found '{}'", name, type_name(lv.ty)))) }
         if !lv.mutable { return Err(terr(args[0].line, args[0].col, format("{}() needs a mutable StringBuilder (declare it with 'var')", name))) }
-        if name == "append" { self.expect_type(args[1], Type.TStr, "append value")? } else { self.expect_type(args[1], t_byte(), "append_byte value")? }
+        if name == "append" {
+            self.expect_type(args[1], Type.TStr, "append value")?
+            if len(args) == 4 {
+                self.expect_type(args[2], t_int(), "append start")?
+                self.expect_type(args[3], t_int(), "append end")?
+            }
+        } else {
+            self.expect_type(args[1], t_byte(), "append_byte value")?
+        }
         return Ok(None)
     }
 

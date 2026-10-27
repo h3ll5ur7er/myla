@@ -2,7 +2,7 @@
 import io
 import unittest
 
-from myla.errors import MylaRuntimeError
+from myla.errors import MylaRuntimeError, TypeCheckError
 from myla.interpreter import Interpreter
 from myla.lexer import tokenize
 from myla.parser import parse
@@ -145,3 +145,43 @@ class TestTestRunner(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAppendRange(unittest.TestCase):
+    """`append(sb, s, start, end)` appends the bytes s[start..end] (MYLA-85)."""
+
+    def test_appends_the_range(self):
+        self.assertEqual(run_main(
+            'var sb = StringBuilder()\n'
+            '    append(sb, "hello world", 6, 11)\n'
+            '    append(sb, "hello world", 0, 0)\n'
+            '    append(sb, "-", 0, 1)\n'
+            '    append(sb, "hello world", 0, 5)\n'
+            '    print(build(sb))'), "world-hello\n")
+
+    def test_a_split_character_is_whole_again_when_joined(self):
+        self.assertEqual(run_main(
+            'var sb = StringBuilder()\n'
+            '    append(sb, "aö", 0, 2)\n'
+            '    append(sb, "aö", 2, 3)\n'
+            '    let s = build(sb)\n'
+            '    print(s == "aö")\n'
+            '    print(s)'), "true\naö\n")
+
+    def test_out_of_bounds(self):
+        for start, end in [(-1, 2), (2, 1), (0, 6), (6, 6)]:
+            with self.subTest(start=start, end=end):
+                with self.assertRaises(MylaRuntimeError) as cm:
+                    run_main(f'var sb = StringBuilder()\n    append(sb, "hello", {start}, {end})')
+                self.assertIn(f"string range {start}..{end} out of bounds (len 5)", str(cm.exception))
+
+    def test_type_errors(self):
+        for args, message in [('"x", 0', "append() takes 2 or 4 argument(s)"),
+                              ('"x", "0", 1', "append start"),
+                              ('"x", 0, 1u8', "append end"),
+                              ('42, 0, 1', "append value")]:
+            with self.subTest(args=args):
+                with self.assertRaises(TypeCheckError) as cm:
+                    run_main(f'var sb = StringBuilder()\n    append(sb, {args})')
+                self.assertIn(message, str(cm.exception))
+

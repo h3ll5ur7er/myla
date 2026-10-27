@@ -107,6 +107,7 @@ fun main() {
 - Generic bounds: `fun sum<T: Add>(…)`; a bound allows the operator on `T`, not calling trait methods on it.
 - Entry point: `fun main()` without parameters; `std.process.args()` and `std.process.exit(code)`.
 - Input: `var r = stdin()` (from `std.io`), then `r.read_line()` (`Result<Option<str>, IoError>`, no `"\n"`), `r.read_exact(n)`, `r.read_to_end()`. A reader is a value, so a helper function can't read from one it was passed: keep it in a struct field and read in `var self` methods.
+- Part of a string: `var sb = StringBuilder()`, `append(sb, s, start, end)` (byte offsets, must lie within `s`), `build(sb)`; there is no slicing syntax.
 - Constants: `const MAX: int = 10`; no global variables.
 
 ## Working in this repository

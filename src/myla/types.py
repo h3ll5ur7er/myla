@@ -3381,8 +3381,12 @@ class Checker:
                 )
             expr.resolved_type = STR
             return STR
-        # append / append_byte: mutate the builder in place
-        if len(expr.args) != 2:
+        # append / append_byte: mutate the builder in place; append(sb, s,
+        # start, end) appends the bytes s[start..end] (MYLA-85)
+        if name == "append" and len(expr.args) not in (2, 4):
+            raise TypeCheckError("append() takes 2 or 4 argument(s)",
+                                 expr.line, expr.column)
+        if name == "append_byte" and len(expr.args) != 2:
             raise TypeCheckError(f"{name}() takes 2 argument(s)",
                                  expr.line, expr.column)
         sb_t, mutable = self._check_lvalue(expr.args[0], scope)
@@ -3398,6 +3402,9 @@ class Checker:
             )
         if name == "append":
             self._expect_type(expr.args[1], scope, STR, "append value")
+            if len(expr.args) == 4:
+                self._expect_type(expr.args[2], scope, INT, "append start")
+                self._expect_type(expr.args[3], scope, INT, "append end")
         else:  # append_byte
             self._expect_type(expr.args[1], scope, BYTE, "append_byte value")
         expr.resolved_type = None

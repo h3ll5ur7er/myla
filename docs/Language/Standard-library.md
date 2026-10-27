@@ -17,7 +17,7 @@ These names are reserved: no declaration may reuse them.
 | `get(m, k)` | map → `Option<V>` | A prelude function, not a built-in |
 | `chars(s)` | `str` → `[char]` | |
 | `format(fmt, args…)` | → `str` | `fmt` is a literal; see [[Language/Collections-and-strings]] |
-| `StringBuilder()`, `append(sb, s)`, `append_byte(sb, b)`, `build(sb)` | | |
+| `StringBuilder()`, `append(sb, s)`, `append(sb, s, start, end)`, `append_byte(sb, b)`, `build(sb)` | | The four-argument `append` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
 The low-level primitives `__write`, `__read`, `__exit`, `__args`, `__read_file`, `__write_file`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal` and `__run_errno` exist for the standard library; call the `std` functions instead.
