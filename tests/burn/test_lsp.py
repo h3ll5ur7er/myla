@@ -211,6 +211,206 @@ class TestMylaLspRobustnessSelfHosted(TestMylaLspRobustness):
         cls.binary = _self_hosted_build()
 
 
+SCOPES = ("fun total(xs: [int]) -> int {\n"     # 0
+          "    var total = 0\n"                      # 1
+          "    for x in xs {\n"                      # 2
+          "        total = total + x\n"              # 3
+          "    }\n"                                  # 4
+          "    return total\n"                       # 5
+          "}\n"                                      # 6
+          "fun main() {\n"                           # 7
+          "    let xs = [1, 2]\n"                    # 8
+          "    print(total(xs))\n"                   # 9
+          "}\n")
+
+KINDS = ("enum Color { Red, Green }\n"                                  # 0
+         "enum Light { Red, Off }\n"                                     # 1
+         "struct P { x: int }\n"                                         # 2
+         "struct Q { x: int }\n"                                         # 3
+         "fun first<T>(xs: [T], f: (T) -> T) -> T {\n"                   # 4
+         "    return f(xs[0])\n"                                         # 5
+         "}\n"                                                           # 6
+         "fun main() {\n"                                                # 7
+         "    let c = Color.Red\n"                                       # 8
+         "    let p = P { x: 1 }\n"                                      # 9
+         "    match c {\n"                                               # 10
+         "        Color.Red => print(first([p.x], (v: int) => v + 1)),\n"  # 11
+         "        _ => {},\n"                                            # 12
+         "    }\n"                                                       # 13
+         "    match Some(p) {\n"                                         # 14
+         "        Some(P { x: n }) => print(n),\n"                       # 15
+         "        None => {},\n"                                         # 16
+         "    }\n"                                                       # 17
+         "}\n")
+
+
+class ScopeScenarios(LspRequestHelpers):
+    """Definition, hover and references resolved by scope and imports
+    (MYLA-51, step 5): a name means the declaration in scope where it is
+    used, not any declaration so named."""
+
+    def defn(self, uri, line, character):
+        return self.at("textDocument/definition", uri, line, character)
+
+    def hover(self, uri, line, character):
+        h = self.at("textDocument/hover", uri, line, character)
+        return h and h["contents"]["value"].removeprefix("```myla\n").removesuffix("\n```")
+
+    def refs(self, uri, line, character, decl=True):
+        found = self.at("textDocument/references", uri, line, character, context={"includeDeclaration": decl})
+        return sorted((l["uri"], l["range"]["start"]["line"], l["range"]["start"]["character"],
+                       l["range"]["end"]["character"]) for l in found)
+
+    def test_locals_and_parameters(self):
+        uri = self.open(SCOPES)
+        self.assertEqual(self.defn(uri, 3, 8), {"uri": uri, "range": rng(1, 8, 13)})      # the local
+        self.assertEqual(self.defn(uri, 3, 16), {"uri": uri, "range": rng(1, 8, 13)})
+        self.assertEqual(self.defn(uri, 9, 10), {"uri": uri, "range": rng(0, 4, 9)})      # the function
+        self.assertEqual(self.defn(uri, 2, 13), {"uri": uri, "range": rng(0, 10, 12)})    # the parameter
+        self.assertEqual(self.defn(uri, 9, 16), {"uri": uri, "range": rng(8, 8, 10)})     # main's xs
+        self.assertEqual(self.defn(uri, 3, 24), {"uri": uri, "range": rng(2, 8, 9)})      # the loop variable
+        self.assertEqual(self.hover(uri, 3, 8), "var total")
+        self.assertEqual(self.hover(uri, 3, 24), "let x")
+        self.assertEqual(self.hover(uri, 2, 13), "xs: [int]")
+        self.assertEqual(self.hover(uri, 9, 10), "fun total(xs: [int]) -> int")
+
+    def test_references_follow_the_declaration(self):
+        uri = self.open(SCOPES)
+        self.assertEqual(self.refs(uri, 3, 8), [(uri, 1, 8, 13), (uri, 3, 8, 13), (uri, 3, 16, 21), (uri, 5, 11, 16)])
+        self.assertEqual(self.refs(uri, 3, 8, decl=False), [(uri, 3, 8, 13), (uri, 3, 16, 21), (uri, 5, 11, 16)])
+        self.assertEqual(self.refs(uri, 0, 4), [(uri, 0, 4, 9), (uri, 9, 10, 15)])
+        self.assertEqual(self.refs(uri, 8, 8), [(uri, 8, 8, 10), (uri, 9, 16, 18)])
+
+    def test_references_in_other_files_skip_their_locals(self):
+        other = self.write("other.my", "fun use_it() -> int {\n    let total = 1\n    return total\n}\n")
+        uri = self.open(SCOPES)
+        self.assertEqual(self.refs(uri, 0, 4), [(uri, 0, 4, 9), (uri, 9, 10, 15)])
+
+    def test_variants_fields_and_type_parameters(self):
+        uri = self.open(KINDS)
+        self.assertEqual(self.defn(uri, 8, 18), {"uri": uri, "range": rng(0, 13, 16)})    # Color.Red, not Light's
+        self.assertEqual(self.defn(uri, 11, 14), {"uri": uri, "range": rng(0, 13, 16)})   # in a pattern
+        self.assertEqual(self.defn(uri, 9, 16), {"uri": uri, "range": rng(2, 11, 12)})    # P's x, not Q's
+        self.assertEqual(self.defn(uri, 15, 17), {"uri": uri, "range": rng(2, 11, 12)})   # in a struct pattern
+        self.assertEqual(self.defn(uri, 15, 34), {"uri": uri, "range": rng(15, 20, 21)})  # the match binding
+        self.assertEqual(self.hover(uri, 15, 34), "let n")
+        self.assertEqual(self.defn(uri, 4, 18), {"uri": uri, "range": rng(4, 10, 11)})    # a type parameter
+        self.assertEqual(self.hover(uri, 4, 18), "type parameter T")
+        self.assertEqual(self.defn(uri, 11, 52), {"uri": uri, "range": rng(11, 41, 42)})  # a lambda parameter
+        self.assertEqual(self.hover(uri, 11, 52), "v: int")
+        self.assertEqual(self.refs(uri, 0, 13), [(uri, 0, 13, 16), (uri, 8, 18, 21), (uri, 11, 14, 17)])
+
+    def test_imports(self):
+        decoy = self.write("a.my", "pub fun helper() -> int {\n    return 0\n}\n")
+        util = self.write("util.my", "// util\npub fun helper() -> int {\n    return 1\n}\n")
+        uri = self.open("from util import helper\nfrom util import helper as h\nimport util\n"
+                        "from std.fs import read_to_string\n"
+                        "fun main() {\n    print(helper() + h() + util.helper())\n}\n")
+        at_util = {"uri": _uri(util), "range": rng(1, 8, 14)}
+        self.assertEqual(self.defn(uri, 5, 10), at_util)
+        self.assertEqual(self.defn(uri, 0, 18), at_util)          # the imported name
+        self.assertEqual(self.defn(uri, 5, 21), at_util)          # through an alias
+        self.assertEqual(self.defn(uri, 5, 33), at_util)          # through the module
+        self.assertEqual(self.defn(uri, 5, 28), {"uri": _uri(util), "range": rng(0, 0, 0)})
+        fs = os.path.join(default_stdlib_root(), "std", "fs.my")
+        found = self.defn(uri, 3, 22)
+        self.assertEqual(found["uri"], _uri(fs))
+        with open(fs, encoding="utf-8") as fh:
+            line = fh.read().splitlines()[found["range"]["start"]["line"]]
+        self.assertIn("fun read_to_string(", line)
+        self.assertEqual(self.hover(uri, 5, 21), "fun helper() -> int")
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspScopes(ScopeScenarios, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = myla_tool("tools/lsp/main.my", "lsp")
+
+    def server_command(self) -> list[str]:
+        return [self.binary, "--stdlib", default_stdlib_root()]
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspScopesSelfHosted(TestMylaLspScopes):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = _self_hosted_build()
+
+
+def _corpus() -> list[str]:
+    import glob
+    return sorted(glob.glob(os.path.join(_REPO, "examples", "*.my")) + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
+                  + glob.glob(os.path.join(_REPO, "tools", "*", "*.my"))
+                  + glob.glob(os.path.join(_REPO, "src", "myla", "std", "*.my")))
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestResolutionCorpus(unittest.TestCase):
+    """`lsp --resolve` over every source in the repository: each name used
+    outside a member access that the file declares (as a global, local,
+    parameter or type parameter) resolves, a local only after its
+    declaration, and no position twice; both builds print the same."""
+
+    def test_the_corpus_resolves(self) -> None:
+        from myla.lexer import tokenize
+        from myla.tokens import TokenKind
+        files = _corpus()
+        self.assertGreater(len(files), 50)
+        out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", default_stdlib_root(), "--resolve",
+                              *files], capture_output=True, text=True, check=True).stdout
+        sections = {}
+        for line in out.splitlines():
+            if line.startswith("file "):
+                current = sections.setdefault(line[5:], [])
+            else:
+                current.append(line)
+        self.assertEqual(sorted(sections), files)
+        resolved_total = 0
+        for path in files:
+            with self.subTest(file=os.path.relpath(path, _REPO)):
+                lines = sections[path]
+                self.assertNotIn("unparsed", lines)
+                declared, defs, uses = set(), set(), set()
+                for line in lines:
+                    parts = line.split()
+                    l, rest = parts[1].split(":")
+                    pos = (int(l), int(rest.split("-")[0]))
+                    if parts[0] == "def":
+                        declared.add(parts[3])
+                        defs.add(pos)
+                    else:
+                        self.assertNotIn(pos, uses, line)
+                        uses.add(pos)
+                        if parts[-1] != "global" and parts[-1] != "module":
+                            self.assertEqual(parts[4], path, line)
+                            dl, dc = parts[5].split(":")
+                            self.assertLess((int(dl), int(dc)), pos, line)
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+                source_lines = text.splitlines()
+                toks = tokenize(text)
+                known = defs | uses
+                for k, t in enumerate(toks):
+                    if t.kind != TokenKind.IDENT or t.lexeme not in declared:
+                        continue
+                    if k > 0 and toks[k - 1].kind in (TokenKind.DOT, TokenKind.HASH):
+                        continue    # a member, or an attribute's name
+                    prefix = source_lines[t.line - 1][:t.column - 1]
+                    pos = (t.line - 1, len(prefix.encode("utf-16-le")) // 2)
+                    self.assertIn(pos, known, f"{t.lexeme} at {t.line}:{t.column} is not resolved")
+                    resolved_total += 1
+        self.assertGreater(resolved_total, 30000)
+
+    def test_both_builds_agree(self) -> None:
+        argv = ["--stdlib", default_stdlib_root(), "--resolve", *_corpus()]
+        by_python = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), *argv], capture_output=True, text=True,
+                                   check=True).stdout
+        by_selfhost = subprocess.run([_self_hosted_build(), *argv], capture_output=True, text=True, check=True).stdout
+        self.assertGreater(len(by_python.splitlines()), 30000)
+        self.assertEqual(by_selfhost, by_python)
+
+
 LEGEND_TYPES = ["namespace", "type", "enum", "interface", "struct", "typeParameter", "parameter", "variable",
                 "property", "enumMember", "function", "method", "keyword", "comment", "string", "number",
                 "operator", "decorator"]
@@ -386,7 +586,9 @@ class TestAgainstThePythonServer(unittest.TestCase):
     """The Myla server answers what the Python server answers, on real files:
     document symbols for every example and compiler source, and definition,
     hover, references and completion at sampled positions in the examples
-    (with examples/ as the workspace)."""
+    (with examples/ as the workspace). Where it resolves by scope (MYLA-51,
+    step 5), it answers where the Python server doesn't (locals) and finds
+    fewer references (only those meaning the same declaration)."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -464,8 +666,14 @@ class TestAgainstThePythonServer(unittest.TestCase):
                 with self.subTest(file=os.path.basename(path), line=line, name=name):
                     pos = {"textDocument": {"uri": uri}, "position": {"line": line, "character": col}}
                     py, my = self.ask("textDocument/definition", pos)
-                    if py != my:
-                        # a name declared in several files: either declaration will do
+                    if py is None and my is not None:
+                        # a local, parameter or type parameter (MYLA-51): the
+                        # Python server resolves only declarations by name
+                        self.assertEqual(my["uri"], uri)
+                        self.assertTrue(self.declares(my, name), my)
+                    elif py != my:
+                        # a name declared in several places: the Myla server
+                        # takes the one in scope, the Python server the first
                         self.assertIsNotNone(py)
                         self.assertIsNotNone(my)
                         self.assertTrue(self.declares(my, name), my)
@@ -475,7 +683,14 @@ class TestAgainstThePythonServer(unittest.TestCase):
                     if n % 4 == 0:
                         rp, rm = self.ask("textDocument/references", dict(pos, context={"includeDeclaration": n % 8 == 0}))
                         key = lambda locs: sorted((l["uri"], str(l["range"])) for l in (locs or []))
-                        self.assertEqual(key(rm), key(rp))
+                        # every occurrence of the name for the Python server;
+                        # those meaning the same declaration for the Myla one
+                        self.assertLessEqual(set(key(rm)), set(key(rp)))
+                        here = [l for l in rm or [] if l["uri"] == uri and l["range"]["start"]["line"] == line
+                                and l["range"]["start"]["character"] == col]
+                        is_decl = my is not None and my["uri"] == uri and my["range"]["start"] == {"line": line, "character": col}
+                        if my is not None and (n % 8 == 0 or not is_decl):
+                            self.assertTrue(here, f"{name} is not among its references")
                     checked += 1
             for line in (0, len(lines) // 2):
                 with self.subTest(file=os.path.basename(path), completion=line):

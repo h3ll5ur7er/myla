@@ -95,6 +95,50 @@ pub fun to_lsp(lines: [str], line: int32, col: int32) -> Pos {
     return Pos { line: l, character: utf16_units(text, c) }
 }
 
+// The lines of a text and which of them are ASCII, for converting many
+// positions: on an ASCII line a column is the character.
+pub struct LineIndex { lines: [str], ascii: [bool] }
+
+pub fun line_index(text: str) -> LineIndex {
+    let lines = lines_of(text)
+    var ascii: [bool] = []
+    for l in lines {
+        var plain = true
+        for b in 0..len(l) {
+            if l[b] >= 128u8 { plain = false }
+        }
+        push(ascii, plain)
+    }
+    return LineIndex { lines: lines, ascii: ascii }
+}
+
+impl LineIndex {
+    // to_lsp(self.lines, line, col)
+    fun pos(self, line: int32, col: int32) -> Pos {
+        let l = line - 1
+        if l >= 0 && l < len(self.lines) && self.ascii[l] && col >= 1 && col - 1 <= len(self.lines[l]) {
+            return Pos { line: l, character: col - 1 }
+        }
+        return to_lsp(self.lines, line, col)
+    }
+}
+
+// LineIndex.pos agrees with to_lsp, on ASCII and other lines and out of range.
+#test()[true]
+fun line_index_agrees() -> bool {
+    let text = "ab\na😀b\n"
+    let ix = line_index(text)
+    let lines = lines_of(text)
+    for line in 0..5 {
+        for col in 0..6 {
+            let a = ix.pos(line, col)
+            let b = to_lsp(lines, line, col)
+            if a.line != b.line || a.character != b.character { return false }
+        }
+    }
+    return true
+}
+
 // The 1-based column just past the identifier or number starting at `col`
 // (a squiggle as wide as the word), or col + 1.
 #test("  return x", 3)[9]

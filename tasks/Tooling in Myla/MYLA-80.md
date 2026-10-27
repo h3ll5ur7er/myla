@@ -71,3 +71,22 @@ Evidence:
 Evidence: `RobustnessScenarios` (5 tests, on both builds): a half-typed string keeps the outline, definition and hover; a parse error keeps the outline and completion; the trigger character; a folder added and removed; a workspace file edited on disk is seen. `references` on `selfhost/checker.my` (workspace: the repository): 365 ms per request before the caches, 65 ms after the first. Full run: 491 unit, 29 integration and 502 burn tests pass; the bootstrap builds the server.
 
 Next: resolution by scope and imports (MYLA-51's main point), member completion by receiver type, fuller signatures, then the VS Code extension.
+
+### Step 5: resolution by scope and imports (MYLA-51, part 2)
+
+D69 on [[Project/Decisions]]; described on [[Architecture/Editor-tooling]].
+
+- `tools/lsp/resolve.my` walks the parsed document with a stack of scopes: parameters, `let`/`var` (the initializer sees the outer name), `for` variables, match bindings (or-patterns declare once), lambda and type parameters, then the file's declarations and the names it imports. Imports are found by the loader's rules (relative, `std.*`, packages) and outlined from the open document or the file; `import m` makes `m.name` resolve. Variants (`Color.Red`, in patterns too) and fields in struct literals and patterns resolve through their type; attribute arguments are walked. Uses are keyed by identifier token, searched among identifier tokens only: the f-string lowering puts its `(`, commas and `)` at the string's start, out of order, which first resolved hole names to a later token.
+- Definition, hover and references use it, and fall back to the lookup by name for what doesn't resolve (members through values, until step 6). References to a local are its uses; to a global, its name's occurrences less those resolving elsewhere in the document and other files' locals (the workspace cache now keeps each file's locals, from one lexing and parsing per file).
+- Speed: a resolution is cached per document until its text changes or a notification arrives, module outlines while their text is the same (`checker.my` imports `ast.my` in six statements, which were outlined six times); an index of ASCII lines skips UTF-16 counting. References dedupe with key sets instead of pairwise comparisons.
+- `build/myla-lsp --resolve <file>…` prints a resolution.
+
+Evidence:
+
+- `ScopeScenarios` (5 tests, both builds) failed before the server used the resolver (all 5) and pass after: a local and a parameter shadowing a function named like them, the loop variable, hover texts; references of the local, the function and main's `xs`; another file's local of the same name left out; `Color.Red` against `Light.Red`, `P`'s field against `Q`'s, struct-pattern bindings, type and lambda parameters; imports through an item, an alias, a module and `std.fs`, with a decoy declaration in a file that sorts first.
+- `TestResolutionCorpus`: on the 65 sources of the repository (examples, compiler, tools, standard library), every name a file declares resolves wherever it is used outside a member access, a local only after its declaration, no position twice; both builds print the same 41,536 lines of declarations and uses. It caught three gaps while I wrote it (attribute arguments, later or-pattern alternatives, the f-string token order), and catches each again when reintroduced (8, 1 and 17 files fail).
+- `TestAgainstThePythonServer` relaxed where the answers differ by design: a local's definition is a declaration of the name in the same file (the Python server answers nothing), references are a subset of the Python server's and include the identifier asked about; with local references cut to the declaration, 12 sampled positions fail.
+- Timing on `selfhost/checker.my` (4,100 lines): resolving it cold with its imports 363 ms → 212 ms after caching module outlines; in the server a request takes about 20 ms when the resolution is cached and 330 ms after an edit. `references` to `TokenKind` in `selfhost/parser.my` (workspace `selfhost/`, 468 locations): 22 ms warm (28 ms before this step), 897 ms for the first request (730 ms before: the locals of each file).
+- Full run: 491 unit, 29 integration and 514 burn tests pass; the bootstrap fixed point stays at 7,794,199 bytes and stage 3 builds the server.
+
+Next: member completion by receiver type and fuller signatures (step 6), then the VS Code extension (step 7). [[MYLA-87]] would cut about a third of the remaining lexing and parsing time.

@@ -6,15 +6,20 @@
 
 from std.process import run, Output
 from std.fs import read_to_string
+from ...selfhost.lexer import lex
+from ...selfhost.parser import parse_source
 from ...selfhost.loader import normalize
-from .symbols import Symbol, SymKind, Range, document_symbols, priority
-from .features import Location, identifier_index
+from .symbols import Symbol, SymKind, Range, outline_parsed, priority, start_key
+from .features import Location, index_identifiers
+from .resolve import local_ranges
+from .text import lines_of
 
 // A declaration in some file.
 pub struct Entry { name: str, kind: SymKind, detail: str, path: str, range: Range }
 
-// What a file's text gives, kept while the text stays the same.
-struct Cached { text: str, entries: [Entry], idents: [str: [Range]] }
+// What a file's text gives, kept while the text stays the same: its
+// declarations, its identifiers by name, and which of them are locals.
+struct Cached { text: str, entries: [Entry], idents: [str: [Range]], locals: [int: bool] }
 
 pub struct Workspace {
     roots: [str],
@@ -33,13 +38,26 @@ fun indexable(k: SymKind) -> bool {
     }
 }
 
-// The declarations worth finding from other files (not fields or impls).
-pub fun entries_of(path: str, text: str) -> [Entry] {
-    var out: [Entry] = []
-    for s in document_symbols(text) {
-        if indexable(s.kind) { push(out, Entry { name: s.name, kind: s.kind, detail: s.detail, path: path, range: s.selection }) }
+// What the text of the file `path` gives, from one lexing and parsing: the
+// declarations worth finding from other files (not fields or impls), the
+// identifiers (when it lexes) and which are locals (when it parses).
+fun analyse(path: str, text: str) -> Cached {
+    var entries: [Entry] = []
+    var locals: [int: bool] = [:]
+    let toks = match lex(text) {
+        Ok(t) => t,
+        Err(d) => { return Cached { text: text, entries: entries, idents: [:], locals: locals } },
     }
-    return out
+    match parse_source(text, 0) {
+        Ok(parsed) => {
+            for s in outline_parsed(text, toks, parsed.program) {
+                if indexable(s.kind) { push(entries, Entry { name: s.name, kind: s.kind, detail: s.detail, path: path, range: s.selection }) }
+            }
+            for r in local_ranges(path, text, toks, parsed.program) { locals[start_key(r)] = true }
+        },
+        Err(d) => {},
+    }
+    return Cached { text: text, entries: entries, idents: index_identifiers(lines_of(text), toks), locals: locals }
 }
 
 // `a` sorts before `b` (by bytes).
@@ -140,7 +158,7 @@ impl Workspace {
             },
             None => {},
         }
-        let c = Cached { text: text, entries: entries_of(path, text), idents: identifier_index(text) }
+        let c = analyse(path, text)
         self.cache[path] = c
         return c
     }
@@ -172,13 +190,17 @@ impl Workspace {
         return out
     }
 
-    // Every identifier `name` in the workspace's files.
+    // Every identifier `name` in the workspace's files that isn't a local
+    // (MYLA-51: a parameter `total` is no reference to a function `total`).
     fun references(var self, name: str, overrides: [str: str]) -> [Location] {
         var out: [Location] = []
         for path in self.files() {
-            match get(self.cached(path, overrides).idents, name) {
+            let c = self.cached(path, overrides)
+            match get(c.idents, name) {
                 Some(ranges) => {
-                    for r in ranges { push(out, Location { path: path, range: r }) }
+                    for r in ranges {
+                        if !contains(c.locals, start_key(r)) { push(out, Location { path: path, range: r }) }
+                    }
                 },
                 None => {},
             }

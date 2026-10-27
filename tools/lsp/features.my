@@ -53,14 +53,9 @@ pub fun identifier_ranges(source: str, name: str) -> [Range] {
     return out
 }
 
-// The ranges of every identifier of `source`, by name.
-pub fun identifier_index(source: str) -> [str: [Range]] {
+// The ranges of the identifiers among `toks` (of a text with `lines`), by name.
+pub fun index_identifiers(lines: [str], toks: [Token]) -> [str: [Range]] {
     var out: [str: [Range]] = [:]
-    let toks = match lex(source) {
-        Ok(t) => t,
-        Err(d) => { return out },
-    }
-    let lines = lines_of(source)
     for t in toks {
         if t.kind == TokenKind.IDENT {
             if !contains(out, t.lexeme) {

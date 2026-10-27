@@ -11,7 +11,7 @@
 from ...selfhost.lexer import lex
 from ...selfhost.parser import parse_source
 from ...selfhost.tokens import Token, TokenKind
-from ...selfhost.ast import Decl, DeclKind, FunData, TypeExpr, TypeKind, Field, Variant
+from ...selfhost.ast import Decl, DeclKind, FunData, TypeExpr, TypeKind, Field, Variant, Program
 from .text import lines_of, to_lsp, code_points, Pos
 
 pub enum SymKind {
@@ -43,6 +43,11 @@ pub struct Symbol {
 
 pub fun range_eq(a: Range, b: Range) -> bool {
     return a.start.line == b.start.line && a.start.character == b.start.character && a.end.line == b.end.line && a.end.character == b.end.character
+}
+
+// A key for an identifier's range (one token: its start tells it apart).
+pub fun start_key(r: Range) -> int {
+    return (r.start.line as int) * 1000000 + (r.start.character as int)
 }
 
 // The LSP SymbolKind number.
@@ -125,9 +130,14 @@ pub fun outline(source: str) -> Option<[Symbol]> {
         Ok(p) => p,
         Err(d) => { return None },
     }
+    return Some(outline_parsed(source, toks, parsed.program))
+}
+
+// The symbols of `source`, given its tokens and its parsed program.
+pub fun outline_parsed(source: str, toks: [Token], program: Program) -> [Symbol] {
     var b = Builder { lines: lines_of(source), toks: toks, out: [] }
-    for d in parsed.program.decls { b.decl(d) }
-    return Some(b.out)
+    for d in program.decls { b.decl(d) }
+    return b.out
 }
 
 impl Builder {

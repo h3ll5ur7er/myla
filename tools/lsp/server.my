@@ -17,10 +17,11 @@ from ...selfhost.diag import Report, type_report
 from ...selfhost.checker import build_checker_decls
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
 from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
-from .symbols import Symbol, SymKind, Range, document_symbols, outline, best_match, lsp_kind, range_eq, is_member_kind, kind_eq
+from .symbols import Symbol, SymKind, Range, document_symbols, outline, best_match, lsp_kind, start_key, is_member_kind, kind_eq
 from .features import Location, identifier_at, identifier_ranges, render, is_member_access, completion_keywords, lexes
 from .workspace import Workspace, Entry, new_workspace
 from .semantic import semantic_tokens, token_types, token_modifiers
+from .resolve import Resolution, Outline, Def, DefKind, resolve, at_position, same_def, is_global, render_local
 
 const DEBOUNCE_MS: int32 = 400
 
@@ -38,14 +39,20 @@ pub struct Server {
     shut_down: bool,
     ws: Workspace,                 // the files under the workspace roots
     good: [str: Good],             // uri -> the last text that parsed, and its outline (MYLA-51)
+    resolved: [str: Resolved],     // uri -> its last resolution
+    known: [str: Outline],         // module path -> its outline, for resolving imports
+    stamp: int,                    // counts notifications: any may change what a name means
 }
+
+// A document's resolution, while its text and the stamp are the same.
+struct Resolved { text: str, stamp: int, res: Resolution }
 
 // The last text of a document that parsed, and its outline.
 struct Good { text: str, symbols: [Symbol] }
 
 pub fun new_server(stdlib: str) -> Server {
     return Server { ch: Channel { input: stdin() }, stdlib: stdlib, docs: [:], dirty: [], urgent: false,
-                    elsewhere: [:], shut_down: false, ws: new_workspace(), good: [:] }
+                    elsewhere: [:], shut_down: false, ws: new_workspace(), good: [:], resolved: [:], known: [:], stamp: 0 }
 }
 
 impl Server {
@@ -80,6 +87,10 @@ impl Server {
         let id = field(msg, "id")
         if method == "" { return true }                 // a response to us
         if method == "exit" { return false }
+        match id {
+            Some(i) => {},
+            None => { self.stamp = self.stamp + 1 },
+        }
         if method == "initialize" {
             self.ws.roots = workspace_roots(params)
             self.reply(id, initialize_result())
@@ -107,12 +118,14 @@ impl Server {
         } else if method == "workspace/didChangeWorkspaceFolders" {
             self.change_folders(field_or_null(params, "event"))
         } else if method == "workspace/didChangeWatchedFiles" {
-            // nothing to do: workspace files are read again on each request, and
-            // their declarations kept only while their text is the same
+            // nothing more to do (the stamp changed): workspace files are read
+            // again on each request, and their declarations kept only while
+            // their text is the same
         } else if method == "textDocument/didClose" {
             let uri = str_field(field_or_null(params, "textDocument"), "uri")
             remove(self.docs, uri)
             if contains(self.good, uri) { remove(self.good, uri) }
+            if contains(self.resolved, uri) { remove(self.resolved, uri) }
             var still: [str] = []
             for u in self.dirty {
                 if u != uri { push(still, u) }
@@ -324,6 +337,29 @@ impl Server {
         self.ws.roots = roots
     }
 
+    // What the document's identifiers refer to (MYLA-51), by scope and
+    // through the imports as the loader finds them; made again when its text
+    // changed or a notification came.
+    fun resolution(var self, d: Doc) -> Resolution {
+        match get(self.resolved, d.uri) {
+            Some(r) => {
+                if r.stamp == self.stamp && r.text == d.text { return r.res }
+            },
+            None => {},
+        }
+        let res = resolve(d.path, d.text, self.stdlib, self.overrides(), self.known)
+        self.known = res.known
+        self.resolved[d.uri] = Resolved { text: d.text, stamp: self.stamp, res: res }
+        return res
+    }
+
+    // The declaration the identifier at `pos` refers to, when resolved.
+    fun resolved_at(var self, d: Doc, pos: Pos) -> Option<Def> {
+        let r = self.resolution(d)
+        if !r.ok { return None }
+        return at_position(r, pos)
+    }
+
     fun document_symbol(var self, params: Json) -> Json {
         return match self.doc_of(params) {
             Some(d) => symbol_tree(d.symbols, -1),
@@ -340,6 +376,10 @@ impl Server {
         let ident = match identifier_at(d.text, pos.line, pos.character) {
             Some(n) => n,
             None => { return Json.Null },
+        }
+        match self.resolved_at(d, pos) {
+            Some(def) => { return location(def.path, def.range) },
+            None => {},
         }
         match best_match(d.symbols, ident) {
             Some(s) => { return location(d.path, s.selection) },
@@ -361,12 +401,22 @@ impl Server {
             None => { return Json.Null },
         }
         var text = ""
-        match best_match(d.symbols, ident) {
-            Some(s) => { text = render(s.name, s.kind, s.detail) },
+        match self.resolved_at(d, pos) {
+            Some(def) => {
+                match def.kind {
+                    DefKind.Global(k) => { text = render(def.name, k, def.detail) },
+                    _ => { text = render_local(def) },
+                }
+            },
             None => {
-                let matches = self.ws.lookup(ident, self.overrides())
-                if len(matches) == 0 { return Json.Null }
-                text = render(matches[0].name, matches[0].kind, matches[0].detail)
+                match best_match(d.symbols, ident) {
+                    Some(s) => { text = render(s.name, s.kind, s.detail) },
+                    None => {
+                        let matches = self.ws.lookup(ident, self.overrides())
+                        if len(matches) == 0 { return Json.Null }
+                        text = render(matches[0].name, matches[0].kind, matches[0].detail)
+                    },
+                }
             },
         }
         let contents = Json.Object([("kind", Json.Str("markdown")), ("value", Json.Str("```myla\n" + text + "\n```"))])
@@ -384,35 +434,60 @@ impl Server {
             Some(n) => n,
             None => { return Json.Array(none) },
         }
-        var found: [Location] = []
-        for r in identifier_ranges(d.text, ident) { push(found, Location { path: d.path, range: r }) }
-        for l in self.ws.references(ident, self.overrides()) { push(found, l) }
         let include_decl = match field(field_or_null(params, "context"), "includeDeclaration") {
             Some(Json.Bool(b)) => b,
             _ => true,
         }
-        var decls: [Range] = []
-        if !include_decl {
-            for s in d.symbols {
-                if s.name == ident { push(decls, s.selection) }
-            }
+        let res = self.resolution(d)
+        var target: Option<Def> = None
+        if res.ok { target = at_position(res, pos) }
+        var found: [Location] = []
+        var decls: [Location] = []
+        match target {
+            Some(def) => {
+                // by declaration: a local's uses are in this document; a
+                // global's occurrences are those of its name, less those that
+                // mean something else here and the locals of other files
+                var other: [int: bool] = [:]
+                for u in res.uses {
+                    if !same_def(u.def, def) { other[start_key(u.range)] = true }
+                }
+                for x in res.defs {
+                    if !same_def(x, def) { other[start_key(x.range)] = true }
+                }
+                if !include_decl { push(decls, Location { path: def.path, range: def.range }) }
+                if !is_global(def) {
+                    push(found, Location { path: def.path, range: def.range })
+                    for u in res.uses {
+                        if same_def(u.def, def) { push(found, Location { path: d.path, range: u.range }) }
+                    }
+                } else {
+                    for r in identifier_ranges(d.text, ident) {
+                        if !contains(other, start_key(r)) { push(found, Location { path: d.path, range: r }) }
+                    }
+                    for l in self.ws.references(ident, self.overrides()) {
+                        if l.path != d.path { push(found, l) }
+                    }
+                }
+            },
+            None => {
+                for r in identifier_ranges(d.text, ident) { push(found, Location { path: d.path, range: r }) }
+                for l in self.ws.references(ident, self.overrides()) { push(found, l) }
+                if !include_decl {
+                    for s in d.symbols {
+                        if s.name == ident { push(decls, Location { path: d.path, range: s.selection }) }
+                    }
+                }
+            },
         }
-        var unique: [Location] = []
+        var seen: [str: bool] = [:]
+        for x in decls { seen[f"{x.path}:{start_key(x.range)}"] = true }
         var out: [Json] = []
         for l in found {
-            var dup = false
-            for u in unique {
-                if u.path == l.path && range_eq(u.range, l.range) { dup = true }
-            }
-            var is_decl = false
-            if l.path == d.path {
-                for r in decls {
-                    if range_eq(r, l.range) { is_decl = true }
-                }
-            }
-            if !dup {
-                push(unique, l)
-                if !is_decl { push(out, location(l.path, l.range)) }
+            let key = f"{l.path}:{start_key(l.range)}"
+            if !contains(seen, key) {
+                seen[key] = true
+                push(out, location(l.path, l.range))
             }
         }
         return Json.Array(out)
