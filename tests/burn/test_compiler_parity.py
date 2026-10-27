@@ -325,6 +325,25 @@ PROGRAMS = {
     # MYLA-84: a const string made with `+` read inside a function: the
     # self-hosted backend evaluated the concatenation at each use, into a
     # temporary its frame had no slot for, and the function's return crashed
+    # MYLA-102: a local binding shadows a top-level function of the same name
+    # in calls too (a closure, a parameter of function type); outside its
+    # scope the function is called again
+    "local_closure_shadows_a_function": (
+        "fun fail(m: str) -> int32 {\n    print(\"the function\")\n    return 1\n}\n"
+        "fun twice(n: int32) -> int32 {\n    return 2 * n\n}\n"
+        "fun apply(twice: (int32) -> int32, x: int32) -> int32 {\n    return twice(x)\n}\n"
+        "#main\nfun main() {\n"
+        "    if true {\n"
+        "        let fail = (m: str) => len(m)\n"
+        "        print(fail(\"the closure\"))\n"
+        "        let twice = (n: int32) => n + 100\n"
+        "        print(twice(1))\n"
+        "    }\n"
+        "    print(fail(\"again\"))\n"
+        "    print(twice(5))\n"
+        "    print(apply((n: int32) => n - 1, 10))\n"
+        "}\n"
+    ),
     "const_string_concatenation_in_functions": (
         "const TABLE: str = \"ab\" + \"cd\" + \"ef\"\n"
         "const N: int32 = 2 + 3\n"

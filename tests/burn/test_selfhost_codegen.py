@@ -99,6 +99,7 @@ PARITY_PROGRAMS = (
     "try_with_a_larger_success_payload",
     "derived_eq_on_plain_enums",
     "const_string_concatenation_in_functions",
+    "local_closure_shadows_a_function",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),

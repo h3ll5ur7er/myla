@@ -1351,11 +1351,18 @@ impl CodeGen {
         return false
     }
 
+    // Whether the checker typed `callee` as a value, which it does only for an
+    // indirect call: a local binding shadows a function of the same name
+    // (MYLA-102), so `f(x)` with a local `f` calls the local.
+    fun called_as_value(self, callee: Expr) -> bool {
+        return contains(self.resolved, callee.id)
+    }
+
     // Whether a call through `callee` resolves indirectly (a function value)
     // rather than to a builtin, a user function, or a method.
     fun call_is_indirect(self, callee: Expr) -> bool {
         match callee.kind {
-            ExprKind.Name(nm) => { return !is_builtin_call_name(nm) && !self.has_function(nm) },
+            ExprKind.Name(nm) => { return !is_builtin_call_name(nm) && (!self.has_function(nm) || self.called_as_value(callee)) },
             ExprKind.GetField(recv, field) => {
                 return !self.has_func(format("{}.{}", self.type_key(self.type_of(recv.id)), field))
             },
@@ -1747,7 +1754,9 @@ impl CodeGen {
                 let indirect = self.call_is_indirect(c)
                 match c.kind {
                     ExprKind.GetField(rc, fld) => { self.visit_expr(c) },
-                    ExprKind.Name(nm) => { if indirect { self.visit_expr(c) } },
+                    // a called name needs no slot: a function is called directly, a
+                    // local (one shadowing a function too, MYLA-102) by its own slot
+                    ExprKind.Name(nm) => {},
                     _ => { self.visit_expr(c) },
                 }
                 for a in args { self.visit_expr(a) }
@@ -3939,7 +3948,7 @@ impl CodeGen {
                 else if nm == "__run_exit_code" { self.emit("movslq __run_exit_val(%rip), %rax") }
                 else if nm == "__run_signal" { self.emit("movslq __run_signal_val(%rip), %rax") }
                 else if nm == "__run_errno" { self.emit("movslq __run_errno_val(%rip), %rax") }
-                else if self.has_func(nm) { self.gen_user_call(e, nm, args) }
+                else if self.has_func(nm) && !self.called_as_value(callee) { self.gen_user_call(e, nm, args) }
                 else { self.gen_indirect_call(e, callee, args) }
             },
             ExprKind.GetField(recv, field) => { self.gen_method_or_closure_call(e, callee, recv, field, args) },

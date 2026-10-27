@@ -1523,13 +1523,14 @@ impl Interp {
             Some(en) => { return Value.VEnum(en, nm, self.eval_args(args)) },
             None => {},
         }
-        let fi = self.func_idx(nm)
-        if fi >= 0 { return self.call_func(fi, self.eval_args(args)) }
-        // indirect call: `f(args)` where f is a closure value
+        // indirect call: `f(args)` where f is a closure value; a local binding
+        // shadows a function of the same name, as the checker types it (MYLA-102)
         match self.lookup(nm) {
             Some(v) => { return self.call_value(v, self.eval_args(args)) },
             None => {},
         }
+        let fi = self.func_idx(nm)
+        if fi >= 0 { return self.call_func(fi, self.eval_args(args)) }
         return Value.VUnit
     }
 
