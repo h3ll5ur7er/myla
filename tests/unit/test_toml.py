@@ -245,6 +245,69 @@ class TestApi(unittest.TestCase):
         Interpreter(checker, out, io.StringIO()).run()
         self.assertEqual(out.getvalue(), "geo\nno name\nno package\nexpected a value\nnot a table\n")
 
+    def test_positions(self):
+        # `parse_doc` keeps where keys and values are (MYLA-93): pairs, keys
+        # of inline tables, headers (the one that opens a table, else the
+        # first that implies it), and columns in characters.
+        text = ("# a comment\n"
+                "[package]\n"
+                "name   =  \"géo\"  # x\n"
+                "authors = [\"a\",\n"
+                "  \"b\"]\n"
+                "[dependencies.big]\n"
+                "path = 'v'\n"
+                "[dependencies]\n"
+                "\"λ\" = { path = \"../λ\", 'x y' = { z = 1 } }\n"
+                "[x.y]\n")
+        paths = [["package"], ["package", "name"], ["package", "authors"],
+                 ["dependencies"], ["dependencies", "big"], ["dependencies", "big", "path"],
+                 ["dependencies", "λ"], ["dependencies", "λ", "path"],
+                 ["dependencies", "λ", "x y"], ["dependencies", "λ", "x y", "z"], ["x"], ["nothing"]]
+        lines = []
+        for p in paths:
+            arr = "[" + ", ".join(json.dumps(k, ensure_ascii=False) for k in p) + "]"
+            lines.append(f"    show(d, {arr})")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "main.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "from std.toml import parse_doc, key_pos, value_pos, TomlDoc, TomlPos\n"
+                    "fun at(p: Option<TomlPos>) -> str {\n"
+                    "    return match p {\n"
+                    "        Some(q) => format(\"{}:{}-{}:{}\", q.line, q.col, q.end_line, q.end_col)\n"
+                    "        None => \"-\"\n"
+                    "    }\n"
+                    "}\n"
+                    "fun show(d: TomlDoc, path: [str]) {\n"
+                    "    print(format(\"{} {}\", at(key_pos(d, path)), at(value_pos(d, path))))\n"
+                    "}\n"
+                    "fun main() {\n"
+                    f"    let text = {json.dumps(text, ensure_ascii=False)}\n"
+                    "    match parse_doc(text) {\n"
+                    "        Ok(d) => {\n"
+                    + "\n".join(lines) + "\n"
+                    "        },\n"
+                    "        Err(e) => print(e.msg),\n"
+                    "    }\n"
+                    "}\n")
+            checker = check(link(path, stdlib_root=default_stdlib_root()))
+        out = io.StringIO()
+        Interpreter(checker, out, io.StringIO()).run()
+        self.assertEqual(out.getvalue().splitlines(), [
+            "2:1-2:10 2:1-2:10",       # [package]
+            "3:1-3:5 3:11-3:16",       # name, "géo" (5 characters)
+            "4:1-4:8 4:11-5:7",        # authors, over two lines
+            "8:1-8:15 8:1-8:15",       # opened by [dependencies], not [dependencies.big]
+            "6:1-6:19 6:1-6:19",
+            "7:1-7:5 7:8-7:11",
+            "9:1-9:4 9:7-9:43",        # "λ" and its inline table
+            "9:9-9:13 9:16-9:22",
+            "9:24-9:29 9:32-9:41",
+            "9:34-9:35 9:38-9:39",
+            "10:1-10:6 10:1-10:6",      # implied by [x.y] only
+            "- -",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

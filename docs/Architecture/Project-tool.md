@@ -3,7 +3,7 @@
 The design of `myla` as a project tool like cargo ([[MYLA-64]]): a manifest, dependencies from paths and Git, and the commands `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` in the self-hosted CLI. The decisions behind it are D73 on [[Project/Decisions]]; this page fills in the details.
 
 > [!NOTE]
-> **Status: approved, being built.** The design and the answers to its [questions](#settled-questions) were approved on 2026-10-27. Built so far: the file-system functions ([[MYLA-88]]) and the TOML parser ([[MYLA-89]]); the loaders ([[MYLA-92]]), the project model ([[MYLA-93]]), the commands ([[MYLA-94]]) and Git dependencies ([[MYLA-95]]) follow.
+> **Status: approved, being built.** The design and the answers to its [questions](#settled-questions) were approved on 2026-10-27. Built so far: the file-system functions ([[MYLA-88]], [[MYLA-98]]), the TOML parser ([[MYLA-89]]) and the project model ([[MYLA-93]]); the loaders ([[MYLA-92]]), the commands ([[MYLA-94]]) and Git dependencies ([[MYLA-95]]) follow.
 
 [TOC]
 
@@ -166,7 +166,50 @@ The project tool collects the packages before every command that compiles:
 4. Each package's name must equal its key in the requesting manifest, and it must have a library (`src/<name>.my`).
 5. The result is one `--package <name>=<dir>/src` per package, where `<dir>` is its package directory.
 
-Cycles between packages are allowed, as import cycles are.
+Cycles between packages are allowed, as import cycles are. A dependency on the root package by its own directory is the root package itself: it gets no `--package` (its `src/` is the project root, [question 2](#settled-questions)), but it must have a library.
+
+### The project model
+
+[[selfhost/project.my]] implements this ([[MYLA-93]], D77). It depends on `std.fs`, `std.toml`, `diag` and `tokens`, not on the loader or the CLI:
+
+```myla
+pub struct Package { name: str, version: str, dir: str, has_program: bool, has_library: bool, source: Source }
+pub enum Source { Root, Path(str), Git(GitSource) }          // Path: the directory as resolved
+pub struct GitSource { url: str, reference: GitRef, commit: str }
+pub enum GitRef { DefaultBranch, Tag(str), Branch(str), Rev(str) }
+pub struct GitPackage { name: str, git: GitSource, dir: str }
+pub struct Project { manifest: str, root: Package, deps: [Package], missing: [GitPackage], unlocked: [GitPackage] }
+pub struct ProjectError { msg: str, path: str, line: int32, col: int32, end_line: int32, end_col: int32 }
+pub struct Lock { entries: [LockEntry] }
+pub struct LockEntry { name: str, git: GitSource }
+
+pub fun find_manifest(start: str) -> Option<str>
+pub fun load_project(manifest: str) -> Result<Project, ProjectError>
+pub fun resolve_project(manifest: str, lock: Lock, allow_unlocked: bool) -> Result<Project, ProjectError>
+pub fun loader_packages(p: Project) -> [(str, str)]
+pub fun render_project_error(e: ProjectError) -> str
+pub fun load_lock(path: str) -> Result<Lock, ProjectError>
+pub fun project_lock(manifest: str) -> Result<Lock, ProjectError>
+pub fun parse_lock(text: str, path: str) -> Result<Lock, ProjectError>
+pub fun render_lock(lock: Lock) -> str
+pub fun lock_of(p: Project) -> Lock
+```
+
+- **Paths.** Every directory is absolute and lexically normalised (no `.`, `..`, `//` or trailing `/`): a relative path is taken from `std.fs.current_dir()` ([[MYLA-98]]). Two requests name the same package directory when the normalised paths are equal; symbolic links are not resolved, as neither loader resolves them. `find_manifest(start)` checks `start`, its parent and so on up to `/`, and gives the manifest's absolute path; `Project.manifest` and the paths in errors are absolute too.
+- **The result.** `deps` holds every dependency of the build, sorted by name, without the root package; `loader_packages` turns it into `(name, dir + "/src")` pairs for `--package`. `has_program` and `has_library` say whether `src/main.my` and `src/<name>.my` exist, so the commands can say ``'shapes' has no program``.
+- **Git dependencies.** A Git dependency is read from `<root>/.myla/deps/<name>-<commit>/` (the root package's directory, also for the Git dependencies of a Git dependency), with the commit of its current entry in the root's `myla.lock`. `load_project` reads that lock file (`project_lock`: none means no entries) and stops at a dependency without a current entry: ``dependency 'json5' is not locked: run `myla fetch` ``. A locked dependency whose checkout doesn't exist yet is no error: it is in `Project.missing`, with the commit and the directory to clone into, and its own dependencies aren't followed. So `myla build` checks out every package in `missing` and resolves again, until `missing` is empty ([question 1](#settled-questions)). `myla fetch` calls `resolve_project(manifest, lock, true)`, which lists the dependencies without a current entry in `Project.unlocked` instead of failing; it resolves their references, checks them out, and repeats, then writes `render_lock(lock_of(p))`, which keeps exactly the current entries ([[MYLA-95]]).
+- **Positions.** `std.toml`'s `parse_doc` keeps where each key and value is (`key_pos`, `value_pos`). A manifest error points at what is wrong: an unknown key at the key, a bad name or a value of the wrong type at the value, a missing field at the `[package]` header, and an error about a dependency (not locked, two versions, no `myla.toml`, a name mismatch, no library, a path outside its Git checkout) at the dependency's key in the manifest that asks for it. Errors in a dependency's own manifest name that file.
+
+| Error | Message |
+| --- | --- |
+| No `[package]` | `missing table [package]` |
+| A missing field | `missing 'name' in [package]`, `missing 'version' in [package]` |
+| A field of the wrong type | `'package.version' must be a string`, `'package.authors' must be an array of strings`, `'package' must be a table` |
+| A bad name | `'1geo' is not a valid package name: it must be an ASCII letter followed by ASCII letters, digits and '_'`, `'while' is a keyword and can't be a package name`, `'std' is the standard library and can't be a package name` |
+| Unknown keys | `unknown key 'nmae' in [package]`, `unknown table 'dependecies'`, `unknown key 'version' in dependency 'geo'` |
+| A dependency's keys | `dependency 'geo' has both 'path' and 'git'`, `dependency 'geo' needs 'path' or 'git'`, `dependency 'geo' has both 'tag' and 'branch': give at most one of 'tag', 'branch' and 'rev'`, `'tag' of dependency 'geo' needs 'git', not 'path'`, `'rev' of dependency 'geo' must be a full commit id (40 hexadecimal digits)`, `'path' of dependency 'geo' is empty`, `dependency 'geo' must be a table, such as geo = { path = "../geo" }` |
+| Resolving | `dependency 'geo' has no myla.toml in /…/geo`, `dependency 'geo' is named 'geometry' in its myla.toml`, `dependency 'geo' has no library (src/geo.my)`, `two versions of package 'util': path ../util (required by app) and path ../util2 (required by geo)` (the root package is `the root package`), `path dependency 'up' of 'json5' is outside its Git checkout`, ``dependency 'json5' is not locked: run `myla fetch` `` |
+| The lock file | `myla.lock is from a newer myla`, `unknown lock file version 0`, `the lock file has no 'version'`, `unknown key 'x' in the lock file`, `unknown key 'x' in [git.json5]`, `missing 'url' in [git.json5]`, `missing 'commit' in [git.json5]`, `'commit' of [git.json5] must be 40 hexadecimal digits` |
 
 ## The loaders: `--package name=dir`
 
@@ -207,7 +250,17 @@ The self-hosted CLI `build/myla` runs a command in **project mode** when it is g
 
 ### Messages
 
-Errors are printed like compile errors, `path:line:col: message` with the line and a caret when there is a position (manifest and lock file errors), else `myla: message`, and the exit status is 1. Fetching prints one line per dependency (`fetching json5 v1.2.0 (4f3c2a1)`); a build prints nothing but errors.
+Errors are printed like compile errors, and the exit status is 1. A manifest or lock file error has a position, so it is printed with the line and carets under the key or value it is about, its kind being `manifest error` or `lock file error` (`render_project_error`):
+
+```
+manifest error: two versions of package 'util': path ../util (required by app) and path ../util2 (required by geo)
+  --> /home/ada/geo/myla.toml:5:1
+  |
+5 | util = { path = "../util2" }
+  | ^^^^
+```
+
+An error without a position is `myla: <file>: <message>` (`myla: /home/ada/app/myla.toml: missing table [package]`), or `myla: <message>` without a file. Fetching prints one line per dependency (`fetching json5 v1.2.0 (4f3c2a1)`); a build prints nothing but errors.
 
 ## Git
 
@@ -247,7 +300,8 @@ The follow-up tasks in the epic `Project tool`:
 | [[MYLA-88]] | File-system functions: `list_dir`, `make_dir`, `make_dir_all`, `exists`, `is_dir`, `is_file` (done, in review) |
 | [[MYLA-89]] | `std.toml`: the subset above, tested against Python's `tomllib` (done, in review) |
 | [[MYLA-92]] | Both loaders: `--package name=dir`, the resolution order, the shadowing error, package module ids, a project root parameter; parity tests between the toolchains |
-| [[MYLA-93]] | The project model in Myla: read and check `myla.toml` and `myla.lock`, resolve path dependencies transitively, the one-version rule, the `--package` list |
+| [[MYLA-93]] | The project model in Myla: read and check `myla.toml` and `myla.lock`, resolve path dependencies transitively, the one-version rule, the `--package` list (done, in review: [the project model](#the-project-model)) |
+| [[MYLA-98]] | `std.fs.current_dir` and its primitive `__getcwd`, for finding the manifest and absolute paths (done, in review) |
 | [[MYLA-94]] | The commands `new`, `build`, `run`, `test`, `check` and `clean` in `build/myla`, with path dependencies; [[Getting started]] and [[Language/Modules]] describe projects |
 | [[MYLA-95]] | Git dependencies: `myla fetch`, `.myla/deps/`, the lock file |
 | [[MYLA-96]] | Not needed for now (question 4 was settled for `rm -rf` and `mv` through `std.process`): `std.fs` primitives to remove and rename files and directories |
