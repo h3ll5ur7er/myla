@@ -1,0 +1,284 @@
+// types.my: types as the language server knows them (MYLA-80 step 6): the
+// text of a type as written (`[Token]`, `Option<P>`, `Box<T>`), taken apart
+// to find a receiver's type syntactically: an element, a type argument, a
+// function's result, with type parameters substituted. No inference beyond
+// that; "" stands for unknown.
+
+// The name of a named type (`Box` of `Box<int>`), "" for a list, map,
+// tuple or function type.
+#test("Box<int>")["Box"]
+#test("P")["P"]
+#test("[P]")[""]
+#test("")[""]
+pub fun base_of(t: str) -> str {
+    if len(t) == 0 || !is_name_start(t[0]) { return "" }
+    var i = 0
+    while i < len(t) && t[i] != '<' { i = i + 1 }
+    return part(t, 0, i)
+}
+
+// The type arguments of `Name<A, B>` (top level only).
+#test("Result<[int], (str, E)>")[["[int]", "(str, E)"]]
+#test("P")[[]]
+pub fun type_args(t: str) -> [str] {
+    var i = 0
+    while i < len(t) && t[i] != '<' { i = i + 1 }
+    if i >= len(t) || t[len(t) - 1] != '>' { return [] }
+    return split_top(part(t, i + 1, len(t) - 1), ',')
+}
+
+// The element of a list type, the value of a map type: what indexing gives.
+#test("[P]")["P"]
+#test("[str: [int]]")["[int]"]
+#test("P")[""]
+pub fun index_of(t: str) -> str {
+    if len(t) < 2 || t[0] != '[' || t[len(t) - 1] != ']' { return "" }
+    let parts = split_top(part(t, 1, len(t) - 1), ':')
+    return parts[len(parts) - 1]
+}
+
+// What `for x in` a value of type `t` binds: a list's element, a map's key.
+#test("[P]")["P"]
+#test("[str: int]")["str"]
+pub fun iter_of(t: str) -> str {
+    if len(t) < 2 || t[0] != '[' || t[len(t) - 1] != ']' { return "" }
+    return split_top(part(t, 1, len(t) - 1), ':')[0]
+}
+
+// The success type of an Option or Result: what `?` gives.
+#test("Option<P>")["P"]
+#test("Result<[int], str>")["[int]"]
+#test("P")[""]
+pub fun success_of(t: str) -> str {
+    let b = base_of(t)
+    if b != "Option" && b != "Result" { return "" }
+    let args = type_args(t)
+    if len(args) == 0 { return "" }
+    return args[0]
+}
+
+// The result type of a function signature (`fun f<T>(g: (int) -> int) -> P`
+// gives `P`), "" without one.
+#test("fun f(g: (int) -> int) -> P")["P"]
+#test("pub fun first<T: Eq>(xs: [T]) -> T")["T"]
+#test("fun run(self)")[""]
+#test("(int) -> [str]")["[str]"]
+pub fun result_of(sig: str) -> str {
+    var i = 0
+    while i < len(sig) && sig[i] != '(' { i = i + 1 }
+    var depth = 0
+    while i < len(sig) {
+        let c = sig[i]
+        if c == '(' || c == '[' || c == '<' {
+            depth = depth + 1
+        } else if c == ')' || c == ']' || c == '>' {
+            // the `>` of an arrow isn't a bracket
+            if !(c == '>' && i > 0 && sig[i - 1] == '-') { depth = depth - 1 }
+            if depth == 0 {
+                let rest = part(sig, i + 1, len(sig))
+                if starts_with(rest, " -> ") { return part(rest, 4, len(rest)) }
+                return ""
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// The type parameters a declaration header names (`pub struct Box<T: Eq, U>`
+// gives T and U).
+#test("pub struct Box<T: Eq + Ord, U>")[["T", "U"]]
+#test("struct P")[[]]
+pub fun header_params(header: str) -> [str] {
+    var out: [str] = []
+    for p in type_args(header) {
+        var i = 0
+        while i < len(p) && p[i] != ':' { i = i + 1 }
+        push(out, trim(part(p, 0, i)))
+    }
+    return out
+}
+
+// `t` with each whole name in `names` replaced by the argument at its index.
+#test("[T]", ["T"], ["P"])["[P]"]
+#test("Map<K, TT>", ["K", "T"], ["str", "int"])["Map<str, TT>"]
+#test("T", ["T"], [])["T"]
+pub fun subst(t: str, names: [str], args: [str]) -> str {
+    if len(names) == 0 || len(names) != len(args) { return t }
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(t) {
+        if is_name_start(t[i]) {
+            var j = i
+            while j < len(t) && is_name_char(t[j]) { j = j + 1 }
+            let word = part(t, i, j)
+            var replaced = false
+            var k = 0
+            while k < len(names) {
+                if names[k] == word && !replaced {
+                    append(sb, args[k])
+                    replaced = true
+                }
+                k = k + 1
+            }
+            if !replaced { append(sb, word) }
+            i = j
+        } else {
+            append_byte(sb, t[i])
+            i = i + 1
+        }
+    }
+    return build(sb)
+}
+
+// The element types of a tuple type, [] for another type.
+#test("(Box, [int])")[["Box", "[int]"]]
+#test("(int) -> str")[[]]
+#test("P")[[]]
+pub fun tuple_elems(t: str) -> [str] {
+    if len(t) < 2 || t[0] != '(' || t[len(t) - 1] != ')' { return [] }
+    return split_top(part(t, 1, len(t) - 1), ',')
+}
+
+// The type parameters of a function signature, without bounds.
+#test("pub fun sum<T: Add, U>(xs: [T]) -> T")[["T", "U"]]
+#test("fun f(x: int)")[[]]
+pub fun sig_type_params(sig: str) -> [str] {
+    var i = 0
+    while i < len(sig) && sig[i] != '(' && sig[i] != '<' { i = i + 1 }
+    if i >= len(sig) || sig[i] != '<' { return [] }
+    var j = i
+    while j < len(sig) && sig[j] != '(' { j = j + 1 }
+    while j > i && sig[j - 1] != '>' { j = j - 1 }
+    var out: [str] = []
+    for p in split_top(part(sig, i + 1, j - 1), ',') {
+        var k = 0
+        while k < len(p) && p[k] != ':' { k = k + 1 }
+        push(out, trim(part(p, 0, k)))
+    }
+    return out
+}
+
+// The parameter types of a function signature (a receiver has none).
+#test("fun sum<T: Add>(xs: [T], zero: T) -> T")[["[T]", "T"]]
+#test("fun get(self, f: (int) -> int) -> int")[["(int) -> int"]]
+#test("fun none()")[[]]
+pub fun sig_param_types(sig: str) -> [str] {
+    var i = 0
+    while i < len(sig) && sig[i] != '(' { i = i + 1 }
+    var depth = 0
+    var j = i
+    while j < len(sig) {
+        let c = sig[j]
+        if c == '(' || c == '[' || c == '<' {
+            depth = depth + 1
+        } else if c == ')' || c == ']' || (c == '>' && !(j > 0 && sig[j - 1] == '-')) {
+            depth = depth - 1
+            if depth == 0 { break }
+        }
+        j = j + 1
+    }
+    var out: [str] = []
+    if j <= i + 1 { return out }
+    for p in split_top(part(sig, i + 1, j), ',') {
+        var k = 0
+        while k < len(p) && p[k] != ':' { k = k + 1 }
+        if k < len(p) { push(out, trim(part(p, k + 1, len(p)))) }
+    }
+    return out
+}
+
+// The type parameters `names` that matching the parameter type `pattern`
+// against the argument type `actual` binds, added to `bound`.
+#test("[T]", "[Vec2]", ["T"], [:])[["T": "Vec2"]]
+#test("Pair<K, V>", "Pair<str, [int]>", ["K", "V"], [:])[["K": "str", "V": "[int]"]]
+#test("T", "", ["T"], [:])[[:]]
+pub fun unify(pattern: str, actual: str, names: [str], bound: [str: str]) -> [str: str] {
+    var out = bound
+    if actual == "" { return out }
+    for n in names {
+        if n == pattern {
+            if !contains(out, n) { out[n] = actual }
+            return out
+        }
+    }
+    let ps = list_or_args(pattern)
+    let xs = list_or_args(actual)
+    if len(ps) == 0 || len(ps) != len(xs) || base_of(pattern) != base_of(actual) { return out }
+    var i = 0
+    while i < len(ps) {
+        out = unify(ps[i], xs[i], names, out)
+        i = i + 1
+    }
+    return out
+}
+
+// The parts of a list, map, tuple or generic type, for unify.
+fun list_or_args(t: str) -> [str] {
+    if len(t) >= 2 && t[0] == '[' && t[len(t) - 1] == ']' { return split_top(part(t, 1, len(t) - 1), ':') }
+    let elems = tuple_elems(t)
+    if len(elems) > 0 { return elems }
+    return type_args(t)
+}
+
+// The built-in types, which have no fields (and methods only from impls).
+pub fun is_builtin_type(name: str) -> bool {
+    for b in ["int", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+              "float", "float32", "float64", "bool", "char", "str", "StringBuilder"] {
+        if b == name { return true }
+    }
+    return false
+}
+
+// `s` split at `sep` outside brackets, each part trimmed.
+fun split_top(s: str, sep: uint8) -> [str] {
+    var out: [str] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    while i < len(s) {
+        let c = s[i]
+        if c == '(' || c == '[' || c == '<' {
+            depth = depth + 1
+        } else if c == ')' || c == ']' || (c == '>' && !(i > 0 && s[i - 1] == '-')) {
+            depth = depth - 1
+        } else if c == sep && depth == 0 {
+            push(out, trim(part(s, start, i)))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    push(out, trim(part(s, start, len(s))))
+    return out
+}
+
+fun is_name_start(c: uint8) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+fun is_name_char(c: uint8) -> bool {
+    return is_name_start(c) || (c >= '0' && c <= '9')
+}
+
+fun starts_with(s: str, prefix: str) -> bool {
+    if len(prefix) > len(s) { return false }
+    for i in 0..len(prefix) {
+        if s[i] != prefix[i] { return false }
+    }
+    return true
+}
+
+#test("  a b ")["a b"]
+fun trim(s: str) -> str {
+    var a = 0
+    var b = len(s)
+    while a < b && s[a] == ' ' { a = a + 1 }
+    while b > a && s[b - 1] == ' ' { b = b - 1 }
+    return part(s, a, b)
+}
+
+fun part(s: str, start: int32, end: int32) -> str {
+    var sb = StringBuilder()
+    append(sb, s, start, end)
+    return build(sb)
+}

@@ -6,7 +6,7 @@
 from ...selfhost.lexer import lex
 from ...selfhost.tokens import Token, TokenKind
 from .symbols import Symbol, SymKind, Range
-from .text import lines_of, to_lsp, code_points, Pos
+from .text import lines_of, to_lsp, code_points, utf16_units, Pos
 
 // A range in a file.
 pub struct Location { path: str, range: Range }
@@ -76,10 +76,10 @@ pub fun render(name: str, kind: SymKind, detail: str) -> str {
     return match kind {
         SymKind.Function => detail,
         SymKind.Method => detail,
-        SymKind.Struct => "struct " + name,
-        SymKind.Enum => "enum " + name,
-        SymKind.Interface => "trait " + name,
-        SymKind.Impl => "impl " + name,
+        SymKind.Struct => detail,
+        SymKind.Enum => detail,
+        SymKind.Interface => detail,
+        SymKind.Impl => detail,
         SymKind.EnumMember => name + detail,
         SymKind.Field => name + ": " + detail,
         SymKind.Constant => "const " + name + ": " + detail,
@@ -120,6 +120,100 @@ pub fun is_member_access(source: str, line: int32, character: int32) -> bool {
     var i = from_lsp_character(lines[line], character)
     while i > 0 && is_word(cps[i - 1]) { i = i - 1 }
     return i > 0 && cps[i - 1] == '.'
+}
+
+// A text to resolve for completion, and where the identifier being
+// completed starts in it.
+pub struct Attempt { text: str, want: Pos }
+
+// The placeholder standing for a word not typed yet.
+const PLACEHOLDER: str = "__complete"
+
+// Texts in which the identifier at the cursor (or a placeholder for it)
+// parses, to try in order: the text with the placeholder inserted at the
+// cursor when no word is typed; then the line replaced by just the receiver
+// chain before the cursor (`ps[0].`, for `print(ps[0].`) and the word.
+pub fun completion_attempts(source: str, line: int32, character: int32) -> [Attempt] {
+    var out: [Attempt] = []
+    let lines = lines_of(source)
+    if line < 0 || line >= len(lines) { return out }
+    let cps = chars(lines[line])
+    let cursor = from_lsp_character(lines[line], character)
+    // the identifier the cursor is in or touches
+    var start = cursor
+    while start > 0 && is_word(cps[start - 1]) { start = start - 1 }
+    var end = cursor
+    while end < len(cps) && is_word(cps[end]) { end = end + 1 }
+    var word = PLACEHOLDER
+    if start < end { word = cps_text(cps, start, end) }
+    let member = start > 0 && cps[start - 1] == '.'
+    let prefix = cps_text(cps, 0, start)
+    let rest = cps_text(cps, end, len(cps))
+    var first = source
+    if start == end { first = with_line(lines, line, prefix + word + rest) }
+    push(out, Attempt { text: first, want: Pos { line: line, character: utf16_units(prefix, start) } })
+    var chain = ""
+    if member { chain = receiver_chain(cps_text(cps, 0, start - 1)) + "." }
+    push(out, Attempt { text: with_line(lines, line, chain + word), want: Pos { line: line, character: utf16_units(chain, code_points(chain)) } })
+    return out
+}
+
+// The receiver expression ending `s`: names joined by `.`, each possibly
+// followed by calls and indexing (`ps[0].scaled(2)` of `print(ps[0].scaled(2)`).
+#test("print(ps[0].scaled(2)")["ps[0].scaled(2)"]
+#test("    x + self")["self"]
+#test("f(a, b)")["f(a, b)"]
+#test("1 + ")[""]
+pub fun receiver_chain(s: str) -> str {
+    let cps = chars(s)
+    var i = len(cps)
+    while true {
+        // calls and indexing
+        while i > 0 && (cps[i - 1] == ')' || cps[i - 1] == ']') {
+            var depth = 0
+            var j = i - 1
+            while j >= 0 {
+                let c = cps[j]
+                if c == ')' || c == ']' { depth = depth + 1 }
+                if c == '(' || c == '[' { depth = depth - 1 }
+                if depth == 0 { break }
+                j = j - 1
+            }
+            if j < 0 { return cps_text(cps, i, len(cps)) }
+            i = j
+        }
+        let end = i
+        while i > 0 && is_word(cps[i - 1]) { i = i - 1 }
+        if i == end { return cps_text(cps, i, len(cps)) }
+        if i > 0 && cps[i - 1] == '.' {
+            i = i - 1
+        } else {
+            return cps_text(cps, i, len(cps))
+        }
+    }
+    return ""
+}
+
+fun cps_text(cps: [char], start: int32, end: int32) -> str {
+    var sb = StringBuilder()
+    var i = start
+    while i < end {
+        append(sb, format("{}", cps[i]))
+        i = i + 1
+    }
+    return build(sb)
+}
+
+// `lines` joined by line breaks, line `n` replaced by `text`.
+fun with_line(lines: [str], n: int32, text: str) -> str {
+    var sb = StringBuilder()
+    var i = 0
+    while i < len(lines) {
+        if i == n { append(sb, text) } else { append(sb, lines[i]) }
+        append(sb, "\n")
+        i = i + 1
+    }
+    return build(sb)
 }
 
 // The reserved words and built-in type names completion offers.

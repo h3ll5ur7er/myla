@@ -11,7 +11,7 @@
 from ...selfhost.lexer import lex
 from ...selfhost.parser import parse_source
 from ...selfhost.tokens import Token, TokenKind
-from ...selfhost.ast import Decl, DeclKind, FunData, TypeExpr, TypeKind, Field, Variant, Program
+from ...selfhost.ast import Decl, DeclKind, FunData, TypeExpr, TypeKind, Field, Variant, Program, TypeParam
 from .text import lines_of, to_lsp, code_points, Pos
 
 pub enum SymKind {
@@ -144,20 +144,20 @@ impl Builder {
     fun decl(var self, d: Decl) {
         match d.kind {
             DeclKind.StructDecl(name, fields, attrs, tps, is_pub) => {
-                let k = self.add(d.line, d.col, name, SymKind.Struct, "struct", name, false, -1, len(fields) > 0)
+                let k = self.add(d.line, d.col, name, SymKind.Struct, header(is_pub, "struct", name, tps), name, false, -1, len(fields) > 0)
                 for f in fields { self.add(f.line, f.col, f.name, SymKind.Field, type_str(f.ty), f.name, false, k, false) }
             },
             DeclKind.EnumDecl(name, variants, attrs, tps, is_pub) => {
-                let k = self.add(d.line, d.col, name, SymKind.Enum, "enum", name, false, -1, len(variants) > 0)
+                let k = self.add(d.line, d.col, name, SymKind.Enum, header(is_pub, "enum", name, tps), name, false, -1, len(variants) > 0)
                 for v in variants { self.add(v.line, v.col, v.name, SymKind.EnumMember, variant_detail(v), v.name, false, k, false) }
             },
             DeclKind.TraitDecl(name, methods, tps, is_pub) => {
-                let k = self.add(d.line, d.col, name, SymKind.Interface, "trait", name, false, -1, len(methods) > 0)
+                let k = self.add(d.line, d.col, name, SymKind.Interface, header(is_pub, "trait", name, tps), name, false, -1, len(methods) > 0)
                 for m in methods { self.fun_symbol(m, k) }
             },
             DeclKind.ImplDecl(target, methods, tps, tr, targs) => {
                 let t = type_str(target)
-                let k = self.add(d.line, d.col, t, SymKind.Impl, "impl " + t, type_head(target), true, -1, len(methods) > 0)
+                let k = self.add(d.line, d.col, t, SymKind.Impl, impl_header(target, tps, tr, targs), type_head(target), true, -1, len(methods) > 0)
                 for m in methods { self.fun_symbol(m, k) }
             },
             DeclKind.FunDecl(fd) => { self.fun_symbol(fd, -1) },
@@ -309,6 +309,49 @@ fun type_head(t: TypeExpr) -> str {
     }
 }
 
+// `<T: Eq + Ord, U>`, or "" for none.
+#test([])[""]
+fun type_params_str(tps: [TypeParam]) -> str {
+    if len(tps) == 0 { return "" }
+    var sb = StringBuilder()
+    append(sb, "<")
+    var i = 0
+    for tp in tps {
+        if i > 0 { append(sb, ", ") }
+        append(sb, tp.name)
+        var j = 0
+        for b in tp.bounds {
+            if j == 0 { append(sb, ": ") } else { append(sb, " + ") }
+            append(sb, b)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    append(sb, ">")
+    return build(sb)
+}
+
+// `pub struct Box<T>`: a type declaration's header.
+fun header(is_pub: bool, keyword: str, name: str, tps: [TypeParam]) -> str {
+    var out = keyword + " " + name + type_params_str(tps)
+    if is_pub { out = "pub " + out }
+    return out
+}
+
+// `impl<T> Show for Box<T>`
+fun impl_header(target: TypeExpr, tps: [TypeParam], tr: Option<str>, targs: [TypeExpr]) -> str {
+    var out = "impl" + type_params_str(tps) + " "
+    match tr {
+        Some(t) => {
+            out = out + t
+            if len(targs) > 0 { out = out + "<" + type_list(targs) + ">" }
+            out = out + " for "
+        },
+        None => {},
+    }
+    return out + type_str(target)
+}
+
 fun variant_detail(v: Variant) -> str {
     if len(v.payload) == 0 { return "" }
     return "(" + type_list(v.payload) + ")"
@@ -317,7 +360,8 @@ fun variant_detail(v: Variant) -> str {
 // `fun name(self, a: T) -> R`
 pub fun signature(fd: FunData) -> str {
     var sb = StringBuilder()
-    append(sb, "fun " + fd.name + "(")
+    if fd.is_pub { append(sb, "pub ") }
+    append(sb, "fun " + fd.name + type_params_str(fd.type_params) + "(")
     var first = true
     match fd.receiver {
         Some(r) => {

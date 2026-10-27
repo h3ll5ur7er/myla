@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -123,6 +124,8 @@ class TestMylaLspSelfHosted(TestMylaLsp):
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestMylaLspRequests(LspRequestScenarios, unittest.TestCase):
     """Symbols, definition, references, hover and completion (step 2)."""
+
+    MEMBERS_OF_P = {"x"}
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -269,8 +272,8 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.defn(uri, 2, 13), {"uri": uri, "range": rng(0, 10, 12)})    # the parameter
         self.assertEqual(self.defn(uri, 9, 16), {"uri": uri, "range": rng(8, 8, 10)})     # main's xs
         self.assertEqual(self.defn(uri, 3, 24), {"uri": uri, "range": rng(2, 8, 9)})      # the loop variable
-        self.assertEqual(self.hover(uri, 3, 8), "var total")
-        self.assertEqual(self.hover(uri, 3, 24), "let x")
+        self.assertEqual(self.hover(uri, 3, 8), "var total: int")
+        self.assertEqual(self.hover(uri, 3, 24), "let x: int")
         self.assertEqual(self.hover(uri, 2, 13), "xs: [int]")
         self.assertEqual(self.hover(uri, 9, 10), "fun total(xs: [int]) -> int")
 
@@ -318,7 +321,7 @@ class ScopeScenarios(LspRequestHelpers):
         with open(fs, encoding="utf-8") as fh:
             line = fh.read().splitlines()[found["range"]["start"]["line"]]
         self.assertIn("fun read_to_string(", line)
-        self.assertEqual(self.hover(uri, 5, 21), "fun helper() -> int")
+        self.assertEqual(self.hover(uri, 5, 21), "pub fun helper() -> int")
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -333,6 +336,127 @@ class TestMylaLspScopes(ScopeScenarios, unittest.TestCase):
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestMylaLspScopesSelfHosted(TestMylaLspScopes):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = _self_hosted_build()
+
+
+TYPED = ("struct P { x: int, y: int }\n"                       # 0
+         "impl P {\n"                                           # 1
+         "    fun norm(self) -> int {\n"                        # 2
+         "        return self.x + self.y\n"                     # 3
+         "    }\n"                                              # 4
+         "    fun scaled(self, k: int) -> P {\n"                # 5
+         "        return P { x: self.x * k, y: self.y * k }\n"  # 6
+         "    }\n"                                              # 7
+         "}\n"                                                  # 8
+         "struct Q { x: int, name: str }\n"                     # 9
+         "enum Color { Red, Green }\n"                          # 10
+         "fun make() -> P {\n"                                  # 11
+         "    return P { x: 1, y: 2 }\n"                        # 12
+         "}\n"                                                  # 13
+         "fun main() {\n"                                       # 14
+         "    let p = make()\n"                                 # 15
+         "    let q = Q { x: 1, name: \"q\" }\n"              # 16
+         "    let ps = [p]\n"                                   # 17
+         "    print(p.norm() + q.x + ps[0].scaled(2).y)\n"      # 18
+         "    let c = Color.Red\n"                              # 19
+         "}\n")
+
+SIGNATURES = ("pub fun first<T: Eq>(xs: [T]) -> T {\n    return xs[0]\n}\n"
+              "pub struct Box<T> { value: T }\n"
+              "trait Show {\n    fun show(self) -> str\n}\n"
+              "impl<T> Show for Box<T> {\n    fun show(self) -> str {\n        return \"box\"\n    }\n}\n")
+
+
+class TypeScenarios(LspRequestHelpers):
+    """Members through values and completion by the receiver's type, and
+    fuller signatures (MYLA-51, step 6)."""
+
+    def defn(self, uri, line, character):
+        return self.at("textDocument/definition", uri, line, character)
+
+    def hover(self, uri, line, character):
+        h = self.at("textDocument/hover", uri, line, character)
+        return h and h["contents"]["value"].removeprefix("```myla\n").removesuffix("\n```")
+
+    def labels(self, uri, line, character):
+        return sorted(i["label"] for i in self.at("textDocument/completion", uri, line, character)["items"])
+
+    def change(self, uri, text, version=2):
+        self.client.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": version},
+                                                     "contentChanges": [{"text": text}]})
+
+    def test_members_through_values(self):
+        uri = self.open(TYPED)
+        line = TYPED.splitlines()[18]
+        self.assertEqual(self.defn(uri, 18, line.index("norm")), {"uri": uri, "range": rng(2, 8, 12)})
+        self.assertEqual(self.defn(uri, 18, line.index("q.x") + 2), {"uri": uri, "range": rng(9, 11, 12)})
+        self.assertEqual(self.defn(uri, 18, line.index("scaled")), {"uri": uri, "range": rng(5, 8, 14)})
+        self.assertEqual(self.defn(uri, 18, line.index(".y") + 1), {"uri": uri, "range": rng(0, 19, 20)})
+        self.assertEqual(self.defn(uri, 3, 20), {"uri": uri, "range": rng(0, 11, 12)})      # self.x
+        self.assertEqual(self.hover(uri, 18, line.index("norm")), "fun norm(self) -> int")
+        self.assertEqual(self.hover(uri, 15, 8), "let p: P")
+        self.assertEqual(self.hover(uri, 17, 8), "let ps: [P]")
+
+    def test_references_to_a_field_skip_other_types(self):
+        uri = self.open(TYPED)
+        found = self.at("textDocument/references", uri, 0, 11, context={"includeDeclaration": False})
+        spots = sorted((l["range"]["start"]["line"], l["range"]["start"]["character"]) for l in found)
+        line6 = TYPED.splitlines()[6]
+        self.assertEqual(spots, [(3, 20), (6, line6.index("x:")), (6, line6.index("self.x") + 5), (12, 15)])
+
+    def test_member_completion_by_type(self):
+        uri = self.open(TYPED)
+        lines = TYPED.splitlines()
+        for typed, expected in (("p.", ["norm", "scaled", "x", "y"]), ("q.", ["name", "x"]),
+                                ("Color.", ["Green", "Red"]), ("ps[0].", ["norm", "scaled", "x", "y"]),
+                                ("p.sc", ["norm", "scaled", "x", "y"])):
+            with self.subTest(typed=typed):
+                broken = lines[:18] + ["    print(" + typed] + lines[19:]
+                self.change(uri, "\n".join(broken) + "\n")
+                self.assertEqual(self.labels(uri, 18, len("    print(" + typed)), expected)
+
+    def test_variants_in_a_pattern(self):
+        uri = self.open(TYPED)
+        typing = TYPED + "fun code(c: Color) -> int {\n    return match c {\n        Color. => 1,\n        _ => 0,\n    }\n}\n"
+        self.change(uri, typing)
+        self.assertEqual(self.labels(uri, 23, len("        Color.")), ["Green", "Red"])
+
+    def test_completion_offers_the_locals_in_scope(self):
+        uri = self.open(TYPED)
+        lines = TYPED.splitlines()
+        self.change(uri, "\n".join(lines[:18] + ["    "] + lines[18:]) + "\n")
+        labels = self.labels(uri, 18, 4)
+        for name in ("p", "q", "ps", "make", "P", "let"):
+            self.assertIn(name, labels)
+        for name in ("c", "k"):                # declared later, or elsewhere
+            self.assertNotIn(name, labels)
+
+    def test_fuller_signatures(self):
+        uri = self.open(SIGNATURES)
+        symbols = {s["name"]: s for s in self.request("textDocument/documentSymbol", uri)}
+        self.assertEqual(symbols["first"]["detail"], "pub fun first<T: Eq>(xs: [T]) -> T")
+        self.assertEqual(symbols["Box"]["detail"], "pub struct Box<T>")
+        impl = [s for s in self.request("textDocument/documentSymbol", uri) if s["kind"] == 5 or s["detail"].startswith("impl")]
+        self.assertEqual([s["detail"] for s in impl if s["detail"].startswith("impl")], ["impl<T> Show for Box<T>"])
+        self.assertEqual(impl[-1]["children"][0]["detail"], "fun show(self) -> str")
+        self.assertEqual(self.hover(uri, 0, 8), "pub fun first<T: Eq>(xs: [T]) -> T")
+        self.assertEqual(self.hover(uri, 3, 11), "pub struct Box<T>")
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspTypes(TypeScenarios, unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = myla_tool("tools/lsp/main.my", "lsp")
+
+    def server_command(self) -> list[str]:
+        return [self.binary, "--stdlib", default_stdlib_root()]
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspTypesSelfHosted(TestMylaLspTypes):
     @classmethod
     def setUpClass(cls) -> None:
         cls.binary = _self_hosted_build()
@@ -401,6 +525,84 @@ class TestResolutionCorpus(unittest.TestCase):
                     self.assertIn(pos, known, f"{t.lexeme} at {t.line}:{t.column} is not resolved")
                     resolved_total += 1
         self.assertGreater(resolved_total, 30000)
+
+    def test_members_agree_with_the_checker(self) -> None:
+        """Where the server resolves `x.f` or `x.m(…)` in an example, it is the
+        field or method of the type the Python checker gives `x` (step 6)."""
+        import dataclasses, glob
+        from myla.lexer import tokenize
+        from myla.parser import parse
+        from myla.tokens import TokenKind
+        from myla.types import EnumType, StructType, check
+        from myla import ast
+        files = sorted(glob.glob(os.path.join(_REPO, "examples", "*.my")))
+        out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", default_stdlib_root(), "--resolve",
+                              *files], capture_output=True, text=True, check=True).stdout
+        uses = {}
+        for line in out.splitlines():
+            if line.startswith("file "):
+                current = line[5:]
+            elif line.startswith("use "):
+                parts = line.split()
+                l, rest = parts[1].split(":")
+                dl, dc = parts[5].split(":")
+                uses[(current, int(l), int(rest.split("-")[0]))] = (parts[4], int(dl), int(dc))
+        checked = resolved = 0
+        for path in files:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            program = parse(tokenize(text))
+            check(program)
+            toks = tokenize(text)
+            # where each struct's fields and each type's methods are declared (1-based)
+            fields, methods = {}, {}
+            for d in program.decls:
+                if isinstance(d, ast.StructDecl):
+                    for f in d.fields:
+                        fields[(d.name, f.name)] = (f.line, f.column)
+                if isinstance(d, ast.ImplDecl) and isinstance(d.target, ast.TypeRef):
+                    for m in d.methods:
+                        methods[(d.target.name, m.name)] = m.line
+            accesses = []
+
+            def walk(node):
+                if isinstance(node, ast.FieldAccess):
+                    accesses.append(node)
+                if dataclasses.is_dataclass(node):
+                    for f in dataclasses.fields(node):
+                        walk(getattr(node, f.name))
+                elif isinstance(node, list):
+                    for x in node:
+                        walk(x)
+            walk(program.decls)
+            lines = text.splitlines()
+            for node in accesses:
+                t = getattr(node.target, "resolved_type", None)
+                if not isinstance(t, (StructType, EnumType)) or not lines[node.line - 1].isascii():
+                    continue
+                # the member's token: the first `.name` from the access on
+                k = next((i for i, tk in enumerate(toks) if (tk.line, tk.column) >= (node.line, node.column)
+                          and tk.kind == TokenKind.IDENT and tk.lexeme == node.field_name
+                          and toks[i - 1].kind == TokenKind.DOT), None)
+                if k is None:
+                    continue
+                key = (t.name, node.field_name)
+                if key not in fields and key not in methods:
+                    continue
+                checked += 1
+                found = uses.get((path, toks[k].line - 1, toks[k].column - 1))
+                if found is None:
+                    continue
+                resolved += 1
+                with self.subTest(file=os.path.basename(path), line=toks[k].line, member=node.field_name):
+                    self.assertEqual(found[0], path)
+                    if key in fields:
+                        self.assertEqual((found[1], found[2]), (fields[key][0] - 1, fields[key][1] - 1))
+                    else:
+                        self.assertEqual(found[1], methods[key] - 1)
+        self.assertGreater(checked, 60)
+        self.assertGreater(resolved, checked * 0.9, f"{resolved} of {checked} resolved")
+        print(f"members: {resolved} of {checked} resolved", file=sys.stderr)
 
     def test_both_builds_agree(self) -> None:
         argv = ["--stdlib", default_stdlib_root(), "--resolve", *_corpus()]
@@ -568,15 +770,35 @@ class TestOwnTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
 
-def _strip_range_ends(symbols: list) -> list:
+def _python_detail(detail: str) -> str:
+    """A Myla server signature or header as the Python server writes it,
+    without `pub`, type parameters and an impl's trait (MYLA-80 step 6)."""
+    import re
+    d = detail.removeprefix("pub ")
+    m = re.match(r"(fun|struct|enum|trait) (\w+)<[^(]*?>(.*)$", d)
+    if m:
+        d = f"{m[1]} {m[2]}{m[3]}"
+    m = re.match(r"impl(<[^>]*>)? (.* for )?(.*)$", d)
+    if m:
+        d = f"impl {m[3]}"
+    return d
+
+
+def _strip_range_ends(symbols: list, mine: bool = False) -> list:
     """Document symbols without the end of `range`, where the servers differ
     on purpose: the Python one ends it at the last line an AST node is on,
-    the Myla one at the declaration's last token."""
+    the Myla one at the declaration's last token. The Myla server's details
+    (`mine`) are written as the Python server's: a type's detail is just its
+    keyword there."""
     out = []
     for s in symbols:
         s = dict(s)
         s["range"] = {"start": s["range"]["start"]}
-        s["children"] = _strip_range_ends(s.get("children", []))
+        if mine and "detail" in s:
+            s["detail"] = _python_detail(s["detail"])
+            if s["detail"].split(" ")[0] in ("struct", "enum", "trait"):
+                s["detail"] = s["detail"].split(" ")[0]
+        s["children"] = _strip_range_ends(s.get("children", []), mine)
         out.append(s)
     return out
 
@@ -640,7 +862,7 @@ class TestAgainstThePythonServer(unittest.TestCase):
                 uri, _ = self.open(path)
                 py, my = self.ask("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
                 self.assertTrue(py, "no symbols")
-                self.assertEqual(_strip_range_ends(my), _strip_range_ends(py))
+                self.assertEqual(_strip_range_ends(my, mine=True), _strip_range_ends(py))
                 self.close_doc(uri)
 
     def declares(self, location: dict, name: str) -> bool:
@@ -678,8 +900,9 @@ class TestAgainstThePythonServer(unittest.TestCase):
                         self.assertIsNotNone(my)
                         self.assertTrue(self.declares(my, name), my)
                     hp, hm = self.ask("textDocument/hover", pos)
-                    if py == my:
-                        self.assertEqual(hm, hp)
+                    if py == my and hp is not None:
+                        value = hm["contents"]["value"].removeprefix("```myla\n").removesuffix("\n```")
+                        self.assertEqual("```myla\n" + _python_detail(value) + "\n```", hp["contents"]["value"])
                     if n % 4 == 0:
                         rp, rm = self.ask("textDocument/references", dict(pos, context={"includeDeclaration": n % 8 == 0}))
                         key = lambda locs: sorted((l["uri"], str(l["range"])) for l in (locs or []))
@@ -696,16 +919,19 @@ class TestAgainstThePythonServer(unittest.TestCase):
                 with self.subTest(file=os.path.basename(path), completion=line):
                     cp, cm = self.ask("textDocument/completion", {"textDocument": {"uri": uri},
                                                                   "position": {"line": line, "character": 0}})
-                    labels = lambda c: sorted({(i["label"], i["kind"]) for i in c["items"]})
-                    self.assertEqual(labels(cm), labels(cp))
+                    labels = lambda c: {(i["label"], i["kind"]) for i in c["items"]}
+                    # the Myla server adds the locals in scope (variables, type parameters)
+                    self.assertLessEqual(labels(cp), labels(cm))
+                    self.assertEqual({kind for _, kind in labels(cm) - labels(cp)} - {6, 25}, set())
             for line, text_line in enumerate(lines):
                 dot = text_line.find(".")
-                if dot > 0 and text_line.isascii():
+                if dot > 0 and text_line.isascii() and not text_line.lstrip().startswith(("//", "#")):
                     with self.subTest(file=os.path.basename(path), member_completion=line):
                         cp, cm = self.ask("textDocument/completion", {"textDocument": {"uri": uri},
                                                                       "position": {"line": line, "character": dot + 1}})
-                        labels = lambda c: sorted({(i["label"], i["kind"]) for i in c["items"]})
-                        self.assertEqual(labels(cm), labels(cp))
+                        labels = lambda c: {(i["label"], i["kind"]) for i in c["items"]}
+                        # every member for the Python server, the receiver's for the Myla one
+                        self.assertLessEqual(labels(cm), labels(cp))
                     break
             self.close_doc(uri)
         self.assertGreater(checked, 200)

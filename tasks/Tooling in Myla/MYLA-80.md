@@ -14,7 +14,7 @@ The self-hosted front end (lexer, parser, checker, loader, diagnostics in [[self
 - [x] Diagnostics published for the file the error is in ([[MYLA-10]]); debounce in the main loop (no threads)
 - [x] Positions in UTF-16 (the rules of [[src/myla/lsp/positions.py]])
 - [x] Document symbols, definition, references, hover, completion: port [[src/myla/lsp/]] and use its tests ([[tests/unit/test_lsp_features.py]], [[tests/integration/test_lsp_diagnostics.py]]) as parity tests against the Myla server
-- [ ] From [[MYLA-51]]: keep the last good parse when the buffer doesn't lex or parse; resolve names through scopes and imports (the checker) instead of by name across the workspace; member completion triggered by `.`; refresh the workspace index on `didChangeWatchedFiles`
+- [x] From [[MYLA-51]]: keep the last good parse when the buffer doesn't lex or parse; resolve names through scopes and imports (the checker) instead of by name across the workspace; member completion triggered by `.`; refresh the workspace index on `didChangeWatchedFiles`
 - [x] Semantic tokens from the compiler's own lexer, so editors highlight exactly what the compiler sees
 - [ ] The VS Code extension starts the Myla server ([[MYLA-53]]), and registers its `**/*.my` file watcher again once the server handles `didChangeWatchedFiles` (removed in [[MYLA-53]] because the Python server ignores it)
 
@@ -92,3 +92,22 @@ Evidence:
 Next: member completion by receiver type and fuller signatures (step 6), then the VS Code extension (step 7).
 
 After [[MYLA-87]] (derived `==` on `TokenKind` as a tag comparison): on `selfhost/checker.my`, semantic tokens 280 → 174 ms, a request after an edit 322 → 193 ms, `--resolve` 217 → 127 ms.
+
+### Step 6: types, member completion, signatures (MYLA-51, part 3)
+
+D70 on [[Project/Decisions]]; described on [[Architecture/Editor-tooling]].
+
+- `tools/lsp/types.my`: types as written (`[P]`, `Option<P>`, `Box<T>`) taken apart: element, map value and key, type arguments, tuple parts, a signature's result, type parameters and parameter types, substitution and unification. `resolve.my` gives each local, parameter, field and constant a type from the source (`type_of`), records the methods of every impl in the file and its imports by target type, and resolves `x.f` and `x.m()` through the receiver's type (`self` is the impl's target).
+- Completion asks the resolver what completes at the cursor, in a patched text that parses (a placeholder at the cursor, or the line cut down to the receiver chain): the receiver's members after a `.` (an enum's variants in a pattern too), the locals in scope otherwise, ahead of the keywords and declarations. When neither patch parses or the type is unknown, every member as before.
+- Signatures with type parameters, bounds and `pub`; type headers (`pub struct Box<T>`); impls as `impl<T> Show for Box<T>`. Hover shows them, and locals with their types.
+
+Evidence:
+
+- `TypeScenarios` (6 tests, both builds) failed before (9 failures over 5 tests; the pattern test was added after, and fails with its fix removed): members through values (`p.norm()`, `q.x` against `P.x`, `ps[0].scaled(2).y`, `self.x`), typed hovers, references to a field without another struct's, member completion for `p.`, `q.`, `Color.`, `ps[0].` and a partial word in a line that doesn't parse, variants in a pattern, locals in scope (not those declared later or in another function), fuller signatures.
+- `TestResolutionCorpus.test_members_agree_with_the_checker`: in the examples, 78 of the 79 member accesses on struct and enum receivers resolve, each to the field or method of the type the Python checker gives the receiver. The first version resolved 69; tuple parts, operators, generic results and destructuring brought the rest.
+- The comparison with the Python server: details mapped back to its form, completion differing only by locals (kinds 6 and 25) without a dot and by fewer members after one; the member check now skips comment lines, where both fall back to every member.
+- Timing on `selfhost/checker.my`: `--resolve` 127 → 136 ms with types; a request after an edit about 180 ms; completing `self.` (155 fields and methods of `Checker`) about 180 ms.
+
+Full run: 492 unit, 29 integration and 529 burn tests pass; the bootstrap fixed point stays at 7,794,199 bytes and stage 3 builds the server.
+
+Next: the VS Code extension starts the Myla server (step 7).

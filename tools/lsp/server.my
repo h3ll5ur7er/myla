@@ -18,10 +18,10 @@ from ...selfhost.checker import build_checker_decls
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
 from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
 from .symbols import Symbol, SymKind, Range, document_symbols, outline, best_match, lsp_kind, start_key, is_member_kind, kind_eq
-from .features import Location, identifier_at, identifier_ranges, render, is_member_access, completion_keywords, lexes
+from .features import Location, identifier_at, identifier_ranges, render, is_member_access, completion_keywords, lexes, completion_attempts
 from .workspace import Workspace, Entry, new_workspace
 from .semantic import semantic_tokens, token_types, token_modifiers
-from .resolve import Resolution, Outline, Def, DefKind, resolve, at_position, same_def, is_global, render_local
+from .resolve import Resolution, Outline, Completion, Def, DefKind, resolve, resolve_at, at_position, same_def, is_global, render_local
 
 const DEBOUNCE_MS: int32 = 400
 
@@ -513,13 +513,24 @@ impl Server {
             None => { return completion_list(items) },
         }
         let pos = position_of(params)
+        let ctx = self.completion_context(d, pos)
+        var seen: [str: bool] = [:]
+        if ctx.found && (ctx.known || !ctx.member) {
+            // the receiver's members; or the locals in scope, then the rest
+            for m in ctx.items {
+                if !contains(seen, m.name) {
+                    seen[m.name] = true
+                    push(items, def_item(m))
+                }
+            }
+            if ctx.member { return completion_list(items) }
+        }
         let member = is_member_access(d.text, pos.line, pos.character)
         var pool: [Entry] = []
         for s in d.symbols {
             push(pool, Entry { name: s.name, kind: s.kind, detail: s.detail, path: d.path, range: s.selection })
         }
         for e in self.ws.all_entries(self.overrides()) { push(pool, e) }
-        var seen: [str: bool] = [:]
         if !member {
             for kw in completion_keywords() {
                 if !contains(seen, "kw:" + kw) {
@@ -536,6 +547,23 @@ impl Server {
             }
         }
         return completion_list(items)
+    }
+
+    // What completes at `pos` in the document's current text (see
+    // completion_attempts): nothing found when no attempt parses.
+    fun completion_context(var self, d: Doc, pos: Pos) -> Completion {
+        let text = match get(self.docs, d.uri) {
+            Some(t) => t,
+            None => d.text,
+        }
+        for a in completion_attempts(text, pos.line, pos.character) {
+            let r = resolve_at(d.path, a.text, self.stdlib, self.overrides(), self.known, a.want)
+            if r.ok {
+                self.known = r.known
+                if r.completion.found { return r.completion }
+            }
+        }
+        return Completion { found: false, member: false, known: false, items: [] }
     }
 
     // The URI to publish an error in `file` under: the checked document's
@@ -682,6 +710,24 @@ fun completion_kind(k: SymKind) -> int64 {
 fun completion_item(e: Entry) -> Json {
     var members: [(str, Json)] = [("label", Json.Str(e.name)), ("kind", Json.Int(completion_kind(e.kind)))]
     if e.detail != "" { push(members, ("detail", Json.Str(e.detail))) }
+    return Json.Object(members)
+}
+
+// A completion item for a declaration the resolver found.
+fun def_item(d: Def) -> Json {
+    var kind: int64 = 6                       // Variable
+    var detail = d.ty
+    match d.kind {
+        DefKind.Global(k) => {
+            kind = completion_kind(k)
+            detail = d.detail
+        },
+        DefKind.TypeParam => { kind = 25 },
+        DefKind.Module => { kind = 9 },
+        _ => {},
+    }
+    var members: [(str, Json)] = [("label", Json.Str(d.name)), ("kind", Json.Int(kind))]
+    if detail != "" { push(members, ("detail", Json.Str(detail))) }
     return Json.Object(members)
 }
 

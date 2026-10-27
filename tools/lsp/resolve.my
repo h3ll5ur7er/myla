@@ -3,8 +3,12 @@
 // match bindings, lambda parameters, type parameters, the file's own
 // declarations, enum variants and struct fields named through their type,
 // and the names imported from other modules (found as the loader finds
-// them). Members reached through a value (`p.x`, `p.get()`) need types and
-// stay unresolved, as do built-ins.
+// them). Members reached through a value (`p.x`, `p.get()`) resolve through
+// the value's type where it can be told from the source (types.my: an
+// annotation, a struct literal, a function's result, a field, an element,
+// `self` in a method); built-ins stay unresolved. A walk can also be asked
+// what completes at a position: the members of a receiver there, or the
+// locals in scope (MYLA-80 step 6).
 //
 // A walk over the parsed file declares and uses names in a stack of scopes;
 // each use is keyed by its token's position, so the AST's own position
@@ -18,17 +22,19 @@ from ...selfhost.loader import normalize
 from ...selfhost.ast import Program, Decl, DeclKind, FunData, TypeExpr, TypeKind, Expr, ExprKind, ExprOrBlock, Stmt, StmtKind, Block, ElseTail, Pattern, PatternKind, MatchArm, Param, BindElem, TypeParam, Attribute, ImportPath, ImportItem, FieldInit, FieldPat
 from .symbols import Symbol, SymKind, Range, outline, outline_parsed, type_str
 from .text import LineIndex, line_index, code_points, Pos
+from .types import base_of, type_args, index_of, iter_of, success_of, result_of, header_params, subst, is_builtin_type, tuple_elems, sig_type_params, sig_param_types, unify
 
 pub enum DefKind {
     Global(SymKind),       // a declaration of some file
-    Local(str),            // "let" or "var", and ": <type>" when written; a match binding or `for` variable is "let"
-    Param(str),            // its type, as written ("" for none)
+    Local(str),            // "let" or "var"; a match binding or `for` variable is "let"
+    Param,
     TypeParam,
     Module,
 }
 
-// A declaration: where its name is, and what to show for it.
-pub struct Def { name: str, path: str, range: Range, kind: DefKind, detail: str }
+// A declaration: where its name is, what to show for it, and the type of a
+// local, parameter, field or constant as far as it is known ("" if not).
+pub struct Def { name: str, path: str, range: Range, kind: DefKind, detail: str, ty: str }
 
 pub fun same_def(a: Def, b: Def) -> bool {
     return a.path == b.path && a.range.start.line == b.range.start.line && a.range.start.character == b.range.start.character
@@ -48,7 +54,16 @@ pub struct Use { range: Range, def: Def }
 // What a document's identifiers refer to: `uses` in token order, and the
 // declarations made in it (`defs`); `known`: the outlines of the modules it
 // imports, to pass to the next resolution.
-pub struct Resolution { uses: [Use], defs: [Def], ok: bool, known: [str: Outline] }
+pub struct Resolution { uses: [Use], defs: [Def], ok: bool, known: [str: Outline], completion: Completion }
+
+// What completes at the asked position: `found` when an identifier is
+// there; `member` when it follows a `.`, with the receiver's members (when
+// `known`) as `items`, or else the locals in scope.
+pub struct Completion { found: bool, member: bool, known: bool, items: [Def] }
+
+fun no_completion() -> Completion {
+    return Completion { found: false, member: false, known: false, items: [] }
+}
 
 // A module's text and its symbols.
 pub struct Outline { text: str, symbols: [Symbol] }
@@ -66,6 +81,11 @@ struct Resolver {
     globals: [str: Global],
     modules: [str: str],           // alias -> module path
     known: [str: Outline],         // module path -> its outline
+    methods: [str: [Def]],         // type name -> the methods of its impls (the file's and its imports')
+    with_methods: [str: bool],     // the files whose methods are in `methods`
+    self_type: str,                // the target of the impl being walked
+    want: Pos,                     // where completion is asked (line -1: nowhere)
+    completion: Completion,
     uses: [Use],
     defs: [Def],
 }
@@ -75,7 +95,13 @@ struct Resolver {
 // `overrides` (open documents) or disk; `known` outlines are reused while
 // their text is the same.
 pub fun resolve(path: str, source: str, stdlib: str, overrides: [str: str], known: [str: Outline]) -> Resolution {
-    let none = Resolution { uses: [], defs: [], ok: false, known: known }
+    return resolve_at(path, source, stdlib, overrides, known, Pos { line: -1, character: 0 })
+}
+
+// resolve, also telling what completes at `want` (the start of the
+// identifier there).
+pub fun resolve_at(path: str, source: str, stdlib: str, overrides: [str: str], known: [str: Outline], want: Pos) -> Resolution {
+    let none = Resolution { uses: [], defs: [], ok: false, known: known, completion: no_completion() }
     let toks = match lex(source) {
         Ok(t) => t,
         Err(d) => { return none },
@@ -84,7 +110,7 @@ pub fun resolve(path: str, source: str, stdlib: str, overrides: [str: str], know
         Ok(p) => p,
         Err(d) => { return none },
     }
-    return resolve_parsed(path, source, toks, parsed.program, stdlib, overrides, known, true)
+    return resolve_parsed(path, source, toks, parsed.program, stdlib, overrides, known, true, want)
 }
 
 // The ranges of the identifiers of `source` (lexed into `toks`, parsed into
@@ -93,7 +119,7 @@ pub fun resolve(path: str, source: str, stdlib: str, overrides: [str: str], know
 // aren't read.
 pub fun local_ranges(path: str, source: str, toks: [Token], program: Program) -> [Range] {
     var out: [Range] = []
-    let r = resolve_parsed(path, source, toks, program, "", [:], [:], false)
+    let r = resolve_parsed(path, source, toks, program, "", [:], [:], false, Pos { line: -1, character: 0 })
     for u in r.uses {
         if !is_global(u.def) { push(out, u.range) }
     }
@@ -103,7 +129,7 @@ pub fun local_ranges(path: str, source: str, toks: [Token], program: Program) ->
     return out
 }
 
-fun resolve_parsed(path: str, source: str, toks: [Token], program: Program, stdlib: str, overrides: [str: str], known: [str: Outline], imports: bool) -> Resolution {
+fun resolve_parsed(path: str, source: str, toks: [Token], program: Program, stdlib: str, overrides: [str: str], known: [str: Outline], imports: bool, want: Pos) -> Resolution {
     let symbols = outline_parsed(source, toks, program)
     // only identifiers: an f-string's expansion puts its `(`, commas and `)`
     // at the string's start, out of order
@@ -116,16 +142,23 @@ fun resolve_parsed(path: str, source: str, toks: [Token], program: Program, stdl
     for sym in symbols {
         if !kind_is_impl(sym.kind) { push(defs, sym_def(path, sym)) }
     }
-    var r = Resolver { path: path, stdlib: stdlib, overrides: overrides, toks: idents, lines: line_index(source), scopes: [], globals: globals_of(path, symbols), modules: [:], known: known, uses: [], defs: defs }
+    var r = Resolver { path: path, stdlib: stdlib, overrides: overrides, toks: idents, lines: line_index(source), scopes: [], globals: globals_of(path, symbols), modules: [:], known: known, methods: [:], with_methods: [:], self_type: "", want: want, completion: no_completion(), uses: [], defs: defs }
+    r.add_methods(path, symbols)
     if imports {
         for d in program.decls { r.import_decl(d) }
     }
     for d in program.decls { r.decl(d) }
-    return Resolution { uses: r.uses, defs: r.defs, ok: true, known: r.known }
+    return Resolution { uses: r.uses, defs: r.defs, ok: true, known: r.known, completion: r.completion }
 }
 
 fun sym_def(path: str, s: Symbol) -> Def {
-    return Def { name: s.name, path: path, range: s.selection, kind: DefKind.Global(s.kind), detail: s.detail }
+    var ty = ""
+    match s.kind {
+        SymKind.Field => { ty = s.detail },
+        SymKind.Constant => { ty = s.detail },
+        _ => {},
+    }
+    return Def { name: s.name, path: path, range: s.selection, kind: DefKind.Global(s.kind), detail: s.detail, ty: ty }
 }
 
 // The top-level declarations of `symbols` (of the file `path`) by name, with
@@ -227,6 +260,7 @@ impl Resolver {
                     None => { return },
                 }
                 let symbols = self.module_symbols(file)
+                self.add_methods(file, symbols)
                 match items {
                     Some(list) => {
                         let exported = globals_of(file, symbols)
@@ -288,11 +322,12 @@ impl Resolver {
         if k >= 0 { push(self.uses, Use { range: self.range_of(k), def: d }) }
     }
 
-    // Declare `name` at or after (line, col) in the innermost scope.
-    fun declare(var self, line: int32, col: int32, name: str, kind: DefKind) {
+    // Declare `name` (of type `ty`) at or after (line, col) in the innermost
+    // scope.
+    fun declare(var self, line: int32, col: int32, name: str, kind: DefKind, ty: str) {
         let k = self.ident_after(line, col, name)
         if k < 0 { return }
-        let d = Def { name: name, path: self.path, range: self.range_of(k), kind: kind, detail: "" }
+        let d = Def { name: name, path: self.path, range: self.range_of(k), kind: kind, detail: "", ty: ty }
         push(self.defs, d)
         if len(self.scopes) > 0 { push(self.scopes[len(self.scopes) - 1], d) }
     }
@@ -335,7 +370,7 @@ impl Resolver {
             None => {
                 if contains(self.modules, name) {
                     let file = self.modules[name]
-                    self.use_at(line, col, name, Def { name: name, path: file, range: Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }, kind: DefKind.Module, detail: "" })
+                    self.use_at(line, col, name, Def { name: name, path: file, range: Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }, kind: DefKind.Module, detail: "", ty: "" })
                 }
             },
         }
@@ -383,7 +418,7 @@ impl Resolver {
     }
 
     fun type_params(var self, tps: [TypeParam]) {
-        for tp in tps { self.declare(tp.line, tp.col, tp.name, DefKind.TypeParam) }
+        for tp in tps { self.declare(tp.line, tp.col, tp.name, DefKind.TypeParam, "") }
     }
 
     fun decl(var self, d: Decl) {
@@ -410,6 +445,7 @@ impl Resolver {
                 self.type_expr(target)
             },
             DeclKind.ImplDecl(target, methods, tps, tr, targs) => {
+                self.self_type = type_str(target)
                 self.push_scope()
                 self.type_params(tps)
                 self.type_expr(target)
@@ -420,6 +456,7 @@ impl Resolver {
                 for t in targs { self.type_expr(t) }
                 for m in methods { self.fun_data(m) }
                 self.pop_scope()
+                self.self_type = ""
             },
             DeclKind.TraitDecl(name, methods, tps, is_pub) => {
                 self.push_scope()
@@ -449,7 +486,7 @@ impl Resolver {
                 },
                 None => {},
             }
-            self.declare(p.line, p.col, p.name, DefKind.Param(shown))
+            self.declare(p.line, p.col, p.name, DefKind.Param, shown)
         }
         match fd.ret_type { Some(t) => { self.type_expr(t) }, None => {} }
         match fd.body { Some(b) => { self.block(b) }, None => {} }
@@ -486,21 +523,30 @@ impl Resolver {
     fun stmt(var self, s: Stmt) {
         match s.kind {
             StmtKind.VarDecl(k, name, ty, init) => {
-                var shown = k
+                var shown = ""
                 match ty {
                     Some(t) => {
                         self.type_expr(t)
-                        shown = k + ": " + type_str(t)
+                        shown = type_str(t)
                     },
                     None => {},
                 }
                 self.expr(init)                  // `let x = x + 1` sees the outer x
-                self.declare(s.line, s.col, name, DefKind.Local(shown))
+                if shown == "" { shown = self.type_of(init) }
+                self.declare(s.line, s.col, name, DefKind.Local(k), shown)
             },
             StmtKind.DestructDecl(k, binding, ty, init) => {
-                match ty { Some(t) => { self.type_expr(t) }, None => {} }
+                var shown = ""
+                match ty {
+                    Some(t) => {
+                        self.type_expr(t)
+                        shown = type_str(t)
+                    },
+                    None => {},
+                }
                 self.expr(init)
-                self.bind_elem(binding, k)
+                if shown == "" { shown = self.type_of(init) }
+                self.bind_elem(binding, k, shown)
             },
             StmtKind.Assign(target, value) => {
                 self.expr(target)
@@ -522,9 +568,24 @@ impl Resolver {
             StmtKind.ForS(var_name, start, end, body, iter) => {
                 match start { Some(e) => { self.expr(e) }, None => {} }
                 match end { Some(e) => { self.expr(e) }, None => {} }
-                match iter { Some(e) => { self.expr(e) }, None => {} }
+                var each = "int"
+                match iter {
+                    Some(e) => {
+                        self.expr(e)
+                        each = iter_of(self.unalias(self.type_of(e)))
+                    },
+                    None => {
+                        match start {
+                            Some(e) => {
+                                let t = self.type_of(e)
+                                if t != "" { each = t }
+                            },
+                            None => {},
+                        }
+                    },
+                }
                 self.push_scope()
-                self.declare(s.line, s.col, var_name, DefKind.Local("let"))
+                self.declare(s.line, s.col, var_name, DefKind.Local("let"), each)
                 self.block(body)
                 self.pop_scope()
             },
@@ -537,12 +598,20 @@ impl Resolver {
         }
     }
 
-    fun bind_elem(var self, b: BindElem, k: str) {
+    // The names a destructuring binds, of the parts of type `t`.
+    fun bind_elem(var self, b: BindElem, k: str, t: str) {
         match b {
-            BindElem.BName(name, line, col) => { self.declare(line, col, name, DefKind.Local(k)) },
+            BindElem.BName(name, line, col) => { self.declare(line, col, name, DefKind.Local(k), t) },
             BindElem.BWild => {},
             BindElem.BTuple(es, line, col) => {
-                for e in es { self.bind_elem(e, k) }
+                let parts = tuple_elems(self.unalias(t))
+                var i = 0
+                for e in es {
+                    var part = ""
+                    if i < len(parts) { part = parts[i] }
+                    self.bind_elem(e, k, part)
+                    i = i + 1
+                }
             },
         }
     }
@@ -558,7 +627,12 @@ impl Resolver {
 
     fun expr(var self, e: Expr) {
         match e.kind {
-            ExprKind.Name(n) => { self.use_name(e.line, e.col, n) },
+            ExprKind.Name(n) => {
+                if self.want.line >= 0 && self.at_want(self.ident_after(e.line, e.col, n)) {
+                    self.completion = Completion { found: true, member: false, known: true, items: self.visible() }
+                }
+                self.use_name(e.line, e.col, n)
+            },
             ExprKind.Unary(op, x) => { self.expr(x) },
             ExprKind.Binary(op, l, r) => {
                 self.expr(l)
@@ -570,7 +644,7 @@ impl Resolver {
             },
             ExprKind.GetField(recv, field) => {
                 self.expr(recv)
-                self.field(recv, field)
+                self.field(e, recv, field)
             },
             ExprKind.StructLit(name, fields) => {
                 self.use_name(e.line, e.col, name)
@@ -621,7 +695,7 @@ impl Resolver {
                         },
                         None => {},
                     }
-                    self.declare(p.line, p.col, p.name, DefKind.Param(shown))
+                    self.declare(p.line, p.col, p.name, DefKind.Param, shown)
                 }
                 match ret { Some(t) => { self.type_expr(t) }, None => {} }
                 self.body(b)
@@ -631,34 +705,329 @@ impl Resolver {
         }
     }
 
-    // `recv.field` where `recv` names an enum (a variant) or a module (one of
-    // its declarations); other members need types.
-    fun field(var self, recv: Expr, field: str) {
-        let owner = match recv.kind {
-            ExprKind.Name(n) => n,
-            _ => { return },
+    // `recv.field` (`e`, positioned at the dot): a variant or a static
+    // method when `recv` names a type, a declaration when it names a module,
+    // else a field or method of the value's type.
+    fun field(var self, e: Expr, recv: Expr, field: str) {
+        let k = self.ident_after(e.line, e.col, field)
+        var named = false
+        var members: [Def] = []
+        match recv.kind {
+            ExprKind.Name(n) => {
+                match self.lookup(n) {
+                    Some(od) => {
+                        match od.kind {
+                            DefKind.Global(SymKind.Enum) => {
+                                named = true
+                                members = self.members_named(n)
+                            },
+                            DefKind.Global(SymKind.Struct) => {
+                                named = true
+                                members = self.members_named(n)
+                            },
+                            _ => {},
+                        }
+                    },
+                    None => {
+                        if contains(self.modules, n) {
+                            named = true
+                            let file = self.modules[n]
+                            for s in self.module_symbols(file) {
+                                if s.parent == -1 && !kind_is_impl(s.kind) { push(members, sym_def(file, s)) }
+                            }
+                        }
+                    },
+                }
+            },
+            _ => {},
         }
-        let k = self.ident_after(recv.line, recv.col, owner)
+        var known = named
+        if !named {
+            match self.value_members(self.type_of(recv)) {
+                Some(ms) => {
+                    members = ms
+                    known = true
+                },
+                None => {},
+            }
+        }
         if k < 0 { return }
-        var d: Option<Def> = None
-        match self.lookup(owner) {
-            Some(od) => {
-                match od.kind {
-                    DefKind.Global(SymKind.Enum) => { d = self.member_of(owner, field) },
+        if self.want.line >= 0 && self.at_want(k) {
+            self.completion = Completion { found: true, member: true, known: known, items: members }
+        }
+        for m in members {
+            if m.name == field {
+                push(self.uses, Use { range: self.range_of(k), def: m })
+                return
+            }
+        }
+    }
+
+    // --- types ---------------------------------------------------------------------
+
+    // Whether the identifier token `k` starts where completion is asked.
+    fun at_want(self, k: int32) -> bool {
+        if k < 0 { return false }
+        let r = self.range_of(k)
+        return r.start.line == self.want.line && r.start.character == self.want.character
+    }
+
+    // The locals in scope, innermost first, each name once.
+    fun visible(self) -> [Def] {
+        var out: [Def] = []
+        var seen: [str: bool] = [:]
+        var i = len(self.scopes) - 1
+        while i >= 0 {
+            var j = len(self.scopes[i]) - 1
+            while j >= 0 {
+                let d = self.scopes[i][j]
+                if !contains(seen, d.name) {
+                    seen[d.name] = true
+                    push(out, d)
+                }
+                j = j - 1
+            }
+            i = i - 1
+        }
+        return out
+    }
+
+    // Record the methods of the impls among `symbols` (of the file `path`),
+    // by the name of their target type.
+    fun add_methods(var self, path: str, symbols: [Symbol]) {
+        if contains(self.with_methods, path) { return }
+        self.with_methods[path] = true
+        for s in symbols {
+            if s.parent >= 0 && kind_is_impl(symbols[s.parent].kind) {
+                let target = base_of(symbols[s.parent].name)
+                if !contains(self.methods, target) {
+                    var empty: [Def] = []
+                    self.methods[target] = empty
+                }
+                push(self.methods[target], sym_def(path, s))
+            }
+        }
+    }
+
+    // `t` with type aliases replaced by their targets.
+    fun unalias(self, t: str) -> str {
+        var out = t
+        var n = 0
+        while n < 8 {
+            match get(self.globals, base_of(out)) {
+                Some(g) => {
+                    match g.def.kind {
+                        DefKind.Global(SymKind.TypeAlias) => { out = g.def.detail },
+                        _ => { return out },
+                    }
+                },
+                None => { return out },
+            }
+            n = n + 1
+        }
+        return out
+    }
+
+    // The members reached through the type named `name` itself: an enum's
+    // variants, and the methods of its impls (static ones among them).
+    fun members_named(self, name: str) -> [Def] {
+        var out: [Def] = []
+        match get(self.globals, name) {
+            Some(g) => {
+                match g.def.kind {
+                    DefKind.Global(SymKind.Enum) => { for m in g.members { push(out, m) } },
+                    _ => {},
+                }
+            },
+            None => {},
+        }
+        match get(self.methods, name) {
+            Some(ms) => { for m in ms { push(out, m) } },
+            None => {},
+        }
+        return out
+    }
+
+    // The members of a value of type `t0`: a struct's fields (their types with
+    // the struct's type arguments substituted) and the methods of the type's
+    // impls; None when the type isn't known.
+    fun value_members(self, t0: str) -> Option<[Def]> {
+        let t = self.unalias(t0)
+        if t == "" { return None }
+        var out: [Def] = []
+        let b = base_of(t)
+        if b == "" { return Some(out) }              // a list, map, tuple or function
+        match get(self.globals, b) {
+            Some(g) => {
+                match g.def.kind {
+                    DefKind.Global(SymKind.Struct) => {
+                        let names = header_params(g.def.detail)
+                        let args = type_args(t)
+                        for m in g.members {
+                            var f = m
+                            f.ty = subst(m.ty, names, args)
+                            push(out, f)
+                        }
+                    },
                     _ => {},
                 }
             },
             None => {
-                if contains(self.modules, owner) { d = self.module_member(self.modules[owner], field) }
+                if !is_builtin_type(b) && !contains(self.methods, b) { return None }
             },
         }
-        match d {
-            Some(x) => {
-                let t = self.toks[k]
-                self.use_at(t.line, t.column + 1, field, x)
+        match get(self.methods, b) {
+            Some(ms) => { for m in ms { push(out, m) } },
+            None => {},
+        }
+        return Some(out)
+    }
+
+    // The type of a value as far as the source tells it ("" if not).
+    fun type_of(self, e: Expr) -> str {
+        match e.kind {
+            ExprKind.Name(n) => {
+                if n == "self" { return self.self_type }
+                return match self.lookup(n) {
+                    Some(d) => d.ty,
+                    None => "",
+                }
+            },
+            ExprKind.StructLit(name, fields) => { return name },
+            ExprKind.StrLit(v) => { return "str" },
+            ExprKind.BoolLit(v) => { return "bool" },
+            ExprKind.IntLit(v, suffix, is_char, big) => {
+                if is_char { return "char" }
+                return match suffix {
+                    Some(sfx) => sfx,
+                    None => "int",
+                }
+            },
+            ExprKind.Cast(x, t) => { return type_str(t) },
+            ExprKind.ListLit(es) => {
+                if len(es) == 0 { return "" }
+                let t = self.type_of(es[0])
+                if t == "" { return "" }
+                return "[" + t + "]"
+            },
+            ExprKind.Index(a, i) => { return index_of(self.unalias(self.type_of(a))) },
+            ExprKind.TupleIndex(x, i) => {
+                let elems = tuple_elems(self.unalias(self.type_of(x)))
+                if i < 0 || i >= (len(elems) as int64) { return "" }
+                return elems[i as int32]
+            },
+            ExprKind.Unary(op, x) => {
+                if op == "!" { return "bool" }
+                return self.type_of(x)
+            },
+            ExprKind.Binary(op, l, r) => {
+                if op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" || op == "&&" || op == "||" { return "bool" }
+                // arithmetic, overloaded or not, gives the operands' type
+                let t = self.type_of(l)
+                if t != "" { return t }
+                return self.type_of(r)
+            },
+            ExprKind.Try(x) => { return success_of(self.unalias(self.type_of(x))) },
+            ExprKind.GetField(recv, f) => { return self.member_type(recv, f, false) },
+            ExprKind.Call(callee, args) => {
+                match callee.kind {
+                    ExprKind.Name(n) => {
+                        match self.lookup(n) {
+                            Some(d) => {
+                                match d.kind {
+                                    DefKind.Global(SymKind.Function) => { return self.call_result(d.detail, args) },
+                                    DefKind.Global(k) => { return "" },
+                                    _ => { return result_of(d.ty) },          // a function value
+                                }
+                            },
+                            None => { return "" },
+                        }
+                    },
+                    ExprKind.GetField(recv, m) => { return self.member_type(recv, m, true) },
+                    _ => { return "" },
+                }
+            },
+            _ => {},
+        }
+        return ""
+    }
+
+    // The result of calling the function with signature `sig` on `args`,
+    // its type parameters bound by matching the parameters' types against
+    // the arguments'.
+    fun call_result(self, sig: str, args: [Expr]) -> str {
+        let ret = result_of(sig)
+        let tps = sig_type_params(sig)
+        if len(tps) == 0 { return ret }
+        let params = sig_param_types(sig)
+        var bound: [str: str] = [:]
+        var i = 0
+        while i < len(params) && i < len(args) {
+            bound = unify(params[i], self.type_of(args[i]), tps, bound)
+            i = i + 1
+        }
+        var names: [str] = []
+        var types: [str] = []
+        for n in keys(bound) {
+            push(names, n)
+            push(types, bound[n])
+        }
+        return subst(ret, names, types)
+    }
+
+    // The type of `recv.name`, or of `recv.name(…)` when `called`.
+    fun member_type(self, recv: Expr, name: str, called: bool) -> str {
+        match recv.kind {
+            ExprKind.Name(n) => {
+                match self.lookup(n) {
+                    Some(od) => {
+                        match od.kind {
+                            DefKind.Global(SymKind.Enum) => { return self.named_member_type(n, name) },
+                            DefKind.Global(SymKind.Struct) => { return self.named_member_type(n, name) },
+                            _ => {},
+                        }
+                    },
+                    None => {},
+                }
+            },
+            _ => {},
+        }
+        let t = self.unalias(self.type_of(recv))
+        match self.value_members(t) {
+            Some(ms) => {
+                for m in ms {
+                    if m.name == name {
+                        match m.kind {
+                            DefKind.Global(SymKind.Field) => {
+                                if called { return result_of(m.ty) }
+                                return m.ty
+                            },
+                            DefKind.Global(SymKind.Method) => {
+                                if !called { return "" }
+                                return subst(result_of(m.detail), ["Self"], [t])
+                            },
+                            _ => { return "" },
+                        }
+                    }
+                }
             },
             None => {},
         }
+        return ""
+    }
+
+    // The type of `T.name` or `T.name(…)` for a type `T`: a variant is a
+    // value of the enum, a static method gives its result.
+    fun named_member_type(self, t: str, name: str) -> str {
+        for m in self.members_named(t) {
+            if m.name == name {
+                match m.kind {
+                    DefKind.Global(SymKind.EnumMember) => { return t },
+                    _ => { return subst(result_of(m.detail), ["Self"], [t]) },
+                }
+            }
+        }
+        return ""
     }
 
     // The symbols of the module file `file` (none when it doesn't parse),
@@ -686,7 +1055,7 @@ impl Resolver {
     // The top-level declaration `name` of the module file `file`.
     fun module_member(var self, file: str, name: str) -> Option<Def> {
         for s in self.module_symbols(file) {
-            if s.parent == -1 && s.name == name { return Some(Def { name: name, path: file, range: s.selection, kind: DefKind.Global(s.kind), detail: s.detail }) }
+            if s.parent == -1 && s.name == name { return Some(sym_def(file, s)) }
         }
         return None
     }
@@ -707,7 +1076,7 @@ impl Resolver {
                     None => {
                         if n == "None" {
                         } else if binding {
-                            self.declare(p.line, p.col, n, DefKind.Local("let"))
+                            self.declare(p.line, p.col, n, DefKind.Local("let"), "")
                         } else {
                             self.use_name(p.line, p.col, n)
                         }
@@ -723,6 +1092,17 @@ impl Resolver {
                         let k = self.ident_after(p.line, p.col, v)
                         if k >= 1 && self.toks[k - 1].lexeme == name {
                             self.use_name(self.toks[k - 1].line, self.toks[k - 1].column, name)
+                        }
+                        if self.want.line >= 0 && self.at_want(k) {
+                            // a pattern names a variant
+                            var variants: [Def] = []
+                            for m in self.members_named(name) {
+                                match m.kind {
+                                    DefKind.Global(SymKind.EnumMember) => { push(variants, m) },
+                                    _ => {},
+                                }
+                            }
+                            self.completion = Completion { found: true, member: true, known: true, items: variants }
                         }
                         match self.member_of(name, v) {
                             Some(d) => { self.use_at(p.line, p.col, v, d) },
@@ -781,15 +1161,11 @@ pub fun at_position(r: Resolution, pos: Pos) -> Option<Def> {
 
 // How hover shows a declaration that isn't a global.
 pub fun render_local(d: Def) -> str {
+    var typed = d.name
+    if d.ty != "" { typed = d.name + ": " + d.ty }
     match d.kind {
-        DefKind.Local(k) => {
-            if k == "let" || k == "var" { return k + " " + d.name }
-            return local_with_type(k, d.name)
-        },
-        DefKind.Param(t) => {
-            if t == "" { return d.name }
-            return d.name + ": " + t
-        },
+        DefKind.Local(k) => { return k + " " + typed },
+        DefKind.Param => { return typed },
         DefKind.TypeParam => { return "type parameter " + d.name },
         DefKind.Module => { return "module " + d.name },
         DefKind.Global(k) => {},
@@ -797,22 +1173,11 @@ pub fun render_local(d: Def) -> str {
     return d.name
 }
 
-// "let: int" (kind and type) and a name -> "let x: int"
-fun local_with_type(k: str, name: str) -> str {
-    var i = 0
-    while i < len(k) && k[i] != ':' { i = i + 1 }
-    var sb = StringBuilder()
-    append(sb, k, 0, i)
-    append(sb, " " + name)
-    append(sb, k, i, len(k))
-    return build(sb)
-}
-
 fun kind_name(k: DefKind) -> str {
     return match k {
         DefKind.Global(s) => "global",
         DefKind.Local(s) => "local",
-        DefKind.Param(s) => "param",
+        DefKind.Param => "param",
         DefKind.TypeParam => "typeparam",
         DefKind.Module => "module",
     }

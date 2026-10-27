@@ -218,9 +218,13 @@ class LspRequestScenarios(LspRequestHelpers):
         result = self.at("textDocument/completion", uri, line, character)
         return {item["label"] for item in result["items"]}
 
+    # every member of the workspace (the Python server); the Myla server
+    # offers the receiver's (MYLA-80 step 6)
+    MEMBERS_OF_P = {"x", "A", "B"}
+
     def test_members_after_a_dot(self):
         uri = self.open(COMPLETION_SOURCE)
-        self.assertEqual(self.labels(uri, 7, 12), {"x", "A", "B"})
+        self.assertEqual(self.labels(uri, 7, 12), self.MEMBERS_OF_P)
 
     def test_keywords_and_declarations_elsewhere(self):
         uri = self.open(COMPLETION_SOURCE)
