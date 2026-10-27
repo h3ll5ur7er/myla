@@ -300,6 +300,13 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.hover(uri, 11, 52), "v: int")
         self.assertEqual(self.refs(uri, 0, 13), [(uri, 0, 13, 16), (uri, 8, 18, 21), (uri, 11, 14, 17)])
 
+    def test_unicode_identifiers(self):
+        # XID identifiers (MYLA-84); ranges in UTF-16 units, 😀 counting two
+        uri = self.open('fun main() {\n    let größe = 1\n    let 日本 = größe\n    print(f"😀{日本}")\n}\n')
+        self.assertEqual(self.defn(uri, 2, 14), {"uri": uri, "range": rng(1, 8, 13)})
+        self.assertEqual(self.defn(uri, 3, 15), {"uri": uri, "range": rng(2, 8, 10)})
+        self.assertEqual(self.hover(uri, 2, 9), "let 日本: int")
+
     def test_imports(self):
         decoy = self.write("a.my", "pub fun helper() -> int {\n    return 0\n}\n")
         util = self.write("util.my", "// util\npub fun helper() -> int {\n    return 1\n}\n")
@@ -734,7 +741,7 @@ class SemanticTokenScenarios:
                         self.assertNotEqual(tok.strip(), "")
                     elif typ in ("variable", "function", "method", "property", "type", "struct", "enum",
                                  "enumMember", "interface", "namespace", "decorator"):
-                        self.assertRegex(tok, r"^[A-Za-z_][A-Za-z0-9_]*$")
+                        self.assertTrue(tok.isidentifier(), tok)       # Unicode identifiers (MYLA-84)
                 # every character that isn't white space or punctuation has a token
                 for n, line in enumerate(lines):
                     units = line.encode("utf-16-le")

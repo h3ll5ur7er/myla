@@ -1,12 +1,11 @@
 // symbols.my: the outline of a document (MYLA-80), the declarations of one
-// parsed file without linking or checking, as src/myla/lsp/symbols.py
-// builds it: a file that doesn't parse has none.
+// parsed file without linking or checking: a file that doesn't parse has
+// none.
 //
 // A symbol's selection range is its name token (for an impl, the last mention
 // of the target type in the header, MYLA-48). Its full range runs from the
 // declaration's start to its last token: the closing brace, or the end of a
-// field or variant (the Python server ends it at the last line any AST node
-// is on).
+// field or variant.
 
 from ...selfhost.lexer import lex
 from ...selfhost.parser import parse_source

@@ -1,6 +1,6 @@
 // workspace.my: the declarations and identifiers of every `.my` file under
 // the workspace roots (MYLA-80), for cross-file definition, references,
-// hover and completion, as src/myla/lsp/workspace.py does. Files come from
+// hover and completion. Files come from
 // `find` (Myla has no directory listing), sorted; open documents count with
 // their unsaved text. A file's declarations are kept until its text changes.
 

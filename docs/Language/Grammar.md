@@ -11,18 +11,18 @@ Notation: `"x"` or `'x'` is a terminal (no escapes: `"\"` is a backslash), `/…
 ## Tokens
 
 ```ebnf
-IDENT          = ( letter | "_" ) ( letter | digit | "_" )* ;
+IDENT          = ident_start ident_char* ;   (* Unicode identifiers: D72 *)
 INT            = ( digits | "0x" hexdigits | "0b" bindigits | "0o" octdigits ) int_suffix? ;
 TUPLE_INDEX    = digits | "0x" hexdigits | "0b" bindigits | "0o" octdigits ;
 FLOAT          = digits ( "." digits exponent? | exponent ) float_suffix? | digits float_suffix ;
-CHAR           = "'" ( char_char | "\" ( "n" | "t" | "r" | "\" | "'" | "0" ) | "\u{" hexdigit+ "}" ) "'" ;
-               (* 1 to 6 hex digits naming a Unicode scalar value *)
-STRING         = '"' ( string_char | "\" ( "n" | "t" | "\" | '"' ) )* '"' ;
-FSTRING_TEXT   = ( fstring_char | "\" ( "n" | "t" | "\" | '"' ) )+ ;
+CHAR           = "'" ( char_char | escape ) "'" ;
+STRING         = '"' ( string_char | escape )* '"' ;
+FSTRING_TEXT   = ( fstring_char | escape )+ ;
 COMMENT        = "//" line_char* | "/*" not_star* ( "*"+ not_star_slash not_star* )* "*"+ "/" ;
 NL             = /\n/ ;
 
-letter         = /[A-Za-z]/ ;
+ident_start    = /[_\p{XID_Start}]/ ;
+ident_char     = /\p{XID_Continue}/ ;
 digit          = /[0-9]/ ;
 hexdigit       = /[0-9a-fA-F]/ ;
 digits         = digit ( "_"? digit )* ;
@@ -32,6 +32,8 @@ octdigits      = /[0-7]/ ( "_"? /[0-7]/ )* ;
 int_suffix     = ( "i" | "u" ) ( "8" | "16" | "32" | "64" ) ;
 float_suffix   = "f32" | "f64" ;
 exponent       = ( "e" | "E" ) ( "+" | "-" )? digits ;
+escape         = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'" | "u{" hexdigit+ "}" ) ;
+               (* \u{…}: 1 to 6 hex digits naming a Unicode scalar value *)
 char_char      = /[^'\\\n]/ ;
 string_char    = /[^"\\\n]/ ;
 fstring_char   = /[^"{}\\\n]/ ;

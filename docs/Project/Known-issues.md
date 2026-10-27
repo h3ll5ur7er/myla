@@ -8,9 +8,7 @@ Open bugs and gaps found by the October 2026 review, by component. Each has a ta
 
 The reference implementation. Most problems are places where the native backend and the interpreter disagree.
 
-| Issue | Task | Severity |
-| --- | --- | --- |
-| The Python lexer accepts non-ASCII letters in identifiers (`größe`); the self-hosted lexer and the grammar description don't | [[MYLA-84]] | low |
+No open issues. (The lexers' disagreement on non-ASCII identifiers is settled: both take Unicode's XID, D72, [[MYLA-84]].)
 
 ## Self-hosted compiler
 

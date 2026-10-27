@@ -34,18 +34,18 @@
 
 (* ----- Tokens ----- *)
 
-IDENT @identifier = ( letter | "_" ) ( letter | digit | "_" )* ;
+IDENT @identifier = ident_start ident_char* ;   (* Unicode identifiers: D72 *)
 INT @integer      = ( digits | "0x" hexdigits | "0b" bindigits | "0o" octdigits ) int_suffix? ;
 TUPLE_INDEX @integer = digits | "0x" hexdigits | "0b" bindigits | "0o" octdigits ;
 FLOAT @float      = digits ( "." digits exponent? | exponent ) float_suffix? | digits float_suffix ;
-CHAR @char        = "'" ( char_char | "\" ( "n" | "t" | "r" | "\" | "'" | "0" ) | "\u{" hexdigit+ "}" ) "'" ;
-                    (* 1 to 6 hex digits naming a Unicode scalar value *)
-STRING @string    = '"' ( string_char | "\" ( "n" | "t" | "\" | '"' ) )* '"' ;
-FSTRING_TEXT @string_content @immediate = ( fstring_char | "\" ( "n" | "t" | "\" | '"' ) )+ ;
+CHAR @char        = "'" ( char_char | escape ) "'" ;
+STRING @string    = '"' ( string_char | escape )* '"' ;
+FSTRING_TEXT @string_content @immediate = ( fstring_char | escape )+ ;
 COMMENT @comment  = "//" line_char* | "/*" not_star* ( "*"+ not_star_slash not_star* )* "*"+ "/" ;
 NL                = /\n/ ;
 
-letter         = /[A-Za-z]/ ;
+ident_start    = /[_\p{XID_Start}]/ ;
+ident_char     = /\p{XID_Continue}/ ;
 digit          = /[0-9]/ ;
 hexdigit       = /[0-9a-fA-F]/ ;
 digits         = digit ( "_"? digit )* ;
@@ -55,6 +55,8 @@ octdigits      = /[0-7]/ ( "_"? /[0-7]/ )* ;
 int_suffix     = ( "i" | "u" ) ( "8" | "16" | "32" | "64" ) ;
 float_suffix   = "f32" | "f64" ;
 exponent       = ( "e" | "E" ) ( "+" | "-" )? digits ;
+escape         = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'" | "u{" hexdigit+ "}" ) ;
+               (* \u{…}: 1 to 6 hex digits naming a Unicode scalar value *)
 char_char      = /[^'\\\n]/ ;
 string_char    = /[^"\\\n]/ ;
 fstring_char   = /[^"{}\\\n]/ ;
@@ -210,10 +212,10 @@ field_pattern = IDENT ( ":" pattern )? ;
 @restrict cast_expression named_type ;            (* "a as T < b": "<" opens type arguments *)
 @restrict fstring NL ;                            (* f-strings are single-line *)
 
-@sample IDENT "x" "y" "count" "Point" "_t" "f" ;
+@sample IDENT "x" "y" "count" "Point" "_t" "f" "größe" "π" ;
 @sample INT "0" "7" "42" "0xff" "0b1010" "1_000" "255u8" "3i64" ;
 @sample TUPLE_INDEX "0" "1" ;
 @sample FLOAT "1.5" "2e3" "0.25f64" "3f32" "1.5e-3" ;
 @sample CHAR "'a'" "'\n'" "'\\'" "'\''" "'\u{1F600}'" ;
-@sample STRING '""' '"hi"' '"a\"b\n"' ;
-@sample FSTRING_TEXT "abc " " = " "x\n" ;
+@sample STRING '""' '"hi"' '"a\"b\n"' '"\r\n\0\u{e9}"' ;
+@sample FSTRING_TEXT "abc " " = " "x\n" "\r\u{7B}" ;

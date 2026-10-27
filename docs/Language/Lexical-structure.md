@@ -48,7 +48,7 @@ fun add(a: int, b: int) -> int {
 
 ## Identifiers and keywords
 
-An identifier starts with a letter or `_` and continues with letters, digits and `_`. They are case-sensitive. By convention types are `PascalCase` and everything else `snake_case`.
+An identifier follows Unicode's identifier syntax: it starts with `_` or an XID_Start character (a letter of any script, or a letter number such as `Ⅻ`) and continues with XID_Continue characters (those, digits of any script, combining marks such as the accent in a decomposed `é`, `_` and a few others such as `·`): `größe`, `π`, `日本`. Identifiers aren't normalized, so a precomposed and a decomposed `é` make different names. Keywords and number literals stay ASCII (`١` is no digit of a literal). Both lexers use one generated table (`src/myla/unicode_ident.py`, `selfhost/unicode.my`, D72). They are case-sensitive. By convention types are `PascalCase` and everything else `snake_case`.
 
 Reserved keywords:
 
@@ -91,13 +91,13 @@ An unsuffixed float literal takes the float type its context expects, defaulting
 
 ## Character literals
 
-`'a'`, `'é'`, `'😀'`, and the escapes `'\n'`, `'\t'`, `'\r'`, `'\\'`, `'\''`, `'\0'` and `'\u{1F600}'` (1–6 hex digits, not a surrogate, at most `10FFFF`). The value is the Unicode scalar.
+`'a'`, `'é'`, `'😀'`, and the escapes (the same in strings): `\n`, `\t`, `\r`, `\0`, `\\`, `\'`, `\"` and `\u{1F600}` (1–6 hex digits, not a surrogate, at most `10FFFF`), as in `'\n'` or `'\u{e9}'`. Any other escape is a lex error. The value is the Unicode scalar.
 
 A character literal has type `char`, except that an **ASCII** literal also fits an integer type when one is expected, so byte comparisons read naturally: `s[i] == 'a'` compares a `uint8` with 97 (D42).
 
 ## String literals
 
-`"…"` with the escapes `\n`, `\t`, `\\` and `\"`. Other escapes (including `\r`, `\0` and `\u`) are lex errors in strings. A string can't span lines.
+`"…"` with the escapes characters take (D72): `\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'` and `\u{…}`, so `"\r\n"` is a protocol's line ending and `"\u{20AC}"` is `€` (stored as its UTF-8 bytes). A `\u{…}` naming a surrogate or a value above `10FFFF` is a lex error, as in a character. A string can't span lines.
 
 ## Interpolated strings
 
@@ -111,7 +111,7 @@ fun main() {
 }
 ```
 
-The lexer rewrites an f-string into a call `format("… {} …", expr, …)`: each hole is cut out by counting braces (skipping nested string and char literals) and lexed again as an expression. So holes accept any expression, and the checker treats the result exactly like `format` ([[Language/Collections-and-strings]]). F-strings are single-line, an empty hole `{}` is an error, and there are no format specifiers.
+The lexer rewrites an f-string into a call `format("… {} …", expr, …)`: each hole is cut out by counting braces (skipping nested string and char literals) and lexed again as an expression. So holes accept any expression, and the checker treats the result exactly like `format` ([[Language/Collections-and-strings]]). F-strings are single-line, an empty hole `{}` is an error, and there are no format specifiers. Their text takes the escapes of strings; an escaped brace such as `\u{7B}` is text, not a hole.
 
 ## Operators and punctuation
 

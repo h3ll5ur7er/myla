@@ -3207,6 +3207,13 @@ impl Checker {
             }
         }
         if is_float(t) { return Ok(CV.CVFloat) }
+        if op == "+" {
+            // strings concatenate (the code generator emits a str const's value)
+            match (lv, rv) {
+                (CV.CVStr(x), CV.CVStr(y)) => { return Ok(CV.CVStr(x + y)) },
+                _ => {},
+            }
+        }
         let li = match lv { CV.CVInt(x) => x, _ => { return Ok(CV.CVUnknown) } }
         let ri = match rv { CV.CVInt(x) => x, _ => { return Ok(CV.CVUnknown) } }
         if op == "+" { return Ok(CV.CVInt(wrap_int(li + ri, t))) }

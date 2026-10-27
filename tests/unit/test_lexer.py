@@ -178,6 +178,64 @@ class TestCharLiterals(unittest.TestCase):
             tokenize(r"'\q'")
 
 
+class TestUnicodeIdentifiers(unittest.TestCase):
+    """Identifiers follow Unicode's identifier syntax: `_` or XID_Start, then
+    XID_Continue; no normalization (D72, MYLA-84)."""
+
+    def idents(self, source):
+        return [t.lexeme for t in tokenize(source) if t.kind == T.IDENT]
+
+    def test_letters_of_any_script(self):
+        self.assertEqual(self.idents("let größe = π + 日本 + Ⅻ"), ["größe", "π", "日本", "Ⅻ"])
+
+    def test_beyond_letters(self):
+        # not letters, but XID: the Weierstrass p, a combining accent, the
+        # middle dot and Arabic-Indic digits after the first character
+        self.assertEqual(self.idents("℘ e\u0301 a\u00b7b x\u0661"), ["℘", "e\u0301", "a\u00b7b", "x\u0661"])
+
+    def test_not_identifier_characters(self):
+        for source, col in (("let x = 1 \u20ac 2", 11), ("let \u00b7a = 1", 5), ("let \u0661 = 1", 5)):
+            with self.subTest(source=source):
+                with self.assertRaises(LexError) as cm:
+                    tokenize(source)
+                self.assertEqual((cm.exception.column, cm.exception.message[:20]), (col, "unexpected character"))
+
+
+class TestStringEscapes(unittest.TestCase):
+    r"""Strings and f-strings take the char escapes: \n \t \r \0 \\ \" \'
+    \u{…}, and chars take \" too: one escape set (D72, MYLA-86)."""
+
+    def value(self, source):
+        return tokenize(source)[0].value
+
+    def test_strings(self):
+        self.assertEqual(self.value(r'"a\r\n\0\'b\u{41}\u{e9}\u{1F600}"'), "a\r\n\0'bAé\U0001F600")
+
+    def test_fstrings(self):
+        # the format string of the lowered `format(…)` call: escapes applied,
+        # `\u{7B}` a literal `{` (doubled, so `format` keeps it), `{}` for the hole
+        toks = tokenize(r'f"\r\u{7B}{x}\u{7D}\0"')
+        self.assertEqual(toks[2].value, "\r{{{}}}\0")
+
+    def test_chars(self):
+        self.assertEqual(self.value(r"'\"'"), 34)
+
+    def test_errors(self):
+        cases = {
+            r'"\u0041"': (1, 3, r"expected '{' after '\u' in string literal"),
+            r'"\u{D800}"': (1, 3, "invalid Unicode scalar U+D800 in string literal (must be 0..0x10FFFF and not a surrogate)"),
+            r'"\u{110000}"': (1, 3, "invalid Unicode scalar U+110000 in string literal (must be 0..0x10FFFF and not a surrogate)"),
+            r'f"\u{}"': (1, 3, r"empty '\u{…}' escape"),   # f-strings point at the backslash
+            r'"\q"': (1, 3, r"invalid escape sequence '\q'"),
+            r"'\u{D800}'": (1, 3, "invalid Unicode scalar U+D800 in char literal (must be 0..0x10FFFF and not a surrogate)"),
+        }
+        for source, (line, col, msg) in cases.items():
+            with self.subTest(source=source):
+                with self.assertRaises(LexError) as cm:
+                    tokenize(source)
+                self.assertEqual((cm.exception.line, cm.exception.column, cm.exception.message), (line, col, msg))
+
+
 class TestComments(unittest.TestCase):
     def test_line_comment(self):
         self.assertEqual(kinds("1 // ignored\n2"), [T.INT, T.NEWLINE, T.INT, T.EOF])

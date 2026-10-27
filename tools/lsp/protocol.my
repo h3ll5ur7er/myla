@@ -96,11 +96,7 @@ impl Channel {
 pub fun send(msg: Json) {
     let body = to_string(msg)
     var sb = StringBuilder()
-    append(sb, format("Content-Length: {}", len(body)))
-    append_byte(sb, 13u8)                  // "\r\n\r\n" (string literals have no "\r")
-    append_byte(sb, '\n')
-    append_byte(sb, 13u8)
-    append_byte(sb, '\n')
+    append(sb, format("Content-Length: {}\r\n\r\n", len(body)))
     append(sb, body)
     write(1, build(sb))
 }

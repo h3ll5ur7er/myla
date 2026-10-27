@@ -102,6 +102,23 @@ class SelfHostedLexerParity(unittest.TestCase):
         finally:
             os.unlink(fh.name)
 
+    def test_unicode_identifiers_and_escapes(self) -> None:
+        # XID identifiers and the escapes strings share with chars (MYLA-84, MYLA-86)
+        source = ("fun größe(π: int, x\u0301: int, a\u00b7b: int) -> int {\n"
+                  "    let 日本 = \"\\r\\n\\0\\'\\u{41}\\u{1F600}\"\n"
+                  "    let s = f\"\\u{7B}{π}\\r\"\n"
+                  "    let c = '\\\"'\n"
+                  "    return π + Ⅻ + ℘\n"
+                  "}\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", delete=False) as fh:
+            fh.write(source)
+        try:
+            expected = canonical_tokens(tokenize(source))
+            self.assertIn("größe", expected)
+            self.assertEqual(self._myla_lex(fh.name), expected)
+        finally:
+            os.unlink(fh.name)
+
     def test_corpus_token_parity(self) -> None:
         checked = 0
         for path in _corpus():

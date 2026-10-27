@@ -294,19 +294,9 @@ impl Lexer {
                     self.fail(sl, sc, "unterminated string literal")
                     return
                 }
-                let esc = self.advance()
-                if esc == 110 {
-                    append_byte(sb, 10)
-                } else if esc == 116 {
-                    append_byte(sb, 9)
-                } else if esc == 92 {
-                    append_byte(sb, 92)
-                } else if esc == 34 {
-                    append_byte(sb, 34)
-                } else {
-                    self.fail(el, ec, format("invalid escape sequence '\\{}'", cp_utf8(esc)))
-                    return
-                }
+                let cp = self.scan_escape(el, ec, "string")
+                if cp < 0 { return }
+                append(sb, cp_utf8(cp))
             } else {
                 append(sb, cp_utf8(c))
             }
@@ -315,10 +305,25 @@ impl Lexer {
         self.emit(TokenKind.STRING, value, sl, sc, 0, "")
     }
 
-    fun scan_unicode_escape(var self, line: int32, col: int32) -> int32 {
+    // The scalar of the escape whose letter is next (the backslash was at
+    // or just before `line`:`col`), in a `literal` ("char" or "string"), the
+    // same escapes in both (D72, MYLA-86); -1 after an error.
+    fun scan_escape(var self, line: int32, col: int32, literal: str) -> int32 {
+        let esc = self.advance()
+        if esc == 117 { return self.scan_unicode_escape(line, col, literal) }
+        if esc == 110 { return 10 }
+        if esc == 116 { return 9 }
+        if esc == 114 { return 13 }
+        if esc == 48 { return 0 }
+        if esc == 92 || esc == 34 || esc == 39 { return esc }
+        self.fail(line, col, format("invalid escape sequence '\\{}'", cp_utf8(esc)))
+        return -1
+    }
+
+    fun scan_unicode_escape(var self, line: int32, col: int32, literal: str) -> int32 {
         if self.at_end() || self.advance() != 123 {
-            self.fail(line, col, "expected '{' after '\\u' in char literal")
-            return 0
+            self.fail(line, col, format("expected '{{' after '\\u' in {} literal", literal))
+            return -1
         }
         var sb = StringBuilder()
         var cnt = 0
@@ -326,24 +331,24 @@ impl Lexer {
             let d = self.advance()
             if digit_value(d) < 0 {
                 self.fail(line, col, format("invalid hex digit '{}' in '\\u{{…}}' escape", cp_utf8(d)))
-                return 0
+                return -1
             }
             append_byte(sb, d as uint8)
             cnt = cnt + 1
         }
         if self.at_end() {
             self.fail(line, col, "unterminated '\\u{…}' escape")
-            return 0
+            return -1
         }
         self.advance()
         if cnt == 0 {
             self.fail(line, col, "empty '\\u{…}' escape")
-            return 0
+            return -1
         }
         let cp = parse_value(build(sb), 16)
         if cp > 1114111 || (cp >= 55296 && cp <= 57343) {
-            self.fail(line, col, format("invalid Unicode scalar U+{} in char literal (must be 0..0x10FFFF and not a surrogate)", hex_upper(cp)))
-            return 0
+            self.fail(line, col, format("invalid Unicode scalar U+{} in {} literal (must be 0..0x10FFFF and not a surrogate)", hex_upper(cp), literal))
+            return -1
         }
         return cp as int32
     }
@@ -366,25 +371,8 @@ impl Lexer {
                 self.fail(sl, sc, "unterminated char literal")
                 return
             }
-            let esc = self.advance()
-            if esc == 117 {
-                cp = self.scan_unicode_escape(el, ec)
-            } else if esc == 110 {
-                cp = 10
-            } else if esc == 116 {
-                cp = 9
-            } else if esc == 114 {
-                cp = 13
-            } else if esc == 92 {
-                cp = 92
-            } else if esc == 39 {
-                cp = 39
-            } else if esc == 48 {
-                cp = 0
-            } else {
-                self.fail(el, ec, format("invalid escape sequence '\\{}'", cp_utf8(esc)))
-                return
-            }
+            cp = self.scan_escape(el, ec, "char")
+            if cp < 0 { return }
         } else {
             cp = c
         }
@@ -614,19 +602,11 @@ impl Lexer {
                     self.fail(sl, sc, "unterminated f-string literal")
                     return
                 }
-                let esc = self.advance()
-                if esc == 110 {
-                    append_byte(fmt, 10)
-                } else if esc == 116 {
-                    append_byte(fmt, 9)
-                } else if esc == 92 {
-                    append_byte(fmt, 92)
-                } else if esc == 34 {
-                    append_byte(fmt, 34)
-                } else {
-                    self.fail(el, ec, format("invalid escape sequence '\\{}'", cp_utf8(esc)))
-                    return
-                }
+                let cp = self.scan_escape(el, ec, "string")
+                if cp < 0 { return }
+                // an escaped brace is text: doubled, `format` keeps it
+                if cp == 123 || cp == 125 { append(fmt, cp_utf8(cp)) }
+                append(fmt, cp_utf8(cp))
             } else {
                 self.advance()
                 append(fmt, cp_utf8(c))

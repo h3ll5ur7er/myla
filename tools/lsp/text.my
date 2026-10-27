@@ -2,12 +2,15 @@
 //
 // The compiler counts lines and columns from 1, a column in code points; LSP
 // counts from 0, a character in UTF-16 code units (a code point above U+FFFF
-// is two). The rules are those of src/myla/lsp/positions.py.
+// is two).
+
+from ...selfhost.util import is_ident_continue
 
 // The lines of `text`, split at "\n", "\r\n" and "\r" (without them).
 #test("a\nb\nc")[["a", "b", "c"]]
 #test("a\n")[["a"]]
 #test("")[[]]
+#test("a\r\nb\rc")[["a", "b", "c"]]
 pub fun lines_of(text: str) -> [str] {
     var out: [str] = []
     var start = 0
@@ -23,23 +26,6 @@ pub fun lines_of(text: str) -> [str] {
     }
     if start < len(text) { push(out, part(text, start, len(text))) }
     return out
-}
-
-// lines_of on "a\r\nb\rc" (string literals have no "\r").
-#test()["a|b|c"]
-fun crlf_lines() -> str {
-    var sb = StringBuilder()
-    append(sb, "a")
-    append_byte(sb, 13u8)
-    append(sb, "\nb")
-    append_byte(sb, 13u8)
-    append(sb, "c")
-    var out = StringBuilder()
-    for l in lines_of(build(sb)) {
-        if len(out) > 0 { append(out, "|") }
-        append(out, l)
-    }
-    return build(out)
 }
 
 // The bytes of `s` from `start` up to `end`.
@@ -144,6 +130,7 @@ fun line_index_agrees() -> bool {
 #test("  return x", 3)[9]
 #test("a + b", 2)[3]
 #test("ab", 5)[6]
+#test("let größe = 1", 5)[10]
 pub fun word_end(line: str, col: int32) -> int32 {
     let cps = chars(line)
     var i = col - 1
@@ -153,8 +140,9 @@ pub fun word_end(line: str, col: int32) -> int32 {
     return i + 1
 }
 
-fun is_word(c: char) -> bool {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+// A character of an identifier (or a number), as the compiler's lexer has it.
+pub fun is_word(c: char) -> bool {
+    return is_ident_continue(c as int32)
 }
 
 // --- URIs -----------------------------------------------------------------------

@@ -1,0 +1,6 @@
+//~ lex error: invalid hex digit 'G' in '\u{…}' escape
+// Strings take the escapes chars take (D72); a `\u{…}` escape names a
+// Unicode scalar in hex digits.
+fun main() {
+    print("a \u{12G} b")
+}

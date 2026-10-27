@@ -307,7 +307,7 @@ fun fstring_end(line: str, i: int32) -> int32 {
         let c = line[j]
         if c == '"' { return j + 1 }
         if c == '\\' {
-            j = j + 2
+            j = escape_end(line, j)
         } else if c == '{' && j + 1 < len(line) && line[j + 1] == '{' {
             j = j + 2
         } else if c == '{' {
@@ -317,6 +317,20 @@ fun fstring_end(line: str, i: int32) -> int32 {
         }
     }
     return len(line)
+}
+
+// Just past the escape whose backslash is at line[j]: two bytes, or the whole
+// `\u{…}` (its brace isn't a hole, MYLA-86).
+#test("a\\u{20AC}b", 1)[9]
+#test("a\\nb", 1)[3]
+fun escape_end(line: str, j: int32) -> int32 {
+    if j + 2 < len(line) && line[j + 1] == 'u' && line[j + 2] == '{' {
+        var k = j + 3
+        while k < len(line) && line[k] != '}' { k = k + 1 }
+        if k < len(line) { return k + 1 }
+        return k
+    }
+    return j + 2
 }
 
 // Just past the `}` closing the hole whose `{` is at line[j].
@@ -353,7 +367,7 @@ fun fstring_spans(line: str, ln: int32, i: int32) -> [Span] {
             return out
         }
         if c == '\\' {
-            j = j + 2
+            j = escape_end(line, j)
         } else if c == '{' && j + 1 < len(line) && line[j + 1] == '{' {
             j = j + 2
         } else if c == '{' {

@@ -26,6 +26,7 @@ EXPECTED = {
     "structs.my": "3\n4\n7\n100\n3\n",
     "attributes.my": "5\n0\n",
     "tuples.my": "7\nseven\n42\n3\n2\n6\n100\n15\n25\n5\n",
+    "unicode.my": "6\n6\u20ac\n{6}\n3\ntrue\n\"\nit's \U0001F600\n",
     "enums.my": "12\n12\n0\nwarm\ncool\nbig circle\nsmall circle\nother\n",
     "types_and_aliases.my": "0\n42\n9\n",
     "recursion.my": "6\n6\n3\n12\n10\n10\nbalanced pair\nbranch\n",

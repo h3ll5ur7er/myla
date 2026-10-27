@@ -13,7 +13,7 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, ExprOrBlock, ElseTail, TypeExpr, MatchArm, Pattern, PatternKind, FieldPat, FieldInit, MapEntry, Attribute, BindElem, bind_elems
 from std.num import f64_literal_bits, f32_round_bits
 from .loader import Span
-from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type
+from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
 // `capoff` is the byte offset within the closure env for a "capture" binding.
@@ -57,6 +57,7 @@ pub struct MonoFn { orig: str, mangled: str, subst: [Subst] }
 
 pub struct CodeGen {
     decls: [Decl],
+    const_strs: [str: str],          // a str const's folded value (MYLA-84)
     resolved: [int32: Type],
     structs: [StructInfo],
     enums: [EnumInfo],
@@ -119,8 +120,16 @@ pub struct CodeGen {
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
+    var const_strs: [str: str] = [:]
+    for n in keys(c.const_values) {
+        match c.const_values[n] {
+            CV.CVStr(t) => { const_strs[n] = t },
+            _ => {},
+        }
+    }
     return CodeGen {
         decls: c.decls,
+        const_strs: const_strs,
         resolved: c.resolved,
         structs: c.structs,
         enums: c.enums,
@@ -1749,6 +1758,15 @@ impl CodeGen {
         if self.has_binding(n) {
             self.emit_name_scalar(self.lookup(n))
             return
+        }
+        // a str const is its folded value, a static string: evaluating its
+        // expression here would make temporaries the frame has no slots for
+        match get(self.const_strs, n) {
+            Some(t) => {
+                self.emit(format("leaq {}(%rip), %rax", self.string_label(t)))
+                return
+            },
+            None => {},
         }
         match self.const_value_expr(n) { Some(ve) => { self.eval(ve) }, None => {} }
     }

@@ -1,12 +1,12 @@
 // features.my: identifiers under the cursor, their occurrences, hover text
-// and the completion context (MYLA-80), by name as src/myla/lsp/lookup.py,
-// hover.py and completion.py do: no scopes or types yet. Lexing the buffer
-// with the compiler's lexer means comments, strings and keywords never match.
+// and the completion context (MYLA-80), by name: what resolve.my can't tell
+// by scope and type falls back to these. Lexing the buffer with the
+// compiler's lexer means comments, strings and keywords never match.
 
 from ...selfhost.lexer import lex
 from ...selfhost.tokens import Token, TokenKind
 from .symbols import Symbol, SymKind, Range
-from .text import lines_of, to_lsp, code_points, utf16_units, Pos
+from .text import lines_of, to_lsp, code_points, utf16_units, is_word, Pos
 
 // A range in a file.
 pub struct Location { path: str, range: Range }
@@ -105,9 +105,6 @@ pub fun from_lsp_character(text: str, character: int32) -> int32 {
     return len(cps)
 }
 
-fun is_word(c: char) -> bool {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
-}
 
 // Whether the cursor is in a member name: after a `.` and word characters.
 #test("p.x", 0, 3)[true]
@@ -164,6 +161,7 @@ pub fun completion_attempts(source: str, line: int32, character: int32) -> [Atte
 #test("    x + self")["self"]
 #test("f(a, b)")["f(a, b)"]
 #test("1 + ")[""]
+#test("print(größe")["größe"]
 pub fun receiver_chain(s: str) -> str {
     let cps = chars(s)
     var i = len(cps)

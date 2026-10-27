@@ -103,6 +103,7 @@ pub fun header_params(header: str) -> [str] {
 #test("[T]", ["T"], ["P"])["[P]"]
 #test("Map<K, TT>", ["K", "T"], ["str", "int"])["Map<str, TT>"]
 #test("T", ["T"], [])["T"]
+#test("[Tü]", ["Tü", "T"], ["P", "Q"])["[P]"]
 pub fun subst(t: str, names: [str], args: [str]) -> str {
     if len(names) == 0 || len(names) != len(args) { return t }
     var sb = StringBuilder()
@@ -252,8 +253,10 @@ fun split_top(s: str, sep: uint8) -> [str] {
     return out
 }
 
+// A byte that may start a name in a type's text: the bytes of a non-ASCII
+// character belong to an identifier (the compiler lexed it as one).
 fun is_name_start(c: uint8) -> bool {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 128u8
 }
 
 fun is_name_char(c: uint8) -> bool {

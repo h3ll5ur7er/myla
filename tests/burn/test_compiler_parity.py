@@ -322,6 +322,23 @@ PROGRAMS = {
         "    var copy = sb\n    append(copy, line, 0, 5)\n"
         "    print(build(sb))\n    print(build(copy))\n}\n"
     ),
+    # MYLA-84: a const string made with `+` read inside a function: the
+    # self-hosted backend evaluated the concatenation at each use, into a
+    # temporary its frame had no slot for, and the function's return crashed
+    "const_string_concatenation_in_functions": (
+        "const TABLE: str = \"ab\" + \"cd\" + \"ef\"\n"
+        "const N: int32 = 2 + 3\n"
+        "fun at(i: int32) -> uint8 {\n    return TABLE[i]\n}\n"
+        "fun size() -> int32 {\n    return len(TABLE) + N\n}\n"
+        "#main\nfun main() {\n"
+        "    var total = 0\n"
+        "    for i in 0..100000 {\n"
+        "        total = total + (at(i % 6) as int32) + size()\n"
+        "    }\n"
+        "    print(total)\n"
+        "    print(TABLE)\n"
+        "}\n"
+    ),
     # MYLA-87: `==` on an enum without payloads compares tags; a hand-written
     # `impl Eq` on one is still called
     "derived_eq_on_plain_enums": (

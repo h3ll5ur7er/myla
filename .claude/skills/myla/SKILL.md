@@ -94,6 +94,7 @@ fun main() {
 - Integers: `int8`…`int64`, `uint8`…`uint64`, wrapping arithmetic. Also `bool`, `char` (Unicode scalar), `str` (immutable UTF-8 bytes), `StringBuilder`, tuples `(int, str)` (1-tuple `(int,)`), lists `[T]`, maps `[K: V]` (keys: integers, `char`, `bool`, `str`), function types, structs, enums, generics.
 - **No implicit conversion at all.** A literal adapts to its context (`let b: uint8 = 200`, `x + 1` with `x: int64`), but a *variable* has a fixed type: `let n = 2` is an `int32`, so `big + n` with `big: int64` fails. Annotate (`let n: int64 = 2`) or cast (`n as int64`).
 - `s[i]` is a byte (`uint8`); `len(s)` counts bytes; `chars(s)` gives `[char]`; `'a'` is a `char` but fits a `uint8` when one is expected (`s[i] == 'a'` works). `+` concatenates strings; no slicing.
+- Escapes are the same in chars, strings and f-strings: `\n \t \r \0 \\ \" \'` and `\u{1F600}` (so `"\r\n"` works). Identifiers may use letters of any script (`größe`, `π`): Unicode XID, not normalized (D72).
 - `==` works on integers, floats, `char`, `bool`, `str`, and structs/enums with `Eq` (`#derive(Eq)` or `impl Eq`). Tuples, lists and maps are not comparable.
 
 ## Syntax notes
