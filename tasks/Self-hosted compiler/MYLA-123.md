@@ -14,5 +14,5 @@ Found while planning [[MYLA-122]]. Both native backends pass an argument as the 
 
 ## Evidence
 
-- The parity program fails on both native backends without the fix (the self-hosted one printed an empty string, `qr`, `1` and `0` where the interpreter prints `ab`, `zzyy`, `2` and `2`; the Python one the same) and passes with it; reverting only the Python backend's change fails it again.
+- The parity program fails on both native backends without the fix (the self-hosted one printed an empty string, `qr`, `1` and `0` where the interpreter prints `ab`, `zzyy`, `2` and `1`, and an empty string for `cd`) and passes with it; reverting only the Python backend's change fails it again.
 - Unit 595, integration 2, burn 738 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,270,593 bytes).
