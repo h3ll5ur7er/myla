@@ -15,6 +15,7 @@ from std.fs import read_to_string
 from ...selfhost.loader import load_program_opts, normalize, type_errors
 from ...selfhost.diag import Report, all_reports, caret_range
 from ...selfhost.checker import build_checker_decls
+from ...selfhost.tokens import SrcSpan
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
 from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
 from .symbols import Symbol, SymKind, Range, document_symbols, outline, best_match, lsp_kind, start_key, is_member_kind, kind_eq
@@ -221,7 +222,7 @@ impl Server {
                         Some(g) => { group = g },
                         None => {},
                     }
-                    push(group, diagnostic(r, file_text(r.path, overrides)))
+                    push(group, diagnostic(r, file_text(r.path, overrides), target))
                     groups[target] = group
                 }
             },
@@ -230,7 +231,10 @@ impl Server {
         // a problem of the project (MYLA-97): a manifest that doesn't load
         // (the document was checked alone), a dependency not checked out
         match ctx.problem {
-            Some(r) => { groups[self.uri_of(r.path, path, uri)] = [diagnostic(r, file_text(r.path, overrides))] },
+            Some(r) => {
+                let target = self.uri_of(r.path, path, uri)
+                groups[target] = [diagnostic(r, file_text(r.path, overrides), target)]
+            },
             None => {},
         }
         var stale: [str] = []
@@ -643,31 +647,48 @@ fun position(p: Pos) -> Json {
     return Json.Object([("line", Json.Int(p.line as int64)), ("character", Json.Int(p.character as int64))])
 }
 
-// A diagnostic for report `r` in a file whose text is `text`: what the
+// A diagnostic for report `r` in the file `uri` whose text is `text`: what the
 // command line underlines (MYLA-65), or without a range from the reported
-// column to the end of the word there, on the same line.
-fun diagnostic(r: Report, text: str) -> Json {
+// column to the end of the word there, on the same line. Its notes with a place
+// are related information, its help lines end the message.
+fun diagnostic(r: Report, text: str, uri: str) -> Json {
+    let lines = lines_of(text)
+    var msg = r.msg
+    var related: [Json] = []
+    for n in r.notes {
+        if n.line > 0 {
+            let loc = Json.Object([("uri", Json.Str(uri)), ("range", text_range(lines, n.line, n.col, n.sp))])
+            push(related, Json.Object([("location", loc), ("message", Json.Str(n.msg))]))
+        } else {
+            msg = msg + "\n" + n.label + ": " + n.msg
+        }
+    }
+    var fields = [("range", text_range(lines, r.line, r.col, r.sp)), ("message", Json.Str(msg)), ("severity", Json.Int(1)),
+                  ("source", Json.Str("myla")), ("code", Json.Str(kind_code(r.kind)))]
+    if len(related) > 0 { push(fields, ("relatedInformation", Json.Array(related))) }
+    return Json.Object(fields)
+}
+
+// The range of a place in `lines` (`line` 0: the start of the file).
+fun text_range(lines: [str], line: int32, at_col: int32, sp: SrcSpan) -> Json {
     var start = Pos { line: 0, character: 0 }
     var end = Pos { line: 0, character: 1 }
-    if r.line > 0 {
-        let lines = lines_of(text)
-        var col = r.col
+    if line > 0 {
+        var col = at_col
         if col < 1 { col = 1 }
         var line_text = ""
-        if r.line - 1 < len(lines) { line_text = lines[r.line - 1] }
+        if line - 1 < len(lines) { line_text = lines[line - 1] }
         var first = col
         var last = word_end(line_text, col)
-        if r.sp.eline > 0 {
-            let (f, e) = caret_range(line_text, r.line, col, r.sp)
+        if sp.eline > 0 {
+            let (f, e) = caret_range(line_text, line, col, sp)
             first = f
             last = e
         }
-        start = to_lsp(lines, r.line, first)
-        end = to_lsp(lines, r.line, last)
+        start = to_lsp(lines, line, first)
+        end = to_lsp(lines, line, last)
     }
-    let range = Json.Object([("start", position(start)), ("end", position(end))])
-    return Json.Object([("range", range), ("message", Json.Str(r.msg)), ("severity", Json.Int(1)),
-                        ("source", Json.Str("myla")), ("code", Json.Str(kind_code(r.kind)))])
+    return Json.Object([("start", position(start)), ("end", position(end))])
 }
 
 // "type error" -> "type"

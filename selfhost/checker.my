@@ -18,7 +18,7 @@ from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Vari
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
 from .ast import Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
 from .ast import Pattern, PatternKind, FieldPat, MatchArm
-from .tokens import SrcSpan, no_span, MAX_ERRORS
+from .tokens import Note, SrcSpan, no_span, MAX_ERRORS
 
 // =========================================================================
 // Types
@@ -44,12 +44,128 @@ pub enum Type {
 // A type error: position, the range it underlines (that of the node it is
 // about, MYLA-65), the Python checker's message, and the id of the declaration
 // being checked, whose module is the error's file (-1: unknown).
-pub struct CheckErr { line: int32, col: int32, sp: SrcSpan, msg: str, decl: int32 }
+pub struct CheckErr { line: int32, col: int32, sp: SrcSpan, msg: str, decl: int32, notes: [Note] }
 
 // An error at a position without a range (one caret).
 fun terr(line: int32, col: int32, msg: str) -> CheckErr { return terr_at(line, col, no_span(), msg) }
 
-fun terr_at(line: int32, col: int32, sp: SrcSpan, msg: str) -> CheckErr { return CheckErr { line: line, col: col, sp: sp, msg: msg, decl: -1 } }
+fun terr_at(line: int32, col: int32, sp: SrcSpan, msg: str) -> CheckErr { return CheckErr { line: line, col: col, sp: sp, msg: msg, decl: -1, notes: [] } }
+
+// `e` with the notes `ns` (MYLA-65).
+fun with_notes(e: CheckErr, ns: [Note]) -> CheckErr {
+    var r = e
+    r.notes = ns
+    return r
+}
+
+// A note about the place `line`, `col`, `sp` (errors.py: note).
+fun note_at(msg: str, line: int32, col: int32, sp: SrcSpan) -> Note {
+    return Note { label: "note", msg: msg, line: line, col: col, sp: sp }
+}
+
+// The edits that turn `a` into `b`, counted on their bytes: inserting, deleting
+// or replacing a byte, or swapping two neighbours (types.py: _edit_distance).
+#test("count", "count")[0]
+#test("cuont", "count")[1]
+#test("cont", "count")[1]
+#test("kitten", "sitting")[3]
+#test("", "abc")[3]
+#test("ca", "abc")[3]
+#test("o", "ö")[2]
+fun edit_distance(a: str, b: str) -> int32 {
+    let n = len(a) as int32
+    let m = len(b) as int32
+    var prev2: [int32] = []
+    var prev: [int32] = []
+    var j = 0
+    while j <= m {
+        push(prev, j)
+        j = j + 1
+    }
+    var i = 1
+    while i <= n {
+        var cur: [int32] = [i]
+        j = 1
+        while j <= m {
+            var cost = 1
+            if a[i - 1] == b[j - 1] { cost = 0 }
+            var d = prev[j] + 1
+            if cur[j - 1] + 1 < d { d = cur[j - 1] + 1 }
+            if prev[j - 1] + cost < d { d = prev[j - 1] + cost }
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                if prev2[j - 2] + 1 < d { d = prev2[j - 2] + 1 }
+            }
+            push(cur, d)
+            j = j + 1
+        }
+        prev2 = prev
+        prev = cur
+        i = i + 1
+    }
+    return prev[m]
+}
+
+// Whether `a` sorts before `b`, byte by byte (the order of Python's strings).
+#test("abcd", "abce")[true]
+#test("abc", "ab")[false]
+#test("ab", "abc")[true]
+#test("b", "b")[false]
+fun str_before(a: str, b: str) -> bool {
+    var i = 0
+    while i < len(a) && i < len(b) {
+        if a[i] != b[i] { return a[i] < b[i] }
+        i = i + 1
+    }
+    return len(a) < len(b)
+}
+
+// Whether `name` is internal to the toolchain: a method's `Key.name` or a
+// `__` primitive.
+fun is_internal_name(name: str) -> bool {
+    if len(name) >= 2 && name[0] == '_' && name[1] == '_' { return true }
+    for c in chars(name) { if c == '.' { return true } }
+    return false
+}
+
+// A help line naming the candidate closest to `name`, if one is within a third
+// of its length in edits; the alphabetically first of equally close ones
+// (types.py: _did_you_mean).
+#test("cuont", ["count", "x"])[[Note { label: "help", msg: "did you mean 'count'?", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]]
+#test("abcf", ["abce", "abcd"])[[Note { label: "help", msg: "did you mean 'abcd'?", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]]
+#test("y", ["x"])[[]]
+#test("__exti", ["__exit"])[[]]
+fun did_you_mean(name: str, cands: [str]) -> [Note] {
+    let limit = (len(name) as int32) / 3
+    var best = ""
+    var best_d = -1
+    for c in cands {
+        if c == name || is_internal_name(c) { continue }
+        let d = edit_distance(name, c)
+        if d <= limit && (best_d < 0 || d < best_d || (d == best_d && str_before(c, best))) {
+            best = c
+            best_d = d
+        }
+    }
+    if best_d < 0 { return [] }
+    return [Note { label: "help", msg: format("did you mean '{}'?", best), line: 0, col: 0, sp: no_span() }]
+}
+
+// The names of the primitive types, as types.py's _PRIMITIVES has them.
+fun primitive_type_names() -> [str] {
+    return ["bool", "str", "StringBuilder", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64", "char"]
+}
+
+// The names of the built-in functions (types.py: _BUILTIN_FUNCS, without the
+// `__` primitives, which are never suggested).
+fun builtin_func_names() -> [str] {
+    return ["print", "assert", "panic", "unreachable", "len", "push", "pop", "contains", "remove", "keys", "format", "chars", "StringBuilder", "append", "append_byte", "build"]
+}
+
+fun field_names(fields: [FieldT]) -> [str] {
+    var out: [str] = []
+    for f in fields { push(out, f.name) }
+    return out
+}
 
 // A type as the Python checker's messages write it (types.py: type_name).
 pub fun type_name(t: Type) -> str {
@@ -677,7 +793,9 @@ pub struct AliasCached { name: str, ty: Type }
 
 pub struct ConstDeclT { name: str, declared: TypeExpr, value: Expr, line: int32, col: int32, sp: SrcSpan, id: int32 }
 
-pub struct Binding { ty: Type, mutable: bool }
+// A variable: its type, whether it can be assigned, and where it is declared,
+// for notes (`line` 0: no note; MYLA-65).
+pub struct Binding { ty: Type, mutable: bool, line: int32, col: int32, sp: SrcSpan }
 // A function with a `#main` attribute: where it is, its name and declaration.
 pub struct MainAt { line: int32, col: int32, sp: SrcSpan, name: str, id: int32 }
 pub struct Frame { names: [str], binds: [Binding] }
@@ -726,6 +844,7 @@ pub struct Checker {
     bounds_cur: [Bound],
     cur_ret: Option<Type>,
     has_cur_ret: bool,
+    ret_at: Option<TypeExpr>,       // the return type of the function being checked, for notes (MYLA-65)
     loop_depth: int32,
     frames: [Frame],
     lambda_infer_active: bool,
@@ -747,7 +866,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         impl_decls: [], traits: [], trait_decls: [], trait_impls: [], user_trait_impls: [],
         aliases: [], alias_cache: [], const_decls: [], consts: [], const_values: [:], const_done: [], const_folding: [],
         allow_self: false, type_params: [], bounds_cur: [],
-        cur_ret: None, has_cur_ret: false, loop_depth: 0,
+        cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
         resolved: [:], errs: [], mains: [],
     }
@@ -912,11 +1031,103 @@ impl Checker {
     fun push_scope(var self) { push(self.frames, Frame { names: [], binds: [] }) }
     fun pop_scope(var self) { pop(self.frames) }
     fun define(var self, name: str, ty: Type, mutable: bool) -> bool {
+        return self.define_at(name, ty, mutable, 0, 0, no_span())
+    }
+    // `define`, for a variable declared at `line`, `col`, `sp`.
+    fun define_at(var self, name: str, ty: Type, mutable: bool, line: int32, col: int32, sp: SrcSpan) -> bool {
         let top = len(self.frames) - 1
         for nm in self.frames[top].names { if nm == name { return false } }
         push(self.frames[top].names, name)
-        push(self.frames[top].binds, Binding { ty: ty, mutable: mutable })
+        push(self.frames[top].binds, Binding { ty: ty, mutable: mutable, line: line, col: col, sp: sp })
         return true
+    }
+    // Every name in scope, innermost scope first.
+    fun scope_names(self) -> [str] {
+        var out: [str] = []
+        var i = len(self.frames) - 1
+        while i >= 0 {
+            for nm in self.frames[i].names { push(out, nm) }
+            i = i - 1
+        }
+        return out
+    }
+
+    // --- notes (MYLA-65) -------------------------------------------------
+    // A note on where the variable the assigned place `target` starts from is
+    // declared (types.py: _declared_at).
+    fun declared_at(self, target: Expr) -> [Note] {
+        var e = target
+        var going = true
+        while going {
+            match e.kind {
+                ExprKind.GetField(t, f) => { e = t },
+                ExprKind.Index(t, i) => { e = t },
+                ExprKind.TupleIndex(t, i) => { e = t },
+                _ => { going = false },
+            }
+        }
+        match e.kind {
+            ExprKind.Name(n) => {
+                match self.lookup(n) {
+                    Some(b) => { if b.line > 0 { return [note_at(format("'{}' is declared here", n), b.line, b.col, b.sp)] } },
+                    None => {},
+                }
+            },
+            _ => {},
+        }
+        return []
+    }
+    // A note on the declaration `name` repeats in the innermost scope (types.py:
+    // _first_declared).
+    fun first_declared(self, name: str) -> [Note] {
+        let top = len(self.frames) - 1
+        var j = 0
+        while j < len(self.frames[top].names) {
+            if self.frames[top].names[j] == name {
+                let b = self.frames[top].binds[j]
+                if b.line == 0 { return [] }
+                return [note_at(format("'{}' is first declared here", name), b.line, b.col, b.sp)]
+            }
+            j = j + 1
+        }
+        return []
+    }
+    // The names a value can be: variables, constants, functions and the
+    // prelude's variants (types.py: _value_names).
+    fun value_names(self) -> [str] {
+        var out = self.scope_names()
+        for c in self.const_decls { push(out, c.name) }
+        for f in self.functions { push(out, f.name) }
+        for v in ["Some", "None", "Ok", "Err"] { push(out, v) }
+        return out
+    }
+    // The names a call can name (types.py: _callable_names).
+    fun callable_names(self) -> [str] {
+        var out: [str] = []
+        for f in self.functions { push(out, f.name) }
+        for b in builtin_func_names() { push(out, b) }
+        for nm in self.scope_names() { push(out, nm) }
+        return out
+    }
+    // The names a type can be (types.py: _type_names).
+    fun type_names(self) -> [str] {
+        var out = primitive_type_names()
+        push(out, "int")
+        push(out, "float")
+        for si in self.structs { push(out, si.name) }
+        for ei in self.enums { push(out, ei.name) }
+        for a in self.aliases { push(out, a.name) }
+        for tp in self.type_params { push(out, tp) }
+        return out
+    }
+    // The methods of the type with key `key`.
+    fun method_names(self, key: Option<str>) -> [str] {
+        var out: [str] = []
+        match key {
+            Some(k) => { for m in self.methods { if m.key == k { push(out, m.name) } } },
+            None => {},
+        }
+        return out
     }
     fun lookup(self, name: str) -> Option<Binding> {
         var i = len(self.frames) - 1
@@ -1035,7 +1246,7 @@ impl Checker {
         }
         if name == "int" { return Ok(t_int()) }
         if name == "float" { return Ok(t_float()) }
-        return Err(terr_at(ln, cl, sp, format("unknown type '{}'", name)))
+        return Err(with_notes(terr_at(ln, cl, sp, format("unknown type '{}'", name)), did_you_mean(name, self.type_names())))
     }
 }
 
@@ -1045,8 +1256,13 @@ impl Checker {
 
 impl Checker {
     fun collect_globals(var self) -> Result<int32, CheckErr> {
-        var seen: [str] = []
+        var seen: [str: int32] = [:]       // name -> its first declaration's index
+        // the prelude's declarations come first (check_program,
+        // build_checker_decls); no note points at them
+        let n_prelude = len(prelude(0).program.decls)
+        var di = -1
         for decl in self.decls {
+            di = di + 1
             self.cur_decl = decl.id
             let ln = decl.line
             let cl = decl.col
@@ -1066,8 +1282,14 @@ impl Checker {
             if handled { continue }
             let name = decl_kind_name(decl)
             if is_builtin_func(name) { return Err(terr_at(ln, cl, sp, format("cannot redefine builtin '{}'", name))) }
-            if contains_str(seen, name) { return Err(terr_at(ln, cl, sp, format("duplicate top-level declaration '{}'", name))) }
-            push(seen, name)
+            if contains(seen, name) {
+                let fi = seen[name]
+                let first = self.decls[fi]
+                var notes: [Note] = []
+                if fi >= n_prelude { notes = [note_at(format("'{}' is first declared here", name), first.line, first.col, first.sp)] }
+                return Err(with_notes(terr_at(ln, cl, sp, format("duplicate top-level declaration '{}'", name)), notes))
+            }
+            seen[name] = di
             match decl.kind {
                 DeclKind.StructDecl(n, fields, attrs, tps, isp) => { self.add_struct(StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl, sp: sp, id: decl.id }) },
                 DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { self.add_enum(EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl, sp: sp, id: decl.id }) },
@@ -1731,7 +1953,7 @@ impl Checker {
             return self.infer_fun_value(e, ident)
         }
         if is_builtin_func(ident) { return Err(terr_at(e.line, e.col, e.sp, format("'{}' cannot be used as a value here", ident))) }
-        return Err(terr_at(e.line, e.col, e.sp, format("unknown name '{}'", ident)))
+        return Err(with_notes(terr_at(e.line, e.col, e.sp, format("unknown name '{}'", ident)), did_you_mean(ident, self.value_names())))
     }
 
     fun infer_fun_value(self, e: Expr, ident: str) -> Result<Type, CheckErr> {
@@ -2080,7 +2302,7 @@ impl Checker {
         match base {
             Type.TStruct(n, args) => {
                 let fields = self.struct_field_types(n, args)
-                return match field_type_get(fields, field) { Some(ft) => Ok(ft), None => Err(terr_at(e.line, e.col, e.sp, format("struct '{}' has no field '{}'", n, field))) }
+                return match field_type_get(fields, field) { Some(ft) => Ok(ft), None => Err(with_notes(terr_at(e.line, e.col, e.sp, format("struct '{}' has no field '{}'", n, field)), did_you_mean(field, field_names(fields)))) }
             },
             _ => {},
         }
@@ -2095,7 +2317,7 @@ impl Checker {
         var provided: [str] = []
         for init in fields {
             if contains_str(provided, init.name) { return Err(terr_at(init.line, init.col, init.sp, format("duplicate field '{}' in struct literal", init.name))) }
-            if match field_type_get(info.fields, init.name) { Some(x) => false, None => true } { return Err(terr_at(init.line, init.col, init.sp, format("struct '{}' has no field '{}'", sname, init.name))) }
+            if match field_type_get(info.fields, init.name) { Some(x) => false, None => true } { return Err(with_notes(terr_at(init.line, init.col, init.sp, format("struct '{}' has no field '{}'", sname, init.name)), did_you_mean(init.name, field_names(info.fields)))) }
             push(provided, init.name)
         }
         // missing fields
@@ -2309,11 +2531,11 @@ impl Checker {
                             if len(payload) > 0 { return Err(terr_at(pat.line, pat.col, pat.sp, format("variant '{}.{}' carries a payload; write '{}(...)' to match it", en, n, n))) }
                             return Ok(0)
                         }
-                        if !self.define(n, t, false) { return Err(terr_at(pat.line, pat.col, pat.sp, format("'{}' is bound more than once in this pattern", n))) }
+                        if !self.define_at(n, t, false, pat.line, pat.col, pat.sp) { return Err(terr_at(pat.line, pat.col, pat.sp, format("'{}' is bound more than once in this pattern", n))) }
                         Ok(0)
                     },
                     _ => {
-                        if !self.define(n, t, false) { return Err(terr_at(pat.line, pat.col, pat.sp, format("'{}' is bound more than once in this pattern", n))) }
+                        if !self.define_at(n, t, false, pat.line, pat.col, pat.sp) { return Err(terr_at(pat.line, pat.col, pat.sp, format("'{}' is bound more than once in this pattern", n))) }
                         Ok(0)
                     },
                 }
@@ -2377,7 +2599,7 @@ impl Checker {
                     push(seen, fp.name)
                     match field_type_get(fields, fp.name) {
                         Some(ft) => { self.check_pattern(fp.pattern, ft)? },
-                        None => { return Err(terr_at(fp.line, fp.col, fp.sp, format("struct '{}' has no field '{}'", tn, fp.name))) },
+                        None => { return Err(with_notes(terr_at(fp.line, fp.col, fp.sp, format("struct '{}' has no field '{}'", tn, fp.name)), did_you_mean(fp.name, field_names(fields)))) },
                     }
                 }
                 return Ok(0)
@@ -2798,7 +3020,7 @@ impl Checker {
                     },
                     None => {},
                 }
-                if !self.define(name, final_t, kind == "var") { return Err(terr_at(s.line, s.col, s.sp, format("'{}' is already declared in this scope", name))) }
+                if !self.define_at(name, final_t, kind == "var", s.line, s.col, s.sp) { return Err(with_notes(terr_at(s.line, s.col, s.sp, format("'{}' is already declared in this scope", name)), self.first_declared(name))) }
                 Ok(0)
             },
             StmtKind.DestructDecl(kind, binding, ty, init) => {
@@ -2817,7 +3039,7 @@ impl Checker {
             StmtKind.Assign(target, value) => {
                 match target.kind { ExprKind.Name(n) => { if n == "self" { return Err(terr_at(s.line, s.col, s.sp, "cannot reassign 'self'; mutate its fields or elements instead")) } }, _ => {} }
                 let lv = self.check_lvalue(target)?
-                if !lv.mutable { return Err(terr_at(s.line, s.col, s.sp, "cannot assign to an immutable binding (declare it with 'var')")) }
+                if !lv.mutable { return Err(with_notes(terr_at(s.line, s.col, s.sp, "cannot assign to an immutable binding (declare it with 'var')"), self.declared_at(target))) }
                 let vt = self.expect_value(value, Some(lv.ty))?
                 if !type_eq(vt, lv.ty) { return Err(terr_at(s.line, s.col, s.sp, format("cannot assign '{}' to '{}'", type_name(vt), type_name(lv.ty)))) }
                 Ok(0)
@@ -2909,7 +3131,13 @@ impl Checker {
             None => { return Err(terr_at(s.line, s.col, s.sp, format("expected a return value of type '{}'", type_name(ret)))) },
             Some(ve) => {
                 let vt = self.expect_value(ve, Some(ret))?
-                if !type_eq(vt, ret) { return Err(terr_at(s.line, s.col, s.sp, format("return type mismatch: expected '{}', found '{}'", type_name(ret), type_name(vt)))) }
+                if !type_eq(vt, ret) {
+                    var notes: [Note] = []
+                    if self.lambda_depth == 0 {
+                        match self.ret_at { Some(te) => { notes = [note_at("the return type is declared here", te.line, te.col, te.sp)] }, None => {} }
+                    }
+                    return Err(with_notes(terr_at(s.line, s.col, s.sp, format("return type mismatch: expected '{}', found '{}'", type_name(ret), type_name(vt))), notes))
+                }
             },
         }
         return Ok(0)
@@ -2919,7 +3147,7 @@ impl Checker {
         return match be {
             BindElem.BWild => Ok(0),
             BindElem.BName(n, ln, cl, sp) => {
-                if !self.define(n, t, mutable) { return Err(terr_at(ln, cl, sp, format("'{}' is already declared in this scope", n))) }
+                if !self.define_at(n, t, mutable, ln, cl, sp) { return Err(with_notes(terr_at(ln, cl, sp, format("'{}' is already declared in this scope", n)), self.first_declared(n))) }
                 Ok(0)
             },
             BindElem.BTuple(elems, ln, cl, sp) => {
@@ -2940,14 +3168,14 @@ impl Checker {
     fun check_lvalue(var self, e: Expr) -> Result<LValue, CheckErr> {
         return match e.kind {
             ExprKind.Name(n) => {
-                match self.lookup(n) { Some(b) => Ok(LValue { ty: b.ty, mutable: b.mutable }), None => Err(terr_at(e.line, e.col, e.sp, format("unknown name '{}'", n))) }
+                match self.lookup(n) { Some(b) => Ok(LValue { ty: b.ty, mutable: b.mutable }), None => Err(with_notes(terr_at(e.line, e.col, e.sp, format("unknown name '{}'", n)), did_you_mean(n, self.scope_names()))) }
             },
             ExprKind.GetField(target, field) => {
                 let base = self.check_lvalue(target)?
                 match base.ty {
                     Type.TStruct(nm, args) => {
                         let fields = self.struct_field_types(nm, args)
-                        match field_type_get(fields, field) { Some(ft) => Ok(LValue { ty: ft, mutable: base.mutable }), None => Err(terr_at(e.line, e.col, e.sp, format("struct '{}' has no field '{}'", nm, field))) }
+                        match field_type_get(fields, field) { Some(ft) => Ok(LValue { ty: ft, mutable: base.mutable }), None => Err(with_notes(terr_at(e.line, e.col, e.sp, format("struct '{}' has no field '{}'", nm, field)), did_you_mean(field, field_names(fields)))) }
                     },
                     _ => Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no fields", type_name(base.ty)))),
                 }
@@ -2975,6 +3203,7 @@ impl Checker {
         let sig = self.functions[idx]
         self.cur_ret = sig.ret
         self.has_cur_ret = match sig.ret { Some(x) => true, None => false }
+        self.ret_at = fd.ret_type
         self.type_params = sig.type_params
         self.bounds_cur = sig.bounds
         self.frames = []
@@ -2983,7 +3212,9 @@ impl Checker {
         var i = 0
         while i < len(fd.params) {
             let mutable = i == 0 && recv == "var self"
-            self.define(fd.params[i].name, sig.params[i], mutable)
+            // the synthesized receiver has no place of its own for a note
+            if i == 0 && recv != "" { self.define(fd.params[i].name, sig.params[i], mutable) }
+            else { self.define_at(fd.params[i].name, sig.params[i], mutable, fd.params[i].line, fd.params[i].col, fd.params[i].sp) }
             i = i + 1
         }
         match fd.body {
@@ -3422,7 +3653,7 @@ impl Checker {
     fun run_all(var self) -> Result<int32, [CheckErr]> {
         match self.run_phases() {
             Ok(x) => {},
-            Err(e) => { return Err([CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl }]) },
+            Err(e) => { return Err([CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl, notes: e.notes }]) },
         }
         self.check_attributes_and_entry()
         for decl in self.decls {
@@ -3470,13 +3701,14 @@ impl Checker {
         self.stmt_match = false
         self.cur_ret = None
         self.has_cur_ret = false
+        self.ret_at = None
         self.type_params = []
         self.bounds_cur = []
     }
 
     // Collect `e`, an error in the declaration being checked.
     fun note(var self, e: CheckErr) {
-        push(self.errs, CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl })
+        push(self.errs, CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl, notes: e.notes })
     }
 
     // Whether MAX_ERRORS errors were collected: the check ends.
@@ -3714,7 +3946,7 @@ impl Checker {
                 },
                 None => {},
             }
-            return Err(terr_at(e.line, e.col, e.sp, format("unknown function '{}'", name)))
+            return Err(with_notes(terr_at(e.line, e.col, e.sp, format("unknown function '{}'", name)), did_you_mean(name, self.callable_names())))
         }
         let sig = self.functions[fi]
         if len(sig.type_params) > 0 { return self.infer_generic_call(e, name, sig, args) }
@@ -3931,14 +4163,14 @@ impl Checker {
                     },
                     _ => {},
                 }
-                return Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)))
+                return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)), did_you_mean(field, self.method_names(key_opt))))
             },
             Some(sig) => {
                 let recv = match sig.decl.receiver { Some(r) => r, None => "self" }
                 if recv == "var self" {
                     if !is_lvalue_shape(target) { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' mutates its receiver ('var self'); it needs a mutable variable (or one of its fields/elements), not a temporary", field))) }
                     let lv = self.check_lvalue(target)?
-                    if !lv.mutable { return Err(terr_at(e.line, e.col, e.sp, format("cannot call the mutating method '{}' on an immutable receiver (declare it with 'var')", field))) }
+                    if !lv.mutable { return Err(with_notes(terr_at(e.line, e.col, e.sp, format("cannot call the mutating method '{}' on an immutable receiver (declare it with 'var')", field)), self.declared_at(target))) }
                 }
                 let nargs = len(sig.params) - 1
                 if len(args) != nargs { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' expects {} argument(s), got {}", field, nargs, len(args)))) }
@@ -4049,7 +4281,7 @@ impl Checker {
         self.push_scope()
         var k = 0
         while k < len(params) {
-            if !self.define(params[k].name, ptypes[k], false) { self.pop_scope()
+            if !self.define_at(params[k].name, ptypes[k], false, params[k].line, params[k].col, params[k].sp) { self.pop_scope()
             return Err(terr_at(params[k].line, params[k].col, params[k].sp, format("duplicate lambda parameter '{}'", params[k].name))) }
             k = k + 1
         }
@@ -4182,7 +4414,7 @@ impl Checker {
             },
             _ => {},
         }
-        return Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv), field)))
+        return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv), field)), did_you_mean(field, self.method_names(self.type_key(recv)))))
     }
 
     fun method_partial(self, recv: Type, field: str, e: Expr) -> Result<Option<PartialTgt>, CheckErr> {

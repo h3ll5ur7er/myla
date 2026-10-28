@@ -1,0 +1,15 @@
+//~ type error: type 'Rect' has no method 'aera'
+//~ span: r.aera()
+//~ help: did you mean 'area'?
+struct Rect { width: int, height: int }
+
+impl Rect {
+    fun area(self) -> int {
+        return self.width * self.height
+    }
+}
+
+fun main() {
+    let r = Rect { width: 2, height: 3 }
+    print(r.aera())
+}

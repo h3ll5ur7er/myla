@@ -1,0 +1,12 @@
+//~ type error: unknown type 'Piont'
+//~ span: Piont
+//~ help: did you mean 'Point'?
+struct Point { x: int, y: int }
+
+fun norm(p: Piont) -> int {
+    return p.x * p.x + p.y * p.y
+}
+
+fun main() {
+    print(norm(Point { x: 3, y: 4 }))
+}

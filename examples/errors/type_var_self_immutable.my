@@ -1,4 +1,6 @@
 //~ type error: immutable receiver
+//~ note: 'c' is declared here
+//~ note span: let c = C { n: 0 }
 // A `var self` method needs a mutable (`var`) receiver; a `let` binding is not.
 struct C { n: int }
 

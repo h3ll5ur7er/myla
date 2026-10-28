@@ -245,6 +245,33 @@ TYPE_ERRORS: dict[str, str] = {
                                             "#test(2)\nfun b(x: int) -> int {\n    return x\n}\nfun main() {}\n"),
     "generic_and_method_bodies": ("fun id<T>(x: T) -> T {\n    return x + 1\n}\nstruct P { a: int }\nimpl P {\n    fun f(self) -> str {\n        return self.a\n    }\n"
                                   "    fun g<U>(self, u: U) -> U {\n        return self\n    }\n}\nfun main() {\n    let p = P { a: 1, b: 2 }\n}\n"),
+    # notes (MYLA-65): where an assigned variable is declared (through
+    # indexing, tuple fields and match bindings; none for a receiver), the
+    # first declaration, the return type (not from a lambda), "did you mean"
+    "note_index_root": _main("let xs = [1, 2]", "xs[0] = 3"),
+    "note_field_of_element": "struct P { x: int }\n" + _main("let ps = [P { x: 1 }]", "ps[0].x = 3"),
+    "note_match_binding": _main("match Some(1) {", "    Some(n) => { n = 2 },", "    None => {},", "}"),
+    "note_for_variable": _main("for i in 0..3 {", "    i = 1", "}"),
+    "note_lambda_param": _main("let f = (a: int) => {", "    a = 1", "}"),
+    "note_receiver": "struct C { n: int }\nimpl C {\n    fun f(self) {\n        self.n = 1\n    }\n}\nfun main() {}\n",
+    "note_destructured": _main("let (a, b) = (1, 2)", "let (c, a) = (3, 4)"),
+    "note_return_in_lambda": "fun f() -> int {\n    let g: (int) -> str = (x: int) => {\n        return x\n    }\n    return 1\n}\nfun main() {}\n",
+    "note_return_generic": "fun id<T>(x: T) -> T {\n    return 1\n}\nfun main() {}\n",
+    "suggest_const": "const LIMIT: int = 3\n" + _main("print(LIMTI)"),
+    "suggest_function_value": "fun double(x: int) -> int {\n    return x * 2\n}\n" + _main("let f = doubel"),
+    "suggest_variant": _main("let x: Option<int> = Nnoe"),
+    "suggest_alias": "typealias Grid = [[int]]\nfun f(g: Gird) {}\nfun main() {}\n",
+    "suggest_type_param": "fun f<Item>(x: Itme) {}\nfun main() {}\n",
+    "suggest_primitive": "fun f(x: flaot64) {}\nfun main() {}\n",
+    "suggest_struct_pattern_field": ("struct P { name: str }\n"
+                                     + _main('let p = P { name: "a" }', "match p {", "    P { nmae } => {},", "}")),
+    "suggest_struct_literal_field": "struct P { name: str }\n" + _main('let p = P { nmae: "a" }'),
+    "suggest_lvalue": _main("var total = 0", "totl = 1"),
+    "suggest_partial_method": ("struct S { a: int }\nimpl S {\n    fun scale(self, k: int) -> int {\n        return self.a * k\n    }\n}\n"
+                               + _main("let s = S { a: 1 }", "let g = s.sacle(_)")),
+    "suggest_in_scope_variable_call": _main("let handler = (x: int) => x", "handlr(1)"),
+    "suggest_nothing_close": _main("let count = 1", "print(zzzzz)"),
+    "suggest_alphabetically_first": _main("let rows_b = 1", "let rows_a = 2", "print(rows_c)"),
     "too_many": "".join(f"fun f{i}() {{\n    let x: int = true\n}}\n" for i in range(25)) + "fun main() {}\n",
 }
 

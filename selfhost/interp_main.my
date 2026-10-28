@@ -30,7 +30,7 @@ fun run_program(prog: Loaded, file: str) -> int32 {
 
 // A runtime error as the Python CLI prints it, in the file of its expression.
 fun runtime_report(r: RtError, prog: Loaded) -> Report {
-    return Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp, more: [] }
+    return Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp, more: [], notes: [] }
 }
 
 fun main() {

@@ -1,10 +1,12 @@
 """How diagnostics render (MYLA-65): the caret line underlines the whole range
 an error is about (the offending token for lex and parse errors, the expression
 or declaration for type errors), only to the end of the first line when the
-range spans lines; the `-->` position and the message stay what they were."""
+range spans lines; the `-->` position and the message stay what they were.
+Notes and help lines follow the error they belong to."""
 import unittest
 
-from myla.errors import MylaError
+from myla.canon import canonical_error
+from myla.errors import MylaError, Note, hint
 from myla.lexer import tokenize
 from myla.parser import parse
 from myla.types import check
@@ -29,9 +31,10 @@ def _main(*lines: str, before: str = "") -> str:
 
 class UnderlineTests(unittest.TestCase):
     def assertUnderlines(self, source: str, line: str, carets: str) -> None:
-        """The diagnostic shows `line` with `carets` beneath it."""
+        """The diagnostic shows `line` with `carets` beneath it (before any
+        notes)."""
         rendered = _render(source).splitlines()
-        self.assertEqual(rendered[-2:], [line, carets], "\n".join(rendered))
+        self.assertEqual(rendered[2:5][-2:], [line, carets], "\n".join(rendered))
 
     # -- the whole rendering ---------------------------------------------------
 
@@ -149,6 +152,64 @@ class SpanTests(unittest.TestCase):
     def test_an_error_without_a_span_gets_one_caret(self):
         err = MylaError("boom", 1, 3)
         self.assertEqual(err.render("abcdef"), "error: boom\n  --> <input>:1:3\n  |\n1 | abcdef\n  |   ^")
+
+
+class NoteTests(unittest.TestCase):
+    """Notes and help lines (MYLA-65)."""
+
+    def test_a_note_shows_its_own_line(self):
+        self.assertEqual(
+            _render(_main("let x = 1", "x = 2")),
+            "type error: cannot assign to an immutable binding (declare it with 'var')\n"
+            "  --> t.my:3:7\n"
+            "  |\n"
+            "3 |     x = 2\n"
+            "  |     ^^^^^\n"
+            "note: 'x' is declared here\n"
+            "  --> t.my:2:5\n"
+            "  |\n"
+            "2 |     let x = 1\n"
+            "  |     ^^^^^^^^^",
+        )
+
+    def test_a_help_line_has_no_place(self):
+        err = MylaError("boom", 1, 3, notes=[hint("did you mean 'abc'?")])
+        self.assertEqual(err.render("abcdef"),
+                         "error: boom\n  --> <input>:1:3\n  |\n1 | abcdef\n  |   ^\n"
+                         "help: did you mean 'abc'?")
+
+    def test_canonical_lines_follow_the_error(self):
+        err = MylaError("boom", 1, 3, notes=[Note("note", "here", 2, 5, (2, 5, 2, 9)),
+                                            hint("did you mean 'abc'?")])
+        self.assertEqual(canonical_error(err),
+                         "err 1 3 - error: boom\nnote 2 5 2:5-2:9: here\nhelp - - -: did you mean 'abc'?")
+
+    def test_the_closest_name_is_suggested(self):
+        def helps(source):
+            return [(n.label, n.message) for n in _error(source).notes]
+        self.assertEqual(helps(_main("let count = 1", "print(cuont)")),
+                         [("help", "did you mean 'count'?")])
+        # equally close names: the alphabetically first
+        self.assertEqual(helps(_main("let abcd = 1", "let abce = 2", "print(abcf)")),
+                         [("help", "did you mean 'abcd'?")])
+        # too far, or too short to tell
+        self.assertEqual(helps(_main("let count = 1", "print(cxxnt)")), [])
+        self.assertEqual(helps(_main("let x = 1", "print(y)")), [])
+        # `__` primitives are not suggested
+        self.assertEqual(helps(_main("__exti(1)")), [])
+
+
+class EditDistanceTests(unittest.TestCase):
+    def test_edits(self):
+        from myla.types import _edit_distance
+        self.assertEqual(_edit_distance("count", "count"), 0)
+        self.assertEqual(_edit_distance("cuont", "count"), 1)     # a swap
+        self.assertEqual(_edit_distance("cont", "count"), 1)
+        self.assertEqual(_edit_distance("coutn", "count"), 1)
+        self.assertEqual(_edit_distance("kitten", "sitting"), 3)
+        self.assertEqual(_edit_distance("", "abc"), 3)
+        self.assertEqual(_edit_distance("ca", "abc"), 3)          # no edit after a swap
+        self.assertEqual(_edit_distance("o", "ö"), 2)             # bytes: ö is two
 
 
 if __name__ == "__main__":

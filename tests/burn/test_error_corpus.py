@@ -38,12 +38,21 @@ order::
     //~ errors: 3
     //~ next: expected an expression
     //~ next: unknown name
+
+The first error's notes (MYLA-65) are named in order, each by its label and a
+substring of its message, and a note's underlined text may be pinned like the
+error's; a file without these directives expects no notes::
+
+    //~ note: is declared here
+    //~ note span: let n = 1
+    //~ help: did you mean 'count'?
 """
 import os
 import re
 import unittest
 
-from myla.errors import LexError, ModuleError, MylaRuntimeError, ParseError, TypeCheckError
+from myla.errors import (LexError, ModuleError, MylaRuntimeError, ParseError, TypeCheckError,
+                         caret_range)
 from myla.interpreter import Interpreter
 from myla.lexer import tokenize
 from myla.loader import default_stdlib_root, link
@@ -61,6 +70,8 @@ _NATIVE = re.compile(r"//~\s*native:\s*(.*?)\s*$")
 _SPAN = re.compile(r"//~\s*span:\s?(.*?)$")
 _COUNT = re.compile(r"//~\s*errors:\s*(\d+)\s*$")
 _NEXT = re.compile(r"//~\s*next:\s*(.*?)\s*$")
+_NOTE = re.compile(r"//~\s*(note|help):\s*(.*?)\s*$")
+_NOTE_SPAN = re.compile(r"//~\s*note span:\s?(.*?)$")
 
 # phase -> (exception class, how far to drive the pipeline)
 _PHASES = {
@@ -114,10 +125,19 @@ def _nexts(source: str) -> list[str]:
     return [m.group(1) for line in source.splitlines() if (m := _NEXT.match(line.strip()))]
 
 
+def _notes(source: str) -> list[tuple[str, str]]:
+    return [(m.group(1), m.group(2)) for line in source.splitlines()
+            if (m := _NOTE.match(line.strip()))]
+
+
+def _note_spans(source: str) -> list[str]:
+    return [m.group(1) for line in source.splitlines() if (m := _NOTE_SPAN.match(line.strip()))]
+
+
 def _underlined(err, source: str) -> str:
-    """The text of the error's line under its carets."""
+    """The text of the error's (or note's) line under its carets."""
     text = source.splitlines()[err.line - 1]
-    start, end = err.caret_range(text)
+    start, end = caret_range(text, err.line, err.column, err.span)
     return text[start - 1:end - 1]
 
 
@@ -154,6 +174,14 @@ def _make(name: str):
         span = _span(source)
         if span is not None:
             self.assertEqual(_underlined(ctx.exception, source), span, f"{name}: the underlined text")
+        notes, wanted = ctx.exception.notes, _notes(source)
+        self.assertEqual([n.label for n in notes], [label for label, _ in wanted],
+                         f"{name}: the notes: {[(n.label, n.message) for n in notes]}")
+        for (_, want), n in zip(wanted, notes):
+            self.assertIn(want.lower(), n.message.lower(), f"{name}: a note")
+        placed = [n for n in notes if n.line is not None]
+        for want, n in zip(_note_spans(source), placed):
+            self.assertEqual(_underlined(n, source), want, f"{name}: the text a note underlines")
         later = ctx.exception.more
         self.assertEqual(1 + len(later), _count(source),
                          f"{name}: the errors reported: {[str(e) for e in (ctx.exception, *later)]}")

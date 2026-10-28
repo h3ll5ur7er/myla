@@ -1,0 +1,12 @@
+//~ type error: return type mismatch: expected 'str', found 'int32'
+//~ span: return n * 2
+//~ note: the return type is declared here
+//~ note span: str
+// A mismatched return value points back at the return type (MYLA-65).
+fun label(n: int) -> str {
+    return n * 2
+}
+
+fun main() {
+    print(label(1))
+}

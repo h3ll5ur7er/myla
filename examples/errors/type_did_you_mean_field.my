@@ -1,0 +1,9 @@
+//~ type error: struct 'Rect' has no field 'widht'
+//~ span: r.widht
+//~ help: did you mean 'width'?
+struct Rect { width: int, height: int }
+
+fun main() {
+    let r = Rect { width: 2, height: 3 }
+    print(r.widht * r.height)
+}

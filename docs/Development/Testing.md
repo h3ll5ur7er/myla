@@ -119,7 +119,20 @@ The stage must report exactly one error, unless the file says how many it report
 //~ next: expected ':', found 'int'
 ```
 
-The corpus has 145 files: 12 lex, 10 parse, 2 module, 109 type, 12 runtime. More module errors (cycles, which file an error is attributed to) are covered by `tests/unit/test_loader.py`.
+The first error's notes and help lines are named in order, each by its label and a substring of its message, and a note's underlined text may be pinned like the error's; a file without these directives expects an error without notes, so a note can't appear or change unnoticed (D83, [[MYLA-65]]):
+
+```
+//~ type error: cannot assign to an immutable binding
+//~ note: 'x' is declared here
+//~ note span: let x = 1
+```
+
+```
+//~ type error: unknown name 'cuont'
+//~ help: did you mean 'count'?
+```
+
+The corpus has 155 files: 12 lex, 10 parse, 2 module, 119 type, 12 runtime. More module errors (cycles, which file an error is attributed to) are covered by `tests/unit/test_loader.py`.
 
 ## Adding tests
 

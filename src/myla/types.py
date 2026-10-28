@@ -28,7 +28,7 @@ import struct
 from dataclasses import dataclass
 
 from . import ast
-from .errors import MAX_ERRORS, MylaError, TypeCheckError, in_file
+from .errors import MAX_ERRORS, MylaError, Note, TypeCheckError, in_file, note
 
 
 # --- type representations --------------------------------------------------
@@ -597,6 +597,8 @@ class TraitSig:
 class _Binding:
     type: Type
     mutable: bool
+    # where it is declared, for notes (MYLA-65); None: no note
+    at: object = None
 
 
 @dataclass
@@ -624,6 +626,15 @@ class _Scope:
                 return scope.names[name]
             scope = scope.parent
         return None
+
+    def all_names(self) -> list[str]:
+        """Every name in scope, innermost scope first."""
+        out: list[str] = []
+        scope: _Scope | None = self
+        while scope is not None:
+            out.extend(scope.names)
+            scope = scope.parent
+        return out
 
     def lookup_scope(self, name: str) -> "_Scope | None":
         """The scope where `name` is defined (for closure-capture analysis)."""
@@ -692,6 +703,48 @@ _PRELUDE_VARIANTS = {
 }
 
 
+def _edit_distance(a: str, b: str) -> int:
+    """The edits that turn `a` into `b`, counted on their UTF-8 bytes: inserting,
+    deleting or replacing a byte, or swapping two neighbours (the optimal string
+    alignment distance)."""
+    x, y = a.encode(), b.encode()
+    prev2: list[int] = []
+    prev = list(range(len(y) + 1))
+    for i in range(1, len(x) + 1):
+        cur = [i] + [0] * len(y)
+        for j in range(1, len(y) + 1):
+            cost = 0 if x[i - 1] == y[j - 1] else 1
+            d = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if i > 1 and j > 1 and x[i - 1] == y[j - 2] and x[i - 2] == y[j - 1]:
+                d = min(d, prev2[j - 2] + 1)
+            cur[j] = d
+        prev2, prev = prev, cur
+    return prev[len(y)]
+
+
+def _did_you_mean(name: str, candidates) -> list[Note]:
+    """A help line naming the candidate closest to `name`, if one is within a
+    third of its length in edits (so none for names under three bytes, where
+    every short name is close); the alphabetically first of equally close ones
+    (MYLA-65). Names with a `.` or starting with `__` are internal."""
+    limit = len(name.encode()) // 3
+    best: tuple[int, str] | None = None
+    for c in candidates:
+        if c == name or "." in c or c.startswith("__"):
+            continue
+        d = _edit_distance(name, c)
+        if d <= limit and (best is None or (d, c) < best):
+            best = (d, c)
+    return [] if best is None else [Note("help", f"did you mean '{best[1]}'?")]
+
+
+def _lvalue_root(expr: ast.Expr) -> ast.Name | None:
+    """The variable an assigned place starts from (`p` of `p.xs[0].y`)."""
+    while isinstance(expr, (ast.FieldAccess, ast.Index, ast.TupleIndex)):
+        expr = expr.target
+    return expr if isinstance(expr, ast.Name) else None
+
+
 class _Stop(Exception):
     """MAX_ERRORS errors were recorded: the check ends."""
 
@@ -734,6 +787,8 @@ class Checker:
         self._alias_cache: dict[str, Type] = {}
         self.entry: ast.FunDecl | None = None
         self._current_ret: Type | None = None
+        # the return type of the function being checked, for notes (MYLA-65)
+        self._ret_at: ast.TypeRef | None = None
         self._try_counter = 0
         self._loop_depth = 0
         # type parameters in scope while resolving/checking a generic decl
@@ -787,6 +842,7 @@ class Checker:
         self._lambda_stack = []
         self._lambda_infer = None
         self._current_ret = None
+        self._ret_at = None
         try:
             with in_file(_source_path(decl)):
                 check()
@@ -837,8 +893,11 @@ class Checker:
                         f"cannot redefine builtin '{name}'", at=decl
                     )
                 if name in seen:
+                    first = seen[name]
                     raise TypeCheckError(
-                        f"duplicate top-level declaration '{name}'", at=decl
+                        f"duplicate top-level declaration '{name}'", at=decl,
+                        notes=[] if getattr(first, "in_prelude", False)
+                        else [note(f"'{name}' is first declared here", first)],
                     )
                 seen[name] = decl
                 if isinstance(decl, ast.StructDecl):
@@ -1513,7 +1572,8 @@ class Checker:
             return INT
         if name == "float":
             return FLOAT
-        raise TypeCheckError(f"unknown type '{name}'", at=ref)
+        raise TypeCheckError(f"unknown type '{name}'", at=ref,
+                             notes=_did_you_mean(name, self._type_names()))
 
     def _resolve_recursion(self) -> None:
         """Classify by-value type cycles (e.g. a recursive `enum Expr`).
@@ -1826,6 +1886,7 @@ class Checker:
     def _check_function(self, decl: ast.FunDecl) -> None:
         sig = self.functions[decl.name]
         self._current_ret = sig.ret
+        self._ret_at = decl.ret_type
         self._type_params = frozenset(decl.type_params)
         self._type_param_bounds = {
             tp: frozenset(traits) for tp, traits in sig.bounds.items()
@@ -1837,7 +1898,9 @@ class Checker:
                 # body can write `self.field = ...`; every other param is borrowed
                 # and immutable.
                 mutable = (i == 0 and decl.receiver == "var self")
-                scope.define(param.name, _Binding(ptype, mutable=mutable))
+                # the synthesized receiver has no place of its own for a note
+                at = None if (i == 0 and decl.receiver) else param
+                scope.define(param.name, _Binding(ptype, mutable=mutable, at=at))
             self._check_block(decl.body, scope, sig.ret)
             if sig.ret is not None and not _block_returns(decl.body):
                 raise TypeCheckError(
@@ -1865,9 +1928,10 @@ class Checker:
                     f"binding of type '{type_name(declared)}'",
                     at=stmt,
                 )
-            if not scope.define(stmt.name, _Binding(final, mutable=(stmt.kind == "var"))):
+            if not scope.define(stmt.name, _Binding(final, mutable=(stmt.kind == "var"), at=stmt)):
                 raise TypeCheckError(
-                    f"'{stmt.name}' is already declared in this scope", at=stmt
+                    f"'{stmt.name}' is already declared in this scope", at=stmt,
+                    notes=self._first_declared(stmt.name, scope),
                 )
 
         elif isinstance(stmt, ast.DestructDecl):
@@ -1897,7 +1961,7 @@ class Checker:
             if not mutable:
                 raise TypeCheckError(
                     "cannot assign to an immutable binding (declare it with 'var')",
-                    at=stmt,
+                    at=stmt, notes=self._declared_at(stmt.target, scope),
                 )
             value_type = self._expect_value(stmt.value, scope, target_type)
             if value_type != target_type:
@@ -1971,10 +2035,13 @@ class Checker:
                     )
                 vt = self._expect_value(stmt.value, scope, ret)
                 if vt != ret:
+                    notes = []
+                    if not self._lambda_stack and self._ret_at is not None:
+                        notes = [note("the return type is declared here", self._ret_at)]
                     raise TypeCheckError(
                         f"return type mismatch: expected '{type_name(ret)}', "
                         f"found '{type_name(vt)}'",
-                        at=stmt,
+                        at=stmt, notes=notes,
                     )
 
         elif isinstance(stmt, ast.ExprStmt):
@@ -1991,10 +2058,10 @@ class Checker:
             return
         if isinstance(binding, ast.BindName):
             binding.resolved_type = t
-            if not scope.define(binding.name, _Binding(t, mutable)):
+            if not scope.define(binding.name, _Binding(t, mutable, at=binding)):
                 raise TypeCheckError(
                     f"'{binding.name}' is already declared in this scope",
-                    at=binding,
+                    at=binding, notes=self._first_declared(binding.name, scope),
                 )
             return
         if isinstance(binding, ast.BindTuple):
@@ -2016,11 +2083,44 @@ class Checker:
             "invalid destructuring binding", at=binding
         )
 
+    # -- notes (MYLA-65) -----------------------------------------------------
+
+    def _declared_at(self, target: ast.Expr, scope: _Scope) -> list[Note]:
+        """A note on where the variable an assigned place starts from is
+        declared."""
+        root = _lvalue_root(target)
+        binding = scope.lookup(root.ident) if root is not None else None
+        if binding is None or binding.at is None:
+            return []
+        return [note(f"'{root.ident}' is declared here", binding.at)]
+
+    def _first_declared(self, name: str, scope: _Scope) -> list[Note]:
+        """A note on the declaration `name` repeats, in the same scope."""
+        binding = scope.names[name]
+        if binding.at is None:
+            return []
+        return [note(f"'{name}' is first declared here", binding.at)]
+
+    def _value_names(self, scope: _Scope) -> list[str]:
+        """The names a value can be: variables, constants, functions and the
+        prelude's variants."""
+        return [*scope.all_names(), *self._const_decls, *self.functions, *_PRELUDE_VARIANTS]
+
+    def _callable_names(self, scope: _Scope) -> list[str]:
+        """The names a call can name: functions, the built-in ones, variables."""
+        return [*self.functions, *_BUILTIN_FUNCS, *scope.all_names()]
+
+    def _type_names(self) -> list[str]:
+        """The names a type can be."""
+        return [*_PRIMITIVES, "int", "float", *self.struct_decls, *self.enum_decls,
+                *self._aliases_raw, *self._type_params]
+
     def _check_lvalue(self, expr: ast.Expr, scope: _Scope) -> tuple[Type, bool]:
         if isinstance(expr, ast.Name):
             binding = scope.lookup(expr.ident)
             if binding is None:
-                raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr)
+                raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr,
+                                     notes=_did_you_mean(expr.ident, scope.all_names()))
             expr.resolved_type = binding.type
             return binding.type, binding.mutable
         if isinstance(expr, ast.FieldAccess):
@@ -2033,7 +2133,7 @@ class Checker:
             if expr.field_name not in fields:
                 raise TypeCheckError(
                     f"struct '{base_type.name}' has no field '{expr.field_name}'",
-                    at=expr,
+                    at=expr, notes=_did_you_mean(expr.field_name, fields),
                 )
             ft = fields[expr.field_name]
             expr.resolved_type = ft
@@ -2158,7 +2258,7 @@ class Checker:
 
         lam_scope = _Scope(scope)
         for p, pt in zip(expr.params, ptypes):
-            if not lam_scope.define(p.name, _Binding(pt, mutable=False)):
+            if not lam_scope.define(p.name, _Binding(pt, mutable=False, at=p)):
                 raise TypeCheckError(
                     f"duplicate lambda parameter '{p.name}'", at=p
                 )
@@ -2525,7 +2625,7 @@ class Checker:
                 pat.as_variant = (t.name, pat.name)
                 return
             pat.resolved_type = t
-            if not scope.define(pat.name, _Binding(t, mutable=False)):
+            if not scope.define(pat.name, _Binding(t, mutable=False, at=pat)):
                 raise TypeCheckError(
                     f"'{pat.name}' is bound more than once in this pattern",
                     at=pat,
@@ -2640,7 +2740,7 @@ class Checker:
             if fp.name not in fields:
                 raise TypeCheckError(
                     f"struct '{t.name}' has no field '{fp.name}'",
-                    at=fp,
+                    at=fp, notes=_did_you_mean(fp.name, fields),
                 )
             self._check_pattern(fp.pattern, fields[fp.name], scope)
 
@@ -2892,7 +2992,8 @@ class Checker:
                     f"'{expr.ident}' cannot be used as a value here",
                     at=expr,
                 )
-            raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr)
+            raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr,
+                                 notes=_did_you_mean(expr.ident, self._value_names(scope)))
         self._record_capture(expr.ident, binding.type, scope)
         expr.resolved_type = binding.type
         return binding.type
@@ -3484,7 +3585,7 @@ class Checker:
             raise TypeCheckError(
                 f"type '{type_name(recv_type)}' has no method "
                 f"'{callee.field_name}'",
-                at=expr,
+                at=expr, notes=_did_you_mean(callee.field_name, table or {}),
             )
         is_var_self = (sig.decl.receiver == "var self")
         if is_var_self:
@@ -3500,7 +3601,7 @@ class Checker:
                 raise TypeCheckError(
                     f"cannot call the mutating method '{callee.field_name}' on an "
                     "immutable receiver (declare it with 'var')",
-                    at=expr,
+                    at=expr, notes=self._declared_at(recv, scope),
                 )
         nargs = len(sig.params) - 1
         if len(expr.args) != nargs:
@@ -3843,7 +3944,8 @@ class Checker:
             enum_name = _PRELUDE_VARIANTS.get(name)
             if enum_name is not None and scope.lookup(name) is None:
                 return self._infer_variant_ctor(expr, enum_name, name, scope, expected)
-            raise TypeCheckError(f"unknown function '{name}'", at=expr)
+            raise TypeCheckError(f"unknown function '{name}'", at=expr,
+                                 notes=_did_you_mean(name, self._callable_names(scope)))
         if sig.type_params:
             return self._infer_generic_call(expr, name, sig, scope)
         if len(expr.args) != len(sig.params):
@@ -3983,7 +4085,7 @@ class Checker:
             raise TypeCheckError(
                 f"type '{type_name(recv_type)}' has no method "
                 f"'{callee.field_name}'",
-                at=expr,
+                at=expr, notes=_did_you_mean(callee.field_name, table or {}),
             )
         # named free function
         if isinstance(callee, ast.Name):
@@ -4273,7 +4375,7 @@ class Checker:
         if expr.field_name not in fields:
             raise TypeCheckError(
                 f"struct '{base.name}' has no field '{expr.field_name}'",
-                at=expr,
+                at=expr, notes=_did_you_mean(expr.field_name, fields),
             )
         ft = fields[expr.field_name]
         expr.resolved_type = ft
@@ -4293,7 +4395,7 @@ class Checker:
             if init.name not in template:
                 raise TypeCheckError(
                     f"struct '{expr.type_name}' has no field '{init.name}'",
-                    at=init,
+                    at=init, notes=_did_you_mean(init.name, template),
                 )
             provided[init.name] = init
         missing = [n for n in template if n not in provided]
@@ -4465,7 +4567,10 @@ def check(program: ast.Program, with_prelude: bool = True) -> Checker:
     `with_prelude=False`.
     """
     if with_prelude:
-        program = ast.Program(_prelude_decls() + list(program.decls))
+        prelude = _prelude_decls()
+        for d in prelude:
+            d.in_prelude = True     # no note points at it (MYLA-65)
+        program = ast.Program(prelude + list(program.decls))
     checker = Checker(program).check()
     _desugar(program)
     return checker

@@ -150,7 +150,7 @@ pub fun render_project_error(e: ProjectError) -> str {
     var kind = "manifest error"
     if base_name(e.path) == "myla.lock" { kind = "lock file error" }
     let sp = SrcSpan { sline: e.line, scol: e.col, eline: e.end_line, ecol: e.end_col }
-    return render(Report { kind: kind, msg: e.msg, path: e.path, line: e.line, col: e.col, sp: sp, more: [] })
+    return render(Report { kind: kind, msg: e.msg, path: e.path, line: e.line, col: e.col, sp: sp, more: [], notes: [] })
 }
 
 // --- Names ------------------------------------------------------------------------

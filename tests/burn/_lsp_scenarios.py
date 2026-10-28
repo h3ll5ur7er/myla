@@ -188,6 +188,21 @@ class LspScenarios:
         got = self.client.diagnostics(1, full=True)[_uri(self.main)]
         self.assertEqual([(d["range"]["start"]["line"], d["code"]) for d in got], [(1, "type"), (4, "type")])
 
+    def test_notes_are_related_information(self):
+        # a note with a place is related information, a help line ends the
+        # message (MYLA-65)
+        src = ("fun f() {\n    let n = 1\n    n = 2\n}\n"
+               "fun main() {\n    let count = 1\n    print(cuont)\n}\n")
+        self.open(self.main, src)
+        got = self.client.diagnostics(1, full=True)[_uri(self.main)]
+        self.assertEqual(len(got), 2)
+        self.assertEqual(got[0]["relatedInformation"], [{
+            "location": {"uri": _uri(self.main), "range": {"start": {"line": 1, "character": 4},
+                                                           "end": {"line": 1, "character": 13}}},
+            "message": "'n' is declared here"}])
+        self.assertEqual(got[1]["message"], "unknown name 'cuont'\nhelp: did you mean 'count'?")
+        self.assertNotIn("relatedInformation", got[1])
+
     def test_every_parse_error_is_published(self):
         self.open(self.main, "fun main() {\n    let = 1\n    print(1 +)\n}\n")
         got = self.client.diagnostics(1, full=True)[_uri(self.main)]

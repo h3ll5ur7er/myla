@@ -29,6 +29,19 @@ Declaration order never matters, because every table is built before any body is
 
 An error in the passes up to `_fold_consts` ends the check: the tables would be incomplete. After that each declaration's attributes, the entry point, each function body and then each method body is checked on its own (`_on_its_own`, from a clean state: loop depth, lambda stack, return type), and its first error is recorded; checking goes on with the next one, up to 20 errors (D80, [[MYLA-65]]). A function's errors cannot affect another's, since signatures come from the tables, so this needs no error type. `check` raises the first error found, with the others in its `more`, in that order: attribute and entry-point errors, then free functions, then methods, each in declaration order (the entry file's declarations before the modules it imports). The self-hosted checker collects them the same way (`run_all`, `check_body`, `note`).
 
+## Notes
+
+An error can carry notes (D83, [[MYLA-65]]): `MylaError.notes` (`errors.Note`; the self-hosted `CheckErr.notes` and `Report.notes`, `tokens.Note`), each a `note` about another place in the same file or a `help` line without one. The CLI prints them after the error's line, a note with its own `-->` and carets; the canonical line a gate compares is followed by one `<label> <line> <col> <span>: <message>` line per note (`canon.canonical_note`, `diag.canonical_note`); the language server publishes a note as related information and appends a help line to the message; the REPL shows a note in the input against the input's lines.
+
+| Error | Note |
+| --- | --- |
+| assigning to an immutable place, or calling a `var self` method on one | `'x' is declared here`, at the variable the place starts from (a `let`, a parameter, a lambda parameter, a destructured or match binding; none for a `for` variable or a method's receiver, which have no place of their own) |
+| a variable declared twice in a scope, a top-level name declared twice | `'x' is first declared here` (not when the first is the prelude's) |
+| a returned value of the wrong type | `the return type is declared here`, at the function's return type (not in a lambda) |
+| an unknown name, function, type, field or method | `help: did you mean 'count'?` |
+
+A suggestion is the candidate closest to the name in edits (inserting, deleting, replacing or swapping neighbouring bytes: `_edit_distance`, `edit_distance`), within a third of the name's length, so names under three bytes get none; of equally close candidates the alphabetically first. The candidates are what the name could have been: for a name, the variables in scope, constants, functions and the prelude's variants; for a call, functions, the built-in functions and variables; for a type, the primitive types, `int`, `float`, structs, enums, aliases and the type parameters in scope; for a field, the struct's fields; for a method, the type's methods. Methods' internal `Key.name` and the `__` primitives are never suggested.
+
 ## Inference
 
 Inference is local and bidirectional: `_infer(expr, scope, expected)` returns the expression's type and records it as `expr.resolved_type`. The `expected` type is a hint, not a constraint; the caller compares the result.

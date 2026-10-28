@@ -1,4 +1,6 @@
 //~ type error: duplicate top-level declaration
+//~ note: 'f' is first declared here
+//~ note span: fun f() {
 fun f() {
 }
 fun f() {

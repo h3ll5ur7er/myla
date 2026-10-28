@@ -441,6 +441,13 @@ DIAGNOSTICS = {
     "several_parse_errors": "fun main() {\n    let = 1\n    print(1 +)\n}\nfun g(a int) {}\nstruct S {\n    a: int b: int\n}\n",
     "several_type_errors": ("fun f() -> int {\n    return \"ä\"\n}\n#test(1)\nfun g(x: int) -> int {\n    return x\n}\n"
                             "fun main() {\n    let x: int = true\n}\n"),
+    # notes (MYLA-65): on a later error, and in an imported module's file
+    "notes_on_several_errors": ("fun f() {\n    let n = 1\n    n = 2\n}\n"
+                                "fun main() {\n    let count = 1\n    print(cuont)\n}\n"),
+    "note_in_an_imported_module": {
+        "main.my": "from .util import label\nfun main() {\n    print(label(1))\n}\n",
+        "util.my": "pub fun label(n: int) -> str {\n    return n * 2\n}\n",
+    },
 }
 
 
@@ -633,7 +640,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertGreater(len(cases), 100)
         with tempfile.TemporaryDirectory() as tmp:
             for name, source in DIAGNOSTICS.items():
-                cases[name] = _write_project(os.path.join(tmp, name), {"main.my": source})
+                files = source if isinstance(source, dict) else {"main.my": source}
+                cases[name] = _write_project(os.path.join(tmp, name), files)
             for name, entry in sorted(cases.items()):
                 with self.subTest(case=name):
                     self._assert_diagnostic_matches(entry, stdlib)

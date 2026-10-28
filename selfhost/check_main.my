@@ -4,7 +4,7 @@
 // accept/reject + diagnostic-position lines for differential comparison against
 // the Python checker: `ok` on success, else `err <line> <col> <span> type:
 // <message>` (diag.canonical) for each error, in the order found (MYLA-65,
-// D80).
+// D80), each followed by its notes (diag.canonical_note).
 // (The checker gate covers single-file programs that lex + parse cleanly; the
 // only diagnostic class it emits is `type`.)
 
@@ -13,7 +13,7 @@ from std.fs import read_to_string
 from std.io import println, eprintln
 from .parser import parse_source_all
 from .checker import check_program
-from .diag import canonical_err, canonical
+from .diag import canonical_err, canonical, canonical_note
 
 fun check_and_report(src: str) {
     let parsed = match parse_source_all(src, 0) {
@@ -25,7 +25,12 @@ fun check_and_report(src: str) {
     }
     match check_program(parsed.program) {
         Ok(x) => println("ok"),
-        Err(errs) => { for e in errs { println(canonical(e.line, e.col, e.sp, "type", e.msg)) } },
+        Err(errs) => {
+            for e in errs {
+                println(canonical(e.line, e.col, e.sp, "type", e.msg))
+                for n in e.notes { println(canonical_note(n)) }
+            }
+        },
     }
 }
 
