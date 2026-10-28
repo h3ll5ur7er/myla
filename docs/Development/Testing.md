@@ -41,7 +41,7 @@ The jobs:
 | --- | --- | --- |
 | Unit | 595 | All pass, about 7 s |
 | Integration | 2 | Pass |
-| Burn | 737 (plus subtests, 5 skipped) | All pass, about 400 s with cached tools (green since [[MYLA-4]]) |
+| Burn | 739 (plus subtests, 5 skipped) | All pass, about 400 s with cached tools (green since [[MYLA-4]]) |
 
 ## Unit tests
 
