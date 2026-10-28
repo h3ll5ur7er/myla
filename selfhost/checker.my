@@ -39,6 +39,9 @@ pub enum Type {
     TFunc([Type], Option<Type>),  // params, return (None = void)
     TParam(str),
     TSelf,
+    // the type of a declaration's part that failed to check (MYLA-110, D84;
+    // types.py: ErrorType)
+    TError,
 }
 
 // A type error: position, the range it underlines (that of the node it is
@@ -184,8 +187,53 @@ pub fun type_name(t: Type) -> str {
         Type.TList(e) => format("[{}]", type_name(e)),
         Type.TMap(k, v) => format("[{}: {}]", type_name(k), type_name(v)),
         Type.TFunc(ps, r) => format("({}) -> {}", type_names(ps), opt_type_name(r)),
+        Type.TError => "{error}",
     }
 }
+
+// Whether `t` is or contains the error type (types.py: _has_error).
+fun has_error(t: Type) -> bool {
+    return match t {
+        Type.TError => true,
+        Type.TStruct(n, a) => list_has_error(a),
+        Type.TEnum(n, a) => list_has_error(a),
+        Type.TTuple(es) => list_has_error(es),
+        Type.TList(e) => has_error(e),
+        Type.TMap(k, v) => has_error(k) || has_error(v),
+        Type.TFunc(ps, r) => list_has_error(ps) || opt_has_error(r),
+        _ => false,
+    }
+}
+
+fun list_has_error(ts: [Type]) -> bool {
+    for t in ts { if has_error(t) { return true } }
+    return false
+}
+
+fun opt_has_error(t: Option<Type>) -> bool {
+    return match t { Some(x) => has_error(x), None => false }
+}
+
+fun sig_has_error(ps: [Type], r: Option<Type>) -> bool {
+    return list_has_error(ps) || opt_has_error(r)
+}
+
+// What a check returns when what it checks depends on the error type: it
+// ends without an error, which would follow from an earlier one (types.py:
+// _Poisoned). `?` carries it like an error; the driver drops it.
+fun poisoned() -> CheckErr {
+    return CheckErr { line: -1, col: 0, sp: no_span(), msg: "", decl: -1, notes: [] }
+}
+
+fun is_poisoned(e: CheckErr) -> bool { return e.line == -1 && e.msg == "" }
+
+// What the declaration phases return when MAX_ERRORS errors are collected:
+// the check ends (types.py: _Stop).
+fun stopped() -> CheckErr {
+    return CheckErr { line: -2, col: 0, sp: no_span(), msg: "", decl: -1, notes: [] }
+}
+
+fun is_stopped(e: CheckErr) -> bool { return e.line == -2 && e.msg == "" }
 
 // `None` (no value) is written `()`.
 fun opt_type_name(t: Option<Type>) -> str {
@@ -288,6 +336,7 @@ fun type_eq(a: Type, b: Type) -> bool {
         Type.TFunc(p1, r1) => match b { Type.TFunc(p2, r2) => type_list_eq(p1, p2) && opt_type_eq(r1, r2), _ => false },
         Type.TParam(n1) => match b { Type.TParam(n2) => n1 == n2, _ => false },
         Type.TSelf => match b { Type.TSelf => true, _ => false },
+        Type.TError => match b { Type.TError => true, _ => false },
     }
 }
 
@@ -854,6 +903,20 @@ pub struct Checker {
     stmt_match: bool,
     resolved: [int32: Type],        // expr node id -> resolved type (v0.8 interp side table)
     errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
+    // going on after a declaration's error (MYLA-110, D84; types.py: Checker):
+    // the declarations left out and the functions not checked (by
+    // name: a function with a bad bound); the `trait\tkey` pairs whose impl or
+    // derive failed; redefined builtins; the methods and traits of impls left
+    // out for want of a type; the consts that failed; whether the declaration
+    // phases are done
+    skipped_decls: [int32: bool],   // by index in `decls` (node ids repeat: the prelude's start at 0 too)
+    skipped_fns: [str: bool],
+    broken_impls: [str: bool],
+    redefined: [str: bool],
+    lost_methods: [str: bool],
+    lost_traits: [str: bool],
+    failed_consts: [str: bool],
+    bodies: bool,
     mains: [MainAt],                // the `#main` functions found so far
 }
 
@@ -869,6 +932,8 @@ fun new_checker(decls: [Decl]) -> Checker {
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
         resolved: [:], errs: [], mains: [],
+        skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
+        lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
     }
 }
 
@@ -1019,12 +1084,17 @@ impl Checker {
         for p in self.trait_impls { if p.key == key && p.trait_name == trnm { return true } }
         return false
     }
-    fun type_implements(self, t: Type, trnm: str) -> bool {
+    fun type_implements(self, t: Type, trnm: str) -> Result<bool, CheckErr> {
         match self.type_key(t) {
-            Some(k) => { if self.trait_implements_pair(k, trnm) { return true } },
+            Some(k) => {
+                if contains(self.broken_impls, trnm + "\t" + k) { return Err(poisoned()) }   // its impl or derive failed (MYLA-110)
+                if self.trait_implements_pair(k, trnm) { return Ok(true) }
+            },
             None => {},
         }
-        return primitive_default_trait(t, trnm)
+        if primitive_default_trait(t, trnm) { return Ok(true) }
+        if contains(self.lost_traits, trnm) { return Err(poisoned()) }   // maybe the left-out impl (MYLA-110)
+        return Ok(false)
     }
 
     // --- scope -----------------------------------------------------------
@@ -1193,7 +1263,7 @@ impl Checker {
             TypeKind.TMap(k, v) => {
                 let kt = self.resolve(k, visiting)?
                 let vt = self.resolve(v, visiting)?
-                if !is_map_key(kt) && !contains_type_param(kt) {
+                if !is_map_key(kt) && !contains_type_param(kt) && !has_error(kt) {
                     return Err(terr_at(ln, cl, sp, format("map key type must be a primitive (integer, char, bool, or str), found '{}'", type_name(kt))))
                 }
                 Ok(Type.TMap(kt, vt))
@@ -1235,12 +1305,25 @@ impl Checker {
         if len(args) > 0 { return Err(terr_at(ln, cl, sp, format("type '{}' is not generic (it takes no type arguments)", name))) }
         match prim_type(name) { Some(t) => { return Ok(t) }, None => {} }
         if self.alias_idx(name) >= 0 {
-            match self.alias_cache_get(name) { Some(t) => { return Ok(t) }, None => {} }
+            match self.alias_cache_get(name) {
+                Some(t) => {
+                    if self.bodies && has_error(t) { return Err(poisoned()) }
+                    return Ok(t)
+                },
+                None => {},
+            }
             if contains_str(visiting, name) { return Err(terr_at(ln, cl, sp, format("type alias cycle involving '{}'", name))) }
             let ai = self.alias_idx(name)
             var v2 = visiting
             push(v2, name)
-            let resolved = self.resolve(self.aliases[ai].target, v2)?
+            let resolved = match self.resolve(self.aliases[ai].target, v2) {
+                Ok(t) => t,
+                Err(e) => {
+                    // the alias is the error type from now on (MYLA-110)
+                    if !is_poisoned(e) { push(self.alias_cache, AliasCached { name: name, ty: Type.TError }) }
+                    return Err(e)
+                },
+            }
             push(self.alias_cache, AliasCached { name: name, ty: resolved })
             return Ok(resolved)
         }
@@ -1267,39 +1350,64 @@ impl Checker {
             let ln = decl.line
             let cl = decl.col
             let sp = decl.sp
+            // a declaration that can't be collected is left out (MYLA-110)
+            var fail: Option<CheckErr> = None
             let handled = match decl.kind {
-                DeclKind.ImportDecl(p, items, alias, isp) => { return Err(terr_at(ln, cl, sp, "imports need the module loader: this file was type-checked on its own (use 'myla check' or 'myla run')")) },
+                DeclKind.ImportDecl(p, items, alias, isp) => {
+                    fail = Some(terr_at(ln, cl, sp, "imports need the module loader: this file was type-checked on its own (use 'myla check' or 'myla run')"))
+                    true
+                },
                 DeclKind.ImplDecl(tg, m, tp, tn, ta) => { push(self.impl_decls, decl)
             true },
                 DeclKind.TraitDecl(n, m, tp, isp) => {
-                    if is_builtin_op_trait(n) { return Err(terr_at(ln, cl, sp, format("'{}' is a built-in operator trait and cannot be redeclared", n))) }
-                    for td in self.trait_decls { if decl_kind_name(td) == n { return Err(terr_at(ln, cl, sp, format("duplicate trait '{}'", n))) } }
-                    push(self.trait_decls, decl)
+                    if is_builtin_op_trait(n) { fail = Some(terr_at(ln, cl, sp, format("'{}' is a built-in operator trait and cannot be redeclared", n))) }
+                    else { for td in self.trait_decls { if decl_kind_name(td) == n { fail = Some(terr_at(ln, cl, sp, format("duplicate trait '{}'", n))) } } }
+                    match fail { Some(x) => {}, None => { push(self.trait_decls, decl) } }
                     true
                 },
                 _ => false,
             }
-            if handled { continue }
-            let name = decl_kind_name(decl)
-            if is_builtin_func(name) { return Err(terr_at(ln, cl, sp, format("cannot redefine builtin '{}'", name))) }
-            if contains(seen, name) {
-                let fi = seen[name]
-                let first = self.decls[fi]
-                var notes: [Note] = []
-                if fi >= n_prelude { notes = [note_at(format("'{}' is first declared here", name), first.line, first.col, first.sp)] }
-                return Err(with_notes(terr_at(ln, cl, sp, format("duplicate top-level declaration '{}'", name)), notes))
+            if !handled {
+                let name = decl_kind_name(decl)
+                if is_builtin_func(name) {
+                    self.redefined[name] = true
+                    fail = Some(terr_at(ln, cl, sp, format("cannot redefine builtin '{}'", name)))
+                } else if contains(seen, name) {
+                    let fi = seen[name]
+                    let first = self.decls[fi]
+                    var notes: [Note] = []
+                    if fi >= n_prelude { notes = [note_at(format("'{}' is first declared here", name), first.line, first.col, first.sp)] }
+                    fail = Some(with_notes(terr_at(ln, cl, sp, format("duplicate top-level declaration '{}'", name)), notes))
+                } else {
+                    seen[name] = di
+                    self.register_decl(decl)
+                }
             }
-            seen[name] = di
-            match decl.kind {
-                DeclKind.StructDecl(n, fields, attrs, tps, isp) => { self.add_struct(StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl, sp: sp, id: decl.id }) },
-                DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { self.add_enum(EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl, sp: sp, id: decl.id }) },
-                DeclKind.TypeAliasDecl(n, target, attrs, isp) => { push(self.aliases, AliasRaw { name: n, target: target, line: ln, col: cl, sp: sp, id: decl.id }) },
-                DeclKind.ConstDecl(n, ty, value, attrs, isp) => { push(self.const_decls, ConstDeclT { name: n, declared: ty, value: value, line: ln, col: cl, sp: sp, id: decl.id }) },
-                DeclKind.FunDecl(fd) => { self.add_function(FuncSig { name: fd.name, params: [], ret: None, type_params: [], bounds: [], decl: fd, has_decl: true, decl_id: decl.id }) },
-                _ => {},
+            match fail {
+                Some(e) => {
+                    self.record(e)?
+                    self.skipped_decls[di] = true
+                },
+                None => {},
             }
         }
         return Ok(0)
+    }
+
+    // Add `decl` to the tables (the parts are resolved later).
+    // Add `decl` to the tables; its parts are resolved later.
+    fun register_decl(var self, decl: Decl) {
+        let ln = decl.line
+        let cl = decl.col
+        let sp = decl.sp
+        match decl.kind {
+            DeclKind.StructDecl(n, fields, attrs, tps, isp) => { self.add_struct(StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl, sp: sp, id: decl.id }) },
+            DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { self.add_enum(EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl, sp: sp, id: decl.id }) },
+            DeclKind.TypeAliasDecl(n, target, attrs, isp) => { push(self.aliases, AliasRaw { name: n, target: target, line: ln, col: cl, sp: sp, id: decl.id }) },
+            DeclKind.ConstDecl(n, ty, value, attrs, isp) => { push(self.const_decls, ConstDeclT { name: n, declared: ty, value: value, line: ln, col: cl, sp: sp, id: decl.id }) },
+            DeclKind.FunDecl(fd) => { self.add_function(FuncSig { name: fd.name, params: [], ret: None, type_params: [], bounds: [], decl: fd, has_decl: true, decl_id: decl.id }) },
+            _ => {},
+        }
     }
 
     // shadow built-in / duplicate type-parameter names
@@ -1312,6 +1420,16 @@ impl Checker {
             push(seen, tp)
         }
         return Ok(0)
+    }
+
+    // `te` resolved in a body, where a failed alias gives the error type
+    // instead of poisoned() (types.py: _resolve_annotation).
+    fun resolve_annotation(var self, te: TypeExpr) -> Result<Type, CheckErr> {
+        match self.resolve0(te) {
+            Ok(t) => { return Ok(t) },
+            Err(e) => { if !is_poisoned(e) { return Err(e) } },
+        }
+        return Ok(Type.TError)
     }
 
     fun param_type(var self, p: Param) -> Result<Type, CheckErr> {
@@ -1341,25 +1459,45 @@ fun synth_typarams(names: [str]) -> [TypeParam] {
 impl Checker {
     fun resolve_signatures(var self) -> Result<int32, CheckErr> {
         // aliases eagerly (catch cycles / bad targets even when unreferenced)
+        // one that fails is the error type, and so is every alias naming it
         var ai = 0
         while ai < len(self.aliases) {
             let a = self.aliases[ai]
             self.cur_decl = a.id
-            self.resolve(a.target, [a.name])?
+            match self.alias_cache_get(a.name) {
+                Some(t) => {},
+                None => {
+                    match self.resolve(a.target, [a.name]) {
+                        Ok(t) => {},
+                        Err(e) => {
+                            self.record(e)?
+                            push(self.alias_cache, AliasCached { name: a.name, ty: Type.TError })
+                        },
+                    }
+                },
+            }
             ai = ai + 1
         }
         // struct fields (under the struct's own type parameters)
+        var pos = -1
         for decl in self.decls {
+            pos = pos + 1
+            if contains(self.skipped_decls, pos) { continue }
             match decl.kind {
                 DeclKind.StructDecl(n, fields, attrs, tps, isp) => {
                     self.cur_decl = decl.id
-                    self.check_type_params(tp_names(tps), decl.line, decl.col, decl.sp)?
+                    self.record_result(self.check_type_params(tp_names(tps), decl.line, decl.col, decl.sp))?
                     self.type_params = tp_names(tps)
                     var fs: [FieldT] = []
                     for f in fields {
-                        for prev in fs { if prev.name == f.name { self.type_params = []
-            return Err(terr_at(f.line, f.col, f.sp, format("duplicate field '{}' in struct '{}'", f.name, n))) } }
-                        let ft = self.resolve0(f.ty)?
+                        // a duplicate field is left out, one of a bad type has the error type
+                        var dup = false
+                        for prev in fs { if prev.name == f.name { dup = true } }
+                        if dup {
+                            self.record(terr_at(f.line, f.col, f.sp, format("duplicate field '{}' in struct '{}'", f.name, n)))?
+                            continue
+                        }
+                        let ft = self.resolve_part(f.ty)?
                         push(fs, FieldT { name: f.name, ty: ft })
                     }
                     self.type_params = []
@@ -1370,18 +1508,25 @@ impl Checker {
             }
         }
         // enum variants & payloads (under the enum's type parameters)
+        pos = -1
         for decl in self.decls {
+            pos = pos + 1
+            if contains(self.skipped_decls, pos) { continue }
             match decl.kind {
                 DeclKind.EnumDecl(n, variants, attrs, tps, isp) => {
                     self.cur_decl = decl.id
-                    self.check_type_params(tp_names(tps), decl.line, decl.col, decl.sp)?
+                    self.record_result(self.check_type_params(tp_names(tps), decl.line, decl.col, decl.sp))?
                     self.type_params = tp_names(tps)
                     var vs: [VariantT] = []
                     for v in variants {
-                        for prev in vs { if prev.name == v.name { self.type_params = []
-            return Err(terr_at(v.line, v.col, v.sp, format("duplicate variant '{}' in enum '{}'", v.name, n))) } }
+                        var dup = false
+                        for prev in vs { if prev.name == v.name { dup = true } }
+                        if dup {
+                            self.record(terr_at(v.line, v.col, v.sp, format("duplicate variant '{}' in enum '{}'", v.name, n)))?
+                            continue
+                        }
                         var payload: [Type] = []
-                        for p in v.payload { push(payload, self.resolve0(p)?) }
+                        for p in v.payload { push(payload, self.resolve_part(p)?) }
                         push(vs, VariantT { name: v.name, payload: payload })
                     }
                     self.type_params = []
@@ -1393,16 +1538,19 @@ impl Checker {
         }
         self.resolve_recursion()?
         // function signatures (under the function's own type parameters)
+        pos = -1
         for decl in self.decls {
+            pos = pos + 1
+            if contains(self.skipped_decls, pos) { continue }
             match decl.kind {
                 DeclKind.FunDecl(fd) => {
                     self.cur_decl = decl.id
-                    self.check_type_params(tp_names(fd.type_params), fd.line, fd.col, fd.sp)?
+                    self.record_result(self.check_type_params(tp_names(fd.type_params), fd.line, fd.col, fd.sp))?
                     self.type_params = tp_names(fd.type_params)
                     var ps: [Type] = []
-                    for p in fd.params { push(ps, self.param_type(p)?) }
+                    for p in fd.params { push(ps, self.param_part(p)?) }
                     var rt: Option<Type> = None
-                    match fd.ret_type { Some(te) => { rt = Some(self.resolve0(te)?) }, None => {} }
+                    match fd.ret_type { Some(te) => { rt = Some(self.resolve_part(te)?) }, None => {} }
                     self.type_params = []
                     let idx = self.func_idx(fd.name)
                     self.functions[idx] = FuncSig { name: fd.name, params: ps, ret: rt, type_params: tp_names(fd.type_params), bounds: build_bounds(fd.type_params), decl: fd, has_decl: true, decl_id: decl.id }
@@ -1459,13 +1607,13 @@ impl Checker {
         for e in self.enums {
             if self.find_cycle(e.name, e.name, [e.name], true) {
                 self.cur_decl = e.id
-                return Err(terr_at(e.line, e.col, e.sp, format("recursive enum '{}' would have infinite size; only enums can be recursive (they are boxed) — wrap the cycle in an enum to introduce indirection", e.name)))
+                self.record(terr_at(e.line, e.col, e.sp, format("recursive enum '{}' would have infinite size; only enums can be recursive (they are boxed) — wrap the cycle in an enum to introduce indirection", e.name)))?
             }
         }
         for s in self.structs {
             if self.find_cycle(s.name, s.name, [s.name], true) {
                 self.cur_decl = s.id
-                return Err(terr_at(s.line, s.col, s.sp, format("recursive struct '{}' would have infinite size; only enums can be recursive (they are boxed) — wrap the cycle in an enum to introduce indirection", s.name)))
+                self.record(terr_at(s.line, s.col, s.sp, format("recursive struct '{}' would have infinite size; only enums can be recursive (they are boxed) — wrap the cycle in an enum to introduce indirection", s.name)))?
             }
         }
         return Ok(0)
@@ -1508,20 +1656,32 @@ impl Checker {
                 DeclKind.TraitDecl(name, methods, tps, isp) => {
                     // check trait type params: no Self, no dup
                     var seen: [str] = []
+                    var tp_fail: Option<CheckErr> = None
                     for p in tps {
-                        if p.name == "Self" { return Err(terr_at(decl.line, decl.col, decl.sp, format("trait '{}' cannot use 'Self' as a type parameter", name))) }
-                        if contains_str(seen, p.name) { return Err(terr_at(decl.line, decl.col, decl.sp, format("duplicate type parameter '{}' on trait '{}'", p.name, name))) }
-                        push(seen, p.name)
+                        match tp_fail {
+                            Some(x) => {},
+                            None => {
+                                if p.name == "Self" { tp_fail = Some(terr_at(decl.line, decl.col, decl.sp, format("trait '{}' cannot use 'Self' as a type parameter", name))) }
+                                else if contains_str(seen, p.name) { tp_fail = Some(terr_at(decl.line, decl.col, decl.sp, format("duplicate type parameter '{}' on trait '{}'", p.name, name))) }
+                                push(seen, p.name)
+                            },
+                        }
                     }
+                    match tp_fail { Some(e) => { self.record(e)? }, None => {} }
                     var msigs: [TraitMethodSig] = []
                     for m in methods {
-                        for prev in msigs { if prev.name == m.name { return Err(terr_at(m.line, m.col, m.sp, format("duplicate method '{}' in trait '{}'", m.name, name))) } }
+                        var dup = false
+                        for prev in msigs { if prev.name == m.name { dup = true } }
+                        if dup {
+                            self.record(terr_at(m.line, m.col, m.sp, format("duplicate method '{}' in trait '{}'", m.name, name)))?
+                            continue
+                        }
                         self.allow_self = true
                         self.type_params = tp_names(tps)
                         var params: [Type] = [Type.TSelf]
-                        for p in m.params { push(params, self.param_type(p)?) }
+                        for p in m.params { push(params, self.param_part(p)?) }
                         var rt: Option<Type> = None
-                        match m.ret_type { Some(te) => { rt = Some(self.resolve0(te)?) }, None => {} }
+                        match m.ret_type { Some(te) => { rt = Some(self.resolve_part(te)?) }, None => {} }
                         self.allow_self = false
                         self.type_params = []
                         let recv = match m.receiver { Some(r) => r, None => "self" }
@@ -1588,18 +1748,127 @@ impl Checker {
         return Ok(0)
     }
 
+    // One `impl`, its errors collected as it goes (MYLA-110; types.py:
+    // _resolve_impl): an impl whose target can't be resolved, can't have
+    // methods, or repeats a trait impl is left out; one of an unknown trait
+    // keeps its methods; one that doesn't conform leaves the pair broken.
     fun resolve_impl(var self, decl: Decl, target_te: TypeExpr, methods: [FunData], tps: [TypeParam], trait_name: Option<str>, trait_args_te: [TypeExpr]) -> Result<int32, CheckErr> {
         let ln = decl.line
         let cl = decl.col
         let sp = decl.sp
-        self.check_type_params(tp_names(tps), ln, cl, sp)?
+        self.record_result(self.check_type_params(tp_names(tps), ln, cl, sp))?
         self.type_params = tp_names(tps)
-        let target = self.resolve0(target_te)?
+        let target = self.resolve_part(target_te)?
         var trait_args: [Type] = []
-        for a in trait_args_te { push(trait_args, self.resolve0(a)?) }
+        for a in trait_args_te { push(trait_args, self.resolve_part(a)?) }
         self.type_params = []
-        let key_opt = self.type_key(target)
-        // validate the target kind
+        var key_opt: Option<str> = None
+        var target_ok = !has_error(target)
+        if target_ok {
+            key_opt = self.type_key(target)
+            match self.check_impl_target(ln, cl, sp, target, key_opt, tps, methods) {
+                Ok(x) => {},
+                Err(e) => {
+                    self.record(e)?
+                    target_ok = false
+                },
+            }
+        }
+        if !target_ok {
+            match key_opt {
+                Some(k) => {},
+                None => {
+                    self.lose_impl(methods, trait_name)
+                    return Ok(0)
+                },
+            }
+        }
+        let key = match key_opt { Some(k) => k, None => "" }
+        // trait binding
+        var have_trait = false
+        var conforms = true
+        var pmap: [Subst] = []
+        var tinfo = TraitInfo { name: "", methods: [], type_params: [], builtin: false, line: 0, col: 0 }
+        match trait_name {
+            Some(tn) => {
+                let ti = self.trait_idx(tn)
+                if ti < 0 {
+                    self.record(terr_at(ln, cl, sp, format("unknown trait '{}' in 'impl {} for {}'", tn, tn, key)))?
+                } else {
+                    tinfo = self.traits[ti]
+                    have_trait = true
+                    if len(trait_args) != len(tinfo.type_params) {
+                        var expected = tn
+                        if len(tinfo.type_params) > 0 { expected = format("{}<{}>", tn, join_strs(tinfo.type_params, ", ")) }
+                        self.record(terr_at(ln, cl, sp, format("trait '{}' expects {} type argument(s), got {} (use 'impl {} for {}')", tn, len(tinfo.type_params), len(trait_args), expected, key)))?
+                        conforms = false
+                    } else {
+                        var pi = 0
+                        while pi < len(tinfo.type_params) {
+                            push(pmap, Subst { name: tinfo.type_params[pi], ty: trait_args[pi] })
+                            pi = pi + 1
+                        }
+                    }
+                    var dup = false
+                    for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { dup = true } }
+                    if dup {
+                        self.record(terr_at(ln, cl, sp, format("duplicate impl of trait '{}' for type '{}' (at most one user impl per trait/type pair)", tn, key)))?
+                        return Ok(0)
+                    }
+                    push(self.user_trait_impls, TraitImplPair { trait_name: tn, key: key })
+                }
+            },
+            None => {},
+        }
+        // field names for collision check
+        var field_names: [str] = []
+        let si = self.struct_idx(key)
+        if si >= 0 { for f in self.structs[si].fields { push(field_names, f.name) } }
+        for m in methods {
+            // a method that can't be added is left out, body and all
+            var bad: Option<CheckErr> = None
+            match self.method_sig(key, m.name) { Some(x) => { bad = Some(terr_at(m.line, m.col, m.sp, format("duplicate method '{}' for type '{}'", m.name, key))) }, None => {} }
+            match bad {
+                Some(x) => {},
+                None => { if contains_str(field_names, m.name) { bad = Some(terr_at(m.line, m.col, m.sp, format("method '{}' collides with a field of '{}'", m.name, key))) } },
+            }
+            match bad {
+                Some(e) => { self.record(e)? },
+                None => { self.register_method(target_te, key, tps, m, decl.id)? },
+            }
+        }
+        if have_trait {
+            if conforms {
+                var impl_names: [str] = []
+                for m in methods { push(impl_names, m.name) }
+                match self.check_trait_conformance(ln, cl, sp, key, target, tinfo, pmap, impl_names) {
+                    Ok(ok) => { conforms = ok },
+                    Err(e) => {
+                        self.record(e)?
+                        conforms = false
+                    },
+                }
+            }
+            match trait_name {
+                Some(tn) => {
+                    if !conforms { self.broken_impls[tn + "\t" + key] = true }
+                    push(self.trait_impls, TraitImplPair { trait_name: tn, key: key })
+                },
+                None => {},
+            }
+        }
+        return Ok(0)
+    }
+
+    // Leave out an impl whose type is unknown: a missing method or trait impl
+    // of its names ends a check silently (MYLA-110).
+    fun lose_impl(var self, methods: [FunData], trait_name: Option<str>) {
+        for m in methods { self.lost_methods[m.name] = true }
+        match trait_name { Some(tn) => { self.lost_traits[tn] = true }, None => {} }
+    }
+
+    // Whether an impl may add methods to `target` (types.py: _check_impl_target).
+    fun check_impl_target(self, ln: int32, cl: int32, sp: SrcSpan, target: Type, key_opt: Option<str>, tps: [TypeParam], methods: [FunData]) -> Result<int32, CheckErr> {
         let is_agg = match target { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, _ => false }
         if is_agg {
             let targs = match target { Type.TStruct(n, a) => a, Type.TEnum(n, a) => a, _ => empty_types() }
@@ -1610,55 +1879,14 @@ impl Checker {
             } else {
                 if len(targs) > 0 { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on a concrete generic instantiation; write 'impl<T> {}<T> {{ ... }}' to cover every instance", key_or_none(key_opt)))) }
             }
-        } else {
-            match key_opt {
-                Some(k) => {
-                    if len(tps) > 0 { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are not supported yet (v0.4.1 covers concrete built-in receivers)")) }
-                    for m in methods { if match m.receiver { Some(r) => r == "var self", None => false } { return Err(terr_at(m.line, m.col, m.sp, "'var self' methods on built-in types are not supported yet; use a read-only 'self' receiver")) } }
-                },
-                None => { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on type '{}'; v0.4.1 supports structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
-            }
+            return Ok(0)
         }
-        let key = match key_opt { Some(k) => k, None => "" }
-        // trait binding
-        var have_trait = false
-        var pmap: [Subst] = []
-        var tinfo = TraitInfo { name: "", methods: [], type_params: [], builtin: false, line: 0, col: 0 }
-        match trait_name {
-            Some(tn) => {
-                let ti = self.trait_idx(tn)
-                if ti < 0 { return Err(terr_at(ln, cl, sp, format("unknown trait '{}' in 'impl {} for {}'", tn, tn, key))) }
-                tinfo = self.traits[ti]
-                have_trait = true
-                if len(trait_args) != len(tinfo.type_params) {
-                    var expected = tn
-                    if len(tinfo.type_params) > 0 { expected = format("{}<{}>", tn, join_strs(tinfo.type_params, ", ")) }
-                    return Err(terr_at(ln, cl, sp, format("trait '{}' expects {} type argument(s), got {} (use 'impl {} for {}')", tn, len(tinfo.type_params), len(trait_args), expected, key)))
-                }
-                var pi = 0
-                while pi < len(tinfo.type_params) { push(pmap, Subst { name: tinfo.type_params[pi], ty: trait_args[pi] })
-            pi = pi + 1 }
-                for p in self.user_trait_impls { if p.trait_name == tn && p.key == key { return Err(terr_at(ln, cl, sp, format("duplicate impl of trait '{}' for type '{}' (at most one user impl per trait/type pair)", tn, key))) } }
-                push(self.user_trait_impls, TraitImplPair { trait_name: tn, key: key })
+        match key_opt {
+            Some(k) => {
+                if len(tps) > 0 { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are not supported yet (v0.4.1 covers concrete built-in receivers)")) }
+                for m in methods { if match m.receiver { Some(r) => r == "var self", None => false } { return Err(terr_at(m.line, m.col, m.sp, "'var self' methods on built-in types are not supported yet; use a read-only 'self' receiver")) } }
             },
-            None => {},
-        }
-        // field names for collision check
-        var field_names: [str] = []
-        let si = self.struct_idx(key)
-        if si >= 0 { for f in self.structs[si].fields { push(field_names, f.name) } }
-        for m in methods {
-            match self.method_sig(key, m.name) { Some(x) => { return Err(terr_at(m.line, m.col, m.sp, format("duplicate method '{}' for type '{}'", m.name, key))) }, None => {} }
-            if contains_str(field_names, m.name) { return Err(terr_at(m.line, m.col, m.sp, format("method '{}' collides with a field of '{}'", m.name, key))) }
-            self.register_method(target_te, key, tps, m, decl.id)?
-        }
-        if have_trait {
-            var impl_names: [str] = []
-            for m in methods { push(impl_names, m.name) }
-            self.check_trait_conformance(ln, cl, sp, key, target, tinfo, pmap, impl_names)?
-        }
-        if have_trait {
-            match trait_name { Some(tn) => push(self.trait_impls, TraitImplPair { trait_name: tn, key: key }), None => {} }
+            None => { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on type '{}'; v0.4.1 supports structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
         }
         return Ok(0)
     }
@@ -1669,13 +1897,13 @@ impl Checker {
         for t in impl_tps { push(combined_names, t.name) }
         for t in m.type_params { push(combined_names, t.name) }
         let combined_bounds = merge_bounds(build_bounds(impl_tps), build_bounds(m.type_params))
-        self.check_type_params(combined_names, m.line, m.col, m.sp)?
+        self.record_result(self.check_type_params(combined_names, m.line, m.col, m.sp))?
         self.type_params = combined_names
-        let self_t = self.resolve0(target_te)?
+        let self_t = self.resolve_part(target_te)?
         var params: [Type] = [self_t]
-        for p in m.params { push(params, self.param_type(p)?) }
+        for p in m.params { push(params, self.param_part(p)?) }
         var rt: Option<Type> = None
-        match m.ret_type { Some(te) => { rt = Some(self.resolve0(te)?) }, None => {} }
+        match m.ret_type { Some(te) => { rt = Some(self.resolve_part(te)?) }, None => {} }
         self.type_params = []
         // synthesize a self parameter so the body checker binds `self`
         var sparams: [Param] = [Param { line: m.line, col: m.col, sp: no_span(), name: "self", ty: Some(target_te) }]
@@ -1694,7 +1922,8 @@ impl Checker {
         return Ok(0)
     }
 
-    fun check_trait_conformance(var self, ln: int32, cl: int32, sp: SrcSpan, key: str, target: Type, trinfo: TraitInfo, pmap: [Subst], impl_names: [str]) -> Result<int32, CheckErr> {
+    // Ok(false): a method that failed earlier couldn't be compared (MYLA-110).
+    fun check_trait_conformance(var self, ln: int32, cl: int32, sp: SrcSpan, key: str, target: Type, trinfo: TraitInfo, pmap: [Subst], impl_names: [str]) -> Result<bool, CheckErr> {
         // missing: trait methods not provided by this impl
         var missing: [str] = []
         for tm in trinfo.methods {
@@ -1713,8 +1942,14 @@ impl Checker {
         if len(extra) > 0 {
             return Err(terr_at(ln, cl, sp, format("impl of trait '{}' for '{}' declares method(s) not in the trait: {}", trinfo.name, key, join_strs(sorted_strs(extra), ", "))))
         }
+        var broken = false
         for tm in trinfo.methods {
-            let sig = match self.method_sig(key, tm.name) { Some(x) => x, None => { return Err(terr_at(ln, cl, sp, format("impl of trait '{}' for '{}' is missing method(s): {}", trinfo.name, key, tm.name))) } }
+            let sig_opt = self.method_sig(key, tm.name)
+            if match sig_opt { Some(x) => false, None => true } {
+                broken = true          // left out (MYLA-110)
+                continue
+            }
+            let sig = match sig_opt { Some(x) => x, None => { return Ok(false) } }
             let recv = match sig.decl.receiver { Some(r) => r, None => "self" }
             if recv != tm.receiver {
                 return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' has receiver '{}' but the trait declares '{}'", tm.name, trinfo.name, key, recv, tm.receiver)))
@@ -1722,6 +1957,10 @@ impl Checker {
             var exp_params: [Type] = []
             for p in tm.params { push(exp_params, subst_self(p, target, pmap)) }
             let exp_ret = opt_subst_self(tm.ret, target, pmap)
+            if sig_has_error(exp_params, exp_ret) || sig_has_error(sig.params, sig.ret) {
+                broken = true          // one side failed and had its error: no comparison
+                continue
+            }
             if !type_list_eq(sig.params, exp_params) || !opt_type_eq(sig.ret, exp_ret) {
                 var rest: [Type] = []
                 var k = 1
@@ -1732,18 +1971,52 @@ impl Checker {
                 return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("method '{}' in impl of trait '{}' for '{}' does not match the trait signature (expected '({}) -> {}')", tm.name, trinfo.name, key, type_names(rest), opt_type_name(exp_ret))))
             }
         }
-        return Ok(0)
+        return Ok(!broken)
     }
 
+    // A bad bound is left out, so calls don't check it, and the function's
+    // body, which may rely on it, isn't checked (MYLA-110).
     fun validate_bounds(var self) -> Result<int32, CheckErr> {
-        for sig in self.functions {
+        var fi = 0
+        while fi < len(self.functions) {
+            let sig = self.functions[fi]
             self.cur_decl = sig.decl_id
+            var kept: [Bound] = []
+            var changed = false
             for b in sig.bounds {
-                if !contains_str(sig.type_params, b.tp) { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("bound on unknown type parameter '{}'", b.tp))) }
+                if !contains_str(sig.type_params, b.tp) {
+                    self.record(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("bound on unknown type parameter '{}'", b.tp)))?
+                    changed = true
+                    continue
+                }
+                var good: [str] = []
                 for tr in b.traits {
-                    if self.trait_idx(tr) < 0 { return Err(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("unknown trait '{}' in bound '{}: {}'", tr, b.tp, tr))) }
+                    if self.trait_idx(tr) < 0 {
+                        self.record(terr_at(sig.decl.line, sig.decl.col, sig.decl.sp, format("unknown trait '{}' in bound '{}: {}'", tr, b.tp, tr)))?
+                        changed = true
+                    } else {
+                        push(good, tr)
+                    }
+                }
+                push(kept, Bound { tp: b.tp, traits: good })
+            }
+            if changed {
+                self.skipped_fns[sig.name] = true
+                var s2 = sig
+                s2.bounds = kept
+                self.functions[fi] = s2
+                // a method's entry has its own copy of the signature
+                var mi = 0
+                while mi < len(self.methods) {
+                    if self.methods[mi].sig.name == sig.name {
+                        var m2 = self.methods[mi]
+                        m2.sig = s2
+                        self.methods[mi] = m2
+                    }
+                    mi = mi + 1
                 }
             }
+            fi = fi + 1
         }
         return Ok(0)
     }
@@ -1848,7 +2121,15 @@ impl Checker {
         return Ok(0)
     }
 
+    // `e`'s type; poisoned() where it contains the error type, since what uses
+    // the value depends on a declaration that failed (MYLA-110).
     fun infer(var self, e: Expr, expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
+        let r = self.infer_node(e, expected)?
+        if opt_has_error(r) { return Err(poisoned()) }
+        return Ok(r)
+    }
+
+    fun infer_node(var self, e: Expr, expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         let as_stmt = self.stmt_match
         self.stmt_match = false
         let r: Result<Option<Type>, CheckErr> = match e.kind {
@@ -1952,6 +2233,7 @@ impl Checker {
             // a non-method top-level function referenced as a value
             return self.infer_fun_value(e, ident)
         }
+        if contains(self.redefined, ident) { return Err(poisoned()) }
         if is_builtin_func(ident) { return Err(terr_at(e.line, e.col, e.sp, format("'{}' cannot be used as a value here", ident))) }
         return Err(with_notes(terr_at(e.line, e.col, e.sp, format("unknown name '{}'", ident)), did_you_mean(ident, self.value_names())))
     }
@@ -2123,7 +2405,7 @@ impl Checker {
             kind = "ord" }
         else { trnm = match arith_trait(op) { Some(t) => t, None => "" }
             kind = "arith" } }
-        if !self.type_implements(lt, trnm) {
+        if !self.type_implements(lt, trnm)? {
             return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' is not defined for '{}': it needs 'impl {} for {}'{}", op, type_name(lt), trnm, type_name(lt), if_str(trnm == "Eq", " (or '#derive(Eq)')", ""))))
         }
         let rt = self.expect_value(r, None)?
@@ -2324,9 +2606,13 @@ impl Checker {
         var missing: [str] = []
         for f in info.fields { if !contains_str(provided, f.name) { push(missing, f.name) } }
         if len(missing) > 0 { return Err(terr_at(e.line, e.col, e.sp, format("missing field(s) in '{}' literal: {}", sname, join_strs(missing, ", ")))) }
+        if len(info.type_params) > 0 {
+            for f in info.fields { if has_error(f.ty) { return Err(poisoned()) } }
+        }
         if len(info.type_params) == 0 {
             for init in fields {
                 let ft = match field_type_get(info.fields, init.name) { Some(x) => x, None => Type.TStr }
+                if has_error(ft) { continue }   // the field's type failed (MYLA-110)
                 let vt = self.expect_value(init.value, Some(ft))?
                 if !type_eq(vt, ft) { return Err(terr_at(init.line, init.col, init.sp, format("field '{}': expected '{}', found '{}'", init.name, type_name(ft), type_name(vt)))) }
             }
@@ -2521,6 +2807,11 @@ impl Checker {
     }
 
     fun check_pattern(var self, pat: Pattern, t: Type) -> Result<int32, CheckErr> {
+        if has_error(t) { return Err(poisoned()) }
+        return self.check_pattern_node(pat, t)
+    }
+
+    fun check_pattern_node(var self, pat: Pattern, t: Type) -> Result<int32, CheckErr> {
         return match pat.kind {
             PatternKind.PWild => Ok(0),
             PatternKind.PBind(n) => {
@@ -3010,7 +3301,13 @@ impl Checker {
         return match s.kind {
             StmtKind.VarDecl(kind, name, ty, init) => {
                 var declared: Option<Type> = None
-                match ty { Some(te) => { declared = Some(self.resolve0(te)?) }, None => {} }
+                match ty { Some(te) => { declared = Some(self.resolve_annotation(te)?) }, None => {} }
+                if opt_has_error(declared) {
+                    // the annotation names a failed alias: the binding has the
+                    // error type and its value isn't checked (MYLA-110)
+                    if !self.define_at(name, Type.TError, kind == "var", s.line, s.col, s.sp) { return Err(with_notes(terr_at(s.line, s.col, s.sp, format("'{}' is already declared in this scope", name)), self.first_declared(name))) }
+                    return Ok(0)
+                }
                 let value_type = self.expect_value(init, declared)?
                 var final_t = value_type
                 match declared {
@@ -3075,7 +3372,8 @@ impl Checker {
             },
             StmtKind.ExprStmt(ex) => {
                 match ex.kind { ExprKind.MatchE(sc, arms) => { self.stmt_match = true }, _ => {} }
-                self.infer(ex, None)?
+                // a result of the error type is fine here: nothing uses it (MYLA-110)
+                self.infer_node(ex, None)?
                 Ok(0)
             },
         }
@@ -3127,6 +3425,7 @@ impl Checker {
             return Ok(0)
         }
         let ret = match self.cur_ret { Some(r) => r, None => t_int() }
+        if has_error(ret) { return Ok(0) }   // the return type failed: the value isn't checked (MYLA-110)
         match v {
             None => { return Err(terr_at(s.line, s.col, s.sp, format("expected a return value of type '{}'", type_name(ret)))) },
             Some(ve) => {
@@ -3166,6 +3465,12 @@ impl Checker {
     }
 
     fun check_lvalue(var self, e: Expr) -> Result<LValue, CheckErr> {
+        let lv = self.check_lvalue_node(e)?
+        if has_error(lv.ty) { return Err(poisoned()) }
+        return Ok(lv)
+    }
+
+    fun check_lvalue_node(var self, e: Expr) -> Result<LValue, CheckErr> {
         return match e.kind {
             ExprKind.Name(n) => {
                 match self.lookup(n) { Some(b) => Ok(LValue { ty: b.ty, mutable: b.mutable }), None => Err(with_notes(terr_at(e.line, e.col, e.sp, format("unknown name '{}'", n)), did_you_mean(n, self.scope_names()))) }
@@ -3245,6 +3550,7 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
         Type.TStr => true,
         Type.TChar => true,
         Type.TFloat(w) => true,
+        Type.TError => true,          // has had its error (MYLA-110)
         Type.TStruct(n, a) => contains_str(eq_names, n),
         Type.TEnum(n, a) => contains_str(eq_names, n),
         _ => false,
@@ -3254,45 +3560,67 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
 impl Checker {
     fun synthesize_derives(var self) -> Result<int32, CheckErr> {
         var targets: [Decl] = []
+        var pos = -1
         for decl in self.decls {
+            pos = pos + 1
+            if contains(self.skipped_decls, pos) { continue }
             self.cur_decl = decl.id
             let attrs = decl_attrs(decl)
+            let is_se = match decl.kind { DeclKind.StructDecl(n, f, a, t, p) => true, DeclKind.EnumDecl(n, v, a, t, p) => true, _ => false }
             for attr in attrs {
                 if attr.name != "derive" { continue }
-                let is_se = match decl.kind { DeclKind.StructDecl(n, f, a, t, p) => true, DeclKind.EnumDecl(n, v, a, t, p) => true, _ => false }
-                if !is_se { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' may only be applied to a struct or enum")) }
-                let has_tps = match decl.kind {
-                    DeclKind.StructDecl(n, f, a, t, p) => len(t) > 0,
-                    DeclKind.EnumDecl(n, v, a, t, p) => len(t) > 0,
-                    _ => false,
+                match self.check_derive_attr(decl, attr) {
+                    Ok(x) => {
+                        var present = false
+                        for d in targets { if d.line == decl.line && d.col == decl.col { present = true } }
+                        if !present { push(targets, decl) }
+                    },
+                    Err(e) => {
+                        self.record(e)?
+                        // Eq is broken for the type: its uses stop silently (MYLA-110)
+                        if is_se { self.broken_impls["Eq\t" + decl_kind_name(decl)] = true }
+                    },
                 }
-                if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (v0.4.4 derives Eq for concrete structs/enums)")) }
-                self.validate_derive_attr(attr)?
-                var present = false
-                for d in targets { if d.line == decl.line && d.col == decl.col { present = true } }
-                if !present { push(targets, decl) }
             }
         }
         if len(targets) == 0 { return Ok(0) }
         var eq_names: [str] = []
         for d in targets { push(eq_names, decl_kind_name(d)) }
+        // an `impl Eq` for a type that doesn't exist may have been meant for
+        // any of them: a type that isn't Eq is then no news (MYLA-110)
+        var lost_eq = false
         for d in self.impl_decls {
             match impl_eq_target_name(d) {
-                Some(nm) => { if !contains_str(eq_names, nm) { push(eq_names, nm) } },
+                Some(nm) => {
+                    if !contains_str(eq_names, nm) { push(eq_names, nm) }
+                    if !self.names_a_type(nm) { lost_eq = true }
+                },
                 None => {},
             }
         }
         for decl in targets {
             self.cur_decl = decl.id
             let name = decl_kind_name(decl)
-            // explicit `impl Eq for name`?
+            // explicit `impl Eq for name`? (it stands)
+            var explicit = false
             for d in self.impl_decls {
                 match impl_eq_target_name(d) {
-                    Some(nm) => { if nm == name { return Err(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Eq and has an explicit 'impl Eq for {}'", name, name))) } },
+                    Some(nm) => { if nm == name { explicit = true } },
                     None => {},
                 }
             }
-            self.check_derivable_eq(decl, name, eq_names)?
+            if explicit {
+                self.record(terr_at(decl.line, decl.col, decl.sp, format("type '{}' both derives Eq and has an explicit 'impl Eq for {}'", name, name)))?
+                continue
+            }
+            match self.check_derivable_eq(decl, name, eq_names) {
+                Ok(x) => {},
+                Err(e) => {
+                    if !lost_eq { self.record(e)? }
+                    self.broken_impls["Eq\t" + name] = true
+                    continue
+                },
+            }
             // register the synthesized Eq impl: method `eq: (Self,Self)->bool`
             var self_t = Type.TEnum(name, [])
             if self.is_struct(name) { self_t = Type.TStruct(name, []) }
@@ -3303,6 +3631,25 @@ impl Checker {
             push(self.user_trait_impls, TraitImplPair { trait_name: "Eq", key: name })
         }
         return Ok(0)
+    }
+
+    fun check_derive_attr(self, decl: Decl, attr: Attribute) -> Result<int32, CheckErr> {
+        let is_se = match decl.kind { DeclKind.StructDecl(n, f, a, t, p) => true, DeclKind.EnumDecl(n, v, a, t, p) => true, _ => false }
+        if !is_se { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' may only be applied to a struct or enum")) }
+        let has_tps = match decl.kind {
+            DeclKind.StructDecl(n, f, a, t, p) => len(t) > 0,
+            DeclKind.EnumDecl(n, v, a, t, p) => len(t) > 0,
+            _ => false,
+        }
+        if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (v0.4.4 derives Eq for concrete structs/enums)")) }
+        return self.validate_derive_attr(attr)
+    }
+
+    // Whether `name` is a type the program or the language declares.
+    fun names_a_type(self, name: str) -> bool {
+        if self.struct_idx(name) >= 0 || self.enum_idx(name) >= 0 || self.alias_idx(name) >= 0 { return true }
+        match prim_type(name) { Some(t) => { return true }, None => {} }
+        return name == "int" || name == "float"
     }
 
     fun validate_derive_attr(self, attr: Attribute) -> Result<int32, CheckErr> {
@@ -3358,8 +3705,13 @@ pub enum CV { CVInt(int64), CVFloat, CVBool(bool), CVStr(str), CVUnknown }
 impl Checker {
     fun fold_consts(var self) -> Result<int32, CheckErr> {
         var i = 0
-        while i < len(self.const_decls) { self.ensure_const(self.const_decls[i].name)?
-            i = i + 1 }
+        while i < len(self.const_decls) {
+            match self.ensure_const(self.const_decls[i].name) {
+                Ok(t) => {},
+                Err(e) => { if is_stopped(e) { return Err(e) } },   // its error, if any, is collected
+            }
+            i = i + 1
+        }
         return Ok(0)
     }
 
@@ -3378,21 +3730,52 @@ impl Checker {
         let decl = self.const_decls[ci]
         // errors folding it are in the const's file, wherever it is used from
         let outer_decl = self.cur_decl
-        self.cur_decl = decl.id
         if contains_str(self.const_folding, name) { return Err(terr_at(decl.line, decl.col, decl.sp, format("const '{}' is defined in terms of itself", name))) }
+        self.cur_decl = decl.id
         push(self.const_folding, name)
-        let declared = self.resolve0(decl.declared)?
-        if is_type_param(declared) { self.const_folding = remove_str(self.const_folding, name)
-            return Err(terr_at(decl.line, decl.col, decl.sp, "a const type must be concrete")) }
-        self.push_scope()
-        let vt = self.expect_value(decl.value, Some(declared))?
-        self.pop_scope()
-        if !type_eq(vt, declared) { self.const_folding = remove_str(self.const_folding, name)
-            return Err(terr_at(decl.value.line, decl.value.col, decl.value.sp, format("const '{}' is declared '{}' but its value has type '{}'", name, type_name(declared), type_name(vt)))) }
-        let value = self.fold_const_expr(decl.value)?
-        self.const_values[name] = value
+        // a const that fails keeps its declared type, if that resolved, and
+        // no value: its error is collected here, once, and the consts folded
+        // from it fail silently (MYLA-110)
+        var declared = Type.TError
+        var fail: Option<CheckErr> = None
+        match self.resolve0(decl.declared) {
+            Ok(t) => {
+                if is_type_param(t) { fail = Some(terr_at(decl.line, decl.col, decl.sp, "a const type must be concrete")) }
+                else {
+                    declared = t
+                    if has_error(t) { fail = Some(poisoned()) }
+                }
+            },
+            Err(e) => { fail = Some(e) },
+        }
+        if match fail { Some(x) => false, None => true } {
+            self.push_scope()
+            let r = self.expect_value(decl.value, Some(declared))
+            self.pop_scope()
+            match r {
+                Ok(vt) => {
+                    if !type_eq(vt, declared) { fail = Some(terr_at(decl.value.line, decl.value.col, decl.value.sp, format("const '{}' is declared '{}' but its value has type '{}'", name, type_name(declared), type_name(vt)))) }
+                    else {
+                        match self.fold_const_expr(decl.value) {
+                            Ok(v) => { self.const_values[name] = v },
+                            Err(e) => { fail = Some(e) },
+                        }
+                    }
+                },
+                Err(e) => { fail = Some(e) },
+            }
+        }
         self.const_folding = remove_str(self.const_folding, name)
         push(self.consts, AliasCached { name: name, ty: declared })
+        match fail {
+            Some(e) => {
+                self.failed_consts[name] = true
+                self.record(e)?
+                self.cur_decl = outer_decl
+                return Err(poisoned())
+            },
+            None => {},
+        }
         self.cur_decl = outer_decl
         return Ok(declared)
     }
@@ -3413,6 +3796,7 @@ impl Checker {
             ExprKind.Name(n) => {
                 if self.const_decl_idx(n) < 0 { return Err(terr_at(e.line, e.col, e.sp, format("'{}' is not a constant and cannot appear in a const initializer", n))) }
                 self.ensure_const(n)?
+                if contains(self.failed_consts, n) { return Err(poisoned()) }
                 return match get(self.const_values, n) { Some(v) => Ok(v), None => Ok(CV.CVUnknown) }
             },
             ExprKind.Unary(op, x) => {
@@ -3563,8 +3947,11 @@ impl Checker {
     // Every declaration's attributes, each on its own, then the entry point
     // (types.py: _check_attributes_and_entry): errors are collected.
     fun check_attributes_and_entry(var self) {
+        var pos = -1
         for decl in self.decls {
+            pos = pos + 1
             if self.full() { return }
+            if contains(self.skipped_decls, pos) { continue }
             self.reset_state(decl.id)
             match self.check_attributes(decl) {
                 Ok(x) => {},
@@ -3626,6 +4013,7 @@ impl Checker {
         let outs = match attr.outputs { Some(x) => x, None => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' requires an expected result, e.g. #test(args)[expected]")) } }
         match sig.ret { Some(x) => {}, None => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' requires the function to return a value")) } }
         if len(attr.args) != len(sig.params) { return Err(terr_at(attr.line, attr.col, attr.sp, format("'#test' expects {} argument(s), got {}", len(sig.params), len(attr.args)))) }
+        if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // the signature failed (MYLA-110)
         self.push_scope()
         var i = 0
         while i < len(attr.args) {
@@ -3647,21 +4035,29 @@ impl Checker {
 
     // -- driver -----------------------------------------------------------
 
-    // Check the program: the declaration phases, whose first error ends the
-    // check, then every function's attributes and body on its own (types.py:
-    // Checker.check). Err: the errors, in the order found (MYLA-65, D80).
+    // Check the program: the declaration phases, which collect each part's
+    // error and go on (MYLA-110, D84), then every function's attributes and
+    // body on its own (types.py: Checker.check). Err: the errors, in the order
+    // found (MYLA-65, D80).
     fun run_all(var self) -> Result<int32, [CheckErr]> {
         match self.run_phases() {
             Ok(x) => {},
-            Err(e) => { return Err([CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl, notes: e.notes }]) },
+            Err(e) => {
+                if !is_stopped(e) { self.note(e) }
+                return Err(self.errs)
+            },
         }
+        self.bodies = true
         self.check_attributes_and_entry()
+        var pos = -1
         for decl in self.decls {
-            match decl.kind { DeclKind.FunDecl(fd) => { self.check_body(decl.id, fd) }, _ => {} }
+            pos = pos + 1
+            if contains(self.skipped_decls, pos) { continue }
+            match decl.kind { DeclKind.FunDecl(fd) => { if !contains(self.skipped_fns, fd.name) { self.check_body(decl.id, fd) } }, _ => {} }
         }
         var i = 0
         while i < len(self.method_decls) {
-            self.check_body(self.method_decl_ids[i], self.method_decls[i])
+            if !contains(self.skipped_fns, self.method_decls[i].name) { self.check_body(self.method_decl_ids[i], self.method_decls[i]) }
             i = i + 1
         }
         if len(self.errs) > 0 { return Err(self.errs) }
@@ -3708,12 +4104,54 @@ impl Checker {
 
     // Collect `e`, an error in the declaration being checked.
     fun note(var self, e: CheckErr) {
+        if is_poisoned(e) { return }   // depends on the error type: no error (MYLA-110)
         push(self.errs, CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl, notes: e.notes })
     }
 
     // Whether MAX_ERRORS errors were collected: the check ends.
     fun full(self) -> bool {
         return len(self.errs) >= MAX_ERRORS
+    }
+
+    // Collect `e`, the error of a declaration's part, and go on (types.py:
+    // _record): Err(stopped()) at MAX_ERRORS. A part that depends on the
+    // error type has nothing to collect.
+    fun record(var self, e: CheckErr) -> Result<int32, CheckErr> {
+        if is_poisoned(e) { return Ok(0) }
+        if is_stopped(e) { return Err(e) }
+        self.note(e)
+        if self.full() { return Err(stopped()) }
+        return Ok(0)
+    }
+
+    // `te` resolved, else the error type, its error collected (types.py: _part).
+    fun resolve_part(var self, te: TypeExpr) -> Result<Type, CheckErr> {
+        return match self.resolve0(te) {
+            Ok(t) => Ok(t),
+            Err(e) => {
+                self.record(e)?
+                Ok(Type.TError)
+            },
+        }
+    }
+
+    fun param_part(var self, p: Param) -> Result<Type, CheckErr> {
+        return match self.param_type(p) {
+            Ok(t) => Ok(t),
+            Err(e) => {
+                self.record(e)?
+                Ok(Type.TError)
+            },
+        }
+    }
+
+    // `r`'s error, if any, collected.
+    fun record_result(var self, r: Result<int32, CheckErr>) -> Result<int32, CheckErr> {
+        match r {
+            Ok(x) => {},
+            Err(e) => { self.record(e)? },
+        }
+        return Ok(0)
     }
 }
 
@@ -3808,6 +4246,7 @@ impl Checker {
         }
         let name = match callee.kind { ExprKind.Name(nm) => nm, _ => "" }
         if name == "" { return self.infer_indirect_call(e, callee, args) }
+        if contains(self.redefined, name) { return Err(poisoned()) }   // written against the left-out redefinition (MYLA-110)
 
         if name == "print" {
             if len(args) != 1 { return Err(terr_at(e.line, e.col, e.sp, "print() takes exactly one argument")) }
@@ -3953,8 +4392,10 @@ impl Checker {
         if len(args) != len(sig.params) { return Err(terr_at(e.line, e.col, e.sp, format("function '{}' expects {} argument(s), got {}", name, len(sig.params), len(args)))) }
         var i = 0
         while i < len(args) {
-            let at = self.expect_value(args[i], Some(sig.params[i]))?
-            if !type_eq(at, sig.params[i]) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch in call to '{}': expected '{}', found '{}'", name, type_name(sig.params[i]), type_name(at)))) }
+            if !has_error(sig.params[i]) {   // else the parameter's type failed (MYLA-110)
+                let at = self.expect_value(args[i], Some(sig.params[i]))?
+                if !type_eq(at, sig.params[i]) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch in call to '{}': expected '{}', found '{}'", name, type_name(sig.params[i]), type_name(at)))) }
+            }
             i = i + 1
         }
         return Ok(sig.ret)
@@ -4080,11 +4521,14 @@ impl Checker {
         if len(args) != len(payload) { return Err(terr_at(e.line, e.col, e.sp, format("variant '{}.{}' expects {} argument(s), got {}", enum_name, variant, len(payload), len(args)))) }
         let ei = self.enum_idx(enum_name)
         let params = self.enums[ei].type_params
+        if list_has_error(payload) && len(params) > 0 { return Err(poisoned()) }
         if len(params) == 0 {
             var i = 0
             while i < len(args) {
-                let at = self.expect_value(args[i], Some(payload[i]))?
-                if !type_eq(at, payload[i]) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("variant '{}.{}': expected '{}', found '{}'", enum_name, variant, type_name(payload[i]), type_name(at)))) }
+                if !has_error(payload[i]) {   // else the payload's type failed (MYLA-110)
+                    let at = self.expect_value(args[i], Some(payload[i]))?
+                    if !type_eq(at, payload[i]) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("variant '{}.{}': expected '{}', found '{}'", enum_name, variant, type_name(payload[i]), type_name(at)))) }
+                }
                 i = i + 1
             }
             return Ok(Type.TEnum(enum_name, []))
@@ -4095,6 +4539,7 @@ impl Checker {
     }
 
     fun infer_generic_call(var self, e: Expr, name: str, sig: FuncSig, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+        if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // its type arguments can't be inferred (MYLA-110)
         if len(args) != len(sig.params) { return Err(terr_at(e.line, e.col, e.sp, format("function '{}' expects {} argument(s), got {}", name, len(sig.params), len(args)))) }
         var subst: [Subst] = []
         var arg_types: [Type] = []
@@ -4131,7 +4576,7 @@ impl Checker {
                 Some(concrete) => {
                     for tr in b.traits {
                         var ok = false
-                        match concrete { Type.TParam(pn) => { ok = self.bound_has(pn, tr) }, _ => { ok = self.type_implements(concrete, tr) } }
+                        match concrete { Type.TParam(pn) => { ok = self.bound_has(pn, tr) }, _ => { ok = self.type_implements(concrete, tr)? } }
                         if !ok { return Err(terr_at(e.line, e.col, e.sp, format("type '{}' does not satisfy the bound '{}: {}' required by '{}'", type_name(concrete), b.tp, tr, sig.decl.name))) }
                     }
                 },
@@ -4160,9 +4605,11 @@ impl Checker {
                             None => false,
                         }
                         if is_func { return self.infer_indirect_call(e, callee, args) }
+                        if match fopt { Some(ft) => has_error(ft), None => false } { return Err(poisoned()) }   // the field's type failed (MYLA-110)
                     },
                     _ => {},
                 }
+                if contains(self.lost_methods, field) { return Err(poisoned()) }   // maybe a left-out impl's (MYLA-110)
                 return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv_type), field)), did_you_mean(field, self.method_names(key_opt))))
             },
             Some(sig) => {
@@ -4178,8 +4625,10 @@ impl Checker {
                 var i = 0
                 while i < len(args) {
                     let pt = sig.params[i + 1]
-                    let at = self.expect_value(args[i], Some(pt))?
-                    if !type_eq(at, pt) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch in call to '{}': expected '{}', found '{}'", field, type_name(pt), type_name(at)))) }
+                    if !has_error(pt) {   // else the parameter's type failed (MYLA-110)
+                        let at = self.expect_value(args[i], Some(pt))?
+                        if !type_eq(at, pt) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch in call to '{}': expected '{}', found '{}'", field, type_name(pt), type_name(at)))) }
+                    }
                     i = i + 1
                 }
                 return Ok(sig.ret)
@@ -4189,6 +4638,7 @@ impl Checker {
     }
 
     fun infer_generic_method(var self, e: Expr, sig: FuncSig, method: str, recv_type: Type, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+        if sig_has_error(sig.params, sig.ret) { return Err(poisoned()) }   // its type arguments can't be inferred (MYLA-110)
         var subst: [Subst] = []
         let r0 = unify_param(sig.params[0], recv_type, subst)
         subst = r0.subst
@@ -4224,6 +4674,7 @@ impl Checker {
 
     fun infer_try(var self, e: Expr, operand: Expr) -> Result<Type, CheckErr> {
         let ot = self.expect_value(operand, None)?
+        if opt_has_error(self.cur_ret) { return Err(poisoned()) }   // the return type failed (MYLA-110)
         // `?` returns from the innermost function or lambda (MYLA-72)
         let where = if_str(self.lambda_depth > 0, "lambda", "function")
         if !self.has_cur_ret && self.lambda_depth > 0 {
@@ -4354,6 +4805,7 @@ impl Checker {
 
     fun infer_partial(var self, e: Expr, callee: Expr, args: [Expr]) -> Result<Type, CheckErr> {
         let pt = self.partial_target(e, callee)?
+        if sig_has_error(pt.params, pt.ret) { return Err(poisoned()) }
         let param_types = pt.params
         if len(args) != len(param_types) {
             return Err(terr_at(e.line, e.col, e.sp, format("partial application must list every argument position ({} expected, found {}); write '_' for each one to leave open (no implicit currying)", len(param_types), len(args))))
@@ -4411,9 +4863,11 @@ impl Checker {
                 let ft = match field_type_get(fields, field) { Some(x) => x, None => Type.TBool }
                 let is_fn = match ft { Type.TFunc(p, r) => true, _ => false }
                 if is_fn { return func_to_partial_res(ft, e) }
+                if has_error(ft) { return Err(poisoned()) }   // the field's type failed (MYLA-110)
             },
             _ => {},
         }
+        if contains(self.lost_methods, field) { return Err(poisoned()) }   // maybe a left-out impl's (MYLA-110)
         return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv), field)), did_you_mean(field, self.method_names(self.type_key(recv)))))
     }
 

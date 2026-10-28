@@ -140,10 +140,21 @@ class SelfType(Type):
     pass
 
 
+@dataclass(frozen=True)
+class ErrorType(Type):
+    """The type of a declaration's part that failed to check (MYLA-110): a
+    parameter, field or payload of an unknown type, an alias in a cycle, a
+    failed const's type. The checker goes on with it, and stops checking a
+    function body silently where the body depends on it, so an error never
+    follows from another (D84)."""
+    pass
+
+
 BOOL = BoolType()
 STR = StrType()
 STRING_BUILDER = StringBuilderType()
 SELF = SelfType()
+ERROR = ErrorType()
 
 # primitive type-name keyword -> Type
 _PRIMITIVES: dict[str, Type] = {
@@ -205,6 +216,8 @@ def type_name(t: Type | None) -> str:
         return t.name
     if isinstance(t, SelfType):
         return "Self"
+    if isinstance(t, ErrorType):
+        return "{error}"
     if isinstance(t, TupleType):
         if len(t.elems) == 1:
             return f"({type_name(t.elems[0])},)"
@@ -217,6 +230,27 @@ def type_name(t: Type | None) -> str:
         params = ", ".join(type_name(p) for p in t.params)
         return f"({params}) -> {type_name(t.ret)}"
     return str(t)
+
+
+def _has_error(t: Type | None) -> bool:
+    """Whether `t` is or contains the error type (MYLA-110)."""
+    if isinstance(t, ErrorType):
+        return True
+    if isinstance(t, (StructType, EnumType)):
+        return any(_has_error(a) for a in t.args)
+    if isinstance(t, TupleType):
+        return any(_has_error(e) for e in t.elems)
+    if isinstance(t, ListType):
+        return _has_error(t.elem)
+    if isinstance(t, MapType):
+        return _has_error(t.key) or _has_error(t.value)
+    if isinstance(t, FuncType):
+        return any(_has_error(p) for p in t.params) or _has_error(t.ret)
+    return False
+
+
+def _sig_has_error(params, ret) -> bool:
+    return any(_has_error(p) for p in params) or _has_error(ret)
 
 
 def _type_to_typeexpr(t: Type | None) -> "ast.TypeExpr":
@@ -749,6 +783,15 @@ class _Stop(Exception):
     """MAX_ERRORS errors were recorded: the check ends."""
 
 
+class _Poisoned(Exception):
+    """What is being checked depends on the error type (MYLA-110): its check
+    ends without an error, since any error would follow from an earlier one."""
+
+
+# A failed const's value (MYLA-110): consts folded from it fail silently.
+_FAILED = object()
+
+
 class Checker:
     def __init__(self, program: ast.Program):
         self.program = program
@@ -809,24 +852,41 @@ class Checker:
         self._lambda_ids: set[int] = set()
         # the errors of the functions checked so far (MYLA-65, D80)
         self._errors: list[MylaError] = []
+        # going on after a declaration's error (MYLA-110, D84): the declarations
+        # left out (a duplicate, an import, …) or not checked (a bad bound),
+        # by id; the (trait, type key) pairs whose impl or derive failed, whose
+        # every use ends a check silently; the builtins a declaration tried to
+        # redefine; the methods and traits of the impls left out because their
+        # type failed, whose absence is no news; whether the declaration
+        # phases are done
+        self._skipped: set[int] = set()
+        self._broken_impls: set[tuple[str, str]] = set()
+        self._redefined_builtins: set[str] = set()
+        self._lost_methods: set[str] = set()
+        self._lost_traits: set[str] = set()
+        self._bodies = False
 
     # -- public entry --------------------------------------------------------
 
     def check(self) -> "Checker":
-        self._collect_globals()
-        self._resolve_signatures()
-        self._resolve_traits()
-        self._synthesize_derives()
-        self._resolve_impls()
-        self._validate_bounds()
-        self._fold_consts()
         try:
+            # every phase records each declaration's error and goes on, the
+            # failed part taking the error type (MYLA-110, D84)
+            self._collect_globals()
+            self._resolve_signatures()
+            self._resolve_traits()
+            self._synthesize_derives()
+            self._resolve_impls()
+            self._validate_bounds()
+            self._fold_consts()
+            self._bodies = True
             self._check_attributes_and_entry()
             for decl in self.program.decls:
-                if isinstance(decl, ast.FunDecl):
+                if isinstance(decl, ast.FunDecl) and id(decl) not in self._skipped:
                     self._on_its_own(decl, lambda d=decl: self._check_function(d))
             for mdecl in self._method_decls:
-                self._on_its_own(mdecl, lambda d=mdecl: self._check_function(d))
+                if id(mdecl) not in self._skipped:
+                    self._on_its_own(mdecl, lambda d=mdecl: self._check_function(d))
         except _Stop:
             pass
         if self._errors:
@@ -847,9 +907,34 @@ class Checker:
             with in_file(_source_path(decl)):
                 check()
         except MylaError as err:
-            self._errors.append(err)
-            if len(self._errors) >= MAX_ERRORS:
-                raise _Stop() from None
+            self._record(err)
+        except _Poisoned:
+            pass
+
+    def _record(self, err: MylaError, path: str | None = None) -> None:
+        """Collect `err` (in `path`, unless it names its file)."""
+        if err.path is None:
+            err.path = path
+        self._errors.append(err)
+        if len(self._errors) >= MAX_ERRORS:
+            raise _Stop() from None
+
+    def _part(self, path: str | None, action, fallback=None):
+        """Run `action`, a part of a declaration in the file `path`, and return
+        its result; on a type error record it and return `fallback`, which is
+        also the result when the part depends on the error type (MYLA-110)."""
+        try:
+            with in_file(path):
+                return action()
+        except TypeCheckError as err:
+            self._record(err)
+            return fallback
+        except _Poisoned:
+            return fallback
+
+    def _fail_part(self, path: str | None, message: str, node: ast.Node, notes=None) -> None:
+        """Record an error about a declaration's part at `node`."""
+        self._record(TypeCheckError(message, at=node, notes=notes), path)
 
     def _fail_at(self, decl: ast.Decl, message: str, node: ast.Node) -> None:
         """Record an error about `decl` at `node`."""
@@ -862,110 +947,121 @@ class Checker:
     def _collect_globals(self) -> None:
         seen: dict[str, ast.Node] = {}
         for decl in self.program.decls:
-            with in_file(_source_path(decl)):
-                if isinstance(decl, ast.ImportDecl):
-                    # The loader resolves imports before checking; an import that
-                    # reaches the checker means the file was checked on its own.
-                    raise TypeCheckError(
-                        "imports need the module loader: this file was type-checked "
-                        "on its own (use 'myla check' or 'myla run')",
-                        at=decl,
-                    )
-                if isinstance(decl, ast.ImplDecl):
-                    self._impl_decls.append(decl)
-                    continue
-                if isinstance(decl, ast.TraitDecl):
-                    if decl.name in _BUILTIN_OP_TRAIT_NAMES:
-                        raise TypeCheckError(
-                            f"'{decl.name}' is a built-in operator trait and cannot "
-                            "be redeclared",
-                            at=decl,
-                        )
-                    if any(t.name == decl.name for t in self._trait_decls):
-                        raise TypeCheckError(
-                            f"duplicate trait '{decl.name}'", at=decl
-                        )
-                    self._trait_decls.append(decl)
-                    continue
-                name = decl.name
-                if name in _BUILTIN_FUNCS:
-                    raise TypeCheckError(
-                        f"cannot redefine builtin '{name}'", at=decl
-                    )
-                if name in seen:
-                    first = seen[name]
-                    raise TypeCheckError(
-                        f"duplicate top-level declaration '{name}'", at=decl,
-                        notes=[] if getattr(first, "in_prelude", False)
-                        else [note(f"'{name}' is first declared here", first)],
-                    )
-                seen[name] = decl
-                if isinstance(decl, ast.StructDecl):
-                    self.struct_decls[name] = decl
-                    self.structs[name] = {}  # filled during resolution
-                elif isinstance(decl, ast.EnumDecl):
-                    self.enum_decls[name] = decl
-                    self.enums[name] = {}  # filled during resolution
-                elif isinstance(decl, ast.TypeAliasDecl):
-                    self._aliases_raw[name] = decl.target
-                    self._alias_paths[name] = _source_path(decl)
-                elif isinstance(decl, ast.ConstDecl):
-                    self._const_decls[name] = decl
-                elif isinstance(decl, ast.FunDecl):
-                    self.functions[name] = FuncSig([], None, decl)  # filled later
+            # a declaration that can't be collected is left out (MYLA-110)
+            if not self._part(_source_path(decl), lambda d=decl: self._collect_one(d, seen) or True, False):
+                self._skipped.add(id(decl))
+
+    def _collect_one(self, decl: ast.Decl, seen: dict[str, ast.Node]) -> None:
+        if isinstance(decl, ast.ImportDecl):
+            # The loader resolves imports before checking; an import that
+            # reaches the checker means the file was checked on its own.
+            raise TypeCheckError(
+                "imports need the module loader: this file was type-checked "
+                "on its own (use 'myla check' or 'myla run')",
+                at=decl,
+            )
+        if isinstance(decl, ast.ImplDecl):
+            self._impl_decls.append(decl)
+            return
+        if isinstance(decl, ast.TraitDecl):
+            if decl.name in _BUILTIN_OP_TRAIT_NAMES:
+                raise TypeCheckError(
+                    f"'{decl.name}' is a built-in operator trait and cannot "
+                    "be redeclared",
+                    at=decl,
+                )
+            if any(t.name == decl.name for t in self._trait_decls):
+                raise TypeCheckError(
+                    f"duplicate trait '{decl.name}'", at=decl
+                )
+            self._trait_decls.append(decl)
+            return
+        name = decl.name
+        if name in _BUILTIN_FUNCS:
+            self._redefined_builtins.add(name)
+            raise TypeCheckError(
+                f"cannot redefine builtin '{name}'", at=decl
+            )
+        if name in seen:
+            first = seen[name]
+            raise TypeCheckError(
+                f"duplicate top-level declaration '{name}'", at=decl,
+                notes=[] if getattr(first, "in_prelude", False)
+                else [note(f"'{name}' is first declared here", first)],
+            )
+        seen[name] = decl
+        if isinstance(decl, ast.StructDecl):
+            self.struct_decls[name] = decl
+            self.structs[name] = {}  # filled during resolution
+        elif isinstance(decl, ast.EnumDecl):
+            self.enum_decls[name] = decl
+            self.enums[name] = {}  # filled during resolution
+        elif isinstance(decl, ast.TypeAliasDecl):
+            self._aliases_raw[name] = decl.target
+            self._alias_paths[name] = _source_path(decl)
+        elif isinstance(decl, ast.ConstDecl):
+            self._const_decls[name] = decl
+        elif isinstance(decl, ast.FunDecl):
+            self.functions[name] = FuncSig([], None, decl)  # filled later
 
     def _resolve_signatures(self) -> None:
         # resolve every alias eagerly so cycles / bad targets are caught even
-        # when the alias is never referenced
+        # when the alias is never referenced; one that fails is the error type
+        # (`_resolve` caches it), and so is every alias that names it
         for name, ref in self._aliases_raw.items():
-            with in_file(self._alias_paths.get(name)):
-                self._resolve(ref, frozenset({name}))
-        # struct fields (resolved under the struct's own type parameters)
+            if name not in self._alias_cache:
+                t = self._part(self._alias_paths.get(name),
+                               lambda r=ref, n=name: self._resolve(r, frozenset({n})))
+                if t is None:
+                    self._alias_cache[name] = ERROR
+        # struct fields (resolved under the struct's own type parameters); a
+        # duplicate field is left out, a field of a bad type has the error type
         for name, decl in self.struct_decls.items():
-            with in_file(_source_path(decl)):
-                self._check_type_params(decl)
-                self._type_params = frozenset(decl.type_params)
-                try:
-                    fields: dict[str, Type] = {}
-                    for f in decl.fields:
-                        if f.name in fields:
-                            raise TypeCheckError(
-                                f"duplicate field '{f.name}' in struct '{name}'", at=f
-                            )
-                        fields[f.name] = self._resolve(f.type)
-                finally:
-                    self._type_params = frozenset()
-                self.structs[name] = fields
+            path = _source_path(decl)
+            self._part(path, lambda d=decl: self._check_type_params(d))
+            self._type_params = frozenset(decl.type_params)
+            try:
+                fields: dict[str, Type] = {}
+                for f in decl.fields:
+                    if f.name in fields:
+                        self._fail_part(path, f"duplicate field '{f.name}' in struct '{name}'", f)
+                        continue
+                    fields[f.name] = self._part(path, lambda f=f: self._resolve(f.type), ERROR)
+            finally:
+                self._type_params = frozenset()
+            self.structs[name] = fields
         # enum variants & payloads (resolved under the enum's type parameters)
         for name, decl in self.enum_decls.items():
-            with in_file(_source_path(decl)):
-                self._check_type_params(decl)
-                self._type_params = frozenset(decl.type_params)
-                try:
-                    variants: dict[str, list[Type]] = {}
-                    for v in decl.variants:
-                        if v.name in variants:
-                            raise TypeCheckError(
-                                f"duplicate variant '{v.name}' in enum '{name}'", at=v
-                            )
-                        variants[v.name] = [self._resolve(p) for p in v.payload]
-                finally:
-                    self._type_params = frozenset()
-                self.enums[name] = variants
+            path = _source_path(decl)
+            self._part(path, lambda d=decl: self._check_type_params(d))
+            self._type_params = frozenset(decl.type_params)
+            try:
+                variants: dict[str, list[Type]] = {}
+                for v in decl.variants:
+                    if v.name in variants:
+                        self._fail_part(path, f"duplicate variant '{v.name}' in enum '{name}'", v)
+                        continue
+                    variants[v.name] = [self._part(path, lambda p=p: self._resolve(p), ERROR)
+                                        for p in v.payload]
+            finally:
+                self._type_params = frozenset()
+            self.enums[name] = variants
         self._resolve_recursion()
         # function signatures (resolved under the function's own type parameters)
         for name, sig in self.functions.items():
-            with in_file(_source_path(sig.decl)):
-                decl = sig.decl
-                self._check_type_params(decl)
-                self._type_params = frozenset(decl.type_params)
-                try:
-                    params = [self._resolve(p.type) for p in decl.params]
-                    ret = self._resolve(decl.ret_type) if decl.ret_type is not None else None
-                finally:
-                    self._type_params = frozenset()
-                self.functions[name] = FuncSig(params, ret, decl, list(decl.type_params),
-                                               dict(decl.type_param_bounds))
+            decl = sig.decl
+            path = _source_path(decl)
+            self._part(path, lambda d=decl: self._check_type_params(d))
+            self._type_params = frozenset(decl.type_params)
+            try:
+                params = [self._part(path, lambda p=p: self._resolve(p.type), ERROR)
+                          for p in decl.params]
+                ret = (self._part(path, lambda: self._resolve(decl.ret_type), ERROR)
+                       if decl.ret_type is not None else None)
+            finally:
+                self._type_params = frozenset()
+            self.functions[name] = FuncSig(params, ret, decl, list(decl.type_params),
+                                           dict(decl.type_param_bounds))
 
     def _check_type_params(self, decl) -> None:
         seen: set[str] = set()
@@ -1003,29 +1099,28 @@ class Checker:
         """Resolve each user `trait`'s method signatures, with `Self` allowed."""
         self._register_builtin_op_traits()
         for decl in self._trait_decls:
-            with in_file(_source_path(decl)):
-                self._check_trait_type_params(decl)
-                methods: dict[str, TraitMethodSig] = {}
-                for m in decl.methods:
-                    if m.name in methods:
-                        raise TypeCheckError(
-                            f"duplicate method '{m.name}' in trait '{decl.name}'",
-                            at=m,
-                        )
-                    # `Self` and the trait's own type parameters are both in scope
-                    # for the signatures (v0.5.5); the latter resolve to `TypeParam`s.
-                    self._allow_self = True
-                    self._type_params = frozenset(decl.type_params)
-                    try:
-                        params = [SELF] + [self._resolve(p.type) for p in m.params]
-                        ret = (self._resolve(m.ret_type)
-                               if m.ret_type is not None else None)
-                    finally:
-                        self._allow_self = False
-                        self._type_params = frozenset()
-                    methods[m.name] = TraitMethodSig(m.name, params, ret, m.receiver)
-                self.traits[decl.name] = TraitSig(decl.name, methods, decl,
-                                                  type_params=list(decl.type_params))
+            path = _source_path(decl)
+            self._part(path, lambda d=decl: self._check_trait_type_params(d))
+            methods: dict[str, TraitMethodSig] = {}
+            for m in decl.methods:
+                if m.name in methods:
+                    self._fail_part(path, f"duplicate method '{m.name}' in trait '{decl.name}'", m)
+                    continue
+                # `Self` and the trait's own type parameters are both in scope
+                # for the signatures (v0.5.5); the latter resolve to `TypeParam`s.
+                self._allow_self = True
+                self._type_params = frozenset(decl.type_params)
+                try:
+                    params = [SELF] + [self._part(path, lambda p=p: self._resolve(p.type), ERROR)
+                                       for p in m.params]
+                    ret = (self._part(path, lambda m=m: self._resolve(m.ret_type), ERROR)
+                           if m.ret_type is not None else None)
+                finally:
+                    self._allow_self = False
+                    self._type_params = frozenset()
+                methods[m.name] = TraitMethodSig(m.name, params, ret, m.receiver)
+            self.traits[decl.name] = TraitSig(decl.name, methods, decl,
+                                              type_params=list(decl.type_params))
 
     def _check_trait_type_params(self, decl: ast.TraitDecl) -> None:
         seen: set[str] = set()
@@ -1080,11 +1175,12 @@ class Checker:
 
     def _check_trait_conformance(self, impl: ast.ImplDecl, key: str,
                                  target: Type, trait: TraitSig,
-                                 param_map: dict | None = None) -> None:
+                                 param_map: dict | None = None) -> bool:
         """Verify `impl Trait for T` covers exactly the trait's signatures with
         matching receiver mutability and `Self`-substituted parameter/return
         types (D52). For a generic trait, `param_map` substitutes the trait's
-        type parameters with this impl's `trait_args` (v0.5.5, D55)."""
+        type parameters with this impl's `trait_args` (v0.5.5, D55). False: a
+        method that failed earlier couldn't be compared (MYLA-110)."""
         impl_methods = {m.name: m for m in impl.methods}
         missing = set(trait.methods) - set(impl_methods)
         if missing:
@@ -1100,8 +1196,12 @@ class Checker:
                 f"in the trait: {', '.join(sorted(extra))}",
                 at=impl,
             )
+        broken = False
         for mname, tmsig in trait.methods.items():
-            sig = self.methods[key][mname]
+            sig = self.methods[key].get(mname)
+            if sig is None:          # left out (MYLA-110)
+                broken = True
+                continue
             if sig.decl.receiver != tmsig.receiver:
                 raise TypeCheckError(
                     f"method '{mname}' in impl of trait '{trait.name}' for "
@@ -1112,6 +1212,10 @@ class Checker:
             exp_params = [self._subst_self(p, target, param_map)
                           for p in tmsig.params]
             exp_ret = self._subst_self(tmsig.ret, target, param_map)
+            if _sig_has_error(exp_params, exp_ret) or _sig_has_error(sig.params, sig.ret):
+                # one side failed and had its error: no comparison (MYLA-110)
+                broken = True
+                continue
             if sig.params != exp_params or sig.ret != exp_ret:
                 exp = (f"({', '.join(type_name(p) for p in exp_params[1:])}) -> "
                        f"{type_name(exp_ret)}")
@@ -1121,24 +1225,30 @@ class Checker:
                     f"'{exp}')",
                     at=sig.decl,
                 )
+        return not broken
 
     def _validate_bounds(self) -> None:
         """Check every generic signature's bounds name a real type parameter and
         a known trait (built-in or user); reject unknown bounds early (X9)."""
         for sig in self.functions.values():
-            with in_file(_source_path(sig.decl)):
-                for tp, traits in sig.bounds.items():
-                    if tp not in sig.type_params:
-                        raise TypeCheckError(
-                            f"bound on unknown type parameter '{tp}'",
-                            at=sig.decl,
-                        )
-                    for tr in traits:
-                        if tr not in self.traits:
-                            raise TypeCheckError(
-                                f"unknown trait '{tr}' in bound '{tp}: {tr}'",
-                                at=sig.decl,
-                            )
+            # a bad bound is left out, so calls don't check it, and the
+            # function's body, which may rely on it, isn't checked (MYLA-110)
+            path = _source_path(sig.decl)
+            kept: dict = {}
+            for tp, traits in sig.bounds.items():
+                if tp not in sig.type_params:
+                    self._fail_part(path, f"bound on unknown type parameter '{tp}'", sig.decl)
+                    self._skipped.add(id(sig.decl))
+                    continue
+                good = []
+                for tr in traits:
+                    if tr not in self.traits:
+                        self._fail_part(path, f"unknown trait '{tr}' in bound '{tp}: {tr}'", sig.decl)
+                        self._skipped.add(id(sig.decl))
+                    else:
+                        good.append(tr)
+                kept[tp] = good
+            sig.bounds = kept
 
     def _check_call_bounds(self, sig: FuncSig, subst: dict[str, Type],
                            expr: ast.Call) -> None:
@@ -1167,9 +1277,15 @@ class Checker:
         built-in implicit default on a primitive (D52). Used by operator
         resolution and generic-bound checking (v0.4.4)."""
         key = self._method_key(t)
+        if (trait, key) in self._broken_impls:
+            raise _Poisoned()   # its impl or derive failed (MYLA-110)
         if key is not None and trait in self.trait_impls.get(key, set()):
             return True
-        return _primitive_default_trait(t, trait)
+        if _primitive_default_trait(t, trait):
+            return True
+        if trait in self._lost_traits:
+            raise _Poisoned()   # maybe the left-out impl (MYLA-110)
+        return False
 
     # -- #derive (v0.4.4) ----------------------------------------------------
 
@@ -1180,45 +1296,70 @@ class Checker:
         the allow-list is `Eq` only (Ord is the planned next addition)."""
         targets: list[ast.StructDecl | ast.EnumDecl] = []
         for decl in self.program.decls:
-            with in_file(_source_path(decl)):
-                for attr in getattr(decl, "attributes", []):
-                    if attr.name != "derive":
-                        continue
-                    if not isinstance(decl, (ast.StructDecl, ast.EnumDecl)):
-                        raise TypeCheckError(
-                            "'#derive' may only be applied to a struct or enum",
-                            at=attr,
-                        )
-                    if decl.type_params:
-                        raise TypeCheckError(
-                            "deriving on generic types is not supported yet (v0.4.4 "
-                            "derives Eq for concrete structs/enums)",
-                            at=attr,
-                        )
-                    self._validate_derive_attr(attr)
-                    if decl not in targets:
-                        targets.append(decl)
+            if id(decl) in self._skipped:
+                continue
+            for attr in getattr(decl, "attributes", []):
+                if attr.name != "derive":
+                    continue
+                if not self._part(_source_path(decl),
+                                  lambda d=decl, a=attr: self._check_derive_attr(d, a) or True, False):
+                    # Eq is broken for the type: its uses stop silently (MYLA-110)
+                    if isinstance(decl, (ast.StructDecl, ast.EnumDecl)):
+                        self._broken_impls.add(("Eq", decl.name))
+                    continue
+                if decl not in targets:
+                    targets.append(decl)
         if not targets:
             return
         # The set of named types that will be `Eq` — user `impl Eq for T` plus
         # every type being derived — used for the structural derivability check.
         eq_types = {decl.name for decl in targets}
+        # an `impl Eq` for a type that doesn't exist may have been meant for any
+        # of them: a type that isn't Eq is then no news (MYLA-110)
+        lost_eq = False
         for impl in self._impl_decls:
             if impl.trait_name == "Eq" and isinstance(impl.target, ast.TypeRef):
                 eq_types.add(impl.target.name)
+                if not self._names_a_type(impl.target.name):
+                    lost_eq = True
         for decl in targets:
-            with in_file(_source_path(decl)):
-                if any(i.trait_name == "Eq" and isinstance(i.target, ast.TypeRef)
-                       and i.target.name == decl.name for i in self._impl_decls):
-                    raise TypeCheckError(
-                        f"type '{decl.name}' both derives Eq and has an explicit "
-                        f"'impl Eq for {decl.name}'",
-                        at=decl,
-                    )
-                self._check_derivable_eq(decl, eq_types)
-                impl = self._make_eq_impl(decl)
-                self._impl_decls.append(impl)
-                self.program.decls.append(impl)
+            path = _source_path(decl)
+            if any(i.trait_name == "Eq" and isinstance(i.target, ast.TypeRef)
+                   and i.target.name == decl.name for i in self._impl_decls):
+                # the explicit impl stands
+                self._fail_part(path, f"type '{decl.name}' both derives Eq and has an explicit "
+                                f"'impl Eq for {decl.name}'", decl)
+                continue
+            try:
+                with in_file(path):
+                    self._check_derivable_eq(decl, eq_types)
+            except TypeCheckError as err:
+                if not lost_eq:
+                    self._record(err)
+                self._broken_impls.add(("Eq", decl.name))
+                continue
+            impl = self._make_eq_impl(decl)
+            self._impl_decls.append(impl)
+            self.program.decls.append(impl)
+
+    def _names_a_type(self, name: str) -> bool:
+        """Whether `name` is a type the program or the language declares."""
+        return (name in self.struct_decls or name in self.enum_decls or name in self._aliases_raw
+                or name in _PRIMITIVES or name in ("int", "float"))
+
+    def _check_derive_attr(self, decl: ast.Decl, attr: ast.Attribute) -> None:
+        if not isinstance(decl, (ast.StructDecl, ast.EnumDecl)):
+            raise TypeCheckError(
+                "'#derive' may only be applied to a struct or enum",
+                at=attr,
+            )
+        if decl.type_params:
+            raise TypeCheckError(
+                "deriving on generic types is not supported yet (v0.4.4 "
+                "derives Eq for concrete structs/enums)",
+                at=attr,
+            )
+        self._validate_derive_attr(attr)
 
     def _validate_derive_attr(self, attr: ast.Attribute) -> None:
         if attr.outputs is not None:
@@ -1245,8 +1386,9 @@ class Checker:
 
     def _check_derivable_eq(self, decl, eq_types: set[str]) -> None:
         def is_eq(t: Type) -> bool:
-            # every primitive with a built-in `==` (MYLA-13)
-            if isinstance(t, (IntType, BoolType, StrType, CharType, FloatType)):
+            # every primitive with a built-in `==` (MYLA-13); a field of the
+            # error type has had its error (MYLA-110)
+            if isinstance(t, (IntType, BoolType, StrType, CharType, FloatType, ErrorType)):
                 return True
             if isinstance(t, (StructType, EnumType)):
                 return t.name in eq_types
@@ -1359,104 +1501,123 @@ class Checker:
         collide with a field; multiple `impl` blocks on one type are allowed.
         """
         for impl in self._impl_decls:
-            with in_file(_source_path(impl)):
-                self._check_type_params(impl)
-                self._type_params = frozenset(impl.type_params)
-                try:
-                    target = self._resolve(impl.target)
-                    trait_args = [self._resolve(a) for a in impl.trait_args]
-                finally:
-                    self._type_params = frozenset()
-                key = self._method_key(target)
-                if isinstance(target, (StructType, EnumType)):
-                    if impl.type_params:
-                        want = tuple(TypeParam(p) for p in impl.type_params)
-                        if target.args != want:
-                            raise TypeCheckError(
-                                f"a generic impl must apply to "
-                                f"'{key}<{', '.join(impl.type_params)}>' with its type "
-                                "parameters in order",
-                                at=impl,
-                            )
-                    elif target.args:
-                        raise TypeCheckError(
-                            "cannot 'impl' on a concrete generic instantiation; write "
-                            "'impl<T> " + key + "<T> { ... }' to cover every instance",
-                            at=impl,
-                        )
-                elif key is not None:
-                    # A built-in receiver type (no orphan rule, D45). v0.4.1c covers
-                    # read-only `self` on scalars / `str` / `StringBuilder`.
-                    if impl.type_params:
-                        raise TypeCheckError(
-                            "generic impls on built-in types are not supported yet "
-                            "(v0.4.1 covers concrete built-in receivers)",
-                            at=impl,
-                        )
-                    for m in impl.methods:
-                        if m.receiver == "var self":
-                            raise TypeCheckError(
-                                "'var self' methods on built-in types are not "
-                                "supported yet; use a read-only 'self' receiver",
-                                at=m,
-                            )
-                else:
+            self._resolve_impl(impl)
+
+    def _resolve_impl(self, impl: ast.ImplDecl) -> None:
+        """Resolve one `impl`, recording each error and going on (MYLA-110): an
+        impl whose target can't be resolved, can't have methods, or repeats a
+        trait impl is left out; one of an unknown trait keeps its methods; one
+        that doesn't conform to its trait leaves the pair broken."""
+        path = _source_path(impl)
+        self._part(path, lambda: self._check_type_params(impl))
+        self._type_params = frozenset(impl.type_params)
+        try:
+            target = self._part(path, lambda: self._resolve(impl.target), ERROR)
+            trait_args = [self._part(path, lambda a=a: self._resolve(a), ERROR)
+                          for a in impl.trait_args]
+        finally:
+            self._type_params = frozenset()
+        key = None if _has_error(target) else self._method_key(target)
+        if _has_error(target) or not self._part(
+                path, lambda: self._check_impl_target(impl, target, key) or True, False):
+            if key is None:
+                self._lose_impl(impl)
+                return
+        trait = None
+        conforms = True
+        param_map: dict | None = None
+        if impl.trait_name is not None:
+            trait = self.traits.get(impl.trait_name)
+            if trait is None:
+                self._fail_part(path, f"unknown trait '{impl.trait_name}' in "
+                                f"'impl {impl.trait_name} for {key}'", impl)
+            else:
+                # Match the trait's arity and bind its type parameters to this
+                # impl's arguments (v0.5.5, D55). Coherence ignores the
+                # arguments, so a type implements a trait at most once.
+                if len(trait_args) != len(trait.type_params):
+                    expected = (f"{impl.trait_name}<"
+                                f"{', '.join(trait.type_params)}>"
+                                if trait.type_params else impl.trait_name)
+                    self._fail_part(path, f"trait '{impl.trait_name}' expects "
+                                    f"{len(trait.type_params)} type argument(s), got "
+                                    f"{len(trait_args)} (use 'impl {expected} for {key}')", impl)
+                    conforms = False
+                elif trait.type_params:
+                    param_map = dict(zip(trait.type_params, trait_args))
+                pair = (impl.trait_name, key)
+                if pair in self._user_trait_impls:
+                    self._fail_part(path, f"duplicate impl of trait '{impl.trait_name}' for type "
+                                    f"'{key}' (at most one user impl per trait/type pair)", impl)
+                    return
+                self._user_trait_impls.add(pair)
+        table = self.methods.setdefault(key, {})
+        field_names = set(self.structs.get(key, {}).keys())
+        for m in impl.methods:
+            # a method that can't be added is left out, body and all
+            if m.name in table:
+                self._fail_part(path, f"duplicate method '{m.name}' for type '{key}'", m)
+                continue
+            if m.name in field_names:
+                self._fail_part(path, f"method '{m.name}' collides with a field of '{key}'", m)
+                continue
+            self._register_method(impl, key, m)
+        if trait is not None:
+            if conforms:
+                conforms = self._part(path, lambda: self._check_trait_conformance(
+                    impl, key, target, trait, param_map), False)
+            if not conforms:
+                self._broken_impls.add((impl.trait_name, key))
+            self.trait_impls.setdefault(key, set()).add(impl.trait_name)
+
+    def _lose_impl(self, impl: ast.ImplDecl) -> None:
+        """Leave `impl` out: the type it was for is unknown, so a missing method
+        or trait impl of its names ends a check silently (MYLA-110)."""
+        self._lost_methods.update(m.name for m in impl.methods)
+        if impl.trait_name is not None:
+            self._lost_traits.add(impl.trait_name)
+
+    def _check_impl_target(self, impl: ast.ImplDecl, target: Type, key: str | None) -> None:
+        """Whether `impl` may add methods to `target`."""
+        if isinstance(target, (StructType, EnumType)):
+            if impl.type_params:
+                want = tuple(TypeParam(p) for p in impl.type_params)
+                if target.args != want:
                     raise TypeCheckError(
-                        f"cannot 'impl' on type '{type_name(target)}'; v0.4.1 supports "
-                        "structs, enums, and concrete scalar / str / StringBuilder "
-                        "receivers",
+                        f"a generic impl must apply to "
+                        f"'{key}<{', '.join(impl.type_params)}>' with its type "
+                        "parameters in order",
                         at=impl,
                     )
-                trait = None
-                param_map: dict | None = None
-                if impl.trait_name is not None:
-                    trait = self.traits.get(impl.trait_name)
-                    if trait is None:
-                        raise TypeCheckError(
-                            f"unknown trait '{impl.trait_name}' in "
-                            f"'impl {impl.trait_name} for {key}'",
-                            at=impl,
-                        )
-                    # Match the trait's arity and bind its type parameters to this
-                    # impl's arguments (v0.5.5, D55). Coherence (below) ignores the
-                    # arguments, so a type implements a trait at most once.
-                    if len(trait_args) != len(trait.type_params):
-                        expected = (f"{impl.trait_name}<"
-                                    f"{', '.join(trait.type_params)}>"
-                                    if trait.type_params else impl.trait_name)
-                        raise TypeCheckError(
-                            f"trait '{impl.trait_name}' expects "
-                            f"{len(trait.type_params)} type argument(s), got "
-                            f"{len(trait_args)} (use 'impl {expected} for {key}')",
-                            at=impl,
-                        )
-                    if trait.type_params:
-                        param_map = dict(zip(trait.type_params, trait_args))
-                    pair = (impl.trait_name, key)
-                    if pair in self._user_trait_impls:
-                        raise TypeCheckError(
-                            f"duplicate impl of trait '{impl.trait_name}' for type "
-                            f"'{key}' (at most one user impl per trait/type pair)",
-                            at=impl,
-                        )
-                    self._user_trait_impls.add(pair)
-                table = self.methods.setdefault(key, {})
-                field_names = set(self.structs.get(key, {}).keys())
-                for m in impl.methods:
-                    if m.name in table:
-                        raise TypeCheckError(
-                            f"duplicate method '{m.name}' for type '{key}'",
-                            at=m,
-                        )
-                    if m.name in field_names:
-                        raise TypeCheckError(
-                            f"method '{m.name}' collides with a field of '{key}'",
-                            at=m,
-                        )
-                    self._register_method(impl, key, m)
-                if trait is not None:
-                    self._check_trait_conformance(impl, key, target, trait, param_map)
-                    self.trait_impls.setdefault(key, set()).add(impl.trait_name)
+            elif target.args:
+                raise TypeCheckError(
+                    "cannot 'impl' on a concrete generic instantiation; write "
+                    "'impl<T> " + key + "<T> { ... }' to cover every instance",
+                    at=impl,
+                )
+        elif key is not None:
+            # A built-in receiver type (no orphan rule, D45). v0.4.1c covers
+            # read-only `self` on scalars / `str` / `StringBuilder`.
+            if impl.type_params:
+                raise TypeCheckError(
+                    "generic impls on built-in types are not supported yet "
+                    "(v0.4.1 covers concrete built-in receivers)",
+                    at=impl,
+                )
+            for m in impl.methods:
+                if m.receiver == "var self":
+                    raise TypeCheckError(
+                        "'var self' methods on built-in types are not "
+                        "supported yet; use a read-only 'self' receiver",
+                        at=m,
+                    )
+        else:
+            raise TypeCheckError(
+                f"cannot 'impl' on type '{type_name(target)}'; v0.4.1 supports "
+                "structs, enums, and concrete scalar / str / StringBuilder "
+                "receivers",
+                at=impl,
+            )
 
     def _register_method(self, impl: ast.ImplDecl, key: str,
                          m: ast.FunDecl) -> None:
@@ -1472,11 +1633,14 @@ class Checker:
         fdecl.span = m.span
         fdecl.source_path = getattr(m, "source_path", None)
         fdecl.tag_eq = getattr(m, "tag_eq", False)
-        self._check_type_params(fdecl)
+        path = _source_path(impl)
+        self._part(path, lambda: self._check_type_params(fdecl))
         self._type_params = frozenset(combined_tps)
         try:
-            params = [self._resolve(p.type) for p in fdecl.params]
-            ret = self._resolve(fdecl.ret_type) if fdecl.ret_type is not None else None
+            params = [self._part(path, lambda p=p: self._resolve(p.type), ERROR)
+                      for p in fdecl.params]
+            ret = (self._part(path, lambda: self._resolve(fdecl.ret_type), ERROR)
+                   if fdecl.ret_type is not None else None)
         finally:
             self._type_params = frozenset()
         sig = FuncSig(params, ret, fdecl, combined_tps, combined_bounds)
@@ -1506,7 +1670,7 @@ class Checker:
             vt = self._resolve(ref.value, visiting)
             # A type-parameter key (e.g. in a generic function) is validated when
             # the function is instantiated with a concrete key type.
-            if not _is_map_key(kt) and not self._contains_type_param(kt):
+            if not _is_map_key(kt) and not self._contains_type_param(kt) and not _has_error(kt):
                 raise TypeCheckError(
                     f"map key type must be a primitive (integer, char, bool, or "
                     f"str), found '{type_name(kt)}'",
@@ -1561,11 +1725,19 @@ class Checker:
             return _PRIMITIVES[name]
         if name in self._aliases_raw:
             if name in self._alias_cache:
-                return self._alias_cache[name]
+                cached = self._alias_cache[name]
+                if self._bodies and _has_error(cached):
+                    raise _Poisoned()
+                return cached
             if name in visiting:
                 raise TypeCheckError(f"type alias cycle involving '{name}'", at=ref)
-            with in_file(self._alias_paths.get(name)):
-                resolved = self._resolve(self._aliases_raw[name], visiting | {name})
+            try:
+                with in_file(self._alias_paths.get(name)):
+                    resolved = self._resolve(self._aliases_raw[name], visiting | {name})
+            except TypeCheckError:
+                # the alias is the error type from now on (MYLA-110)
+                self._alias_cache[name] = ERROR
+                raise
             self._alias_cache[name] = resolved
             return resolved
         if name == "int":
@@ -1644,13 +1816,13 @@ class Checker:
             if find_cycle(name, name, frozenset({name}), stop_at_boxed=True):
                 kind = "enum" if name in self.enums else "struct"
                 decl = self.enum_decls.get(name) or self.struct_decls.get(name)
-                with in_file(_source_path(decl)):
-                    raise TypeCheckError(
-                        f"recursive {kind} '{name}' would have infinite size; "
-                        "only enums can be recursive (they are boxed) — wrap the "
-                        "cycle in an enum to introduce indirection",
-                        at=decl,
-                    )
+                self._fail_part(
+                    _source_path(decl),
+                    f"recursive {kind} '{name}' would have infinite size; "
+                    "only enums can be recursive (they are boxed) — wrap the "
+                    "cycle in an enum to introduce indirection",
+                    decl,
+                )
 
     # -- attributes & entry point -------------------------------------------
 
@@ -1659,7 +1831,10 @@ class Checker:
     def _fold_consts(self) -> None:
         """Type-check and constant-fold every `const`, detecting cycles."""
         for name in self._const_decls:
-            self._ensure_const(name)
+            try:
+                self._ensure_const(name)
+            except _Poisoned:
+                pass       # its error, if it has one, is recorded
 
     def _ensure_const(self, name: str) -> ConstInfo:
         """Return the folded value of const `name`, folding it (and any consts it
@@ -1672,13 +1847,21 @@ class Checker:
                 f"const '{name}' is defined in terms of itself", at=decl
             )
         self._const_folding.add(name)
+        # a const that fails keeps its declared type, if that resolved, and a
+        # failed value: its error is recorded here, once, and the consts folded
+        # from it fail silently (MYLA-110)
+        declared: Type = ERROR
+        failed = False
         try:
             with in_file(_source_path(decl)):   # also when folded from elsewhere
-                declared = self._resolve(decl.declared_type)
-                if isinstance(declared, TypeParam):
+                t = self._resolve(decl.declared_type)
+                if isinstance(t, TypeParam):
                     raise TypeCheckError(
                         "a const type must be concrete", at=decl
                     )
+                declared = t
+                if _has_error(declared):
+                    raise _Poisoned()
                 vt = self._expect_value(decl.value, _Scope(), declared)
                 if vt != declared:
                     raise TypeCheckError(
@@ -1687,10 +1870,17 @@ class Checker:
                         at=decl.value,
                     )
                 value = self._fold_const_expr(decl.value)
+        except TypeCheckError as err:
+            self._record(err)
+            failed = True
+        except _Poisoned:
+            failed = True
         finally:
             self._const_folding.discard(name)
-        info = ConstInfo(declared, value)
+        info = ConstInfo(declared, _FAILED if failed else value)
         self.consts[name] = info
+        if failed:
+            raise _Poisoned()
         return info
 
     def _fold_const_expr(self, expr: ast.Expr):
@@ -1707,7 +1897,10 @@ class Checker:
         if isinstance(expr, ast.Name):
             ref = getattr(expr, "const_ref", None)
             if ref is not None:
-                return self._ensure_const(ref).value
+                value = self._ensure_const(ref).value
+                if value is _FAILED:
+                    raise _Poisoned()
+                return value
             raise TypeCheckError(
                 f"'{expr.ident}' is not a constant and cannot appear in a const "
                 "initializer",
@@ -1799,7 +1992,8 @@ class Checker:
     def _check_attributes_and_entry(self) -> None:
         main_decls: list[ast.FunDecl] = []
         for decl in self.program.decls:
-            self._on_its_own(decl, lambda d=decl: self._check_attributes(d, main_decls))
+            if id(decl) not in self._skipped:
+                self._on_its_own(decl, lambda d=decl: self._check_attributes(d, main_decls))
 
         named_main = self.functions.get("main")
         entry = main_decls[0] if main_decls else (named_main.decl if named_main else None)
@@ -1861,6 +2055,8 @@ class Checker:
                 f"'#test' expects {len(sig.params)} argument(s), got {len(attr.args)}",
                 at=attr,
             )
+        if _sig_has_error(sig.params, sig.ret):
+            raise _Poisoned()   # the signature failed (MYLA-110)
         for arg, ptype in zip(attr.args, sig.params):
             t = self._expect_value(arg, _Scope(), ptype)
             if t != ptype:
@@ -1919,7 +2115,16 @@ class Checker:
 
     def _check_stmt(self, stmt: ast.Stmt, scope: _Scope, ret: Type | None) -> None:
         if isinstance(stmt, ast.VarDecl):
-            declared = self._resolve(stmt.declared_type) if stmt.declared_type else None
+            declared = self._resolve_annotation(stmt.declared_type) if stmt.declared_type else None
+            if _has_error(declared):
+                # the annotation names a failed alias: the binding has the error
+                # type and its value isn't checked (MYLA-110)
+                if not scope.define(stmt.name, _Binding(ERROR, mutable=(stmt.kind == "var"), at=stmt)):
+                    raise TypeCheckError(
+                        f"'{stmt.name}' is already declared in this scope", at=stmt,
+                        notes=self._first_declared(stmt.name, scope),
+                    )
+                return
             value_type = self._expect_value(stmt.init, scope, declared)
             final = declared if declared is not None else value_type
             if declared is not None and value_type != declared:
@@ -2027,6 +2232,8 @@ class Checker:
                             "cannot return a value from a function with no return type",
                             at=stmt,
                         )
+            elif _has_error(ret):
+                pass   # the return type failed: the value isn't checked (MYLA-110)
             else:
                 if stmt.value is None:
                     raise TypeCheckError(
@@ -2047,7 +2254,9 @@ class Checker:
         elif isinstance(stmt, ast.ExprStmt):
             if isinstance(stmt.expr, ast.Match):
                 stmt.expr.is_statement = True
-            self._infer(stmt.expr, scope, None)  # void calls allowed here
+            # void calls allowed here; so is a result of the error type, which
+            # nothing uses (MYLA-110)
+            self._infer_node(stmt.expr, scope, None)
 
         else:  # pragma: no cover - defensive
             raise TypeCheckError(f"unsupported statement {type(stmt).__name__}",
@@ -2083,6 +2292,14 @@ class Checker:
             "invalid destructuring binding", at=binding
         )
 
+    def _resolve_annotation(self, ref) -> Type:
+        """`ref` resolved in a body, where a failed alias gives the error type
+        instead of ending the check (MYLA-110)."""
+        try:
+            return self._resolve(ref)
+        except _Poisoned:
+            return ERROR
+
     # -- notes (MYLA-65) -----------------------------------------------------
 
     def _declared_at(self, target: ast.Expr, scope: _Scope) -> list[Note]:
@@ -2116,6 +2333,12 @@ class Checker:
                 *self._aliases_raw, *self._type_params]
 
     def _check_lvalue(self, expr: ast.Expr, scope: _Scope) -> tuple[Type, bool]:
+        t, mutable = self._check_lvalue_node(expr, scope)
+        if _has_error(t):
+            raise _Poisoned()
+        return t, mutable
+
+    def _check_lvalue_node(self, expr: ast.Expr, scope: _Scope) -> tuple[Type, bool]:
         if isinstance(expr, ast.Name):
             binding = scope.lookup(expr.ident)
             if binding is None:
@@ -2182,6 +2405,13 @@ class Checker:
         return t
 
     def _infer(self, expr: ast.Expr, scope: _Scope, expected: Type | None) -> Type | None:
+        t = self._infer_node(expr, scope, expected)
+        if _has_error(t):
+            # what uses this value depends on a declaration that failed (MYLA-110)
+            raise _Poisoned()
+        return t
+
+    def _infer_node(self, expr: ast.Expr, scope: _Scope, expected: Type | None) -> Type | None:
         if isinstance(expr, ast.IntLit):
             return self._infer_int_lit(expr, expected)
         if isinstance(expr, ast.FloatLit):
@@ -2473,6 +2703,8 @@ class Checker:
     def _infer_try(self, expr: ast.Try, scope: _Scope) -> Type:
         ot = self._expect_value(expr.operand, scope, None)
         ret = self._current_ret
+        if _has_error(ret):
+            raise _Poisoned()   # the return type failed (MYLA-110)
         # `?` returns from the innermost function or lambda (MYLA-72)
         where = "lambda" if self._lambda_stack else "function"
         if ret is None and self._lambda_stack:
@@ -2609,6 +2841,11 @@ class Checker:
     # -- patterns ------------------------------------------------------------
 
     def _check_pattern(self, pat, t: Type, scope: _Scope) -> None:
+        if _has_error(t):
+            raise _Poisoned()
+        self._check_pattern_node(pat, t, scope)
+
+    def _check_pattern_node(self, pat, t: Type, scope: _Scope) -> None:
         if isinstance(pat, ast.PatWildcard):
             return
         if isinstance(pat, ast.PatBinding):
@@ -2987,6 +3224,8 @@ class Checker:
                 return self._infer_bare_variant(expr, enum_name, expr.ident, expected)
             if expr.ident in self.functions and "." not in expr.ident:
                 return self._infer_fun_value(expr, expected)
+            if expr.ident in self._redefined_builtins:
+                raise _Poisoned()
             if expr.ident in self.functions or expr.ident in _BUILTIN_FUNCS:
                 raise TypeCheckError(
                     f"'{expr.ident}' cannot be used as a value here",
@@ -3582,6 +3821,10 @@ class Checker:
                 field_t = self._struct_field_types(recv_type).get(callee.field_name)
                 if isinstance(field_t, FuncType):
                     return self._infer_indirect_call(expr, scope)
+                if _has_error(field_t):
+                    raise _Poisoned()   # the field's type failed (MYLA-110)
+            if callee.field_name in self._lost_methods:
+                raise _Poisoned()   # maybe a left-out impl's (MYLA-110)
             raise TypeCheckError(
                 f"type '{type_name(recv_type)}' has no method "
                 f"'{callee.field_name}'",
@@ -3615,6 +3858,8 @@ class Checker:
         if sig.type_params:
             return self._infer_generic_method(expr, sig, recv_type, scope)
         for arg, ptype in zip(expr.args, sig.params[1:]):
+            if _has_error(ptype):
+                continue    # the parameter's type failed (MYLA-110)
             at = self._expect_value(arg, scope, ptype)
             if at != ptype:
                 raise TypeCheckError(
@@ -3631,6 +3876,8 @@ class Checker:
         (and method's) type parameters from the receiver type and the arguments,
         then record them in `expr.type_args` for monomorphization."""
         method = expr.callee.field_name
+        if _sig_has_error(sig.params, sig.ret):
+            raise _Poisoned()   # its type arguments can't be inferred (MYLA-110)
         subst: dict[str, Type] = {}
         # The receiver pins the impl's type parameters (e.g. `Box<int>` → T=int).
         self._unify_param(sig.params[0], recv_type, subst)
@@ -3688,6 +3935,8 @@ class Checker:
         if not isinstance(callee, ast.Name):
             return self._infer_indirect_call(expr, scope)
         name = callee.ident
+        if name in self._redefined_builtins:
+            raise _Poisoned()   # written against the left-out redefinition (MYLA-110)
         if name == "print":
             if len(expr.args) != 1:
                 raise TypeCheckError("print() takes exactly one argument",
@@ -3955,6 +4204,8 @@ class Checker:
                 at=expr,
             )
         for arg, ptype in zip(expr.args, sig.params):
+            if _has_error(ptype):
+                continue    # the parameter's type failed (MYLA-110)
             at = self._expect_value(arg, scope, ptype)
             if at != ptype:
                 raise TypeCheckError(
@@ -4008,6 +4259,8 @@ class Checker:
         `((r, t0) => (h0) => r.m(t0, h0))(recv, a)`, whose parameters the
         inner lambda captures by value (D48)."""
         param_types, _ret_t = self._partial_target(expr, scope)
+        if _sig_has_error(param_types, _ret_t):
+            raise _Poisoned()
         if len(expr.args) != len(param_types):
             raise TypeCheckError(
                 f"partial application must list every argument position "
@@ -4082,6 +4335,10 @@ class Checker:
                 field_t = self._struct_field_types(recv_type).get(callee.field_name)
                 if isinstance(field_t, FuncType):
                     return list(field_t.params), field_t.ret
+                if _has_error(field_t):
+                    raise _Poisoned()   # the field's type failed (MYLA-110)
+            if callee.field_name in self._lost_methods:
+                raise _Poisoned()   # maybe a left-out impl's (MYLA-110)
             raise TypeCheckError(
                 f"type '{type_name(recv_type)}' has no method "
                 f"'{callee.field_name}'",
@@ -4112,6 +4369,8 @@ class Checker:
 
     def _infer_generic_call(self, expr: ast.Call, name: str, sig: FuncSig,
                             scope: _Scope) -> Type | None:
+        if _sig_has_error(sig.params, sig.ret):
+            raise _Poisoned()   # its type arguments can't be inferred (MYLA-110)
         if len(expr.args) != len(sig.params):
             raise TypeCheckError(
                 f"function '{name}' expects {len(sig.params)} argument(s), "
@@ -4311,8 +4570,12 @@ class Checker:
                 at=expr,
             )
         params = self.enum_decls[enum_name].type_params
+        if any(_has_error(pt) for pt in payload) and params:
+            raise _Poisoned()
         if not params:
             for arg, pt in zip(expr.args, payload):
+                if _has_error(pt):
+                    continue    # the payload's type failed (MYLA-110)
                 at = self._expect_value(arg, scope, pt)
                 if at != pt:
                     raise TypeCheckError(
@@ -4405,8 +4668,12 @@ class Checker:
                 at=expr,
             )
         params = self.struct_decls[expr.type_name].type_params
+        if params and any(_has_error(t) for t in template.values()):
+            raise _Poisoned()
         if not params:
             for init in expr.fields:
+                if _has_error(template[init.name]):
+                    continue    # the field's type failed (MYLA-110)
                 vt = self._expect_value(init.value, scope, template[init.name])
                 if vt != template[init.name]:
                     raise TypeCheckError(

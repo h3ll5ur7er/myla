@@ -1,5 +1,8 @@
 //~ type error: 'Self' is only valid inside a trait declaration
+//~ errors: 2
+//~ next: 'Self' is only valid inside a trait declaration
 // `Self` is a trait-signature placeholder; it has no meaning elsewhere (v0.4.4).
+// Each part of the signature that names it is reported (MYLA-110).
 fun identity(x: Self) -> Self {
     return x
 }

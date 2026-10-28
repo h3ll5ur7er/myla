@@ -27,7 +27,36 @@ flowchart TD
 
 Declaration order never matters, because every table is built before any body is checked.
 
-An error in the passes up to `_fold_consts` ends the check: the tables would be incomplete. After that each declaration's attributes, the entry point, each function body and then each method body is checked on its own (`_on_its_own`, from a clean state: loop depth, lambda stack, return type), and its first error is recorded; checking goes on with the next one, up to 20 errors (D80, [[MYLA-65]]). A function's errors cannot affect another's, since signatures come from the tables, so this needs no error type. `check` raises the first error found, with the others in its `more`, in that order: attribute and entry-point errors, then free functions, then methods, each in declaration order (the entry file's declarations before the modules it imports). The self-hosted checker collects them the same way (`run_all`, `check_body`, `note`).
+The passes up to `_fold_consts` record each declaration part's error and go on, the part taking the error type or being left out (D84, [[MYLA-110]]; see "Going on after a declaration's error" below). After that each declaration's attributes, the entry point, each function body and then each method body is checked on its own (`_on_its_own`, from a clean state: loop depth, lambda stack, return type), and its first error is recorded; checking goes on with the next one, up to 20 errors (D80, [[MYLA-65]]). A function's errors cannot affect another's, since signatures come from the tables. `check` raises the first error found, with the others in its `more`, in that order: the declarations' errors in the order the passes find them, then attribute and entry-point errors, then free functions, then methods, each in declaration order (the entry file's declarations before the modules it imports). The self-hosted checker collects them the same way (`run_all`, `record`, `check_body`, `note`).
+
+## Going on after a declaration's error
+
+D84, [[MYLA-110]]. A part of a declaration that fails to check takes the **error type** (`ErrorType`, `ERROR`; self-hosted `Type.TError`) or is **left out**, and the passes go on (`_part`, `_record`, `_fail_part`; self-hosted `record`, `resolve_part`, `param_part`, `record_result`):
+
+| Part | Failure | What remains |
+| --- | --- | --- |
+| a declaration | an import checked alone, a redefined builtin, a duplicate name or trait | the first one; the duplicate is left out, its body not checked (`_skipped`, by position) |
+| a type in a signature, field, payload, trait method, impl target, const | unknown, wrong arguments, `Self` outside a trait, … | the error type for that part |
+| an alias | a bad target, a cycle | the error type for the alias and every alias that names it, one error (`_resolve` caches it) |
+| a field, variant or method | a duplicate, a method colliding with a field | the first one |
+| type parameters, a recursive struct | shadowing, duplicates, infinite size | the declaration, as written |
+| a `#derive` | not derivable, generic, a bad attribute, an explicit impl too | no derived impl; Eq is broken for the type (`_broken_impls`) unless an explicit impl stands |
+| an impl | its target type failed or can't have methods; a duplicate impl | left out; its methods' and trait's names are lost (`_lost_methods`, `_lost_traits`) |
+| an impl | an unknown trait; the trait's arity; conformance | its methods stay; the (trait, type) pair is broken |
+| a bound | an unknown trait or type parameter | the bound is left out, and the function's body isn't checked |
+| a const | any error in its type or value | its declared type (or the error type), no value; consts folded from it fail silently |
+
+Bodies are checked as before. Where one depends on what failed, its check ends without an error (`_Poisoned`; self-hosted `poisoned()`, which `?` carries and `note` drops), since any error there would follow from the first:
+
+- an expression whose type contains the error type (`_infer` wraps `_infer_node`), an assigned place (`_check_lvalue`) or a pattern (`_check_pattern`) of such a type;
+- a call of a generic function or method, or a partial application, whose signature contains it; a generic struct or enum literal with such a field or payload;
+- `?` in a function whose return type failed; a call or method value through a field whose type failed;
+- a broken (trait, type) pair, or a lost trait, asked for by an operator or a bound (`_type_implements`); a method that isn't there but whose name a lost impl had;
+- a call of a redefined builtin; a const folded from a failed one; a `#test` of a function whose signature failed.
+
+Some parts are skipped rather than ending the check, since nothing else depends on them: the argument for a parameter of the error type (non-generic calls and methods), a field or payload of the error type in a literal, the value returned from a function whose return type failed, the initialiser of a `let` annotated with a failed alias (the binding has the error type), and a call statement whose result has the error type.
+
+So no reported error follows from another, at the price of not checking the rest of a body after its first use of a failed part. The first error of a run is the one a single-error run reported, except where that one followed from a declaration error found later (an `impl Eq` for a misspelled type makes a `#derive(Eq)` that relies on it fail first; the derive is now left broken silently). `tests/burn/test_declaration_recovery.py` checks this on 674 mutants of the examples, each with one declaration broken: exactly the injected error is reported; the checker gate compares the self-hosted checker on the same mutants.
 
 ## Notes
 

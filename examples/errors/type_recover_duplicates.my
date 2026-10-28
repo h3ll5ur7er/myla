@@ -1,0 +1,14 @@
+//~ type error: duplicate field 'a' in struct 'S'
+//~ errors: 3
+//~ next: duplicate variant 'X' in enum 'E'
+//~ next: cannot assign value of type 'str' to binding of type 'int32'
+// A duplicate field or variant is left out; the first one stays (MYLA-110).
+struct S { a: int, a: str }
+enum E { X, X }
+
+fun main() {
+    let s = S { a: 1 }
+    print(s.a + 1)
+    let e = E.X
+    let z: int = "z"
+}
