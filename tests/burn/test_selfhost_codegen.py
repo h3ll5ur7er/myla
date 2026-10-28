@@ -28,6 +28,7 @@ from __future__ import annotations
 import glob
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -733,6 +734,86 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # only `let keep = a > b` makes a bool
         self.assertEqual(body.count("\tset"), 1, body)
         self.assertNotIn("movzbq %al", body.replace("setg %al\n\tmovzbq %al", ""), body)
+
+    def test_scalars_live_in_callee_saved_registers(self) -> None:
+        # MYLA-121: a loop's variables, a value kept across a call and a
+        # parameter read in a loop live in %rbx and %r12-%r15, which each
+        # function saves before writing and restores before returning
+        source = (
+            "fun sum_squares(n: int) -> int {\n"
+            "    var total = 0\n"
+            "    var i = 0\n"
+            "    while i < n {\n"
+            "        total = total + i * i\n"
+            "        i = i + 1\n"
+            "    }\n"
+            "    return total\n"
+            "}\n"
+            "fun fib(n: int) -> int {\n"
+            "    if n < 2 { return n }\n"
+            "    return fib(n - 1) + fib(n - 2)\n"
+            "}\n"
+            "struct Acc { base: int, step: int }\n"
+            "impl Acc {\n"
+            "    fun run(self, n: int) -> int {\n"
+            "        var s = self.base\n"
+            "        var k = 0\n"
+            "        while k < n {\n"
+            "            s = s + self.step + fib(k % 3)\n"
+            "            k = k + 1\n"
+            "        }\n"
+            "        return s\n"
+            "    }\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(sum_squares(10))\n"
+            "    print(fib(15))\n"
+            "    let a = Acc { base: 100, step: 3 }\n"
+            "    print(a.run(7))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("285\n610\n125\n", 0))
+        saved = r"%(rbx|r12|r13|r14|r15)"
+        # the frame is touched only to save and restore those registers and
+        # to read the parameters into them
+        for name in ("sum_squares", "Acc.run"):
+            body = self._function_asm(asm, name)
+            frame = [l.strip() for l in body.split("\n") if "(%rbp)" in l]
+            for line in frame:
+                self.assertRegex(line, rf"^movq ({saved}, -\d+\(%rbp\)|-?\d+\(%rbp\), {saved})$", body)
+            self.assertTrue(frame, body)
+        self.assertEqual(self._unsaved_callee_saved(asm), [])
+
+    def _unsaved_callee_saved(self, asm: str) -> list:
+        """The routines of `asm` writing %rbx or %r12-%r15 without saving it
+        first (a push, or a store into the frame)."""
+        names = {"rbx": ("%rbx", "%ebx", "%bx", "%bl")}
+        for r in ("r12", "r13", "r14", "r15"):
+            names[r] = tuple(f"%{r}{suffix}" for suffix in ("", "d", "w", "b"))
+        bad, fn, kept = set(), None, set()
+        for line in asm.split("\n"):
+            if re.match(r"^[A-Za-z_][\w$.]*:", line):
+                fn, kept = line.split(":")[0], set()
+                continue
+            s = line.strip()
+            m = re.match(r"(?:pushq %(\w+)|movq %(\w+), -?\d+\(%rbp\))$", s)
+            if m:
+                kept.add(m.group(1) or m.group(2))
+                continue
+            if s.startswith(("popq", "push", "cmp", "test", "call", "j")):
+                continue
+            parts = s.split(None, 1)
+            if len(parts) < 2:
+                continue
+            dest = parts[1].rsplit(",", 1)[-1].strip()
+            for r, forms in names.items():
+                if dest in forms and r not in kept:
+                    bad.add((fn, r))
+        return sorted(bad)
 
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS

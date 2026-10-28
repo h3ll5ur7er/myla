@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp
 from .ir import IrFunc, Inst, Term, use_counts, def_counts, inst_defs, inst_uses, term_uses, successors
 
 impl CodeGen {
@@ -25,18 +25,25 @@ impl CodeGen {
     fun emit_ir_at(var self, f: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
         self.temp_uses = use_counts(f)
         self.ret_type = f.ret
+        let reach = reachable_blocks(f)
         // the frame: the temporaries' cells next to %rbp (the most used, so
         // the most reached with 1-byte offsets), then each slot that isn't an
-        // argument word. Which temporaries need a cell depends on what is
-        // recomputed, which depends on the slots' offsets: laid out twice.
-        self.temp_remat = self.remat_texts(f, layout_slots(f, 0))
+        // argument word, then the saved registers. Which temporaries need a
+        // cell or get a register depends on what is recomputed, which
+        // depends on the slots' offsets and registers: laid out twice.
+        self.clear_regs(f)
+        let defs = def_counts(f)
+        self.temp_remat = self.remat_texts(f, layout_slots(f, 0), defs)
+        self.alloc_regs(f, reach)
         let cells = self.alloc_temps(f)
         let slot_off = layout_slots(f, 8 * cells)
-        self.temp_remat = self.remat_texts(f, slot_off)
+        self.temp_remat = self.remat_texts(f, slot_off, defs)
         var cursor = 8 * cells
         for s in f.slots {
             if s.word < 0 { cursor = cursor + (s.size + 7) / 8 * 8 }
         }
+        let saves = cursor
+        cursor = cursor + 8 * len(self.saved_regs)
         let temp_base = 0
         let frame = (cursor + 15) / 16 * 16
         self.epilogue = format(".Lret_{}", mangled)
@@ -51,11 +58,22 @@ impl CodeGen {
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
         if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
+        // the callee-saved registers it uses, and the parameters living in
+        // registers (MYLA-121)
+        var r = 0
+        while r < len(self.saved_regs) {
+            self.emit(format("movq %{}, {}(%rbp)", self.saved_regs[r], -saves - 8 * (r + 1)))
+            r = r + 1
+        }
+        var si = 0
+        while si < len(f.slots) {
+            if f.slots[si].word >= 0 && self.slot_reg[si] != "" { self.emit(format("movq {}(%rbp), %{}", slot_off[si], self.slot_reg[si])) }
+            si = si + 1
+        }
         self.dbg_push_scope()
 
         // a block nothing reaches (after a `return`, MYLA-120) has no code; its
         // debug scopes and variables stay, so the scopes stay nested
-        let reach = reachable_blocks(f)
         var k = 0
         while k < len(f.order) {
             let b = f.order[k]
@@ -94,6 +112,11 @@ impl CodeGen {
         }
 
         self.emit(format("{}:", self.epilogue))
+        r = 0
+        while r < len(self.saved_regs) {
+            self.emit(format("movq {}(%rbp), %{}", -saves - 8 * (r + 1), self.saved_regs[r]))
+            r = r + 1
+        }
         self.emit("leave")
         self.emit("ret")
         self.end_loc()
@@ -111,23 +134,31 @@ impl CodeGen {
             Inst.Load(d, s) => {
                 // read where it is used instead (`remat_texts`)
                 if self.temp_remat[d] == "" {
-                    self.emit(format("movq {}(%rbp), %rax", slot_off[s]))
+                    if self.slot_reg[s] != "" { self.emit(format("movq %{}, %rax", self.slot_reg[s])) }
+                    else { self.emit(format("movq {}(%rbp), %rax", slot_off[s])) }
                     self.store_temp(d, temp_base)
                 }
             },
             Inst.Store(s, v) => {
-                self.load_temp(v, "rax", temp_base)
-                self.emit(format("movq %rax, {}(%rbp)", slot_off[s]))
+                if self.slot_reg[s] != "" { self.load_temp(v, self.slot_reg[s], temp_base) }
+                else { self.emit(format("movq {}, {}(%rbp)", self.value_operand(v, temp_base), slot_off[s])) }
             },
             Inst.Addr(d, s) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.Offset(d, p, off) => {
-                self.load_temp(p, "rax", temp_base)
-                if off != 0 { self.emit(format("addq ${}, %rax", off)) }
+                let base = self.reg_of(p)
+                if base != "" { self.emit(format("leaq {}({}), %rax", off, base)) }
+                else {
+                    self.load_temp(p, "rax", temp_base)
+                    if off != 0 { self.emit(format("addq ${}, %rax", off)) }
+                }
                 self.store_temp(d, temp_base)
             },
             Inst.LoadAt(d, p, off) => {
                 // through a slot's address: straight from the frame (MYLA-120)
+                // or through a register (MYLA-121)
+                let base = self.reg_of(p)
                 if self.temp_frame[p] != 0 { self.emit(format("movq {}(%rbp), %rax", self.temp_frame[p] + off)) }
+                else if base != "" { self.emit(format("movq {}({}), %rax", off, base)) }
                 else {
                     self.load_temp(p, "rax", temp_base)
                     self.emit(format("movq {}(%rax), %rax", off))
@@ -135,13 +166,12 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.StoreAt(p, off, v) => {
-                if self.temp_frame[p] != 0 {
-                    self.load_temp(v, "rax", temp_base)
-                    self.emit(format("movq %rax, {}(%rbp)", self.temp_frame[p] + off))
-                } else {
+                let base = self.reg_of(p)
+                if self.temp_frame[p] != 0 { self.emit(format("movq {}, {}(%rbp)", self.value_operand(v, temp_base), self.temp_frame[p] + off)) }
+                else if base != "" { self.emit(format("movq {}, {}({})", self.value_operand(v, temp_base), off, base)) }
+                else {
                     self.load_temp(p, "rcx", temp_base)
-                    self.load_temp(v, "rax", temp_base)
-                    self.emit(format("movq %rax, {}(%rcx)", off))
+                    self.emit(format("movq {}, {}(%rcx)", self.value_operand(v, temp_base), off))
                 }
             },
             Inst.Copy(d, src, size) => {
@@ -150,24 +180,42 @@ impl CodeGen {
                 self.emit_copy(size)
             },
             Inst.Bin(d, op, t, rt, a, b, pos) => {
-                self.load_temp(a, "rax", temp_base)
                 match t {
                     Type.TFloat(w) => {
+                        self.load_temp(a, "rax", temp_base)
                         self.load_temp(b, "rcx", temp_base)
                         self.emit_float_op(op, rt)
                     },
-                    _ => { self.emit_int_op(op, t, rt, pos.line, pos.col, self.second_operand(op, b, temp_base)) },
+                    _ => {
+                        // the operands swapped when the second is still in
+                        // %rax and the order doesn't matter (MYLA-121)
+                        if self.swap_operands(op, a, b) {
+                            self.load_temp(b, "rax", temp_base)
+                            self.emit_int_op(op, t, rt, pos.line, pos.col, self.second_operand(op, a, temp_base))
+                        } else {
+                            self.load_temp(a, "rax", temp_base)
+                            self.emit_int_op(op, t, rt, pos.line, pos.col, self.second_operand(op, b, temp_base))
+                        }
+                    },
                 }
                 self.store_temp(d, temp_base)
             },
             Inst.Cmp(d, op, t, a, b) => {
-                self.load_temp(a, "rax", temp_base)
                 match t {
                     Type.TFloat(w) => {
+                        self.load_temp(a, "rax", temp_base)
                         self.load_temp(b, "rcx", temp_base)
                         self.emit_float_op(op, t)
                     },
-                    _ => { self.emit_int_op(op, t, Type.TBool, 0, 0, self.second_operand(op, b, temp_base)) },
+                    _ => {
+                        if self.swap_operands(op, a, b) {
+                            self.load_temp(b, "rax", temp_base)
+                            self.emit_int_op(swapped_cmp(op), t, Type.TBool, 0, 0, self.second_operand(op, a, temp_base))
+                        } else {
+                            self.load_temp(a, "rax", temp_base)
+                            self.emit_int_op(op, t, Type.TBool, 0, 0, self.second_operand(op, b, temp_base))
+                        }
+                    },
                 }
                 self.store_temp(d, temp_base)
             },
@@ -237,8 +285,12 @@ impl CodeGen {
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
             Inst.RetainVal(t, v) => {
-                self.load_temp(v, "rax", temp_base)
-                self.emit("incq -8(%rax)")
+                let at = self.reg_of(v)
+                if at != "" { self.emit(format("incq -8({})", at)) }
+                else {
+                    self.load_temp(v, "rax", temp_base)
+                    self.emit("incq -8(%rax)")
+                }
             },
             Inst.Retain(t, p) => {
                 self.load_temp(p, "r8", temp_base)
@@ -263,8 +315,7 @@ impl CodeGen {
                 self.store_temp(d2, temp_base)
             },
             Inst.Check(v, kind, p) => {
-                self.load_temp(v, "rax", temp_base)
-                self.emit("testq %rax, %rax")
+                self.emit_test(v, temp_base)
                 self.trap("jz", "__trap_" + kind, p.line, p.col)
             },
             Inst.SbAppend(h, v) => {
@@ -416,9 +467,23 @@ impl CodeGen {
     fun emit_compare_branch(var self, cmp: Inst, term: Term, labels: [str], next: int32, temp_base: int32) {
         match cmp {
             Inst.Cmp(d, op, t, x, y) => {
-                self.load_temp(x, "rax", temp_base)
-                self.emit(format("cmpq {}, %rax", self.second_operand(op, y, temp_base)))
-                let cond = jump_cond(op, int_signed(t))
+                // the first operand where it is when that is a register; the
+                // two swapped when the second is still in %rax
+                var cop = op
+                var left = self.reg_of(x)
+                if left == "" && self.swap_operands(op, x, y) {
+                    self.load_temp(y, "rax", temp_base)
+                    left = "%rax"
+                    cop = swapped_cmp(op)
+                    self.emit(format("cmpq {}, {}", self.second_operand(op, x, temp_base), left))
+                } else {
+                    if left == "" {
+                        self.load_temp(x, "rax", temp_base)
+                        left = "%rax"
+                    }
+                    self.emit(format("cmpq {}, {}", self.second_operand(op, y, temp_base), left))
+                }
+                let cond = jump_cond(cop, int_signed(t))
                 match term {
                     Term.Br(c, yes, no) => {
                         if no == next { self.emit(format("j{} {}", cond, labels[yes])) }
@@ -443,8 +508,7 @@ impl CodeGen {
                 if b != next { self.emit(format("jmp {}", labels[b])) }
             },
             Term.Br(c, a, b) => {
-                self.load_temp(c, "rax", temp_base)
-                self.emit("testq %rax, %rax")
+                self.emit_test(c, temp_base)
                 if b == next { self.emit(format("jnz {}", labels[a])) }
                 else {
                     self.emit(format("jz {}", labels[b]))
@@ -507,6 +571,7 @@ impl CodeGen {
             if self.temp_imm[t] != "" { return self.temp_imm[t] }
             if self.temp_src[t] != "" { return self.temp_src[t] }
             if self.temp_remat[t] == "" && !(self.pend_store != "" && self.pend_temp == t) {
+                if self.temp_reg[t] != "" { return "%" + self.temp_reg[t] }
                 return format("{}(%rbp)", self.temp_off[t])
             }
         }
@@ -528,7 +593,7 @@ impl CodeGen {
     // address or a slot's address, is recomputed where it is read instead of
     // being kept in a slot: the instruction up to its register's name
     // (MYLA-108); "" for the other temporaries.
-    fun remat_texts(var self, f: IrFunc, slot_off: [int32]) -> [str] {
+    fun remat_texts(var self, f: IrFunc, slot_off: [int32], defs: [int32]) -> [str] {
         var out: [str] = []
         var src: [str] = []
         var imm: [str] = []
@@ -539,14 +604,16 @@ impl CodeGen {
             push(imm, "")
             push(frame, 0)
         }
-        let defs = def_counts(f)
         for b in f.blocks {
             var i = 0
             while i < len(b.insts) {
                 let inst = b.insts[i]
-                let text = self.def_text(inst, slot_off)
-                for d in inst_defs(inst) {
-                    if defs[d] == 1 { out[d] = text }
+                match inst {
+                    Inst.Const(d, t, v) => { if defs[d] == 1 { out[d] = self.def_text(inst, slot_off) } },
+                    Inst.Str(d, text) => { if defs[d] == 1 { out[d] = self.def_text(inst, slot_off) } },
+                    Inst.Addr(d, sl) => { if defs[d] == 1 { out[d] = self.def_text(inst, slot_off) } },
+                    Inst.Label(d, sym) => { if defs[d] == 1 { out[d] = self.def_text(inst, slot_off) } },
+                    _ => {},
                 }
                 // a slot's address: its offset from %rbp (never 0), for loads
                 // and stores through it
@@ -574,7 +641,7 @@ impl CodeGen {
                 match inst {
                     Inst.Load(d, s) => {
                         if defs[d] == 1 && reads_before_writes(b.insts, b.term, i, d, self.temp_uses[d]) {
-                            src[d] = format("{}(%rbp)", slot_off[s])
+                            if self.slot_reg[s] != "" { src[d] = "%" + self.slot_reg[s] } else { src[d] = format("{}(%rbp)", slot_off[s]) }
                             out[d] = format("movq {}, %", src[d])
                         }
                     },
@@ -659,7 +726,7 @@ impl CodeGen {
         var cells = 0
         i = 0
         while i < n {
-            if cross[i] && self.temp_remat[i] == "" && self.temp_uses[i] > 0 {
+            if cross[i] && self.temp_remat[i] == "" && self.temp_uses[i] > 0 && self.temp_reg[i] == "" {
                 cell[i] = cells
                 cells = cells + 1
             }
@@ -677,7 +744,7 @@ impl CodeGen {
                 }
                 active = still
                 for t in inst_defs(inst) {
-                    if !cross[t] && cell[t] < 0 && self.temp_remat[t] == "" && self.temp_uses[t] > 0 {
+                    if !cross[t] && cell[t] < 0 && self.temp_remat[t] == "" && self.temp_uses[t] > 0 && self.temp_reg[t] == "" {
                         if len(free) > 0 {
                             cell[t] = free[len(free) - 1]
                             free = drop_last_cell(free)
@@ -698,6 +765,338 @@ impl CodeGen {
         return cells
     }
 
+    // No temporary or slot in a register (yet).
+    fun clear_regs(var self, f: IrFunc) {
+        var treg: [str] = []
+        for t in f.temps { push(treg, "") }
+        var sreg: [str] = []
+        for s in f.slots { push(sreg, "") }
+        self.temp_reg = treg
+        self.slot_reg = sreg
+        self.saved_regs = []
+    }
+
+    // Which temporaries and slots live in a callee-saved register (MYLA-121;
+    // `temp_reg`, `slot_reg`) and which of them the function saves
+    // (`saved_regs`). The candidates are the temporaries that would need a
+    // frame cell and the scalar slots (8 bytes, owning nothing) that only
+    // `load` and `store` touch, parameters included. Each has one live
+    // interval over the reachable blocks in emission order (liveness across
+    // blocks by backward dataflow); a linear scan hands out %rbx and
+    // %r12-%r15, and when they run out the value with fewer reads and writes
+    // (weighted by loop depth) gives way. Not under `-g`, whose variables
+    // live in the frame.
+    fun alloc_regs(var self, f: IrFunc, reach: [bool]) {
+        self.clear_regs(f)
+        if self.debug { return }
+        let nt = len(f.temps)
+        let nv = nt + len(f.slots)
+        // value v: the temporary v below nt, else the slot v - nt
+        var cand: [bool] = []
+        var i = 0
+        while i < nt {
+            push(cand, self.temp_remat[i] == "" && self.temp_uses[i] > 0)
+            i = i + 1
+        }
+        for sl in f.slots { push(cand, sl.size == 8 && !sl.owns) }
+        for b in f.blocks {
+            for inst in b.insts {
+                match inst {
+                    Inst.Addr(d, s) => { cand[nt + s] = false },
+                    Inst.DropSlot(t, s) => { cand[nt + s] = false },
+                    Inst.Init(s) => { cand[nt + s] = false },
+                    Inst.Moved(s) => { cand[nt + s] = false },
+                    _ => {},
+                }
+            }
+        }
+        let depth = loop_depths(f, reach)
+
+        // what each reachable instruction and terminator reads and writes, in
+        // emission order (`tv[tat[p]]` up to `tv[tat[p + 1]]` at position p:
+        // v read, -1 - v written); and per candidate its first and last
+        // position, its weight, and whether liveness has to follow it across
+        // blocks (used in two blocks, or read before written in its block)
+        var tv: [int32] = []
+        var tat: [int32] = []
+        var first: [int32] = []
+        var last: [int32] = []
+        var weight: [int64] = []
+        var home: [int32] = []
+        var global: [bool] = []
+        var src_slot: [int32] = []
+        i = 0
+        while i < nv {
+            push(first, -1)
+            push(last, -1)
+            push(weight, 0)
+            push(home, -1)
+            push(global, false)
+            if i < nt { push(src_slot, -1) }
+            i = i + 1
+        }
+        var bstart: [int32] = []
+        var bend: [int32] = []
+        for b in f.blocks {
+            push(bstart, -1)
+            push(bend, -1)
+        }
+        var pos = 0
+        for b in f.order {
+            if !reach[b] { continue }
+            bstart[b] = pos
+            var w: int64 = 1
+            var d = 0
+            while d < depth[b] && d < 3 {
+                w = w * 10
+                d = d + 1
+            }
+            for inst in f.blocks[b].insts {
+                push(tat, len(tv))
+                // a variable read where it is used is read there (`temp_src`)
+                for u in inst_uses(inst) {
+                    if cand[u] { push(tv, u) }
+                    if src_slot[u] >= 0 && cand[nt + src_slot[u]] { push(tv, nt + src_slot[u]) }
+                }
+                match inst {
+                    Inst.Load(t, sl) => {
+                        if cand[nt + sl] { push(tv, nt + sl) }
+                        if self.temp_src[t] != "" { src_slot[t] = sl }
+                    },
+                    Inst.Store(sl, v) => { if cand[nt + sl] { push(tv, -1 - (nt + sl)) } },
+                    _ => {},
+                }
+                for t in inst_defs(inst) {
+                    if cand[t] { push(tv, -1 - t) }
+                }
+                pos = pos + 1
+            }
+            push(tat, len(tv))
+            for u in term_uses(f.blocks[b].term) {
+                if cand[u] { push(tv, u) }
+                if src_slot[u] >= 0 && cand[nt + src_slot[u]] { push(tv, nt + src_slot[u]) }
+            }
+            bend[b] = pos
+            pos = pos + 1
+            // the block's positions, read before written
+            var p = bstart[b]
+            while p < pos {
+                var k = tat[p]
+                let end = match p + 1 < pos { true => tat[p + 1], false => len(tv) }
+                while k < end {
+                    var v = tv[k]
+                    let read = v >= 0
+                    if !read { v = -1 - v }
+                    if first[v] < 0 {
+                        first[v] = p
+                        if read { global[v] = true }
+                    }
+                    last[v] = p
+                    weight[v] = weight[v] + w
+                    if home[v] < 0 { home[v] = b } else if home[v] != b { global[v] = true }
+                    k = k + 1
+                }
+                p = p + 1
+            }
+        }
+        push(tat, len(tv))
+        let spans = self.live_spans(f, reach, cand, global, tv, tat, bstart, bend, first, last)
+        first = spans.0
+        last = spans.1
+
+        // the linear scan, intervals by their start
+        var head: [int32] = []
+        i = 0
+        while i < pos {
+            push(head, -1)
+            i = i + 1
+        }
+        var link: [int32] = []
+        var reg: [int32] = []
+        i = 0
+        while i < nv {
+            push(link, -1)
+            push(reg, -1)
+            if cand[i] && first[i] >= 0 {
+                link[i] = head[first[i]]
+                head[first[i]] = i
+            }
+            i = i + 1
+        }
+        let names = ["rbx", "r12", "r13", "r14", "r15"]
+        var owner = [-1, -1, -1, -1, -1]
+        var p = 0
+        while p < pos {
+            var v = head[p]
+            while v >= 0 {
+                var r = 0
+                while r < 5 {
+                    // read for the last time where v is written: an
+                    // instruction reads its operands before it writes
+                    if owner[r] >= 0 && last[owner[r]] <= p { owner[r] = -1 }
+                    r = r + 1
+                }
+                var pick = -1
+                r = 0
+                while r < 5 && pick < 0 {
+                    if owner[r] < 0 { pick = r }
+                    r = r + 1
+                }
+                if pick < 0 {
+                    // the lightest holder gives way to a heavier value
+                    var low = 0
+                    r = 1
+                    while r < 5 {
+                        if weight[owner[r]] < weight[owner[low]] { low = r }
+                        r = r + 1
+                    }
+                    if weight[owner[low]] < weight[v] {
+                        reg[owner[low]] = -1
+                        pick = low
+                    }
+                }
+                if pick >= 0 {
+                    owner[pick] = v
+                    reg[v] = pick
+                }
+                v = link[v]
+            }
+            p = p + 1
+        }
+
+        // a register is worth its save and restore only with enough use
+        var used: [int64] = [0, 0, 0, 0, 0]
+        i = 0
+        while i < nv {
+            if reg[i] >= 0 { used[reg[i]] = used[reg[i]] + weight[i] }
+            i = i + 1
+        }
+        i = 0
+        while i < nv {
+            if reg[i] >= 0 && used[reg[i]] >= REG_MIN_USE {
+                if i < nt { self.temp_reg[i] = names[reg[i]] } else { self.slot_reg[i - nt] = names[reg[i]] }
+            }
+            i = i + 1
+        }
+        var r = 0
+        while r < 5 {
+            if used[r] >= REG_MIN_USE { push(self.saved_regs, names[r]) }
+            r = r + 1
+        }
+    }
+
+    // The intervals `first`..`last` (`alloc_regs`) stretched over each
+    // reachable block that a value liveness follows across blocks is live
+    // into or out of.
+    fun live_spans(self, f: IrFunc, reach: [bool], cand: [bool], global: [bool], tv: [int32], tat: [int32], bstart: [int32], bend: [int32], first: [int32], last: [int32]) -> ([int32], [int32]) {
+        var lo = first
+        var hi = last
+        // the values liveness follows, numbered densely
+        var gid: [int32] = []
+        var gval: [int32] = []
+        var i = 0
+        while i < len(cand) {
+            if cand[i] && global[i] {
+                push(gid, len(gval))
+                push(gval, i)
+            } else { push(gid, -1) }
+            i = i + 1
+        }
+        let ng = len(gval)
+        if ng == 0 { return (lo, hi) }
+        let nw = (ng + 63) / 64
+        let nb = len(f.blocks)
+        // what each block reads before writing it (use) and writes (def)
+        var use_bits: [int64] = []
+        var def_bits: [int64] = []
+        var live_in: [int64] = []
+        var live_out: [int64] = []
+        i = 0
+        while i < nb * nw {
+            push(use_bits, 0)
+            push(def_bits, 0)
+            push(live_in, 0)
+            push(live_out, 0)
+            i = i + 1
+        }
+        // and its successors (-1: none)
+        var succ1: [int32] = []
+        var succ2: [int32] = []
+        for b in f.blocks {
+            let ss = successors(b.term)
+            push(succ1, match len(ss) > 0 { true => ss[0], false => -1 })
+            push(succ2, match len(ss) > 1 { true => ss[1], false => -1 })
+        }
+        let one: int64 = 1
+        for b in f.order {
+            if !reach[b] { continue }
+            let base = b * nw
+            var k = tat[bstart[b]]
+            while k < tat[bend[b] + 1] {
+                var v = tv[k]
+                let read = v >= 0
+                if !read { v = -1 - v }
+                let g = gid[v]
+                if g >= 0 {
+                    let at = base + g / 64
+                    let bit = one << ((g % 64) as int64)
+                    if read {
+                        if def_bits[at] & bit == 0 { use_bits[at] = use_bits[at] | bit }
+                    } else { def_bits[at] = def_bits[at] | bit }
+                }
+                k = k + 1
+            }
+        }
+        // live in = use | (live out & ~def), live out = the successors' live in
+        var changed = true
+        while changed {
+            changed = false
+            var k = len(f.order) - 1
+            while k >= 0 {
+                let b = f.order[k]
+                if reach[b] {
+                    let base = b * nw
+                    let s1 = succ1[b]
+                    let s2 = succ2[b]
+                    var j = 0
+                    while j < nw {
+                        var out: int64 = 0
+                        if s1 >= 0 { out = live_in[s1 * nw + j] }
+                        if s2 >= 0 { out = out | live_in[s2 * nw + j] }
+                        live_out[base + j] = out
+                        let inn = use_bits[base + j] | (out & ~def_bits[base + j])
+                        if inn != live_in[base + j] {
+                            live_in[base + j] = inn
+                            changed = true
+                        }
+                        j = j + 1
+                    }
+                }
+                k = k - 1
+            }
+        }
+        for b in f.order {
+            if !reach[b] { continue }
+            let base = b * nw
+            var g = 0
+            while g < ng {
+                let v = gval[g]
+                let bit = one << ((g % 64) as int64)
+                let at = base + g / 64
+                if live_in[at] & bit != 0 {
+                    if bstart[b] < lo[v] { lo[v] = bstart[b] }
+                    if bstart[b] > hi[v] { hi[v] = bstart[b] }
+                }
+                if live_out[at] & bit != 0 {
+                    if bend[b] < lo[v] { lo[v] = bend[b] }
+                    if bend[b] > hi[v] { hi[v] = bend[b] }
+                }
+                g = g + 1
+            }
+        }
+        return (lo, hi)
+    }
+
     // Push the temporary `t` (a call's argument): straight from its slot, or
     // from the variable it was read from.
     fun push_temp(var self, t: int32, temp_base: int32) {
@@ -710,7 +1109,8 @@ impl CodeGen {
             self.emit("pushq %rax")
             return
         }
-        self.emit(format("pushq {}(%rbp)", self.temp_off[t]))
+        if self.temp_reg[t] != "" { self.emit("pushq %" + self.temp_reg[t]) }
+        else { self.emit(format("pushq {}(%rbp)", self.temp_off[t])) }
     }
 
     // The temporary `t` into `reg`. Read right after it was computed, it is
@@ -729,6 +1129,10 @@ impl CodeGen {
             if reg != "rax" { self.emit(format("movq %rax, %{}", reg)) }
             return
         }
+        if self.temp_reg[t] != "" {
+            if self.temp_reg[t] != reg { self.emit(format("movq %{}, %{}", self.temp_reg[t], reg)) }
+            return
+        }
         self.emit(format("movq {}(%rbp), %{}", self.temp_off[t], reg))
     }
 
@@ -738,9 +1142,85 @@ impl CodeGen {
     fun store_temp(var self, t: int32, temp_base: int32) {
         if self.pend_store != "" { self.flush_temp() }
         if self.temp_uses[t] == 0 { return }
-        self.pend_store = format("movq %rax, {}(%rbp)", self.temp_off[t])
+        if self.temp_reg[t] != "" { self.pend_store = "movq %rax, %" + self.temp_reg[t] }
+        else { self.pend_store = format("movq %rax, {}(%rbp)", self.temp_off[t]) }
         self.pend_temp = t
     }
+
+    // Whether the integer operation `op` on `a` and `b` is better done as
+    // `b op' a` (`swapped_cmp`): `b` is still in %rax, `a` isn't.
+    fun swap_operands(self, op: str, a: int32, b: int32) -> bool {
+        if !(self.pend_store != "" && self.pend_temp == b) || a == b { return false }
+        return op == "+" || op == "*" || op == "&" || op == "|" || op == "^" || op == "==" || op == "!=" || is_cmp(op)
+    }
+
+    // The register holding the temporary `t` now (MYLA-121): its own, or the
+    // variable's it is read from; "" when it isn't in one (its store into
+    // its register still held back, its value is in %rax).
+    fun reg_of(self, t: int32) -> str {
+        if self.pend_store != "" && self.pend_temp == t { return "" }
+        if self.temp_reg[t] != "" { return "%" + self.temp_reg[t] }
+        let src = self.temp_src[t]
+        if len(src) > 0 && src[0] == '%' { return src }
+        return ""
+    }
+
+    // The temporary `t` as the source of a store: an immediate, its
+    // register, else loaded into %rax.
+    fun value_operand(var self, t: int32, temp_base: int32) -> str {
+        if self.temp_imm[t] != "" { return self.temp_imm[t] }
+        let r = self.reg_of(t)
+        if r != "" { return r }
+        self.load_temp(t, "rax", temp_base)
+        return "%rax"
+    }
+
+    // The flags of the temporary `t` against zero, for a jump.
+    fun emit_test(var self, t: int32, temp_base: int32) {
+        var r = self.reg_of(t)
+        if r == "" {
+            self.load_temp(t, "rax", temp_base)
+            r = "%rax"
+        }
+        self.emit(format("testq {}, {}", r, r))
+    }
+}
+
+// The least loop-weighted reads and writes of the values in a callee-saved
+// register that pay for saving and restoring it (MYLA-121).
+const REG_MIN_USE: int64 = 4
+
+// How many loops each reachable block of `f` is in: a jump back to a block
+// emitted earlier closes a loop over the blocks emitted from there to it.
+fun loop_depths(f: IrFunc, reach: [bool]) -> [int32] {
+    var at: [int32] = []
+    var depth: [int32] = []
+    for b in f.blocks {
+        push(at, -1)
+        push(depth, 0)
+    }
+    var k = 0
+    while k < len(f.order) {
+        at[f.order[k]] = k
+        k = k + 1
+    }
+    k = 0
+    while k < len(f.order) {
+        let b = f.order[k]
+        if reach[b] {
+            for s in successors(f.blocks[b].term) {
+                if at[s] <= k {
+                    var j = at[s]
+                    while j <= k {
+                        depth[f.order[j]] = depth[f.order[j]] + 1
+                        j = j + 1
+                    }
+                }
+            }
+        }
+        k = k + 1
+    }
+    return depth
 }
 
 // The condition code of a conditional jump taken when `op` holds between
@@ -757,6 +1237,20 @@ fun jump_cond(op: str, signed: bool) -> str {
     if op == ">" { if signed { return "g" } else { return "a" } }
     if signed { return "ge" }
     return "ae"
+}
+
+// The comparison that holds for `b, a` exactly when `op` holds for `a, b`;
+// any other operator is the same both ways.
+#test("<")[">"]
+#test(">=")["<="]
+#test("==")["=="]
+#test("+")["+"]
+fun swapped_cmp(op: str) -> str {
+    if op == "<" { return ">" }
+    if op == ">" { return "<" }
+    if op == "<=" { return ">=" }
+    if op == ">=" { return "<=" }
+    return op
 }
 
 // The condition code that holds exactly when `cond` doesn't.

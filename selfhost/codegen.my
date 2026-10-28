@@ -162,6 +162,12 @@ pub struct CodeGen {
     // per temporary, its frame offset (`alloc_temps`; temporaries whose lives
     // don't overlap share one)
     temp_off: [int32],
+    // MYLA-121: per temporary and per slot, the callee-saved register it
+    // lives in ("rbx", "r12", …; "" for none), and the registers the function
+    // saves in the prologue
+    temp_reg: [str],
+    slot_reg: [str],
+    saved_regs: [str],
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -230,6 +236,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
+        temp_reg: [], slot_reg: [], saved_regs: [],
     }
 }
 
