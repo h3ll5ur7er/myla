@@ -176,7 +176,14 @@ With function values every function of the compiler, the examples and the parity
 
 The compiler's binary got 11% smaller and runs 12% fewer instructions compiling itself ([[MYLA-120]] has the measurements).
 
-Altogether the self-compile went from 3.80 s (the old path) to about 1.9 s, the binary from 2.39 to 1.39 MB, and the peak from 128 to 89 MB. Callee-saved registers for scalar locals were tried and didn't pay off. A register allocator over temporaries, and leaving out the retain/release pair of a copy never written, are left to [[MYLA-109]]. Most of the remaining time is in the compiler's own linear lookups ([[MYLA-119]]).
+[[MYLA-121]], register allocation:
+
+- **Callee-saved registers.** Temporaries that would need a frame cell and scalar slots that only `load` and `store` touch (parameters included) live in `%rbx` and `%r12`–`%r15`: one live interval each over the reachable blocks in emission order (liveness across blocks by a backward dataflow, `live_spans`), handed out by a linear scan in which the value with fewer loop-weighted reads and writes gives way (`alloc_regs`). A function saves the registers it uses in the prologue, only when their values weigh enough (`REG_MIN_USE`), and not under `-g`.
+- **Registers read directly.** Loads and stores through a pointer in a register, offsets, reference counts, tests and compare-and-branch use the register; stores take an immediate or a register as their source; a commutative operation or a comparison takes a second operand still in `%rax` first.
+
+The compiler's binary got 7% smaller and compiles itself about 3–4% faster; the stress programs 2.6% faster overall, lists 25% ([[MYLA-121]] has the measurements).
+
+Altogether the self-compile went from 3.80 s (the old path) to about 1.9 s, the binary from 2.39 to 1.39 MB, and the peak from 128 to 89 MB. Callee-saved registers for the four most-used scalar locals were tried and didn't pay off; the register allocator over temporaries and locals of [[MYLA-121]] does. Leaving out the retain/release pair of a copy never written is left to [[MYLA-122]]. Most of the remaining time is in the compiler's own linear lookups ([[MYLA-119]]).
 
 ### Lowering ownership
 

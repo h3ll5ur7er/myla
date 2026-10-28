@@ -785,9 +785,8 @@ impl CodeGen {
     // blocks by backward dataflow); a linear scan hands out %rbx and
     // %r12-%r15, and when they run out the value with fewer reads and writes
     // (weighted by loop depth) gives way. Not under `-g`, whose variables
-    // live in the frame.
+    // live in the frame. `clear_regs` has emptied the tables.
     fun alloc_regs(var self, f: IrFunc, reach: [bool]) {
-        self.clear_regs(f)
         if self.debug { return }
         let nt = len(f.temps)
         let nv = nt + len(f.slots)
@@ -1187,8 +1186,10 @@ impl CodeGen {
 }
 
 // The least loop-weighted reads and writes of the values in a callee-saved
-// register that pay for saving and restoring it (MYLA-121).
-const REG_MIN_USE: int64 = 4
+// register that pay for saving and restoring it (MYLA-121; on the compiler
+// compiling itself, 4 and 12 ran equally fast and 12 ran 1.6% fewer
+// instructions, 40 was slower).
+const REG_MIN_USE: int64 = 12
 
 // How many loops each reachable block of `f` is in: a jump back to a block
 // emitted earlier closes a loop over the blocks emitted from there to it.
