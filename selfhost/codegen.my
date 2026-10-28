@@ -1377,14 +1377,12 @@ impl CodeGen {
         let m = self.request_fn(en, [])
         while len(self.fn_worklist) > 0 || len(self.lam_jobs) > 0 {
             if len(self.fn_worklist) > 0 {
-                let job = self.fn_worklist[len(self.fn_worklist) - 1]
-                self.fn_worklist = drop_last(self.fn_worklist)
+                let job = pop(self.fn_worklist)
                 self.subst = job.subst
                 self.gen_any_function(self.sig_of(job.orig).decl, job.mangled)
                 self.subst = []
             } else {
-                let lj = self.lam_jobs[len(self.lam_jobs) - 1]
-                self.lam_jobs = drop_last(self.lam_jobs)
+                let lj = pop(self.lam_jobs)
                 if contains(self.lam_seen, lj.lifted) { continue }
                 self.lam_seen[lj.lifted] = true
                 self.gen_any_lambda(lj)
@@ -5559,16 +5557,6 @@ fun unify_into(declared: Type, concrete: Type) -> [Subst] {
                 i = i + 1
             }
         },
-    }
-    return out
-}
-
-fun drop_last<T>(xs: [T]) -> [T] {
-    var out: [T] = []
-    var i = 0
-    while i < len(xs) - 1 {
-        push(out, xs[i])
-        i = i + 1
     }
     return out
 }

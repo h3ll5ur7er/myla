@@ -183,25 +183,44 @@ impl Parser {
         return self.toks[idx]
     }
 
+    // The kind of the current token, or of the one `offset` further, read in
+    // place: `peek` copies the token and its strings (MYLA-124).
+    fun peek_kind(self) -> TokenKind {
+        if self.pos >= len(self.toks) { return self.toks[len(self.toks) - 1].kind }
+        return self.toks[self.pos].kind
+    }
+
+    fun peek_kind_at(self, offset: int32) -> TokenKind {
+        let idx = self.pos + offset
+        if idx >= len(self.toks) { return self.toks[len(self.toks) - 1].kind }
+        return self.toks[idx].kind
+    }
+
     fun at_end(self) -> bool {
-        return self.peek().kind == TokenKind.EOF
+        return self.peek_kind() == TokenKind.EOF
     }
 
     fun check(self, k: TokenKind) -> bool {
-        return self.peek().kind == k
+        return self.peek_kind() == k
     }
 
     fun advance(var self) -> Token {
         let tok = self.peek()
-        if tok.kind != TokenKind.EOF {
-            self.pos = self.pos + 1
-        }
+        self.skip()
         return tok
     }
 
+    // Past the current token, unless it is the end (`advance` without the
+    // copy of the token).
+    fun skip(var self) {
+        if self.peek_kind() != TokenKind.EOF {
+            self.pos = self.pos + 1
+        }
+    }
+
     fun match1(var self, k: TokenKind) -> bool {
-        if self.peek().kind == k {
-            self.advance()
+        if self.peek_kind() == k {
+            self.skip()
             return true
         }
         return false
@@ -254,7 +273,7 @@ impl Parser {
                 }
                 self.sync(start, mode)
                 if self.pos == start && (mode == SYNC_DECL || !(self.check(TokenKind.RBRACE) || self.resuming_at_declaration())) {
-                    self.advance()
+                    self.skip()
                 }
                 return true
             },
@@ -293,11 +312,11 @@ impl Parser {
             }
             if k == TokenKind.RBRACE && !brace && mode != SYNC_DECL { return }
             if mode == SYNC_STMT && (k == TokenKind.NEWLINE || k == TokenKind.SEMI) && !brace {
-                let nxt = self.peek_at(1).kind
+                let nxt = self.peek_kind_at(1)
                 if len(opens) == 0 || is_stmt_start(nxt) || is_decl_start(nxt) || nxt == TokenKind.RBRACE { return }
             }
             opens = nest(opens, k)
-            self.advance()
+            self.skip()
         }
     }
 
@@ -327,14 +346,14 @@ impl Parser {
 
     fun skip_newlines(var self) {
         while self.check(TokenKind.NEWLINE) {
-            self.advance()
+            self.skip()
         }
     }
 
     // Skip the newlines and `;` between statements or declarations (D61).
     fun skip_separators(var self) {
         while self.at_separator() {
-            self.advance()
+            self.skip()
         }
     }
 
@@ -382,7 +401,7 @@ impl Parser {
         var is_pub = false
         let pub_tok = self.peek()
         if self.check(TokenKind.PUB) {
-            self.advance()
+            self.skip()
             is_pub = true
         }
         let tok = self.peek()
@@ -446,12 +465,12 @@ impl Parser {
         let tok = self.peek()
         var dots = 0
         while self.check(TokenKind.DOT) || self.check(TokenKind.DOTDOT) {
-            if self.peek().kind == TokenKind.DOTDOT {
+            if self.peek_kind() == TokenKind.DOTDOT {
                 dots = dots + 2
             } else {
                 dots = dots + 1
             }
-            self.advance()
+            self.skip()
         }
         var segments: [str] = [self.expect(TokenKind.IDENT, "a module path segment").lexeme]
         while self.match1(TokenKind.DOT) {
@@ -495,7 +514,7 @@ impl Parser {
         if !self.check(TokenKind.LT) {
             return params
         }
-        self.advance()
+        self.skip()
         while true {
             let tok = self.expect(TokenKind.IDENT, "type parameter name")
             var bounds: [str] = []
@@ -776,7 +795,7 @@ impl Parser {
             return self.paren_type()
         }
         if k == TokenKind.LBRACKET {
-            self.advance()
+            self.skip()
             let first = self.parse_type()
             if self.match1(TokenKind.COLON) {
                 let value = self.parse_type()
@@ -787,11 +806,11 @@ impl Parser {
             return self.mk_type(tok.line, tok.column, TypeKind.TList(first))
         }
         if self.is_prim_type(k) {
-            self.advance()
+            self.skip()
             return self.mk_type(tok.line, tok.column, TypeKind.TRef(tok.lexeme, []))
         }
         if k == TokenKind.IDENT {
-            self.advance()
+            self.skip()
             let args = self.type_args()
             return self.mk_type(tok.line, tok.column, TypeKind.TRef(tok.lexeme, args))
         }
@@ -808,7 +827,7 @@ impl Parser {
         if !self.check(TokenKind.LT) {
             return args
         }
-        self.advance()
+        self.skip()
         push(args, self.parse_type())
         while self.match1(TokenKind.COMMA) {
             push(args, self.parse_type())
@@ -884,7 +903,7 @@ impl Parser {
     }
 
     fun statement(var self) -> Stmt {
-        let k = self.peek().kind
+        let k = self.peek_kind()
         if k == TokenKind.LET || k == TokenKind.VAR {
             return self.var_decl()
         }
@@ -937,7 +956,7 @@ impl Parser {
     }
 
     fun tuple_binding(var self) -> [BindElem] {
-        self.advance()
+        self.skip()
         var elems: [BindElem] = [self.binding_elem()]
         if !self.match1(TokenKind.COMMA) {
             self.fail_at(self.peek(), "expected ',' in destructuring binding (use '(x,)' for a 1-tuple)")
@@ -959,7 +978,7 @@ impl Parser {
             return BindElem.BTuple(elems, tok.line, tok.column, self.span_from(tok.line, tok.column))
         }
         if tok.kind == TokenKind.IDENT {
-            self.advance()
+            self.skip()
             if tok.lexeme == "_" {
                 return BindElem.BWild
             }
@@ -1176,8 +1195,8 @@ impl Parser {
                 return expr
             }
             let a = self.peek()
-            self.advance()
-            self.advance()
+            self.skip()
+            self.skip()
             let right = self.term()
             expr = self.mk_expr_from(st, a.line, a.column, ExprKind.Binary(op, expr, right))
         }
@@ -1218,7 +1237,7 @@ impl Parser {
     }
 
     fun unary(var self) -> Expr {
-        let k = self.peek().kind
+        let k = self.peek_kind()
         if k == TokenKind.MINUS || k == TokenKind.BANG || k == TokenKind.TILDE {
             let op = self.advance()
             let operand = self.unary()
@@ -1267,38 +1286,38 @@ impl Parser {
         let tok = self.peek()
         let k = tok.kind
         if k == TokenKind.INT {
-            self.advance()
+            self.skip()
             return self.mk_expr(tok.line, tok.column, ExprKind.IntLit(tok.ival, suffix_opt(tok.suffix), false, tok.big))
         }
         if k == TokenKind.FLOAT {
-            self.advance()
+            self.skip()
             return self.mk_expr(tok.line, tok.column, ExprKind.FloatLit(tok.lexeme, suffix_opt(tok.suffix)))
         }
         if k == TokenKind.CHAR {
-            self.advance()
+            self.skip()
             return self.mk_expr(tok.line, tok.column, ExprKind.IntLit(tok.ival, None, true, ""))
         }
         if k == TokenKind.STRING {
-            self.advance()
+            self.skip()
             return self.mk_expr(tok.line, tok.column, ExprKind.StrLit(tok.lexeme))
         }
         if k == TokenKind.TRUE {
-            self.advance()
+            self.skip()
             return self.mk_expr(tok.line, tok.column, ExprKind.BoolLit(true))
         }
         if k == TokenKind.FALSE {
-            self.advance()
+            self.skip()
             return self.mk_expr(tok.line, tok.column, ExprKind.BoolLit(false))
         }
         if k == TokenKind.IDENT {
-            self.advance()
+            self.skip()
             if self.allow_struct_lit && self.check(TokenKind.LBRACE) {
                 return self.struct_lit(tok)
             }
             return self.mk_expr(tok.line, tok.column, ExprKind.Name(tok.lexeme))
         }
         if k == TokenKind.SELF {
-            self.advance()
+            self.skip()
             return self.mk_expr(tok.line, tok.column, ExprKind.Name("self"))
         }
         if k == TokenKind.MATCH {
@@ -1325,7 +1344,7 @@ impl Parser {
             return self.mk_expr(lb.line, lb.column, ExprKind.MapLit([]))
         }
         if self.check(TokenKind.RBRACKET) {
-            self.advance()
+            self.skip()
             return self.mk_expr(lb.line, lb.column, ExprKind.ListLit([]))
         }
         let first = self.expression()
@@ -1438,14 +1457,14 @@ impl Parser {
             return self.mk_pat(tok.line, tok.column, PatternKind.PLit(lit))
         }
         if k == TokenKind.MINUS {
-            self.advance()
+            self.skip()
             let int_tok = self.expect(TokenKind.INT, "integer literal after '-' in pattern")
             let inner = self.mk_expr(int_tok.line, int_tok.column, ExprKind.IntLit(int_tok.ival, suffix_opt(int_tok.suffix), false, int_tok.big))
             let lit = self.mk_expr(tok.line, tok.column, ExprKind.Unary("-", inner))
             return self.mk_pat(tok.line, tok.column, PatternKind.PLit(lit))
         }
         if k == TokenKind.DOT {
-            self.advance()
+            self.skip()
             let vtok = self.expect(TokenKind.IDENT, "variant name after '.'")
             return self.enum_pattern_tail(None, vtok, tok)
         }
@@ -1460,7 +1479,7 @@ impl Parser {
     }
 
     fun ident_pattern(var self, first: Token) -> Pattern {
-        self.advance()
+        self.skip()
         if first.lexeme == "_" {
             return self.mk_pat(first.line, first.column, PatternKind.PWild)
         }
@@ -1468,7 +1487,7 @@ impl Parser {
             return self.struct_pattern(first)
         }
         if self.check(TokenKind.DOT) {
-            self.advance()
+            self.skip()
             let vtok = self.expect(TokenKind.IDENT, "variant name after '.'")
             return self.enum_pattern_tail(Some(first.lexeme), vtok, first)
         }
@@ -1596,7 +1615,7 @@ impl Parser {
             return first
         }
         var elems: [Expr] = [first]
-        self.advance()
+        self.skip()
         while !self.check(TokenKind.RPAREN) {
             push(elems, self.expression())
             if !self.match1(TokenKind.COMMA) {
@@ -1672,7 +1691,7 @@ impl Parser {
         if !(t.kind == TokenKind.IDENT && t.lexeme == "_") {
             return false
         }
-        let k1 = self.peek_at(1).kind
+        let k1 = self.peek_kind_at(1)
         return k1 == TokenKind.COMMA || k1 == TokenKind.RPAREN
     }
 }

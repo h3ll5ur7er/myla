@@ -474,8 +474,8 @@ impl Lower {
 
     fun close_scope(var self) {
         self.drop_owners(len(self.owners) - 1)
-        self.scopes = drop_last_scope(self.scopes)
-        self.owners = drop_last_ints(self.owners)
+        pop(self.scopes)
+        pop(self.owners)
         self.add(Inst.Scope(false))
     }
 
@@ -509,7 +509,7 @@ impl Lower {
 
     fun end_temps(var self) {
         self.drop_temps(len(self.temps) - 1)
-        self.temps = drop_last_ints(self.temps)
+        pop(self.temps)
     }
 
     fun drop_temps(var self, depth: int32) {
@@ -640,7 +640,7 @@ impl Lower {
                 self.start(body_b)
                 push(self.loops, LoopTarget { cont: head, brk: end, owners: len(self.owners), temps: len(self.temps) })
                 self.block(cg, body)
-                self.loops = drop_last_loop(self.loops)
+                pop(self.loops)
                 self.finish(Term.Jmp(head))
                 self.start(end)
             },
@@ -939,7 +939,7 @@ impl Lower {
         self.add(Inst.Bind(vn, lv))
         push(self.loops, LoopTarget { cont: cont, brk: done, owners: depth, temps: len(self.temps) })
         for st in body.stmts { self.stmt(cg, st) }
-        self.loops = drop_last_loop(self.loops)
+        pop(self.loops)
         self.close_scope()
         self.finish(Term.Jmp(cont))
         self.start(cont)
@@ -1017,7 +1017,7 @@ impl Lower {
         self.add(Inst.Bind(vn, elem))
         push(self.loops, LoopTarget { cont: cont, brk: done, owners: depth, temps: len(self.temps) })
         for st in body.stmts { self.stmt(cg, st) }
-        self.loops = drop_last_loop(self.loops)
+        pop(self.loops)
         self.close_scope()
         self.finish(Term.Jmp(cont))
         self.start(cont)
@@ -1030,7 +1030,7 @@ impl Lower {
         self.finish(Term.Jmp(head))
         self.start(done)
         self.drop_owners(len(self.owners) - 1)
-        self.owners = drop_last_ints(self.owners)
+        pop(self.owners)
     }
 
     // --- scalar expressions -----------------------------------------------------
@@ -2282,8 +2282,8 @@ impl Lower {
             }
             self.arm_body(cg, arm.body, result, rt)
             self.leave(Term.Jmp(end))
-            self.scopes = drop_last_scope(self.scopes)
-            self.owners = drop_last_ints(self.owners)
+            pop(self.scopes)
+            pop(self.owners)
             self.add(Inst.Scope(false))
             self.finish(Term.Jmp(fail))
             self.start(fail)
@@ -2291,7 +2291,7 @@ impl Lower {
         self.finish(Term.Trap("match", Pos { line: e.line, col: e.col }))
         self.start(end)
         self.drop_owners(len(self.owners) - 1)
-        self.owners = drop_last_ints(self.owners)
+        pop(self.owners)
         if result < 0 { return -1 }
         // every arm that reaches here stored the value
         self.own_temp(result)
@@ -2496,32 +2496,3 @@ fun diverges(e: Expr) -> bool {
     }
 }
 
-fun drop_last_scope(xs: [[Local]]) -> [[Local]] {
-    var out: [[Local]] = []
-    var i = 0
-    while i + 1 < len(xs) {
-        push(out, xs[i])
-        i = i + 1
-    }
-    return out
-}
-
-fun drop_last_loop(xs: [LoopTarget]) -> [LoopTarget] {
-    var out: [LoopTarget] = []
-    var i = 0
-    while i + 1 < len(xs) {
-        push(out, xs[i])
-        i = i + 1
-    }
-    return out
-}
-
-fun drop_last_ints(xs: [[int32]]) -> [[int32]] {
-    var out: [[int32]] = []
-    var i = 0
-    while i + 1 < len(xs) {
-        push(out, xs[i])
-        i = i + 1
-    }
-    return out
-}
