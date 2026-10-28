@@ -157,9 +157,17 @@ pub struct CodeGen {
     // per temporary read from a variable where it is used, the variable's
     // operand (`-24(%rbp)`), else ""
     temp_src: [str],
+    temp_imm: [str],                // MYLA-120: a constant temporary as an immediate operand, "" when not
+    temp_frame: [int32],            // MYLA-120: a slot address's offset from %rbp, 0 when not
     // per temporary, its frame offset (`alloc_temps`; temporaries whose lives
     // don't overlap share one)
     temp_off: [int32],
+    // MYLA-121: per temporary and per slot, the callee-saved register it
+    // lives in ("rbx", "r12", …; "" for none), and the registers the function
+    // saves in the prologue
+    temp_reg: [str],
+    slot_reg: [str],
+    saved_regs: [str],
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -227,7 +235,8 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
-        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_off: [],
+        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
+        temp_reg: [], slot_reg: [], saved_regs: [],
     }
 }
 
@@ -1618,15 +1627,17 @@ impl CodeGen {
     // The integer operation `op` on %rax (left, of type `lt`) and %rcx (right),
     // its result (of type `rt`) in %rax; `/` and `%` trap at line:col on a zero
     // divisor (shared with the IR backend, MYLA-103).
-    fun emit_int_op(var self, op: str, lt: Type, rt: Type, line: int32, col: int32) {
+    // `op` on %rax and `src`, the second operand: %rcx, or for the operators
+    // `takes_operand` names an immediate or a memory operand (MYLA-120).
+    fun emit_int_op(var self, op: str, lt: Type, rt: Type, line: int32, col: int32, src: str) {
         if op == "+" {
-            self.emit("addq %rcx, %rax")
+            self.emit(format("addq {}, %rax", src))
             self.wrap(rt)
         } else if op == "-" {
-            self.emit("subq %rcx, %rax")
+            self.emit(format("subq {}, %rax", src))
             self.wrap(rt)
         } else if op == "*" {
-            self.emit("imulq %rcx, %rax")
+            if starts_with_dollar(src) { self.emit(format("imulq {}, %rax, %rax", src)) } else { self.emit(format("imulq {}, %rax", src)) }
             self.wrap(rt)
         } else if op == "/" || op == "%" {
             self.emit("testq %rcx, %rcx")
@@ -1652,21 +1663,21 @@ impl CodeGen {
             }
             self.wrap(rt)
         } else if is_cmp(op) {
-            self.emit("cmpq %rcx, %rax")
+            self.emit(format("cmpq {}, %rax", src))
             self.emit(format("{} %al", cmp_set(op, int_signed(lt))))
             self.emit("movzbq %al, %rax")
         } else if op == "==" || op == "!=" {
-            self.emit("cmpq %rcx, %rax")
+            self.emit(format("cmpq {}, %rax", src))
             if op == "==" { self.emit("sete %al") } else { self.emit("setne %al") }
             self.emit("movzbq %al, %rax")
         } else if op == "&" {
-            self.emit("andq %rcx, %rax")
+            self.emit(format("andq {}, %rax", src))
             self.wrap(rt)
         } else if op == "|" {
-            self.emit("orq %rcx, %rax")
+            self.emit(format("orq {}, %rax", src))
             self.wrap(rt)
         } else if op == "^" {
-            self.emit("xorq %rcx, %rax")
+            self.emit(format("xorq {}, %rax", src))
             self.wrap(rt)
         } else if op == "<<" || op == ">>" {
             self.emit(format("andq ${}, %rcx", int_width_cg(rt) - 1))
@@ -1826,16 +1837,13 @@ impl CodeGen {
     fun wrap(var self, t: Type) {
         match t {
             Type.TInt(w, s) => {
-                if w != 64 {
-                    if s {
-                        let shift = 64 - w
-                        self.emit(format("shlq ${}, %rax", shift))
-                        self.emit(format("sarq ${}, %rax", shift))
-                    } else if w == 32 {
-                        self.emit("movl %eax, %eax")
-                    } else {
-                        self.emit(format("andq ${}, %rax", (1 << w) - 1))
-                    }
+                // sign- or zero-extended from the low w bits, in one instruction (MYLA-120)
+                if w == 32 {
+                    if s { self.emit("movslq %eax, %rax") } else { self.emit("movl %eax, %eax") }
+                } else if w == 16 {
+                    if s { self.emit("movswq %ax, %rax") } else { self.emit("movzwl %ax, %eax") }
+                } else if w == 8 {
+                    if s { self.emit("movsbq %al, %rax") } else { self.emit("movzbl %al, %eax") }
                 }
             },
             _ => {},
@@ -1856,21 +1864,25 @@ impl CodeGen {
     // %rax, trapping at line:col when it is out of bounds (shared with the IR
     // backend, MYLA-105).
     fun emit_elem_addr(var self, is_str: bool, stride: int32, line: int32, col: int32) {
+        self.emit_elem_check(line, col)
+        self.emit(format("leaq {}, %rax", self.elem_operand(is_str, stride)))
+    }
+
+    // The memory operand of the element %rcx of the list or string %rax
+    // (bounds-checked already); for a stride that isn't a scale, %rcx is
+    // multiplied first (MYLA-120).
+    fun elem_operand(var self, is_str: bool, stride: int32) -> str {
+        if is_str { return "8(%rax,%rcx)" }
+        if stride == 1 || stride == 2 || stride == 4 || stride == 8 { return format("16(%rax,%rcx,{})", stride) }
+        self.emit(format("imulq ${}, %rcx", stride))
+        return "16(%rax,%rcx)"
+    }
+
+    // The bounds check of element %rcx of the list or string %rax.
+    fun emit_elem_check(var self, line: int32, col: int32) {
         self.emit("movq (%rax), %rdx")
         self.emit("cmpq %rdx, %rcx")
         self.trap("jae", "__trap_index", line, col)
-        if is_str {
-            self.emit("leaq 8(%rax), %rax")
-            self.emit("addq %rcx, %rax")
-        } else {
-            self.emit("leaq 16(%rax), %rax")
-            if stride == 8 {
-                self.emit("leaq (%rax,%rcx,8), %rax")
-            } else {
-                self.emit(format("imulq ${}, %rcx", stride))
-                self.emit("addq %rcx, %rax")
-            }
-        }
     }
 
     // -- copy-on-write mutation addressing --------------------------------
@@ -5643,13 +5655,21 @@ fun pow2_bits(k: int32, neg: bool) -> int64 {
     return bits
 }
 
-fun int_signed(t: Type) -> bool {
+pub fun int_signed(t: Type) -> bool {
     return match t { Type.TInt(w, s) => s, _ => false }
 }
 
 fun int_width_cg(t: Type) -> int32 {
     return match t { Type.TInt(w, s) => w, _ => 64 }
 }
+
+// Whether the integer operator `op` takes its second operand as an
+// immediate or from memory (`emit_int_op`); the others want it in %rcx.
+pub fun takes_operand(op: str) -> bool {
+    return op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^" || op == "==" || op == "!=" || is_cmp(op)
+}
+
+fun starts_with_dollar(s: str) -> bool { return len(s) > 0 && s[0] == '$' }
 
 pub fun is_cmp(op: str) -> bool {
     return op == "<" || op == "<=" || op == ">" || op == ">="

@@ -167,7 +167,23 @@ With function values every function of the compiler, the examples and the parity
 - **Reachable functions only.** The worklist starts at the entry point; each function queues what it calls, makes values of or applies partially.
 - **Shared frame cells.** Temporaries living in one block share cells by a linear scan, next to `%rbp`; those living in several blocks keep their own.
 
-Altogether the self-compile went from 3.80 s (the old path) to about 1.9 s, the binary from 2.39 to 1.39 MB, and the peak from 128 to 89 MB. Callee-saved registers for scalar locals were tried and didn't pay off. A register allocator over temporaries, and leaving out the retain/release pair of a copy never written, are left to [[MYLA-109]]. Most of the remaining time is in the compiler's own linear lookups ([[MYLA-119]]).
+[[MYLA-120]], instruction selection (the IR is unchanged):
+
+- **Compare and branch.** An integer comparison whose only use is the branch ending its block is a `cmpq` and a conditional jump; a branch falls through to whichever successor comes next.
+- **Operands where they are.** The second operand of `+ - * & | ^` and the comparisons is an immediate, the variable's slot a temporary was read from, or the temporary's cell, instead of being loaded into `%rcx`.
+- **Addressing modes.** Loads and stores through a slot's address use the frame directly; an element's address is one `leaq` and folds into the load after it; 32-bit constants load with `movq`; integers wrap to their width in one instruction.
+- **Unreachable blocks** get no code, only their debug scopes.
+
+The compiler's binary got 11% smaller and runs 12% fewer instructions compiling itself ([[MYLA-120]] has the measurements).
+
+[[MYLA-121]], register allocation:
+
+- **Callee-saved registers.** Temporaries that would need a frame cell and scalar slots that only `load` and `store` touch (parameters included) live in `%rbx` and `%r12`–`%r15`: one live interval each over the reachable blocks in emission order (liveness across blocks by a backward dataflow, `live_spans`), handed out by a linear scan in which the value with fewer loop-weighted reads and writes gives way (`alloc_regs`). A function saves the registers it uses in the prologue, only when their values weigh enough (`REG_MIN_USE`), and not under `-g`.
+- **Registers read directly.** Loads and stores through a pointer in a register, offsets, reference counts, tests and compare-and-branch use the register; stores take an immediate or a register as their source; a commutative operation or a comparison takes a second operand still in `%rax` first.
+
+The compiler's binary got 7% smaller and compiles itself about 3–4% faster; the stress programs 2.6% faster overall, lists 25% ([[MYLA-121]] has the measurements).
+
+Altogether the self-compile went from 3.80 s (the old path) to about 1.9 s, the binary from 2.39 to 1.39 MB, and the peak from 128 to 89 MB. Callee-saved registers for the four most-used scalar locals were tried and didn't pay off; the register allocator over temporaries and locals of [[MYLA-121]] does. Leaving out the retain/release pair of a copy never written is left to [[MYLA-122]]. Most of the remaining time is in the compiler's own linear lookups ([[MYLA-119]]).
 
 ### Lowering ownership
 

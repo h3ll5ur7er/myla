@@ -443,7 +443,7 @@ fun apply(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> [bool] {
     return out
 }
 
-fun successors(t: Term) -> [int32] {
+pub fun successors(t: Term) -> [int32] {
     return match t {
         Term.Jmp(b) => [b]
         Term.Br(c, a, b) => [a, b]
