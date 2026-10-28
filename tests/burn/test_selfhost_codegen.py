@@ -101,6 +101,7 @@ PARITY_PROGRAMS = (
     "const_string_concatenation_in_functions",
     "local_closure_shadows_a_function",
     "plain_aggregates",
+    "strings_through_the_ir",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -110,6 +111,7 @@ PARITY_PROGRAMS = (
 # over 4 GiB (with it, 8 to 18 MB) (MYLA-22).
 STRESS_PROGRAMS = {
     "STRESS_SRC": "354000000",
+    "STRESS_STR_OWNERSHIP_SRC": "4650000",
     "STRESS_TRY_SRC": "100000",
     "STRESS_TRY_AFTER_STAGED_VALUE_SRC": "7500000",
     "STRESS_LOOPCTL_SRC": "200001\n133333",
@@ -688,7 +690,9 @@ class SelfHostedCodegenParityThroughIR(SelfHostedCodegenParity):
         # the examples and parity programs exercise the IR, not only the
         # fallback: count the functions that went through it
         from .test_compiler_parity import PROGRAMS
+        from . import test_compiler_parity
         sources = [PROGRAMS[name] for name in PARITY_PROGRAMS]
+        sources += [getattr(test_compiler_parity, name) for name in STRESS_PROGRAMS]
         for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
             with open(path, encoding="utf-8") as fh:
                 sources.append(fh.read())
@@ -697,6 +701,9 @@ class SelfHostedCodegenParityThroughIR(SelfHostedCodegenParity):
             proc = self._ir_run(source, default_stdlib_root(), "--ir-stats")
             self.assertEqual(proc.returncode, 0, proc.stderr)
             through += int(proc.stderr.split(" functions through the IR")[0].split()[-1])
+            # a function the ownership verifier rejects falls back silently;
+            # here that is a failure (MYLA-105)
+            self.assertNotIn("IR verifier", proc.stderr)
         self.assertGreater(through, 60)
 
 

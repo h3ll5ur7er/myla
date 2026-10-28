@@ -176,6 +176,34 @@ impl CodeGen {
                 self.emit(format("call myla_{}", name))
                 self.emit(format("addq ${}, %rsp", 8 * (len(args) + 1)))
             },
+            Inst.Rt(d, name, args) => {
+                let regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+                var i = 0
+                while i < len(args) {
+                    self.load_temp(args[i], regs[i], temp_base)
+                    i = i + 1
+                }
+                self.emit(format("call {}", name))
+                if d >= 0 { self.store_temp(d, temp_base) }
+            },
+            Inst.RetainVal(t, v) => {
+                self.load_temp(v, "rax", temp_base)
+                self.emit("incq -8(%rax)")
+            },
+            Inst.Retain(t, p) => {
+                self.load_temp(p, "r8", temp_base)
+                self.retain("r8", 0, t)
+            },
+            Inst.DropSlot(t, s) => { self.drop_value("rbp", slot_off[s], t) },
+            Inst.DropAt(t, p) => {
+                // the walk keeps the address in callee-saved %rbx across the
+                // drop calls, as the old path's `drop_stored`
+                self.emit("pushq %rbx")
+                self.load_temp(p, "rbx", temp_base)
+                self.walk_member("rbx", 0, t, false)
+                self.emit("popq %rbx")
+            },
+            Inst.Init(s) => {},
             Inst.Print(t, a) => {
                 self.load_temp(a, "rax", temp_base)
                 self.emit_print(t)

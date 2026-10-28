@@ -16,7 +16,7 @@ from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
-from .ir import render_func
+from .ir import render_func, verify
 from .lower import lower_function
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
@@ -1657,6 +1657,15 @@ impl CodeGen {
         if self.use_ir {
             match lower_function(self, fd, mangled) {
                 Ok(f) => {
+                    // the ownership verifier (MYLA-105): a function it rejects
+                    // falls back, with the reason the tests look for
+                    let problem = verify(f)
+                    if problem != "" {
+                        push(self.ir_skipped, format("{}: IR verifier: {}", mangled, problem))
+                        if self.keep_ir { push(self.ir_texts, render_func(f)) }
+                        self.gen_function(fd, mangled)
+                        return
+                    }
                     for inst in f.instances { let m = self.request_fn(inst.orig, inst.targs) }
                     push(self.ir_done, mangled)
                     if self.keep_ir { push(self.ir_texts, render_func(f)) }
@@ -7742,7 +7751,7 @@ fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => false }
 fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
 
 // A heap cell whose pointer is the value: retained and dropped as one pointer.
-fun is_cell_t(t: Type) -> bool { return is_list_t(t) || is_map_t(t) || is_sb_t(t) || is_str_t(t) }
+pub fun is_cell_t(t: Type) -> bool { return is_list_t(t) || is_map_t(t) || is_sb_t(t) || is_str_t(t) }
 
 // A `str` cell in the data section: the heap's `[size][refcount]` header, then
 // `[len][bytes]` at `label`; its count never reaches zero (MYLA-18, the Python
@@ -7756,7 +7765,7 @@ fun static_str(label: str, text: str) -> [str] {
 
 // The variable a place (`x`, `x.f`, `x[i].g`) starts from, or "" when `e` is
 // not a place.
-fun place_root(e: Expr) -> str {
+pub fun place_root(e: Expr) -> str {
     return match e.kind {
         ExprKind.Name(n) => n,
         ExprKind.GetField(t, f) => place_root(t),
@@ -7774,7 +7783,7 @@ fun is_mutating_builtin(n: str) -> bool {
 // conservatively: an assignment to or into it, a mutating builtin on it, or a
 // method call on it (the method may take `var self`). Myla has no references
 // and closures capture by value, so nothing else can.
-fun arms_may_write(arms: [MatchArm], name: str) -> bool {
+pub fun arms_may_write(arms: [MatchArm], name: str) -> bool {
     for arm in arms {
         match arm.guard { Some(g) => { if may_write_expr(g, name) { return true } }, None => {} }
         if may_write_body(arm.body, name) { return true }

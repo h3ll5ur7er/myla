@@ -448,6 +448,80 @@ PROGRAMS = {
         "    print(r)\n"
         "}\n"
     ),
+    # MYLA-105: strings and aggregates holding them through the IR: a const,
+    # concatenation, equality, len, fields and payloads, a copy whose field is
+    # reassigned, early returns from a loop, a match on a string whose arm
+    # writes it, a break with owners in scope
+    "strings_through_the_ir": (
+        'const GREETING: str = "hello"\n'
+        "\n"
+        "struct Named { name: str, n: int }\n"
+        "\n"
+        "enum Token {\n"
+        "    Word(str),\n"
+        "    Num(int),\n"
+        "    End,\n"
+        "}\n"
+        "\n"
+        "fun describe(t: Token) -> str {\n"
+        "    return match t {\n"
+        '        Token.Word(w) => "word " + w,\n'
+        '        Token.Num(n) => "num",\n'
+        '        Token.End => "end",\n'
+        "    }\n"
+        "}\n"
+        "\n"
+        "fun rename(x: Named, to: str) -> Named {\n"
+        "    var y = x\n"
+        '    y.name = to + "!"\n'
+        "    return y\n"
+        "}\n"
+        "\n"
+        "fun first_long(a: str, b: str, c: str) -> str {\n"
+        "    for i in 0..3 {\n"
+        "        if i == 0 && len(a) > 3 { return a }\n"
+        "        if i == 1 && len(b) > 3 { return b }\n"
+        "    }\n"
+        "    return c\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    var s = GREETING\n"
+        '    s = s + ", " + "world"\n'
+        "    print(s)\n"
+        "    print(len(s))\n"
+        '    print(s == "hello, world")\n'
+        "    print(s != GREETING)\n"
+        '    let n = Named { name: "a", n: 1 }\n'
+        '    let m = rename(n, "b")\n'
+        "    print(n.name)\n"
+        "    print(m.name)\n"
+        '    var t = Token.Word("hi")\n'
+        "    print(describe(t))\n"
+        "    print(describe(Token.Num(3)))\n"
+        "    print(describe(Token.End))\n"
+        '    var mode = "start"\n'
+        "    match mode {\n"
+        '        "start" => { mode = "running" },\n'
+        "        _ => {},\n"
+        "    }\n"
+        "    print(mode)\n"
+        '    print(first_long("ab", "abcd", "c"))\n'
+        '    print(first_long("ab", "a", "c"))\n'
+        '    var words = "x"\n'
+        "    var i = 0\n"
+        "    while i < 4 {\n"
+        "        let piece = describe(Token.Word(words))\n"
+        "        if len(piece) > 9 {\n"
+        "            break\n"
+        "        }\n"
+        '        words = words + "y"\n'
+        "        i = i + 1\n"
+        "    }\n"
+        "    print(words)\n"
+        "}\n"
+    ),
     "const_string_concatenation_in_functions": (
         "const TABLE: str = \"ab\" + \"cd\" + \"ef\"\n"
         "const N: int32 = 2 + 3\n"
@@ -1994,6 +2068,58 @@ STRESS_LOOPCTL_SRC = (
 )
 
 
+# MYLA-105: strings churned through every ownership path the IR lowers (an
+# owned temporary per concatenation, reassignment in a loop, an early return
+# with an owner in scope, struct fields, a match on a string, a break): a
+# missed drop would leak some 50 MB over the run and fail the peak check.
+STRESS_STR_OWNERSHIP_SRC = (
+        "struct Person { name: str, tag: str }\n"
+        "\n"
+        "fun greet(p: Person) -> str {\n"
+        '    return "hi " + p.name\n'
+        "}\n"
+        "\n"
+        "fun pick(n: int) -> str {\n"
+        '    var s = "x"\n'
+        "    var i = 0\n"
+        "    while i < n {\n"
+        '        s = s + "y"\n'
+        "        if i == 5 {\n"
+        '            return s + "!"\n'
+        "        }\n"
+        "        i = i + 1\n"
+        "    }\n"
+        "    return s\n"
+        "}\n"
+        "\n"
+        "fun label(s: str) -> int {\n"
+        "    return match s {\n"
+        '        "a" => 1,\n'
+        '        "xyy" => 2,\n'
+        "        _ => len(s),\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    var total = 0\n"
+        "    var k = 0\n"
+        "    while k < 300000 {\n"
+        '        let p = Person { name: "n" + "m", tag: pick(k % 10) }\n'
+        "        let g = greet(p)\n"
+        "        total = total + len(g) + len(p.tag) + label(p.tag)\n"
+        "        var w = p.name\n"
+        "        w = w + w\n"
+        "        if len(w) > 100 {\n"
+        "            break\n"
+        "        }\n"
+        "        k = k + 1\n"
+        "    }\n"
+        "    print(total)\n"
+        "}\n"
+)
+
+
 # Lists are reference-counted heap cells with copy-on-write. This churns millions
 # of list allocations — building, sharing (forcing CoW clones), push/pop growth,
 # and per-iteration drops — through the finite arena: a leak or a missed drop
@@ -2492,6 +2618,12 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_LOOPCTL_SRC)
         self.assertEqual(code, 0, "arena exhausted — break/continue leaked locals")
         self.assertEqual(out.strip(), "200001\n133333")
+
+    def test_strings_drop_on_every_path(self):
+        # MYLA-105: the string stress program the IR gate also runs
+        out, code = build_and_run(STRESS_STR_OWNERSHIP_SRC)
+        self.assertEqual(code, 0, "arena exhausted: strings leaked")
+        self.assertEqual(out.strip(), "4650000")
 
     def test_panic_aborts_after_flushing_output(self):
         # panic() exits nonzero; output emitted before it must still appear.

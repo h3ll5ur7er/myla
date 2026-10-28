@@ -52,6 +52,23 @@ pub enum Inst {
     // call name sret %ptr (%args): a user function with an aggregate result,
     // written to the storage at %ptr; aggregate arguments are addresses
     CallSret(str, int32, [int32]),
+    // %dst = rt name(%args): a runtime helper, the arguments in %rdi, %rsi,
+    // %rdx, %rcx, %r8 and %r9 (`__str_concat`, `__str_eq`, …); dst -1 without
+    // a result (MYLA-105)
+    Rt(int32, str, [int32]),
+    // retain T %v: one more reference to the cell %v points at (T a string,
+    // list, map or builder)
+    RetainVal(Type, int32),
+    // retain T [%ptr]: one more reference to every heap value the T at %ptr owns
+    Retain(Type, int32),
+    // drop T $slot: release what the owning slot holds (its owner's end)
+    DropSlot(Type, int32),
+    // drop T [%ptr]: release what the member at %ptr holds (before it is
+    // overwritten)
+    DropAt(Type, int32),
+    // init $slot: the aggregate built member by member in the slot is
+    // complete (for the verifier; no code)
+    Init(int32),
     // print ty %a: a scalar, as `print` writes it
     Print(Type, int32),
     // loc line col: the source position of the code that follows
@@ -80,10 +97,11 @@ pub enum Term {
 pub struct IrBlock { insts: [Inst], term: Term }
 
 // A slot: its name (for debug information and the text form), the Myla type
-// of what it holds, its size in bytes, and, for a parameter, the index of its
+// of what it holds, its size in bytes, for a parameter the index of its
 // argument word (`16 + 8 * word(%rbp)`, holding the value of a scalar and the
-// address of an aggregate), else -1.
-pub struct Slot { name: str, ty: Type, size: int32, word: int32 }
+// address of an aggregate) or -1, and whether it owns the heap values it holds
+// (a local, an owned temporary: the verifier follows it, MYLA-105).
+pub struct Slot { name: str, ty: Type, size: int32, word: int32, owns: bool }
 
 // A generic function's instance a function calls: the generic function and
 // its type arguments, which the code generator then stamps out.
@@ -110,6 +128,7 @@ pub fun render_func(f: IrFunc) -> str {
         let s = f.slots[i]
         var where = ""
         if s.word >= 0 { where = format(" (argument {})", s.word) } else if s.size != 8 { where = format(" ({} bytes)", s.size) }
+        if s.owns { where = where + " owns" }
         append(sb, format("  ${} {}: {}{}\n", i, s.name, type_name(s.ty), where))
         i = i + 1
     }
@@ -143,6 +162,12 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Cast(d, from_t, to_t, a) => format("%t{} = cast {} -> {} %t{}", d, type_name(from_t), type_name(to_t), a)
         Inst.Call(d, name, args) => render_call(d, name, args)
         Inst.CallSret(name, r, args) => render_call(-1, name, args) + format(" sret %t{}", r)
+        Inst.Rt(d, name, args) => render_rt(d, name, args)
+        Inst.RetainVal(t, v) => format("retain {} %t{}", type_name(t), v)
+        Inst.Retain(t, p) => format("retain {} [%t{}]", type_name(t), p)
+        Inst.DropSlot(t, s) => format("drop {} ${}", type_name(t), s)
+        Inst.DropAt(t, p) => format("drop {} [%t{}]", type_name(t), p)
+        Inst.Init(s) => format("init ${}", s)
         Inst.Print(t, a) => format("print {} %t{}", type_name(t), a)
         Inst.Loc(p) => format("loc {} {}", p.line, p.col)
         Inst.Bind(name, s) => format("bind {} ${}", name, s)
@@ -168,6 +193,20 @@ fun render_call(d: int32, name: str, args: [int32]) -> str {
     var sb = StringBuilder()
     if d >= 0 { append(sb, format("%t{} = ", d)) }
     append(sb, format("call myla_{}(", name))
+    var first = true
+    for a in args {
+        if !first { append(sb, ", ") }
+        append(sb, format("%t{}", a))
+        first = false
+    }
+    append(sb, ")")
+    return build(sb)
+}
+
+fun render_rt(d: int32, name: str, args: [int32]) -> str {
+    var sb = StringBuilder()
+    if d >= 0 { append(sb, format("%t{} = ", d)) }
+    append(sb, format("rt {}(", name))
     var first = true
     for a in args {
         if !first { append(sb, ", ") }
@@ -207,4 +246,172 @@ fun quoted(s: str) -> str {
     }
     append(sb, "\"")
     return build(sb)
+}
+
+// --- The verifier (MYLA-105) ------------------------------------------------------
+
+// The ownership errors in `f`, "" if there are none: along every path from
+// the entry, an owning slot is stored into only while it holds nothing, and
+// dropped only while it holds a value; at `ret` none holds a value; and where
+// paths join they agree on which slots hold one. A `copy` or `call … sret`
+// into an owning slot's address stores into it. Blocks no path reaches aren't
+// checked (the code after a `return`).
+pub fun verify(f: IrFunc) -> str {
+    let n = len(f.blocks)
+    if n == 0 { return "" }
+    // the slot each temporary is the address of (`addr`), or -1
+    var addr_of: [int32] = []
+    for t in f.temps { push(addr_of, -1) }
+    for b in f.blocks {
+        for inst in b.insts {
+            match inst {
+                Inst.Addr(d, s) => { addr_of[d] = s },
+                _ => {},
+            }
+        }
+    }
+    // the state at each block's entry: which slots hold a value
+    var known: [bool] = []
+    var entry: [[bool]] = []
+    var none: [bool] = []
+    for s in f.slots { push(none, false) }
+    for b in f.blocks {
+        push(known, false)
+        push(entry, none)
+    }
+    known[0] = true
+    var work = [0]
+    while len(work) > 0 {
+        let b = work[len(work) - 1]
+        work = drop_last_int(work)
+        var live = entry[b]
+        for inst in f.blocks[b].insts {
+            let problem = step(f, inst, addr_of, live)
+            if problem != "" { return format("L{}: {}", b, problem) }
+            live = apply(f, inst, addr_of, live)
+        }
+        let succ = successors(f.blocks[b].term)
+        match f.blocks[b].term {
+            Term.Ret(v) => {
+                var i = 0
+                while i < len(live) {
+                    if live[i] { return format("L{}: ${} ({}) still holds a value at ret", b, i, f.slots[i].name) }
+                    i = i + 1
+                }
+            },
+            _ => {},
+        }
+        for s in succ {
+            if !known[s] {
+                known[s] = true
+                entry[s] = live
+                push(work, s)
+            } else {
+                var i = 0
+                while i < len(live) {
+                    if live[i] != entry[s][i] { return format("L{}: paths into L{} disagree on whether ${} ({}) holds a value", b, s, i, f.slots[i].name) }
+                    i = i + 1
+                }
+            }
+        }
+    }
+    return ""
+}
+
+// The slot an instruction stores into (an owning one), or -1.
+fun stored_slot(f: IrFunc, inst: Inst, addr_of: [int32]) -> int32 {
+    var s = -1
+    match inst {
+        Inst.Store(slot, v) => { s = slot },
+        Inst.Copy(d, src, size) => { s = addr_of[d] },
+        Inst.CallSret(name, r, args) => { s = addr_of[r] },
+        Inst.Init(slot) => { s = slot },
+        _ => {},
+    }
+    if s >= 0 && f.slots[s].owns { return s }
+    return -1
+}
+
+// What is wrong with `inst` given which slots hold a value, or "".
+fun step(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> str {
+    match inst {
+        Inst.DropSlot(t, s) => {
+            if !f.slots[s].owns { return format("drop of ${} ({}), which owns nothing", s, f.slots[s].name) }
+            if !live[s] { return format("drop of ${} ({}), which holds no value", s, f.slots[s].name) }
+            return ""
+        },
+        _ => {},
+    }
+    let s = stored_slot(f, inst, addr_of)
+    if s >= 0 && live[s] { return format("store into ${} ({}), which still holds a value", s, f.slots[s].name) }
+    return ""
+}
+
+fun apply(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> [bool] {
+    var out = live
+    match inst {
+        Inst.DropSlot(t, s) => { out[s] = false },
+        _ => {},
+    }
+    let s = stored_slot(f, inst, addr_of)
+    if s >= 0 { out[s] = true }
+    return out
+}
+
+fun successors(t: Term) -> [int32] {
+    return match t {
+        Term.Jmp(b) => [b]
+        Term.Br(c, a, b) => [a, b]
+        _ => []
+    }
+}
+
+fun drop_last_int(xs: [int32]) -> [int32] {
+    var out: [int32] = []
+    var i = 0
+    while i + 1 < len(xs) {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+// --- Verifier tests ---------------------------------------------------------------
+
+// `verify` on a function of one block with `insts`, then `ret`: slot $0 is
+// an owning string slot, temporary %t0 a string.
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.DropSlot(Type.TStr, 0)])[""]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0)])["L0: $0 (s) still holds a value at ret"]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.DropSlot(Type.TStr, 0), Inst.DropSlot(Type.TStr, 0)])["L0: drop of $0 (s), which holds no value"]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Store(0, 0)])["L0: store into $0 (s), which still holds a value"]
+#test([Inst.DropSlot(Type.TStr, 1)])["L0: drop of $1 (b), which owns nothing"]
+fun verify_block(insts: [Inst]) -> str {
+    return verify(test_func([IrBlock { insts: insts, term: Term.Ret(-1) }]))
+}
+
+// `verify` on a diamond: L0 stores into $0 and branches to L1 (`left`) and
+// L2 (`right`), which join in L3, which drops $0 and returns.
+#test([], [])[""]
+#test([Inst.DropSlot(Type.TStr, 0)], [])["L1: paths into L3 disagree on whether $0 (s) holds a value"]
+fun verify_diamond(left: [Inst], right: [Inst]) -> str {
+    return verify(test_func([
+        IrBlock { insts: [Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Const(1, Type.TBool, 1)], term: Term.Br(1, 1, 2) },
+        IrBlock { insts: left, term: Term.Jmp(3) },
+        IrBlock { insts: right, term: Term.Jmp(3) },
+        IrBlock { insts: [Inst.DropSlot(Type.TStr, 0)], term: Term.Ret(-1) },
+    ]))
+}
+
+fun test_func(blocks: [IrBlock]) -> IrFunc {
+    var order: [int32] = []
+    var i = 0
+    while i < len(blocks) {
+        push(order, i)
+        i = i + 1
+    }
+    return IrFunc {
+        name: "f", ret: None,
+        slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false }],
+        temps: [Type.TStr, Type.TBool], blocks: blocks, order: order, instances: [],
+    }
 }
