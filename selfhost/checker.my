@@ -694,6 +694,12 @@ pub enum ArmBody {
 // =========================================================================
 
 pub struct Checker {
+    // the index of the first struct, enum, function and method (`key\tname`)
+    // of each name, kept with the lists (`add_*`; MYLA-119)
+    struct_map: [str: int32],
+    enum_map: [str: int32],
+    func_map: [str: int32],
+    method_map: [str: int32],
     decls: [Decl],
     structs: [StructInfo],
     enums: [EnumInfo],
@@ -734,6 +740,7 @@ pub struct Checker {
 
 fun new_checker(decls: [Decl]) -> Checker {
     return Checker {
+        struct_map: [:], enum_map: [:], func_map: [:], method_map: [:],
         decls: decls,
         structs: [], enums: [], recursive_enums: [],
         functions: [], methods: [], method_decls: [], method_decl_keys: [], method_decl_ids: [],
@@ -822,26 +829,28 @@ fun is_lvalue_shape(e: Expr) -> bool {
 // --- lookups -------------------------------------------------------------
 
 impl Checker {
-    fun struct_idx(self, name: str) -> int32 {
-        var i = 0
-        while i < len(self.structs) { if self.structs[i].name == name { return i }
-            i = i + 1
-        }
-        return -1
+    fun struct_idx(self, name: str) -> int32 { return index_in(self.struct_map, name) }
+    fun enum_idx(self, name: str) -> int32 { return index_in(self.enum_map, name) }
+    fun func_idx(self, name: str) -> int32 { return index_in(self.func_map, name) }
+
+    // Append to the tables, keeping their maps (the first of a name wins, as
+    // the searches they replace found it).
+    fun add_struct(var self, info: StructInfo) {
+        if !contains(self.struct_map, info.name) { self.struct_map[info.name] = len(self.structs) }
+        push(self.structs, info)
     }
-    fun enum_idx(self, name: str) -> int32 {
-        var i = 0
-        while i < len(self.enums) { if self.enums[i].name == name { return i }
-            i = i + 1
-        }
-        return -1
+    fun add_enum(var self, info: EnumInfo) {
+        if !contains(self.enum_map, info.name) { self.enum_map[info.name] = len(self.enums) }
+        push(self.enums, info)
     }
-    fun func_idx(self, name: str) -> int32 {
-        var i = 0
-        while i < len(self.functions) { if self.functions[i].name == name { return i }
-            i = i + 1
-        }
-        return -1
+    fun add_function(var self, sig: FuncSig) {
+        if !contains(self.func_map, sig.name) { self.func_map[sig.name] = len(self.functions) }
+        push(self.functions, sig)
+    }
+    fun add_method(var self, m: MethodEntry) {
+        let k = m.key + "\t" + m.name
+        if !contains(self.method_map, k) { self.method_map[k] = len(self.methods) }
+        push(self.methods, m)
     }
     fun trait_idx(self, name: str) -> int32 {
         var i = 0
@@ -872,8 +881,9 @@ impl Checker {
     fun is_enum(self, name: str) -> bool { return self.enum_idx(name) >= 0 }
 
     fun method_sig(self, key: str, name: str) -> Option<FuncSig> {
-        for m in self.methods { if m.key == key && m.name == name { return Some(m.sig) } }
-        return None
+        let i = index_in(self.method_map, key + "\t" + name)
+        if i < 0 { return None }
+        return Some(self.methods[i].sig)
     }
     fun type_key(self, t: Type) -> Option<str> {
         return match t {
@@ -1059,11 +1069,11 @@ impl Checker {
             if contains_str(seen, name) { return Err(terr_at(ln, cl, sp, format("duplicate top-level declaration '{}'", name))) }
             push(seen, name)
             match decl.kind {
-                DeclKind.StructDecl(n, fields, attrs, tps, isp) => { push(self.structs, StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl, sp: sp, id: decl.id }) },
-                DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { push(self.enums, EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl, sp: sp, id: decl.id }) },
+                DeclKind.StructDecl(n, fields, attrs, tps, isp) => { self.add_struct(StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl, sp: sp, id: decl.id }) },
+                DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { self.add_enum(EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl, sp: sp, id: decl.id }) },
                 DeclKind.TypeAliasDecl(n, target, attrs, isp) => { push(self.aliases, AliasRaw { name: n, target: target, line: ln, col: cl, sp: sp, id: decl.id }) },
                 DeclKind.ConstDecl(n, ty, value, attrs, isp) => { push(self.const_decls, ConstDeclT { name: n, declared: ty, value: value, line: ln, col: cl, sp: sp, id: decl.id }) },
-                DeclKind.FunDecl(fd) => { push(self.functions, FuncSig { name: fd.name, params: [], ret: None, type_params: [], bounds: [], decl: fd, has_decl: true, decl_id: decl.id }) },
+                DeclKind.FunDecl(fd) => { self.add_function(FuncSig { name: fd.name, params: [], ret: None, type_params: [], bounds: [], decl: fd, has_decl: true, decl_id: decl.id }) },
                 _ => {},
             }
         }
@@ -1454,8 +1464,8 @@ impl Checker {
             type_params: synth_typarams(combined_names), receiver: m.receiver, is_pub: false,
         }
         let sig = FuncSig { name: mangled, params: params, ret: rt, type_params: combined_names, bounds: combined_bounds, decl: fdecl, has_decl: true, decl_id: impl_id }
-        push(self.functions, sig)
-        push(self.methods, MethodEntry { key: key, name: m.name, sig: sig })
+        self.add_function(sig)
+        self.add_method(MethodEntry { key: key, name: m.name, sig: sig })
         push(self.method_decls, fdecl)
         push(self.method_decl_keys, key)
         push(self.method_decl_ids, impl_id)
@@ -3057,7 +3067,7 @@ impl Checker {
             if self.is_struct(name) { self_t = Type.TStruct(name, []) }
             let fdecl = FunData { line: decl.line, col: decl.col, sp: no_span(), name: format("{}.eq", name), params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: Some("self"), is_pub: false }
             let sig = FuncSig { name: format("{}.eq", name), params: [self_t, self_t], ret: Some(Type.TBool), type_params: [], bounds: [], decl: fdecl, has_decl: true, decl_id: decl.id }
-            push(self.methods, MethodEntry { key: name, name: "eq", sig: sig })
+            self.add_method(MethodEntry { key: name, name: "eq", sig: sig })
             push(self.trait_impls, TraitImplPair { trait_name: "Eq", key: name })
             push(self.user_trait_impls, TraitImplPair { trait_name: "Eq", key: name })
         }
@@ -4197,3 +4207,11 @@ fun func_to_partial_res(t: Type, e: Expr) -> Result<PartialTgt, CheckErr> {
 pub struct PartialTgt { params: [Type], ret: Option<Type>, name: str }
 
 
+
+// The index `m` maps `name` to, or -1.
+fun index_in(m: [str: int32], name: str) -> int32 {
+    return match get(m, name) {
+        Some(i) => i
+        None => -1
+    }
+}

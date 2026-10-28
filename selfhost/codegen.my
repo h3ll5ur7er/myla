@@ -76,9 +76,9 @@ pub struct CodeGen {
     str_labels: [str],
     subst: [Subst],
     fn_worklist: [MonoFn],
-    fn_done: [str],
+    fn_seen: [str: bool],            // queued or emitted, by mangled name
     lam_jobs: [LamJob],
-    lam_done: [str],
+    lam_seen: [str: bool],
     partial_jobs: [PartialJob],
     fnval_set: [str],
     uses_float: bool,
@@ -131,6 +131,16 @@ pub struct CodeGen {
     // the functions' IR text is kept (`--emit-ir`), and the text; the structs
     // and enums the lowering can't take (`blocked_types`), worked out before
     // the first function.
+    // Lookup tables (MYLA-119): the index of each function, struct and enum
+    // by name (the first of a name), the enums' names, the variants' names
+    // and those without a payload, and each interned string's index.
+    func_ix: [str: int32],
+    struct_ix: [str: int32],
+    enum_ix: [str: int32],
+    enum_names: [str: bool],
+    variant_names: [str: bool],
+    nullary_names: [str: bool],
+    str_ix: [str: int32],
     keep_ir: bool,
     ir_texts: [str],
     ir_blocked: [str],
@@ -160,7 +170,40 @@ pub fun new_codegen(c: Checker) -> CodeGen {
             _ => {},
         }
     }
+    var func_ix: [str: int32] = [:]
+    var i = 0
+    while i < len(c.functions) {
+        if !contains(func_ix, c.functions[i].name) { func_ix[c.functions[i].name] = i }
+        i = i + 1
+    }
+    var struct_ix: [str: int32] = [:]
+    i = 0
+    while i < len(c.structs) {
+        if !contains(struct_ix, c.structs[i].name) { struct_ix[c.structs[i].name] = i }
+        i = i + 1
+    }
+    var enum_ix: [str: int32] = [:]
+    var variant_names: [str: bool] = [:]
+    var nullary_names: [str: bool] = [:]
+    i = 0
+    while i < len(c.enums) {
+        if !contains(enum_ix, c.enums[i].name) { enum_ix[c.enums[i].name] = i }
+        for v in c.enums[i].variants {
+            variant_names[v.name] = true
+            if len(v.payload) == 0 { nullary_names[v.name] = true }
+        }
+        i = i + 1
+    }
+    var enum_names: [str: bool] = [:]
+    for d in c.decls {
+        match d.kind {
+            DeclKind.EnumDecl(en, variants, attrs, tps, isp) => { enum_names[en] = true },
+            _ => {},
+        }
+    }
     return CodeGen {
+        func_ix: func_ix, struct_ix: struct_ix, enum_ix: enum_ix, enum_names: enum_names,
+        variant_names: variant_names, nullary_names: nullary_names, str_ix: [:],
         decls: c.decls,
         const_strs: const_strs,
         resolved: c.resolved,
@@ -171,8 +214,8 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         text: [], rodata: [], strdata: [],
         label_n: 0, str_n: 0,
         str_texts: [], str_labels: [],
-        subst: [], fn_worklist: [], fn_done: [],
-        lam_jobs: [], lam_done: [], partial_jobs: [], fnval_set: [],
+        subst: [], fn_worklist: [], fn_seen: [:],
+        lam_jobs: [], lam_seen: [:], partial_jobs: [], fnval_set: [],
         uses_float: false,
         epilogue: "", ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
@@ -790,12 +833,10 @@ impl CodeGen {
     }
 
     fun str_index(self, text: str) -> int32 {
-        var i = 0
-        while i < len(self.str_texts) {
-            if self.str_texts[i] == text { return i }
-            i = i + 1
+        return match get(self.str_ix, text) {
+            Some(i) => i
+            None => -1
         }
-        return -1
     }
 
     // Intern a string literal, emitting a static `str` cell (MYLA-18).
@@ -804,6 +845,7 @@ impl CodeGen {
         if existing >= 0 { return self.str_labels[existing] }
         let lab = format(".Lstr{}", self.str_n)
         self.str_n = self.str_n + 1
+        self.str_ix[text] = len(self.str_texts)
         push(self.str_texts, text)
         push(self.str_labels, lab)
         for line in static_str(lab, text) { push(self.strdata, line) }
@@ -813,13 +855,14 @@ impl CodeGen {
     // -- lookups ----------------------------------------------------------
 
     fun sig_of(self, name: str) -> FuncSig {
-        for f in self.funcs { if f.name == name { return f } }
-        return self.funcs[0]
+        return match get(self.func_ix, name) {
+            Some(i) => self.funcs[i]
+            None => self.funcs[0]
+        }
     }
 
     fun has_func(self, name: str) -> bool {
-        for f in self.funcs { if f.name == name { return true } }
-        return false
+        return contains(self.func_ix, name)
     }
 
     // The method-table key for a receiver type (mirrors Checker.type_key).
@@ -848,13 +891,17 @@ impl CodeGen {
     // -- type layout ------------------------------------------------------
 
     fun struct_info(self, name: str) -> StructInfo {
-        for s in self.structs { if s.name == name { return s } }
-        return self.structs[0]
+        return match get(self.struct_ix, name) {
+            Some(i) => self.structs[i]
+            None => self.structs[0]
+        }
     }
 
     fun enum_info(self, name: str) -> EnumInfo {
-        for e in self.enums { if e.name == name { return e } }
-        return self.enums[0]
+        return match get(self.enum_ix, name) {
+            Some(i) => self.enums[i]
+            None => self.enums[0]
+        }
     }
 
     fun is_boxed(self, t: Type) -> bool {
@@ -1257,32 +1304,19 @@ impl CodeGen {
     }
 
     fun is_enum_name(self, n: str) -> bool {
-        for d in self.decls {
-            match d.kind {
-                DeclKind.EnumDecl(en, variants, attrs, tps, isp) => { if en == n { return true } },
-                _ => {},
-            }
-        }
-        return false
+        return contains(self.enum_names, n)
     }
 
     fun is_nullary_variant(self, n: str) -> bool {
-        for ei in self.enums {
-            for v in ei.variants { if v.name == n && len(v.payload) == 0 { return true } }
-        }
-        return false
+        return contains(self.nullary_names, n)
     }
 
     fun is_variant_name(self, n: str) -> bool {
-        for ei in self.enums {
-            for v in ei.variants { if v.name == n { return true } }
-        }
-        return false
+        return contains(self.variant_names, n)
     }
 
     fun has_function(self, n: str) -> bool {
-        for f in self.funcs { if f.name == n { return true } }
-        return false
+        return contains(self.func_ix, n)
     }
 
     // Whether the checker typed `callee` as a value, which it does only for an
@@ -1336,16 +1370,14 @@ impl CodeGen {
             if len(self.fn_worklist) > 0 {
                 let job = self.fn_worklist[len(self.fn_worklist) - 1]
                 self.fn_worklist = drop_last(self.fn_worklist)
-                if list_has_str(self.fn_done, job.mangled) { continue }
-                push(self.fn_done, job.mangled)
                 self.subst = job.subst
                 self.gen_any_function(self.sig_of(job.orig).decl, job.mangled)
                 self.subst = []
             } else {
                 let lj = self.lam_jobs[len(self.lam_jobs) - 1]
                 self.lam_jobs = drop_last(self.lam_jobs)
-                if list_has_str(self.lam_done, lj.lifted) { continue }
-                push(self.lam_done, lj.lifted)
+                if contains(self.lam_seen, lj.lifted) { continue }
+                self.lam_seen[lj.lifted] = true
                 self.gen_any_lambda(lj)
             }
         }
@@ -1361,13 +1393,15 @@ impl CodeGen {
     fun request_fn(var self, orig: str, targs: [Type]) -> str {
         let sig = self.sig_of(orig)
         if len(sig.type_params) == 0 {
-            if !list_has_str(self.fn_done, orig) && !worklist_has(self.fn_worklist, orig) {
+            if !contains(self.fn_seen, orig) {
+                self.fn_seen[orig] = true
                 push(self.fn_worklist, MonoFn { orig: orig, mangled: orig, subst: [] })
             }
             return orig
         }
         let mangled = mangle_fn(orig, targs)
-        if !list_has_str(self.fn_done, mangled) && !worklist_has(self.fn_worklist, mangled) {
+        if !contains(self.fn_seen, mangled) {
+            self.fn_seen[mangled] = true
             var sub: [Subst] = []
             var i = 0
             while i < len(sig.type_params) {
@@ -5353,11 +5387,6 @@ pub fun failure_variant(enum_name: str) -> str {
 }
 
 // -- monomorphization helpers --------------------------------------------
-
-fun worklist_has(wl: [MonoFn], mangled: str) -> bool {
-    for m in wl { if m.mangled == mangled { return true } }
-    return false
-}
 
 fun int_type_name_cg(w: int32, signed: bool) -> str {
     if signed { return format("int{}", w) }
