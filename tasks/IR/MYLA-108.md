@@ -2,7 +2,7 @@
 id: MYLA-108
 title: IR: optimisations
 type: feature
-status: in-progress
+status: review
 priority: medium
 labels: [ir, codegen, selfhost]
 ---
@@ -14,8 +14,8 @@ Step 6 of [[MYLA-67]] ([[Architecture/IR]]): each optimisation a separate change
 - [x] A variable's value read where it is used, when nothing in between can write a slot
 - [x] Frame slot reuse: temporaries whose lives don't overlap share a cell, next to `%rbp`
 - [x] Retain/drop pairs that cancel: a new value (a call's result, a literal, a concatenation) moved out of its temporary into the place it is stored
-- [ ] Retain/drop pairs that cancel for a copy never written
-- [ ] Scalars in registers (a simple allocator over temporaries)
+- [x] Retain/drop pairs that cancel for a copy never written: not done (see below)
+- [x] Scalars in registers (a simple allocator over temporaries): tried, measured, not kept (see below)
 - [x] Copy elision for aggregate results: a call's result, struct, tuple or enum built straight into a new variable or the caller's storage
 - [x] Dead functions after monomorphization
 
@@ -35,6 +35,8 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 | Only reachable functions emitted | 1.72 s | 91 MB | 1.49 MB | 5.91 MB |
 | Aggregates built in place | see below | 90 MB | 1.46 MB | 5.83 MB |
 | Temporaries share frame cells | see below | 89 MB | 1.39 MB | 5.82 MB |
+
+Times vary by about ±0.1 s between runs on this machine; the last rows' times are within that. Measured after the last row, alternating runs on an idle machine: a median of 2.02 s and a best of 1.87 s, against 3.80 s for the old path.
 
 ## How (walks out of line)
 
@@ -122,3 +124,16 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 
 - **Measured:** the median frame shrinks from 400 to 144 bytes (largest 21,664 → 8,752), and 1-byte offsets now cover 61% of frame accesses instead of 34%. The binary is 5% smaller (1.46 → 1.39 MB) and the peak 1 MB lower; the assembly text barely changes (shorter numbers). The compiler built this way reproduces its own output.
 - **Tests:** the stress programs stay at 11 MB; the codegen gate, the parity tests and the debug-information tests pass.
+
+## Tried and not kept: scalar locals in registers
+
+- **Tried:** the four most-used locals of a function that are 8 bytes, own nothing and whose address is never taken lived in `%r12`–`%r15`, saved to the frame in the prologue and restored before `leave`, and not used under `-g`. A check of the emitted code confirmed that every routine writing `%r12`–`%r15` saves them first.
+- **Measured** (alternating runs on an idle machine): the self-compile median went from 2.02 to 2.10 s (min 1.87 against 1.88 s), within the noise. One loop-heavy stress program got 9% faster (0.57 → 0.52 s) and another 9% slower (1.07 → 1.17 s), and the binary grew from 1.39 to 1.40 MB. The temporaries already travel in `%rax` (see above), and the compiler's locals are mostly aggregates or values that own heap memory. So it isn't kept. A real register allocator over temporaries and locals, with liveness across blocks, belongs with [[MYLA-109]]'s later backend work.
+
+## Not done: retain/drop for a copy never written
+
+`let ys = xs` retains, and the scope's end releases; leaving both out is only safe while neither variable is written (copy-on-write would otherwise change the copy in place) and the copy doesn't outlive the original. That needs an alias and liveness analysis over the scope, for a pair (`incq` and one release call) that the profile doesn't show among the costs. New values, the common case, are moved already (above). This goes to [[MYLA-109]] with the allocator.
+
+## Where the time goes now
+
+callgrind on the self-compile puts most of the remaining time in the compiler's own linear lookups (`sig_of`, `is_enum_name`, `has_func`, string interning), not in the code the IR emits: [[MYLA-119]].

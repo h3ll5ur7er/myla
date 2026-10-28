@@ -155,6 +155,20 @@ With function values every function of the compiler, the examples and the parity
 
 `lowerable` decides from `CodeGen.ir_blocked`, the structs and enums whose declarations the lowering can't take (with function values lowered, only those using `Self`), worked out once before the first function (`blocked_types`, a fixed point); a type is lowerable when it names none of them, type arguments included. Walking each type's declarations on every call had made the IR thirty times slower on the compiler (61 s against 1.8 s).
 
+### Optimisations
+
+[[MYLA-108]], each measured on the compiler compiling itself (the table is on the task):
+
+- **Walks out of line.** An enum's retain or release walk, or that of a struct or tuple with several owning members, is a helper (`__walkd_T`, `__walkr_T`) instead of a tag dispatch at every site.
+- **Temporaries in `%rax`.** A temporary read by the next instruction is taken from `%rax`; its store is written only if something else reads it (`use_counts`).
+- **Recomputed, not stored.** A temporary written once by a constant, a string's, symbol's or slot's address, or read from a variable that nothing writes before its reads (in its block), is recomputed where it is read (`remat_texts`; `def_counts` keeps those written in several blocks, like `&&` results).
+- **Moves.** A new value (a call's result, a literal, a concatenation) bound for a place is moved out of its temporary instead of retained and then dropped (`take`, `holder`).
+- **In place.** `let` and `return` offer their destination to the aggregate they evaluate: literals and direct calls build their value there (`into`, `placed`).
+- **Reachable functions only.** The worklist starts at the entry point; each function queues what it calls, makes values of or applies partially.
+- **Shared frame cells.** Temporaries living in one block share cells by a linear scan, next to `%rbp`; those living in several blocks keep their own.
+
+Altogether the self-compile went from 3.80 s (the old path) to about 1.9 s, the binary from 2.39 to 1.39 MB, and the peak from 128 to 89 MB. Callee-saved registers for scalar locals were tried and didn't pay off. A register allocator over temporaries, and leaving out the retain/release pair of a copy never written, are left to [[MYLA-109]]. Most of the remaining time is in the compiler's own linear lookups ([[MYLA-119]]).
+
 ### Lowering ownership
 
 [[MYLA-105]] lowers strings, and aggregates holding them, with every rule of [[Architecture/Native-backend#heap-and-reference-counting]] as an instruction:

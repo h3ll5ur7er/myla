@@ -26,7 +26,7 @@ A small IR in between (for the self-hosted backend, D79), with explicit temporar
 - [x] [[MYLA-105]] Heap values, ownership and the verifier (in review)
 - [x] [[MYLA-106]] Closures, function values, the remaining constructs, `-g` (in review)
 - [x] [[MYLA-107]] The IR by default, the old emission code deleted (in review)
-- [ ] [[MYLA-108]] Optimisations
+- [x] [[MYLA-108]] Optimisations (in review)
 - [ ] [[MYLA-109]] Later: LLVM on the IR, an IR interpreter
 
 ## Done when
