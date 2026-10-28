@@ -660,6 +660,29 @@ class SelfHostedCodegenParity(unittest.TestCase):
         start = proc.stdout.index("fun myla_scale")
         self.assertEqual(proc.stdout[start:proc.stdout.index("}\n", start) + 2], IR_SAMPLE_TEXT)
 
+    def test_only_reachable_functions_are_emitted(self) -> None:
+        # MYLA-108: from the entry point, through calls, function values and
+        # partial applications
+        source = (
+            "fun unused() -> int { return 1 }\n"
+            "fun called() -> int { return 2 }\n"
+            "fun as_value(x: int) -> int { return x }\n"
+            "fun partly(a: int, b: int) -> int { return a + b }\n"
+            "fun main() {\n"
+            "    let f = as_value\n"
+            "    let g = partly(1, _)\n"
+            "    print(called() + f(3) + g(4))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("10\n", 0))
+        self.assertNotIn("myla_unused:", asm)
+        for name in ("called", "as_value", "partly", "main"):
+            self.assertIn(f"myla_{name}:", asm)
+
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS
 

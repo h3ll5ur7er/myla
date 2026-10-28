@@ -17,7 +17,7 @@ Step 6 of [[MYLA-67]] ([[Architecture/IR]]): each optimisation a separate change
 - [ ] Retain/drop pairs that cancel for a copy never written
 - [ ] Scalars in registers (a simple allocator over temporaries)
 - [ ] Copy elision for aggregate results
-- [ ] Dead functions after monomorphization
+- [x] Dead functions after monomorphization
 
 ## Measurements
 
@@ -32,6 +32,7 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 | Constants and addresses recomputed | 2.00 s | 97 MB | 1.83 MB | 7.30 MB |
 | Variables read where used | 2.01 s | 95 MB | 1.72 MB | 6.91 MB |
 | New values moved, not retained and dropped | 1.84 s | 93 MB | 1.59 MB | 6.32 MB |
+| Only reachable functions emitted | 1.72 s | 91 MB | 1.49 MB | 5.91 MB |
 
 ## How (walks out of line)
 
@@ -88,3 +89,14 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 - **Measured:** 13% faster (2.11 → 1.84 s, the earlier row's 2.01 s re-measured as 2.11 s on an idle machine), the binary 8% smaller, the assembly 9% smaller, the peak 2 MB lower. The compiler built this way reproduces its own output.
 - **Mutation:** a `take` that doesn't hand the slot over (so it is still dropped) crashes or garbles three stress programs.
 - **Tests:** the stress programs stay at 11 MB; the codegen gate, the parity tests and the debug-information tests pass (182 tests).
+
+## How (only reachable functions emitted)
+
+- **Change:** `generate` seeds the worklist with the entry point alone, not with every non-generic function. `take_ir` queues what each emitted function reaches: its direct calls (`call`, `call … sret`), the functions it makes values of, and its partial applications' targets (`request_plain`); generic instances were already queued this way. There is no dynamic dispatch to miss: trait calls are monomorphized.
+- **Note:** an unreachable function is still type-checked, but no longer lowered or verified.
+
+## Evidence (only reachable functions emitted)
+
+- **Measured:** 0.12 s faster (less to lower and emit), the binary 6% smaller, the assembly 6% smaller (`examples/methods.my`: 42,335 → 40,718 bytes). The compiler built this way reproduces its own output.
+- **Test:** `test_only_reachable_functions_are_emitted` (a function never used is left out; ones called, made values of or applied partially are emitted and run). The build before the change emits the unused function.
+- **Tests:** the stress programs stay at 11 MB; the codegen gate, the parity tests, the debug-information tests and the CLI tests pass (192 tests).

@@ -16,7 +16,7 @@ from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
-from .ir import render_func, verify, IrFunc
+from .ir import render_func, verify, IrFunc, Inst
 from .lower import lower_function, lower_lambda, blocked_types, Lowered
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
@@ -1325,13 +1325,10 @@ impl CodeGen {
     fun generate(var self) -> str {
         let en = self.entry_name()
         self.emit_runtime_prelude(en)
-        // Seed the worklist with every non-generic function (each keeps its name);
-        // generic functions are stamped on demand from reached call sites (D13).
-        for f in self.funcs {
-            if f.has_decl && len(f.type_params) == 0 {
-                let m = self.request_fn(f.name, [])
-            }
-        }
+        // Start from the entry point: every function is emitted once a function
+        // emitted calls it, makes it a value or applies it partially (MYLA-108;
+        // `take_ir`); generic ones stamped out per instance (D13).
+        let m = self.request_fn(en, [])
         while len(self.fn_worklist) > 0 || len(self.lam_jobs) > 0 {
             if len(self.fn_worklist) > 0 {
                 let job = self.fn_worklist[len(self.fn_worklist) - 1]
@@ -1518,12 +1515,31 @@ impl CodeGen {
         if self.keep_ir { push(self.ir_texts, render_func(l.f)) }
         if problem != "" { panic(format("internal error: {}: IR verifier: {}", mangled, problem)) }
         for inst in l.f.instances { let m = self.request_fn(inst.orig, inst.targs) }
+        for b in l.f.blocks {
+            for inst in b.insts {
+                match inst {
+                    Inst.Call(d, name, args) => { self.request_plain(name) },
+                    Inst.CallSret(name, r, args) => { self.request_plain(name) },
+                    _ => {},
+                }
+            }
+        }
         for lj in l.lams { push(self.lam_jobs, lj) }
-        for pj in l.partials { push(self.partial_jobs, pj) }
+        for pj in l.partials {
+            push(self.partial_jobs, pj)
+            if pj.target != "" { self.request_plain(pj.target) }
+        }
         for n in l.fnvals {
             if !list_has_str(self.fnval_set, n) { push(self.fnval_set, n) }
+            self.request_plain(n)
         }
         return l.f
+    }
+
+    // Queue the non-generic function `name` (a generic instance is named by
+    // its mangled name, and queued from `IrFunc.instances`).
+    fun request_plain(var self, name: str) {
+        if self.has_func(name) && len(self.sig_of(name).type_params) == 0 { let m = self.request_fn(name, []) }
     }
 
     // -- statements -------------------------------------------------------
