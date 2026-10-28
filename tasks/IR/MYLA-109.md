@@ -11,4 +11,4 @@ After [[MYLA-107]]: better code from the IR first (better binaries in the long r
 - [ ] Decide when the IR is stable
 - [x] [[MYLA-120]] Instruction selection: compare-and-branch, operands where they are, addressing modes
 - [x] [[MYLA-121]] A register allocator over temporaries and locals, with liveness across blocks (a callee-saved-registers-for-scalar-locals version didn't pay off on the compiler, [[MYLA-108]])
-- [ ] [[MYLA-122]] Retain/release left out for a copy that neither it nor its original writes while both live (needs alias and liveness analysis, [[MYLA-108]])
+- [x] [[MYLA-122]] Retain/release left out for a copy that neither it nor its original writes while both live (needs alias and liveness analysis, [[MYLA-108]])

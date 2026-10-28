@@ -2,7 +2,7 @@
 id: MYLA-123
 title: Arguments read from a `var self` receiver are changed by its writes
 type: bug
-status: review
+status: done
 priority: high
 labels: [codegen, selfhost, ownership]
 ---
