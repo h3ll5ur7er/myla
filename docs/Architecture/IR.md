@@ -3,7 +3,7 @@
 The design of the mid-level intermediate representation between the checker and the self-hosted native backend ([[MYLA-67]], D79). Today [[selfhost/codegen.my]] turns the checked, monomorphized AST straight into assembly text and decides frame layout, reference counting, copy-on-write, staged stores and drops while it emits instructions ([[Architecture/Native-backend]]). The IR makes those decisions explicit data, so they can be printed, checked and optimised, and leaves the backend only instruction selection.
 
 > [!NOTE]
-> **Status: approved, being built.** The decisions below were approved on 2026-10-27 (D79). The steps are tasks [[MYLA-103]] to [[MYLA-109]].
+> **Status: built, and stable since D85.** The decisions below were approved on 2026-10-27 (D79). The steps were tasks [[MYLA-103]] to [[MYLA-109]] and [[MYLA-120]] to [[MYLA-122]]; see "Stability" for what may change from here.
 
 [TOC]
 
@@ -16,6 +16,15 @@ The design of the mid-level intermediate representation between the checker and 
 5. **Migration behind a flag, function by function.** `--ir` makes the backend lower each function to IR and emit it from there; a function using a construct the lowering doesn't support yet falls back to the current path. Both paths share the calling convention, the frame base, the runtime and the code generator's pools (string literals, position records, helper flags, debug information), so functions from either path call each other. The gates run the corpus with and without `--ir`; `--ir-stats` counts the functions each path emitted. When every function of the compiler itself goes through the IR, the parity corpus and the stress tests agree and the bootstrap reaches its fixed point, `--ir` becomes the default and the old emission code is deleted.
 6. **First reach parity, then optimise.** The first target is identical behaviour (the same output and exit status on every test, not the same assembly), a verifier that checks reference counting on every path, and a text form (`--emit-ir`). Optimisations come afterwards, each a task of its own, measured on the compiler compiling itself.
 7. **No IR interpreter yet.** The verifier plus the comparison of native output with the interpreters is the oracle; an IR interpreter can come later if bugs call for it.
+
+## Stability
+
+Since D85 the IR is stable: the instruction set, the terminators, the model of slots and temporaries and what each instruction means, as "The IR" below describes them. Nothing in them changed after function values went through the IR ([[MYLA-106]]); making it the only path, and every optimisation since, needed only the lowering or the backend.
+
+- **Adding an instruction** means, in one change: its entry below and its text form (`render_inst`), the verifier's rule when it touches an owning slot, and its code in every backend.
+- **Changing what an instruction means, or removing one**, needs a new decision.
+- **Free to change:** which instructions the lowering emits for a construct, and how a backend carries them out (instruction selection, registers, the frame layout), as long as the verifier accepts every function and the gates pass.
+- **Outside the IR,** for each backend to provide: the runtime (hand-written x86-64 assembly called with the System V argument registers), the per-type retain, drop and clone walks behind `retain`, `drop` and `cow`, and the thunks and environment release functions of function values. How an LLVM backend gets them is [[MYLA-62]]'s decision.
 
 ## Modules
 
@@ -223,4 +232,7 @@ A value that owns no heap memory is *plain*: a scalar, or a struct, tuple or enu
 | [[MYLA-106]] | Closures and function values, partial application, `for` over lists and maps, `?`, the remaining builtins; `-g` through the IR (variables and scopes) |
 | [[MYLA-107]] | Every function of the compiler through the IR; `--ir` the default; the old emission code deleted; the bootstrap's fixed point |
 | [[MYLA-108]] | Optimisations, each measured on the compiler compiling itself: slot reuse, retain/drop pairs that cancel, scalars in registers, copy elision for results, dead functions |
-| [[MYLA-109]] | Later: an LLVM backend on the IR ([[MYLA-62]]), an IR interpreter if needed |
+| [[MYLA-120]] | Instruction selection: compare and branch, operands where they are, addressing modes, no code for unreachable blocks |
+| [[MYLA-121]] | Register allocation: liveness across blocks, a linear scan over the callee-saved registers |
+| [[MYLA-122]] | Borrowing: a `let` of a part of a fixed variable takes no reference |
+| [[MYLA-109]] | The IR declared stable (D85); an LLVM backend on it is [[MYLA-62]], an IR interpreter waits until bugs call for one |
