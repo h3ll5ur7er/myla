@@ -32,3 +32,5 @@ Step 5 of [[MYLA-67]] ([[Architecture/IR]]).
 
 - **Output:** the trimmed compiler emits byte for byte what the IR-default build emitted, on `selfhost/gen_main.my` and `examples/methods.my`.
 - **Tests:** the codegen gate, the debug-information tests and the CLI tests pass (50 tests).
+- **Suites:** unit 567, integration 2, burn 704 (5 skipped), extension 54/54; the bootstrap reaches a byte-identical fixed point at 13,673,473 bytes.
+- **Measured** (the compiler built by itself, compiling itself; best of three): the old path at 63b1621 took 3.80 s with a 128 MB peak, a 2.39 MB binary and 10.46 MB of assembly. Through the IR it takes 2.37 s with a 135 MB peak, a 3.36 MB binary and 13.67 MB of assembly. It is faster, but larger until [[MYLA-108]].

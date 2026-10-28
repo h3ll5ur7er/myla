@@ -37,7 +37,7 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 | --- | --- | --- |
 | Unit | 567 | All pass, about 6 s |
 | Integration | 2 | Pass |
-| Burn | 703 (plus subtests, 5 skipped) | All pass, about 350 s with cached tools (green since [[MYLA-4]]) |
+| Burn | 704 (plus subtests, 5 skipped) | All pass, about 350 s with cached tools (green since [[MYLA-4]]) |
 
 ## Unit tests
 

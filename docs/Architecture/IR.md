@@ -78,7 +78,7 @@ panic %msg @pos               ; `panic`, `unreachable`, a failed `assert` (never
 unreachable
 ```
 
-`T` is a Myla type (`[str]`, `Option<Point>`); the backend turns `retain`/`drop`/`cow` into the same walks and helper calls the current code generator emits (`owned_walk`, `__drop_list_T`, `__cow…`). Positions (`@pos`) are the 16-byte records of runtime errors ([[Architecture/Native-backend#runtime-error-positions]]), shared with the old path.
+`T` is a Myla type (`[str]`, `Option<Point>`); the backend turns `retain`/`drop`/`cow` into the code generator's walks and helper calls (`owned_walk`, `__drop_list_T`, `__clone_list_T`); an enum's walk, or that of a struct or tuple with several owning members, is a helper of its own (`__walkd_T`, `__walkr_T`, [[MYLA-108]]). Positions (`@pos`) are the 16-byte records of runtime errors ([[Architecture/Native-backend#runtime-error-positions]]), shared with the old path.
 
 ### Ownership in the IR
 

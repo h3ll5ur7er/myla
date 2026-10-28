@@ -90,6 +90,11 @@ pub struct CodeGen {
     drop_emitted: [str],
     need_clone: [Type],
     clone_emitted: [str],
+    // aggregates whose retain or release walk is a helper of its own
+    // (`walk_helper`), and whether each is the retain walk; emitted by name
+    need_walk: [Type],
+    walk_retain: [bool],
+    walk_emitted: [str],
     need_sb: bool,
     // The loader's module spans (which node ids belong to which file; ids from
     // `prelude_id` on are the prelude's, with no source), for runtime-error
@@ -156,6 +161,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         uses_float: false,
         epilogue: "", ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
+        need_walk: [], walk_retain: [], walk_emitted: [],
         need_sb: false,
         line_spans: [], prelude_id: 0,
         cur_path: "<input>", pos_labels: [:], posdata: [],
@@ -967,7 +973,74 @@ impl CodeGen {
     // Walk the heap-pointer leaves an inline value of `t` at `off(base)` directly
     // owns, retaining (incq) or releasing (drop) each. Inline sub-aggregates
     // recurse; boxed/list/map/builder members are leaves the action follows.
+    // An enum, or a struct or tuple with more than one member to walk, is
+    // walked by a helper of its own, called with the value's address in %rdi
+    // (MYLA-108: inlined at every drop, these walks were a third of the
+    // compiler's code).
     fun owned_walk(var self, base: str, off: int32, t: Type, retain: bool) {
+        if self.walk_helper(t) {
+            let name = self.register_walk(t, retain)
+            self.emit(format("leaq {}(%{}), %rdi", off, base))
+            self.emit("call " + name)
+            return
+        }
+        self.owned_walk_inline(base, off, t, retain)
+    }
+
+    // Whether `t`'s walk goes through a helper: an enum, or a struct or tuple
+    // with more than one member owning heap values.
+    fun walk_helper(self, t: Type) -> bool {
+        var members: [Type] = []
+        match t {
+            Type.TEnum(n, a) => { return true },
+            Type.TStruct(n, a) => {
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                for f in info.fields { push(members, subst_type(f.ty, sub)) }
+            },
+            Type.TTuple(es) => { members = es },
+            _ => {},
+        }
+        var owning = 0
+        for m in members {
+            if self.is_boxed(m) || self.owns_heap(m) { owning = owning + 1 }
+        }
+        return owning > 1
+    }
+
+    // The name of `t`'s retain or release walk helper, to be emitted.
+    fun register_walk(var self, t: Type, retain: bool) -> str {
+        var name = "__walkd_" + mono_token(t)
+        if retain { name = "__walkr_" + mono_token(t) }
+        if list_has_str(self.walk_emitted, name) { return name }
+        var i = 0
+        while i < len(self.need_walk) {
+            if self.walk_retain[i] == retain && mono_token(self.need_walk[i]) == mono_token(t) { return name }
+            i = i + 1
+        }
+        push(self.need_walk, t)
+        push(self.walk_retain, retain)
+        return name
+    }
+
+    // `__walkd_<T>` / `__walkr_<T>`: %rdi = the address of an inline T; release
+    // or retain every heap value it holds. The address stays in %rbx across
+    // the calls the walk makes.
+    fun emit_walk_helper(var self, t: Type, retain: bool, name: str) {
+        self.emit(format("{}:", name))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("movq %rdi, %rbx")
+        self.owned_walk_inline("rbx", 0, t, retain)
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // `owned_walk` itself, emitted here.
+    fun owned_walk_inline(var self, base: str, off: int32, t: Type, retain: bool) {
         match t {
             Type.TStruct(n, a) => {
                 let info = self.struct_info(n)
@@ -4516,34 +4589,48 @@ impl CodeGen {
     // Drop helpers recurse (dropping a list element re-registers its own drop),
     // so we drain `need_drop` as a worklist whose length may grow mid-loop.
     fun emit_drop_helpers(var self) {
-        if self.need_sb { self.emit_sb_rc_helpers() }
+        // each helper may ask for others: until none is left
         var i = 0
-        while i < len(self.need_drop) {
-            let t = self.need_drop[i]
-            i = i + 1
-            let tok = mono_token(t)
-            if list_has_str(self.drop_emitted, tok) { continue }
-            push(self.drop_emitted, tok)
-            match t {
-                Type.TList(e) => { self.emit_list_drop_helper(t) },
-                Type.TMap(k, v) => { self.emit_map_drop_helper(t) },
-                Type.TEnum(n, a) => { self.emit_dropb_helper(t) },
-                _ => {},
-            }
-        }
         var j = 0
-        while j < len(self.need_clone) {
-            let t = self.need_clone[j]
-            j = j + 1
-            let tok = mono_token(t)
-            if list_has_str(self.clone_emitted, tok) { continue }
-            push(self.clone_emitted, tok)
-            match t {
-                Type.TList(e) => { self.emit_list_clone_helper(t) },
-                Type.TMap(k, v) => { self.emit_map_clone_helper(t) },
-                _ => {},
+        var k = 0
+        while i < len(self.need_drop) || j < len(self.need_clone) || k < len(self.need_walk) {
+            while i < len(self.need_drop) {
+                let t = self.need_drop[i]
+                i = i + 1
+                let tok = mono_token(t)
+                if list_has_str(self.drop_emitted, tok) { continue }
+                push(self.drop_emitted, tok)
+                match t {
+                    Type.TList(e) => { self.emit_list_drop_helper(t) },
+                    Type.TMap(k2, v) => { self.emit_map_drop_helper(t) },
+                    Type.TEnum(n, a) => { self.emit_dropb_helper(t) },
+                    _ => {},
+                }
+            }
+            while j < len(self.need_clone) {
+                let t = self.need_clone[j]
+                j = j + 1
+                let tok = mono_token(t)
+                if list_has_str(self.clone_emitted, tok) { continue }
+                push(self.clone_emitted, tok)
+                match t {
+                    Type.TList(e) => { self.emit_list_clone_helper(t) },
+                    Type.TMap(k2, v) => { self.emit_map_clone_helper(t) },
+                    _ => {},
+                }
+            }
+            while k < len(self.need_walk) {
+                let t = self.need_walk[k]
+                let retain = self.walk_retain[k]
+                k = k + 1
+                var name = "__walkd_" + mono_token(t)
+                if retain { name = "__walkr_" + mono_token(t) }
+                if list_has_str(self.walk_emitted, name) { continue }
+                push(self.walk_emitted, name)
+                self.emit_walk_helper(t, retain, name)
             }
         }
+        if self.need_sb { self.emit_sb_rc_helpers() }
     }
 
     // `__drop_list_<elem>`: %rdi = list cell. Decrement the refcount; at zero,
@@ -4729,8 +4816,17 @@ impl CodeGen {
             self.emit("cmpq $1, %rax")
             let cont = self.label()
             self.emit(format("jne {}", cont))
-            if self.owns_heap(kt) { self.walk_member("rcx", 8, kt, true) }
-            if self.owns_heap(vt) { self.walk_member("rcx", 16, vt, true) }
+            // the slot's address on the stack: a walk may call a helper
+            self.emit("pushq %rcx")
+            if self.owns_heap(kt) {
+                self.emit("movq (%rsp), %rcx")
+                self.walk_member("rcx", 8, kt, true)
+            }
+            if self.owns_heap(vt) {
+                self.emit("movq (%rsp), %rcx")
+                self.walk_member("rcx", 16, vt, true)
+            }
+            self.emit("addq $8, %rsp")
             self.emit(format("{}:", cont))
             self.emit("incq %r14")
             self.emit(format("jmp {}", loop))
