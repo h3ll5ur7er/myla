@@ -12,7 +12,7 @@
 from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding
-from .ir import IrFunc, Inst, Term, use_counts, def_counts, inst_defs
+from .ir import IrFunc, Inst, Term, use_counts, def_counts, inst_defs, inst_uses, term_uses
 
 impl CodeGen {
     // Emit `f`, the IR of the function `fd`, as `myla_<mangled>`.
@@ -81,8 +81,11 @@ impl CodeGen {
             Inst.Const(d, t, v) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.Str(d, text) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.Load(d, s) => {
-                self.emit(format("movq {}(%rbp), %rax", slot_off[s]))
-                self.store_temp(d, temp_base)
+                // read where it is used instead (`remat_texts`)
+                if self.temp_remat[d] == "" {
+                    self.emit(format("movq {}(%rbp), %rax", slot_off[s]))
+                    self.store_temp(d, temp_base)
+                }
             },
             Inst.Store(s, v) => {
                 self.load_temp(v, "rax", temp_base)
@@ -391,16 +394,35 @@ impl CodeGen {
     // (MYLA-108); "" for the other temporaries.
     fun remat_texts(var self, f: IrFunc, slot_off: [int32]) -> [str] {
         var out: [str] = []
-        for t in f.temps { push(out, "") }
+        var src: [str] = []
+        for t in f.temps {
+            push(out, "")
+            push(src, "")
+        }
         let defs = def_counts(f)
         for b in f.blocks {
-            for inst in b.insts {
+            var i = 0
+            while i < len(b.insts) {
+                let inst = b.insts[i]
                 let text = self.def_text(inst, slot_off)
                 for d in inst_defs(inst) {
                     if defs[d] == 1 { out[d] = text }
                 }
+                // a variable's value read where every read of it follows,
+                // in this block, with nothing in between that writes a slot
+                match inst {
+                    Inst.Load(d, s) => {
+                        if defs[d] == 1 && reads_before_writes(b.insts, b.term, i, d, self.temp_uses[d]) {
+                            src[d] = format("{}(%rbp)", slot_off[s])
+                            out[d] = format("movq {}, %", src[d])
+                        }
+                    },
+                    _ => {},
+                }
+                i = i + 1
             }
         }
+        self.temp_src = src
         return out
     }
 
@@ -431,8 +453,13 @@ impl CodeGen {
         self.store_temp(d, temp_base)
     }
 
-    // Push the temporary `t` (a call's argument): straight from its slot.
+    // Push the temporary `t` (a call's argument): straight from its slot, or
+    // from the variable it was read from.
     fun push_temp(var self, t: int32, temp_base: int32) {
+        if self.temp_src[t] != "" {
+            self.emit("pushq " + self.temp_src[t])
+            return
+        }
         if self.temp_remat[t] != "" || (self.pend_store != "" && self.pend_temp == t) {
             self.load_temp(t, "rax", temp_base)
             self.emit("pushq %rax")
@@ -482,3 +509,50 @@ fun wrapped(v: int64, w: int32, signed: bool) -> int64 {
     let one: int64 = 1
     return v & ((one << w) - 1)
 }
+
+// Whether all `n` reads of the temporary `t`, written by `insts[at]`, come
+// later in the same block (its terminator included) with only instructions
+// in between that write no slot, so the slot still holds what was read.
+fun reads_before_writes(insts: [Inst], term: Term, at: int32, t: int32, n: int32) -> bool {
+    var seen = 0
+    var j = at + 1
+    while j < len(insts) && seen < n {
+        for u in inst_uses(insts[j]) {
+            if u == t { seen = seen + 1 }
+        }
+        if seen < n && !writes_no_slot(insts[j]) { return false }
+        j = j + 1
+    }
+    if seen < n {
+        for u in term_uses(term) {
+            if u == t { seen = seen + 1 }
+        }
+    }
+    return seen == n
+}
+
+// Whether `inst` writes no frame slot, directly or through an address.
+fun writes_no_slot(inst: Inst) -> bool {
+    return match inst {
+        Inst.Const(d, t, v) => true
+        Inst.Str(d, text) => true
+        Inst.Load(d, s) => true
+        Inst.Addr(d, s) => true
+        Inst.Offset(d, p, off) => true
+        Inst.LoadAt(d, p, off) => true
+        Inst.Bin(d, op, lt, rt, a, b, pos) => true
+        Inst.Cmp(d, op, t, a, b) => true
+        Inst.Un(d, op, t, a) => true
+        Inst.Cast(d, from_t, to_t, a) => true
+        Inst.Elem(d, c, i, stride, is_str, pos) => true
+        Inst.Load8(d, p) => true
+        Inst.Check(v, kind, pos) => true
+        Inst.Global(d, sym, w) => true
+        Inst.Label(d, sym) => true
+        Inst.Loc(p) => true
+        Inst.Bind(name, s) => true
+        Inst.Scope(open) => true
+        _ => false
+    }
+}
+

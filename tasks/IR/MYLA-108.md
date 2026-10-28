@@ -11,6 +11,7 @@ Step 6 of [[MYLA-67]] ([[Architecture/IR]]): each optimisation a separate change
 - [x] Retain and release walks out of line (a helper per aggregate type instead of the walk at every site)
 - [x] A temporary read right after it is computed taken from `%rax` (its store held back, and dropped when nothing else reads it)
 - [x] Constants and addresses recomputed where they are read; call arguments pushed from their slots
+- [x] A variable's value read where it is used, when nothing in between can write a slot
 - [ ] Frame slot reuse
 - [ ] Retain/drop pairs that cancel (a list copied and never written)
 - [ ] Scalars in registers (a simple allocator over temporaries)
@@ -28,6 +29,7 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 | Walks out of line | 2.26 s | 113 MB | 2.54 MB | 9.79 MB |
 | Temporaries in `%rax` | 2.08 s | 108 MB | 2.21 MB | 8.67 MB |
 | Constants and addresses recomputed | 2.00 s | 97 MB | 1.83 MB | 7.30 MB |
+| Variables read where used | 2.01 s | 95 MB | 1.72 MB | 6.91 MB |
 
 ## How (walks out of line)
 
@@ -62,3 +64,14 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 
 - **Measured:** 0.08 s faster, the binary 17% smaller (2.21 → 1.83 MB), the assembly 16% smaller (8.67 → 7.30 MB), and the peak 11 MB lower. The compiler built this way reproduces its own output.
 - **Tests:** `inst_defs` has `#test` cases; the stress programs stay at 11 MB; the codegen gate, the parity tests and the debug-information tests pass (182 tests).
+
+## How (variables read where used)
+
+- **Why:** the most frequent pair left was a variable read into a temporary that went to its slot (`load a; load b; op` reads `a` before `b`), 14,474 times.
+- **Change:** a `load $s` whose reads all follow in the same block, with only instructions in between that write no slot (`writes_no_slot`: constants, addresses, loads, arithmetic, comparisons, casts, element addresses, checks, debug markers), is read from the variable where it is used (`reads_before_writes`); the `load` itself emits nothing. A call argument read that way is pushed straight from the variable (`temp_src`).
+- **A slip:** the first version kept emitting the `load` as well, which made everything larger and slower. Comparing the two builds' instruction counts showed it.
+
+## Evidence (variables read where used)
+
+- **Measured:** the binary 6% smaller (1.83 → 1.72 MB), the assembly 5% smaller (7.30 → 6.91 MB), the peak 2 MB lower, and the time unchanged (the analysis costs about what it saves). The compiler built this way reproduces its own output.
+- **Tests:** the stress programs stay at 11 MB, and the codegen gate, the parity tests and the debug-information tests pass.
