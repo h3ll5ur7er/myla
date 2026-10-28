@@ -451,6 +451,93 @@ fun successors(t: Term) -> [int32] {
     }
 }
 
+// --- Uses ----------------------------------------------------------------------
+
+// The temporaries `inst` reads, one entry per operand (MYLA-108): what the
+// backend loads to emit it.
+#test(Inst.Copy(1, 2, 8))[[1, 2]]
+#test(Inst.CallIndSret(3, 4, [5, 5]))[[3, 4, 5, 5]]
+#test(Inst.Const(0, Type.TBool, 1))[[]]
+pub fun inst_uses(inst: Inst) -> [int32] {
+    return match inst {
+        Inst.Const(d, t, v) => []
+        Inst.Str(d, text) => []
+        Inst.Load(d, s) => []
+        Inst.Store(s, v) => [v]
+        Inst.Addr(d, s) => []
+        Inst.Offset(d, p, off) => [p]
+        Inst.LoadAt(d, p, off) => [p]
+        Inst.StoreAt(p, off, v) => [p, v]
+        Inst.Copy(d, src, size) => [d, src]
+        Inst.Bin(d, op, lt, rt, a, b, pos) => [a, b]
+        Inst.Cmp(d, op, t, a, b) => [a, b]
+        Inst.Un(d, op, t, a) => [a]
+        Inst.Cast(d, from_t, to_t, a) => [a]
+        Inst.Call(d, name, args) => args
+        Inst.CallSret(name, r, args) => prepend(r, args)
+        Inst.Rt(d, name, args) => args
+        Inst.RetainVal(t, v) => [v]
+        Inst.Retain(t, p) => [p]
+        Inst.DropSlot(t, s) => []
+        Inst.DropAt(t, p) => [p]
+        Inst.Init(s) => []
+        Inst.Elem(d, c, i, stride, is_str, pos) => [c, i]
+        Inst.Load8(d, p) => [p]
+        Inst.Cow(d, t, h) => [h]
+        Inst.Append(d, h, c, stride) => [h, c]
+        Inst.Pop(d, c, stride, pos) => [c]
+        Inst.RtPair(d, d2, name, args) => args
+        Inst.Check(v, kind, pos) => [v]
+        Inst.SbAppend(h, v) => [h, v]
+        Inst.SbAppendRange(h, v, a, b, pos) => [h, v, a, b]
+        Inst.SbAppendByte(h, b) => [h, b]
+        Inst.SbBuild(d, c) => [c]
+        Inst.MapRemove(t, h, c, k) => [h, c, k]
+        Inst.Global(d, sym, w) => []
+        Inst.Exit(v) => [v]
+        Inst.Moved(s) => []
+        Inst.Label(d, sym) => []
+        Inst.CallInd(d, fv, args) => prepend(fv, args)
+        Inst.CallIndSret(fv, r, args) => prepend(fv, prepend(r, args))
+        Inst.Print(t, a) => [a]
+        Inst.Loc(p) => []
+        Inst.Bind(name, s) => []
+        Inst.Scope(open) => []
+    }
+}
+
+// The temporaries a terminator reads.
+pub fun term_uses(t: Term) -> [int32] {
+    return match t {
+        Term.Br(c, a, b) => [c]
+        Term.Ret(v) => match v {
+            -1 => []
+            _ => [v]
+        }
+        Term.Panic(m, p) => [m]
+        _ => []
+    }
+}
+
+// How many times each temporary of `f` is read.
+pub fun use_counts(f: IrFunc) -> [int32] {
+    var counts: [int32] = []
+    for t in f.temps { push(counts, 0) }
+    for b in f.blocks {
+        for inst in b.insts {
+            for u in inst_uses(inst) { counts[u] = counts[u] + 1 }
+        }
+        for u in term_uses(b.term) { counts[u] = counts[u] + 1 }
+    }
+    return counts
+}
+
+fun prepend(x: int32, xs: [int32]) -> [int32] {
+    var out = [x]
+    for y in xs { push(out, y) }
+    return out
+}
+
 fun drop_last_int(xs: [int32]) -> [int32] {
     var out: [int32] = []
     var i = 0

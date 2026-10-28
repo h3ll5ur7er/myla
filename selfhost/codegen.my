@@ -135,6 +135,12 @@ pub struct CodeGen {
     ir_texts: [str],
     ir_blocked: [str],
     ir_ready: bool,
+    // the store of the temporary in %rax, held back until the next line
+    // (`store_temp`, MYLA-108; "" for none), and how often each temporary of
+    // the function being emitted is read
+    pend_store: str,
+    pend_temp: int32,
+    temp_uses: [int32],
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -169,6 +175,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
+        pend_store: "", pend_temp: -1, temp_uses: [],
     }
 }
 
@@ -745,6 +752,7 @@ impl CodeGen {
 
     // Append a generated instruction (tab-indented) or a label (flush-left).
     fun emit(var self, line: str) {
+        if self.pend_store != "" { self.flush_temp() }
         if line == "" {
             push(self.text, "")
         } else if ends_colon(line) {
@@ -755,7 +763,17 @@ impl CodeGen {
     }
 
     // Append a pre-formatted runtime-prelude line verbatim.
-    fun raw(var self, line: str) { push(self.text, line) }
+    fun raw(var self, line: str) {
+        if self.pend_store != "" { self.flush_temp() }
+        push(self.text, line)
+    }
+
+    // Emit the held-back store of a temporary (see `store_temp`).
+    fun flush_temp(var self) {
+        push(self.text, "\t" + self.pend_store)
+        self.pend_store = ""
+        self.pend_temp = -1
+    }
 
     fun label(var self) -> str {
         self.label_n = self.label_n + 1

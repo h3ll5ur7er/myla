@@ -12,7 +12,7 @@
 from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding
-from .ir import IrFunc, Inst, Term
+from .ir import IrFunc, Inst, Term, use_counts
 
 impl CodeGen {
     // Emit `f`, the IR of the function `fd`, as `myla_<mangled>`.
@@ -23,6 +23,7 @@ impl CodeGen {
     // Emit `f` as `myla_<mangled>`: a function or lambda declared by the node
     // `decl_id` (its file) at `line:col`.
     fun emit_ir_at(var self, f: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
+        self.temp_uses = use_counts(f)
         self.ret_type = f.ret
         // the frame: each slot that isn't an argument word, then each temporary
         var slot_off: [int32] = []
@@ -408,11 +409,28 @@ impl CodeGen {
         }
     }
 
+    // The temporary `t` into `reg`. Read right after it was computed, it is
+    // still in %rax: moved from there, and stored first only when something
+    // else reads it too (MYLA-108).
     fun load_temp(var self, t: int32, reg: str, temp_base: int32) {
+        if self.pend_store != "" && self.pend_temp == t {
+            if self.temp_uses[t] > 1 { self.flush_temp() } else {
+                self.pend_store = ""
+                self.pend_temp = -1
+            }
+            if reg != "rax" { self.emit(format("movq %rax, %{}", reg)) }
+            return
+        }
         self.emit(format("movq {}(%rbp), %{}", -(temp_base + 8 * (t + 1)), reg))
     }
 
+    // %rax into the temporary `t`: the store is held back until the next
+    // line, which may read `t` (see `load_temp`); a temporary nothing reads
+    // isn't stored.
     fun store_temp(var self, t: int32, temp_base: int32) {
-        self.emit(format("movq %rax, {}(%rbp)", -(temp_base + 8 * (t + 1))))
+        if self.pend_store != "" { self.flush_temp() }
+        if self.temp_uses[t] == 0 { return }
+        self.pend_store = format("movq %rax, {}(%rbp)", -(temp_base + 8 * (t + 1)))
+        self.pend_temp = t
     }
 }
