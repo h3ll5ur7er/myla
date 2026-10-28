@@ -1034,6 +1034,24 @@ PROGRAMS = {
         "    print(total)\n"
         "}\n"
     ),
+    # MYLA-24: chars through format() and f-strings, ASCII and multi-byte
+    "format_renders_chars": (
+        "struct Glyph { c: char, name: str }\n"
+        "fun show(g: Glyph) -> str {\n    return f\"{g.name}={g.c}\"\n}\n"
+        "#main\nfun main() {\n"
+        "    print(format(\"{}\", 'a'))\n"
+        "    print(format(\"[{}|{}|{}]\", 'é', '€', '😀'))\n"
+        "    let c = 'z'\n"
+        "    print(f\"c={c} n={c as uint32}\")\n"
+        "    print(show(Glyph { c: 'ß', name: \"sharp\" }))\n"
+        "    var s = \"\"\n"
+        "    for i in 0..5 {\n"
+        "        s = s + format(\"{}{}\", 'x', i)\n"
+        "    }\n"
+        "    print(s)\n"
+        "    print(format(\"{} {} {}\", 'q', 1.5f64, true))\n"
+        "}\n"
+    ),
     "const_string_concatenation_in_functions": (
         "const TABLE: str = \"ab\" + \"cd\" + \"ef\"\n"
         "const N: int32 = 2 + 3\n"

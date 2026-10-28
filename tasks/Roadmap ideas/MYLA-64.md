@@ -28,7 +28,7 @@ Decided as D73 on [[Project/Decisions]]; the details, with the questions settled
 - [x] [[MYLA-93]] The project model: manifest, lock file, path dependencies (in review; with [[MYLA-98]], `std.fs.current_dir`)
 - [x] [[MYLA-94]] The commands, with path dependencies (in review)
 - [x] [[MYLA-95]] Git dependencies and `myla fetch` (in review)
-- [ ] [[MYLA-96]] Removing and renaming files in `std.fs` (not needed for now: `rm -rf`/`mv` through `std.process`)
+- [x] [[MYLA-96]] Removing and renaming files in `std.fs` (in review; `myla clean`, `fetch` and the driver use them instead of `rm`/`mv`)
 - [x] [[MYLA-97]] The language server finds files with `list_dir` and resolves into packages (in review)
 
 ## Depends on
