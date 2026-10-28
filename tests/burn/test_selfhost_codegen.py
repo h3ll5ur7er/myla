@@ -75,6 +75,7 @@ PARITY_PROGRAMS = (
     "assign_replaces_map_and_builder_elements",
     "assign_heap_owning_struct_to_any_place",
     "assign_heap_owning_struct_to_itself",
+    "method_arguments_survive_the_receivers_writes",
     "assign_to_a_field_of_a_shared_element_copies_it",
     "match_binding_survives_writes_to_the_scrutinee",
     "destructure_boxed_enum_and_list_leaves",

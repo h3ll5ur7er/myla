@@ -1665,10 +1665,16 @@ impl Lower {
             },
             None => {},
         }
+        // a method writing its receiver gets a copy of an argument read from
+        // the same variable, taken before the call (MYLA-123): its writes
+        // would change or release the argument's place otherwise
+        var root = ""
+        if sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false } { root = place_root(argv[0]) }
         var vals: [int32] = []
         var i = 0
         while i < len(argv) && i < len(params) {
-            if is_aggregate(params[i]) { push(vals, self.addr(cg, argv[i])) } else { push(vals, self.expr(cg, argv[i])) }
+            if i > 0 && root != "" && place_root(argv[i]) == root && cg.owns_heap(params[i]) { push(vals, self.stage(cg, params[i], argv[i]).1) }
+            else if is_aggregate(params[i]) { push(vals, self.addr(cg, argv[i])) } else { push(vals, self.expr(cg, argv[i])) }
             i = i + 1
         }
         if !has_ret {
