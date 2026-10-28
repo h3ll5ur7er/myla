@@ -15,21 +15,23 @@ from std.process import args, exit
 from std.io import write, eprintln
 from .checker import build_checker_decls
 from .codegen import new_codegen
+from .dwarf import read_gdb_script
 from .loader import load_program_opts, load_options, parse_package_flag, Loaded, file_of, default_stdlib_root
 from .diag import render, type_report
 
 // How the assembly is generated: `debug`, DWARF debug information, so gdb
-// steps through the Myla source and shows its variables (MYLA-71, MYLA-66);
+// steps through the Myla source and shows its variables (MYLA-71, MYLA-66),
+// with the pretty-printers from `stdlib_root` embedded (D82);
 // `ir`, through the IR, with its statistics (`ir_stats`) or its text instead
 // of the assembly (`emit_ir`).
 struct Mode { debug: bool, ir: bool, ir_stats: bool, emit_ir: bool }
 
-fun emit_asm(prog: Loaded, mode: Mode) -> int32 {
+fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
             var g = new_codegen(c)
             g.set_sources(prog.spans, prog.next_id)
-            if mode.debug { g.enable_debug_info() }
+            if mode.debug { g.enable_debug_info(read_gdb_script(stdlib_root)) }
             if mode.ir || mode.ir_stats || mode.emit_ir { g.enable_ir(mode.emit_ir) }
             let asm = g.generate()
             if mode.emit_ir { write(1, g.ir_text()) } else { write(1, asm) }
@@ -80,7 +82,7 @@ fun main() {
     }
     match load_program_opts(argv[1], opts) {
         Ok(prog) => {
-            let code = emit_asm(prog, mode)
+            let code = emit_asm(prog, mode, opts.stdlib_root)
             exit(code)
         },
         Err(r) => {

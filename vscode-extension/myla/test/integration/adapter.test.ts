@@ -108,7 +108,9 @@ test("breakpoints, stepping, the stack and variables", { skip }, async () => {
   assert.equal(s["1"].value, "5");
   const t = await variables(dap, vars.t.ref);
   assert.deepEqual([t["0"].value, t["1"].value], ["7", "true"]);
-  // heap values inside a struct show as values, not as cell pointers
+  // heap values inside a struct show as values, not as cell pointers: in the
+  // summary through the binary's pretty-printers, in the children by the adapter
+  assert.equal(vars.bag.value, 'Bag {items: [4, 5], label: "two"}');
   const bag = await variables(dap, vars.bag.ref);
   assert.equal(bag.items.value, "[4, 5]");
   assert.equal(bag.label.value, '"two"');

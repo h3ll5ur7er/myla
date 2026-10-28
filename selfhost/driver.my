@@ -16,6 +16,7 @@ from .loader import load_program_opts, LoadOptions, file_of, Loaded
 from .diag import render, type_report, Report
 from .checker import build_checker_decls, Checker, CheckErr
 from .codegen import new_codegen
+from .dwarf import read_gdb_script
 from .interp import new_interp, RtError, TestRun
 
 // Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
@@ -48,7 +49,7 @@ fun compile_asm(file: str, opts: LoadOptions, debug: bool, ir: bool) -> Result<s
     let ch = load_and_check(file, opts)?
     var g = new_codegen(ch.checker)
     g.set_sources(ch.prog.spans, ch.prog.next_id)
-    if debug { g.enable_debug_info() }
+    if debug { g.enable_debug_info(read_gdb_script(opts.stdlib_root)) }
     if ir { g.enable_ir(false) }
     return Ok(g.generate())
 }

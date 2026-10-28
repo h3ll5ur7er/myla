@@ -19,7 +19,7 @@ from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, Varia
 from .ir import render_func
 from .lower import lower_function
 import .ir_x86 as ir_x86
-from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
+from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
 // `capoff` is the byte offset within the closure env for a "capture" binding.
@@ -154,6 +154,7 @@ pub struct CodeGen {
     dbg_fn_end: str,
     dbg_mark: str,
     dbg_n: int32,
+    dbg_script: str,
     // The IR (MYLA-103, D79): whether functions are lowered to it (`--ir`),
     // whether their IR text is kept (`--emit-ir`), the functions emitted from
     // it, those that fell back to the old path with the reason, and the text.
@@ -199,7 +200,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         cur_path: "<input>", pos_labels: [:], posdata: [],
         debug: false, line_files: [], cur_file: 0, last_loc: "",
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
-        dbg_fn_end: "", dbg_mark: "", dbg_n: 0,
+        dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         use_ir: false, keep_ir: false, ir_done: [], ir_skipped: [], ir_texts: [],
     }
 }
@@ -213,9 +214,11 @@ impl CodeGen {
     }
 
     // Emit DWARF debug information (`-g`): line tables (MYLA-71), variables
-    // and types (MYLA-66).
-    fun enable_debug_info(var self) {
+    // and types (MYLA-66), and embed the pretty-printers `gdb_script` (the
+    // text of `debug/myla_gdb.py`, `dwarf.read_gdb_script`; "" for none, D82).
+    fun enable_debug_info(var self, gdb_script: str) {
         self.debug = true
+        self.dbg_script = gdb_script
     }
 
     // Lower each function to the IR and emit it from there, falling back to
@@ -307,18 +310,40 @@ impl CodeGen {
     fun dbg_line(var self, line: str) { push(self.dbg_lines, line) }
 
     // Open the subprogram of the function at label `symbol`, if the function
-    // has a line table.
+    // has a line table; it returns `self.ret_type`.
     fun dbg_begin_function(var self, symbol: str) {
         self.dbg_fn = self.cur_file != 0
         if !self.dbg_fn { return }
         self.dbg_fn_end = self.dbg_label("f")
         self.dbg_scopes = []
-        self.dbg_line(format("\t.uleb128 {}", AB_SUBPROGRAM))
+        let ty = self.dbg_return_type(self.ret_type)
+        if ty == "" {
+            self.dbg_line(format("\t.uleb128 {}", AB_SUBPROGRAM))
+        } else {
+            self.dbg_line(format("\t.uleb128 {}", AB_TYPED_SUBPROGRAM))
+        }
         self.dbg_line(dw_string(symbol))
         self.dbg_line(format("\t.quad {}", symbol))
         self.dbg_line(format("\t.quad {} - {}", self.dbg_fn_end, symbol))
         self.dbg_line("\t.uleb128 1")
         self.dbg_line(format("\t.byte {}", OP_REG6))
+        if ty != "" { self.dbg_line(dw_ref(ty)) }
+    }
+
+    // The type `finish` reads a function's result as, from `%rax` ("": none
+    // it can read). An aggregate comes back through the hidden pointer `%rax`
+    // returns; a float in `%rax`, where gdb would read `%xmm0`.
+    fun dbg_return_type(var self, ret: Option<Type>) -> str {
+        let t = match ret {
+            Some(t) => t,
+            None => { return "" },
+        }
+        match t {
+            Type.TFloat(w) => { return "" },
+            _ => {},
+        }
+        if is_aggregate(t) { return self.dbg_pointer(self.dbg_aggregate(t)) }
+        return self.dbg_element(t)
     }
 
     // Close the subprogram; its end label goes after the function's code.
@@ -552,6 +577,7 @@ impl CodeGen {
             return out
         }
         if p.kind == "cell" { return self.dbg_cell_lines(p.ty) }
+        if p.kind == "slot" { return self.dbg_slot_lines(p.ty, p.n) }
         return self.dbg_aggregate_lines(p.ty)
     }
 
@@ -572,9 +598,31 @@ impl CodeGen {
                 let items = self.dbg_items(e)
                 return self.dbg_struct_lines(type_name(t), 16, ["len", "cap", "items"], [len_t, len_t, items], [0, 8, 16])
             },
+            Type.TMap(k, v) => {
+                // the slots, as many as the capacity
+                let stride = 16 + self.stored_size(v)
+                let slot = self.dbg_type(format("slot:{}", type_name(t)), "slot", t, "", stride, 0)
+                let slots = self.dbg_array(slot, stride, 8)
+                return self.dbg_struct_lines(type_name(t), 16, ["len", "cap", "slots"], [len_t, len_t, slots], [0, 8, 16])
+            },
             _ => {},
         }
         return self.dbg_struct_lines(type_name(t), 16, ["len", "cap"], [len_t, len_t], [0, 8])
+    }
+
+    // A map slot of map type `t`, `size` bytes: `[state:8][key:8][value]`
+    // (state 1: occupied).
+    fun dbg_slot_lines(var self, t: Type, size: int32) -> [str] {
+        match t {
+            Type.TMap(k, v) => {
+                let state = self.dbg_base(Type.TInt(64, false), 8)
+                let key = self.dbg_element(k)
+                let value = self.dbg_element(v)
+                return self.dbg_struct_lines("slot", size, ["state", "key", "value"], [state, key, value], [0, 8, 16])
+            },
+            _ => {},
+        }
+        return []
     }
 
     fun dbg_aggregate_lines(var self, t: Type) -> [str] {
@@ -697,7 +745,9 @@ impl CodeGen {
         for l in ["\t.quad .Ltext0", "\t.quad .Letext0 - .Ltext0", "\t.long .Ldebug_line0"] { push(out, l) }
         for l in self.dbg_lines { push(out, l) }
         for l in types { push(out, l) }
-        for l in ["\t.byte 0", ".Ldebug_info_end:", "\t.section .debug_line,\"\",@progbits", ".Ldebug_line0:"] { push(out, l) }
+        for l in ["\t.byte 0", ".Ldebug_info_end:"] { push(out, l) }
+        if self.dbg_script != "" { for l in gdb_scripts_section(self.dbg_script) { push(out, l) } }
+        for l in ["\t.section .debug_line,\"\",@progbits", ".Ldebug_line0:"] { push(out, l) }
         return out
     }
 

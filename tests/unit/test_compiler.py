@@ -188,6 +188,21 @@ class TestLineTables(unittest.TestCase):
         store = next(i for i, l in enumerate(body) if l.startswith("\tmovq %rax, -"))
         self.assertRegex(body[store + 1], r"^\.Ldb\d+:$")
 
+    def test_debug_info_has_return_types_and_the_pretty_printers(self):
+        # MYLA-66: `finish` reads a result through the subprogram's type, and
+        # the binary carries the gdb pretty-printers (D82)
+        from myla.compiler.dwarf import GDB_SCRIPT, SUBPROGRAM, TYPED_SUBPROGRAM
+        asm = self.asm(debug=True)
+        info = asm[asm.index(".section .debug_info"):asm.index(".section .debug_line")]
+        self.assertIn(f'\t.uleb128 {TYPED_SUBPROGRAM}\n\t.string "myla_lib$twice"', info)
+        self.assertIn(f'\t.uleb128 {SUBPROGRAM}\n\t.string "myla_main"', info)
+        self.assertIn('\t.section .debug_gdb_scripts,"MS",@progbits,1\n\t.byte 4\n'
+                      '\t.ascii "myla-printers\\n"\n', asm)
+        with open(GDB_SCRIPT, "rb") as fh:
+            script = fh.read()
+        script.decode("ascii")                  # copied byte for byte by both compilers
+        self.assertIn(b"register_pretty_printer", script)
+
     def test_debug_info_leaves_the_code_alone(self):
         # without the directives and labels `-g` adds, the code is the same
         def code(asm: str) -> list[str]:

@@ -1082,7 +1082,7 @@ class CodeGen:
 
         self._emit(f"myla_{decl.name}:")
         if self._fn_dbg:
-            self._fn_dbg.begin_function(f"myla_{decl.name}")
+            self._fn_dbg.begin_function(f"myla_{decl.name}", sig.ret)
         self._emit_loc(decl)
         self._emit("pushq %rbp")
         self._emit("movq %rsp, %rbp")
@@ -4010,7 +4010,7 @@ class CodeGen:
 
         self._emit(f"myla_{lam.lifted_name}:")
         if self._fn_dbg:
-            self._fn_dbg.begin_function(f"myla_{lam.lifted_name}")
+            self._fn_dbg.begin_function(f"myla_{lam.lifted_name}", ret)
         self._emit_loc(lam)
         self._emit("pushq %rbp")
         self._emit("movq %rsp, %rbp")
