@@ -13,7 +13,8 @@ Step 6 of [[MYLA-67]] ([[Architecture/IR]]): each optimisation a separate change
 - [x] Constants and addresses recomputed where they are read; call arguments pushed from their slots
 - [x] A variable's value read where it is used, when nothing in between can write a slot
 - [ ] Frame slot reuse
-- [ ] Retain/drop pairs that cancel (a list copied and never written)
+- [x] Retain/drop pairs that cancel: a new value (a call's result, a literal, a concatenation) moved out of its temporary into the place it is stored
+- [ ] Retain/drop pairs that cancel for a copy never written
 - [ ] Scalars in registers (a simple allocator over temporaries)
 - [ ] Copy elision for aggregate results
 - [ ] Dead functions after monomorphization
@@ -30,6 +31,7 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 | Temporaries in `%rax` | 2.08 s | 108 MB | 2.21 MB | 8.67 MB |
 | Constants and addresses recomputed | 2.00 s | 97 MB | 1.83 MB | 7.30 MB |
 | Variables read where used | 2.01 s | 95 MB | 1.72 MB | 6.91 MB |
+| New values moved, not retained and dropped | 1.84 s | 93 MB | 1.59 MB | 6.32 MB |
 
 ## How (walks out of line)
 
@@ -75,3 +77,14 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 
 - **Measured:** the binary 6% smaller (1.83 → 1.72 MB), the assembly 5% smaller (7.30 → 6.91 MB), the peak 2 MB lower, and the time unchanged (the analysis costs about what it saves). The compiler built this way reproduces its own output.
 - **Tests:** the stress programs stay at 11 MB, and the codegen gate, the parity tests and the debug-information tests pass.
+
+## How (new values moved)
+
+- **Profile first:** callgrind on the self-compile (addresses mapped to the nearest symbol, since the labels aren't typed as functions) puts most of the time in the compiler's own linear lookups: `sig_of` 7.7%, `is_enum_name` 6.3%, `has_func` 5.3%, `str_index` 3.6%, `struct_info` 1.9%. Those are source changes, not IR ones ([[MYLA-119]]). Of what the IR emits, the reference counting stood out: `let s = f()` retained the call's result into `s` and then released the statement's temporary.
+- **Change:** the lowering records which owning slot holds each temporary (`holder`: the value stored into it, read from it, or its address). A value bound for a place (`let`, an assignment, a member or element store, `push`, a map insert, `return`, a match's result, a box, an environment) is taken when its holder is still one of an open statement's temporaries (`take`): the slot hands its references over (`moved`), and neither the retain nor the drop is emitted. `stage` uses such a temporary as the staged value itself. An assignment of a new aggregate to a variable needs no staged copy, as it can't share the old value.
+
+## Evidence (new values moved)
+
+- **Measured:** 13% faster (2.11 → 1.84 s, the earlier row's 2.01 s re-measured as 2.11 s on an idle machine), the binary 8% smaller, the assembly 9% smaller, the peak 2 MB lower. The compiler built this way reproduces its own output.
+- **Mutation:** a `take` that doesn't hand the slot over (so it is still dropped) crashes or garbles three stress programs.
+- **Tests:** the stress programs stay at 11 MB; the codegen gate, the parity tests and the debug-information tests pass (182 tests).

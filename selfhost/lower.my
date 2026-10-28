@@ -49,8 +49,9 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // while there is none).
 // `lams`, `partials` and `fnvals`: the lambda bodies, partial-application
 // thunks and function-value thunks the function needs, which the code
-// generator emits after it.
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
+// generator emits after it. `holder`: per temporary, the owning slot it was
+// stored into, read from or is the address of (-1: none), for `take`.
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32] }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
 pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
@@ -60,7 +61,7 @@ pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: 
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [] }
     var first_word = 0
     match ret {
         Some(t) => {
@@ -99,7 +100,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [] }
     var first_word = 0
     match ret {
         Some(t) => {
@@ -268,6 +269,12 @@ impl Lower {
 
     fun add(var self, inst: Inst) {
         push(self.f.blocks[self.cur].insts, inst)
+        match inst {
+            Inst.Store(s, v) => { if self.f.slots[s].owns { self.holder[v] = s } },
+            Inst.Addr(d, s) => { if self.f.slots[s].owns { self.holder[d] = s } },
+            Inst.Load(d, s) => { if self.f.slots[s].owns { self.holder[d] = s } },
+            _ => {},
+        }
     }
 
     // End the current block with `t` (if it isn't ended yet).
@@ -288,7 +295,52 @@ impl Lower {
 
     fun temp(var self, t: Type) -> int32 {
         push(self.f.temps, t)
+        push(self.holder, -1)
         return len(self.f.temps) - 1
+    }
+
+    // Whether the value `v` (a cell, or an aggregate's address) is held by an
+    // owned temporary of a statement still open, which then hands its
+    // references over (`moved`) instead of being retained into a place and
+    // dropped (MYLA-108).
+    fun take(var self, v: int32) -> bool {
+        let s = self.holder[v]
+        if s < 0 { return false }
+        for ts in self.temps {
+            for x in ts {
+                if x == s {
+                    self.moved(s)
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    // Whether the value `v` of type `t`, which owns heap values, is taken
+    // from an owned temporary (`take`).
+    fun took(var self, cg: CodeGen, t: Type, v: int32) -> bool {
+        return cg.owns_heap(t) && self.take(v)
+    }
+
+    // Whether the value `v` is held by an owned temporary of a statement still
+    // open (as `take`, without taking it).
+    fun holds(self, v: int32) -> bool {
+        let s = self.holder[v]
+        if s < 0 { return false }
+        for ts in self.temps {
+            for x in ts {
+                if x == s { return true }
+            }
+        }
+        return false
+    }
+
+    // `retain` unless the value is taken from an owned temporary.
+    fun retain_or_take(var self, cg: CodeGen, t: Type, v: int32) {
+        if !cg.owns_heap(t) { return }
+        if self.take(v) { return }
+        self.retain(cg, t, v)
     }
 
     fun new_slot(var self, name: str, t: Type, size: int32, word: int32, owns: bool) -> int32 {
@@ -505,13 +557,15 @@ impl Lower {
                 let slot = self.value_slot(cg, name, t, true)
                 if is_aggregate(t) {
                     let src = self.addr(cg, init)
+                    let took = self.took(cg, t, src)
                     let dst = self.slot_addr(slot)
                     self.add(Inst.Copy(dst, src, cg.size(t)))
-                    self.retain(cg, t, dst)
+                    if !took { self.retain(cg, t, dst) }
                 } else {
                     let v = self.expr(cg, init)
+                    let took = self.took(cg, t, v)
                     self.add(Inst.Store(slot, v))
-                    self.retain(cg, t, v)
+                    if !took { self.retain(cg, t, v) }
                 }
                 self.declare(name, slot)
                 self.own(slot)
@@ -609,16 +663,17 @@ impl Lower {
         let t = cg.type_of(e.id)
         if self.sret >= 0 {
             let src = self.addr(cg, e)
+            let took = self.took(cg, t, src)
             let dst = self.slot_addr(self.sret)
             self.add(Inst.Copy(dst, src, cg.size(t)))
-            self.retain(cg, t, dst)
+            if !took { self.retain(cg, t, dst) }
             self.drop_temps(0)
             self.drop_owners(0)
             self.leave(Term.Ret(dst))
             return
         }
         let v = self.expr(cg, e)
-        self.retain(cg, t, v)
+        self.retain_or_take(cg, t, v)
         self.drop_temps(0)
         self.drop_owners(0)
         self.leave(Term.Ret(v))
@@ -680,6 +735,12 @@ impl Lower {
             // a variable: nothing is evaluated between the value and the store
             if is_aggregate(t) {
                 let src = self.addr(cg, value)
+                if self.took(cg, t, src) {
+                    // a new value, which can't share the old one
+                    self.add(Inst.DropSlot(t, local))
+                    self.add(Inst.Copy(self.slot_addr(local), src, cg.size(t)))
+                    return
+                }
                 let staged = self.value_slot(cg, "__staged", t, false)
                 let sp = self.slot_addr(staged)
                 self.add(Inst.Copy(sp, src, cg.size(t)))
@@ -689,7 +750,7 @@ impl Lower {
                 return
             }
             let v = self.expr(cg, value)
-            self.retain(cg, t, v)
+            self.retain_or_take(cg, t, v)
             if self.f.slots[local].owns { self.add(Inst.DropSlot(t, local)) }
             self.add(Inst.Store(local, v))
             return
@@ -1194,11 +1255,12 @@ impl Lower {
     // of its own: the pointer a member of type `t` holds.
     fun box(var self, cg: CodeGen, value: Expr, t: Type) -> int32 {
         let src = self.addr(cg, value)
+        let took = self.took(cg, t, src)
         let size = self.int_const(cg.size(t))
         let p = self.temp(Type.TInt(64, false))
         self.add(Inst.Rt(p, "__alloc", [size]))
         self.add(Inst.Copy(p, src, cg.size(t)))
-        self.retain(cg, t, p)
+        if !took { self.retain(cg, t, p) }
         return p
     }
 
@@ -1226,13 +1288,14 @@ impl Lower {
             self.add(Inst.StoreAt(base, off, self.box(cg, value, mt)))
         } else if is_aggregate(mt) {
             let src = self.addr(cg, value)
+            let took = self.took(cg, mt, src)
             let dst = self.offset(base, off)
             self.add(Inst.Copy(dst, src, cg.size(mt)))
-            self.retain(cg, mt, dst)
+            if !took { self.retain(cg, mt, dst) }
         } else {
             let v = self.expr(cg, value)
             self.add(Inst.StoreAt(base, off, v))
-            self.retain(cg, mt, v)
+            self.retain_or_take(cg, mt, v)
         }
     }
 
@@ -1367,13 +1430,14 @@ impl Lower {
     fun store_env(var self, cg: CodeGen, env: int32, off: int32, value: Expr, t: Type) {
         if is_aggregate(t) {
             let src = self.addr(cg, value)
+            let took = self.took(cg, t, src)
             let dst = self.offset(env, off)
             self.add(Inst.Copy(dst, src, cg.size(t)))
-            self.retain(cg, t, dst)
+            if !took { self.retain(cg, t, dst) }
         } else {
             let v = self.expr(cg, value)
             self.add(Inst.StoreAt(env, off, v))
-            self.retain(cg, t, v)
+            self.retain_or_take(cg, t, v)
         }
     }
 
@@ -1720,6 +1784,8 @@ impl Lower {
         let owns = cg.owns_heap(vt)
         if is_aggregate(vt) {
             let src = self.addr(cg, value)
+            // an owned temporary is staged already: it moves in when stored
+            if owns && self.holds(src) { return (self.holder[src], src) }
             let slot = self.value_slot(cg, "__staged", vt, owns)
             let staged = self.slot_addr(slot)
             self.add(Inst.Copy(staged, src, cg.size(vt)))
@@ -1729,6 +1795,7 @@ impl Lower {
             return (slot, staged)
         }
         let v = self.expr(cg, value)
+        if owns && self.holds(v) { return (self.holder[v], v) }
         self.retain(cg, vt, v)
         if !owns { return (-1, v) }
         let slot = self.value_slot(cg, "__staged", vt, true)
@@ -2196,13 +2263,15 @@ impl Lower {
     fun store_result(var self, cg: CodeGen, ex: Expr, result: int32, rt: Type) {
         if is_aggregate(rt) {
             let src = self.addr(cg, ex)
+            let took = self.took(cg, rt, src)
             let dst = self.slot_addr(result)
             self.add(Inst.Copy(dst, src, cg.size(rt)))
-            self.retain(cg, rt, dst)
+            if !took { self.retain(cg, rt, dst) }
         } else {
             let v = self.expr(cg, ex)
+            let took = self.took(cg, rt, v)
             self.add(Inst.Store(result, v))
-            self.retain(cg, rt, v)
+            if !took { self.retain(cg, rt, v) }
         }
     }
 
