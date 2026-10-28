@@ -69,6 +69,22 @@ pub enum Inst {
     // init $slot: the aggregate built member by member in the slot is
     // complete (for the verifier; no code)
     Init(int32),
+    // %dst = elem %cell[%i] stride: the address of element %i of a list (or
+    // of byte %i of a string, `true`), trapping at the position when it is out
+    // of bounds (MYLA-105)
+    Elem(int32, int32, int32, int32, bool, Pos),
+    // %dst = load8 [%ptr]: a byte (a string's)
+    Load8(int32, int32),
+    // %dst = cow T [%holder]: the list or map cell the 8 bytes at %holder
+    // point at, made unique (cloned and stored back when it is shared)
+    Cow(int32, Type, int32),
+    // %dst = append [%holder] %cell stride: room for one more element at the
+    // end of the unique list %cell (grown and stored back into %holder when
+    // full), its length counted; the new element's address
+    Append(int32, int32, int32, int32),
+    // %dst = pop %cell stride: the address of the last element of the unique
+    // list %cell, which is no longer counted; trapping when it is empty
+    Pop(int32, int32, int32, Pos),
     // print ty %a: a scalar, as `print` writes it
     Print(Type, int32),
     // loc line col: the source position of the code that follows
@@ -168,6 +184,11 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.DropSlot(t, s) => format("drop {} ${}", type_name(t), s)
         Inst.DropAt(t, p) => format("drop {} [%t{}]", type_name(t), p)
         Inst.Init(s) => format("init ${}", s)
+        Inst.Elem(d, c, i, stride, is_str, p) => format("%t{} = elem %t{}[%t{}] {}{} @{}:{}", d, c, i, stride, str_suffix(is_str), p.line, p.col)
+        Inst.Load8(d, p) => format("%t{} = load8 [%t{}]", d, p)
+        Inst.Cow(d, t, h) => format("%t{} = cow {} [%t{}]", d, type_name(t), h)
+        Inst.Append(d, h, c, stride) => format("%t{} = append [%t{}] %t{} {}", d, h, c, stride)
+        Inst.Pop(d, c, stride, p) => format("%t{} = pop %t{} {} @{}:{}", d, c, stride, p.line, p.col)
         Inst.Print(t, a) => format("print {} %t{}", type_name(t), a)
         Inst.Loc(p) => format("loc {} {}", p.line, p.col)
         Inst.Bind(name, s) => format("bind {} ${}", name, s)
@@ -201,6 +222,11 @@ fun render_call(d: int32, name: str, args: [int32]) -> str {
     }
     append(sb, ")")
     return build(sb)
+}
+
+fun str_suffix(is_str: bool) -> str {
+    if is_str { return " str" }
+    return ""
 }
 
 fun render_rt(d: int32, name: str, args: [int32]) -> str {

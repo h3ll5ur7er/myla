@@ -37,7 +37,7 @@
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit
 from .checker import Type, Subst, opt_subst_type, subst_type
-from .codegen import CodeGen, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, arms_may_write, is_cell_t
+from .codegen import CodeGen, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 
 // A name in scope: the slot holding it.
@@ -105,14 +105,15 @@ fun is_scalar(t: Type) -> bool {
     }
 }
 
-// Whether values of type `t` can be lowered yet: scalars, strings, and
+// Whether values of type `t` can be lowered yet: scalars, strings, lists, and
 // structs, tuples and enums (not recursive ones, whose members are boxed) of
-// such values; not lists, maps, builders or function values yet.
+// such values; not maps, builders or function values yet.
 fun lowerable(cg: CodeGen, t: Type, depth: int32) -> bool {
     if depth > 16 { return false }
     if is_scalar(t) { return true }
     match t {
         Type.TStr => { return true },
+        Type.TList(et) => { return lowerable(cg, et, depth + 1) },
         Type.TStruct(n, a) => {
             let info = cg.struct_info(n)
             let sub = cg.type_subst(info.type_params, a)
@@ -230,6 +231,10 @@ impl Lower {
                 if slot >= 0 { return self.f.slots[slot].ty }
             },
             ExprKind.GetField(t, f) => { return cg.struct_field_type_t(self.place_type(cg, t), f) },
+            ExprKind.Index(b, i) => {
+                let bt = self.place_type(cg, b)
+                if is_list_t(bt) { return list_elem(bt) }
+            },
             ExprKind.TupleIndex(t, i) => {
                 let es = tuple_elems(self.place_type(cg, t))
                 let ix = i as int32
@@ -248,8 +253,9 @@ impl Lower {
         return d
     }
 
+    // `p + off` in a temporary of its own, also at offset 0: the address of a
+    // member, which the verifier mustn't read as the whole slot's.
     fun offset(var self, p: int32, off: int32) -> int32 {
-        if off == 0 { return p }
         let d = self.temp(Type.TInt(64, false))
         self.add(Inst.Offset(d, p, off))
         return d
@@ -562,9 +568,23 @@ impl Lower {
                 let base = self.place(cg, tgt)
                 return self.offset(base, cg.elem_offset(self.place_type(cg, tgt), idx as int32))
             },
+            ExprKind.Index(base, idx) => {
+                // the list made unique first (copy-on-write along the whole
+                // path to the place, as the old path's `mut_place_addr`), then
+                // the index, bounds-checked
+                let lt = self.place_type(cg, base)
+                if !is_list_t(lt) { return self.unsupported("an assignment to a map value or a byte") }
+                let holder = self.place(cg, base)
+                let cell = self.temp(Type.TInt(64, false))
+                self.add(Inst.Cow(cell, lt, holder))
+                let i = self.expr(cg, idx)
+                let d = self.temp(Type.TInt(64, false))
+                self.add(Inst.Elem(d, cell, i, cg.stored_size(list_elem(lt)), false, Pos { line: e.line, col: e.col }))
+                return d
+            },
             _ => {},
         }
-        return self.unsupported("an assignment to an element of a collection")
+        return self.unsupported("an assignment to that place")
     }
 
     fun if_stmt(var self, cg: CodeGen, c: Expr, then: Block, otherwise: Option<ElseTail>) {
@@ -600,7 +620,7 @@ impl Lower {
     fun for_range(var self, cg: CodeGen, vn: str, start: Option<Expr>, end: Option<Expr>, body: Block, iter: Option<Expr>) {
         match iter {
             Some(it) => {
-                let d = self.unsupported("a for loop over a collection")
+                self.for_list(cg, vn, it, body)
                 return
             },
             None => {},
@@ -657,6 +677,78 @@ impl Lower {
         self.add(Inst.Store(lv, y))
         self.finish(Term.Jmp(head))
         self.start(done)
+    }
+
+    // `for v in xs { body }`: the loop holds a reference to the list (dropped
+    // when it ends, or by a `return` from the body), walks it by index, and
+    // `v` borrows each element in turn.
+    fun for_list(var self, cg: CodeGen, vn: str, it: Expr, body: Block) {
+        let lt = cg.type_of(it.id)
+        if !is_list_t(lt) || !lowerable(cg, lt, 0) {
+            let d = self.unsupported("a for loop over a map")
+            return
+        }
+        let et = list_elem(lt)
+        let stride = cg.stored_size(et)
+        let held = self.value_slot(cg, "__iterated", lt, true)
+        self.begin_temps()
+        let v = self.expr(cg, it)
+        self.add(Inst.Store(held, v))
+        self.retain(cg, lt, v)
+        self.end_temps()
+        var loop_owners: [int32] = []
+        push(self.owners, loop_owners)
+        self.own(held)
+        let idx = self.new_slot("__index", Type.TInt(64, false), 8, -1, false)
+        let zero = self.konst(Type.TInt(64, false), 0)
+        self.add(Inst.Store(idx, zero))
+        let elem = self.value_slot(cg, vn, et, false)
+        let head = self.new_block()
+        self.finish(Term.Jmp(head))
+        self.start(head)
+        let i = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(i, idx))
+        let cell = self.temp(lt)
+        self.add(Inst.Load(cell, held))
+        let n = self.temp(Type.TInt(64, false))
+        self.add(Inst.LoadAt(n, cell, 0))
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "<", Type.TInt(64, false), i, n))
+        let body_b = self.new_block()
+        let cont = self.new_block()
+        let done = self.new_block()
+        self.finish(Term.Br(c, body_b, done))
+        self.start(body_b)
+        let p = self.temp(Type.TInt(64, false))
+        self.add(Inst.Elem(p, cell, i, stride, false, Pos { line: 0, col: 0 }))
+        if is_aggregate(et) {
+            let dst = self.slot_addr(elem)
+            self.add(Inst.Copy(dst, p, cg.size(et)))
+        } else {
+            let x = self.temp(et)
+            self.add(Inst.LoadAt(x, p, 0))
+            self.add(Inst.Store(elem, x))
+        }
+        let depth = len(self.owners)
+        self.open_scope()
+        self.declare(vn, elem)
+        self.add(Inst.Bind(vn, elem))
+        push(self.loops, LoopTarget { cont: cont, brk: done, owners: depth, temps: len(self.temps) })
+        for st in body.stmts { self.stmt(cg, st) }
+        self.loops = drop_last_loop(self.loops)
+        self.close_scope()
+        self.finish(Term.Jmp(cont))
+        self.start(cont)
+        let i2 = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(i2, idx))
+        let one = self.konst(Type.TInt(64, false), 1)
+        let i3 = self.temp(Type.TInt(64, false))
+        self.add(Inst.Bin(i3, "+", Type.TInt(64, false), Type.TInt(64, false), i2, one, Pos { line: 0, col: 0 }))
+        self.add(Inst.Store(idx, i3))
+        self.finish(Term.Jmp(head))
+        self.start(done)
+        self.drop_owners(len(self.owners) - 1)
+        self.owners = drop_last_ints(self.owners)
     }
 
     // --- scalar expressions -----------------------------------------------------
@@ -724,6 +816,14 @@ impl Lower {
                 return d
             },
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
+            ExprKind.Index(base, idx) => {
+                let p = self.elem_read(cg, e, base, idx)
+                if is_aggregate(t) { return self.unsupported("an aggregate element used as a scalar") }
+                let d = self.temp(t)
+                if is_tstr(self.place_type(cg, base)) { self.add(Inst.Load8(d, p)) } else { self.add(Inst.LoadAt(d, p, 0)) }
+                return d
+            },
+            ExprKind.ListLit(elems) => { return self.list_lit(cg, t, elems) },
             _ => {},
         }
         return self.unsupported("that kind of expression")
@@ -901,6 +1001,7 @@ impl Lower {
                 return res
             },
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
+            ExprKind.Index(base, idx) => { return self.elem_read(cg, e, base, idx) },
             _ => {},
         }
         return self.unsupported("that kind of aggregate expression")
@@ -954,12 +1055,14 @@ impl Lower {
         match callee.kind {
             ExprKind.Name(nm) => {
                 if nm == "print" && len(args) == 1 { return self.print(cg, args[0]) }
-                if nm == "len" && len(args) == 1 && is_tstr(cg.type_of(args[0].id)) {
+                if nm == "len" && len(args) == 1 && (is_tstr(cg.type_of(args[0].id)) || is_list_t(cg.type_of(args[0].id))) {
                     let s = self.expr(cg, args[0])
                     let d = self.temp(Type.TInt(32, true))
                     self.add(Inst.LoadAt(d, s, 0))
                     return d
                 }
+                if nm == "push" && len(args) == 2 && is_list_t(self.place_type(cg, args[0])) { return self.push_elem(cg, args[0], args[1]) }
+                if nm == "pop" && len(args) == 1 && is_list_t(self.place_type(cg, args[0])) { return self.pop_elem(cg, e, args[0]) }
                 if is_builtin_call_name(nm) { return self.unsupported(format("the builtin {}", nm)) }
                 if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.unsupported("a call of a function value") }
                 return self.direct_call(cg, e, nm, args)
@@ -1034,6 +1137,95 @@ impl Lower {
         let d = self.temp(ret_t)
         self.add(Inst.Call(d, target, vals))
         return self.owned_value(cg, d, ret_t)
+    }
+
+    // --- lists ------------------------------------------------------------------
+
+    // `[a, b, …]`: a new cell holding the elements, each with its own
+    // references; the statement owns it.
+    fun list_lit(var self, cg: CodeGen, lt: Type, elems: [Expr]) -> int32 {
+        if !lowerable(cg, lt, 0) { return self.unsupported("a list of that element type") }
+        let et = list_elem(lt)
+        let stride = cg.stored_size(et)
+        let n = len(elems)
+        let size = self.konst(Type.TInt(64, true), (16 + n * stride) as int64)
+        let cell = self.temp(lt)
+        self.add(Inst.Rt(cell, "__alloc", [size]))
+        let count = self.konst(Type.TInt(64, true), n as int64)
+        self.add(Inst.StoreAt(cell, 0, count))
+        self.add(Inst.StoreAt(cell, 8, count))
+        var i = 0
+        for el in elems {
+            self.store_member(cg, el, cell, 16 + i * stride)
+            i = i + 1
+        }
+        return self.owned_value(cg, cell, lt)
+    }
+
+    // The address of element `idx` of the list or string `base` (bounds
+    // checked at `e`), borrowed from it.
+    fun elem_read(var self, cg: CodeGen, e: Expr, base: Expr, idx: Expr) -> int32 {
+        let bt = self.place_type(cg, base)
+        if is_map_t(bt) { return self.unsupported("a map lookup") }
+        if !is_list_t(bt) && !is_tstr(bt) { return self.unsupported("indexing that type") }
+        let cell = self.expr(cg, base)
+        let i = self.expr(cg, idx)
+        var stride = 1
+        if is_list_t(bt) { stride = cg.stored_size(list_elem(bt)) }
+        let d = self.temp(Type.TInt(64, false))
+        self.add(Inst.Elem(d, cell, i, stride, is_tstr(bt), Pos { line: e.line, col: e.col }))
+        return d
+    }
+
+    // `push(holder, value)`: the value taken first (with its references), then
+    // the list made unique, grown when full, and the value moved in.
+    fun push_elem(var self, cg: CodeGen, holder: Expr, value: Expr) -> int32 {
+        let lt = self.place_type(cg, holder)
+        if !lowerable(cg, lt, 0) { return self.unsupported("a list of that element type") }
+        let et = list_elem(lt)
+        let stride = cg.stored_size(et)
+        var staged = -1
+        var v = -1
+        if is_aggregate(et) {
+            let src = self.addr(cg, value)
+            let slot = self.value_slot(cg, "__staged", et, false)
+            staged = self.slot_addr(slot)
+            self.add(Inst.Copy(staged, src, cg.size(et)))
+            self.retain(cg, et, staged)
+        } else {
+            v = self.expr(cg, value)
+            self.retain(cg, et, v)
+        }
+        let h = self.place(cg, holder)
+        let cell = self.temp(lt)
+        self.add(Inst.Cow(cell, lt, h))
+        let slot_p = self.temp(Type.TInt(64, false))
+        self.add(Inst.Append(slot_p, h, cell, stride))
+        if is_aggregate(et) { self.add(Inst.Copy(slot_p, staged, cg.size(et))) } else { self.add(Inst.StoreAt(slot_p, 0, v)) }
+        return -1
+    }
+
+    // `pop(holder)`: the last element moved out of the (unique) list, with its
+    // references; the statement owns it.
+    fun pop_elem(var self, cg: CodeGen, e: Expr, holder: Expr) -> int32 {
+        let lt = self.place_type(cg, holder)
+        if !lowerable(cg, lt, 0) { return self.unsupported("a list of that element type") }
+        let et = list_elem(lt)
+        let h = self.place(cg, holder)
+        let cell = self.temp(lt)
+        self.add(Inst.Cow(cell, lt, h))
+        let p = self.temp(Type.TInt(64, false))
+        self.add(Inst.Pop(p, cell, cg.stored_size(et), Pos { line: e.line, col: e.col }))
+        if is_aggregate(et) {
+            let slot = self.value_slot(cg, "__popped", et, true)
+            let dst = self.slot_addr(slot)
+            self.add(Inst.Copy(dst, p, cg.size(et)))
+            self.own_temp(slot)
+            return dst
+        }
+        let d = self.temp(et)
+        self.add(Inst.LoadAt(d, p, 0))
+        return self.owned_value(cg, d, et)
     }
 
     fun print(var self, cg: CodeGen, arg: Expr) -> int32 {

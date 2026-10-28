@@ -3047,14 +3047,22 @@ impl CodeGen {
         self.eval(idx)
         self.emit("movq %rax, %rcx")
         self.emit("popq %rax")
+        var stride = 1
+        if !is_str_t(bt) { stride = self.elem_stride(list_elem(bt)) }
+        self.emit_elem_addr(is_str_t(bt), stride, e.line, e.col)
+    }
+
+    // The address of element %rcx of the list (or string, `is_str`) cell in
+    // %rax, trapping at line:col when it is out of bounds (shared with the IR
+    // backend, MYLA-105).
+    fun emit_elem_addr(var self, is_str: bool, stride: int32, line: int32, col: int32) {
         self.emit("movq (%rax), %rdx")
         self.emit("cmpq %rdx, %rcx")
-        self.trap("jae", "__trap_index", e.line, e.col)
-        if is_str_t(bt) {
+        self.trap("jae", "__trap_index", line, col)
+        if is_str {
             self.emit("leaq 8(%rax), %rax")
             self.emit("addq %rcx, %rax")
         } else {
-            let stride = self.elem_stride(list_elem(bt))
             self.emit("leaq 16(%rax), %rax")
             if stride == 8 {
                 self.emit("leaq (%rax,%rcx,8), %rax")
@@ -7694,7 +7702,7 @@ pub fun tuple_elems(t: Type) -> [Type] {
     return match t { Type.TTuple(es) => es, _ => [] }
 }
 
-fun list_elem(t: Type) -> Type {
+pub fun list_elem(t: Type) -> Type {
     return match t { Type.TList(e) => e, _ => Type.TInt(32, true) }
 }
 
@@ -7745,9 +7753,9 @@ fun map_val(t: Type) -> Type {
     return match t { Type.TMap(k, v) => v, _ => Type.TInt(32, true) }
 }
 
-fun is_list_t(t: Type) -> bool { return match t { Type.TList(e) => true, _ => false } }
-fun is_map_t(t: Type) -> bool { return match t { Type.TMap(k, v) => true, _ => false } }
-fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => false } }
+pub fun is_list_t(t: Type) -> bool { return match t { Type.TList(e) => true, _ => false } }
+pub fun is_map_t(t: Type) -> bool { return match t { Type.TMap(k, v) => true, _ => false } }
+pub fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => false } }
 fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
 
 // A heap cell whose pointer is the value: retained and dropped as one pointer.

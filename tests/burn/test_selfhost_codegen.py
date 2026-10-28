@@ -102,6 +102,7 @@ PARITY_PROGRAMS = (
     "local_closure_shadows_a_function",
     "plain_aggregates",
     "strings_through_the_ir",
+    "lists_through_the_ir",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),

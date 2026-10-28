@@ -39,7 +39,7 @@ A function has parameters, a result, slots, temporaries and basic blocks; block 
 
 ### Instructions
 
-What [[MYLA-103]], [[MYLA-104]] and the first part of [[MYLA-105]] built is marked *now*; the rest is the plan for the next steps.
+What [[MYLA-103]], [[MYLA-104]] and the first two parts of [[MYLA-105]] built is marked *now*; the rest is the plan for the next steps.
 
 ```text
 %t = const i32 42             %t = const f64 0x400921fb54442d18
@@ -65,7 +65,7 @@ loc 12 5                      ; the source position of what follows
 bind x $s3                    ; debug information: x lives in $s3 from here
 ```
 
-*Now*: `const`, `str`, `load`/`store` of 8-byte slots, `addr` (a slot's address), `%t = %p + off`, `load`/`store` at `[%p + off]`, `copy size [%dst], [%src]`, `call … sret %r` (an aggregate result into the storage at `%r`), `rt name(%args)` (a runtime helper such as `__str_concat`, the arguments in `%rdi`, `%rsi`, …), `retain T %v` (a cell) and `retain T [%p]` (every heap value of the T at `%p`), `drop T $slot` (an owner's end) and `drop T [%p]` (a member before it is overwritten), `init $slot` (an aggregate built member by member is complete; no code), the integer and float operations (`%t = + int32 %a, %b`, with the result type after `->` when it differs, and `@line:col` on a division), `cmp`, the unary operators, `cast`, `call` with scalar arguments, `print ty %a` (a scalar, as `print` writes it), `loc`, `bind`, and `scope open`/`scope close` (the lexical scopes of debug information, which `emit_ir` turns into the same DWARF blocks as the old path).
+*Now*: `const`, `str`, `load`/`store` of 8-byte slots, `addr` (a slot's address), `%t = %p + off`, `load`/`store` at `[%p + off]`, `copy size [%dst], [%src]`, `call … sret %r` (an aggregate result into the storage at `%r`), `rt name(%args)` (a runtime helper such as `__str_concat`, the arguments in `%rdi`, `%rsi`, …), `retain T %v` (a cell) and `retain T [%p]` (every heap value of the T at `%p`), `drop T $slot` (an owner's end) and `drop T [%p]` (a member before it is overwritten), `init $slot` (an aggregate built member by member is complete; no code), `elem %cell[%i] stride` (an element's or byte's address, bounds-checked at a position), `load8`, `cow T [%holder]` (the cell made unique, a clone stored back when shared), `append [%holder] %cell stride` (room for one more element, the grown cell stored back), `pop %cell stride` (the last element's address, trapping when empty), the integer and float operations (`%t = + int32 %a, %b`, with the result type after `->` when it differs, and `@line:col` on a division), `cmp`, the unary operators, `cast`, `call` with scalar arguments, `print ty %a` (a scalar, as `print` writes it), `loc`, `bind`, and `scope open`/`scope close` (the lexical scopes of debug information, which `emit_ir` turns into the same DWARF blocks as the old path).
 
 Terminators (*now*: `jmp`, `br`, `ret`, `trap`):
 
@@ -144,8 +144,9 @@ A parameter is a slot at its argument word, so it needs no copy. The code after 
 | [[MYLA-103]] (scalars) | 50 of 227 | 13 of 1,004 |
 | [[MYLA-104]] (plain aggregates, generic calls) | 94 of 227 | 18 of 1,021 |
 | [[MYLA-105]], first part (strings, ownership, the verifier) | 122 of 227 | 64 of 1,072 |
+| [[MYLA-105]], second part (lists) | 145 of 227 | 178 of 1,079 |
 
-Nearly every remaining function of the compiler has a parameter, result or local that is a list or a map, or an aggregate holding one: the rest of [[MYLA-105]].
+Nearly every remaining function of the compiler has a parameter, result or local that is a map, a builder or a recursive enum (the syntax tree's boxed members), or an aggregate holding one: the rest of [[MYLA-105]].
 
 ### Lowering ownership
 
@@ -155,6 +156,7 @@ Nearly every remaining function of the compiler has a parameter, result or local
 - **Temporaries.** An owned temporary (a call's result, a concatenation, an aggregate literal holding a string, a `match`'s value) lives in an owning slot registered with the statement, which drops it at its end. Where no statement end follows, it is dropped right after the value is known: a condition, a guard, an operand of `&&`/`||`, a range bound, an arm's expression. `return`, `break` and `continue` also drop the temporaries of the statements they leave.
 - **Borrowing.** Parameters and match bindings borrow; nothing drops them.
 - **Assignments.** An assignment takes the new value (retains it, staged in a slot of its own for an aggregate) before it releases the old one (`drop $slot` for a local, `drop [%p]` for a member), which the new value may share (`p = p`, `o.a = o.a`).
+- **Lists.** A list literal is a new cell, its elements stored with their own references, owned by the statement. Reading an element borrows it from the list (bounds-checked, `elem`). A write to an element (`xs[i] = v`, `xs[i].f = v`, at any depth) takes the value first, then makes every list on the path to the place unique (`cow`), as the old path's `mut_place_addr` does, then releases the old element. `push` takes the value, makes the list unique, grows it when full (`append`) and moves the value in; `pop` moves the last element out to the statement. A `for` loop over a list holds a reference of its own for the loop (dropped at its end, or by a `return` from the body) and borrows each element.
 - **Matches.** A match copies its scrutinee; the copy owns references of its own (retained, dropped after the match or by an arm's early exit) only when an arm may write the variable the scrutinee came from (MYLA-2).
 
 The **verifier** (`verify` in [[selfhost/ir.my]]) follows every owning slot along the reachable paths. It rejects a store into a slot that still holds a value, a drop of one that holds none, a slot holding a value at `ret`, and paths that join disagreeing on a slot. A `copy`, `call … sret` or `init` into an owning slot stores into it. A function it rejects falls back to the old path with the reason `IR verifier: …`, which the IR gate treats as a failure.

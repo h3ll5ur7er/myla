@@ -204,6 +204,56 @@ impl CodeGen {
                 self.emit("popq %rbx")
             },
             Inst.Init(s) => {},
+            Inst.Elem(d, c, i, stride, is_str, p) => {
+                self.load_temp(c, "rax", temp_base)
+                self.load_temp(i, "rcx", temp_base)
+                self.emit_elem_addr(is_str, stride, p.line, p.col)
+                self.store_temp(d, temp_base)
+            },
+            Inst.Load8(d, p) => {
+                self.load_temp(p, "rax", temp_base)
+                self.emit("movzbl (%rax), %eax")
+                self.store_temp(d, temp_base)
+            },
+            Inst.Cow(d, t, h) => {
+                self.load_temp(h, "rax", temp_base)
+                self.cow_unique(t)
+                self.store_temp(d, temp_base)
+            },
+            Inst.Append(d, h, c, stride) => {
+                // as `gen_push`: grow when full (publishing the new cell), then
+                // count the element and point at its slot
+                let have = self.label()
+                self.load_temp(c, "rax", temp_base)
+                self.emit("movq (%rax), %rdx")
+                self.emit("movq 8(%rax), %rcx")
+                self.emit("cmpq %rcx, %rdx")
+                self.emit(format("jb {}", have))
+                self.emit("movq %rax, %rdi")
+                self.emit(format("movq ${}, %rsi", stride))
+                self.emit("call __list_grow")
+                self.load_temp(h, "rcx", temp_base)
+                self.emit("movq %rax, (%rcx)")
+                self.emit(format("{}:", have))
+                self.emit("movq (%rax), %rdx")
+                self.emit("leaq 1(%rdx), %rcx")
+                self.emit("movq %rcx, (%rax)")
+                self.emit(format("imulq ${}, %rdx", stride))
+                self.emit("leaq 16(%rax,%rdx), %rax")
+                self.store_temp(d, temp_base)
+            },
+            Inst.Pop(d, c, stride, p) => {
+                // as `gen_pop`
+                self.load_temp(c, "rax", temp_base)
+                self.emit("movq (%rax), %rcx")
+                self.emit("testq %rcx, %rcx")
+                self.trap("jz", "__trap_pop", p.line, p.col)
+                self.emit("decq %rcx")
+                self.emit("movq %rcx, (%rax)")
+                self.emit(format("imulq ${}, %rcx", stride))
+                self.emit("leaq 16(%rax,%rcx), %rax")
+                self.store_temp(d, temp_base)
+            },
             Inst.Print(t, a) => {
                 self.load_temp(a, "rax", temp_base)
                 self.emit_print(t)
