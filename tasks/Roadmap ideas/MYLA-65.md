@@ -2,7 +2,7 @@
 id: MYLA-65
 title: Better error messages
 type: improvement
-status: in-progress
+status: review
 priority: medium
 labels: [diagnostics, tooling]
 ---
@@ -65,6 +65,35 @@ Moving positions to the range's start (so `-->` points at the `nope` of `nope(1)
 - The checker gate compares notes like messages: the corpus plus 22 snippets (index, element-field and match-binding roots, a `for` variable and a receiver without a note, a lambda parameter, a destructured redeclaration, `return` in a lambda and in a generic function, suggestions of a constant, a function value, a variant, an alias, a type parameter, a primitive, struct-literal and struct-pattern fields, an assigned name, a partially applied method, a called variable, nothing close, a tie). The codegen gate's CLI comparison renders every corpus file and notes on a later error and in an imported module; `test_selfhost_cli` has a REPL session with a note and a help line; the language server scenarios check `relatedInformation` and the message, against both builds.
 
 ## Evidence
+
+### Notes and help lines
+
+Before, both lines ended after the carets; now:
+
+```
+type error: struct 'Rect' has no field 'widht'
+  --> examples/errors/type_did_you_mean_field.my:8:12
+  |
+8 |     print(r.widht * r.height)
+  |           ^^^^^^^
+help: did you mean 'width'?
+
+type error: return type mismatch: expected 'str', found 'int32'
+  --> examples/errors/type_return_type_note.my:7:5
+  |
+7 |     return n * 2
+  |     ^^^^^^^^^^^^
+note: the return type is declared here
+  --> examples/errors/type_return_type_note.my:6:22
+  |
+6 | fun label(n: int) -> str {
+  |                      ^^^
+```
+
+- Tests failing first: the 10 new corpus cases (and two existing files, which gained notes once the checker had them and now name them), the new unit tests, the REPL session and the language server scenario (`KeyError: 'relatedInformation'`); the checker gate failed on the three duplicate-declaration cases until the self-hosted checker had that note.
+- Mutation checks: the self-hosted `return` note made unconditional (fails `note_return_in_lambda`), its tie-break reversed (fails `suggest_alphabetically_first`; the gate had no tie before this check), the notes rendered without their source line (fails 5 cases of the codegen gate's CLI comparison).
+- Unit 570 → 575, integration 2, burn 710 → 722 (5 skipped, as before), extension 54: all pass. Bootstrap fixed point: 5,952,875 bytes.
+- Cost, the compiler built by itself compiling itself, two runs of best of 3: 1.09 and 1.05 s before, 1.04 and 1.07 s after; peak 90 → 92 MB (variables carry their position).
 
 ### More than one error per run
 
