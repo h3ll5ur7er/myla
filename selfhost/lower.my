@@ -35,9 +35,9 @@
 // path generates it.
 
 from std.num import f64_literal_bits, f32_round_bits
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import Type, Subst, opt_subst_type, subst_type
-from .codegen import CodeGen, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .codegen import CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 
 // A name in scope: the slot holding it.
@@ -54,14 +54,20 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // the result's address (an aggregate result, else -1), the bindings of the
 // match arm being lowered, and the first construct that can't be lowered (""
 // while there is none).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str }
+// `lams`, `partials` and `fnvals`: the lambda bodies, partial-application
+// thunks and function-value thunks the function needs, which the code
+// generator emits as the old path's.
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
+
+// A function's IR, with the code it needs generated besides (see `Lower`).
+pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
 
 // The IR of the function `fd`, generated as `mangled`; Err: why it can't be
 // lowered yet.
-pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<IrFunc, str> {
+pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "" }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [] }
     var first_word = 0
     match ret {
         Some(t) => {
@@ -91,7 +97,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<IrFunc,
     if lw.err != "" { return Err(lw.err) }
     // the end of the body: as `gen_function`, fall through to the epilogue
     lw.finish(Term.Ret(-1))
-    return Ok(lw.f)
+    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
 }
 
 // Whether `t` is a scalar: an integer, float, bool or char.
@@ -105,9 +111,9 @@ fun is_scalar(t: Type) -> bool {
     }
 }
 
-// Whether values of type `t` can be lowered yet: scalars, strings, lists,
-// maps, builders, and structs, tuples and enums (recursive ones too, whose
-// members are boxed) of such values; not function values yet.
+// Whether values of type `t` can be lowered: scalars, strings, lists, maps,
+// builders, function values, and structs, tuples and enums (recursive ones
+// too, whose members are boxed) of such values.
 fun lowerable(cg: CodeGen, t: Type) -> bool {
     return member_lowerable(t, cg.ir_blocked)
 }
@@ -126,6 +132,10 @@ fun member_lowerable(t: Type, blocked: [str]) -> bool {
         Type.TTuple(es) => all_lowerable(es, blocked)
         Type.TStruct(n, a) => !has_name(blocked, n) && all_lowerable(a, blocked)
         Type.TEnum(n, a) => !has_name(blocked, n) && all_lowerable(a, blocked)
+        Type.TFunc(ps, r) => all_lowerable(ps, blocked) && match r {
+            Some(rt) => member_lowerable(rt, blocked)
+            None => true
+        }
         _ => false
     }
 }
@@ -144,9 +154,9 @@ fun has_name(names: [str], n: str) -> bool {
     return false
 }
 
-// The structs and enums whose declared members can't be lowered yet (a
-// function value, directly or through another such type), to a fixed point;
-// a generic one is lowerable for lowerable type arguments.
+// The structs and enums whose declared members can't be lowered (through
+// another such type, to a fixed point; `Self`); a generic one is lowerable
+// for lowerable type arguments.
 pub fun blocked_types(cg: CodeGen) -> [str] {
     var blocked: [str] = []
     var changed = true
@@ -1057,8 +1067,10 @@ impl Lower {
             ExprKind.Name(n) => {
                 let slot = self.lookup(n)
                 if slot >= 0 { return self.slot_addr(slot) }
-                return self.unsupported("a function used as a value")
+                if cg.has_func(n) { return self.fn_value(cg, e, n) }
+                return self.unsupported("that name as a value")
             },
+            ExprKind.Lambda(params, rt, body) => { return self.lambda_value(cg, e, params, body) },
             ExprKind.GetField(tgt, field) => {
                 let base = self.addr(cg, tgt)
                 return self.unbox(cg, t, self.offset(base, cg.field_offset(self.place_type(cg, tgt), field)))
@@ -1094,6 +1106,7 @@ impl Lower {
             },
             ExprKind.Binary(op, l, r) => {
                 let lt = cg.type_of(l.id)
+                if op == ">>" && is_tfunc(lt) { return self.compose(cg, e, l, r) }
                 if !is_overloadable_op(op) || !is_struct_or_enum_t(lt) { return self.unsupported("that operator on aggregates") }
                 let pa = self.addr(cg, l)
                 let pb = self.addr(cg, r)
@@ -1180,7 +1193,7 @@ impl Lower {
     // -1 without a result. A result that owns heap values is the statement's.
     fun call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr]) -> int32 {
         if self.err != "" { return -1 }
-        if args_have_hole(args) { return self.unsupported("a partial application") }
+        if args_have_hole(args) { return self.partial(cg, e, callee, args) }
         match callee.kind {
             ExprKind.Name(nm) => {
                 if nm == "print" && len(args) == 1 { return self.print(cg, args[0]) }
@@ -1215,19 +1228,249 @@ impl Lower {
                     return self.owned_value(cg, d, Type.TStr)
                 }
                 if is_builtin_call_name(nm) { return self.io_call(cg, e, nm, args) }
-                if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.unsupported("a call of a function value") }
+                if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.indirect_call(cg, e, callee, args) }
                 return self.direct_call(cg, e, nm, args)
             },
             ExprKind.GetField(recv, field) => {
                 let mname = format("{}.{}", cg.type_key(cg.type_of(recv.id)), field)
-                if !cg.has_func(mname) { return self.unsupported("a call of a function value in a field") }
+                if !cg.has_func(mname) { return self.indirect_call(cg, e, callee, args) }
                 var argv: [Expr] = [recv]
                 for a in args { push(argv, a) }
                 return self.direct_call(cg, e, mname, argv)
             },
             _ => {},
         }
-        return self.unsupported("a call of a function value")
+        return self.indirect_call(cg, e, callee, args)
+    }
+
+    // A call through the function value `callee` (evaluated first): its
+    // code called with its environment as the first word after the result's
+    // address, the arguments as for `direct_call`.
+    fun indirect_call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr]) -> int32 {
+        let ft = self.place_type(cg, callee)
+        if !is_tfunc(ft) || !lowerable(cg, ft) { return self.unsupported("a call through a value of that type") }
+        let params = tfunc_params(ft)
+        let fv = self.addr(cg, callee)
+        var vals: [int32] = []
+        var i = 0
+        while i < len(args) && i < len(params) {
+            if is_aggregate(params[i]) { push(vals, self.addr(cg, args[i])) } else { push(vals, self.expr(cg, args[i])) }
+            i = i + 1
+        }
+        match tfunc_ret(ft) {
+            Some(rt) => {
+                if is_aggregate(rt) {
+                    let slot = self.value_slot(cg, "__result", rt, true)
+                    let res = self.slot_addr(slot)
+                    self.add(Inst.CallIndSret(fv, res, vals))
+                    self.own_temp(slot)
+                    return res
+                }
+                let d = self.temp(rt)
+                self.add(Inst.CallInd(d, fv, vals))
+                return self.owned_value(cg, d, rt)
+            },
+            None => {},
+        }
+        self.add(Inst.CallInd(-1, fv, vals))
+        return -1
+    }
+
+    // --- function values -------------------------------------------------------
+
+    // A slot for the function value of type `t` made here: (its address, its
+    // environment cell of `size` bytes, whose first word is the release
+    // function `drop`; -1 for none: a null environment), its code `code`.
+    fun fat_value(var self, cg: CodeGen, t: Type, code: str, size: int32, drop: str) -> (int32, int32, int32) {
+        let slot = self.value_slot(cg, "__fn", t, true)
+        let base = self.slot_addr(slot)
+        let c = self.temp(Type.TInt(64, false))
+        self.add(Inst.Label(c, code))
+        self.add(Inst.StoreAt(base, 0, c))
+        if size < 0 {
+            self.add(Inst.StoreAt(base, 8, self.int_const(0)))
+            return (slot, base, -1)
+        }
+        let env = self.temp(Type.TInt(64, false))
+        self.add(Inst.Rt(env, "__alloc", [self.int_const(size)]))
+        let d = self.temp(Type.TInt(64, false))
+        self.add(Inst.Label(d, drop))
+        self.add(Inst.StoreAt(env, 0, d))
+        self.add(Inst.StoreAt(base, 8, env))
+        return (slot, base, env)
+    }
+
+    // The function value's slot is complete: the statement owns it.
+    fun made_value(var self, slot: int32) {
+        self.mark_built(slot)
+        self.own_temp(slot)
+    }
+
+    // A copy of `value` of type `t` stored into the environment `env` at
+    // `off`, with references of its own.
+    fun store_env(var self, cg: CodeGen, env: int32, off: int32, value: Expr, t: Type) {
+        if is_aggregate(t) {
+            let src = self.addr(cg, value)
+            let dst = self.offset(env, off)
+            self.add(Inst.Copy(dst, src, cg.size(t)))
+            self.retain(cg, t, dst)
+        } else {
+            let v = self.expr(cg, value)
+            self.add(Inst.StoreAt(env, off, v))
+            self.retain(cg, t, v)
+        }
+    }
+
+    // A top-level function `n` as a value: its thunk (taking an environment
+    // word it ignores) and a null environment (the old `materialize_fnval`).
+    fun fn_value(var self, cg: CodeGen, e: Expr, n: str) -> int32 {
+        if len(cg.sig_of(n).type_params) > 0 { return self.unsupported("a generic function as a value") }
+        if !has_name(self.fnvals, n) { push(self.fnvals, n) }
+        let made = self.fat_value(cg, cg.type_of(e.id), format("myla_{}__fnval", n), -1, "")
+        self.made_value(made.0)
+        return made.1
+    }
+
+    // A lambda: its body lifted into a function of its own (emitted as the
+    // old path's), its captures copied into a new environment by value
+    // (D48), as `gen_lambda_value`.
+    fun lambda_value(var self, cg: CodeGen, e: Expr, params: [Param], body: ExprOrBlock) -> int32 {
+        let t = cg.type_of(e.id)
+        if !lowerable(cg, t) { return self.unsupported("a lambda of that type") }
+        let lifted = format("{}__lam{}", self.f.name, e.id)
+        var bound: [str] = []
+        for p in params { push(bound, p.name) }
+        var caps: [Cap] = []
+        var seen: [str] = []
+        var size = 8                // word 0 of the env holds its drop function
+        var owns = false
+        for nm in cg.free_eb(body, bound) {
+            let slot = self.lookup(nm)
+            if slot >= 0 && !has_name(seen, nm) {
+                push(seen, nm)
+                let ct = self.f.slots[slot].ty
+                if !lowerable(cg, ct) { return self.unsupported("a capture of that type") }
+                push(caps, Cap { name: nm, ty: ct, off: size })
+                size = size + cg.size(ct)
+                if cg.owns_heap(ct) { owns = true }
+            }
+        }
+        push(self.lams, LamJob { lifted: lifted, params: params, ftype: t, body: body, caps: caps, subst: cg.subst, id: e.id, line: e.line, col: e.col })
+        if len(caps) == 0 { size = -1 }
+        var drop = "__free"
+        if owns { drop = format("myla_{}_env_drop", lifted) }
+        let made = self.fat_value(cg, t, "myla_" + lifted, size, drop)
+        for c in caps {
+            let slot = self.lookup(c.name)
+            if is_aggregate(c.ty) {
+                let dst = self.offset(made.2, c.off)
+                self.add(Inst.Copy(dst, self.slot_addr(slot), cg.size(c.ty)))
+                self.retain(cg, c.ty, dst)
+            } else {
+                let v = self.temp(c.ty)
+                self.add(Inst.Load(v, slot))
+                self.add(Inst.StoreAt(made.2, c.off, v))
+                self.retain(cg, c.ty, v)
+            }
+        }
+        self.made_value(made.0)
+        return made.1
+    }
+
+    // `l >> r`: an environment holding both function values (retained), and
+    // the runtime's `__compose_call`, as `gen_compose`.
+    fun compose(var self, cg: CodeGen, e: Expr, l: Expr, r: Expr) -> int32 {
+        let made = self.fat_value(cg, cg.type_of(e.id), "__compose_call", 40, "__compose_env_drop")
+        self.store_env(cg, made.2, 8, l, cg.type_of(l.id))
+        self.store_env(cg, made.2, 24, r, cg.type_of(r.id))
+        self.made_value(made.0)
+        return made.1
+    }
+
+    // `f(a, _, …)`: the filled arguments (and a method's receiver, or the
+    // function value called) evaluated now into a new environment, and a
+    // thunk filling the holes from its own parameters, as `gen_partial`.
+    fun partial(var self, cg: CodeGen, e: Expr, callee: Expr, given: [Expr]) -> int32 {
+        var target = ""
+        var args = given
+        var fn_value = false
+        match callee.kind {
+            ExprKind.Name(n) => {
+                if self.lookup(n) >= 0 { fn_value = true } else { target = n }
+            },
+            ExprKind.GetField(recv, field) => {
+                let mname = format("{}.{}", cg.type_key(cg.type_of(recv.id)), field)
+                if cg.has_func(mname) {
+                    target = mname
+                    args = [recv]
+                    for a in given { push(args, a) }
+                } else {
+                    fn_value = true
+                }
+            },
+            _ => { fn_value = true },
+        }
+        var params: [Type] = []
+        var ret: Option<Type> = None
+        let ft = self.place_type(cg, callee)
+        if fn_value {
+            params = tfunc_params(ft)
+            ret = tfunc_ret(ft)
+        } else {
+            let sig = cg.sig_of(target)
+            if len(sig.type_params) > 0 { return self.unsupported("a partial application of a generic function") }
+            params = sig.params
+            ret = sig.ret
+        }
+        let t = cg.type_of(e.id)
+        if !lowerable(cg, t) { return self.unsupported("a partial application of that type") }
+        var slots: [int32] = []
+        var aggs: [bool] = []
+        var fills: [Expr] = []
+        var offs: [int32] = []
+        var owned: [DropEntry] = []
+        var size = 8               // word 0 of the env holds its drop function
+        var fn_off = -1
+        if fn_value {
+            fn_off = size
+            push(owned, DropEntry { off: size, ty: ft })
+            size = size + 16
+        }
+        var i = 0
+        while i < len(args) {
+            let a = args[i]
+            push(aggs, is_aggregate(params[i]))
+            if is_hole_expr(a) {
+                push(slots, -1)
+            } else {
+                push(slots, size)
+                push(fills, a)
+                push(offs, size)
+                let at = cg.type_of(a.id)
+                if !lowerable(cg, at) { return self.unsupported("a partial application with an argument of that type") }
+                if cg.owns_heap(at) { push(owned, DropEntry { off: size, ty: at }) }
+                size = size + cg.size(at)
+            }
+            i = i + 1
+        }
+        let lifted = format("{}__partial{}", self.f.name, e.id)
+        var drop = "__free"
+        if len(owned) > 0 { drop = format("myla_{}_env_drop", lifted) }
+        let made = self.fat_value(cg, t, "myla_" + lifted, size, drop)
+        if fn_value {
+            let src = self.addr(cg, callee)
+            let dst = self.offset(made.2, fn_off)
+            self.add(Inst.Copy(dst, src, 16))
+            self.retain(cg, ft, dst)
+        }
+        var k = 0
+        while k < len(fills) {
+            self.store_env(cg, made.2, offs[k], fills[k], cg.type_of(fills[k].id))
+            k = k + 1
+        }
+        push(self.partials, PartialJob { lifted: lifted, target: target, fn_off: fn_off, slots: slots, aggs: aggs, sret: is_aggregate_opt(ret), owned: owned })
+        self.made_value(made.0)
+        return made.1
     }
 
     // A call of the user function `name` with the argument list `argv`

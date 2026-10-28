@@ -176,6 +176,38 @@ impl CodeGen {
                 self.emit(format("call myla_{}", name))
                 self.emit(format("addq ${}, %rsp", 8 * (len(args) + 1)))
             },
+            Inst.Label(d, sym) => {
+                self.emit(format("leaq {}(%rip), %rax", sym))
+                self.store_temp(d, temp_base)
+            },
+            Inst.CallInd(d, fv, args) => {
+                // as `gen_indirect_call`: the arguments, then the environment
+                var i = len(args) - 1
+                while i >= 0 {
+                    self.load_temp(args[i], "rax", temp_base)
+                    self.emit("pushq %rax")
+                    i = i - 1
+                }
+                self.load_temp(fv, "rax", temp_base)
+                self.emit("pushq 8(%rax)")
+                self.emit("call *(%rax)")
+                self.emit(format("addq ${}, %rsp", 8 * (len(args) + 1)))
+                if d >= 0 { self.store_temp(d, temp_base) }
+            },
+            Inst.CallIndSret(fv, r, args) => {
+                var i = len(args) - 1
+                while i >= 0 {
+                    self.load_temp(args[i], "rax", temp_base)
+                    self.emit("pushq %rax")
+                    i = i - 1
+                }
+                self.load_temp(fv, "rax", temp_base)
+                self.emit("pushq 8(%rax)")
+                self.load_temp(r, "rcx", temp_base)
+                self.emit("pushq %rcx")
+                self.emit("call *(%rax)")
+                self.emit(format("addq ${}, %rsp", 8 * (len(args) + 2)))
+            },
             Inst.Rt(d, name, args) => {
                 self.load_args(args, temp_base)
                 if name == "__float_to_str" { self.uses_float = true }

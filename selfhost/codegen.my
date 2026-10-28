@@ -1665,7 +1665,8 @@ impl CodeGen {
                 self.ir_ready = true
             }
             match lower_function(self, fd, mangled) {
-                Ok(f) => {
+                Ok(lowered) => {
+                    let f = lowered.f
                     // the ownership verifier (MYLA-105): a function it rejects
                     // falls back, with the reason the tests look for
                     let problem = verify(f)
@@ -1676,6 +1677,13 @@ impl CodeGen {
                         return
                     }
                     for inst in f.instances { let m = self.request_fn(inst.orig, inst.targs) }
+                    // the lambdas, partial applications and function values it
+                    // makes, emitted as the old path's (MYLA-106)
+                    for lj in lowered.lams { push(self.lam_jobs, lj) }
+                    for pj in lowered.partials { push(self.partial_jobs, pj) }
+                    for n in lowered.fnvals {
+                        if !list_has_str(self.fnval_set, n) { push(self.fnval_set, n) }
+                    }
                     push(self.ir_done, mangled)
                     if self.keep_ir { push(self.ir_texts, render_func(f)) }
                     self.emit_ir(f, fd, mangled)
@@ -7929,7 +7937,7 @@ pub fun is_tfunc(t: Type) -> bool {
     return match t { Type.TFunc(p, r) => true, _ => false }
 }
 
-fun is_hole_expr(e: Expr) -> bool {
+pub fun is_hole_expr(e: Expr) -> bool {
     return match e.kind { ExprKind.Hole => true, _ => false }
 }
 
@@ -7967,13 +7975,13 @@ fun empty_str_list() -> [str] {
     return e
 }
 
-fun tfunc_params(t: Type) -> [Type] {
+pub fun tfunc_params(t: Type) -> [Type] {
     match t { Type.TFunc(p, r) => { return p }, _ => {} }
     var empty: [Type] = []
     return empty
 }
 
-fun tfunc_ret(t: Type) -> Option<Type> {
+pub fun tfunc_ret(t: Type) -> Option<Type> {
     match t { Type.TFunc(p, r) => { return r }, _ => {} }
     return None
 }

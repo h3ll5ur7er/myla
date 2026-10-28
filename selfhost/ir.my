@@ -112,6 +112,13 @@ pub enum Inst {
     // moved $slot: the owning slot's value was moved out (into a container);
     // it holds none now (no code)
     Moved(int32),
+    // %dst = label sym: the address of the symbol `sym` (a function's code)
+    Label(int32, str),
+    // %dst = callind [%fv](%args): a call through the function value at %fv,
+    // its environment the first word (-1: no result)
+    CallInd(int32, int32, [int32]),
+    // callind [%fv] sret %r (%args): one with an aggregate result into %r
+    CallIndSret(int32, int32, [int32]),
     // print ty %a: a scalar, as `print` writes it
     Print(Type, int32),
     // loc line col: the source position of the code that follows
@@ -229,6 +236,9 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Global(d, sym, w) => format("%t{} = global {} {}", d, sym, w)
         Inst.Exit(v) => format("exit %t{}", v)
         Inst.Moved(s) => format("moved ${}", s)
+        Inst.Label(d, sym) => format("%t{} = label {}", d, sym)
+        Inst.CallInd(d, fv, args) => render_call(d, format("[%t{}]", fv), args)
+        Inst.CallIndSret(fv, r, args) => render_call(-1, format("[%t{}]", fv), args) + format(" sret %t{}", r)
         Inst.Print(t, a) => format("print {} %t{}", type_name(t), a)
         Inst.Loc(p) => format("loc {} {}", p.line, p.col)
         Inst.Bind(name, s) => format("bind {} ${}", name, s)
@@ -393,6 +403,7 @@ fun stored_slot(f: IrFunc, inst: Inst, addr_of: [int32]) -> int32 {
         Inst.Store(slot, v) => { s = slot },
         Inst.Copy(d, src, size) => { s = addr_of[d] },
         Inst.CallSret(name, r, args) => { s = addr_of[r] },
+        Inst.CallIndSret(fv, r, args) => { s = addr_of[r] },
         Inst.Init(slot) => { s = slot },
         _ => {},
     }

@@ -106,6 +106,7 @@ PARITY_PROGRAMS = (
     "maps_and_builders_through_the_ir",
     "recursive_enums_through_the_ir",
     "try_through_the_ir",
+    "function_values_through_the_ir",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -732,58 +733,36 @@ class SelfHostedCodegenParityThroughIR(SelfHostedCodegenParity):
         self.assertEqual(proc.stdout[start:proc.stdout.index("}\n", start) + 2], IR_SAMPLE_TEXT)
 
     def test_the_corpus_goes_through_the_ir(self) -> None:
-        # the examples and parity programs exercise the IR, not only the
-        # fallback: count the functions that went through it
+        # every function of the examples, parity programs and stress programs
+        # goes through the IR, not the fallback (MYLA-106); a function the
+        # ownership verifier rejected would fall back too (MYLA-105)
         from .test_compiler_parity import PROGRAMS
         from . import test_compiler_parity
-        sources = [PROGRAMS[name] for name in PARITY_PROGRAMS]
-        sources += [getattr(test_compiler_parity, name) for name in STRESS_PROGRAMS]
+        sources = {name: PROGRAMS[name] for name in PARITY_PROGRAMS}
+        sources.update({name: getattr(test_compiler_parity, name) for name in STRESS_PROGRAMS})
         for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
             with open(path, encoding="utf-8") as fh:
-                sources.append(fh.read())
-        through = 0
-        for source in sources:
-            proc = self._ir_run(source, default_stdlib_root(), "--ir-stats")
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            through += int(proc.stderr.split(" functions through the IR")[0].split()[-1])
-            # a function the ownership verifier rejects falls back silently;
-            # here that is a failure (MYLA-105)
-            self.assertNotIn("IR verifier", proc.stderr)
-        self.assertGreater(through, 60)
-
-    def test_builtins_go_through_the_ir(self) -> None:
-        # assert, panic, unreachable and the I/O intrinsics: every function of
-        # the runtime-error programs goes through the IR, and no function of
-        # the I/O project (std's included) falls back for a builtin (MYLA-105)
-        stdlib = default_stdlib_root()
-        entries = sorted(glob.glob(os.path.join(_REPO, "examples", "errors", "runtime_*.my")))
-        with tempfile.TemporaryDirectory() as tmp:
-            io_entry = _write_project(os.path.join(tmp, "io"), MODULE_PROJECTS["io_through_the_ir"])
-            for entry in [*entries, io_entry]:
-                with self.subTest(program=entry):
-                    proc = subprocess.run([self._binary, entry, stdlib, "--ir", "--ir-stats"],
-                                          capture_output=True, text=True)
-                    self.assertEqual(proc.returncode, 0, proc.stderr)
-                    self.assertNotIn("the builtin", proc.stderr)
-                    if entry != io_entry:
-                        self.assertIn(" 0 by the old path", proc.stderr)
-
-    def test_heap_values_go_through_the_ir(self) -> None:
-        # every function of the maps-and-builders program (`get`'s instance
-        # included), the recursive-enum one (MYLA-105), the `?` one, the `?`
-        # stress programs and the destructuring one (MYLA-106)
-        from .test_compiler_parity import PROGRAMS
-        from . import test_compiler_parity
-        sources = {name: PROGRAMS[name] for name in (
-            "maps_and_builders_through_the_ir", "recursive_enums_through_the_ir", "try_through_the_ir",
-            "destructure_boxed_enum_and_list_leaves")}
-        for name in ("STRESS_TRY_SRC", "STRESS_TRY_AFTER_STAGED_VALUE_SRC"):
-            sources[name] = getattr(test_compiler_parity, name)
+                sources[os.path.basename(path)] = fh.read()
         for name, source in sources.items():
             with self.subTest(program=name):
                 proc = self._ir_run(source, default_stdlib_root(), "--ir-stats")
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn(" 0 by the old path", proc.stderr)
+
+    def test_builtins_go_through_the_ir(self) -> None:
+        # assert, panic, unreachable and the I/O intrinsics: every function of
+        # the runtime-error programs and of the I/O project, std's included
+        # (MYLA-105)
+        stdlib = default_stdlib_root()
+        entries = sorted(glob.glob(os.path.join(_REPO, "examples", "errors", "runtime_*.my")))
+        with tempfile.TemporaryDirectory() as tmp:
+            entries.append(_write_project(os.path.join(tmp, "io"), MODULE_PROJECTS["io_through_the_ir"]))
+            for entry in entries:
+                with self.subTest(program=entry):
+                    proc = subprocess.run([self._binary, entry, stdlib, "--ir", "--ir-stats"],
+                                          capture_output=True, text=True)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertIn(" 0 by the old path", proc.stderr)
 
 
 if __name__ == "__main__":
