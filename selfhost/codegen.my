@@ -1826,16 +1826,13 @@ impl CodeGen {
     fun wrap(var self, t: Type) {
         match t {
             Type.TInt(w, s) => {
-                if w != 64 {
-                    if s {
-                        let shift = 64 - w
-                        self.emit(format("shlq ${}, %rax", shift))
-                        self.emit(format("sarq ${}, %rax", shift))
-                    } else if w == 32 {
-                        self.emit("movl %eax, %eax")
-                    } else {
-                        self.emit(format("andq ${}, %rax", (1 << w) - 1))
-                    }
+                // sign- or zero-extended from the low w bits, in one instruction (MYLA-120)
+                if w == 32 {
+                    if s { self.emit("movslq %eax, %rax") } else { self.emit("movl %eax, %eax") }
+                } else if w == 16 {
+                    if s { self.emit("movswq %ax, %rax") } else { self.emit("movzwl %ax, %eax") }
+                } else if w == 8 {
+                    if s { self.emit("movsbq %al, %rax") } else { self.emit("movzbl %al, %eax") }
                 }
             },
             _ => {},
