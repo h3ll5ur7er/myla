@@ -687,6 +687,85 @@ PROGRAMS = {
         '    print(format("[{}|{}]", len(m), "s"))\n'
         "}\n"
     ),
+    # MYLA-105: recursive enums through the IR: boxed payloads, fields, list
+    # elements and map values; recursion, patterns through boxes, member
+    # writes that release the old box, push/pop/for, copies that keep theirs
+    "recursive_enums_through_the_ir": (
+        "enum Tree {\n"
+        "    Leaf(int),\n"
+        "    Node(Tree, Tree),\n"
+        "    Named(str, Tree),\n"
+        "}\n"
+        "\n"
+        "struct Holder { name: str, tree: Tree, spare: [Tree] }\n"
+        "\n"
+        "fun sum(t: Tree) -> int {\n"
+        "    return match t {\n"
+        "        Leaf(n) => n\n"
+        "        Node(l, r) => sum(l) + sum(r)\n"
+        "        Named(s, inner) => len(s) + sum(inner)\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "fun grow(depth: int) -> Tree {\n"
+        "    if depth == 0 { return Tree.Leaf(1) }\n"
+        "    return Tree.Node(grow(depth - 1), Tree.Named(\"n\", grow(depth - 1)))\n"
+        "}\n"
+        "\n"
+        "fun leftmost(t: Tree) -> int {\n"
+        "    return match t {\n"
+        "        Node(Node(Leaf(a), _), _) => a * 100\n"
+        "        Node(Leaf(a), _) => a * 10\n"
+        "        Node(l, _) => leftmost(l)\n"
+        "        Named(_, Leaf(a)) => a\n"
+        "        _ => -1\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "fun first(o: Option<Tree>) -> int {\n"
+        "    return match o {\n"
+        "        Some(t) => sum(t)\n"
+        "        None => 0\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    let t = grow(4)\n"
+        "    print(sum(t))\n"
+        "    print(leftmost(t))\n"
+        "    print(leftmost(Tree.Node(Tree.Node(Tree.Leaf(7), Tree.Leaf(0)), Tree.Leaf(0))))\n"
+        "    var h = Holder { name: \"h\", tree: Tree.Leaf(5), spare: [] }\n"
+        "    let before = h\n"
+        "    h.tree = Tree.Node(h.tree, Tree.Leaf(6))\n"
+        "    print(sum(h.tree) + sum(before.tree))\n"
+        "    push(h.spare, t)\n"
+        "    push(h.spare, Tree.Named(\"xyz\", Tree.Leaf(1)))\n"
+        "    var total = 0\n"
+        "    for s in h.spare {\n"
+        "        total = total + sum(s)\n"
+        "    }\n"
+        "    print(total)\n"
+        "    let last = pop(h.spare)\n"
+        "    print(sum(last) + len(h.spare))\n"
+        "    h.spare[0] = Tree.Leaf(42)\n"
+        "    print(sum(h.spare[0]))\n"
+        "    var forest = [\"a\": Tree.Leaf(2)]\n"
+        "    forest[\"b\"] = Tree.Node(forest[\"a\"], forest[\"a\"])\n"
+        "    forest[\"a\"] = Tree.Leaf(3)\n"
+        "    print(sum(forest[\"a\"]) + sum(forest[\"b\"]))\n"
+        "    print(first(Some(t)) + first(None))\n"
+        "    var count = 0\n"
+        "    var i = 0\n"
+        "    while i < 200 {\n"
+        "        let big = grow(6)\n"
+        "        h.tree = big\n"
+        "        count = count + sum(h.tree)\n"
+        "        i = i + 1\n"
+        "    }\n"
+        "    print(count)\n"
+        "}\n"
+    ),
     "const_string_concatenation_in_functions": (
         "const TABLE: str = \"ab\" + \"cd\" + \"ef\"\n"
         "const N: int32 = 2 + 3\n"
@@ -2237,6 +2316,49 @@ STRESS_LOOPCTL_SRC = (
 # owned temporary per concatenation, reassignment in a loop, an early return
 # with an owner in scope, struct fields, a match on a string, a break): a
 # missed drop would leak some 50 MB over the run and fail the peak check.
+# MYLA-105: recursive enums replaced in every kind of member, millions of
+# boxes: each write must release the box it replaces
+STRESS_BOXED_MEMBERS_SRC = (
+        "enum Tree {\n"
+        "    Leaf(int),\n"
+        "    Node(Tree, Tree),\n"
+        "    Named(str, Tree),\n"
+        "}\n"
+        "\n"
+        "struct Holder { tree: Tree, spare: [Tree] }\n"
+        "\n"
+        "fun grow(depth: int) -> Tree {\n"
+        "    if depth == 0 { return Tree.Leaf(1) }\n"
+        "    return Tree.Node(grow(depth - 1), Tree.Named(\"n\", grow(depth - 1)))\n"
+        "}\n"
+        "\n"
+        "fun sum(t: Tree) -> int {\n"
+        "    return match t {\n"
+        "        Leaf(n) => n\n"
+        "        Node(l, r) => sum(l) + sum(r)\n"
+        "        Named(s, inner) => sum(inner)\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    var h = Holder { tree: Tree.Leaf(0), spare: [Tree.Leaf(0)] }\n"
+        "    var forest = [\"k\": Tree.Leaf(0)]\n"
+        "    var total = 0\n"
+        "    var i = 0\n"
+        "    while i < 30000 {\n"
+        "        h.tree = grow(5)\n"
+        "        h.spare[0] = grow(5)\n"
+        "        forest[\"k\"] = grow(5)\n"
+        "        push(h.spare, grow(5))\n"
+        "        let t = pop(h.spare)\n"
+        "        total = total + sum(h.tree) + sum(h.spare[0]) + sum(forest[\"k\"]) + sum(t)\n"
+        "        i = i + 1\n"
+        "    }\n"
+        "    print(total)\n"
+        "}\n"
+)
+
 STRESS_STR_OWNERSHIP_SRC = (
         "struct Person { name: str, tag: str }\n"
         "\n"
@@ -2783,6 +2905,12 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_LOOPCTL_SRC)
         self.assertEqual(code, 0, "arena exhausted — break/continue leaked locals")
         self.assertEqual(out.strip(), "200001\n133333")
+
+    def test_boxed_members_are_released(self):
+        # MYLA-105: the recursive-enum stress program the IR gate also runs
+        out, code = build_and_run(STRESS_BOXED_MEMBERS_SRC)
+        self.assertEqual(code, 0, "arena exhausted: boxes leaked")
+        self.assertEqual(out.strip(), "3840000")
 
     def test_strings_drop_on_every_path(self):
         # MYLA-105: the string stress program the IR gate also runs

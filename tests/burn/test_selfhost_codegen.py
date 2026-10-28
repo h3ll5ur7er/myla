@@ -104,6 +104,7 @@ PARITY_PROGRAMS = (
     "strings_through_the_ir",
     "lists_through_the_ir",
     "maps_and_builders_through_the_ir",
+    "recursive_enums_through_the_ir",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -132,6 +133,7 @@ STRESS_PROGRAMS = {
     "STRESS_FOR_EARLY_RETURN_SRC": "6999999",
     "STRESS_LARGE_SIZES_SRC": "60002",
     "STRESS_MAP_OVERWRITE_SRC": "1090910",
+    "STRESS_BOXED_MEMBERS_SRC": "3840000",
 }
 PEAK_LIMIT_MB = 30
 
@@ -765,12 +767,15 @@ class SelfHostedCodegenParityThroughIR(SelfHostedCodegenParity):
                     if entry != io_entry:
                         self.assertIn(" 0 by the old path", proc.stderr)
 
-    def test_maps_and_builders_go_through_the_ir(self) -> None:
-        # every function of the program, `get`'s instance included (MYLA-105)
+    def test_heap_values_go_through_the_ir(self) -> None:
+        # every function of the maps-and-builders program (`get`'s instance
+        # included) and of the recursive-enum one (MYLA-105)
         from .test_compiler_parity import PROGRAMS
-        proc = self._ir_run(PROGRAMS["maps_and_builders_through_the_ir"], default_stdlib_root(), "--ir-stats")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn(" 0 by the old path", proc.stderr)
+        for name in ("maps_and_builders_through_the_ir", "recursive_enums_through_the_ir"):
+            with self.subTest(program=name):
+                proc = self._ir_run(PROGRAMS[name], default_stdlib_root(), "--ir-stats")
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn(" 0 by the old path", proc.stderr)
 
 
 if __name__ == "__main__":

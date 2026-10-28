@@ -2,7 +2,7 @@
 id: MYLA-105
 title: IR: heap values, ownership and the verifier
 type: feature
-status: in-progress
+status: review
 priority: high
 labels: [ir, codegen, selfhost]
 ---
@@ -14,7 +14,7 @@ Step 3 of [[MYLA-67]] ([[Architecture/IR]]): strings, lists, maps and builders t
 - [x] Part 2: lists: literals, indexing (with the string's byte index) and its bounds trap, `push`/`pop`/`len`, staged stores into elements and copy-on-write, `for` over a list
 - [x] Part 3: maps, builders, `chars`, `format` and f-strings, the remaining builtins
 - [x] The list and map stress tests with `--ir`
-- [ ] Part 4: recursive enums (boxed members)
+- [x] Part 4: recursive enums (boxed members)
 
 ## How (part 1)
 
@@ -68,3 +68,20 @@ Step 3 of [[MYLA-67]] ([[Architecture/IR]]): strings, lists, maps and builders t
 - **Old path:** byte-identical on `selfhost/gen_main.my` and `examples/methods.my`.
 - **Self-compile:** the compiler built with `--ir` emits the same assembly for itself as the normal build (10,111,730 bytes).
 - **Coverage:** examples go from 145 to 184 of 227 functions, the compiler from 178 to 273 of 1,099. The verifier rejects none.
+
+## How (part 4)
+
+- **Lowering:**
+  - boxed members: `unbox` (load the box's pointer) where a member of a recursive enum is read as an aggregate (fields, tuple elements, list elements, map values) and in sub-patterns;
+  - `box` (a new cell holding a retained copy) where one is stored: member stores, list literals, `push`, map inserts, and assignments to a member, which release the old box;
+  - `pop` copies the value out of the box with its own references, then releases the box; a `for` over such a list copies each value out of its box.
+- **Lowerable types:** `lowerable` is now a shallow check against `CodeGen.ir_blocked`, the structs and enums whose declarations hold a function value, worked out once per program (`blocked_types`). The recursive walk it replaced made `--ir` on the compiler take 61 s instead of 1.8 s.
+
+## Evidence (part 4)
+
+- **Parity:** the `recursive_enums_through_the_ir` program prints the interpreter's output with all 5 functions through the IR. It covers recursion over a tree, nested patterns through boxes, member, element and map-value writes, `push`/`pop`/`for`, copies that keep their trees, and `Option<Tree>`.
+- **Stress:** `STRESS_BOXED_MEMBERS_SRC` replaces trees in a field, a list element and a map value, and pushes and pops them, 30,000 times. It runs in both backends' suites and the gates: 11 MB with `--ir`, as on the old path. `STRESS_SRC` (354 million recursive-enum allocations) now goes entirely through the IR, also at 11 MB.
+- **Mutation:** a member assignment that doesn't release the old box takes the boxed stress program to 215 MB (the limit is 30).
+- **Old path:** byte-identical on `selfhost/gen_main.my` and `examples/methods.my`.
+- **Self-compile:** with 1,007 of its 1,108 functions through the IR, the compiler built with `--ir` emits the same assembly as the normal build, both with `--ir` and without.
+- **Coverage:** examples go from 184 to 198 of 227 functions, the compiler from 273 to 1,007 of 1,108. The verifier rejects none.

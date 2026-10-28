@@ -17,7 +17,7 @@ from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
 from .ir import render_func, verify
-from .lower import lower_function
+from .lower import lower_function, blocked_types
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 
@@ -163,6 +163,10 @@ pub struct CodeGen {
     ir_done: [str],
     ir_skipped: [str],
     ir_texts: [str],
+    // the structs and enums the lowering can't take yet (`blocked_types`),
+    // worked out before the first function
+    ir_blocked: [str],
+    ir_ready: bool,
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -202,6 +206,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         use_ir: false, keep_ir: false, ir_done: [], ir_skipped: [], ir_texts: [],
+        ir_blocked: [], ir_ready: false,
     }
 }
 
@@ -1655,6 +1660,10 @@ impl CodeGen {
     // else by the old path (MYLA-103, D79 (5)).
     fun gen_any_function(var self, fd: FunData, mangled: str) {
         if self.use_ir {
+            if !self.ir_ready {
+                self.ir_blocked = blocked_types(self)
+                self.ir_ready = true
+            }
             match lower_function(self, fd, mangled) {
                 Ok(f) => {
                     // the ownership verifier (MYLA-105): a function it rejects

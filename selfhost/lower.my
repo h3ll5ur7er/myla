@@ -65,7 +65,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<IrFunc,
     var first_word = 0
     match ret {
         Some(t) => {
-            if !lowerable(cg, t, 0) { return Err("its result type") }
+            if !lowerable(cg, t) { return Err("its result type") }
             if is_aggregate(t) {
                 lw.sret = lw.new_slot("__sret", t, 8, 0, false)
                 first_word = 1
@@ -78,7 +78,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<IrFunc,
     var i = 0
     while i < len(fd.params) {
         let t = subst_type(sig.params[i], cg.subst)
-        if !lowerable(cg, t, 0) { return Err("a parameter's type") }
+        if !lowerable(cg, t) { return Err("a parameter's type") }
         let s = lw.new_slot(fd.params[i].name, t, 8, first_word + i, false)
         lw.declare(fd.params[i].name, s)
         lw.add(Inst.Bind(fd.params[i].name, s))
@@ -106,44 +106,78 @@ fun is_scalar(t: Type) -> bool {
 }
 
 // Whether values of type `t` can be lowered yet: scalars, strings, lists,
-// maps, builders, and structs, tuples and enums (not recursive ones, whose
+// maps, builders, and structs, tuples and enums (recursive ones too, whose
 // members are boxed) of such values; not function values yet.
-fun lowerable(cg: CodeGen, t: Type, depth: int32) -> bool {
-    if depth > 16 { return false }
+fun lowerable(cg: CodeGen, t: Type) -> bool {
+    return member_lowerable(t, cg.ir_blocked)
+}
+
+// `lowerable` for a type whose structs and enums are lowerable unless named
+// in `blocked`, with their type arguments; a type parameter (in a
+// declaration) is.
+fun member_lowerable(t: Type, blocked: [str]) -> bool {
     if is_scalar(t) { return true }
-    match t {
-        Type.TStr => { return true },
-        Type.TSB => { return true },
-        Type.TList(et) => { return lowerable(cg, et, depth + 1) },
-        Type.TMap(kt, vt) => { return lowerable(cg, kt, depth + 1) && lowerable(cg, vt, depth + 1) },
-        Type.TStruct(n, a) => {
-            let info = cg.struct_info(n)
-            let sub = cg.type_subst(info.type_params, a)
-            for fld in info.fields {
-                if !lowerable(cg, subst_type(fld.ty, sub), depth + 1) { return false }
-            }
-            return true
-        },
-        Type.TTuple(es) => {
-            for et in es {
-                if !lowerable(cg, et, depth + 1) { return false }
-            }
-            return true
-        },
-        Type.TEnum(n, a) => {
-            if cg.is_boxed(t) { return false }
-            let info = cg.enum_info(n)
-            let sub = cg.type_subst(info.type_params, a)
-            for v in info.variants {
-                for pt in v.payload {
-                    if !lowerable(cg, subst_type(pt, sub), depth + 1) { return false }
-                }
-            }
-            return true
-        },
-        _ => {},
+    return match t {
+        Type.TStr => true
+        Type.TSB => true
+        Type.TParam(n) => true
+        Type.TList(et) => member_lowerable(et, blocked)
+        Type.TMap(kt, vt) => member_lowerable(kt, blocked) && member_lowerable(vt, blocked)
+        Type.TTuple(es) => all_lowerable(es, blocked)
+        Type.TStruct(n, a) => !has_name(blocked, n) && all_lowerable(a, blocked)
+        Type.TEnum(n, a) => !has_name(blocked, n) && all_lowerable(a, blocked)
+        _ => false
+    }
+}
+
+fun all_lowerable(ts: [Type], blocked: [str]) -> bool {
+    for t in ts {
+        if !member_lowerable(t, blocked) { return false }
+    }
+    return true
+}
+
+fun has_name(names: [str], n: str) -> bool {
+    for x in names {
+        if x == n { return true }
     }
     return false
+}
+
+// The structs and enums whose declared members can't be lowered yet (a
+// function value, directly or through another such type), to a fixed point;
+// a generic one is lowerable for lowerable type arguments.
+pub fun blocked_types(cg: CodeGen) -> [str] {
+    var blocked: [str] = []
+    var changed = true
+    while changed {
+        changed = false
+        for s in cg.structs {
+            if !has_name(blocked, s.name) {
+                var ok = true
+                for f in s.fields {
+                    if !member_lowerable(f.ty, blocked) { ok = false }
+                }
+                if !ok {
+                    push(blocked, s.name)
+                    changed = true
+                }
+            }
+        }
+        for e in cg.enums {
+            if !has_name(blocked, e.name) {
+                var ok = true
+                for v in e.variants {
+                    if !all_lowerable(v.payload, blocked) { ok = false }
+                }
+                if !ok {
+                    push(blocked, e.name)
+                    changed = true
+                }
+            }
+        }
+    }
+    return blocked
 }
 
 // Whether `t`'s values are a pointer to a heap cell held in 8 bytes (a
@@ -399,7 +433,7 @@ impl Lower {
             StmtKind.ExprStmt(e) => { self.discard(cg, e) },
             StmtKind.VarDecl(k, name, ty, init) => {
                 let t = cg.type_of(init.id)
-                if !lowerable(cg, t, 0) {
+                if !lowerable(cg, t) {
                     let d = self.unsupported("a local's type")
                     return
                 }
@@ -507,7 +541,7 @@ impl Lower {
     // (retained) before the old one is released, which it may share.
     fun assign(var self, cg: CodeGen, target: Expr, value: Expr) {
         let t = self.place_type(cg, target)
-        if !lowerable(cg, t, 0) {
+        if !lowerable(cg, t) {
             let d = self.unsupported("an assignment of that type")
             return
         }
@@ -532,6 +566,15 @@ impl Lower {
                 }
             },
             _ => {},
+        }
+        if cg.is_boxed(t) && local < 0 {
+            // a member holding a recursive enum: a new box first, then the
+            // place, whose old box is released
+            let b = self.box(cg, value, t)
+            let dst = self.place(cg, target)
+            self.add(Inst.DropAt(t, dst))
+            self.add(Inst.StoreAt(dst, 0, b))
+            return
         }
         if is_aggregate(t) {
             // the value first, staged in a slot of its own with its
@@ -706,7 +749,7 @@ impl Lower {
     // its keys.
     fun for_list(var self, cg: CodeGen, vn: str, it: Expr, body: Block) {
         let it_t = cg.type_of(it.id)
-        if (!is_list_t(it_t) && !is_map_t(it_t)) || !lowerable(cg, it_t, 0) {
+        if (!is_list_t(it_t) && !is_map_t(it_t)) || !lowerable(cg, it_t) {
             let d = self.unsupported("a for loop over that type")
             return
         }
@@ -751,7 +794,7 @@ impl Lower {
         self.add(Inst.Elem(p, cell, i, stride, false, Pos { line: 0, col: 0 }))
         if is_aggregate(et) {
             let dst = self.slot_addr(elem)
-            self.add(Inst.Copy(dst, p, cg.size(et)))
+            self.add(Inst.Copy(dst, self.unbox(cg, et, p), cg.size(et)))
         } else {
             let x = self.temp(et)
             self.add(Inst.LoadAt(x, p, 0))
@@ -889,7 +932,7 @@ impl Lower {
         if op == "&&" || op == "||" { return self.logical(cg, op, l, r) }
         let lt = cg.type_of(l.id)
         let rt = cg.type_of(e.id)
-        if is_overloadable_op(op) && is_struct_or_enum_t(lt) && lowerable(cg, lt, 0) {
+        if is_overloadable_op(op) && is_struct_or_enum_t(lt) && lowerable(cg, lt) {
             return self.overloaded_scalar(cg, op, l, r, lt)
         }
         if is_tstr(lt) {
@@ -976,7 +1019,7 @@ impl Lower {
     fun addr(var self, cg: CodeGen, e: Expr) -> int32 {
         if self.err != "" { return 0 }
         let t = cg.type_of(e.id)
-        if !lowerable(cg, t, 0) { return self.unsupported("an aggregate of that type") }
+        if !lowerable(cg, t) { return self.unsupported("an aggregate of that type") }
         let ci = cg.ctor_info(e)
         if ci.ok { return self.enum_ctor(cg, t, ci.enum_name, ci.variant, ci.args) }
         match e.kind {
@@ -987,11 +1030,11 @@ impl Lower {
             },
             ExprKind.GetField(tgt, field) => {
                 let base = self.addr(cg, tgt)
-                return self.offset(base, cg.field_offset(self.place_type(cg, tgt), field))
+                return self.unbox(cg, t, self.offset(base, cg.field_offset(self.place_type(cg, tgt), field)))
             },
             ExprKind.TupleIndex(tgt, idx) => {
                 let base = self.addr(cg, tgt)
-                return self.offset(base, cg.elem_offset(self.place_type(cg, tgt), idx as int32))
+                return self.unbox(cg, t, self.offset(base, cg.elem_offset(self.place_type(cg, tgt), idx as int32)))
             },
             ExprKind.StructLit(name, fields) => {
                 let slot = self.value_slot(cg, "__struct", t, true)
@@ -1030,10 +1073,38 @@ impl Lower {
                 return res
             },
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
-            ExprKind.Index(base, idx) => { return self.elem_read(cg, e, base, idx) },
+            ExprKind.Index(base, idx) => { return self.unbox(cg, t, self.elem_read(cg, e, base, idx)) },
             _ => {},
         }
         return self.unsupported("that kind of aggregate expression")
+    }
+
+    // The address of the value of type `t` held by the member at `p`: `p`
+    // itself, or for a recursive enum (a boxed member) the box's, borrowed.
+    fun unbox(var self, cg: CodeGen, t: Type, p: int32) -> int32 {
+        if !cg.is_boxed(t) { return p }
+        let q = self.temp(Type.TInt(64, false))
+        self.add(Inst.LoadAt(q, p, 0))
+        return q
+    }
+
+    // A new box holding a copy of `value`, a recursive enum's, with references
+    // of its own: the pointer a member of type `t` holds (as the old path's
+    // `box_value`).
+    fun box(var self, cg: CodeGen, value: Expr, t: Type) -> int32 {
+        let src = self.addr(cg, value)
+        let size = self.int_const(cg.size(t))
+        let p = self.temp(Type.TInt(64, false))
+        self.add(Inst.Rt(p, "__alloc", [size]))
+        self.add(Inst.Copy(p, src, cg.size(t)))
+        self.retain(cg, t, p)
+        return p
+    }
+
+    // Whether a member of type `t` holds the value itself as an aggregate (not
+    // a scalar, a cell or a box's pointer).
+    fun inline_member(self, cg: CodeGen, t: Type) -> bool {
+        return is_aggregate(t) && !cg.is_boxed(t)
     }
 
     // An enum value built in a new slot: the variant's tag, then its payload.
@@ -1056,7 +1127,9 @@ impl Lower {
     // Store `value` as the member at `base + off`, with its own references.
     fun store_member(var self, cg: CodeGen, value: Expr, base: int32, off: int32) {
         let mt = cg.type_of(value.id)
-        if is_aggregate(mt) {
+        if cg.is_boxed(mt) {
+            self.add(Inst.StoreAt(base, off, self.box(cg, value, mt)))
+        } else if is_aggregate(mt) {
             let src = self.addr(cg, value)
             let dst = self.offset(base, off)
             self.add(Inst.Copy(dst, src, cg.size(mt)))
@@ -1157,13 +1230,13 @@ impl Lower {
             ret = opt_subst_type(sig.ret, sub)
         }
         for p in params {
-            if !lowerable(cg, p, 0) { return self.unsupported("a call with an argument of that type") }
+            if !lowerable(cg, p) { return self.unsupported("a call with an argument of that type") }
         }
         var ret_t = Type.TBool
         var has_ret = false
         match ret {
             Some(rt) => {
-                if !lowerable(cg, rt, 0) { return self.unsupported("a call whose result has that type") }
+                if !lowerable(cg, rt) { return self.unsupported("a call whose result has that type") }
                 ret_t = rt
                 has_ret = true
             },
@@ -1196,7 +1269,7 @@ impl Lower {
     // `[a, b, …]`: a new cell holding the elements, each with its own
     // references; the statement owns it.
     fun list_lit(var self, cg: CodeGen, lt: Type, elems: [Expr]) -> int32 {
-        if !lowerable(cg, lt, 0) { return self.unsupported("a list of that element type") }
+        if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
         let et = list_elem(lt)
         let stride = cg.stored_size(et)
         let n = len(elems)
@@ -1233,27 +1306,16 @@ impl Lower {
     // the list made unique, grown when full, and the value moved in.
     fun push_elem(var self, cg: CodeGen, holder: Expr, value: Expr) -> int32 {
         let lt = self.place_type(cg, holder)
-        if !lowerable(cg, lt, 0) { return self.unsupported("a list of that element type") }
+        if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
         let et = list_elem(lt)
         let stride = cg.stored_size(et)
-        var staged = -1
-        var v = -1
-        if is_aggregate(et) {
-            let src = self.addr(cg, value)
-            let slot = self.value_slot(cg, "__staged", et, false)
-            staged = self.slot_addr(slot)
-            self.add(Inst.Copy(staged, src, cg.size(et)))
-            self.retain(cg, et, staged)
-        } else {
-            v = self.expr(cg, value)
-            self.retain(cg, et, v)
-        }
+        let staged = self.stage(cg, et, value)
         let h = self.place(cg, holder)
         let cell = self.temp(lt)
         self.add(Inst.Cow(cell, lt, h))
         let slot_p = self.temp(Type.TInt(64, false))
         self.add(Inst.Append(slot_p, h, cell, stride))
-        if is_aggregate(et) { self.add(Inst.Copy(slot_p, staged, cg.size(et))) } else { self.add(Inst.StoreAt(slot_p, 0, v)) }
+        self.store_staged(cg, et, slot_p, staged)
         return -1
     }
 
@@ -1261,13 +1323,24 @@ impl Lower {
     // references; the statement owns it.
     fun pop_elem(var self, cg: CodeGen, e: Expr, holder: Expr) -> int32 {
         let lt = self.place_type(cg, holder)
-        if !lowerable(cg, lt, 0) { return self.unsupported("a list of that element type") }
+        if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
         let et = list_elem(lt)
         let h = self.place(cg, holder)
         let cell = self.temp(lt)
         self.add(Inst.Cow(cell, lt, h))
         let p = self.temp(Type.TInt(64, false))
         self.add(Inst.Pop(p, cell, cg.stored_size(et), Pos { line: e.line, col: e.col }))
+        if cg.is_boxed(et) {
+            // the list held a box: the value copied out with references of
+            // its own, then the box released (MYLA-74)
+            let slot = self.value_slot(cg, "__popped", et, true)
+            let dst = self.slot_addr(slot)
+            self.add(Inst.Copy(dst, self.unbox(cg, et, p), cg.size(et)))
+            self.retain(cg, et, dst)
+            self.add(Inst.DropAt(et, p))
+            self.own_temp(slot)
+            return dst
+        }
         if is_aggregate(et) {
             let slot = self.value_slot(cg, "__popped", et, true)
             let dst = self.slot_addr(slot)
@@ -1314,10 +1387,12 @@ impl Lower {
         return d
     }
 
-    // The value `value` of the map's value type `vt` taken, with references of
-    // its own, before the container is touched: (its temporary or -1, the
-    // address of its staged copy or -1).
+    // The value `value` of a container's element type `vt` taken, with
+    // references of its own, before the container is touched: (its temporary
+    // (a box's pointer for a recursive enum) or -1, the address of its staged
+    // copy or -1).
     fun stage(var self, cg: CodeGen, vt: Type, value: Expr) -> (int32, int32) {
+        if cg.is_boxed(vt) { return (self.box(cg, value, vt), -1) }
         if is_aggregate(vt) {
             let src = self.addr(cg, value)
             let slot = self.value_slot(cg, "__staged", vt, false)
@@ -1356,13 +1431,18 @@ impl Lower {
             self.finish(Term.Jmp(join))
             self.start(join)
         }
-        if is_aggregate(vt) { self.add(Inst.Copy(p, staged.1, cg.size(vt))) } else { self.add(Inst.StoreAt(p, 0, staged.0)) }
+        self.store_staged(cg, vt, p, staged)
+    }
+
+    // Move the value staged by `stage` into the member at `p`.
+    fun store_staged(var self, cg: CodeGen, vt: Type, p: int32, staged: (int32, int32)) {
+        if self.inline_member(cg, vt) { self.add(Inst.Copy(p, staged.1, cg.size(vt))) } else { self.add(Inst.StoreAt(p, 0, staged.0)) }
     }
 
     // `[k: v, …]`: a new map, each key evaluated before its value; the
     // statement owns it.
     fun map_lit(var self, cg: CodeGen, mt: Type, entries: [MapEntry]) -> int32 {
-        if !lowerable(cg, mt, 0) { return self.unsupported("a map of that type") }
+        if !lowerable(cg, mt) { return self.unsupported("a map of that type") }
         let eight = self.int_const(8)
         let size = self.int_const(cg.map_slot_size(mt))
         let cell = self.temp(mt)
@@ -1601,11 +1681,11 @@ impl Lower {
     fun match_expr(var self, cg: CodeGen, e: Expr, scrut: Expr, arms: [MatchArm], want: bool) -> int32 {
         if self.err != "" { return 0 }
         let sst = cg.type_of(scrut.id)
-        if !lowerable(cg, sst, 0) { return self.unsupported("a match on a value of that type") }
+        if !lowerable(cg, sst) { return self.unsupported("a match on a value of that type") }
         let rt = cg.type_of(e.id)
         var result = -1
         if want {
-            if !lowerable(cg, rt, 0) { return self.unsupported("a match whose value has that type") }
+            if !lowerable(cg, rt) { return self.unsupported("a match whose value has that type") }
             result = self.value_slot(cg, "__match", rt, true)
         }
         let root_var = place_root(scrut)
@@ -1764,7 +1844,7 @@ impl Lower {
                 let payload = cg.variant_payload(t, variant)
                 var i = 0
                 for sub in elems {
-                    self.pattern(cg, sub, base, off + cg.variant_field_offset(t, variant, i), payload[i], fail)
+                    self.member_pattern(cg, sub, base, off + cg.variant_field_offset(t, variant, i), payload[i], fail)
                     i = i + 1
                 }
             },
@@ -1772,13 +1852,13 @@ impl Lower {
                 let ets = tuple_elems(t)
                 var i = 0
                 for sub in elems {
-                    self.pattern(cg, sub, base, off + cg.elem_offset(t, i), ets[i], fail)
+                    self.member_pattern(cg, sub, base, off + cg.elem_offset(t, i), ets[i], fail)
                     i = i + 1
                 }
             },
             PatternKind.PStruct(name, fps) => {
                 for fp in fps {
-                    self.pattern(cg, fp.pattern, base, off + cg.field_offset(t, fp.name), cg.struct_field_type_t(t, fp.name), fail)
+                    self.member_pattern(cg, fp.pattern, base, off + cg.field_offset(t, fp.name), cg.struct_field_type_t(t, fp.name), fail)
                 }
             },
             PatternKind.POr(alts) => {
@@ -1797,6 +1877,22 @@ impl Lower {
                 self.start(matched)
             },
         }
+    }
+
+    // The sub-pattern `sub` of the member of type `t` at `base + off`; a
+    // recursive enum's member is a box, which it borrows from.
+    fun member_pattern(var self, cg: CodeGen, sub: Pattern, base: int32, off: int32, t: Type, fail: int32) {
+        let wild = match sub.kind {
+            PatternKind.PWild => true
+            _ => false
+        }
+        if cg.is_boxed(t) && !wild {
+            let q = self.temp(Type.TInt(64, false))
+            self.add(Inst.LoadAt(q, base, off))
+            self.pattern(cg, sub, q, 0, t, fail)
+            return
+        }
+        self.pattern(cg, sub, base, off, t, fail)
     }
 
     fun check_tag(var self, cg: CodeGen, base: int32, off: int32, tag: int32, fail: int32) {
