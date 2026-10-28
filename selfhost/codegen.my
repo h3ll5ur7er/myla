@@ -147,6 +147,9 @@ pub struct CodeGen {
     // per temporary read from a variable where it is used, the variable's
     // operand (`-24(%rbp)`), else ""
     temp_src: [str],
+    // per temporary, its frame offset (`alloc_temps`; temporaries whose lives
+    // don't overlap share one)
+    temp_off: [int32],
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -181,7 +184,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
-        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [],
+        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_off: [],
     }
 }
 

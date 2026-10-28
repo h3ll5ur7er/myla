@@ -25,20 +25,19 @@ impl CodeGen {
     fun emit_ir_at(var self, f: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
         self.temp_uses = use_counts(f)
         self.ret_type = f.ret
-        // the frame: each slot that isn't an argument word, then each temporary
-        var slot_off: [int32] = []
-        var cursor = 0
-        for s in f.slots {
-            if s.word >= 0 {
-                push(slot_off, 16 + 8 * s.word)
-            } else {
-                cursor = cursor + (s.size + 7) / 8 * 8
-                push(slot_off, -cursor)
-            }
-        }
-        let temp_base = cursor
-        cursor = cursor + 8 * len(f.temps)
+        // the frame: the temporaries' cells next to %rbp (the most used, so
+        // the most reached with 1-byte offsets), then each slot that isn't an
+        // argument word. Which temporaries need a cell depends on what is
+        // recomputed, which depends on the slots' offsets: laid out twice.
+        self.temp_remat = self.remat_texts(f, layout_slots(f, 0))
+        let cells = self.alloc_temps(f)
+        let slot_off = layout_slots(f, 8 * cells)
         self.temp_remat = self.remat_texts(f, slot_off)
+        var cursor = 8 * cells
+        for s in f.slots {
+            if s.word < 0 { cursor = cursor + (s.size + 7) / 8 * 8 }
+        }
+        let temp_base = 0
         let frame = (cursor + 15) / 16 * 16
         self.epilogue = format(".Lret_{}", mangled)
         var labels: [str] = []
@@ -453,6 +452,88 @@ impl CodeGen {
         self.store_temp(d, temp_base)
     }
 
+    // Give each temporary that needs one a frame cell (`temp_off`), sharing
+    // cells between temporaries whose lives don't overlap (MYLA-108): one
+    // read and written within a single block gets a cell from its first
+    // write to its last read (freed only after the instruction of that read,
+    // which may still write its own result), by a linear scan in emission
+    // order; one living in several blocks keeps a cell of its own. Returns
+    // the number of cells.
+    fun alloc_temps(var self, f: IrFunc) -> int32 {
+        let n = len(f.temps)
+        var home: [int32] = []
+        var cross: [bool] = []
+        var last: [int32] = []
+        var cell: [int32] = []
+        var i = 0
+        while i < n {
+            push(home, -1)
+            push(cross, false)
+            push(last, -1)
+            push(cell, -1)
+            i = i + 1
+        }
+        // where each temporary lives and is last read
+        var pos = 0
+        for b in f.order {
+            for inst in f.blocks[b].insts {
+                for t in inst_defs(inst) {
+                    if home[t] < 0 { home[t] = b } else if home[t] != b { cross[t] = true }
+                }
+                for t in inst_uses(inst) {
+                    if home[t] < 0 { home[t] = b } else if home[t] != b { cross[t] = true }
+                    last[t] = pos
+                }
+                pos = pos + 1
+            }
+            for t in term_uses(f.blocks[b].term) {
+                if home[t] < 0 { home[t] = b } else if home[t] != b { cross[t] = true }
+                last[t] = pos
+            }
+            pos = pos + 1
+        }
+        var cells = 0
+        i = 0
+        while i < n {
+            if cross[i] && self.temp_remat[i] == "" && self.temp_uses[i] > 0 {
+                cell[i] = cells
+                cells = cells + 1
+            }
+            i = i + 1
+        }
+        // the others, block by block
+        var free: [int32] = []
+        var active: [int32] = []
+        pos = 0
+        for b in f.order {
+            for inst in f.blocks[b].insts {
+                var still: [int32] = []
+                for t in active {
+                    if last[t] < pos { push(free, cell[t]) } else { push(still, t) }
+                }
+                active = still
+                for t in inst_defs(inst) {
+                    if !cross[t] && cell[t] < 0 && self.temp_remat[t] == "" && self.temp_uses[t] > 0 {
+                        if len(free) > 0 {
+                            cell[t] = free[len(free) - 1]
+                            free = drop_last_cell(free)
+                        } else {
+                            cell[t] = cells
+                            cells = cells + 1
+                        }
+                        push(active, t)
+                    }
+                }
+                pos = pos + 1
+            }
+            pos = pos + 1
+        }
+        var off: [int32] = []
+        for c in cell { push(off, -8 * (c + 1)) }
+        self.temp_off = off
+        return cells
+    }
+
     // Push the temporary `t` (a call's argument): straight from its slot, or
     // from the variable it was read from.
     fun push_temp(var self, t: int32, temp_base: int32) {
@@ -465,7 +546,7 @@ impl CodeGen {
             self.emit("pushq %rax")
             return
         }
-        self.emit(format("pushq {}(%rbp)", -(temp_base + 8 * (t + 1))))
+        self.emit(format("pushq {}(%rbp)", self.temp_off[t]))
     }
 
     // The temporary `t` into `reg`. Read right after it was computed, it is
@@ -484,7 +565,7 @@ impl CodeGen {
             if reg != "rax" { self.emit(format("movq %rax, %{}", reg)) }
             return
         }
-        self.emit(format("movq {}(%rbp), %{}", -(temp_base + 8 * (t + 1)), reg))
+        self.emit(format("movq {}(%rbp), %{}", self.temp_off[t], reg))
     }
 
     // %rax into the temporary `t`: the store is held back until the next
@@ -493,7 +574,7 @@ impl CodeGen {
     fun store_temp(var self, t: int32, temp_base: int32) {
         if self.pend_store != "" { self.flush_temp() }
         if self.temp_uses[t] == 0 { return }
-        self.pend_store = format("movq %rax, {}(%rbp)", -(temp_base + 8 * (t + 1)))
+        self.pend_store = format("movq %rax, {}(%rbp)", self.temp_off[t])
         self.pend_temp = t
     }
 }
@@ -556,3 +637,29 @@ fun writes_no_slot(inst: Inst) -> bool {
     }
 }
 
+
+// The frame offset of each slot of `f`: an argument word above %rbp, the
+// others below the first `below` bytes.
+fun layout_slots(f: IrFunc, below: int32) -> [int32] {
+    var off: [int32] = []
+    var cursor = below
+    for s in f.slots {
+        if s.word >= 0 {
+            push(off, 16 + 8 * s.word)
+        } else {
+            cursor = cursor + (s.size + 7) / 8 * 8
+            push(off, -cursor)
+        }
+    }
+    return off
+}
+
+fun drop_last_cell(xs: [int32]) -> [int32] {
+    var out: [int32] = []
+    var i = 0
+    while i + 1 < len(xs) {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}

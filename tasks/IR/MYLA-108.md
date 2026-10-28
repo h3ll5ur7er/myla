@@ -12,7 +12,7 @@ Step 6 of [[MYLA-67]] ([[Architecture/IR]]): each optimisation a separate change
 - [x] A temporary read right after it is computed taken from `%rax` (its store held back, and dropped when nothing else reads it)
 - [x] Constants and addresses recomputed where they are read; call arguments pushed from their slots
 - [x] A variable's value read where it is used, when nothing in between can write a slot
-- [ ] Frame slot reuse
+- [x] Frame slot reuse: temporaries whose lives don't overlap share a cell, next to `%rbp`
 - [x] Retain/drop pairs that cancel: a new value (a call's result, a literal, a concatenation) moved out of its temporary into the place it is stored
 - [ ] Retain/drop pairs that cancel for a copy never written
 - [ ] Scalars in registers (a simple allocator over temporaries)
@@ -34,6 +34,7 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 | New values moved, not retained and dropped | 1.84 s | 93 MB | 1.59 MB | 6.32 MB |
 | Only reachable functions emitted | 1.72 s | 91 MB | 1.49 MB | 5.91 MB |
 | Aggregates built in place | see below | 90 MB | 1.46 MB | 5.83 MB |
+| Temporaries share frame cells | see below | 89 MB | 1.39 MB | 5.82 MB |
 
 ## How (walks out of line)
 
@@ -111,3 +112,13 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 
 - **Measured:** the binary 2% smaller (1.49 → 1.46 MB), the assembly 1% smaller, the peak 1 MB lower; the time is within the noise (taken while another test run used the machine). The compiler built this way reproduces its own output.
 - **Tests:** the stress programs stay at 11 MB; the codegen gate, the parity tests and the debug-information tests pass (184 tests).
+
+## How (temporaries share frame cells)
+
+- **Why:** every temporary had a cell of its own, so frames were large (median 400 bytes, largest 21,664), and two thirds of the frame accesses (60,847 of 91,597) needed a 4-byte offset instead of a 1-byte one.
+- **Change:** `alloc_temps` gives a cell only to a temporary that is stored (not recomputed, read at least once). One read and written within a single block gets a cell from its first write to its last read; a linear scan in emission order frees the cell only after the instruction of that last read, which may still write its own result. One living in several blocks (a `&&` result, say) keeps a cell of its own, which is safe around loops. The cells come first below `%rbp`, then the slots, so `layout_slots` runs twice: once to decide what is recomputed, once after the cells are counted.
+
+## Evidence (temporaries share frame cells)
+
+- **Measured:** the median frame shrinks from 400 to 144 bytes (largest 21,664 → 8,752), and 1-byte offsets now cover 61% of frame accesses instead of 34%. The binary is 5% smaller (1.46 → 1.39 MB) and the peak 1 MB lower; the assembly text barely changes (shorter numbers). The compiler built this way reproduces its own output.
+- **Tests:** the stress programs stay at 11 MB; the codegen gate, the parity tests and the debug-information tests pass.
