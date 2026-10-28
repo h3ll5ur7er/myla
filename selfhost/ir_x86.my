@@ -17,7 +17,12 @@ from .ir import IrFunc, Inst, Term
 impl CodeGen {
     // Emit `f`, the IR of the function `fd`, as `myla_<mangled>`.
     fun emit_ir(var self, f: IrFunc, fd: FunData, mangled: str) {
-        let sig = self.sig_of(fd.name)
+        self.emit_ir_at(f, self.sig_of(fd.name).decl_id, fd.line, fd.col, mangled)
+    }
+
+    // Emit `f` as `myla_<mangled>`: a function or lambda declared by the node
+    // `decl_id` (its file) at `line:col`.
+    fun emit_ir_at(var self, f: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
         self.cur_mangled = mangled
         self.struct_ret = false
         self.ret_type = f.ret
@@ -41,11 +46,11 @@ impl CodeGen {
         var labels: [str] = []
         for b in f.blocks { push(labels, self.label()) }
 
-        self.cur_file = self.file_number(sig.decl_id)
-        self.cur_path = self.path_of(sig.decl_id)
+        self.cur_file = self.file_number(decl_id)
+        self.cur_path = self.path_of(decl_id)
         self.emit(format("myla_{}:", mangled))
         self.dbg_begin_function(format("myla_{}", mangled))
-        self.emit_loc(fd.line, fd.col)
+        self.emit_loc(line, col)
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
         if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }

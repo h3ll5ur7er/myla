@@ -16,8 +16,8 @@ from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
-from .ir import render_func, verify
-from .lower import lower_function, blocked_types
+from .ir import render_func, verify, IrFunc
+from .lower import lower_function, lower_lambda, blocked_types, Lowered
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 
@@ -167,6 +167,7 @@ pub struct CodeGen {
     // worked out before the first function
     ir_blocked: [str],
     ir_ready: bool,
+    ir_last: IrFunc,                 // what `take_ir` accepted last
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -207,6 +208,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         use_ir: false, keep_ir: false, ir_done: [], ir_skipped: [], ir_texts: [],
         ir_blocked: [], ir_ready: false,
+        ir_last: IrFunc { name: "", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [] },
     }
 }
 
@@ -1518,7 +1520,7 @@ impl CodeGen {
                 self.lam_jobs = drop_last(self.lam_jobs)
                 if list_has_str(self.lam_done, lj.lifted) { continue }
                 push(self.lam_done, lj.lifted)
-                self.gen_lambda_function(lj)
+                self.gen_any_lambda(lj)
             }
         }
         for pj in self.partial_jobs { self.gen_partial_function(pj) }
@@ -1664,35 +1666,61 @@ impl CodeGen {
                 self.ir_blocked = blocked_types(self)
                 self.ir_ready = true
             }
-            match lower_function(self, fd, mangled) {
-                Ok(lowered) => {
-                    let f = lowered.f
-                    // the ownership verifier (MYLA-105): a function it rejects
-                    // falls back, with the reason the tests look for
-                    let problem = verify(f)
-                    if problem != "" {
-                        push(self.ir_skipped, format("{}: IR verifier: {}", mangled, problem))
-                        if self.keep_ir { push(self.ir_texts, render_func(f)) }
-                        self.gen_function(fd, mangled)
-                        return
-                    }
-                    for inst in f.instances { let m = self.request_fn(inst.orig, inst.targs) }
-                    // the lambdas, partial applications and function values it
-                    // makes, emitted as the old path's (MYLA-106)
-                    for lj in lowered.lams { push(self.lam_jobs, lj) }
-                    for pj in lowered.partials { push(self.partial_jobs, pj) }
-                    for n in lowered.fnvals {
-                        if !list_has_str(self.fnval_set, n) { push(self.fnval_set, n) }
-                    }
-                    push(self.ir_done, mangled)
-                    if self.keep_ir { push(self.ir_texts, render_func(f)) }
-                    self.emit_ir(f, fd, mangled)
-                    return
-                },
-                Err(why) => { push(self.ir_skipped, format("{}: {}", mangled, why)) },
+            if self.take_ir(lower_function(self, fd, mangled), mangled) {
+                self.emit_ir(self.ir_last, fd, mangled)
+                return
             }
         }
         self.gen_function(fd, mangled)
+    }
+
+    // A lambda's body (MYLA-106): through the IR as a function is, or by the
+    // old path; then its environment's release function.
+    fun gen_any_lambda(var self, job: LamJob) {
+        if self.use_ir {
+            self.subst = job.subst
+            let lowered = lower_lambda(self, job)
+            self.subst = []
+            if self.take_ir(lowered, job.lifted) {
+                self.subst = job.subst
+                self.emit_ir_at(self.ir_last, job.id, job.line, job.col, job.lifted)
+                var owned: [DropEntry] = []
+                for c in job.caps { if self.owns_heap(c.ty) { push(owned, DropEntry { off: c.off, ty: c.ty }) } }
+                if len(owned) > 0 { self.emit_env_drop(job.lifted, owned) }
+                self.subst = []
+                return
+            }
+        }
+        self.gen_lambda_function(job)
+    }
+
+    // Whether the lowering's result goes through the IR: it lowered and the
+    // ownership verifier (MYLA-105) accepts it; then what it needs is queued
+    // (generic instances; the lambdas, partial applications and function
+    // values it makes, MYLA-106) and the IR is kept in `ir_last`. Otherwise
+    // the reason is recorded for `--ir-stats`.
+    fun take_ir(var self, lowered: Result<Lowered, str>, mangled: str) -> bool {
+        match lowered {
+            Ok(l) => {
+                let problem = verify(l.f)
+                if self.keep_ir { push(self.ir_texts, render_func(l.f)) }
+                if problem != "" {
+                    push(self.ir_skipped, format("{}: IR verifier: {}", mangled, problem))
+                    return false
+                }
+                for inst in l.f.instances { let m = self.request_fn(inst.orig, inst.targs) }
+                for lj in l.lams { push(self.lam_jobs, lj) }
+                for pj in l.partials { push(self.partial_jobs, pj) }
+                for n in l.fnvals {
+                    if !list_has_str(self.fnval_set, n) { push(self.fnval_set, n) }
+                }
+                push(self.ir_done, mangled)
+                self.ir_last = l.f
+                return true
+            },
+            Err(why) => { push(self.ir_skipped, format("{}: {}", mangled, why)) },
+        }
+        return false
     }
 
     fun gen_function(var self, fd: FunData, mangled: str) {

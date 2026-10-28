@@ -2,16 +2,16 @@
 id: MYLA-106
 title: IR: closures, function values and the rest
 type: feature
-status: in-progress
+status: review
 priority: medium
 labels: [ir, codegen, selfhost]
 ---
 Step 4 of [[MYLA-67]] ([[Architecture/IR]]): what is left.
 
 - [x] Lambdas and their environments, function values, partial application, composition
-- [ ] Lambda bodies, partial-application thunks and function-value thunks through the IR (still emitted by the old path)
+- [x] Lambda bodies through the IR (the partial-application and function-value thunks stay fixed adapters)
 - [x] `for` over lists and maps, `?`, every remaining builtin and I/O primitive (the loops and builtins came with [[MYLA-105]]); destructuring declarations
-- [ ] `-g` through the IR: `bind` → variables and lexical blocks; `test_debug_info.py` with `--ir`
+- [x] `-g` through the IR: `bind` → variables and lexical blocks; `test_debug_info.py` with `--ir`
 
 ## How (part 1: `?`)
 
@@ -52,3 +52,16 @@ Step 4 of [[MYLA-67]] ([[Architecture/IR]]): what is left.
 - **Mutation:** captures stored without their retains change the parity program's output.
 - **Old path:** byte-identical on `selfhost/gen_main.my` and `examples/methods.my`.
 - **Self-compile:** all 1,119 functions of the compiler go through the IR, and the compiler built that way emits the same assembly as the normal build (10,454,359 bytes).
+
+## How (part 3: lambda bodies, `-g`)
+
+- **Lambda bodies:** `lower_lambda` lowers a lifted lambda the way `lower_function` lowers a function. The environment is the argument word after the result's address; each capture is copied out of it into a non-owning slot at entry (bound for the debugger); an expression body returns like `return` (`ret_value`, now shared with `return`).
+- **The code generator:** `gen_any_lambda` puts lambda jobs through the IR, under the defining function's substitution, then emits the environment's release function as before. `take_ir` holds what `gen_any_function` and `gen_any_lambda` share: the verifier, the queued requests, `--ir-stats` and `--emit-ir`. `emit_ir_at` emits a function from a declaration id and position, which a lambda has without a `FunData`.
+- **`-g`:** `emit_ir` already produced the old path's DWARF variables and scopes from `bind` and `scope`. `test_debug_info.py` now runs its self-hosted line-table and gdb classes again with `--ir`.
+
+## Evidence (part 3)
+
+- **Coverage:** with its lambdas, the compiler has 1,124 functions through the IR and none by the old path; the CLI has 1,459 and the language server 949. The parity, stress and example corpus stays entirely in the IR (the gate's assertion).
+- **Debugging:** the 48 debug-information tests pass, the `--ir` classes included: gdb shows arguments, locals, scopes, strings, lists and aggregates, and `set var` works.
+- **Self-compile:** the compiler built with `--ir` emits the same assembly as the normal build (10,526,729 bytes).
+- **Old path:** byte-identical on `selfhost/gen_main.my` and `examples/methods.my`; every stress program at 11 MB.

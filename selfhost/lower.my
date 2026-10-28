@@ -100,6 +100,69 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
     return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
 }
 
+// The IR of a lambda's body, lifted into `job.lifted` (MYLA-106): called with
+// its environment as the word after the result's address, then its
+// arguments. Each capture is copied out of the environment into a slot of its
+// own at entry, borrowed as a parameter is (captures are immutable, D48).
+pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
+    let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [] }
+    var first_word = 0
+    match ret {
+        Some(t) => {
+            if !lowerable(cg, t) { return Err("its result type") }
+            if is_aggregate(t) {
+                lw.sret = lw.new_slot("__sret", t, 8, 0, false)
+                first_word = 1
+            }
+        },
+        None => {},
+    }
+    let entry = lw.new_block()
+    lw.start(entry)
+    let env = lw.new_slot("__env", Type.TInt(64, false), 8, first_word, false)
+    let ptypes = tfunc_params(job.ftype)
+    var i = 0
+    while i < len(job.params) {
+        let t = subst_type(ptypes[i], cg.subst)
+        if !lowerable(cg, t) { return Err("a parameter's type") }
+        let s = lw.new_slot(job.params[i].name, t, 8, first_word + 1 + i, false)
+        lw.declare(job.params[i].name, s)
+        lw.add(Inst.Bind(job.params[i].name, s))
+        i = i + 1
+    }
+    for c in job.caps {
+        if !lowerable(cg, c.ty) { return Err("a capture's type") }
+        let s = lw.value_slot(cg, c.name, c.ty, false)
+        let e = lw.temp(Type.TInt(64, false))
+        lw.add(Inst.Load(e, env))
+        if is_aggregate(c.ty) {
+            lw.add(Inst.Copy(lw.slot_addr(s), lw.offset(e, c.off), cg.size(c.ty)))
+        } else {
+            let v = lw.temp(c.ty)
+            lw.add(Inst.LoadAt(v, e, c.off))
+            lw.add(Inst.Store(s, v))
+        }
+        lw.declare(c.name, s)
+        lw.add(Inst.Bind(c.name, s))
+    }
+    match job.body {
+        ExprOrBlock.EB_Block(b) => { lw.block(cg, b) },
+        ExprOrBlock.EB_Expr(ex) => {
+            lw.add(Inst.Loc(Pos { line: ex.line, col: ex.col }))
+            lw.begin_temps()
+            match ret {
+                Some(t) => { lw.ret_value(cg, ex) },
+                None => { lw.discard(cg, ex) },
+            }
+            lw.end_temps()
+        },
+    }
+    if lw.err != "" { return Err(lw.err) }
+    lw.finish(Term.Ret(-1))
+    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
+}
+
 // Whether `t` is a scalar: an integer, float, bool or char.
 fun is_scalar(t: Type) -> bool {
     return match t {
@@ -465,24 +528,7 @@ impl Lower {
             StmtKind.Assign(target, value) => { self.assign(cg, target, value) },
             StmtKind.ReturnS(ov) => {
                 match ov {
-                    Some(e) => {
-                        let t = cg.type_of(e.id)
-                        if self.sret >= 0 {
-                            let src = self.addr(cg, e)
-                            let dst = self.slot_addr(self.sret)
-                            self.add(Inst.Copy(dst, src, cg.size(t)))
-                            self.retain(cg, t, dst)
-                            self.drop_temps(0)
-                            self.drop_owners(0)
-                            self.leave(Term.Ret(dst))
-                        } else {
-                            let v = self.expr(cg, e)
-                            self.retain(cg, t, v)
-                            self.drop_temps(0)
-                            self.drop_owners(0)
-                            self.leave(Term.Ret(v))
-                        }
-                    },
+                    Some(e) => { self.ret_value(cg, e) },
                     None => {
                         self.drop_temps(0)
                         self.drop_owners(0)
@@ -565,6 +611,27 @@ impl Lower {
 
     // An expression statement: its value, if any, isn't used (an owned one
     // is dropped with the statement's temporaries).
+    // `return e`: the value with references of its own (into the result's
+    // storage for an aggregate), then every temporary and owner dropped.
+    fun ret_value(var self, cg: CodeGen, e: Expr) {
+        let t = cg.type_of(e.id)
+        if self.sret >= 0 {
+            let src = self.addr(cg, e)
+            let dst = self.slot_addr(self.sret)
+            self.add(Inst.Copy(dst, src, cg.size(t)))
+            self.retain(cg, t, dst)
+            self.drop_temps(0)
+            self.drop_owners(0)
+            self.leave(Term.Ret(dst))
+            return
+        }
+        let v = self.expr(cg, e)
+        self.retain(cg, t, v)
+        self.drop_temps(0)
+        self.drop_owners(0)
+        self.leave(Term.Ret(v))
+    }
+
     fun discard(var self, cg: CodeGen, e: Expr) {
         match e.kind {
             ExprKind.MatchE(scrut, arms) => {
