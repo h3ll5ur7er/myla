@@ -87,10 +87,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # the debugger's integration test builds Myla programs with the Python
-      # CLI (python3 myla.py build -g) and debugs them with gdb
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # CLI (python3 myla.py build -g) and debugs them with gdb. It uses the
+      # runner's own python3 (3.12): actions/setup-python sets LD_LIBRARY_PATH
+      # to its libpython, which gdb then embeds instead of the one it was
+      # built with, and the pretty-printers the binaries embed (D82) don't run
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -101,6 +101,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq gdb
           gdb --version | head -1
+          python3 --version
+          gdb -batch -ex "python import sys; print('gdb embeds Python', sys.version.split()[0])"
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
       - name: Typecheck

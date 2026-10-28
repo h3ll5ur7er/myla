@@ -29,7 +29,7 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 | `unit` | Unit and integration tests on Python 3.12 and 3.13 |
 | `burn` | The burn suite (native builds with the runner's binutils), with Node and the tree-sitter CLI for `test_grammar.py` (Node also runs the VS Code extension's server choice in `test_lsp.py`) |
 | `bootstrap` | `scripts/bootstrap.sh`, then the stage 3 compiler builds and runs `examples/hello.my` |
-| `vscode-extension` | In `vscode-extension/myla`, with Node 22, Python and gdb: `npm ci`, `npm run typecheck`, `npm run lint`, `npm test` (the extension's tests, the debugger against gdb with the Python CLI building), `npx vsce package`; uploads the `.vsix` as the artifact `myla-vscode-extension` ([[MYLA-101]]) |
+| `vscode-extension` | In `vscode-extension/myla`, with Node 22, gdb and the runner's own Python (`actions/setup-python` would point gdb at its libpython, and the binaries' pretty-printers wouldn't run, D82): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test` (the extension's tests, the debugger against gdb with the Python CLI building), `npx vsce package`; uploads the `.vsix` as the artifact `myla-vscode-extension` ([[MYLA-101]]) |
 
 ## Results (October 2026)
 
