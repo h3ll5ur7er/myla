@@ -726,6 +726,12 @@ class SelfHostedCodegenParityThroughIR(SelfHostedCodegenParity):
                 fh.write(source)
             return subprocess.run([self._binary, path, *flags], capture_output=True, text=True)
 
+    def test_the_ir_is_the_default(self) -> None:
+        # without flags the compiler goes through the IR (MYLA-107)
+        plain = self._ir_run(IR_SAMPLE)
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertEqual(plain.stdout, self._ir_run(IR_SAMPLE, "--ir").stdout)
+
     def test_the_text_form(self) -> None:
         proc = self._ir_run(IR_SAMPLE, "--emit-ir")
         self.assertEqual(proc.returncode, 0, proc.stderr)

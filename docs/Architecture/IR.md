@@ -138,7 +138,7 @@ A parameter is a slot at its argument word, so it needs no copy. The code after 
 
 ### Coverage
 
-`gen_main <file> <stdlib> --ir-stats` reports how many functions went through the IR and, for each other one, the first construct the lowering doesn't cover yet.
+`gen_main <file> <stdlib> --ir-stats` reports how many functions went through the IR and, for each other one, the first construct the lowering doesn't cover yet. Since [[MYLA-107]] the IR is the default: every build goes through it, a function the verifier rejected would still fall back, and `--ir` is accepted but changes nothing.
 
 | After | Examples | The compiler |
 | --- | --- | --- |

@@ -206,7 +206,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         debug: false, line_files: [], cur_file: 0, last_loc: "",
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
-        use_ir: false, keep_ir: false, ir_done: [], ir_skipped: [], ir_texts: [],
+        use_ir: true, keep_ir: false, ir_done: [], ir_skipped: [], ir_texts: [],
         ir_blocked: [], ir_ready: false,
         ir_last: IrFunc { name: "", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [] },
     }
@@ -229,8 +229,9 @@ impl CodeGen {
     }
 
     // Lower each function to the IR and emit it from there, falling back to
-    // the old path for constructs the IR doesn't cover yet (MYLA-103, D79);
-    // `keep`: keep each function's IR text (`ir_text`).
+    // the old path for a function the verifier rejects (MYLA-103, D79; the
+    // default since MYLA-107); `keep`: keep each function's IR text
+    // (`ir_text`).
     fun enable_ir(var self, keep: bool) {
         self.use_ir = true
         self.keep_ir = keep
