@@ -672,6 +672,54 @@ class SelfHostedCodegenParity(unittest.TestCase):
         start = proc.stdout.index("fun myla_scale")
         self.assertEqual(proc.stdout[start:proc.stdout.index("}\n", start) + 2], IR_SAMPLE_TEXT)
 
+    def test_lets_of_fixed_variables_borrow(self) -> None:
+        # MYLA-122: a `let` of a part of a variable nothing writes while it
+        # lives (a parameter, a `let`, a loop's element), and a `for` over
+        # one, take no reference of their own; a `var`, or a `let` of one,
+        # still does
+        source = (
+            "struct P { name: str, tags: [str] }\n"
+            "fun borrowing(p: P) -> int {\n"
+            "    let n = p.name\n"
+            "    let t = p.tags\n"
+            "    let first = t[0]\n"
+            "    var total = len(n) + len(first)\n"
+            "    for x in t {\n"
+            "        let y = x\n"
+            "        total = total + len(y)\n"
+            "    }\n"
+            "    return total\n"
+            "}\n"
+            "fun owning(p: P) -> int {\n"
+            "    var q = p\n"
+            "    let n = q.name\n"
+            "    q.name = \"z\"\n"
+            "    return len(n)\n"
+            "}\n"
+            "fun main() {\n"
+            "    let p = P { name: \"ab\", tags: [\"x\", \"yz\"] }\n"
+            "    print(borrowing(p))\n"
+            "    print(owning(p))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            self.assertEqual(self._build_and_run(self._emit_asm(path)), ("6\n2\n", 0))
+            proc = subprocess.run([self._binary, path, "--emit-ir"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        def ir_of(name: str) -> str:
+            start = proc.stdout.index(f"fun myla_{name} ")
+            return proc.stdout[start:proc.stdout.index("}\n", start)]
+
+        borrowing = ir_of("borrowing")
+        self.assertNotIn("retain", borrowing, borrowing)
+        self.assertNotIn("drop", borrowing, borrowing)
+        owning = ir_of("owning")
+        self.assertIn(" q: P (16 bytes) owns\n", owning)
+        self.assertIn(" n: str owns\n", owning)
+
     def test_only_reachable_functions_are_emitted(self) -> None:
         # MYLA-108: from the entry point, through calls, function values and
         # partial applications
