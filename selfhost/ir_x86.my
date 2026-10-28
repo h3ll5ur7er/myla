@@ -12,7 +12,7 @@
 from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding, int_signed, takes_operand
-from .ir import IrFunc, Inst, Term, use_counts, def_counts, inst_defs, inst_uses, term_uses
+from .ir import IrFunc, Inst, Term, use_counts, def_counts, inst_defs, inst_uses, term_uses, successors
 
 impl CodeGen {
     // Emit `f`, the IR of the function `fd`, as `myla_<mangled>`.
@@ -53,9 +53,23 @@ impl CodeGen {
         if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
         self.dbg_push_scope()
 
+        // a block nothing reaches (after a `return`, MYLA-120) has no code; its
+        // debug scopes and variables stay, so the scopes stay nested
+        let reach = reachable_blocks(f)
         var k = 0
         while k < len(f.order) {
             let b = f.order[k]
+            if !reach[b] {
+                for inst in f.blocks[b].insts {
+                    match inst {
+                        Inst.Scope(open) => { self.emit_inst(f, inst, slot_off, temp_base) },
+                        Inst.Bind(name, s) => { self.emit_inst(f, inst, slot_off, temp_base) },
+                        _ => {},
+                    }
+                }
+                k = k + 1
+                continue
+            }
             self.emit(format("{}:", labels[b]))
             let insts = f.blocks[b].insts
             let fused = self.fused_compare(insts, f.blocks[b].term)
@@ -67,8 +81,13 @@ impl CodeGen {
                     i = i + 1
                 }
             }
+            // the next block with code, which a jump to it falls through to
             var next = -1
-            if k + 1 < len(f.order) { next = f.order[k + 1] }
+            var nk = k + 1
+            while nk < len(f.order) && next < 0 {
+                if reach[f.order[nk]] { next = f.order[nk] }
+                nk = nk + 1
+            }
             if fused >= 0 { self.emit_compare_branch(insts[fused], f.blocks[b].term, labels, next, temp_base) }
             else { self.emit_term(f.blocks[b].term, labels, next, temp_base) }
             k = k + 1
@@ -751,6 +770,26 @@ fun negated_cond(cond: str) -> str {
         if cond == p.1 { return p.0 }
     }
     return cond
+}
+
+// Which blocks of `f` the entry block reaches.
+fun reachable_blocks(f: IrFunc) -> [bool] {
+    var reach: [bool] = []
+    for b in f.blocks { push(reach, false) }
+    if len(f.blocks) == 0 { return reach }
+    var work: [int32] = [0]
+    reach[0] = true
+    while len(work) > 0 {
+        let b = work[len(work) - 1]
+        work = drop_last_cell(work)
+        for s in successors(f.blocks[b].term) {
+            if !reach[s] {
+                reach[s] = true
+                push(work, s)
+            }
+        }
+    }
+    return reach
 }
 
 // The instruction loading the integer `v` into a register, up to its name:
