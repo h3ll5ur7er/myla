@@ -7,9 +7,8 @@
 // process spawning of its own. `--package name=dir` adds a dependency, as in
 // `myla build` (MYLA-92); `--root dir` sets the project root (default: the
 // file's directory), as the project tool does for files under `src/`.
-// `--ir` lowers functions to the IR first (MYLA-103, D79), `--ir-stats` also
-// reports on stderr how many went through it and why the others didn't,
-// `--emit-ir` prints their IR instead of the assembly.
+// Every function goes through the IR (D79, MYLA-107); `--emit-ir` prints it
+// instead of the assembly.
 
 from std.process import args, exit
 from std.io import write, eprintln

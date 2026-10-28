@@ -2,7 +2,7 @@
 id: MYLA-67
 title: A mid-level IR between the checker and the code generators
 type: improvement
-status: in-progress
+status: review
 priority: high
 labels: [backend, design, memory]
 ---
@@ -23,13 +23,13 @@ A small IR in between (for the self-hosted backend, D79), with explicit temporar
 - [x] The design on [[Architecture/IR]] and D79
 - [x] [[MYLA-103]] `ir.my`, the flags, scalar functions through the IR (in review)
 - [x] [[MYLA-104]] Aggregates (in review)
-- [ ] [[MYLA-105]] Heap values, ownership and the verifier
-- [ ] [[MYLA-106]] Closures, function values, the remaining constructs, `-g`
-- [ ] [[MYLA-107]] The IR by default, the old emission code deleted
+- [x] [[MYLA-105]] Heap values, ownership and the verifier (in review)
+- [x] [[MYLA-106]] Closures, function values, the remaining constructs, `-g` (in review)
+- [x] [[MYLA-107]] The IR by default, the old emission code deleted (in review)
 - [ ] [[MYLA-108]] Optimisations
 - [ ] [[MYLA-109]] Later: LLVM on the IR, an IR interpreter
 
 ## Done when
 
 - [x] An IR design on a wiki page under [[Architecture]]
-- [ ] The self-hosted backend lowers every function through it, with the same behaviour on the parity tests, the stress tests and the bootstrap ([[MYLA-107]])
+- [x] The self-hosted backend lowers every function through it, with the same behaviour on the parity tests, the stress tests and the bootstrap ([[MYLA-107]])

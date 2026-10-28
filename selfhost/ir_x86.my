@@ -1,13 +1,13 @@
 // ir_x86.my -- IR → x86-64 assembly (MYLA-103, D79; wiki: Architecture/IR).
 //
-// `emit_ir` is a method of the code generator, so a function lowered to IR
-// is emitted with the same pools (string literals, runtime-error positions,
-// helper flags), the same debug information and the same calling convention
-// as one emitted by the old path, and the two call each other freely. The
-// frame gives every slot that isn't an argument word, and every temporary,
-// an 8-byte slot of its own, as wasteful as the old path; the instruction
-// sequences for operations, casts and `print` are the old path's own
-// (`emit_int_op`, `emit_float_op`, `emit_cast`, `emit_unary`, `emit_print`).
+// `emit_ir` is a method of the code generator, so every function is emitted
+// with its pools (string literals, runtime-error positions, helper flags), its
+// debug information, calling convention and runtime. The frame gives every
+// slot that isn't an argument word, and every temporary, an 8-byte slot of
+// its own; the instruction sequences for operations, casts, `print` and the
+// like are shared with the code generator (`emit_int_op`, `emit_float_op`,
+// `emit_cast`, `emit_unary`, `emit_print`, …), which kept the old one-pass
+// path and the IR alike while both existed (MYLA-103 to MYLA-107).
 
 from .ast import FunData
 from .checker import Type
@@ -182,7 +182,7 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.CallInd(d, fv, args) => {
-                // as `gen_indirect_call`: the arguments, then the environment
+                // the arguments, then the environment, then the call
                 var i = len(args) - 1
                 while i >= 0 {
                     self.load_temp(args[i], "rax", temp_base)
@@ -226,7 +226,7 @@ impl CodeGen {
             Inst.DropSlot(t, s) => { self.drop_value("rbp", slot_off[s], t) },
             Inst.DropAt(t, p) => {
                 // the walk keeps the address in callee-saved %rbx across the
-                // drop calls, as the old path's `drop_stored`
+                // drop calls
                 self.emit("pushq %rbx")
                 self.load_temp(p, "rbx", temp_base)
                 self.walk_member("rbx", 0, t, false)
@@ -247,7 +247,7 @@ impl CodeGen {
                 self.trap("jz", "__trap_" + kind, p.line, p.col)
             },
             Inst.SbAppend(h, v) => {
-                // as `gen_sb_append`
+                // the string's length and bytes
                 self.load_temp(v, "rsi", temp_base)
                 self.emit("movq (%rsi), %rdx")
                 self.emit("addq $8, %rsi")
@@ -255,7 +255,7 @@ impl CodeGen {
                 self.emit("call __sb_append_bytes")
             },
             Inst.SbAppendRange(h, v, a, b, p) => {
-                // as `gen_sb_append` with a range: 0 <= start <= end <= len
+                // a range: 0 <= start <= end <= len
                 self.load_temp(b, "rcx", temp_base)
                 self.emit("movslq %ecx, %rcx")
                 self.load_temp(a, "rdx", temp_base)
@@ -266,7 +266,7 @@ impl CodeGen {
                 self.emit("call __sb_append_bytes")
             },
             Inst.SbAppendByte(h, b) => {
-                // as `gen_sb_append_byte`: the byte on the stack
+                // the byte on the stack
                 self.load_temp(b, "rax", temp_base)
                 self.emit("pushq %rax")
                 self.emit("movq %rsp, %rsi")
@@ -285,14 +285,14 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.Exit(v) => {
-                // as `gen_io_exit`
+                // the exit system call
                 self.load_temp(v, "rax", temp_base)
                 self.emit("movl %eax, %edi")
                 self.emit("movq $60, %rax")
                 self.emit("syscall")
             },
             Inst.MapRemove(mt, h, c, k) => {
-                // as `gen_map_remove`
+                // the holder, then the cell, below the key
                 self.load_temp(h, "rax", temp_base)
                 self.emit("pushq %rax")
                 self.load_temp(c, "rax", temp_base)
@@ -317,7 +317,7 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.Append(d, h, c, stride) => {
-                // as `gen_push`: grow when full (publishing the new cell), then
+                // grow when full (publishing the new cell), then
                 // count the element and point at its slot
                 let have = self.label()
                 self.load_temp(c, "rax", temp_base)
@@ -339,7 +339,7 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.Pop(d, c, stride, p) => {
-                // as `gen_pop`
+                // trap when empty, else uncount the last element
                 self.load_temp(c, "rax", temp_base)
                 self.emit("movq (%rax), %rcx")
                 self.emit("testq %rcx, %rcx")
@@ -391,7 +391,6 @@ impl CodeGen {
             },
             Term.Trap(kind, p) => { self.trap("jmp", "__trap_" + kind, p.line, p.col) },
             Term.Panic(m, p) => {
-                // as `gen_intrinsic`
                 self.load_temp(m, "rdi", temp_base)
                 self.load_position(p.line, p.col, "rsi")
                 self.emit("call __panic")

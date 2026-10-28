@@ -1387,8 +1387,6 @@ impl CodeGen {
 
     // -- functions --------------------------------------------------------
 
-    // Emit a function: through the IR with `--ir` when it can be lowered,
-    // else by the old path (MYLA-103, D79 (5)).
     // A function: lowered to the IR, checked and emitted (D79, MYLA-107).
     fun gen_any_function(var self, fd: FunData, mangled: str) {
         if !self.ir_ready {
@@ -1887,7 +1885,8 @@ impl CodeGen {
     // Emit a partial-application thunk, called as `thunk([sret,] env, holes…)`:
     // rebuild the full argument list from the env (filled; an aggregate passed
     // by its address in the env) and the holes, forward the sret pointer, and
-    // call the target (a function value with its own env, as gen_indirect_call).
+    // call the target (a function value with its own env, as a call through
+    // one does).
     fun gen_partial_function(var self, job: PartialJob) {
         let n = len(job.slots)
         var env_off = 16
@@ -5149,7 +5148,7 @@ pub fun tfunc_ret(t: Type) -> Option<Type> {
     return None
 }
 
-// Names that `gen_call` handles as builtins (i.e. not indirect calls).
+// Names that are builtins, not calls of a function or function value.
 pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "print" || nm == "assert" || nm == "panic" || nm == "unreachable" { return true }
     if nm == "len" || nm == "push" || nm == "pop" || nm == "chars" || nm == "format" { return true }

@@ -1,38 +1,31 @@
-// lower.my -- the checked AST of one function → IR (MYLA-103, MYLA-104, D79;
-// wiki: Architecture/IR).
+// lower.my -- the checked AST of a function or lambda → IR (MYLA-103 to
+// MYLA-107, D79; wiki: Architecture/IR).
 //
-// `lower_function` reads the code generator's state (the checker's types, the
-// signatures, the layouts, the monomorphizer's substitution) and builds an
-// `IrFunc`, or returns the construct it can't lower yet, and the code
-// generator emits the function the old way (the per-function fallback of D79
-// (5)). It covers values that own no heap memory ("plain" values):
+// `lower_function` and `lower_lambda` read the code generator's state (the
+// checker's types, the signatures, the layouts, the monomorphizer's
+// substitution) and build an `IrFunc`, with the lambda bodies and thunks it
+// needs (`Lowered`), which the code generator verifies and emits. Every
+// construct is lowered:
 //
-// - scalars: integers, floats, bool, char; operators with their traps, casts,
-//   `&&`/`||`;
-// - aggregates: structs, tuples and enums whose members are plain, in slots
-//   and reached through addresses (MYLA-104): literals and constructors, field
-//   and element reads and writes, copies, parameters (an argument word holding
-//   the caller's address, also for `var self`) and results (written to the
-//   storage the caller passes first, sret), method calls, the operators a type
-//   overloads, and `match` with every kind of pattern;
-// - statements: `let`, assignments, `if`, `while`, `for` over a range,
-//   `break`, `continue`, `return`; calls of non-generic user functions and
-//   methods; `print` of a scalar or a string literal.
-//
-// - strings and aggregates holding them (MYLA-105), with every ownership rule
-//   of the old path as an instruction: a local owns its value (a binding
+// - scalars, with their operators, traps and casts; aggregates (structs,
+//   tuples, enums) in slots reached through addresses, a recursive enum's
+//   members boxed; strings, lists, maps, builders and function values;
+// - every statement, `match` with every kind of pattern, `?`, calls (direct,
+//   generic, methods, through function values), lambdas, partial
+//   application, composition, and the builtins;
+// - every ownership rule as an instruction: a local owns its value (a binding
 //   copies and retains; owners are dropped at the end of their scope, before
-//   `return` and on `break`/`continue`); an owned temporary (a call's or a
-//   concatenation's result, an aggregate literal holding a string) is dropped
-//   at the end of its statement, or right after a condition, a guard or an
+//   `return` and on `break`/`continue`); an owned temporary (a call's result,
+//   a new string, list or map, an aggregate literal holding one) is dropped at
+//   the end of its statement, or right after a condition, a guard or an
 //   operand of `&&`/`||`; parameters and match bindings borrow; an assignment
-//   retains the new value before it releases the old one (`p = p`); a match
+//   retains the new value before it releases the old one (`p = p`); a value
+//   bound for a container waits in an owning slot until it is stored; a match
 //   copies its scrutinee, and retains the copy only when an arm may write the
 //   variable it came from.
 //
-// It emits what the old path emits for them (the same order of evaluation, the
-// same scopes, positions and copies), so a function behaves the same whichever
-// path generates it.
+// It keeps the old one-pass path's order of evaluation, scopes, positions and
+// copies, which the Python backend shares, so both backends behave alike.
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
@@ -56,7 +49,7 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // while there is none).
 // `lams`, `partials` and `fnvals`: the lambda bodies, partial-application
 // thunks and function-value thunks the function needs, which the code
-// generator emits as the old path's.
+// generator emits after it.
 struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
@@ -95,7 +88,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         None => {},
     }
     if lw.err != "" { return Err(lw.err) }
-    // the end of the body: as `gen_function`, fall through to the epilogue
+    // the end of the body falls through to the epilogue
     lw.finish(Term.Ret(-1))
     return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
 }
@@ -331,8 +324,7 @@ impl Lower {
     }
 
     // The type of a place: a variable's from its slot (the checker leaves
-    // assignment targets untyped, and the old path's `place_type` reads its
-    // own bindings), a field's or element's from its aggregate.
+    // assignment targets untyped), a field's or element's from its aggregate.
     fun place_type(self, cg: CodeGen, e: Expr) -> Type {
         match e.kind {
             ExprKind.Name(n) => {
@@ -732,12 +724,11 @@ impl Lower {
             },
             ExprKind.Index(base, idx) => {
                 // the list made unique first (copy-on-write along the whole
-                // path to the place, as the old path's `mut_place_addr`), then
-                // the index, bounds-checked
+                // path to the place), then the index, bounds-checked
                 let lt = self.place_type(cg, base)
                 if is_map_t(lt) {
-                    // as the old path's `mut_map_value_addr`: trapping when
-                    // the key is missing
+                    // the map made unique first; trapping when the key is
+                    // missing
                     let mh = self.place(cg, base)
                     let mc = self.temp(lt)
                     self.add(Inst.Cow(mc, lt, mh))
@@ -1027,8 +1018,7 @@ impl Lower {
             None => {},
         }
         if !is_scalar(t) { return self.unsupported("a name that isn't a local") }
-        // a scalar const is its expression, evaluated where it is used, as the
-        // old path does
+        // a scalar const is its expression, evaluated where it is used
         match cg.const_value_expr(n) {
             Some(ve) => { return self.expr(cg, ve) },
             None => {},
@@ -1201,8 +1191,7 @@ impl Lower {
     }
 
     // A new box holding a copy of `value`, a recursive enum's, with references
-    // of its own: the pointer a member of type `t` holds (as the old path's
-    // `box_value`).
+    // of its own: the pointer a member of type `t` holds.
     fun box(var self, cg: CodeGen, value: Expr, t: Type) -> int32 {
         let src = self.addr(cg, value)
         let size = self.int_const(cg.size(t))
@@ -1389,7 +1378,7 @@ impl Lower {
     }
 
     // A top-level function `n` as a value: its thunk (taking an environment
-    // word it ignores) and a null environment (the old `materialize_fnval`).
+    // word it ignores) and a null environment.
     fun fn_value(var self, cg: CodeGen, e: Expr, n: str) -> int32 {
         if len(cg.sig_of(n).type_params) > 0 { return self.unsupported("a generic function as a value") }
         if !has_name(self.fnvals, n) { push(self.fnvals, n) }
@@ -1398,9 +1387,8 @@ impl Lower {
         return made.1
     }
 
-    // A lambda: its body lifted into a function of its own (emitted as the
-    // old path's), its captures copied into a new environment by value
-    // (D48), as `gen_lambda_value`.
+    // A lambda: its body lifted into a function of its own (`lower_lambda`),
+    // its captures copied into a new environment by value (D48).
     fun lambda_value(var self, cg: CodeGen, e: Expr, params: [Param], body: ExprOrBlock) -> int32 {
         let t = cg.type_of(e.id)
         if !lowerable(cg, t) { return self.unsupported("a lambda of that type") }
@@ -1445,7 +1433,7 @@ impl Lower {
     }
 
     // `l >> r`: an environment holding both function values (retained), and
-    // the runtime's `__compose_call`, as `gen_compose`.
+    // the runtime's `__compose_call`.
     fun compose(var self, cg: CodeGen, e: Expr, l: Expr, r: Expr) -> int32 {
         let made = self.fat_value(cg, cg.type_of(e.id), "__compose_call", 40, "__compose_env_drop")
         self.store_env(cg, made.2, 8, l, cg.type_of(l.id))
@@ -1456,7 +1444,7 @@ impl Lower {
 
     // `f(a, _, …)`: the filled arguments (and a method's receiver, or the
     // function value called) evaluated now into a new environment, and a
-    // thunk filling the holes from its own parameters, as `gen_partial`.
+    // thunk filling the holes from its own parameters (D51, D60).
     fun partial(var self, cg: CodeGen, e: Expr, callee: Expr, given: [Expr]) -> int32 {
         var target = ""
         var args = given
@@ -1752,7 +1740,7 @@ impl Lower {
     // Set `key` in the (unique) map the 8 bytes at `holder` point at to the
     // staged value (see `stage`), releasing the value it replaces: room made
     // first, then the key's slot found or made (with a reference to a string
-    // key), as `emit_map_set_slot`.
+    // key).
     fun map_put(var self, cg: CodeGen, mt: Type, holder: int32, key: int32, staged: (int32, int32)) {
         let vt = map_val(mt)
         let size = self.int_const(cg.map_slot_size(mt))
@@ -1959,7 +1947,7 @@ impl Lower {
     // `inner?`: the success payload (a scalar's temporary or an aggregate's
     // address), borrowed from the operand; otherwise the failure's tag and
     // payload are copied into the function's result with references of their
-    // own, and it returns as `return` does (the old path's `gen_try`).
+    // own, and it returns as `return` does.
     fun try_expr(var self, cg: CodeGen, e: Expr, inner: Expr) -> int32 {
         let carrier = cg.type_of(inner.id)
         if !lowerable(cg, carrier) { return self.unsupported("`?` on a value of that type") }
@@ -2253,7 +2241,8 @@ impl Lower {
                     self.start(next)
                     return
                 }
-                // the old path compares the 64-bit images (`cmpq`)
+                // the 64-bit images are compared (`cmpq`), as the Python
+                // backend does
                 let c = self.expr(cg, lit)
                 self.branch_equal(v, c, fail)
             },
