@@ -24,7 +24,7 @@ from .diag import render
 // with the pretty-printers from `stdlib_root` embedded (D82);
 // `ir`, through the IR, with its statistics (`ir_stats`) or its text instead
 // of the assembly (`emit_ir`).
-struct Mode { debug: bool, ir_stats: bool, emit_ir: bool }
+struct Mode { debug: bool, emit_ir: bool }
 
 fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
@@ -32,11 +32,9 @@ fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
             var g = new_codegen(c)
             g.set_sources(prog.spans, prog.next_id)
             if mode.debug { g.enable_debug_info(read_gdb_script(stdlib_root)) }
-            // the IR is the default (MYLA-107); `--ir` is still accepted
-            if mode.emit_ir { g.enable_ir(true) }
+            if mode.emit_ir { g.keep_ir_text() }
             let asm = g.generate()
             if mode.emit_ir { write(1, g.ir_text()) } else { write(1, asm) }
-            if mode.ir_stats { write(2, g.ir_stats()) }
             0
         },
         Err(errs) => {
@@ -49,19 +47,15 @@ fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
 fun main() {
     let argv = args()
     if len(argv) < 2 {
-        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--ir] [--ir-stats] [--emit-ir] [--package name=dir]... [--root dir]")
+        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--package name=dir]... [--root dir]")
         exit(2)
     }
     var opts = load_options(default_stdlib_root(argv[0]))
-    var mode = Mode { debug: false, ir_stats: false, emit_ir: false }
+    var mode = Mode { debug: false, emit_ir: false }
     var j = 2
     while j < len(argv) {
         if argv[j] == "-g" {
             mode.debug = true
-        } else if argv[j] == "--ir" {
-            // the default since MYLA-107
-        } else if argv[j] == "--ir-stats" {
-            mode.ir_stats = true
         } else if argv[j] == "--emit-ir" {
             mode.emit_ir = true
         } else if argv[j] == "--package" && j + 1 < len(argv) {

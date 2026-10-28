@@ -90,9 +90,6 @@ class TestSelfHostedLineTables(unittest.TestCase):
     """`gen_main -g` (the self-hosted compiler) emits the same kind of line
     table: one `.file` per module, `.loc` per function, lambda and statement."""
 
-    # extra flags for the compiler (the subclass below adds `--ir`)
-    _flags: list[str] = []
-
     @classmethod
     def setUpClass(cls):
         from myla.loader import default_stdlib_root
@@ -116,7 +113,7 @@ class TestSelfHostedLineTables(unittest.TestCase):
                 fh.write(text)
 
     def build(self, *flags: str) -> str:
-        asm = subprocess.run([self.gen, os.path.join(self.dir, "main.my"), self.stdlib, *flags, *self._flags],
+        asm = subprocess.run([self.gen, os.path.join(self.dir, "main.my"), self.stdlib, *flags],
                              capture_output=True, text=True, check=True).stdout
         binary = os.path.join(self.dir, "prog" + "".join(flags).replace("-", "_"))
         with open(binary + ".s", "w", encoding="utf-8") as fh:
@@ -154,7 +151,7 @@ class TestSelfHostedLineTables(unittest.TestCase):
 
         entry = os.path.join(self.dir, "main.my")
         python = compile_to_asm(check(link(entry, stdlib_root=self.stdlib)), debug=True)
-        selfhosted = subprocess.run([self.gen, entry, self.stdlib, "-g", *self._flags],
+        selfhosted = subprocess.run([self.gen, entry, self.stdlib, "-g"],
                                     capture_output=True, text=True, check=True).stdout
         self.assertEqual(table(selfhosted), table(python))
 
@@ -186,7 +183,7 @@ class TestSelfHostedLineTables(unittest.TestCase):
 
     def test_the_compile_unit_names_the_working_directory(self):
         # std.fs.current_dir (MYLA-98), as the Python backend's os.getcwd()
-        asm = subprocess.run([self.gen, "main.my", self.stdlib, "-g", *self._flags], cwd=self.dir,
+        asm = subprocess.run([self.gen, "main.my", self.stdlib, "-g"], cwd=self.dir,
                              capture_output=True, text=True, check=True).stdout
         binary = os.path.join(self.dir, "prog_cwd")
         with open(binary + ".s", "w", encoding="utf-8") as fh:
@@ -200,7 +197,7 @@ class TestSelfHostedLineTables(unittest.TestCase):
         self.assertTrue(comp_dir[0].rstrip().endswith(": " + self.dir), comp_dir)
 
     def test_without_g_there_are_no_line_directives(self):
-        asm = subprocess.run([self.gen, os.path.join(self.dir, "main.my"), self.stdlib, *self._flags],
+        asm = subprocess.run([self.gen, os.path.join(self.dir, "main.my"), self.stdlib],
                              capture_output=True, text=True, check=True).stdout
         self.assertNotIn(".loc", asm)
         self.assertNotIn(".file", asm)
@@ -483,9 +480,6 @@ class TestGdbVariables(GdbVariables, unittest.TestCase):
 class TestSelfHostedGdbVariables(GdbVariables, unittest.TestCase):
     """The self-hosted backend (`gen_main … -g`)."""
 
-    # extra flags for the compiler (the subclass below adds `--ir`)
-    _flags: list[str] = []
-
     @classmethod
     def setUpClass(cls):
         from myla.loader import default_stdlib_root
@@ -504,7 +498,7 @@ class TestSelfHostedGdbVariables(GdbVariables, unittest.TestCase):
         path = os.path.join(self.dir, name + ".my")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(source)
-        asm = subprocess.run([self.gen, path, self.stdlib, "-g", *self._flags],
+        asm = subprocess.run([self.gen, path, self.stdlib, "-g"],
                              capture_output=True, text=True, check=True).stdout
         binary = os.path.join(self.dir, name)
         with open(binary + ".s", "w", encoding="utf-8") as fh:
@@ -512,21 +506,6 @@ class TestSelfHostedGdbVariables(GdbVariables, unittest.TestCase):
         subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
         subprocess.run(["ld", "-o", binary, binary + ".o"], check=True)
         return binary
-
-
-
-class TestSelfHostedLineTablesThroughIR(TestSelfHostedLineTables):
-    """The line tables again, with every function lowered to the IR first
-    (`--ir`, MYLA-106)."""
-
-    _flags = ["--ir"]
-
-
-class TestSelfHostedGdbVariablesThroughIR(TestSelfHostedGdbVariables):
-    """What gdb shows again, with every function lowered to the IR first
-    (`--ir`, MYLA-106)."""
-
-    _flags = ["--ir"]
 
 
 if __name__ == "__main__":

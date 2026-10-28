@@ -2,7 +2,7 @@
 
 [[src/myla/compiler/codegen_x86.py]] turns the monomorphized program ([[Architecture/Monomorphization]]) into GAS/AT&T assembly for x86-64 Linux. [[src/myla/compiler/__init__.py]] writes `<out>.s`, runs `as --64` and `ld`, and deletes the intermediate files (`--keep-asm` keeps the `.s`). There is no libc: the runtime is emitted as assembly and talks to the kernel with system calls (D2, D29).
 
-The self-hosted code generator ([[Architecture/Self-hosted-compiler]]) is a port of this one and uses the same conventions and layouts.
+The self-hosted code generator ([[Architecture/Self-hosted-compiler]]) began as a port of this one and uses the same conventions and layouts; since [[MYLA-107]] it emits every function from its IR ([[Architecture/IR]]) instead of in one pass.
 
 [TOC]
 

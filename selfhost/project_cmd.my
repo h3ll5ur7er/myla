@@ -94,7 +94,7 @@ fun with_program() -> Option<Here> {
 }
 
 // `myla build [-g]`: `src/main.my` to `build/<name>`.
-pub fun project_build(base: LoadOptions, debug: bool, ir: bool) -> int32 {
+pub fun project_build(base: LoadOptions, debug: bool) -> int32 {
     let h = match with_program() {
         Some(h) => h
         None => { return 1 }
@@ -108,7 +108,7 @@ pub fun project_build(base: LoadOptions, debug: bool, ir: bool) -> int32 {
         },
     }
     let entry = shown(h, h.project.root.dir + "/src/main.my")
-    return cmd_build(entry, shown(h, out_dir + "/" + h.project.root.name), options(h, base), debug, ir)
+    return cmd_build(entry, shown(h, out_dir + "/" + h.project.root.name), options(h, base), debug)
 }
 
 // `myla run [args…]`: interpret `src/main.my` with the arguments.

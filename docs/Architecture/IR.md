@@ -22,10 +22,10 @@ The design of the mid-level intermediate representation between the checker and 
 | Module | Role |
 | --- | --- |
 | [[selfhost/ir.my]] | The data types (`IrFunc`, `Block`, `Inst`, `Operand`, `Kind`), the text printer (`render_func`) and the verifier |
-| [[selfhost/lower.my]] | `impl CodeGen`: the checked AST of one function → `IrFunc`, or the construct it can't lower yet |
+| [[selfhost/lower.my]] | The checked AST of one function or lambda → `IrFunc` (`lower_function`, `lower_lambda`), reading the code generator |
 | [[selfhost/ir_x86.my]] | `impl CodeGen`: `IrFunc` → assembly, with the frame layout, through the code generator's `emit`, pools and debug information |
 
-`impl CodeGen` blocks in other modules (allowed since an `impl` follows its type) give the IR code the code generator's state without a second copy of it, and keep [[selfhost/codegen.my]] almost unchanged until the old path is removed. In `generate`, a function job with `--ir` tries `lower_function`; `Ok` goes to `emit_ir`, `Err` (the unsupported construct, which `--ir-stats` reports) to `gen_function` as today.
+`impl CodeGen` blocks in other modules (allowed since an `impl` follows its type) give the IR code the code generator's state without a second copy of it. In `generate`, each function job goes through `lower_function`, the verifier and `emit_ir` (`gen_any_function`, `take_ir`), and each lambda job through `lower_lambda` (`gen_any_lambda`). Since [[MYLA-107]] there is no other path: a function the lowering can't take, or the verifier rejects, is an internal error. During the migration such a function fell back to the old one-pass emission, which [[MYLA-107]] deleted.
 
 ## The IR
 
@@ -134,11 +134,11 @@ A parameter is a slot at its argument word, so it needs no copy. The code after 
 
 ## The backend
 
-`emit_ir` lays out the frame (each slot its offset, each temporary an 8-byte slot of its own at first, exactly as wasteful as today), then emits each block: a label per block, one short instruction sequence per IR instruction, the prologue and epilogue as `gen_function` emits them. The sequences for operations, casts, `print`, the unary operators, element addresses, map removal and the builder's range check and `build` are the old path's own: `emit_int_op`, `emit_float_op`, `emit_cast`, `emit_unary`, `emit_print`, `emit_elem_addr`, `emit_map_remove`, `emit_sb_range` and `emit_sb_build` were split out of `eval_binary`, `eval_binary_float`, `gen_cast`, `eval_unary`, `gen_print`, `gen_elem_addr`, `gen_map_remove`, `gen_sb_append` and `gen_sb_build` (which emit byte-identical assembly since), so wrapping, traps and float rounding can't drift between the paths. `loc` becomes `.loc` (with `-g`), `bind` and `scope` the DWARF variable and scope entries through the existing `dbg_*` methods.
+`emit_ir` lays out the frame (each slot its offset, each temporary an 8-byte slot of its own, as wasteful as the old path), then emits each block: a label per block, one short instruction sequence per IR instruction, and the old path's prologue and epilogue. The sequences for operations, casts, `print`, the unary operators, element addresses, map removal and the builder's range check and `build` (`emit_int_op`, `emit_float_op`, `emit_cast`, `emit_unary`, `emit_print`, `emit_elem_addr`, `emit_map_remove`, `emit_sb_range`, `emit_sb_build`) were split out of the old path's emitters while both existed, so wrapping, traps and float rounding couldn't drift between the paths; together with the retain, drop and copy-on-write walks and the runtime they are what remains of it. `loc` becomes `.loc` (with `-g`), `bind` and `scope` the DWARF variable and scope entries through the existing `dbg_*` methods.
 
 ### Coverage
 
-`gen_main <file> <stdlib> --ir-stats` reports how many functions went through the IR and, for each other one, the first construct the lowering doesn't cover yet. Since [[MYLA-107]] the IR is the default: every build goes through it, a function the verifier rejected would still fall back, and `--ir` is accepted but changes nothing.
+During the migration `gen_main <file> <stdlib> --ir-stats` reported how many functions went through the IR and, for each other one, the first construct the lowering didn't cover yet:
 
 | After | Examples | The compiler |
 | --- | --- | --- |
@@ -151,9 +151,9 @@ A parameter is a slot at its argument word, so it needs no copy. The code after 
 | [[MYLA-106]], first part (`?`, destructuring) | 207 of 227 | 1,084 of 1,111 |
 | [[MYLA-106]], second part (function values) | 227 of 227 | 1,119 of 1,119 |
 
-Every function of the compiler, the examples and the parity and stress programs goes through the IR, and the compiler built with `--ir` emits exactly the assembly the normal build does. Lambda bodies go through it too ([[MYLA-106]], third part: 1,124 functions of the compiler, 1,459 of the CLI, 949 of the language server), and so do `-g` builds, whose debug-information tests run with `--ir` as well. What the old code still emits besides: the partial-application and function-value thunks (fixed adapters, requested by the lowering as generic instances are) and the environments' release functions.
+With function values every function of the compiler, the examples and the parity and stress programs went through the IR, and the compiler built through it emitted exactly the assembly the normal build did. Lambda bodies followed ([[MYLA-106]], third part: 1,124 functions of the compiler, 1,459 of the CLI, 949 of the language server), and `-g` builds. [[MYLA-107]] then made the IR the only path. Besides the functions, the code generator emits the partial-application and function-value thunks (fixed adapters, requested by the lowering as generic instances are), the environments' release functions, the per-type drop and clone helpers and the runtime.
 
-`lowerable` decides from `CodeGen.ir_blocked`, the structs and enums whose declared members hold a function value (directly or through another such type), worked out once before the first function (`blocked_types`, a fixed point); a type is lowerable when it names none of them, type arguments included. Walking each type's declarations on every call made `--ir` thirty times slower on the compiler (61 s against 1.8 s).
+`lowerable` decides from `CodeGen.ir_blocked`, the structs and enums whose declarations the lowering can't take (with function values lowered, only those using `Self`), worked out once before the first function (`blocked_types`, a fixed point); a type is lowerable when it names none of them, type arguments included. Walking each type's declarations on every call had made the IR thirty times slower on the compiler (61 s against 1.8 s).
 
 ### Lowering ownership
 

@@ -23,11 +23,7 @@ impl CodeGen {
     // Emit `f` as `myla_<mangled>`: a function or lambda declared by the node
     // `decl_id` (its file) at `line:col`.
     fun emit_ir_at(var self, f: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
-        self.cur_mangled = mangled
-        self.struct_ret = false
         self.ret_type = f.ret
-        self.scopes = []
-        self.loops = []
         // the frame: each slot that isn't an argument word, then each temporary
         var slot_off: [int32] = []
         var cursor = 0

@@ -470,8 +470,6 @@ def _oracle(path: str) -> tuple[str, int]:
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedCodegenParity(unittest.TestCase):
     _binary: str
-    # extra flags for the compiler (the subclass below adds `--ir`)
-    _flags: list[str] = []
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -483,7 +481,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         """Assembly for `path`, produced by the self-hosted backend."""
         extra = [stdlib_root] if stdlib_root is not None else []
         proc = subprocess.run(
-            [self._binary, path, *extra, *self._flags], capture_output=True, text=True
+            [self._binary, path, *extra], capture_output=True, text=True
         )
         self.assertEqual(
             proc.returncode, 0,
@@ -610,7 +608,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             shown.append(f"error: aborting due to {len(shown)} previous errors")
         expected = "\n\n".join(shown)
         proc = subprocess.run(
-            [self._binary, entry, stdlib, *self._flags], capture_output=True, text=True
+            [self._binary, entry, stdlib], capture_output=True, text=True
         )
         self.assertEqual((proc.returncode, proc.stderr), (1, expected + "\n"))
 
@@ -648,6 +646,18 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 out, code, peak = self._build_and_measure(self._emit_asm(path))
                 self.assertEqual((out.strip(), code), (expected, 0))
                 self.assertLess(peak, PEAK_LIMIT_MB, "memory was not reclaimed")
+
+    def test_the_ir_text_form(self) -> None:
+        # every function goes through the IR (D79, MYLA-107); `--emit-ir`
+        # prints it
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(IR_SAMPLE)
+            proc = subprocess.run([self._binary, path, "--emit-ir"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        start = proc.stdout.index("fun myla_scale")
+        self.assertEqual(proc.stdout[start:proc.stdout.index("}\n", start) + 2], IR_SAMPLE_TEXT)
 
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS
@@ -707,68 +717,6 @@ L4:
   ret
 }
 """
-
-
-class SelfHostedCodegenParityThroughIR(SelfHostedCodegenParity):
-    """The code-generating tests again, with every function the IR covers
-    lowered to it first (`--ir`, MYLA-103, D79): the same output, the same
-    runtime errors, memory reclaimed. The front-end tests aren't repeated."""
-
-    _flags = ["--ir"]
-    test_module_errors_match_the_python_loader = None
-    test_diagnostics_match_the_python_cli = None
-    test_derived_eq_on_a_plain_enum_compares_tags = None
-
-    def _ir_run(self, source: str, *flags: str) -> subprocess.CompletedProcess:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "prog.my")
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(source)
-            return subprocess.run([self._binary, path, *flags], capture_output=True, text=True)
-
-    def test_the_ir_is_the_default(self) -> None:
-        # without flags the compiler goes through the IR (MYLA-107)
-        plain = self._ir_run(IR_SAMPLE)
-        self.assertEqual(plain.returncode, 0, plain.stderr)
-        self.assertEqual(plain.stdout, self._ir_run(IR_SAMPLE, "--ir").stdout)
-
-    def test_the_text_form(self) -> None:
-        proc = self._ir_run(IR_SAMPLE, "--emit-ir")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        start = proc.stdout.index("fun myla_scale")
-        self.assertEqual(proc.stdout[start:proc.stdout.index("}\n", start) + 2], IR_SAMPLE_TEXT)
-
-    def test_the_corpus_goes_through_the_ir(self) -> None:
-        # every function of the examples, parity programs and stress programs
-        # goes through the IR, not the fallback (MYLA-106); a function the
-        # ownership verifier rejected would fall back too (MYLA-105)
-        from .test_compiler_parity import PROGRAMS
-        from . import test_compiler_parity
-        sources = {name: PROGRAMS[name] for name in PARITY_PROGRAMS}
-        sources.update({name: getattr(test_compiler_parity, name) for name in STRESS_PROGRAMS})
-        for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
-            with open(path, encoding="utf-8") as fh:
-                sources[os.path.basename(path)] = fh.read()
-        for name, source in sources.items():
-            with self.subTest(program=name):
-                proc = self._ir_run(source, default_stdlib_root(), "--ir-stats")
-                self.assertEqual(proc.returncode, 0, proc.stderr)
-                self.assertIn(" 0 by the old path", proc.stderr)
-
-    def test_builtins_go_through_the_ir(self) -> None:
-        # assert, panic, unreachable and the I/O intrinsics: every function of
-        # the runtime-error programs and of the I/O project, std's included
-        # (MYLA-105)
-        stdlib = default_stdlib_root()
-        entries = sorted(glob.glob(os.path.join(_REPO, "examples", "errors", "runtime_*.my")))
-        with tempfile.TemporaryDirectory() as tmp:
-            entries.append(_write_project(os.path.join(tmp, "io"), MODULE_PROJECTS["io_through_the_ir"]))
-            for entry in entries:
-                with self.subTest(program=entry):
-                    proc = subprocess.run([self._binary, entry, stdlib, "--ir", "--ir-stats"],
-                                          capture_output=True, text=True)
-                    self.assertEqual(proc.returncode, 0, proc.stderr)
-                    self.assertIn(" 0 by the old path", proc.stderr)
 
 
 if __name__ == "__main__":
