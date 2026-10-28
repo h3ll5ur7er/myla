@@ -85,6 +85,30 @@ pub enum Inst {
     // %dst = pop %cell stride: the address of the last element of the unique
     // list %cell, which is no longer counted; trapping when it is empty
     Pop(int32, int32, int32, Pos),
+    // %dst, %dst2 = rt name(%args): a runtime helper returning %rax and %rdx
+    // (`__map_set_slot`: the slot, and whether the key was there)
+    RtPair(int32, int32, str, [int32]),
+    // check %v kind: trap (`__trap_<kind>`) at the position when %v is 0 (a
+    // missing map key)
+    Check(int32, str, Pos),
+    // sbappend [%holder] %s: the bytes of string %s appended to the builder
+    // the 8 bytes at %holder point at (made unique already)
+    SbAppend(int32, int32),
+    // sbappend [%holder] %s[%start..%end]: a range of %s, checked at the position
+    SbAppendRange(int32, int32, int32, int32, Pos),
+    // sbappendbyte [%holder] %b: one byte
+    SbAppendByte(int32, int32),
+    // %dst = sbbuild %cell: a new string of the builder's bytes
+    SbBuild(int32, int32),
+    // mapremove T [%holder] %cell %key: the key's entry removed from the map
+    // %cell, which the 8 bytes at %holder point at (made unique already); the
+    // table is rebuilt and stored back
+    MapRemove(Type, int32, int32, int32),
+    // %dst = global sym width: the runtime's variable `sym`, 8 bytes or 4
+    // (sign-extended)
+    Global(int32, str, int32),
+    // exit %code: the process ends with the low 8 bits of %code as its status
+    Exit(int32),
     // print ty %a: a scalar, as `print` writes it
     Print(Type, int32),
     // loc line col: the source position of the code that follows
@@ -108,6 +132,9 @@ pub enum Term {
     // trap kind @pos: the runtime error `__trap_<kind>` at a position (a
     // match no arm matched)
     Trap(str, Pos),
+    // panic %msg @pos: the runtime error with the message string %msg at a
+    // position (`panic`, `unreachable`, a failed `assert`)
+    Panic(int32, Pos),
 }
 
 pub struct IrBlock { insts: [Inst], term: Term }
@@ -189,6 +216,15 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Cow(d, t, h) => format("%t{} = cow {} [%t{}]", d, type_name(t), h)
         Inst.Append(d, h, c, stride) => format("%t{} = append [%t{}] %t{} {}", d, h, c, stride)
         Inst.Pop(d, c, stride, p) => format("%t{} = pop %t{} {} @{}:{}", d, c, stride, p.line, p.col)
+        Inst.RtPair(d, d2, name, args) => format("%t{}, ", d) + render_rt(d2, name, args)
+        Inst.Check(v, kind, p) => format("check %t{} {} @{}:{}", v, kind, p.line, p.col)
+        Inst.SbAppend(h, v) => format("sbappend [%t{}] %t{}", h, v)
+        Inst.SbAppendRange(h, v, a, b, p) => format("sbappend [%t{}] %t{}[%t{}..%t{}] @{}:{}", h, v, a, b, p.line, p.col)
+        Inst.SbAppendByte(h, b) => format("sbappendbyte [%t{}] %t{}", h, b)
+        Inst.SbBuild(d, c) => format("%t{} = sbbuild %t{}", d, c)
+        Inst.MapRemove(t, h, c, k) => format("mapremove {} [%t{}] %t{} %t{}", type_name(t), h, c, k)
+        Inst.Global(d, sym, w) => format("%t{} = global {} {}", d, sym, w)
+        Inst.Exit(v) => format("exit %t{}", v)
         Inst.Print(t, a) => format("print {} %t{}", type_name(t), a)
         Inst.Loc(p) => format("loc {} {}", p.line, p.col)
         Inst.Bind(name, s) => format("bind {} ${}", name, s)
@@ -245,6 +281,7 @@ fun render_rt(d: int32, name: str, args: [int32]) -> str {
 
 #test(Term.Br(1, 2, 3))["br %t1, L2, L3"]
 #test(Term.Ret(-1))["ret"]
+#test(Term.Panic(2, Pos { line: 3, col: 4 }))["panic %t2 @3:4"]
 pub fun render_term(t: Term) -> str {
     return match t {
         Term.Open => "(open)"
@@ -255,6 +292,7 @@ pub fun render_term(t: Term) -> str {
             _ => format("ret %t{}", v)
         }
         Term.Trap(kind, p) => format("trap {} @{}:{}", kind, p.line, p.col)
+        Term.Panic(m, p) => format("panic %t{} @{}:{}", m, p.line, p.col)
     }
 }
 

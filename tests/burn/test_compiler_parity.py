@@ -605,6 +605,88 @@ PROGRAMS = {
         "    print(len(words))\n"
         "}\n"
     ),
+    # MYLA-105: maps, builders, chars and format through the IR: literals,
+    # reads, inserts and overwrites (of owned values), contains, remove, keys,
+    # len, for loops, get, nested places with copy-on-write; StringBuilder with
+    # ranges and bytes; f-strings of every printable type
+    "maps_and_builders_through_the_ir": (
+        "struct Pt { x: int, label: str }\n"
+        "\n"
+        "fun count(m: [str: int]) -> int {\n"
+        "    var n = 0\n"
+        "    for k in m {\n"
+        "        n = n + m[k]\n"
+        "    }\n"
+        "    return n\n"
+        "}\n"
+        "\n"
+        "fun describe(m: [str: int], k: str) -> str {\n"
+        "    return match get(m, k) {\n"
+        '        Some(v) => f"{k}={v}"\n'
+        '        None => f"{k} missing"\n'
+        "    }\n"
+        "}\n"
+        "\n"
+        "fun joined(parts: [str]) -> str {\n"
+        "    var sb = StringBuilder()\n"
+        "    for p in parts {\n"
+        "        if len(sb) > 0 { append_byte(sb, 44) }\n"
+        "        append(sb, p)\n"
+        "    }\n"
+        "    return build(sb)\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        '    var m = ["a": 1, "b": 2]\n'
+        '    m["c"] = 3\n'
+        '    m["a"] = 10\n'
+        "    print(len(m))\n"
+        '    print(m["a"] + m["c"])\n'
+        '    print(contains(m, "b"))\n'
+        "    let saved = m\n"
+        '    remove(m, "b")\n'
+        '    print(contains(m, "b"))\n'
+        '    print(contains(saved, "b"))\n'
+        "    print(count(m))\n"
+        "    print(count(saved))\n"
+        '    print(describe(m, "c"))\n'
+        '    print(describe(m, "z"))\n'
+        "    print(len(keys(saved)))\n"
+        '    var names: [int: str] = [1: "one"]\n'
+        '    names[2] = "two"\n'
+        '    names[1] = "uno" + "!"\n'
+        "    print(names[1] + names[2])\n"
+        '    var pts = ["p": Pt { x: 1, label: "first" }]\n'
+        '    pts["q"] = Pt { x: 2, label: "second" }\n'
+        "    let old = pts\n"
+        '    pts["p"].x = 7\n'
+        '    pts["p"].label = "moved"\n'
+        '    print(pts["p"].x + old["p"].x)\n'
+        '    print(pts["p"].label + old["p"].label)\n'
+        '    var lists: [str: [int]] = ["xs": [1, 2]]\n'
+        '    push(lists["xs"], 3)\n'
+        '    lists["xs"][0] = 100\n'
+        '    print(lists["xs"][0] + len(lists["xs"]))\n'
+        '    print(joined(["x", "yy", "zzz"]))\n'
+        "    var sb = StringBuilder()\n"
+        '    append(sb, "hello world", 6, 11)\n'
+        "    append_byte(sb, 33)\n"
+        "    let built = build(sb)\n"
+        "    print(built)\n"
+        "    print(len(sb))\n"
+        "    var vowels = 0\n"
+        '    for c in chars("héllo wörld") {\n'
+        "        if c == 'o' || c == 'ö' || c == 'é' { vowels = vowels + 1 }\n"
+        "    }\n"
+        "    print(vowels)\n"
+        "    let f: float64 = 2.5\n"
+        "    let ok = true\n"
+        "    let ch = 'q'\n"
+        '    print(f"{vowels} {f} {ok} {ch} {built}!")\n'
+        '    print(format("[{}|{}]", len(m), "s"))\n'
+        "}\n"
+    ),
     "const_string_concatenation_in_functions": (
         "const TABLE: str = \"ab\" + \"cd\" + \"ef\"\n"
         "const N: int32 = 2 + 3\n"

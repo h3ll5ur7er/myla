@@ -12,8 +12,9 @@ Step 3 of [[MYLA-67]] ([[Architecture/IR]]): strings, lists, maps and builders t
 - [x] The verifier, run on every function the gates compile; a test with deliberately broken IR for each rule
 - [x] A string stress program (some 50 MB of churn) with `--ir`
 - [x] Part 2: lists: literals, indexing (with the string's byte index) and its bounds trap, `push`/`pop`/`len`, staged stores into elements and copy-on-write, `for` over a list
-- [ ] Part 3: maps, builders, `chars`, `format` and f-strings, the remaining builtins
-- [ ] The list and map stress tests with `--ir`
+- [x] Part 3: maps, builders, `chars`, `format` and f-strings, the remaining builtins
+- [x] The list and map stress tests with `--ir`
+- [ ] Part 4: recursive enums (boxed members)
 
 ## How (part 1)
 
@@ -45,3 +46,25 @@ Step 3 of [[MYLA-67]] ([[Architecture/IR]]): strings, lists, maps and builders t
 - **Parity:** the `lists_through_the_ir` parity program (push/pop through `var self` and into nested lists, writes at any depth, copies that must not see later writes, an early return from a `for`, string bytes): all 5 functions through the IR, the interpreter's output, peak 11 MB as the old path. The gates pass with `--ir`, the list stress program included.
 - **Mutation:** element writes without `cow` fail the IR gate on `lists_through_the_ir`.
 - **Coverage:** examples 122 → 145 of 227, the compiler 64 → 178 of 1,079; the verifier rejects none.
+
+## How (part 3)
+
+- **IR:** `rt` with two results (`__map_set_slot`'s slot and "the key was there" flag), `check` (a trap when a value is 0), `sbappend` (with and without a checked range), `sbappendbyte`, `sbbuild`, `mapremove`, `global`, `exit`, and the `panic` terminator. Map removal, the builder's range check and `build` were split out of the old path as `emit_map_remove`, `emit_sb_range` and `emit_sb_build`; its assembly stays byte-identical.
+- **Lowering:**
+  - map literals, reads (`check … key`), inserts and overwrites (releasing the replaced value), places inside values (`m[k].f = v`, `push(m[k], x)`), `contains`, `remove`, `keys`, `len`, and `for` over a map's keys;
+  - `StringBuilder`, `append` (with a range), `append_byte`, `build`, `chars`, `format` and f-strings;
+  - `assert`, `panic`, `unreachable` and the I/O intrinsics;
+  - a partial application falls back.
+- **Place types:** `place_type` knows map values.
+
+## Evidence (part 3)
+
+- **Parity:**
+  - the `maps_and_builders_through_the_ir` parity program covers every map and builder operation, copies that must not see later writes, and f-strings of each printable type: all 5 functions (`get`'s instance too) go through the IR and print the interpreter's output;
+  - the `io_through_the_ir` module project uses std.fs, std.process and std.io, and no function falls back for a builtin;
+  - every runtime-error program goes through the IR entirely and still reports the interpreter's position.
+- **Stress:** every stress program gives the same output with `--ir`, at the old path's peak (11 MB). The map, map-remove, map-overwrite and builder programs now run entirely through the IR.
+- **Mutation:** a `map_put` that doesn't release the replaced value fails the overwrite stress program (305 MB, the limit is 30).
+- **Old path:** byte-identical on `selfhost/gen_main.my` and `examples/methods.my`.
+- **Self-compile:** the compiler built with `--ir` emits the same assembly for itself as the normal build (10,111,730 bytes).
+- **Coverage:** examples go from 145 to 184 of 227 functions, the compiler from 178 to 273 of 1,099. The verifier rejects none.

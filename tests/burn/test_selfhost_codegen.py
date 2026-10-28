@@ -103,6 +103,7 @@ PARITY_PROGRAMS = (
     "plain_aggregates",
     "strings_through_the_ir",
     "lists_through_the_ir",
+    "maps_and_builders_through_the_ir",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -154,6 +155,46 @@ MODULE_PROJECTS = {
             "from std.process import args\n"
             "fun collect(n: int) -> int {\n    return n * 2\n}\n"
             "fun main() {\n    print(collect(len(args()) as int))\n}\n"),
+    },
+    # MYLA-105: the I/O intrinsics behind std.fs, std.process and std.io,
+    # with results that don't depend on the machine
+    "io_through_the_ir": {
+        "main.my": (
+            "from std.fs import read_to_string, write_to_file, current_dir, list_dir, make_dir, exists, is_dir, is_file\n"
+            "from std.process import args, run\n"
+            "from std.io import println, eprintln\n"
+            "fun main() {\n"
+            '    println("start")\n'
+            '    eprintln("to stderr")\n'
+            "    print(len(args()) > 0)\n"
+            "    match current_dir() {\n"
+            "        Ok(d) => { print(len(d) > 0) },\n"
+            "        Err(e) => { print(false) },\n"
+            "    }\n"
+            '    match read_to_string("/nonexistent/file") {\n'
+            "        Ok(s) => { print(s) },\n"
+            '        Err(e) => { print("no file") },\n'
+            "    }\n"
+            '    match write_to_file("/nonexistent/dir/file", "x") {\n'
+            "        Ok(n) => { print(n) },\n"
+            '        Err(e) => { print("not written") },\n'
+            "    }\n"
+            '    match list_dir("/nonexistent") {\n'
+            "        Ok(names) => { print(len(names)) },\n"
+            '        Err(e) => { print("no dir") },\n'
+            "    }\n"
+            '    match make_dir("/nonexistent/a/b") {\n'
+            "        Ok(n) => { print(n) },\n"
+            '        Err(e) => { print("not made") },\n'
+            "    }\n"
+            '    print(exists("/"))\n'
+            '    print(is_dir("/"))\n'
+            '    print(is_file("/"))\n'
+            '    match run("/bin/echo", ["hi"]) {\n'
+            "        Ok(o) => { print(len(o.stdout)) },\n"
+            '        Err(e) => { print("not run") },\n'
+            "    }\n"
+            "}\n"),
     },
     # the same private name in three modules
     "private_names_per_module": {
@@ -706,6 +747,30 @@ class SelfHostedCodegenParityThroughIR(SelfHostedCodegenParity):
             # here that is a failure (MYLA-105)
             self.assertNotIn("IR verifier", proc.stderr)
         self.assertGreater(through, 60)
+
+    def test_builtins_go_through_the_ir(self) -> None:
+        # assert, panic, unreachable and the I/O intrinsics: every function of
+        # the runtime-error programs goes through the IR, and no function of
+        # the I/O project (std's included) falls back for a builtin (MYLA-105)
+        stdlib = default_stdlib_root()
+        entries = sorted(glob.glob(os.path.join(_REPO, "examples", "errors", "runtime_*.my")))
+        with tempfile.TemporaryDirectory() as tmp:
+            io_entry = _write_project(os.path.join(tmp, "io"), MODULE_PROJECTS["io_through_the_ir"])
+            for entry in [*entries, io_entry]:
+                with self.subTest(program=entry):
+                    proc = subprocess.run([self._binary, entry, stdlib, "--ir", "--ir-stats"],
+                                          capture_output=True, text=True)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertNotIn("the builtin", proc.stderr)
+                    if entry != io_entry:
+                        self.assertIn(" 0 by the old path", proc.stderr)
+
+    def test_maps_and_builders_go_through_the_ir(self) -> None:
+        # every function of the program, `get`'s instance included (MYLA-105)
+        from .test_compiler_parity import PROGRAMS
+        proc = self._ir_run(PROGRAMS["maps_and_builders_through_the_ir"], default_stdlib_root(), "--ir-stats")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(" 0 by the old path", proc.stderr)
 
 
 if __name__ == "__main__":

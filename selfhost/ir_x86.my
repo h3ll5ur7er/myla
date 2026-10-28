@@ -177,12 +177,8 @@ impl CodeGen {
                 self.emit(format("addq ${}, %rsp", 8 * (len(args) + 1)))
             },
             Inst.Rt(d, name, args) => {
-                let regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
-                var i = 0
-                while i < len(args) {
-                    self.load_temp(args[i], regs[i], temp_base)
-                    i = i + 1
-                }
+                self.load_args(args, temp_base)
+                if name == "__float_to_str" { self.uses_float = true }
                 self.emit(format("call {}", name))
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
@@ -204,6 +200,72 @@ impl CodeGen {
                 self.emit("popq %rbx")
             },
             Inst.Init(s) => {},
+            Inst.RtPair(d, d2, name, args) => {
+                self.load_args(args, temp_base)
+                self.emit(format("call {}", name))
+                self.store_temp(d, temp_base)
+                self.emit("movq %rdx, %rax")
+                self.store_temp(d2, temp_base)
+            },
+            Inst.Check(v, kind, p) => {
+                self.load_temp(v, "rax", temp_base)
+                self.emit("testq %rax, %rax")
+                self.trap("jz", "__trap_" + kind, p.line, p.col)
+            },
+            Inst.SbAppend(h, v) => {
+                // as `gen_sb_append`
+                self.load_temp(v, "rsi", temp_base)
+                self.emit("movq (%rsi), %rdx")
+                self.emit("addq $8, %rsi")
+                self.load_temp(h, "rdi", temp_base)
+                self.emit("call __sb_append_bytes")
+            },
+            Inst.SbAppendRange(h, v, a, b, p) => {
+                // as `gen_sb_append` with a range: 0 <= start <= end <= len
+                self.load_temp(b, "rcx", temp_base)
+                self.emit("movslq %ecx, %rcx")
+                self.load_temp(a, "rdx", temp_base)
+                self.emit("movslq %edx, %rdx")
+                self.load_temp(v, "rsi", temp_base)
+                self.emit_sb_range(p.line, p.col)
+                self.load_temp(h, "rdi", temp_base)
+                self.emit("call __sb_append_bytes")
+            },
+            Inst.SbAppendByte(h, b) => {
+                // as `gen_sb_append_byte`: the byte on the stack
+                self.load_temp(b, "rax", temp_base)
+                self.emit("pushq %rax")
+                self.emit("movq %rsp, %rsi")
+                self.emit("movq $1, %rdx")
+                self.load_temp(h, "rdi", temp_base)
+                self.emit("call __sb_append_bytes")
+                self.emit("addq $8, %rsp")
+            },
+            Inst.SbBuild(d, c) => {
+                self.load_temp(c, "rax", temp_base)
+                self.emit_sb_build()
+                self.store_temp(d, temp_base)
+            },
+            Inst.Global(d, sym, w) => {
+                if w == 4 { self.emit(format("movslq {}(%rip), %rax", sym)) } else { self.emit(format("movq {}(%rip), %rax", sym)) }
+                self.store_temp(d, temp_base)
+            },
+            Inst.Exit(v) => {
+                // as `gen_io_exit`
+                self.load_temp(v, "rax", temp_base)
+                self.emit("movl %eax, %edi")
+                self.emit("movq $60, %rax")
+                self.emit("syscall")
+            },
+            Inst.MapRemove(mt, h, c, k) => {
+                // as `gen_map_remove`
+                self.load_temp(h, "rax", temp_base)
+                self.emit("pushq %rax")
+                self.load_temp(c, "rax", temp_base)
+                self.emit("pushq %rax")
+                self.load_temp(k, "rsi", temp_base)
+                self.emit_map_remove(mt)
+            },
             Inst.Elem(d, c, i, stride, is_str, p) => {
                 self.load_temp(c, "rax", temp_base)
                 self.load_temp(i, "rcx", temp_base)
@@ -294,6 +356,22 @@ impl CodeGen {
                 self.emit(format("jmp {}", self.epilogue))
             },
             Term.Trap(kind, p) => { self.trap("jmp", "__trap_" + kind, p.line, p.col) },
+            Term.Panic(m, p) => {
+                // as `gen_intrinsic`
+                self.load_temp(m, "rdi", temp_base)
+                self.load_position(p.line, p.col, "rsi")
+                self.emit("call __panic")
+            },
+        }
+    }
+
+    // The arguments of a runtime helper into the calling registers.
+    fun load_args(var self, args: [int32], temp_base: int32) {
+        let regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+        var i = 0
+        while i < len(args) {
+            self.load_temp(args[i], regs[i], temp_base)
+            i = i + 1
         }
     }
 

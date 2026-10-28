@@ -35,9 +35,9 @@
 // path generates it.
 
 from std.num import f64_literal_bits, f32_round_bits
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry
 from .checker import Type, Subst, opt_subst_type, subst_type
-from .codegen import CodeGen, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t
+from .codegen import CodeGen, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 
 // A name in scope: the slot holding it.
@@ -105,15 +105,17 @@ fun is_scalar(t: Type) -> bool {
     }
 }
 
-// Whether values of type `t` can be lowered yet: scalars, strings, lists, and
-// structs, tuples and enums (not recursive ones, whose members are boxed) of
-// such values; not maps, builders or function values yet.
+// Whether values of type `t` can be lowered yet: scalars, strings, lists,
+// maps, builders, and structs, tuples and enums (not recursive ones, whose
+// members are boxed) of such values; not function values yet.
 fun lowerable(cg: CodeGen, t: Type, depth: int32) -> bool {
     if depth > 16 { return false }
     if is_scalar(t) { return true }
     match t {
         Type.TStr => { return true },
+        Type.TSB => { return true },
         Type.TList(et) => { return lowerable(cg, et, depth + 1) },
+        Type.TMap(kt, vt) => { return lowerable(cg, kt, depth + 1) && lowerable(cg, vt, depth + 1) },
         Type.TStruct(n, a) => {
             let info = cg.struct_info(n)
             let sub = cg.type_subst(info.type_params, a)
@@ -234,6 +236,7 @@ impl Lower {
             ExprKind.Index(b, i) => {
                 let bt = self.place_type(cg, b)
                 if is_list_t(bt) { return list_elem(bt) }
+                if is_map_t(bt) { return map_val(bt) }
             },
             ExprKind.TupleIndex(t, i) => {
                 let es = tuple_elems(self.place_type(cg, t))
@@ -508,6 +511,15 @@ impl Lower {
             let d = self.unsupported("an assignment of that type")
             return
         }
+        match target.kind {
+            ExprKind.Index(base, idx) => {
+                if is_map_t(self.place_type(cg, base)) {
+                    self.map_set(cg, base, idx, value)
+                    return
+                }
+            },
+            _ => {},
+        }
         let local = match target.kind {
             ExprKind.Name(n) => self.lookup(n)
             _ => -1
@@ -552,8 +564,8 @@ impl Lower {
         self.add(Inst.StoreAt(dst, 0, v))
     }
 
-    // The address of an assignable place: a local, or a field or tuple element
-    // of one; no list or map elements yet.
+    // The address of an assignable place: a local, a field, tuple element, list
+    // element or map value of one at any depth, made unique on the way.
     fun place(var self, cg: CodeGen, e: Expr) -> int32 {
         match e.kind {
             ExprKind.Name(n) => {
@@ -573,7 +585,16 @@ impl Lower {
                 // path to the place, as the old path's `mut_place_addr`), then
                 // the index, bounds-checked
                 let lt = self.place_type(cg, base)
-                if !is_list_t(lt) { return self.unsupported("an assignment to a map value or a byte") }
+                if is_map_t(lt) {
+                    // as the old path's `mut_map_value_addr`: trapping when
+                    // the key is missing
+                    let mh = self.place(cg, base)
+                    let mc = self.temp(lt)
+                    self.add(Inst.Cow(mc, lt, mh))
+                    let k = self.expr(cg, idx)
+                    return self.map_value(cg, e, lt, mc, k)
+                }
+                if !is_list_t(lt) { return self.unsupported("an assignment to a byte") }
                 let holder = self.place(cg, base)
                 let cell = self.temp(Type.TInt(64, false))
                 self.add(Inst.Cow(cell, lt, holder))
@@ -681,20 +702,27 @@ impl Lower {
 
     // `for v in xs { body }`: the loop holds a reference to the list (dropped
     // when it ends, or by a `return` from the body), walks it by index, and
-    // `v` borrows each element in turn.
+    // `v` borrows each element in turn. Over a map, the list is a new one of
+    // its keys.
     fun for_list(var self, cg: CodeGen, vn: str, it: Expr, body: Block) {
-        let lt = cg.type_of(it.id)
-        if !is_list_t(lt) || !lowerable(cg, lt, 0) {
-            let d = self.unsupported("a for loop over a map")
+        let it_t = cg.type_of(it.id)
+        if (!is_list_t(it_t) && !is_map_t(it_t)) || !lowerable(cg, it_t, 0) {
+            let d = self.unsupported("a for loop over that type")
             return
         }
+        var lt = it_t
+        if is_map_t(it_t) { lt = Type.TList(map_key(it_t)) }
         let et = list_elem(lt)
         let stride = cg.stored_size(et)
         let held = self.value_slot(cg, "__iterated", lt, true)
         self.begin_temps()
         let v = self.expr(cg, it)
-        self.add(Inst.Store(held, v))
-        self.retain(cg, lt, v)
+        if is_map_t(it_t) {
+            self.add(Inst.Store(held, self.map_keys(cg, it_t, v)))
+        } else {
+            self.add(Inst.Store(held, v))
+            self.retain(cg, lt, v)
+        }
         self.end_temps()
         var loop_owners: [int32] = []
         push(self.owners, loop_owners)
@@ -824,6 +852,7 @@ impl Lower {
                 return d
             },
             ExprKind.ListLit(elems) => { return self.list_lit(cg, t, elems) },
+            ExprKind.MapLit(entries) => { return self.map_lit(cg, t, entries) },
             _ => {},
         }
         return self.unsupported("that kind of expression")
@@ -1052,10 +1081,11 @@ impl Lower {
     // -1 without a result. A result that owns heap values is the statement's.
     fun call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr]) -> int32 {
         if self.err != "" { return -1 }
+        if args_have_hole(args) { return self.unsupported("a partial application") }
         match callee.kind {
             ExprKind.Name(nm) => {
                 if nm == "print" && len(args) == 1 { return self.print(cg, args[0]) }
-                if nm == "len" && len(args) == 1 && (is_tstr(cg.type_of(args[0].id)) || is_list_t(cg.type_of(args[0].id))) {
+                if nm == "len" && len(args) == 1 && is_cell_t(cg.type_of(args[0].id)) {
                     let s = self.expr(cg, args[0])
                     let d = self.temp(Type.TInt(32, true))
                     self.add(Inst.LoadAt(d, s, 0))
@@ -1063,7 +1093,29 @@ impl Lower {
                 }
                 if nm == "push" && len(args) == 2 && is_list_t(self.place_type(cg, args[0])) { return self.push_elem(cg, args[0], args[1]) }
                 if nm == "pop" && len(args) == 1 && is_list_t(self.place_type(cg, args[0])) { return self.pop_elem(cg, e, args[0]) }
-                if is_builtin_call_name(nm) { return self.unsupported(format("the builtin {}", nm)) }
+                if nm == "contains" && len(args) == 2 { return self.map_contains(cg, args[0], args[1]) }
+                if nm == "remove" && len(args) == 2 { return self.map_remove(cg, args[0], args[1]) }
+                if nm == "keys" && len(args) == 1 {
+                    let m = self.expr(cg, args[0])
+                    return self.owned_value(cg, self.map_keys(cg, cg.type_of(args[0].id), m), cg.type_of(e.id))
+                }
+                if nm == "chars" && len(args) == 1 {
+                    let s = self.expr(cg, args[0])
+                    let d = self.temp(cg.type_of(e.id))
+                    self.add(Inst.Rt(d, "__str_chars", [s]))
+                    return self.owned_value(cg, d, cg.type_of(e.id))
+                }
+                if nm == "format" && len(args) >= 1 { return self.format_call(cg, args) }
+                if nm == "StringBuilder" && len(args) == 0 { return self.sb_new(cg) }
+                if (nm == "append" && (len(args) == 2 || len(args) == 4)) || (nm == "append_byte" && len(args) == 2) { return self.sb_append(cg, e, nm, args) }
+                if nm == "assert" || nm == "panic" || nm == "unreachable" { return self.intrinsic(cg, e, nm, args) }
+                if nm == "build" && len(args) == 1 {
+                    let c = self.expr(cg, args[0])
+                    let d = self.temp(Type.TStr)
+                    self.add(Inst.SbBuild(d, c))
+                    return self.owned_value(cg, d, Type.TStr)
+                }
+                if is_builtin_call_name(nm) { return self.io_call(cg, e, nm, args) }
                 if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.unsupported("a call of a function value") }
                 return self.direct_call(cg, e, nm, args)
             },
@@ -1166,10 +1218,10 @@ impl Lower {
     // checked at `e`), borrowed from it.
     fun elem_read(var self, cg: CodeGen, e: Expr, base: Expr, idx: Expr) -> int32 {
         let bt = self.place_type(cg, base)
-        if is_map_t(bt) { return self.unsupported("a map lookup") }
-        if !is_list_t(bt) && !is_tstr(bt) { return self.unsupported("indexing that type") }
+        if !is_list_t(bt) && !is_tstr(bt) && !is_map_t(bt) { return self.unsupported("indexing that type") }
         let cell = self.expr(cg, base)
         let i = self.expr(cg, idx)
+        if is_map_t(bt) { return self.map_value(cg, e, bt, cell, i) }
         var stride = 1
         if is_list_t(bt) { stride = cg.stored_size(list_elem(bt)) }
         let d = self.temp(Type.TInt(64, false))
@@ -1226,6 +1278,308 @@ impl Lower {
         let d = self.temp(et)
         self.add(Inst.LoadAt(d, p, 0))
         return self.owned_value(cg, d, et)
+    }
+
+    // --- maps -------------------------------------------------------------------
+
+    fun int_const(var self, v: int32) -> int32 {
+        return self.konst(Type.TInt(64, true), v as int64)
+    }
+
+    // The slot of `key` in the map `cell` of type `mt`, or 0 when it is missing.
+    fun map_lookup(var self, cg: CodeGen, mt: Type, cell: int32, key: int32) -> int32 {
+        let size = self.int_const(cg.map_slot_size(mt))
+        let is_str = self.int_const(cg.map_is_str(mt))
+        let d = self.temp(Type.TInt(64, false))
+        self.add(Inst.Rt(d, "__map_lookup", [cell, key, size, is_str]))
+        return d
+    }
+
+    // The address of the value of `key` in the map `cell`, borrowed from it;
+    // trapping at `e` when the key is missing.
+    fun map_value(var self, cg: CodeGen, e: Expr, mt: Type, cell: int32, key: int32) -> int32 {
+        let slot = self.map_lookup(cg, mt, cell, key)
+        self.add(Inst.Check(slot, "key", Pos { line: e.line, col: e.col }))
+        return self.offset(slot, 16)
+    }
+
+    // A new list of the keys of the map `cell`, each with its reference; the
+    // caller owns it.
+    fun map_keys(var self, cg: CodeGen, mt: Type, cell: int32) -> int32 {
+        let size = self.int_const(cg.map_slot_size(mt))
+        let stride = self.int_const(cg.stored_size(map_key(mt)))
+        let is_str = self.int_const(cg.map_is_str(mt))
+        let d = self.temp(Type.TList(map_key(mt)))
+        self.add(Inst.Rt(d, "__map_keys", [cell, size, stride, is_str]))
+        return d
+    }
+
+    // The value `value` of the map's value type `vt` taken, with references of
+    // its own, before the container is touched: (its temporary or -1, the
+    // address of its staged copy or -1).
+    fun stage(var self, cg: CodeGen, vt: Type, value: Expr) -> (int32, int32) {
+        if is_aggregate(vt) {
+            let src = self.addr(cg, value)
+            let slot = self.value_slot(cg, "__staged", vt, false)
+            let staged = self.slot_addr(slot)
+            self.add(Inst.Copy(staged, src, cg.size(vt)))
+            self.retain(cg, vt, staged)
+            return (-1, staged)
+        }
+        let v = self.expr(cg, value)
+        self.retain(cg, vt, v)
+        return (v, -1)
+    }
+
+    // Set `key` in the (unique) map the 8 bytes at `holder` point at to the
+    // staged value (see `stage`), releasing the value it replaces: room made
+    // first, then the key's slot found or made (with a reference to a string
+    // key), as `emit_map_set_slot`.
+    fun map_put(var self, cg: CodeGen, mt: Type, holder: int32, key: int32, staged: (int32, int32)) {
+        let vt = map_val(mt)
+        let size = self.int_const(cg.map_slot_size(mt))
+        let is_str = self.int_const(cg.map_is_str(mt))
+        let unused = self.int_const(0)
+        self.add(Inst.Rt(-1, "__map_reserve", [holder, size, unused, is_str]))
+        let cell = self.temp(mt)
+        self.add(Inst.LoadAt(cell, holder, 0))
+        let slot = self.temp(Type.TInt(64, false))
+        let had = self.temp(Type.TBool)
+        self.add(Inst.RtPair(slot, had, "__map_set_slot", [cell, key, size, is_str]))
+        let p = self.offset(slot, 16)
+        if cg.owns_heap(vt) {
+            let drop_b = self.new_block()
+            let join = self.new_block()
+            self.finish(Term.Br(had, drop_b, join))
+            self.start(drop_b)
+            self.add(Inst.DropAt(vt, p))
+            self.finish(Term.Jmp(join))
+            self.start(join)
+        }
+        if is_aggregate(vt) { self.add(Inst.Copy(p, staged.1, cg.size(vt))) } else { self.add(Inst.StoreAt(p, 0, staged.0)) }
+    }
+
+    // `[k: v, …]`: a new map, each key evaluated before its value; the
+    // statement owns it.
+    fun map_lit(var self, cg: CodeGen, mt: Type, entries: [MapEntry]) -> int32 {
+        if !lowerable(cg, mt, 0) { return self.unsupported("a map of that type") }
+        let eight = self.int_const(8)
+        let size = self.int_const(cg.map_slot_size(mt))
+        let cell = self.temp(mt)
+        self.add(Inst.Rt(cell, "__map_new", [eight, size]))
+        let slot = self.value_slot(cg, "__map", mt, true)
+        self.add(Inst.Store(slot, cell))
+        self.own_temp(slot)
+        let h = self.slot_addr(slot)
+        for en in entries {
+            let k = self.expr(cg, en.key)
+            let staged = self.stage(cg, map_val(mt), en.value)
+            self.map_put(cg, mt, h, k, staged)
+        }
+        let d = self.temp(mt)
+        self.add(Inst.Load(d, slot))
+        return d
+    }
+
+    // `m[k] = value`: the value taken first, then the map made unique, then
+    // the key.
+    fun map_set(var self, cg: CodeGen, base: Expr, idx: Expr, value: Expr) {
+        let mt = self.place_type(cg, base)
+        let staged = self.stage(cg, map_val(mt), value)
+        let h = self.place(cg, base)
+        let cell = self.temp(mt)
+        self.add(Inst.Cow(cell, mt, h))
+        let k = self.expr(cg, idx)
+        self.map_put(cg, mt, h, k, staged)
+    }
+
+    fun map_contains(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
+        let mt = self.place_type(cg, m)
+        if !is_map_t(mt) { return self.unsupported("contains on that type") }
+        let cell = self.expr(cg, m)
+        let key = self.expr(cg, k)
+        let slot = self.map_lookup(cg, mt, cell, key)
+        let zero = self.int_const(0)
+        let d = self.temp(Type.TBool)
+        self.add(Inst.Cmp(d, "!=", Type.TInt(64, false), slot, zero))
+        return d
+    }
+
+    // `remove(m, k)`: the map made unique (copies keep the entry), then the
+    // key; see `emit_map_remove`.
+    fun map_remove(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
+        let mt = self.place_type(cg, m)
+        if !is_map_t(mt) { return self.unsupported("remove on that type") }
+        let h = self.place(cg, m)
+        let cell = self.temp(mt)
+        self.add(Inst.Cow(cell, mt, h))
+        let key = self.expr(cg, k)
+        self.add(Inst.MapRemove(mt, h, cell, key))
+        return -1
+    }
+
+    // --- strings ----------------------------------------------------------------
+
+    fun sb_new(var self, cg: CodeGen) -> int32 {
+        let size = self.int_const(16)
+        let cell = self.temp(Type.TSB)
+        self.add(Inst.Rt(cell, "__alloc", [size]))
+        let zero = self.int_const(0)
+        self.add(Inst.StoreAt(cell, 0, zero))
+        self.add(Inst.StoreAt(cell, 8, zero))
+        return self.owned_value(cg, cell, Type.TSB)
+    }
+
+    // `append(sb, s)`, `append(sb, s, start, end)` (the range checked) and
+    // `append_byte(sb, b)`: the builder made unique first, then the arguments.
+    fun sb_append(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
+        let h = self.place(cg, args[0])
+        let cell = self.temp(Type.TSB)
+        self.add(Inst.Cow(cell, Type.TSB, h))
+        let v = self.expr(cg, args[1])
+        if nm == "append_byte" {
+            self.add(Inst.SbAppendByte(h, v))
+        } else if len(args) == 4 {
+            let a = self.expr(cg, args[2])
+            let b = self.expr(cg, args[3])
+            self.add(Inst.SbAppendRange(h, v, a, b, Pos { line: e.line, col: e.col }))
+        } else {
+            self.add(Inst.SbAppend(h, v))
+        }
+        return -1
+    }
+
+    // `format(fmt, args…)` (and f-strings): the literal's pieces concatenated
+    // with each argument's print form; every intermediate string is owned by
+    // the statement.
+    fun format_call(var self, cg: CodeGen, args: [Expr]) -> int32 {
+        let fmt = match args[0].kind {
+            ExprKind.StrLit(s) => s
+            _ => ""
+        }
+        let segs = format_segments(fmt)
+        var acc = self.temp(Type.TStr)
+        self.add(Inst.Str(acc, segs[0]))
+        var k = 1
+        while k < len(args) {
+            let piece = self.render(cg, args[k])
+            let joined = self.temp(Type.TStr)
+            self.add(Inst.Rt(joined, "__str_concat", [acc, piece]))
+            let j = self.owned_value(cg, joined, Type.TStr)
+            let seg = self.temp(Type.TStr)
+            self.add(Inst.Str(seg, segs[k]))
+            let next = self.temp(Type.TStr)
+            self.add(Inst.Rt(next, "__str_concat", [j, seg]))
+            acc = self.owned_value(cg, next, Type.TStr)
+            k = k + 1
+        }
+        return acc
+    }
+
+    // The print form of a printable value as a string: a string itself
+    // (borrowed), or a new one the statement owns.
+    fun render(var self, cg: CodeGen, arg: Expr) -> int32 {
+        let t = cg.type_of(arg.id)
+        var helper = ""
+        var extra = -1
+        match t {
+            Type.TStr => { return self.expr(cg, arg) },
+            Type.TBool => { helper = "__bool_to_str" },
+            Type.TInt(w, s) => {
+                if s { helper = "__int_to_str" } else { helper = "__uint_to_str" }
+            },
+            Type.TFloat(w) => {
+                helper = "__float_to_str"
+                if w == 32 { extra = 9 } else { extra = 17 }
+            },
+            Type.TChar => { helper = "__char_to_str" },
+            _ => { return self.unsupported("format of a value that isn't a scalar or a string") },
+        }
+        let v = self.expr(cg, arg)
+        var rargs = [v]
+        if extra >= 0 { push(rargs, self.int_const(extra)) }
+        let d = self.temp(Type.TStr)
+        self.add(Inst.Rt(d, helper, rargs))
+        return self.owned_value(cg, d, Type.TStr)
+    }
+
+    // --- the other builtins -----------------------------------------------------
+
+    // `panic(msg)`, `unreachable()` and `assert(c)`, `assert(c, msg)`: the
+    // runtime error at the call's position; the code after the first two is
+    // unreachable.
+    fun intrinsic(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
+        let at = Pos { line: e.line, col: e.col }
+        if nm == "panic" {
+            let m = self.expr(cg, args[0])
+            self.leave(Term.Panic(m, at))
+            return -1
+        }
+        let fail = self.temp(Type.TStr)
+        if nm == "unreachable" {
+            self.add(Inst.Str(fail, "reached unreachable code"))
+            self.leave(Term.Panic(fail, at))
+            return -1
+        }
+        let c = self.expr(cg, args[0])
+        let bad = self.new_block()
+        let ok = self.new_block()
+        self.finish(Term.Br(c, ok, bad))
+        self.start(bad)
+        if len(args) == 2 {
+            let m = self.expr(cg, args[1])
+            self.finish(Term.Panic(m, at))
+        } else {
+            self.add(Inst.Str(fail, "assertion failed"))
+            self.finish(Term.Panic(fail, at))
+        }
+        self.start(ok)
+        return -1
+    }
+
+    // The I/O intrinsics (`__write`, `__read_file`, …): runtime helpers taking
+    // their arguments in the calling registers, or the runtime's variables; a
+    // result that is a cell is a new reference.
+    fun io_call(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
+        let t = cg.type_of(e.id)
+        if nm == "__io_errno" || nm == "__run_stderr" {
+            let d = self.temp(t)
+            self.add(Inst.Global(d, nm + "_val", 8))
+            return self.owned_value(cg, d, t)
+        }
+        if nm == "__run_exit_code" || nm == "__run_signal" || nm == "__run_errno" {
+            var sym = nm + "_val"
+            if nm == "__run_exit_code" { sym = "__run_exit_val" }
+            let d = self.temp(t)
+            self.add(Inst.Global(d, sym, 4))
+            return d
+        }
+        // helpers without a result, then those with one
+        let effects = ["__exit", "__write", "__write_file", "__mkdir"]
+        let results = ["__args", "__read_file", "__read", "__poll", "__getcwd", "__list_dir", "__stat", "__run"]
+        var has_result = false
+        var known = false
+        for r in effects { if r == nm { known = true } }
+        for r in results {
+            if r == nm {
+                known = true
+                has_result = true
+            }
+        }
+        if !known { return self.unsupported(format("the builtin {}", nm)) }
+        var vals: [int32] = []
+        for a in args { push(vals, self.expr(cg, a)) }
+        if nm == "__exit" {
+            self.add(Inst.Exit(vals[0]))
+            return -1
+        }
+        if !has_result {
+            self.add(Inst.Rt(-1, nm, vals))
+            return -1
+        }
+        let d = self.temp(t)
+        self.add(Inst.Rt(d, nm, vals))
+        return self.owned_value(cg, d, t)
     }
 
     fun print(var self, cg: CodeGen, arg: Expr) -> int32 {

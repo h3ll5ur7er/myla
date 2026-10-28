@@ -65,15 +65,16 @@ loc 12 5                      ; the source position of what follows
 bind x $s3                    ; debug information: x lives in $s3 from here
 ```
 
-*Now*: `const`, `str`, `load`/`store` of 8-byte slots, `addr` (a slot's address), `%t = %p + off`, `load`/`store` at `[%p + off]`, `copy size [%dst], [%src]`, `call … sret %r` (an aggregate result into the storage at `%r`), `rt name(%args)` (a runtime helper such as `__str_concat`, the arguments in `%rdi`, `%rsi`, …), `retain T %v` (a cell) and `retain T [%p]` (every heap value of the T at `%p`), `drop T $slot` (an owner's end) and `drop T [%p]` (a member before it is overwritten), `init $slot` (an aggregate built member by member is complete; no code), `elem %cell[%i] stride` (an element's or byte's address, bounds-checked at a position), `load8`, `cow T [%holder]` (the cell made unique, a clone stored back when shared), `append [%holder] %cell stride` (room for one more element, the grown cell stored back), `pop %cell stride` (the last element's address, trapping when empty), the integer and float operations (`%t = + int32 %a, %b`, with the result type after `->` when it differs, and `@line:col` on a division), `cmp`, the unary operators, `cast`, `call` with scalar arguments, `print ty %a` (a scalar, as `print` writes it), `loc`, `bind`, and `scope open`/`scope close` (the lexical scopes of debug information, which `emit_ir` turns into the same DWARF blocks as the old path).
+*Now*: `const`, `str`, `load`/`store` of 8-byte slots, `addr` (a slot's address), `%t = %p + off`, `load`/`store` at `[%p + off]`, `copy size [%dst], [%src]`, `call … sret %r` (an aggregate result into the storage at `%r`), `rt name(%args)` (a runtime helper such as `__str_concat`, the arguments in `%rdi`, `%rsi`, …), `retain T %v` (a cell) and `retain T [%p]` (every heap value of the T at `%p`), `drop T $slot` (an owner's end) and `drop T [%p]` (a member before it is overwritten), `init $slot` (an aggregate built member by member is complete; no code), `elem %cell[%i] stride` (an element's or byte's address, bounds-checked at a position), `load8`, `cow T [%holder]` (the cell made unique, a clone stored back when shared), `append [%holder] %cell stride` (room for one more element, the grown cell stored back), `pop %cell stride` (the last element's address, trapping when empty), `%t, %t2 = rt name(%args)` (a helper returning `%rax` and `%rdx`: `__map_set_slot`'s slot and whether the key was there), `check %v kind` (trap when `%v` is 0: a missing map key), `sbappend`/`sbappendbyte`/`sbbuild` (the builder sequences), `mapremove T [%holder] %cell %key`, `global sym width` (a runtime variable such as `__io_errno_val`), `exit %code`, the integer and float operations (`%t = + int32 %a, %b`, with the result type after `->` when it differs, and `@line:col` on a division), `cmp`, the unary operators, `cast`, `call` with scalar arguments, `print ty %a` (a scalar, as `print` writes it), `loc`, `bind`, and `scope open`/`scope close` (the lexical scopes of debug information, which `emit_ir` turns into the same DWARF blocks as the old path).
 
-Terminators (*now*: `jmp`, `br`, `ret`, `trap`):
+Terminators (*now*: `jmp`, `br`, `ret`, `trap`, `panic`):
 
 ```text
 jmp L3
 br %c, L4, L5
 ret                           ret %t
 trap index @pos               ; the runtime error at a position (never returns)
+panic %msg @pos               ; `panic`, `unreachable`, a failed `assert` (never returns)
 unreachable
 ```
 
@@ -133,7 +134,7 @@ A parameter is a slot at its argument word, so it needs no copy. The code after 
 
 ## The backend
 
-`emit_ir` lays out the frame (each slot its offset, each temporary an 8-byte slot of its own at first, exactly as wasteful as today), then emits each block: a label per block, one short instruction sequence per IR instruction, the prologue and epilogue as `gen_function` emits them. The sequences for operations, casts, `print` and the unary operators are the old path's own: `emit_int_op`, `emit_float_op`, `emit_cast`, `emit_unary` and `emit_print` were split out of `eval_binary`, `eval_binary_float`, `gen_cast`, `eval_unary` and `gen_print` (which emit byte-identical assembly since), so wrapping, traps and float rounding can't drift between the paths. `loc` becomes `.loc` (with `-g`), `bind` and `scope` the DWARF variable and scope entries through the existing `dbg_*` methods.
+`emit_ir` lays out the frame (each slot its offset, each temporary an 8-byte slot of its own at first, exactly as wasteful as today), then emits each block: a label per block, one short instruction sequence per IR instruction, the prologue and epilogue as `gen_function` emits them. The sequences for operations, casts, `print`, the unary operators, element addresses, map removal and the builder's range check and `build` are the old path's own: `emit_int_op`, `emit_float_op`, `emit_cast`, `emit_unary`, `emit_print`, `emit_elem_addr`, `emit_map_remove`, `emit_sb_range` and `emit_sb_build` were split out of `eval_binary`, `eval_binary_float`, `gen_cast`, `eval_unary`, `gen_print`, `gen_elem_addr`, `gen_map_remove`, `gen_sb_append` and `gen_sb_build` (which emit byte-identical assembly since), so wrapping, traps and float rounding can't drift between the paths. `loc` becomes `.loc` (with `-g`), `bind` and `scope` the DWARF variable and scope entries through the existing `dbg_*` methods.
 
 ### Coverage
 
@@ -145,8 +146,9 @@ A parameter is a slot at its argument word, so it needs no copy. The code after 
 | [[MYLA-104]] (plain aggregates, generic calls) | 94 of 227 | 18 of 1,021 |
 | [[MYLA-105]], first part (strings, ownership, the verifier) | 122 of 227 | 64 of 1,072 |
 | [[MYLA-105]], second part (lists) | 145 of 227 | 178 of 1,079 |
+| [[MYLA-105]], third part (maps, builders, `format`, the other builtins) | 184 of 227 | 273 of 1,099 |
 
-Nearly every remaining function of the compiler has a parameter, result or local that is a map, a builder or a recursive enum (the syntax tree's boxed members), or an aggregate holding one: the rest of [[MYLA-105]].
+Nearly every remaining function of the compiler has a parameter, result or local that is a recursive enum (the syntax tree's boxed members) or an aggregate holding one: the rest of [[MYLA-105]]. Function values and `?` follow in [[MYLA-106]].
 
 ### Lowering ownership
 
@@ -157,6 +159,9 @@ Nearly every remaining function of the compiler has a parameter, result or local
 - **Borrowing.** Parameters and match bindings borrow; nothing drops them.
 - **Assignments.** An assignment takes the new value (retains it, staged in a slot of its own for an aggregate) before it releases the old one (`drop $slot` for a local, `drop [%p]` for a member), which the new value may share (`p = p`, `o.a = o.a`).
 - **Lists.** A list literal is a new cell, its elements stored with their own references, owned by the statement. Reading an element borrows it from the list (bounds-checked, `elem`). A write to an element (`xs[i] = v`, `xs[i].f = v`, at any depth) takes the value first, then makes every list on the path to the place unique (`cow`), as the old path's `mut_place_addr` does, then releases the old element. `push` takes the value, makes the list unique, grows it when full (`append`) and moves the value in; `pop` moves the last element out to the statement. A `for` loop over a list holds a reference of its own for the loop (dropped at its end, or by a `return` from the body) and borrows each element.
+- **Maps.** A map literal is a new map owned by the statement, each key evaluated before its value. A read (`m[k]`, also inside `get`) borrows the value, trapping when the key is missing (`check … key`). `m[k] = v` takes the value first, makes the map unique, finds or makes the key's slot (`__map_set_slot`, which retains a string key), releases the value it held when the key was there, and moves the new one in; a write into a value (`m[k].f = v`, `push(m[k], x)`) makes the map unique and traps on a missing key, as the old path's `mut_map_value_addr`. `remove` makes the map unique and releases the key and value (`mapremove`); `keys`, and a `for` loop over a map, make a new list of the keys.
+- **Builders and `format`.** `StringBuilder()` is a new cell; `append` and `append_byte` make it unique first. `build`, `chars`, `format` (and so f-strings) and every rendered piece make new strings owned by the statement; unlike the old path, which releases each piece as soon as it is concatenated, the IR keeps them until the statement ends.
+- **The I/O intrinsics.** Runtime helpers (`rt`) or runtime variables (`global`); a cell they return is a new reference (`__run_stderr` hands over the runtime's).
 - **Matches.** A match copies its scrutinee; the copy owns references of its own (retained, dropped after the match or by an arm's early exit) only when an arm may write the variable the scrutinee came from (MYLA-2).
 
 The **verifier** (`verify` in [[selfhost/ir.my]]) follows every owning slot along the reachable paths. It rejects a store into a slot that still holds a value, a drop of one that holds none, a slot holding a value at `ret`, and paths that join disagreeing on a slot. A `copy`, `call … sret` or `init` into an owning slot stores into it. A function it rejects falls back to the old path with the reason `IR verifier: …`, which the IR gate treats as a failure.

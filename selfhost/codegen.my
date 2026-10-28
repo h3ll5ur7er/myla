@@ -3487,6 +3487,14 @@ impl CodeGen {
         self.emit("pushq %rax")
         self.eval(k)
         self.emit("movq %rax, %rsi")
+        self.emit_map_remove(mt)
+    }
+
+    // The rest of `remove`: the key in %rsi, the unique cell and below it the
+    // map's holder on the stack (both popped); removes the key's entry,
+    // releases its key and value, rebuilds the table and stores it back
+    // (shared with the IR backend, MYLA-105).
+    fun emit_map_remove(var self, mt: Type) {
         self.emit("movq (%rsp), %rdi")
         self.emit(format("movq ${}, %rdx", self.map_slot_size(mt)))
         self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
@@ -3636,20 +3644,7 @@ impl CodeGen {
             self.emit("popq %rdx")
             self.emit("movslq %edx, %rdx")     // start
             self.emit("popq %rsi")             // str
-            let bad = self.label()
-            let good = self.label()
-            self.emit("testq %rdx, %rdx")
-            self.emit(format("jl {}", bad))
-            self.emit("cmpq %rdx, %rcx")
-            self.emit(format("jl {}", bad))
-            self.emit("cmpq (%rsi), %rcx")
-            self.emit(format("jle {}", good))
-            self.emit(format("{}:", bad))
-            self.trap("jmp", "__trap_index", e.line, e.col)
-            self.emit(format("{}:", good))
-            self.emit("leaq 8(%rsi,%rdx), %rsi")   // &bytes[start]
-            self.emit("subq %rdx, %rcx")
-            self.emit("movq %rcx, %rdx")       // count
+            self.emit_sb_range(e.line, e.col)
         } else {
             self.emit("movq %rax, %rsi")
             self.emit("movq (%rsi), %rdx")
@@ -3657,6 +3652,27 @@ impl CodeGen {
         }
         self.emit("popq %rdi")             // &holder
         self.emit("call __sb_append_bytes")
+    }
+
+    // The bytes str[start..end] for `__sb_append_bytes`: the string in %rsi,
+    // start in %rdx and end in %rcx (sign-extended) become the address in %rsi
+    // and the count in %rdx, trapping at `line:col` unless 0 <= start <= end
+    // <= len (shared with the IR backend, MYLA-105).
+    fun emit_sb_range(var self, line: int32, col: int32) {
+        let bad = self.label()
+        let good = self.label()
+        self.emit("testq %rdx, %rdx")
+        self.emit(format("jl {}", bad))
+        self.emit("cmpq %rdx, %rcx")
+        self.emit(format("jl {}", bad))
+        self.emit("cmpq (%rsi), %rcx")
+        self.emit(format("jle {}", good))
+        self.emit(format("{}:", bad))
+        self.trap("jmp", "__trap_index", line, col)
+        self.emit(format("{}:", good))
+        self.emit("leaq 8(%rsi,%rdx), %rsi")   // &bytes[start]
+        self.emit("subq %rdx, %rcx")
+        self.emit("movq %rcx, %rdx")       // count
     }
 
     fun gen_sb_append_byte(var self, sb: Expr, b: Expr) {
@@ -3674,6 +3690,12 @@ impl CodeGen {
 
     fun gen_sb_build(var self, sb: Expr) {
         self.eval(sb)
+        self.emit_sb_build()
+    }
+
+    // A new string of the bytes of the builder in %rax, in %rax (shared with
+    // the IR backend, MYLA-105).
+    fun emit_sb_build(var self) {
         self.emit("pushq %rax")
         self.emit("movq (%rax), %rdx")
         self.emit("leaq 8(%rdx), %rdi")
@@ -7708,7 +7730,7 @@ pub fun list_elem(t: Type) -> Type {
 
 // Split a `format` template into literal segments (one more than the number of
 // `{}` holes). `{{`/`}}` collapse to single literal braces.
-fun format_segments(s: str) -> [str] {
+pub fun format_segments(s: str) -> [str] {
     var segs: [str] = []
     var cur = ""
     let n = len(s)
@@ -7745,11 +7767,11 @@ fun str_byte(s: str, i: int32) -> str {
     return build(sb)
 }
 
-fun map_key(t: Type) -> Type {
+pub fun map_key(t: Type) -> Type {
     return match t { Type.TMap(k, v) => k, _ => Type.TStr }
 }
 
-fun map_val(t: Type) -> Type {
+pub fun map_val(t: Type) -> Type {
     return match t { Type.TMap(k, v) => v, _ => Type.TInt(32, true) }
 }
 
@@ -7902,7 +7924,7 @@ fun is_hole_expr(e: Expr) -> bool {
     return match e.kind { ExprKind.Hole => true, _ => false }
 }
 
-fun args_have_hole(args: [Expr]) -> bool {
+pub fun args_have_hole(args: [Expr]) -> bool {
     for a in args { if is_hole_expr(a) { return true } }
     return false
 }
