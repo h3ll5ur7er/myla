@@ -1,0 +1,12 @@
+//~ type error: const 'LIMIT' is declared 'int32' but its value has type 'str'
+//~ errors: 2
+//~ next: cannot assign value of type 'int32' to binding of type 'str'
+// A const that fails keeps its declared type; a const folded from it fails
+// silently, and both can be used (MYLA-110).
+const LIMIT: int = "ten"
+const DOUBLE: int = LIMIT * 2
+
+fun main() {
+    print(DOUBLE + LIMIT)
+    let s: str = 1
+}

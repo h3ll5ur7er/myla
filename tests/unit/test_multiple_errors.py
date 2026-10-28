@@ -132,10 +132,14 @@ class CheckRecoveryTests(unittest.TestCase):
                          (4, "'#test' expects 1 argument(s), got 2"))
         self.assertEqual(_lines(src), [4, 2])
 
-    def test_a_declaration_error_stays_single(self):
+    def test_bodies_are_checked_after_a_declaration_error(self):
+        # MYLA-110: the duplicate is left out, and main is still checked
         src = "fun f() {}\nfun f() {}\nfun main() {\n    let x: int = true\n}\n"
         errs = _errors(src)
-        self.assertEqual([e.message for e in errs], ["duplicate top-level declaration 'f'"])
+        self.assertEqual([e.message for e in errs], [
+            "duplicate top-level declaration 'f'",
+            "cannot assign value of type 'bool' to binding of type 'int32'",
+        ])
 
     def test_a_failed_function_leaves_no_state_behind(self):
         # the error inside the loop must not leave `b` inside a loop

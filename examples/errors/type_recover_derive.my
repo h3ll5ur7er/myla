@@ -1,0 +1,16 @@
+//~ type error: cannot derive Eq for struct 'Pair'
+//~ errors: 2
+//~ next: return type mismatch: expected 'int32', found 'str'
+// A failed derive leaves Eq broken for the type: comparing ends the check of
+// `main` silently; `other` is checked as usual (MYLA-110).
+#derive(Eq)
+struct Pair { a: int, f: (int) -> int }
+
+fun main() {
+    let p = Pair { a: 1, f: (x: int) => x }
+    print(p == p)
+}
+
+fun other() -> int {
+    return "x"
+}

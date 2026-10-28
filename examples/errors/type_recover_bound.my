@@ -1,0 +1,13 @@
+//~ type error: unknown trait 'Nope' in bound 'T: Nope'
+//~ errors: 2
+//~ next: cannot assign value of type 'int32' to binding of type 'str'
+// A function with a bad bound is not checked, and its calls don't check that
+// bound (MYLA-110).
+fun pick<T: Nope>(a: T, b: T) -> T {
+    return a.nope()
+}
+
+fun main() {
+    print(pick(1, 2))
+    let s: str = 3
+}

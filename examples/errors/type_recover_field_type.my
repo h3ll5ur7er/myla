@@ -1,0 +1,21 @@
+//~ type error: unknown type 'Colour'
+//~ span: Colour
+//~ errors: 2
+//~ next: return type mismatch: expected 'str', found 'int32'
+// A field of an unknown type has the error type: reading it ends the check of
+// `brightness` silently, a literal may give it any value, and `width` is
+// checked as usual (MYLA-110).
+struct Pixel { x: int, c: Colour }
+
+fun brightness(p: Pixel) -> int {
+    return p.c.level
+}
+
+fun width(p: Pixel) -> str {
+    return p.x
+}
+
+fun main() {
+    let p = Pixel { x: 1, c: 7 }
+    print(brightness(p))
+}

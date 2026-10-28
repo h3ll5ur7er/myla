@@ -1,0 +1,21 @@
+//~ type error: unknown type 'Nope'
+//~ errors: 2
+//~ next: cannot assign value of type 'int32' to binding of type 'bool'
+// A trait method's unknown type is not compared with an impl's (MYLA-110).
+trait Shape {
+    fun area(self) -> Nope
+}
+
+struct Sq { s: int }
+
+impl Shape for Sq {
+    fun area(self) -> int {
+        return self.s * self.s
+    }
+}
+
+fun main() {
+    let q = Sq { s: 2 }
+    print(q.area())
+    let b: bool = 1
+}

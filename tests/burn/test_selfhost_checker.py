@@ -38,6 +38,7 @@ from myla.loader import default_stdlib_root, link
 from myla.parser import parse
 from myla.types import check
 
+from ._mutants import mutants
 from ._native import CAN_BUILD_NATIVE
 from ._tools import selfhost_tool
 
@@ -387,6 +388,17 @@ class SelfHostedCheckerParity(unittest.TestCase):
                     with open(path, "w", encoding="utf-8") as fh:
                         fh.write(source)
                     self.assertEqual(self._myla_check(path), expected)
+
+    def test_declaration_mutants_match_the_oracle(self) -> None:
+        # every example with one declaration broken (MYLA-110): the same error,
+        # then the same silence where bodies depend on the broken part
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, source, _first in mutants():
+                with self.subTest(mutant=name):
+                    path = os.path.join(tmp, name + ".my")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(source)
+                    self.assertEqual(self._myla_check(path), _oracle_source(source))
 
 
 if __name__ == "__main__":

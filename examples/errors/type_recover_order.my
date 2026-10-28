@@ -1,0 +1,17 @@
+//~ type error: unknown type 'Nope'
+//~ errors: 4
+//~ next: recursive struct 'Loop' would have infinite size
+//~ next: unknown type 'Gone'
+//~ next: cannot assign value of type 'bool' to binding of type 'int32'
+// The declarations' errors come first, in the order the phases find them
+// (aliases, fields, recursion, signatures, ...), then the bodies' (MYLA-110).
+// That is the order a single-error run would find them in.
+fun f(a: Gone) {}
+
+typealias T = Nope
+
+struct Loop { next: Loop }
+
+fun main() {
+    let x: int = true
+}

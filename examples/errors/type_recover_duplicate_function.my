@@ -1,0 +1,19 @@
+//~ type error: duplicate top-level declaration 'area'
+//~ note: 'area' is first declared here
+//~ note span: fun area(w: int, h: int) -> int {
+//~ errors: 2
+//~ next: unknown name 'nope'
+// The duplicate is left out, body and all; calls use the first declaration
+// (MYLA-110).
+fun area(w: int, h: int) -> int {
+    return w * h
+}
+
+fun area(r: int) -> int {
+    return r * r * 3 + true
+}
+
+fun main() {
+    print(area(2, 3))
+    print(nope)
+}
