@@ -108,6 +108,7 @@ PARITY_PROGRAMS = (
     "try_through_the_ir",
     "function_values_through_the_ir",
     "logical_results_as_values",
+    "aggregates_built_in_place",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),

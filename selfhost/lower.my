@@ -51,7 +51,11 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // thunks and function-value thunks the function needs, which the code
 // generator emits after it. `holder`: per temporary, the owning slot it was
 // stored into, read from or is the address of (-1: none), for `take`.
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32] }
+// `into`: the slot the next aggregate `addr` makes may be built in (-1:
+// none; see `build_slot`); `placed`: per temporary, whether it is the address
+// of a value built there (a flag would be overwritten by a `return` nested in
+// the value).
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool] }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
 pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
@@ -61,7 +65,7 @@ pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: 
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [] }
     var first_word = 0
     match ret {
         Some(t) => {
@@ -100,7 +104,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [] }
     var first_word = 0
     match ret {
         Some(t) => {
@@ -296,6 +300,7 @@ impl Lower {
     fun temp(var self, t: Type) -> int32 {
         push(self.f.temps, t)
         push(self.holder, -1)
+        push(self.placed, false)
         return len(self.f.temps) - 1
     }
 
@@ -556,11 +561,16 @@ impl Lower {
                 }
                 let slot = self.value_slot(cg, name, t, true)
                 if is_aggregate(t) {
+                    // built in the variable's slot when it can be
+                    self.into = slot
                     let src = self.addr(cg, init)
-                    let took = self.took(cg, t, src)
-                    let dst = self.slot_addr(slot)
-                    self.add(Inst.Copy(dst, src, cg.size(t)))
-                    if !took { self.retain(cg, t, dst) }
+                    self.into = -1
+                    if !self.is_placed(src) {
+                        let took = self.took(cg, t, src)
+                        let dst = self.slot_addr(slot)
+                        self.add(Inst.Copy(dst, src, cg.size(t)))
+                        if !took { self.retain(cg, t, dst) }
+                    }
                 } else {
                     let v = self.expr(cg, init)
                     let took = self.took(cg, t, v)
@@ -662,11 +672,16 @@ impl Lower {
     fun ret_value(var self, cg: CodeGen, e: Expr) {
         let t = cg.type_of(e.id)
         if self.sret >= 0 {
+            // built in the caller's storage when it can be
+            self.into = self.sret
             let src = self.addr(cg, e)
-            let took = self.took(cg, t, src)
+            self.into = -1
             let dst = self.slot_addr(self.sret)
-            self.add(Inst.Copy(dst, src, cg.size(t)))
-            if !took { self.retain(cg, t, dst) }
+            if !self.is_placed(src) {
+                let took = self.took(cg, t, src)
+                self.add(Inst.Copy(dst, src, cg.size(t)))
+                if !took { self.retain(cg, t, dst) }
+            }
             self.drop_temps(0)
             self.drop_owners(0)
             self.leave(Term.Ret(dst))
@@ -687,7 +702,7 @@ impl Lower {
             },
             ExprKind.Call(callee, args) => {
                 if !cg.ctor_info(e).ok {
-                    let v = self.call(cg, e, callee, args)
+                    let v = self.call(cg, e, callee, args, -1)
                     return
                 }
             },
@@ -1027,7 +1042,7 @@ impl Lower {
                 return d
             },
             ExprKind.Call(callee, args) => {
-                let d = self.call(cg, e, callee, args)
+                let d = self.call(cg, e, callee, args, -1)
                 if d < 0 { return self.unsupported("a call without a value used as one") }
                 return d
             },
@@ -1176,11 +1191,14 @@ impl Lower {
     // variable keeps it (borrowed), or a slot the value is built in (owned
     // by the statement when it holds heap values).
     fun addr(var self, cg: CodeGen, e: Expr) -> int32 {
+        // the destination offered to this expression only, not to its parts
+        let into = self.into
+        self.into = -1
         if self.err != "" { return 0 }
         let t = cg.type_of(e.id)
         if !lowerable(cg, t) { return self.unsupported("an aggregate of that type") }
         let ci = cg.ctor_info(e)
-        if ci.ok { return self.enum_ctor(cg, t, ci.enum_name, ci.variant, ci.args) }
+        if ci.ok { return self.enum_ctor(cg, t, ci.enum_name, ci.variant, ci.args, into) }
         match e.kind {
             ExprKind.Name(n) => {
                 let slot = self.lookup(n)
@@ -1198,27 +1216,25 @@ impl Lower {
                 return self.unbox(cg, t, self.offset(base, cg.elem_offset(self.place_type(cg, tgt), idx as int32)))
             },
             ExprKind.StructLit(name, fields) => {
-                let slot = self.value_slot(cg, "__struct", t, true)
+                let slot = self.build_slot(cg, "__struct", t, into)
                 let base = self.slot_addr(slot)
                 for fi in fields { self.store_member(cg, fi.value, base, cg.field_offset(t, fi.name)) }
-                self.mark_built(slot)
-                self.own_temp(slot)
+                self.built(slot, into, base)
                 return base
             },
             ExprKind.TupleLit(elems) => {
-                let slot = self.value_slot(cg, "__tuple", t, true)
+                let slot = self.build_slot(cg, "__tuple", t, into)
                 let base = self.slot_addr(slot)
                 var i = 0
                 for el in elems {
                     self.store_member(cg, el, base, cg.elem_offset(t, i))
                     i = i + 1
                 }
-                self.mark_built(slot)
-                self.own_temp(slot)
+                self.built(slot, into, base)
                 return base
             },
             ExprKind.Call(callee, args) => {
-                let d = self.call(cg, e, callee, args)
+                let d = self.call(cg, e, callee, args, into)
                 if d < 0 { return self.unsupported("a call without a value used as one") }
                 return d
             },
@@ -1265,8 +1281,8 @@ impl Lower {
     }
 
     // An enum value built in a new slot: the variant's tag, then its payload.
-    fun enum_ctor(var self, cg: CodeGen, t: Type, enum_name: str, variant: str, args: [Expr]) -> int32 {
-        let slot = self.value_slot(cg, "__enum", t, true)
+    fun enum_ctor(var self, cg: CodeGen, t: Type, enum_name: str, variant: str, args: [Expr], into: int32) -> int32 {
+        let slot = self.build_slot(cg, "__enum", t, into)
         let base = self.slot_addr(slot)
         let tag = self.konst(Type.TInt(64, true), cg.variant_tag(enum_name, variant) as int64)
         self.add(Inst.StoreAt(base, 0, tag))
@@ -1276,9 +1292,28 @@ impl Lower {
             i = i + 1
         }
         // the slot holds a value even when the variant's payload owns nothing
-        self.mark_built(slot)
-        self.own_temp(slot)
+        self.built(slot, into, base)
         return base
+    }
+
+    // Whether `v` is the address of a value built in its destination.
+    fun is_placed(self, v: int32) -> bool {
+        return v >= 0 && v < len(self.placed) && self.placed[v]
+    }
+
+    // The slot an aggregate value is built in: `into`, the destination its
+    // statement offers (a new variable's slot, or the function's result), or
+    // a temporary of its own (MYLA-108: no copy from one to the other).
+    fun build_slot(var self, cg: CodeGen, name: str, t: Type, into: int32) -> int32 {
+        if into >= 0 { return into }
+        return self.value_slot(cg, name, t, true)
+    }
+
+    // The aggregate at `base`, in `slot`, is complete: a temporary of its own
+    // is the statement's; built in `into`, its address says so (`placed`).
+    fun built(var self, slot: int32, into: int32, base: int32) {
+        self.mark_built(slot)
+        if slot != into { self.own_temp(slot) } else { self.placed[base] = true }
     }
 
     // Store `value` as the member at `base + off`, with its own references.
@@ -1310,7 +1345,7 @@ impl Lower {
     // A call: `print`, `len` of a string, a user function, or a method; the
     // temporary holding its scalar result or its aggregate result's address,
     // -1 without a result. A result that owns heap values is the statement's.
-    fun call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr]) -> int32 {
+    fun call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr], into: int32) -> int32 {
         if self.err != "" { return -1 }
         if args_have_hole(args) { return self.partial(cg, e, callee, args) }
         match callee.kind {
@@ -1348,14 +1383,14 @@ impl Lower {
                 }
                 if is_builtin_call_name(nm) { return self.io_call(cg, e, nm, args) }
                 if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.indirect_call(cg, e, callee, args) }
-                return self.direct_call(cg, e, nm, args)
+                return self.direct_call(cg, e, nm, args, into)
             },
             ExprKind.GetField(recv, field) => {
                 let mname = format("{}.{}", cg.type_key(cg.type_of(recv.id)), field)
                 if !cg.has_func(mname) { return self.indirect_call(cg, e, callee, args) }
                 var argv: [Expr] = [recv]
                 for a in args { push(argv, a) }
-                return self.direct_call(cg, e, mname, argv)
+                return self.direct_call(cg, e, mname, argv, into)
             },
             _ => {},
         }
@@ -1595,7 +1630,7 @@ impl Lower {
     // A call of the user function `name` with the argument list `argv`
     // (for a method the receiver first): scalars by value, aggregates by
     // address, both borrowed; an aggregate result through storage of its own.
-    fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr]) -> int32 {
+    fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr], into: int32) -> int32 {
         let sig = cg.sig_of(name)
         // a generic function: the instance for the argument types, which the
         // code generator stamps out once this function is lowered
@@ -1641,6 +1676,13 @@ impl Lower {
             return -1
         }
         if is_aggregate(ret_t) {
+            if into >= 0 {
+                // straight into the statement's destination
+                let dst = self.slot_addr(into)
+                self.add(Inst.CallSret(target, dst, vals))
+                self.placed[dst] = true
+                return dst
+            }
             let slot = self.value_slot(cg, "__result", ret_t, true)
             let res = self.slot_addr(slot)
             self.add(Inst.CallSret(target, res, vals))

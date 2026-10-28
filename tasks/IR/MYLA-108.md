@@ -16,7 +16,7 @@ Step 6 of [[MYLA-67]] ([[Architecture/IR]]): each optimisation a separate change
 - [x] Retain/drop pairs that cancel: a new value (a call's result, a literal, a concatenation) moved out of its temporary into the place it is stored
 - [ ] Retain/drop pairs that cancel for a copy never written
 - [ ] Scalars in registers (a simple allocator over temporaries)
-- [ ] Copy elision for aggregate results
+- [x] Copy elision for aggregate results: a call's result, struct, tuple or enum built straight into a new variable or the caller's storage
 - [x] Dead functions after monomorphization
 
 ## Measurements
@@ -33,6 +33,7 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 | Variables read where used | 2.01 s | 95 MB | 1.72 MB | 6.91 MB |
 | New values moved, not retained and dropped | 1.84 s | 93 MB | 1.59 MB | 6.32 MB |
 | Only reachable functions emitted | 1.72 s | 91 MB | 1.49 MB | 5.91 MB |
+| Aggregates built in place | see below | 90 MB | 1.46 MB | 5.83 MB |
 
 ## How (walks out of line)
 
@@ -100,3 +101,13 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 - **Measured:** 0.12 s faster (less to lower and emit), the binary 6% smaller, the assembly 6% smaller (`examples/methods.my`: 42,335 → 40,718 bytes). The compiler built this way reproduces its own output.
 - **Test:** `test_only_reachable_functions_are_emitted` (a function never used is left out; ones called, made values of or applied partially are emitted and run). The build before the change emits the unused function.
 - **Tests:** the stress programs stay at 11 MB; the codegen gate, the parity tests, the debug-information tests and the CLI tests pass (192 tests).
+
+## How (aggregates built in place)
+
+- **Change:** `let x = …` and `return …` offer a destination to the aggregate they evaluate (`into`: the new variable's slot, or the function's result storage). `addr` takes it for the outermost expression only, clearing it first so no part of the expression sees it. A struct, tuple or enum literal is then built in that slot (`build_slot`, `built`), and a direct call writes its result there (`call … sret`). Neither the copy nor a temporary is emitted.
+- **Telling a value built in place:** the first version marked "the destination was used" with one flag. In `let t = match o { Some(x) => x, None => { return Err(…) } }`, the nested `return` built its `Err` in place and set the flag, so the `let` never stored `t`; the verifier rejected the function (`drop of $34 (t), which holds no value`) when the compiler compiled itself. Now the address each in-place build returns is marked (`placed`), and the `let` or `return` checks its own value's address. The parity program `aggregates_built_in_place` covers this; with a shared flag again, the verifier rejects it.
+
+## Evidence (aggregates built in place)
+
+- **Measured:** the binary 2% smaller (1.49 → 1.46 MB), the assembly 1% smaller, the peak 1 MB lower; the time is within the noise (taken while another test run used the machine). The compiler built this way reproduces its own output.
+- **Tests:** the stress programs stay at 11 MB; the codegen gate, the parity tests and the debug-information tests pass (184 tests).
