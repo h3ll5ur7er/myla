@@ -2,11 +2,12 @@
 
 `selfhost/checker.my` is the Myla-written type checker; `selfhost/check_main.my`
 lexes + parses + type-checks a single-file program and prints the stable
-accept/reject line (`ok`, else `err <line> <col> <span> type: <message>`). This
-test asserts that, for every single-file source in the shared corpus and for
-every snippet of TYPE_ERRORS, that line is identical to the Python oracle's: the
-same verdict, position, underlined range (MYLA-65) and message (MYLA-28). That is the v0.7 checker-parity gate
-from docs/Development/Testing.md.
+accept/reject line (`ok`, else `err <line> <col> <span> type: <message>` for
+each error, MYLA-65, D80). This test asserts that, for every single-file source
+in the shared corpus and for every snippet of TYPE_ERRORS, those lines are
+identical to the Python oracle's: the same verdict, errors in the same order,
+positions, underlined ranges (MYLA-65) and messages (MYLA-28). That is the v0.7
+checker-parity gate from docs/Development/Testing.md.
 
 As with the lexer/parser gates, the Myla checker runs as a *native binary* when
 the host can build one (which also exercises interpreter/compiler parity of the
@@ -29,7 +30,7 @@ import tempfile
 import unittest
 
 from myla.ast import ImportDecl
-from myla.canon import canonical_error
+from myla.canon import canonical_errors
 from myla.errors import MylaError
 from myla.interpreter import Interpreter
 from myla.lexer import tokenize
@@ -226,6 +227,52 @@ TYPE_ERRORS: dict[str, str] = {
                                         "    9223372036854775807 => {},", "    -0 => {},", "    _ => {},", "}",
                                         "let u: uint64 = 0", "match u {", "    18446744073709551615 => {},",
                                         "    -0 => {},", "    _ => {},", "}", "let z: bool = 1"),
+    # several errors: every function's attributes and body are checked on
+    # their own, after the declarations (MYLA-65, D80)
+    "several_functions": ("fun f() -> int {\n    return \"a\"\n}\nfun g() {\n    let x: int = true\n    let y: int = \"x\"\n}\n"
+                          "struct S { a: int }\nimpl S {\n    fun m(self) -> int {\n        return nope\n    }\n}\n"
+                          "fun main() {\n    print(1 + \"x\")\n}\n"),
+    "attributes_then_bodies": ("fun main() {\n    let x: int = true\n}\n#test(1, 2)[3]\nfun h(a: int) -> int {\n    return a\n}\n"
+                               "#test(1)\nfun k(a: int) -> int {\n    return a\n}\n#nope\nstruct T { a: int }\n"),
+    "entry_point_and_a_body": "fun main(x: int) {\n    let y: int = true\n}\n",
+    "two_mains_and_a_body": "#main\nfun a() {}\n#main\nfun b() {}\nfun c() {\n    let y: int = true\n}\n",
+    "a_declaration_error_stays_single": "fun f() {}\nfun f() {}\nfun main() {\n    let x: int = true\n}\n",
+    "state_after_a_failed_loop": ("fun a() {\n    while true {\n        let x: int = \"s\"\n    }\n}\n"
+                                  "fun b() {\n    break\n}\nfun main() {}\n"),
+    "state_after_a_failed_lambda": ("fun a() {\n    let f = (x: int) => {\n        for i in 0..3 {\n            return \"s\" + 1\n        }\n        return 1\n    }\n}\n"
+                                    "fun b() -> int {\n    let g = (y: int) => y + 1\n    continue\n}\nfun main() {}\n"),
+    "state_after_a_failed_test_attribute": ("#test((x: int) => { return x + \"s\" })[1]\nfun a(f: (int) -> int) -> int {\n    return f(1)\n}\n"
+                                            "#test(2)\nfun b(x: int) -> int {\n    return x\n}\nfun main() {}\n"),
+    "generic_and_method_bodies": ("fun id<T>(x: T) -> T {\n    return x + 1\n}\nstruct P { a: int }\nimpl P {\n    fun f(self) -> str {\n        return self.a\n    }\n"
+                                  "    fun g<U>(self, u: U) -> U {\n        return self\n    }\n}\nfun main() {\n    let p = P { a: 1, b: 2 }\n}\n"),
+    # notes (MYLA-65): where an assigned variable is declared (through
+    # indexing, tuple fields and match bindings; none for a receiver), the
+    # first declaration, the return type (not from a lambda), "did you mean"
+    "note_index_root": _main("let xs = [1, 2]", "xs[0] = 3"),
+    "note_field_of_element": "struct P { x: int }\n" + _main("let ps = [P { x: 1 }]", "ps[0].x = 3"),
+    "note_match_binding": _main("match Some(1) {", "    Some(n) => { n = 2 },", "    None => {},", "}"),
+    "note_for_variable": _main("for i in 0..3 {", "    i = 1", "}"),
+    "note_lambda_param": _main("let f = (a: int) => {", "    a = 1", "}"),
+    "note_receiver": "struct C { n: int }\nimpl C {\n    fun f(self) {\n        self.n = 1\n    }\n}\nfun main() {}\n",
+    "note_destructured": _main("let (a, b) = (1, 2)", "let (c, a) = (3, 4)"),
+    "note_return_in_lambda": "fun f() -> int {\n    let g: (int) -> str = (x: int) => {\n        return x\n    }\n    return 1\n}\nfun main() {}\n",
+    "note_return_generic": "fun id<T>(x: T) -> T {\n    return 1\n}\nfun main() {}\n",
+    "suggest_const": "const LIMIT: int = 3\n" + _main("print(LIMTI)"),
+    "suggest_function_value": "fun double(x: int) -> int {\n    return x * 2\n}\n" + _main("let f = doubel"),
+    "suggest_variant": _main("let x: Option<int> = Nnoe"),
+    "suggest_alias": "typealias Grid = [[int]]\nfun f(g: Gird) {}\nfun main() {}\n",
+    "suggest_type_param": "fun f<Item>(x: Itme) {}\nfun main() {}\n",
+    "suggest_primitive": "fun f(x: flaot64) {}\nfun main() {}\n",
+    "suggest_struct_pattern_field": ("struct P { name: str }\n"
+                                     + _main('let p = P { name: "a" }', "match p {", "    P { nmae } => {},", "}")),
+    "suggest_struct_literal_field": "struct P { name: str }\n" + _main('let p = P { nmae: "a" }'),
+    "suggest_lvalue": _main("var total = 0", "totl = 1"),
+    "suggest_partial_method": ("struct S { a: int }\nimpl S {\n    fun scale(self, k: int) -> int {\n        return self.a * k\n    }\n}\n"
+                               + _main("let s = S { a: 1 }", "let g = s.sacle(_)")),
+    "suggest_in_scope_variable_call": _main("let handler = (x: int) => x", "handlr(1)"),
+    "suggest_nothing_close": _main("let count = 1", "print(zzzzz)"),
+    "suggest_alphabetically_first": _main("let rows_b = 1", "let rows_a = 2", "print(rows_c)"),
+    "too_many": "".join(f"fun f{i}() {{\n    let x: int = true\n}}\n" for i in range(25)) + "fun main() {}\n",
 }
 
 
@@ -244,9 +291,10 @@ def _corpus() -> list[str]:
 
 
 def _canonical(err: MylaError) -> str:
-    """`err <line> <col> <span> <kind>: <message>`: the range a diagnostic
-    underlines must agree too (MYLA-65)."""
-    return canonical_error(err)
+    """`err <line> <col> <span> <kind>: <message>` for `err` and the errors
+    after it (D80): the range a diagnostic underlines must agree too
+    (MYLA-65)."""
+    return canonical_errors(err)
 
 
 def _snippets() -> dict[str, str]:

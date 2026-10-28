@@ -5,7 +5,7 @@ Support for the [Myla](https://github.com/h3ll5ur7er/myla) programming language 
 ## Features
 
 - **Editing:** syntax highlighting (a TextMate grammar, plus semantic highlighting from the language server), snippets, comment toggling, bracket matching and auto-closing, `// region` folding.
-- **Language server** (`build/myla-lsp`, written in Myla): the compiler's diagnostics, document outline, go to definition, find references and hover resolved by scope, imports and type, and completion of members after `.` and of the names in scope.
+- **Language server** (`build/myla-lsp`, written in Myla): the compiler's diagnostics, document outline, go to definition, find references and hover resolved by scope, imports and type, and completion of members after `.` and of the names in scope. A file inside a project (`myla.toml`) is checked with the project's dependencies, and manifest errors show on `myla.toml`.
 - **Run, test, build:** *Myla: Run Current File*, *Myla: Run Tests in Current File* and *Myla: Build Current File* (also the ▷ menu in the editor title) run `myla run`, `myla test` and `myla build` in a terminal; errors land in the Problems view. The same commands are tasks of type `myla` for `tasks.json`.
 - **Debugger:** `F5` on a `.my` file builds it with `myla build -g` and debugs it with gdb, no launch configuration needed:
   - line breakpoints (conditions and hit counts too), function breakpoints such as `main` or `Point.len`;

@@ -1,0 +1,642 @@
+// ir.my -- the mid-level IR between the checker and the self-hosted backend
+// (MYLA-67, D79; wiki: Architecture/IR): three-address code on basic blocks.
+//
+// A function has slots (frame memory: locals, and the argument words of its
+// parameters), temporaries (8-byte scalars, assigned by any number of
+// instructions: not SSA) and blocks, block 0 the entry. Each block ends in one
+// terminator. Scalars are 8-byte values in the backend's canonical form, and
+// every instruction that computes one carries the Myla type it has, so the
+// backend wraps, compares and converts as the current path does.
+// `render_func` prints the text form (`gen_main --emit-ir`).
+
+from .checker import Type, type_name
+
+// A source position: of a statement (`Loc`), or where a runtime error is
+// reported (a division's divisor).
+pub struct Pos { line: int32, col: int32 }
+
+// An instruction. `dst` and the operands are temporaries.
+pub enum Inst {
+    // %dst = const ty bits: an integer, bool or char value, or a float's f64 image
+    Const(int32, Type, int64),
+    // %dst = str "text": the address of the static str cell holding the text
+    Str(int32, str),
+    // %dst = load [$slot]: the 8-byte scalar in a slot (in an aggregate
+    // parameter's slot: the pointer to the caller's value)
+    Load(int32, int32),
+    // store [$slot], %src
+    Store(int32, int32),
+    // %dst = addr $slot: the address of a slot (MYLA-104)
+    Addr(int32, int32),
+    // %dst = %ptr + off: an address inside an aggregate
+    Offset(int32, int32, int32),
+    // %dst = load [%ptr + off]: the 8-byte scalar there
+    LoadAt(int32, int32, int32),
+    // store [%ptr + off], %src
+    StoreAt(int32, int32, int32),
+    // copy size [%dst], [%src]: an aggregate's bytes
+    Copy(int32, int32, int32),
+    // %dst = op ty %a, %b: + - * / % & | ^ << >> on integers (ty: the left
+    // operand's type, rt: the result's) or + - * / % on floats; / and % trap at
+    // the position on a zero integer divisor
+    Bin(int32, str, Type, Type, int32, int32, Pos),
+    // %dst = cmp op ty %a, %b: == != < <= > >= on integers, floats, bools, chars
+    Cmp(int32, str, Type, int32, int32),
+    // %dst = op ty %a: - ~ ! with the result type
+    Un(int32, str, Type, int32),
+    // %dst = cast from -> to %a
+    Cast(int32, Type, Type, int32),
+    // %dst = call name(%args): a user function with scalar arguments; dst -1
+    // when its result isn't used or it has none
+    Call(int32, str, [int32]),
+    // call name sret %ptr (%args): a user function with an aggregate result,
+    // written to the storage at %ptr; aggregate arguments are addresses
+    CallSret(str, int32, [int32]),
+    // %dst = rt name(%args): a runtime helper, the arguments in %rdi, %rsi,
+    // %rdx, %rcx, %r8 and %r9 (`__str_concat`, `__str_eq`, …); dst -1 without
+    // a result (MYLA-105)
+    Rt(int32, str, [int32]),
+    // retain T %v: one more reference to the cell %v points at (T a string,
+    // list, map or builder)
+    RetainVal(Type, int32),
+    // retain T [%ptr]: one more reference to every heap value the T at %ptr owns
+    Retain(Type, int32),
+    // drop T $slot: release what the owning slot holds (its owner's end)
+    DropSlot(Type, int32),
+    // drop T [%ptr]: release what the member at %ptr holds (before it is
+    // overwritten)
+    DropAt(Type, int32),
+    // init $slot: the aggregate built member by member in the slot is
+    // complete (for the verifier; no code)
+    Init(int32),
+    // %dst = elem %cell[%i] stride: the address of element %i of a list (or
+    // of byte %i of a string, `true`), trapping at the position when it is out
+    // of bounds (MYLA-105)
+    Elem(int32, int32, int32, int32, bool, Pos),
+    // %dst = load8 [%ptr]: a byte (a string's)
+    Load8(int32, int32),
+    // %dst = cow T [%holder]: the list or map cell the 8 bytes at %holder
+    // point at, made unique (cloned and stored back when it is shared)
+    Cow(int32, Type, int32),
+    // %dst = append [%holder] %cell stride: room for one more element at the
+    // end of the unique list %cell (grown and stored back into %holder when
+    // full), its length counted; the new element's address
+    Append(int32, int32, int32, int32),
+    // %dst = pop %cell stride: the address of the last element of the unique
+    // list %cell, which is no longer counted; trapping when it is empty
+    Pop(int32, int32, int32, Pos),
+    // %dst, %dst2 = rt name(%args): a runtime helper returning %rax and %rdx
+    // (`__map_set_slot`: the slot, and whether the key was there)
+    RtPair(int32, int32, str, [int32]),
+    // check %v kind: trap (`__trap_<kind>`) at the position when %v is 0 (a
+    // missing map key)
+    Check(int32, str, Pos),
+    // sbappend [%holder] %s: the bytes of string %s appended to the builder
+    // the 8 bytes at %holder point at (made unique already)
+    SbAppend(int32, int32),
+    // sbappend [%holder] %s[%start..%end]: a range of %s, checked at the position
+    SbAppendRange(int32, int32, int32, int32, Pos),
+    // sbappendbyte [%holder] %b: one byte
+    SbAppendByte(int32, int32),
+    // %dst = sbbuild %cell: a new string of the builder's bytes
+    SbBuild(int32, int32),
+    // mapremove T [%holder] %cell %key: the key's entry removed from the map
+    // %cell, which the 8 bytes at %holder point at (made unique already); the
+    // table is rebuilt and stored back
+    MapRemove(Type, int32, int32, int32),
+    // %dst = global sym width: the runtime's variable `sym`, 8 bytes or 4
+    // (sign-extended)
+    Global(int32, str, int32),
+    // exit %code: the process ends with the low 8 bits of %code as its status
+    Exit(int32),
+    // moved $slot: the owning slot's value was moved out (into a container);
+    // it holds none now (no code)
+    Moved(int32),
+    // %dst = label sym: the address of the symbol `sym` (a function's code)
+    Label(int32, str),
+    // %dst = callind [%fv](%args): a call through the function value at %fv,
+    // its environment the first word (-1: no result)
+    CallInd(int32, int32, [int32]),
+    // callind [%fv] sret %r (%args): one with an aggregate result into %r
+    CallIndSret(int32, int32, [int32]),
+    // print ty %a: a scalar, as `print` writes it
+    Print(Type, int32),
+    // loc line col: the source position of the code that follows
+    Loc(Pos),
+    // bind name $slot: debug information, the variable lives in the slot from
+    // here to the end of the enclosing scope (a parameter: the whole function)
+    Bind(str, int32),
+    // scope open / close: the lexical scopes of debug information
+    Scope(bool),
+}
+
+// How a block ends.
+pub enum Term {
+    // not ended yet (only while lowering)
+    Open,
+    Jmp(int32),
+    // br %cond, then, else
+    Br(int32, int32, int32),
+    // ret %value, or -1 for none
+    Ret(int32),
+    // trap kind @pos: the runtime error `__trap_<kind>` at a position (a
+    // match no arm matched)
+    Trap(str, Pos),
+    // panic %msg @pos: the runtime error with the message string %msg at a
+    // position (`panic`, `unreachable`, a failed `assert`)
+    Panic(int32, Pos),
+}
+
+pub struct IrBlock { insts: [Inst], term: Term }
+
+// A slot: its name (for debug information and the text form), the Myla type
+// of what it holds, its size in bytes, for a parameter the index of its
+// argument word (`16 + 8 * word(%rbp)`, holding the value of a scalar and the
+// address of an aggregate) or -1, and whether it owns the heap values it holds
+// (a local, an owned temporary: the verifier follows it, MYLA-105).
+pub struct Slot { name: str, ty: Type, size: int32, word: int32, owns: bool }
+
+// A generic function's instance a function calls: the generic function and
+// its type arguments, which the code generator then stamps out.
+pub struct Instance { orig: str, targs: [Type] }
+
+// A function: its assembly name (without `myla_`), its result type (None:
+// none), its slots, the type of each temporary, its blocks, the order in
+// which lowering started the blocks, which is the order they are emitted in,
+// and the generic instances it calls.
+pub struct IrFunc { name: str, ret: Option<Type>, slots: [Slot], temps: [Type], blocks: [IrBlock], order: [int32], instances: [Instance] }
+
+// --- The text form --------------------------------------------------------------
+
+pub fun render_func(f: IrFunc) -> str {
+    var sb = StringBuilder()
+    var ret = ""
+    match f.ret {
+        Some(t) => { ret = " -> " + type_name(t) },
+        None => {},
+    }
+    append(sb, format("fun myla_{}{} {{\n", f.name, ret))
+    var i = 0
+    while i < len(f.slots) {
+        let s = f.slots[i]
+        var where = ""
+        if s.word >= 0 { where = format(" (argument {})", s.word) } else if s.size != 8 { where = format(" ({} bytes)", s.size) }
+        if s.owns { where = where + " owns" }
+        append(sb, format("  ${} {}: {}{}\n", i, s.name, type_name(s.ty), where))
+        i = i + 1
+    }
+    for b in f.order {
+        append(sb, format("L{}:\n", b))
+        for inst in f.blocks[b].insts { append(sb, "  " + render_inst(inst) + "\n") }
+        append(sb, "  " + render_term(f.blocks[b].term) + "\n")
+    }
+    append(sb, "}\n")
+    return build(sb)
+}
+
+#test(Inst.Const(0, Type.TInt(32, true), 42))["%t0 = const int32 42"]
+#test(Inst.Bin(3, "/", Type.TInt(32, true), Type.TInt(32, true), 1, 2, Pos { line: 4, col: 9 }))["%t3 = / int32 %t1, %t2 @4:9"]
+#test(Inst.Call(-1, "f", [1, 2]))["call myla_f(%t1, %t2)"]
+#test(Inst.Scope(true))["scope open"]
+pub fun render_inst(inst: Inst) -> str {
+    return match inst {
+        Inst.Const(d, t, v) => format("%t{} = const {} {}", d, type_name(t), v)
+        Inst.Str(d, text) => format("%t{} = str {}", d, quoted(text))
+        Inst.Load(d, s) => format("%t{} = load ${}", d, s)
+        Inst.Store(s, v) => format("store ${}, %t{}", s, v)
+        Inst.Addr(d, s) => format("%t{} = addr ${}", d, s)
+        Inst.Offset(d, p, off) => format("%t{} = %t{} + {}", d, p, off)
+        Inst.LoadAt(d, p, off) => format("%t{} = load [%t{} + {}]", d, p, off)
+        Inst.StoreAt(p, off, v) => format("store [%t{} + {}], %t{}", p, off, v)
+        Inst.Copy(d, src, size) => format("copy {} [%t{}], [%t{}]", size, d, src)
+        Inst.Bin(d, op, t, rt, a, b, pos) => render_bin(d, op, t, rt, a, b, pos)
+        Inst.Cmp(d, op, t, a, b) => format("%t{} = cmp {} {} %t{}, %t{}", d, op, type_name(t), a, b)
+        Inst.Un(d, op, t, a) => format("%t{} = {} {} %t{}", d, op, type_name(t), a)
+        Inst.Cast(d, from_t, to_t, a) => format("%t{} = cast {} -> {} %t{}", d, type_name(from_t), type_name(to_t), a)
+        Inst.Call(d, name, args) => render_call(d, name, args)
+        Inst.CallSret(name, r, args) => render_call(-1, name, args) + format(" sret %t{}", r)
+        Inst.Rt(d, name, args) => render_rt(d, name, args)
+        Inst.RetainVal(t, v) => format("retain {} %t{}", type_name(t), v)
+        Inst.Retain(t, p) => format("retain {} [%t{}]", type_name(t), p)
+        Inst.DropSlot(t, s) => format("drop {} ${}", type_name(t), s)
+        Inst.DropAt(t, p) => format("drop {} [%t{}]", type_name(t), p)
+        Inst.Init(s) => format("init ${}", s)
+        Inst.Elem(d, c, i, stride, is_str, p) => format("%t{} = elem %t{}[%t{}] {}{} @{}:{}", d, c, i, stride, str_suffix(is_str), p.line, p.col)
+        Inst.Load8(d, p) => format("%t{} = load8 [%t{}]", d, p)
+        Inst.Cow(d, t, h) => format("%t{} = cow {} [%t{}]", d, type_name(t), h)
+        Inst.Append(d, h, c, stride) => format("%t{} = append [%t{}] %t{} {}", d, h, c, stride)
+        Inst.Pop(d, c, stride, p) => format("%t{} = pop %t{} {} @{}:{}", d, c, stride, p.line, p.col)
+        Inst.RtPair(d, d2, name, args) => format("%t{}, ", d) + render_rt(d2, name, args)
+        Inst.Check(v, kind, p) => format("check %t{} {} @{}:{}", v, kind, p.line, p.col)
+        Inst.SbAppend(h, v) => format("sbappend [%t{}] %t{}", h, v)
+        Inst.SbAppendRange(h, v, a, b, p) => format("sbappend [%t{}] %t{}[%t{}..%t{}] @{}:{}", h, v, a, b, p.line, p.col)
+        Inst.SbAppendByte(h, b) => format("sbappendbyte [%t{}] %t{}", h, b)
+        Inst.SbBuild(d, c) => format("%t{} = sbbuild %t{}", d, c)
+        Inst.MapRemove(t, h, c, k) => format("mapremove {} [%t{}] %t{} %t{}", type_name(t), h, c, k)
+        Inst.Global(d, sym, w) => format("%t{} = global {} {}", d, sym, w)
+        Inst.Exit(v) => format("exit %t{}", v)
+        Inst.Moved(s) => format("moved ${}", s)
+        Inst.Label(d, sym) => format("%t{} = label {}", d, sym)
+        Inst.CallInd(d, fv, args) => render_call(d, format("[%t{}]", fv), args)
+        Inst.CallIndSret(fv, r, args) => render_call(-1, format("[%t{}]", fv), args) + format(" sret %t{}", r)
+        Inst.Print(t, a) => format("print {} %t{}", type_name(t), a)
+        Inst.Loc(p) => format("loc {} {}", p.line, p.col)
+        Inst.Bind(name, s) => format("bind {} ${}", name, s)
+        Inst.Scope(open) => match open {
+            true => "scope open"
+            false => "scope close"
+        }
+    }
+}
+
+fun render_bin(d: int32, op: str, t: Type, rt: Type, a: int32, b: int32, pos: Pos) -> str {
+    var text = format("%t{} = {} {} %t{}, %t{}", d, op, type_name(t), a, b)
+    if !type_eq_names(t, rt) { text = text + " -> " + type_name(rt) }
+    if pos.line > 0 { text = text + format(" @{}:{}", pos.line, pos.col) }
+    return text
+}
+
+fun type_eq_names(a: Type, b: Type) -> bool {
+    return type_name(a) == type_name(b)
+}
+
+fun render_call(d: int32, name: str, args: [int32]) -> str {
+    var sb = StringBuilder()
+    if d >= 0 { append(sb, format("%t{} = ", d)) }
+    append(sb, format("call myla_{}(", name))
+    var first = true
+    for a in args {
+        if !first { append(sb, ", ") }
+        append(sb, format("%t{}", a))
+        first = false
+    }
+    append(sb, ")")
+    return build(sb)
+}
+
+fun str_suffix(is_str: bool) -> str {
+    if is_str { return " str" }
+    return ""
+}
+
+fun render_rt(d: int32, name: str, args: [int32]) -> str {
+    var sb = StringBuilder()
+    if d >= 0 { append(sb, format("%t{} = ", d)) }
+    append(sb, format("rt {}(", name))
+    var first = true
+    for a in args {
+        if !first { append(sb, ", ") }
+        append(sb, format("%t{}", a))
+        first = false
+    }
+    append(sb, ")")
+    return build(sb)
+}
+
+#test(Term.Br(1, 2, 3))["br %t1, L2, L3"]
+#test(Term.Ret(-1))["ret"]
+#test(Term.Panic(2, Pos { line: 3, col: 4 }))["panic %t2 @3:4"]
+pub fun render_term(t: Term) -> str {
+    return match t {
+        Term.Open => "(open)"
+        Term.Jmp(b) => format("jmp L{}", b)
+        Term.Br(c, a, b) => format("br %t{}, L{}, L{}", c, a, b)
+        Term.Ret(v) => match v {
+            -1 => "ret"
+            _ => format("ret %t{}", v)
+        }
+        Term.Trap(kind, p) => format("trap {} @{}:{}", kind, p.line, p.col)
+        Term.Panic(m, p) => format("panic %t{} @{}:{}", m, p.line, p.col)
+    }
+}
+
+// `s` as a double-quoted string with `"`, `\` and control characters escaped.
+#test("a\"b\n")["\"a\\\"b\\n\""]
+fun quoted(s: str) -> str {
+    var sb = StringBuilder()
+    append(sb, "\"")
+    for c in chars(s) {
+        if c == '"' { append(sb, "\\\"") }
+        else if c == '\\' { append(sb, "\\\\") }
+        else if c == '\n' { append(sb, "\\n") }
+        else if c == '\t' { append(sb, "\\t") }
+        else { append(sb, format("{}", c)) }
+    }
+    append(sb, "\"")
+    return build(sb)
+}
+
+// --- The verifier (MYLA-105) ------------------------------------------------------
+
+// The ownership errors in `f`, "" if there are none: along every path from
+// the entry, an owning slot is stored into only while it holds nothing, and
+// dropped only while it holds a value; at `ret` none holds a value; and where
+// paths join they agree on which slots hold one. A `copy` or `call … sret`
+// into an owning slot's address stores into it. Blocks no path reaches aren't
+// checked (the code after a `return`).
+pub fun verify(f: IrFunc) -> str {
+    let n = len(f.blocks)
+    if n == 0 { return "" }
+    // the slot each temporary is the address of (`addr`), or -1
+    var addr_of: [int32] = []
+    for t in f.temps { push(addr_of, -1) }
+    for b in f.blocks {
+        for inst in b.insts {
+            match inst {
+                Inst.Addr(d, s) => { addr_of[d] = s },
+                _ => {},
+            }
+        }
+    }
+    // the state at each block's entry: which slots hold a value
+    var known: [bool] = []
+    var entry: [[bool]] = []
+    var none: [bool] = []
+    for s in f.slots { push(none, false) }
+    for b in f.blocks {
+        push(known, false)
+        push(entry, none)
+    }
+    known[0] = true
+    var work = [0]
+    while len(work) > 0 {
+        let b = work[len(work) - 1]
+        work = drop_last_int(work)
+        var live = entry[b]
+        for inst in f.blocks[b].insts {
+            let problem = step(f, inst, addr_of, live)
+            if problem != "" { return format("L{}: {}", b, problem) }
+            live = apply(f, inst, addr_of, live)
+        }
+        let succ = successors(f.blocks[b].term)
+        match f.blocks[b].term {
+            Term.Ret(v) => {
+                var i = 0
+                while i < len(live) {
+                    if live[i] { return format("L{}: ${} ({}) still holds a value at ret", b, i, f.slots[i].name) }
+                    i = i + 1
+                }
+            },
+            _ => {},
+        }
+        for s in succ {
+            if !known[s] {
+                known[s] = true
+                entry[s] = live
+                push(work, s)
+            } else {
+                var i = 0
+                while i < len(live) {
+                    if live[i] != entry[s][i] { return format("L{}: paths into L{} disagree on whether ${} ({}) holds a value", b, s, i, f.slots[i].name) }
+                    i = i + 1
+                }
+            }
+        }
+    }
+    return ""
+}
+
+// The slot an instruction stores into (an owning one), or -1.
+fun stored_slot(f: IrFunc, inst: Inst, addr_of: [int32]) -> int32 {
+    var s = -1
+    match inst {
+        Inst.Store(slot, v) => { s = slot },
+        Inst.Copy(d, src, size) => { s = addr_of[d] },
+        Inst.CallSret(name, r, args) => { s = addr_of[r] },
+        Inst.CallIndSret(fv, r, args) => { s = addr_of[r] },
+        Inst.Init(slot) => { s = slot },
+        _ => {},
+    }
+    if s >= 0 && f.slots[s].owns { return s }
+    return -1
+}
+
+// What is wrong with `inst` given which slots hold a value, or "".
+fun step(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> str {
+    match inst {
+        Inst.DropSlot(t, s) => {
+            if !f.slots[s].owns { return format("drop of ${} ({}), which owns nothing", s, f.slots[s].name) }
+            if !live[s] { return format("drop of ${} ({}), which holds no value", s, f.slots[s].name) }
+            return ""
+        },
+        Inst.Moved(s) => {
+            if !f.slots[s].owns { return format("move out of ${} ({}), which owns nothing", s, f.slots[s].name) }
+            if !live[s] { return format("move out of ${} ({}), which holds no value", s, f.slots[s].name) }
+            return ""
+        },
+        _ => {},
+    }
+    let s = stored_slot(f, inst, addr_of)
+    if s >= 0 && live[s] { return format("store into ${} ({}), which still holds a value", s, f.slots[s].name) }
+    return ""
+}
+
+fun apply(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> [bool] {
+    var out = live
+    match inst {
+        Inst.DropSlot(t, s) => { out[s] = false },
+        Inst.Moved(s) => { out[s] = false },
+        _ => {},
+    }
+    let s = stored_slot(f, inst, addr_of)
+    if s >= 0 { out[s] = true }
+    return out
+}
+
+fun successors(t: Term) -> [int32] {
+    return match t {
+        Term.Jmp(b) => [b]
+        Term.Br(c, a, b) => [a, b]
+        _ => []
+    }
+}
+
+// --- Uses ----------------------------------------------------------------------
+
+// The temporaries `inst` reads, one entry per operand (MYLA-108): what the
+// backend loads to emit it.
+#test(Inst.Copy(1, 2, 8))[[1, 2]]
+#test(Inst.CallIndSret(3, 4, [5, 5]))[[3, 4, 5, 5]]
+#test(Inst.Const(0, Type.TBool, 1))[[]]
+pub fun inst_uses(inst: Inst) -> [int32] {
+    return match inst {
+        Inst.Const(d, t, v) => []
+        Inst.Str(d, text) => []
+        Inst.Load(d, s) => []
+        Inst.Store(s, v) => [v]
+        Inst.Addr(d, s) => []
+        Inst.Offset(d, p, off) => [p]
+        Inst.LoadAt(d, p, off) => [p]
+        Inst.StoreAt(p, off, v) => [p, v]
+        Inst.Copy(d, src, size) => [d, src]
+        Inst.Bin(d, op, lt, rt, a, b, pos) => [a, b]
+        Inst.Cmp(d, op, t, a, b) => [a, b]
+        Inst.Un(d, op, t, a) => [a]
+        Inst.Cast(d, from_t, to_t, a) => [a]
+        Inst.Call(d, name, args) => args
+        Inst.CallSret(name, r, args) => prepend(r, args)
+        Inst.Rt(d, name, args) => args
+        Inst.RetainVal(t, v) => [v]
+        Inst.Retain(t, p) => [p]
+        Inst.DropSlot(t, s) => []
+        Inst.DropAt(t, p) => [p]
+        Inst.Init(s) => []
+        Inst.Elem(d, c, i, stride, is_str, pos) => [c, i]
+        Inst.Load8(d, p) => [p]
+        Inst.Cow(d, t, h) => [h]
+        Inst.Append(d, h, c, stride) => [h, c]
+        Inst.Pop(d, c, stride, pos) => [c]
+        Inst.RtPair(d, d2, name, args) => args
+        Inst.Check(v, kind, pos) => [v]
+        Inst.SbAppend(h, v) => [h, v]
+        Inst.SbAppendRange(h, v, a, b, pos) => [h, v, a, b]
+        Inst.SbAppendByte(h, b) => [h, b]
+        Inst.SbBuild(d, c) => [c]
+        Inst.MapRemove(t, h, c, k) => [h, c, k]
+        Inst.Global(d, sym, w) => []
+        Inst.Exit(v) => [v]
+        Inst.Moved(s) => []
+        Inst.Label(d, sym) => []
+        Inst.CallInd(d, fv, args) => prepend(fv, args)
+        Inst.CallIndSret(fv, r, args) => prepend(fv, prepend(r, args))
+        Inst.Print(t, a) => [a]
+        Inst.Loc(p) => []
+        Inst.Bind(name, s) => []
+        Inst.Scope(open) => []
+    }
+}
+
+// The temporaries a terminator reads.
+pub fun term_uses(t: Term) -> [int32] {
+    return match t {
+        Term.Br(c, a, b) => [c]
+        Term.Ret(v) => match v {
+            -1 => []
+            _ => [v]
+        }
+        Term.Panic(m, p) => [m]
+        _ => []
+    }
+}
+
+// The temporaries `inst` writes (a temporary can be written in more than one
+// block: the result of `&&`/`||`).
+#test(Inst.RtPair(1, 2, "f", [3]))[[1, 2]]
+#test(Inst.Call(-1, "f", [3]))[[]]
+#test(Inst.Store(0, 4))[[]]
+pub fun inst_defs(inst: Inst) -> [int32] {
+    return match inst {
+        Inst.Const(d, t, v) => [d]
+        Inst.Str(d, text) => [d]
+        Inst.Load(d, s) => [d]
+        Inst.Addr(d, s) => [d]
+        Inst.Offset(d, p, off) => [d]
+        Inst.LoadAt(d, p, off) => [d]
+        Inst.Bin(d, op, lt, rt, a, b, pos) => [d]
+        Inst.Cmp(d, op, t, a, b) => [d]
+        Inst.Un(d, op, t, a) => [d]
+        Inst.Cast(d, from_t, to_t, a) => [d]
+        Inst.Call(d, name, args) => result_temp(d)
+        Inst.Rt(d, name, args) => result_temp(d)
+        Inst.Elem(d, c, i, stride, is_str, pos) => [d]
+        Inst.Load8(d, p) => [d]
+        Inst.Cow(d, t, h) => [d]
+        Inst.Append(d, h, c, stride) => [d]
+        Inst.Pop(d, c, stride, pos) => [d]
+        Inst.RtPair(d, d2, name, args) => [d, d2]
+        Inst.SbBuild(d, c) => [d]
+        Inst.Global(d, sym, w) => [d]
+        Inst.Label(d, sym) => [d]
+        Inst.CallInd(d, fv, args) => result_temp(d)
+        _ => []
+    }
+}
+
+fun result_temp(d: int32) -> [int32] {
+    if d < 0 { return [] }
+    return [d]
+}
+
+// How many times each temporary of `f` is written.
+pub fun def_counts(f: IrFunc) -> [int32] {
+    var counts: [int32] = []
+    for t in f.temps { push(counts, 0) }
+    for b in f.blocks {
+        for inst in b.insts {
+            for d in inst_defs(inst) { counts[d] = counts[d] + 1 }
+        }
+    }
+    return counts
+}
+
+// How many times each temporary of `f` is read.
+pub fun use_counts(f: IrFunc) -> [int32] {
+    var counts: [int32] = []
+    for t in f.temps { push(counts, 0) }
+    for b in f.blocks {
+        for inst in b.insts {
+            for u in inst_uses(inst) { counts[u] = counts[u] + 1 }
+        }
+        for u in term_uses(b.term) { counts[u] = counts[u] + 1 }
+    }
+    return counts
+}
+
+fun prepend(x: int32, xs: [int32]) -> [int32] {
+    var out = [x]
+    for y in xs { push(out, y) }
+    return out
+}
+
+fun drop_last_int(xs: [int32]) -> [int32] {
+    var out: [int32] = []
+    var i = 0
+    while i + 1 < len(xs) {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+// --- Verifier tests ---------------------------------------------------------------
+
+// `verify` on a function of one block with `insts`, then `ret`: slot $0 is
+// an owning string slot, temporary %t0 a string.
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.DropSlot(Type.TStr, 0)])[""]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0)])["L0: $0 (s) still holds a value at ret"]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.DropSlot(Type.TStr, 0), Inst.DropSlot(Type.TStr, 0)])["L0: drop of $0 (s), which holds no value"]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Store(0, 0)])["L0: store into $0 (s), which still holds a value"]
+#test([Inst.DropSlot(Type.TStr, 1)])["L0: drop of $1 (b), which owns nothing"]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Moved(0)])[""]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Moved(0), Inst.DropSlot(Type.TStr, 0)])["L0: drop of $0 (s), which holds no value"]
+#test([Inst.Moved(0)])["L0: move out of $0 (s), which holds no value"]
+fun verify_block(insts: [Inst]) -> str {
+    return verify(test_func([IrBlock { insts: insts, term: Term.Ret(-1) }]))
+}
+
+// `verify` on a diamond: L0 stores into $0 and branches to L1 (`left`) and
+// L2 (`right`), which join in L3, which drops $0 and returns.
+#test([], [])[""]
+#test([Inst.DropSlot(Type.TStr, 0)], [])["L1: paths into L3 disagree on whether $0 (s) holds a value"]
+fun verify_diamond(left: [Inst], right: [Inst]) -> str {
+    return verify(test_func([
+        IrBlock { insts: [Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Const(1, Type.TBool, 1)], term: Term.Br(1, 1, 2) },
+        IrBlock { insts: left, term: Term.Jmp(3) },
+        IrBlock { insts: right, term: Term.Jmp(3) },
+        IrBlock { insts: [Inst.DropSlot(Type.TStr, 0)], term: Term.Ret(-1) },
+    ]))
+}
+
+fun test_func(blocks: [IrBlock]) -> IrFunc {
+    var order: [int32] = []
+    var i = 0
+    while i < len(blocks) {
+        push(order, i)
+        i = i + 1
+    }
+    return IrFunc {
+        name: "f", ret: None,
+        slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false }],
+        temps: [Type.TStr, Type.TBool], blocks: blocks, order: order, instances: [],
+    }
+}

@@ -100,6 +100,16 @@ PARITY_PROGRAMS = (
     "derived_eq_on_plain_enums",
     "const_string_concatenation_in_functions",
     "local_closure_shadows_a_function",
+    "plain_aggregates",
+    "strings_through_the_ir",
+    "lists_through_the_ir",
+    "maps_and_builders_through_the_ir",
+    "recursive_enums_through_the_ir",
+    "try_through_the_ir",
+    "function_values_through_the_ir",
+    "logical_results_as_values",
+    "aggregates_built_in_place",
+    "format_renders_chars",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -109,6 +119,7 @@ PARITY_PROGRAMS = (
 # over 4 GiB (with it, 8 to 18 MB) (MYLA-22).
 STRESS_PROGRAMS = {
     "STRESS_SRC": "354000000",
+    "STRESS_STR_OWNERSHIP_SRC": "4650000",
     "STRESS_TRY_SRC": "100000",
     "STRESS_TRY_AFTER_STAGED_VALUE_SRC": "7500000",
     "STRESS_LOOPCTL_SRC": "200001\n133333",
@@ -127,6 +138,7 @@ STRESS_PROGRAMS = {
     "STRESS_FOR_EARLY_RETURN_SRC": "6999999",
     "STRESS_LARGE_SIZES_SRC": "60002",
     "STRESS_MAP_OVERWRITE_SRC": "1090910",
+    "STRESS_BOXED_MEMBERS_SRC": "3840000",
 }
 PEAK_LIMIT_MB = 30
 
@@ -150,6 +162,46 @@ MODULE_PROJECTS = {
             "from std.process import args\n"
             "fun collect(n: int) -> int {\n    return n * 2\n}\n"
             "fun main() {\n    print(collect(len(args()) as int))\n}\n"),
+    },
+    # MYLA-105: the I/O intrinsics behind std.fs, std.process and std.io,
+    # with results that don't depend on the machine
+    "io_through_the_ir": {
+        "main.my": (
+            "from std.fs import read_to_string, write_to_file, current_dir, list_dir, make_dir, exists, is_dir, is_file\n"
+            "from std.process import args, run\n"
+            "from std.io import println, eprintln\n"
+            "fun main() {\n"
+            '    println("start")\n'
+            '    eprintln("to stderr")\n'
+            "    print(len(args()) > 0)\n"
+            "    match current_dir() {\n"
+            "        Ok(d) => { print(len(d) > 0) },\n"
+            "        Err(e) => { print(false) },\n"
+            "    }\n"
+            '    match read_to_string("/nonexistent/file") {\n'
+            "        Ok(s) => { print(s) },\n"
+            '        Err(e) => { print("no file") },\n'
+            "    }\n"
+            '    match write_to_file("/nonexistent/dir/file", "x") {\n'
+            "        Ok(n) => { print(n) },\n"
+            '        Err(e) => { print("not written") },\n'
+            "    }\n"
+            '    match list_dir("/nonexistent") {\n'
+            "        Ok(names) => { print(len(names)) },\n"
+            '        Err(e) => { print("no dir") },\n'
+            "    }\n"
+            '    match make_dir("/nonexistent/a/b") {\n'
+            "        Ok(n) => { print(n) },\n"
+            '        Err(e) => { print("not made") },\n'
+            "    }\n"
+            '    print(exists("/"))\n'
+            '    print(is_dir("/"))\n'
+            '    print(is_file("/"))\n'
+            '    match run("/bin/echo", ["hi"]) {\n'
+            "        Ok(o) => { print(len(o.stdout)) },\n"
+            '        Err(e) => { print("not run") },\n'
+            "    }\n"
+            "}\n"),
     },
     # the same private name in three modules
     "private_names_per_module": {
@@ -352,6 +404,15 @@ MODULE_ERRORS = {
         "pkg.my": "pub fun f() -> int {\n    return 1\n}\n",
         "pkg/pkg.my": "pub fun f() -> int {\n    return 2\n}\n",
     },
+    # several errors (MYLA-65, D80): each printed in its own file
+    "parse_errors_in_module": {
+        "main.my": "import lib\nfun main() {\n    print(lib.f())\n}\n",
+        "lib.my": "pub fun f() -> int {\n    return 1 +\n}\npub fun g( {\n}\nfun h() {\n    let = 2\n}\n",
+    },
+    "type_errors_in_two_modules": {
+        "main.my": "import lib\nfun main() {\n    let x: int = lib.f()\n    let y: str = 1\n}\n",
+        "lib.my": "pub fun f() -> str {\n    return 1\n}\nfun g() {\n    print(nope)\n}\n",
+    },
 }
 
 # A child's peak RSS counts its parent's memory at fork time, so the program
@@ -376,6 +437,17 @@ DIAGNOSTICS = {
     "chain_starting_on_an_earlier_line": "struct P { x: int }\nfun main() {\n    let p = [P { x: 1 },\n        P { x: 2 }][0].nope()\n}\n",
     "newline_token": "fun main() {\n    let x = 1 +\n    print(x)\n}\n",
     "end_of_input": "fun main() {\n    let x = (1",
+    # several errors (MYLA-65, D80), then the summary line
+    "several_parse_errors": "fun main() {\n    let = 1\n    print(1 +)\n}\nfun g(a int) {}\nstruct S {\n    a: int b: int\n}\n",
+    "several_type_errors": ("fun f() -> int {\n    return \"ä\"\n}\n#test(1)\nfun g(x: int) -> int {\n    return x\n}\n"
+                            "fun main() {\n    let x: int = true\n}\n"),
+    # notes (MYLA-65): on a later error, and in an imported module's file
+    "notes_on_several_errors": ("fun f() {\n    let n = 1\n    n = 2\n}\n"
+                                "fun main() {\n    let count = 1\n    print(cuont)\n}\n"),
+    "note_in_an_imported_module": {
+        "main.my": "from .util import label\nfun main() {\n    print(label(1))\n}\n",
+        "util.my": "pub fun label(n: int) -> str {\n    return n * 2\n}\n",
+    },
 }
 
 
@@ -536,9 +608,15 @@ class SelfHostedCodegenParity(unittest.TestCase):
         with self.assertRaises(MylaError) as ctx:
             check(link(entry, stdlib_root=stdlib))
         err = ctx.exception
-        path = err.path or entry
-        with open(path, encoding="utf-8") as fh:
-            expected = err.render(fh.read(), path)
+        # every error in its file, then a summary line (MYLA-65, D80)
+        shown = []
+        for e in (err, *err.more):
+            path = e.path or entry
+            with open(path, encoding="utf-8") as fh:
+                shown.append(e.render(fh.read(), path))
+        if err.more:
+            shown.append(f"error: aborting due to {len(shown)} previous errors")
+        expected = "\n\n".join(shown)
         proc = subprocess.run(
             [self._binary, entry, stdlib], capture_output=True, text=True
         )
@@ -562,7 +640,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertGreater(len(cases), 100)
         with tempfile.TemporaryDirectory() as tmp:
             for name, source in DIAGNOSTICS.items():
-                cases[name] = _write_project(os.path.join(tmp, name), {"main.my": source})
+                files = source if isinstance(source, dict) else {"main.my": source}
+                cases[name] = _write_project(os.path.join(tmp, name), files)
             for name, entry in sorted(cases.items()):
                 with self.subTest(case=name):
                     self._assert_diagnostic_matches(entry, stdlib)
@@ -579,6 +658,41 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 self.assertEqual((out.strip(), code), (expected, 0))
                 self.assertLess(peak, PEAK_LIMIT_MB, "memory was not reclaimed")
 
+    def test_the_ir_text_form(self) -> None:
+        # every function goes through the IR (D79, MYLA-107); `--emit-ir`
+        # prints it
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(IR_SAMPLE)
+            proc = subprocess.run([self._binary, path, "--emit-ir"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        start = proc.stdout.index("fun myla_scale")
+        self.assertEqual(proc.stdout[start:proc.stdout.index("}\n", start) + 2], IR_SAMPLE_TEXT)
+
+    def test_only_reachable_functions_are_emitted(self) -> None:
+        # MYLA-108: from the entry point, through calls, function values and
+        # partial applications
+        source = (
+            "fun unused() -> int { return 1 }\n"
+            "fun called() -> int { return 2 }\n"
+            "fun as_value(x: int) -> int { return x }\n"
+            "fun partly(a: int, b: int) -> int { return a + b }\n"
+            "fun main() {\n"
+            "    let f = as_value\n"
+            "    let g = partly(1, _)\n"
+            "    print(called() + f(3) + g(4))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("10\n", 0))
+        self.assertNotIn("myla_unused:", asm)
+        for name in ("called", "as_value", "partly", "main"):
+            self.assertIn(f"myla_{name}:", asm)
+
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS
 
@@ -589,6 +703,54 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     fh.write(PROGRAMS[name])
                 got = self._build_and_run(self._emit_asm(path))
                 self.assertEqual(got, _oracle(path))
+
+
+
+IR_SAMPLE = """\
+fun scale(x: int32, by: int32) -> int32 {
+    if x > 100 {
+        return x
+    }
+    return x * by
+}
+
+fun main() {
+    print(scale(7, 6))
+}
+"""
+
+IR_SAMPLE_TEXT = """\
+fun myla_scale -> int32 {
+  $0 x: int32 (argument 0)
+  $1 by: int32 (argument 1)
+L0:
+  bind x $0
+  bind by $1
+  scope open
+  loc 2 5
+  %t0 = load $0
+  %t1 = const int32 100
+  %t2 = cmp > int32 %t0, %t1
+  br %t2, L1, L2
+L1:
+  scope open
+  loc 3 9
+  %t3 = load $0
+  ret %t3
+L3:
+  scope close
+  jmp L2
+L2:
+  loc 5 5
+  %t4 = load $0
+  %t5 = load $1
+  %t6 = * int32 %t4, %t5 @5:14
+  ret %t6
+L4:
+  scope close
+  ret
+}
+"""
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
 // workspace.my: the declarations and identifiers of every `.my` file under
 // the workspace roots (MYLA-80), for cross-file definition, references,
-// hover and completion. Files come from
-// `find` (Myla has no directory listing), sorted; open documents count with
-// their unsaved text. A file's declarations are kept until its text changes.
+// hover and completion. Files are listed with `std.fs` (MYLA-97), sorted by
+// path, skipping the directories of builds, fetched dependencies and tools;
+// a caller adds roots of its own, such as the packages of a document's
+// project. Open documents count with their unsaved text. A file's
+// declarations are kept until its text changes.
 
-from std.process import run, Output
-from std.fs import read_to_string
+from std.fs import read_to_string, list_dir, is_dir
 from ...selfhost.lexer import lex
 from ...selfhost.parser import parse_source
 from ...selfhost.loader import normalize
@@ -101,37 +102,58 @@ fun sorted(xs: [str]) -> [str] {
     return out
 }
 
-fun decode(bytes: [uint8]) -> str {
-    var sb = StringBuilder()
-    for b in bytes { append_byte(sb, b) }
-    return build(sb)
+// Directories the scan doesn't enter: version control, builds, fetched
+// dependencies (a project's packages are roots of their own), tools' data.
+#test(".myla")[true]
+#test("src")[false]
+fun skipped(name: str) -> bool {
+    return name == ".git" || name == ".myla" || name == "build" || name == "node_modules" || name == ".venv" || name == "__pycache__" || name == "out"
+}
+
+#test("a.my")[true]
+#test(".my")[false]
+#test("a.myx")[false]
+fun is_source(name: str) -> bool {
+    let n = len(name)
+    return n > 3 && name[n - 3] == '.' && name[n - 2] == 'm' && name[n - 1] == 'y'
+}
+
+// Directories deeper than this aren't entered: `is_dir` follows symbolic
+// links, so a link to a parent would loop.
+const MAX_DEPTH: int32 = 32
+
+// The `.my` files under the directory `dir`, `depth` levels below a root.
+fun walk(dir: str, depth: int32) -> [str] {
+    var out: [str] = []
+    let names = match list_dir(dir) {
+        Ok(ns) => ns,
+        Err(e) => { return out },
+    }
+    for n in names {
+        let path = dir + "/" + n
+        if is_source(n) && !is_dir(path) {
+            push(out, path)
+        } else if !skipped(n) && depth < MAX_DEPTH && is_dir(path) {
+            for p in walk(path, depth + 1) { push(out, p) }
+        }
+    }
+    return out
 }
 
 impl Workspace {
-    // The `.my` files under the roots, skipping the directories
-    // workspace.py skips.
-    fun files(self) -> [str] {
+    // The `.my` files under the roots and the directories `extra`, each
+    // once, sorted.
+    fun files(self, extra: [str]) -> [str] {
         var seen: [str: bool] = [:]
         var out: [str] = []
-        for root in self.roots {
-            let argv = ["find", root, "(", "-name", ".git", "-o", "-name", ".venv", "-o", "-name", "node_modules", "-o", "-name", "__pycache__", "-o", "-name", "build", "-o", "-name", "out", ")", "-prune", "-o", "-type", "f", "-name", "*.my", "-print"]
-            match run("/usr/bin/env", argv) {
-                Ok(o) => {
-                    var sb = StringBuilder()
-                    for b in o.stdout {
-                        if b == '\n' {
-                            let p = normalize(build(sb))
-                            sb = StringBuilder()
-                            if !contains(seen, p) {
-                                seen[p] = true
-                                push(out, p)
-                            }
-                        } else {
-                            append_byte(sb, b)
-                        }
-                    }
-                },
-                Err(e) => {},
+        var dirs = self.roots
+        for d in extra { push(dirs, d) }
+        for d in dirs {
+            for p in walk(normalize(d), 0) {
+                if !contains(seen, p) {
+                    seen[p] = true
+                    push(out, p)
+                }
             }
         }
         return sorted(out)
@@ -167,18 +189,19 @@ impl Workspace {
         return self.cached(path, overrides).entries
     }
 
-    fun all_entries(var self, overrides: [str: str]) -> [Entry] {
+    // The declarations of the files (see `files`).
+    fun all_entries(var self, overrides: [str: str], extra: [str]) -> [Entry] {
         var out: [Entry] = []
-        for path in self.files() {
+        for path in self.files(extra) {
             for e in self.entries_for(path, overrides) { push(out, e) }
         }
         return out
     }
 
     // The declarations named `name`, highest priority first (stable).
-    fun lookup(var self, name: str, overrides: [str: str]) -> [Entry] {
+    fun lookup(var self, name: str, overrides: [str: str], extra: [str]) -> [Entry] {
         var matches: [Entry] = []
-        for e in self.all_entries(overrides) {
+        for e in self.all_entries(overrides, extra) {
             if e.name == name { push(matches, e) }
         }
         var out: [Entry] = []
@@ -190,11 +213,11 @@ impl Workspace {
         return out
     }
 
-    // Every identifier `name` in the workspace's files that isn't a local
+    // Every identifier `name` in the files (see `files`) that isn't a local
     // (MYLA-51: a parameter `total` is no reference to a function `total`).
-    fun references(var self, name: str, overrides: [str: str]) -> [Location] {
+    fun references(var self, name: str, overrides: [str: str], extra: [str]) -> [Location] {
         var out: [Location] = []
-        for path in self.files() {
+        for path in self.files(extra) {
             let c = self.cached(path, overrides)
             match get(c.idents, name) {
                 Some(ranges) => {

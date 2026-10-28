@@ -1,8 +1,12 @@
 """The Myla parser: a list of Tokens -> an AST (a `Program`).
 
 Recursive descent with a layered expression grammar encoding precedence and
-associativity, mirroring docs/Language/Grammar.md Panic-mode error handling: the
-first syntax error raises `ParseError` (docs/Architecture/Lexer-and-parser.md).
+associativity, mirroring docs/Language/Grammar.md. A syntax error raises
+`ParseError`; a block, an impl or trait body and the program catch it, record
+it and resume at the next statement, member or declaration (`_sync`), so one
+run reports up to MAX_ERRORS of them (MYLA-65, D80;
+docs/Architecture/Lexer-and-parser.md). `parse` raises the first, with the
+others in its `more`.
 
 Newlines (NEWLINE tokens) separate statements and top-level declarations; a
 `;` may stand for such a newline (D61), and a run of both is one separator. A
@@ -18,8 +22,29 @@ few notes on the tricky bits:
 from __future__ import annotations
 
 from . import ast
-from .errors import ParseError
+from .errors import MAX_ERRORS, ParseError
 from .tokens import Token, TokenKind as T
+
+# The tokens that begin a declaration, and those that begin a statement other
+# than an expression: where the parser resumes after an error (`_sync`).
+_DECL_START = {T.FUN, T.STRUCT, T.ENUM, T.IMPL, T.TRAIT, T.TYPEALIAS, T.CONST,
+               T.IMPORT, T.FROM, T.PUB, T.HASH}
+_STMT_START = {T.LET, T.VAR, T.IF, T.WHILE, T.FOR, T.RETURN, T.BREAK, T.CONTINUE}
+
+# What `_sync` skips to: the next statement of a block, the next member of an
+# impl or trait body, the next top-level declaration.
+_STMT, _MEMBER, _DECL = "statement", "member", "declaration"
+
+
+class _Unwind(Exception):
+    """Leaves the declaration being parsed without a new error: after an error,
+    a block reached a line that starts a declaration, so its closing brace is
+    missing. The impl or trait body (at a method) or the program catches it."""
+
+
+class _Stop(Exception):
+    """MAX_ERRORS errors were recorded: the parse ends."""
+
 
 # Token kinds that name a primitive type in a type position.
 _PRIM_TYPE_KINDS = {
@@ -34,6 +59,7 @@ class Parser:
         self.tokens = list(tokens)       # a copy: `_type_args` may split a `>=`
         self.pos = 0
         self._allow_struct_lit = True
+        self.errors: list[ParseError] = []
 
     # -- cursor helpers ------------------------------------------------------
 
@@ -95,10 +121,84 @@ class Parser:
     def parse_program(self) -> ast.Program:
         decls: list[ast.Decl] = []
         self._skip_separators()
-        while not self._at_end():
-            decls.append(self._declaration())
-            self._terminate("declaration")
+        try:
+            while not self._at_end():
+                start = self.pos
+                try:
+                    decls.append(self._declaration())
+                    self._terminate("declaration")
+                except ParseError as err:
+                    self._recover(err, start, _DECL)
+                except _Unwind:
+                    pass
+                self._skip_separators()
+        except _Stop:
+            pass
+        if self.errors:
+            first = self.errors[0]
+            first.more = self.errors[1:]
+            raise first
         return ast.Program(decls)
+
+    # -- error recovery (MYLA-65, D80) ----------------------------------------
+
+    def _recover(self, err: ParseError, start: int, mode: str) -> None:
+        """Record `err`, raised while parsing from token `start`, and skip to
+        where parsing can go on (`_sync`). An error that is not after the last
+        one recorded is dropped: it follows from that one. `_recover` moves
+        past `start` unless a block or body ends there (at its `}` or,
+        unwinding, at a declaration), so a loop calling it makes progress."""
+        last = self.errors[-1] if self.errors else None
+        if last is None or (err.line, err.column) > (last.line, last.column):
+            self.errors.append(err)
+            if len(self.errors) >= MAX_ERRORS:
+                raise _Stop()
+        self._sync(start, mode)
+        if self.pos == start and (mode == _DECL or not (
+                self._check(T.RBRACE) or self._resuming_at_declaration())):
+            self._advance()
+
+    def _at_line_start(self) -> bool:
+        return self.pos == 0 or self.tokens[self.pos - 1].kind in (T.NEWLINE, T.SEMI)
+
+    def _sync(self, start: int, mode: str) -> None:
+        """Skip from the error to where a `mode` can begin. The brackets
+        opened since `start` (the statement, member or declaration's first
+        token) and not closed are tracked, so a construct spanning lines is
+        skipped whole. It stops at the end of the input; at a line starting a
+        declaration (in a member or a declaration only when no brace is open,
+        or when it is at column 1); at a `}` closing the enclosing block or
+        body; and, for a statement, at a newline or `;` with no brace open,
+        when no bracket is open either or the next line starts a statement,
+        a declaration or with `}`."""
+        opens: list[T] = []
+        for i in range(start, self.pos):
+            _nest(opens, self.tokens[i].kind)
+        while not self._at_end():
+            tok = self._peek()
+            k = tok.kind
+            brace = T.LBRACE in opens
+            if k in _DECL_START and self._at_line_start():
+                if mode == _STMT or not brace or tok.column == 1:
+                    return
+            if k is T.RBRACE and not brace and mode != _DECL:
+                return
+            if mode == _STMT and k in (T.NEWLINE, T.SEMI) and not brace:
+                nxt = self._peek(1).kind
+                if not opens or nxt in _STMT_START or nxt in _DECL_START or nxt is T.RBRACE:
+                    return
+            _nest(opens, k)
+            self._advance()
+
+    def _resuming_at_declaration(self) -> bool:
+        """Whether the last error is at the next token, which starts a
+        declaration on its line: then the block or body being parsed is
+        missing its `}`, and the parse resumes at the declaration."""
+        tok = self._peek()
+        if not self.errors or tok.kind not in _DECL_START or not self._at_line_start():
+            return False
+        last = self.errors[-1]
+        return (last.line, last.column) == (tok.line, tok.column)
 
     def _terminate(self, what: str) -> None:
         """Require a separator / RBRACE / EOF after a statement or declaration."""
@@ -351,13 +451,8 @@ class Parser:
         self._skip_separators()
         methods: list[ast.FunDecl] = []
         while not self._check(T.RBRACE) and not self._at_end():
-            if not self._check(T.FUN):
-                tok = self._peek()
-                raise ParseError(
-                    f"expected a method ('fun ...') in impl block, found '{tok.lexeme}'",
-                    at=tok,
-                )
-            methods.append(self._method_decl())
+            self._member(lambda: methods.append(self._method_decl()),
+                         "a method ('fun ...') in impl block")
             # a method always ends in `}`, so the next method's `fun` (or the
             # impl's closing `}`) may follow on the same or a later line.
             self._skip_separators()
@@ -376,19 +471,31 @@ class Parser:
         self._skip_separators()
         methods: list[ast.FunDecl] = []
         while not self._check(T.RBRACE) and not self._at_end():
-            if not self._check(T.FUN):
-                tok = self._peek()
-                raise ParseError(
-                    f"expected a method signature ('fun ...') in trait body, "
-                    f"found '{tok.lexeme}'",
-                    at=tok,
-                )
-            methods.append(self._method_sig())
+            self._member(lambda: methods.append(self._method_sig()),
+                         "a method signature ('fun ...') in trait body")
             self._skip_separators()
         self._expect(T.RBRACE, "'}' to close trait body")
         return ast.TraitDecl(
             name.value, methods, type_params=type_params
         ).at(kw.line, kw.column, self._end())
+
+    def _member(self, parse_method, what: str) -> None:
+        """One member of an impl or trait body: `parse_method` at a `fun`.
+        After an error, the next `fun` or the body's `}`; a line starting
+        another declaration (or at column 1) leaves the body (`_Unwind`)."""
+        tok = self._peek()
+        if self._resuming_at_declaration() and (tok.kind is not T.FUN or tok.column == 1):
+            raise _Unwind()
+        start = self.pos
+        try:
+            if not self._check(T.FUN):
+                raise ParseError(f"expected {what}, found '{tok.lexeme}'", at=tok)
+            parse_method()
+        except ParseError as err:
+            self._recover(err, start, _MEMBER)
+        except _Unwind:
+            if not (self._check(T.FUN) and self._peek().column > 1):
+                raise
 
     def _method_header(self):
         """Parse a method header `fun name<…>(self|var self, params…) -> ret`,
@@ -539,16 +646,23 @@ class Parser:
         stmts: list[ast.Stmt] = []
         self._skip_separators()
         while not self._check(T.RBRACE) and not self._at_end():
-            stmts.append(self._statement())
-            if self._at_separator():
+            if self._resuming_at_declaration():
+                raise _Unwind()
+            start = self.pos
+            try:
+                stmts.append(self._statement())
+                if self._at_separator():
+                    self._skip_separators()
+                elif self._check(T.RBRACE):
+                    break
+                else:
+                    tok = self._peek()
+                    raise ParseError(
+                        f"expected newline, ';' or '}}', found '{tok.lexeme}'", at=tok
+                    )
+            except ParseError as err:
+                self._recover(err, start, _STMT)
                 self._skip_separators()
-            elif self._check(T.RBRACE):
-                break
-            else:
-                tok = self._peek()
-                raise ParseError(
-                    f"expected newline, ';' or '}}', found '{tok.lexeme}'", at=tok
-                )
         self._expect(T.RBRACE, "'}'")
         return ast.Block(stmts).at(lbrace.line, lbrace.column, self._end())
 
@@ -1164,6 +1278,19 @@ class Parser:
         if not (t.kind is T.IDENT and t.value == "_"):
             return False
         return self._peek(1).kind in (T.COMMA, T.RPAREN)
+
+
+def _nest(opens: list[T], kind: T) -> None:
+    """Track the brackets open while skipping tokens (`Parser._sync`): an
+    opening one is pushed; a closing one pops back to its partner, or is
+    ignored without one."""
+    if kind in (T.LPAREN, T.LBRACKET, T.LBRACE):
+        opens.append(kind)
+        return
+    partner = {T.RPAREN: T.LPAREN, T.RBRACKET: T.LBRACKET, T.RBRACE: T.LBRACE}.get(kind)
+    if partner is not None and partner in opens:
+        while opens.pop() is not partner:
+            pass
 
 
 def _is_lvalue(expr: ast.Expr) -> bool:

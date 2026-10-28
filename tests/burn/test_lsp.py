@@ -22,7 +22,8 @@ from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 from ._tools import myla_tool, selfhost_tool
-from ._lsp_scenarios import LspScenarios, LspRequestHelpers, LspRequestScenarios, _Client, _uri, rng
+from ._lsp_scenarios import (LspScenarios, LspRequestHelpers, LspRequestScenarios, ProjectScenarios,
+                             WorkspaceScanScenarios, _Client, _uri, rng)
 
 
 _TMP = tempfile.TemporaryDirectory()
@@ -206,6 +207,44 @@ class TestMylaLspRobustness(RobustnessScenarios, unittest.TestCase):
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestMylaLspRobustnessSelfHosted(TestMylaLspRobustness):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = _self_hosted_build()
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspProjects(ProjectScenarios, unittest.TestCase):
+    """Documents in a project with a path dependency (MYLA-97)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = myla_tool("tools/lsp/main.my", "lsp")
+
+    def server_command(self) -> list[str]:
+        return [self.binary, "--stdlib", default_stdlib_root()]
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspProjectsSelfHosted(TestMylaLspProjects):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = _self_hosted_build()
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspWorkspaceScan(WorkspaceScanScenarios, unittest.TestCase):
+    """The workspace's files, listed with std.fs (MYLA-97)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.binary = myla_tool("tools/lsp/main.my", "lsp")
+
+    def server_command(self) -> list[str]:
+        return [self.binary, "--stdlib", default_stdlib_root()]
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+class TestMylaLspWorkspaceScanSelfHosted(TestMylaLspWorkspaceScan):
     @classmethod
     def setUpClass(cls) -> None:
         cls.binary = _self_hosted_build()

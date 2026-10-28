@@ -11,7 +11,7 @@
 // that: another commit is another directory.
 
 from std.process import run, Output, ExitStatus
-from std.fs import exists, is_file, make_dir_all, write_to_file
+from std.fs import exists, is_file, make_dir_all, write_to_file, remove_dir_all, rename
 from std.io import eprintln
 from .project import resolve_project, load_project, project_lock, render_lock, lock_of, render_project_error, parent_dir, ref_text
 from .project import Project, Lock, LockEntry, GitPackage, GitSource, GitRef
@@ -103,10 +103,8 @@ pub fun check_out(g: GitPackage) -> Result<int32, str> {
         remove_tree(partial)
         return Err(failed + "\n" + trim_end(co.err))
     }
-    match run("/usr/bin/env", ["mv", partial, g.dir]) {
-        Ok(out) => {
-            if !finished(out).ok { return Err(format("myla: cannot rename {} to {}", partial, g.dir)) }
-        },
+    match rename(partial, g.dir) {
+        Ok(n) => {},
         Err(e) => { return Err(format("myla: cannot rename {} to {}", partial, g.dir)) },
     }
     return Ok(0)
@@ -181,8 +179,8 @@ fun with_entry(lock: Lock, e: LockEntry) -> Lock {
 
 // Remove the directory tree `path`; whether that worked.
 fun remove_tree(path: str) -> bool {
-    return match run("/usr/bin/env", ["rm", "-rf", path]) {
-        Ok(out) => finished(out).ok
+    return match remove_dir_all(path) {
+        Ok(n) => true
         Err(e) => false
     }
 }

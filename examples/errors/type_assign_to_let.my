@@ -1,6 +1,9 @@
 //~ type error: cannot assign to an immutable binding
 //~ span: x = 2
-// `let` bindings are immutable; use `var` to reassign.
+//~ note: 'x' is declared here
+//~ note span: let x = 1
+// `let` bindings are immutable; use `var` to reassign. The note shows where the
+// binding was declared (MYLA-65).
 fun main() {
     let x = 1
     x = 2

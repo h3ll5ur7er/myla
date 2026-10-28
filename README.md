@@ -1,5 +1,7 @@
 # Myla Programming Language
 
+[![CI](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml)
+
 Very simple custom language with a compiler and an interpreter.
 Inspired by modern languages like Swift, Rust, and Python.
 

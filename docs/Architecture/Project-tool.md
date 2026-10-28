@@ -3,7 +3,7 @@
 The design of `myla` as a project tool like cargo ([[MYLA-64]]): a manifest, dependencies from paths and Git, and the commands `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` in the self-hosted CLI. The decisions behind it are D73 on [[Project/Decisions]]; this page fills in the details.
 
 > [!NOTE]
-> **Status: built.** The design and the answers to its [questions](#settled-questions) were approved on 2026-10-27 and built the same day: the file-system functions ([[MYLA-88]], [[MYLA-98]]), the TOML parser ([[MYLA-89]]), the loaders' `--package` ([[MYLA-92]]), the project model ([[MYLA-93]]), the commands ([[MYLA-94]]) and Git dependencies with `myla fetch` ([[MYLA-95]]). Still open: the language server reading projects ([[MYLA-97]]).
+> **Status: built.** The design and the answers to its [questions](#settled-questions) were approved on 2026-10-27 and built the same day: the file-system functions ([[MYLA-88]], [[MYLA-98]]), the TOML parser ([[MYLA-89]]), the loaders' `--package` ([[MYLA-92]]), the project model ([[MYLA-93]]), the commands ([[MYLA-94]]) and Git dependencies with `myla fetch` ([[MYLA-95]]), and the language server reading projects ([[MYLA-97]], D81).
 
 [TOC]
 
@@ -242,7 +242,7 @@ The self-hosted CLI `build/myla` runs a command in **project mode** when it is g
 | `myla build [-g]` | Resolves the packages (fetching what the lock file names but isn't checked out yet, see `fetch`), type-checks `src/main.my` with them and compiles it to `build/<name>`; `-g` adds line tables as in file mode | No `myla.toml` here or above; a manifest error, with file, line and column; a dependency error (missing, two versions, no library, name mismatch); a Git dependency without a current lock entry (``run `myla fetch` ``, [question 1](#settled-questions)); no `src/main.my` (``'shapes' has no program (src/main.my); `myla check` checks its library``); any compile error, as in file mode |
 | `myla run [args…]` | Like `build` up to the type check, then interprets `src/main.my` with `args` as in file mode ([question 6](#settled-questions)) | As for `build`; a runtime error; the program's exit status is `myla`'s |
 | `myla test` | Runs the `#test` cases of every `.my` file under `src/`, in sorted order, each file's own cases once, with the packages; prints `== <file>` and the file's PASS/FAIL lines for each file that has cases, then `<passed>/<total> passed in <n> files.` (`no #test cases found.` without any) | As for `build`, per file: a file that doesn't compile prints its error and the others still run; exits with 1 if a case fails or a file doesn't compile |
-| `myla check` | Type-checks every `.my` file under `src/` with the packages; prints nothing when all is well | Every file's first error |
+| `myla check` | Type-checks every `.my` file under `src/` with the packages; prints nothing when all is well | Every file's errors (up to 20 each, D80) |
 | `myla fetch [--update]` | Resolves the Git dependencies of the whole build: for each one without a current lock entry (or each one, with `--update`), asks the remote for the commit, checks it out into `.myla/deps/<name>-<commit>/` if that directory doesn't exist, and writes `myla.lock` | Git isn't installed; Git fails (its stderr is shown with the dependency's name and URL); a reference doesn't exist; a dependency error as for `build` |
 | `myla clean` | Removes `build/` (with `--deps` also `.myla/`) | A file can't be removed |
 
@@ -281,7 +281,7 @@ These were open while the design was proposed; each was settled as proposed (202
 1. **Implicit fetching.** Should `build`, `run`, `test` and `check` fetch on their own when the lock file is missing or not current (as cargo does), or stop with "run `myla fetch`"? *Settled:* they check out commits the lock file already names (so a fresh clone builds with one command), but only `myla fetch` resolves references and writes `myla.lock`; a missing or stale entry is an error that says to run it. Builds then never change files under version control.
 2. **A library importing itself by name.** Inside its own project a library's `src/shapes.my` is the project module `shapes`; as a dependency it is `geo.shapes`. *Settled:* modules of a library import each other relatively, and the tool doesn't pass the root package as a `--package`. Alternative: pass it too, and let a package whose directory is the project root shadow nothing (then `geo.shapes` would also work inside `geo`, but one file could get two module ids).
 3. **Visibility of packages.** Every module may import every package of the build, also packages it didn't declare (a dependency's dependencies). *Settled:* accept that for now; restricting it needs the loader to know which package a module belongs to.
-4. **Removing files.** `myla clean` and the `.partial` checkouts need to remove directories, and the checkout needs a rename; `std.fs` can't do either. *Settled:* run `rm -rf` and `mv` through `std.process` as the CLI runs `rm -f` today; primitives (`unlink`, `rmdir`, `rename`) are [[MYLA-96]] if they are wanted instead.
+4. **Removing files.** `myla clean` and the `.partial` checkouts need to remove directories, and the checkout needs a rename; `std.fs` couldn't do either. *Settled* at first to run `rm -rf` and `mv` through `std.process`; since [[MYLA-96]] `std.fs` has `remove_dir_all`, `remove_file` and `rename`, which `myla clean`, the checkouts and `myla build`'s intermediate files use.
 5. **`myla new` options.** Should it run `git init`, and offer `--lib` (a `src/<name>.my` instead of `src/main.my`)? *Settled:* neither at first.
 6. **`myla run`: interpret or build?** cargo builds and runs the binary. *Settled:* interpret, as `myla run file.my` does; `myla build && build/<name>` runs the binary.
 7. **Finding the project.** *Settled:* the current directory and its parents, the nearest `myla.toml` wins. Alternative: the current directory only.
@@ -304,7 +304,7 @@ The follow-up tasks in the epic `Project tool`:
 | [[MYLA-98]] | `std.fs.current_dir` and its primitive `__getcwd`, for finding the manifest and absolute paths (done, in review) |
 | [[MYLA-94]] | The commands `new`, `build`, `run`, `test`, `check` and `clean` in `build/myla`, with path dependencies; [[Getting started]] and [[Language/Modules]] describe projects (done, in review) |
 | [[MYLA-95]] | Git dependencies: `myla fetch`, `.myla/deps/`, the lock file (done, in review) |
-| [[MYLA-96]] | Not needed for now (question 4 was settled for `rm -rf` and `mv` through `std.process`): `std.fs` primitives to remove and rename files and directories |
-| [[MYLA-97]] | The language server: index files with `list_dir`, and find packages so definitions in dependencies resolve |
+| [[MYLA-96]] | `std.fs` primitives to remove and rename files and directories, used by `myla clean`, the checkouts and `myla build` instead of `rm` and `mv` |
+| [[MYLA-97]] | The language server: index files with `list_dir`, and find packages so definitions in dependencies resolve (done, in review: a document in a project is checked and resolved with its packages and `src/` as the root, Git dependencies as far as they are checked out, manifest errors on `myla.toml`; [[Architecture/Editor-tooling]], D81) |
 
 [[MYLA-64]] is done when a fresh `myla new` project with one path dependency builds, runs and tests ([[MYLA-94]]).

@@ -1,0 +1,16 @@
+//~ type error: cannot assign to an immutable binding
+//~ span: p.x = 2
+//~ note: 'p' is declared here
+//~ note span: p: P
+// Parameters are immutable; the note points at the parameter the assigned place
+// starts from (MYLA-65).
+struct P { x: int }
+
+fun f(p: P) -> int {
+    p.x = 2
+    return p.x
+}
+
+fun main() {
+    print(f(P { x: 1 }))
+}

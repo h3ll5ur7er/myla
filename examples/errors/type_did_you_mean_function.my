@@ -1,0 +1,7 @@
+//~ type error: unknown function 'pirnt'
+//~ span: pirnt("hi")
+//~ help: did you mean 'print'?
+// Built-in functions are suggested too.
+fun main() {
+    pirnt("hi")
+}

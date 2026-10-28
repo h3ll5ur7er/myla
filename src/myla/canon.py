@@ -71,11 +71,31 @@ def canonical_tokens(tokens: list[Token]) -> str:
 def canonical_error(err) -> str:
     """A diagnostic as the self-hosted drivers print it:
     `err <line> <col> <span> <kind>: <message>`, the span `l:c-l:c` or `-`
-    (MYLA-65), a missing position `-`."""
+    (MYLA-65), a missing position `-`, then a line for each of its notes."""
     line = "-" if err.line is None else str(err.line)
     col = "-" if err.column is None else str(err.column)
     span = "-" if err.span is None else "{}:{}-{}:{}".format(*err.span)
-    return f"err {line} {col} {span} {err.kind.split()[0]}: {err.message}"
+    out = f"err {line} {col} {span} {err.kind.split()[0]}: {err.message}"
+    for n in err.notes:
+        out += "\n" + canonical_note(n)
+    return out
+
+
+def canonical_note(n) -> str:
+    """A note on an error as the self-hosted drivers print it, after the error
+    (MYLA-65): `<label> <line> <col> <span>: <message>`, `-` for a missing
+    position or span."""
+    line = "-" if n.line is None else str(n.line)
+    col = "-" if n.column is None else str(n.column)
+    span = "-" if n.span is None else "{}:{}-{}:{}".format(*n.span)
+    return f"{n.label} {line} {col} {span}: {n.message}"
+
+
+def canonical_errors(err) -> str:
+    """`err` and the errors in its `more` (MYLA-65, D80), one
+    `canonical_error` line each: what the self-hosted drivers print for a
+    run's errors."""
+    return "\n".join(canonical_error(e) for e in (err, *err.more))
 
 
 # --- canonical AST dump (self-hosting v0.6b) -------------------------------

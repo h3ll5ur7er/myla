@@ -155,6 +155,32 @@ class TestSelfHostedLineTables(unittest.TestCase):
                                     capture_output=True, text=True, check=True).stdout
         self.assertEqual(table(selfhosted), table(python))
 
+    def test_both_backends_embed_the_pretty_printers(self):
+        # an inline Python script (kind 4) in .debug_gdb_scripts: src/myla/debug/myla_gdb.py
+        from myla.compiler import build
+        from myla.loader import link
+        from myla.types import check
+
+        def section(binary: str) -> bytes:
+            names = subprocess.run(["readelf", "-S", "-W", binary], capture_output=True,
+                                   text=True, check=True).stdout
+            if ".debug_gdb_scripts" not in names:
+                return b""
+            raw = os.path.join(self.dir, "scripts.bin")
+            subprocess.run(["objcopy", f"--dump-section=.debug_gdb_scripts={raw}", binary,
+                            os.path.join(self.dir, "scratch.o")], check=True)
+            with open(raw, "rb") as fh:
+                return fh.read()
+
+        python = os.path.join(self.dir, "prog_py")
+        build(check(link(os.path.join(self.dir, "main.my"), stdlib_root=self.stdlib)), python,
+              debug=True)
+        with open(GDB_SCRIPT, "rb") as fh:
+            expected = b"\x04myla-printers\n" + fh.read() + b"\x00"
+        self.assertEqual(section(python), expected)
+        self.assertEqual(section(self.build("-g")), expected)
+        self.assertEqual(section(self.build()), b"")      # only with -g
+
     def test_the_compile_unit_names_the_working_directory(self):
         # std.fs.current_dir (MYLA-98), as the Python backend's os.getcwd()
         asm = subprocess.run([self.gen, "main.my", self.stdlib, "-g"], cwd=self.dir,
@@ -188,13 +214,20 @@ class TestSelfHostedLineTables(unittest.TestCase):
         self.assertIn("main.my:4", session)                # the caller's line
 
 
-def gdb(binary: str, *commands: str) -> str:
-    """gdb's output for `commands`, run in batch mode on `binary`."""
+def gdb(binary: str, *commands: str, printers: bool = False) -> str:
+    """gdb's output for `commands`, run in batch mode on `binary`; with
+    `printers`, gdb may auto-load the pretty-printers the binary embeds."""
     args = ["gdb", "-q", "-batch", "-nx"]
+    if printers:
+        args += ["-iex", f"add-auto-load-safe-path {binary}"]
     for command in commands:
         args += ["-ex", command]
     return subprocess.run(args + [binary], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, timeout=60).stdout
+
+
+GDB_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir,
+                          "src", "myla", "debug", "myla_gdb.py")
 
 
 # Scalars of every kind, a loop variable, shadowing and a match binding.
@@ -272,6 +305,56 @@ fun main() {
 }
 """
 
+# Heap values inside aggregates, lists and maps, float32 fields and elements, a
+# boxed enum, and functions returning an aggregate, an integer and a string,
+# for the pretty-printers and `finish` (MYLA-66).
+HEAP = """\
+struct Bag {
+    items: [int],
+    label: str,
+    ratio: float,
+    tags: [str: int],
+}
+
+enum Tree {
+    Leaf(int),
+    Node(Tree, Tree),
+}
+
+fun make_bag(n: int) -> Bag {
+    return Bag { items: [n, n + 1], label: "two", ratio: 0.1, tags: ["k": n] }
+}
+
+fun total(b: Bag) -> int {
+    return b.items[0] + b.items[1]
+}
+
+fun greet(name: str) -> str {
+    return "hi " + name
+}
+
+fun main() {
+    let bag = make_bag(4)
+    let words = ["a", "b"]
+    let m = ["x": 1]
+    let names = [1: "one"]
+    let pair = (1.5, "p")
+    let fs = [0.1, 0.25]
+    let tree = Tree.Node(Tree.Leaf(1), Tree.Leaf(2))
+    let nested = [[1, 2], [3]]
+    print(total(bag))
+    print(greet("bo"))
+    print(len(words) + len(m) + len(names) + len(pair.1) + len(fs) + len(nested))
+    match tree { Node(_, _) => print(1), Leaf(v) => print(v) }
+}
+"""
+HEAP_LOCALS = (
+    'bag = Bag {items: [4, 5], label: "two", ratio: 0.100000001, tags: {"k": 4}}',
+    'words = ["a", "b"]', 'm = {"x": 1}', 'names = {1: "one"}', 'pair = (1.5, "p")',
+    "fs = [0.100000001, 0.25]", "tree = Tree::Node(Tree::Leaf(1), Tree::Leaf(2))",
+    "nested = [[1, 2], [3]]",
+)
+
 
 class GdbVariables:
     """What gdb shows of the variables in a `-g` build (MYLA-66): `build(name,
@@ -317,7 +400,7 @@ class GdbVariables:
             self.assertIn(line + "\n", session)
         self.assertIn("$1 = -2\n$2 = 4\n", session)
         self.assertRegex(session, r"\$3 = str \{len: 1, bytes: \[99 'c'\]\}")
-        self.assertRegex(session, r"\$4 = \[str: int32\] \{len: 1, cap: \d+\}")
+        self.assertRegex(session, r"\$4 = \[str: int32\] \{len: 1, cap: \d+, slots: \[")
 
     def test_set_var_writes_a_value_the_program_reads(self):
         # a signed slot is described whole, so a negative value is written
@@ -335,6 +418,44 @@ class GdbVariables:
         self.assertIn("self = Point {x: 3, y: 1.5}\ndx = 4\n", session)
         self.assertIn("n = 1\n", session)        # the lambda's parameter
         self.assertIn("k = 10\n", session)       # its capture
+
+    def test_the_printers_show_heap_values_inside_aggregates(self):
+        # the pretty-printers the binary embeds, auto-loaded where allowed
+        session = gdb(self.build("heap", HEAP), "break heap.my:34", "run", "info locals",
+                      "print *words[1]", "print/r *words[1]", "print bag.tags", printers=True)
+        for line in HEAP_LOCALS:
+            self.assertIn(line + "\n", session)
+        self.assertIn('$1 = "b"\n', session)                        # a cell, dereferenced
+        self.assertIn("$2 = str {len: 1, bytes: [98 'b']}\n", session)  # raw: the cell
+        self.assertIn('$3 = {"k": 4}\n', session)
+
+    def test_without_the_printers_heap_values_are_pointers(self):
+        binary = self.build("heap", HEAP)
+        session = gdb(binary, "break heap.my:34", "run", "info locals")
+        self.assertIn("auto-loading has been declined", session)    # gdb says why
+        self.assertRegex(session, r"bag = Bag \{items: 0x[0-9a-f]+, label: 0x[0-9a-f]+, "
+                                  r"ratio: 0.10000000149011612, tags: 0x[0-9a-f]+\}")
+        # the same script, loaded by hand
+        session = gdb(binary, f"source {GDB_SCRIPT}", "break heap.my:34", "run", "info locals")
+        for line in HEAP_LOCALS:
+            self.assertIn(line + "\n", session)
+
+    def test_finish_prints_the_value_returned(self):
+        session = gdb(self.build("heap", HEAP), "break myla_make_bag", "break myla_total",
+                      "break myla_greet", "run", "finish", "continue", "finish", "continue",
+                      "finish", printers=True)
+        self.assertIn('Value returned is $1 = Bag {items: [4, 5], label: "two", '
+                      'ratio: 0.100000001, tags: {"k": 4}}\n', session)
+        self.assertIn("Value returned is $2 = 9\n", session)
+        self.assertIn('Value returned is $3 = "hi bo"\n', session)
+
+    def test_finish_without_the_printers(self):
+        # an aggregate comes back through the hidden pointer %rax returns
+        session = gdb(self.build("heap", HEAP), "break myla_make_bag", "break myla_total",
+                      "run", "finish", "print *$", "continue", "finish")
+        self.assertRegex(session, r"Value returned is \$1 = \(\*mut Bag\) 0x[0-9a-f]+\n")
+        self.assertIn("$2 = Bag {items: 0x", session)
+        self.assertIn("Value returned is $3 = 9\n", session)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE and shutil.which("gdb"), "needs native builds and gdb")

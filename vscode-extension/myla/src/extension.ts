@@ -94,8 +94,9 @@ async function startServer(): Promise<void> {
     options: { cwd: choice.cwd },
   };
 
-  // The server takes file changes from the editor (didChangeWatchedFiles).
-  watcher = vscode.workspace.createFileSystemWatcher("**/*.my");
+  // The server takes file changes from the editor (didChangeWatchedFiles):
+  // sources, and the manifests and lock files of projects (MYLA-97).
+  watcher = vscode.workspace.createFileSystemWatcher("**/{*.my,myla.toml,myla.lock}");
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [

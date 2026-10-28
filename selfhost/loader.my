@@ -26,8 +26,9 @@
 // the project root and then the stdlib root.
 
 from std.fs import read_to_string, exists, is_dir
-from .parser import parse_source
-from .diag import Report, report
+from .parser import parse_source_all
+from .diag import Report, reports, type_report, chain
+from .checker import CheckErr
 from .tokens import SrcSpan, no_span, keywords
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
@@ -63,6 +64,18 @@ pub fun file_of(prog: Loaded, id: int32) -> str {
         if sp.first_id <= id { path = sp.path }
     }
     return path
+}
+
+// The type errors `errs` (not empty) of the linked program `prog`, each in its
+// declaration's file, as one report (MYLA-65, D80).
+pub fun type_errors(prog: Loaded, errs: [CheckErr]) -> Report {
+    var rs: [Report] = []
+    for e in errs {
+        var r = type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl))
+        r.notes = e.notes
+        push(rs, r)
+    }
+    return chain(rs)
 }
 
 // How to load a program: the stdlib root ("" for none); the packages, each a
@@ -254,7 +267,7 @@ fun same_binding(a: Binding, b: Binding) -> bool {
 }
 
 fun at(path: str, line: int32, col: int32, sp: SrcSpan, msg: str) -> Report {
-    return Report { kind: "module error", msg: msg, path: path, line: line, col: col, sp: sp }
+    return Report { kind: "module error", msg: msg, path: path, line: line, col: col, sp: sp, more: [], notes: [] }
 }
 
 impl Loader {
@@ -413,14 +426,14 @@ impl Loader {
             None => {
                 match read_to_string(path) {
                     Ok(s) => { src = s },
-                    Err(e) => { return Err(Report { kind: "module error", msg: format("cannot read module '{}'", path), path: path, line: 0, col: 0, sp: no_span() }) },
+                    Err(e) => { return Err(Report { kind: "module error", msg: format("cannot read module '{}'", path), path: path, line: 0, col: 0, sp: no_span(), more: [], notes: [] }) },
                 }
             },
         }
         push(self.spans, Span { first_id: self.next_id, path: path })
-        var parsed = match parse_source(src, self.next_id) {
+        var parsed = match parse_source_all(src, self.next_id) {
             Ok(x) => x,
-            Err(d) => { return Err(report(d, path)) },
+            Err(ds) => { return Err(reports(ds, path)) },
         }
         self.next_id = parsed.next_id
         var imports: [Decl] = []
@@ -1109,7 +1122,7 @@ pub fun default_stdlib_root(argv0: str) -> str {
 
 // A module error without a position (the package list's).
 fun list_error(msg: str) -> Report {
-    return Report { kind: "module error", msg: msg, path: "", line: 0, col: 0, sp: no_span() }
+    return Report { kind: "module error", msg: msg, path: "", line: 0, col: 0, sp: no_span(), more: [], notes: [] }
 }
 
 // `name=dir`, the value of a `--package` flag, as a (name, dir) pair for

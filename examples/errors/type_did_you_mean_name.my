@@ -1,0 +1,8 @@
+//~ type error: unknown name 'cuont'
+//~ span: cuont
+//~ help: did you mean 'count'?
+// A misspelled name suggests the closest name in scope (MYLA-65).
+fun main() {
+    let count = 3
+    print(cuont + 1)
+}

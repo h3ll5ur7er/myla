@@ -10,6 +10,11 @@ interpretation/compilation. It:
 - type-checks every function body, annotating each value expression with a
   `resolved_type` attribute that the interpreter and compiler rely on.
 
+An error while building the tables ends the check. Once they are built, each
+function's attributes and each body are checked on their own: the first error
+of each is recorded and checking goes on, up to MAX_ERRORS (MYLA-65, D80).
+`check` raises the first error found, with the others in its `more`.
+
 Integer literals are "flexible": an unsuffixed literal adopts the type required
 by its context (annotation, parameter, return, or the other operand of a binary
 op), defaulting to `int` (`int32`).
@@ -23,7 +28,7 @@ import struct
 from dataclasses import dataclass
 
 from . import ast
-from .errors import TypeCheckError, in_file
+from .errors import MAX_ERRORS, MylaError, Note, TypeCheckError, in_file, note
 
 
 # --- type representations --------------------------------------------------
@@ -592,6 +597,8 @@ class TraitSig:
 class _Binding:
     type: Type
     mutable: bool
+    # where it is declared, for notes (MYLA-65); None: no note
+    at: object = None
 
 
 @dataclass
@@ -619,6 +626,15 @@ class _Scope:
                 return scope.names[name]
             scope = scope.parent
         return None
+
+    def all_names(self) -> list[str]:
+        """Every name in scope, innermost scope first."""
+        out: list[str] = []
+        scope: _Scope | None = self
+        while scope is not None:
+            out.extend(scope.names)
+            scope = scope.parent
+        return out
 
     def lookup_scope(self, name: str) -> "_Scope | None":
         """The scope where `name` is defined (for closure-capture analysis)."""
@@ -656,7 +672,8 @@ _BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop
                   "__write", "__exit", "__args", "__read_file", "__io_errno",
                   "__run", "__run_stderr", "__run_exit_code", "__run_signal",
                   "__run_errno", "__write_file", "__read", "__poll",
-                  "__list_dir", "__mkdir", "__stat", "__getcwd"}
+                  "__list_dir", "__mkdir", "__stat", "__getcwd",
+                  "__unlink", "__rmdir", "__rename"}
 
 # builtin calls that never return (the checker treats them like a `return`)
 _DIVERGING_BUILTINS = {"panic", "unreachable", "__exit"}
@@ -684,6 +701,52 @@ _PRELUDE_SRC = (
 _PRELUDE_VARIANTS = {
     "Some": "Option", "None": "Option", "Ok": "Result", "Err": "Result",
 }
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """The edits that turn `a` into `b`, counted on their UTF-8 bytes: inserting,
+    deleting or replacing a byte, or swapping two neighbours (the optimal string
+    alignment distance)."""
+    x, y = a.encode(), b.encode()
+    prev2: list[int] = []
+    prev = list(range(len(y) + 1))
+    for i in range(1, len(x) + 1):
+        cur = [i] + [0] * len(y)
+        for j in range(1, len(y) + 1):
+            cost = 0 if x[i - 1] == y[j - 1] else 1
+            d = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if i > 1 and j > 1 and x[i - 1] == y[j - 2] and x[i - 2] == y[j - 1]:
+                d = min(d, prev2[j - 2] + 1)
+            cur[j] = d
+        prev2, prev = prev, cur
+    return prev[len(y)]
+
+
+def _did_you_mean(name: str, candidates) -> list[Note]:
+    """A help line naming the candidate closest to `name`, if one is within a
+    third of its length in edits (so none for names under three bytes, where
+    every short name is close); the alphabetically first of equally close ones
+    (MYLA-65). Names with a `.` or starting with `__` are internal."""
+    limit = len(name.encode()) // 3
+    best: tuple[int, str] | None = None
+    for c in candidates:
+        if c == name or "." in c or c.startswith("__"):
+            continue
+        d = _edit_distance(name, c)
+        if d <= limit and (best is None or (d, c) < best):
+            best = (d, c)
+    return [] if best is None else [Note("help", f"did you mean '{best[1]}'?")]
+
+
+def _lvalue_root(expr: ast.Expr) -> ast.Name | None:
+    """The variable an assigned place starts from (`p` of `p.xs[0].y`)."""
+    while isinstance(expr, (ast.FieldAccess, ast.Index, ast.TupleIndex)):
+        expr = expr.target
+    return expr if isinstance(expr, ast.Name) else None
+
+
+class _Stop(Exception):
+    """MAX_ERRORS errors were recorded: the check ends."""
 
 
 class Checker:
@@ -724,6 +787,8 @@ class Checker:
         self._alias_cache: dict[str, Type] = {}
         self.entry: ast.FunDecl | None = None
         self._current_ret: Type | None = None
+        # the return type of the function being checked, for notes (MYLA-65)
+        self._ret_at: ast.TypeRef | None = None
         self._try_counter = 0
         self._loop_depth = 0
         # type parameters in scope while resolving/checking a generic decl
@@ -742,6 +807,8 @@ class Checker:
         # pass); each is assigned a unique `lifted_name`
         self._lambdas: list[ast.Lambda] = []
         self._lambda_ids: set[int] = set()
+        # the errors of the functions checked so far (MYLA-65, D80)
+        self._errors: list[MylaError] = []
 
     # -- public entry --------------------------------------------------------
 
@@ -753,15 +820,42 @@ class Checker:
         self._resolve_impls()
         self._validate_bounds()
         self._fold_consts()
-        self._check_attributes_and_entry()
-        for decl in self.program.decls:
-            if isinstance(decl, ast.FunDecl):
-                with in_file(_source_path(decl)):
-                    self._check_function(decl)
-        for mdecl in self._method_decls:
-            with in_file(_source_path(mdecl)):
-                self._check_function(mdecl)
+        try:
+            self._check_attributes_and_entry()
+            for decl in self.program.decls:
+                if isinstance(decl, ast.FunDecl):
+                    self._on_its_own(decl, lambda d=decl: self._check_function(d))
+            for mdecl in self._method_decls:
+                self._on_its_own(mdecl, lambda d=mdecl: self._check_function(d))
+        except _Stop:
+            pass
+        if self._errors:
+            first = self._errors[0]
+            first.more = self._errors[1:]
+            raise first
         return self
+
+    def _on_its_own(self, decl: ast.Decl, check) -> None:
+        """Run `check`, about `decl`, from a clean state; record its error
+        (with `decl`'s file) and go on (MYLA-65, D80)."""
+        self._loop_depth = 0
+        self._lambda_stack = []
+        self._lambda_infer = None
+        self._current_ret = None
+        self._ret_at = None
+        try:
+            with in_file(_source_path(decl)):
+                check()
+        except MylaError as err:
+            self._errors.append(err)
+            if len(self._errors) >= MAX_ERRORS:
+                raise _Stop() from None
+
+    def _fail_at(self, decl: ast.Decl, message: str, node: ast.Node) -> None:
+        """Record an error about `decl` at `node`."""
+        def fail() -> None:
+            raise TypeCheckError(message, at=node)
+        self._on_its_own(decl, fail)
 
     # -- global collection ---------------------------------------------------
 
@@ -799,8 +893,11 @@ class Checker:
                         f"cannot redefine builtin '{name}'", at=decl
                     )
                 if name in seen:
+                    first = seen[name]
                     raise TypeCheckError(
-                        f"duplicate top-level declaration '{name}'", at=decl
+                        f"duplicate top-level declaration '{name}'", at=decl,
+                        notes=[] if getattr(first, "in_prelude", False)
+                        else [note(f"'{name}' is first declared here", first)],
                     )
                 seen[name] = decl
                 if isinstance(decl, ast.StructDecl):
@@ -1475,7 +1572,8 @@ class Checker:
             return INT
         if name == "float":
             return FLOAT
-        raise TypeCheckError(f"unknown type '{name}'", at=ref)
+        raise TypeCheckError(f"unknown type '{name}'", at=ref,
+                             notes=_did_you_mean(name, self._type_names()))
 
     def _resolve_recursion(self) -> None:
         """Classify by-value type cycles (e.g. a recursive `enum Expr`).
@@ -1701,52 +1799,47 @@ class Checker:
     def _check_attributes_and_entry(self) -> None:
         main_decls: list[ast.FunDecl] = []
         for decl in self.program.decls:
-            with in_file(_source_path(decl)):
-                for attr in decl.attributes:
-                    # `#derive` (v0.4.4) is validated and lowered by
-                    # `_synthesize_derives`; skip it here.
-                    if attr.name == "derive":
-                        continue
-                    if attr.name not in ("main", "test"):
-                        raise TypeCheckError(
-                            f"unknown attribute '#{attr.name}'", at=attr
-                        )
-                    if not isinstance(decl, ast.FunDecl):
-                        raise TypeCheckError(
-                            f"attribute '#{attr.name}' may only be applied to functions",
-                            at=attr,
-                        )
-                    if decl.type_params:
-                        raise TypeCheckError(
-                            f"attribute '#{attr.name}' cannot be applied to a generic "
-                            "function (it has no single concrete instantiation)",
-                            at=attr,
-                        )
-                    if attr.name == "main":
-                        self._check_main_attr(decl, attr)
-                        main_decls.append(decl)
-                    else:
-                        self._check_test_attr(decl, attr)
+            self._on_its_own(decl, lambda d=decl: self._check_attributes(d, main_decls))
 
         named_main = self.functions.get("main")
-        if main_decls and named_main is not None and named_main.decl not in main_decls:
-            with in_file(_source_path(named_main.decl)):
-                raise TypeCheckError(
-                    "both a '#main' function and a function named 'main' are present",
-                    at=named_main.decl,
-                )
-        if len(main_decls) > 1:
-            with in_file(_source_path(main_decls[1])):
-                raise TypeCheckError(
-                    "more than one '#main' entry point", at=main_decls[1]
-                )
         entry = main_decls[0] if main_decls else (named_main.decl if named_main else None)
-        if entry is not None and entry.params:
-            with in_file(_source_path(entry)):
-                raise TypeCheckError(
-                    "entry point must take no parameters in v0.0", at=entry
-                )
+        if main_decls and named_main is not None and named_main.decl not in main_decls:
+            self._fail_at(named_main.decl,
+                          "both a '#main' function and a function named 'main' are present",
+                          named_main.decl)
+        elif len(main_decls) > 1:
+            self._fail_at(main_decls[1], "more than one '#main' entry point", main_decls[1])
+        elif entry is not None and entry.params:
+            self._fail_at(entry, "entry point must take no parameters in v0.0", entry)
         self.entry = entry
+
+    def _check_attributes(self, decl: ast.Decl, main_decls: list[ast.FunDecl]) -> None:
+        """Check `decl`'s attributes; add it to `main_decls` for each `#main`."""
+        for attr in decl.attributes:
+            # `#derive` (v0.4.4) is validated and lowered by
+            # `_synthesize_derives`; skip it here.
+            if attr.name == "derive":
+                continue
+            if attr.name not in ("main", "test"):
+                raise TypeCheckError(
+                    f"unknown attribute '#{attr.name}'", at=attr
+                )
+            if not isinstance(decl, ast.FunDecl):
+                raise TypeCheckError(
+                    f"attribute '#{attr.name}' may only be applied to functions",
+                    at=attr,
+                )
+            if decl.type_params:
+                raise TypeCheckError(
+                    f"attribute '#{attr.name}' cannot be applied to a generic "
+                    "function (it has no single concrete instantiation)",
+                    at=attr,
+                )
+            if attr.name == "main":
+                self._check_main_attr(decl, attr)
+                main_decls.append(decl)
+            else:
+                self._check_test_attr(decl, attr)
 
     def _check_main_attr(self, decl: ast.FunDecl, attr: ast.Attribute) -> None:
         if attr.args or attr.outputs is not None:
@@ -1769,18 +1862,31 @@ class Checker:
                 at=attr,
             )
         for arg, ptype in zip(attr.args, sig.params):
-            self._expect_value(arg, _Scope(), ptype)
+            t = self._expect_value(arg, _Scope(), ptype)
+            if t != ptype:
+                raise TypeCheckError(
+                    f"'#test' argument type mismatch: expected '{type_name(ptype)}', "
+                    f"found '{type_name(t)}'",
+                    at=arg,
+                )
         if len(attr.outputs) != 1:
             raise TypeCheckError(
                 "'#test' expects exactly one expected value in [...]", at=attr
             )
-        self._expect_value(attr.outputs[0], _Scope(), sig.ret)
+        t = self._expect_value(attr.outputs[0], _Scope(), sig.ret)
+        if t != sig.ret:
+            raise TypeCheckError(
+                f"'#test' expected value type mismatch: expected '{type_name(sig.ret)}', "
+                f"found '{type_name(t)}'",
+                at=attr.outputs[0],
+            )
 
     # -- function bodies -----------------------------------------------------
 
     def _check_function(self, decl: ast.FunDecl) -> None:
         sig = self.functions[decl.name]
         self._current_ret = sig.ret
+        self._ret_at = decl.ret_type
         self._type_params = frozenset(decl.type_params)
         self._type_param_bounds = {
             tp: frozenset(traits) for tp, traits in sig.bounds.items()
@@ -1792,7 +1898,9 @@ class Checker:
                 # body can write `self.field = ...`; every other param is borrowed
                 # and immutable.
                 mutable = (i == 0 and decl.receiver == "var self")
-                scope.define(param.name, _Binding(ptype, mutable=mutable))
+                # the synthesized receiver has no place of its own for a note
+                at = None if (i == 0 and decl.receiver) else param
+                scope.define(param.name, _Binding(ptype, mutable=mutable, at=at))
             self._check_block(decl.body, scope, sig.ret)
             if sig.ret is not None and not _block_returns(decl.body):
                 raise TypeCheckError(
@@ -1820,9 +1928,10 @@ class Checker:
                     f"binding of type '{type_name(declared)}'",
                     at=stmt,
                 )
-            if not scope.define(stmt.name, _Binding(final, mutable=(stmt.kind == "var"))):
+            if not scope.define(stmt.name, _Binding(final, mutable=(stmt.kind == "var"), at=stmt)):
                 raise TypeCheckError(
-                    f"'{stmt.name}' is already declared in this scope", at=stmt
+                    f"'{stmt.name}' is already declared in this scope", at=stmt,
+                    notes=self._first_declared(stmt.name, scope),
                 )
 
         elif isinstance(stmt, ast.DestructDecl):
@@ -1852,7 +1961,7 @@ class Checker:
             if not mutable:
                 raise TypeCheckError(
                     "cannot assign to an immutable binding (declare it with 'var')",
-                    at=stmt,
+                    at=stmt, notes=self._declared_at(stmt.target, scope),
                 )
             value_type = self._expect_value(stmt.value, scope, target_type)
             if value_type != target_type:
@@ -1926,10 +2035,13 @@ class Checker:
                     )
                 vt = self._expect_value(stmt.value, scope, ret)
                 if vt != ret:
+                    notes = []
+                    if not self._lambda_stack and self._ret_at is not None:
+                        notes = [note("the return type is declared here", self._ret_at)]
                     raise TypeCheckError(
                         f"return type mismatch: expected '{type_name(ret)}', "
                         f"found '{type_name(vt)}'",
-                        at=stmt,
+                        at=stmt, notes=notes,
                     )
 
         elif isinstance(stmt, ast.ExprStmt):
@@ -1946,10 +2058,10 @@ class Checker:
             return
         if isinstance(binding, ast.BindName):
             binding.resolved_type = t
-            if not scope.define(binding.name, _Binding(t, mutable)):
+            if not scope.define(binding.name, _Binding(t, mutable, at=binding)):
                 raise TypeCheckError(
                     f"'{binding.name}' is already declared in this scope",
-                    at=binding,
+                    at=binding, notes=self._first_declared(binding.name, scope),
                 )
             return
         if isinstance(binding, ast.BindTuple):
@@ -1971,11 +2083,44 @@ class Checker:
             "invalid destructuring binding", at=binding
         )
 
+    # -- notes (MYLA-65) -----------------------------------------------------
+
+    def _declared_at(self, target: ast.Expr, scope: _Scope) -> list[Note]:
+        """A note on where the variable an assigned place starts from is
+        declared."""
+        root = _lvalue_root(target)
+        binding = scope.lookup(root.ident) if root is not None else None
+        if binding is None or binding.at is None:
+            return []
+        return [note(f"'{root.ident}' is declared here", binding.at)]
+
+    def _first_declared(self, name: str, scope: _Scope) -> list[Note]:
+        """A note on the declaration `name` repeats, in the same scope."""
+        binding = scope.names[name]
+        if binding.at is None:
+            return []
+        return [note(f"'{name}' is first declared here", binding.at)]
+
+    def _value_names(self, scope: _Scope) -> list[str]:
+        """The names a value can be: variables, constants, functions and the
+        prelude's variants."""
+        return [*scope.all_names(), *self._const_decls, *self.functions, *_PRELUDE_VARIANTS]
+
+    def _callable_names(self, scope: _Scope) -> list[str]:
+        """The names a call can name: functions, the built-in ones, variables."""
+        return [*self.functions, *_BUILTIN_FUNCS, *scope.all_names()]
+
+    def _type_names(self) -> list[str]:
+        """The names a type can be."""
+        return [*_PRIMITIVES, "int", "float", *self.struct_decls, *self.enum_decls,
+                *self._aliases_raw, *self._type_params]
+
     def _check_lvalue(self, expr: ast.Expr, scope: _Scope) -> tuple[Type, bool]:
         if isinstance(expr, ast.Name):
             binding = scope.lookup(expr.ident)
             if binding is None:
-                raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr)
+                raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr,
+                                     notes=_did_you_mean(expr.ident, scope.all_names()))
             expr.resolved_type = binding.type
             return binding.type, binding.mutable
         if isinstance(expr, ast.FieldAccess):
@@ -1988,7 +2133,7 @@ class Checker:
             if expr.field_name not in fields:
                 raise TypeCheckError(
                     f"struct '{base_type.name}' has no field '{expr.field_name}'",
-                    at=expr,
+                    at=expr, notes=_did_you_mean(expr.field_name, fields),
                 )
             ft = fields[expr.field_name]
             expr.resolved_type = ft
@@ -2113,7 +2258,7 @@ class Checker:
 
         lam_scope = _Scope(scope)
         for p, pt in zip(expr.params, ptypes):
-            if not lam_scope.define(p.name, _Binding(pt, mutable=False)):
+            if not lam_scope.define(p.name, _Binding(pt, mutable=False, at=p)):
                 raise TypeCheckError(
                     f"duplicate lambda parameter '{p.name}'", at=p
                 )
@@ -2480,7 +2625,7 @@ class Checker:
                 pat.as_variant = (t.name, pat.name)
                 return
             pat.resolved_type = t
-            if not scope.define(pat.name, _Binding(t, mutable=False)):
+            if not scope.define(pat.name, _Binding(t, mutable=False, at=pat)):
                 raise TypeCheckError(
                     f"'{pat.name}' is bound more than once in this pattern",
                     at=pat,
@@ -2595,7 +2740,7 @@ class Checker:
             if fp.name not in fields:
                 raise TypeCheckError(
                     f"struct '{t.name}' has no field '{fp.name}'",
-                    at=fp,
+                    at=fp, notes=_did_you_mean(fp.name, fields),
                 )
             self._check_pattern(fp.pattern, fields[fp.name], scope)
 
@@ -2847,7 +2992,8 @@ class Checker:
                     f"'{expr.ident}' cannot be used as a value here",
                     at=expr,
                 )
-            raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr)
+            raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr,
+                                 notes=_did_you_mean(expr.ident, self._value_names(scope)))
         self._record_capture(expr.ident, binding.type, scope)
         expr.resolved_type = binding.type
         return binding.type
@@ -3439,7 +3585,7 @@ class Checker:
             raise TypeCheckError(
                 f"type '{type_name(recv_type)}' has no method "
                 f"'{callee.field_name}'",
-                at=expr,
+                at=expr, notes=_did_you_mean(callee.field_name, table or {}),
             )
         is_var_self = (sig.decl.receiver == "var self")
         if is_var_self:
@@ -3455,7 +3601,7 @@ class Checker:
                 raise TypeCheckError(
                     f"cannot call the mutating method '{callee.field_name}' on an "
                     "immutable receiver (declare it with 'var')",
-                    at=expr,
+                    at=expr, notes=self._declared_at(recv, scope),
                 )
         nargs = len(sig.params) - 1
         if len(expr.args) != nargs:
@@ -3708,6 +3854,21 @@ class Checker:
                 )
             expr.resolved_type = None
             return None
+        if name in ("__unlink", "__rmdir", "__rename"):
+            # unlink(2), rmdir(2), rename(2) (MYLA-96): paths, no result
+            want = ("from: str, to: str" if name == "__rename" else "path: str")
+            nargs = 2 if name == "__rename" else 1
+            if len(expr.args) != nargs:
+                raise TypeCheckError(f"{name}() takes ({want})", at=expr)
+            for a in expr.args:
+                a_t = self._expect_value(a, scope, STR)
+                if not isinstance(a_t, StrType):
+                    raise TypeCheckError(
+                        f"{name}() paths must be strings, found '{type_name(a_t)}'",
+                        at=a,
+                    )
+            expr.resolved_type = None
+            return None
         if name == "__run":
             if len(expr.args) != 2:
                 raise TypeCheckError(
@@ -3783,7 +3944,8 @@ class Checker:
             enum_name = _PRELUDE_VARIANTS.get(name)
             if enum_name is not None and scope.lookup(name) is None:
                 return self._infer_variant_ctor(expr, enum_name, name, scope, expected)
-            raise TypeCheckError(f"unknown function '{name}'", at=expr)
+            raise TypeCheckError(f"unknown function '{name}'", at=expr,
+                                 notes=_did_you_mean(name, self._callable_names(scope)))
         if sig.type_params:
             return self._infer_generic_call(expr, name, sig, scope)
         if len(expr.args) != len(sig.params):
@@ -3923,7 +4085,7 @@ class Checker:
             raise TypeCheckError(
                 f"type '{type_name(recv_type)}' has no method "
                 f"'{callee.field_name}'",
-                at=expr,
+                at=expr, notes=_did_you_mean(callee.field_name, table or {}),
             )
         # named free function
         if isinstance(callee, ast.Name):
@@ -4213,7 +4375,7 @@ class Checker:
         if expr.field_name not in fields:
             raise TypeCheckError(
                 f"struct '{base.name}' has no field '{expr.field_name}'",
-                at=expr,
+                at=expr, notes=_did_you_mean(expr.field_name, fields),
             )
         ft = fields[expr.field_name]
         expr.resolved_type = ft
@@ -4233,7 +4395,7 @@ class Checker:
             if init.name not in template:
                 raise TypeCheckError(
                     f"struct '{expr.type_name}' has no field '{init.name}'",
-                    at=init,
+                    at=init, notes=_did_you_mean(init.name, template),
                 )
             provided[init.name] = init
         missing = [n for n in template if n not in provided]
@@ -4405,7 +4567,10 @@ def check(program: ast.Program, with_prelude: bool = True) -> Checker:
     `with_prelude=False`.
     """
     if with_prelude:
-        program = ast.Program(_prelude_decls() + list(program.decls))
+        prelude = _prelude_decls()
+        for d in prelude:
+            d.in_prelude = True     # no note points at it (MYLA-65)
+        program = ast.Program(prelude + list(program.decls))
     checker = Checker(program).check()
     _desugar(program)
     return checker

@@ -17,9 +17,9 @@ from std.num import format_float
 from .lexer import lex
 from .tokens import Token, TokenKind
 from .ast import Decl, DeclKind, Stmt, StmtKind, ElseTail
-from .loader import load_program_opts, load_options, file_of, normalize, Loaded
+from .loader import load_program_opts, load_options, file_of, normalize, Loaded, type_errors
 from .checker import build_checker_decls, Checker
-from .diag import render, type_report, Report, carets
+from .diag import render_one, Report, carets
 from .tokens import SrcSpan
 from .interp import new_interp, Value, SessionStep
 from .util import cp_utf8
@@ -87,14 +87,14 @@ impl Session {
         let prog = match load_program_opts(ENTRY, opts) {
             Ok(p) => p,
             Err(r) => {
-                report(r, t, input)
+                report_all(r, t, input)
                 return -1
             },
         }
         let c = match build_checker_decls(prog.decls, prog.next_id) {
             Ok(c) => c,
-            Err(e) => {
-                report(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl)), t, input)
+            Err(errs) => {
+                report_all(type_errors(prog, errs), t, input)
                 return -1
             },
         }
@@ -106,7 +106,7 @@ impl Session {
         let step = it.session_step(self.names, self.vals, input_stmts(c, len(self.levels)), true)
         match step.err {
             Some(r) => {
-                report(Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp }, t, input)
+                report(Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp, more: [], notes: [] }, t, input)
                 return -1
             },
             None => {},
@@ -182,26 +182,43 @@ fun input_stmts(c: Checker, depth: int32) -> [Stmt] {
     return stmts
 }
 
-// Print `r`; when it is in the session's text and in the input, with the
-// input's own line numbers and source.
+// Print `r` and the errors after it, a blank line apart, then a summary
+// line when there are several (MYLA-65, D80).
+fun report_all(r: Report, t: Text, input: str) {
+    report(r, t, input)
+    for m in r.more {
+        eprintln("")
+        report(m, t, input)
+    }
+    if len(r.more) > 0 { eprintln(format("\nerror: aborting due to {} previous errors", len(r.more) + 1)) }
+}
+
+// Print `r` (not its `more`) and its notes; one in the session's text and in
+// the input with the input's own line numbers and source, one elsewhere in the
+// session's text on its own line.
 fun report(r: Report, t: Text, input: str) {
-    if normalize(r.path) != normalize(ENTRY) || r.line < t.start || r.line >= t.start + count_lines(input) {
-        if normalize(r.path) == normalize(ENTRY) {
-            eprintln(format("{}: {}", r.kind, r.msg))
-        } else {
-            eprintln(render(r))
-        }
+    if normalize(r.path) != normalize(ENTRY) {
+        eprintln(render_one(r))
         return
     }
+    var sb = StringBuilder()
+    append(sb, in_input(format("{}: {}", r.kind, r.msg), r.line, r.col, r.sp, t, input))
+    for n in r.notes { append(sb, "\n" + in_input(format("{}: {}", n.label, n.msg), n.line, n.col, n.sp, t, input)) }
+    eprintln(build(sb))
+}
+
+// `header`, then, for a place in the input, the input's line with its carets.
+fun in_input(header: str, at_line: int32, col: int32, at_sp: SrcSpan, t: Text, input: str) -> str {
+    if at_line < t.start || at_line >= t.start + count_lines(input) { return header }
     let shift = t.start - 1
-    let line = r.line - shift
+    let line = at_line - shift
     let src = input_line(input, line)
     let gutter = format("{}", line)
     var pad = StringBuilder()
     for c in chars(gutter) { append_byte(pad, ' ') }
-    var sp = r.sp
+    var sp = at_sp
     if sp.eline > 0 { sp = SrcSpan { sline: sp.sline - shift, scol: sp.scol, eline: sp.eline - shift, ecol: sp.ecol } }
-    eprintln(format("{}: {}\n  --> <input>:{}:{}\n{} |\n{} | {}\n{} | {}", r.kind, r.msg, line, r.col, build(pad), gutter, src, build(pad), carets(src, line, r.col, sp)))
+    return format("{}\n  --> <input>:{}:{}\n{} |\n{} | {}\n{} | {}", header, line, col, build(pad), gutter, src, build(pad), carets(src, line, col, sp))
 }
 
 // Whether `text` leaves a bracket open (so the input goes on); a text that

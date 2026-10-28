@@ -28,11 +28,21 @@ How values are described (docs/Development/Debugging.md):
   read from the cell's header through `DW_OP_push_object_address`.
 - A map variable, and any heap value inside an aggregate or a list, is a
   pointer to a description of its cell (`p *x` shows it): gdb can't give array
-  elements or fields types whose size depends on their value.
+  elements or fields types whose size depends on their value. A map cell lists
+  its slots (`[state][key][value]`, as many as its capacity).
+- A subprogram's type is what `finish` reads: a scalar's type (in `%rax`), a
+  pointer to a cell, or for an aggregate a pointer to it (the hidden result
+  pointer `%rax` returns). Floats come back in `%rax` too, where gdb's amd64
+  rules don't look, so a float function has no type.
+- The binary embeds the pretty-printers of `myla/debug/myla_gdb.py` in its
+  `.debug_gdb_scripts` section (D82): auto-loaded, they print the pointers to
+  cells as the values, and a float32 field or element as a float.
 
 The self-hosted code generator emits the same (`selfhost/codegen.my`).
 """
 from __future__ import annotations
+
+import os
 
 from ..types import (
     BoolType, CharType, EnumType, FloatType, FuncType, IntType, ListType, MapType,
@@ -41,7 +51,7 @@ from ..types import (
 
 # Abbreviation codes, and the table: (code, DW_TAG, has children, [(DW_AT, DW_FORM)]).
 CU, BASE, SUBPROGRAM, PARAM, VAR, BLOCK, PTR, VOIDPTR, STRUCT, MEMBER, ARRAY, SUBRANGE, \
-    VARIANT_PART, VARIANT, TAG = range(1, 16)
+    VARIANT_PART, VARIANT, TAG, TYPED_SUBPROGRAM = range(1, 17)
 
 _STRING, _DATA1, _DATA2, _DATA8, _UDATA, _ADDR, _REF4, _EXPRLOC, _SECOFF, _FLAG = (
     0x08, 0x0b, 0x05, 0x07, 0x0f, 0x01, 0x13, 0x18, 0x17, 0x19)
@@ -65,6 +75,8 @@ ABBREVS = [
     (VARIANT_PART, 0x33, True, [(0x15, _REF4)]),
     (VARIANT, 0x19, True, [(0x16, _UDATA)]),
     (TAG, 0x0d, False, [(_NAME, _STRING), (_TYPE, _REF4), (0x38, _UDATA), (0x34, _FLAG)]),
+    (TYPED_SUBPROGRAM, 0x2e, True, [(_NAME, _STRING), (_LOW_PC, _ADDR), (_HIGH_PC, _DATA8),
+                                    (0x40, _EXPRLOC), (_TYPE, _REF4)]),
 ]
 
 DW_LANG_RUST = 0x1c
@@ -105,6 +117,27 @@ def abbrev_section() -> list[str]:
         out.append("\t.uleb128 " + ", ".join(f"{a}, {f}" for a, f in attrs) + ", 0, 0")
     out.append("\t.byte 0")
     return out
+
+
+# The pretty-printers every `-g` binary embeds (D82), and the name gdb knows them by.
+GDB_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "debug", "myla_gdb.py")
+GDB_SCRIPT_NAME = "myla-printers"
+
+
+def gdb_scripts_section(script: str) -> list[str]:
+    """`.debug_gdb_scripts` holding `script` inline: kind 4 (Python text), its
+    name on the first line, then the text, NUL-terminated. gdb runs it when
+    it loads the binary, where `auto-load safe-path` allows."""
+    def ascii_(text: str, end: str) -> str:
+        return '\t.ascii "' + text.replace("\\", "\\\\").replace('"', '\\"') + end + '"'
+    out = ['\t.section .debug_gdb_scripts,"MS",@progbits,1', "\t.byte 4",
+           ascii_(GDB_SCRIPT_NAME, "\\n")]
+    lines = script.split("\n")
+    out += [ascii_(line, "\\n") for line in lines[:-1]]
+    if lines[-1]:
+        out.append(ascii_(lines[-1], ""))
+    return out + ["\t.byte 0"]
 
 
 def _string(text: str) -> str:
@@ -150,11 +183,26 @@ class DebugInfo:
 
     # -- functions and scopes ------------------------------------------------
 
-    def begin_function(self, symbol: str) -> None:
+    def begin_function(self, symbol: str, ret: Type | None) -> None:
+        """Open the subprogram of the function at `symbol` returning `ret`."""
         self.fn_end = self._label("f")
         self.scopes = []
-        self.lines += [f"\t.uleb128 {SUBPROGRAM}", _string(symbol), f"\t.quad {symbol}",
-                       f"\t.quad {self.fn_end} - {symbol}", "\t.uleb128 1", f"\t.byte {_REG6}"]
+        ty = self._return_type(ret)
+        self.lines += [f"\t.uleb128 {TYPED_SUBPROGRAM if ty else SUBPROGRAM}", _string(symbol),
+                       f"\t.quad {symbol}", f"\t.quad {self.fn_end} - {symbol}", "\t.uleb128 1",
+                       f"\t.byte {_REG6}"]
+        if ty:
+            self.lines.append(_ref(ty))
+
+    def _return_type(self, t: Type | None) -> str | None:
+        """The type `finish` reads the result as, from `%rax` (None: none it
+        can read). An aggregate comes back through the hidden pointer `%rax`
+        returns; a float in `%rax`, where gdb would read `%xmm0`."""
+        if t is None or isinstance(t, FloatType):
+            return None
+        if _is_aggregate(t):
+            return self._pointer(self._aggregate(t))
+        return self._element(t)
 
     def end_function(self) -> None:
         """Close the subprogram; its end label goes after the function's code."""
@@ -329,7 +377,17 @@ class DebugInfo:
                 ("len", self._base(i64), 0), ("cap", self._base(i64), 8),
                 ("items", self._items(t.elem), 16)])
         return self._struct(("cell", self.display(t)), self.display(t), 16, lambda: [
-            ("len", self._base(i64), 0), ("cap", self._base(i64), 8)])
+            ("len", self._base(i64), 0), ("cap", self._base(i64), 8),
+            ("slots", self._slots(t), 16)])
+
+    def _slots(self, t: MapType) -> str:
+        """A map cell's slots, as many as its capacity: `[state:8][key:8][value]`
+        (state 1: occupied)."""
+        stride = 16 + self.cg._stored_size(t.value)
+        slot = self._struct(("slot", self.display(t)), "slot", stride, lambda: [
+            ("state", self._base(IntType(64, False)), 0), ("key", self._element(t.key), 8),
+            ("value", self._element(t.value), 16)])
+        return self._dynamic_array(slot, stride, 8)
 
     def _element(self, t: Type) -> str:
         """The type of a value stored inside an aggregate or a list (or a
@@ -412,5 +470,7 @@ class DebugInfo:
                 _string(name), _string(comp_dir), "\t.quad .Ltext0",
                 "\t.quad .Letext0 - .Ltext0", "\t.long .Ldebug_line0"]
         out += self.lines + types + ["\t.byte 0", ".Ldebug_info_end:"]
+        with open(GDB_SCRIPT, encoding="ascii") as fh:
+            out += gdb_scripts_section(fh.read())
         out += ['\t.section .debug_line,"",@progbits', ".Ldebug_line0:"]
         return out

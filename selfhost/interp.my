@@ -1440,6 +1440,19 @@ impl Interp {
             __mkdir(path, as_int(self.eval(args[1])) as int32)
             return Value.VUnit
         }
+        if nm == "__unlink" {
+            __unlink(as_str(self.eval(args[0])))
+            return Value.VUnit
+        }
+        if nm == "__rmdir" {
+            __rmdir(as_str(self.eval(args[0])))
+            return Value.VUnit
+        }
+        if nm == "__rename" {
+            let from_path = as_str(self.eval(args[0]))
+            __rename(from_path, as_str(self.eval(args[1])))
+            return Value.VUnit
+        }
         if nm == "__args" {
             var out: [Value] = []
             for a in self.argv { push(out, Value.VStr(a)) }

@@ -6,7 +6,8 @@
 //
 // The standard library is found next to the build/ directory the binary is
 // in, as for build/myla, unless --stdlib names it. --resolve prints what each
-// identifier of the files refers to (see resolve.my) instead of serving.
+// identifier of the files refers to (see resolve.my) instead of serving; a
+// file inside a project is resolved with its packages (projects.my).
 
 from std.process import args, exit
 from std.fs import read_to_string
@@ -14,6 +15,7 @@ from std.io import eprintln
 from ...selfhost.loader import default_stdlib_root, normalize
 from .server import new_server
 from .resolve import resolve, describe
+from .projects import context_of
 
 fun main() {
     let argv = args()
@@ -39,7 +41,7 @@ fun main() {
             match read_to_string(path) {
                 Ok(text) => {
                     print(f"file {path}")
-                    for line in describe(resolve(path, text, stdlib, [:], [:])) { print(line) }
+                    for line in describe(resolve(path, text, context_of(path, stdlib, [:]).opts, [:])) { print(line) }
                 },
                 Err(e) => {
                     eprintln(f"cannot read {path}")

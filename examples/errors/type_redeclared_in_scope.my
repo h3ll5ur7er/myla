@@ -1,0 +1,9 @@
+//~ type error: 'total' is already declared in this scope
+//~ span: let total = 2
+//~ note: 'total' is first declared here
+//~ note span: var total = 1
+fun main() {
+    var total = 1
+    let total = 2
+    print(total)
+}

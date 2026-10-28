@@ -11,9 +11,9 @@
 // given on the command line would be: `src/main.my`.
 
 from std.io import write, eprintln
-from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir
+from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir, remove_dir_all
 from .loader import LoadOptions
-from .driver import cmd_build, cmd_interp, own_tests, load_and_check, run_step
+from .driver import cmd_build, cmd_interp, own_tests, load_and_check
 from .project import find_manifest, loader_packages, relative_path, name_error, Project
 from .fetch import checked_out_project, fetch
 
@@ -202,8 +202,14 @@ pub fun project_clean(deps: bool) -> int32 {
     var dirs = [h.project.root.dir + "/build"]
     if deps { push(dirs, h.project.root.dir + "/.myla") }
     for d in dirs {
-        if exists(d) && run_step("/usr/bin/env", ["rm", "-rf", d], "myla: cannot remove " + shown(h, d)) {
-            return 1
+        if exists(d) {
+            match remove_dir_all(d) {
+                Ok(n) => {},
+                Err(e) => {
+                    eprintln("myla: cannot remove " + shown(h, d))
+                    return 1
+                },
+            }
         }
     }
     return 0

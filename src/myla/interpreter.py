@@ -761,6 +761,25 @@ class Interpreter:
             self._io_errno = err.errno or 0
             return {"__list_dir": "", "__stat": -1}.get(name)
 
+    def _remove_primitive(self, name: str, expr: ast.Call, env):
+        """`__unlink(path)`, `__rmdir(path)` and `__rename(from, to)`
+        (MYLA-96), as the native helpers behave: each path ends at its first
+        NUL byte, and each call sets `__io_errno`. A symbolic link is unlinked
+        itself, and unlinking a directory is EISDIR."""
+        import os
+        paths = [_str_bytes(self._eval(a, env)).split(b"\0")[0] for a in expr.args]
+        self._io_errno = 0
+        try:
+            if name == "__unlink":
+                os.unlink(paths[0])
+            elif name == "__rmdir":
+                os.rmdir(paths[0])
+            else:
+                os.rename(paths[0], paths[1])
+        except OSError as err:
+            self._io_errno = err.errno or 0
+        return None
+
     def _run_process(self, program: str, argv: list[str]) -> "ListValue":
         """Spawn `program` with `argv`, wait for it, and capture its output.
 
@@ -897,6 +916,8 @@ class Interpreter:
             return None
         if callee.ident in ("__list_dir", "__mkdir", "__stat"):
             return self._directory_primitive(callee.ident, expr, env)
+        if callee.ident in ("__unlink", "__rmdir", "__rename"):
+            return self._remove_primitive(callee.ident, expr, env)
         if callee.ident == "__run":
             program = self._eval(expr.args[0], env)
             argv = [str(a) for a in self._eval(expr.args[1], env).elems]

@@ -1,0 +1,7 @@
+//~ type error: '#test' expected value type mismatch: expected 'int32', found 'bool'
+//~ span: true
+#test(2)[true]
+fun k(a: int) -> int {
+    return a
+}
+fun main() {}

@@ -11,11 +11,12 @@
 
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
-from std.fs import write_to_file
-from .loader import load_program_opts, LoadOptions, file_of, Loaded
-from .diag import render, type_report, Report
+from std.fs import write_to_file, remove_file
+from .loader import load_program_opts, LoadOptions, file_of, Loaded, type_errors
+from .diag import render, Report
 from .checker import build_checker_decls, Checker, CheckErr
 from .codegen import new_codegen
+from .dwarf import read_gdb_script
 from .interp import new_interp, RtError, TestRun
 
 // Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
@@ -29,7 +30,8 @@ fun decode(bytes: [uint8]) -> str {
 pub struct Checked { checker: Checker, prog: Loaded }
 
 // Load, link and type-check the program rooted at `file`, as `opts` says.
-// Errors are carried as the diagnostic text to print.
+// Errors are carried as the diagnostic text to print: every error, then a
+// summary line when there are several (MYLA-65, D80).
 pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
     let prog = match load_program_opts(file, opts) {
         Ok(p) => p,
@@ -37,17 +39,18 @@ pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
     }
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => Ok(Checked { checker: c, prog: prog }),
-        Err(e) => Err(render(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl)))),
+        Err(errs) => Err(render(type_errors(prog, errs))),
     }
 }
 
 // Type-check `file`, then generate its x86-64 assembly (`debug`: with DWARF
-// debug information, MYLA-71, MYLA-66).
+// debug information, MYLA-71, MYLA-66; `ir`: lowering functions to the IR
+// first, MYLA-103).
 fun compile_asm(file: str, opts: LoadOptions, debug: bool) -> Result<str, str> {
     let ch = load_and_check(file, opts)?
     var g = new_codegen(ch.checker)
     g.set_sources(ch.prog.spans, ch.prog.next_id)
-    if debug { g.enable_debug_info() }
+    if debug { g.enable_debug_info(read_gdb_script(opts.stdlib_root)) }
     return Ok(g.generate())
 }
 
@@ -100,7 +103,7 @@ pub fun cmd_interp(file: str, opts: LoadOptions, tests: bool, prog_args: [str]) 
             }
             let code = it.run()
             match it.rt_err {
-                Some(r) => { eprintln(render(Report { kind: "runtime error", msg: r.msg, path: file_of(ch.prog, r.node), line: r.line, col: r.col, sp: r.sp })) },
+                Some(r) => { eprintln(render(Report { kind: "runtime error", msg: r.msg, path: file_of(ch.prog, r.node), line: r.line, col: r.col, sp: r.sp, more: [], notes: [] })) },
                 None => {},
             }
             return code
@@ -122,6 +125,14 @@ pub fun own_tests(file: str, opts: LoadOptions) -> Result<TestRun, str> {
 }
 
 // `myla build <file> -o <out>`: compile to a native binary at `out`.
+// Whether the file `path` was removed.
+fun removed(path: str) -> bool {
+    return match remove_file(path) {
+        Ok(n) => true
+        Err(e) => false
+    }
+}
+
 pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool) -> int32 {
     let asm = match compile_asm(file, opts, debug) {
         Ok(a) => a,
@@ -146,7 +157,8 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool) -> int
         return 1
     }
     // the assembly and object file were only steps (MYLA-35)
-    if run_step("/usr/bin/env", ["rm", "-f", asm_path, obj_path], "myla: cannot remove the intermediate files") {
+    if !removed(asm_path) || !removed(obj_path) {
+        eprintln("myla: cannot remove the intermediate files")
         return 1
     }
     return 0

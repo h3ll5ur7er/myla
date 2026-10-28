@@ -391,6 +391,49 @@ class TestDirectoryPrimitives(unittest.TestCase):
         self.assertEqual(out, "16384\n-1\n2\n0\n16384\n17\n")
 
 
+class TestRemovePrimitives(unittest.TestCase):
+    """The type rules and behaviour of `__unlink`, `__rmdir` and `__rename`
+    (MYLA-96)."""
+
+    def test_accepted(self):
+        check_src('fun main() {\n    __unlink("f")\n    __rmdir("d")\n    __rename("a", "b")\n}\n')
+
+    def test_rejected(self):
+        cases = {
+            "__unlink()": "__unlink() takes (path: str)",
+            "__unlink(1)": "__unlink() paths must be strings, found 'int32'",
+            '__rmdir("a", "b")': "__rmdir() takes (path: str)",
+            '__rename("a")': "__rename() takes (from: str, to: str)",
+            '__rename("a", 2)': "__rename() paths must be strings, found 'int32'",
+        }
+        for call, message in cases.items():
+            with self.subTest(call=call):
+                with self.assertRaises(TypeCheckError) as ctx:
+                    check_src(f"fun main() {{ {call} }}\n")
+                self.assertIn(message, str(ctx.exception))
+
+    def test_errno_of_each(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "full", "x"))
+            open(os.path.join(tmp, "f"), "w").close()
+            out, _, _ = link_and_run(
+                "fun main() {\n"
+                f'    __rename("{tmp}/f", "{tmp}/g")\n'
+                "    print(__io_errno())\n"
+                f'    __unlink("{tmp}/g")\n'
+                "    print(__io_errno())\n"
+                f'    __unlink("{tmp}/g")\n'
+                "    print(__io_errno())\n"
+                f'    __unlink("{tmp}/full")\n'
+                "    print(__io_errno())\n"
+                f'    __rmdir("{tmp}/full")\n'
+                "    print(__io_errno())\n"
+                f'    __rmdir("{tmp}/full/x")\n'
+                "    print(__io_errno())\n"
+                "}\n")
+        self.assertEqual(out, "0\n0\n2\n21\n39\n0\n")
+
+
 class TestDirectoryFunctions(unittest.TestCase):
     """`std.fs`'s `list_dir`, `make_dir`, `make_dir_all`, `exists`, `is_dir`
     and `is_file` in the interpreter (MYLA-88)."""

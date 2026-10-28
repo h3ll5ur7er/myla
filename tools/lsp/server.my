@@ -5,16 +5,17 @@
 // soon as no other message is waiting; a change waits until no message has
 // come for DEBOUNCE_MS, so a burst of keystrokes is checked once. A check
 // runs the self-hosted loader and checker with the text of every open
-// document, and publishes the error, if any, for the file it is in (MYLA-10);
-// files that showed an error from an earlier check of the same document are
-// cleared.
+// document, and publishes the errors, if any, each for the file it is in
+// (MYLA-10, MYLA-65); files that showed an error from an earlier check of the
+// same document are cleared.
 
 from std.io import stdin
 from std.json import Json, field
 from std.fs import read_to_string
-from ...selfhost.loader import load_program_with, file_of, normalize
-from ...selfhost.diag import Report, type_report, caret_range
+from ...selfhost.loader import load_program_opts, normalize, type_errors
+from ...selfhost.diag import Report, all_reports, caret_range
 from ...selfhost.checker import build_checker_decls
+from ...selfhost.tokens import SrcSpan
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
 from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
 from .symbols import Symbol, SymKind, Range, document_symbols, outline, best_match, lsp_kind, start_key, is_member_kind, kind_eq
@@ -22,6 +23,7 @@ from .features import Location, identifier_at, identifier_ranges, render, is_mem
 from .workspace import Workspace, Entry, new_workspace
 from .semantic import semantic_tokens, token_types, token_modifiers
 from .resolve import Resolution, Outline, Completion, Def, DefKind, resolve, resolve_at, at_position, same_def, is_global, render_local
+from .projects import Context, context_of
 
 const DEBOUNCE_MS: int32 = 400
 
@@ -118,9 +120,12 @@ impl Server {
         } else if method == "workspace/didChangeWorkspaceFolders" {
             self.change_folders(field_or_null(params, "event"))
         } else if method == "workspace/didChangeWatchedFiles" {
-            // nothing more to do (the stamp changed): workspace files are read
-            // again on each request, and their declarations kept only while
-            // their text is the same
+            // workspace files are read again on each request (the stamp
+            // changed), their declarations kept only while their text is the
+            // same; a changed manifest or lock file can change every check
+            if project_changed(params) {
+                for u in keys(self.docs) { self.mark(u, false) }
+            }
         } else if method == "textDocument/didClose" {
             let uri = str_field(field_or_null(params, "textDocument"), "uri")
             remove(self.docs, uri)
@@ -183,18 +188,15 @@ impl Server {
     fun check(var self, uri: str) {
         let path = uri_path(uri)
         if path == "" { return }
-        var overrides: [str: str] = [:]
-        for u in keys(self.docs) {
-            let p = uri_path(u)
-            if p != "" { overrides[p] = self.docs[u] }
-        }
+        let ctx = self.context(path)
+        let overrides = ctx.opts.overrides
         var found: Option<Report> = None
-        match load_program_with(path, self.stdlib, overrides) {
+        match load_program_opts(path, ctx.opts) {
             Err(r) => { found = Some(r) },
             Ok(prog) => {
                 match build_checker_decls(prog.decls, prog.next_id) {
                     Ok(c) => {},
-                    Err(e) => { found = Some(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl))) },
+                    Err(errs) => { found = Some(type_errors(prog, errs)) },
                 }
             },
         }
@@ -210,17 +212,28 @@ impl Server {
         // the checked document always gets a (maybe empty) list, which clears it
         var groups: [str: [Json]] = [:]
         groups[uri] = []
+        // every error the run found (MYLA-65, D80), each in its file
         match found {
+            Some(first) => {
+                for r in all_reports(first) {
+                    let target = self.uri_of(r.path, path, uri)
+                    var group: [Json] = []
+                    match get(groups, target) {
+                        Some(g) => { group = g },
+                        None => {},
+                    }
+                    push(group, diagnostic(r, file_text(r.path, overrides), target))
+                    groups[target] = group
+                }
+            },
+            None => {},
+        }
+        // a problem of the project (MYLA-97): a manifest that doesn't load
+        // (the document was checked alone), a dependency not checked out
+        match ctx.problem {
             Some(r) => {
                 let target = self.uri_of(r.path, path, uri)
-                let text = match get(overrides, normalize(r.path)) {
-                    Some(t) => t,
-                    None => match read_to_string(r.path) {
-                        Ok(t) => t,
-                        Err(e) => "",
-                    },
-                }
-                groups[target] = [diagnostic(r, text)]
+                groups[target] = [diagnostic(r, file_text(r.path, overrides), target)]
             },
             None => {},
         }
@@ -245,6 +258,12 @@ impl Server {
     }
 
     // --- requests (MYLA-80 step 2) ---------------------------------------------
+
+    // How to load the document at `path`: inside a project with its packages
+    // (MYLA-97), else alone.
+    fun context(self, path: str) -> Context {
+        return context_of(normalize(path), self.stdlib, self.overrides())
+    }
 
     // The text of every open document, by path.
     fun overrides(self) -> [str: str] {
@@ -347,7 +366,7 @@ impl Server {
             },
             None => {},
         }
-        let res = resolve(d.path, d.text, self.stdlib, self.overrides(), self.known)
+        let res = resolve(d.path, d.text, self.context(d.path).opts, self.known)
         self.known = res.known
         self.resolved[d.uri] = Resolved { text: d.text, stamp: self.stamp, res: res }
         return res
@@ -385,7 +404,7 @@ impl Server {
             Some(s) => { return location(d.path, s.selection) },
             None => {},
         }
-        let matches = self.ws.lookup(ident, self.overrides())
+        let matches = self.ws.lookup(ident, self.overrides(), self.context(d.path).package_dirs)
         if len(matches) == 0 { return Json.Null }
         return location(matches[0].path, matches[0].range)
     }
@@ -412,7 +431,7 @@ impl Server {
                 match best_match(d.symbols, ident) {
                     Some(s) => { text = render(s.name, s.kind, s.detail) },
                     None => {
-                        let matches = self.ws.lookup(ident, self.overrides())
+                        let matches = self.ws.lookup(ident, self.overrides(), self.context(d.path).package_dirs)
                         if len(matches) == 0 { return Json.Null }
                         text = render(matches[0].name, matches[0].kind, matches[0].detail)
                     },
@@ -465,14 +484,14 @@ impl Server {
                     for r in identifier_ranges(d.text, ident) {
                         if !contains(other, start_key(r)) { push(found, Location { path: d.path, range: r }) }
                     }
-                    for l in self.ws.references(ident, self.overrides()) {
+                    for l in self.ws.references(ident, self.overrides(), self.context(d.path).package_dirs) {
                         if l.path != d.path { push(found, l) }
                     }
                 }
             },
             None => {
                 for r in identifier_ranges(d.text, ident) { push(found, Location { path: d.path, range: r }) }
-                for l in self.ws.references(ident, self.overrides()) { push(found, l) }
+                for l in self.ws.references(ident, self.overrides(), self.context(d.path).package_dirs) { push(found, l) }
                 if !include_decl {
                     for s in d.symbols {
                         if s.name == ident { push(decls, Location { path: d.path, range: s.selection }) }
@@ -530,7 +549,7 @@ impl Server {
         for s in d.symbols {
             push(pool, Entry { name: s.name, kind: s.kind, detail: s.detail, path: d.path, range: s.selection })
         }
-        for e in self.ws.all_entries(self.overrides()) { push(pool, e) }
+        for e in self.ws.all_entries(self.overrides(), self.context(d.path).package_dirs) { push(pool, e) }
         if !member {
             for kw in completion_keywords() {
                 if !contains(seen, "kw:" + kw) {
@@ -556,8 +575,9 @@ impl Server {
             Some(t) => t,
             None => d.text,
         }
+        let opts = self.context(d.path).opts
         for a in completion_attempts(text, pos.line, pos.character) {
-            let r = resolve_at(d.path, a.text, self.stdlib, self.overrides(), self.known, a.want)
+            let r = resolve_at(d.path, a.text, opts, self.known, a.want)
             if r.ok {
                 self.known = r.known
                 if r.completion.found { return r.completion }
@@ -579,6 +599,45 @@ impl Server {
     }
 }
 
+// The text of `path`: an open document's, else the file's ("" if unreadable).
+fun file_text(path: str, overrides: [str: str]) -> str {
+    return match get(overrides, normalize(path)) {
+        Some(t) => t,
+        None => match read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => "",
+        },
+    }
+}
+
+// Whether a didChangeWatchedFiles notification names a manifest or a lock
+// file.
+fun project_changed(params: Json) -> bool {
+    match field(params, "changes") {
+        Some(Json.Array(changes)) => {
+            for c in changes {
+                let name = base_name(str_field(c, "uri"))
+                if name == "myla.toml" || name == "myla.lock" { return true }
+            }
+        },
+        _ => {},
+    }
+    return false
+}
+
+// The last component of a path or URI.
+#test("file:///a/myla.toml")["myla.toml"]
+#test("x")["x"]
+fun base_name(p: str) -> str {
+    var start = 0
+    for i in 0..len(p) {
+        if p[i] == '/' { start = i + 1 }
+    }
+    var sb = StringBuilder()
+    append(sb, p, start, len(p))
+    return build(sb)
+}
+
 fun publish(uri: str, diagnostics: [Json]) {
     let params = Json.Object([("uri", Json.Str(uri)), ("diagnostics", Json.Array(diagnostics))])
     send(notification("textDocument/publishDiagnostics", params))
@@ -588,31 +647,48 @@ fun position(p: Pos) -> Json {
     return Json.Object([("line", Json.Int(p.line as int64)), ("character", Json.Int(p.character as int64))])
 }
 
-// A diagnostic for report `r` in a file whose text is `text`: what the
+// A diagnostic for report `r` in the file `uri` whose text is `text`: what the
 // command line underlines (MYLA-65), or without a range from the reported
-// column to the end of the word there, on the same line.
-fun diagnostic(r: Report, text: str) -> Json {
+// column to the end of the word there, on the same line. Its notes with a place
+// are related information, its help lines end the message.
+fun diagnostic(r: Report, text: str, uri: str) -> Json {
+    let lines = lines_of(text)
+    var msg = r.msg
+    var related: [Json] = []
+    for n in r.notes {
+        if n.line > 0 {
+            let loc = Json.Object([("uri", Json.Str(uri)), ("range", text_range(lines, n.line, n.col, n.sp))])
+            push(related, Json.Object([("location", loc), ("message", Json.Str(n.msg))]))
+        } else {
+            msg = msg + "\n" + n.label + ": " + n.msg
+        }
+    }
+    var fields = [("range", text_range(lines, r.line, r.col, r.sp)), ("message", Json.Str(msg)), ("severity", Json.Int(1)),
+                  ("source", Json.Str("myla")), ("code", Json.Str(kind_code(r.kind)))]
+    if len(related) > 0 { push(fields, ("relatedInformation", Json.Array(related))) }
+    return Json.Object(fields)
+}
+
+// The range of a place in `lines` (`line` 0: the start of the file).
+fun text_range(lines: [str], line: int32, at_col: int32, sp: SrcSpan) -> Json {
     var start = Pos { line: 0, character: 0 }
     var end = Pos { line: 0, character: 1 }
-    if r.line > 0 {
-        let lines = lines_of(text)
-        var col = r.col
+    if line > 0 {
+        var col = at_col
         if col < 1 { col = 1 }
         var line_text = ""
-        if r.line - 1 < len(lines) { line_text = lines[r.line - 1] }
+        if line - 1 < len(lines) { line_text = lines[line - 1] }
         var first = col
         var last = word_end(line_text, col)
-        if r.sp.eline > 0 {
-            let (f, e) = caret_range(line_text, r.line, col, r.sp)
+        if sp.eline > 0 {
+            let (f, e) = caret_range(line_text, line, col, sp)
             first = f
             last = e
         }
-        start = to_lsp(lines, r.line, first)
-        end = to_lsp(lines, r.line, last)
+        start = to_lsp(lines, line, first)
+        end = to_lsp(lines, line, last)
     }
-    let range = Json.Object([("start", position(start)), ("end", position(end))])
-    return Json.Object([("range", range), ("message", Json.Str(r.msg)), ("severity", Json.Int(1)),
-                        ("source", Json.Str("myla")), ("code", Json.Str(kind_code(r.kind)))])
+    return Json.Object([("start", position(start)), ("end", position(end))])
 }
 
 // "type error" -> "type"

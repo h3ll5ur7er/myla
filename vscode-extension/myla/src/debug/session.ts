@@ -290,6 +290,10 @@ export class MylaDebugSession {
     await gdb.send("-gdb-set confirm off");
     // strings are UTF-8; gdb's default charset in a C locale mangles them
     await gdb.send("-gdb-set charset UTF-8");
+    // let gdb load the pretty-printers the binary embeds (D82, MYLA-66), so its
+    // summaries show heap values inside aggregates as values; the program runs
+    // anyway, and variable objects stay raw, so the rendering below needs them not
+    await this.console(`add-auto-load-safe-path ${executable}`).catch(() => undefined);
     try {
       await gdb.send(`-file-exec-and-symbols ${miQuote(executable)}`);
     } catch (err) {
@@ -941,7 +945,8 @@ export class MylaDebugSession {
     try {
       const v = await this.createVarobj(text, frame?.thread, frame?.level);
       type = v.type;
-      if (shapeOf(v.type) === "heap-string") {
+      // a cell's address, unless the pretty-printers already printed the text
+      if (shapeOf(v.type) === "heap-string" && /^0x[0-9a-f]+$/.test(value)) {
         const s = await this.readMylaString(value, frame?.level);
         if (s !== undefined) value = quoteMylaString(s);
       } else if (v.numchild > 0 && isExpandable(v.type, value)) {

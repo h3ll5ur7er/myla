@@ -1,0 +1,2484 @@
+// lower.my -- the checked AST of a function or lambda → IR (MYLA-103 to
+// MYLA-107, D79; wiki: Architecture/IR).
+//
+// `lower_function` and `lower_lambda` read the code generator's state (the
+// checker's types, the signatures, the layouts, the monomorphizer's
+// substitution) and build an `IrFunc`, with the lambda bodies and thunks it
+// needs (`Lowered`), which the code generator verifies and emits. Every
+// construct is lowered:
+//
+// - scalars, with their operators, traps and casts; aggregates (structs,
+//   tuples, enums) in slots reached through addresses, a recursive enum's
+//   members boxed; strings, lists, maps, builders and function values;
+// - every statement, `match` with every kind of pattern, `?`, calls (direct,
+//   generic, methods, through function values), lambdas, partial
+//   application, composition, and the builtins;
+// - every ownership rule as an instruction: a local owns its value (a binding
+//   copies and retains; owners are dropped at the end of their scope, before
+//   `return` and on `break`/`continue`); an owned temporary (a call's result,
+//   a new string, list or map, an aggregate literal holding one) is dropped at
+//   the end of its statement, or right after a condition, a guard or an
+//   operand of `&&`/`||`; parameters and match bindings borrow; an assignment
+//   retains the new value before it releases the old one (`p = p`); a value
+//   bound for a container waits in an owning slot until it is stored; a match
+//   copies its scrutinee, and retains the copy only when an arm may write the
+//   variable it came from.
+//
+// It keeps the old one-pass path's order of evaluation, scopes, positions and
+// copies, which the Python backend shares, so both backends behave alike.
+
+from std.num import f64_literal_bits, f32_round_bits
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
+from .checker import Type, Subst, opt_subst_type, subst_type
+from .codegen import CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
+
+// A name in scope: the slot holding it.
+struct Local { name: str, slot: int32 }
+
+// Where `continue` and `break` go in the innermost loop, and how many owner
+// and temporary scopes were open when it began (those it leaves are dropped).
+struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
+
+// The function being lowered: the IR so far, the block instructions go to,
+// the names in scope (innermost scope last), the owning slots of each scope
+// (dropped when it ends), the owned temporaries of each statement or
+// condition being lowered (dropped when it ends), the loops, the slot holding
+// the result's address (an aggregate result, else -1), the bindings of the
+// match arm being lowered, and the first construct that can't be lowered (""
+// while there is none).
+// `lams`, `partials` and `fnvals`: the lambda bodies, partial-application
+// thunks and function-value thunks the function needs, which the code
+// generator emits after it. `holder`: per temporary, the owning slot it was
+// stored into, read from or is the address of (-1: none), for `take`.
+// `into`: the slot the next aggregate `addr` makes may be built in (-1:
+// none; see `build_slot`); `placed`: per temporary, whether it is the address
+// of a value built there (a flag would be overwritten by a `return` nested in
+// the value).
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool] }
+
+// A function's IR, with the code it needs generated besides (see `Lower`).
+pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
+
+// The IR of the function `fd`, generated as `mangled`; Err: why it can't be
+// lowered yet.
+pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
+    let sig = cg.sig_of(fd.name)
+    let ret = opt_subst_type(sig.ret, cg.subst)
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [] }
+    var first_word = 0
+    match ret {
+        Some(t) => {
+            if !lowerable(cg, t) { return Err("its result type") }
+            if is_aggregate(t) {
+                lw.sret = lw.new_slot("__sret", t, 8, 0, false)
+                first_word = 1
+            }
+        },
+        None => {},
+    }
+    let entry = lw.new_block()
+    lw.start(entry)
+    var i = 0
+    while i < len(fd.params) {
+        let t = subst_type(sig.params[i], cg.subst)
+        if !lowerable(cg, t) { return Err("a parameter's type") }
+        let s = lw.new_slot(fd.params[i].name, t, 8, first_word + i, false)
+        lw.declare(fd.params[i].name, s)
+        lw.add(Inst.Bind(fd.params[i].name, s))
+        i = i + 1
+    }
+    match fd.body {
+        Some(b) => { lw.block(cg, b) },
+        None => {},
+    }
+    if lw.err != "" { return Err(lw.err) }
+    // the end of the body falls through to the epilogue
+    lw.finish(Term.Ret(-1))
+    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
+}
+
+// The IR of a lambda's body, lifted into `job.lifted` (MYLA-106): called with
+// its environment as the word after the result's address, then its
+// arguments. Each capture is copied out of the environment into a slot of its
+// own at entry, borrowed as a parameter is (captures are immutable, D48).
+pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
+    let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [] }
+    var first_word = 0
+    match ret {
+        Some(t) => {
+            if !lowerable(cg, t) { return Err("its result type") }
+            if is_aggregate(t) {
+                lw.sret = lw.new_slot("__sret", t, 8, 0, false)
+                first_word = 1
+            }
+        },
+        None => {},
+    }
+    let entry = lw.new_block()
+    lw.start(entry)
+    let env = lw.new_slot("__env", Type.TInt(64, false), 8, first_word, false)
+    let ptypes = tfunc_params(job.ftype)
+    var i = 0
+    while i < len(job.params) {
+        let t = subst_type(ptypes[i], cg.subst)
+        if !lowerable(cg, t) { return Err("a parameter's type") }
+        let s = lw.new_slot(job.params[i].name, t, 8, first_word + 1 + i, false)
+        lw.declare(job.params[i].name, s)
+        lw.add(Inst.Bind(job.params[i].name, s))
+        i = i + 1
+    }
+    for c in job.caps {
+        if !lowerable(cg, c.ty) { return Err("a capture's type") }
+        let s = lw.value_slot(cg, c.name, c.ty, false)
+        let e = lw.temp(Type.TInt(64, false))
+        lw.add(Inst.Load(e, env))
+        if is_aggregate(c.ty) {
+            lw.add(Inst.Copy(lw.slot_addr(s), lw.offset(e, c.off), cg.size(c.ty)))
+        } else {
+            let v = lw.temp(c.ty)
+            lw.add(Inst.LoadAt(v, e, c.off))
+            lw.add(Inst.Store(s, v))
+        }
+        lw.declare(c.name, s)
+        lw.add(Inst.Bind(c.name, s))
+    }
+    match job.body {
+        ExprOrBlock.EB_Block(b) => { lw.block(cg, b) },
+        ExprOrBlock.EB_Expr(ex) => {
+            lw.add(Inst.Loc(Pos { line: ex.line, col: ex.col }))
+            lw.begin_temps()
+            match ret {
+                Some(t) => { lw.ret_value(cg, ex) },
+                None => { lw.discard(cg, ex) },
+            }
+            lw.end_temps()
+        },
+    }
+    if lw.err != "" { return Err(lw.err) }
+    lw.finish(Term.Ret(-1))
+    return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
+}
+
+// Whether `t` is a scalar: an integer, float, bool or char.
+fun is_scalar(t: Type) -> bool {
+    return match t {
+        Type.TInt(w, s) => true
+        Type.TFloat(w) => true
+        Type.TBool => true
+        Type.TChar => true
+        _ => false
+    }
+}
+
+// Whether values of type `t` can be lowered: scalars, strings, lists, maps,
+// builders, function values, and structs, tuples and enums (recursive ones
+// too, whose members are boxed) of such values.
+fun lowerable(cg: CodeGen, t: Type) -> bool {
+    return member_lowerable(t, cg.ir_blocked)
+}
+
+// `lowerable` for a type whose structs and enums are lowerable unless named
+// in `blocked`, with their type arguments; a type parameter (in a
+// declaration) is.
+fun member_lowerable(t: Type, blocked: [str]) -> bool {
+    if is_scalar(t) { return true }
+    return match t {
+        Type.TStr => true
+        Type.TSB => true
+        Type.TParam(n) => true
+        Type.TList(et) => member_lowerable(et, blocked)
+        Type.TMap(kt, vt) => member_lowerable(kt, blocked) && member_lowerable(vt, blocked)
+        Type.TTuple(es) => all_lowerable(es, blocked)
+        Type.TStruct(n, a) => !has_name(blocked, n) && all_lowerable(a, blocked)
+        Type.TEnum(n, a) => !has_name(blocked, n) && all_lowerable(a, blocked)
+        Type.TFunc(ps, r) => all_lowerable(ps, blocked) && match r {
+            Some(rt) => member_lowerable(rt, blocked)
+            None => true
+        }
+        _ => false
+    }
+}
+
+fun all_lowerable(ts: [Type], blocked: [str]) -> bool {
+    for t in ts {
+        if !member_lowerable(t, blocked) { return false }
+    }
+    return true
+}
+
+fun has_name(names: [str], n: str) -> bool {
+    for x in names {
+        if x == n { return true }
+    }
+    return false
+}
+
+// The structs and enums whose declared members can't be lowered (through
+// another such type, to a fixed point; `Self`); a generic one is lowerable
+// for lowerable type arguments.
+pub fun blocked_types(cg: CodeGen) -> [str] {
+    var blocked: [str] = []
+    var changed = true
+    while changed {
+        changed = false
+        for s in cg.structs {
+            if !has_name(blocked, s.name) {
+                var ok = true
+                for f in s.fields {
+                    if !member_lowerable(f.ty, blocked) { ok = false }
+                }
+                if !ok {
+                    push(blocked, s.name)
+                    changed = true
+                }
+            }
+        }
+        for e in cg.enums {
+            if !has_name(blocked, e.name) {
+                var ok = true
+                for v in e.variants {
+                    if !all_lowerable(v.payload, blocked) { ok = false }
+                }
+                if !ok {
+                    push(blocked, e.name)
+                    changed = true
+                }
+            }
+        }
+    }
+    return blocked
+}
+
+// Whether `t`'s values are a pointer to a heap cell held in 8 bytes (a
+// string so far): a scalar for the frame, with a reference count.
+fun is_cell(t: Type) -> bool {
+    return is_cell_t(t)
+}
+
+impl Lower {
+    // --- building -------------------------------------------------------------
+
+    fun new_block(var self) -> int32 {
+        push(self.f.blocks, IrBlock { insts: [], term: Term.Open })
+        return len(self.f.blocks) - 1
+    }
+
+    // Make `b` the block instructions go to (blocks are emitted in this order).
+    fun start(var self, b: int32) {
+        self.cur = b
+        push(self.f.order, b)
+    }
+
+    fun add(var self, inst: Inst) {
+        push(self.f.blocks[self.cur].insts, inst)
+        match inst {
+            Inst.Store(s, v) => { if self.f.slots[s].owns { self.holder[v] = s } },
+            Inst.Addr(d, s) => { if self.f.slots[s].owns { self.holder[d] = s } },
+            Inst.Load(d, s) => { if self.f.slots[s].owns { self.holder[d] = s } },
+            _ => {},
+        }
+    }
+
+    // End the current block with `t` (if it isn't ended yet).
+    fun finish(var self, t: Term) {
+        match self.f.blocks[self.cur].term {
+            Term.Open => { self.f.blocks[self.cur].term = t },
+            _ => {},
+        }
+    }
+
+    // End the current block with `t` and continue in a new block, which only a
+    // jump made later can reach (the code after a `return` or `break`).
+    fun leave(var self, t: Term) {
+        self.finish(t)
+        let next = self.new_block()
+        self.start(next)
+    }
+
+    fun temp(var self, t: Type) -> int32 {
+        push(self.f.temps, t)
+        push(self.holder, -1)
+        push(self.placed, false)
+        return len(self.f.temps) - 1
+    }
+
+    // Whether the value `v` (a cell, or an aggregate's address) is held by an
+    // owned temporary of a statement still open, which then hands its
+    // references over (`moved`) instead of being retained into a place and
+    // dropped (MYLA-108).
+    fun take(var self, v: int32) -> bool {
+        let s = self.holder[v]
+        if s < 0 { return false }
+        for ts in self.temps {
+            for x in ts {
+                if x == s {
+                    self.moved(s)
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    // Whether the value `v` of type `t`, which owns heap values, is taken
+    // from an owned temporary (`take`).
+    fun took(var self, cg: CodeGen, t: Type, v: int32) -> bool {
+        return cg.owns_heap(t) && self.take(v)
+    }
+
+    // Whether the value `v` is held by an owned temporary of a statement still
+    // open (as `take`, without taking it).
+    fun holds(self, v: int32) -> bool {
+        let s = self.holder[v]
+        if s < 0 { return false }
+        for ts in self.temps {
+            for x in ts {
+                if x == s { return true }
+            }
+        }
+        return false
+    }
+
+    // `retain` unless the value is taken from an owned temporary.
+    fun retain_or_take(var self, cg: CodeGen, t: Type, v: int32) {
+        if !cg.owns_heap(t) { return }
+        if self.take(v) { return }
+        self.retain(cg, t, v)
+    }
+
+    fun new_slot(var self, name: str, t: Type, size: int32, word: int32, owns: bool) -> int32 {
+        push(self.f.slots, Slot { name: name, ty: t, size: size, word: word, owns: owns })
+        return len(self.f.slots) - 1
+    }
+
+    // A slot for a value of type `t` (its size, at least 8 bytes); `owns`: it
+    // owns the heap values it will hold.
+    fun value_slot(var self, cg: CodeGen, name: str, t: Type, owns: bool) -> int32 {
+        var size = 8
+        if is_aggregate(t) { size = cg.size(t) }
+        if size < 8 { size = 8 }
+        return self.new_slot(name, t, size, -1, owns && cg.owns_heap(t))
+    }
+
+    fun declare(var self, name: str, slot: int32) {
+        push(self.scopes[len(self.scopes) - 1], Local { name: name, slot: slot })
+    }
+
+    // The slot of the innermost `name` in scope, or -1.
+    fun lookup(self, name: str) -> int32 {
+        var i = len(self.scopes) - 1
+        while i >= 0 {
+            var j = len(self.scopes[i]) - 1
+            while j >= 0 {
+                if self.scopes[i][j].name == name { return self.scopes[i][j].slot }
+                j = j - 1
+            }
+            i = i - 1
+        }
+        return -1
+    }
+
+    // The type of a place: a variable's from its slot (the checker leaves
+    // assignment targets untyped), a field's or element's from its aggregate.
+    fun place_type(self, cg: CodeGen, e: Expr) -> Type {
+        match e.kind {
+            ExprKind.Name(n) => {
+                let slot = self.lookup(n)
+                if slot >= 0 { return self.f.slots[slot].ty }
+            },
+            ExprKind.GetField(t, f) => { return cg.struct_field_type_t(self.place_type(cg, t), f) },
+            ExprKind.Index(b, i) => {
+                let bt = self.place_type(cg, b)
+                if is_list_t(bt) { return list_elem(bt) }
+                if is_map_t(bt) { return map_val(bt) }
+            },
+            ExprKind.TupleIndex(t, i) => {
+                let es = tuple_elems(self.place_type(cg, t))
+                let ix = i as int32
+                if ix < len(es) { return es[ix] }
+            },
+            _ => {},
+        }
+        return cg.type_of(e.id)
+    }
+
+    // The address of the aggregate in slot `s`: an aggregate parameter's slot
+    // holds the caller's address, another slot holds the value itself.
+    fun slot_addr(var self, s: int32) -> int32 {
+        let d = self.temp(Type.TInt(64, false))
+        if self.f.slots[s].word >= 0 { self.add(Inst.Load(d, s)) } else { self.add(Inst.Addr(d, s)) }
+        return d
+    }
+
+    // `p + off` in a temporary of its own, also at offset 0: the address of a
+    // member, which the verifier mustn't read as the whole slot's.
+    fun offset(var self, p: int32, off: int32) -> int32 {
+        let d = self.temp(Type.TInt(64, false))
+        self.add(Inst.Offset(d, p, off))
+        return d
+    }
+
+    fun konst(var self, t: Type, v: int64) -> int32 {
+        let d = self.temp(t)
+        self.add(Inst.Const(d, t, v))
+        return d
+    }
+
+    // Record the first construct that can't be lowered; returns a dummy temp.
+    fun unsupported(var self, what: str) -> int32 {
+        if self.err == "" { self.err = what }
+        return self.temp(Type.TInt(64, true))
+    }
+
+    // --- ownership --------------------------------------------------------------
+
+    // A lexical scope: names, and the owners dropped when it ends.
+    fun open_scope(var self) {
+        var names: [Local] = []
+        push(self.scopes, names)
+        var slots: [int32] = []
+        push(self.owners, slots)
+        self.add(Inst.Scope(true))
+    }
+
+    fun close_scope(var self) {
+        self.drop_owners(len(self.owners) - 1)
+        self.scopes = drop_last_scope(self.scopes)
+        self.owners = drop_last_ints(self.owners)
+        self.add(Inst.Scope(false))
+    }
+
+    // Drop the owners of the scopes from the innermost down to index `depth`,
+    // each scope's in reverse order (they stay registered).
+    fun drop_owners(var self, depth: int32) {
+        var s = len(self.owners) - 1
+        while s >= depth {
+            var i = len(self.owners[s]) - 1
+            while i >= 0 {
+                let slot = self.owners[s][i]
+                self.add(Inst.DropSlot(self.f.slots[slot].ty, slot))
+                i = i - 1
+            }
+            s = s - 1
+        }
+    }
+
+    // The innermost scope owns `slot` from now on.
+    fun own(var self, slot: int32) {
+        if !self.f.slots[slot].owns { return }
+        push(self.owners[len(self.owners) - 1], slot)
+    }
+
+    // A statement's or condition's owned temporaries: those registered until
+    // the matching `end_temps` are dropped there.
+    fun begin_temps(var self) {
+        var ts: [int32] = []
+        push(self.temps, ts)
+    }
+
+    fun end_temps(var self) {
+        self.drop_temps(len(self.temps) - 1)
+        self.temps = drop_last_ints(self.temps)
+    }
+
+    fun drop_temps(var self, depth: int32) {
+        var s = len(self.temps) - 1
+        while s >= depth {
+            var i = len(self.temps[s]) - 1
+            while i >= 0 {
+                let slot = self.temps[s][i]
+                self.add(Inst.DropSlot(self.f.slots[slot].ty, slot))
+                i = i - 1
+            }
+            s = s - 1
+        }
+    }
+
+    // The owned temporary in `slot` (holding its value now) is dropped when
+    // the innermost temporary scope ends.
+    fun own_temp(var self, slot: int32) {
+        if !self.f.slots[slot].owns { return }
+        if len(self.temps) == 0 {
+            let d = self.unsupported("a temporary outside a statement")
+            return
+        }
+        push(self.temps[len(self.temps) - 1], slot)
+    }
+
+    // The cell value `v` of type `t` is a new reference (a call's result, a
+    // concatenation): keep it in an owning slot dropped with the statement.
+    fun owned_value(var self, cg: CodeGen, v: int32, t: Type) -> int32 {
+        if !cg.owns_heap(t) { return v }
+        let slot = self.value_slot(cg, "__temp", t, true)
+        self.add(Inst.Store(slot, v))
+        self.own_temp(slot)
+        return v
+    }
+
+    // One more reference to the value of type `t`: `v` holds a cell pointer
+    // (a string) or an aggregate's address.
+    fun retain(var self, cg: CodeGen, t: Type, v: int32) {
+        if !cg.owns_heap(t) { return }
+        if is_aggregate(t) { self.add(Inst.Retain(t, v)) } else { self.add(Inst.RetainVal(t, v)) }
+    }
+
+    // A scalar expression evaluated where nothing ends its temporaries (a
+    // condition, a guard, an operand of `&&`/`||`): they are dropped as soon
+    // as its value is known, which owns nothing.
+    fun cond(var self, cg: CodeGen, e: Expr) -> int32 {
+        self.begin_temps()
+        let v = self.expr(cg, e)
+        self.end_temps()
+        return v
+    }
+
+    // --- statements -------------------------------------------------------------
+
+    fun block(var self, cg: CodeGen, b: Block) {
+        self.open_scope()
+        for s in b.stmts { self.stmt(cg, s) }
+        self.close_scope()
+    }
+
+    fun stmt(var self, cg: CodeGen, s: Stmt) {
+        if self.err != "" { return }
+        self.add(Inst.Loc(Pos { line: s.line, col: s.col }))
+        self.begin_temps()
+        self.stmt_body(cg, s)
+        self.end_temps()
+    }
+
+    fun stmt_body(var self, cg: CodeGen, s: Stmt) {
+        match s.kind {
+            StmtKind.ExprStmt(e) => { self.discard(cg, e) },
+            StmtKind.VarDecl(k, name, ty, init) => {
+                let t = cg.type_of(init.id)
+                if !lowerable(cg, t) {
+                    let d = self.unsupported("a local's type")
+                    return
+                }
+                let slot = self.value_slot(cg, name, t, true)
+                if is_aggregate(t) {
+                    // built in the variable's slot when it can be
+                    self.into = slot
+                    let src = self.addr(cg, init)
+                    self.into = -1
+                    if !self.is_placed(src) {
+                        let took = self.took(cg, t, src)
+                        let dst = self.slot_addr(slot)
+                        self.add(Inst.Copy(dst, src, cg.size(t)))
+                        if !took { self.retain(cg, t, dst) }
+                    }
+                } else {
+                    let v = self.expr(cg, init)
+                    let took = self.took(cg, t, v)
+                    self.add(Inst.Store(slot, v))
+                    if !took { self.retain(cg, t, v) }
+                }
+                self.declare(name, slot)
+                self.own(slot)
+                self.add(Inst.Bind(name, slot))
+            },
+            StmtKind.Assign(target, value) => { self.assign(cg, target, value) },
+            StmtKind.ReturnS(ov) => {
+                match ov {
+                    Some(e) => { self.ret_value(cg, e) },
+                    None => {
+                        self.drop_temps(0)
+                        self.drop_owners(0)
+                        self.leave(Term.Ret(-1))
+                    },
+                }
+            },
+            StmtKind.IfS(c, then, otherwise) => { self.if_stmt(cg, c, then, otherwise) },
+            StmtKind.WhileS(c, body) => {
+                let head = self.new_block()
+                self.finish(Term.Jmp(head))
+                self.start(head)
+                let v = self.cond(cg, c)
+                let body_b = self.new_block()
+                let end = self.new_block()
+                self.finish(Term.Br(v, body_b, end))
+                self.start(body_b)
+                push(self.loops, LoopTarget { cont: head, brk: end, owners: len(self.owners), temps: len(self.temps) })
+                self.block(cg, body)
+                self.loops = drop_last_loop(self.loops)
+                self.finish(Term.Jmp(head))
+                self.start(end)
+            },
+            StmtKind.ForS(vn, start, end, body, iter) => { self.for_range(cg, vn, start, end, body, iter) },
+            StmtKind.BreakS => {
+                let lp = self.loops[len(self.loops) - 1]
+                self.drop_temps(lp.temps)
+                self.drop_owners(lp.owners)
+                self.leave(Term.Jmp(lp.brk))
+            },
+            StmtKind.ContinueS => {
+                let lp = self.loops[len(self.loops) - 1]
+                self.drop_temps(lp.temps)
+                self.drop_owners(lp.owners)
+                self.leave(Term.Jmp(lp.cont))
+            },
+            StmtKind.DestructDecl(k, binding, ty, init) => {
+                let t = cg.type_of(init.id)
+                if !lowerable(cg, t) {
+                    let d = self.unsupported("a local's type")
+                    return
+                }
+                let src = self.addr(cg, init)
+                self.destructure(cg, bind_elems(binding), src, t)
+            },
+        }
+    }
+
+    // The names of a tuple binding (`let (a, (b, _)) = …`): each a variable of
+    // its own, holding a retained copy of its element of the tuple at `base`.
+    fun destructure(var self, cg: CodeGen, elems: [BindElem], base: int32, t: Type) {
+        let ets = tuple_elems(t)
+        var i = 0
+        for b in elems {
+            let et = ets[i]
+            let off = cg.elem_offset(t, i)
+            match b {
+                BindElem.BName(n, l, c, sp) => {
+                    let slot = self.value_slot(cg, n, et, true)
+                    if is_aggregate(et) {
+                        let dst = self.slot_addr(slot)
+                        self.add(Inst.Copy(dst, self.unbox(cg, et, self.offset(base, off)), cg.size(et)))
+                        self.retain(cg, et, dst)
+                    } else {
+                        let v = self.temp(et)
+                        self.add(Inst.LoadAt(v, base, off))
+                        self.add(Inst.Store(slot, v))
+                        self.retain(cg, et, v)
+                    }
+                    self.declare(n, slot)
+                    self.own(slot)
+                    self.add(Inst.Bind(n, slot))
+                },
+                BindElem.BWild => {},
+                BindElem.BTuple(es, l, c, sp) => { self.destructure(cg, es, self.offset(base, off), et) },
+            }
+            i = i + 1
+        }
+    }
+
+    // An expression statement: its value, if any, isn't used (an owned one
+    // is dropped with the statement's temporaries).
+    // `return e`: the value with references of its own (into the result's
+    // storage for an aggregate), then every temporary and owner dropped.
+    fun ret_value(var self, cg: CodeGen, e: Expr) {
+        let t = cg.type_of(e.id)
+        if self.sret >= 0 {
+            // built in the caller's storage when it can be
+            self.into = self.sret
+            let src = self.addr(cg, e)
+            self.into = -1
+            let dst = self.slot_addr(self.sret)
+            if !self.is_placed(src) {
+                let took = self.took(cg, t, src)
+                self.add(Inst.Copy(dst, src, cg.size(t)))
+                if !took { self.retain(cg, t, dst) }
+            }
+            self.drop_temps(0)
+            self.drop_owners(0)
+            self.leave(Term.Ret(dst))
+            return
+        }
+        let v = self.expr(cg, e)
+        self.retain_or_take(cg, t, v)
+        self.drop_temps(0)
+        self.drop_owners(0)
+        self.leave(Term.Ret(v))
+    }
+
+    fun discard(var self, cg: CodeGen, e: Expr) {
+        match e.kind {
+            ExprKind.MatchE(scrut, arms) => {
+                let v = self.match_expr(cg, e, scrut, arms, false)
+                return
+            },
+            ExprKind.Call(callee, args) => {
+                if !cg.ctor_info(e).ok {
+                    let v = self.call(cg, e, callee, args, -1)
+                    return
+                }
+            },
+            _ => {},
+        }
+        if is_aggregate(cg.type_of(e.id)) {
+            let p = self.addr(cg, e)
+        } else {
+            let v = self.expr(cg, e)
+        }
+    }
+
+    // `target = value`: a local, or a field or element of one at any depth
+    // (through a `var self` parameter's address too). The new value is taken
+    // (retained) before the old one is released, which it may share.
+    fun assign(var self, cg: CodeGen, target: Expr, value: Expr) {
+        let t = self.place_type(cg, target)
+        if !lowerable(cg, t) {
+            let d = self.unsupported("an assignment of that type")
+            return
+        }
+        match target.kind {
+            ExprKind.Index(base, idx) => {
+                if is_map_t(self.place_type(cg, base)) {
+                    self.map_set(cg, base, idx, value)
+                    return
+                }
+            },
+            _ => {},
+        }
+        let local = match target.kind {
+            ExprKind.Name(n) => self.lookup(n)
+            _ => -1
+        }
+        match target.kind {
+            ExprKind.Name(n) => {
+                if local < 0 {
+                    let d = self.unsupported("an assignment to that place")
+                    return
+                }
+            },
+            _ => {},
+        }
+        if local >= 0 && (self.f.slots[local].owns || !is_aggregate(t)) {
+            // a variable: nothing is evaluated between the value and the store
+            if is_aggregate(t) {
+                let src = self.addr(cg, value)
+                if self.took(cg, t, src) {
+                    // a new value, which can't share the old one
+                    self.add(Inst.DropSlot(t, local))
+                    self.add(Inst.Copy(self.slot_addr(local), src, cg.size(t)))
+                    return
+                }
+                let staged = self.value_slot(cg, "__staged", t, false)
+                let sp = self.slot_addr(staged)
+                self.add(Inst.Copy(sp, src, cg.size(t)))
+                self.retain(cg, t, sp)
+                self.add(Inst.DropSlot(t, local))
+                self.add(Inst.Copy(self.slot_addr(local), sp, cg.size(t)))
+                return
+            }
+            let v = self.expr(cg, value)
+            self.retain_or_take(cg, t, v)
+            if self.f.slots[local].owns { self.add(Inst.DropSlot(t, local)) }
+            self.add(Inst.Store(local, v))
+            return
+        }
+        if local >= 0 && cg.is_boxed(t) {
+            let d = self.unsupported("an assignment to a recursive enum through a parameter")
+            return
+        }
+        // a member (or what a `var self` parameter points at): the value
+        // first, then the place, which may still return early (`?`)
+        let staged = self.stage(cg, t, value)
+        let dst = self.place(cg, target)
+        if cg.owns_heap(t) { self.add(Inst.DropAt(t, dst)) }
+        self.store_staged(cg, t, dst, staged)
+    }
+
+    // The address of an assignable place: a local, a field, tuple element, list
+    // element or map value of one at any depth, made unique on the way.
+    fun place(var self, cg: CodeGen, e: Expr) -> int32 {
+        match e.kind {
+            ExprKind.Name(n) => {
+                let slot = self.lookup(n)
+                if slot >= 0 { return self.slot_addr(slot) }
+            },
+            ExprKind.GetField(tgt, field) => {
+                let base = self.place(cg, tgt)
+                return self.offset(base, cg.field_offset(self.place_type(cg, tgt), field))
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                let base = self.place(cg, tgt)
+                return self.offset(base, cg.elem_offset(self.place_type(cg, tgt), idx as int32))
+            },
+            ExprKind.Index(base, idx) => {
+                // the list made unique first (copy-on-write along the whole
+                // path to the place), then the index, bounds-checked
+                let lt = self.place_type(cg, base)
+                if is_map_t(lt) {
+                    // the map made unique first; trapping when the key is
+                    // missing
+                    let mh = self.place(cg, base)
+                    let mc = self.temp(lt)
+                    self.add(Inst.Cow(mc, lt, mh))
+                    let k = self.expr(cg, idx)
+                    return self.map_value(cg, e, lt, mc, k)
+                }
+                if !is_list_t(lt) { return self.unsupported("an assignment to a byte") }
+                let holder = self.place(cg, base)
+                let cell = self.temp(Type.TInt(64, false))
+                self.add(Inst.Cow(cell, lt, holder))
+                let i = self.expr(cg, idx)
+                let d = self.temp(Type.TInt(64, false))
+                self.add(Inst.Elem(d, cell, i, cg.stored_size(list_elem(lt)), false, Pos { line: e.line, col: e.col }))
+                return d
+            },
+            _ => {},
+        }
+        return self.unsupported("an assignment to that place")
+    }
+
+    fun if_stmt(var self, cg: CodeGen, c: Expr, then: Block, otherwise: Option<ElseTail>) {
+        let v = self.cond(cg, c)
+        let then_b = self.new_block()
+        let end = self.new_block()
+        match otherwise {
+            None => {
+                self.finish(Term.Br(v, then_b, end))
+                self.start(then_b)
+                self.block(cg, then)
+                self.finish(Term.Jmp(end))
+            },
+            Some(et) => {
+                let else_b = self.new_block()
+                self.finish(Term.Br(v, then_b, else_b))
+                self.start(then_b)
+                self.block(cg, then)
+                self.finish(Term.Jmp(end))
+                self.start(else_b)
+                match et {
+                    ElseTail.ElseBlock(b) => { self.block(cg, b) },
+                    ElseTail.ElseIf(s2) => { self.stmt(cg, s2) },
+                }
+                self.finish(Term.Jmp(end))
+            },
+        }
+        self.start(end)
+    }
+
+    // `for v in start..end { body }`: the variable and the end in slots, the
+    // end evaluated once, the variable incremented (wrapping) after the body.
+    fun for_range(var self, cg: CodeGen, vn: str, start: Option<Expr>, end: Option<Expr>, body: Block, iter: Option<Expr>) {
+        match iter {
+            Some(it) => {
+                self.for_list(cg, vn, it, body)
+                return
+            },
+            None => {},
+        }
+        let loop_t = match start {
+            Some(e) => cg.type_of(e.id)
+            None => Type.TInt(32, true)
+        }
+        let lv = self.new_slot(vn, loop_t, 8, -1, false)
+        let fe = self.new_slot("__end", loop_t, 8, -1, false)
+        match start {
+            Some(e) => {
+                let v = self.cond(cg, e)
+                self.add(Inst.Store(lv, v))
+            },
+            None => {},
+        }
+        match end {
+            Some(e) => {
+                let v = self.cond(cg, e)
+                self.add(Inst.Store(fe, v))
+            },
+            None => {},
+        }
+        let head = self.new_block()
+        self.finish(Term.Jmp(head))
+        self.start(head)
+        let a = self.temp(loop_t)
+        self.add(Inst.Load(a, lv))
+        let b = self.temp(loop_t)
+        self.add(Inst.Load(b, fe))
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "<", loop_t, a, b))
+        let body_b = self.new_block()
+        let cont = self.new_block()
+        let done = self.new_block()
+        self.finish(Term.Br(c, body_b, done))
+        self.start(body_b)
+        let depth = len(self.owners)
+        self.open_scope()
+        self.declare(vn, lv)
+        self.add(Inst.Bind(vn, lv))
+        push(self.loops, LoopTarget { cont: cont, brk: done, owners: depth, temps: len(self.temps) })
+        for st in body.stmts { self.stmt(cg, st) }
+        self.loops = drop_last_loop(self.loops)
+        self.close_scope()
+        self.finish(Term.Jmp(cont))
+        self.start(cont)
+        let x = self.temp(loop_t)
+        self.add(Inst.Load(x, lv))
+        let one = self.konst(loop_t, 1)
+        let y = self.temp(loop_t)
+        self.add(Inst.Bin(y, "+", loop_t, loop_t, x, one, Pos { line: 0, col: 0 }))
+        self.add(Inst.Store(lv, y))
+        self.finish(Term.Jmp(head))
+        self.start(done)
+    }
+
+    // `for v in xs { body }`: the loop holds a reference to the list (dropped
+    // when it ends, or by a `return` from the body), walks it by index, and
+    // `v` borrows each element in turn. Over a map, the list is a new one of
+    // its keys.
+    fun for_list(var self, cg: CodeGen, vn: str, it: Expr, body: Block) {
+        let it_t = cg.type_of(it.id)
+        if (!is_list_t(it_t) && !is_map_t(it_t)) || !lowerable(cg, it_t) {
+            let d = self.unsupported("a for loop over that type")
+            return
+        }
+        var lt = it_t
+        if is_map_t(it_t) { lt = Type.TList(map_key(it_t)) }
+        let et = list_elem(lt)
+        let stride = cg.stored_size(et)
+        let held = self.value_slot(cg, "__iterated", lt, true)
+        self.begin_temps()
+        let v = self.expr(cg, it)
+        if is_map_t(it_t) {
+            self.add(Inst.Store(held, self.map_keys(cg, it_t, v)))
+        } else {
+            self.add(Inst.Store(held, v))
+            self.retain(cg, lt, v)
+        }
+        self.end_temps()
+        var loop_owners: [int32] = []
+        push(self.owners, loop_owners)
+        self.own(held)
+        let idx = self.new_slot("__index", Type.TInt(64, false), 8, -1, false)
+        let zero = self.konst(Type.TInt(64, false), 0)
+        self.add(Inst.Store(idx, zero))
+        let elem = self.value_slot(cg, vn, et, false)
+        let head = self.new_block()
+        self.finish(Term.Jmp(head))
+        self.start(head)
+        let i = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(i, idx))
+        let cell = self.temp(lt)
+        self.add(Inst.Load(cell, held))
+        let n = self.temp(Type.TInt(64, false))
+        self.add(Inst.LoadAt(n, cell, 0))
+        let c = self.temp(Type.TBool)
+        self.add(Inst.Cmp(c, "<", Type.TInt(64, false), i, n))
+        let body_b = self.new_block()
+        let cont = self.new_block()
+        let done = self.new_block()
+        self.finish(Term.Br(c, body_b, done))
+        self.start(body_b)
+        let p = self.temp(Type.TInt(64, false))
+        self.add(Inst.Elem(p, cell, i, stride, false, Pos { line: 0, col: 0 }))
+        if is_aggregate(et) {
+            let dst = self.slot_addr(elem)
+            self.add(Inst.Copy(dst, self.unbox(cg, et, p), cg.size(et)))
+        } else {
+            let x = self.temp(et)
+            self.add(Inst.LoadAt(x, p, 0))
+            self.add(Inst.Store(elem, x))
+        }
+        let depth = len(self.owners)
+        self.open_scope()
+        self.declare(vn, elem)
+        self.add(Inst.Bind(vn, elem))
+        push(self.loops, LoopTarget { cont: cont, brk: done, owners: depth, temps: len(self.temps) })
+        for st in body.stmts { self.stmt(cg, st) }
+        self.loops = drop_last_loop(self.loops)
+        self.close_scope()
+        self.finish(Term.Jmp(cont))
+        self.start(cont)
+        let i2 = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(i2, idx))
+        let one = self.konst(Type.TInt(64, false), 1)
+        let i3 = self.temp(Type.TInt(64, false))
+        self.add(Inst.Bin(i3, "+", Type.TInt(64, false), Type.TInt(64, false), i2, one, Pos { line: 0, col: 0 }))
+        self.add(Inst.Store(idx, i3))
+        self.finish(Term.Jmp(head))
+        self.start(done)
+        self.drop_owners(len(self.owners) - 1)
+        self.owners = drop_last_ints(self.owners)
+    }
+
+    // --- scalar expressions -----------------------------------------------------
+
+    // The temporary holding the value of the scalar expression `e` (for a
+    // string, the cell pointer: borrowed, or owned by a temporary slot).
+    fun expr(var self, cg: CodeGen, e: Expr) -> int32 {
+        if self.err != "" { return 0 }
+        let t = cg.type_of(e.id)
+        match e.kind {
+            ExprKind.IntLit(v, suf, isc, big) => { return self.konst(t, v) },
+            ExprKind.FloatLit(lex, suf) => {
+                var bits = f64_literal_bits(lex)
+                match t {
+                    Type.TFloat(w) => { if w == 32 { bits = f32_round_bits(bits) } },
+                    _ => {},
+                }
+                return self.konst(t, bits as int64)
+            },
+            ExprKind.BoolLit(b) => {
+                var one: int64 = 0
+                if b { one = 1 }
+                return self.konst(Type.TBool, one)
+            },
+            ExprKind.StrLit(text) => {
+                // a static cell: no reference to own
+                let d = self.temp(Type.TStr)
+                self.add(Inst.Str(d, text))
+                return d
+            },
+            ExprKind.Name(n) => { return self.name(cg, n, t) },
+            ExprKind.Unary(op, x) => {
+                if !is_scalar(t) { return self.unsupported("a unary operator on a value that isn't a scalar") }
+                let a = self.expr(cg, x)
+                let d = self.temp(t)
+                self.add(Inst.Un(d, op, t, a))
+                return d
+            },
+            ExprKind.Binary(op, l, r) => { return self.binary(cg, e, op, l, r) },
+            ExprKind.Cast(x, ty) => {
+                let src = cg.type_of(x.id)
+                if !is_scalar(src) || !is_scalar(t) { return self.unsupported("a cast of a value that isn't a scalar") }
+                let a = self.expr(cg, x)
+                let d = self.temp(t)
+                self.add(Inst.Cast(d, src, t, a))
+                return d
+            },
+            ExprKind.Call(callee, args) => {
+                let d = self.call(cg, e, callee, args, -1)
+                if d < 0 { return self.unsupported("a call without a value used as one") }
+                return d
+            },
+            ExprKind.GetField(tgt, field) => {
+                if is_aggregate(t) { return self.unsupported("an aggregate field used as a scalar") }
+                let base = self.addr(cg, tgt)
+                let d = self.temp(t)
+                self.add(Inst.LoadAt(d, base, cg.field_offset(self.place_type(cg, tgt), field)))
+                return d
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                if is_aggregate(t) { return self.unsupported("an aggregate element used as a scalar") }
+                let base = self.addr(cg, tgt)
+                let d = self.temp(t)
+                self.add(Inst.LoadAt(d, base, cg.elem_offset(self.place_type(cg, tgt), idx as int32)))
+                return d
+            },
+            ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
+            ExprKind.Index(base, idx) => {
+                let p = self.elem_read(cg, e, base, idx)
+                if is_aggregate(t) { return self.unsupported("an aggregate element used as a scalar") }
+                let d = self.temp(t)
+                if is_tstr(self.place_type(cg, base)) { self.add(Inst.Load8(d, p)) } else { self.add(Inst.LoadAt(d, p, 0)) }
+                return d
+            },
+            ExprKind.ListLit(elems) => { return self.list_lit(cg, t, elems) },
+            ExprKind.MapLit(entries) => { return self.map_lit(cg, t, entries) },
+            ExprKind.Try(inner) => { return self.try_expr(cg, e, inner) },
+            _ => {},
+        }
+        return self.unsupported("that kind of expression")
+    }
+
+    fun name(var self, cg: CodeGen, n: str, t: Type) -> int32 {
+        let slot = self.lookup(n)
+        if slot >= 0 {
+            if is_aggregate(self.f.slots[slot].ty) { return self.unsupported("an aggregate used as a scalar") }
+            let d = self.temp(self.f.slots[slot].ty)
+            self.add(Inst.Load(d, slot))
+            return d
+        }
+        // a str const is its folded value, a static string (MYLA-84)
+        match get(cg.const_strs, n) {
+            Some(text) => {
+                let d = self.temp(Type.TStr)
+                self.add(Inst.Str(d, text))
+                return d
+            },
+            None => {},
+        }
+        if !is_scalar(t) { return self.unsupported("a name that isn't a local") }
+        // a scalar const is its expression, evaluated where it is used
+        match cg.const_value_expr(n) {
+            Some(ve) => { return self.expr(cg, ve) },
+            None => {},
+        }
+        return self.unsupported("a function used as a value")
+    }
+
+    fun binary(var self, cg: CodeGen, e: Expr, op: str, l: Expr, r: Expr) -> int32 {
+        if op == "&&" || op == "||" { return self.logical(cg, op, l, r) }
+        let lt = cg.type_of(l.id)
+        let rt = cg.type_of(e.id)
+        if is_overloadable_op(op) && is_struct_or_enum_t(lt) && lowerable(cg, lt) {
+            return self.overloaded_scalar(cg, op, l, r, lt)
+        }
+        if is_tstr(lt) {
+            if op == "==" || op == "!=" {
+                let a = self.expr(cg, l)
+                let b = self.expr(cg, r)
+                let eq = self.temp(Type.TBool)
+                self.add(Inst.Rt(eq, "__str_eq", [a, b]))
+                if op == "==" { return eq }
+                let d = self.temp(Type.TBool)
+                self.add(Inst.Un(d, "!", Type.TBool, eq))
+                return d
+            }
+            if op == "+" {
+                let a = self.expr(cg, l)
+                let b = self.expr(cg, r)
+                let d = self.temp(Type.TStr)
+                self.add(Inst.Rt(d, "__str_concat", [a, b]))
+                return self.owned_value(cg, d, Type.TStr)
+            }
+            return self.unsupported("that operator on strings")
+        }
+        if !is_scalar(lt) || !is_scalar(rt) { return self.unsupported("an operator on values that aren't scalars") }
+        let a = self.expr(cg, l)
+        let b = self.expr(cg, r)
+        let d = self.temp(rt)
+        if op == "==" || op == "!=" || is_cmp(op) {
+            self.add(Inst.Cmp(d, op, lt, a, b))
+        } else {
+            self.add(Inst.Bin(d, op, lt, rt, a, b, Pos { line: e.line, col: e.col }))
+        }
+        return d
+    }
+
+    // `a == b`, `a != b` and the orderings on a user type: its `eq` or `cmp`
+    // method, called with both operands' addresses.
+    fun overloaded_scalar(var self, cg: CodeGen, op: str, l: Expr, r: Expr, lt: Type) -> int32 {
+        let key = cg.type_key(lt)
+        var method = ""
+        if op == "==" || op == "!=" { method = "eq" } else if is_cmp(op) { method = "cmp" } else { return self.unsupported("an arithmetic operator on a user type used as a scalar") }
+        let pa = self.addr(cg, l)
+        let pb = self.addr(cg, r)
+        let res = self.temp(Type.TInt(64, true))
+        self.add(Inst.Call(res, format("{}.{}", key, method), [pa, pb]))
+        if op == "==" { return res }
+        let d = self.temp(Type.TBool)
+        if op == "!=" {
+            self.add(Inst.Un(d, "!", Type.TBool, res))
+            return d
+        }
+        let zero = self.konst(Type.TInt(64, true), 0)
+        self.add(Inst.Cmp(d, op, Type.TInt(64, true), res, zero))
+        return d
+    }
+
+    // `l && r` / `l || r`: `r` runs only when it decides the result; each
+    // operand drops its own temporaries, since the right one may not run.
+    fun logical(var self, cg: CodeGen, op: str, l: Expr, r: Expr) -> int32 {
+        let d = self.temp(Type.TBool)
+        let a = self.cond(cg, l)
+        let rhs = self.new_block()
+        let yes = self.new_block()
+        let no = self.new_block()
+        let end = self.new_block()
+        if op == "&&" { self.finish(Term.Br(a, rhs, no)) } else { self.finish(Term.Br(a, yes, rhs)) }
+        self.start(rhs)
+        let b = self.cond(cg, r)
+        self.finish(Term.Br(b, yes, no))
+        self.start(yes)
+        self.add(Inst.Const(d, Type.TBool, 1))
+        self.finish(Term.Jmp(end))
+        self.start(no)
+        self.add(Inst.Const(d, Type.TBool, 0))
+        self.finish(Term.Jmp(end))
+        self.start(end)
+        return d
+    }
+
+    // --- aggregate expressions --------------------------------------------------
+
+    // A temporary holding the address of the aggregate value of `e`: where a
+    // variable keeps it (borrowed), or a slot the value is built in (owned
+    // by the statement when it holds heap values).
+    fun addr(var self, cg: CodeGen, e: Expr) -> int32 {
+        // the destination offered to this expression only, not to its parts
+        let into = self.into
+        self.into = -1
+        if self.err != "" { return 0 }
+        let t = cg.type_of(e.id)
+        if !lowerable(cg, t) { return self.unsupported("an aggregate of that type") }
+        let ci = cg.ctor_info(e)
+        if ci.ok { return self.enum_ctor(cg, t, ci.enum_name, ci.variant, ci.args, into) }
+        match e.kind {
+            ExprKind.Name(n) => {
+                let slot = self.lookup(n)
+                if slot >= 0 { return self.slot_addr(slot) }
+                if cg.has_func(n) { return self.fn_value(cg, e, n) }
+                return self.unsupported("that name as a value")
+            },
+            ExprKind.Lambda(params, rt, body) => { return self.lambda_value(cg, e, params, body) },
+            ExprKind.GetField(tgt, field) => {
+                let base = self.addr(cg, tgt)
+                return self.unbox(cg, t, self.offset(base, cg.field_offset(self.place_type(cg, tgt), field)))
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                let base = self.addr(cg, tgt)
+                return self.unbox(cg, t, self.offset(base, cg.elem_offset(self.place_type(cg, tgt), idx as int32)))
+            },
+            ExprKind.StructLit(name, fields) => {
+                let slot = self.build_slot(cg, "__struct", t, into)
+                let base = self.slot_addr(slot)
+                for fi in fields { self.store_member(cg, fi.value, base, cg.field_offset(t, fi.name)) }
+                self.built(slot, into, base)
+                return base
+            },
+            ExprKind.TupleLit(elems) => {
+                let slot = self.build_slot(cg, "__tuple", t, into)
+                let base = self.slot_addr(slot)
+                var i = 0
+                for el in elems {
+                    self.store_member(cg, el, base, cg.elem_offset(t, i))
+                    i = i + 1
+                }
+                self.built(slot, into, base)
+                return base
+            },
+            ExprKind.Call(callee, args) => {
+                let d = self.call(cg, e, callee, args, into)
+                if d < 0 { return self.unsupported("a call without a value used as one") }
+                return d
+            },
+            ExprKind.Binary(op, l, r) => {
+                let lt = cg.type_of(l.id)
+                if op == ">>" && is_tfunc(lt) { return self.compose(cg, e, l, r) }
+                if !is_overloadable_op(op) || !is_struct_or_enum_t(lt) { return self.unsupported("that operator on aggregates") }
+                let pa = self.addr(cg, l)
+                let pb = self.addr(cg, r)
+                let slot = self.value_slot(cg, "__result", t, true)
+                let res = self.slot_addr(slot)
+                self.add(Inst.CallSret(format("{}.{}", cg.type_key(lt), arith_method_cg(op)), res, [pa, pb]))
+                self.own_temp(slot)
+                return res
+            },
+            ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
+            ExprKind.Index(base, idx) => { return self.unbox(cg, t, self.elem_read(cg, e, base, idx)) },
+            ExprKind.Try(inner) => { return self.try_expr(cg, e, inner) },
+            _ => {},
+        }
+        return self.unsupported("that kind of aggregate expression")
+    }
+
+    // The address of the value of type `t` held by the member at `p`: `p`
+    // itself, or for a recursive enum (a boxed member) the box's, borrowed.
+    fun unbox(var self, cg: CodeGen, t: Type, p: int32) -> int32 {
+        if !cg.is_boxed(t) { return p }
+        let q = self.temp(Type.TInt(64, false))
+        self.add(Inst.LoadAt(q, p, 0))
+        return q
+    }
+
+    // A new box holding a copy of `value`, a recursive enum's, with references
+    // of its own: the pointer a member of type `t` holds.
+    fun box(var self, cg: CodeGen, value: Expr, t: Type) -> int32 {
+        let src = self.addr(cg, value)
+        let took = self.took(cg, t, src)
+        let size = self.int_const(cg.size(t))
+        let p = self.temp(Type.TInt(64, false))
+        self.add(Inst.Rt(p, "__alloc", [size]))
+        self.add(Inst.Copy(p, src, cg.size(t)))
+        if !took { self.retain(cg, t, p) }
+        return p
+    }
+
+    // An enum value built in a new slot: the variant's tag, then its payload.
+    fun enum_ctor(var self, cg: CodeGen, t: Type, enum_name: str, variant: str, args: [Expr], into: int32) -> int32 {
+        let slot = self.build_slot(cg, "__enum", t, into)
+        let base = self.slot_addr(slot)
+        let tag = self.konst(Type.TInt(64, true), cg.variant_tag(enum_name, variant) as int64)
+        self.add(Inst.StoreAt(base, 0, tag))
+        var i = 0
+        for a in args {
+            self.store_member(cg, a, base, cg.variant_field_offset(t, variant, i))
+            i = i + 1
+        }
+        // the slot holds a value even when the variant's payload owns nothing
+        self.built(slot, into, base)
+        return base
+    }
+
+    // Whether `v` is the address of a value built in its destination.
+    fun is_placed(self, v: int32) -> bool {
+        return v >= 0 && v < len(self.placed) && self.placed[v]
+    }
+
+    // The slot an aggregate value is built in: `into`, the destination its
+    // statement offers (a new variable's slot, or the function's result), or
+    // a temporary of its own (MYLA-108: no copy from one to the other).
+    fun build_slot(var self, cg: CodeGen, name: str, t: Type, into: int32) -> int32 {
+        if into >= 0 { return into }
+        return self.value_slot(cg, name, t, true)
+    }
+
+    // The aggregate at `base`, in `slot`, is complete: a temporary of its own
+    // is the statement's; built in `into`, its address says so (`placed`).
+    fun built(var self, slot: int32, into: int32, base: int32) {
+        self.mark_built(slot)
+        if slot != into { self.own_temp(slot) } else { self.placed[base] = true }
+    }
+
+    // Store `value` as the member at `base + off`, with its own references.
+    fun store_member(var self, cg: CodeGen, value: Expr, base: int32, off: int32) {
+        let mt = cg.type_of(value.id)
+        if cg.is_boxed(mt) {
+            self.add(Inst.StoreAt(base, off, self.box(cg, value, mt)))
+        } else if is_aggregate(mt) {
+            let src = self.addr(cg, value)
+            let took = self.took(cg, mt, src)
+            let dst = self.offset(base, off)
+            self.add(Inst.Copy(dst, src, cg.size(mt)))
+            if !took { self.retain(cg, mt, dst) }
+        } else {
+            let v = self.expr(cg, value)
+            self.add(Inst.StoreAt(base, off, v))
+            self.retain_or_take(cg, mt, v)
+        }
+    }
+
+    // An aggregate slot whose members were stored one by one now holds its
+    // value (for the verifier).
+    fun mark_built(var self, slot: int32) {
+        if self.f.slots[slot].owns { self.add(Inst.Init(slot)) }
+    }
+
+    // --- calls ------------------------------------------------------------------
+
+    // A call: `print`, `len` of a string, a user function, or a method; the
+    // temporary holding its scalar result or its aggregate result's address,
+    // -1 without a result. A result that owns heap values is the statement's.
+    fun call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr], into: int32) -> int32 {
+        if self.err != "" { return -1 }
+        if args_have_hole(args) { return self.partial(cg, e, callee, args) }
+        match callee.kind {
+            ExprKind.Name(nm) => {
+                if nm == "print" && len(args) == 1 { return self.print(cg, args[0]) }
+                if nm == "len" && len(args) == 1 && is_cell_t(cg.type_of(args[0].id)) {
+                    let s = self.expr(cg, args[0])
+                    let d = self.temp(Type.TInt(32, true))
+                    self.add(Inst.LoadAt(d, s, 0))
+                    return d
+                }
+                if nm == "push" && len(args) == 2 && is_list_t(self.place_type(cg, args[0])) { return self.push_elem(cg, args[0], args[1]) }
+                if nm == "pop" && len(args) == 1 && is_list_t(self.place_type(cg, args[0])) { return self.pop_elem(cg, e, args[0]) }
+                if nm == "contains" && len(args) == 2 { return self.map_contains(cg, args[0], args[1]) }
+                if nm == "remove" && len(args) == 2 { return self.map_remove(cg, args[0], args[1]) }
+                if nm == "keys" && len(args) == 1 {
+                    let m = self.expr(cg, args[0])
+                    return self.owned_value(cg, self.map_keys(cg, cg.type_of(args[0].id), m), cg.type_of(e.id))
+                }
+                if nm == "chars" && len(args) == 1 {
+                    let s = self.expr(cg, args[0])
+                    let d = self.temp(cg.type_of(e.id))
+                    self.add(Inst.Rt(d, "__str_chars", [s]))
+                    return self.owned_value(cg, d, cg.type_of(e.id))
+                }
+                if nm == "format" && len(args) >= 1 { return self.format_call(cg, args) }
+                if nm == "StringBuilder" && len(args) == 0 { return self.sb_new(cg) }
+                if (nm == "append" && (len(args) == 2 || len(args) == 4)) || (nm == "append_byte" && len(args) == 2) { return self.sb_append(cg, e, nm, args) }
+                if nm == "assert" || nm == "panic" || nm == "unreachable" { return self.intrinsic(cg, e, nm, args) }
+                if nm == "build" && len(args) == 1 {
+                    let c = self.expr(cg, args[0])
+                    let d = self.temp(Type.TStr)
+                    self.add(Inst.SbBuild(d, c))
+                    return self.owned_value(cg, d, Type.TStr)
+                }
+                if is_builtin_call_name(nm) { return self.io_call(cg, e, nm, args) }
+                if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.indirect_call(cg, e, callee, args) }
+                return self.direct_call(cg, e, nm, args, into)
+            },
+            ExprKind.GetField(recv, field) => {
+                let mname = format("{}.{}", cg.type_key(cg.type_of(recv.id)), field)
+                if !cg.has_func(mname) { return self.indirect_call(cg, e, callee, args) }
+                var argv: [Expr] = [recv]
+                for a in args { push(argv, a) }
+                return self.direct_call(cg, e, mname, argv, into)
+            },
+            _ => {},
+        }
+        return self.indirect_call(cg, e, callee, args)
+    }
+
+    // A call through the function value `callee` (evaluated first): its
+    // code called with its environment as the first word after the result's
+    // address, the arguments as for `direct_call`.
+    fun indirect_call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr]) -> int32 {
+        let ft = self.place_type(cg, callee)
+        if !is_tfunc(ft) || !lowerable(cg, ft) { return self.unsupported("a call through a value of that type") }
+        let params = tfunc_params(ft)
+        let fv = self.addr(cg, callee)
+        var vals: [int32] = []
+        var i = 0
+        while i < len(args) && i < len(params) {
+            if is_aggregate(params[i]) { push(vals, self.addr(cg, args[i])) } else { push(vals, self.expr(cg, args[i])) }
+            i = i + 1
+        }
+        match tfunc_ret(ft) {
+            Some(rt) => {
+                if is_aggregate(rt) {
+                    let slot = self.value_slot(cg, "__result", rt, true)
+                    let res = self.slot_addr(slot)
+                    self.add(Inst.CallIndSret(fv, res, vals))
+                    self.own_temp(slot)
+                    return res
+                }
+                let d = self.temp(rt)
+                self.add(Inst.CallInd(d, fv, vals))
+                return self.owned_value(cg, d, rt)
+            },
+            None => {},
+        }
+        self.add(Inst.CallInd(-1, fv, vals))
+        return -1
+    }
+
+    // --- function values -------------------------------------------------------
+
+    // A slot for the function value of type `t` made here: (its address, its
+    // environment cell of `size` bytes, whose first word is the release
+    // function `drop`; -1 for none: a null environment), its code `code`.
+    fun fat_value(var self, cg: CodeGen, t: Type, code: str, size: int32, drop: str) -> (int32, int32, int32) {
+        let slot = self.value_slot(cg, "__fn", t, true)
+        let base = self.slot_addr(slot)
+        let c = self.temp(Type.TInt(64, false))
+        self.add(Inst.Label(c, code))
+        self.add(Inst.StoreAt(base, 0, c))
+        if size < 0 {
+            self.add(Inst.StoreAt(base, 8, self.int_const(0)))
+            return (slot, base, -1)
+        }
+        let env = self.temp(Type.TInt(64, false))
+        self.add(Inst.Rt(env, "__alloc", [self.int_const(size)]))
+        let d = self.temp(Type.TInt(64, false))
+        self.add(Inst.Label(d, drop))
+        self.add(Inst.StoreAt(env, 0, d))
+        self.add(Inst.StoreAt(base, 8, env))
+        return (slot, base, env)
+    }
+
+    // The function value's slot is complete: the statement owns it.
+    fun made_value(var self, slot: int32) {
+        self.mark_built(slot)
+        self.own_temp(slot)
+    }
+
+    // A copy of `value` of type `t` stored into the environment `env` at
+    // `off`, with references of its own.
+    fun store_env(var self, cg: CodeGen, env: int32, off: int32, value: Expr, t: Type) {
+        if is_aggregate(t) {
+            let src = self.addr(cg, value)
+            let took = self.took(cg, t, src)
+            let dst = self.offset(env, off)
+            self.add(Inst.Copy(dst, src, cg.size(t)))
+            if !took { self.retain(cg, t, dst) }
+        } else {
+            let v = self.expr(cg, value)
+            self.add(Inst.StoreAt(env, off, v))
+            self.retain_or_take(cg, t, v)
+        }
+    }
+
+    // A top-level function `n` as a value: its thunk (taking an environment
+    // word it ignores) and a null environment.
+    fun fn_value(var self, cg: CodeGen, e: Expr, n: str) -> int32 {
+        if len(cg.sig_of(n).type_params) > 0 { return self.unsupported("a generic function as a value") }
+        if !has_name(self.fnvals, n) { push(self.fnvals, n) }
+        let made = self.fat_value(cg, cg.type_of(e.id), format("myla_{}__fnval", n), -1, "")
+        self.made_value(made.0)
+        return made.1
+    }
+
+    // A lambda: its body lifted into a function of its own (`lower_lambda`),
+    // its captures copied into a new environment by value (D48).
+    fun lambda_value(var self, cg: CodeGen, e: Expr, params: [Param], body: ExprOrBlock) -> int32 {
+        let t = cg.type_of(e.id)
+        if !lowerable(cg, t) { return self.unsupported("a lambda of that type") }
+        let lifted = format("{}__lam{}", self.f.name, e.id)
+        var bound: [str] = []
+        for p in params { push(bound, p.name) }
+        var caps: [Cap] = []
+        var seen: [str] = []
+        var size = 8                // word 0 of the env holds its drop function
+        var owns = false
+        for nm in cg.free_eb(body, bound) {
+            let slot = self.lookup(nm)
+            if slot >= 0 && !has_name(seen, nm) {
+                push(seen, nm)
+                let ct = self.f.slots[slot].ty
+                if !lowerable(cg, ct) { return self.unsupported("a capture of that type") }
+                push(caps, Cap { name: nm, ty: ct, off: size })
+                size = size + cg.size(ct)
+                if cg.owns_heap(ct) { owns = true }
+            }
+        }
+        push(self.lams, LamJob { lifted: lifted, params: params, ftype: t, body: body, caps: caps, subst: cg.subst, id: e.id, line: e.line, col: e.col })
+        if len(caps) == 0 { size = -1 }
+        var drop = "__free"
+        if owns { drop = format("myla_{}_env_drop", lifted) }
+        let made = self.fat_value(cg, t, "myla_" + lifted, size, drop)
+        for c in caps {
+            let slot = self.lookup(c.name)
+            if is_aggregate(c.ty) {
+                let dst = self.offset(made.2, c.off)
+                self.add(Inst.Copy(dst, self.slot_addr(slot), cg.size(c.ty)))
+                self.retain(cg, c.ty, dst)
+            } else {
+                let v = self.temp(c.ty)
+                self.add(Inst.Load(v, slot))
+                self.add(Inst.StoreAt(made.2, c.off, v))
+                self.retain(cg, c.ty, v)
+            }
+        }
+        self.made_value(made.0)
+        return made.1
+    }
+
+    // `l >> r`: an environment holding both function values (retained), and
+    // the runtime's `__compose_call`.
+    fun compose(var self, cg: CodeGen, e: Expr, l: Expr, r: Expr) -> int32 {
+        let made = self.fat_value(cg, cg.type_of(e.id), "__compose_call", 40, "__compose_env_drop")
+        self.store_env(cg, made.2, 8, l, cg.type_of(l.id))
+        self.store_env(cg, made.2, 24, r, cg.type_of(r.id))
+        self.made_value(made.0)
+        return made.1
+    }
+
+    // `f(a, _, …)`: the filled arguments (and a method's receiver, or the
+    // function value called) evaluated now into a new environment, and a
+    // thunk filling the holes from its own parameters (D51, D60).
+    fun partial(var self, cg: CodeGen, e: Expr, callee: Expr, given: [Expr]) -> int32 {
+        var target = ""
+        var args = given
+        var fn_value = false
+        match callee.kind {
+            ExprKind.Name(n) => {
+                if self.lookup(n) >= 0 { fn_value = true } else { target = n }
+            },
+            ExprKind.GetField(recv, field) => {
+                let mname = format("{}.{}", cg.type_key(cg.type_of(recv.id)), field)
+                if cg.has_func(mname) {
+                    target = mname
+                    args = [recv]
+                    for a in given { push(args, a) }
+                } else {
+                    fn_value = true
+                }
+            },
+            _ => { fn_value = true },
+        }
+        var params: [Type] = []
+        var ret: Option<Type> = None
+        let ft = self.place_type(cg, callee)
+        if fn_value {
+            params = tfunc_params(ft)
+            ret = tfunc_ret(ft)
+        } else {
+            let sig = cg.sig_of(target)
+            if len(sig.type_params) > 0 { return self.unsupported("a partial application of a generic function") }
+            params = sig.params
+            ret = sig.ret
+        }
+        let t = cg.type_of(e.id)
+        if !lowerable(cg, t) { return self.unsupported("a partial application of that type") }
+        var slots: [int32] = []
+        var aggs: [bool] = []
+        var fills: [Expr] = []
+        var offs: [int32] = []
+        var owned: [DropEntry] = []
+        var size = 8               // word 0 of the env holds its drop function
+        var fn_off = -1
+        if fn_value {
+            fn_off = size
+            push(owned, DropEntry { off: size, ty: ft })
+            size = size + 16
+        }
+        var i = 0
+        while i < len(args) {
+            let a = args[i]
+            push(aggs, is_aggregate(params[i]))
+            if is_hole_expr(a) {
+                push(slots, -1)
+            } else {
+                push(slots, size)
+                push(fills, a)
+                push(offs, size)
+                let at = cg.type_of(a.id)
+                if !lowerable(cg, at) { return self.unsupported("a partial application with an argument of that type") }
+                if cg.owns_heap(at) { push(owned, DropEntry { off: size, ty: at }) }
+                size = size + cg.size(at)
+            }
+            i = i + 1
+        }
+        let lifted = format("{}__partial{}", self.f.name, e.id)
+        var drop = "__free"
+        if len(owned) > 0 { drop = format("myla_{}_env_drop", lifted) }
+        let made = self.fat_value(cg, t, "myla_" + lifted, size, drop)
+        if fn_value {
+            let src = self.addr(cg, callee)
+            let dst = self.offset(made.2, fn_off)
+            self.add(Inst.Copy(dst, src, 16))
+            self.retain(cg, ft, dst)
+        }
+        var k = 0
+        while k < len(fills) {
+            self.store_env(cg, made.2, offs[k], fills[k], cg.type_of(fills[k].id))
+            k = k + 1
+        }
+        push(self.partials, PartialJob { lifted: lifted, target: target, fn_off: fn_off, slots: slots, aggs: aggs, sret: is_aggregate_opt(ret), owned: owned })
+        self.made_value(made.0)
+        return made.1
+    }
+
+    // A call of the user function `name` with the argument list `argv`
+    // (for a method the receiver first): scalars by value, aggregates by
+    // address, both borrowed; an aggregate result through storage of its own.
+    fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr], into: int32) -> int32 {
+        let sig = cg.sig_of(name)
+        // a generic function: the instance for the argument types, which the
+        // code generator stamps out once this function is lowered
+        var target = sig.name
+        var params = sig.params
+        var ret = sig.ret
+        if len(sig.type_params) > 0 {
+            let targs = cg.solve_targs(sig, argv)
+            target = mangle_fn(sig.name, targs)
+            push(self.f.instances, Instance { orig: sig.name, targs: targs })
+            var sub: [Subst] = []
+            var k = 0
+            while k < len(sig.type_params) {
+                push(sub, Subst { name: sig.type_params[k], ty: targs[k] })
+                k = k + 1
+            }
+            var cp: [Type] = []
+            for p in sig.params { push(cp, subst_type(p, sub)) }
+            params = cp
+            ret = opt_subst_type(sig.ret, sub)
+        }
+        for p in params {
+            if !lowerable(cg, p) { return self.unsupported("a call with an argument of that type") }
+        }
+        var ret_t = Type.TBool
+        var has_ret = false
+        match ret {
+            Some(rt) => {
+                if !lowerable(cg, rt) { return self.unsupported("a call whose result has that type") }
+                ret_t = rt
+                has_ret = true
+            },
+            None => {},
+        }
+        var vals: [int32] = []
+        var i = 0
+        while i < len(argv) && i < len(params) {
+            if is_aggregate(params[i]) { push(vals, self.addr(cg, argv[i])) } else { push(vals, self.expr(cg, argv[i])) }
+            i = i + 1
+        }
+        if !has_ret {
+            self.add(Inst.Call(-1, target, vals))
+            return -1
+        }
+        if is_aggregate(ret_t) {
+            if into >= 0 {
+                // straight into the statement's destination
+                let dst = self.slot_addr(into)
+                self.add(Inst.CallSret(target, dst, vals))
+                self.placed[dst] = true
+                return dst
+            }
+            let slot = self.value_slot(cg, "__result", ret_t, true)
+            let res = self.slot_addr(slot)
+            self.add(Inst.CallSret(target, res, vals))
+            self.own_temp(slot)
+            return res
+        }
+        let d = self.temp(ret_t)
+        self.add(Inst.Call(d, target, vals))
+        return self.owned_value(cg, d, ret_t)
+    }
+
+    // --- lists ------------------------------------------------------------------
+
+    // `[a, b, …]`: a new cell holding the elements, each with its own
+    // references; the statement owns it.
+    fun list_lit(var self, cg: CodeGen, lt: Type, elems: [Expr]) -> int32 {
+        if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
+        let et = list_elem(lt)
+        let stride = cg.stored_size(et)
+        let n = len(elems)
+        let size = self.konst(Type.TInt(64, true), (16 + n * stride) as int64)
+        let cell = self.temp(lt)
+        self.add(Inst.Rt(cell, "__alloc", [size]))
+        let count = self.konst(Type.TInt(64, true), n as int64)
+        self.add(Inst.StoreAt(cell, 0, count))
+        self.add(Inst.StoreAt(cell, 8, count))
+        var i = 0
+        for el in elems {
+            self.store_member(cg, el, cell, 16 + i * stride)
+            i = i + 1
+        }
+        return self.owned_value(cg, cell, lt)
+    }
+
+    // The address of element `idx` of the list or string `base` (bounds
+    // checked at `e`), borrowed from it.
+    fun elem_read(var self, cg: CodeGen, e: Expr, base: Expr, idx: Expr) -> int32 {
+        let bt = self.place_type(cg, base)
+        if !is_list_t(bt) && !is_tstr(bt) && !is_map_t(bt) { return self.unsupported("indexing that type") }
+        let cell = self.expr(cg, base)
+        let i = self.expr(cg, idx)
+        if is_map_t(bt) { return self.map_value(cg, e, bt, cell, i) }
+        var stride = 1
+        if is_list_t(bt) { stride = cg.stored_size(list_elem(bt)) }
+        let d = self.temp(Type.TInt(64, false))
+        self.add(Inst.Elem(d, cell, i, stride, is_tstr(bt), Pos { line: e.line, col: e.col }))
+        return d
+    }
+
+    // `push(holder, value)`: the value taken first (with its references), then
+    // the list made unique, grown when full, and the value moved in.
+    fun push_elem(var self, cg: CodeGen, holder: Expr, value: Expr) -> int32 {
+        let lt = self.place_type(cg, holder)
+        if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
+        let et = list_elem(lt)
+        let stride = cg.stored_size(et)
+        let staged = self.stage(cg, et, value)
+        let h = self.place(cg, holder)
+        let cell = self.temp(lt)
+        self.add(Inst.Cow(cell, lt, h))
+        let slot_p = self.temp(Type.TInt(64, false))
+        self.add(Inst.Append(slot_p, h, cell, stride))
+        self.store_staged(cg, et, slot_p, staged)
+        return -1
+    }
+
+    // `pop(holder)`: the last element moved out of the (unique) list, with its
+    // references; the statement owns it.
+    fun pop_elem(var self, cg: CodeGen, e: Expr, holder: Expr) -> int32 {
+        let lt = self.place_type(cg, holder)
+        if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
+        let et = list_elem(lt)
+        let h = self.place(cg, holder)
+        let cell = self.temp(lt)
+        self.add(Inst.Cow(cell, lt, h))
+        let p = self.temp(Type.TInt(64, false))
+        self.add(Inst.Pop(p, cell, cg.stored_size(et), Pos { line: e.line, col: e.col }))
+        if cg.is_boxed(et) {
+            // the list held a box: the value copied out with references of
+            // its own, then the box released (MYLA-74)
+            let slot = self.value_slot(cg, "__popped", et, true)
+            let dst = self.slot_addr(slot)
+            self.add(Inst.Copy(dst, self.unbox(cg, et, p), cg.size(et)))
+            self.retain(cg, et, dst)
+            self.add(Inst.DropAt(et, p))
+            self.own_temp(slot)
+            return dst
+        }
+        if is_aggregate(et) {
+            let slot = self.value_slot(cg, "__popped", et, true)
+            let dst = self.slot_addr(slot)
+            self.add(Inst.Copy(dst, p, cg.size(et)))
+            self.own_temp(slot)
+            return dst
+        }
+        let d = self.temp(et)
+        self.add(Inst.LoadAt(d, p, 0))
+        return self.owned_value(cg, d, et)
+    }
+
+    // --- maps -------------------------------------------------------------------
+
+    fun int_const(var self, v: int32) -> int32 {
+        return self.konst(Type.TInt(64, true), v as int64)
+    }
+
+    // The slot of `key` in the map `cell` of type `mt`, or 0 when it is missing.
+    fun map_lookup(var self, cg: CodeGen, mt: Type, cell: int32, key: int32) -> int32 {
+        let size = self.int_const(cg.map_slot_size(mt))
+        let is_str = self.int_const(cg.map_is_str(mt))
+        let d = self.temp(Type.TInt(64, false))
+        self.add(Inst.Rt(d, "__map_lookup", [cell, key, size, is_str]))
+        return d
+    }
+
+    // The address of the value of `key` in the map `cell`, borrowed from it;
+    // trapping at `e` when the key is missing.
+    fun map_value(var self, cg: CodeGen, e: Expr, mt: Type, cell: int32, key: int32) -> int32 {
+        let slot = self.map_lookup(cg, mt, cell, key)
+        self.add(Inst.Check(slot, "key", Pos { line: e.line, col: e.col }))
+        return self.offset(slot, 16)
+    }
+
+    // A new list of the keys of the map `cell`, each with its reference; the
+    // caller owns it.
+    fun map_keys(var self, cg: CodeGen, mt: Type, cell: int32) -> int32 {
+        let size = self.int_const(cg.map_slot_size(mt))
+        let stride = self.int_const(cg.stored_size(map_key(mt)))
+        let is_str = self.int_const(cg.map_is_str(mt))
+        let d = self.temp(Type.TList(map_key(mt)))
+        self.add(Inst.Rt(d, "__map_keys", [cell, size, stride, is_str]))
+        return d
+    }
+
+    // The value `value` of a member's type `vt` taken, with references of its
+    // own, before the container or place it goes to is evaluated: (the owning
+    // slot holding it until it is moved in, or -1 when it owns nothing; its
+    // temporary, or its staged copy's address for an aggregate). A `?` or
+    // `return` in between drops it with the statement's temporaries.
+    fun stage(var self, cg: CodeGen, vt: Type, value: Expr) -> (int32, int32) {
+        let owns = cg.owns_heap(vt)
+        if is_aggregate(vt) {
+            let src = self.addr(cg, value)
+            // an owned temporary is staged already: it moves in when stored
+            if owns && self.holds(src) { return (self.holder[src], src) }
+            let slot = self.value_slot(cg, "__staged", vt, owns)
+            let staged = self.slot_addr(slot)
+            self.add(Inst.Copy(staged, src, cg.size(vt)))
+            self.retain(cg, vt, staged)
+            if !owns { return (-1, staged) }
+            self.own_temp(slot)
+            return (slot, staged)
+        }
+        let v = self.expr(cg, value)
+        if owns && self.holds(v) { return (self.holder[v], v) }
+        self.retain(cg, vt, v)
+        if !owns { return (-1, v) }
+        let slot = self.value_slot(cg, "__staged", vt, true)
+        self.add(Inst.Store(slot, v))
+        self.own_temp(slot)
+        return (slot, v)
+    }
+
+    // Set `key` in the (unique) map the 8 bytes at `holder` point at to the
+    // staged value (see `stage`), releasing the value it replaces: room made
+    // first, then the key's slot found or made (with a reference to a string
+    // key).
+    fun map_put(var self, cg: CodeGen, mt: Type, holder: int32, key: int32, staged: (int32, int32)) {
+        let vt = map_val(mt)
+        let size = self.int_const(cg.map_slot_size(mt))
+        let is_str = self.int_const(cg.map_is_str(mt))
+        let unused = self.int_const(0)
+        self.add(Inst.Rt(-1, "__map_reserve", [holder, size, unused, is_str]))
+        let cell = self.temp(mt)
+        self.add(Inst.LoadAt(cell, holder, 0))
+        let slot = self.temp(Type.TInt(64, false))
+        let had = self.temp(Type.TBool)
+        self.add(Inst.RtPair(slot, had, "__map_set_slot", [cell, key, size, is_str]))
+        let p = self.offset(slot, 16)
+        if cg.owns_heap(vt) {
+            let drop_b = self.new_block()
+            let join = self.new_block()
+            self.finish(Term.Br(had, drop_b, join))
+            self.start(drop_b)
+            self.add(Inst.DropAt(vt, p))
+            self.finish(Term.Jmp(join))
+            self.start(join)
+        }
+        self.store_staged(cg, vt, p, staged)
+    }
+
+    // Move the value `stage` took into the member at `p`, which takes over its
+    // references (a recursive enum's into a new box).
+    fun store_staged(var self, cg: CodeGen, vt: Type, p: int32, staged: (int32, int32)) {
+        if cg.is_boxed(vt) {
+            let size = self.int_const(cg.size(vt))
+            let b = self.temp(Type.TInt(64, false))
+            self.add(Inst.Rt(b, "__alloc", [size]))
+            self.add(Inst.Copy(b, staged.1, cg.size(vt)))
+            self.add(Inst.StoreAt(p, 0, b))
+        } else if is_aggregate(vt) {
+            self.add(Inst.Copy(p, staged.1, cg.size(vt)))
+        } else {
+            self.add(Inst.StoreAt(p, 0, staged.1))
+        }
+        self.moved(staged.0)
+    }
+
+    // The staged value in the owning `slot` (-1: none) was moved into its
+    // place: no temporary scope drops it any more.
+    fun moved(var self, slot: int32) {
+        if slot < 0 { return }
+        self.add(Inst.Moved(slot))
+        var i = 0
+        while i < len(self.temps) {
+            var kept: [int32] = []
+            for s in self.temps[i] {
+                if s != slot { push(kept, s) }
+            }
+            self.temps[i] = kept
+            i = i + 1
+        }
+    }
+
+    // `[k: v, …]`: a new map, each key evaluated before its value; the
+    // statement owns it.
+    fun map_lit(var self, cg: CodeGen, mt: Type, entries: [MapEntry]) -> int32 {
+        if !lowerable(cg, mt) { return self.unsupported("a map of that type") }
+        let eight = self.int_const(8)
+        let size = self.int_const(cg.map_slot_size(mt))
+        let cell = self.temp(mt)
+        self.add(Inst.Rt(cell, "__map_new", [eight, size]))
+        let slot = self.value_slot(cg, "__map", mt, true)
+        self.add(Inst.Store(slot, cell))
+        self.own_temp(slot)
+        let h = self.slot_addr(slot)
+        for en in entries {
+            let k = self.expr(cg, en.key)
+            let staged = self.stage(cg, map_val(mt), en.value)
+            self.map_put(cg, mt, h, k, staged)
+        }
+        let d = self.temp(mt)
+        self.add(Inst.Load(d, slot))
+        return d
+    }
+
+    // `m[k] = value`: the value taken first, then the map made unique, then
+    // the key.
+    fun map_set(var self, cg: CodeGen, base: Expr, idx: Expr, value: Expr) {
+        let mt = self.place_type(cg, base)
+        let staged = self.stage(cg, map_val(mt), value)
+        let h = self.place(cg, base)
+        let cell = self.temp(mt)
+        self.add(Inst.Cow(cell, mt, h))
+        let k = self.expr(cg, idx)
+        self.map_put(cg, mt, h, k, staged)
+    }
+
+    fun map_contains(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
+        let mt = self.place_type(cg, m)
+        if !is_map_t(mt) { return self.unsupported("contains on that type") }
+        let cell = self.expr(cg, m)
+        let key = self.expr(cg, k)
+        let slot = self.map_lookup(cg, mt, cell, key)
+        let zero = self.int_const(0)
+        let d = self.temp(Type.TBool)
+        self.add(Inst.Cmp(d, "!=", Type.TInt(64, false), slot, zero))
+        return d
+    }
+
+    // `remove(m, k)`: the map made unique (copies keep the entry), then the
+    // key; see `emit_map_remove`.
+    fun map_remove(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
+        let mt = self.place_type(cg, m)
+        if !is_map_t(mt) { return self.unsupported("remove on that type") }
+        let h = self.place(cg, m)
+        let cell = self.temp(mt)
+        self.add(Inst.Cow(cell, mt, h))
+        let key = self.expr(cg, k)
+        self.add(Inst.MapRemove(mt, h, cell, key))
+        return -1
+    }
+
+    // --- strings ----------------------------------------------------------------
+
+    fun sb_new(var self, cg: CodeGen) -> int32 {
+        let size = self.int_const(16)
+        let cell = self.temp(Type.TSB)
+        self.add(Inst.Rt(cell, "__alloc", [size]))
+        let zero = self.int_const(0)
+        self.add(Inst.StoreAt(cell, 0, zero))
+        self.add(Inst.StoreAt(cell, 8, zero))
+        return self.owned_value(cg, cell, Type.TSB)
+    }
+
+    // `append(sb, s)`, `append(sb, s, start, end)` (the range checked) and
+    // `append_byte(sb, b)`: the builder made unique first, then the arguments.
+    fun sb_append(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
+        let h = self.place(cg, args[0])
+        let cell = self.temp(Type.TSB)
+        self.add(Inst.Cow(cell, Type.TSB, h))
+        let v = self.expr(cg, args[1])
+        if nm == "append_byte" {
+            self.add(Inst.SbAppendByte(h, v))
+        } else if len(args) == 4 {
+            let a = self.expr(cg, args[2])
+            let b = self.expr(cg, args[3])
+            self.add(Inst.SbAppendRange(h, v, a, b, Pos { line: e.line, col: e.col }))
+        } else {
+            self.add(Inst.SbAppend(h, v))
+        }
+        return -1
+    }
+
+    // `format(fmt, args…)` (and f-strings): the literal's pieces concatenated
+    // with each argument's print form; every intermediate string is owned by
+    // the statement.
+    fun format_call(var self, cg: CodeGen, args: [Expr]) -> int32 {
+        let fmt = match args[0].kind {
+            ExprKind.StrLit(s) => s
+            _ => ""
+        }
+        let segs = format_segments(fmt)
+        var acc = self.temp(Type.TStr)
+        self.add(Inst.Str(acc, segs[0]))
+        var k = 1
+        while k < len(args) {
+            let piece = self.render(cg, args[k])
+            let joined = self.temp(Type.TStr)
+            self.add(Inst.Rt(joined, "__str_concat", [acc, piece]))
+            let j = self.owned_value(cg, joined, Type.TStr)
+            let seg = self.temp(Type.TStr)
+            self.add(Inst.Str(seg, segs[k]))
+            let next = self.temp(Type.TStr)
+            self.add(Inst.Rt(next, "__str_concat", [j, seg]))
+            acc = self.owned_value(cg, next, Type.TStr)
+            k = k + 1
+        }
+        return acc
+    }
+
+    // The print form of a printable value as a string: a string itself
+    // (borrowed), or a new one the statement owns.
+    fun render(var self, cg: CodeGen, arg: Expr) -> int32 {
+        let t = cg.type_of(arg.id)
+        var helper = ""
+        var extra = -1
+        match t {
+            Type.TStr => { return self.expr(cg, arg) },
+            Type.TBool => { helper = "__bool_to_str" },
+            Type.TInt(w, s) => {
+                if s { helper = "__int_to_str" } else { helper = "__uint_to_str" }
+            },
+            Type.TFloat(w) => {
+                helper = "__float_to_str"
+                if w == 32 { extra = 9 } else { extra = 17 }
+            },
+            Type.TChar => { helper = "__char_to_str" },
+            _ => { return self.unsupported("format of a value that isn't a scalar or a string") },
+        }
+        let v = self.expr(cg, arg)
+        var rargs = [v]
+        if extra >= 0 { push(rargs, self.int_const(extra)) }
+        let d = self.temp(Type.TStr)
+        self.add(Inst.Rt(d, helper, rargs))
+        return self.owned_value(cg, d, Type.TStr)
+    }
+
+    // --- `?` -------------------------------------------------------------------
+
+    // `inner?`: the success payload (a scalar's temporary or an aggregate's
+    // address), borrowed from the operand; otherwise the failure's tag and
+    // payload are copied into the function's result with references of their
+    // own, and it returns as `return` does.
+    fun try_expr(var self, cg: CodeGen, e: Expr, inner: Expr) -> int32 {
+        let carrier = cg.type_of(inner.id)
+        if !lowerable(cg, carrier) { return self.unsupported("`?` on a value of that type") }
+        if self.sret < 0 { return self.unsupported("`?` in a function without a carrier result") }
+        let en = enum_name_of(carrier)
+        let c = self.addr(cg, inner)
+        let tag = self.temp(Type.TInt(64, true))
+        self.add(Inst.LoadAt(tag, c, 0))
+        let ok_tag = self.konst(Type.TInt(64, true), cg.variant_tag(en, success_variant(en)) as int64)
+        let is_ok = self.temp(Type.TBool)
+        self.add(Inst.Cmp(is_ok, "==", Type.TInt(64, true), tag, ok_tag))
+        let ok_b = self.new_block()
+        let fail_b = self.new_block()
+        self.finish(Term.Br(is_ok, ok_b, fail_b))
+        self.start(fail_b)
+        // the tag and the failure's payload only: the result can be smaller
+        // than the operand (MYLA-80)
+        var nbytes = 8
+        for ft in cg.variant_payload(carrier, failure_variant(en)) { nbytes = nbytes + cg.stored_size(ft) }
+        let dst = self.slot_addr(self.sret)
+        self.add(Inst.Copy(dst, c, nbytes))
+        self.retain(cg, self.f.slots[self.sret].ty, dst)
+        self.drop_temps(0)
+        self.drop_owners(0)
+        self.finish(Term.Ret(dst))
+        self.start(ok_b)
+        let rt = cg.type_of(e.id)
+        let off = cg.variant_field_offset(carrier, success_variant(en), 0)
+        if is_aggregate(rt) { return self.unbox(cg, rt, self.offset(c, off)) }
+        let d = self.temp(rt)
+        self.add(Inst.LoadAt(d, c, off))
+        return d
+    }
+
+    // --- the other builtins -----------------------------------------------------
+
+    // `panic(msg)`, `unreachable()` and `assert(c)`, `assert(c, msg)`: the
+    // runtime error at the call's position; the code after the first two is
+    // unreachable.
+    fun intrinsic(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
+        let at = Pos { line: e.line, col: e.col }
+        if nm == "panic" {
+            let m = self.expr(cg, args[0])
+            self.leave(Term.Panic(m, at))
+            return -1
+        }
+        let fail = self.temp(Type.TStr)
+        if nm == "unreachable" {
+            self.add(Inst.Str(fail, "reached unreachable code"))
+            self.leave(Term.Panic(fail, at))
+            return -1
+        }
+        let c = self.expr(cg, args[0])
+        let bad = self.new_block()
+        let ok = self.new_block()
+        self.finish(Term.Br(c, ok, bad))
+        self.start(bad)
+        if len(args) == 2 {
+            let m = self.expr(cg, args[1])
+            self.finish(Term.Panic(m, at))
+        } else {
+            self.add(Inst.Str(fail, "assertion failed"))
+            self.finish(Term.Panic(fail, at))
+        }
+        self.start(ok)
+        return -1
+    }
+
+    // The I/O intrinsics (`__write`, `__read_file`, …): runtime helpers taking
+    // their arguments in the calling registers, or the runtime's variables; a
+    // result that is a cell is a new reference.
+    fun io_call(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
+        let t = cg.type_of(e.id)
+        if nm == "__io_errno" || nm == "__run_stderr" {
+            let d = self.temp(t)
+            self.add(Inst.Global(d, nm + "_val", 8))
+            return self.owned_value(cg, d, t)
+        }
+        if nm == "__run_exit_code" || nm == "__run_signal" || nm == "__run_errno" {
+            var sym = nm + "_val"
+            if nm == "__run_exit_code" { sym = "__run_exit_val" }
+            let d = self.temp(t)
+            self.add(Inst.Global(d, sym, 4))
+            return d
+        }
+        // helpers without a result, then those with one
+        let effects = ["__exit", "__write", "__write_file", "__mkdir", "__unlink", "__rmdir", "__rename"]
+        let results = ["__args", "__read_file", "__read", "__poll", "__getcwd", "__list_dir", "__stat", "__run"]
+        var has_result = false
+        var known = false
+        for r in effects { if r == nm { known = true } }
+        for r in results {
+            if r == nm {
+                known = true
+                has_result = true
+            }
+        }
+        if !known { return self.unsupported(format("the builtin {}", nm)) }
+        var vals: [int32] = []
+        for a in args { push(vals, self.expr(cg, a)) }
+        if nm == "__exit" {
+            self.add(Inst.Exit(vals[0]))
+            return -1
+        }
+        if !has_result {
+            self.add(Inst.Rt(-1, nm, vals))
+            return -1
+        }
+        let d = self.temp(t)
+        self.add(Inst.Rt(d, nm, vals))
+        return self.owned_value(cg, d, t)
+    }
+
+    fun print(var self, cg: CodeGen, arg: Expr) -> int32 {
+        let t = cg.type_of(arg.id)
+        if !is_scalar(t) && !is_tstr(t) { return self.unsupported("print of a value that isn't a scalar or a string") }
+        let v = self.expr(cg, arg)
+        self.add(Inst.Print(t, v))
+        return -1
+    }
+
+    // --- match ------------------------------------------------------------------
+
+    // `match scrut { arms }`: the scrutinee copied into a slot, each arm's
+    // pattern tested against it in turn (its bindings copied out of it,
+    // borrowing), the guard, the body; no arm matching traps. The copy holds
+    // references of its own only when an arm may write the variable it came
+    // from (MYLA-2). `want`: the match is a value, returned as a scalar's
+    // temporary or an aggregate's address (else -1), owned by the statement.
+    fun match_expr(var self, cg: CodeGen, e: Expr, scrut: Expr, arms: [MatchArm], want: bool) -> int32 {
+        if self.err != "" { return 0 }
+        let sst = cg.type_of(scrut.id)
+        if !lowerable(cg, sst) { return self.unsupported("a match on a value of that type") }
+        let rt = cg.type_of(e.id)
+        var result = -1
+        if want {
+            if !lowerable(cg, rt) { return self.unsupported("a match whose value has that type") }
+            result = self.value_slot(cg, "__match", rt, true)
+        }
+        let root_var = place_root(scrut)
+        let owns_copy = root_var != "" && cg.owns_heap(sst) && arms_may_write(arms, root_var)
+        let root = self.value_slot(cg, "__scrutinee", sst, owns_copy)
+        let base = self.slot_addr(root)
+        if is_aggregate(sst) {
+            let src = self.addr(cg, scrut)
+            self.add(Inst.Copy(base, src, cg.size(sst)))
+            if owns_copy { self.retain(cg, sst, base) }
+        } else {
+            let v = self.expr(cg, scrut)
+            self.add(Inst.Store(root, v))
+            if owns_copy { self.retain(cg, sst, v) }
+        }
+        // the copy is dropped after the match, or by an early exit from an arm
+        var match_owners: [int32] = []
+        push(self.owners, match_owners)
+        self.own(root)
+        let end = self.new_block()
+        for arm in arms {
+            if self.err != "" { return 0 }
+            let fail = self.new_block()
+            self.arm_binds = []
+            self.pattern(cg, arm.pattern, base, 0, sst, fail)
+            var names: [Local] = []
+            push(self.scopes, names)
+            var arm_owners: [int32] = []
+            push(self.owners, arm_owners)
+            self.add(Inst.Scope(true))
+            for b in self.arm_binds {
+                self.declare(b.name, b.slot)
+                self.add(Inst.Bind(b.name, b.slot))
+            }
+            match arm.guard {
+                Some(g) => {
+                    let c = self.cond(cg, g)
+                    let body_b = self.new_block()
+                    self.finish(Term.Br(c, body_b, fail))
+                    self.start(body_b)
+                },
+                None => {},
+            }
+            self.arm_body(cg, arm.body, result, rt)
+            self.leave(Term.Jmp(end))
+            self.scopes = drop_last_scope(self.scopes)
+            self.owners = drop_last_ints(self.owners)
+            self.add(Inst.Scope(false))
+            self.finish(Term.Jmp(fail))
+            self.start(fail)
+        }
+        self.finish(Term.Trap("match", Pos { line: e.line, col: e.col }))
+        self.start(end)
+        self.drop_owners(len(self.owners) - 1)
+        self.owners = drop_last_ints(self.owners)
+        if result < 0 { return -1 }
+        // every arm that reaches here stored the value
+        self.own_temp(result)
+        if is_aggregate(rt) { return self.slot_addr(result) }
+        let d = self.temp(rt)
+        self.add(Inst.Load(d, result))
+        return d
+    }
+
+    // An arm's body; with a result slot, the value of its expression, or of a
+    // block's last expression statement, is stored there with its own
+    // references. An expression body drops its temporaries right after.
+    fun arm_body(var self, cg: CodeGen, body: ExprOrBlock, result: int32, rt: Type) {
+        match body {
+            ExprOrBlock.EB_Expr(ex) => {
+                self.add(Inst.Loc(Pos { line: ex.line, col: ex.col }))
+                self.begin_temps()
+                if result >= 0 && !diverges(ex) { self.store_result(cg, ex, result, rt) } else { self.discard(cg, ex) }
+                self.end_temps()
+            },
+            ExprOrBlock.EB_Block(b) => {
+                self.open_scope()
+                let n = len(b.stmts)
+                var i = 0
+                while i < n {
+                    let s = b.stmts[i]
+                    var last_value = false
+                    if i == n - 1 && result >= 0 {
+                        match s.kind {
+                            StmtKind.ExprStmt(ex) => {
+                                last_value = !diverges(ex)
+                            },
+                            _ => {},
+                        }
+                    }
+                    if last_value {
+                        match s.kind {
+                            StmtKind.ExprStmt(ex) => {
+                                self.begin_temps()
+                                self.store_result(cg, ex, result, rt)
+                                self.end_temps()
+                            },
+                            _ => {},
+                        }
+                    }
+                    if !last_value { self.stmt(cg, s) }
+                    i = i + 1
+                }
+                self.close_scope()
+            },
+        }
+    }
+
+    fun store_result(var self, cg: CodeGen, ex: Expr, result: int32, rt: Type) {
+        if is_aggregate(rt) {
+            let src = self.addr(cg, ex)
+            let took = self.took(cg, rt, src)
+            let dst = self.slot_addr(result)
+            self.add(Inst.Copy(dst, src, cg.size(rt)))
+            if !took { self.retain(cg, rt, dst) }
+        } else {
+            let v = self.expr(cg, ex)
+            let took = self.took(cg, rt, v)
+            self.add(Inst.Store(result, v))
+            if !took { self.retain(cg, rt, v) }
+        }
+    }
+
+    // Test pattern `p` against the value of type `t` at `base + off`, jumping
+    // to `fail` when it doesn't match; bindings are copied into slots of their
+    // own, borrowing (one per name and arm, shared by the alternatives of `|`).
+    fun pattern(var self, cg: CodeGen, p: Pattern, base: int32, off: int32, t: Type, fail: int32) {
+        if self.err != "" { return }
+        match p.kind {
+            PatternKind.PWild => {},
+            PatternKind.PBind(n) => {
+                if cg.is_nullary_variant(n) {
+                    self.check_tag(cg, base, off, cg.variant_tag(enum_name_of(t), n), fail)
+                    return
+                }
+                let slot = self.arm_slot(cg, n, t)
+                if is_aggregate(t) {
+                    let src = self.offset(base, off)
+                    let dst = self.slot_addr(slot)
+                    self.add(Inst.Copy(dst, src, cg.size(t)))
+                } else {
+                    let v = self.temp(t)
+                    self.add(Inst.LoadAt(v, base, off))
+                    self.add(Inst.Store(slot, v))
+                }
+            },
+            PatternKind.PLit(lit) => {
+                let v = self.temp(t)
+                self.add(Inst.LoadAt(v, base, off))
+                if is_tstr(t) {
+                    let c = self.expr(cg, lit)
+                    let eq = self.temp(Type.TBool)
+                    self.add(Inst.Rt(eq, "__str_eq", [v, c]))
+                    let next = self.new_block()
+                    self.finish(Term.Br(eq, next, fail))
+                    self.start(next)
+                    return
+                }
+                // the 64-bit images are compared (`cmpq`), as the Python
+                // backend does
+                let c = self.expr(cg, lit)
+                self.branch_equal(v, c, fail)
+            },
+            PatternKind.PEnum(en, variant, elems, hp) => {
+                self.check_tag(cg, base, off, cg.variant_tag(enum_name_of(t), variant), fail)
+                let payload = cg.variant_payload(t, variant)
+                var i = 0
+                for sub in elems {
+                    self.member_pattern(cg, sub, base, off + cg.variant_field_offset(t, variant, i), payload[i], fail)
+                    i = i + 1
+                }
+            },
+            PatternKind.PTuple(elems) => {
+                let ets = tuple_elems(t)
+                var i = 0
+                for sub in elems {
+                    self.member_pattern(cg, sub, base, off + cg.elem_offset(t, i), ets[i], fail)
+                    i = i + 1
+                }
+            },
+            PatternKind.PStruct(name, fps) => {
+                for fp in fps {
+                    self.member_pattern(cg, fp.pattern, base, off + cg.field_offset(t, fp.name), cg.struct_field_type_t(t, fp.name), fail)
+                }
+            },
+            PatternKind.POr(alts) => {
+                let matched = self.new_block()
+                let n = len(alts)
+                var i = 0
+                while i < n - 1 {
+                    let next_alt = self.new_block()
+                    self.pattern(cg, alts[i], base, off, t, next_alt)
+                    self.finish(Term.Jmp(matched))
+                    self.start(next_alt)
+                    i = i + 1
+                }
+                self.pattern(cg, alts[n - 1], base, off, t, fail)
+                self.finish(Term.Jmp(matched))
+                self.start(matched)
+            },
+        }
+    }
+
+    // The sub-pattern `sub` of the member of type `t` at `base + off`; a
+    // recursive enum's member is a box, which it borrows from.
+    fun member_pattern(var self, cg: CodeGen, sub: Pattern, base: int32, off: int32, t: Type, fail: int32) {
+        let wild = match sub.kind {
+            PatternKind.PWild => true
+            _ => false
+        }
+        if cg.is_boxed(t) && !wild {
+            let q = self.temp(Type.TInt(64, false))
+            self.add(Inst.LoadAt(q, base, off))
+            self.pattern(cg, sub, q, 0, t, fail)
+            return
+        }
+        self.pattern(cg, sub, base, off, t, fail)
+    }
+
+    fun check_tag(var self, cg: CodeGen, base: int32, off: int32, tag: int32, fail: int32) {
+        let v = self.temp(Type.TInt(64, true))
+        self.add(Inst.LoadAt(v, base, off))
+        let c = self.konst(Type.TInt(64, true), tag as int64)
+        self.branch_equal(v, c, fail)
+    }
+
+    // Continue when `a == b` (64-bit images), else jump to `fail`.
+    fun branch_equal(var self, a: int32, b: int32, fail: int32) {
+        let eq = self.temp(Type.TBool)
+        self.add(Inst.Cmp(eq, "==", Type.TInt(64, true), a, b))
+        let next = self.new_block()
+        self.finish(Term.Br(eq, next, fail))
+        self.start(next)
+    }
+
+    // The slot of the binding `n` in the current arm (made the first time); it
+    // borrows from the scrutinee's copy.
+    fun arm_slot(var self, cg: CodeGen, n: str, t: Type) -> int32 {
+        for b in self.arm_binds {
+            if b.name == n { return b.slot }
+        }
+        let slot = self.value_slot(cg, n, t, false)
+        push(self.arm_binds, Local { name: n, slot: slot })
+        return slot
+    }
+}
+
+// Whether `e` is a call that never returns (`panic`, `unreachable`): an
+// arm ending in one has no value to store.
+fun diverges(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Call(callee, args) => match callee.kind {
+            ExprKind.Name(nm) => nm == "panic" || nm == "unreachable"
+            _ => false
+        }
+        _ => false
+    }
+}
+
+fun drop_last_scope(xs: [[Local]]) -> [[Local]] {
+    var out: [[Local]] = []
+    var i = 0
+    while i + 1 < len(xs) {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun drop_last_loop(xs: [LoopTarget]) -> [LoopTarget] {
+    var out: [LoopTarget] = []
+    var i = 0
+    while i + 1 < len(xs) {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun drop_last_ints(xs: [[int32]]) -> [[int32]] {
+    var out: [[int32]] = []
+    var i = 0
+    while i + 1 < len(xs) {
+        push(out, xs[i])
+        i = i + 1
+    }
+    return out
+}

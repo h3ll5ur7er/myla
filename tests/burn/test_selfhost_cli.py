@@ -272,6 +272,24 @@ class TestRepl(_Layout):
         proc = self.repl("1\nfun g() -> int {\n    let a = 1\n}\n")
         self.assertIn("1 | fun g() -> int {\n  | ^^^^^^^^^^^^^^^^\n", proc.stderr)
 
+    def test_several_errors_in_an_input(self):
+        # each error against the input's lines, then the summary (MYLA-65, D80)
+        proc = self.repl("fun f() -> int {\n    let = 1\n    return = 2\n}\n1\n")
+        self.assertEqual(proc.stdout, "1\n")
+        self.assertIn("  --> <input>:2:9\n", proc.stderr)
+        self.assertIn("  --> <input>:3:12\n", proc.stderr)
+        self.assertIn("  |            ^\n\nerror: aborting due to 2 previous errors\n", proc.stderr)
+
+    def test_notes_follow_their_error(self):
+        # a note in the input names the input's line, one earlier in the
+        # session stands on its own; help lines too (MYLA-65)
+        proc = self.repl("fun f() {\n    let n = 1\n    n = 2\n}\nlet count = 3\ncuont + 1\n")
+        self.assertIn("3 |     n = 2\n  |     ^^^^^\n"
+                      "note: 'n' is declared here\n  --> <input>:2:5\n  |\n2 |     let n = 1\n  |     ^^^^^^^^^\n",
+                      proc.stderr)
+        self.assertIn("unknown name 'cuont'\n  --> <input>:1:1\n  |\n1 | cuont + 1\n  | ^^^^^\n"
+                      "help: did you mean 'count'?\n", proc.stderr)
+
     def test_exit_ends_the_session(self):
         proc = self.repl("from std.process import exit\nprint(1)\nexit(4)\nprint(2)\n")
         self.assertEqual((proc.stdout, proc.returncode), ("1\n", 4))
