@@ -167,6 +167,15 @@ With function values every function of the compiler, the examples and the parity
 - **Reachable functions only.** The worklist starts at the entry point; each function queues what it calls, makes values of or applies partially.
 - **Shared frame cells.** Temporaries living in one block share cells by a linear scan, next to `%rbp`; those living in several blocks keep their own.
 
+[[MYLA-120]], instruction selection (the IR is unchanged):
+
+- **Compare and branch.** An integer comparison whose only use is the branch ending its block is a `cmpq` and a conditional jump; a branch falls through to whichever successor comes next.
+- **Operands where they are.** The second operand of `+ - * & | ^` and the comparisons is an immediate, the variable's slot a temporary was read from, or the temporary's cell, instead of being loaded into `%rcx`.
+- **Addressing modes.** Loads and stores through a slot's address use the frame directly; an element's address is one `leaq` and folds into the load after it; 32-bit constants load with `movq`; integers wrap to their width in one instruction.
+- **Unreachable blocks** get no code, only their debug scopes.
+
+The compiler's binary got 11% smaller and runs 12% fewer instructions compiling itself ([[MYLA-120]] has the measurements).
+
 Altogether the self-compile went from 3.80 s (the old path) to about 1.9 s, the binary from 2.39 to 1.39 MB, and the peak from 128 to 89 MB. Callee-saved registers for scalar locals were tried and didn't pay off. A register allocator over temporaries, and leaving out the retain/release pair of a copy never written, are left to [[MYLA-109]]. Most of the remaining time is in the compiler's own linear lookups ([[MYLA-119]]).
 
 ### Lowering ownership
