@@ -3387,13 +3387,20 @@ impl Checker {
         if len(attr.args) != len(sig.params) { return Err(terr_at(attr.line, attr.col, attr.sp, format("'#test' expects {} argument(s), got {}", len(sig.params), len(attr.args)))) }
         self.push_scope()
         var i = 0
-        while i < len(attr.args) { self.expect_value(attr.args[i], Some(sig.params[i]))?
-            i = i + 1 }
+        while i < len(attr.args) {
+            let at = self.expect_value(attr.args[i], Some(sig.params[i]))?
+            if !type_eq(at, sig.params[i]) {
+                self.pop_scope()
+                return Err(terr_at(attr.args[i].line, attr.args[i].col, attr.args[i].sp, format("'#test' argument type mismatch: expected '{}', found '{}'", type_name(sig.params[i]), type_name(at))))
+            }
+            i = i + 1
+        }
         if len(outs) != 1 { self.pop_scope()
             return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' expects exactly one expected value in [...]")) }
         let rt = match sig.ret { Some(x) => x, None => t_int() }
-        self.expect_value(outs[0], Some(rt))?
+        let ot = self.expect_value(outs[0], Some(rt))?
         self.pop_scope()
+        if !type_eq(ot, rt) { return Err(terr_at(outs[0].line, outs[0].col, outs[0].sp, format("'#test' expected value type mismatch: expected '{}', found '{}'", type_name(rt), type_name(ot)))) }
         return Ok(0)
     }
 

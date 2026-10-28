@@ -1,0 +1,7 @@
+//~ type error: '#test' argument type mismatch: expected 'int32', found 'str'
+//~ span: "s"
+#test("s")[1]
+fun k(a: int) -> int {
+    return a
+}
+fun main() {}

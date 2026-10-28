@@ -1801,12 +1801,24 @@ class Checker:
                 at=attr,
             )
         for arg, ptype in zip(attr.args, sig.params):
-            self._expect_value(arg, _Scope(), ptype)
+            t = self._expect_value(arg, _Scope(), ptype)
+            if t != ptype:
+                raise TypeCheckError(
+                    f"'#test' argument type mismatch: expected '{type_name(ptype)}', "
+                    f"found '{type_name(t)}'",
+                    at=arg,
+                )
         if len(attr.outputs) != 1:
             raise TypeCheckError(
                 "'#test' expects exactly one expected value in [...]", at=attr
             )
-        self._expect_value(attr.outputs[0], _Scope(), sig.ret)
+        t = self._expect_value(attr.outputs[0], _Scope(), sig.ret)
+        if t != sig.ret:
+            raise TypeCheckError(
+                f"'#test' expected value type mismatch: expected '{type_name(sig.ret)}', "
+                f"found '{type_name(t)}'",
+                at=attr.outputs[0],
+            )
 
     # -- function bodies -----------------------------------------------------
 

@@ -2,7 +2,7 @@
 id: MYLA-111
 title: "#test arguments and expected values are not type-checked"
 type: bug
-status: todo
+status: review
 priority: low
 labels: [checker, attributes]
 ---
@@ -24,6 +24,15 @@ fun main() {}
 
 A type error at the argument (or the expected value), like a call with a wrong argument type: `_expect_type` / a `type_eq` check with the parameter type, in both checkers, with snippets in the checker gate and a file in `examples/errors/`.
 
-- [ ] Python checker
-- [ ] Self-hosted checker
-- [ ] Gate snippets and corpus file
+- [x] Python checker
+- [x] Self-hosted checker
+- [x] Gate snippets and corpus file
+
+## How
+
+Both checkers compare the type each `#test` argument and the expected value infer to (with the parameter's, or the result's, type as the hint) with that type, as a call's arguments are compared. A mismatch is a type error at the argument or the expected value, in the style of the call messages: `'#test' argument type mismatch: expected 'int32', found 'str'` and `'#test' expected value type mismatch: expected 'int32', found 'bool'` (`_check_test_attr` in `types.py`, `check_test_attr` in `selfhost/checker.my`).
+
+## Evidence
+
+- `examples/errors/type_test_attr_arg_type.my` and `type_test_attr_expected_type.my`, with their message and span. Both failed before the change; the error corpus, the checker gate (which runs the corpus through the self-hosted checker: same position, range and message) and the codegen gate's diagnostics comparison pass.
+- Every example, compiler, tool and library source with `#test` cases still checks.
