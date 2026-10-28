@@ -6,7 +6,11 @@
 // `type_name` as types.py does), threaded through
 // `Result<_, CheckErr>` and propagated with `?`. The phase order and
 // within-phase iteration order mirror types.py exactly, so the *first* error
-// is the oracle's: same position, same message (MYLA-28).
+// is the oracle's: same position, same message (MYLA-28). An error while
+// building the tables ends the check; after that each function's attributes
+// and each body are checked on their own, and the first error of each is
+// collected, up to MAX_ERRORS: the same errors in the same order as types.py
+// (MYLA-65, D80).
 
 from .parser import parse_source, Parsed
 from .ast import int_text
@@ -14,7 +18,7 @@ from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Vari
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry
 from .ast import Stmt, StmtKind, Block, ElseTail, BindElem, ExprOrBlock
 from .ast import Pattern, PatternKind, FieldPat, MatchArm
-from .tokens import SrcSpan, no_span
+from .tokens import SrcSpan, no_span, MAX_ERRORS
 
 // =========================================================================
 // Types
@@ -674,6 +678,8 @@ pub struct AliasCached { name: str, ty: Type }
 pub struct ConstDeclT { name: str, declared: TypeExpr, value: Expr, line: int32, col: int32, sp: SrcSpan, id: int32 }
 
 pub struct Binding { ty: Type, mutable: bool }
+// A function with a `#main` attribute: where it is, its name and declaration.
+pub struct MainAt { line: int32, col: int32, sp: SrcSpan, name: str, id: int32 }
 pub struct Frame { names: [str], binds: [Binding] }
 
 // a checked match-arm body value (with its source node for re-inference)
@@ -722,6 +728,8 @@ pub struct Checker {
     lambda_infer: [MatchVal],
     stmt_match: bool,
     resolved: [int32: Type],        // expr node id -> resolved type (v0.8 interp side table)
+    errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
+    mains: [MainAt],                // the `#main` functions found so far
 }
 
 fun new_checker(decls: [Decl]) -> Checker {
@@ -734,7 +742,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, loop_depth: 0,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
-        resolved: [:],
+        resolved: [:], errs: [], mains: [],
     }
 }
 
@@ -3311,58 +3319,62 @@ fun remove_str(xs: [str], s: str) -> [str] {
 // =========================================================================
 
 impl Checker {
-    fun check_attributes_and_entry(var self) -> Result<int32, CheckErr> {
-        var main_lines: [int32] = []
-        var main_cols: [int32] = []
-        var main_sps: [SrcSpan] = []
-        var main_names: [str] = []
-        var main_ids: [int32] = []
+    // Every declaration's attributes, each on its own, then the entry point
+    // (types.py: _check_attributes_and_entry): errors are collected.
+    fun check_attributes_and_entry(var self) {
         for decl in self.decls {
-            self.cur_decl = decl.id
-            let attrs = decl_attrs(decl)
-            let is_fun = match decl.kind { DeclKind.FunDecl(fd) => true, _ => false }
-            for attr in attrs {
-                if attr.name == "derive" { continue }
-                if attr.name != "main" && attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("unknown attribute '#{}'", attr.name))) }
-                if !is_fun { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' may only be applied to functions", attr.name))) }
-                match decl.kind {
-                    DeclKind.FunDecl(fd) => {
-                        if len(fd.type_params) > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' cannot be applied to a generic function (it has no single concrete instantiation)", attr.name))) }
-                        if attr.name == "main" {
-                            match attr.outputs { Some(x) => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#main' takes no arguments")) }, None => {} }
-                            if len(attr.args) > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#main' takes no arguments")) }
-                            push(main_lines, fd.line)
-                            push(main_cols, fd.col)
-                            push(main_sps, fd.sp)
-                            push(main_names, fd.name)
-                            push(main_ids, decl.id)
-                        } else {
-                            self.check_test_attr(decl, fd, attr)?
-                        }
-                    },
-                    _ => {},
-                }
+            if self.full() { return }
+            self.reset_state(decl.id)
+            match self.check_attributes(decl) {
+                Ok(x) => {},
+                Err(e) => { self.note(e) },
             }
         }
+        if self.full() { return }
+        var main_names: [str] = []
+        for m in self.mains { push(main_names, m.name) }
         let named_main = self.func_idx("main")
-        if len(main_lines) > 0 && named_main >= 0 && !contains_str(main_names, "main") {
-            self.cur_decl = self.functions[named_main].decl_id
-            return Err(terr_at(self.functions[named_main].decl.line, self.functions[named_main].decl.col, self.functions[named_main].decl.sp, "both a '#main' function and a function named 'main' are present"))
-        }
-        if len(main_lines) > 1 {
-            self.cur_decl = main_ids[1]
-            return Err(terr_at(main_lines[1], main_cols[1], main_sps[1], "more than one '#main' entry point"))
-        }
-        // entry param check
-        if len(main_lines) > 0 {
-            // entry is main_decls[0]; need its params - find decl by name
-            let en = main_names[0]
-            let ei = self.func_idx(en)
-            if ei >= 0 { if len(self.functions[ei].decl.params) > 0 { self.cur_decl = self.functions[ei].decl_id
-            return Err(terr_at(self.functions[ei].decl.line, self.functions[ei].decl.col, self.functions[ei].decl.sp, "entry point must take no parameters in v0.0")) } }
+        if len(self.mains) > 0 && named_main >= 0 && !contains_str(main_names, "main") {
+            let d = self.functions[named_main].decl
+            self.reset_state(self.functions[named_main].decl_id)
+            self.note(terr_at(d.line, d.col, d.sp, "both a '#main' function and a function named 'main' are present"))
+        } else if len(self.mains) > 1 {
+            self.reset_state(self.mains[1].id)
+            self.note(terr_at(self.mains[1].line, self.mains[1].col, self.mains[1].sp, "more than one '#main' entry point"))
         } else {
-            if named_main >= 0 { if len(self.functions[named_main].decl.params) > 0 { self.cur_decl = self.functions[named_main].decl_id
-            return Err(terr_at(self.functions[named_main].decl.line, self.functions[named_main].decl.col, self.functions[named_main].decl.sp, "entry point must take no parameters in v0.0")) } }
+            // the entry point: the `#main` function, else `main`
+            var ei = named_main
+            if len(self.mains) > 0 { ei = self.func_idx(self.mains[0].name) }
+            if ei >= 0 && len(self.functions[ei].decl.params) > 0 {
+                let d = self.functions[ei].decl
+                self.reset_state(self.functions[ei].decl_id)
+                self.note(terr_at(d.line, d.col, d.sp, "entry point must take no parameters in v0.0"))
+            }
+        }
+    }
+
+    // `decl`'s attributes (types.py: _check_attributes); each `#main`
+    // function goes to `mains`.
+    fun check_attributes(var self, decl: Decl) -> Result<int32, CheckErr> {
+        let attrs = decl_attrs(decl)
+        let is_fun = match decl.kind { DeclKind.FunDecl(fd) => true, _ => false }
+        for attr in attrs {
+            if attr.name == "derive" { continue }
+            if attr.name != "main" && attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("unknown attribute '#{}'", attr.name))) }
+            if !is_fun { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' may only be applied to functions", attr.name))) }
+            match decl.kind {
+                DeclKind.FunDecl(fd) => {
+                    if len(fd.type_params) > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' cannot be applied to a generic function (it has no single concrete instantiation)", attr.name))) }
+                    if attr.name == "main" {
+                        match attr.outputs { Some(x) => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#main' takes no arguments")) }, None => {} }
+                        if len(attr.args) > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#main' takes no arguments")) }
+                        push(self.mains, MainAt { line: fd.line, col: fd.col, sp: fd.sp, name: fd.name, id: decl.id })
+                    } else {
+                        self.check_test_attr(decl, fd, attr)?
+                    }
+                },
+                _ => {},
+            }
         }
         return Ok(0)
     }
@@ -3386,11 +3398,26 @@ impl Checker {
     }
 
     // -- driver -----------------------------------------------------------
-    fun run_all(var self) -> Result<int32, CheckErr> {
-        return match self.run_phases() {
-            Ok(x) => Ok(x),
-            Err(e) => Err(CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl }),
+
+    // Check the program: the declaration phases, whose first error ends the
+    // check, then every function's attributes and body on its own (types.py:
+    // Checker.check). Err: the errors, in the order found (MYLA-65, D80).
+    fun run_all(var self) -> Result<int32, [CheckErr]> {
+        match self.run_phases() {
+            Ok(x) => {},
+            Err(e) => { return Err([CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl }]) },
         }
+        self.check_attributes_and_entry()
+        for decl in self.decls {
+            match decl.kind { DeclKind.FunDecl(fd) => { self.check_body(decl.id, fd) }, _ => {} }
+        }
+        var i = 0
+        while i < len(self.method_decls) {
+            self.check_body(self.method_decl_ids[i], self.method_decls[i])
+            i = i + 1
+        }
+        if len(self.errs) > 0 { return Err(self.errs) }
+        return Ok(0)
     }
 
     fun run_phases(var self) -> Result<int32, CheckErr> {
@@ -3401,18 +3428,43 @@ impl Checker {
         self.resolve_impls()?
         self.validate_bounds()?
         self.fold_consts()?
-        self.check_attributes_and_entry()?
-        for decl in self.decls {
-            self.cur_decl = decl.id
-            match decl.kind { DeclKind.FunDecl(fd) => { self.check_function(fd)? }, _ => {} }
-        }
-        var i = 0
-        while i < len(self.method_decls) {
-            self.cur_decl = self.method_decl_ids[i]
-            self.check_function(self.method_decls[i])?
-            i = i + 1
-        }
         return Ok(0)
+    }
+
+    // The body of `fd` (declaration `id`), on its own: its error is collected.
+    fun check_body(var self, id: int32, fd: FunData) {
+        if self.full() { return }
+        self.reset_state(id)
+        match self.check_function(fd) {
+            Ok(x) => {},
+            Err(e) => { self.note(e) },
+        }
+    }
+
+    // Before checking declaration `id` on its own: what an earlier check that
+    // failed may have left behind (types.py: _on_its_own).
+    fun reset_state(var self, id: int32) {
+        self.cur_decl = id
+        self.frames = []
+        self.loop_depth = 0
+        self.lambda_depth = 0
+        self.lambda_infer_active = false
+        self.lambda_infer = []
+        self.stmt_match = false
+        self.cur_ret = None
+        self.has_cur_ret = false
+        self.type_params = []
+        self.bounds_cur = []
+    }
+
+    // Collect `e`, an error in the declaration being checked.
+    fun note(var self, e: CheckErr) {
+        push(self.errs, CheckErr { line: e.line, col: e.col, sp: e.sp, msg: e.msg, decl: self.cur_decl })
+    }
+
+    // Whether MAX_ERRORS errors were collected: the check ends.
+    fun full(self) -> bool {
+        return len(self.errs) >= MAX_ERRORS
     }
 }
 
@@ -3428,7 +3480,7 @@ fun prelude(first_id: int32) -> Parsed {
     }
 }
 
-pub fun check_program(user: Program) -> Result<int32, CheckErr> {
+pub fun check_program(user: Program) -> Result<int32, [CheckErr]> {
     let pre = prelude(0)
     var decls: [Decl] = []
     for d in pre.program.decls { push(decls, d) }
@@ -3439,8 +3491,8 @@ pub fun check_program(user: Program) -> Result<int32, CheckErr> {
 
 // Type-check a linked program (selfhost/loader.my: its declarations, whose node
 // ids are below `next_id`), with the prelude parsed after it so every id stays
-// unique, and return the populated checker (MYLA-30).
-pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, CheckErr> {
+// unique, and return the populated checker (MYLA-30), or its errors (D80).
+pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, [CheckErr]> {
     let pre = prelude(next_id)
     var all: [Decl] = []
     for d in pre.program.decls { push(all, d) }

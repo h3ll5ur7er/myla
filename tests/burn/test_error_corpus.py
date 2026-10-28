@@ -30,6 +30,14 @@ with the bundled standard library.
 A file may also pin the source text the diagnostic underlines (MYLA-65)::
 
     //~ span: nope(1)
+
+The stage reports exactly one error, unless the file says how many it reports
+(MYLA-65, D80), and then may name a substring of each later error's message, in
+order::
+
+    //~ errors: 3
+    //~ next: expected an expression
+    //~ next: unknown name
 """
 import os
 import re
@@ -51,6 +59,8 @@ ERRORS_DIR = os.path.abspath(
 _DIRECTIVE = re.compile(r"//~\s*(lex|parse|module|type|runtime)\s+error:\s*(.*?)\s*$")
 _NATIVE = re.compile(r"//~\s*native:\s*(.*?)\s*$")
 _SPAN = re.compile(r"//~\s*span:\s?(.*?)$")
+_COUNT = re.compile(r"//~\s*errors:\s*(\d+)\s*$")
+_NEXT = re.compile(r"//~\s*next:\s*(.*?)\s*$")
 
 # phase -> (exception class, how far to drive the pipeline)
 _PHASES = {
@@ -95,6 +105,15 @@ def _span(source: str) -> str | None:
     return matches[0] if matches else None
 
 
+def _count(source: str) -> int:
+    matches = [int(m.group(1)) for line in source.splitlines() if (m := _COUNT.match(line.strip()))]
+    return matches[0] if matches else 1
+
+
+def _nexts(source: str) -> list[str]:
+    return [m.group(1) for line in source.splitlines() if (m := _NEXT.match(line.strip()))]
+
+
 def _underlined(err, source: str) -> str:
     """The text of the error's line under its carets."""
     text = source.splitlines()[err.line - 1]
@@ -135,6 +154,15 @@ def _make(name: str):
         span = _span(source)
         if span is not None:
             self.assertEqual(_underlined(ctx.exception, source), span, f"{name}: the underlined text")
+        later = ctx.exception.more
+        self.assertEqual(1 + len(later), _count(source),
+                         f"{name}: the errors reported: {[str(e) for e in (ctx.exception, *later)]}")
+        nexts = _nexts(source)
+        if nexts:
+            self.assertEqual(len(nexts), len(later), f"{name}: one 'next' directive per later error")
+            for want, err in zip(nexts, later):
+                self.assertIsInstance(err, exc_type, f"{name}: a later error of another stage")
+                self.assertIn(want.lower(), str(err).lower(), f"{name}: a later error")
         native = _native(source)
         if phase == "runtime":
             self.assertIsNotNone(native, f"{name}: a runtime error file needs a '//~ native:' line")

@@ -353,6 +353,15 @@ MODULE_ERRORS = {
         "pkg.my": "pub fun f() -> int {\n    return 1\n}\n",
         "pkg/pkg.my": "pub fun f() -> int {\n    return 2\n}\n",
     },
+    # several errors (MYLA-65, D80): each printed in its own file
+    "parse_errors_in_module": {
+        "main.my": "import lib\nfun main() {\n    print(lib.f())\n}\n",
+        "lib.my": "pub fun f() -> int {\n    return 1 +\n}\npub fun g( {\n}\nfun h() {\n    let = 2\n}\n",
+    },
+    "type_errors_in_two_modules": {
+        "main.my": "import lib\nfun main() {\n    let x: int = lib.f()\n    let y: str = 1\n}\n",
+        "lib.my": "pub fun f() -> str {\n    return 1\n}\nfun g() {\n    print(nope)\n}\n",
+    },
 }
 
 # A child's peak RSS counts its parent's memory at fork time, so the program
@@ -377,6 +386,10 @@ DIAGNOSTICS = {
     "chain_starting_on_an_earlier_line": "struct P { x: int }\nfun main() {\n    let p = [P { x: 1 },\n        P { x: 2 }][0].nope()\n}\n",
     "newline_token": "fun main() {\n    let x = 1 +\n    print(x)\n}\n",
     "end_of_input": "fun main() {\n    let x = (1",
+    # several errors (MYLA-65, D80), then the summary line
+    "several_parse_errors": "fun main() {\n    let = 1\n    print(1 +)\n}\nfun g(a int) {}\nstruct S {\n    a: int b: int\n}\n",
+    "several_type_errors": ("fun f() -> int {\n    return \"ä\"\n}\n#test(1)\nfun g(x: int) -> int {\n    return x\n}\n"
+                            "fun main() {\n    let x: int = true\n}\n"),
 }
 
 
@@ -539,9 +552,15 @@ class SelfHostedCodegenParity(unittest.TestCase):
         with self.assertRaises(MylaError) as ctx:
             check(link(entry, stdlib_root=stdlib))
         err = ctx.exception
-        path = err.path or entry
-        with open(path, encoding="utf-8") as fh:
-            expected = err.render(fh.read(), path)
+        # every error in its file, then a summary line (MYLA-65, D80)
+        shown = []
+        for e in (err, *err.more):
+            path = e.path or entry
+            with open(path, encoding="utf-8") as fh:
+                shown.append(e.render(fh.read(), path))
+        if err.more:
+            shown.append(f"error: aborting due to {len(shown)} previous errors")
+        expected = "\n\n".join(shown)
         proc = subprocess.run(
             [self._binary, entry, stdlib, *self._flags], capture_output=True, text=True
         )

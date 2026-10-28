@@ -21,7 +21,13 @@ The checker adds attributes to nodes as it goes (`resolved_type`, `enum_ctor`, `
 
 ## Parser
 
-[[src/myla/parser.py]] is recursive descent with one method per precedence level (`_pipe` → `_logic_or` → … → `_unary` → `_postfix` → `_primary`), panic mode: the first error raises `ParseError`.
+[[src/myla/parser.py]] is recursive descent with one method per precedence level (`_pipe` → `_logic_or` → … → `_unary` → `_postfix` → `_primary`). A syntax error raises `ParseError`; the parser catches it at three places, records it and resumes, so a run reports up to 20 errors (`MAX_ERRORS`, D80, [[MYLA-65]]):
+
+- **Where.** `_block` around each statement, `_member` around each method of an impl or trait body, `parse_program` around each declaration. `parse` raises the first error with the others in `more`.
+- **How far it skips** (`_sync`). From the error, keeping track of the brackets opened since the statement, member or declaration began (and not closed), so a call or a `match` spanning lines is skipped whole. A statement ends at a newline or `;` with no brace open; with only parentheses or brackets open, when the next line starts a statement, a declaration or with `}` (an unclosed `(` ends at the next statement). A member or declaration ends at a line starting a declaration (`fun`, `struct`, `enum`, `impl`, `trait`, `typealias`, `const`, `import`, `from`, `pub`, `#`) with no brace open, or at column 1. A `}` that closes the enclosing block or body ends a statement or member skip.
+- **Missing braces.** When the last error is at a line starting a declaration, the block or body being parsed is missing its `}`: `_Unwind` leaves it without a new error, and the impl or trait body (at an indented `fun`) or the program goes on there. So `if c {` without its `}` gives one error, at the next declaration, and that declaration is parsed.
+- **Cascades.** An error that is not after the last one recorded is dropped, and each recovery point moves past the token it started at unless a block or body ends there, so the parser never loops.
+- The self-hosted parser does the same without exceptions: `fail` keeps the error as pending and jumps to the end of the input, and the same three places record it and go back to where it was found (`recovered`, `sync`, [[Architecture/Self-hosted-compiler]]).
 
 Details worth knowing:
 
@@ -37,4 +43,4 @@ Details worth knowing:
 
 ## Canonical dumps
 
-`myla tokenize --canonical` and `myla parse --canonical` print stable, implementation-independent formats ([[src/myla/canon.py]]): one token per line (`KIND line col "lexeme" [int=…] [suf=…] [cp=…] end=line:col`) and one S-expression per declaration (without positions). `canon.canonical_error` is the error line the self-hosted drivers print, `err <line> <col> <span> <kind>: <message>`. The self-hosted lexer and parser reproduce them byte for byte; that is how they were brought up ([[Architecture/Self-hosted-compiler]]).
+`myla tokenize --canonical` and `myla parse --canonical` print stable, implementation-independent formats ([[src/myla/canon.py]]): one token per line (`KIND line col "lexeme" [int=…] [suf=…] [cp=…] end=line:col`) and one S-expression per declaration (without positions). `canon.canonical_error` is the error line the self-hosted drivers print, `err <line> <col> <span> <kind>: <message>`, and `canon.canonical_errors` one such line for each error of a run (D80). The self-hosted lexer and parser reproduce them byte for byte; that is how they were brought up ([[Architecture/Self-hosted-compiler]]).

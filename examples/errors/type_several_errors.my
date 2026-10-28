@@ -1,0 +1,28 @@
+//~ type error: '#test' expects 1 argument(s), got 2
+//~ span: #test(1, 2)[3]
+//~ errors: 4
+//~ next: cannot assign value of type 'bool' to binding of type 'int32'
+//~ next: unknown name 'nope'
+//~ next: return type mismatch: expected 'str', found 'int32'
+// Once the declarations are consistent, every function's attributes, then
+// every function body, then every method body is checked on its own; each
+// reports its first error (MYLA-65, D80). The second error in `main` and
+// anything after the error in `count` are not reported.
+struct Box { n: int }
+
+impl Box {
+    fun label(self) -> str {
+        return self.n
+    }
+}
+
+fun main() {
+    let x: int = true
+    let y: str = 1
+    print(count(3))
+}
+
+#test(1, 2)[3]
+fun count(n: int) -> int {
+    return nope + n + "more"
+}

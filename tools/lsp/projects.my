@@ -69,15 +69,15 @@ fun dependency_pos(manifest: str, name: str) -> TomlPos {
 
 // A project error as a report on the file it is about (the manifest when it
 // names none), with its position.
-#test(ProjectError { msg: "m", path: "/p/myla.lock", line: 2, col: 1, end_line: 2, end_col: 5 }, "/p/myla.toml")[Report { kind: "lock file error", msg: "m", path: "/p/myla.lock", line: 2, col: 1, sp: SrcSpan { sline: 2, scol: 1, eline: 2, ecol: 5 } }]
-#test(ProjectError { msg: "m", path: "", line: 0, col: 0, end_line: 0, end_col: 0 }, "/p/myla.toml")[Report { kind: "manifest error", msg: "m", path: "/p/myla.toml", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }]
+#test(ProjectError { msg: "m", path: "/p/myla.lock", line: 2, col: 1, end_line: 2, end_col: 5 }, "/p/myla.toml")[Report { kind: "lock file error", msg: "m", path: "/p/myla.lock", line: 2, col: 1, sp: SrcSpan { sline: 2, scol: 1, eline: 2, ecol: 5 }, more: [] }]
+#test(ProjectError { msg: "m", path: "", line: 0, col: 0, end_line: 0, end_col: 0 }, "/p/myla.toml")[Report { kind: "manifest error", msg: "m", path: "/p/myla.toml", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [] }]
 fun project_report(e: ProjectError, manifest: str) -> Report {
     var path = e.path
     if path == "" { path = manifest }
     var kind = "manifest error"
     if ends_with(path, "/myla.lock") { kind = "lock file error" }
     let sp = SrcSpan { sline: e.line, scol: e.col, eline: e.end_line, ecol: e.end_col }
-    return Report { kind: kind, msg: e.msg, path: path, line: e.line, col: e.col, sp: sp }
+    return Report { kind: kind, msg: e.msg, path: path, line: e.line, col: e.col, sp: sp, more: [] }
 }
 
 #test("/a/myla.lock", "/myla.lock")[true]

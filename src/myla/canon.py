@@ -78,6 +78,13 @@ def canonical_error(err) -> str:
     return f"err {line} {col} {span} {err.kind.split()[0]}: {err.message}"
 
 
+def canonical_errors(err) -> str:
+    """`err` and the errors in its `more` (MYLA-65, D80), one
+    `canonical_error` line each: what the self-hosted drivers print for a
+    run's errors."""
+    return "\n".join(canonical_error(e) for e in (err, *err.more))
+
+
 # --- canonical AST dump (self-hosting v0.6b) -------------------------------
 #
 # A compact one-line S-expression per node: `(tag child child ...)`. Lists are

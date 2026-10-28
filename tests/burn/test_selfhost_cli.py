@@ -281,6 +281,14 @@ class TestRepl(_Layout):
         proc = self.repl("1\nfun g() -> int {\n    let a = 1\n}\n")
         self.assertIn("1 | fun g() -> int {\n  | ^^^^^^^^^^^^^^^^\n", proc.stderr)
 
+    def test_several_errors_in_an_input(self):
+        # each error against the input's lines, then the summary (MYLA-65, D80)
+        proc = self.repl("fun f() -> int {\n    let = 1\n    return = 2\n}\n1\n")
+        self.assertEqual(proc.stdout, "1\n")
+        self.assertIn("  --> <input>:2:9\n", proc.stderr)
+        self.assertIn("  --> <input>:3:12\n", proc.stderr)
+        self.assertIn("  |            ^\n\nerror: aborting due to 2 previous errors\n", proc.stderr)
+
     def test_exit_ends_the_session(self):
         proc = self.repl("from std.process import exit\nprint(1)\nexit(4)\nprint(2)\n")
         self.assertEqual((proc.stdout, proc.returncode), ("1\n", 4))

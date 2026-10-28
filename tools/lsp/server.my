@@ -5,15 +5,15 @@
 // soon as no other message is waiting; a change waits until no message has
 // come for DEBOUNCE_MS, so a burst of keystrokes is checked once. A check
 // runs the self-hosted loader and checker with the text of every open
-// document, and publishes the error, if any, for the file it is in (MYLA-10);
-// files that showed an error from an earlier check of the same document are
-// cleared.
+// document, and publishes the errors, if any, each for the file it is in
+// (MYLA-10, MYLA-65); files that showed an error from an earlier check of the
+// same document are cleared.
 
 from std.io import stdin
 from std.json import Json, field
 from std.fs import read_to_string
-from ...selfhost.loader import load_program_opts, file_of, normalize
-from ...selfhost.diag import Report, type_report, caret_range
+from ...selfhost.loader import load_program_opts, normalize, type_errors
+from ...selfhost.diag import Report, all_reports, caret_range
 from ...selfhost.checker import build_checker_decls
 from .protocol import Channel, Incoming, send, response, error_response, notification, str_field, field_or_null
 from .text import lines_of, to_lsp, word_end, uri_path, path_uri, Pos
@@ -195,7 +195,7 @@ impl Server {
             Ok(prog) => {
                 match build_checker_decls(prog.decls, prog.next_id) {
                     Ok(c) => {},
-                    Err(e) => { found = Some(type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl))) },
+                    Err(errs) => { found = Some(type_errors(prog, errs)) },
                 }
             },
         }
@@ -211,10 +211,19 @@ impl Server {
         // the checked document always gets a (maybe empty) list, which clears it
         var groups: [str: [Json]] = [:]
         groups[uri] = []
+        // every error the run found (MYLA-65, D80), each in its file
         match found {
-            Some(r) => {
-                let target = self.uri_of(r.path, path, uri)
-                groups[target] = [diagnostic(r, file_text(r.path, overrides))]
+            Some(first) => {
+                for r in all_reports(first) {
+                    let target = self.uri_of(r.path, path, uri)
+                    var group: [Json] = []
+                    match get(groups, target) {
+                        Some(g) => { group = g },
+                        None => {},
+                    }
+                    push(group, diagnostic(r, file_text(r.path, overrides)))
+                    groups[target] = group
+                }
             },
             None => {},
         }

@@ -29,6 +29,10 @@ pub fun no_span() -> SrcSpan {
 // message, 1-based position and range the Python front end reports.
 pub struct Diag { kind: str, line: int32, col: int32, sp: SrcSpan, msg: str }
 
+// At most this many errors per run (MYLA-65, D80): the parser and the checker
+// stop at the limit (src/myla/errors.py: MAX_ERRORS).
+pub const MAX_ERRORS: int32 = 20
+
 pub struct Token {
     kind: TokenKind,
     lexeme: str,

@@ -9,14 +9,35 @@
 // (src/myla/errors.py: MylaError.render). The carets underline the error's
 // range on its line, to the end of the line when the range goes on (MYLA-65).
 // The file is read again for the source line; without a position only the
-// first line is printed.
+// first line is printed. A report may carry the errors found after it (`more`,
+// MYLA-65, D80): each is printed the same way, a blank line apart, then
+// `error: aborting due to <n> previous errors` (src/myla/cli.py: report_text).
 
 from std.fs import read_to_string
 from .tokens import Diag, SrcSpan
 
 // An error with the file it is in (`line` 0: no position; `sp` with `eline` 0:
-// no range, one caret).
-pub struct Report { kind: str, msg: str, path: str, line: int32, col: int32, sp: SrcSpan }
+// no range, one caret), and the errors the same stage found after it (only the
+// first error of a run has any).
+pub struct Report { kind: str, msg: str, path: str, line: int32, col: int32, sp: SrcSpan, more: [Report] }
+
+// The first of `rs` (not empty), with the others as its `more`.
+pub fun chain(rs: [Report]) -> Report {
+    var first = rs[0]
+    var i = 1
+    while i < len(rs) {
+        push(first.more, rs[i])
+        i = i + 1
+    }
+    return first
+}
+
+// `r` and its `more`, in order.
+pub fun all_reports(r: Report) -> [Report] {
+    var out = [r]
+    for m in r.more { push(out, m) }
+    return out
+}
 
 // `d` as `err <line> <col> <span> <kind>: <message>`, the line the differential
 // test drivers print (the Python side builds it from its exception with
@@ -45,11 +66,18 @@ fun split_kind(kind: str) -> str {
 }
 
 pub fun type_report(line: int32, col: int32, sp: SrcSpan, msg: str, path: str) -> Report {
-    return Report { kind: "type error", msg: msg, path: path, line: line, col: col, sp: sp }
+    return Report { kind: "type error", msg: msg, path: path, line: line, col: col, sp: sp, more: [] }
 }
 
 pub fun report(d: Diag, path: str) -> Report {
-    return Report { kind: d.kind, msg: d.msg, path: path, line: d.line, col: d.col, sp: d.sp }
+    return Report { kind: d.kind, msg: d.msg, path: path, line: d.line, col: d.col, sp: d.sp, more: [] }
+}
+
+// Lex or parse errors `ds` (not empty) in the file `path`, as one report.
+pub fun reports(ds: [Diag], path: str) -> Report {
+    var rs: [Report] = []
+    for d in ds { push(rs, report(d, path)) }
+    return chain(rs)
 }
 
 // Line `n` (1-based) of `src`, if it has one.
@@ -107,7 +135,21 @@ pub fun carets(text: str, line: int32, col: int32, sp: SrcSpan) -> str {
     return build(sb)
 }
 
+// What the CLI prints for `r`: it and its `more`, a blank line apart, then a
+// summary line when there are several.
+#test(Report { kind: "type error", msg: "a", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [] })["type error: a"]
+#test(Report { kind: "parse error", msg: "a", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [Report { kind: "parse error", msg: "b", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [] }] })["parse error: a\n\nparse error: b\n\nerror: aborting due to 2 previous errors"]
 pub fun render(r: Report) -> str {
+    if len(r.more) == 0 { return render_one(r) }
+    var sb = StringBuilder()
+    append(sb, render_one(r))
+    for m in r.more { append(sb, "\n\n" + render_one(m)) }
+    append(sb, format("\n\nerror: aborting due to {} previous errors", len(r.more) + 1))
+    return build(sb)
+}
+
+// One error, with the line it points at.
+pub fun render_one(r: Report) -> str {
     var sb = StringBuilder()
     append(sb, format("{}: {}", r.kind, r.msg))
     if r.line == 0 { return build(sb) }
