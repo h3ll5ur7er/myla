@@ -2928,6 +2928,9 @@ impl CodeGen {
         self.emit_poll_runtime()
         self.emit_list_dir_runtime()
         self.emit_mkdir_runtime()
+        self.emit_path_syscall_runtime("__unlink", 87, ".Lul")
+        self.emit_path_syscall_runtime("__rmdir", 84, ".Lrd")
+        self.emit_rename_runtime()
         self.emit_stat_runtime()
         self.emit_getcwd_runtime()
         self.emit_run_runtime()
@@ -3123,6 +3126,62 @@ impl CodeGen {
 
     // `__mkdir`: rdi = path str cell, esi = mode -> void; mkdir(83) sets
     // `__io_errno_val` to 0 or the errno. Backs `std.fs.make_dir` (MYLA-88).
+    // `__unlink` / `__rmdir`: rdi = path str cell -> void; the system call `nr`
+    // (unlink 87, rmdir 84) on the path sets `__io_errno_val` to 0 or the
+    // errno. Back `std.fs.remove_file` / `remove_dir` (MYLA-96).
+    fun emit_path_syscall_runtime(var self, name: str, nr: int32, label: str) {
+        self.raw(name + ":")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r12")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.emit_c_path(label + "_path", "%r12")
+        self.raw(format("\tmovq ${}, %rax", nr))
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw(format("\tjns {}_ret", label))
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(label + "_ret:")
+        self.raw("\tleaq -16(%rbp), %rsp")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // `__rename`: rdi = from str cell, rsi = to str cell -> void; rename(82)
+    // sets `__io_errno_val` to 0 or the errno. Backs `std.fs.rename` (MYLA-96).
+    fun emit_rename_runtime(var self) {
+        self.raw("__rename:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.emit_c_path(".Lrn_from", "%r12")
+        self.raw("\tmovq %rsi, %rdi")
+        self.emit_c_path(".Lrn_to", "%r13")
+        self.raw("\tmovq $82, %rax")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq %r13, %rsi")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjns .Lrn_ret")
+        self.raw("\tnegq %rax")
+        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(".Lrn_ret:")
+        self.raw("\tleaq -16(%rbp), %rsp")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
+    }
+
     fun emit_mkdir_runtime(var self) {
         self.raw("__mkdir:")
         self.raw("\tpushq %rbp")
@@ -5331,6 +5390,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" || nm == "__poll" { return true }
     if nm == "__run_signal" || nm == "__run_errno" { return true }
     if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" || nm == "__getcwd" { return true }
+    if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
     return false
 }
 

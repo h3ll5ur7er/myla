@@ -219,6 +219,58 @@ fun main() {
 """
 
 
+# Removing and renaming (MYLA-96): files, empty and full directories, a
+# tree holding a symbolic link to a directory outside it (removed, not
+# followed), and the errors.
+REMOVE_TOUR = """from std.fs import write_to_file, make_dir, remove_file, remove_dir, remove_dir_all, rename, exists, IoError
+from std.io import println
+fun code(r: Result<int32, IoError>) -> str {
+    return match r {
+        Ok(n) => "ok"
+        Err(e) => match e {
+            IoError.NotFound => "not found"
+            IoError.PermissionDenied => "denied"
+            IoError.Other(c) => format("errno {}", c)
+        }
+    }
+}
+fun main() {
+    write_to_file("a.txt", "hello")
+    println(code(rename("a.txt", "b.txt")))
+    let a = exists("a.txt")
+    let b = exists("b.txt")
+    println(format("{} {}", a, b))
+    println(code(remove_file("b.txt")))
+    println(code(remove_file("b.txt")))
+    make_dir("d")
+    println(code(remove_file("d")))
+    write_to_file("d/f", "x")
+    println(code(remove_dir("d")))
+    println(code(remove_dir_all("tree")))
+    print(exists("tree"))
+    print(exists("outside/keep"))
+    println(code(remove_dir_all("missing")))
+    println(code(remove_dir_all("d")))
+    print(exists("d"))
+    println(code(rename("nothere", "x")))
+    make_dir("e")
+    println(code(remove_dir("e")))
+}
+"""
+REMOVE_TOUR_OUTPUT = "ok\nfalse true\nok\nnot found\nerrno 21\nerrno 39\nok\nfalse\ntrue\nnot found\nok\nfalse\nnot found\nok\n"
+
+
+def prepare_tree(work: str) -> None:
+    """`tree/` with files, nested directories and a link to `outside/`."""
+    os.makedirs(os.path.join(work, "tree", "sub", "deeper"))
+    os.makedirs(os.path.join(work, "outside"))
+    for rel in ("tree/one", "tree/sub/two", "tree/sub/deeper/three", "outside/keep"):
+        with open(os.path.join(work, rel), "w") as fh:
+            fh.write(rel)
+    os.symlink(os.path.join(work, "outside"), os.path.join(work, "tree", "link"))
+    os.symlink("nowhere", os.path.join(work, "tree", "sub", "dangling"))
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class DirectoryParity(unittest.TestCase):
     """The same program, in a fresh working directory, prints the same in the
@@ -298,6 +350,11 @@ class DirectoryParity(unittest.TestCase):
         for impl, result in self.run_all("cwd-removed", CWD_PROGRAM, wrap=wrap).items():
             with self.subTest(implementation=impl):
                 self.assertEqual(result, ("not found\n", "", 0))
+
+    def test_remove_and_rename(self) -> None:
+        for impl, result in self.run_all("remove", REMOVE_TOUR, prepare_tree).items():
+            with self.subTest(implementation=impl):
+                self.assertEqual(result, (REMOVE_TOUR_OUTPUT, "", 0))
 
     def test_many_long_names(self) -> None:
         names = [f"{i:03d}" + "x" * (i - 3) if i >= 3 else "n" * i for i in range(1, 256)]

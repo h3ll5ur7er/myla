@@ -196,6 +196,10 @@ class CodeGen:
         # `__io_errno_val` global).
         self._uses_list_dir = False
         self._uses_mkdir = False
+        # `__unlink`, `__rmdir`, `__rename` (MYLA-96), the same way
+        self._uses_unlink = False
+        self._uses_rmdir = False
+        self._uses_rename = False
         self._uses_stat = False
         # set once `std.fs.current_dir` uses `__getcwd`, gating its helper
         # (MYLA-98; it shares the `__io_errno_val` global).
@@ -468,6 +472,12 @@ class CodeGen:
             self._emit_list_dir_runtime()
         if self._uses_mkdir:
             self._emit_mkdir_runtime()
+        if self._uses_unlink:
+            self._emit_path_syscall_runtime("__unlink", 87, ".Lul")
+        if self._uses_rmdir:
+            self._emit_path_syscall_runtime("__rmdir", 84, ".Lrd")
+        if self._uses_rename:
+            self._emit_rename_runtime()
         if self._uses_stat:
             self._emit_stat_runtime()
         if self._uses_getcwd:
@@ -540,7 +550,8 @@ class CodeGen:
             out.append("\t.skip 8")
         if (self._uses_read_file or self._uses_write_file or self._uses_read or self._uses_poll
                 or self._uses_list_dir or self._uses_mkdir or self._uses_stat
-                or self._uses_getcwd or self._uses_io_errno):
+                or self._uses_getcwd or self._uses_io_errno
+                or self._uses_unlink or self._uses_rmdir or self._uses_rename):
             # errno of the last `__read_file`, `__write_file`, `__read`, `__poll`,
             # `__list_dir`, `__mkdir`, `__stat` or `__getcwd` (0 on success),
             # read by `__io_errno`
@@ -4202,6 +4213,24 @@ class CodeGen:
             self._emit("popq %rdi")              # path
             self._emit("call __mkdir")           # errno -> global
             return
+        if name in ("__unlink", "__rmdir"):
+            if name == "__unlink":
+                self._uses_unlink = True
+            else:
+                self._uses_rmdir = True
+            self._eval(expr.args[0])             # path str cell -> rax
+            self._emit("movq %rax, %rdi")
+            self._emit(f"call {name}")           # errno -> global
+            return
+        if name == "__rename":
+            self._uses_rename = True
+            self._eval(expr.args[0])             # from str cell -> rax
+            self._emit("pushq %rax")
+            self._eval(expr.args[1])             # to str cell -> rax
+            self._emit("movq %rax, %rsi")
+            self._emit("popq %rdi")
+            self._emit("call __rename")          # errno -> global
+            return
 
         if name == "__run":
             self._uses_run = True
@@ -5446,6 +5475,63 @@ class CodeGen:
         e("\tpopq %r13")
         e("\tpopq %r12")
         e("\tpopq %rbx")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_path_syscall_runtime(self, name: str, nr: int, label: str) -> None:
+        """`__unlink` / `__rmdir`: rdi = path str cell -> void; the system call
+        `nr` (unlink 87, rmdir 84) on the path sets `__io_errno_val` to 0 or
+        the errno. Back `std.fs.remove_file` / `remove_dir` (MYLA-96)."""
+        e = self.text.append
+        e(f"{name}:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %r12")
+        e("\tpushq %r12")                      # (keeps %rsp 16-byte aligned)
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        self._emit_c_path(f"{label}_path", "%r12")
+        e(f"\tmovq ${nr}, %rax")
+        e("\tmovq %r12, %rdi")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e(f"\tjns {label}_ret")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e(f"{label}_ret:")
+        e("\tleaq -16(%rbp), %rsp")
+        e("\tpopq %r12")
+        e("\tpopq %r12")
+        e("\tpopq %rbp")
+        e("\tret")
+        e("")
+
+    def _emit_rename_runtime(self) -> None:
+        """`__rename`: rdi = from str cell, rsi = to str cell -> void;
+        rename(82) sets `__io_errno_val` to 0 or the errno. Backs
+        `std.fs.rename` (MYLA-96)."""
+        e = self.text.append
+        e("__rename:")
+        e("\tpushq %rbp")
+        e("\tmovq %rsp, %rbp")
+        e("\tpushq %r12")
+        e("\tpushq %r13")
+        e("\tmovq $0, __io_errno_val(%rip)")    # clear errno
+        self._emit_c_path(".Lrn_from", "%r12")  # keeps %rsi
+        e("\tmovq %rsi, %rdi")
+        self._emit_c_path(".Lrn_to", "%r13")
+        e("\tmovq $82, %rax")                  # sys_rename
+        e("\tmovq %r12, %rdi")
+        e("\tmovq %r13, %rsi")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjns .Lrn_ret")
+        e("\tnegq %rax")
+        e("\tmovq %rax, __io_errno_val(%rip)")
+        e(".Lrn_ret:")
+        e("\tleaq -16(%rbp), %rsp")
+        e("\tpopq %r13")
+        e("\tpopq %r12")
         e("\tpopq %rbp")
         e("\tret")
         e("")

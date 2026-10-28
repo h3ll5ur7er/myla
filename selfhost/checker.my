@@ -298,7 +298,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 }
 
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd"
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__unlink" || name == "__rmdir" || name == "__rename"
 }
 
 fun is_diverging_builtin(name: str) -> bool {
@@ -3652,6 +3652,21 @@ impl Checker {
             if !is_str(p_t) { return Err(terr(e.line, e.col, format("__mkdir() path must be a string, found '{}'", type_name(p_t)))) }
             let m_t = self.expect_value(args[1], Some(t_int()))?
             if !is_int(m_t) { return Err(terr(e.line, e.col, format("__mkdir() mode must be an integer, found '{}'", type_name(m_t)))) }
+            return Ok(None)
+        }
+        if name == "__unlink" || name == "__rmdir" || name == "__rename" {
+            // unlink(2), rmdir(2), rename(2) (MYLA-96): paths, no result
+            var want = "path: str"
+            var nargs = 1
+            if name == "__rename" {
+                want = "from: str, to: str"
+                nargs = 2
+            }
+            if len(args) != nargs { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes ({})", name, want))) }
+            for a in args {
+                let a_t = self.expect_value(a, Some(Type.TStr))?
+                if !is_str(a_t) { return Err(terr_at(a.line, a.col, a.sp, format("{}() paths must be strings, found '{}'", name, type_name(a_t)))) }
+            }
             return Ok(None)
         }
         if name == "__run" {

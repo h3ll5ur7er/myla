@@ -2143,7 +2143,7 @@ impl Lower {
             return d
         }
         // helpers without a result, then those with one
-        let effects = ["__exit", "__write", "__write_file", "__mkdir"]
+        let effects = ["__exit", "__write", "__write_file", "__mkdir", "__unlink", "__rmdir", "__rename"]
         let results = ["__args", "__read_file", "__read", "__poll", "__getcwd", "__list_dir", "__stat", "__run"]
         var has_result = false
         var known = false

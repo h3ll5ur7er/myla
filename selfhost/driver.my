@@ -11,7 +11,7 @@
 
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
-from std.fs import write_to_file
+from std.fs import write_to_file, remove_file
 from .loader import load_program_opts, LoadOptions, file_of, Loaded, type_errors
 from .diag import render, Report
 from .checker import build_checker_decls, Checker, CheckErr
@@ -125,6 +125,14 @@ pub fun own_tests(file: str, opts: LoadOptions) -> Result<TestRun, str> {
 }
 
 // `myla build <file> -o <out>`: compile to a native binary at `out`.
+// Whether the file `path` was removed.
+fun removed(path: str) -> bool {
+    return match remove_file(path) {
+        Ok(n) => true
+        Err(e) => false
+    }
+}
+
 pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool) -> int32 {
     let asm = match compile_asm(file, opts, debug) {
         Ok(a) => a,
@@ -149,7 +157,8 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool) -> int
         return 1
     }
     // the assembly and object file were only steps (MYLA-35)
-    if run_step("/usr/bin/env", ["rm", "-f", asm_path, obj_path], "myla: cannot remove the intermediate files") {
+    if !removed(asm_path) || !removed(obj_path) {
+        eprintln("myla: cannot remove the intermediate files")
         return 1
     }
     return 0

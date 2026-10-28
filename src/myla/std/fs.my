@@ -59,8 +59,10 @@ pub fun write_to_file(path: str, contents: str) -> Result<int32, IoError> {
 // NUL byte, in the file system's order ("." and ".." may be among them);
 // `__mkdir(path, mode)` makes one directory; `__stat(path)` gives the
 // `st_mode` of what the path names (symbolic links followed), or -1;
-// `__getcwd()` gives the working directory, or "" (MYLA-98). Each sets the
-// errno that `__io_errno` reads.
+// `__getcwd()` gives the working directory, or "" (MYLA-98); `__unlink(path)`,
+// `__rmdir(path)` and `__rename(from, to)` remove a file (or a symbolic link
+// itself), remove an empty directory and rename (MYLA-96). Each sets the errno
+// that `__io_errno` reads.
 //
 // The helpers below have no `#test` cases: `myla test` runs the cases of every
 // linked module, and every program that prints links this one through
@@ -126,6 +128,55 @@ pub fun make_dir_all(path: str) -> Result<int32, IoError> {
         return Ok(0)
     }
     return Err(from_errno(17))
+}
+
+// Remove the file `path` (a symbolic link is removed itself, not what it
+// names). A directory is `Other(21)` (EISDIR). `Ok` holds 0.
+pub fun remove_file(path: str) -> Result<int32, IoError> {
+    __unlink(path)
+    return io_result()
+}
+
+// Remove the directory `path`, which must be empty: one that isn't is
+// `Other(39)` (ENOTEMPTY). `Ok` holds 0.
+pub fun remove_dir(path: str) -> Result<int32, IoError> {
+    __rmdir(path)
+    return io_result()
+}
+
+// Remove `path` and, for a directory, everything in it, like `rm -r`. A
+// symbolic link is removed, not followed, even one naming a directory.
+// `Ok` holds 0.
+pub fun remove_dir_all(path: str) -> Result<int32, IoError> {
+    // a file or a link goes at once; a directory is EISDIR
+    __unlink(path)
+    let err = __io_errno()
+    if err == 0 {
+        return Ok(0)
+    }
+    if err != 21 {
+        return Err(from_errno(err))
+    }
+    for name in list_dir(path)? {
+        remove_dir_all(path + "/" + name)?
+    }
+    return remove_dir(path)
+}
+
+// Rename (or move, within one file system) `from_path` to `to`, replacing a
+// file at `to`. `Ok` holds 0.
+pub fun rename(from_path: str, to: str) -> Result<int32, IoError> {
+    __rename(from_path, to)
+    return io_result()
+}
+
+// `Ok(0)`, or the error of the last primitive.
+fun io_result() -> Result<int32, IoError> {
+    let err = __io_errno()
+    if err == 0 {
+        return Ok(0)
+    }
+    return Err(from_errno(err))
 }
 
 // Whether `path` names something that exists (a dangling symbolic link

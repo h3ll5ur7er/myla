@@ -661,7 +661,8 @@ _BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop
                   "__write", "__exit", "__args", "__read_file", "__io_errno",
                   "__run", "__run_stderr", "__run_exit_code", "__run_signal",
                   "__run_errno", "__write_file", "__read", "__poll",
-                  "__list_dir", "__mkdir", "__stat", "__getcwd"}
+                  "__list_dir", "__mkdir", "__stat", "__getcwd",
+                  "__unlink", "__rmdir", "__rename"}
 
 # builtin calls that never return (the checker treats them like a `return`)
 _DIVERGING_BUILTINS = {"panic", "unreachable", "__exit"}
@@ -3750,6 +3751,21 @@ class Checker:
                     f"__mkdir() mode must be an integer, found '{type_name(m_t)}'",
                     expr.line, expr.column,
                 )
+            expr.resolved_type = None
+            return None
+        if name in ("__unlink", "__rmdir", "__rename"):
+            # unlink(2), rmdir(2), rename(2) (MYLA-96): paths, no result
+            want = ("from: str, to: str" if name == "__rename" else "path: str")
+            nargs = 2 if name == "__rename" else 1
+            if len(expr.args) != nargs:
+                raise TypeCheckError(f"{name}() takes ({want})", at=expr)
+            for a in expr.args:
+                a_t = self._expect_value(a, scope, STR)
+                if not isinstance(a_t, StrType):
+                    raise TypeCheckError(
+                        f"{name}() paths must be strings, found '{type_name(a_t)}'",
+                        at=a,
+                    )
             expr.resolved_type = None
             return None
         if name == "__run":

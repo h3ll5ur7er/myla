@@ -118,6 +118,10 @@ fun main() {
 | `exists(path: str) -> bool` | Whether the path names anything (symbolic links followed, so a dangling one doesn't count) |
 | `is_dir(path: str) -> bool`, `is_file(path: str) -> bool` | Whether it names a directory, a regular file (links followed) |
 | `current_dir() -> Result<str, IoError>` | The working directory: an absolute path without symbolic links, as the kernel gives it; a directory that was removed is `NotFound` ([[MYLA-98]]) |
+| `remove_file(path: str) -> Result<int32, IoError>` | Removes a file, or a symbolic link itself; a directory is `Other(21)` (EISDIR); `Ok` holds 0 ([[MYLA-96]]) |
+| `remove_dir(path: str) -> Result<int32, IoError>` | Removes an empty directory; one that isn't is `Other(39)` (ENOTEMPTY); `Ok` holds 0 |
+| `remove_dir_all(path: str) -> Result<int32, IoError>` | Removes the path and, for a directory, everything in it, like `rm -r`; symbolic links are removed, not followed; `Ok` holds 0 |
+| `rename(from_path: str, to: str) -> Result<int32, IoError>` | Renames or moves within one file system, replacing a file at `to`; `Ok` holds 0 |
 | `enum IoError { NotFound, PermissionDenied, Other(int32) }` | Mapped from the OS errno |
 
 The file's bytes become the string unchanged, even when they aren't valid UTF-8: strings work on bytes, and `chars` gives U+FFFD for the invalid ones ([[Language/Collections-and-strings]], [[MYLA-12]]).
@@ -145,7 +149,7 @@ fun main() {
 
 ### Directory primitives
 
-The directory functions rest on four primitives (D64's pattern: a small system call per implementation, the rest shared Myla code; [[MYLA-88]], [[MYLA-98]]):
+The directory functions rest on seven primitives (D64's pattern: a small system call per implementation, the rest shared Myla code; [[MYLA-88]], [[MYLA-98]], [[MYLA-96]]):
 
 | Primitive | Does | Result |
 | --- | --- | --- |
@@ -153,6 +157,9 @@ The directory functions rest on four primitives (D64's pattern: a small system c
 | `__mkdir(path: str, mode: int32)` | mkdir(2) | Nothing |
 | `__stat(path: str) -> int32` | stat(2) | `st_mode` (file type and permission bits), or -1 on an error |
 | `__getcwd() -> str` | getcwd(2) into a 4 KB buffer | The working directory, or `""` on an error (ENOENT for a removed directory, ERANGE for a path longer than the buffer) |
+| `__unlink(path: str)` | unlink(2) | Nothing (a directory is EISDIR, which `remove_dir_all` uses to tell one without following links) |
+| `__rmdir(path: str)` | rmdir(2) | Nothing |
+| `__rename(from: str, to: str)` | rename(2) | Nothing |
 
 Each sets the errno that `__io_errno()` reads (0 on success). A name can't hold a NUL byte, so NUL separates them. `list_dir` drops `.` and `..` and sorts the names by their bytes, so the Python interpreter (`os.listdir`), the native helpers and every file system give the same list.
 
