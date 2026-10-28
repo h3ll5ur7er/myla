@@ -1932,6 +1932,42 @@ PROGRAMS = {
         "    print(ws[0].p.x)\n"
         "    print(ws2[0].p.x)\n}\n"
     ),
+    "method_arguments_survive_the_receivers_writes": (
+        # MYLA-123: an argument read from the receiver of a `var self` method
+        # is a copy taken before the call, which the method's writes to its
+        # receiver neither change nor release
+        "struct B { name: str, xs: [int] }\n"
+        "impl B {\n"
+        "    fun rename(var self, n: str) {\n"
+        "        self.name = \"zz\" + \"yy\"\n"
+        "        churn()\n"
+        "        print(n)\n"
+        "    }\n"
+        "    fun swap(var self, other: B) {\n"
+        "        self.name = \"q\" + \"r\"\n"
+        "        self.xs = [9]\n"
+        "        churn()\n"
+        "        print(other.name)\n"
+        "        print(len(other.xs))\n"
+        "    }\n"
+        "    fun keep(var self, xs: [int]) {\n"
+        "        push(self.xs, 5)\n"
+        "        print(len(xs))\n"
+        "    }\n"
+        "}\n"
+        "fun churn() {\n"                       # reuses freed cells, if any
+        "    var big: [str] = []\n"
+        "    for i in 0..50 { push(big, f\"cell {i}\") }\n}\n"
+        "#main\nfun main() {\n"
+        "    var b = B { name: \"a\" + \"b\", xs: [1, 2] }\n"
+        "    b.rename(b.name)\n"
+        "    b.swap(b)\n"
+        "    b.keep(b.xs)\n"
+        "    print(b.name)\n"
+        "    print(len(b.xs))\n"
+        "    var bs = [B { name: \"c\" + \"d\", xs: [] }]\n"
+        "    bs[0].rename(bs[0].name)\n}\n"
+    ),
     "assign_heap_owning_struct_to_itself": (
         "struct Inner { xs: [int] }\n"
         "struct Outer { inner: Inner }\n"

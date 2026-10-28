@@ -34,7 +34,10 @@ from .codegen import CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, 
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 
 // A name in scope: the slot holding it.
-struct Local { name: str, slot: int32 }
+// A variable in scope; `fixed`: nothing writes it while it lives (a `let`,
+// a parameter other than `var self`, a capture, a `for` loop's element), so
+// a `let` copying a part of it can borrow (MYLA-122).
+struct Local { name: str, slot: int32, fixed: bool }
 
 // Where `continue` and `break` go in the innermost loop, and how many owner
 // and temporary scopes were open when it began (those it leaves are dropped).
@@ -84,7 +87,8 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         let t = subst_type(sig.params[i], cg.subst)
         if !lowerable(cg, t) { return Err("a parameter's type") }
         let s = lw.new_slot(fd.params[i].name, t, 8, first_word + i, false)
-        lw.declare(fd.params[i].name, s)
+        let writes_self = i == 0 && match fd.receiver { Some(r) => r == "var self", None => false }
+        lw.declare_as(fd.params[i].name, s, !writes_self)
         lw.add(Inst.Bind(fd.params[i].name, s))
         i = i + 1
     }
@@ -125,7 +129,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
         let t = subst_type(ptypes[i], cg.subst)
         if !lowerable(cg, t) { return Err("a parameter's type") }
         let s = lw.new_slot(job.params[i].name, t, 8, first_word + 1 + i, false)
-        lw.declare(job.params[i].name, s)
+        lw.declare_as(job.params[i].name, s, true)
         lw.add(Inst.Bind(job.params[i].name, s))
         i = i + 1
     }
@@ -141,7 +145,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
             lw.add(Inst.LoadAt(v, e, c.off))
             lw.add(Inst.Store(s, v))
         }
-        lw.declare(c.name, s)
+        lw.declare_as(c.name, s, true)
         lw.add(Inst.Bind(c.name, s))
     }
     match job.body {
@@ -362,8 +366,33 @@ impl Lower {
         return self.new_slot(name, t, size, -1, owns && cg.owns_heap(t))
     }
 
-    fun declare(var self, name: str, slot: int32) {
-        push(self.scopes[len(self.scopes) - 1], Local { name: name, slot: slot })
+    fun declare(var self, name: str, slot: int32) { self.declare_as(name, slot, false) }
+
+    fun declare_as(var self, name: str, slot: int32, fixed: bool) {
+        push(self.scopes[len(self.scopes) - 1], Local { name: name, slot: slot, fixed: fixed })
+    }
+
+    // Whether `e` is a part of a fixed variable (`Local`): the variable, a
+    // field, a tuple's element or an element of a list or map in it.
+    fun fixed_place(self, e: Expr) -> bool {
+        return match e.kind {
+            ExprKind.Name(n) => {
+                var i = len(self.scopes) - 1
+                while i >= 0 {
+                    var j = len(self.scopes[i]) - 1
+                    while j >= 0 {
+                        if self.scopes[i][j].name == n { return self.scopes[i][j].fixed }
+                        j = j - 1
+                    }
+                    i = i - 1
+                }
+                false
+            },
+            ExprKind.GetField(t, f) => self.fixed_place(t),
+            ExprKind.TupleIndex(t, i) => self.fixed_place(t),
+            ExprKind.Index(t, i) => self.fixed_place(t),
+            _ => false,
+        }
     }
 
     // The slot of the innermost `name` in scope, or -1.
@@ -560,6 +589,11 @@ impl Lower {
                     return
                 }
                 let slot = self.value_slot(cg, name, t, true)
+                // a `let` of a part of a fixed variable borrows it: neither
+                // changes while the `let` lives, and the variable outlives it
+                // (it is in scope), so the copy needs no reference of its own
+                // (MYLA-122)
+                let borrows = k == "let" && self.fixed_place(init)
                 if is_aggregate(t) {
                     // built in the variable's slot when it can be
                     self.into = slot
@@ -569,15 +603,17 @@ impl Lower {
                         let took = self.took(cg, t, src)
                         let dst = self.slot_addr(slot)
                         self.add(Inst.Copy(dst, src, cg.size(t)))
-                        if !took { self.retain(cg, t, dst) }
+                        if !took && borrows { self.f.slots[slot].owns = false }
+                        else if !took { self.retain(cg, t, dst) }
                     }
                 } else {
                     let v = self.expr(cg, init)
                     let took = self.took(cg, t, v)
                     self.add(Inst.Store(slot, v))
-                    if !took { self.retain(cg, t, v) }
+                    if !took && borrows { self.f.slots[slot].owns = false }
+                    else if !took { self.retain(cg, t, v) }
                 }
-                self.declare(name, slot)
+                self.declare_as(name, slot, k == "let")
                 self.own(slot)
                 self.add(Inst.Bind(name, slot))
             },
@@ -938,7 +974,8 @@ impl Lower {
             self.add(Inst.Store(held, self.map_keys(cg, it_t, v)))
         } else {
             self.add(Inst.Store(held, v))
-            self.retain(cg, lt, v)
+            // a fixed iterable needs no snapshot of its own (MYLA-122)
+            if self.fixed_place(it) { self.f.slots[held].owns = false } else { self.retain(cg, lt, v) }
         }
         self.end_temps()
         var loop_owners: [int32] = []
@@ -976,7 +1013,7 @@ impl Lower {
         }
         let depth = len(self.owners)
         self.open_scope()
-        self.declare(vn, elem)
+        self.declare_as(vn, elem, true)
         self.add(Inst.Bind(vn, elem))
         push(self.loops, LoopTarget { cont: cont, brk: done, owners: depth, temps: len(self.temps) })
         for st in body.stmts { self.stmt(cg, st) }
@@ -1665,10 +1702,16 @@ impl Lower {
             },
             None => {},
         }
+        // a method writing its receiver gets a copy of an argument read from
+        // the same variable, taken before the call (MYLA-123): its writes
+        // would change or release the argument's place otherwise
+        var root = ""
+        if sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false } { root = place_root(argv[0]) }
         var vals: [int32] = []
         var i = 0
         while i < len(argv) && i < len(params) {
-            if is_aggregate(params[i]) { push(vals, self.addr(cg, argv[i])) } else { push(vals, self.expr(cg, argv[i])) }
+            if i > 0 && root != "" && place_root(argv[i]) == root && cg.owns_heap(params[i]) { push(vals, self.stage(cg, params[i], argv[i]).1) }
+            else if is_aggregate(params[i]) { push(vals, self.addr(cg, argv[i])) } else { push(vals, self.expr(cg, argv[i])) }
             i = i + 1
         }
         if !has_ret {
@@ -2436,7 +2479,7 @@ impl Lower {
             if b.name == n { return b.slot }
         }
         let slot = self.value_slot(cg, n, t, false)
-        push(self.arm_binds, Local { name: n, slot: slot })
+        push(self.arm_binds, Local { name: n, slot: slot, fixed: false })
         return slot
     }
 }

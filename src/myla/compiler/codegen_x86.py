@@ -1335,6 +1335,8 @@ class CodeGen:
                     self._locals[f"mutholder:{id(expr)}"] = -cursor[0]
                     if expr.callee.ident == "push":
                         stage(expr, expr.args[0].resolved_type.elem)
+                for a, t in self._aliased_args(expr):
+                    stage(a, t, True)
             elif isinstance(expr, ast.FieldAccess):
                 if getattr(expr, "enum_ctor", None) is not None:
                     alloc(expr, self._size(expr.resolved_type))  # no-payload variant
@@ -4316,12 +4318,39 @@ class CodeGen:
         logical: list = []
         if struct_ret:
             logical.append(("sret", self._locals[id(expr)]))
+        aliased = {id(a) for a, _ in self._aliased_args(expr)}
         for i, arg in enumerate(expr.args):
-            logical.append(("arg", arg, sig.params[i]))
+            logical.append(("staged" if id(arg) in aliased else "arg", arg, sig.params[i]))
         self._store_call_words(logical)
         self._emit(f"call myla_{name}")
         if logical:
             self._emit(f"addq ${8 * len(logical)}, %rsp")
+        if aliased:
+            # the copies released after the call, its result kept
+            self._emit("pushq %rax")
+            self._emit("pushq %rax")
+            for item in reversed(logical):
+                if item[0] == "staged":
+                    self._staged_drops.pop()
+                    self._release(self._locals[f"staged:{id(item[1])}"], item[2], True)
+            self._emit("popq %rax")
+            self._emit("popq %rax")
+
+    def _aliased_args(self, expr: ast.Call) -> list:
+        """The arguments of a call to a method writing its receiver (`var
+        self`) read from the receiver's variable, with their types: each is
+        passed as a copy taken before the call (MYLA-123), since the method's
+        writes would change or release its place otherwise."""
+        if getattr(expr, "indirect_call", False) or not isinstance(expr.callee, ast.Name):
+            return []
+        sig = self.checker.functions.get(expr.callee.ident)
+        if sig is None or getattr(sig.decl, "receiver", None) != "var self" or not expr.args:
+            return []
+        root = _place_root(expr.args[0])
+        if root is None:
+            return []
+        return [(a, sig.params[i]) for i, a in enumerate(expr.args)
+                if i > 0 and _place_root(a) == root and self._owns_heap(sig.params[i])]
 
     def _store_call_words(self, logical: list) -> None:
         """Put the outgoing argument words on the stack, the first at the
@@ -4329,10 +4358,11 @@ class CodeGen:
         words are reserved, then filled in source order. When at most one word
         has effects or reads state (the others are literals, the sret pointer
         or the env), pushing them last to first is the same and shorter.
-        Items: ("sret", slot), ("env", slot) or ("arg", expr, type)."""
+        Items: ("sret", slot), ("env", slot), ("arg", expr, type) or
+        ("staged", expr, type), an argument passed as a copy (`_aliased_args`)."""
         if not logical:
             return
-        ordered = sum(1 for item in logical if item[0] == "arg" and not _is_literal(item[1])) > 1
+        ordered = sum(1 for item in logical if item[0] in ("arg", "staged") and not _is_literal(item[1])) > 1
         if ordered:
             self._emit(f"subq ${8 * len(logical)}, %rsp")
         for k in range(len(logical)) if ordered else reversed(range(len(logical))):
@@ -4341,6 +4371,11 @@ class CodeGen:
                 self._emit(f"leaq {item[1]}(%rbp), %rax")
             elif item[0] == "env":
                 self._emit(f"movq {item[1]}(%rbp), %rax")
+            elif item[0] == "staged":
+                _, arg, ptype = item
+                slot = self._locals[f"staged:{id(arg)}"]
+                self._stage_value(arg, ptype, slot, inline=True)
+                self._emit(f"{'leaq' if _is_aggregate(ptype) else 'movq'} {slot}(%rbp), %rax")
             else:
                 _, arg, ptype = item
                 if _is_aggregate(ptype):
