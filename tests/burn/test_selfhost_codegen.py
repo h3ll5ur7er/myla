@@ -693,6 +693,47 @@ class SelfHostedCodegenParity(unittest.TestCase):
         for name in ("called", "as_value", "partly", "main"):
             self.assertIn(f"myla_{name}:", asm)
 
+    def _function_asm(self, asm: str, name: str) -> str:
+        """The lines of `myla_<name>`, up to its `ret`."""
+        lines = asm.split("\n")
+        start = lines.index(f"myla_{name}:")
+        end = next(i for i in range(start, len(lines)) if lines[i].strip() == "ret")
+        return "\n".join(lines[start:end + 1])
+
+    def test_a_comparison_feeding_a_branch_is_a_conditional_jump(self) -> None:
+        # MYLA-120: no bool is made for an integer comparison whose only use
+        # is the branch after it; each condition and operand kind still works
+        source = (
+            "fun pick(a: int, b: int, c: uint8, d: char, e: bool) -> int {\n"
+            "    var n = 0\n"
+            "    if a < b { n = n + 1 }\n"
+            "    if a >= b { n = n + 2 }\n"
+            "    if c > 200u8 { n = n + 4 }\n"
+            "    if d == 'x' { n = n + 8 }\n"
+            "    if e != true { n = n + 16 }\n"
+            "    var i = 0\n"
+            "    while i <= b {\n"
+            "        i = i + 1\n"
+            "    }\n"
+            "    let keep = a > b\n"
+            "    if keep { n = n + 32 }\n"
+            "    return n + i\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(pick(1, 2, 250u8, 'x', false))\n"
+            "    print(pick(-3, -5, 7u8, 'y', true))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("32\n34\n", 0))
+        body = self._function_asm(asm, "pick")
+        # only `let keep = a > b` makes a bool
+        self.assertEqual(body.count("\tset"), 1, body)
+        self.assertNotIn("movzbq %al", body.replace("setg %al\n\tmovzbq %al", ""), body)
+
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS
 

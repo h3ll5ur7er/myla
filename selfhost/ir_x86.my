@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding
+from .codegen import CodeGen, CgBinding, int_signed
 from .ir import IrFunc, Inst, Term, use_counts, def_counts, inst_defs, inst_uses, term_uses
 
 impl CodeGen {
@@ -57,10 +57,17 @@ impl CodeGen {
         while k < len(f.order) {
             let b = f.order[k]
             self.emit(format("{}:", labels[b]))
-            for inst in f.blocks[b].insts { self.emit_inst(f, inst, slot_off, temp_base) }
+            let insts = f.blocks[b].insts
+            let fused = self.fused_compare(insts, f.blocks[b].term)
+            var i = 0
+            while i < len(insts) {
+                if i != fused { self.emit_inst(f, insts[i], slot_off, temp_base) }
+                i = i + 1
+            }
             var next = -1
             if k + 1 < len(f.order) { next = f.order[k + 1] }
-            self.emit_term(f.blocks[b].term, labels, next, temp_base)
+            if fused >= 0 { self.emit_compare_branch(insts[fused], f.blocks[b].term, labels, next, temp_base) }
+            else { self.emit_term(f.blocks[b].term, labels, next, temp_base) }
             k = k + 1
         }
 
@@ -350,6 +357,49 @@ impl CodeGen {
         }
     }
 
+    // The index of the instruction of `insts` that the branch `term` can fuse
+    // with (MYLA-120): an integer comparison ending the block whose result
+    // only the branch reads; -1 when there is none.
+    fun fused_compare(self, insts: [Inst], term: Term) -> int32 {
+        if len(insts) == 0 { return -1 }
+        let last = len(insts) - 1
+        return match term {
+            Term.Br(c, a, b) => match insts[last] {
+                Inst.Cmp(d, op, t, x, y) => {
+                    if d != c || self.temp_uses[d] != 1 { return -1 }
+                    match t { Type.TFloat(w) => { return -1 }, _ => {} }
+                    last
+                },
+                _ => -1,
+            },
+            _ => -1,
+        }
+    }
+
+    // The comparison `cmp` and the branch `term` on it as a compare and a
+    // conditional jump; the successor emitted next is fallen through to.
+    fun emit_compare_branch(var self, cmp: Inst, term: Term, labels: [str], next: int32, temp_base: int32) {
+        match cmp {
+            Inst.Cmp(d, op, t, x, y) => {
+                self.load_temp(x, "rax", temp_base)
+                self.load_temp(y, "rcx", temp_base)
+                self.emit("cmpq %rcx, %rax")
+                let cond = jump_cond(op, int_signed(t))
+                match term {
+                    Term.Br(c, yes, no) => {
+                        if no == next { self.emit(format("j{} {}", cond, labels[yes])) }
+                        else {
+                            self.emit(format("j{} {}", negated_cond(cond), labels[no]))
+                            if yes != next { self.emit(format("jmp {}", labels[yes])) }
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+    }
+
     // A block's terminator; `next` is the block emitted after it (-1: none),
     // which a jump to it can fall through to.
     fun emit_term(var self, t: Term, labels: [str], next: int32, temp_base: int32) {
@@ -361,8 +411,11 @@ impl CodeGen {
             Term.Br(c, a, b) => {
                 self.load_temp(c, "rax", temp_base)
                 self.emit("testq %rax, %rax")
-                self.emit(format("jz {}", labels[b]))
-                if a != next { self.emit(format("jmp {}", labels[a])) }
+                if b == next { self.emit(format("jnz {}", labels[a])) }
+                else {
+                    self.emit(format("jz {}", labels[b]))
+                    if a != next { self.emit(format("jmp {}", labels[a])) }
+                }
             },
             Term.Ret(v) => {
                 if v >= 0 { self.load_temp(v, "rax", temp_base) }
@@ -577,6 +630,35 @@ impl CodeGen {
         self.pend_store = format("movq %rax, {}(%rbp)", self.temp_off[t])
         self.pend_temp = t
     }
+}
+
+// The condition code of a conditional jump taken when `op` holds between
+// two integers (signed or not), as `cmpq %rcx, %rax` compares them.
+#test("<", true)["l"]
+#test("<", false)["b"]
+#test(">=", false)["ae"]
+#test("!=", true)["ne"]
+fun jump_cond(op: str, signed: bool) -> str {
+    if op == "==" { return "e" }
+    if op == "!=" { return "ne" }
+    if op == "<" { if signed { return "l" } else { return "b" } }
+    if op == "<=" { if signed { return "le" } else { return "be" } }
+    if op == ">" { if signed { return "g" } else { return "a" } }
+    if signed { return "ge" }
+    return "ae"
+}
+
+// The condition code that holds exactly when `cond` doesn't.
+#test("l")["ge"]
+#test("be")["a"]
+#test("e")["ne"]
+fun negated_cond(cond: str) -> str {
+    let pairs = [("e", "ne"), ("l", "ge"), ("le", "g"), ("b", "ae"), ("be", "a")]
+    for p in pairs {
+        if cond == p.0 { return p.1 }
+        if cond == p.1 { return p.0 }
+    }
+    return cond
 }
 
 // The constant `v` as a `w`-bit integer (signed or not) holds it in 64 bits,

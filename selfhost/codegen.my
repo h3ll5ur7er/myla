@@ -5643,7 +5643,7 @@ fun pow2_bits(k: int32, neg: bool) -> int64 {
     return bits
 }
 
-fun int_signed(t: Type) -> bool {
+pub fun int_signed(t: Type) -> bool {
     return match t { Type.TInt(w, s) => s, _ => false }
 }
 
