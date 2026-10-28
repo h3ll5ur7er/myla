@@ -2,7 +2,7 @@
 id: MYLA-120
 title: Instruction selection in the IR backend
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [ir, codegen, selfhost, performance]
 ---

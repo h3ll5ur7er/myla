@@ -2,7 +2,7 @@
 id: MYLA-110
 title: Keep checking after a declaration-level type error
 type: improvement
-status: review
+status: done
 priority: low
 labels: [diagnostics, checker]
 ---

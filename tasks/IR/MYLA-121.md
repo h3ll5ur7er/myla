@@ -2,7 +2,7 @@
 id: MYLA-121
 title: Register allocation in the IR backend
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [ir, codegen, selfhost, performance]
 ---
