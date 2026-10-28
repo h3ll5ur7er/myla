@@ -1607,6 +1607,7 @@ impl CodeGen {
         if self.use_ir {
             match lower_function(self, fd, mangled) {
                 Ok(f) => {
+                    for inst in f.instances { let m = self.request_fn(inst.orig, inst.targs) }
                     push(self.ir_done, mangled)
                     if self.keep_ir { push(self.ir_texts, render_func(f)) }
                     self.emit_ir(f, fd, mangled)
@@ -7616,7 +7617,7 @@ fun join_lines(xs: [str]) -> str {
     return build(sb)
 }
 
-fun is_aggregate(t: Type) -> bool {
+pub fun is_aggregate(t: Type) -> bool {
     return match t {
         Type.TStruct(n, a) => true,
         Type.TTuple(es) => true,
@@ -7626,11 +7627,11 @@ fun is_aggregate(t: Type) -> bool {
     }
 }
 
-fun is_aggregate_opt(ot: Option<Type>) -> bool {
+pub fun is_aggregate_opt(ot: Option<Type>) -> bool {
     return match ot { Some(t) => is_aggregate(t), None => false }
 }
 
-fun tuple_elems(t: Type) -> [Type] {
+pub fun tuple_elems(t: Type) -> [Type] {
     return match t { Type.TTuple(es) => es, _ => [] }
 }
 
@@ -7822,11 +7823,11 @@ fun type_args_of(t: Type) -> [Type] {
     }
 }
 
-fun is_struct_or_enum_t(t: Type) -> bool {
+pub fun is_struct_or_enum_t(t: Type) -> bool {
     return match t { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, _ => false }
 }
 
-fun is_tfunc(t: Type) -> bool {
+pub fun is_tfunc(t: Type) -> bool {
     return match t { Type.TFunc(p, r) => true, _ => false }
 }
 
@@ -7903,13 +7904,13 @@ fun attrs_have_derive_eq(attrs: [Attribute]) -> bool {
     return false
 }
 
-fun is_overloadable_op(op: str) -> bool {
+pub fun is_overloadable_op(op: str) -> bool {
     if op == "==" || op == "!=" { return true }
     if is_cmp(op) { return true }
     return op == "+" || op == "-" || op == "*" || op == "/" || op == "%"
 }
 
-fun arith_method_cg(op: str) -> str {
+pub fun arith_method_cg(op: str) -> str {
     if op == "+" { return "add" }
     if op == "-" { return "sub" }
     if op == "*" { return "mul" }
@@ -7917,7 +7918,7 @@ fun arith_method_cg(op: str) -> str {
     return "rem"
 }
 
-fun enum_name_of(t: Type) -> str {
+pub fun enum_name_of(t: Type) -> str {
     return match t { Type.TEnum(n, a) => n, _ => "" }
 }
 
@@ -7960,7 +7961,7 @@ fun int_type_name_cg(w: int32, signed: bool) -> str {
     return format("uint{}", w)
 }
 
-fun mangle_fn(name: str, args: [Type]) -> str {
+pub fun mangle_fn(name: str, args: [Type]) -> str {
     return format("{}__{}", name, join_tokens(args))
 }
 
@@ -8085,7 +8086,7 @@ fun push_str_copy(xs: [str], s: str) -> [str] {
     return out
 }
 
-fun is_tstr(t: Type) -> bool {
+pub fun is_tstr(t: Type) -> bool {
     return match t { Type.TStr => true, _ => false }
 }
 
@@ -8181,11 +8182,11 @@ fun int_width_cg(t: Type) -> int32 {
     return match t { Type.TInt(w, s) => w, _ => 64 }
 }
 
-fun is_cmp(op: str) -> bool {
+pub fun is_cmp(op: str) -> bool {
     return op == "<" || op == "<=" || op == ">" || op == ">="
 }
 
-fun cmp_set(op: str, signed: bool) -> str {
+pub fun cmp_set(op: str, signed: bool) -> str {
     if op == "<" {
         if signed { return "setl" }
         return "setb"

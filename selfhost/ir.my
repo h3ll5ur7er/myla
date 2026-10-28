@@ -21,10 +21,21 @@ pub enum Inst {
     Const(int32, Type, int64),
     // %dst = str "text": the address of the static str cell holding the text
     Str(int32, str),
-    // %dst = load [$slot]: the 8-byte scalar in a slot
+    // %dst = load [$slot]: the 8-byte scalar in a slot (in an aggregate
+    // parameter's slot: the pointer to the caller's value)
     Load(int32, int32),
     // store [$slot], %src
     Store(int32, int32),
+    // %dst = addr $slot: the address of a slot (MYLA-104)
+    Addr(int32, int32),
+    // %dst = %ptr + off: an address inside an aggregate
+    Offset(int32, int32, int32),
+    // %dst = load [%ptr + off]: the 8-byte scalar there
+    LoadAt(int32, int32, int32),
+    // store [%ptr + off], %src
+    StoreAt(int32, int32, int32),
+    // copy size [%dst], [%src]: an aggregate's bytes
+    Copy(int32, int32, int32),
     // %dst = op ty %a, %b: + - * / % & | ^ << >> on integers (ty: the left
     // operand's type, rt: the result's) or + - * / % on floats; / and % trap at
     // the position on a zero integer divisor
@@ -38,6 +49,9 @@ pub enum Inst {
     // %dst = call name(%args): a user function with scalar arguments; dst -1
     // when its result isn't used or it has none
     Call(int32, str, [int32]),
+    // call name sret %ptr (%args): a user function with an aggregate result,
+    // written to the storage at %ptr; aggregate arguments are addresses
+    CallSret(str, int32, [int32]),
     // print ty %a: a scalar, as `print` writes it
     Print(Type, int32),
     // loc line col: the source position of the code that follows
@@ -58,19 +72,28 @@ pub enum Term {
     Br(int32, int32, int32),
     // ret %value, or -1 for none
     Ret(int32),
+    // trap kind @pos: the runtime error `__trap_<kind>` at a position (a
+    // match no arm matched)
+    Trap(str, Pos),
 }
 
 pub struct IrBlock { insts: [Inst], term: Term }
 
 // A slot: its name (for debug information and the text form), the Myla type
-// of what it holds, and, for a parameter, the index of its argument word
-// (`16 + 8 * word(%rbp)`), else -1.
-pub struct Slot { name: str, ty: Type, word: int32 }
+// of what it holds, its size in bytes, and, for a parameter, the index of its
+// argument word (`16 + 8 * word(%rbp)`, holding the value of a scalar and the
+// address of an aggregate), else -1.
+pub struct Slot { name: str, ty: Type, size: int32, word: int32 }
+
+// A generic function's instance a function calls: the generic function and
+// its type arguments, which the code generator then stamps out.
+pub struct Instance { orig: str, targs: [Type] }
 
 // A function: its assembly name (without `myla_`), its result type (None:
-// none), its slots, the type of each temporary, its blocks, and the order in
-// which lowering started the blocks, which is the order they are emitted in.
-pub struct IrFunc { name: str, ret: Option<Type>, slots: [Slot], temps: [Type], blocks: [IrBlock], order: [int32] }
+// none), its slots, the type of each temporary, its blocks, the order in
+// which lowering started the blocks, which is the order they are emitted in,
+// and the generic instances it calls.
+pub struct IrFunc { name: str, ret: Option<Type>, slots: [Slot], temps: [Type], blocks: [IrBlock], order: [int32], instances: [Instance] }
 
 // --- The text form --------------------------------------------------------------
 
@@ -86,7 +109,7 @@ pub fun render_func(f: IrFunc) -> str {
     while i < len(f.slots) {
         let s = f.slots[i]
         var where = ""
-        if s.word >= 0 { where = format(" (argument {})", s.word) }
+        if s.word >= 0 { where = format(" (argument {})", s.word) } else if s.size != 8 { where = format(" ({} bytes)", s.size) }
         append(sb, format("  ${} {}: {}{}\n", i, s.name, type_name(s.ty), where))
         i = i + 1
     }
@@ -109,11 +132,17 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Str(d, text) => format("%t{} = str {}", d, quoted(text))
         Inst.Load(d, s) => format("%t{} = load ${}", d, s)
         Inst.Store(s, v) => format("store ${}, %t{}", s, v)
+        Inst.Addr(d, s) => format("%t{} = addr ${}", d, s)
+        Inst.Offset(d, p, off) => format("%t{} = %t{} + {}", d, p, off)
+        Inst.LoadAt(d, p, off) => format("%t{} = load [%t{} + {}]", d, p, off)
+        Inst.StoreAt(p, off, v) => format("store [%t{} + {}], %t{}", p, off, v)
+        Inst.Copy(d, src, size) => format("copy {} [%t{}], [%t{}]", size, d, src)
         Inst.Bin(d, op, t, rt, a, b, pos) => render_bin(d, op, t, rt, a, b, pos)
         Inst.Cmp(d, op, t, a, b) => format("%t{} = cmp {} {} %t{}, %t{}", d, op, type_name(t), a, b)
         Inst.Un(d, op, t, a) => format("%t{} = {} {} %t{}", d, op, type_name(t), a)
         Inst.Cast(d, from_t, to_t, a) => format("%t{} = cast {} -> {} %t{}", d, type_name(from_t), type_name(to_t), a)
         Inst.Call(d, name, args) => render_call(d, name, args)
+        Inst.CallSret(name, r, args) => render_call(-1, name, args) + format(" sret %t{}", r)
         Inst.Print(t, a) => format("print {} %t{}", type_name(t), a)
         Inst.Loc(p) => format("loc {} {}", p.line, p.col)
         Inst.Bind(name, s) => format("bind {} ${}", name, s)
@@ -160,6 +189,7 @@ pub fun render_term(t: Term) -> str {
             -1 => "ret"
             _ => format("ret %t{}", v)
         }
+        Term.Trap(kind, p) => format("trap {} @{}:{}", kind, p.line, p.col)
     }
 }
 

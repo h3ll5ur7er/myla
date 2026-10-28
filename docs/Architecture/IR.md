@@ -39,7 +39,7 @@ A function has parameters, a result, slots, temporaries and basic blocks; block 
 
 ### Instructions
 
-What [[MYLA-103]] built is marked *now*; the rest is the plan for the next steps.
+What [[MYLA-103]] and [[MYLA-104]] built is marked *now*; the rest is the plan for the next steps.
 
 ```text
 %t = const i32 42             %t = const f64 0x400921fb54442d18
@@ -65,9 +65,9 @@ loc 12 5                      ; the source position of what follows
 bind x $s3                    ; debug information: x lives in $s3 from here
 ```
 
-*Now*: `const`, `str`, `load`/`store` of 8-byte slots, the integer and float operations (`%t = + int32 %a, %b`, with the result type after `->` when it differs, and `@line:col` on a division), `cmp`, the unary operators, `cast`, `call` with scalar arguments, `print ty %a` (a scalar, as `print` writes it), `loc`, `bind`, and `scope open`/`scope close` (the lexical scopes of debug information, which `emit_ir` turns into the same DWARF blocks as the old path).
+*Now*: `const`, `str`, `load`/`store` of 8-byte slots, `addr` (a slot's address), `%t = %p + off`, `load`/`store` at `[%p + off]`, `copy size [%dst], [%src]`, `call … sret %r` (an aggregate result into the storage at `%r`), the integer and float operations (`%t = + int32 %a, %b`, with the result type after `->` when it differs, and `@line:col` on a division), `cmp`, the unary operators, `cast`, `call` with scalar arguments, `print ty %a` (a scalar, as `print` writes it), `loc`, `bind`, and `scope open`/`scope close` (the lexical scopes of debug information, which `emit_ir` turns into the same DWARF blocks as the old path).
 
-Terminators (*now*: `jmp`, `br`, `ret`):
+Terminators (*now*: `jmp`, `br`, `ret`, `trap`):
 
 ```text
 jmp L3
@@ -137,7 +137,18 @@ A parameter is a slot at its argument word, so it needs no copy. The code after 
 
 ### Coverage
 
-`gen_main <file> <stdlib> --ir-stats` reports how many functions went through the IR and, for each other one, the first construct the lowering doesn't cover yet. After [[MYLA-103]] the compiler itself has 13 of 1,004 functions through the IR; the rest have an aggregate or heap result (566) or parameter (418), the subjects of [[MYLA-104]] and [[MYLA-105]]. The examples have 50 of 227.
+`gen_main <file> <stdlib> --ir-stats` reports how many functions went through the IR and, for each other one, the first construct the lowering doesn't cover yet.
+
+| After | Examples | The compiler |
+| --- | --- | --- |
+| [[MYLA-103]] (scalars) | 50 of 227 | 13 of 1,004 |
+| [[MYLA-104]] (plain aggregates, generic calls) | 94 of 227 | 18 of 1,021 |
+
+Nearly every remaining function of the compiler has a parameter, result or local that owns heap memory (strings, lists, maps, or aggregates holding them): [[MYLA-105]].
+
+### Lowering aggregates
+
+A value that owns no heap memory is *plain*: a scalar, or a struct, tuple or enum of plain values (not a recursive enum, whose members are boxed). [[MYLA-104]] lowers plain aggregates: the lowering keeps a temporary holding the aggregate's address, as the old path keeps it in `%rax`. A local is a slot of the aggregate's size; a parameter's slot is its argument word, which holds the caller's address (for `var self` too, so writes reach the caller); an aggregate result is written through the address the caller passes as the first word, which the function returns. Literals and constructors build their value in a slot of their own; fields and elements are `+ off` from their aggregate's address; a `match` copies its scrutinee into a slot and tests each arm's pattern against it, copying bindings out (one slot per name and arm, shared by the alternatives of `|`), and traps when no arm matches. The checker leaves assignment targets untyped, so the lowering derives a place's type from its slots, as the old path does from its bindings. A generic function's instance is named by the lowering and stamped out by the code generator once the caller is lowered (the lowering only reads the code generator).
 
 ## Steps
 

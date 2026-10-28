@@ -30,7 +30,7 @@ impl CodeGen {
             if s.word >= 0 {
                 push(slot_off, 16 + 8 * s.word)
             } else {
-                cursor = cursor + 8
+                cursor = cursor + (s.size + 7) / 8 * 8
                 push(slot_off, -cursor)
             }
         }
@@ -99,6 +99,30 @@ impl CodeGen {
                 self.load_temp(v, "rax", temp_base)
                 self.emit(format("movq %rax, {}(%rbp)", slot_off[s]))
             },
+            Inst.Addr(d, s) => {
+                self.emit(format("leaq {}(%rbp), %rax", slot_off[s]))
+                self.store_temp(d, temp_base)
+            },
+            Inst.Offset(d, p, off) => {
+                self.load_temp(p, "rax", temp_base)
+                if off != 0 { self.emit(format("addq ${}, %rax", off)) }
+                self.store_temp(d, temp_base)
+            },
+            Inst.LoadAt(d, p, off) => {
+                self.load_temp(p, "rax", temp_base)
+                self.emit(format("movq {}(%rax), %rax", off))
+                self.store_temp(d, temp_base)
+            },
+            Inst.StoreAt(p, off, v) => {
+                self.load_temp(p, "rcx", temp_base)
+                self.load_temp(v, "rax", temp_base)
+                self.emit(format("movq %rax, {}(%rcx)", off))
+            },
+            Inst.Copy(d, src, size) => {
+                self.load_temp(src, "rsi", temp_base)
+                self.load_temp(d, "rdi", temp_base)
+                self.emit_copy(size)
+            },
             Inst.Bin(d, op, t, rt, a, b, pos) => {
                 self.load_temp(a, "rax", temp_base)
                 self.load_temp(b, "rcx", temp_base)
@@ -139,6 +163,19 @@ impl CodeGen {
                 if len(args) > 0 { self.emit(format("addq ${}, %rsp", 8 * len(args))) }
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
+            Inst.CallSret(name, r, args) => {
+                // the result's address is the first word, below the arguments
+                var i = len(args) - 1
+                while i >= 0 {
+                    self.load_temp(args[i], "rax", temp_base)
+                    self.emit("pushq %rax")
+                    i = i - 1
+                }
+                self.load_temp(r, "rax", temp_base)
+                self.emit("pushq %rax")
+                self.emit(format("call myla_{}", name))
+                self.emit(format("addq ${}, %rsp", 8 * (len(args) + 1)))
+            },
             Inst.Print(t, a) => {
                 self.load_temp(a, "rax", temp_base)
                 self.emit_print(t)
@@ -178,6 +215,7 @@ impl CodeGen {
                 if v >= 0 { self.load_temp(v, "rax", temp_base) }
                 self.emit(format("jmp {}", self.epilogue))
             },
+            Term.Trap(kind, p) => { self.trap("jmp", "__trap_" + kind, p.line, p.col) },
         }
     }
 

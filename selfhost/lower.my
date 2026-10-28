@@ -1,23 +1,33 @@
-// lower.my -- the checked AST of one function → IR (MYLA-103, D79; wiki:
-// Architecture/IR).
+// lower.my -- the checked AST of one function → IR (MYLA-103, MYLA-104, D79;
+// wiki: Architecture/IR).
 //
 // `lower_function` reads the code generator's state (the checker's types, the
-// signatures, the monomorphizer's substitution) and builds an `IrFunc`, or
-// returns the construct it can't lower yet, and the code generator emits the
-// function the old way (the per-function fallback of D79 (5)). This first step
-// covers scalar functions: integer, float, bool and char parameters, locals and
-// results; arithmetic with its traps, comparisons, casts, `&&`/`||`; `if`,
-// `while`, `for` over a range, `break`, `continue`, `return`; calls of
-// non-generic user functions with scalar arguments; `print` of a scalar or a
-// string literal. It emits what the old path emits for them (the same order of
-// evaluation, the same scopes and positions), so a function behaves the same
-// whichever path generates it.
+// signatures, the layouts, the monomorphizer's substitution) and builds an
+// `IrFunc`, or returns the construct it can't lower yet, and the code
+// generator emits the function the old way (the per-function fallback of D79
+// (5)). It covers values that own no heap memory ("plain" values):
+//
+// - scalars: integers, floats, bool, char; operators with their traps, casts,
+//   `&&`/`||`;
+// - aggregates: structs, tuples and enums whose members are plain, in slots
+//   and reached through addresses (MYLA-104): literals and constructors, field
+//   and element reads and writes, copies, parameters (an argument word holding
+//   the caller's address, also for `var self`) and results (written to the
+//   storage the caller passes first, sret), method calls, the operators a type
+//   overloads, and `match` with every kind of pattern;
+// - statements: `let`, assignments, `if`, `while`, `for` over a range,
+//   `break`, `continue`, `return`; calls of non-generic user functions and
+//   methods; `print` of a scalar or a string literal.
+//
+// It emits what the old path emits for them (the same order of evaluation, the
+// same scopes, positions and copies), so a function behaves the same whichever
+// path generates it.
 
 from std.num import f64_literal_bits, f32_round_bits
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail
-from .checker import Type, opt_subst_type, subst_type
-from .codegen import CodeGen, is_builtin_call_name, is_internal_name
-from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit
+from .checker import Type, Subst, opt_subst_type, subst_type
+from .codegen import CodeGen, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp
+from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 
 // A name in scope: the slot holding it.
 struct Local { name: str, slot: int32 }
@@ -26,27 +36,36 @@ struct Local { name: str, slot: int32 }
 struct LoopTarget { cont: int32, brk: int32 }
 
 // The function being lowered: the IR so far, the block instructions go to,
-// the names in scope (innermost scope last), the loops, and the first
-// construct that can't be lowered ("" while there is none).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], loops: [LoopTarget], err: str }
+// the names in scope (innermost scope last), the loops, the slot holding the
+// result's address (an aggregate result, else -1), the bindings of the match
+// arm being lowered, and the first construct that can't be lowered ("" while
+// there is none).
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str }
 
 // The IR of the function `fd`, generated as `mangled`; Err: why it can't be
 // lowered yet.
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<IrFunc, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], loops: [], sret: -1, arm_binds: [], err: "" }
+    var first_word = 0
     match ret {
-        Some(t) => { if !is_scalar(t) { return Err("its result type") } },
+        Some(t) => {
+            if !plain(cg, t) { return Err("its result owns heap memory") }
+            if is_aggregate(t) {
+                lw.sret = lw.new_slot("__sret", t, 8, 0)
+                first_word = 1
+            }
+        },
         None => {},
     }
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [] }, cur: 0, scopes: [[]], loops: [], err: "" }
     let entry = lw.new_block()
     lw.start(entry)
     var i = 0
     while i < len(fd.params) {
         let t = subst_type(sig.params[i], cg.subst)
-        if !is_scalar(t) { return Err("an aggregate or heap parameter") }
-        let s = lw.new_slot(fd.params[i].name, t, i)
+        if !plain(cg, t) { return Err("a parameter owns heap memory") }
+        let s = lw.new_slot(fd.params[i].name, t, 8, first_word + i)
         lw.declare(fd.params[i].name, s)
         lw.add(Inst.Bind(fd.params[i].name, s))
         i = i + 1
@@ -61,7 +80,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<IrFunc,
     return Ok(lw.f)
 }
 
-// Whether `t` is a scalar this step lowers: an integer, float, bool or char.
+// Whether `t` is a scalar: an integer, float, bool or char.
 fun is_scalar(t: Type) -> bool {
     return match t {
         Type.TInt(w, s) => true
@@ -72,11 +91,12 @@ fun is_scalar(t: Type) -> bool {
     }
 }
 
-fun is_float(t: Type) -> bool {
-    return match t {
-        Type.TFloat(w) => true
-        _ => false
-    }
+// Whether a value of type `t` owns no heap memory: a scalar, or a struct,
+// tuple or enum (not a recursive one, whose members are boxed) of such values.
+fun plain(cg: CodeGen, t: Type) -> bool {
+    if is_scalar(t) { return true }
+    if !is_aggregate(t) || is_tfunc(t) || cg.is_boxed(t) { return false }
+    return !cg.owns_heap(t)
 }
 
 impl Lower {
@@ -118,9 +138,17 @@ impl Lower {
         return len(self.f.temps) - 1
     }
 
-    fun new_slot(var self, name: str, t: Type, word: int32) -> int32 {
-        push(self.f.slots, Slot { name: name, ty: t, word: word })
+    fun new_slot(var self, name: str, t: Type, size: int32, word: int32) -> int32 {
+        push(self.f.slots, Slot { name: name, ty: t, size: size, word: word })
         return len(self.f.slots) - 1
+    }
+
+    // A slot for a value of type `t` (its size, at least 8 bytes).
+    fun value_slot(var self, cg: CodeGen, name: str, t: Type) -> int32 {
+        var size = 8
+        if is_aggregate(t) { size = cg.size(t) }
+        if size < 8 { size = 8 }
+        return self.new_slot(name, t, size, -1)
     }
 
     fun declare(var self, name: str, slot: int32) {
@@ -139,6 +167,47 @@ impl Lower {
             i = i - 1
         }
         return -1
+    }
+
+    // The type of a place: a variable's from its slot (the checker leaves
+    // assignment targets untyped, and the old path's `place_type` reads its
+    // own bindings), a field's or element's from its aggregate.
+    fun place_type(self, cg: CodeGen, e: Expr) -> Type {
+        match e.kind {
+            ExprKind.Name(n) => {
+                let slot = self.lookup(n)
+                if slot >= 0 { return self.f.slots[slot].ty }
+            },
+            ExprKind.GetField(t, f) => { return cg.struct_field_type_t(self.place_type(cg, t), f) },
+            ExprKind.TupleIndex(t, i) => {
+                let es = tuple_elems(self.place_type(cg, t))
+                let ix = i as int32
+                if ix < len(es) { return es[ix] }
+            },
+            _ => {},
+        }
+        return cg.type_of(e.id)
+    }
+
+    // The address of the aggregate in slot `s`: an aggregate parameter's slot
+    // holds the caller's address, another slot holds the value itself.
+    fun slot_addr(var self, s: int32) -> int32 {
+        let d = self.temp(Type.TInt(64, false))
+        if self.f.slots[s].word >= 0 { self.add(Inst.Load(d, s)) } else { self.add(Inst.Addr(d, s)) }
+        return d
+    }
+
+    fun offset(var self, p: int32, off: int32) -> int32 {
+        if off == 0 { return p }
+        let d = self.temp(Type.TInt(64, false))
+        self.add(Inst.Offset(d, p, off))
+        return d
+    }
+
+    fun konst(var self, t: Type, v: int64) -> int32 {
+        let d = self.temp(t)
+        self.add(Inst.Const(d, t, v))
+        return d
     }
 
     fun open_scope(var self) {
@@ -170,40 +239,38 @@ impl Lower {
         if self.err != "" { return }
         self.add(Inst.Loc(Pos { line: s.line, col: s.col }))
         match s.kind {
-            StmtKind.ExprStmt(e) => {
-                let v = self.expr_or_unit(cg, e)
-            },
+            StmtKind.ExprStmt(e) => { self.discard(cg, e) },
             StmtKind.VarDecl(k, name, ty, init) => {
                 let t = cg.type_of(init.id)
-                if !is_scalar(t) {
-                    let d = self.unsupported("a local that isn't a scalar")
+                if !plain(cg, t) {
+                    let d = self.unsupported("a local that owns heap memory")
                     return
                 }
-                let v = self.expr(cg, init)
-                let slot = self.new_slot(name, t, -1)
-                self.add(Inst.Store(slot, v))
+                let slot = self.value_slot(cg, name, t)
+                if is_aggregate(t) {
+                    let src = self.addr(cg, init)
+                    let dst = self.slot_addr(slot)
+                    self.add(Inst.Copy(dst, src, cg.size(t)))
+                } else {
+                    let v = self.expr(cg, init)
+                    self.add(Inst.Store(slot, v))
+                }
                 self.declare(name, slot)
                 self.add(Inst.Bind(name, slot))
             },
-            StmtKind.Assign(target, value) => {
-                match target.kind {
-                    ExprKind.Name(n) => {
-                        let slot = self.lookup(n)
-                        if slot < 0 || !is_scalar(self.f.slots[slot].ty) {
-                            let d = self.unsupported("an assignment to that place")
-                            return
-                        }
-                        let v = self.expr(cg, value)
-                        self.add(Inst.Store(slot, v))
-                    },
-                    _ => { let d = self.unsupported("an assignment to a field or element") },
-                }
-            },
+            StmtKind.Assign(target, value) => { self.assign(cg, target, value) },
             StmtKind.ReturnS(ov) => {
                 match ov {
                     Some(e) => {
-                        let v = self.expr(cg, e)
-                        self.leave(Term.Ret(v))
+                        if self.sret >= 0 {
+                            let src = self.addr(cg, e)
+                            let dst = self.slot_addr(self.sret)
+                            self.add(Inst.Copy(dst, src, cg.size(cg.type_of(e.id))))
+                            self.leave(Term.Ret(dst))
+                        } else {
+                            let v = self.expr(cg, e)
+                            self.leave(Term.Ret(v))
+                        }
                     },
                     None => { self.leave(Term.Ret(-1)) },
                 }
@@ -235,6 +302,84 @@ impl Lower {
             },
             _ => { let d = self.unsupported("a destructuring declaration") },
         }
+    }
+
+    // An expression statement: its value, if any, isn't used.
+    fun discard(var self, cg: CodeGen, e: Expr) {
+        match e.kind {
+            ExprKind.MatchE(scrut, arms) => {
+                let v = self.match_expr(cg, e, scrut, arms, false)
+                return
+            },
+            ExprKind.Call(callee, args) => {
+                if !is_aggregate(cg.type_of(e.id)) || cg.ctor_info(e).ok == false {
+                    let v = self.call(cg, e, callee, args)
+                    return
+                }
+            },
+            _ => {},
+        }
+        if is_aggregate(cg.type_of(e.id)) {
+            let p = self.addr(cg, e)
+        } else {
+            let v = self.expr(cg, e)
+        }
+    }
+
+    // `target = value`: a local, or a field or element of one at any depth
+    // (through a `var self` parameter's address too).
+    fun assign(var self, cg: CodeGen, target: Expr, value: Expr) {
+        let t = self.place_type(cg, target)
+        if !plain(cg, t) {
+            let d = self.unsupported("an assignment of a value that owns heap memory")
+            return
+        }
+        match target.kind {
+            ExprKind.Name(n) => {
+                let slot = self.lookup(n)
+                if slot < 0 {
+                    let d = self.unsupported("an assignment to that place")
+                    return
+                }
+                if !is_aggregate(t) {
+                    let v = self.expr(cg, value)
+                    self.add(Inst.Store(slot, v))
+                    return
+                }
+            },
+            _ => {},
+        }
+        // the value first, then the place, as the old path's staged stores
+        if is_aggregate(t) {
+            let src = self.addr(cg, value)
+            let dst = self.place(cg, target)
+            self.add(Inst.Copy(dst, src, cg.size(t)))
+        } else {
+            let v = self.expr(cg, value)
+            let dst = self.place(cg, target)
+            self.add(Inst.StoreAt(dst, 0, v))
+        }
+    }
+
+    // The address of an assignable place: a local, or a field or tuple element
+    // of one; no list or map elements yet.
+    fun place(var self, cg: CodeGen, e: Expr) -> int32 {
+        match e.kind {
+            ExprKind.Name(n) => {
+                let slot = self.lookup(n)
+                if slot >= 0 { return self.slot_addr(slot) }
+            },
+            ExprKind.GetField(tgt, field) => {
+                let base = self.place(cg, tgt)
+                return self.offset(base, cg.field_offset(self.place_type(cg, tgt), field))
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                let base = self.place(cg, tgt)
+                return self.offset(base, cg.elem_offset(self.place_type(cg, tgt), idx as int32))
+            },
+            _ => {},
+        }
+        return self.unsupported("an assignment to an element of a collection")
     }
 
     fun if_stmt(var self, cg: CodeGen, cond: Expr, then: Block, otherwise: Option<ElseTail>) {
@@ -279,8 +424,8 @@ impl Lower {
             Some(e) => cg.type_of(e.id)
             None => Type.TInt(32, true)
         }
-        let lv = self.new_slot(vn, loop_t, -1)
-        let fe = self.new_slot("__end", loop_t, -1)
+        let lv = self.new_slot(vn, loop_t, 8, -1)
+        let fe = self.new_slot("__end", loop_t, 8, -1)
         match start {
             Some(e) => {
                 let v = self.expr(cg, e)
@@ -322,8 +467,7 @@ impl Lower {
         self.start(cont)
         let x = self.temp(loop_t)
         self.add(Inst.Load(x, lv))
-        let one = self.temp(loop_t)
-        self.add(Inst.Const(one, loop_t, 1))
+        let one = self.konst(loop_t, 1)
         let y = self.temp(loop_t)
         self.add(Inst.Bin(y, "+", loop_t, loop_t, x, one, Pos { line: 0, col: 0 }))
         self.add(Inst.Store(lv, y))
@@ -331,44 +475,26 @@ impl Lower {
         self.start(done)
     }
 
-    // --- expressions ------------------------------------------------------------
-
-    // An expression statement's value, or -1 when it has none (a call of a
-    // function without a result, `print`).
-    fun expr_or_unit(var self, cg: CodeGen, e: Expr) -> int32 {
-        match e.kind {
-            ExprKind.Call(callee, args) => { return self.call(cg, e, callee, args) },
-            _ => {},
-        }
-        return self.expr(cg, e)
-    }
+    // --- scalar expressions -----------------------------------------------------
 
     // The temporary holding the value of the scalar expression `e`.
     fun expr(var self, cg: CodeGen, e: Expr) -> int32 {
         if self.err != "" { return 0 }
         let t = cg.type_of(e.id)
         match e.kind {
-            ExprKind.IntLit(v, suf, isc, big) => {
-                let d = self.temp(t)
-                self.add(Inst.Const(d, t, v))
-                return d
-            },
+            ExprKind.IntLit(v, suf, isc, big) => { return self.konst(t, v) },
             ExprKind.FloatLit(lex, suf) => {
                 var bits = f64_literal_bits(lex)
                 match t {
                     Type.TFloat(w) => { if w == 32 { bits = f32_round_bits(bits) } },
                     _ => {},
                 }
-                let d = self.temp(t)
-                self.add(Inst.Const(d, t, bits as int64))
-                return d
+                return self.konst(t, bits as int64)
             },
             ExprKind.BoolLit(b) => {
                 var one: int64 = 0
                 if b { one = 1 }
-                let d = self.temp(Type.TBool)
-                self.add(Inst.Const(d, Type.TBool, one))
-                return d
+                return self.konst(Type.TBool, one)
             },
             ExprKind.Name(n) => { return self.name(cg, n, t) },
             ExprKind.Unary(op, x) => {
@@ -392,6 +518,21 @@ impl Lower {
                 if d < 0 { return self.unsupported("a call without a value used as one") }
                 return d
             },
+            ExprKind.GetField(tgt, field) => {
+                if !is_scalar(t) { return self.unsupported("a field that isn't a scalar used as one") }
+                let base = self.addr(cg, tgt)
+                let d = self.temp(t)
+                self.add(Inst.LoadAt(d, base, cg.field_offset(self.place_type(cg, tgt), field)))
+                return d
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                if !is_scalar(t) { return self.unsupported("an element that isn't a scalar used as one") }
+                let base = self.addr(cg, tgt)
+                let d = self.temp(t)
+                self.add(Inst.LoadAt(d, base, cg.elem_offset(self.place_type(cg, tgt), idx as int32)))
+                return d
+            },
+            ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
             _ => {},
         }
         return self.unsupported("that kind of expression")
@@ -400,6 +541,7 @@ impl Lower {
     fun name(var self, cg: CodeGen, n: str, t: Type) -> int32 {
         let slot = self.lookup(n)
         if slot >= 0 {
+            if is_aggregate(self.f.slots[slot].ty) { return self.unsupported("an aggregate used as a scalar") }
             let d = self.temp(self.f.slots[slot].ty)
             self.add(Inst.Load(d, slot))
             return d
@@ -418,15 +560,39 @@ impl Lower {
         if op == "&&" || op == "||" { return self.logical(cg, op, l, r) }
         let lt = cg.type_of(l.id)
         let rt = cg.type_of(e.id)
-        if !is_scalar(lt) || !is_scalar(rt) { return self.unsupported("an operator on values that aren't scalars") }
+        if is_overloadable_op(op) && is_struct_or_enum_t(lt) && plain(cg, lt) {
+            return self.overloaded_scalar(cg, op, l, r, lt)
+        }
+        if !is_scalar(lt) || !is_scalar(rt) { return self.unsupported("an operator on values that own heap memory") }
         let a = self.expr(cg, l)
         let b = self.expr(cg, r)
         let d = self.temp(rt)
-        if op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" {
+        if op == "==" || op == "!=" || is_cmp(op) {
             self.add(Inst.Cmp(d, op, lt, a, b))
         } else {
             self.add(Inst.Bin(d, op, lt, rt, a, b, Pos { line: e.line, col: e.col }))
         }
+        return d
+    }
+
+    // `a == b`, `a != b` and the orderings on a user type: its `eq` or `cmp`
+    // method, called with both operands' addresses.
+    fun overloaded_scalar(var self, cg: CodeGen, op: str, l: Expr, r: Expr, lt: Type) -> int32 {
+        let key = cg.type_key(lt)
+        var method = ""
+        if op == "==" || op == "!=" { method = "eq" } else if is_cmp(op) { method = "cmp" } else { return self.unsupported("an arithmetic operator on a user type used as a scalar") }
+        let pa = self.addr(cg, l)
+        let pb = self.addr(cg, r)
+        let res = self.temp(Type.TInt(64, true))
+        self.add(Inst.Call(res, format("{}.{}", key, method), [pa, pb]))
+        if op == "==" { return res }
+        let d = self.temp(Type.TBool)
+        if op == "!=" {
+            self.add(Inst.Un(d, "!", Type.TBool, res))
+            return d
+        }
+        let zero = self.konst(Type.TInt(64, true), 0)
+        self.add(Inst.Cmp(d, op, Type.TInt(64, true), res, zero))
         return d
     }
 
@@ -452,41 +618,177 @@ impl Lower {
         return d
     }
 
-    // A call: `print`, or a non-generic user function with scalar arguments;
-    // its result's temporary, -1 without one.
+    // --- aggregate expressions --------------------------------------------------
+
+    // A temporary holding the address of the aggregate value of `e`: where a
+    // variable keeps it, or a slot the value is built in.
+    fun addr(var self, cg: CodeGen, e: Expr) -> int32 {
+        if self.err != "" { return 0 }
+        let t = cg.type_of(e.id)
+        if !plain(cg, t) { return self.unsupported("an aggregate that owns heap memory") }
+        let ci = cg.ctor_info(e)
+        if ci.ok { return self.enum_ctor(cg, t, ci.enum_name, ci.variant, ci.args) }
+        match e.kind {
+            ExprKind.Name(n) => {
+                let slot = self.lookup(n)
+                if slot >= 0 { return self.slot_addr(slot) }
+                return self.unsupported("a function used as a value")
+            },
+            ExprKind.GetField(tgt, field) => {
+                let base = self.addr(cg, tgt)
+                return self.offset(base, cg.field_offset(self.place_type(cg, tgt), field))
+            },
+            ExprKind.TupleIndex(tgt, idx) => {
+                let base = self.addr(cg, tgt)
+                return self.offset(base, cg.elem_offset(self.place_type(cg, tgt), idx as int32))
+            },
+            ExprKind.StructLit(name, fields) => {
+                let slot = self.value_slot(cg, "__struct", t)
+                let base = self.slot_addr(slot)
+                for fi in fields { self.store_member(cg, fi.value, base, cg.field_offset(t, fi.name)) }
+                return base
+            },
+            ExprKind.TupleLit(elems) => {
+                let slot = self.value_slot(cg, "__tuple", t)
+                let base = self.slot_addr(slot)
+                var i = 0
+                for el in elems {
+                    self.store_member(cg, el, base, cg.elem_offset(t, i))
+                    i = i + 1
+                }
+                return base
+            },
+            ExprKind.Call(callee, args) => {
+                let d = self.call(cg, e, callee, args)
+                if d < 0 { return self.unsupported("a call without a value used as one") }
+                return d
+            },
+            ExprKind.Binary(op, l, r) => {
+                let lt = cg.type_of(l.id)
+                if !is_overloadable_op(op) || !is_struct_or_enum_t(lt) { return self.unsupported("that operator on aggregates") }
+                let pa = self.addr(cg, l)
+                let pb = self.addr(cg, r)
+                let slot = self.value_slot(cg, "__result", t)
+                let res = self.slot_addr(slot)
+                self.add(Inst.CallSret(format("{}.{}", cg.type_key(lt), arith_method_cg(op)), res, [pa, pb]))
+                return res
+            },
+            ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
+            _ => {},
+        }
+        return self.unsupported("that kind of aggregate expression")
+    }
+
+    // An enum value built in a new slot: the variant's tag, then its payload.
+    fun enum_ctor(var self, cg: CodeGen, t: Type, enum_name: str, variant: str, args: [Expr]) -> int32 {
+        let slot = self.value_slot(cg, "__enum", t)
+        let base = self.slot_addr(slot)
+        let tag = self.konst(Type.TInt(64, true), cg.variant_tag(enum_name, variant) as int64)
+        self.add(Inst.StoreAt(base, 0, tag))
+        var i = 0
+        for a in args {
+            self.store_member(cg, a, base, cg.variant_field_offset(t, variant, i))
+            i = i + 1
+        }
+        return base
+    }
+
+    // Store `value` as the member at `base + off`.
+    fun store_member(var self, cg: CodeGen, value: Expr, base: int32, off: int32) {
+        let mt = cg.type_of(value.id)
+        if is_aggregate(mt) {
+            let src = self.addr(cg, value)
+            let dst = self.offset(base, off)
+            self.add(Inst.Copy(dst, src, cg.size(mt)))
+        } else {
+            let v = self.expr(cg, value)
+            self.add(Inst.StoreAt(base, off, v))
+        }
+    }
+
+    // --- calls ------------------------------------------------------------------
+
+    // A call: `print`, a non-generic user function, or a method; the temporary
+    // holding its scalar result or its aggregate result's address, -1 without
+    // a result.
     fun call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr]) -> int32 {
         if self.err != "" { return -1 }
-        let nm = match callee.kind {
-            ExprKind.Name(n) => n
-            _ => ""
+        match callee.kind {
+            ExprKind.Name(nm) => {
+                if nm == "print" && len(args) == 1 { return self.print(cg, args[0]) }
+                if is_builtin_call_name(nm) { return self.unsupported(format("the builtin {}", nm)) }
+                if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.unsupported("a call of a function value") }
+                return self.direct_call(cg, e, nm, args)
+            },
+            ExprKind.GetField(recv, field) => {
+                let mname = format("{}.{}", cg.type_key(cg.type_of(recv.id)), field)
+                if !cg.has_func(mname) { return self.unsupported("a call of a function value in a field") }
+                var argv: [Expr] = [recv]
+                for a in args { push(argv, a) }
+                return self.direct_call(cg, e, mname, argv)
+            },
+            _ => {},
         }
-        if nm == "" { return self.unsupported("a method call or a call of a function value") }
-        if nm == "print" && len(args) == 1 { return self.print(cg, args[0]) }
-        if is_builtin_call_name(nm) { return self.unsupported(format("the builtin {}", nm)) }
-        if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.unsupported("a call of a function value") }
-        let sig = cg.sig_of(nm)
-        if len(sig.type_params) > 0 { return self.unsupported("a call of a generic function") }
-        for p in sig.params {
-            if !is_scalar(p) { return self.unsupported("a call with an argument that isn't a scalar") }
-        }
-        var argv: [int32] = []
-        for a in args { push(argv, self.expr(cg, a)) }
-        return match sig.ret {
-            Some(rt) => self.call_with_result(sig.name, rt, argv)
-            None => self.call_without_result(sig.name, argv)
-        }
+        return self.unsupported("a call of a function value")
     }
 
-    fun call_with_result(var self, name: str, rt: Type, argv: [int32]) -> int32 {
-        if !is_scalar(rt) { return self.unsupported("a call whose result isn't a scalar") }
-        let d = self.temp(rt)
-        self.add(Inst.Call(d, name, argv))
+    // A call of the user function `name` with the argument list `argv`
+    // (for a method the receiver first): scalars by value, aggregates by
+    // address, an aggregate result through storage of its own.
+    fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr]) -> int32 {
+        let sig = cg.sig_of(name)
+        // a generic function: the instance for the argument types, which the
+        // code generator stamps out once this function is lowered
+        var target = sig.name
+        var params = sig.params
+        var ret = sig.ret
+        if len(sig.type_params) > 0 {
+            let targs = cg.solve_targs(sig, argv)
+            target = mangle_fn(sig.name, targs)
+            push(self.f.instances, Instance { orig: sig.name, targs: targs })
+            var sub: [Subst] = []
+            var k = 0
+            while k < len(sig.type_params) {
+                push(sub, Subst { name: sig.type_params[k], ty: targs[k] })
+                k = k + 1
+            }
+            var cp: [Type] = []
+            for p in sig.params { push(cp, subst_type(p, sub)) }
+            params = cp
+            ret = opt_subst_type(sig.ret, sub)
+        }
+        for p in params {
+            if !plain(cg, p) { return self.unsupported("a call with an argument that owns heap memory") }
+        }
+        var ret_t = Type.TBool
+        var has_ret = false
+        match ret {
+            Some(rt) => {
+                if !plain(cg, rt) { return self.unsupported("a call whose result owns heap memory") }
+                ret_t = rt
+                has_ret = true
+            },
+            None => {},
+        }
+        var vals: [int32] = []
+        var i = 0
+        while i < len(argv) && i < len(params) {
+            if is_aggregate(params[i]) { push(vals, self.addr(cg, argv[i])) } else { push(vals, self.expr(cg, argv[i])) }
+            i = i + 1
+        }
+        if !has_ret {
+            self.add(Inst.Call(-1, target, vals))
+            return -1
+        }
+        if is_aggregate(ret_t) {
+            let slot = self.value_slot(cg, "__result", ret_t)
+            let res = self.slot_addr(slot)
+            self.add(Inst.CallSret(target, res, vals))
+            return res
+        }
+        let d = self.temp(ret_t)
+        self.add(Inst.Call(d, target, vals))
         return d
-    }
-
-    fun call_without_result(var self, name: str, argv: [int32]) -> int32 {
-        self.add(Inst.Call(-1, name, argv))
-        return -1
     }
 
     fun print(var self, cg: CodeGen, arg: Expr) -> int32 {
@@ -504,6 +806,212 @@ impl Lower {
         let v = self.expr(cg, arg)
         self.add(Inst.Print(t, v))
         return -1
+    }
+
+    // --- match ------------------------------------------------------------------
+
+    // `match scrut { arms }`: the scrutinee copied into a slot, each arm's
+    // pattern tested against it in turn (its bindings copied out of it), the
+    // guard, the body; no arm matching traps. `want`: the match is a value,
+    // returned as a scalar's temporary or an aggregate's address (else -1).
+    fun match_expr(var self, cg: CodeGen, e: Expr, scrut: Expr, arms: [MatchArm], want: bool) -> int32 {
+        if self.err != "" { return 0 }
+        let sst = cg.type_of(scrut.id)
+        if !plain(cg, sst) { return self.unsupported("a match on a value that owns heap memory") }
+        let rt = cg.type_of(e.id)
+        var result = -1
+        if want {
+            if !plain(cg, rt) { return self.unsupported("a match whose value owns heap memory") }
+            result = self.value_slot(cg, "__match", rt)
+        }
+        let root = self.value_slot(cg, "__scrutinee", sst)
+        let base = self.slot_addr(root)
+        if is_aggregate(sst) {
+            let src = self.addr(cg, scrut)
+            self.add(Inst.Copy(base, src, cg.size(sst)))
+        } else {
+            let v = self.expr(cg, scrut)
+            self.add(Inst.Store(root, v))
+        }
+        let end = self.new_block()
+        for arm in arms {
+            if self.err != "" { return 0 }
+            let fail = self.new_block()
+            self.arm_binds = []
+            self.pattern(cg, arm.pattern, base, 0, sst, fail)
+            var scope: [Local] = []
+            push(self.scopes, scope)
+            self.add(Inst.Scope(true))
+            for b in self.arm_binds {
+                self.declare(b.name, b.slot)
+                self.add(Inst.Bind(b.name, b.slot))
+            }
+            match arm.guard {
+                Some(g) => {
+                    let c = self.expr(cg, g)
+                    let body_b = self.new_block()
+                    self.finish(Term.Br(c, body_b, fail))
+                    self.start(body_b)
+                },
+                None => {},
+            }
+            self.arm_body(cg, arm.body, result, rt)
+            self.leave(Term.Jmp(end))
+            self.scopes = drop_last_scope(self.scopes)
+            self.add(Inst.Scope(false))
+            self.finish(Term.Jmp(fail))
+            self.start(fail)
+        }
+        self.finish(Term.Trap("match", Pos { line: e.line, col: e.col }))
+        self.start(end)
+        if result < 0 { return -1 }
+        if is_aggregate(rt) { return self.slot_addr(result) }
+        let d = self.temp(rt)
+        self.add(Inst.Load(d, result))
+        return d
+    }
+
+    // An arm's body; with a result slot, the value of its expression, or of a
+    // block's last expression statement, is stored there.
+    fun arm_body(var self, cg: CodeGen, body: ExprOrBlock, result: int32, rt: Type) {
+        match body {
+            ExprOrBlock.EB_Expr(ex) => {
+                self.add(Inst.Loc(Pos { line: ex.line, col: ex.col }))
+                if result >= 0 { self.store_result(cg, ex, result, rt) } else { self.discard(cg, ex) }
+            },
+            ExprOrBlock.EB_Block(b) => {
+                self.open_scope()
+                let n = len(b.stmts)
+                var i = 0
+                while i < n {
+                    let s = b.stmts[i]
+                    var last_value = false
+                    if i == n - 1 && result >= 0 {
+                        match s.kind {
+                            StmtKind.ExprStmt(ex) => {
+                                last_value = true
+                                self.store_result(cg, ex, result, rt)
+                            },
+                            _ => {},
+                        }
+                    }
+                    if !last_value { self.stmt(cg, s) }
+                    i = i + 1
+                }
+                self.close_scope()
+            },
+        }
+    }
+
+    fun store_result(var self, cg: CodeGen, ex: Expr, result: int32, rt: Type) {
+        if is_aggregate(rt) {
+            let src = self.addr(cg, ex)
+            let dst = self.slot_addr(result)
+            self.add(Inst.Copy(dst, src, cg.size(rt)))
+        } else {
+            let v = self.expr(cg, ex)
+            self.add(Inst.Store(result, v))
+        }
+    }
+
+    // Test pattern `p` against the value of type `t` at `base + off`, jumping
+    // to `fail` when it doesn't match; bindings are copied into slots of their
+    // own (one per name and arm, shared by the alternatives of `|`).
+    fun pattern(var self, cg: CodeGen, p: Pattern, base: int32, off: int32, t: Type, fail: int32) {
+        if self.err != "" { return }
+        match p.kind {
+            PatternKind.PWild => {},
+            PatternKind.PBind(n) => {
+                if cg.is_nullary_variant(n) {
+                    self.check_tag(cg, base, off, cg.variant_tag(enum_name_of(t), n), fail)
+                    return
+                }
+                let slot = self.arm_slot(cg, n, t)
+                if is_aggregate(t) {
+                    let src = self.offset(base, off)
+                    let dst = self.slot_addr(slot)
+                    self.add(Inst.Copy(dst, src, cg.size(t)))
+                } else {
+                    let v = self.temp(t)
+                    self.add(Inst.LoadAt(v, base, off))
+                    self.add(Inst.Store(slot, v))
+                }
+            },
+            PatternKind.PLit(lit) => {
+                if is_tstr(t) {
+                    self.unsupported("a string literal pattern")
+                    return
+                }
+                // the old path compares the 64-bit images (`cmpq`)
+                let c = self.expr(cg, lit)
+                let v = self.temp(t)
+                self.add(Inst.LoadAt(v, base, off))
+                self.branch_equal(v, c, fail)
+            },
+            PatternKind.PEnum(en, variant, elems, hp) => {
+                self.check_tag(cg, base, off, cg.variant_tag(enum_name_of(t), variant), fail)
+                let payload = cg.variant_payload(t, variant)
+                var i = 0
+                for sub in elems {
+                    self.pattern(cg, sub, base, off + cg.variant_field_offset(t, variant, i), payload[i], fail)
+                    i = i + 1
+                }
+            },
+            PatternKind.PTuple(elems) => {
+                let ets = tuple_elems(t)
+                var i = 0
+                for sub in elems {
+                    self.pattern(cg, sub, base, off + cg.elem_offset(t, i), ets[i], fail)
+                    i = i + 1
+                }
+            },
+            PatternKind.PStruct(name, fps) => {
+                for fp in fps {
+                    self.pattern(cg, fp.pattern, base, off + cg.field_offset(t, fp.name), cg.struct_field_type_t(t, fp.name), fail)
+                }
+            },
+            PatternKind.POr(alts) => {
+                let matched = self.new_block()
+                let n = len(alts)
+                var i = 0
+                while i < n - 1 {
+                    let next_alt = self.new_block()
+                    self.pattern(cg, alts[i], base, off, t, next_alt)
+                    self.finish(Term.Jmp(matched))
+                    self.start(next_alt)
+                    i = i + 1
+                }
+                self.pattern(cg, alts[n - 1], base, off, t, fail)
+                self.finish(Term.Jmp(matched))
+                self.start(matched)
+            },
+        }
+    }
+
+    fun check_tag(var self, cg: CodeGen, base: int32, off: int32, tag: int32, fail: int32) {
+        let v = self.temp(Type.TInt(64, true))
+        self.add(Inst.LoadAt(v, base, off))
+        let c = self.konst(Type.TInt(64, true), tag as int64)
+        self.branch_equal(v, c, fail)
+    }
+
+    // Continue when `a == b` (64-bit images), else jump to `fail`.
+    fun branch_equal(var self, a: int32, b: int32, fail: int32) {
+        let eq = self.temp(Type.TBool)
+        self.add(Inst.Cmp(eq, "==", Type.TInt(64, true), a, b))
+        let next = self.new_block()
+        self.finish(Term.Br(eq, next, fail))
+        self.start(next)
+    }
+
+    // The slot of the binding `n` in the current arm (made the first time).
+    fun arm_slot(var self, cg: CodeGen, n: str, t: Type) -> int32 {
+        for b in self.arm_binds {
+            if b.name == n { return b.slot }
+        }
+        let slot = self.value_slot(cg, n, t)
+        push(self.arm_binds, Local { name: n, slot: slot })
+        return slot
     }
 }
 

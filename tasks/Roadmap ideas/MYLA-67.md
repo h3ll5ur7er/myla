@@ -22,7 +22,7 @@ A small IR in between (for the self-hosted backend, D79), with explicit temporar
 
 - [x] The design on [[Architecture/IR]] and D79
 - [x] [[MYLA-103]] `ir.my`, the flags, scalar functions through the IR (in review)
-- [ ] [[MYLA-104]] Aggregates
+- [x] [[MYLA-104]] Aggregates (in review)
 - [ ] [[MYLA-105]] Heap values, ownership and the verifier
 - [ ] [[MYLA-106]] Closures, function values, the remaining constructs, `-g`
 - [ ] [[MYLA-107]] The IR by default, the old emission code deleted
