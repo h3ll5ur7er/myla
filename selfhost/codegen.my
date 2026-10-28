@@ -95,6 +95,10 @@ pub struct CodeGen {
     need_walk: [Type],
     walk_retain: [bool],
     walk_emitted: [str],
+    // the drop, clone and walk helpers asked for so far, by kind and type
+    // token ("drop.L4.str"): one lookup instead of comparing the token of
+    // every queued type (MYLA-124)
+    helper_seen: [str: bool],
     need_sb: bool,
     // The loader's module spans (which node ids belong to which file; ids from
     // `prelude_id` on are the prelude's, with no source), for runtime-error
@@ -227,7 +231,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         uses_float: false,
         epilogue: "", ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
-        need_walk: [], walk_retain: [], walk_emitted: [],
+        need_walk: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
         line_spans: [], prelude_id: 0,
         cur_path: "<input>", pos_labels: [:], posdata: [],
@@ -1017,9 +1021,9 @@ impl CodeGen {
             return
         }
         if is_str_t(t) { return }                // `__str_drop` is always there
-        let tok = mono_token(t)
-        if list_has_str(self.drop_emitted, tok) { return }
-        for p in self.need_drop { if mono_token(p) == tok { return } }
+        let key = "drop" + mono_token(t)
+        if contains(self.helper_seen, key) { return }
+        self.helper_seen[key] = true
         push(self.need_drop, t)
     }
 
@@ -1029,9 +1033,9 @@ impl CodeGen {
             self.need_sb = true
             return
         }
-        let tok = mono_token(t)
-        if list_has_str(self.clone_emitted, tok) { return }
-        for p in self.need_clone { if mono_token(p) == tok { return } }
+        let key = "clone" + mono_token(t)
+        if contains(self.helper_seen, key) { return }
+        self.helper_seen[key] = true
         push(self.need_clone, t)
     }
 
@@ -1093,14 +1097,11 @@ impl CodeGen {
 
     // The name of `t`'s retain or release walk helper, to be emitted.
     fun register_walk(var self, t: Type, retain: bool) -> str {
-        var name = "__walkd_" + mono_token(t)
-        if retain { name = "__walkr_" + mono_token(t) }
-        if list_has_str(self.walk_emitted, name) { return name }
-        var i = 0
-        while i < len(self.need_walk) {
-            if self.walk_retain[i] == retain && mono_token(self.need_walk[i]) == mono_token(t) { return name }
-            i = i + 1
-        }
+        let tok = mono_token(t)
+        var name = "__walkd_" + tok
+        if retain { name = "__walkr_" + tok }
+        if contains(self.helper_seen, name) { return name }
+        self.helper_seen[name] = true
         push(self.need_walk, t)
         push(self.walk_retain, retain)
         return name
