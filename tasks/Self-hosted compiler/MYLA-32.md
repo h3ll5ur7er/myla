@@ -15,7 +15,7 @@ labels: [selfhost, interpreter, parity]
 - [x] `>>` on `uint64` is an arithmetic shift
 - [x] The receiver is evaluated after the arguments, and a `var self` receiver is evaluated twice
 - [x] `for i in a..b` materializes the whole range, truncated to `int32`
-- [ ] Lists, maps and scopes are copied on every update, so assignment is O(n): recorded as [[MYLA-74]]
+- [x] Lists, maps and scopes are copied on every update, so assignment is O(n): recorded as [[MYLA-74]], which made `push` and element assignment amortised O(1) (in review)
 - [x] `Value.to_string` formats a `float64`, which the self-hosted codegen can't render: every float path of the stage3-built `myla run` crashes (fixed by [[MYLA-29]])
 
 ## Done when

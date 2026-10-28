@@ -3,9 +3,9 @@ follows from it (MYLA-110, D84).
 
 For every mutant of `_mutants` (an example with one declaration broken), the
 Python checker reports the injected error and nothing else, since the examples
-have no errors of their own, and never raises anything but a Myla error. The checker gate
-(test_selfhost_checker.py) compares the self-hosted checker on the same
-mutants.
+have no errors of their own, and never raises anything but a Myla error. The
+checker gate (test_selfhost_checker.py) compares the self-hosted checker on the
+same mutants.
 """
 import unittest
 

@@ -13,7 +13,7 @@ The Rust edition was an experiment: a faster stage 0 for the bootstrap and a tes
 - [x] Bootstrap fixes landed, so nobody needs a faster stage 0 (about 8 seconds)
 - [x] Anything worth keeping from the actor prototype and `rust/docs/concurrency.md` is noted in [[MYLA-61]] (surface syntax, runtime, and what went wrong)
 - [x] The tree-sitter grammar moved from `rust/editor/tree-sitter-myla/` to `editor/tree-sitter-myla/`; `.vscode/settings.json` points there ([[MYLA-55]] still tracks that file's machine-specific paths); aligning it with the real grammar is [[MYLA-47]], now in the Editor tooling epic
-- [ ] The VS Code grammar and snippets lose their Rust-dialect keywords: left to [[MYLA-54]] (it concerns the extension, not `rust/`)
+- [x] The VS Code grammar and snippets lose their Rust-dialect keywords: left to [[MYLA-54]] (it concerns the extension, not `rust/`), which removed them (in review; no `actor`, `spawn`, `chan`, `select`, `async` or `await` is left in the extension's grammar or snippets)
 
 ## Done when
 

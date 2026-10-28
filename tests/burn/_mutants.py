@@ -2,8 +2,8 @@
 
 Each mutant takes a single-file example and breaks one declaration: a
 parameter, return, field, payload, const, alias or impl target type becomes the
-unknown type `Nope`, or a
-function, struct or enum is declared a second time. The checker must report
+unknown type `Nope`, or a function, struct or enum is declared a second time.
+The checker must report
 that error first, and nothing that follows from it: the bodies that depend on
 the broken part stop silently, the others are checked as before.
 """
