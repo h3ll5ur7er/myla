@@ -22,7 +22,11 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on pull requests and pushes to `master` ([[MYLA-69]]):
+`.github/workflows/ci.yml` runs on pull requests and pushes to `master` ([[MYLA-69]]); the README shows the state of `master` as a badge:
+
+[![CI](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml)
+
+The jobs:
 
 | Job | Runs |
 | --- | --- |
