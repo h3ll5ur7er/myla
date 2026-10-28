@@ -10,6 +10,7 @@ Step 6 of [[MYLA-67]] ([[Architecture/IR]]): each optimisation a separate change
 
 - [x] Retain and release walks out of line (a helper per aggregate type instead of the walk at every site)
 - [x] A temporary read right after it is computed taken from `%rax` (its store held back, and dropped when nothing else reads it)
+- [x] Constants and addresses recomputed where they are read; call arguments pushed from their slots
 - [ ] Frame slot reuse
 - [ ] Retain/drop pairs that cancel (a list copied and never written)
 - [ ] Scalars in registers (a simple allocator over temporaries)
@@ -26,6 +27,7 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 | The IR, old path deleted ([[MYLA-107]]) | 2.37 s | 135 MB | 3.36 MB | 13.67 MB |
 | Walks out of line | 2.26 s | 113 MB | 2.54 MB | 9.79 MB |
 | Temporaries in `%rax` | 2.08 s | 108 MB | 2.21 MB | 8.67 MB |
+| Constants and addresses recomputed | 2.00 s | 97 MB | 1.83 MB | 7.30 MB |
 
 ## How (walks out of line)
 
@@ -49,3 +51,14 @@ The compiler built by itself, compiling itself (`selfhost/gen_main.my`), best of
 
 - **Measured:** 0.18 s faster, the binary 13% smaller (2.54 → 2.21 MB), the assembly 11% smaller (9.79 → 8.67 MB), and the peak 5 MB lower. The compiler built this way reproduces its own output.
 - **Tests:** `inst_uses` has its own `#test` cases; the stress programs stay at 11 MB; the codegen gate, the parity tests and the debug-information tests pass (181 tests).
+
+## How (constants and addresses recomputed)
+
+- **Why:** a constant, a string's or symbol's address, or a slot's address went into a temporary's slot and came back, and a call argument was loaded and then pushed (`movq …, %rax` then `pushq %rax`, 14,362 times).
+- **Change:** `remat_texts` finds the temporaries written once, by `const`, `str`, `label` or `addr`. Such a temporary gets no slot traffic: `load_temp` emits its defining instruction straight into the register asked for. A wrapped integer constant carries its final value (`wrapped`, as `wrap` leaves it). `push_temp` pushes an argument straight from its slot.
+- **Definitions:** a temporary can be written in more than one block (the result of `&&`/`||` is `const 1` on one path and `const 0` on the other). `inst_defs` and `def_counts` find those, and they keep their slots. The first version missed this: the compiler built with it couldn't read its own modules (every such result was the last constant), while every stress program still passed. The new parity program `logical_results_as_values` keeps `&&`/`||` results as values; it fails with the bug put back.
+
+## Evidence (constants and addresses recomputed)
+
+- **Measured:** 0.08 s faster, the binary 17% smaller (2.21 → 1.83 MB), the assembly 16% smaller (8.67 → 7.30 MB), and the peak 11 MB lower. The compiler built this way reproduces its own output.
+- **Tests:** `inst_defs` has `#test` cases; the stress programs stay at 11 MB; the codegen gate, the parity tests and the debug-information tests pass (182 tests).

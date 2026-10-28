@@ -519,6 +519,56 @@ pub fun term_uses(t: Term) -> [int32] {
     }
 }
 
+// The temporaries `inst` writes (a temporary can be written in more than one
+// block: the result of `&&`/`||`).
+#test(Inst.RtPair(1, 2, "f", [3]))[[1, 2]]
+#test(Inst.Call(-1, "f", [3]))[[]]
+#test(Inst.Store(0, 4))[[]]
+pub fun inst_defs(inst: Inst) -> [int32] {
+    return match inst {
+        Inst.Const(d, t, v) => [d]
+        Inst.Str(d, text) => [d]
+        Inst.Load(d, s) => [d]
+        Inst.Addr(d, s) => [d]
+        Inst.Offset(d, p, off) => [d]
+        Inst.LoadAt(d, p, off) => [d]
+        Inst.Bin(d, op, lt, rt, a, b, pos) => [d]
+        Inst.Cmp(d, op, t, a, b) => [d]
+        Inst.Un(d, op, t, a) => [d]
+        Inst.Cast(d, from_t, to_t, a) => [d]
+        Inst.Call(d, name, args) => result_temp(d)
+        Inst.Rt(d, name, args) => result_temp(d)
+        Inst.Elem(d, c, i, stride, is_str, pos) => [d]
+        Inst.Load8(d, p) => [d]
+        Inst.Cow(d, t, h) => [d]
+        Inst.Append(d, h, c, stride) => [d]
+        Inst.Pop(d, c, stride, pos) => [d]
+        Inst.RtPair(d, d2, name, args) => [d, d2]
+        Inst.SbBuild(d, c) => [d]
+        Inst.Global(d, sym, w) => [d]
+        Inst.Label(d, sym) => [d]
+        Inst.CallInd(d, fv, args) => result_temp(d)
+        _ => []
+    }
+}
+
+fun result_temp(d: int32) -> [int32] {
+    if d < 0 { return [] }
+    return [d]
+}
+
+// How many times each temporary of `f` is written.
+pub fun def_counts(f: IrFunc) -> [int32] {
+    var counts: [int32] = []
+    for t in f.temps { push(counts, 0) }
+    for b in f.blocks {
+        for inst in b.insts {
+            for d in inst_defs(inst) { counts[d] = counts[d] + 1 }
+        }
+    }
+    return counts
+}
+
 // How many times each temporary of `f` is read.
 pub fun use_counts(f: IrFunc) -> [int32] {
     var counts: [int32] = []

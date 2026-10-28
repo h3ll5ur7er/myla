@@ -951,6 +951,40 @@ PROGRAMS = {
         "    print(make_adder(20)(22))\n"
         "}\n"
     ),
+    # MYLA-108: `&&` and `||` results kept as values (stored, passed,
+    # returned): their temporary is written in two blocks, so it can't be
+    # recomputed from either
+    "logical_results_as_values": (
+        "fun both(a: int, b: int) -> bool {\n"
+        "    return a > 1 && b > 1\n"
+        "}\n"
+        "\n"
+        "fun show(x: bool) -> int {\n"
+        "    if x { return 1 }\n"
+        "    return 0\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    let a = 5\n"
+        "    let b = 0\n"
+        "    let and_ab = a > 1 && b > 1\n"
+        "    let or_ab = a > 1 || b > 1\n"
+        "    let nor = !(a < 1 || b < 1)\n"
+        "    print(and_ab)\n"
+        "    print(or_ab)\n"
+        "    print(nor)\n"
+        "    print(both(2, 3))\n"
+        "    print(both(2, 0))\n"
+        "    print(show(a > 1 && b == 0) + show(b > 1 || a == 0))\n"
+        "    var flags: [bool] = []\n"
+        "    for i in 0..4 {\n"
+        "        push(flags, i % 2 == 0 && i > 0)\n"
+        "    }\n"
+        "    print(flags[2])\n"
+        "    print(flags[1] || flags[3])\n"
+        "}\n"
+    ),
     "const_string_concatenation_in_functions": (
         "const TABLE: str = \"ab\" + \"cd\" + \"ef\"\n"
         "const N: int32 = 2 + 3\n"

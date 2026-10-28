@@ -12,7 +12,7 @@
 from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding
-from .ir import IrFunc, Inst, Term, use_counts
+from .ir import IrFunc, Inst, Term, use_counts, def_counts, inst_defs
 
 impl CodeGen {
     // Emit `f`, the IR of the function `fd`, as `myla_<mangled>`.
@@ -38,6 +38,7 @@ impl CodeGen {
         }
         let temp_base = cursor
         cursor = cursor + 8 * len(f.temps)
+        self.temp_remat = self.remat_texts(f, slot_off)
         let frame = (cursor + 15) / 16 * 16
         self.epilogue = format(".Lret_{}", mangled)
         var labels: [str] = []
@@ -75,24 +76,10 @@ impl CodeGen {
 
     fun emit_inst(var self, f: IrFunc, inst: Inst, slot_off: [int32], temp_base: int32) {
         match inst {
-            Inst.Const(d, t, v) => {
-                match t {
-                    Type.TFloat(w) => {
-                        self.uses_float = true
-                        self.emit(format("movabsq ${}, %rax", v))
-                    },
-                    Type.TInt(w, s) => {
-                        self.emit(format("movabsq ${}, %rax", v))
-                        self.wrap(t)
-                    },
-                    _ => { self.emit(format("movq ${}, %rax", v)) },
-                }
-                self.store_temp(d, temp_base)
-            },
-            Inst.Str(d, text) => {
-                self.emit(format("leaq {}(%rip), %rax", self.string_label(text)))
-                self.store_temp(d, temp_base)
-            },
+            // a constant or an address is recomputed where it is read
+            // (`remat_texts`), unless its temporary is written elsewhere too
+            Inst.Const(d, t, v) => { self.def_into_temp(inst, d, slot_off, temp_base) },
+            Inst.Str(d, text) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.Load(d, s) => {
                 self.emit(format("movq {}(%rbp), %rax", slot_off[s]))
                 self.store_temp(d, temp_base)
@@ -101,10 +88,7 @@ impl CodeGen {
                 self.load_temp(v, "rax", temp_base)
                 self.emit(format("movq %rax, {}(%rbp)", slot_off[s]))
             },
-            Inst.Addr(d, s) => {
-                self.emit(format("leaq {}(%rbp), %rax", slot_off[s]))
-                self.store_temp(d, temp_base)
-            },
+            Inst.Addr(d, s) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.Offset(d, p, off) => {
                 self.load_temp(p, "rax", temp_base)
                 if off != 0 { self.emit(format("addq ${}, %rax", off)) }
@@ -157,8 +141,7 @@ impl CodeGen {
                 // the first argument at the lowest address: push the last first
                 var i = len(args) - 1
                 while i >= 0 {
-                    self.load_temp(args[i], "rax", temp_base)
-                    self.emit("pushq %rax")
+                    self.push_temp(args[i], temp_base)
                     i = i - 1
                 }
                 self.emit(format("call myla_{}", name))
@@ -169,25 +152,19 @@ impl CodeGen {
                 // the result's address is the first word, below the arguments
                 var i = len(args) - 1
                 while i >= 0 {
-                    self.load_temp(args[i], "rax", temp_base)
-                    self.emit("pushq %rax")
+                    self.push_temp(args[i], temp_base)
                     i = i - 1
                 }
-                self.load_temp(r, "rax", temp_base)
-                self.emit("pushq %rax")
+                self.push_temp(r, temp_base)
                 self.emit(format("call myla_{}", name))
                 self.emit(format("addq ${}, %rsp", 8 * (len(args) + 1)))
             },
-            Inst.Label(d, sym) => {
-                self.emit(format("leaq {}(%rip), %rax", sym))
-                self.store_temp(d, temp_base)
-            },
+            Inst.Label(d, sym) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.CallInd(d, fv, args) => {
                 // the arguments, then the environment, then the call
                 var i = len(args) - 1
                 while i >= 0 {
-                    self.load_temp(args[i], "rax", temp_base)
-                    self.emit("pushq %rax")
+                    self.push_temp(args[i], temp_base)
                     i = i - 1
                 }
                 self.load_temp(fv, "rax", temp_base)
@@ -199,8 +176,7 @@ impl CodeGen {
             Inst.CallIndSret(fv, r, args) => {
                 var i = len(args) - 1
                 while i >= 0 {
-                    self.load_temp(args[i], "rax", temp_base)
-                    self.emit("pushq %rax")
+                    self.push_temp(args[i], temp_base)
                     i = i - 1
                 }
                 self.load_temp(fv, "rax", temp_base)
@@ -409,10 +385,70 @@ impl CodeGen {
         }
     }
 
+    // How each temporary defined once, by a constant, a string's or symbol's
+    // address or a slot's address, is recomputed where it is read instead of
+    // being kept in a slot: the instruction up to its register's name
+    // (MYLA-108); "" for the other temporaries.
+    fun remat_texts(var self, f: IrFunc, slot_off: [int32]) -> [str] {
+        var out: [str] = []
+        for t in f.temps { push(out, "") }
+        let defs = def_counts(f)
+        for b in f.blocks {
+            for inst in b.insts {
+                let text = self.def_text(inst, slot_off)
+                for d in inst_defs(inst) {
+                    if defs[d] == 1 { out[d] = text }
+                }
+            }
+        }
+        return out
+    }
+
+    // The code computing a constant, a string's or symbol's address or a
+    // slot's address, up to its register's name; "" for other instructions.
+    fun def_text(var self, inst: Inst, slot_off: [int32]) -> str {
+        return match inst {
+            Inst.Const(d, t, v) => match t {
+                Type.TFloat(w) => {
+                    self.uses_float = true
+                    format("movabsq ${}, %", v)
+                }
+                Type.TInt(w, s) => format("movabsq ${}, %", wrapped(v, w, s))
+                _ => format("movq ${}, %", v)
+            }
+            Inst.Str(d, text) => format("leaq {}(%rip), %", self.string_label(text))
+            Inst.Addr(d, s) => format("leaq {}(%rbp), %", slot_off[s])
+            Inst.Label(d, sym) => format("leaq {}(%rip), %", sym)
+            _ => ""
+        }
+    }
+
+    // A constant or an address whose temporary is kept in its slot: computed
+    // into %rax and stored.
+    fun def_into_temp(var self, inst: Inst, d: int32, slot_off: [int32], temp_base: int32) {
+        if self.temp_remat[d] != "" { return }
+        self.emit(self.def_text(inst, slot_off) + "rax")
+        self.store_temp(d, temp_base)
+    }
+
+    // Push the temporary `t` (a call's argument): straight from its slot.
+    fun push_temp(var self, t: int32, temp_base: int32) {
+        if self.temp_remat[t] != "" || (self.pend_store != "" && self.pend_temp == t) {
+            self.load_temp(t, "rax", temp_base)
+            self.emit("pushq %rax")
+            return
+        }
+        self.emit(format("pushq {}(%rbp)", -(temp_base + 8 * (t + 1))))
+    }
+
     // The temporary `t` into `reg`. Read right after it was computed, it is
     // still in %rax: moved from there, and stored first only when something
     // else reads it too (MYLA-108).
     fun load_temp(var self, t: int32, reg: str, temp_base: int32) {
+        if self.temp_remat[t] != "" {
+            self.emit(self.temp_remat[t] + reg)
+            return
+        }
         if self.pend_store != "" && self.pend_temp == t {
             if self.temp_uses[t] > 1 { self.flush_temp() } else {
                 self.pend_store = ""
@@ -433,4 +469,16 @@ impl CodeGen {
         self.pend_store = format("movq %rax, {}(%rbp)", -(temp_base + 8 * (t + 1)))
         self.pend_temp = t
     }
+}
+
+// The constant `v` as a `w`-bit integer (signed or not) holds it in 64 bits,
+// as `wrap` leaves it in %rax.
+fun wrapped(v: int64, w: int32, signed: bool) -> int64 {
+    if w == 64 { return v }
+    if signed {
+        let shift = 64 - w
+        return (v << shift) >> shift
+    }
+    let one: int64 = 1
+    return v & ((one << w) - 1)
 }
