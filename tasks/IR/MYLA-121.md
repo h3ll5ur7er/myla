@@ -33,6 +33,6 @@ All in [[selfhost/ir_x86.my]]; the IR is unchanged.
 - The compiler before (MYLA-120) and after, built by themselves, compiling the same source: 3,198.3 → 3,299.4 million instructions (+3.2%: the allocator's own work), but best 0.961 → 0.929 s, median 1.033 → 1.013 s; binary 1,301,504 → 1,242,680 bytes. The allocator alone cost 9.5%, then 6.4% after flattening it; `remat_texts` gave part of it back.
 - The stress programs, same source without and with registers, 8 alternating runs each: sum of the medians 10.73 → 10.45 s (−2.6%); lists −25%, closures −14%, `?` after a staged value −12%, maps −7%, the others within ±4% (the map removal stress, +8% at first, is equal over 40 runs: best 0.074 → 0.071 s).
 - `REG_MIN_USE`: 1, 4, 12 and 40 gave 3,380.6, 3,361.1, 3,306.9 and 3,283.5 million instructions; 4 and 12 ran equally fast (medians 1.035 and 1.041 s), 40 slower (1.061 s).
-- Unit 595, integration 2, burn 737 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,285,806 bytes, from 5,463,803).
+- Unit 595, integration 2, burn 737 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,264,716 bytes, from 5,463,803).
 
 Not done here: a division by a constant still tests its divisor for zero and −1; a value loaded into a register-held temporary still passes through `%rax`.
