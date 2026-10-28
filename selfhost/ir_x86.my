@@ -200,6 +200,7 @@ impl CodeGen {
                 self.emit("popq %rbx")
             },
             Inst.Init(s) => {},
+            Inst.Moved(s) => {},
             Inst.RtPair(d, d2, name, args) => {
                 self.load_args(args, temp_base)
                 self.emit(format("call {}", name))

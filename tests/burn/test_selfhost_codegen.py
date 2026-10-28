@@ -105,6 +105,7 @@ PARITY_PROGRAMS = (
     "lists_through_the_ir",
     "maps_and_builders_through_the_ir",
     "recursive_enums_through_the_ir",
+    "try_through_the_ir",
 )
 
 # The Python backend's arena-reclaim stress programs (test_compiler_parity),
@@ -769,11 +770,18 @@ class SelfHostedCodegenParityThroughIR(SelfHostedCodegenParity):
 
     def test_heap_values_go_through_the_ir(self) -> None:
         # every function of the maps-and-builders program (`get`'s instance
-        # included) and of the recursive-enum one (MYLA-105)
+        # included), the recursive-enum one (MYLA-105), the `?` one, the `?`
+        # stress programs and the destructuring one (MYLA-106)
         from .test_compiler_parity import PROGRAMS
-        for name in ("maps_and_builders_through_the_ir", "recursive_enums_through_the_ir"):
+        from . import test_compiler_parity
+        sources = {name: PROGRAMS[name] for name in (
+            "maps_and_builders_through_the_ir", "recursive_enums_through_the_ir", "try_through_the_ir",
+            "destructure_boxed_enum_and_list_leaves")}
+        for name in ("STRESS_TRY_SRC", "STRESS_TRY_AFTER_STAGED_VALUE_SRC"):
+            sources[name] = getattr(test_compiler_parity, name)
+        for name, source in sources.items():
             with self.subTest(program=name):
-                proc = self._ir_run(PROGRAMS[name], default_stdlib_root(), "--ir-stats")
+                proc = self._ir_run(source, default_stdlib_root(), "--ir-stats")
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn(" 0 by the old path", proc.stderr)
 

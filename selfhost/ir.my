@@ -109,6 +109,9 @@ pub enum Inst {
     Global(int32, str, int32),
     // exit %code: the process ends with the low 8 bits of %code as its status
     Exit(int32),
+    // moved $slot: the owning slot's value was moved out (into a container);
+    // it holds none now (no code)
+    Moved(int32),
     // print ty %a: a scalar, as `print` writes it
     Print(Type, int32),
     // loc line col: the source position of the code that follows
@@ -225,6 +228,7 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.MapRemove(t, h, c, k) => format("mapremove {} [%t{}] %t{} %t{}", type_name(t), h, c, k)
         Inst.Global(d, sym, w) => format("%t{} = global {} {}", d, sym, w)
         Inst.Exit(v) => format("exit %t{}", v)
+        Inst.Moved(s) => format("moved ${}", s)
         Inst.Print(t, a) => format("print {} %t{}", type_name(t), a)
         Inst.Loc(p) => format("loc {} {}", p.line, p.col)
         Inst.Bind(name, s) => format("bind {} ${}", name, s)
@@ -404,6 +408,11 @@ fun step(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> str {
             if !live[s] { return format("drop of ${} ({}), which holds no value", s, f.slots[s].name) }
             return ""
         },
+        Inst.Moved(s) => {
+            if !f.slots[s].owns { return format("move out of ${} ({}), which owns nothing", s, f.slots[s].name) }
+            if !live[s] { return format("move out of ${} ({}), which holds no value", s, f.slots[s].name) }
+            return ""
+        },
         _ => {},
     }
     let s = stored_slot(f, inst, addr_of)
@@ -415,6 +424,7 @@ fun apply(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> [bool] {
     var out = live
     match inst {
         Inst.DropSlot(t, s) => { out[s] = false },
+        Inst.Moved(s) => { out[s] = false },
         _ => {},
     }
     let s = stored_slot(f, inst, addr_of)
@@ -449,6 +459,9 @@ fun drop_last_int(xs: [int32]) -> [int32] {
 #test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.DropSlot(Type.TStr, 0), Inst.DropSlot(Type.TStr, 0)])["L0: drop of $0 (s), which holds no value"]
 #test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Store(0, 0)])["L0: store into $0 (s), which still holds a value"]
 #test([Inst.DropSlot(Type.TStr, 1)])["L0: drop of $1 (b), which owns nothing"]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Moved(0)])[""]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Moved(0), Inst.DropSlot(Type.TStr, 0)])["L0: drop of $0 (s), which holds no value"]
+#test([Inst.Moved(0)])["L0: move out of $0 (s), which holds no value"]
 fun verify_block(insts: [Inst]) -> str {
     return verify(test_func([IrBlock { insts: insts, term: Term.Ret(-1) }]))
 }

@@ -8033,12 +8033,12 @@ fun getfield_name(callee: Expr) -> str {
     return match callee.kind { ExprKind.GetField(tgt, field) => field, _ => "" }
 }
 
-fun success_variant(enum_name: str) -> str {
+pub fun success_variant(enum_name: str) -> str {
     if enum_name == "Option" { return "Some" }
     return "Ok"
 }
 
-fun failure_variant(enum_name: str) -> str {
+pub fun failure_variant(enum_name: str) -> str {
     if enum_name == "Option" { return "None" }
     return "Err"
 }

@@ -35,9 +35,9 @@
 // path generates it.
 
 from std.num import f64_literal_bits, f32_round_bits
-from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems
 from .checker import Type, Subst, opt_subst_type, subst_type
-from .codegen import CodeGen, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole
+from .codegen import CodeGen, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 
 // A name in scope: the slot holding it.
@@ -509,7 +509,47 @@ impl Lower {
                 self.drop_owners(lp.owners)
                 self.leave(Term.Jmp(lp.cont))
             },
-            _ => { let d = self.unsupported("a destructuring declaration") },
+            StmtKind.DestructDecl(k, binding, ty, init) => {
+                let t = cg.type_of(init.id)
+                if !lowerable(cg, t) {
+                    let d = self.unsupported("a local's type")
+                    return
+                }
+                let src = self.addr(cg, init)
+                self.destructure(cg, bind_elems(binding), src, t)
+            },
+        }
+    }
+
+    // The names of a tuple binding (`let (a, (b, _)) = …`): each a variable of
+    // its own, holding a retained copy of its element of the tuple at `base`.
+    fun destructure(var self, cg: CodeGen, elems: [BindElem], base: int32, t: Type) {
+        let ets = tuple_elems(t)
+        var i = 0
+        for b in elems {
+            let et = ets[i]
+            let off = cg.elem_offset(t, i)
+            match b {
+                BindElem.BName(n, l, c, sp) => {
+                    let slot = self.value_slot(cg, n, et, true)
+                    if is_aggregate(et) {
+                        let dst = self.slot_addr(slot)
+                        self.add(Inst.Copy(dst, self.unbox(cg, et, self.offset(base, off)), cg.size(et)))
+                        self.retain(cg, et, dst)
+                    } else {
+                        let v = self.temp(et)
+                        self.add(Inst.LoadAt(v, base, off))
+                        self.add(Inst.Store(slot, v))
+                        self.retain(cg, et, v)
+                    }
+                    self.declare(n, slot)
+                    self.own(slot)
+                    self.add(Inst.Bind(n, slot))
+                },
+                BindElem.BWild => {},
+                BindElem.BTuple(es, l, c, sp) => { self.destructure(cg, es, self.offset(base, off), et) },
+            }
+            i = i + 1
         }
     }
 
@@ -567,44 +607,34 @@ impl Lower {
             },
             _ => {},
         }
-        if cg.is_boxed(t) && local < 0 {
-            // a member holding a recursive enum: a new box first, then the
-            // place, whose old box is released
-            let b = self.box(cg, value, t)
-            let dst = self.place(cg, target)
-            self.add(Inst.DropAt(t, dst))
-            self.add(Inst.StoreAt(dst, 0, b))
-            return
-        }
-        if is_aggregate(t) {
-            // the value first, staged in a slot of its own with its
-            // references, then the place
-            let src = self.addr(cg, value)
-            let staged = self.value_slot(cg, "__staged", t, false)
-            let sp = self.slot_addr(staged)
-            self.add(Inst.Copy(sp, src, cg.size(t)))
-            self.retain(cg, t, sp)
-            if local >= 0 && self.f.slots[local].owns {
+        if local >= 0 && (self.f.slots[local].owns || !is_aggregate(t)) {
+            // a variable: nothing is evaluated between the value and the store
+            if is_aggregate(t) {
+                let src = self.addr(cg, value)
+                let staged = self.value_slot(cg, "__staged", t, false)
+                let sp = self.slot_addr(staged)
+                self.add(Inst.Copy(sp, src, cg.size(t)))
+                self.retain(cg, t, sp)
                 self.add(Inst.DropSlot(t, local))
-                let dst = self.slot_addr(local)
-                self.add(Inst.Copy(dst, sp, cg.size(t)))
-            } else {
-                let dst = self.place(cg, target)
-                if cg.owns_heap(t) { self.add(Inst.DropAt(t, dst)) }
-                self.add(Inst.Copy(dst, sp, cg.size(t)))
+                self.add(Inst.Copy(self.slot_addr(local), sp, cg.size(t)))
+                return
             }
-            return
-        }
-        let v = self.expr(cg, value)
-        self.retain(cg, t, v)
-        if local >= 0 {
+            let v = self.expr(cg, value)
+            self.retain(cg, t, v)
             if self.f.slots[local].owns { self.add(Inst.DropSlot(t, local)) }
             self.add(Inst.Store(local, v))
             return
         }
+        if local >= 0 && cg.is_boxed(t) {
+            let d = self.unsupported("an assignment to a recursive enum through a parameter")
+            return
+        }
+        // a member (or what a `var self` parameter points at): the value
+        // first, then the place, which may still return early (`?`)
+        let staged = self.stage(cg, t, value)
         let dst = self.place(cg, target)
         if cg.owns_heap(t) { self.add(Inst.DropAt(t, dst)) }
-        self.add(Inst.StoreAt(dst, 0, v))
+        self.store_staged(cg, t, dst, staged)
     }
 
     // The address of an assignable place: a local, a field, tuple element, list
@@ -896,6 +926,7 @@ impl Lower {
             },
             ExprKind.ListLit(elems) => { return self.list_lit(cg, t, elems) },
             ExprKind.MapLit(entries) => { return self.map_lit(cg, t, entries) },
+            ExprKind.Try(inner) => { return self.try_expr(cg, e, inner) },
             _ => {},
         }
         return self.unsupported("that kind of expression")
@@ -1074,6 +1105,7 @@ impl Lower {
             },
             ExprKind.MatchE(scrut, arms) => { return self.match_expr(cg, e, scrut, arms, true) },
             ExprKind.Index(base, idx) => { return self.unbox(cg, t, self.elem_read(cg, e, base, idx)) },
+            ExprKind.Try(inner) => { return self.try_expr(cg, e, inner) },
             _ => {},
         }
         return self.unsupported("that kind of aggregate expression")
@@ -1099,12 +1131,6 @@ impl Lower {
         self.add(Inst.Copy(p, src, cg.size(t)))
         self.retain(cg, t, p)
         return p
-    }
-
-    // Whether a member of type `t` holds the value itself as an aggregate (not
-    // a scalar, a cell or a box's pointer).
-    fun inline_member(self, cg: CodeGen, t: Type) -> bool {
-        return is_aggregate(t) && !cg.is_boxed(t)
     }
 
     // An enum value built in a new slot: the variant's tag, then its payload.
@@ -1387,23 +1413,30 @@ impl Lower {
         return d
     }
 
-    // The value `value` of a container's element type `vt` taken, with
-    // references of its own, before the container is touched: (its temporary
-    // (a box's pointer for a recursive enum) or -1, the address of its staged
-    // copy or -1).
+    // The value `value` of a member's type `vt` taken, with references of its
+    // own, before the container or place it goes to is evaluated: (the owning
+    // slot holding it until it is moved in, or -1 when it owns nothing; its
+    // temporary, or its staged copy's address for an aggregate). A `?` or
+    // `return` in between drops it with the statement's temporaries.
     fun stage(var self, cg: CodeGen, vt: Type, value: Expr) -> (int32, int32) {
-        if cg.is_boxed(vt) { return (self.box(cg, value, vt), -1) }
+        let owns = cg.owns_heap(vt)
         if is_aggregate(vt) {
             let src = self.addr(cg, value)
-            let slot = self.value_slot(cg, "__staged", vt, false)
+            let slot = self.value_slot(cg, "__staged", vt, owns)
             let staged = self.slot_addr(slot)
             self.add(Inst.Copy(staged, src, cg.size(vt)))
             self.retain(cg, vt, staged)
-            return (-1, staged)
+            if !owns { return (-1, staged) }
+            self.own_temp(slot)
+            return (slot, staged)
         }
         let v = self.expr(cg, value)
         self.retain(cg, vt, v)
-        return (v, -1)
+        if !owns { return (-1, v) }
+        let slot = self.value_slot(cg, "__staged", vt, true)
+        self.add(Inst.Store(slot, v))
+        self.own_temp(slot)
+        return (slot, v)
     }
 
     // Set `key` in the (unique) map the 8 bytes at `holder` point at to the
@@ -1434,9 +1467,37 @@ impl Lower {
         self.store_staged(cg, vt, p, staged)
     }
 
-    // Move the value staged by `stage` into the member at `p`.
+    // Move the value `stage` took into the member at `p`, which takes over its
+    // references (a recursive enum's into a new box).
     fun store_staged(var self, cg: CodeGen, vt: Type, p: int32, staged: (int32, int32)) {
-        if self.inline_member(cg, vt) { self.add(Inst.Copy(p, staged.1, cg.size(vt))) } else { self.add(Inst.StoreAt(p, 0, staged.0)) }
+        if cg.is_boxed(vt) {
+            let size = self.int_const(cg.size(vt))
+            let b = self.temp(Type.TInt(64, false))
+            self.add(Inst.Rt(b, "__alloc", [size]))
+            self.add(Inst.Copy(b, staged.1, cg.size(vt)))
+            self.add(Inst.StoreAt(p, 0, b))
+        } else if is_aggregate(vt) {
+            self.add(Inst.Copy(p, staged.1, cg.size(vt)))
+        } else {
+            self.add(Inst.StoreAt(p, 0, staged.1))
+        }
+        self.moved(staged.0)
+    }
+
+    // The staged value in the owning `slot` (-1: none) was moved into its
+    // place: no temporary scope drops it any more.
+    fun moved(var self, slot: int32) {
+        if slot < 0 { return }
+        self.add(Inst.Moved(slot))
+        var i = 0
+        while i < len(self.temps) {
+            var kept: [int32] = []
+            for s in self.temps[i] {
+                if s != slot { push(kept, s) }
+            }
+            self.temps[i] = kept
+            i = i + 1
+        }
     }
 
     // `[k: v, …]`: a new map, each key evaluated before its value; the
@@ -1581,6 +1642,46 @@ impl Lower {
         let d = self.temp(Type.TStr)
         self.add(Inst.Rt(d, helper, rargs))
         return self.owned_value(cg, d, Type.TStr)
+    }
+
+    // --- `?` -------------------------------------------------------------------
+
+    // `inner?`: the success payload (a scalar's temporary or an aggregate's
+    // address), borrowed from the operand; otherwise the failure's tag and
+    // payload are copied into the function's result with references of their
+    // own, and it returns as `return` does (the old path's `gen_try`).
+    fun try_expr(var self, cg: CodeGen, e: Expr, inner: Expr) -> int32 {
+        let carrier = cg.type_of(inner.id)
+        if !lowerable(cg, carrier) { return self.unsupported("`?` on a value of that type") }
+        if self.sret < 0 { return self.unsupported("`?` in a function without a carrier result") }
+        let en = enum_name_of(carrier)
+        let c = self.addr(cg, inner)
+        let tag = self.temp(Type.TInt(64, true))
+        self.add(Inst.LoadAt(tag, c, 0))
+        let ok_tag = self.konst(Type.TInt(64, true), cg.variant_tag(en, success_variant(en)) as int64)
+        let is_ok = self.temp(Type.TBool)
+        self.add(Inst.Cmp(is_ok, "==", Type.TInt(64, true), tag, ok_tag))
+        let ok_b = self.new_block()
+        let fail_b = self.new_block()
+        self.finish(Term.Br(is_ok, ok_b, fail_b))
+        self.start(fail_b)
+        // the tag and the failure's payload only: the result can be smaller
+        // than the operand (MYLA-80)
+        var nbytes = 8
+        for ft in cg.variant_payload(carrier, failure_variant(en)) { nbytes = nbytes + cg.stored_size(ft) }
+        let dst = self.slot_addr(self.sret)
+        self.add(Inst.Copy(dst, c, nbytes))
+        self.retain(cg, self.f.slots[self.sret].ty, dst)
+        self.drop_temps(0)
+        self.drop_owners(0)
+        self.finish(Term.Ret(dst))
+        self.start(ok_b)
+        let rt = cg.type_of(e.id)
+        let off = cg.variant_field_offset(carrier, success_variant(en), 0)
+        if is_aggregate(rt) { return self.unbox(cg, rt, self.offset(c, off)) }
+        let d = self.temp(rt)
+        self.add(Inst.LoadAt(d, c, off))
+        return d
     }
 
     // --- the other builtins -----------------------------------------------------
@@ -1758,7 +1859,7 @@ impl Lower {
             ExprOrBlock.EB_Expr(ex) => {
                 self.add(Inst.Loc(Pos { line: ex.line, col: ex.col }))
                 self.begin_temps()
-                if result >= 0 { self.store_result(cg, ex, result, rt) } else { self.discard(cg, ex) }
+                if result >= 0 && !diverges(ex) { self.store_result(cg, ex, result, rt) } else { self.discard(cg, ex) }
                 self.end_temps()
             },
             ExprOrBlock.EB_Block(b) => {
@@ -1771,7 +1872,14 @@ impl Lower {
                     if i == n - 1 && result >= 0 {
                         match s.kind {
                             StmtKind.ExprStmt(ex) => {
-                                last_value = true
+                                last_value = !diverges(ex)
+                            },
+                            _ => {},
+                        }
+                    }
+                    if last_value {
+                        match s.kind {
+                            StmtKind.ExprStmt(ex) => {
                                 self.begin_temps()
                                 self.store_result(cg, ex, result, rt)
                                 self.end_temps()
@@ -1920,6 +2028,18 @@ impl Lower {
         let slot = self.value_slot(cg, n, t, false)
         push(self.arm_binds, Local { name: n, slot: slot })
         return slot
+    }
+}
+
+// Whether `e` is a call that never returns (`panic`, `unreachable`): an
+// arm ending in one has no value to store.
+fun diverges(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Call(callee, args) => match callee.kind {
+            ExprKind.Name(nm) => nm == "panic" || nm == "unreachable"
+            _ => false
+        }
+        _ => false
     }
 }
 
