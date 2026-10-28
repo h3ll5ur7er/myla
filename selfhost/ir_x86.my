@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand
 from .ir import IrFunc, Inst, Term, use_counts, def_counts, inst_defs, inst_uses, term_uses
 
 impl CodeGen {
@@ -120,19 +120,23 @@ impl CodeGen {
             },
             Inst.Bin(d, op, t, rt, a, b, pos) => {
                 self.load_temp(a, "rax", temp_base)
-                self.load_temp(b, "rcx", temp_base)
                 match t {
-                    Type.TFloat(w) => { self.emit_float_op(op, rt) },
-                    _ => { self.emit_int_op(op, t, rt, pos.line, pos.col) },
+                    Type.TFloat(w) => {
+                        self.load_temp(b, "rcx", temp_base)
+                        self.emit_float_op(op, rt)
+                    },
+                    _ => { self.emit_int_op(op, t, rt, pos.line, pos.col, self.second_operand(op, b, temp_base)) },
                 }
                 self.store_temp(d, temp_base)
             },
             Inst.Cmp(d, op, t, a, b) => {
                 self.load_temp(a, "rax", temp_base)
-                self.load_temp(b, "rcx", temp_base)
                 match t {
-                    Type.TFloat(w) => { self.emit_float_op(op, t) },
-                    _ => { self.emit_int_op(op, t, Type.TBool, 0, 0) },
+                    Type.TFloat(w) => {
+                        self.load_temp(b, "rcx", temp_base)
+                        self.emit_float_op(op, t)
+                    },
+                    _ => { self.emit_int_op(op, t, Type.TBool, 0, 0, self.second_operand(op, b, temp_base)) },
                 }
                 self.store_temp(d, temp_base)
             },
@@ -382,8 +386,7 @@ impl CodeGen {
         match cmp {
             Inst.Cmp(d, op, t, x, y) => {
                 self.load_temp(x, "rax", temp_base)
-                self.load_temp(y, "rcx", temp_base)
-                self.emit("cmpq %rcx, %rax")
+                self.emit(format("cmpq {}, %rax", self.second_operand(op, y, temp_base)))
                 let cond = jump_cond(op, int_signed(t))
                 match term {
                     Term.Br(c, yes, no) => {
@@ -430,6 +433,23 @@ impl CodeGen {
         }
     }
 
+    // The second operand of the integer operator `op`, the first being in
+    // %rax already (MYLA-120): an immediate, a variable's slot or the
+    // temporary's cell where `op` takes one (`takes_operand`), else the
+    // temporary loaded into %rcx. With %rax loaded no store of another
+    // temporary is held back, so a cell holds its value.
+    fun second_operand(var self, op: str, t: int32, temp_base: int32) -> str {
+        if takes_operand(op) {
+            if self.temp_imm[t] != "" { return self.temp_imm[t] }
+            if self.temp_src[t] != "" { return self.temp_src[t] }
+            if self.temp_remat[t] == "" && !(self.pend_store != "" && self.pend_temp == t) {
+                return format("{}(%rbp)", self.temp_off[t])
+            }
+        }
+        self.load_temp(t, "rcx", temp_base)
+        return "%rcx"
+    }
+
     // The arguments of a runtime helper into the calling registers.
     fun load_args(var self, args: [int32], temp_base: int32) {
         let regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
@@ -447,9 +467,11 @@ impl CodeGen {
     fun remat_texts(var self, f: IrFunc, slot_off: [int32]) -> [str] {
         var out: [str] = []
         var src: [str] = []
+        var imm: [str] = []
         for t in f.temps {
             push(out, "")
             push(src, "")
+            push(imm, "")
         }
         let defs = def_counts(f)
         for b in f.blocks {
@@ -459,6 +481,21 @@ impl CodeGen {
                 let text = self.def_text(inst, slot_off)
                 for d in inst_defs(inst) {
                     if defs[d] == 1 { out[d] = text }
+                }
+                // an integer constant that fits a sign-extended 32-bit immediate
+                match inst {
+                    Inst.Const(d, t, v) => {
+                        match t {
+                            Type.TInt(w, sg) => {
+                                let x = wrapped(v, w, sg)
+                                if defs[d] == 1 && x >= -2147483648 && x <= 2147483647 { imm[d] = format("${}", x) }
+                            },
+                            Type.TBool => { if defs[d] == 1 { imm[d] = format("${}", v) } },
+                            Type.TChar => { if defs[d] == 1 && v <= 2147483647 { imm[d] = format("${}", v) } },
+                            _ => {},
+                        }
+                    },
+                    _ => {},
                 }
                 // a variable's value read where every read of it follows,
                 // in this block, with nothing in between that writes a slot
@@ -475,6 +512,7 @@ impl CodeGen {
             }
         }
         self.temp_src = src
+        self.temp_imm = imm
         return out
     }
 

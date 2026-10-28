@@ -157,6 +157,7 @@ pub struct CodeGen {
     // per temporary read from a variable where it is used, the variable's
     // operand (`-24(%rbp)`), else ""
     temp_src: [str],
+    temp_imm: [str],                // MYLA-120: a constant temporary as an immediate operand, "" when not
     // per temporary, its frame offset (`alloc_temps`; temporaries whose lives
     // don't overlap share one)
     temp_off: [int32],
@@ -227,7 +228,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
-        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_off: [],
+        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_off: [],
     }
 }
 
@@ -1618,15 +1619,17 @@ impl CodeGen {
     // The integer operation `op` on %rax (left, of type `lt`) and %rcx (right),
     // its result (of type `rt`) in %rax; `/` and `%` trap at line:col on a zero
     // divisor (shared with the IR backend, MYLA-103).
-    fun emit_int_op(var self, op: str, lt: Type, rt: Type, line: int32, col: int32) {
+    // `op` on %rax and `src`, the second operand: %rcx, or for the operators
+    // `takes_operand` names an immediate or a memory operand (MYLA-120).
+    fun emit_int_op(var self, op: str, lt: Type, rt: Type, line: int32, col: int32, src: str) {
         if op == "+" {
-            self.emit("addq %rcx, %rax")
+            self.emit(format("addq {}, %rax", src))
             self.wrap(rt)
         } else if op == "-" {
-            self.emit("subq %rcx, %rax")
+            self.emit(format("subq {}, %rax", src))
             self.wrap(rt)
         } else if op == "*" {
-            self.emit("imulq %rcx, %rax")
+            if starts_with_dollar(src) { self.emit(format("imulq {}, %rax, %rax", src)) } else { self.emit(format("imulq {}, %rax", src)) }
             self.wrap(rt)
         } else if op == "/" || op == "%" {
             self.emit("testq %rcx, %rcx")
@@ -1652,21 +1655,21 @@ impl CodeGen {
             }
             self.wrap(rt)
         } else if is_cmp(op) {
-            self.emit("cmpq %rcx, %rax")
+            self.emit(format("cmpq {}, %rax", src))
             self.emit(format("{} %al", cmp_set(op, int_signed(lt))))
             self.emit("movzbq %al, %rax")
         } else if op == "==" || op == "!=" {
-            self.emit("cmpq %rcx, %rax")
+            self.emit(format("cmpq {}, %rax", src))
             if op == "==" { self.emit("sete %al") } else { self.emit("setne %al") }
             self.emit("movzbq %al, %rax")
         } else if op == "&" {
-            self.emit("andq %rcx, %rax")
+            self.emit(format("andq {}, %rax", src))
             self.wrap(rt)
         } else if op == "|" {
-            self.emit("orq %rcx, %rax")
+            self.emit(format("orq {}, %rax", src))
             self.wrap(rt)
         } else if op == "^" {
-            self.emit("xorq %rcx, %rax")
+            self.emit(format("xorq {}, %rax", src))
             self.wrap(rt)
         } else if op == "<<" || op == ">>" {
             self.emit(format("andq ${}, %rcx", int_width_cg(rt) - 1))
@@ -5647,6 +5650,14 @@ pub fun int_signed(t: Type) -> bool {
 fun int_width_cg(t: Type) -> int32 {
     return match t { Type.TInt(w, s) => w, _ => 64 }
 }
+
+// Whether the integer operator `op` takes its second operand as an
+// immediate or from memory (`emit_int_op`); the others want it in %rcx.
+pub fun takes_operand(op: str) -> bool {
+    return op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^" || op == "==" || op == "!=" || is_cmp(op)
+}
+
+fun starts_with_dollar(s: str) -> bool { return len(s) > 0 && s[0] == '$' }
 
 pub fun is_cmp(op: str) -> bool {
     return op == "<" || op == "<=" || op == ">" || op == ">="
