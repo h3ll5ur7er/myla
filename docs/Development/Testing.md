@@ -39,9 +39,9 @@ The jobs:
 
 | Suite | Tests | Result |
 | --- | --- | --- |
-| Unit | 575 | All pass, about 6 s |
+| Unit | 595 | All pass, about 7 s |
 | Integration | 2 | Pass |
-| Burn | 722 (plus subtests, 5 skipped) | All pass, about 385 s with cached tools (green since [[MYLA-4]]) |
+| Burn | 735 (plus subtests, 5 skipped) | All pass, about 400 s with cached tools (green since [[MYLA-4]]) |
 
 ## Unit tests
 
