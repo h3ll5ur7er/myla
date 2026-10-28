@@ -158,6 +158,7 @@ pub struct CodeGen {
     // operand (`-24(%rbp)`), else ""
     temp_src: [str],
     temp_imm: [str],                // MYLA-120: a constant temporary as an immediate operand, "" when not
+    temp_frame: [int32],            // MYLA-120: a slot address's offset from %rbp, 0 when not
     // per temporary, its frame offset (`alloc_temps`; temporaries whose lives
     // don't overlap share one)
     temp_off: [int32],
@@ -228,7 +229,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
-        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_off: [],
+        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
     }
 }
 
@@ -1856,21 +1857,25 @@ impl CodeGen {
     // %rax, trapping at line:col when it is out of bounds (shared with the IR
     // backend, MYLA-105).
     fun emit_elem_addr(var self, is_str: bool, stride: int32, line: int32, col: int32) {
+        self.emit_elem_check(line, col)
+        self.emit(format("leaq {}, %rax", self.elem_operand(is_str, stride)))
+    }
+
+    // The memory operand of the element %rcx of the list or string %rax
+    // (bounds-checked already); for a stride that isn't a scale, %rcx is
+    // multiplied first (MYLA-120).
+    fun elem_operand(var self, is_str: bool, stride: int32) -> str {
+        if is_str { return "8(%rax,%rcx)" }
+        if stride == 1 || stride == 2 || stride == 4 || stride == 8 { return format("16(%rax,%rcx,{})", stride) }
+        self.emit(format("imulq ${}, %rcx", stride))
+        return "16(%rax,%rcx)"
+    }
+
+    // The bounds check of element %rcx of the list or string %rax.
+    fun emit_elem_check(var self, line: int32, col: int32) {
         self.emit("movq (%rax), %rdx")
         self.emit("cmpq %rdx, %rcx")
         self.trap("jae", "__trap_index", line, col)
-        if is_str {
-            self.emit("leaq 8(%rax), %rax")
-            self.emit("addq %rcx, %rax")
-        } else {
-            self.emit("leaq 16(%rax), %rax")
-            if stride == 8 {
-                self.emit("leaq (%rax,%rcx,8), %rax")
-            } else {
-                self.emit(format("imulq ${}, %rcx", stride))
-                self.emit("addq %rcx, %rax")
-            }
-        }
     }
 
     // -- copy-on-write mutation addressing --------------------------------

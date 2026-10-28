@@ -61,8 +61,11 @@ impl CodeGen {
             let fused = self.fused_compare(insts, f.blocks[b].term)
             var i = 0
             while i < len(insts) {
-                if i != fused { self.emit_inst(f, insts[i], slot_off, temp_base) }
-                i = i + 1
+                if i + 1 < len(insts) && i + 1 != fused && self.emit_elem_load(insts[i], insts[i + 1], temp_base) { i = i + 2 }
+                else {
+                    if i != fused { self.emit_inst(f, insts[i], slot_off, temp_base) }
+                    i = i + 1
+                }
             }
             var next = -1
             if k + 1 < len(f.order) { next = f.order[k + 1] }
@@ -104,14 +107,23 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.LoadAt(d, p, off) => {
-                self.load_temp(p, "rax", temp_base)
-                self.emit(format("movq {}(%rax), %rax", off))
+                // through a slot's address: straight from the frame (MYLA-120)
+                if self.temp_frame[p] != 0 { self.emit(format("movq {}(%rbp), %rax", self.temp_frame[p] + off)) }
+                else {
+                    self.load_temp(p, "rax", temp_base)
+                    self.emit(format("movq {}(%rax), %rax", off))
+                }
                 self.store_temp(d, temp_base)
             },
             Inst.StoreAt(p, off, v) => {
-                self.load_temp(p, "rcx", temp_base)
-                self.load_temp(v, "rax", temp_base)
-                self.emit(format("movq %rax, {}(%rcx)", off))
+                if self.temp_frame[p] != 0 {
+                    self.load_temp(v, "rax", temp_base)
+                    self.emit(format("movq %rax, {}(%rbp)", self.temp_frame[p] + off))
+                } else {
+                    self.load_temp(p, "rcx", temp_base)
+                    self.load_temp(v, "rax", temp_base)
+                    self.emit(format("movq %rax, {}(%rcx)", off))
+                }
             },
             Inst.Copy(d, src, size) => {
                 self.load_temp(src, "rsi", temp_base)
@@ -433,6 +445,39 @@ impl CodeGen {
         }
     }
 
+    // An element's address and the load of it that follows, as one
+    // addressing mode (MYLA-120); false when `a` and `b` aren't such a pair.
+    fun emit_elem_load(var self, a: Inst, b: Inst, temp_base: int32) -> bool {
+        return match a {
+            Inst.Elem(e, c, i, stride, is_str, p) => {
+                if self.temp_uses[e] != 1 { return false }
+                let ok = match b {
+                    Inst.LoadAt(d, q, off) => q == e && off == 0 && !is_str,
+                    Inst.Load8(d, q) => q == e && is_str,
+                    _ => false,
+                }
+                if !ok { return false }
+                self.load_temp(c, "rax", temp_base)
+                self.load_temp(i, "rcx", temp_base)
+                self.emit_elem_check(p.line, p.col)
+                let at = self.elem_operand(is_str, stride)
+                match b {
+                    Inst.LoadAt(d, q, off) => {
+                        self.emit(format("movq {}, %rax", at))
+                        self.store_temp(d, temp_base)
+                    },
+                    Inst.Load8(d, q) => {
+                        self.emit(format("movzbl {}, %eax", at))
+                        self.store_temp(d, temp_base)
+                    },
+                    _ => {},
+                }
+                true
+            },
+            _ => false,
+        }
+    }
+
     // The second operand of the integer operator `op`, the first being in
     // %rax already (MYLA-120): an immediate, a variable's slot or the
     // temporary's cell where `op` takes one (`takes_operand`), else the
@@ -468,10 +513,12 @@ impl CodeGen {
         var out: [str] = []
         var src: [str] = []
         var imm: [str] = []
+        var frame: [int32] = []
         for t in f.temps {
             push(out, "")
             push(src, "")
             push(imm, "")
+            push(frame, 0)
         }
         let defs = def_counts(f)
         for b in f.blocks {
@@ -481,6 +528,12 @@ impl CodeGen {
                 let text = self.def_text(inst, slot_off)
                 for d in inst_defs(inst) {
                     if defs[d] == 1 { out[d] = text }
+                }
+                // a slot's address: its offset from %rbp (never 0), for loads
+                // and stores through it
+                match inst {
+                    Inst.Addr(d, s) => { if defs[d] == 1 { frame[d] = slot_off[s] } },
+                    _ => {},
                 }
                 // an integer constant that fits a sign-extended 32-bit immediate
                 match inst {
@@ -513,6 +566,7 @@ impl CodeGen {
         }
         self.temp_src = src
         self.temp_imm = imm
+        self.temp_frame = frame
         return out
     }
 
@@ -525,7 +579,7 @@ impl CodeGen {
                     self.uses_float = true
                     format("movabsq ${}, %", v)
                 }
-                Type.TInt(w, s) => format("movabsq ${}, %", wrapped(v, w, s))
+                Type.TInt(w, s) => int_const_text(wrapped(v, w, s))
                 _ => format("movq ${}, %", v)
             }
             Inst.Str(d, text) => format("leaq {}(%rip), %", self.string_label(text))
@@ -697,6 +751,16 @@ fun negated_cond(cond: str) -> str {
         if cond == p.1 { return p.0 }
     }
     return cond
+}
+
+// The instruction loading the integer `v` into a register, up to its name:
+// `movq` sign-extends a 32-bit immediate, shorter than `movabsq` (MYLA-120).
+#test(5)["movq $5, %"]
+#test(-1)["movq $-1, %"]
+#test(4294967295)["movabsq $4294967295, %"]
+fun int_const_text(v: int64) -> str {
+    if v >= -2147483648 && v <= 2147483647 { return format("movq ${}, %", v) }
+    return format("movabsq ${}, %", v)
 }
 
 // The constant `v` as a `w`-bit integer (signed or not) holds it in 64 bits,
