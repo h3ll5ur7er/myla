@@ -31,5 +31,4 @@ All in [[selfhost/ir_x86.my]] and the shared emitters of [[selfhost/codegen.my]]
 - The codegen gate (corpus, parity and stress programs, diagnostics), the debug-information tests (gdb) and the bootstrap's fixed point pass after each step.
 - The same source (the compiler) compiled by the code generator before and after: 3,554.8 → 3,124.7 million instructions compiling itself (−12.1%), binary 1,460,976 → 1,300,568 bytes (−11.0%); wall time, alternating runs: best 1.061 → 1.043 s, median 1.223 → 1.120 s.
 - The stress programs, same comparison: 0 to 16% fewer instructions each (lists −15.8%, a match's result −12.7%, `?` −7.0%, maps −1.2%; the allocator stress is unchanged).
-
 - On the last commit: unit 595, integration 2, burn 736 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,463,803 bytes).
