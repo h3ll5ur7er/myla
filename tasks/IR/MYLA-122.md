@@ -2,7 +2,7 @@
 id: MYLA-122
 title: Leave out retain and release of copies that are never written
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [ir, codegen, selfhost, performance]
 ---

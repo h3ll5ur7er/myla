@@ -3,7 +3,7 @@
 The design of the mid-level intermediate representation between the checker and the self-hosted native backend ([[MYLA-67]], D79). Today [[selfhost/codegen.my]] turns the checked, monomorphized AST straight into assembly text and decides frame layout, reference counting, copy-on-write, staged stores and drops while it emits instructions ([[Architecture/Native-backend]]). The IR makes those decisions explicit data, so they can be printed, checked and optimised, and leaves the backend only instruction selection.
 
 > [!NOTE]
-> **Status: approved, being built.** The decisions below were approved on 2026-10-27 (D79). The steps are tasks [[MYLA-103]] to [[MYLA-109]].
+> **Status: built, and stable since D85.** The decisions below were approved on 2026-10-27 (D79). The steps were tasks [[MYLA-103]] to [[MYLA-109]] and [[MYLA-120]] to [[MYLA-122]]; see "Stability" for what may change from here.
 
 [TOC]
 
@@ -16,6 +16,25 @@ The design of the mid-level intermediate representation between the checker and 
 5. **Migration behind a flag, function by function.** `--ir` makes the backend lower each function to IR and emit it from there; a function using a construct the lowering doesn't support yet falls back to the current path. Both paths share the calling convention, the frame base, the runtime and the code generator's pools (string literals, position records, helper flags, debug information), so functions from either path call each other. The gates run the corpus with and without `--ir`; `--ir-stats` counts the functions each path emitted. When every function of the compiler itself goes through the IR, the parity corpus and the stress tests agree and the bootstrap reaches its fixed point, `--ir` becomes the default and the old emission code is deleted.
 6. **First reach parity, then optimise.** The first target is identical behaviour (the same output and exit status on every test, not the same assembly), a verifier that checks reference counting on every path, and a text form (`--emit-ir`). Optimisations come afterwards, each a task of its own, measured on the compiler compiling itself.
 7. **No IR interpreter yet.** The verifier plus the comparison of native output with the interpreters is the oracle; an IR interpreter can come later if bugs call for it.
+
+## Stability
+
+Since D85 the IR is stable: the instruction set, the terminators, the model of slots and temporaries and what each instruction means, as "The IR" below describes them. Nothing in them changed after function values went through the IR ([[MYLA-106]]); making it the only path, and every optimisation since, needed only the lowering or the backend.
+
+- **Adding an instruction** means, in one change: its entry below and its text form (`render_inst`), the verifier's rule when it touches an owning slot, and its code in every backend.
+- **Changing what an instruction means, or removing one**, needs a new decision.
+- **Free to change:** which instructions the lowering emits for a construct, and how a backend carries them out (instruction selection, registers, the frame layout), as long as the verifier accepts every function and the gates pass.
+- **Outside the IR,** for each backend to provide: the runtime (hand-written x86-64 assembly called with the System V argument registers), the per-type retain, drop and clone walks behind `retain`, `drop` and `cow`, and the thunks and environment release functions of function values. How an LLVM backend gets them is [[MYLA-62]]'s decision.
+- **Known pressure points,** each a decision of its own when it comes:
+  - *One class of temporaries:* every temporary is an 8-byte value in a general-purpose register. Floats already pay for it (moved to `%xmm0`/`%xmm1` for every operation, `emit_float_op`). SIMD vectors or 128-bit integers in temporaries would need wider temporaries and loads, stores and constants with a width, register classes, a caller-saved allocator (no `%xmm` register survives a call under System V), slot alignment and a calling convention for them. As aggregates in slots, with new instructions, they would fit today's rules, but slowly.
+  - *Untyped addresses:* an address is a `uint64` temporary. x86 doesn't care; LLVM's provenance and alias analysis want a pointer type, and so would references in the language. Best settled with [[MYLA-62]].
+  - *Calls never end a block:* nothing leaves a function between two instructions (a `panic` aborts, `?` is an ordinary branch). Running drops while a `panic` unwinds, or catchable errors, would need calls that end a block with an unwind successor (LLVM's `invoke`) and cleanup blocks the verifier follows on every exit.
+  - *Slots live in the frame:* a suspended coroutine must keep its slots between resumes. Stackless coroutines (C#'s and Python's state machines, Swift's async functions; the scheduler, an event loop or a task executor, doesn't matter here) need them in a heap frame: either a lowering that turns them into members of a heap object (today's instructions suffice, but the verifier and the allocator no longer see them as slots) or a new home for slots. Swift's split functions also need guaranteed tail calls and a second calling convention (ours has the caller pop the arguments it pushed, so a tail call to a function with more arguments can't reuse the frame). Stackful coroutines (Go, Lua) need nothing from the IR, only stack switching in the runtime.
+  - *One thread:* `retain` is a plain `incq` and `cow` trusts a count of 1. Values shared between threads would need atomic counts (a variant of `retain`, so the rest stays cheap) or a type that keeps them from being counted.
+  - *Lowered per target:* sizes, field offsets, element sizes and the cell layout `elem`, `append` and `pop` assume (length at 0, capacity at 8, elements from 16) are constants in the IR. A target with other sizes (32-bit wasm) means lowering again for it; a calling convention (Windows x64) is the backend's.
+  - *Monomorphic* (decision 3): `copy` has a constant size and `retain` and `drop` a static type. Code shared between a generic function's instances would need sizes and walks from runtime type descriptors.
+
+  References would otherwise need little new in the instruction set (`&x` is `addr $x`; `var self` already is a mutable reference). What they would break is in the language and the lowering: [[MYLA-122]]'s borrowing relies on `let`s being deeply immutable, [[MYLA-123]] on aliasing only through a `var self` receiver, and a pointer into a list dangles when the list grows or is copied on write.
 
 ## Modules
 
@@ -185,7 +204,7 @@ The compiler's binary got 7% smaller and compiles itself about 3–4% faster; th
 
 [[MYLA-122]], borrowing: a `let` of a part of a fixed variable, and a `for` over one, take no reference (see "Lowering ownership" below); 1.4% fewer instructions compiling itself. Such a slot owns nothing, so a scalar one can live in a register too.
 
-Altogether the self-compile went from 3.80 s (the old path) to about 1.9 s, the binary from 2.39 to 1.39 MB, and the peak from 128 to 89 MB. Callee-saved registers for the four most-used scalar locals were tried and didn't pay off; the register allocator over temporaries and locals of [[MYLA-121]] does. [[MYLA-122]] leaves out the retain/release pair of a copy of a fixed variable. The linear lookups that took most of the remaining time are gone ([[MYLA-119]]); the biggest reference-counting costs left are copies the compiler's own code makes ([[MYLA-124]]).
+Altogether the self-compile went from 3.80 s (the old path) to about 1.9 s, the binary from 2.39 to 1.39 MB, and the peak from 128 to 89 MB; with the lookup tables of [[MYLA-119]], the work above and fewer copies in the compiler's own code ([[MYLA-124]]) it takes about 0.8 s (median of alternating runs), its binary is 1.24 MB and its peak 92 MB. Callee-saved registers for the four most-used scalar locals were tried and didn't pay off; the register allocator over temporaries and locals of [[MYLA-121]] does. [[MYLA-122]] leaves out the retain/release pair of a copy of a fixed variable. The linear lookups that took most of the remaining time are gone ([[MYLA-119]]), and so are the biggest copies the compiler's own code made ([[MYLA-124]]).
 
 ### Lowering ownership
 
@@ -223,4 +242,7 @@ A value that owns no heap memory is *plain*: a scalar, or a struct, tuple or enu
 | [[MYLA-106]] | Closures and function values, partial application, `for` over lists and maps, `?`, the remaining builtins; `-g` through the IR (variables and scopes) |
 | [[MYLA-107]] | Every function of the compiler through the IR; `--ir` the default; the old emission code deleted; the bootstrap's fixed point |
 | [[MYLA-108]] | Optimisations, each measured on the compiler compiling itself: slot reuse, retain/drop pairs that cancel, scalars in registers, copy elision for results, dead functions |
-| [[MYLA-109]] | Later: an LLVM backend on the IR ([[MYLA-62]]), an IR interpreter if needed |
+| [[MYLA-120]] | Instruction selection: compare and branch, operands where they are, addressing modes, no code for unreachable blocks |
+| [[MYLA-121]] | Register allocation: liveness across blocks, a linear scan over the callee-saved registers |
+| [[MYLA-122]] | Borrowing: a `let` of a part of a fixed variable takes no reference |
+| [[MYLA-109]] | The IR declared stable (D85); an LLVM backend on it is [[MYLA-62]], an IR interpreter waits until bugs call for one |

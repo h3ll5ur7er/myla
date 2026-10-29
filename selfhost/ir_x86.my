@@ -12,7 +12,7 @@
 from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp
-from .ir import IrFunc, Inst, Term, use_counts, def_counts, inst_defs, inst_uses, term_uses, successors
+from .ir import IrFunc, Inst, Term, Touches, touches, use_counts, def_counts, inst_uses, term_uses, successors
 
 impl CodeGen {
     // Emit `f`, the IR of the function `fd`, as `myla_<mangled>`.
@@ -23,7 +23,8 @@ impl CodeGen {
     // Emit `f` as `myla_<mangled>`: a function or lambda declared by the node
     // `decl_id` (its file) at `line:col`.
     fun emit_ir_at(var self, f: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
-        self.temp_uses = use_counts(f)
+        let tc = touches(f)
+        self.temp_uses = use_counts(f, tc)
         self.ret_type = f.ret
         let reach = reachable_blocks(f)
         // the frame: the temporaries' cells next to %rbp (the most used, so
@@ -32,10 +33,10 @@ impl CodeGen {
         // cell or get a register depends on what is recomputed, which
         // depends on the slots' offsets and registers: laid out twice.
         self.clear_regs(f)
-        let defs = def_counts(f)
+        let defs = def_counts(f, tc)
         self.temp_remat = self.remat_texts(f, layout_slots(f, 0), defs)
-        self.alloc_regs(f, reach)
-        let cells = self.alloc_temps(f)
+        self.alloc_regs(f, reach, tc)
+        let cells = self.alloc_temps(f, tc)
         let slot_off = layout_slots(f, 8 * cells)
         self.temp_remat = self.remat_texts(f, slot_off, defs)
         var cursor = 8 * cells
@@ -690,7 +691,7 @@ impl CodeGen {
     // which may still write its own result), by a linear scan in emission
     // order; one living in several blocks keeps a cell of its own. Returns
     // the number of cells.
-    fun alloc_temps(var self, f: IrFunc) -> int32 {
+    fun alloc_temps(var self, f: IrFunc, tc: Touches) -> int32 {
         let n = len(f.temps)
         var home: [int32] = []
         var cross: [bool] = []
@@ -707,15 +708,23 @@ impl CodeGen {
         // where each temporary lives and is last read
         var pos = 0
         for b in f.order {
-            for inst in f.blocks[b].insts {
-                for t in inst_defs(inst) {
+            var i = tc.at[b]
+            while i < tc.at[b] + len(f.blocks[b].insts) {
+                var k = tc.wat[i]
+                while k < tc.wat[i + 1] {
+                    let t = tc.writes[k]
                     if home[t] < 0 { home[t] = b } else if home[t] != b { cross[t] = true }
+                    k = k + 1
                 }
-                for t in inst_uses(inst) {
+                k = tc.rat[i]
+                while k < tc.rat[i + 1] {
+                    let t = tc.reads[k]
                     if home[t] < 0 { home[t] = b } else if home[t] != b { cross[t] = true }
                     last[t] = pos
+                    k = k + 1
                 }
                 pos = pos + 1
+                i = i + 1
             }
             for t in term_uses(f.blocks[b].term) {
                 if home[t] < 0 { home[t] = b } else if home[t] != b { cross[t] = true }
@@ -737,25 +746,35 @@ impl CodeGen {
         var active: [int32] = []
         pos = 0
         for b in f.order {
-            for inst in f.blocks[b].insts {
-                var still: [int32] = []
+            var i = tc.at[b]
+            while i < tc.at[b] + len(f.blocks[b].insts) {
+                // the cells of the temporaries read for the last time freed,
+                // the list rebuilt only then (MYLA-124)
+                var ended = false
                 for t in active {
-                    if last[t] < pos { push(free, cell[t]) } else { push(still, t) }
+                    if last[t] < pos { ended = true }
                 }
-                active = still
-                for t in inst_defs(inst) {
+                if ended {
+                    var still: [int32] = []
+                    for t in active {
+                        if last[t] < pos { push(free, cell[t]) } else { push(still, t) }
+                    }
+                    active = still
+                }
+                var k = tc.wat[i]
+                while k < tc.wat[i + 1] {
+                    let t = tc.writes[k]
                     if !cross[t] && cell[t] < 0 && self.temp_remat[t] == "" && self.temp_uses[t] > 0 && self.temp_reg[t] == "" {
-                        if len(free) > 0 {
-                            cell[t] = free[len(free) - 1]
-                            free = drop_last_cell(free)
-                        } else {
+                        if len(free) > 0 { cell[t] = pop(free) } else {
                             cell[t] = cells
                             cells = cells + 1
                         }
                         push(active, t)
                     }
+                    k = k + 1
                 }
                 pos = pos + 1
+                i = i + 1
             }
             pos = pos + 1
         }
@@ -786,7 +805,7 @@ impl CodeGen {
     // %r12-%r15, and when they run out the value with fewer reads and writes
     // (weighted by loop depth) gives way. Not under `-g`, whose variables
     // live in the frame. `clear_regs` has emptied the tables.
-    fun alloc_regs(var self, f: IrFunc, reach: [bool]) {
+    fun alloc_regs(var self, f: IrFunc, reach: [bool], tc: Touches) {
         if self.debug { return }
         let nt = len(f.temps)
         let nv = nt + len(f.slots)
@@ -850,12 +869,16 @@ impl CodeGen {
                 w = w * 10
                 d = d + 1
             }
+            var ii = tc.at[b]
             for inst in f.blocks[b].insts {
                 push(tat, len(tv))
                 // a variable read where it is used is read there (`temp_src`)
-                for u in inst_uses(inst) {
+                var k = tc.rat[ii]
+                while k < tc.rat[ii + 1] {
+                    let u = tc.reads[k]
                     if cand[u] { push(tv, u) }
                     if src_slot[u] >= 0 && cand[nt + src_slot[u]] { push(tv, nt + src_slot[u]) }
+                    k = k + 1
                 }
                 match inst {
                     Inst.Load(t, sl) => {
@@ -865,10 +888,13 @@ impl CodeGen {
                     Inst.Store(sl, v) => { if cand[nt + sl] { push(tv, -1 - (nt + sl)) } },
                     _ => {},
                 }
-                for t in inst_defs(inst) {
-                    if cand[t] { push(tv, -1 - t) }
+                k = tc.wat[ii]
+                while k < tc.wat[ii + 1] {
+                    if cand[tc.writes[k]] { push(tv, -1 - tc.writes[k]) }
+                    k = k + 1
                 }
                 pos = pos + 1
+                ii = ii + 1
             }
             push(tat, len(tv))
             for u in term_uses(f.blocks[b].term) {
@@ -1276,7 +1302,7 @@ fun reachable_blocks(f: IrFunc) -> [bool] {
     reach[0] = true
     while len(work) > 0 {
         let b = work[len(work) - 1]
-        work = drop_last_cell(work)
+        pop(work)
         for s in successors(f.blocks[b].term) {
             if !reach[s] {
                 reach[s] = true
@@ -1372,12 +1398,3 @@ fun layout_slots(f: IrFunc, below: int32) -> [int32] {
     return off
 }
 
-fun drop_last_cell(xs: [int32]) -> [int32] {
-    var out: [int32] = []
-    var i = 0
-    while i + 1 < len(xs) {
-        push(out, xs[i])
-        i = i + 1
-    }
-    return out
-}

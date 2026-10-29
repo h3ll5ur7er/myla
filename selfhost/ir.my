@@ -361,12 +361,19 @@ pub fun verify(f: IrFunc) -> str {
     var work = [0]
     while len(work) > 0 {
         let b = work[len(work) - 1]
-        work = drop_last_int(work)
+        pop(work)
         var live = entry[b]
         for inst in f.blocks[b].insts {
             let problem = step(f, inst, addr_of, live)
             if problem != "" { return format("L{}: {}", b, problem) }
-            live = apply(f, inst, addr_of, live)
+            // the instruction's effect, in place, not on a copy (MYLA-124)
+            match inst {
+                Inst.DropSlot(t, s) => { live[s] = false },
+                Inst.Moved(s) => { live[s] = false },
+                _ => {},
+            }
+            let stored = stored_slot(f, inst, addr_of)
+            if stored >= 0 { live[stored] = true }
         }
         let succ = successors(f.blocks[b].term)
         match f.blocks[b].term {
@@ -429,18 +436,6 @@ fun step(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> str {
     let s = stored_slot(f, inst, addr_of)
     if s >= 0 && live[s] { return format("store into ${} ({}), which still holds a value", s, f.slots[s].name) }
     return ""
-}
-
-fun apply(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> [bool] {
-    var out = live
-    match inst {
-        Inst.DropSlot(t, s) => { out[s] = false },
-        Inst.Moved(s) => { out[s] = false },
-        _ => {},
-    }
-    let s = stored_slot(f, inst, addr_of)
-    if s >= 0 { out[s] = true }
-    return out
 }
 
 pub fun successors(t: Term) -> [int32] {
@@ -557,26 +552,43 @@ fun result_temp(d: int32) -> [int32] {
     return [d]
 }
 
-// How many times each temporary of `f` is written.
-pub fun def_counts(f: IrFunc) -> [int32] {
-    var counts: [int32] = []
-    for t in f.temps { push(counts, 0) }
+// What every instruction of a function reads and writes (`inst_uses`,
+// `inst_defs`), worked out once for the backend's passes instead of two new
+// lists per instruction in each (MYLA-124): instruction j of block b is
+// number `at[b] + j`, and instruction i reads `reads[rat[i]]` up to
+// `reads[rat[i + 1]]` and writes `writes[wat[i]]` up to `writes[wat[i + 1]]`.
+pub struct Touches { at: [int32], rat: [int32], reads: [int32], wat: [int32], writes: [int32] }
+
+pub fun touches(f: IrFunc) -> Touches {
+    var tc = Touches { at: [], rat: [], reads: [], wat: [], writes: [] }
     for b in f.blocks {
+        push(tc.at, len(tc.rat))
         for inst in b.insts {
-            for d in inst_defs(inst) { counts[d] = counts[d] + 1 }
+            push(tc.rat, len(tc.reads))
+            push(tc.wat, len(tc.writes))
+            for u in inst_uses(inst) { push(tc.reads, u) }
+            for d in inst_defs(inst) { push(tc.writes, d) }
         }
     }
+    push(tc.rat, len(tc.reads))
+    push(tc.wat, len(tc.writes))
+    return tc
+}
+
+// How many times each temporary of `f` is written.
+pub fun def_counts(f: IrFunc, tc: Touches) -> [int32] {
+    var counts: [int32] = []
+    for t in f.temps { push(counts, 0) }
+    for d in tc.writes { counts[d] = counts[d] + 1 }
     return counts
 }
 
 // How many times each temporary of `f` is read.
-pub fun use_counts(f: IrFunc) -> [int32] {
+pub fun use_counts(f: IrFunc, tc: Touches) -> [int32] {
     var counts: [int32] = []
     for t in f.temps { push(counts, 0) }
+    for u in tc.reads { counts[u] = counts[u] + 1 }
     for b in f.blocks {
-        for inst in b.insts {
-            for u in inst_uses(inst) { counts[u] = counts[u] + 1 }
-        }
         for u in term_uses(b.term) { counts[u] = counts[u] + 1 }
     }
     return counts
@@ -585,16 +597,6 @@ pub fun use_counts(f: IrFunc) -> [int32] {
 fun prepend(x: int32, xs: [int32]) -> [int32] {
     var out = [x]
     for y in xs { push(out, y) }
-    return out
-}
-
-fun drop_last_int(xs: [int32]) -> [int32] {
-    var out: [int32] = []
-    var i = 0
-    while i + 1 < len(xs) {
-        push(out, xs[i])
-        i = i + 1
-    }
     return out
 }
 
