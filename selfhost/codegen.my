@@ -174,6 +174,15 @@ pub struct CodeGen {
     saved_regs: [str],
     save_base: int32,               // MYLA-126: the saved registers' cells start below it
     arg_words: int32,               // MYLA-126: the argument words the function pops
+    // MYLA-127: per function (by its signature's name), which parameters its
+    // body keeps as a whole value (`keeps`); such a parameter of a scalar
+    // type that owns heap memory is passed owned (`owned_param`)
+    kept_params: [str: [bool]],
+    keeping: [str: bool],           // MYLA-127: the names (a method's after the dot) of functions keeping a parameter
+    scan_kept: [str],               // MYLA-127: while scanning a body, the names it keeps
+    scan_args: [ScanArg],           // MYLA-127: the calls found by the scan
+    owning: [str: bool],            // MYLA-127: the functions with an owned parameter
+    no_owned: [bool],
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -242,7 +251,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0, arg_words: 0,
+        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [],
     }
 }
 
@@ -897,6 +906,273 @@ impl CodeGen {
         return contains(self.func_ix, name)
     }
 
+    // -- owned parameters (MYLA-127, D86) ----------------------------------
+
+    // Which parameters of each function with a body its body keeps as a
+    // whole value, worked out once before any function is lowered.
+    // A parameter is passed owned where that pays: the body keeps it, and
+    // the calls give it a new value (a call's result, a concatenation, a
+    // list or map literal: an owned temporary, handed over; or a variable
+    // passed right in a `return`, its last use, which moves it) more often
+    // than another variable's (retained for it). One walk over every body
+    // (`scan_*`) finds the names each keeps and the calls' arguments.
+    fun find_kept_params(var self) {
+        for sig in self.funcs {
+            if !sig.has_decl { continue }
+            self.scan_kept = []
+            match sig.decl.body {
+                Some(b) => { self.scan_block(b) },
+                None => {},
+            }
+            var flags: [bool] = []
+            var any = false
+            for p in sig.decl.params {
+                let k = p.name != "self" && list_has_str(self.scan_kept, p.name)
+                push(flags, k)
+                if k { any = true }
+            }
+            self.kept_params[sig.name] = flags
+            if any { self.keeping[method_part(sig.name)] = true }
+        }
+        // the arguments passed to the functions that keep one, counted by
+        // the name a call uses (methods of one name on different types vote
+        // together: no receiver's type to look up)
+        var score: [str: [int32]] = [:]
+        for u in self.scan_args {
+            if !contains(self.keeping, u.callee) { continue }
+            var first = 0
+            if u.recv >= 0 { first = 1 }
+            var ss = match get(score, u.callee) {
+                Some(xs) => xs,
+                None => {
+                    var zeros: [int32] = []
+                    zeros
+                },
+            }
+            while len(ss) < first + len(u.fresh) { push(ss, 0) }
+            var i = 0
+            while i < len(u.fresh) {
+                if u.fresh[i] { ss[first + i] = ss[first + i] + 1 } else { ss[first + i] = ss[first + i] - 1 }
+                i = i + 1
+            }
+            score[u.callee] = ss
+        }
+        self.scan_args = []
+        for sig in self.funcs {
+            if !sig.has_decl { continue }
+            let kept = match get(self.kept_params, sig.name) {
+                Some(fl) => fl,
+                None => {
+                    var no: [bool] = []
+                    no
+                },
+            }
+            let ss = match get(score, method_part(sig.name)) {
+                Some(xs) => xs,
+                None => {
+                    var zeros: [int32] = []
+                    zeros
+                },
+            }
+            var flags: [bool] = []
+            var any = false
+            var i = 0
+            while i < len(kept) {
+                let k = kept[i] && i < len(ss) && ss[i] > 0
+                push(flags, k)
+                if k { any = true }
+                i = i + 1
+            }
+            self.kept_params[sig.name] = flags
+            if any { self.owning[sig.name] = true }
+        }
+    }
+
+    fun scan_block(var self, b: Block) {
+        for st in b.stmts { self.scan_stmt(st) }
+    }
+
+    fun scan_stmt(var self, st: Stmt) {
+        match st.kind {
+            StmtKind.ExprStmt(e) => { self.scan_expr(e, false) },
+            StmtKind.VarDecl(k, n, ty, init) => {
+                if k == "var" { self.keep_name(init) }
+                self.scan_expr(init, false)
+            },
+            StmtKind.DestructDecl(k, bs, ty, init) => { self.scan_expr(init, false) },
+            StmtKind.Assign(target, value) => {
+                self.keep_name(value)
+                self.scan_expr(target, false)
+                self.scan_expr(value, false)
+            },
+            StmtKind.ReturnS(ov) => {
+                match ov {
+                    Some(e) => {
+                        self.keep_name(e)
+                        self.scan_expr(e, true)
+                    },
+                    None => {},
+                }
+            },
+            StmtKind.IfS(c, then, otherwise) => {
+                self.scan_expr(c, false)
+                self.scan_block(then)
+                match otherwise {
+                    Some(ElseTail.ElseBlock(eb)) => { self.scan_block(eb) },
+                    Some(ElseTail.ElseIf(es)) => { self.scan_stmt(es) },
+                    None => {},
+                }
+            },
+            StmtKind.WhileS(c, body) => {
+                self.scan_expr(c, false)
+                self.scan_block(body)
+            },
+            StmtKind.ForS(v, start, end, body, iter) => {
+                match start { Some(e) => { self.scan_expr(e, false) }, None => {} }
+                match end { Some(e) => { self.scan_expr(e, false) }, None => {} }
+                match iter { Some(e) => { self.scan_expr(e, false) }, None => {} }
+                self.scan_block(body)
+            },
+            _ => {},
+        }
+    }
+
+    // `scan_kept` gets the name `e` is, when it is a variable.
+    fun keep_name(var self, e: Expr) {
+        match e.kind {
+            ExprKind.Name(n) => { push(self.scan_kept, n) },
+            _ => {},
+        }
+    }
+
+    // The expression's kept names and call arguments; `in_return`: it is
+    // returned, so a variable a call in it passes is its last use.
+    fun scan_expr(var self, e: Expr, in_return: bool) {
+        match e.kind {
+            ExprKind.Call(callee, args) => {
+                // a constructor's payload, or the value `push` appends, is
+                // kept; the call's arguments are counted
+                var stores = false
+                var callee_name = ""
+                var recv = -1
+                match callee.kind {
+                    ExprKind.Name(f) => {
+                        stores = f == "push" || f == "Some" || f == "Ok" || f == "Err"
+                        callee_name = f
+                    },
+                    ExprKind.GetField(t, f) => {
+                        let enum_ctor = match t.kind {
+                            ExprKind.Name(q) => self.is_enum_name(q),
+                            _ => false,
+                        }
+                        if enum_ctor { stores = true } else {
+                            callee_name = f
+                            recv = t.id
+                        }
+                    },
+                    _ => {},
+                }
+                var fresh: [bool] = []
+                for a in args {
+                    if stores { self.keep_name(a) }
+                    if callee_name != "" { push(fresh, is_new_value(a) || (in_return && is_name_expr(a))) }
+                    self.scan_expr(a, false)
+                }
+                if callee_name != "" { push(self.scan_args, ScanArg { callee: callee_name, recv: recv, fresh: fresh }) }
+                self.scan_expr(callee, false)
+            },
+            ExprKind.Unary(op, x) => { self.scan_expr(x, false) },
+            ExprKind.Binary(op, l, r) => {
+                self.scan_expr(l, false)
+                self.scan_expr(r, false)
+            },
+            ExprKind.GetField(t, f) => { self.scan_expr(t, false) },
+            ExprKind.StructLit(n, fields) => {
+                for fi in fields {
+                    self.keep_name(fi.value)
+                    self.scan_expr(fi.value, false)
+                }
+            },
+            ExprKind.TupleLit(es) => {
+                for x in es {
+                    self.keep_name(x)
+                    self.scan_expr(x, false)
+                }
+            },
+            ExprKind.ListLit(es) => {
+                for x in es {
+                    self.keep_name(x)
+                    self.scan_expr(x, false)
+                }
+            },
+            ExprKind.MapLit(entries) => {
+                for en in entries {
+                    self.keep_name(en.key)
+                    self.keep_name(en.value)
+                    self.scan_expr(en.key, false)
+                    self.scan_expr(en.value, false)
+                }
+            },
+            ExprKind.TupleIndex(t, i) => { self.scan_expr(t, false) },
+            ExprKind.Index(t, i) => {
+                self.scan_expr(t, false)
+                self.scan_expr(i, false)
+            },
+            ExprKind.MatchE(sc, arms) => {
+                self.scan_expr(sc, false)
+                for arm in arms {
+                    match arm.guard { Some(g) => { self.scan_expr(g, false) }, None => {} }
+                    match arm.body {
+                        ExprOrBlock.EB_Expr(x) => { self.scan_expr(x, false) },
+                        ExprOrBlock.EB_Block(blk) => { self.scan_block(blk) },
+                    }
+                }
+            },
+            ExprKind.Try(x) => { self.scan_expr(x, false) },
+            ExprKind.Cast(x, ty) => { self.scan_expr(x, false) },
+            // a lambda captures what it reads
+            ExprKind.Lambda(ps, rt, body) => {
+                let names = match body {
+                    ExprOrBlock.EB_Expr(x) => names_in_expr(x, []),
+                    ExprOrBlock.EB_Block(blk) => names_in_block(blk, []),
+                }
+                for n in names { push(self.scan_kept, n) }
+            },
+            _ => {},
+        }
+    }
+
+    // Whether the function `sig`'s parameter `i`, of type `t` (its type
+    // arguments substituted), is passed owned: its body keeps it, and it is
+    // a scalar that owns heap memory (a string, list, map or builder).
+    fun owned_param(self, sig: FuncSig, i: int32, t: Type) -> bool {
+        if is_aggregate(t) || !self.owns_heap(t) { return false }
+        return match get(self.kept_params, sig.name) {
+            Some(flags) => i < len(flags) && flags[i],
+            None => false,
+        }
+    }
+
+    // `owned_param` for each of the parameters `params` of `sig`; none for a
+    // function without owned parameters (most).
+    fun owned_params(self, sig: FuncSig, params: [Type]) -> [bool] {
+        if !contains(self.owning, sig.name) { return self.no_owned }
+        var out: [bool] = []
+        let flags = match get(self.kept_params, sig.name) {
+            Some(fl) => fl,
+            None => {
+                var no: [bool] = []
+                no
+            },
+        }
+        var i = 0
+        while i < len(params) {
+            push(out, i < len(flags) && flags[i] && !is_aggregate(params[i]) && self.owns_heap(params[i]))
+            i = i + 1
+        }
+        return out
+    }
+
     // The method-table key for a receiver type (mirrors Checker.type_key).
     fun type_key(self, t: Type) -> str {
         return match t {
@@ -1394,6 +1670,7 @@ impl CodeGen {
         // Start from the entry point: every function is emitted once a function
         // emitted calls it, makes it a value or applies it partially (MYLA-108;
         // `take_ir`); generic ones stamped out per instance (D13).
+        self.find_kept_params()
         let m = self.request_fn(en, [])
         while len(self.fn_worklist) > 0 || len(self.lam_jobs) > 0 {
             if len(self.fn_worklist) > 0 {
@@ -2088,6 +2365,10 @@ impl CodeGen {
         self.emit(format("myla_{}:", job.lifted))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
+        // a parameter of a named target passed owned gets a reference of its
+        // own (MYLA-127): the env keeps its filled ones, the holes are lent
+        var tsig = self.funcs[0]
+        if job.fn_off < 0 { tsig = self.sig_of(job.target) }
         var pos = n - 1
         while pos >= 0 {
             if job.slots[pos] < 0 {
@@ -2103,6 +2384,7 @@ impl CodeGen {
                 if job.aggs[pos] { self.emit(format("leaq {}(%rcx), %rax", job.slots[pos])) }
                 else { self.emit(format("movq {}(%rcx), %rax", job.slots[pos])) }
             }
+            if job.fn_off < 0 && pos < len(tsig.params) && self.owned_param(tsig, pos, tsig.params[pos]) { self.emit("incq -8(%rax)") }
             self.emit("pushq %rax")
             pos = pos - 1
         }
@@ -2163,7 +2445,18 @@ impl CodeGen {
         let struct_ret = is_aggregate_opt(sig.ret)
         self.emit(format("myla_{}__fnval:", n))
         // the return address at 0(%rsp), the result's address (if any) at
-        // 8(%rsp), the env after it, then the arguments
+        // 8(%rsp), the env after it, then the arguments; one passed owned
+        // gets a reference of its own, its caller lends it (MYLA-127)
+        var first = 16
+        if struct_ret { first = 24 }
+        var i = 0
+        while i < len(sig.params) {
+            if self.owned_param(sig, i, sig.params[i]) {
+                self.emit(format("movq {}(%rsp), %rax", first + 8 * i))
+                self.emit("incq -8(%rax)")
+            }
+            i = i + 1
+        }
         if struct_ret {
             self.emit("movq 8(%rsp), %rax")
             self.emit("movq %rax, 16(%rsp)")
@@ -5253,6 +5546,135 @@ pub fun place_root(e: Expr) -> str {
         ExprKind.Index(t, i) => place_root(t),
         _ => "",
     }
+}
+
+// Whether the expression makes a new value an owned temporary holds (a
+// call's result, a concatenation, a list or map literal), not a variable's
+// or a constant's (MYLA-127).
+fun is_new_value(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Call(c, args) => true,
+        ExprKind.Binary(op, l, r) => true,
+        ExprKind.ListLit(es) => true,
+        ExprKind.MapLit(entries) => true,
+        _ => false,
+    }
+}
+
+// A call the scan found (`find_kept_params`): the function's name (a
+// method's after the dot, with its receiver's node id; -1 for a function),
+// and whether each argument is a new value.
+struct ScanArg { callee: str, recv: int32, fresh: [bool] }
+
+// Whether `e` is a variable.
+fun is_name_expr(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Name(n) => true,
+        _ => false,
+    }
+}
+
+// The part of a function's name a call names it by: a method's after the
+// dot (`T.m` → `m`).
+#test("Lexer.peek")["peek"]
+#test("main")["main"]
+fun method_part(name: str) -> str {
+    var i = len(name) - 1
+    while i >= 0 {
+        if name[i] == '.' {
+            var sb = StringBuilder()
+            append(sb, name, i + 1, len(name))
+            return build(sb)
+        }
+        i = i - 1
+    }
+    return name
+}
+
+// `acc` with the name `e` is, when it is a variable's (MYLA-127).
+fun with_name(e: Expr, acc: [str]) -> [str] {
+    return match e.kind {
+        ExprKind.Name(n) => {
+            if list_has_str(acc, n) { return acc }
+            var out = acc
+            push(out, n)
+            out
+        },
+        _ => acc,
+    }
+}
+
+// `acc` with every name the expression or block reads (a lambda captures
+// them, MYLA-127).
+fun names_in_expr(e: Expr, acc: [str]) -> [str] {
+    var out = with_name(e, acc)
+    match e.kind {
+        ExprKind.Unary(op, x) => { out = names_in_expr(x, out) },
+        ExprKind.Binary(op, l, r) => { out = names_in_expr(r, names_in_expr(l, out)) },
+        ExprKind.Call(c, args) => {
+            out = names_in_expr(c, out)
+            for a in args { out = names_in_expr(a, out) }
+        },
+        ExprKind.GetField(t, f) => { out = names_in_expr(t, out) },
+        ExprKind.StructLit(n, fields) => { for fi in fields { out = names_in_expr(fi.value, out) } },
+        ExprKind.TupleLit(es) => { for x in es { out = names_in_expr(x, out) } },
+        ExprKind.ListLit(es) => { for x in es { out = names_in_expr(x, out) } },
+        ExprKind.MapLit(entries) => {
+            for en in entries { out = names_in_expr(en.value, names_in_expr(en.key, out)) }
+        },
+        ExprKind.TupleIndex(t, i) => { out = names_in_expr(t, out) },
+        ExprKind.Index(t, i) => { out = names_in_expr(i, names_in_expr(t, out)) },
+        ExprKind.MatchE(sc, arms) => {
+            out = names_in_expr(sc, out)
+            for arm in arms {
+                match arm.guard { Some(g) => { out = names_in_expr(g, out) }, None => {} }
+                match arm.body {
+                    ExprOrBlock.EB_Expr(x) => { out = names_in_expr(x, out) },
+                    ExprOrBlock.EB_Block(blk) => { out = names_in_block(blk, out) },
+                }
+            }
+        },
+        ExprKind.Try(x) => { out = names_in_expr(x, out) },
+        ExprKind.Cast(x, ty) => { out = names_in_expr(x, out) },
+        ExprKind.Lambda(ps, rt, body) => {
+            match body {
+                ExprOrBlock.EB_Expr(x) => { out = names_in_expr(x, out) },
+                ExprOrBlock.EB_Block(blk) => { out = names_in_block(blk, out) },
+            }
+        },
+        _ => {},
+    }
+    return out
+}
+
+fun names_in_block(b: Block, acc: [str]) -> [str] {
+    var out = acc
+    for st in b.stmts {
+        match st.kind {
+            StmtKind.ExprStmt(e) => { out = names_in_expr(e, out) },
+            StmtKind.VarDecl(k, n, ty, init) => { out = names_in_expr(init, out) },
+            StmtKind.DestructDecl(k, bs, ty, init) => { out = names_in_expr(init, out) },
+            StmtKind.Assign(target, value) => { out = names_in_expr(value, names_in_expr(target, out)) },
+            StmtKind.ReturnS(ov) => { match ov { Some(e) => { out = names_in_expr(e, out) }, None => {} } },
+            StmtKind.IfS(c, then, otherwise) => {
+                out = names_in_block(then, names_in_expr(c, out))
+                match otherwise {
+                    Some(ElseTail.ElseBlock(eb)) => { out = names_in_block(eb, out) },
+                    Some(ElseTail.ElseIf(es)) => { out = names_in_block(Block { line: 0, col: 0, sp: es.sp, stmts: [es] }, out) },
+                    None => {},
+                }
+            },
+            StmtKind.WhileS(c, body) => { out = names_in_block(body, names_in_expr(c, out)) },
+            StmtKind.ForS(v, start, end, body, iter) => {
+                match start { Some(e) => { out = names_in_expr(e, out) }, None => {} }
+                match end { Some(e) => { out = names_in_expr(e, out) }, None => {} }
+                match iter { Some(e) => { out = names_in_expr(e, out) }, None => {} }
+                out = names_in_block(body, out)
+            },
+            _ => {},
+        }
+    }
+    return out
 }
 
 fun is_mutating_builtin(n: str) -> bool {

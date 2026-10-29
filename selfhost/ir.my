@@ -357,6 +357,14 @@ pub fun verify(f: IrFunc) -> str {
         push(known, false)
         push(entry, none)
     }
+    // a parameter passed owned holds a value on entry (MYLA-127)
+    var first = none
+    var s = 0
+    while s < len(f.slots) {
+        if f.slots[s].word >= 0 && f.slots[s].owns { first[s] = true }
+        s = s + 1
+    }
+    entry[0] = first
     known[0] = true
     var work = [0]
     while len(work) > 0 {

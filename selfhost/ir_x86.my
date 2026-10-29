@@ -104,6 +104,7 @@ impl CodeGen {
             let fused = self.fused_compare(insts, f.blocks[b].term)
             var tail = -1
             if !self.debug { tail = tail_call_at(insts, f.blocks[b].term) }
+            if tail >= 0 && !drops_after_free(f, insts, tail) { tail = -1 }
             if tail >= 0 {
                 if len(in_frame) == 0 { in_frame = frame_addresses(f) }
                 if passes_frame_address(insts[tail], in_frame) { tail = -1 }
@@ -125,7 +126,18 @@ impl CodeGen {
                 if reach[f.order[nk]] { next = f.order[nk] }
                 nk = nk + 1
             }
-            if tail >= 0 { self.emit_tail_call(insts[tail], temp_base) }
+            if tail >= 0 {
+                // the owners dropped after the call go before the jump
+                var j = tail + 1
+                while j < len(insts) {
+                    match insts[j] {
+                        Inst.DropSlot(t, s) => { self.emit_inst(f, insts[j], slot_off, temp_base) },
+                        _ => {},
+                    }
+                    j = j + 1
+                }
+                self.emit_tail_call(insts[tail], temp_base)
+            }
             else if fused >= 0 { self.emit_compare_branch(insts[fused], f.blocks[b].term, labels, next, temp_base) }
             else { self.emit_term(f.blocks[b].term, labels, next, temp_base) }
             k = k + 1
@@ -1369,10 +1381,11 @@ fun jump_cond(op: str, signed: bool) -> str {
 
 // The index of the call in `insts` that the terminator `term` returns the
 // result of at once, so it can be a tail call (`emit_tail_call`); -1 when
-// there is none. After the call only a `moved`, debug information, or the
-// result stored into an owning slot that is then moved may follow (a drop
-// means something lives across the call). No argument may be an address in
-// this frame either, which the jump leaves (`passes_frame_address`).
+// there is none. After the call only a `moved`, debug information, the
+// result stored into an owning slot that is then moved, or drops may follow;
+// the drops go before the jump, so no argument may depend on what they drop
+// (`drops_after_free`). No argument may be an address in this frame either,
+// which the jump leaves (`passes_frame_address`).
 fun tail_call_at(insts: [Inst], term: Term) -> int32 {
     let v = match term {
         Term.Ret(x) => x,
@@ -1392,6 +1405,9 @@ fun tail_call_at(insts: [Inst], term: Term) -> int32 {
                 // the result kept in an owning slot only to be moved out
                 if x != v || s != moved { return -1 }
             },
+            // dropped before the jump when no argument depends on it
+            // (`drops_after_free`)
+            Inst.DropSlot(t, s) => {},
             Inst.Loc(p) => {},
             Inst.Scope(open) => {},
             Inst.Bind(n, s) => {},
@@ -1400,6 +1416,120 @@ fun tail_call_at(insts: [Inst], term: Term) -> int32 {
         i = i - 1
     }
     return -1
+}
+
+// Whether no argument of the call `insts[at]` depends on a slot dropped
+// after it (MYLA-126), so those drops can go before a tail call: an argument
+// read from the slot, through it, or kept in it (a call's result held by a
+// statement's temporary) depends on it, and so does one read from a slot
+// that owns nothing (a borrowing `let`, a match's copy) whatever was put
+// into that slot depends on (a parameter's slot excepted: the caller keeps
+// its value alive); one taken from another block may depend on anything.
+fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
+    var dropped: [int32] = []
+    var j = at + 1
+    while j < len(insts) {
+        match insts[j] {
+            Inst.DropSlot(t, s) => { push(dropped, s) },
+            _ => {},
+        }
+        j = j + 1
+    }
+    if len(dropped) == 0 { return true }
+    var none: [int32] = []
+    let args = match insts[at] {
+        Inst.Call(d, name, a) => a,
+        _ => none,
+    }
+    for a in args {
+        var work = [a]
+        var seen: [int32] = []
+        while len(work) > 0 {
+            let t = pop(work)
+            if contains_int(seen, t) { continue }
+            push(seen, t)
+            // kept in a dropped slot
+            var k = 0
+            while k < at {
+                match insts[k] {
+                    Inst.Store(s, x) => { if x == t && contains_int(dropped, s) { return false } },
+                    _ => {},
+                }
+                k = k + 1
+            }
+            // where it comes from
+            var found = false
+            k = at - 1
+            while k >= 0 && !found {
+                match insts[k] {
+                    Inst.Load(d, s) => {
+                        if d == t {
+                            found = true
+                            if contains_int(dropped, s) { return false }
+                            if !f.slots[s].owns && f.slots[s].word < 0 {
+                                let src = filled_from(insts, k, s)
+                                if len(src) == 0 { return false }
+                                for u in src { push(work, u) }
+                            }
+                        }
+                    },
+                    Inst.Addr(d, s) => {
+                        if d == t {
+                            found = true
+                            if contains_int(dropped, s) { return false }
+                            if !f.slots[s].owns && f.slots[s].word < 0 {
+                                let src = filled_from(insts, k, s)
+                                if len(src) == 0 { return false }
+                                for u in src { push(work, u) }
+                            }
+                        }
+                    },
+                    Inst.LoadAt(d, p, off) => { if d == t { found = true; push(work, p) } },
+                    Inst.Offset(d, p, off) => { if d == t { found = true; push(work, p) } },
+                    Inst.Elem(d, c, i, stride, is_str, pos) => { if d == t { found = true; push(work, c) } },
+                    Inst.Const(d, ty, v) => { if d == t { found = true } },
+                    Inst.Str(d, text) => { if d == t { found = true } },
+                    Inst.Bin(d, op, lt, rt, x, y, pos) => { if d == t { found = true } },
+                    Inst.Cmp(d, op, ty, x, y) => { if d == t { found = true } },
+                    Inst.Un(d, op, ty, x) => { if d == t { found = true } },
+                    Inst.Cast(d, ft, tt, x) => { if d == t { found = true } },
+                    Inst.Call(d, name, xs) => { if d == t { found = true } },
+                    Inst.Rt(d, name, xs) => { if d == t { found = true } },
+                    _ => {},
+                }
+                k = k - 1
+            }
+            if !found { return false }
+        }
+    }
+    return true
+}
+
+// The temporaries stored or copied into the slot `s` before `insts[at]`, in
+// this block (`drops_after_free`); none when it isn't filled here.
+fun filled_from(insts: [Inst], at: int32, s: int32) -> [int32] {
+    var out: [int32] = []
+    var addrs: [int32] = []
+    var k = 0
+    while k < at {
+        match insts[k] {
+            Inst.Store(x, v) => { if x == s { push(out, v) } },
+            Inst.Addr(d, x) => { if x == s { push(addrs, d) } },
+            Inst.Copy(d, src, size) => { if contains_int(addrs, d) { push(out, src) } },
+            _ => {},
+        }
+        k = k + 1
+    }
+    return out
+}
+
+#test([1, 2], 2)[true]
+#test([1, 2], 3)[false]
+fun contains_int(xs: [int32], x: int32) -> bool {
+    for y in xs {
+        if y == x { return true }
+    }
+    return false
 }
 
 // Whether the call `c` passes an argument that may be an address in the
