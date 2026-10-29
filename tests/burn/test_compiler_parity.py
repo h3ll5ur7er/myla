@@ -1932,6 +1932,33 @@ PROGRAMS = {
         "    print(ws[0].p.x)\n"
         "    print(ws2[0].p.x)\n}\n"
     ),
+    "borrowed_lets_survive_a_moved_value": (
+        # MYLA-127: a value something borrows (a `let` of it, a loop over it,
+        # a match on it) isn't moved out of its variable by its last use: the
+        # borrower may still read it after the new owner lets it go
+        "fun churn() {\n"                       # reuses freed cells, if any
+        "    var big: [str] = []\n"
+        "    for i in 0..50 { push(big, f\"cell {i}\") }\n}\n"
+        "fun lets() {\n"
+        "    let s = \"a\" + \"b\"\n"
+        "    let n = s\n"
+        "    var t = s\n"
+        "    t = \"z\"\n"
+        "    churn()\n"
+        "    print(n)\n"
+        "    print(t)\n}\n"
+        "fun loops() {\n"
+        "    let xs = [\"c\" + \"d\"]\n"
+        "    for x in xs {\n"
+        "        var ys = xs\n"
+        "        ys = []\n"
+        "        churn()\n"
+        "        print(x)\n"
+        "    }\n}\n"
+        "#main\nfun main() {\n"
+        "    lets()\n"
+        "    loops()\n}\n"
+    ),
     "method_arguments_survive_the_receivers_writes": (
         # MYLA-123: an argument read from the receiver of a `var self` method
         # is a copy taken before the call, which the method's writes to its
