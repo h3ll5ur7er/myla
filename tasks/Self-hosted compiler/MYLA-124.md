@@ -41,8 +41,8 @@ On the compiler compiling itself, measured with the compiler at [[MYLA-122]] and
 | Step | Instructions (million) |
 | --- | --- |
 | Before | 3,248.1 |
-| Tokens, work stacks, the verifier | 3,147.3 |
-| Reads and writes once, `alloc_temps` | 3,030.7 |
+| Tokens, the verifier, `alloc_temps`' live list | 3,147.3 |
+| Work stacks, reads and writes once | 3,030.7 |
 | Helpers by name | 2,820.5 |
 | Exhaustiveness | 2,564.2 (−21.1% in all) |
 
