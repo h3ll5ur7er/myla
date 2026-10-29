@@ -2,7 +2,7 @@
 id: MYLA-127
 title: Owned (consuming) parameters
 type: feature
-status: review
+status: done
 priority: low
 labels: [language, ownership, design]
 ---
