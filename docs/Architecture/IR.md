@@ -25,6 +25,11 @@ Since D85 the IR is stable: the instruction set, the terminators, the model of s
 - **Changing what an instruction means, or removing one**, needs a new decision.
 - **Free to change:** which instructions the lowering emits for a construct, and how a backend carries them out (instruction selection, registers, the frame layout), as long as the verifier accepts every function and the gates pass.
 - **Outside the IR,** for each backend to provide: the runtime (hand-written x86-64 assembly called with the System V argument registers), the per-type retain, drop and clone walks behind `retain`, `drop` and `cow`, and the thunks and environment release functions of function values. How an LLVM backend gets them is [[MYLA-62]]'s decision.
+- **Known pressure points,** each a decision of its own when it comes:
+  - *One class of temporaries:* every temporary is an 8-byte value in a general-purpose register. Floats already pay for it (moved to `%xmm0`/`%xmm1` for every operation, `emit_float_op`). SIMD vectors or 128-bit integers in temporaries would need wider temporaries and loads, stores and constants with a width, register classes, a caller-saved allocator (no `%xmm` register survives a call under System V), slot alignment and a calling convention for them. As aggregates in slots, with new instructions, they would fit today's rules, but slowly.
+  - *Untyped addresses:* an address is a `uint64` temporary. x86 doesn't care; LLVM's provenance and alias analysis want a pointer type, and so would references in the language. Best settled with [[MYLA-62]].
+
+  References would otherwise need little new in the instruction set (`&x` is `addr $x`; `var self` already is a mutable reference). What they would break is in the language and the lowering: [[MYLA-122]]'s borrowing relies on `let`s being deeply immutable, [[MYLA-123]] on aliasing only through a `var self` receiver, and a pointer into a list dangles when the list grows or is copied on write.
 
 ## Modules
 
