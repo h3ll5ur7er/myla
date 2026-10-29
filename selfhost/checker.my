@@ -3011,9 +3011,23 @@ impl Checker {
         var out: [SigCon] = []
         match t {
             Type.TEnum(tn, args) => {
-                for v in self.enum_variant_names(tn) {
-                    let payload = match self.enum_variant_payload(tn, args, v) { Some(p) => p, None => empty_types() }
-                    push(out, SigCon { key: v, types: payload })
+                // the variants in one pass, as `enum_variant_payload` gives
+                // each (looking each up was quadratic, MYLA-124)
+                let ei = self.enum_idx(tn)
+                if ei >= 0 {
+                    let info = self.enums[ei]
+                    var subst: [Subst] = []
+                    if len(info.type_params) > 0 && len(args) >= len(info.type_params) {
+                        var i = 0
+                        while i < len(info.type_params) {
+                            push(subst, Subst { name: info.type_params[i], ty: args[i] })
+                            i = i + 1
+                        }
+                    }
+                    for v in info.variants {
+                        if len(subst) > 0 { push(out, SigCon { key: v.name, types: subst_type_list(v.payload, subst) }) }
+                        else { push(out, SigCon { key: v.name, types: v.payload }) }
+                    }
                 }
             },
             Type.TBool => {
