@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load
 from .ir import IrFunc, Inst, Term, Touches, touches, use_counts, def_counts, inst_uses, term_uses, successors
 
 impl CodeGen {
@@ -193,6 +193,23 @@ impl CodeGen {
                         if self.swap_operands(op, a, b) {
                             self.load_temp(b, "rax", temp_base)
                             self.emit_int_op(op, t, rt, pos.line, pos.col, self.second_operand(op, a, temp_base))
+                        } else if (op == "/" || op == "%") && self.temp_imm[b] != "" && self.temp_imm[b] != "$0" && self.temp_imm[b] != "$-1" {
+                            // a constant divisor: neither 0 nor -1 to test
+                            // for; an unsigned power of two is a shift or a
+                            // mask (MYLA-125)
+                            self.load_temp(a, "rax", temp_base)
+                            let k = power_of_two(self.temp_imm[b])
+                            if k > 0 && !int_signed(t) {
+                                if op == "/" { self.emit(format("shrq ${}, %rax", k)) }
+                                else {
+                                    let one: int64 = 1
+                                    self.emit(format("andq ${}, %rax", (one << (k as int64)) - 1))
+                                }
+                                self.wrap(rt)
+                            } else {
+                                self.load_temp(b, "rcx", temp_base)
+                                self.emit_int_op(op, t, rt, pos.line, pos.col, self.temp_imm[b])
+                            }
                         } else {
                             self.load_temp(a, "rax", temp_base)
                             self.emit_int_op(op, t, rt, pos.line, pos.col, self.second_operand(op, b, temp_base))
@@ -1147,9 +1164,18 @@ impl CodeGen {
             return
         }
         if self.pend_store != "" && self.pend_temp == t {
-            if self.temp_uses[t] > 1 { self.flush_temp() } else {
+            if self.temp_uses[t] > 1 { self.flush_temp_in_rax() } else {
                 self.pend_store = ""
                 self.pend_temp = -1
+                // read once, by this: loaded straight into `reg` (MYLA-125)
+                if reg != "rax" {
+                    let n = len(self.text)
+                    let folded = fold_load(self.text[n - 1], "%" + reg)
+                    if folded != "" {
+                        self.text[n - 1] = folded
+                        return
+                    }
+                }
             }
             if reg != "rax" { self.emit(format("movq %rax, %{}", reg)) }
             return
@@ -1165,7 +1191,7 @@ impl CodeGen {
     // line, which may read `t` (see `load_temp`); a temporary nothing reads
     // isn't stored.
     fun store_temp(var self, t: int32, temp_base: int32) {
-        if self.pend_store != "" { self.flush_temp() }
+        if self.pend_store != "" { self.flush_temp_in_rax() }
         if self.temp_uses[t] == 0 { return }
         if self.temp_reg[t] != "" { self.pend_store = "movq %rax, %" + self.temp_reg[t] }
         else { self.pend_store = format("movq %rax, {}(%rbp)", self.temp_off[t]) }
@@ -1264,6 +1290,22 @@ fun jump_cond(op: str, signed: bool) -> str {
     if op == ">" { if signed { return "g" } else { return "a" } }
     if signed { return "ge" }
     return "ae"
+}
+
+// k when the immediate `imm` is `$2^k` (0 < k < 32), else 0.
+#test("$8")[3]
+#test("$2")[1]
+#test("$6")[0]
+#test("$1")[0]
+#test("$-8")[0]
+fun power_of_two(imm: str) -> int32 {
+    let one: int64 = 1
+    var k = 1
+    while k < 32 {
+        if imm == format("${}", one << (k as int64)) { return k }
+        k = k + 1
+    }
+    return 0
 }
 
 // The comparison that holds for `b, a` exactly when `op` holds for `a, b`;

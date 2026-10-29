@@ -479,6 +479,42 @@ def _oracle(path: str) -> tuple[str, int]:
     return out.getvalue(), code
 
 
+# MYLA-121: a loop, recursion keeping a value across a call, and a method
+# reading `self` in a loop with a call inside
+REGISTER_SAMPLE = (
+    "fun sum_squares(n: int) -> int {\n"
+    "    var total = 0\n"
+    "    var i = 0\n"
+    "    while i < n {\n"
+    "        total = total + i * i\n"
+    "        i = i + 1\n"
+    "    }\n"
+    "    return total\n"
+    "}\n"
+    "fun fib(n: int) -> int {\n"
+    "    if n < 2 { return n }\n"
+    "    return fib(n - 1) + fib(n - 2)\n"
+    "}\n"
+    "struct Acc { base: int, step: int }\n"
+    "impl Acc {\n"
+    "    fun run(self, n: int) -> int {\n"
+    "        var s = self.base\n"
+    "        var k = 0\n"
+    "        while k < n {\n"
+    "            s = s + self.step + fib(k % 3)\n"
+    "            k = k + 1\n"
+    "        }\n"
+    "        return s\n"
+    "    }\n"
+    "}\n"
+    "fun main() {\n"
+    "    print(sum_squares(10))\n"
+    "    print(fib(15))\n"
+    "    let a = Acc { base: 100, step: 3 }\n"
+    "    print(a.run(7))\n"
+    "}\n")
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedCodegenParity(unittest.TestCase):
     _binary: str
@@ -788,38 +824,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each
         # function saves before writing and restores before returning
-        source = (
-            "fun sum_squares(n: int) -> int {\n"
-            "    var total = 0\n"
-            "    var i = 0\n"
-            "    while i < n {\n"
-            "        total = total + i * i\n"
-            "        i = i + 1\n"
-            "    }\n"
-            "    return total\n"
-            "}\n"
-            "fun fib(n: int) -> int {\n"
-            "    if n < 2 { return n }\n"
-            "    return fib(n - 1) + fib(n - 2)\n"
-            "}\n"
-            "struct Acc { base: int, step: int }\n"
-            "impl Acc {\n"
-            "    fun run(self, n: int) -> int {\n"
-            "        var s = self.base\n"
-            "        var k = 0\n"
-            "        while k < n {\n"
-            "            s = s + self.step + fib(k % 3)\n"
-            "            k = k + 1\n"
-            "        }\n"
-            "        return s\n"
-            "    }\n"
-            "}\n"
-            "fun main() {\n"
-            "    print(sum_squares(10))\n"
-            "    print(fib(15))\n"
-            "    let a = Acc { base: 100, step: 3 }\n"
-            "    print(a.run(7))\n"
-            "}\n")
+        source = REGISTER_SAMPLE
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "prog.my")
             with open(path, "w", encoding="utf-8") as fh:
@@ -836,6 +841,58 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 self.assertRegex(line, rf"^movq ({saved}, -\d+\(%rbp\)|-?\d+\(%rbp\), {saved})$", body)
             self.assertTrue(frame, body)
         self.assertEqual(self._unsaved_callee_saved(asm), [])
+
+    def test_division_by_a_constant_tests_nothing(self) -> None:
+        # MYLA-125: a divisor known not to be 0 or -1 needs neither test; an
+        # unsigned power of two is a shift or a mask
+        source = (
+            "fun f(x: int, y: uint32, z: int64) -> int64 {\n"
+            "    let a = x / 7 + x % 7\n"
+            "    let b = y / 8u32 + y % 8u32\n"
+            "    let c = z / -3 + z % 1000000\n"
+            "    return (a as int64) + (b as int64) + c\n"
+            "}\n"
+            "fun g(x: int, n: int) -> int { return x / n + x % -1 }\n"
+            "fun main() {\n"
+            "    print(f(-100, 4000000003u32, -9876543210))\n"
+            "    print(g(-2147483648, -1))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            expected = _oracle(path)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), expected)
+        body = self._function_asm(asm, "f")
+        self.assertNotIn("testq %rcx, %rcx", body, body)
+        self.assertNotIn("cmpq $-1, %rcx", body, body)
+        self.assertNotIn("divq", body.replace("idivq", ""), body)   # unsigned by 8: shift and mask
+        # a divisor that may be 0 or -1 keeps both tests
+        g = self._function_asm(asm, "g")
+        self.assertIn("testq %rcx, %rcx", g, g)
+
+    def test_loads_go_straight_into_registers(self) -> None:
+        # MYLA-125: a value loaded for a temporary or variable in a register
+        # isn't loaded into %rax first and moved
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(REGISTER_SAMPLE)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("285\n610\n125\n", 0))
+        # in the compiled functions (the runtime is written by hand)
+        lines, routine = [], ""
+        for line in asm.split("\n"):
+            if re.match(r"^[A-Za-z_][\w$.]*:", line):
+                routine = line
+            elif routine.startswith("myla_"):
+                lines.append(line.strip())
+        pairs = [(a, b) for a, b in zip(lines, lines[1:])
+                 if re.fullmatch(r"(movq|leaq) (.*), %rax", a)
+                 and not re.search(r"%(r|e)?ax\b|%al\b", a.rsplit(",", 1)[0])
+                 and re.fullmatch(r"movq %rax, %(rbx|r12|r13|r14|r15)", b)]
+        self.assertEqual(pairs, [])
 
     def _unsaved_callee_saved(self, asm: str) -> list:
         """The routines of `asm` writing %rbx or %r12-%r15 without saving it
