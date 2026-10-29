@@ -172,6 +172,7 @@ pub struct CodeGen {
     temp_reg: [str],
     slot_reg: [str],
     saved_regs: [str],
+    save_base: int32,               // MYLA-126: the saved registers' cells start below it
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -240,7 +241,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [],
+        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0,
     }
 }
 
@@ -2144,7 +2145,9 @@ impl CodeGen {
     }
 
     // `myla_<fn>__fnval(env, args…)`: adapter so a plain `fun` can be called
-    // through the closure convention; drops the env and forwards to `myla_<fn>`.
+    // through the closure convention: the arguments move down over the env
+    // word and it jumps to `myla_<fn>` (MYLA-126), whose caller pops the
+    // words it pushed, the env's too.
     fun emit_fnval_thunk(var self, n: str) {
         let sig = self.sig_of(n)
         let struct_ret = is_aggregate_opt(sig.ret)
@@ -2153,24 +2156,15 @@ impl CodeGen {
         if struct_ret { base = 2 }
         let arg0_off = 16 + 8 * base
         self.emit(format("myla_{}__fnval:", n))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        var i = nargs - 1
-        while i >= 0 {
-            self.emit(format("movq {}(%rbp), %rax", arg0_off + 8 * i))
-            self.emit("pushq %rax")
-            i = i - 1
+        // the return address at 0(%rsp), the result's address (if any) at
+        // 8(%rsp), the env after it, then the arguments
+        var i = 0
+        while i < nargs {
+            self.emit(format("movq {}(%rsp), %rax", arg0_off - 8 + 8 * i))
+            self.emit(format("movq %rax, {}(%rsp)", arg0_off - 16 + 8 * i))
+            i = i + 1
         }
-        if struct_ret {
-            self.emit("movq 16(%rbp), %rax")
-            self.emit("pushq %rax")
-        }
-        self.emit(format("call myla_{}", n))
-        var cleanup = 8 * nargs
-        if struct_ret { cleanup = cleanup + 8 }
-        if cleanup > 0 { self.emit(format("addq ${}, %rsp", cleanup)) }
-        self.emit("leave")
-        self.emit("ret")
+        self.emit(format("jmp myla_{}", n))
         self.emit("")
     }
 
@@ -3877,16 +3871,14 @@ impl CodeGen {
         self.raw("\tmovq 8(%rbx), %rcx")
         self.raw("\tcall *%rcx")
         self.raw("\taddq $16, %rsp")
-        self.raw("\tmovq %rax, %rcx")
-        self.raw("\tpushq %rcx")
+        // the second function in this frame's words, by a jump (MYLA-126)
+        self.raw("\tmovq %rax, 24(%rbp)")
         self.raw("\tmovq 32(%rbx), %rcx")
-        self.raw("\tpushq %rcx")
+        self.raw("\tmovq %rcx, 16(%rbp)")
         self.raw("\tmovq 24(%rbx), %rcx")
-        self.raw("\tcall *%rcx")
-        self.raw("\taddq $16, %rsp")
         self.raw("\tpopq %rbx")
         self.raw("\tleave")
-        self.raw("\tret")
+        self.raw("\tjmp *%rcx")
         self.raw("")
         self.raw("__compose_env_drop:")
         self.raw("\tpushq %rbx")

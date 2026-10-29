@@ -894,6 +894,56 @@ class SelfHostedCodegenParity(unittest.TestCase):
                  and re.fullmatch(r"movq %rax, %(rbx|r12|r13|r14|r15)", b)]
         self.assertEqual(pairs, [])
 
+    def test_calls_in_tail_position_reuse_the_frame(self) -> None:
+        # MYLA-126: a call whose result is returned at once jumps, so deep
+        # recursion runs in constant stack (ten million frames would overflow
+        # it); a call passing an address in the caller's frame, or followed by
+        # a drop, stays a call
+        source = (
+            "struct P { a: int, b: int }\n"
+            "fun count_down(n: int, acc: int64) -> int64 {\n"
+            "    if n == 0 { return acc }\n"
+            "    return count_down(n - 1, acc + (n as int64))\n"
+            "}\n"
+            "fun is_even(n: int) -> bool {\n"
+            "    if n == 0 { return true }\n"
+            "    return is_odd(n - 1)\n"
+            "}\n"
+            "fun is_odd(n: int) -> bool {\n"
+            "    if n == 0 { return false }\n"
+            "    return is_even(n - 1)\n"
+            "}\n"
+            "fun sum(p: P) -> int { return p.a + p.b }\n"
+            "fun via_local(x: int) -> int {\n"
+            "    let p = P { a: x, b: 2 }\n"
+            "    return sum(p)\n"
+            "}\n"
+            "fun label(n: int, s: str) -> str {\n"
+            "    if n == 0 { return s }\n"
+            "    let t = s + \"x\"\n"
+            "    return label(n - 1, t)\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(count_down(10000000, 0))\n"
+            "    print(is_even(1000001))\n"
+            "    print(via_local(40))\n"
+            "    print(label(3, \"a\"))\n"
+            "    let f = count_down\n"
+            "    print(f(10, 0))\n"
+            "    let g = ((x: int) => x + 1) >> ((y: int) => y * 2)\n"
+            "    print(g(3))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("50000005000000\nfalse\n42\naxxx\n55\n8\n", 0))
+        self.assertIn("jmp myla_count_down", self._function_asm(asm, "count_down"))
+        self.assertIn("jmp myla_is_odd", self._function_asm(asm, "is_even"))
+        self.assertIn("call myla_sum", self._function_asm(asm, "via_local"))
+        self.assertIn("call myla_label", self._function_asm(asm, "label"))
+
     def _unsaved_callee_saved(self, asm: str) -> list:
         """The routines of `asm` writing %rbx or %r12-%r15 without saving it
         first (a push, or a store into the frame)."""

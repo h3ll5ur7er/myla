@@ -45,6 +45,15 @@ impl CodeGen {
         }
         let saves = cursor
         cursor = cursor + 8 * len(self.saved_regs)
+        // what a tail call needs (MYLA-126): the argument words the caller
+        // pushed, where the saved registers are, and (worked out for the
+        // first candidate) the temporaries holding an address in this frame
+        var words = 0
+        for s in f.slots {
+            if s.word >= 0 && s.word + 1 > words { words = s.word + 1 }
+        }
+        var in_frame: [bool] = []
+        self.save_base = saves
         let temp_base = 0
         let frame = (cursor + 15) / 16 * 16
         self.epilogue = format(".Lret_{}", mangled)
@@ -92,9 +101,17 @@ impl CodeGen {
             self.emit(format("{}:", labels[b]))
             let insts = f.blocks[b].insts
             let fused = self.fused_compare(insts, f.blocks[b].term)
+            var tail = -1
+            if !self.debug { tail = tail_call_at(insts, f.blocks[b].term, words) }
+            if tail >= 0 {
+                if len(in_frame) == 0 { in_frame = frame_addresses(f) }
+                if passes_frame_address(insts[tail], in_frame) { tail = -1 }
+            }
+            var stop = len(insts)
+            if tail >= 0 { stop = tail }
             var i = 0
-            while i < len(insts) {
-                if i + 1 < len(insts) && i + 1 != fused && self.emit_elem_load(insts[i], insts[i + 1], temp_base) { i = i + 2 }
+            while i < stop {
+                if i + 1 < stop && i + 1 != fused && self.emit_elem_load(insts[i], insts[i + 1], temp_base) { i = i + 2 }
                 else {
                     if i != fused { self.emit_inst(f, insts[i], slot_off, temp_base) }
                     i = i + 1
@@ -107,17 +124,14 @@ impl CodeGen {
                 if reach[f.order[nk]] { next = f.order[nk] }
                 nk = nk + 1
             }
-            if fused >= 0 { self.emit_compare_branch(insts[fused], f.blocks[b].term, labels, next, temp_base) }
+            if tail >= 0 { self.emit_tail_call(insts[tail], temp_base) }
+            else if fused >= 0 { self.emit_compare_branch(insts[fused], f.blocks[b].term, labels, next, temp_base) }
             else { self.emit_term(f.blocks[b].term, labels, next, temp_base) }
             k = k + 1
         }
 
         self.emit(format("{}:", self.epilogue))
-        r = 0
-        while r < len(self.saved_regs) {
-            self.emit(format("movq {}(%rbp), %{}", -saves - 8 * (r + 1), self.saved_regs[r]))
-            r = r + 1
-        }
+        self.restore_regs()
         self.emit("leave")
         self.emit("ret")
         self.end_loc()
@@ -477,6 +491,40 @@ impl CodeGen {
                 _ => -1,
             },
             _ => -1,
+        }
+    }
+
+    // The call `c`, whose result the function returns at once, as a jump
+    // reusing this frame (MYLA-126): the arguments pushed, then popped into
+    // the argument words this function was called with (the caller pops
+    // them), the saved registers restored and the frame left.
+    fun emit_tail_call(var self, c: Inst, temp_base: int32) {
+        match c {
+            Inst.Call(d, name, args) => {
+                var i = len(args) - 1
+                while i >= 0 {
+                    self.push_temp(args[i], temp_base)
+                    i = i - 1
+                }
+                i = 0
+                while i < len(args) {
+                    self.emit(format("popq {}(%rbp)", 16 + 8 * i))
+                    i = i + 1
+                }
+                self.restore_regs()
+                self.emit("leave")
+                self.emit(format("jmp myla_{}", name))
+            },
+            _ => {},
+        }
+    }
+
+    // The callee-saved registers the function saved, restored (MYLA-121).
+    fun restore_regs(var self) {
+        var r = 0
+        while r < len(self.saved_regs) {
+            self.emit(format("movq {}(%rbp), %{}", -self.save_base - 8 * (r + 1), self.saved_regs[r]))
+            r = r + 1
         }
     }
 
@@ -1290,6 +1338,78 @@ fun jump_cond(op: str, signed: bool) -> str {
     if op == ">" { if signed { return "g" } else { return "a" } }
     if signed { return "ge" }
     return "ae"
+}
+
+// The index of the call in `insts` that the terminator `term` returns the
+// result of at once, so it can be a tail call (`emit_tail_call`); -1 when
+// there is none. After the call only a `moved`, debug information, or the
+// result stored into an owning slot that is then moved may follow (a drop
+// means something lives across the call); and the callee takes at most the
+// `words` argument words this function was called with. No argument may be
+// an address in this frame either, which the jump leaves
+// (`passes_frame_address`).
+fun tail_call_at(insts: [Inst], term: Term, words: int32) -> int32 {
+    let v = match term {
+        Term.Ret(x) => x,
+        _ => -2,
+    }
+    if v == -2 { return -1 }
+    var i = len(insts) - 1
+    var moved = -1
+    while i >= 0 {
+        match insts[i] {
+            Inst.Call(d, name, args) => {
+                if d != v || len(args) > words { return -1 }
+                return i
+            },
+            Inst.Moved(s) => { moved = s },
+            Inst.Store(s, x) => {
+                // the result kept in an owning slot only to be moved out
+                if x != v || s != moved { return -1 }
+            },
+            Inst.Loc(p) => {},
+            Inst.Scope(open) => {},
+            Inst.Bind(n, s) => {},
+            _ => { return -1 },
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+// Whether the call `c` passes an argument that may be an address in the
+// caller's frame (`frame_addresses`).
+fun passes_frame_address(c: Inst, in_frame: [bool]) -> bool {
+    return match c {
+        Inst.Call(d, name, args) => {
+            for a in args {
+                if in_frame[a] { return true }
+            }
+            false
+        },
+        _ => false,
+    }
+}
+
+// Which temporaries of `f` may hold an address in its frame: a slot's
+// address, or one computed from such an address.
+fun frame_addresses(f: IrFunc) -> [bool] {
+    var out: [bool] = []
+    for t in f.temps { push(out, false) }
+    var changed = true
+    while changed {
+        changed = false
+        for b in f.blocks {
+            for inst in b.insts {
+                match inst {
+                    Inst.Addr(d, s) => { if !out[d] { out[d] = true; changed = true } },
+                    Inst.Offset(d, p, off) => { if out[p] && !out[d] { out[d] = true; changed = true } },
+                    _ => {},
+                }
+            }
+        }
+    }
+    return out
 }
 
 // k when the immediate `imm` is `$2^k` (0 < k < 32), else 0.

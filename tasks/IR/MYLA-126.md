@@ -2,7 +2,7 @@
 id: MYLA-126
 title: Tail calls
 type: feature
-status: backlog
+status: in-progress
 priority: low
 labels: [ir, codegen, selfhost, design]
 ---
