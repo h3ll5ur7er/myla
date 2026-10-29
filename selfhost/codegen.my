@@ -16,7 +16,7 @@ from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
-from .ir import render_func, verify, IrFunc, Inst
+from .ir import render_func, verify, moves, IrFunc, Inst
 from .lower import lower_function, lower_lambda, blocked_types, Lowered
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
@@ -1575,8 +1575,10 @@ impl CodeGen {
             Ok(x) => x
             Err(why) => { panic(format("internal error: {} can't be lowered to the IR: {}", mangled, why)) }
         }
-        let problem = verify(l.f)
-        if self.keep_ir { push(self.ir_texts, render_func(l.f)) }
+        // a last use moves (MYLA-127), checked by the verifier with the rest
+        let f = moves(l.f)
+        let problem = verify(f)
+        if self.keep_ir { push(self.ir_texts, render_func(f)) }
         if problem != "" { panic(format("internal error: {}: IR verifier: {}", mangled, problem)) }
         for inst in l.f.instances { let m = self.request_fn(inst.orig, inst.targs) }
         for b in l.f.blocks {
@@ -1597,7 +1599,7 @@ impl CodeGen {
             if !list_has_str(self.fnval_set, n) { push(self.fnval_set, n) }
             self.request_plain(n)
         }
-        return l.f
+        return f
     }
 
     // Queue the non-generic function `name` (a generic instance is named by

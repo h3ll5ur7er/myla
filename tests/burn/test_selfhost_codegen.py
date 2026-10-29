@@ -756,6 +756,56 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn(" q: P (16 bytes) owns\n", owning)
         self.assertIn(" n: str owns\n", owning)
 
+    def test_a_last_use_moves(self) -> None:
+        # MYLA-127: a value taken from an owning variable that nothing reads
+        # afterwards moves (no retain, and no drop of the variable); one read
+        # again, or read through after it is taken, is retained
+        source = (
+            "struct Box2 { name: str, tags: [str] }\n"
+            "fun make_list(n: int) -> [int] {\n"
+            "    var out: [int] = []\n"
+            "    for i in 0..n { push(out, i) }\n"
+            "    return out\n"
+            "}\n"
+            "fun boxed(s: str) -> Box2 {\n"
+            "    var b = Box2 { name: s + \"!\", tags: [] }\n"
+            "    push(b.tags, s)\n"
+            "    return b\n"
+            "}\n"
+            "fun again(s: str) -> [str] {\n"
+            "    var t = s + \"?\"\n"
+            "    var xs: [str] = []\n"
+            "    push(xs, t)\n"
+            "    print(t)\n"
+            "    return xs\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(len(make_list(5)))\n"
+            "    let b = boxed(\"x\")\n"
+            "    print(b.name)\n"
+            "    print(len(b.tags))\n"
+            "    print(len(again(\"y\")))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            self.assertEqual(self._build_and_run(self._emit_asm(path)), ("5\nx!\n1\ny?\n1\n", 0))
+            proc = subprocess.run([self._binary, path, "--emit-ir"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        def ir_of(name: str) -> str:
+            start = proc.stdout.index(f"fun myla_{name} ")
+            return proc.stdout[start:proc.stdout.index("}\n", start)]
+
+        made = ir_of("make_list")
+        self.assertNotIn("retain", made, made)
+        self.assertIn("moved $1\n", made, made)
+        boxed = ir_of("boxed")
+        self.assertNotIn("retain Box2", boxed, boxed)
+        # `t` is printed after it is pushed: retained for the list
+        self.assertIn("retain str", ir_of("again"))
+
     def test_only_reachable_functions_are_emitted(self) -> None:
         # MYLA-108: from the entry point, through calls, function values and
         # partial applications
