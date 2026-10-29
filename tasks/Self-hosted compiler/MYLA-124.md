@@ -2,7 +2,7 @@
 id: MYLA-124
 title: Copies and throwaway lists in the self-hosted compiler's hot paths
 type: improvement
-status: review
+status: done
 priority: low
 labels: [selfhost, performance]
 ---
