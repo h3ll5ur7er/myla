@@ -55,7 +55,7 @@ fun is_decl_start(k: TokenKind) -> bool {
 #test(TokenKind.RETURN)[true]
 #test(TokenKind.IDENT)[false]
 fun is_stmt_start(k: TokenKind) -> bool {
-    return k == TokenKind.LET || k == TokenKind.VAR || k == TokenKind.IF || k == TokenKind.WHILE || k == TokenKind.FOR || k == TokenKind.RETURN || k == TokenKind.BREAK || k == TokenKind.CONTINUE
+    return k == TokenKind.LET || k == TokenKind.VAR || k == TokenKind.IF || k == TokenKind.WHILE || k == TokenKind.FOR || k == TokenKind.RETURN || k == TokenKind.BECOME || k == TokenKind.BREAK || k == TokenKind.CONTINUE
 }
 
 #test([TokenKind.LPAREN], TokenKind.LBRACE)[false]
@@ -919,6 +919,11 @@ impl Parser {
         if k == TokenKind.RETURN {
             return self.return_stmt()
         }
+        if k == TokenKind.BECOME {
+            let kw = self.advance()
+            let value = self.expression()
+            return self.mk_stmt(kw.line, kw.column, StmtKind.ReturnS(Some(value), true))
+        }
         if k == TokenKind.BREAK {
             let tok = self.advance()
             return self.mk_stmt(tok.line, tok.column, StmtKind.BreakS)
@@ -1031,7 +1036,7 @@ impl Parser {
     fun return_stmt(var self) -> Stmt {
         let kw = self.advance()
         if self.at_separator() || self.check(TokenKind.RBRACE) || self.at_end() {
-            return self.mk_stmt(kw.line, kw.column, StmtKind.ReturnS(None))
+            return self.mk_stmt(kw.line, kw.column, StmtKind.ReturnS(None, false))
         }
         let st = self.peek()
         var value = self.expression()
@@ -1044,7 +1049,7 @@ impl Parser {
             }
             value = self.mk_expr_from(st, vl, vc, ExprKind.TupleLit(elems))
         }
-        return self.mk_stmt(kw.line, kw.column, StmtKind.ReturnS(Some(value)))
+        return self.mk_stmt(kw.line, kw.column, StmtKind.ReturnS(Some(value), false))
     }
 
     fun assign_or_expr(var self) -> Stmt {

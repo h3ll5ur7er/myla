@@ -1,0 +1,12 @@
+//~ type error: 'become' can't stand in a lambda
+//~ span: count(n - 1)
+// `become` ends a function's body; a lambda's can call a function that uses it (D87).
+fun count(n: int) -> int {
+    return n
+}
+fun main() {
+    let f = (n: int) => {
+        become count(n - 1)
+    }
+    print(f(2))
+}

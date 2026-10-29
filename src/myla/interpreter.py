@@ -30,6 +30,16 @@ class _ReturnSignal(Exception):
         self.value = value
 
 
+class _BecomeSignal(Exception):
+    """Raised by `become` (D87) with the callee's body and frame; the call that
+    runs the function goes on with them instead of recursing."""
+    def __init__(self, body, frame: "_Env", path: str | None, is_block: bool = True):
+        self.body = body
+        self.frame = frame
+        self.path = path
+        self.is_block = is_block
+
+
 class _BreakSignal(Exception):
     """Raised by `break`; caught by the innermost enclosing loop."""
 
@@ -311,18 +321,52 @@ class Interpreter:
     # -- calls & statements --------------------------------------------------
 
     def _call(self, decl: ast.FunDecl, args: list):
+        return self._run(decl.body, self._function_frame(decl, args),
+                         getattr(decl, "source_path", None))
+
+    @staticmethod
+    def _function_frame(decl: ast.FunDecl, args: list) -> "_Env":
         frame = _Env()
         for param, value in zip(decl.params, args):
             frame.define(param.name, _copy(value))
-        try:
-            self._exec_block(decl.body, frame)
-        except _ReturnSignal as ret:
-            return ret.value
-        except MylaError as err:   # attribute it to this function's file (MYLA-10)
-            if err.path is None:
-                err.path = getattr(decl, "source_path", None)
-            raise
-        return None
+        return frame
+
+    def _run(self, body, frame: "_Env", path: str | None, is_block: bool = True):
+        """Run a function's body in its frame and return its result. A `become`
+        in it (D87) goes on with the callee's body and frame in this loop, so a
+        chain of them doesn't grow the stack."""
+        while True:
+            try:
+                if not is_block:
+                    return self._eval(body, frame)
+                self._exec_block(body, frame)
+                return None
+            except _ReturnSignal as ret:
+                return ret.value
+            except _BecomeSignal as tail:
+                body, frame, path, is_block = tail.body, tail.frame, tail.path, tail.is_block
+            except MylaError as err:   # attribute it to the function's file (MYLA-10)
+                if err.path is None:
+                    err.path = path
+                raise
+
+    def _become(self, expr: ast.Call, env: "_Env") -> _BecomeSignal:
+        """The callee of `become expr` (D87) with its frame: a function, a
+        method or a function value, as the checker allows."""
+        mfunc = getattr(expr, "method_func", None)
+        if mfunc is not None:
+            decl = self.functions[mfunc].decl
+            return _BecomeSignal(decl.body, self._method_frame(expr, env, decl),
+                                 getattr(decl, "source_path", None))
+        if getattr(expr, "indirect_call", False):
+            clo = self._eval(expr.callee, env)
+            args = [self._eval(a, env) for a in expr.args]
+            return _BecomeSignal(clo.body, self._closure_frame(clo, args), clo.path,
+                                 clo.is_block)
+        decl = self.functions[expr.callee.ident].decl
+        args = [self._eval(a, env) for a in expr.args]
+        return _BecomeSignal(decl.body, self._function_frame(decl, args),
+                             getattr(decl, "source_path", None))
 
     def _exec_block(self, block: ast.Block, parent: _Env) -> None:
         env = _Env(parent)
@@ -403,6 +447,8 @@ class Interpreter:
             raise _ContinueSignal()
 
         elif isinstance(stmt, ast.Return):
+            if stmt.tail:
+                raise self._become(stmt.value, env)
             value = self._eval(stmt.value, env) if stmt.value is not None else None
             raise _ReturnSignal(value)
 
@@ -583,22 +629,16 @@ class Interpreter:
         )
 
     def _call_closure(self, clo: "ClosureValue", args: list):
+        return self._run(clo.body, self._closure_frame(clo, args), clo.path, clo.is_block)
+
+    @staticmethod
+    def _closure_frame(clo: "ClosureValue", args: list) -> "_Env":
         frame = _Env()
         for name, value in clo.env.items():
             frame.define(name, value)
         for param, value in zip(clo.params, args):
             frame.define(param.name, _copy(value))
-        try:
-            if not clo.is_block:
-                return self._eval(clo.body, frame)
-            self._exec_block(clo.body, frame)
-        except _ReturnSignal as ret:
-            return ret.value
-        except MylaError as err:   # attribute it to the lambda's file (MYLA-10)
-            if err.path is None:
-                err.path = clo.path
-            raise
-        return None
+        return frame
 
     def _index_read(self, expr: ast.Index, env: _Env):
         target = self._eval(expr.target, env)
@@ -721,15 +761,7 @@ class Interpreter:
         frame = _Env()
         frame.define("self", _copy(left))
         frame.define(sig.decl.params[1].name, _copy(right))
-        try:
-            self._exec_block(sig.decl.body, frame)
-        except _ReturnSignal as ret:
-            return ret.value
-        except MylaError as err:   # attribute it to the method's file (MYLA-10)
-            if err.path is None:
-                err.path = getattr(sig.decl, "source_path", None)
-            raise
-        return None
+        return self._run(sig.decl.body, frame, getattr(sig.decl, "source_path", None))
 
     @staticmethod
     def _eval_shr(left: int, right: int, t: Type) -> int:
@@ -997,6 +1029,10 @@ class Interpreter:
 
     def _eval_method_call(self, expr: ast.Call, env: _Env, mfunc: str):
         decl = self.functions[mfunc].decl
+        return self._run(decl.body, self._method_frame(expr, env, decl),
+                         getattr(decl, "source_path", None))
+
+    def _method_frame(self, expr: ast.Call, env: _Env, decl: ast.FunDecl) -> _Env:
         recv_expr = expr.callee.target
         is_var_self = getattr(expr, "method_is_var_self", False)
         # For `var self`, bind `self` to the *actual* receiver object (no copy)
@@ -1011,15 +1047,7 @@ class Interpreter:
         frame.define("self", recv)
         for param, value in zip(decl.params[1:], args):
             frame.define(param.name, value)
-        try:
-            self._exec_block(decl.body, frame)
-        except _ReturnSignal as ret:
-            return ret.value
-        except MylaError as err:   # attribute it to the method's file (MYLA-10)
-            if err.path is None:
-                err.path = getattr(decl, "source_path", None)
-            raise
-        return None
+        return frame
 
     def _eval_intrinsic(self, expr: ast.Call, env: _Env):
         name = expr.callee.ident

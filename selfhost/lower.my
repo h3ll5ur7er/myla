@@ -57,8 +57,9 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // `into`: the slot the next aggregate `addr` makes may be built in (-1:
 // none; see `build_slot`); `placed`: per temporary, whether it is the address
 // of a value built there (a flag would be overwritten by a `return` nested in
-// the value).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool] }
+// the value). `tail`: the next call lowered ends the function by `become`
+// (D87); `tailed`: it did.
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
 pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
@@ -68,7 +69,7 @@ pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: 
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false }
     var first_word = 0
     match ret {
         Some(t) => {
@@ -113,7 +114,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false }
     var first_word = 0
     match ret {
         Some(t) => {
@@ -623,9 +624,9 @@ impl Lower {
                 self.add(Inst.Bind(name, slot))
             },
             StmtKind.Assign(target, value) => { self.assign(cg, target, value) },
-            StmtKind.ReturnS(ov) => {
+            StmtKind.ReturnS(ov, tail) => {
                 match ov {
-                    Some(e) => { self.ret_value(cg, e) },
+                    Some(e) => { if tail { self.become_call(cg, e) } else { self.ret_value(cg, e) } },
                     None => {
                         self.drop_temps(0)
                         self.drop_owners(0)
@@ -733,6 +734,34 @@ impl Lower {
         self.drop_temps(0)
         self.drop_owners(0)
         self.leave(Term.Ret(v))
+    }
+
+    // `become e` (D87): the call `e`, its arguments evaluated, then the
+    // function's owners dropped and the call made in place of the function
+    // (`tail_call`).
+    fun become_call(var self, cg: CodeGen, e: Expr) {
+        match e.kind {
+            ExprKind.Call(callee, args) => {
+                self.tail = true
+                self.tailed = false
+                let v = self.call(cg, e, callee, args, -1)
+                self.tail = false
+                if self.tailed { return }
+            },
+            _ => {},
+        }
+        let d = self.unsupported("a 'become' of that call")
+    }
+
+    // The call `c` ending the function by `become`: the owners dropped first,
+    // since what the arguments need is theirs (owned, or kept by the caller's
+    // caller: the checker sees to it), and the call jumped to.
+    fun tail_call(var self, c: Inst) {
+        self.drop_temps(0)
+        self.drop_owners(0)
+        self.add(c)
+        self.leave(Term.Become)
+        self.tailed = true
     }
 
     fun discard(var self, cg: CodeGen, e: Expr) {
@@ -1397,6 +1426,9 @@ impl Lower {
     // -1 without a result. A result that owns heap values is the statement's.
     fun call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr], into: int32) -> int32 {
         if self.err != "" { return -1 }
+        // the calls in the arguments of one that `become` makes aren't its
+        let tail = self.tail
+        self.tail = false
         if args_have_hole(args) { return self.partial(cg, e, callee, args) }
         match callee.kind {
             ExprKind.Name(nm) => {
@@ -1432,25 +1464,25 @@ impl Lower {
                     return self.owned_value(cg, d, Type.TStr)
                 }
                 if is_builtin_call_name(nm) { return self.io_call(cg, e, nm, args) }
-                if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.indirect_call(cg, e, callee, args) }
-                return self.direct_call(cg, e, nm, args, into)
+                if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.indirect_call(cg, e, callee, args, tail) }
+                return self.direct_call(cg, e, nm, args, into, tail)
             },
             ExprKind.GetField(recv, field) => {
                 let mname = format("{}.{}", cg.type_key(cg.type_of(recv.id)), field)
-                if !cg.has_func(mname) { return self.indirect_call(cg, e, callee, args) }
+                if !cg.has_func(mname) { return self.indirect_call(cg, e, callee, args, tail) }
                 var argv: [Expr] = [recv]
                 for a in args { push(argv, a) }
-                return self.direct_call(cg, e, mname, argv, into)
+                return self.direct_call(cg, e, mname, argv, into, tail)
             },
             _ => {},
         }
-        return self.indirect_call(cg, e, callee, args)
+        return self.indirect_call(cg, e, callee, args, tail)
     }
 
     // A call through the function value `callee` (evaluated first): its
     // code called with its environment as the first word after the result's
-    // address, the arguments as for `direct_call`.
-    fun indirect_call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr]) -> int32 {
+    // address, the arguments as for `direct_call`; with `tail`, by `become`.
+    fun indirect_call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr], tail: bool) -> int32 {
         let ft = self.place_type(cg, callee)
         if !is_tfunc(ft) || !lowerable(cg, ft) { return self.unsupported("a call through a value of that type") }
         let params = tfunc_params(ft)
@@ -1460,6 +1492,12 @@ impl Lower {
         while i < len(args) && i < len(params) {
             if is_aggregate(params[i]) { push(vals, self.addr(cg, args[i])) } else { push(vals, self.expr(cg, args[i])) }
             i = i + 1
+        }
+        if tail {
+            // the result into the caller's storage, as this function's goes
+            if self.sret >= 0 { self.tail_call(Inst.CallIndSret(fv, self.slot_addr(self.sret), vals)) }
+            else { self.tail_call(Inst.CallInd(-1, fv, vals)) }
+            return -1
         }
         match tfunc_ret(ft) {
             Some(rt) => {
@@ -1680,7 +1718,9 @@ impl Lower {
     // A call of the user function `name` with the argument list `argv`
     // (for a method the receiver first): scalars by value, aggregates by
     // address, both borrowed; an aggregate result through storage of its own.
-    fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr], into: int32) -> int32 {
+    // With `tail`, by `become`: the parameters it passes heap values to are
+    // owned (`find_kept_params`).
+    fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr], into: int32, tail: bool) -> int32 {
         let sig = cg.sig_of(name)
         // a generic function: the instance for the argument types, which the
         // code generator stamps out once this function is lowered
@@ -1727,6 +1767,8 @@ impl Lower {
             // an owned parameter gets a reference of its own: an owned
             // temporary's, or one retained for it (MYLA-127)
             let owned = i < len(owns) && owns[i]
+            // nothing keeps a borrowed value alive once `become` has gone
+            if tail && !owned && !is_aggregate(params[i]) && cg.owns_heap(params[i]) && !(i == 0 && root != "") { return self.unsupported("a 'become' passing a heap value to a borrowed parameter") }
             if i > 0 && root != "" && place_root(argv[i]) == root && cg.owns_heap(params[i]) {
                 let staged = self.stage(cg, params[i], argv[i])
                 if owned { self.moved(staged.0) }
@@ -1739,6 +1781,11 @@ impl Lower {
                 push(vals, v)
             }
             i = i + 1
+        }
+        if tail {
+            if has_ret && is_aggregate(ret_t) { self.tail_call(Inst.CallSret(target, self.slot_addr(self.sret), vals)) }
+            else { self.tail_call(Inst.Call(-1, target, vals)) }
+            return -1
         }
         if !has_ret {
             self.add(Inst.Call(-1, target, vals))

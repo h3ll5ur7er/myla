@@ -1,0 +1,13 @@
+//~ type error: 'become' needs a call, not a '?'
+//~ span: half(n)?
+// A `?` after the call would need the function's frame afterwards (D87).
+fun half(n: int) -> Option<int> {
+    if n % 2 == 0 { return Some(n / 2) }
+    return None
+}
+fun quarter(n: int) -> Option<int> {
+    become half(n)?
+}
+fun main() {
+    let q = quarter(8)
+}

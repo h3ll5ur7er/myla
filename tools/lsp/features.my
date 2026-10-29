@@ -217,7 +217,7 @@ fun with_line(lines: [str], n: int32, text: str) -> str {
 // The reserved words and built-in type names completion offers.
 pub fun completion_keywords() -> [str] {
     return ["fun", "struct", "enum", "trait", "impl", "typealias", "const",
-            "import", "from", "as", "pub", "let", "var", "return", "if", "else",
+            "import", "from", "as", "pub", "let", "var", "return", "become", "if", "else",
             "match", "while", "for", "in", "break", "continue", "self", "true", "false",
             "bool", "str", "char", "int", "int8", "int16", "int32", "int64",
             "uint8", "uint16", "uint32", "uint64", "float", "float32", "float64"]

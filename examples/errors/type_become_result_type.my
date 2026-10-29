@@ -1,0 +1,14 @@
+//~ type error: 'become' needs a call returning 'int64', found 'int32'
+//~ span: count(n - 1)
+//~ note: the return type is declared here
+//~ note span: int64
+// The callee's result is the function's, without a conversion (D87).
+fun count(n: int) -> int {
+    return n
+}
+fun wide(n: int) -> int64 {
+    become count(n - 1)
+}
+fun main() {
+    print(wide(3))
+}

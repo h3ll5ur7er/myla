@@ -1767,6 +1767,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "become_stmt"
+        },
+        {
+          "type": "SYMBOL",
           "name": "break_stmt"
         },
         {
@@ -2087,6 +2091,19 @@
               "type": "BLANK"
             }
           ]
+        }
+      ]
+    },
+    "become_stmt": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "become"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_expression"
         }
       ]
     },

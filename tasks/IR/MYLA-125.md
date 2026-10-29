@@ -2,7 +2,7 @@
 id: MYLA-125
 title: Instruction selection follow-ups in the IR backend
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [ir, codegen, selfhost, performance]
 ---

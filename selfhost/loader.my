@@ -867,7 +867,7 @@ impl Renamer {
                 self.vals = saved
                 StmtKind.ForS(v, start2, end2, body2, iter2)
             },
-            StmtKind.ReturnS(v) => StmtKind.ReturnS(self.opt_expr(v)),
+            StmtKind.ReturnS(v, tail) => StmtKind.ReturnS(self.opt_expr(v), tail),
             StmtKind.ExprStmt(x) => StmtKind.ExprStmt(self.expr(x)),
             _ => s.kind,
         }

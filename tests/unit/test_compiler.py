@@ -130,10 +130,13 @@ class TestLineTables(unittest.TestCase):
                 re.findall(r'^\t\.file (\d+) "(.*)"$', asm, re.M)}
 
     def function(self, asm: str, label: str) -> list[str]:
-        """The lines of one generated function, from its label to its `ret`."""
+        """The lines of one generated function, from its label to its `ret`
+        (`ret $n` where it pops its argument words, D87)."""
         lines = asm.splitlines()
         start = lines.index(label)
-        return lines[start:lines.index("\tret", start) + 2]
+        end = next(i for i in range(start, len(lines))
+                   if lines[i] == "\tret" or lines[i].startswith("\tret $"))
+        return lines[start:end + 2]
 
     def test_no_line_info_by_default(self):
         asm = self.asm(debug=False)

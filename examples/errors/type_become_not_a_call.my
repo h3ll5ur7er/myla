@@ -1,0 +1,9 @@
+//~ type error: 'become' needs a call
+//~ span: n + 1
+// `become` hands the function's result over to a call (D87).
+fun next(n: int) -> int {
+    become n + 1
+}
+fun main() {
+    print(next(1))
+}

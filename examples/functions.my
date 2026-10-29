@@ -1,4 +1,4 @@
-// functions.my — declarations, parameters, return values, recursion.
+// functions.my — declarations, parameters, return values, recursion, tail calls.
 //
 // Every value-returning function carries #test cases (run with `myla test`), so
 // the example doubles as a regression suite — see CONVENTIONS in the README.
@@ -20,7 +20,37 @@ fun factorial(n: int) -> int {
     return n * factorial(n - 1)
 }
 
+// `become` ends the function with a call that takes over its stack frame
+// (D87): however deep it goes, the stack doesn't grow.
+#test(0, 1)[1]
+#test(5, 1)[120]
+fun factorial_acc(n: int, acc: int) -> int {
+    if n <= 1 {
+        return acc
+    }
+    become factorial_acc(n - 1, acc * n)
+}
+
+#test(10)[true]
+#test(7)[false]
+fun is_even(n: int) -> bool {
+    if n == 0 {
+        return true
+    }
+    become is_odd(n - 1)
+}
+
+#test(7)[true]
+fun is_odd(n: int) -> bool {
+    if n == 0 {
+        return false
+    }
+    become is_even(n - 1)
+}
+
 fun main() {
-    print(add(2, 3))        // 5
-    print(factorial(5))     // 120
+    print(add(2, 3))                // 5
+    print(factorial(5))             // 120
+    print(factorial_acc(5, 1))      // 120
+    print(is_even(100000))          // true, a hundred thousand calls deep
 }

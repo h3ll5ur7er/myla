@@ -20,7 +20,7 @@ EXAMPLES_DIR = os.path.abspath(
 EXPECTED = {
     "hello.my": "Hello from Myla!\n",
     "variables.my": "10\nAnn\ntrue\n2\n",
-    "functions.my": "5\n120\n",
+    "functions.my": "5\n120\n120\ntrue\n",
     "loops.my": "10\n3\n2\n1\ntrue\n",
     "control_flow.my": "negative\nzero\npositive\ntrue\ntrue\ntrue\n",
     "structs.my": "3\n4\n7\n100\n3\n",
