@@ -2,7 +2,7 @@
 id: MYLA-129
 title: A heap-free aggregate argument read from a `var self` receiver still sees its writes
 type: bug
-status: todo
+status: in-progress
 priority: medium
 labels: [codegen, selfhost]
 ---

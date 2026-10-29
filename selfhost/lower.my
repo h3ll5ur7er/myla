@@ -1756,8 +1756,9 @@ impl Lower {
             None => {},
         }
         // a method writing its receiver gets a copy of an argument read from
-        // the same variable, taken before the call (MYLA-123): its writes
-        // would change or release the argument's place otherwise
+        // the same variable (passed by address or owning heap memory), taken
+        // before the call (MYLA-123, MYLA-129): its writes would change or
+        // release the argument's place otherwise
         var root = ""
         if sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false } { root = place_root(argv[0]) }
         var vals: [int32] = []
@@ -1769,7 +1770,7 @@ impl Lower {
             let owned = i < len(owns) && owns[i]
             // nothing keeps a borrowed value alive once `become` has gone
             if tail && !owned && !is_aggregate(params[i]) && cg.owns_heap(params[i]) && !(i == 0 && root != "") { return self.unsupported("a 'become' passing a heap value to a borrowed parameter") }
-            if i > 0 && root != "" && place_root(argv[i]) == root && cg.owns_heap(params[i]) {
+            if i > 0 && root != "" && place_root(argv[i]) == root && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
                 let staged = self.stage(cg, params[i], argv[i])
                 if owned { self.moved(staged.0) }
                 push(vals, staged.1)

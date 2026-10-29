@@ -76,6 +76,7 @@ PARITY_PROGRAMS = (
     "assign_heap_owning_struct_to_any_place",
     "assign_heap_owning_struct_to_itself",
     "method_arguments_survive_the_receivers_writes",
+    "heap_free_arguments_survive_the_receivers_writes",
     "borrowed_lets_survive_a_moved_value",
     "become_keeps_the_stack_flat",
     "assign_to_a_field_of_a_shared_element_copies_it",
