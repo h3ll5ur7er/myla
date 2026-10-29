@@ -1064,6 +1064,14 @@ impl Lower {
             ExprKind.Name(n) => { return self.name(cg, n, t) },
             ExprKind.Unary(op, x) => {
                 if !is_scalar(t) { return self.unsupported("a unary operator on a value that isn't a scalar") }
+                // a negative integer literal is a constant (an immediate
+                // operand where it fits, MYLA-125); the backend wraps it
+                match x.kind {
+                    ExprKind.IntLit(v, suf, isc, big) => {
+                        if op == "-" && match t { Type.TInt(w, sg) => true, _ => false } { return self.konst(t, 0 - v) }
+                    },
+                    _ => {},
+                }
                 let a = self.expr(cg, x)
                 let d = self.temp(t)
                 self.add(Inst.Un(d, op, t, a))

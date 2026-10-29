@@ -2,7 +2,7 @@
 id: MYLA-109
 title: IR: later backends and an IR interpreter
 type: feature
-status: review
+status: done
 priority: low
 labels: [ir, codegen, selfhost]
 ---
