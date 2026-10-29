@@ -183,9 +183,21 @@ pub struct CodeGen {
     scan_args: [ScanArg],           // MYLA-127: the calls found by the scan
     owning: [str: bool],            // MYLA-127: the functions with an owned parameter
     no_owned: [bool],
+    // MYLA-128, D87: per function, the parameters a `become` hands a heap
+    // value over to (owned), and those it passes on to a function value
+    // (borrowed), as the checker found them
+    handed: [str: [int32]],
+    passed_on: [str: [int32]],
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
+    var handed: [str: [int32]] = [:]
+    for k in keys(c.handovers) {
+        let h = c.handovers[k]
+        handed[h.func] = with_int(int_list(get(handed, h.func)), h.index)
+    }
+    var passed_on: [str: [int32]] = [:]
+    for p in c.passed_on { passed_on[p.func] = with_int(int_list(get(passed_on, p.func)), p.index) }
     var const_strs: [str: str] = [:]
     for n in keys(c.const_values) {
         match c.const_values[n] {
@@ -251,7 +263,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [],
+        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on,
     }
 }
 
@@ -915,7 +927,10 @@ impl CodeGen {
     // list or map literal: an owned temporary, handed over; or a variable
     // passed right in a `return`, its last use, which moves it) more often
     // than another variable's (retained for it). One walk over every body
-    // (`scan_*`) finds the names each keeps and the calls' arguments.
+    // (`scan_*`) finds the names each keeps and the calls' arguments. A
+    // parameter a `become` hands a heap value over to is owned (nothing
+    // would keep the value alive); one a `become` passes on to a function
+    // value isn't (the function value only borrows it; D87).
     fun find_kept_params(var self) {
         for sig in self.funcs {
             if !sig.has_decl { continue }
@@ -974,11 +989,13 @@ impl CodeGen {
                     zeros
                 },
             }
+            let handed = int_list(get(self.handed, sig.name))
+            let passed = int_list(get(self.passed_on, sig.name))
             var flags: [bool] = []
             var any = false
             var i = 0
             while i < len(kept) {
-                let k = kept[i] && i < len(ss) && ss[i] > 0
+                let k = ((kept[i] && i < len(ss) && ss[i] > 0) || contains_int(handed, i)) && !contains_int(passed, i)
                 push(flags, k)
                 if k { any = true }
                 i = i + 1
@@ -1005,7 +1022,7 @@ impl CodeGen {
                 self.scan_expr(target, false)
                 self.scan_expr(value, false)
             },
-            StmtKind.ReturnS(ov) => {
+            StmtKind.ReturnS(ov, tail) => {
                 match ov {
                     Some(e) => {
                         self.keep_name(e)
@@ -2509,7 +2526,7 @@ impl CodeGen {
                     push(b2, vn)
                     for v in self.free_block(body, b2) { push(out, v) }
                 },
-                StmtKind.ReturnS(ov) => { for v in self.free_opt(ov, bnd) { push(out, v) } },
+                StmtKind.ReturnS(ov, tail) => { for v in self.free_opt(ov, bnd) { push(out, v) } },
                 StmtKind.ExprStmt(e) => { for v in self.free_expr(e, bnd) { push(out, v) } },
                 _ => {},
             }
@@ -5655,7 +5672,7 @@ fun names_in_block(b: Block, acc: [str]) -> [str] {
             StmtKind.VarDecl(k, n, ty, init) => { out = names_in_expr(init, out) },
             StmtKind.DestructDecl(k, bs, ty, init) => { out = names_in_expr(init, out) },
             StmtKind.Assign(target, value) => { out = names_in_expr(value, names_in_expr(target, out)) },
-            StmtKind.ReturnS(ov) => { match ov { Some(e) => { out = names_in_expr(e, out) }, None => {} } },
+            StmtKind.ReturnS(ov, tail) => { match ov { Some(e) => { out = names_in_expr(e, out) }, None => {} } },
             StmtKind.IfS(c, then, otherwise) => {
                 out = names_in_block(then, names_in_expr(c, out))
                 match otherwise {
@@ -5733,7 +5750,7 @@ fun may_write_stmt(st: Stmt, name: str) -> bool {
         StmtKind.ForS(v, start, end, body, iter) => {
             return may_write_opt(start, name) || may_write_opt(end, name) || may_write_opt(iter, name) || may_write_block(body, name)
         },
-        StmtKind.ReturnS(ov) => { return may_write_opt(ov, name) },
+        StmtKind.ReturnS(ov, tail) => { return may_write_opt(ov, name) },
         StmtKind.ExprStmt(e) => { return may_write_expr(e, name) },
         _ => {},
     }
@@ -5885,6 +5902,34 @@ pub fun enum_name_of(t: Type) -> str {
 
 fun expr_name(e: Expr) -> str {
     return match e.kind { ExprKind.Name(n) => n, _ => "" }
+}
+
+// The list a map lookup found, else none.
+fun int_list(o: Option<[int32]>) -> [int32] {
+    return match o {
+        Some(xs) => xs,
+        None => {
+            var none: [int32] = []
+            none
+        },
+    }
+}
+
+#test([1], 2)[[1, 2]]
+#test([1, 2], 2)[[1, 2]]
+fun with_int(xs: [int32], x: int32) -> [int32] {
+    var out = xs
+    if !contains_int(out, x) { push(out, x) }
+    return out
+}
+
+#test([3, 5], 5)[true]
+#test([3], 4)[false]
+fun contains_int(xs: [int32], x: int32) -> bool {
+    for y in xs {
+        if y == x { return true }
+    }
+    return false
 }
 
 // The receiver of a `EnumName.Variant` callee, or a dummy expr otherwise.

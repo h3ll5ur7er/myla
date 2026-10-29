@@ -29,7 +29,7 @@ from .tokens import Token, TokenKind as T
 # than an expression: where the parser resumes after an error (`_sync`).
 _DECL_START = {T.FUN, T.STRUCT, T.ENUM, T.IMPL, T.TRAIT, T.TYPEALIAS, T.CONST,
                T.IMPORT, T.FROM, T.PUB, T.HASH}
-_STMT_START = {T.LET, T.VAR, T.IF, T.WHILE, T.FOR, T.RETURN, T.BREAK, T.CONTINUE}
+_STMT_START = {T.LET, T.VAR, T.IF, T.WHILE, T.FOR, T.RETURN, T.BECOME, T.BREAK, T.CONTINUE}
 
 # What `_sync` skips to: the next statement of a block, the next member of an
 # impl or trait body, the next top-level declaration.
@@ -678,6 +678,10 @@ class Parser:
             return self._for_stmt()
         if tok.kind is T.RETURN:
             return self._return_stmt()
+        if tok.kind is T.BECOME:
+            kw = self._advance()  # become
+            value = self._expression()
+            return ast.Return(value, tail=True).at(kw.line, kw.column, self._end())
         if tok.kind is T.BREAK:
             self._advance()
             return ast.Break().at(tok.line, tok.column, self._end())

@@ -4,7 +4,7 @@
 pub enum TokenKind {
     INT, FLOAT, STRING, CHAR,
     IDENT,
-    LET, VAR, FUN, RETURN, STRUCT, ENUM, IMPL, TRAIT, SELF, MATCH,
+    LET, VAR, FUN, RETURN, BECOME, STRUCT, ENUM, IMPL, TRAIT, SELF, MATCH,
     TYPEALIAS, AS, PUB, IMPORT, FROM, CONST, BREAK, CONTINUE,
     IF, ELSE, WHILE, FOR, IN, TRUE, FALSE,
     BOOL, STR, INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64,
@@ -53,7 +53,7 @@ pub struct Token {
 // The reserved words, as keyword_kind recognises them (the grammar tool
 // checks that grammar/myla.ebnf uses each of them, MYLA-77).
 pub fun keywords() -> [str] {
-    return ["let", "var", "fun", "return", "struct", "enum", "impl", "trait", "self", "match",
+    return ["let", "var", "fun", "return", "become", "struct", "enum", "impl", "trait", "self", "match",
             "typealias", "as", "pub", "import", "from", "const", "break", "continue", "if", "else",
             "while", "for", "in", "true", "false", "bool", "str", "int8", "int16", "int32",
             "int64", "uint8", "uint16", "uint32", "uint64"]
@@ -86,6 +86,7 @@ pub fun keyword_kind(text: str) -> TokenKind {
     if text == "var" { return TokenKind.VAR }
     if text == "fun" { return TokenKind.FUN }
     if text == "return" { return TokenKind.RETURN }
+    if text == "become" { return TokenKind.BECOME }
     if text == "struct" { return TokenKind.STRUCT }
     if text == "enum" { return TokenKind.ENUM }
     if text == "impl" { return TokenKind.IMPL }
@@ -139,6 +140,7 @@ pub fun kind_name(k: TokenKind) -> str {
         TokenKind.VAR => "VAR",
         TokenKind.FUN => "FUN",
         TokenKind.RETURN => "RETURN",
+        TokenKind.BECOME => "BECOME",
         TokenKind.STRUCT => "STRUCT",
         TokenKind.ENUM => "ENUM",
         TokenKind.IMPL => "IMPL",

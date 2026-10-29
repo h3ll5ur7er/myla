@@ -1,0 +1,18 @@
+//~ type error: 'become' can't pass 's' on to a function value: a 'become' in 'start' hands it over to 'relay'
+//~ span: s
+//~ note: it is handed over here
+//~ note span: "a" + s0
+// `start` hands its new string over to `relay`, which would have to free it,
+// but `relay` passes it on to a function value, which only borrows it (D87).
+fun relay(s: str, g: (str) -> int) -> int {
+    become g(s)
+}
+fun start(s0: str, g: (str) -> int) -> int {
+    become relay("a" + s0, g)
+}
+fun size(s: str) -> int {
+    return len(s)
+}
+fun main() {
+    print(start("b", size))
+}

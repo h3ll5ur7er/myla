@@ -102,7 +102,7 @@ function_type = "(" ( type ( "," type )* ","? )? ")" "->" type ;
 
 ```ebnf
 block       = "{" SEP* ( statement ( SEP+ statement )* SEP* )? "}" ;
-statement   = var_decl | if_stmt | while_stmt | for_stmt | return_stmt
+statement   = var_decl | if_stmt | while_stmt | for_stmt | return_stmt | become_stmt
             | "break" | "continue" | assignment | expression ;
 
 var_decl    = ( "let" | "var" ) ( IDENT | bind_tuple ) ( ":" type )? "=" expression ;
@@ -114,6 +114,7 @@ while_stmt  = "while" cond block ;
 for_stmt    = "for" IDENT "in" cond ( ".." cond )? block ;
 cond        = expression ;                          (* without struct literals *)
 return_stmt = "return" ( expression ( "," expression )* )? ;   (* a, b is a tuple *)
+become_stmt = "become" expression ;                (* a call, D87 *)
 
 assignment  = place "=" expression ;
 place       = ( IDENT | "self" | "(" place ")" )

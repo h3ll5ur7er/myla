@@ -53,7 +53,7 @@ An identifier follows Unicode's identifier syntax: it starts with `_` or an XID_
 Reserved keywords:
 
 ```
-let var fun return struct enum impl trait self match typealias as pub
+let var fun return become struct enum impl trait self match typealias as pub
 import from const break continue if else while for in true false
 bool str int8 int16 int32 int64 uint8 uint16 uint32 uint64
 ```

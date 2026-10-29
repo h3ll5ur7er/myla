@@ -404,7 +404,10 @@ class For(Node):
 
 @dataclass
 class Return(Node):
+    """`return value`, or with `tail` `become call` (D87): a return of the
+    call that is guaranteed not to grow the stack."""
     value: Optional["Expr"] = None
+    tail: bool = False
 
 
 @dataclass

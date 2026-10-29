@@ -115,7 +115,7 @@ pub enum StmtKind {
     IfS(Expr, Block, Option<ElseTail>),
     WhileS(Expr, Block),
     ForS(str, Option<Expr>, Option<Expr>, Block, Option<Expr>),  // var,start,end,body,iter
-    ReturnS(Option<Expr>),
+    ReturnS(Option<Expr>, bool),                         // value, `become` (D87)
     BreakS,
     ContinueS,
     ExprStmt(Expr),
@@ -317,6 +317,12 @@ pub fun dump_block(b: Block) -> str {
     return format("(block {})", join_map(b.stmts, dump_stmt))
 }
 
+// The keyword of a return statement: `become` for a tail call (D87).
+fun return_word(tail: bool) -> str {
+    if tail { return "become" }
+    return "return"
+}
+
 pub fun dump_stmt(s: Stmt) -> str {
     return match s.kind {
         StmtKind.VarDecl(kind, name, ty, init) => format("(vardecl {} {} {} {})", sstr(kind), sstr(name), opt_type(ty), dump_expr(init)),
@@ -331,7 +337,7 @@ pub fun dump_stmt(s: Stmt) -> str {
         },
         StmtKind.WhileS(cond, body) => format("(while {} {})", dump_expr(cond), dump_block(body)),
         StmtKind.ForS(v, start, end, body, iter) => format("(for {} {} {} {} {})", sstr(v), opt_expr(start), opt_expr(end), dump_block(body), opt_expr(iter)),
-        StmtKind.ReturnS(v) => format("(return {})", opt_expr(v)),
+        StmtKind.ReturnS(v, tail) => format("({} {})", return_word(tail), opt_expr(v)),
         StmtKind.BreakS => "(break)",
         StmtKind.ContinueS => "(continue)",
         StmtKind.ExprStmt(e) => format("(exprstmt {})", dump_expr(e)),

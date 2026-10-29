@@ -865,6 +865,16 @@ class Checker:
         self._lost_methods: set[str] = set()
         self._lost_traits: set[str] = set()
         self._bodies = False
+        # `become` (D87): the function being checked, by name, and the scope
+        # of its parameters; the heap-value parameters a `become` hands a value
+        # over to, {(function, parameter index): (handing function, argument)},
+        # the first of each; and the heap-value parameters a `become` passes
+        # on to a function value, as (function, parameter index, argument)
+        self._fun_name = ""
+        self._param_scope: _Scope | None = None
+        self.become_handovers: dict[tuple[str, int], tuple[str, ast.Expr]] = {}
+        self._fun_path: str | None = None
+        self._passed_on: list[tuple[str, int, ast.Name, str | None]] = []
 
     # -- public entry --------------------------------------------------------
 
@@ -887,6 +897,7 @@ class Checker:
             for mdecl in self._method_decls:
                 if id(mdecl) not in self._skipped:
                     self._on_its_own(mdecl, lambda d=mdecl: self._check_function(d))
+            self._check_passed_on()
         except _Stop:
             pass
         if self._errors:
@@ -2087,8 +2098,11 @@ class Checker:
         self._type_param_bounds = {
             tp: frozenset(traits) for tp, traits in sig.bounds.items()
         }
+        self._fun_name = decl.name
+        self._fun_path = _source_path(decl)
         try:
             scope = _Scope()
+            self._param_scope = scope
             for i, (param, ptype) in enumerate(zip(decl.params, sig.params)):
                 # A `var self` receiver (params[0] of a method) is mutable so the
                 # body can write `self.field = ...`; every other param is borrowed
@@ -2220,6 +2234,9 @@ class Checker:
                 raise TypeCheckError(
                     f"'{kw}' outside of a loop", at=stmt
                 )
+
+        elif isinstance(stmt, ast.Return) and stmt.tail:
+            self._check_become(stmt.value, scope, ret)
 
         elif isinstance(stmt, ast.Return):
             if ret is None:
@@ -4195,6 +4212,7 @@ class Checker:
                 return self._infer_variant_ctor(expr, enum_name, name, scope, expected)
             raise TypeCheckError(f"unknown function '{name}'", at=expr,
                                  notes=_did_you_mean(name, self._callable_names(scope)))
+        expr.direct_call = True
         if sig.type_params:
             return self._infer_generic_call(expr, name, sig, scope)
         if len(expr.args) != len(sig.params):
@@ -4243,6 +4261,131 @@ class Checker:
         expr.indirect_call = True
         expr.resolved_type = ft.ret
         return ft.ret
+
+    # -- guaranteed tail calls (`become`, D87) -------------------------------
+
+    def _check_become(self, value: ast.Expr, scope: _Scope, ret: Type | None) -> None:
+        """`become value`: a call of a function, a method or a function value
+        that returns what the function does, whose arguments can be passed
+        without the function's frame."""
+        if self._lambda_stack:
+            raise TypeCheckError("'become' can't stand in a lambda", at=value)
+        if isinstance(value, ast.Try):
+            raise TypeCheckError("'become' needs a call, not a '?'", at=value)
+        if not isinstance(value, ast.Call):
+            raise TypeCheckError("'become' needs a call", at=value)
+        callee_kind = ("partial" if any(isinstance(a, ast.Hole) for a in value.args)
+                       else None)
+        t = self._infer_node(value, scope, ret)
+        if callee_kind is None:
+            if getattr(value, "method_func", None) is not None:
+                callee_kind = "method"
+            elif getattr(value, "indirect_call", False):
+                callee_kind = "value"
+            elif getattr(value, "direct_call", False):
+                callee_kind = "function"
+        if callee_kind not in ("method", "value", "function"):
+            raise TypeCheckError(
+                "'become' needs a call of a function, a method or a function value",
+                at=value,
+            )
+        if _has_error(t) or _has_error(ret):
+            raise _Poisoned()
+        if t != ret:
+            notes = [note("the return type is declared here", self._ret_at)] \
+                if self._ret_at is not None else []
+            raise TypeCheckError(
+                f"'become' needs a call returning {_quoted_or_nothing(ret)}, "
+                f"found {_quoted_or_nothing(t)}",
+                at=value, notes=notes,
+            )
+        if callee_kind == "value" and not self._param_part(value.callee, scope):
+            raise TypeCheckError(
+                "'become' can only call a function value that is (a part of) a parameter",
+                at=value.callee,
+            )
+        args = list(value.args)
+        # a `var self` receiver is its caller's variable, never handed over
+        mutates = False
+        if callee_kind == "method":
+            recv = value.callee.target
+            mutates = value.method_is_var_self
+            # the method changes the receiver of the call that `become` ends
+            if value.method_is_var_self and not (isinstance(recv, ast.Name)
+                                                 and recv.ident == "self"):
+                raise TypeCheckError(
+                    f"'become' can call the mutating method '{value.callee.field_name}' "
+                    "only on 'self'",
+                    at=recv,
+                )
+            args.insert(0, recv)
+            target = value.method_func
+        elif callee_kind == "function":
+            target = value.callee.ident
+            mutates = getattr(self.functions[target].decl, "receiver", None) == "var self"
+        for i, arg in enumerate(args):
+            at = getattr(arg, "resolved_type", None)
+            if at is None or _has_error(at) or isinstance(at, _SCALARS):
+                continue
+            frame = isinstance(at, _FRAME_VALUES)
+            if frame and not self._param_part(arg, scope):
+                raise TypeCheckError(
+                    f"'become' can only pass a '{type_name(at)}' that is "
+                    "(a part of) a parameter",
+                    at=arg,
+                )
+            # the method changes its receiver, and the copy of a part of it a
+            # call passes (MYLA-123) would live in the frame the jump leaves
+            if (frame and mutates and i > 0 and _root_name(arg) is not None
+                    and _root_name(arg) == _root_name(args[0])):
+                raise TypeCheckError(
+                    f"'become' can't pass a part of '{_root_name(arg)}' to the "
+                    "method that changes it",
+                    at=arg,
+                )
+            if not frame and callee_kind == "value" and not self._param_part(arg, scope):
+                raise TypeCheckError(
+                    f"'become' can only pass a '{type_name(at)}' to a function "
+                    "value when it is (a part of) a parameter",
+                    at=arg,
+                )
+            # what may own heap memory: handed over to a function, which owns
+            # it then, or passed on to a function value, which borrows it
+            if frame and not isinstance(at, _MAYBE_HEAP):
+                continue
+            if callee_kind == "value":
+                if isinstance(arg, ast.Name):
+                    index = self._param_index(arg.ident)
+                    self._passed_on.append((self._fun_name, index, arg, self._fun_path))
+            elif not (i == 0 and mutates):
+                self.become_handovers.setdefault((target, i), (self._fun_name, arg))
+
+    def _param_part(self, expr: ast.Expr, scope: _Scope) -> bool:
+        """Whether `expr` is a parameter of the function being checked or a
+        field or element of one, which lives in its caller's storage."""
+        while isinstance(expr, (ast.FieldAccess, ast.TupleIndex)):
+            expr = expr.target
+        return (isinstance(expr, ast.Name) and self._param_scope is not None
+                and scope.lookup_scope(expr.ident) is self._param_scope)
+
+    def _param_index(self, name: str) -> int:
+        assert self._param_scope is not None
+        return list(self._param_scope.names).index(name)
+
+    def _check_passed_on(self) -> None:
+        """A heap value a `become` passes on to a function value stays its
+        caller's, so a `become` can't hand one over to that parameter."""
+        for fun, index, arg, path in self._passed_on:
+            handed = self.become_handovers.get((fun, index))
+            if handed is None:
+                continue
+            by, at = handed
+            self._fail_part(
+                path,
+                f"'become' can't pass '{arg.ident}' on to a function value: a "
+                f"'become' in '{by}' hands it over to '{fun}'",
+                arg, notes=[note("it is handed over here", at)],
+            )
 
     # -- partial application (`_` holes, X7) ---------------------------------
 
@@ -4721,6 +4864,24 @@ def _is_diverging(expr: ast.Expr) -> bool:
     which never returns — so the checker treats it like a `return`."""
     return (isinstance(expr, ast.Call) and isinstance(expr.callee, ast.Name)
             and expr.callee.ident in _DIVERGING_BUILTINS)
+
+
+# What `become` passes freely (D87), and what lives in a frame, so it must be
+# (a part of) a parameter; a type parameter may stand for either.
+_SCALARS = (IntType, FloatType, CharType, BoolType)
+_FRAME_VALUES = (StructType, TupleType, EnumType, FuncType, TypeParam, SelfType)
+_MAYBE_HEAP = (TypeParam, SelfType)
+
+
+def _root_name(expr: ast.Expr) -> str | None:
+    """The variable a place expression (`a.b[i].c`) is a part of."""
+    while isinstance(expr, (ast.FieldAccess, ast.TupleIndex, ast.Index)):
+        expr = expr.target
+    return expr.ident if isinstance(expr, ast.Name) else None
+
+
+def _quoted_or_nothing(t: Type | None) -> str:
+    return "nothing" if t is None else f"'{type_name(t)}'"
 
 
 def _stmt_returns(stmt: ast.Stmt) -> bool:

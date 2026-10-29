@@ -1,0 +1,21 @@
+//~ type error: 'become' can call the mutating method 'tick' only on 'self'
+//~ span: self.inner
+// A `var self` method that `become` calls goes on changing the same `self`;
+// a field of it would have to be stored back after the call (D87).
+struct Clock { n: int }
+struct Watch { inner: Clock }
+impl Clock {
+    fun tick(var self) {
+        self.n = self.n + 1
+    }
+}
+impl Watch {
+    fun tick(var self) {
+        become self.inner.tick()
+    }
+}
+fun main() {
+    var w = Watch { inner: Clock { n: 0 } }
+    w.tick()
+    print(w.inner.n)
+}

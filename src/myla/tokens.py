@@ -26,6 +26,7 @@ class TokenKind(Enum):
     VAR = auto()
     FUN = auto()
     RETURN = auto()
+    BECOME = auto()
     STRUCT = auto()
     ENUM = auto()
     IMPL = auto()
@@ -106,6 +107,7 @@ KEYWORDS: dict[str, TokenKind] = {
     "var": TokenKind.VAR,
     "fun": TokenKind.FUN,
     "return": TokenKind.RETURN,
+    "become": TokenKind.BECOME,
     "struct": TokenKind.STRUCT,
     "enum": TokenKind.ENUM,
     "impl": TokenKind.IMPL,

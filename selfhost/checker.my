@@ -313,6 +313,57 @@ fun type_list_eq(a: [Type], b: [Type]) -> bool {
     return true
 }
 
+// What `become` passes freely (D87), and what lives in a frame, so it must be
+// (a part of) a parameter; a type parameter may stand for either.
+fun is_scalar_type(t: Type) -> bool {
+    return match t {
+        Type.TInt(w, s) => true,
+        Type.TFloat(w) => true,
+        Type.TChar => true,
+        Type.TBool => true,
+        _ => false,
+    }
+}
+
+fun is_frame_value(t: Type) -> bool {
+    return match t {
+        Type.TStruct(n, a) => true,
+        Type.TTuple(es) => true,
+        Type.TEnum(n, a) => true,
+        Type.TFunc(ps, r) => true,
+        Type.TParam(n) => true,
+        Type.TSelf => true,
+        _ => false,
+    }
+}
+
+// The variable a place expression (`a.b[i].c`) is a part of ("": none).
+fun root_name(e: Expr) -> str {
+    return match e.kind {
+        ExprKind.GetField(t, f) => root_name(t),
+        ExprKind.TupleIndex(t, i) => root_name(t),
+        ExprKind.Index(t, i) => root_name(t),
+        ExprKind.Name(n) => n,
+        _ => "",
+    }
+}
+
+fun is_maybe_heap(t: Type) -> bool {
+    return match t {
+        Type.TParam(n) => true,
+        Type.TSelf => true,
+        _ => false,
+    }
+}
+
+fun sig_mutates(sig: FuncSig) -> bool {
+    return sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false }
+}
+
+fun quoted_or_nothing(t: Option<Type>) -> str {
+    return match t { Some(x) => format("'{}'", type_name(x)), None => "nothing" }
+}
+
 fun opt_type_eq(a: Option<Type>, b: Option<Type>) -> bool {
     return match a {
         Some(x) => match b { Some(y) => type_eq(x, y), None => false },
@@ -849,6 +900,12 @@ pub struct Binding { ty: Type, mutable: bool, line: int32, col: int32, sp: SrcSp
 pub struct MainAt { line: int32, col: int32, sp: SrcSpan, name: str, id: int32 }
 pub struct Frame { names: [str], binds: [Binding] }
 
+// `become` (D87; types.py: _check_become): a `become` that hands a heap value
+// over to a parameter, the first of each, and one that passes a heap-value
+// parameter on to a function value (in declaration `decl`)
+pub struct Handover { func: str, index: int32, by: str, line: int32, col: int32, sp: SrcSpan }
+pub struct PassedOn { func: str, index: int32, name: str, line: int32, col: int32, sp: SrcSpan, decl: int32 }
+
 // a checked match-arm body value (with its source node for re-inference)
 pub struct MatchVal { ty: Type, node: Option<Expr> }
 pub enum ArmBody {
@@ -918,6 +975,17 @@ pub struct Checker {
     failed_consts: [str: bool],
     bodies: bool,
     mains: [MainAt],                // the `#main` functions found so far
+    // `become` (D87): the kind of the call inferred last (`function`,
+    // `method` or `value`), its node and its function; the function being
+    // checked; the parameters (`function\tindex`) a `become` hands a heap value
+    // over to, and the heap-value parameters one passes on to a function value
+    call_kind: str,
+    call_kind_id: int32,
+    call_target: str,
+    call_mutates: bool,
+    fun_name: str,
+    handovers: [str: Handover],
+    passed_on: [PassedOn],
 }
 
 fun new_checker(decls: [Decl]) -> Checker {
@@ -934,6 +1002,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         resolved: [:], errs: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
+        call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], passed_on: [],
     }
 }
 
@@ -948,7 +1017,7 @@ fun is_diverging(e: Expr) -> bool {
 
 fun stmt_returns(s: Stmt) -> bool {
     return match s.kind {
-        StmtKind.ReturnS(v) => true,
+        StmtKind.ReturnS(v, tail) => true,
         StmtKind.ExprStmt(e) => is_diverging(e),
         StmtKind.IfS(cond, then, otherwise) => {
             if !block_returns(then) { return false }
@@ -3375,7 +3444,10 @@ impl Checker {
                 Ok(0)
             },
             StmtKind.ForS(var_name, start, end, body, iter) => self.check_for(s, var_name, start, end, body, iter),
-            StmtKind.ReturnS(v) => self.check_return(s, v),
+            StmtKind.ReturnS(v, tail) => {
+                if !tail { return self.check_return(s, v) }
+                match v { Some(ve) => self.check_become(ve), None => Ok(0) }
+            },
             StmtKind.BreakS => {
                 if self.loop_depth == 0 { return Err(terr_at(s.line, s.col, s.sp, "'break' outside of a loop")) }
                 Ok(0)
@@ -3456,6 +3528,136 @@ impl Checker {
         return Ok(0)
     }
 
+    // `become ve` (D87): a call of a function, a method or a function value
+    // that returns what the function does, whose arguments can be passed
+    // without the function's frame (types.py: _check_become).
+    fun check_become(var self, ve: Expr) -> Result<int32, CheckErr> {
+        if self.lambda_depth > 0 { return Err(terr_at(ve.line, ve.col, ve.sp, "'become' can't stand in a lambda")) }
+        var callee = ve
+        var args: [Expr] = []
+        match ve.kind {
+            ExprKind.Call(c, a) => {
+                callee = c
+                args = a
+            },
+            ExprKind.Try(x) => { return Err(terr_at(ve.line, ve.col, ve.sp, "'become' needs a call, not a '?'")) },
+            _ => { return Err(terr_at(ve.line, ve.col, ve.sp, "'become' needs a call")) },
+        }
+        var partial = false
+        for a in args { match a.kind { ExprKind.Hole => { partial = true }, _ => {} } }
+        self.call_kind_id = -1
+        let t = self.infer_node(ve, self.cur_ret)?
+        var kind = ""
+        if !partial && self.call_kind_id == ve.id { kind = self.call_kind }
+        if kind == "" { return Err(terr_at(ve.line, ve.col, ve.sp, "'become' needs a call of a function, a method or a function value")) }
+        if opt_has_error(t) || opt_has_error(self.cur_ret) { return Err(poisoned()) }
+        if !opt_type_eq(t, self.cur_ret) {
+            var notes: [Note] = []
+            match self.ret_at { Some(te) => { notes = [note_at("the return type is declared here", te.line, te.col, te.sp)] }, None => {} }
+            return Err(with_notes(terr_at(ve.line, ve.col, ve.sp, format("'become' needs a call returning {}, found {}", quoted_or_nothing(self.cur_ret), quoted_or_nothing(t))), notes))
+        }
+        if kind == "value" && !self.in_param(callee) { return Err(terr_at(callee.line, callee.col, callee.sp, "'become' can only call a function value that is (a part of) a parameter")) }
+        let target = self.call_target
+        var all: [Expr] = []
+        match callee.kind {
+            ExprKind.GetField(recv, f) => {
+                if kind == "method" {
+                    // the method changes the receiver of the call that `become` ends
+                    let on_self = match recv.kind { ExprKind.Name(n) => n == "self", _ => false }
+                    if self.call_mutates && !on_self { return Err(terr_at(recv.line, recv.col, recv.sp, format("'become' can call the mutating method '{}' only on 'self'", f))) }
+                    push(all, recv)
+                }
+            },
+            _ => {},
+        }
+        for a in args { push(all, a) }
+        var i = 0
+        while i < len(all) {
+            let arg = all[i]
+            if contains(self.resolved, arg.id) {
+                let at = self.resolved[arg.id]
+                if !has_error(at) && !is_scalar_type(at) {
+                    let frame = is_frame_value(at)
+                    if frame && !self.in_param(arg) { return Err(terr_at(arg.line, arg.col, arg.sp, format("'become' can only pass a '{}' that is (a part of) a parameter", type_name(at)))) }
+                    // the method changes its receiver, and the copy of a part
+                    // of it a call passes (MYLA-123) would live in the frame
+                    // the jump leaves
+                    if frame && self.call_mutates && i > 0 && root_name(arg) != "" && root_name(arg) == root_name(all[0]) { return Err(terr_at(arg.line, arg.col, arg.sp, format("'become' can't pass a part of '{}' to the method that changes it", root_name(arg)))) }
+                    if !frame && kind == "value" && !self.in_param(arg) { return Err(terr_at(arg.line, arg.col, arg.sp, format("'become' can only pass a '{}' to a function value when it is (a part of) a parameter", type_name(at)))) }
+                    // what may own heap memory: handed over to a function,
+                    // which owns it then, or passed on to a function value,
+                    // which borrows it
+                    if !frame || is_maybe_heap(at) {
+                        if kind == "value" {
+                            match arg.kind {
+                                ExprKind.Name(n) => { push(self.passed_on, PassedOn { func: self.fun_name, index: self.param_index(n), name: n, line: arg.line, col: arg.col, sp: arg.sp, decl: self.cur_decl }) },
+                                _ => {},
+                            }
+                        } else if !(i == 0 && self.call_mutates) {
+                            // (a `var self` receiver is its caller's variable)
+                            let key = format("{}\t{}", target, i)
+                            if !contains(self.handovers, key) { self.handovers[key] = Handover { func: target, index: i, by: self.fun_name, line: arg.line, col: arg.col, sp: arg.sp } }
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+        return Ok(0)
+    }
+
+    // Whether `e` is a parameter of the function being checked or a field or
+    // element of one, which lives in its caller's storage.
+    fun in_param(self, e: Expr) -> bool {
+        var x = e
+        var walking = true
+        while walking {
+            match x.kind {
+                ExprKind.GetField(t, f) => { x = t },
+                ExprKind.TupleIndex(t, k) => { x = t },
+                _ => { walking = false },
+            }
+        }
+        let n = match x.kind { ExprKind.Name(nm) => nm, _ => "" }
+        if n == "" { return false }
+        var i = len(self.frames) - 1
+        while i >= 0 {
+            if contains_str(self.frames[i].names, n) { return i == 0 }
+            i = i - 1
+        }
+        return false
+    }
+
+    fun param_index(self, name: str) -> int32 {
+        var i = 0
+        while i < len(self.frames[0].names) {
+            if self.frames[0].names[i] == name { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    // A heap value a `become` passes on to a function value stays its
+    // caller's, so a `become` can't hand one over to that parameter.
+    fun check_passed_on(var self) {
+        for p in self.passed_on {
+            let key = format("{}\t{}", p.func, p.index)
+            if !contains(self.handovers, key) { continue }
+            if self.full() { return }
+            let h = self.handovers[key]
+            let msg = format("'become' can't pass '{}' on to a function value: a 'become' in '{}' hands it over to '{}'", p.name, h.by, p.func)
+            push(self.errs, CheckErr { line: p.line, col: p.col, sp: p.sp, msg: msg, decl: p.decl, notes: [note_at("it is handed over here", h.line, h.col, h.sp)] })
+        }
+    }
+
+    // The kind of the call `e` just inferred, for `become`.
+    fun mark_call(var self, e: Expr, kind: str, target: str, mutates: bool) {
+        self.call_kind = kind
+        self.call_kind_id = e.id
+        self.call_target = target
+        self.call_mutates = mutates
+    }
+
     fun bind_elem(var self, be: BindElem, t: Type, mutable: bool) -> Result<int32, CheckErr> {
         return match be {
             BindElem.BWild => Ok(0),
@@ -3523,6 +3725,7 @@ impl Checker {
         self.cur_ret = sig.ret
         self.has_cur_ret = match sig.ret { Some(x) => true, None => false }
         self.ret_at = fd.ret_type
+        self.fun_name = fd.name
         self.type_params = sig.type_params
         self.bounds_cur = sig.bounds
         self.frames = []
@@ -4074,6 +4277,7 @@ impl Checker {
             if !contains(self.skipped_fns, self.method_decls[i].name) { self.check_body(self.method_decl_ids[i], self.method_decls[i]) }
             i = i + 1
         }
+        self.check_passed_on()
         if len(self.errs) > 0 { return Err(self.errs) }
         return Ok(0)
     }
@@ -4402,7 +4606,11 @@ impl Checker {
             return Err(with_notes(terr_at(e.line, e.col, e.sp, format("unknown function '{}'", name)), did_you_mean(name, self.callable_names())))
         }
         let sig = self.functions[fi]
-        if len(sig.type_params) > 0 { return self.infer_generic_call(e, name, sig, args) }
+        if len(sig.type_params) > 0 {
+            let gr = self.infer_generic_call(e, name, sig, args)?
+            self.mark_call(e, "function", name, sig_mutates(sig))
+            return Ok(gr)
+        }
         if len(args) != len(sig.params) { return Err(terr_at(e.line, e.col, e.sp, format("function '{}' expects {} argument(s), got {}", name, len(sig.params), len(args)))) }
         var i = 0
         while i < len(args) {
@@ -4412,6 +4620,7 @@ impl Checker {
             }
             i = i + 1
         }
+        self.mark_call(e, "function", name, sig_mutates(sig))
         return Ok(sig.ret)
     }
 
@@ -4526,6 +4735,7 @@ impl Checker {
             if !type_eq(at, ps[i]) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch: expected '{}', found '{}'", type_name(ps[i]), type_name(at)))) }
             i = i + 1
         }
+        self.mark_call(e, "value", "", false)
         return Ok(rr)
     }
 
@@ -4635,7 +4845,11 @@ impl Checker {
                 }
                 let nargs = len(sig.params) - 1
                 if len(args) != nargs { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' expects {} argument(s), got {}", field, nargs, len(args)))) }
-                if len(sig.type_params) > 0 { return self.infer_generic_method(e, sig, field, recv_type, args) }
+                if len(sig.type_params) > 0 {
+                    let gr = self.infer_generic_method(e, sig, field, recv_type, args)?
+                    self.mark_call(e, "method", sig.name, recv == "var self")
+                    return Ok(gr)
+                }
                 var i = 0
                 while i < len(args) {
                     let pt = sig.params[i + 1]
@@ -4645,6 +4859,7 @@ impl Checker {
                     }
                     i = i + 1
                 }
+                self.mark_call(e, "method", sig.name, recv == "var self")
                 return Ok(sig.ret)
             },
         }

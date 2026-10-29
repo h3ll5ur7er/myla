@@ -162,6 +162,10 @@ class CodeGen:
         self._staged_drops: list[list] = []
         self._epilogue = ""
         self._struct_ret = False
+        self._arg_words = 0     # the argument words the function pops (callee-pops)
+        # the parameters a `become` hands a heap value over to, which are owned
+        # (D87): the callee drops them, and every call gives them a reference
+        self._become_owned = set(checker.become_handovers)
         # top-level `fun`s referenced as values: each needs an env-ignoring thunk
         # so it shares the closure calling convention (v0.4.2)
         self._fnval_thunks: set[str] = set()
@@ -1101,13 +1105,17 @@ class CodeGen:
             self._emit(f"subq ${frame}, %rsp")
 
         # bind parameters to their incoming stack slots (parameters are borrowed,
-        # so they are never dropped — the caller owns the argument)
+        # so they are never dropped — the caller owns the argument — but for
+        # those a `become` hands a value over to, D87)
         self._push_scope()
         self._drop_scopes.append([])
         param_base = 1 if self._struct_ret else 0
+        self._arg_words = param_base + len(sig.params)
         for i, (param, ptype) in enumerate(zip(decl.params, sig.params)):
             offset = 16 + 8 * (param_base + i)
             self._bind(param.name, ("param", offset, ptype), whole_function=True, param=True)
+            if self._param_owned(decl.name, i, ptype):
+                self._drop_scopes[-1].append((offset, ptype))
 
         if getattr(decl, "tag_eq", False):
             # derived `eq` of an enum without payloads (MYLA-87): self and
@@ -1120,10 +1128,13 @@ class CodeGen:
             self._emit("movzbq %al, %rax")
         else:
             self._gen_block(decl.body)
+            # the owned parameters, at the end of a function without a result
+            for slot, t in reversed(self._drop_scopes[-1]):
+                self._drop_value("rbp", slot, t)
 
         self._emit(f"{self._epilogue}:")
         self._emit("leave")
-        self._emit("ret")
+        self._emit(_ret_popping(self._arg_words))
         self._end_loc()
         self._drop_scopes.pop()
         self._pop_scope()
@@ -1468,6 +1479,9 @@ class CodeGen:
             cont, end, depth = self._loops[-1]
             self._emit_loop_exit_drops(depth)
             self._emit(f"jmp {cont}")
+
+        elif isinstance(stmt, ast.Return) and stmt.tail:
+            self._gen_become(stmt.value)
 
         elif isinstance(stmt, ast.Return):
             if stmt.value is None:
@@ -4034,6 +4048,7 @@ class CodeGen:
         self._drop_scopes.append([])
         param_base = 1 if self._struct_ret else 0
         env_off = 16 + 8 * param_base          # the hidden env pointer
+        self._arg_words = param_base + 1 + len(ft.params)
         for i, (param, ptype) in enumerate(zip(lam.params, ft.params)):
             offset = 16 + 8 * (param_base + 1 + i)
             self._bind(param.name, ("param", offset, ptype), whole_function=True, param=True)
@@ -4045,7 +4060,7 @@ class CodeGen:
 
         self._emit(f"{self._epilogue}:")
         self._emit("leave")
-        self._emit("ret")
+        self._emit(_ret_popping(self._arg_words))
         self._end_loc()
         self._drop_scopes.pop()
         self._pop_scope()
@@ -4057,28 +4072,28 @@ class CodeGen:
 
     def _emit_fnval_thunk(self, name: str) -> None:
         """`myla_<fn>__fnval(env, args…)`: an adapter so a plain `fun` can be
-        called through the closure convention. Drops the (ignored) env argument
-        and forwards the rest to `myla_<fn>` (v0.4.2)."""
+        called through the closure convention (v0.4.2): the (ignored) env word
+        dropped by moving the return address (and the sret pointer) up over
+        it, and a jump to `myla_<fn>`, which pops the rest (callee-pops), so a
+        `become` through it doesn't grow the stack either (D87). An owned
+        parameter gets a reference of its own."""
         sig = self._sig(name)
         struct_ret = _is_aggregate(sig.ret)
         nargs = len(sig.params)
         self._emit(f"myla_{name}__fnval:")
-        self._emit("pushq %rbp")
-        self._emit("movq %rsp, %rbp")
-        # incoming (from 16(%rbp)): [sret?], env, arg0, arg1, …
-        arg0_off = 16 + 8 * ((1 if struct_ret else 0) + 1)
-        for i in reversed(range(nargs)):
-            self._emit(f"movq {arg0_off + 8 * i}(%rbp), %rax")
-            self._emit("pushq %rax")
+        # incoming (from 0(%rsp)): return address, [sret?], env, arg0, arg1, …
+        arg0_off = 8 * (2 + (1 if struct_ret else 0))
+        for i in range(nargs):
+            if self._param_owned(name, i, sig.params[i]):
+                self._emit(f"movq {arg0_off + 8 * i}(%rsp), %rax")
+                self._emit("incq -8(%rax)")
         if struct_ret:
-            self._emit("movq 16(%rbp), %rax")     # sret pointer
-            self._emit("pushq %rax")
-        self._emit(f"call myla_{name}")
-        cleanup = 8 * (nargs + (1 if struct_ret else 0))
-        if cleanup:
-            self._emit(f"addq ${cleanup}, %rsp")
-        self._emit("leave")
-        self._emit("ret")
+            self._emit("movq 8(%rsp), %rax")      # sret pointer
+            self._emit("movq %rax, 16(%rsp)")
+        self._emit("movq (%rsp), %rax")           # return address
+        self._emit("movq %rax, 8(%rsp)")
+        self._emit("addq $8, %rsp")
+        self._emit(f"jmp myla_{name}")
         self._emit("")
 
     def _emit_lambda_env_drop(self, lam: ast.Lambda, offsets: list) -> None:
@@ -4120,7 +4135,6 @@ class CodeGen:
             logical.append(("arg", arg, ft.params[i]))
         self._store_call_words(logical)
         self._emit(f"call *{code_off}(%rbp)")
-        self._emit(f"addq ${8 * len(logical)}, %rsp")
 
     def _gen_call(self, expr: ast.Call) -> None:
         if getattr(expr, "indirect_call", False):
@@ -4320,11 +4334,10 @@ class CodeGen:
             logical.append(("sret", self._locals[id(expr)]))
         aliased = {id(a) for a, _ in self._aliased_args(expr)}
         for i, arg in enumerate(expr.args):
-            logical.append(("staged" if id(arg) in aliased else "arg", arg, sig.params[i]))
+            logical.append(("staged" if id(arg) in aliased else "arg", arg, sig.params[i],
+                            self._param_owned(name, i, sig.params[i])))
         self._store_call_words(logical)
         self._emit(f"call myla_{name}")
-        if logical:
-            self._emit(f"addq ${8 * len(logical)}, %rsp")
         if aliased:
             # the copies released after the call, its result kept
             self._emit("pushq %rax")
@@ -4335,6 +4348,95 @@ class CodeGen:
                     self._release(self._locals[f"staged:{id(item[1])}"], item[2], True)
             self._emit("popq %rax")
             self._emit("popq %rax")
+
+    def _param_owned(self, name: str, i: int, t: Type) -> bool:
+        """Whether parameter `i` of function `name`, of type `t`, is owned: a
+        `become` hands a heap value over to it (D87)."""
+        return (name, i) in self._become_owned and isinstance(t, _CELL_TYPES)
+
+    def _gen_become(self, call: ast.Call) -> None:
+        """`become call` (D87): the call's words pushed as a call pushes them
+        (an owned parameter's with a reference of its own; an aggregate result
+        into the caller's storage, as this function's goes), the arguments'
+        temporaries and the function's owners dropped, then the words moved
+        into the function's own and the callee jumped to, which returns to
+        the function's caller (`_frame_handover`)."""
+        indirect = getattr(call, "indirect_call", False)
+        logical: list = []
+        if self._struct_ret:
+            logical.append(("word", "16(%rbp)"))
+        if indirect:
+            ft = call.callee.resolved_type
+            code_off = self._locals[f"indcode:{id(call)}"]
+            env_off = self._locals[f"indenv:{id(call)}"]
+            self._addr_of_aggregate(call.callee)          # rax = &fat value
+            self._emit("movq (%rax), %rcx")
+            self._emit(f"movq %rcx, {code_off}(%rbp)")
+            self._emit("movq 8(%rax), %rcx")
+            self._emit(f"movq %rcx, {env_off}(%rbp)")
+            logical.append(("env", env_off))
+            for i, arg in enumerate(call.args):
+                logical.append(("arg", arg, ft.params[i]))
+            target = "*%rcx"
+        else:
+            name = call.callee.ident
+            sig = self._sig(name)
+            aliased = {id(a) for a, _ in self._aliased_args(call)}
+            for i, arg in enumerate(call.args):
+                logical.append(("staged" if id(arg) in aliased else "arg", arg, sig.params[i],
+                                self._param_owned(name, i, sig.params[i])))
+            target = f"myla_{name}"
+        self._store_call_words(logical)
+        # the copies passed (heap values, each with a reference of its own
+        # now: the checker allows no aggregate), released
+        for item in reversed(logical):
+            if item[0] == "staged":
+                self._staged_drops.pop()
+                self._release(self._locals[f"staged:{id(item[1])}"], item[2], True)
+        temps: list = []
+        if indirect:
+            self._collect_expr_temps(call.callee, temps)
+        for arg in call.args:
+            self._collect_expr_temps(arg, temps)
+        for slot, t in temps:
+            self._drop_value("rbp", slot, t)
+        self._emit_return_drops()
+        if indirect:
+            self._emit(f"movq {code_off}(%rbp), %rcx")
+        self._frame_handover(len(logical))
+        self._emit(f"jmp {target}")
+
+    def _frame_handover(self, m: int) -> None:
+        """The m words just pushed in place of the function's own (callee-pops,
+        as in `selfhost/ir_x86.my`): the callee pops its words and the caller
+        expects the n words it pushed popped, so the m words go to the top of
+        those words and the return address right below them (popped into
+        place when they fit, copied from the top down when there are more,
+        as they may overlap where they were pushed), and the caller's %rbp
+        restored; %rcx is left alone."""
+        n = self._arg_words
+        first = 16 + 8 * (n - m)
+        if m <= n:
+            for i in range(m):
+                self._emit(f"popq {first + 8 * i}(%rbp)")
+            if m < n:
+                self._emit("movq 8(%rbp), %rax")
+                self._emit(f"movq %rax, {first - 8}(%rbp)")
+                self._emit("movq 0(%rbp), %rax")
+                self._emit(f"movq %rax, {first - 16}(%rbp)")
+                self._emit(f"leaq {first - 16}(%rbp), %rsp")
+                self._emit("popq %rbp")
+            else:
+                self._emit("leave")
+        else:
+            self._emit("movq 8(%rbp), %r10")
+            self._emit("movq 0(%rbp), %r11")
+            for i in reversed(range(m)):
+                self._emit(f"movq {8 * i}(%rsp), %rax")
+                self._emit(f"movq %rax, {first + 8 * i}(%rbp)")
+            self._emit(f"movq %r10, {first - 8}(%rbp)")
+            self._emit(f"leaq {first - 8}(%rbp), %rsp")
+            self._emit("movq %r11, %rbp")
 
     def _aliased_args(self, expr: ast.Call) -> list:
         """The arguments of a call to a method writing its receiver (`var
@@ -4358,8 +4460,10 @@ class CodeGen:
         words are reserved, then filled in source order. When at most one word
         has effects or reads state (the others are literals, the sret pointer
         or the env), pushing them last to first is the same and shorter.
-        Items: ("sret", slot), ("env", slot), ("arg", expr, type) or
-        ("staged", expr, type), an argument passed as a copy (`_aliased_args`)."""
+        Items: ("sret", slot), ("env", slot), ("arg", expr, type[, owned]) or
+        ("staged", expr, type[, owned]), an argument passed as a copy
+        (`_aliased_args`); an owned one gets a reference of its own (D87);
+        ("word", operand), a word as it is (`become`'s own sret pointer)."""
         if not logical:
             return
         ordered = sum(1 for item in logical if item[0] in ("arg", "staged") and not _is_literal(item[1])) > 1
@@ -4371,17 +4475,21 @@ class CodeGen:
                 self._emit(f"leaq {item[1]}(%rbp), %rax")
             elif item[0] == "env":
                 self._emit(f"movq {item[1]}(%rbp), %rax")
+            elif item[0] == "word":
+                self._emit(f"movq {item[1]}, %rax")
             elif item[0] == "staged":
-                _, arg, ptype = item
+                arg, ptype = item[1], item[2]
                 slot = self._locals[f"staged:{id(arg)}"]
                 self._stage_value(arg, ptype, slot, inline=True)
                 self._emit(f"{'leaq' if _is_aggregate(ptype) else 'movq'} {slot}(%rbp), %rax")
             else:
-                _, arg, ptype = item
+                arg, ptype = item[1], item[2]
                 if _is_aggregate(ptype):
                     self._addr_of_aggregate(arg)
                 else:
                     self._eval(arg)
+            if item[0] in ("arg", "staged") and len(item) > 3 and item[3]:
+                self._emit("incq -8(%rax)")
             self._emit(f"movq %rax, {8 * k}(%rsp)" if ordered else "pushq %rax")
 
     def _gen_intrinsic(self, expr: ast.Call) -> None:
@@ -6273,6 +6381,12 @@ def _const_scalar(literal) -> int:
 def _asm_string(text: str) -> str:
     """Escape `text` for a double-quoted GAS string."""
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _ret_popping(words: int) -> str:
+    """The return of a function that pops its `words` argument words (the
+    callee pops them, so `become` can hand them over; D87)."""
+    return f"ret ${8 * words}" if words else "ret"
 
 
 def _place_root(expr: ast.Expr) -> str | None:

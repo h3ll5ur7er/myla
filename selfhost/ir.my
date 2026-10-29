@@ -139,6 +139,9 @@ pub enum Term {
     Br(int32, int32, int32),
     // ret %value, or -1 for none
     Ret(int32),
+    // become: the call that ends the block is made in place of the function,
+    // which returns what it returns (D87); the owners are dropped before it
+    Become,
     // trap kind @pos: the runtime error `__trap_<kind>` at a position (a
     // match no arm matched)
     Trap(str, Pos),
@@ -295,6 +298,7 @@ fun render_rt(d: int32, name: str, args: [int32]) -> str {
 
 #test(Term.Br(1, 2, 3))["br %t1, L2, L3"]
 #test(Term.Ret(-1))["ret"]
+#test(Term.Become)["become"]
 #test(Term.Panic(2, Pos { line: 3, col: 4 }))["panic %t2 @3:4"]
 pub fun render_term(t: Term) -> str {
     return match t {
@@ -305,6 +309,7 @@ pub fun render_term(t: Term) -> str {
             -1 => "ret"
             _ => format("ret %t{}", v)
         }
+        Term.Become => "become"
         Term.Trap(kind, p) => format("trap {} @{}:{}", kind, p.line, p.col)
         Term.Panic(m, p) => format("panic %t{} @{}:{}", m, p.line, p.col)
     }
@@ -392,6 +397,14 @@ pub fun verify(f: IrFunc) -> str {
                     i = i + 1
                 }
             },
+            Term.Become => {
+                if !ends_in_call(f.blocks[b].insts) { return format("L{}: become after no call", b) }
+                var i = 0
+                while i < len(live) {
+                    if live[i] { return format("L{}: ${} ({}) still holds a value at become", b, i, f.slots[i].name) }
+                    i = i + 1
+                }
+            },
             _ => {},
         }
         for s in succ {
@@ -444,6 +457,19 @@ fun step(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> str {
     let s = stored_slot(f, inst, addr_of)
     if s >= 0 && live[s] { return format("store into ${} ({}), which still holds a value", s, f.slots[s].name) }
     return ""
+}
+
+// Whether the last instruction of a block is a call of a function or a
+// function value (what `become` makes in place of the function).
+pub fun ends_in_call(insts: [Inst]) -> bool {
+    if len(insts) == 0 { return false }
+    return match insts[len(insts) - 1] {
+        Inst.Call(d, name, args) => true
+        Inst.CallSret(name, r, args) => true
+        Inst.CallInd(d, fv, args) => true
+        Inst.CallIndSret(fv, r, args) => true
+        _ => false
+    }
 }
 
 pub fun successors(t: Term) -> [int32] {
@@ -947,6 +973,14 @@ fun prepend(x: int32, xs: [int32]) -> [int32] {
 #test([Inst.Moved(0)])["L0: move out of $0 (s), which holds no value"]
 fun verify_block(insts: [Inst]) -> str {
     return verify(test_func([IrBlock { insts: insts, term: Term.Ret(-1) }]))
+}
+
+// `verify` on a function of one block with `insts`, then `become`.
+#test([Inst.Call(-1, "f", [])])[""]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Call(-1, "f", [])])["L0: $0 (s) still holds a value at become"]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Call(-1, "f", []), Inst.DropSlot(Type.TStr, 0)])["L0: become after no call"]
+fun verify_become(insts: [Inst]) -> str {
+    return verify(test_func([IrBlock { insts: insts, term: Term.Become }]))
 }
 
 // `verify` on a diamond: L0 stores into $0 and branches to L1 (`left`) and

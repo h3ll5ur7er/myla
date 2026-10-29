@@ -68,9 +68,21 @@ impl Value {
 pub enum Ctrl {
     CNone,
     CReturn,
+    CBecome,
     CBreak,
     CContinue,
     CExit,
+}
+
+// The call a `become` (D87) leaves pending for the loop that runs the
+// function (run_tail): a function, a method with its receiver, a `var self`
+// method on the same `self`, or a function value; and its arguments.
+pub enum TailCall {
+    TNone,
+    TFunc(int32, [Value]),
+    TMethod(int32, Value, [Value]),
+    TSelfMethod(int32, [Value]),
+    TValue(Value, [Value]),
 }
 
 pub struct RtFrame { names: [str], vals: [Value] }
@@ -101,6 +113,7 @@ pub struct Interp {
     rt_err: Option<RtError>, // the runtime error that stopped the program
     cell: Value,            // the value `update_cell` is changing
     receivers: [Value],     // `var self` receivers on their way into a call
+    tail: TailCall,         // the call a `become` left pending (Ctrl.CBecome)
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
@@ -111,6 +124,23 @@ pub struct RtError { msg: str, line: int32, col: int32, sp: SrcSpan, node: int32
 // The results of a run of `#test` cases: a PASS/FAIL line for each case, and
 // how many passed of how many (run_test_cases).
 pub struct TestRun { report: [str], passed: int32, total: int32 }
+
+// A partial application's arguments: its filled slots, and `argv` in its holes.
+fun fill_holes(slots: [Value], holes: [bool], argv: [Value]) -> [Value] {
+    var full: [Value] = []
+    var hi = 0
+    var i = 0
+    while i < len(slots) {
+        if holes[i] {
+            push(full, argv[hi])
+            hi = hi + 1
+        } else {
+            push(full, slots[i])
+        }
+        i = i + 1
+    }
+    return full
+}
 
 // Whether the loader qualified `name` with a module id (`geo$area`,
 // `geo$Point.eq`): it isn't declared in the entry module.
@@ -163,6 +193,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         rt_err: None,
         cell: Value.VUnit,
         receivers: [],
+        tail: TailCall.TNone,
     }
     return it
 }
@@ -411,6 +442,10 @@ impl Interp {
 
     fun returning(self) -> bool {
         return match self.ctrl { Ctrl.CReturn => true, _ => false }
+    }
+
+    fun becoming(self) -> bool {
+        return match self.ctrl { Ctrl.CBecome => true, _ => false }
     }
 
     // Stop the program with a runtime error at `e` (exit status 1).
@@ -688,7 +723,11 @@ impl Interp {
                 let p = self.place_of(target)
                 self.write_place(p, v)
             },
-            StmtKind.ReturnS(v) => {
+            StmtKind.ReturnS(v, tail) => {
+                if tail {
+                    match v { Some(ex) => { self.exec_become(ex) }, None => {} }
+                    return
+                }
                 var rv = Value.VUnit
                 match v { Some(ex) => { rv = self.eval(ex) }, None => {} }
                 if !self.stop() { self.ctrl = Ctrl.CReturn
@@ -1326,8 +1365,117 @@ impl Interp {
     // Call method `fi` on the receiver on top of `self.receivers`, which
     // moves into the method's `self`; yields the result and the final `self`.
     fun call_with_receiver(var self, fi: int32, argv: [Value]) -> (Value, Value) {
-        let fd = self.func_decls[fi]
         let saved = self.scopes
+        self.enter_method(fi, argv)
+        // `become self.m(…)` with a `var self` method goes on with this `self`
+        // (the checker allows no other receiver), so the final `self` is that
+        // of the last of them
+        while self.becoming() && self.tail_on_self() {
+            self.ctrl = Ctrl.CNone
+            let t = self.tail
+            self.tail = TailCall.TNone
+            match t {
+                TailCall.TSelfMethod(next, args) => {
+                    push(self.receivers, self.lookup_or_unit("self"))
+                    self.enter_method(next, args)
+                },
+                _ => {},
+            }
+        }
+        let final_self = self.lookup_or_unit("self")
+        let rv = self.run_tail()
+        self.scopes = saved
+        return rv, final_self
+    }
+
+    fun tail_on_self(self) -> bool {
+        return match self.tail { TailCall.TSelfMethod(fi, args) => true, _ => false }
+    }
+
+    // -- `become` (D87) ---------------------------------------------------
+
+    // `become call`: the callee and the arguments, evaluated as a call's
+    // would be, left pending for run_tail.
+    fun exec_become(var self, ex: Expr) {
+        let t = match ex.kind {
+            ExprKind.Call(callee, args) => self.tail_call(callee, args),
+            _ => TailCall.TNone,
+        }
+        if !self.stop() {
+            self.ctrl = Ctrl.CBecome
+            self.tail = t
+        }
+    }
+
+    fun tail_call(var self, callee: Expr, args: [Expr]) -> TailCall {
+        match callee.kind {
+            ExprKind.Name(nm) => {
+                // a local binding shadows a function of the same name (MYLA-102)
+                match self.lookup(nm) {
+                    Some(v) => { return TailCall.TValue(v, self.eval_args(args)) },
+                    None => {},
+                }
+                return TailCall.TFunc(self.func_idx(nm), self.eval_args(args))
+            },
+            ExprKind.GetField(tgt, field) => {
+                let fi = self.func_idx(format("{}.{}", self.recv_key(tgt), field))
+                if fi >= 0 {
+                    if self.method_is_var_self(fi) { return TailCall.TSelfMethod(fi, self.eval_args(args)) }
+                    let rv0 = self.eval(tgt)
+                    return TailCall.TMethod(fi, rv0, self.eval_args(args))
+                }
+                // a struct field holding a closure
+                let fv = get_field(self.eval(tgt), field)
+                return TailCall.TValue(fv, self.eval_args(args))
+            },
+            _ => {},
+        }
+        return TailCall.TValue(self.eval(callee), self.eval_args(args))
+    }
+
+    // Run the calls `become` leaves pending one after another in this loop,
+    // instead of recursing, and yield the last one's result.
+    fun run_tail(var self) -> Value {
+        while self.becoming() {
+            self.ctrl = Ctrl.CNone
+            let t = self.tail
+            self.tail = TailCall.TNone
+            match t {
+                TailCall.TFunc(fi, argv) => { self.enter_func(fi, argv) },
+                TailCall.TMethod(fi, recv, argv) => {
+                    push(self.receivers, recv)
+                    self.enter_method(fi, argv)
+                },
+                TailCall.TSelfMethod(fi, argv) => {
+                    push(self.receivers, self.lookup_or_unit("self"))
+                    self.enter_method(fi, argv)
+                },
+                TailCall.TValue(v, argv) => { self.enter_value(v, argv) },
+                TailCall.TNone => {},
+            }
+        }
+        return self.take_return()
+    }
+
+    // Function `fi` in a frame of its own with its parameters: its body runs,
+    // leaving its result (or the next `become`) pending.
+    fun enter_func(var self, fi: int32, argv: [Value]) {
+        if fi < 0 { return }
+        let fd = self.func_decls[fi]
+        self.scopes = []
+        self.push_scope()
+        var i = 0
+        while i < len(fd.params) {
+            self.define(fd.params[i].name, argv[i])
+            i = i + 1
+        }
+        self.exec_block_body(fd.body)
+    }
+
+    // Method `fi` on the receiver on top of `self.receivers`, which moves
+    // into its `self`.
+    fun enter_method(var self, fi: int32, argv: [Value]) {
+        let fd = self.func_decls[fi]
         self.scopes = []
         self.push_scope()
         self.define("self", pop(self.receivers))
@@ -1337,10 +1485,67 @@ impl Interp {
             i = i + 1
         }
         self.exec_block_body(fd.body)
-        let rv = self.take_return()
-        let final_self = self.lookup_or_unit("self")
-        self.scopes = saved
-        return rv, final_self
+    }
+
+    // The function value `v`: as call_value, but entered (a composition's
+    // last function, a partial application's base) instead of called.
+    fun enter_value(var self, v: Value, argv: [Value]) {
+        match v {
+            Value.VClosure(ps, body, cnames, cvals, fname, isfunc) => {
+                if isfunc {
+                    let fi = self.func_idx(fname)
+                    if fi < 0 { return }
+                    if is_method_name(fname) {
+                        // a method value: argv[0] is the receiver
+                        push(self.receivers, argv[0])
+                        var rest: [Value] = []
+                        var k = 1
+                        while k < len(argv) {
+                            push(rest, argv[k])
+                            k = k + 1
+                        }
+                        self.enter_method(fi, rest)
+                        return
+                    }
+                    self.enter_func(fi, argv)
+                    return
+                }
+                self.scopes = []
+                self.push_scope()
+                var i = 0
+                while i < len(cnames) {
+                    self.define(cnames[i], cvals[i])
+                    i = i + 1
+                }
+                var k = 0
+                while k < len(ps) {
+                    self.define(ps[k].name, argv[k])
+                    k = k + 1
+                }
+                match body {
+                    ExprOrBlock.EB_Expr(ex) => {
+                        let rv = self.eval(ex)
+                        // a `?` in the body has returned from the lambda (MYLA-72)
+                        if !self.stop() {
+                            self.ctrl = Ctrl.CReturn
+                            self.ctrl_val = rv
+                        }
+                    },
+                    ExprOrBlock.EB_Block(b) => { self.exec_block(b) },
+                }
+            },
+            Value.VCompose(fs) => {
+                var x = argv[0]
+                var i = 0
+                while i < len(fs) - 1 {
+                    x = self.call_value(fs[i], [x])
+                    i = i + 1
+                }
+                self.enter_value(fs[len(fs) - 1], [x])
+            },
+            Value.VPartial(base, slots, holes) => { self.enter_value(base, fill_holes(slots, holes, argv)) },
+            _ => {},
+        }
     }
 
     fun has_method_body(self, key: str, name: str) -> bool {
@@ -1601,19 +1806,7 @@ impl Interp {
 
     // Fill a partial application's holes with the supplied args, in order.
     fun call_partial(var self, base: Value, slots: [Value], holes: [bool], argv: [Value]) -> Value {
-        var full: [Value] = []
-        var hi = 0
-        var i = 0
-        while i < len(slots) {
-            if holes[i] {
-                push(full, argv[hi])
-                hi = hi + 1
-            } else {
-                push(full, slots[i])
-            }
-            i = i + 1
-        }
-        return self.call_value(base, full)
+        return self.call_value(base, fill_holes(slots, holes, argv))
     }
 
     // A lambda captures every currently-visible local by value (a snapshot).
@@ -1674,7 +1867,7 @@ impl Interp {
             },
             ExprOrBlock.EB_Block(b) => {
                 self.exec_block(b)
-                rv = self.take_return()
+                rv = self.run_tail()
             },
         }
         self.scopes = saved
@@ -1682,17 +1875,9 @@ impl Interp {
     }
 
     fun call_func(var self, fi: int32, argv: [Value]) -> Value {
-        let fd = self.func_decls[fi]
         let saved = self.scopes
-        self.scopes = []
-        self.push_scope()
-        var i = 0
-        while i < len(fd.params) {
-            self.define(fd.params[i].name, argv[i])
-            i = i + 1
-        }
-        self.exec_block_body(fd.body)
-        let rv = self.take_return()
+        self.enter_func(fi, argv)
+        let rv = self.run_tail()
         self.scopes = saved
         return rv
     }

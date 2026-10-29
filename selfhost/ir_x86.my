@@ -103,11 +103,16 @@ impl CodeGen {
             let insts = f.blocks[b].insts
             let fused = self.fused_compare(insts, f.blocks[b].term)
             var tail = -1
-            if !self.debug { tail = tail_call_at(insts, f.blocks[b].term) }
-            if tail >= 0 && !drops_after_free(f, insts, tail) { tail = -1 }
-            if tail >= 0 {
-                if len(in_frame) == 0 { in_frame = frame_addresses(f) }
-                if passes_frame_address(insts[tail], in_frame) { tail = -1 }
+            let becomes = match f.blocks[b].term { Term.Become => true, _ => false }
+            // `become`'s call always replaces the function (D87), under -g too
+            if becomes { tail = len(insts) - 1 }
+            else {
+                if !self.debug { tail = tail_call_at(insts, f.blocks[b].term) }
+                if tail >= 0 && !drops_after_free(f, insts, tail) { tail = -1 }
+                if tail >= 0 {
+                    if len(in_frame) == 0 { in_frame = frame_addresses(f) }
+                    if passes_frame_address(insts[tail], in_frame) { tail = -1 }
+                }
             }
             var stop = len(insts)
             if tail >= 0 { stop = tail }
@@ -505,57 +510,100 @@ impl CodeGen {
     }
 
     // The call `c`, whose result the function returns at once, as a jump
-    // reusing this frame (MYLA-126). The callee pops its arguments and the
-    // caller expects the n words it pushed popped, so the callee's m
-    // arguments go to the top of those words and the return address right
-    // below them: the arguments are pushed, the saved registers restored,
-    // the arguments copied up (popped while they move into the argument
-    // words, copied from the top down when there are more, as they may then
-    // overlap where they were pushed), the return address and the caller's
-    // %rbp put in place, and the callee jumped to.
+    // reusing this frame (MYLA-126; `become`'s, D87): its words pushed as
+    // `emit_inst` pushes them (the arguments last first, then a function
+    // value's environment, then an aggregate result's address), a function
+    // value's code in %rcx, which the handover leaves alone.
     fun emit_tail_call(var self, c: Inst, temp_base: int32) {
+        var target = ""
+        var words: [int32] = []
+        var fv = -1
+        var r = -1
         match c {
             Inst.Call(d, name, args) => {
-                let m = len(args)
-                let n = self.arg_words
-                var i = m - 1
-                while i >= 0 {
-                    self.push_temp(args[i], temp_base)
-                    i = i - 1
-                }
-                self.restore_regs()
-                let first = 16 + 8 * (n - m)
-                if m <= n {
-                    i = 0
-                    while i < m {
-                        self.emit(format("popq {}(%rbp)", first + 8 * i))
-                        i = i + 1
-                    }
-                    if m < n {
-                        self.emit("movq 8(%rbp), %rax")
-                        self.emit(format("movq %rax, {}(%rbp)", first - 8))
-                        self.emit("movq 0(%rbp), %rax")
-                        self.emit(format("movq %rax, {}(%rbp)", first - 16))
-                        self.emit(format("leaq {}(%rbp), %rsp", first - 16))
-                        self.emit("popq %rbp")
-                    } else { self.emit("leave") }
-                } else {
-                    self.emit("movq 8(%rbp), %r10")
-                    self.emit("movq 0(%rbp), %r11")
-                    i = m - 1
-                    while i >= 0 {
-                        self.emit(format("movq {}(%rsp), %rax", 8 * i))
-                        self.emit(format("movq %rax, {}(%rbp)", first + 8 * i))
-                        i = i - 1
-                    }
-                    self.emit(format("movq %r10, {}(%rbp)", first - 8))
-                    self.emit(format("leaq {}(%rbp), %rsp", first - 8))
-                    self.emit("movq %r11, %rbp")
-                }
-                self.emit(format("jmp myla_{}", name))
+                words = args
+                target = format("myla_{}", name)
             },
-            _ => {},
+            Inst.CallSret(name, res, args) => {
+                words = args
+                r = res
+                target = format("myla_{}", name)
+            },
+            Inst.CallInd(d, f, args) => {
+                words = args
+                fv = f
+                target = "*%rcx"
+            },
+            Inst.CallIndSret(f, res, args) => {
+                words = args
+                fv = f
+                r = res
+                target = "*%rcx"
+            },
+            _ => { return },
         }
+        var i = len(words) - 1
+        while i >= 0 {
+            self.push_temp(words[i], temp_base)
+            i = i - 1
+        }
+        var m = len(words)
+        if fv >= 0 {
+            self.load_temp(fv, "rax", temp_base)
+            self.emit("pushq 8(%rax)")
+            m = m + 1
+        }
+        if r >= 0 {
+            self.push_temp(r, temp_base)
+            m = m + 1
+        }
+        if fv >= 0 {
+            self.load_temp(fv, "rax", temp_base)
+            self.emit("movq (%rax), %rcx")
+        }
+        self.emit_frame_handover(m, target)
+    }
+
+    // The m words just pushed in place of the function's own, and a jump to
+    // `target` (MYLA-126). The callee pops its words and the caller expects
+    // the n words it pushed popped, so the callee's m words go to the top of
+    // those words and the return address right below them: the saved
+    // registers restored, the words copied up (popped while they move into
+    // the argument words, copied from the top down when there are more, as
+    // they may then overlap where they were pushed), the return address and
+    // the caller's %rbp put in place, and the callee jumped to.
+    fun emit_frame_handover(var self, m: int32, target: str) {
+        let n = self.arg_words
+        self.restore_regs()
+        let first = 16 + 8 * (n - m)
+        var i = 0
+        if m <= n {
+            while i < m {
+                self.emit(format("popq {}(%rbp)", first + 8 * i))
+                i = i + 1
+            }
+            if m < n {
+                self.emit("movq 8(%rbp), %rax")
+                self.emit(format("movq %rax, {}(%rbp)", first - 8))
+                self.emit("movq 0(%rbp), %rax")
+                self.emit(format("movq %rax, {}(%rbp)", first - 16))
+                self.emit(format("leaq {}(%rbp), %rsp", first - 16))
+                self.emit("popq %rbp")
+            } else { self.emit("leave") }
+        } else {
+            self.emit("movq 8(%rbp), %r10")
+            self.emit("movq 0(%rbp), %r11")
+            i = m - 1
+            while i >= 0 {
+                self.emit(format("movq {}(%rsp), %rax", 8 * i))
+                self.emit(format("movq %rax, {}(%rbp)", first + 8 * i))
+                i = i - 1
+            }
+            self.emit(format("movq %r10, {}(%rbp)", first - 8))
+            self.emit(format("leaq {}(%rbp), %rsp", first - 8))
+            self.emit("movq %r11, %rbp")
+        }
+        self.emit(format("jmp {}", target))
     }
 
     // The callee-saved registers the function saved, restored (MYLA-121).
@@ -624,6 +672,8 @@ impl CodeGen {
                 if v >= 0 { self.load_temp(v, "rax", temp_base) }
                 self.emit(format("jmp {}", self.epilogue))
             },
+            // the call before it is the jump (`emit_tail_call`)
+            Term.Become => {},
             Term.Trap(kind, p) => { self.trap("jmp", "__trap_" + kind, p.line, p.col) },
             Term.Panic(m, p) => {
                 self.load_temp(m, "rdi", temp_base)

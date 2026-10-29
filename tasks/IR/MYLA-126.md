@@ -2,7 +2,7 @@
 id: MYLA-126
 title: Tail calls
 type: feature
-status: in-progress
+status: done
 priority: low
 labels: [ir, codegen, selfhost, design]
 ---
@@ -18,7 +18,7 @@ Where we stand (discussed with the IR's stability, D85):
 
 - [x] Opportunistic tail calls in the backend (no owners alive, no more argument words); thunks and `__compose_call` jump (the adapter from the closure convention to a plain function, and `__compose_call`; partial-application thunks pass more words than they receive and wait for callee-pops)
 - [x] Callee-pops calling convention; the owners nothing a tail call passes depends on dropped before the jump
-- [ ] With [[MYLA-127]]: the guarantee (tail position, marker, checker errors, interpreters)
+- [x] With [[MYLA-127]]: the guarantee (tail position, marker, checker errors, interpreters): `become`, D87, [[MYLA-128]]. Partial-application thunks still call their function; with callee-pops they could jump too
 
 ## Step A: opportunistic tail calls
 

@@ -21,6 +21,7 @@
 
 - Environments are chains of dictionaries (`_Env`); each call starts a fresh frame whose parent is nothing, since functions see only their parameters, constants and other functions.
 - `return`, `break` and `continue` are Python exceptions; `std.process.exit` raises `_ExitSignal`, caught by `run()`, which returns the exit status.
+- `become` (D87) raises `_BecomeSignal` with the callee's body and its new frame; `_run`, the loop every call goes through, catches it and goes on with them, so a chain of `become`s doesn't nest Python calls. The self-hosted interpreter does the same with `Ctrl.CBecome` and `run_tail`; a `var self` method that `become` calls on `self` passes `self` on, and the caller stores back the last one's.
 - Constants are evaluated once from the checker's folded values.
 - `var self` methods bind `self` to the caller's actual object (`_resolve_struct` finds it), so field writes reach the caller; read-only `self` gets a copy.
 - Operators on structs and enums inside a bounded generic body are dispatched at run time to `Type.add`, `Type.eq`, `Type.cmp`, … (`_dispatch_operator`); everywhere else they were desugared into method calls.

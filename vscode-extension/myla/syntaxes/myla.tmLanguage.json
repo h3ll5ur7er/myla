@@ -297,7 +297,7 @@
         },
         {
           "name": "keyword.control.flow.myla",
-          "match": "\\b(return)\\b"
+          "match": "\\b(return|become)\\b"
         },
         {
           "name": "storage.modifier.visibility.myla",

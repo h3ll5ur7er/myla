@@ -69,6 +69,7 @@
   "while"
   "in"
   "return"
+  "become"
   "match"
 ] @keyword
 

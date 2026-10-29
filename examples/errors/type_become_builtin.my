@@ -1,0 +1,9 @@
+//~ type error: 'become' needs a call of a function, a method or a function value
+//~ span: Some(n)
+// An enum variant (or a builtin) is no call `become` can jump to (D87).
+fun wrap(n: int) -> Option<int> {
+    become Some(n)
+}
+fun main() {
+    let w = wrap(1)
+}

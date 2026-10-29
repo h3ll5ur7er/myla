@@ -77,6 +77,7 @@ PARITY_PROGRAMS = (
     "assign_heap_owning_struct_to_itself",
     "method_arguments_survive_the_receivers_writes",
     "borrowed_lets_survive_a_moved_value",
+    "become_keeps_the_stack_flat",
     "assign_to_a_field_of_a_shared_element_copies_it",
     "match_binding_survives_writes_to_the_scrutinee",
     "destructure_boxed_enum_and_list_leaves",
@@ -1058,6 +1059,36 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn("call myla_first_of", self._function_asm(asm, "borrowed"))
         # `rest` borrows from the match's value, dropped after the call
         self.assertIn("call myla_first_of", self._function_asm(asm, "through_match"))
+
+    def test_become_replaces_the_frame(self) -> None:
+        # MYLA-128, D87: every `become` of the parity program jumps, so it runs
+        # a million calls deep in the default stack (a `return` of the same
+        # calls overflows it), and so it does built with -g
+        from .test_compiler_parity import PROGRAMS
+        source = (PROGRAMS["become_keeps_the_stack_flat"]
+                  .replace("let deep = 20000", "let deep = 1000000")
+                  .replace("0..1000 {", "0..1000000 {"))
+        expected = ("1784293664\ntrue\ntrue\n3000000\n3000000\n2000000\n459109\n3\n"
+                    "1000001\n1000000\n2999997\n2999997\n1000\nc\nabc\n42\n789\ndone\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), (expected, 0))
+            proc = subprocess.run([self._binary, path, "-g"], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(self._build_and_run(proc.stdout), (expected, 0))
+            ir = subprocess.run([self._binary, path, "--emit-ir"], capture_output=True, text=True).stdout
+        self.assertIn("jmp myla_count", self._function_asm(asm, "count"))
+        self.assertIn("jmp myla_Counter.run", self._function_asm(asm, "Counter.run"))
+        self.assertIn("jmp myla_Walker.walk", self._function_asm(asm, "Walker.walk"))
+        self.assertIn("jmp myla_fib", self._function_asm(asm, "fib"))
+        self.assertIn("jmp myla_label", self._function_asm(asm, "label"))
+        self.assertIn("jmp *%rcx", self._function_asm(asm, "spin"))
+        self.assertIn("jmp *%rcx", self._function_asm(asm, "via"))
+        # the IR's text form: the call, then the terminator
+        self.assertRegex(ir, r"call myla_count\(%t\d+, %t\d+\)\n  become\n")
 
     def _unsaved_callee_saved(self, asm: str) -> list:
         """The routines of `asm` writing %rbx or %r12-%r15 without saving it

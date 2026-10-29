@@ -266,6 +266,8 @@ def _ct(node) -> str:
         iterable = "nil" if node.iterable is None else _ct(node.iterable)
         return ("(for " + _s(node.var_name) + " " + start + " " + end + " "
                 + _ct(node.body) + " " + iterable + ")")
+    if k == "Return" and node.tail:
+        return "(become " + _ct(node.value) + ")"
     if k == "Return":
         return "(return " + ("nil" if node.value is None else _ct(node.value)) + ")"
     if k == "Break":

@@ -92,6 +92,44 @@ fun main() {
 }
 ```
 
+## become
+
+`become f(args)` ends the function like `return f(args)`, but the call runs in place of the function: its frame is gone by the time the call starts. However long a chain of `become`s runs (a recursion, functions calling each other, a state machine), the stack doesn't grow. Every implementation guarantees it, also with `-g` (D87, [[MYLA-128]]). A `return` of a call stays an ordinary return. The self-hosted compiler still turns it into a jump when it can ([[MYLA-126]]), but nothing guarantees it.
+
+```myla
+fun gcd(a: int, b: int) -> int {
+    if b == 0 { return a }
+    become gcd(b, a % b)
+}
+
+fun is_even(n: int) -> bool {
+    if n == 0 { return true }
+    become is_odd(n - 1)
+}
+
+fun is_odd(n: int) -> bool {
+    if n == 0 { return false }
+    become is_even(n - 1)
+}
+
+fun main() {
+    print(gcd(1071, 462))      // 21
+    print(is_even(1000000))    // true, without a million frames
+}
+```
+
+The checker accepts a `become` that can run without the function's frame ([[src/myla/types.py#L4267-L4388]]):
+
+- It stands where a `return` could, in a function's body; a lambda's body can't use it.
+- It calls a function, a method (`become self.step(n)`) or a function value, not a builtin, an enum variant or a partial application. No `?` follows the call.
+- The callee returns the function's result type, without a conversion, or both return nothing.
+- A function value it calls must be a parameter or a part of one: `become g(x)`, `become m.next(m, n)`.
+- A struct, tuple, enum or function value it passes, or a value of a type parameter, must be a parameter or a part of one: those live in the caller's storage, and the function's own would go with its frame.
+- Scalars pass freely, and so do strings, lists, maps and builders passed to a function or a method, which then owns them: the compiler passes such a parameter owned (D86). A function value only borrows its arguments, so a value it gets this way must be (a part of) a parameter too. A parameter that a `become` hands a value over to can't be passed on to a function value.
+- A method that changes its receiver (`var self`) can only be called on `self`, and gets no struct, tuple or enum that is a part of `self`.
+
+The guarantee is the `become`'s own: a function value's code runs as written, so a lambda whose body calls a function, or a partial application, makes an ordinary call there.
+
 ## Expression statements
 
 Any expression can stand alone; usually it's a call. A `match` used as a statement may have arms without a value.

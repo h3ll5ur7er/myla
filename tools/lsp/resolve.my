@@ -612,7 +612,7 @@ impl Resolver {
                 self.block(body)
                 self.pop_scope()
             },
-            StmtKind.ReturnS(v) => {
+            StmtKind.ReturnS(v, tail) => {
                 match v { Some(e) => { self.expr(e) }, None => {} }
             },
             StmtKind.BreakS => {},
