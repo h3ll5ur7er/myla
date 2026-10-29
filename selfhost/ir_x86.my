@@ -542,44 +542,54 @@ impl CodeGen {
             },
             _ => { return },
         }
-        var i = len(words) - 1
+        // the words, the lowest first (-1: the environment); one already
+        // where it goes, a parameter passed on in its place, stays there
+        var temps: [int32] = []
+        if r >= 0 { push(temps, r) }
+        if fv >= 0 { push(temps, -1) }
+        for a in words { push(temps, a) }
+        let m = len(temps)
+        let first = 16 + 8 * (self.arg_words - m)
+        var in_place: [bool] = []
+        var k = 0
+        while k < m {
+            push(in_place, m <= self.arg_words && temps[k] >= 0 && self.temp_src[temps[k]] == format("{}(%rbp)", first + 8 * k))
+            k = k + 1
+        }
+        var i = m - 1
         while i >= 0 {
-            self.push_temp(words[i], temp_base)
+            if !in_place[i] {
+                if temps[i] >= 0 { self.push_temp(temps[i], temp_base) }
+                else {
+                    self.load_temp(fv, "rax", temp_base)
+                    self.emit("pushq 8(%rax)")
+                }
+            }
             i = i - 1
-        }
-        var m = len(words)
-        if fv >= 0 {
-            self.load_temp(fv, "rax", temp_base)
-            self.emit("pushq 8(%rax)")
-            m = m + 1
-        }
-        if r >= 0 {
-            self.push_temp(r, temp_base)
-            m = m + 1
         }
         if fv >= 0 {
             self.load_temp(fv, "rax", temp_base)
             self.emit("movq (%rax), %rcx")
         }
-        self.emit_frame_handover(m, target)
+        self.emit_frame_handover(m, in_place, target)
     }
 
-    // The m words just pushed in place of the function's own, and a jump to
-    // `target` (MYLA-126). The callee pops its words and the caller expects
+    // The m words just pushed (but those `in_place` already) in place of the
+    // function's own, and a jump to `target` (MYLA-126). The callee pops its words and the caller expects
     // the n words it pushed popped, so the callee's m words go to the top of
     // those words and the return address right below them: the saved
     // registers restored, the words copied up (popped while they move into
     // the argument words, copied from the top down when there are more, as
     // they may then overlap where they were pushed), the return address and
     // the caller's %rbp put in place, and the callee jumped to.
-    fun emit_frame_handover(var self, m: int32, target: str) {
+    fun emit_frame_handover(var self, m: int32, in_place: [bool], target: str) {
         let n = self.arg_words
         self.restore_regs()
         let first = 16 + 8 * (n - m)
         var i = 0
         if m <= n {
             while i < m {
-                self.emit(format("popq {}(%rbp)", first + 8 * i))
+                if !in_place[i] { self.emit(format("popq {}(%rbp)", first + 8 * i)) }
                 i = i + 1
             }
             if m < n {

@@ -810,9 +810,10 @@ fun defining_addr(insts: [Inst], at: int32, t: int32) -> int32 {
 
 // The index of the `drop $s` the retain `insts[at]` can be moved into
 // (`moves`), or -1: every temporary taken from slot s in this block (loaded
-// from it, its address, or computed from those) is no longer read after the
-// retain, but for a retained loaded value read once, and nothing touches s
-// before that drop.
+// from it, its address, or computed from those) is no longer read after that
+// drop, and between the retain and the drop only read (`only_reads`) before
+// the retained loaded value is taken (read once), so nothing can tell the
+// value lost a reference; and nothing else touches s before the drop.
 fun move_drop(f: IrFunc, insts: [Inst], term: Term, at: int32, s: int32) -> int32 {
     // a drop of s later in the block, first (cheap)
     var later = false
@@ -855,20 +856,44 @@ fun move_drop(f: IrFunc, insts: [Inst], term: Term, at: int32, s: int32) -> int3
         Inst.RetainVal(t, v) => { allowed = v },
         _ => {},
     }
+    // the retained value may be taken before the retain (stored, then retained)
+    var taken = false
+    j = 0
+    while j < at {
+        for u in inst_uses(insts[j]) { if u == allowed && allowed >= 0 { taken = true } }
+        j = j + 1
+    }
     var reads = 0
     var drop = -1
     j = at + 1
     while j < len(insts) {
+        // until the drop the slot still holds the value: what only reads it
+        // (a load of the slot, or of what is computed from one) may go on
+        // reading it there, but nothing taken from it is read after the drop,
+        // nor once the retained value is taken: its taker shares the value
+        // at one reference less and may change it in place
+        let reading = drop < 0 && !taken && reads == 0 && only_reads(insts[j])
         if touches_slot(insts[j], s) {
             let is_drop = match insts[j] {
                 Inst.DropSlot(t, x) => x == s,
                 _ => false,
             }
-            if !is_drop || drop >= 0 { return -1 }
-            drop = j
+            if !is_drop && !reading { return -1 }
+            if is_drop {
+                if drop >= 0 { return -1 }
+                drop = j
+            }
         }
+        var from_family = match insts[j] { Inst.Load(d, x) => x == s, _ => false }
         for u in inst_uses(insts[j]) {
-            if u == allowed { reads = reads + 1 } else if has_int(family, u) { return -1 }
+            if u == allowed { reads = reads + 1 } else if has_int(family, u) {
+                if !reading { return -1 }
+                from_family = true
+            }
+        }
+        if from_family {
+            // a plain scalar read out of the value is a copy of its own
+            for d in inst_defs(insts[j]) { if !plain_scalar(f.temps[d]) && !has_int(family, d) { push(family, d) } }
         }
         j = j + 1
     }
@@ -877,6 +902,42 @@ fun move_drop(f: IrFunc, insts: [Inst], term: Term, at: int32, s: int32) -> int3
     }
     if drop < 0 || reads > 1 { return -1 }
     return drop
+}
+
+// Whether a temporary of type `t` is a plain value: an integer (but a
+// `uint64`, which may be an address), a float, a bool or a char.
+#test(Type.TInt(32, true))[true]
+#test(Type.TInt(64, false))[false]
+#test(Type.TStr)[false]
+fun plain_scalar(t: Type) -> bool {
+    return match t {
+        Type.TInt(w, signed) => signed || w < 64
+        Type.TFloat(w) => true
+        Type.TBool => true
+        Type.TChar => true
+        _ => false
+    }
+}
+
+// Whether `inst` only reads (a slot, memory, or temporaries) into a
+// temporary of its own, which a value's last reference can't notice.
+#test(Inst.LoadAt(1, 2, 0))[true]
+#test(Inst.Cow(1, Type.TStr, 2))[false]
+fun only_reads(inst: Inst) -> bool {
+    return match inst {
+        Inst.Const(d, t, v) => true
+        Inst.Load(d, x) => true
+        Inst.Offset(d, p, off) => true
+        Inst.LoadAt(d, p, off) => true
+        Inst.Load8(d, p) => true
+        Inst.Elem(d, c, i, stride, is_str, pos) => true
+        Inst.Bin(d, op, lt, rt, a, b, pos) => true
+        Inst.Cmp(d, op, t, a, b) => true
+        Inst.Un(d, op, t, a) => true
+        Inst.Cast(d, from_t, to_t, a) => true
+        Inst.Loc(p) => true
+        _ => false
+    }
 }
 
 // Whether `inst` names the slot `s` (reads, writes, takes its address,
