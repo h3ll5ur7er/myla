@@ -173,6 +173,7 @@ pub struct CodeGen {
     slot_reg: [str],
     saved_regs: [str],
     save_base: int32,               // MYLA-126: the saved registers' cells start below it
+    arg_words: int32,               // MYLA-126: the argument words the function pops
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -241,7 +242,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0,
+        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0, arg_words: 0,
     }
 }
 
@@ -2121,9 +2122,16 @@ impl CodeGen {
         } else {
             self.emit(format("call myla_{}", job.target))
         }
-        if pushed > 0 { self.emit(format("addq ${}, %rsp", 8 * pushed)) }
+        // the target popped what it was given; this pops the words it was
+        // called with: the result's address, the env and the holes (MYLA-126)
+        var holes = 0
+        for sl in job.slots {
+            if sl < 0 { holes = holes + 1 }
+        }
+        var words = 1 + holes
+        if job.sret { words = words + 1 }
         self.emit("leave")
-        self.emit("ret")
+        self.emit(ret_popping(words))
         self.emit("")
         if len(job.owned) > 0 { self.emit_env_drop(job.lifted, job.owned) }
     }
@@ -2145,25 +2153,22 @@ impl CodeGen {
     }
 
     // `myla_<fn>__fnval(env, args…)`: adapter so a plain `fun` can be called
-    // through the closure convention: the arguments move down over the env
-    // word and it jumps to `myla_<fn>` (MYLA-126), whose caller pops the
-    // words it pushed, the env's too.
+    // through the closure convention (MYLA-126): the return address and the
+    // result's address move up over the env word, and it jumps to
+    // `myla_<fn>`, which pops the arguments and so all its caller pushed.
     fun emit_fnval_thunk(var self, n: str) {
         let sig = self.sig_of(n)
         let struct_ret = is_aggregate_opt(sig.ret)
-        let nargs = len(sig.params)
-        var base = 1
-        if struct_ret { base = 2 }
-        let arg0_off = 16 + 8 * base
         self.emit(format("myla_{}__fnval:", n))
         // the return address at 0(%rsp), the result's address (if any) at
         // 8(%rsp), the env after it, then the arguments
-        var i = 0
-        while i < nargs {
-            self.emit(format("movq {}(%rsp), %rax", arg0_off - 8 + 8 * i))
-            self.emit(format("movq %rax, {}(%rsp)", arg0_off - 16 + 8 * i))
-            i = i + 1
+        if struct_ret {
+            self.emit("movq 8(%rsp), %rax")
+            self.emit("movq %rax, 16(%rsp)")
         }
+        self.emit("movq (%rsp), %rax")
+        self.emit("movq %rax, 8(%rsp)")
+        self.emit("addq $8, %rsp")
         self.emit(format("jmp myla_{}", n))
         self.emit("")
     }
@@ -3870,8 +3875,8 @@ impl CodeGen {
         self.raw("\tpushq %rcx")
         self.raw("\tmovq 8(%rbx), %rcx")
         self.raw("\tcall *%rcx")
-        self.raw("\taddq $16, %rsp")
-        // the second function in this frame's words, by a jump (MYLA-126)
+        // the second function in this frame's words, by a jump; it pops
+        // them (MYLA-126)
         self.raw("\tmovq %rax, 24(%rbp)")
         self.raw("\tmovq 32(%rbx), %rcx")
         self.raw("\tmovq %rcx, 16(%rbp)")
@@ -3995,7 +4000,7 @@ impl CodeGen {
         self.emit("movq $0, %rax")
         self.emit(format("{}:", lend))
         self.emit("popq %rbp")
-        self.emit("ret")
+        self.emit("ret $16")                // it pops self and other (MYLA-126)
     }
 
     fun emit_enum_eq(var self, name: str) {
@@ -4033,7 +4038,7 @@ impl CodeGen {
         self.emit("movq $0, %rax")
         self.emit(format("{}:", lend))
         self.emit("popq %rbp")
-        self.emit("ret")
+        self.emit("ret $16")                // it pops self and other (MYLA-126)
     }
 
     // Compare the component of type `ft` at byte offset `off` in the two cells
@@ -4051,7 +4056,6 @@ impl CodeGen {
             self.emit(format("{} {}(%rax), %rax", load, off))
             self.emit("pushq %rax")
             self.emit(format("call myla_{}.eq", self.type_key(ft)))
-            self.emit("addq $16, %rsp")
             self.emit("testq %rax, %rax")
             self.emit(format("jz {}", lne))
         } else if is_tstr(ft) {
@@ -5680,6 +5684,15 @@ pub fun takes_operand(op: str) -> bool {
 }
 
 fun starts_with_dollar(s: str) -> bool { return len(s) > 0 && s[0] == '$' }
+
+// The return of a function called with `words` argument words, which it
+// pops (MYLA-126).
+#test(0)["ret"]
+#test(2)["ret $16"]
+pub fun ret_popping(words: int32) -> str {
+    if words == 0 { return "ret" }
+    return format("ret ${}", 8 * words)
+}
 
 // Whether the held-back store `s` is a move from %rax into a register
 // (`movq %rax, %r12`), not into a frame cell.

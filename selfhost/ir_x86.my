@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, ret_popping
 from .ir import IrFunc, Inst, Term, Touches, touches, use_counts, def_counts, inst_uses, term_uses, successors
 
 impl CodeGen {
@@ -54,6 +54,7 @@ impl CodeGen {
         }
         var in_frame: [bool] = []
         self.save_base = saves
+        self.arg_words = words
         let temp_base = 0
         let frame = (cursor + 15) / 16 * 16
         self.epilogue = format(".Lret_{}", mangled)
@@ -102,7 +103,7 @@ impl CodeGen {
             let insts = f.blocks[b].insts
             let fused = self.fused_compare(insts, f.blocks[b].term)
             var tail = -1
-            if !self.debug { tail = tail_call_at(insts, f.blocks[b].term, words) }
+            if !self.debug { tail = tail_call_at(insts, f.blocks[b].term) }
             if tail >= 0 {
                 if len(in_frame) == 0 { in_frame = frame_addresses(f) }
                 if passes_frame_address(insts[tail], in_frame) { tail = -1 }
@@ -133,7 +134,8 @@ impl CodeGen {
         self.emit(format("{}:", self.epilogue))
         self.restore_regs()
         self.emit("leave")
-        self.emit("ret")
+        // the callee pops the argument words its caller pushed (MYLA-126)
+        self.emit(ret_popping(words))
         self.end_loc()
         self.dbg_pop_scope()
         self.dbg_end_function()
@@ -269,7 +271,6 @@ impl CodeGen {
                     i = i - 1
                 }
                 self.emit(format("call myla_{}", name))
-                if len(args) > 0 { self.emit(format("addq ${}, %rsp", 8 * len(args))) }
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
             Inst.CallSret(name, r, args) => {
@@ -281,7 +282,6 @@ impl CodeGen {
                 }
                 self.push_temp(r, temp_base)
                 self.emit(format("call myla_{}", name))
-                self.emit(format("addq ${}, %rsp", 8 * (len(args) + 1)))
             },
             Inst.Label(d, sym) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.CallInd(d, fv, args) => {
@@ -294,7 +294,6 @@ impl CodeGen {
                 self.load_temp(fv, "rax", temp_base)
                 self.emit("pushq 8(%rax)")
                 self.emit("call *(%rax)")
-                self.emit(format("addq ${}, %rsp", 8 * (len(args) + 1)))
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
             Inst.CallIndSret(fv, r, args) => {
@@ -308,7 +307,6 @@ impl CodeGen {
                 self.load_temp(r, "rcx", temp_base)
                 self.emit("pushq %rcx")
                 self.emit("call *(%rax)")
-                self.emit(format("addq ${}, %rsp", 8 * (len(args) + 2)))
             },
             Inst.Rt(d, name, args) => {
                 self.load_args(args, temp_base)
@@ -495,24 +493,53 @@ impl CodeGen {
     }
 
     // The call `c`, whose result the function returns at once, as a jump
-    // reusing this frame (MYLA-126): the arguments pushed, then popped into
-    // the argument words this function was called with (the caller pops
-    // them), the saved registers restored and the frame left.
+    // reusing this frame (MYLA-126). The callee pops its arguments and the
+    // caller expects the n words it pushed popped, so the callee's m
+    // arguments go to the top of those words and the return address right
+    // below them: the arguments are pushed, the saved registers restored,
+    // the arguments copied up (popped while they move into the argument
+    // words, copied from the top down when there are more, as they may then
+    // overlap where they were pushed), the return address and the caller's
+    // %rbp put in place, and the callee jumped to.
     fun emit_tail_call(var self, c: Inst, temp_base: int32) {
         match c {
             Inst.Call(d, name, args) => {
-                var i = len(args) - 1
+                let m = len(args)
+                let n = self.arg_words
+                var i = m - 1
                 while i >= 0 {
                     self.push_temp(args[i], temp_base)
                     i = i - 1
                 }
-                i = 0
-                while i < len(args) {
-                    self.emit(format("popq {}(%rbp)", 16 + 8 * i))
-                    i = i + 1
-                }
                 self.restore_regs()
-                self.emit("leave")
+                let first = 16 + 8 * (n - m)
+                if m <= n {
+                    i = 0
+                    while i < m {
+                        self.emit(format("popq {}(%rbp)", first + 8 * i))
+                        i = i + 1
+                    }
+                    if m < n {
+                        self.emit("movq 8(%rbp), %rax")
+                        self.emit(format("movq %rax, {}(%rbp)", first - 8))
+                        self.emit("movq 0(%rbp), %rax")
+                        self.emit(format("movq %rax, {}(%rbp)", first - 16))
+                        self.emit(format("leaq {}(%rbp), %rsp", first - 16))
+                        self.emit("popq %rbp")
+                    } else { self.emit("leave") }
+                } else {
+                    self.emit("movq 8(%rbp), %r10")
+                    self.emit("movq 0(%rbp), %r11")
+                    i = m - 1
+                    while i >= 0 {
+                        self.emit(format("movq {}(%rsp), %rax", 8 * i))
+                        self.emit(format("movq %rax, {}(%rbp)", first + 8 * i))
+                        i = i - 1
+                    }
+                    self.emit(format("movq %r10, {}(%rbp)", first - 8))
+                    self.emit(format("leaq {}(%rbp), %rsp", first - 8))
+                    self.emit("movq %r11, %rbp")
+                }
                 self.emit(format("jmp myla_{}", name))
             },
             _ => {},
@@ -1344,11 +1371,9 @@ fun jump_cond(op: str, signed: bool) -> str {
 // result of at once, so it can be a tail call (`emit_tail_call`); -1 when
 // there is none. After the call only a `moved`, debug information, or the
 // result stored into an owning slot that is then moved may follow (a drop
-// means something lives across the call); and the callee takes at most the
-// `words` argument words this function was called with. No argument may be
-// an address in this frame either, which the jump leaves
-// (`passes_frame_address`).
-fun tail_call_at(insts: [Inst], term: Term, words: int32) -> int32 {
+// means something lives across the call). No argument may be an address in
+// this frame either, which the jump leaves (`passes_frame_address`).
+fun tail_call_at(insts: [Inst], term: Term) -> int32 {
     let v = match term {
         Term.Ret(x) => x,
         _ => -2,
@@ -1359,7 +1384,7 @@ fun tail_call_at(insts: [Inst], term: Term, words: int32) -> int32 {
     while i >= 0 {
         match insts[i] {
             Inst.Call(d, name, args) => {
-                if d != v || len(args) > words { return -1 }
+                if d != v { return -1 }
                 return i
             },
             Inst.Moved(s) => { moved = s },

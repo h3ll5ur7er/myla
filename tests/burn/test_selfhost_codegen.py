@@ -783,7 +783,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         """The lines of `myla_<name>`, up to its `ret`."""
         lines = asm.split("\n")
         start = lines.index(f"myla_{name}:")
-        end = next(i for i in range(start, len(lines)) if lines[i].strip() == "ret")
+        end = next(i for i in range(start, len(lines)) if lines[i].strip().split(" ")[0] == "ret")
         return "\n".join(lines[start:end + 1])
 
     def test_a_comparison_feeding_a_branch_is_a_conditional_jump(self) -> None:
@@ -897,8 +897,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
     def test_calls_in_tail_position_reuse_the_frame(self) -> None:
         # MYLA-126: a call whose result is returned at once jumps, so deep
         # recursion runs in constant stack (ten million frames would overflow
-        # it); a call passing an address in the caller's frame, or followed by
-        # a drop, stays a call
+        # it), also between functions taking more or fewer arguments; a call
+        # passing an address in the caller's frame, or followed by a drop,
+        # stays a call
         source = (
             "struct P { a: int, b: int }\n"
             "fun count_down(n: int, acc: int64) -> int64 {\n"
@@ -913,6 +914,14 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "    if n == 0 { return false }\n"
             "    return is_even(n - 1)\n"
             "}\n"
+            "fun spread(n: int) -> int64 {\n"
+            "    if n == 0 { return 0 }\n"
+            "    return gather(n - 1, n, 2)\n"
+            "}\n"
+            "fun gather(n: int, a: int, b: int) -> int64 {\n"
+            "    if n == 0 { return (a + b) as int64 }\n"
+            "    return spread(n - 1)\n"
+            "}\n"
             "fun sum(p: P) -> int { return p.a + p.b }\n"
             "fun via_local(x: int) -> int {\n"
             "    let p = P { a: x, b: 2 }\n"
@@ -926,6 +935,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "fun main() {\n"
             "    print(count_down(10000000, 0))\n"
             "    print(is_even(1000001))\n"
+            "    print(spread(10000001))\n"
             "    print(via_local(40))\n"
             "    print(label(3, \"a\"))\n"
             "    let f = count_down\n"
@@ -938,7 +948,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(source)
             asm = self._emit_asm(path)
-            self.assertEqual(self._build_and_run(asm), ("50000005000000\nfalse\n42\naxxx\n55\n8\n", 0))
+            self.assertEqual(self._build_and_run(asm), ("50000005000000\nfalse\n3\n42\naxxx\n55\n8\n", 0))
         self.assertIn("jmp myla_count_down", self._function_asm(asm, "count_down"))
         self.assertIn("jmp myla_is_odd", self._function_asm(asm, "is_even"))
         self.assertIn("call myla_sum", self._function_asm(asm, "via_local"))
