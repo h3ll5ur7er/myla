@@ -204,6 +204,10 @@ The compiler's binary got 7% smaller and compiles itself about 3–4% faster; th
 
 [[MYLA-122]], borrowing: a `let` of a part of a fixed variable, and a `for` over one, take no reference (see "Lowering ownership" below); 1.4% fewer instructions compiling itself. Such a slot owns nothing, so a scalar one can live in a register too.
 
+[[MYLA-125]]: a division by a constant other than 0 and −1 tests nothing (an unsigned power of two is a shift or a mask), a negative integer literal is a constant, and a value loaded for a register goes straight into it (the held-back move folds into the load); 2% fewer instructions compiling itself.
+
+[[MYLA-126]], tail calls: a direct call whose result is returned at once, with nothing dropped after it, no more argument words than the caller has and no argument pointing into the frame, pops its arguments into the caller's own argument words and jumps (not under `-g`); recursion over scalars runs in constant stack. The adapter from the closure convention to a plain function and `__compose_call` jump too.
+
 Altogether the self-compile went from 3.80 s (the old path) to about 1.9 s, the binary from 2.39 to 1.39 MB, and the peak from 128 to 89 MB; with the lookup tables of [[MYLA-119]], the work above and fewer copies in the compiler's own code ([[MYLA-124]]) it takes about 0.8 s (median of alternating runs), its binary is 1.24 MB and its peak 92 MB. Callee-saved registers for the four most-used scalar locals were tried and didn't pay off; the register allocator over temporaries and locals of [[MYLA-121]] does. [[MYLA-122]] leaves out the retain/release pair of a copy of a fixed variable. The linear lookups that took most of the remaining time are gone ([[MYLA-119]]), and so are the biggest copies the compiler's own code made ([[MYLA-124]]).
 
 ### Lowering ownership
