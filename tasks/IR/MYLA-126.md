@@ -17,7 +17,7 @@ Where we stand (discussed with the IR's stability, D85):
 - **A guarantee** also needs a defined tail position (`return f(…)`, a returned `match`'s arms), probably an explicit marker so the checker can reject what it can't guarantee, and trampolines in both interpreters, which recurse natively (Python's recursion limit). Tail-called frames vanish from backtraces.
 
 - [x] Opportunistic tail calls in the backend (no owners alive, no more argument words); thunks and `__compose_call` jump (the adapter from the closure convention to a plain function, and `__compose_call`; partial-application thunks pass more words than they receive and wait for callee-pops)
-- [ ] Callee-pops calling convention
+- [x] Callee-pops calling convention; the owners nothing a tail call passes depends on dropped before the jump
 - [ ] With [[MYLA-127]]: the guarantee (tail position, marker, checker errors, interpreters)
 
 ## Step A: opportunistic tail calls
@@ -31,3 +31,15 @@ Evidence:
 - New test first: `test_calls_in_tail_position_reuse_the_frame` (ten million frames of a recursion, mutual recursion, a call through a function value and a composition; a struct passed by its address and a call followed by a drop stay calls) crashed with a stack overflow and passes.
 - The compiler, which has 73 such calls, compiles itself in the same time (2,564.9 → 2,567.2 million instructions on the same input: finding the candidates costs about what the jumps save).
 - Unit 595, integration 2, burn 742 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,177,196 bytes).
+
+## Step B: the callee pops
+
+- **Convention.** Every function compiled through the IR, the derived `eq` methods and the partial-application thunks pop the argument words their caller pushed (`ret $8n`, `ret_popping` in [[selfhost/codegen.my]]); calls no longer `addq` after themselves. The adapter from the closure convention moves the return address (and the result's address) up over the environment word and jumps, so the target's pop removes all its caller pushed. `__compose_call` jumps to its second function with its own two words.
+- **Tail calls with any count** (`emit_tail_call`). The callee's m arguments go to the top of the n words the caller pushed and the return address right below them: popped into place when m ≤ n (the caller's `%rbp` restored from where it is moved), copied from the top down when m > n (they may overlap where they were pushed; the return address and the caller's `%rbp` are read into `%r10` and `%r11` first).
+- **Drops before the jump** (`drops_after_free`). A drop after the call no longer rules a tail call out when no argument depends on the dropped slot: an argument read from it, through it, kept in it (a call's result in a statement's temporary), or read from a slot that owns nothing whatever was put into that slot depends on (a parameter's slot excepted); one taken from another block may depend on anything. Those drops are emitted before the jump.
+
+Evidence:
+
+- `test_calls_in_tail_position_reuse_the_frame` grew mutual recursion between functions of one and three arguments, ten million deep; `test_tail_calls_hand_over_owned_arguments` (with [[MYLA-127]]): a recursion threading a list a million deep (no copy of the list, constant stack), a string threaded through tail calls, an argument borrowed from a statement's temporary and one borrowed through a match's value, which stay calls. The second case of the latter was found by the bootstrap: a first version followed a borrowed slot no further and miscompiled the loader (a freed list read by `join`).
+- The compiler has 167 tail jumps instead of 105; the stress programs, together with [[MYLA-127]]: 66,920.1 → 66,746.7 million instructions (−0.3%; partial application −5.8%, trait dispatch −4.4%, none worse).
+- Unit 595, integration 2, burn 745 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,203,771 bytes).

@@ -357,6 +357,14 @@ pub fun verify(f: IrFunc) -> str {
         push(known, false)
         push(entry, none)
     }
+    // a parameter passed owned holds a value on entry (MYLA-127)
+    var first = none
+    var s = 0
+    while s < len(f.slots) {
+        if f.slots[s].word >= 0 && f.slots[s].owns { first[s] = true }
+        s = s + 1
+    }
+    entry[0] = first
     known[0] = true
     var work = [0]
     while len(work) > 0 {
@@ -547,9 +555,334 @@ pub fun inst_defs(inst: Inst) -> [int32] {
     }
 }
 
+// Whether `inst` writes the temporary `t` (`inst_defs` without a list).
+fun writes_temp(inst: Inst, t: int32) -> bool {
+    return match inst {
+        Inst.Const(d, ty, v) => d == t
+        Inst.Str(d, text) => d == t
+        Inst.Load(d, s) => d == t
+        Inst.Addr(d, s) => d == t
+        Inst.Offset(d, p, off) => d == t
+        Inst.LoadAt(d, p, off) => d == t
+        Inst.Bin(d, op, lt, rt, a, b, pos) => d == t
+        Inst.Cmp(d, op, ty, a, b) => d == t
+        Inst.Un(d, op, ty, a) => d == t
+        Inst.Cast(d, from_t, to_t, a) => d == t
+        Inst.Call(d, name, args) => d == t
+        Inst.Rt(d, name, args) => d == t
+        Inst.Elem(d, c, i, stride, is_str, pos) => d == t
+        Inst.Load8(d, p) => d == t
+        Inst.Cow(d, ty, h) => d == t
+        Inst.Append(d, h, c, stride) => d == t
+        Inst.Pop(d, c, stride, pos) => d == t
+        Inst.RtPair(d, d2, name, args) => d == t || d2 == t
+        Inst.SbBuild(d, c) => d == t
+        Inst.Global(d, sym, w) => d == t
+        Inst.Label(d, sym) => d == t
+        Inst.CallInd(d, fv, args) => d == t
+        _ => false
+    }
+}
+
 fun result_temp(d: int32) -> [int32] {
     if d < 0 { return [] }
     return [d]
+}
+
+// A last use moves (MYLA-127): in a block, a `retain` of the whole value an
+// owning slot holds (a `load` of it, or a `copy` out of its address), when
+// the block drops the slot later and nothing in between touches it or reads
+// anything taken from it (only whoever takes the retained value uses the
+// loaded value, once), hands the slot's reference over instead. The retain
+// goes and the drop becomes `moved`: the only holder besides the slot is
+// the one that took the value, which then owns the slot's reference. A slot
+// something borrows from (`borrowed_slots`) keeps its reference.
+pub fun moves(f: IrFunc) -> IrFunc {
+    var out = f
+    var borrowed: [bool] = []           // worked out for the first candidate
+    var b = 0
+    while b < len(f.blocks) {
+        // only a block with a retain and a drop of a slot has anything to move
+        if retains_and_drops(f.blocks[b].insts) {
+            let insts = f.blocks[b].insts
+            var cut: [int32] = []           // the retains that go
+            var drops: [int32] = []         // the drops that become `moved`
+            var i = 0
+            while i < len(insts) {
+                let s = retained_slot(f, insts, i)
+                if s >= 0 {
+                    if len(borrowed) == 0 { borrowed = borrowed_slots(f) }
+                    if !borrowed[s] {
+                        let d = move_drop(f, insts, f.blocks[b].term, i, s)
+                        if d >= 0 && !has_int(drops, d) {
+                            push(cut, i)
+                            push(drops, d)
+                        }
+                    }
+                }
+                i = i + 1
+            }
+            if len(cut) > 0 {
+                var kept: [Inst] = []
+                i = 0
+                while i < len(insts) {
+                    if !has_int(cut, i) {
+                        if has_int(drops, i) {
+                            match insts[i] {
+                                Inst.DropSlot(t, x) => { push(kept, Inst.Moved(x)) },
+                                _ => {},
+                            }
+                        } else { push(kept, insts[i]) }
+                    }
+                    i = i + 1
+                }
+                out.blocks[b].insts = kept
+            }
+        }
+        b = b + 1
+    }
+    return out
+}
+
+// The owning slots a slot that owns nothing holds a part of: a borrowing
+// `let` of it (MYLA-122), a loop's list or element over it, a match's
+// borrowed copy of it. Such a borrower may read the value after its last
+// use in the owner, so the owner keeps its reference to the end (MYLA-127).
+// A value is followed from a `load` of an owning slot or its address through
+// loads, offsets and elements computed from it in the block.
+fun borrowed_slots(f: IrFunc) -> [bool] {
+    var out: [bool] = []
+    for sl in f.slots { push(out, false) }
+    var root: [int32] = []
+    for t in f.temps { push(root, -1) }
+    for b in f.blocks {
+        var set: [int32] = []
+        var k = 0
+        while k < len(b.insts) {
+            match b.insts[k] {
+                Inst.Load(d, x) => {
+                    if f.slots[x].owns {
+                        root[d] = x
+                        push(set, d)
+                    }
+                },
+                Inst.Addr(d, x) => {
+                    if f.slots[x].owns {
+                        root[d] = x
+                        push(set, d)
+                    }
+                },
+                Inst.LoadAt(d, p, off) => {
+                    if root[p] >= 0 {
+                        root[d] = root[p]
+                        push(set, d)
+                    }
+                },
+                Inst.Offset(d, p, off) => {
+                    if root[p] >= 0 {
+                        root[d] = root[p]
+                        push(set, d)
+                    }
+                },
+                Inst.Elem(d, c, i, stride, is_str, pos) => {
+                    if root[c] >= 0 {
+                        root[d] = root[c]
+                        push(set, d)
+                    }
+                },
+                Inst.Store(x, v) => {
+                    if !f.slots[x].owns && root[v] >= 0 { out[root[v]] = true }
+                },
+                Inst.Copy(d, src, size) => {
+                    // a copy retained right away has references of its own
+                    let retained = k + 1 < len(b.insts) && match b.insts[k + 1] {
+                        Inst.Retain(t, p) => p == d,
+                        _ => false,
+                    }
+                    if root[src] >= 0 && root[d] < 0 && !retained { out[root[src]] = true }
+                },
+                _ => {},
+            }
+            k = k + 1
+        }
+        // a value taken in another block isn't followed; a temporary written
+        // again in the block keeps its root, which can only keep a reference
+        for d in set { root[d] = -1 }
+    }
+    return out
+}
+
+fun retains_and_drops(insts: [Inst]) -> bool {
+    var retains = false
+    var drops = false
+    for inst in insts {
+        match inst {
+            Inst.RetainVal(t, v) => { retains = true },
+            Inst.Retain(t, p) => { retains = true },
+            Inst.DropSlot(t, s) => { drops = true },
+            _ => {},
+        }
+    }
+    return retains && drops
+}
+
+// The owning slot whose whole value the retain `insts[at]` is of: a
+// `retain T %v` of `%v = load $s`, or a `retain T [%d]` right after
+// `copy [%d], [%a]` with `%a = addr $s` and T the slot's type; else -1.
+fun retained_slot(f: IrFunc, insts: [Inst], at: int32) -> int32 {
+    match insts[at] {
+        Inst.RetainVal(t, v) => {
+            let s = defining_load(insts, at, v)
+            if s >= 0 && f.slots[s].owns { return s }
+        },
+        Inst.Retain(t, d) => {
+            if at == 0 { return -1 }
+            match insts[at - 1] {
+                Inst.Copy(cd, src, size) => {
+                    if cd != d { return -1 }
+                    let s = defining_addr(insts, at - 1, src)
+                    if s >= 0 && f.slots[s].owns && type_eq_names(t, f.slots[s].ty) { return s }
+                },
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+    return -1
+}
+
+// The slot the temporary `t` was last set to the value of (`load $s`) before
+// `insts[at]`, in this block; -1 when it wasn't, or was set otherwise.
+fun defining_load(insts: [Inst], at: int32, t: int32) -> int32 {
+    var j = at - 1
+    while j >= 0 {
+        if writes_temp(insts[j], t) {
+            return match insts[j] {
+                Inst.Load(x, s) => s,
+                _ => -1,
+            }
+        }
+        j = j - 1
+    }
+    return -1
+}
+
+// Likewise for a slot's address (`addr $s`).
+fun defining_addr(insts: [Inst], at: int32, t: int32) -> int32 {
+    var j = at - 1
+    while j >= 0 {
+        if writes_temp(insts[j], t) {
+            return match insts[j] {
+                Inst.Addr(x, s) => s,
+                _ => -1,
+            }
+        }
+        j = j - 1
+    }
+    return -1
+}
+
+// The index of the `drop $s` the retain `insts[at]` can be moved into
+// (`moves`), or -1: every temporary taken from slot s in this block (loaded
+// from it, its address, or computed from those) is no longer read after the
+// retain, but for a retained loaded value read once, and nothing touches s
+// before that drop.
+fun move_drop(f: IrFunc, insts: [Inst], term: Term, at: int32, s: int32) -> int32 {
+    // a drop of s later in the block, first (cheap)
+    var later = false
+    var j = at + 1
+    while j < len(insts) && !later {
+        match insts[j] {
+            Inst.DropSlot(t, x) => { later = x == s },
+            _ => {},
+        }
+        j = j + 1
+    }
+    if !later { return -1 }
+    // the temporaries taken from s up to the retain (few), from the slot's
+    // first use in the block
+    var family: [int32] = []
+    j = 0
+    while j < at && !touches_slot(insts[j], s) { j = j + 1 }
+    while j < at {
+        let from_s = match insts[j] {
+            Inst.Load(d, x) => x == s,
+            Inst.Addr(d, x) => x == s,
+            _ => false,
+        }
+        var reads_family = from_s
+        if !reads_family && len(family) > 0 {
+            for u in inst_uses(insts[j]) {
+                if has_int(family, u) { reads_family = true }
+            }
+        }
+        if reads_family || len(family) > 0 {
+            for d in inst_defs(insts[j]) {
+                if reads_family { if !has_int(family, d) { push(family, d) } }
+                else { family = without_int(family, d) }
+            }
+        }
+        j = j + 1
+    }
+    var allowed = -1
+    match insts[at] {
+        Inst.RetainVal(t, v) => { allowed = v },
+        _ => {},
+    }
+    var reads = 0
+    var drop = -1
+    j = at + 1
+    while j < len(insts) {
+        if touches_slot(insts[j], s) {
+            let is_drop = match insts[j] {
+                Inst.DropSlot(t, x) => x == s,
+                _ => false,
+            }
+            if !is_drop || drop >= 0 { return -1 }
+            drop = j
+        }
+        for u in inst_uses(insts[j]) {
+            if u == allowed { reads = reads + 1 } else if has_int(family, u) { return -1 }
+        }
+        j = j + 1
+    }
+    for u in term_uses(term) {
+        if u == allowed { reads = reads + 1 } else if has_int(family, u) { return -1 }
+    }
+    if drop < 0 || reads > 1 { return -1 }
+    return drop
+}
+
+// Whether `inst` names the slot `s` (reads, writes, takes its address,
+// drops it or marks it moved or initialised).
+fun touches_slot(inst: Inst, s: int32) -> bool {
+    return match inst {
+        Inst.Load(d, x) => x == s,
+        Inst.Store(x, v) => x == s,
+        Inst.Addr(d, x) => x == s,
+        Inst.DropSlot(t, x) => x == s,
+        Inst.Moved(x) => x == s,
+        Inst.Init(x) => x == s,
+        _ => false,
+    }
+}
+
+#test([3, 5], 5)[true]
+#test([3, 5], 4)[false]
+fun has_int(xs: [int32], x: int32) -> bool {
+    for y in xs {
+        if y == x { return true }
+    }
+    return false
+}
+
+#test([3, 5, 3], 3)[[5]]
+fun without_int(xs: [int32], x: int32) -> [int32] {
+    var out: [int32] = []
+    for y in xs {
+        if y != x { push(out, y) }
+    }
+    return out
 }
 
 // What every instruction of a function reads and writes (`inst_uses`,

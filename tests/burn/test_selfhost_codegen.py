@@ -76,6 +76,7 @@ PARITY_PROGRAMS = (
     "assign_heap_owning_struct_to_any_place",
     "assign_heap_owning_struct_to_itself",
     "method_arguments_survive_the_receivers_writes",
+    "borrowed_lets_survive_a_moved_value",
     "assign_to_a_field_of_a_shared_element_copies_it",
     "match_binding_survives_writes_to_the_scrutinee",
     "destructure_boxed_enum_and_list_leaves",
@@ -756,6 +757,56 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn(" q: P (16 bytes) owns\n", owning)
         self.assertIn(" n: str owns\n", owning)
 
+    def test_a_last_use_moves(self) -> None:
+        # MYLA-127: a value taken from an owning variable that nothing reads
+        # afterwards moves (no retain, and no drop of the variable); one read
+        # again, or read through after it is taken, is retained
+        source = (
+            "struct Box2 { name: str, tags: [str] }\n"
+            "fun make_list(n: int) -> [int] {\n"
+            "    var out: [int] = []\n"
+            "    for i in 0..n { push(out, i) }\n"
+            "    return out\n"
+            "}\n"
+            "fun boxed(s: str) -> Box2 {\n"
+            "    var b = Box2 { name: s + \"!\", tags: [] }\n"
+            "    push(b.tags, s)\n"
+            "    return b\n"
+            "}\n"
+            "fun again(s: str) -> [str] {\n"
+            "    var t = s + \"?\"\n"
+            "    var xs: [str] = []\n"
+            "    push(xs, t)\n"
+            "    print(t)\n"
+            "    return xs\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(len(make_list(5)))\n"
+            "    let b = boxed(\"x\")\n"
+            "    print(b.name)\n"
+            "    print(len(b.tags))\n"
+            "    print(len(again(\"y\")))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            self.assertEqual(self._build_and_run(self._emit_asm(path)), ("5\nx!\n1\ny?\n1\n", 0))
+            proc = subprocess.run([self._binary, path, "--emit-ir"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        def ir_of(name: str) -> str:
+            start = proc.stdout.index(f"fun myla_{name} ")
+            return proc.stdout[start:proc.stdout.index("}\n", start)]
+
+        made = ir_of("make_list")
+        self.assertNotIn("retain", made, made)
+        self.assertIn("moved $1\n", made, made)
+        boxed = ir_of("boxed")
+        self.assertNotIn("retain Box2", boxed, boxed)
+        # `t` is printed after it is pushed: retained for the list
+        self.assertIn("retain str", ir_of("again"))
+
     def test_only_reachable_functions_are_emitted(self) -> None:
         # MYLA-108: from the entry point, through calls, function values and
         # partial applications
@@ -783,7 +834,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         """The lines of `myla_<name>`, up to its `ret`."""
         lines = asm.split("\n")
         start = lines.index(f"myla_{name}:")
-        end = next(i for i in range(start, len(lines)) if lines[i].strip() == "ret")
+        end = next(i for i in range(start, len(lines)) if lines[i].strip().split(" ")[0] == "ret")
         return "\n".join(lines[start:end + 1])
 
     def test_a_comparison_feeding_a_branch_is_a_conditional_jump(self) -> None:
@@ -897,8 +948,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
     def test_calls_in_tail_position_reuse_the_frame(self) -> None:
         # MYLA-126: a call whose result is returned at once jumps, so deep
         # recursion runs in constant stack (ten million frames would overflow
-        # it); a call passing an address in the caller's frame, or followed by
-        # a drop, stays a call
+        # it), also between functions taking more or fewer arguments; a call
+        # passing an address in the caller's frame, or followed by a drop,
+        # stays a call
         source = (
             "struct P { a: int, b: int }\n"
             "fun count_down(n: int, acc: int64) -> int64 {\n"
@@ -913,6 +965,14 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "    if n == 0 { return false }\n"
             "    return is_even(n - 1)\n"
             "}\n"
+            "fun spread(n: int) -> int64 {\n"
+            "    if n == 0 { return 0 }\n"
+            "    return gather(n - 1, n, 2)\n"
+            "}\n"
+            "fun gather(n: int, a: int, b: int) -> int64 {\n"
+            "    if n == 0 { return (a + b) as int64 }\n"
+            "    return spread(n - 1)\n"
+            "}\n"
             "fun sum(p: P) -> int { return p.a + p.b }\n"
             "fun via_local(x: int) -> int {\n"
             "    let p = P { a: x, b: 2 }\n"
@@ -926,6 +986,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "fun main() {\n"
             "    print(count_down(10000000, 0))\n"
             "    print(is_even(1000001))\n"
+            "    print(spread(10000001))\n"
             "    print(via_local(40))\n"
             "    print(label(3, \"a\"))\n"
             "    let f = count_down\n"
@@ -938,11 +999,65 @@ class SelfHostedCodegenParity(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(source)
             asm = self._emit_asm(path)
-            self.assertEqual(self._build_and_run(asm), ("50000005000000\nfalse\n42\naxxx\n55\n8\n", 0))
+            self.assertEqual(self._build_and_run(asm), ("50000005000000\nfalse\n3\n42\naxxx\n55\n8\n", 0))
         self.assertIn("jmp myla_count_down", self._function_asm(asm, "count_down"))
         self.assertIn("jmp myla_is_odd", self._function_asm(asm, "is_even"))
         self.assertIn("call myla_sum", self._function_asm(asm, "via_local"))
         self.assertIn("call myla_label", self._function_asm(asm, "label"))
+
+    def test_tail_calls_hand_over_owned_arguments(self) -> None:
+        # MYLA-127, MYLA-126: a parameter passed owned lets a call in tail
+        # position take a value the caller owns, and the caller's other owners
+        # are dropped before the jump, so a recursion threading a list runs in
+        # constant stack (and the list isn't copied); an argument borrowed from
+        # an owner dropped after the call keeps the call
+        source = (
+            "fun collect(n: int, acc: [int]) -> [int] {\n"
+            "    if n == 0 { return acc }\n"
+            "    var next = acc\n"
+            "    push(next, n)\n"
+            "    return collect(n - 1, next)\n"
+            "}\n"
+            "fun label(n: int, s: str) -> str {\n"
+            "    if n == 0 { return s }\n"
+            "    let t = s + \"x\"\n"
+            "    return label(n - 1, t)\n"
+            "}\n"
+            "fun first_of(xs: [str]) -> str { return xs[0] }\n"
+            "fun maybe(n: int) -> Option<[str]> {\n"
+            "    if n > 0 { return Some([\"m\" + \"n\"]) }\n"
+            "    return None\n"
+            "}\n"
+            "fun through_match(n: int) -> str {\n"
+            "    match maybe(n) {\n"
+            "        Some(rest) => { return first_of(rest) },\n"
+            "        None => {},\n"
+            "    }\n"
+            "    return \"\"\n"
+            "}\n"
+            "fun borrowed(n: int) -> str {\n"
+            "    let t = [\"a\" + \"b\"]\n"
+            "    return first_of(t)\n"
+            "}\n"
+            "fun main() {\n"
+            "    let xs = collect(1000000, [])\n"
+            "    print(len(xs))\n"
+            "    print(xs[999999])\n"
+            "    print(label(3, \"q\" + \"r\"))\n"
+            "    print(borrowed(1))\n"
+            "    print(through_match(1))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("1000000\n1\nqrxxx\nab\nmn\n", 0))
+        self.assertIn("jmp myla_collect", self._function_asm(asm, "collect"))
+        self.assertIn("jmp myla_label", self._function_asm(asm, "label"))
+        self.assertIn("call myla_first_of", self._function_asm(asm, "borrowed"))
+        # `rest` borrows from the match's value, dropped after the call
+        self.assertIn("call myla_first_of", self._function_asm(asm, "through_match"))
 
     def _unsaved_callee_saved(self, asm: str) -> list:
         """The routines of `asm` writing %rbx or %r12-%r15 without saving it

@@ -266,7 +266,8 @@ PLAIN_ENUM_EQ = (
 
 
 def function_body(asm: str, label: str) -> list[str]:
-    """The instruction lines of the function at `label`, up to its `ret`."""
+    """The instruction lines of the function at `label`, up to its `ret`
+    (`ret $n` where the callee pops its arguments, MYLA-126)."""
     lines = asm.splitlines()
     start = lines.index(label + ":")
     body = []
@@ -275,7 +276,7 @@ def function_body(asm: str, label: str) -> list[str]:
         if not line or line.startswith("."):
             continue
         body.append(line)
-        if line == "ret":
+        if line == "ret" or line.startswith("ret $"):
             return body
     raise AssertionError(f"no ret after {label}")
 

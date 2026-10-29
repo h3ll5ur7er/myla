@@ -86,9 +86,13 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
     while i < len(fd.params) {
         let t = subst_type(sig.params[i], cg.subst)
         if !lowerable(cg, t) { return Err("a parameter's type") }
-        let s = lw.new_slot(fd.params[i].name, t, 8, first_word + i, false)
+        // a parameter passed owned holds the caller's reference, which the
+        // function drops on every exit unless it moves it on (MYLA-127)
+        let owned = cg.owned_param(sig, i, t)
+        let s = lw.new_slot(fd.params[i].name, t, 8, first_word + i, owned)
         let writes_self = i == 0 && match fd.receiver { Some(r) => r == "var self", None => false }
         lw.declare_as(fd.params[i].name, s, !writes_self)
+        lw.own(s)
         lw.add(Inst.Bind(fd.params[i].name, s))
         i = i + 1
     }
@@ -98,6 +102,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
     }
     if lw.err != "" { return Err(lw.err) }
     // the end of the body falls through to the epilogue
+    lw.drop_owners(0)
     lw.finish(Term.Ret(-1))
     return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
 }
@@ -1716,10 +1721,23 @@ impl Lower {
         var root = ""
         if sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false } { root = place_root(argv[0]) }
         var vals: [int32] = []
+        let owns = cg.owned_params(sig, params)
         var i = 0
         while i < len(argv) && i < len(params) {
-            if i > 0 && root != "" && place_root(argv[i]) == root && cg.owns_heap(params[i]) { push(vals, self.stage(cg, params[i], argv[i]).1) }
-            else if is_aggregate(params[i]) { push(vals, self.addr(cg, argv[i])) } else { push(vals, self.expr(cg, argv[i])) }
+            // an owned parameter gets a reference of its own: an owned
+            // temporary's, or one retained for it (MYLA-127)
+            let owned = i < len(owns) && owns[i]
+            if i > 0 && root != "" && place_root(argv[i]) == root && cg.owns_heap(params[i]) {
+                let staged = self.stage(cg, params[i], argv[i])
+                if owned { self.moved(staged.0) }
+                push(vals, staged.1)
+            }
+            else if is_aggregate(params[i]) { push(vals, self.addr(cg, argv[i])) }
+            else {
+                let v = self.expr(cg, argv[i])
+                if owned { self.retain_or_take(cg, params[i], v) }
+                push(vals, v)
+            }
             i = i + 1
         }
         if !has_ret {
