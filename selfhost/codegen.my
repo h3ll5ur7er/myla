@@ -2373,8 +2373,10 @@ impl CodeGen {
     // Emit a partial-application thunk, called as `thunk([sret,] env, holes…)`:
     // rebuild the full argument list from the env (filled; an aggregate passed
     // by its address in the env) and the holes, forward the sret pointer, and
-    // call the target (a function value with its own env, as a call through
-    // one does).
+    // jump to the target (a function value with its own env, as a call through
+    // one does) in place of the thunk (`emit_frame_handover`; MYLA-130): the
+    // caller holds the env, which what the target borrows lives in, until the
+    // target returns to it.
     fun gen_partial_function(var self, job: PartialJob) {
         let n = len(job.slots)
         var env_off = 16
@@ -2417,22 +2419,29 @@ impl CodeGen {
             self.emit("pushq %rax")
             pushed = pushed + 1
         }
+        var target = format("myla_{}", job.target)
         if job.fn_off >= 0 {
             self.emit(format("movq {}(%rbp), %rcx", env_off))
-            self.emit(format("call *{}(%rcx)", job.fn_off))
-        } else {
-            self.emit(format("call myla_{}", job.target))
+            self.emit(format("movq {}(%rcx), %rcx", job.fn_off))
+            target = "*%rcx"
         }
-        // the target popped what it was given; this pops the words it was
-        // called with: the result's address, the env and the holes (MYLA-126)
+        // the words it was called with: the result's address, the env and
+        // the holes; nothing saved
         var holes = 0
         for sl in job.slots {
             if sl < 0 { holes = holes + 1 }
         }
         var words = 1 + holes
         if job.sret { words = words + 1 }
-        self.emit("leave")
-        self.emit(ret_popping(words))
+        self.arg_words = words
+        self.saved_regs = []
+        var in_place: [bool] = []
+        var k = 0
+        while k < pushed {
+            push(in_place, false)
+            k = k + 1
+        }
+        self.emit_frame_handover(pushed, in_place, target)
         self.emit("")
         if len(job.owned) > 0 { self.emit_env_drop(job.lifted, job.owned) }
     }

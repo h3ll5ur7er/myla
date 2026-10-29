@@ -76,6 +76,7 @@ PARITY_PROGRAMS = (
     "assign_heap_owning_struct_to_any_place",
     "assign_heap_owning_struct_to_itself",
     "method_arguments_survive_the_receivers_writes",
+    "heap_free_arguments_survive_the_receivers_writes",
     "borrowed_lets_survive_a_moved_value",
     "become_keeps_the_stack_flat",
     "assign_to_a_field_of_a_shared_element_copies_it",
@@ -1089,6 +1090,47 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn("jmp *%rcx", self._function_asm(asm, "via"))
         # the IR's text form: the call, then the terminator
         self.assertRegex(ir, r"call myla_count\(%t\d+, %t\d+\)\n  become\n")
+        # MYLA-130: the list `total` passes on is handed over (read before
+        # its drop, not retained), and a word already in place stays there
+        total_ir = ir[ir.index("fun myla_total"):]
+        total_ir = total_ir[:total_ir.index("\n}")]
+        self.assertNotIn("retain", total_ir)
+        self.assertIn("moved $0", total_ir)
+        self.assertNotIn("popq 16(%rbp)", self._function_asm(asm, "fib"))
+
+    def test_partial_application_thunks_jump(self) -> None:
+        # MYLA-130: a partial application's thunk jumps to its function (or
+        # through its function value), so a `become` through one runs in
+        # constant stack too
+        source = (
+            "struct Machine { step: int, next: (Machine, int, int) -> int }\n"
+            "struct Big { a: int, b: int, c: int }\n"
+            "fun hop(k: int, m: Machine, n: int, acc: int) -> int {\n"
+            "    if n == 0 { return acc }\n"
+            "    become m.next(m, n - 1, acc + k)\n"
+            "}\n"
+            "fun weigh(big: Big, s: str, x: int) -> Big {\n"
+            "    return Big { a: big.a + x, b: len(s), c: big.c }\n"
+            "}\n"
+            "fun main() {\n"
+            "    let m = Machine { step: 0, next: hop(3, _, _, _) }\n"
+            "    print(m.next(m, 1000000, 0))\n"
+            "    let w = weigh(Big { a: 1, b: 2, c: 3 }, \"ab\" + \"c\", _)\n"
+            "    let r = w(4)\n"
+            "    print(r.a + r.b + r.c)\n"
+            "    let f = (a: int, b: int) => a * b\n"
+            "    let g = f(_, 7)\n"
+            "    print(g(6))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("3000000\n11\n42\n", 0))
+        thunks = [line for line in asm.split("\n") if line.startswith("\tjmp myla_hop") or line == "\tjmp *%rcx"]
+        self.assertGreaterEqual(len(thunks), 2)
+        self.assertNotIn("call myla_hop", asm)
 
     def _unsaved_callee_saved(self, asm: str) -> list:
         """The routines of `asm` writing %rbx or %r12-%r15 without saving it

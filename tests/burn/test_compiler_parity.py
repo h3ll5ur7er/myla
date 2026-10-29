@@ -2130,6 +2130,42 @@ PROGRAMS = {
         "    var bs = [B { name: \"c\" + \"d\", xs: [] }]\n"
         "    bs[0].rename(bs[0].name)\n}\n"
     ),
+    "heap_free_arguments_survive_the_receivers_writes": (
+        # MYLA-129: the same for an argument without heap memory (a struct,
+        # a tuple, an enum, the receiver itself, an element's part), which was
+        # passed as the place it was read from
+        "struct P { x: int, y: int }\n"
+        "enum Mode { Slow, Fast(int) }\n"
+        "struct W { p: P, t: (int, int), mode: Mode }\n"
+        "impl W {\n"
+        "    fun moved(var self, q: P) -> int {\n"
+        "        self.p.x = 5\n"
+        "        return q.x * 10 + self.p.x\n"
+        "    }\n"
+        "    fun shifted(var self, u: (int, int)) -> int {\n"
+        "        self.t = (7, 8)\n"
+        "        return u.0 + u.1\n"
+        "    }\n"
+        "    fun switched(var self, m: Mode) -> int {\n"
+        "        self.mode = Mode.Fast(9)\n"
+        "        return match m { Mode.Slow => 0, Mode.Fast(n) => n }\n"
+        "    }\n"
+        "    fun cloned(var self, other: W) -> int {\n"
+        "        self.p.y = 6\n"
+        "        return other.p.y\n"
+        "    }\n"
+        "}\n"
+        "#main\nfun main() {\n"
+        "    var w = W { p: P { x: 1, y: 2 }, t: (3, 4), mode: Mode.Slow }\n"
+        "    print(w.moved(w.p))\n"
+        "    print(w.shifted(w.t))\n"
+        "    print(w.switched(w.mode))\n"
+        "    print(w.cloned(w))\n"
+        "    var ws = [W { p: P { x: 2, y: 3 }, t: (0, 0), mode: Mode.Fast(4) }]\n"
+        "    print(ws[0].moved(ws[0].p))\n"
+        "    print(ws[0].switched(ws[0].mode))\n"
+        "    print(w.p.x + w.p.y + w.t.0 + ws[0].p.x)\n}\n"
+    ),
     "assign_heap_owning_struct_to_itself": (
         "struct Inner { xs: [int] }\n"
         "struct Outer { inner: Inner }\n"

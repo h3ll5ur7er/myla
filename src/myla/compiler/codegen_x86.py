@@ -4440,9 +4440,10 @@ class CodeGen:
 
     def _aliased_args(self, expr: ast.Call) -> list:
         """The arguments of a call to a method writing its receiver (`var
-        self`) read from the receiver's variable, with their types: each is
-        passed as a copy taken before the call (MYLA-123), since the method's
-        writes would change or release its place otherwise."""
+        self`) read from the receiver's variable, with their types: each one
+        passed by address or owning heap memory is passed as a copy taken
+        before the call (MYLA-123, MYLA-129), since the method's writes would
+        change or release its place otherwise."""
         if getattr(expr, "indirect_call", False) or not isinstance(expr.callee, ast.Name):
             return []
         sig = self.checker.functions.get(expr.callee.ident)
@@ -4452,7 +4453,8 @@ class CodeGen:
         if root is None:
             return []
         return [(a, sig.params[i]) for i, a in enumerate(expr.args)
-                if i > 0 and _place_root(a) == root and self._owns_heap(sig.params[i])]
+                if i > 0 and _place_root(a) == root
+                and (_is_aggregate(sig.params[i]) or self._owns_heap(sig.params[i]))]
 
     def _store_call_words(self, logical: list) -> None:
         """Put the outgoing argument words on the stack, the first at the
