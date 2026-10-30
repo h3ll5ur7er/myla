@@ -1,0 +1,17 @@
+//~ type error: 'become' can only pass a '(int32) -> int32' that is (a part of) a parameter
+//~ span: f
+// A function value is passed by its address, also to a function (D88 takes
+// only structs, tuples and enums by value).
+fun double(n: int) -> int {
+    return n * 2
+}
+fun apply(f: (int) -> int, n: int) -> int {
+    return f(n)
+}
+fun twice(n: int) -> int {
+    let f = double
+    become apply(f, n)
+}
+fun main() {
+    print(twice(2))
+}

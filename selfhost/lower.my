@@ -83,14 +83,21 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
     }
     let entry = lw.new_block()
     lw.start(entry)
+    var word = first_word
     var i = 0
     while i < len(fd.params) {
         let t = subst_type(sig.params[i], cg.subst)
         if !lowerable(cg, t) { return Err("a parameter's type") }
         // a parameter passed owned holds the caller's reference, which the
-        // function drops on every exit unless it moves it on (MYLA-127)
-        let owned = cg.owned_param(sig, i, t)
-        let s = lw.new_slot(fd.params[i].name, t, 8, first_word + i, owned)
+        // function drops on every exit unless it moves it on (MYLA-127); one
+        // passed by value holds the aggregate in its argument words, owning
+        // what it holds (D88)
+        var s = -1
+        if cg.byval_param(sig, i, t) {
+            s = lw.new_slot(fd.params[i].name, t, cg.word_size(t), word, cg.owns_heap(t))
+            lw.f.slots[s].inline = true
+        } else { s = lw.new_slot(fd.params[i].name, t, 8, word, cg.owned_param(sig, i, t)) }
+        word = word + lw.f.slots[s].size / 8
         let writes_self = i == 0 && match fd.receiver { Some(r) => r == "var self", None => false }
         lw.declare_as(fd.params[i].name, s, !writes_self)
         lw.own(s)
@@ -351,6 +358,22 @@ impl Lower {
         return false
     }
 
+    // The argument words of the aggregate of type `t` at `src`, passed by
+    // value (D88): with a reference of their own to what it holds (taken from
+    // an owned temporary, else retained), read in place.
+    fun value_words(var self, cg: CodeGen, t: Type, src: int32) -> [int32] {
+        if !self.took(cg, t, src) { self.retain(cg, t, src) }
+        var ws: [int32] = []
+        var off = 0
+        while off < cg.word_size(t) {
+            let w = self.temp(Type.TInt(64, false))
+            self.add(Inst.LoadAt(w, src, off))
+            push(ws, w)
+            off = off + 8
+        }
+        return ws
+    }
+
     // `retain` unless the value is taken from an owned temporary.
     fun retain_or_take(var self, cg: CodeGen, t: Type, v: int32) {
         if !cg.owns_heap(t) { return }
@@ -359,7 +382,7 @@ impl Lower {
     }
 
     fun new_slot(var self, name: str, t: Type, size: int32, word: int32, owns: bool) -> int32 {
-        push(self.f.slots, Slot { name: name, ty: t, size: size, word: word, owns: owns })
+        push(self.f.slots, Slot { name: name, ty: t, size: size, word: word, owns: owns, inline: false })
         return len(self.f.slots) - 1
     }
 
@@ -443,7 +466,7 @@ impl Lower {
     // holds the caller's address, another slot holds the value itself.
     fun slot_addr(var self, s: int32) -> int32 {
         let d = self.temp(Type.TInt(64, false))
-        if self.f.slots[s].word >= 0 { self.add(Inst.Load(d, s)) } else { self.add(Inst.Addr(d, s)) }
+        if self.f.slots[s].word >= 0 && !self.f.slots[s].inline { self.add(Inst.Load(d, s)) } else { self.add(Inst.Addr(d, s)) }
         return d
     }
 
@@ -1226,10 +1249,19 @@ impl Lower {
         let key = cg.type_key(lt)
         var method = ""
         if op == "==" || op == "!=" { method = "eq" } else if is_cmp(op) { method = "cmp" } else { return self.unsupported("an arithmetic operator on a user type used as a scalar") }
-        let pa = self.addr(cg, l)
-        let pb = self.addr(cg, r)
+        let name = format("{}.{}", key, method)
+        let msig = cg.sig_of(name)
+        var vals: [int32] = []
+        var k = 0
+        for side in [l, r] {
+            let p = self.addr(cg, side)
+            // by value when a `become` hands one over to it (D88; a derived
+            // `eq` is the code generator's routine, which takes addresses)
+            if cg.has_func(name) && cg.byval_param(msig, k, lt) { for w in self.value_words(cg, lt, p) { push(vals, w) } } else { push(vals, p) }
+            k = k + 1
+        }
         let res = self.temp(Type.TInt(64, true))
-        self.add(Inst.Call(res, format("{}.{}", key, method), [pa, pb]))
+        self.add(Inst.Call(res, name, vals))
         if op == "==" { return res }
         let d = self.temp(Type.TBool)
         if op == "!=" {
@@ -1768,9 +1800,12 @@ impl Lower {
             // an owned parameter gets a reference of its own: an owned
             // temporary's, or one retained for it (MYLA-127)
             let owned = i < len(owns) && owns[i]
+            let byval = cg.byval_param(sig, i, params[i])
             // nothing keeps a borrowed value alive once `become` has gone
-            if tail && !owned && !is_aggregate(params[i]) && cg.owns_heap(params[i]) && !(i == 0 && root != "") { return self.unsupported("a 'become' passing a heap value to a borrowed parameter") }
-            if i > 0 && root != "" && place_root(argv[i]) == root && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
+            if tail && !owned && !byval && !(i == 0 && root != "") && (is_aggregate(params[i]) || cg.owns_heap(params[i])) { return self.unsupported("a 'become' passing a value to a borrowed parameter") }
+            // a copy of its own, which the method's writes can't reach either
+            if byval { for w in self.value_words(cg, params[i], self.addr(cg, argv[i])) { push(vals, w) } }
+            else if i > 0 && root != "" && place_root(argv[i]) == root && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
                 let staged = self.stage(cg, params[i], argv[i])
                 if owned { self.moved(staged.0) }
                 push(vals, staged.1)

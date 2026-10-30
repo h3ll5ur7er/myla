@@ -124,9 +124,9 @@ The checker accepts a `become` that can run without the function's frame ([[src/
 - It calls a function, a method (`become self.step(n)`) or a function value, not a builtin, an enum variant or a partial application. No `?` follows the call.
 - The callee returns the function's result type, without a conversion, or both return nothing.
 - A function value it calls must be a parameter or a part of one: `become g(x)`, `become m.next(m, n)`.
-- A struct, tuple, enum or function value it passes, or a value of a type parameter, must be a parameter or a part of one: those live in the caller's storage, and the function's own would go with its frame.
-- Scalars pass freely, and so do strings, lists, maps and builders passed to a function or a method, which then owns them: the compiler passes such a parameter owned (D86). A function value only borrows its arguments, so a value it gets this way must be (a part of) a parameter too. A parameter that a `become` hands a value over to can't be passed on to a function value.
-- A method that changes its receiver (`var self`) can only be called on `self`, and gets no struct, tuple or enum that is a part of `self`.
+- Scalars pass freely. A function or a method takes what else `become` passes as a value of its own: a string, list, map or builder owned (the compiler passes such a parameter owned, D86), a struct, tuple or enum (or a value of a type parameter) by value, copied into its argument words (D88). A function value passed must be a parameter or a part of one.
+- A function value only borrows its arguments: the address of a struct, tuple or enum, a heap value. So when `become` calls one, these must be (parts of) parameters, which live in the caller's storage. A parameter that a `become` hands a value over to can't be passed on to a function value, not even a part of it.
+- A method that changes its receiver (`var self`) can only be called on `self`.
 
 The guarantee is the `become`'s own: a function value's code runs as written, so a lambda whose body calls a function, or a partial application, makes an ordinary call there.
 

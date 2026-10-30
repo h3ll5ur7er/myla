@@ -155,9 +155,11 @@ pub struct IrBlock { insts: [Inst], term: Term }
 // A slot: its name (for debug information and the text form), the Myla type
 // of what it holds, its size in bytes, for a parameter the index of its
 // argument word (`16 + 8 * word(%rbp)`, holding the value of a scalar and the
-// address of an aggregate) or -1, and whether it owns the heap values it holds
-// (a local, an owned temporary: the verifier follows it, MYLA-105).
-pub struct Slot { name: str, ty: Type, size: int32, word: int32, owns: bool }
+// address of an aggregate) or -1, whether it owns the heap values it holds
+// (a local, an owned temporary: the verifier follows it, MYLA-105), and for
+// an aggregate parameter whether its argument words hold the aggregate itself
+// (`inline`: passed by value, D88) instead of its address.
+pub struct Slot { name: str, ty: Type, size: int32, word: int32, owns: bool, inline: bool }
 
 // A generic function's instance a function calls: the generic function and
 // its type arguments, which the code generator then stamps out.
@@ -183,7 +185,8 @@ pub fun render_func(f: IrFunc) -> str {
     while i < len(f.slots) {
         let s = f.slots[i]
         var where = ""
-        if s.word >= 0 { where = format(" (argument {})", s.word) } else if s.size != 8 { where = format(" ({} bytes)", s.size) }
+        if s.inline { where = format(" (argument {}, {} bytes by value)", s.word, s.size) }
+        else if s.word >= 0 { where = format(" (argument {})", s.word) } else if s.size != 8 { where = format(" ({} bytes)", s.size) }
         if s.owns { where = where + " owns" }
         append(sb, format("  ${} {}: {}{}\n", i, s.name, type_name(s.ty), where))
         i = i + 1
@@ -1066,7 +1069,7 @@ fun test_func(blocks: [IrBlock]) -> IrFunc {
     }
     return IrFunc {
         name: "f", ret: None,
-        slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false }],
+        slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true, inline: false }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false, inline: false }],
         temps: [Type.TStr, Type.TBool], blocks: blocks, order: order, instances: [],
     }
 }

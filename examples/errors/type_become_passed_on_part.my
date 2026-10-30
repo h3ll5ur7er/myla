@@ -1,0 +1,19 @@
+//~ type error: 'become' can't pass 'p' on to a function value: a 'become' in 'start' hands it over to 'relay'
+//~ span: p.name
+//~ note: it is handed over here
+//~ note span: Named { name: "a" + s, n: 1 }
+// `relay` gets its struct by value from a `become` (D88) and drops it before
+// its own jump, but a function value only borrows the part passed on to it.
+struct Named { name: str, n: int }
+fun relay(p: Named, g: (str) -> int) -> int {
+    become g(p.name)
+}
+fun start(s: str, g: (str) -> int) -> int {
+    become relay(Named { name: "a" + s, n: 1 }, g)
+}
+fun size(s: str) -> int {
+    return len(s)
+}
+fun main() {
+    print(start("b", size))
+}

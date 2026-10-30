@@ -2,7 +2,7 @@
 id: MYLA-131
 title: Aggregate parameters by value (D88)
 type: feature
-status: todo
+status: in-progress
 priority: medium
 labels: [codegen, selfhost, ownership, design]
 ---
@@ -35,11 +35,11 @@ So passing every aggregate by value would copy (and retain) a lot. Passing by va
 
 D88: option 1. Function values keep the rule, and D87's rule against passing a part of `self` to a `var self` method goes.
 
-- [ ] D88 recorded, the Statements page and D87 updated
-- [ ] Checkers (Python and self-hosted): no "(a part of) a parameter" rule for an aggregate passed to a function or method; aggregates recorded in the handovers; the `var self` part rule removed; the error corpus adjusted
-- [ ] Self-hosted backend: by-value parameters (argument words of their size, owned slot, dropped at the end), callers copy and retain, the `__fnval` adapter and partial thunks copy, `become` passes them
-- [ ] Python backend: the same
-- [ ] Tests: parity programs (a state machine with an enum state, a struct built per step, a part of `self` to a `var self` method), deep runs in both native backends, the ordinary calls of such functions
+- [x] D88 recorded, the Statements page and D87 updated
+- [x] Checkers (Python and self-hosted): no "(a part of) a parameter" rule for an aggregate passed to a function or method; aggregates recorded in the handovers; the `var self` part rule removed; the error corpus adjusted
+- [x] Self-hosted backend: by-value parameters (argument words of their size, owned slot, dropped at the end), callers copy and retain, the `__fnval` adapter and partial thunks copy, `become` passes them
+- [x] Python backend: the same
+- [x] Tests: parity programs (a state machine with an enum state, a struct built per step, a part of `self` to a `var self` method), deep runs in both native backends, the ordinary calls of such functions
 
 ## Questions besides (as discussed)
 

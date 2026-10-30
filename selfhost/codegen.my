@@ -1170,6 +1170,20 @@ impl CodeGen {
         }
     }
 
+    // Whether the function `sig`'s parameter `i`, of type `t`, is passed by
+    // value: a struct, tuple or enum a `become` hands over to it (D88), its
+    // words in the argument words.
+    fun byval_param(self, sig: FuncSig, i: int32, t: Type) -> bool {
+        return is_aggregate(t) && contains_int(int_list(get(self.handed, sig.name)), i)
+    }
+
+    // The bytes of argument words a value of type `t` takes by value.
+    fun word_size(self, t: Type) -> int32 {
+        let size = (self.size(t) + 7) / 8 * 8
+        if size < 8 { return 8 }
+        return size
+    }
+
     // `owned_param` for each of the parameters `params` of `sig`; none for a
     // function without owned parameters (most).
     fun owned_params(self, sig: FuncSig, params: [Type]) -> [bool] {
@@ -2388,8 +2402,10 @@ impl CodeGen {
         // own (MYLA-127): the env keeps its filled ones, the holes are lent
         var tsig = self.funcs[0]
         if job.fn_off < 0 { tsig = self.sig_of(job.target) }
+        var pushed = 0
         var pos = n - 1
         while pos >= 0 {
+            var load: [str] = []
             if job.slots[pos] < 0 {
                 var hidx = 0
                 var j = 0
@@ -2397,17 +2413,22 @@ impl CodeGen {
                     if job.slots[j] < 0 { hidx = hidx + 1 }
                     j = j + 1
                 }
-                self.emit(format("movq {}(%rbp), %rax", env_off + 8 + 8 * hidx))
+                push(load, format("movq {}(%rbp), %rax", env_off + 8 + 8 * hidx))
             } else {
-                self.emit(format("movq {}(%rbp), %rcx", env_off))
-                if job.aggs[pos] { self.emit(format("leaq {}(%rcx), %rax", job.slots[pos])) }
-                else { self.emit(format("movq {}(%rcx), %rax", job.slots[pos])) }
+                push(load, format("movq {}(%rbp), %rcx", env_off))
+                if job.aggs[pos] { push(load, format("leaq {}(%rcx), %rax", job.slots[pos])) }
+                else { push(load, format("movq {}(%rcx), %rax", job.slots[pos])) }
             }
-            if job.fn_off < 0 && pos < len(tsig.params) && self.owned_param(tsig, pos, tsig.params[pos]) { self.emit("incq -8(%rax)") }
-            self.emit("pushq %rax")
+            // a parameter passed by value gets a copy of its own (D88)
+            if job.fn_off < 0 && pos < len(tsig.params) && self.byval_param(tsig, pos, tsig.params[pos]) { pushed = pushed + self.push_value_words(tsig.params[pos], load) }
+            else {
+                for line in load { self.emit(line) }
+                if job.fn_off < 0 && pos < len(tsig.params) && self.owned_param(tsig, pos, tsig.params[pos]) { self.emit("incq -8(%rax)") }
+                self.emit("pushq %rax")
+                pushed = pushed + 1
+            }
             pos = pos - 1
         }
-        var pushed = n
         if job.fn_off >= 0 {
             self.emit(format("movq {}(%rbp), %rcx", env_off))
             self.emit(format("movq {}(%rcx), %rax", job.fn_off + 8))   // the value's env
@@ -2469,6 +2490,16 @@ impl CodeGen {
     fun emit_fnval_thunk(var self, n: str) {
         let sig = self.sig_of(n)
         let struct_ret = is_aggregate_opt(sig.ret)
+        var byval = false
+        var k = 0
+        while k < len(sig.params) {
+            if self.byval_param(sig, k, sig.params[k]) { byval = true }
+            k = k + 1
+        }
+        if byval {
+            self.emit_byval_fnval_thunk(n, sig, struct_ret)
+            return
+        }
         self.emit(format("myla_{}__fnval:", n))
         // the return address at 0(%rsp), the result's address (if any) at
         // 8(%rsp), the env after it, then the arguments; one passed owned
@@ -2492,6 +2523,60 @@ impl CodeGen {
         self.emit("addq $8, %rsp")
         self.emit(format("jmp myla_{}", n))
         self.emit("")
+    }
+
+    // The adapter for a function with a parameter passed by value (D88):
+    // the words rebuilt below the frame, a copy (with references of its own)
+    // of each such aggregate, whose address the closure convention passes,
+    // and handed over in place of the adapter's (`emit_frame_handover`).
+    fun emit_byval_fnval_thunk(var self, n: str, sig: FuncSig, struct_ret: bool) {
+        self.emit(format("myla_{}__fnval:", n))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        var first = 24
+        if struct_ret { first = 32 }
+        var pushed = 0
+        var i = len(sig.params) - 1
+        while i >= 0 {
+            let load = format("movq {}(%rbp), %rax", first + 8 * i)
+            if self.byval_param(sig, i, sig.params[i]) { pushed = pushed + self.push_value_words(sig.params[i], [load]) }
+            else {
+                self.emit(load)
+                if self.owned_param(sig, i, sig.params[i]) { self.emit("incq -8(%rax)") }
+                self.emit("pushq %rax")
+                pushed = pushed + 1
+            }
+            i = i - 1
+        }
+        if struct_ret {
+            self.emit("pushq 16(%rbp)")
+            pushed = pushed + 1
+        }
+        var words = len(sig.params) + 1
+        if struct_ret { words = words + 1 }
+        self.arg_words = words
+        self.saved_regs = []
+        var in_place: [bool] = []
+        while len(in_place) < pushed { push(in_place, false) }
+        self.emit_frame_handover(pushed, in_place, format("myla_{}", n))
+        self.emit("")
+    }
+
+    // Push the words of the aggregate of type `t` whose address the lines
+    // `load` put in %rax, with references of their own to what it holds, for
+    // a parameter passed by value (D88): how many words.
+    fun push_value_words(var self, t: Type, load: [str]) -> int32 {
+        for line in load { self.emit(line) }
+        self.emit("movq %rax, %r8")
+        self.retain("r8", 0, t)
+        let words = self.word_size(t) / 8
+        var w = words - 1
+        while w >= 0 {
+            for line in load { self.emit(line) }
+            self.emit(format("pushq {}(%rax)", 8 * w))
+            w = w - 1
+        }
+        return words
     }
 
     fun free_eb(self, body: ExprOrBlock, bound: [str]) -> [str] {
