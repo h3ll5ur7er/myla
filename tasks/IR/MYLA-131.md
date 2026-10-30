@@ -2,7 +2,7 @@
 id: MYLA-131
 title: Aggregate parameters by value (D88)
 type: feature
-status: in-progress
+status: done
 priority: medium
 labels: [codegen, selfhost, ownership, design]
 ---
@@ -47,3 +47,11 @@ D88: option 1. Function values keep the rule, and D87's rule against passing a p
 - **Size:** option 1 copies whatever size the value has; a large struct costs its size per `become`. A limit would make the checker depend on layout, so none is recommended.
 - **`var self`:** stays a pointer; `become` still calls a `var self` method only on `self`.
 - **The Python backend** implements it too, as for D87.
+
+## Evidence
+
+- The parity program `become_passes_aggregates_by_value` (an enum state machine, a struct per step with and without heap members, a tuple, a type parameter, a part of `self` to a `var self` method, the same functions called directly, through a function value and a partial application) prints the same in both interpreters and both native backends; before D88 the checkers rejected its five `become`s.
+- A million deep (`test_become_runs_a_million_deep`, `test_become_passes_aggregates_by_value`) both native backends, with and without `-g`, print what the self-hosted interpreter prints. A chain copying a struct with a growing string 50,000 times stays at a 10 MB peak (kept, the copies would take over 1 GiB).
+- Compiling itself, the compiler emits the same code and runs 0.04% more instructions (2,777,231,244 → 2,778,384,004; a first version hashed function names for every argument and cost 0.23%).
+- Unit 595, integration 2, burn 765 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,333,932 bytes).
+- Found on the way: [[MYLA-132]] (an explicit call of a derived `eq` doesn't lower in the self-hosted backend).
