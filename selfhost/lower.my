@@ -1504,8 +1504,12 @@ impl Lower {
                 return self.direct_call(cg, e, nm, args, into, tail)
             },
             ExprKind.GetField(recv, field) => {
-                let mname = format("{}.{}", cg.type_key(cg.type_of(recv.id)), field)
-                if !cg.has_func(mname) { return self.indirect_call(cg, e, callee, args, tail) }
+                let key = cg.type_key(cg.type_of(recv.id))
+                let mname = format("{}.{}", key, field)
+                if !cg.has_func(mname) {
+                    if field == "eq" && len(args) == 1 && cg.derived_eq_routine(key) { return self.derived_eq(cg, mname, recv, args[0], tail) }
+                    return self.indirect_call(cg, e, callee, args, tail)
+                }
                 var argv: [Expr] = [recv]
                 for a in args { push(argv, a) }
                 return self.direct_call(cg, e, mname, argv, into, tail)
@@ -1513,6 +1517,23 @@ impl Lower {
             _ => {},
         }
         return self.indirect_call(cg, e, callee, args, tail)
+    }
+
+    // `a.eq(b)` of a `#derive(Eq)` type: the code generator's routine, with
+    // both operands' addresses (MYLA-132). It calls nothing that comes back,
+    // so `become` makes it an ordinary call and returns its result.
+    fun derived_eq(var self, cg: CodeGen, name: str, a: Expr, b: Expr, tail: bool) -> int32 {
+        let pa = self.addr(cg, a)
+        let pb = self.addr(cg, b)
+        let res = self.temp(Type.TBool)
+        self.add(Inst.Call(res, name, [pa, pb]))
+        if tail {
+            self.drop_temps(0)
+            self.drop_owners(0)
+            self.leave(Term.Ret(res))
+            self.tailed = true
+        }
+        return res
     }
 
     // A call through the function value `callee` (evaluated first): its

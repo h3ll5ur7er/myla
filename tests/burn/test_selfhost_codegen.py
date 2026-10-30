@@ -80,6 +80,7 @@ PARITY_PROGRAMS = (
     "borrowed_lets_survive_a_moved_value",
     "become_keeps_the_stack_flat",
     "become_passes_aggregates_by_value",
+    "derived_eq_called_by_name",
     "assign_to_a_field_of_a_shared_element_copies_it",
     "match_binding_survives_writes_to_the_scrutinee",
     "destructure_boxed_enum_and_list_leaves",

@@ -2194,6 +2194,33 @@ PROGRAMS = {
         "    print(keep(rename(Named { name: \"k\", steps: [] }, 2)).name)\n"
         "}\n"
     ),
+    "derived_eq_called_by_name": (
+        # MYLA-132: a derived `eq` called by name (and by `become`), of a
+        # struct and of an enum, as `==` calls it
+        "#derive(Eq)\n"
+        "struct P { x: int, s: str }\n"
+        "#derive(Eq)\n"
+        "enum Light { Red, Green, Dim(int) }\n"
+        "fun same(a: P, b: P) -> bool {\n"
+        "    return a.eq(b)\n"
+        "}\n"
+        "fun lit(l: Light) -> bool {\n"
+        "    become l.eq(Light.Green)\n"
+        "}\n"
+        "fun near(a: P, x: int) -> bool {\n"
+        "    become a.eq(P { x: x, s: \"k\" + \"\" })\n"
+        "}\n"
+        "#main\n"
+        "fun main() {\n"
+        "    print(same(P { x: 1, s: \"k\" }, P { x: 1, s: \"k\" }))\n"
+        "    print(same(P { x: 1, s: \"k\" }, P { x: 1, s: \"j\" }))\n"
+        "    print(lit(Light.Green))\n"
+        "    print(lit(Light.Dim(2)))\n"
+        "    print(Light.Dim(3).eq(Light.Dim(3)))\n"
+        "    print(near(P { x: 1, s: \"k\" }, 1))\n"
+        "    print(near(P { x: 1, s: \"k\" }, 2))\n"
+        "}\n"
+    ),
     "method_arguments_survive_the_receivers_writes": (
         # MYLA-123: an argument read from the receiver of a `var self` method
         # is a copy taken before the call, which the method's writes to its

@@ -1177,6 +1177,19 @@ impl CodeGen {
         return len(self.handed) > 0 && is_aggregate(t) && contains_int(int_list(get(self.handed, sig.name)), i)
     }
 
+    // Whether `myla_<key>.eq` is the routine `emit_derived_eq` writes for a
+    // `#derive(Eq)` struct or enum (called with both operands' addresses).
+    fun derived_eq_routine(self, key: str) -> bool {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.StructDecl(name, fields, attrs, tps, isp) => { if name == key { return len(tps) == 0 && attrs_have_derive_eq(attrs) } },
+                DeclKind.EnumDecl(name, variants, attrs, tps, isp) => { if name == key { return len(tps) == 0 && attrs_have_derive_eq(attrs) } },
+                _ => {},
+            }
+        }
+        return false
+    }
+
     // Whether some parameter of `sig` is passed by value (most have none).
     fun has_byval(self, sig: FuncSig) -> bool {
         return len(self.handed) > 0 && contains(self.handed, sig.name)

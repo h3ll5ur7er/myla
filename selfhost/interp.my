@@ -1297,6 +1297,12 @@ impl Interp {
 
     fun eval_method_call(var self, e: Expr, recv: Expr, method: str, args: [Expr]) -> Value {
         let key = self.recv_key(recv)
+        // a derived `eq` has no body: structural equality, as `==` (MYLA-132)
+        if self.derived_eq(key, method, args) {
+            let a = self.eval(recv)
+            let b = self.eval(args[0])
+            return Value.VBool(value_eq(a, b))
+        }
         let fi = self.func_idx(format("{}.{}", key, method))
         if fi >= 0 {
             // the receiver first (once), then the arguments, as in Python
@@ -1397,6 +1403,25 @@ impl Interp {
     // `become call`: the callee and the arguments, evaluated as a call's
     // would be, left pending for run_tail.
     fun exec_become(var self, ex: Expr) {
+        // a derived `eq` is the interpreter's own comparison, which returns
+        match ex.kind {
+            ExprKind.Call(callee, args) => {
+                match callee.kind {
+                    ExprKind.GetField(tgt, field) => {
+                        if self.derived_eq(self.recv_key(tgt), field, args) {
+                            let v = self.eval(ex)
+                            if !self.stop() {
+                                self.ctrl = Ctrl.CReturn
+                                self.ctrl_val = v
+                            }
+                            return
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
         let t = match ex.kind {
             ExprKind.Call(callee, args) => self.tail_call(callee, args),
             _ => TailCall.TNone,
@@ -1546,6 +1571,11 @@ impl Interp {
             Value.VPartial(base, slots, holes) => { self.enter_value(base, fill_holes(slots, holes, argv)) },
             _ => {},
         }
+    }
+
+    // Whether `recv.method(args)` calls the `eq` of a `#derive(Eq)` type.
+    fun derived_eq(self, key: str, method: str, args: [Expr]) -> bool {
+        return method == "eq" && len(args) == 1 && !self.has_method_body(key, "eq")
     }
 
     fun has_method_body(self, key: str, name: str) -> bool {
