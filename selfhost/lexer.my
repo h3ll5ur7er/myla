@@ -10,7 +10,7 @@ from .util import digit_value, parse_value, is_blank, escape
 from .tokens import TokenKind, Token, Diag, SrcSpan, keyword_kind, is_int_suffix, is_float_suffix, kind_name
 
 pub struct Lexer {
-    cps: [int32],
+    cps: [char],
     pos: int32,
     line: int32,
     col: int32,
@@ -20,10 +20,8 @@ pub struct Lexer {
 }
 
 pub fun new_lexer(src: str) -> Lexer {
-    var cps: [int32] = []
-    for ch in chars(src) {
-        push(cps, ch as int32)
-    }
+    // the code points as `chars` decodes them, not copied (MYLA-133)
+    let cps = chars(src)
     return Lexer { cps: cps, pos: 0, line: 1, col: 1, n: len(cps) as int32, toks: [], err: None }
 }
 
@@ -58,7 +56,9 @@ impl Lexer {
         var sb = StringBuilder()
         var i = start
         while i < end {
-            append(sb, cp_utf8(self.cps[i]))
+            // ASCII as it is, without a string of its own (MYLA-133)
+            let c = self.cps[i] as int32
+            if c < 128 { append_byte(sb, c as uint8) } else { append(sb, cp_utf8(c)) }
             i = i + 1
         }
         return build(sb)
@@ -70,17 +70,17 @@ impl Lexer {
 
     fun peek(self) -> int32 {
         if self.pos >= self.n { return 0 }
-        return self.cps[self.pos]
+        return self.cps[self.pos] as int32
     }
 
     fun peek1(self) -> int32 {
         if self.pos + 1 >= self.n { return 0 }
-        return self.cps[self.pos + 1]
+        return self.cps[self.pos + 1] as int32
     }
 
     fun peek2(self) -> int32 {
         if self.pos + 2 >= self.n { return 0 }
-        return self.cps[self.pos + 2]
+        return self.cps[self.pos + 2] as int32
     }
 
     // Record the first error and stop: the scanners return after calling this,
@@ -100,7 +100,7 @@ impl Lexer {
 
     fun advance(var self) -> int32 {
         if self.pos >= self.n { return 0 }
-        let c = self.cps[self.pos]
+        let c = self.cps[self.pos] as int32
         self.pos = self.pos + 1
         if c == 10 {
             self.line = self.line + 1
