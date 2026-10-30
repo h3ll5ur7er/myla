@@ -1174,7 +1174,12 @@ impl CodeGen {
     // value: a struct, tuple or enum a `become` hands over to it (D88), its
     // words in the argument words.
     fun byval_param(self, sig: FuncSig, i: int32, t: Type) -> bool {
-        return is_aggregate(t) && contains_int(int_list(get(self.handed, sig.name)), i)
+        return len(self.handed) > 0 && is_aggregate(t) && contains_int(int_list(get(self.handed, sig.name)), i)
+    }
+
+    // Whether some parameter of `sig` is passed by value (most have none).
+    fun has_byval(self, sig: FuncSig) -> bool {
+        return len(self.handed) > 0 && contains(self.handed, sig.name)
     }
 
     // The bytes of argument words a value of type `t` takes by value.

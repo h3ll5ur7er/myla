@@ -1250,14 +1250,18 @@ impl Lower {
         var method = ""
         if op == "==" || op == "!=" { method = "eq" } else if is_cmp(op) { method = "cmp" } else { return self.unsupported("an arithmetic operator on a user type used as a scalar") }
         let name = format("{}.{}", key, method)
-        let msig = cg.sig_of(name)
+        // by value when a `become` hands one over to it (D88; a derived `eq`
+        // is the code generator's routine, which takes addresses)
+        var byval = [false, false]
+        if cg.has_func(name) && cg.has_byval(cg.sig_of(name)) {
+            let msig = cg.sig_of(name)
+            byval = [cg.byval_param(msig, 0, lt), cg.byval_param(msig, 1, lt)]
+        }
         var vals: [int32] = []
         var k = 0
         for side in [l, r] {
             let p = self.addr(cg, side)
-            // by value when a `become` hands one over to it (D88; a derived
-            // `eq` is the code generator's routine, which takes addresses)
-            if cg.has_func(name) && cg.byval_param(msig, k, lt) { for w in self.value_words(cg, lt, p) { push(vals, w) } } else { push(vals, p) }
+            if byval[k] { for w in self.value_words(cg, lt, p) { push(vals, w) } } else { push(vals, p) }
             k = k + 1
         }
         let res = self.temp(Type.TInt(64, true))
@@ -1795,12 +1799,13 @@ impl Lower {
         if sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false } { root = place_root(argv[0]) }
         var vals: [int32] = []
         let owns = cg.owned_params(sig, params)
+        let any_byval = cg.has_byval(sig)
         var i = 0
         while i < len(argv) && i < len(params) {
             // an owned parameter gets a reference of its own: an owned
             // temporary's, or one retained for it (MYLA-127)
             let owned = i < len(owns) && owns[i]
-            let byval = cg.byval_param(sig, i, params[i])
+            let byval = any_byval && cg.byval_param(sig, i, params[i])
             // nothing keeps a borrowed value alive once `become` has gone
             if tail && !owned && !byval && !(i == 0 && root != "") && (is_aggregate(params[i]) || cg.owns_heap(params[i])) { return self.unsupported("a 'become' passing a value to a borrowed parameter") }
             // a copy of its own, which the method's writes can't reach either
