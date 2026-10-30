@@ -26,3 +26,4 @@ fun main() {
 ## Evidence
 
 - `derived_eq_called_by_name` printed `ERR: VUnit` for every line in the self-hosted interpreter and didn't compile with the self-hosted backend ("a call through a value of that type"); now all four implementations print `true false true false true true false`.
+- Unit 595, integration 2, burn 766 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,339,067 bytes).
