@@ -79,6 +79,8 @@ PARITY_PROGRAMS = (
     "heap_free_arguments_survive_the_receivers_writes",
     "borrowed_lets_survive_a_moved_value",
     "become_keeps_the_stack_flat",
+    "become_passes_aggregates_by_value",
+    "derived_eq_called_by_name",
     "assign_to_a_field_of_a_shared_element_copies_it",
     "match_binding_survives_writes_to_the_scrutinee",
     "destructure_boxed_enum_and_list_leaves",
@@ -1097,6 +1099,43 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertNotIn("retain", total_ir)
         self.assertIn("moved $0", total_ir)
         self.assertNotIn("popq 16(%rbp)", self._function_asm(asm, "fib"))
+
+    def test_become_passes_aggregates_by_value(self) -> None:
+        # MYLA-131, D88: the parity program a million deep, with and without
+        # -g; the parameters a `become` hands an aggregate over to hold it in
+        # their argument words; each step's copy is released (kept, the
+        # strings would take more than 1 GiB)
+        from .test_compiler_parity import PROGRAMS
+        source = PROGRAMS["become_passes_aggregates_by_value"].replace("let deep = 20000", "let deep = 1000000")
+        expected = ("counted 1000000\n3000000\nrs\n2\n1001\n1000\n3000000\n5\ntext!\n"
+                    "1000004\n11\n10\n13\nk\n")
+        leak = (
+            "struct Named { name: str, steps: [int] }\n"
+            "fun rename(t: Named, n: int) -> Named {\n"
+            "    if n == 0 { return t }\n"
+            "    become rename(Named { name: t.name + \"x\", steps: t.steps }, n - 1)\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(len(rename(Named { name: \"\", steps: [1] }, 50000).name))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), (expected, 0))
+            proc = subprocess.run([self._binary, path, "-g"], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(self._build_and_run(proc.stdout), (expected, 0))
+            ir = subprocess.run([self._binary, path, "--emit-ir"], capture_output=True, text=True).stdout
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(leak)
+            out, code, peak = self._build_and_measure(self._emit_asm(path))
+        self.assertEqual((out, code), ("50000\n", 0))
+        self.assertLess(peak, 64)
+        self.assertIn("jmp myla_walk", self._function_asm(asm, "walk"))
+        self.assertRegex(ir, r"\$\d+ p: Pos \(argument 1, 16 bytes by value\)\n")
+        self.assertRegex(ir, r"\$\d+ s: State \(argument 0, 16 bytes by value\) owns\n")
 
     def test_partial_application_thunks_jump(self) -> None:
         # MYLA-130: a partial application's thunk jumps to its function (or

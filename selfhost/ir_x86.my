@@ -50,7 +50,8 @@ impl CodeGen {
         // first candidate) the temporaries holding an address in this frame
         var words = 0
         for s in f.slots {
-            if s.word >= 0 && s.word + 1 > words { words = s.word + 1 }
+            // a parameter passed by value takes as many words as it has (D88)
+            if s.word >= 0 && s.word + s.size / 8 > words { words = s.word + s.size / 8 }
         }
         var in_frame: [bool] = []
         self.save_base = saves
@@ -476,7 +477,9 @@ impl CodeGen {
             Inst.Loc(p) => { self.emit_loc(p.line, p.col) },
             Inst.Bind(name, s) => {
                 let slot = f.slots[s]
-                if slot.word >= 0 {
+                // a parameter passed by value lives in its argument words as a
+                // local in its slot (D88)
+                if slot.word >= 0 && !slot.inline {
                     let b = CgBinding { name: name, kind: "param", offset: slot_off[s], ty: slot.ty, capoff: 0 }
                     self.dbg_variable(b, true, true)
                 } else {

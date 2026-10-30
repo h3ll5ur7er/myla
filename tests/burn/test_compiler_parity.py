@@ -2094,6 +2094,133 @@ PROGRAMS = {
         "    shout(deep)\n"
         "}\n"
     ),
+    "become_passes_aggregates_by_value": (
+        # MYLA-131, D88: `become` hands a struct, tuple or enum its function
+        # made over by value: a state machine, a struct per step (owning heap
+        # values, or not), a tuple, a type parameter, a part of `self` to a
+        # `var self` method; the same functions called as usual, through a
+        # function value and a partial application, their value kept
+        "enum State { Start, Count(int), Done(str) }\n"
+        "struct Pos { x: int, y: int }\n"
+        "struct Named { name: str, steps: [int] }\n"
+        "struct Walker { at: Pos, home: Pos, moves: int }\n"
+        "\n"
+        "fun step(s: State, n: int) -> str {\n"
+        "    match s {\n"
+        "        State.Start => { become step_on(State.Count(0), n) },\n"
+        "        State.Count(k) => { become step(next_state(k, n), n) },\n"
+        "        State.Done(msg) => { return msg },\n"
+        "    }\n"
+        "    unreachable()\n"
+        "}\n"
+        "\n"
+        "fun next_state(k: int, n: int) -> State {\n"
+        "    if k < n { return State.Count(k + 1) }\n"
+        "    return State.Done(f\"counted {k}\")\n"
+        "}\n"
+        "\n"
+        "fun step_on(s: State, n: int) -> str {\n"
+        "    become step(s, n)\n"
+        "}\n"
+        "\n"
+        "fun walk(p: Pos, n: int) -> Pos {\n"
+        "    if n == 0 { return p }\n"
+        "    become walk(Pos { x: p.x + 1, y: p.y + 2 }, n - 1)\n"
+        "}\n"
+        "\n"
+        "fun rename(t: Named, n: int) -> Named {\n"
+        "    if n == 0 { return t }\n"
+        "    become rename(Named { name: t.name + \"\", steps: t.steps }, n - 1)\n"
+        "}\n"
+        "\n"
+        "fun grow(t: Named, n: int) -> Named {\n"
+        "    if n == 0 { return t }\n"
+        "    var steps = t.steps\n"
+        "    push(steps, n)\n"
+        "    become grow(Named { name: t.name + \".\", steps: steps }, n - 1)\n"
+        "}\n"
+        "\n"
+        "fun pair_sum(t: (int, Pos), n: int) -> int {\n"
+        "    if n == 0 { return t.0 + t.1.x }\n"
+        "    become pair_sum((t.0 + 1, Pos { x: t.1.x + 2, y: 0 }), n - 1)\n"
+        "}\n"
+        "\n"
+        "fun echo<T>(x: T, n: int) -> T {\n"
+        "    if n == 0 { return x }\n"
+        "    become echo(x, n - 1)\n"
+        "}\n"
+        "\n"
+        "impl Walker {\n"
+        "    fun go(var self, to: Pos, n: int) {\n"
+        "        self.at = to\n"
+        "        self.moves = self.moves + 1\n"
+        "        if n == 0 { return }\n"
+        "        become self.go(self.home, n - 1)\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "fun total(p: Pos) -> int {\n"
+        "    return p.x + p.y\n"
+        "}\n"
+        "\n"
+        "fun keep(t: Named) -> Named {\n"
+        "    let kept = t\n"
+        "    return kept\n"
+        "}\n"
+        "\n"
+        "#main\n"
+        "fun main() {\n"
+        "    let deep = 20000\n"
+        "    print(step(State.Start, deep))\n"
+        "    let p = walk(Pos { x: 0, y: 0 }, deep)\n"
+        "    print(p.x + p.y)\n"
+        "    let r = rename(Named { name: \"r\" + \"s\", steps: [1, 2] }, deep)\n"
+        "    print(r.name)\n"
+        "    print(len(r.steps))\n"
+        "    let g = grow(Named { name: \"n\", steps: [] }, 1000)\n"
+        "    print(len(g.name))\n"
+        "    print(len(g.steps))\n"
+        "    print(pair_sum((0, Pos { x: 0, y: 0 }), deep))\n"
+        "    print(echo(Pos { x: 4, y: 5 }, deep).y)\n"
+        "    print(echo(\"text\" + \"!\", deep))\n"
+        "    var w = Walker { at: Pos { x: 9, y: 9 }, home: Pos { x: 1, y: 2 }, moves: 0 }\n"
+        "    w.go(Pos { x: 5, y: 5 }, deep)\n"
+        "    print(w.at.x + w.at.y + w.moves)\n"
+        "    print(total(walk(Pos { x: 1, y: 1 }, 3)))\n"
+        "    let f = walk\n"
+        "    print(total(f(Pos { x: 2, y: 2 }, 2)))\n"
+        "    let h = walk(_, 4)\n"
+        "    print(total(h(Pos { x: 0, y: 1 })))\n"
+        "    print(keep(rename(Named { name: \"k\", steps: [] }, 2)).name)\n"
+        "}\n"
+    ),
+    "derived_eq_called_by_name": (
+        # MYLA-132: a derived `eq` called by name (and by `become`), of a
+        # struct and of an enum, as `==` calls it
+        "#derive(Eq)\n"
+        "struct P { x: int, s: str }\n"
+        "#derive(Eq)\n"
+        "enum Light { Red, Green, Dim(int) }\n"
+        "fun same(a: P, b: P) -> bool {\n"
+        "    return a.eq(b)\n"
+        "}\n"
+        "fun lit(l: Light) -> bool {\n"
+        "    become l.eq(Light.Green)\n"
+        "}\n"
+        "fun near(a: P, x: int) -> bool {\n"
+        "    become a.eq(P { x: x, s: \"k\" + \"\" })\n"
+        "}\n"
+        "#main\n"
+        "fun main() {\n"
+        "    print(same(P { x: 1, s: \"k\" }, P { x: 1, s: \"k\" }))\n"
+        "    print(same(P { x: 1, s: \"k\" }, P { x: 1, s: \"j\" }))\n"
+        "    print(lit(Light.Green))\n"
+        "    print(lit(Light.Dim(2)))\n"
+        "    print(Light.Dim(3).eq(Light.Dim(3)))\n"
+        "    print(near(P { x: 1, s: \"k\" }, 1))\n"
+        "    print(near(P { x: 1, s: \"k\" }, 2))\n"
+        "}\n"
+    ),
     "method_arguments_survive_the_receivers_writes": (
         # MYLA-123: an argument read from the receiver of a `var self` method
         # is a copy taken before the call, which the method's writes to its
@@ -3311,6 +3438,38 @@ STRESS_MAP_OVERWRITE_SRC = (
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class TestCompilerParity(unittest.TestCase):
+    def test_become_runs_a_million_deep(self):
+        # MYLA-128, MYLA-131: every `become` of the parity programs jumps, so
+        # they run a million calls deep in the default stack
+        programs = (
+            ("become_keeps_the_stack_flat", "0..1000 {", "0..1000000 {",
+             "1784293664\ntrue\ntrue\n3000000\n3000000\n2000000\n459109\n3\n"
+             "1000001\n1000000\n2999997\n2999997\n1000\nc\nabc\n42\n789\ndone\n"),
+            ("become_passes_aggregates_by_value", "", "",
+             "counted 1000000\n3000000\nrs\n2\n1001\n1000\n3000000\n5\ntext!\n"
+             "1000004\n11\n10\n13\nk\n"),
+        )
+        for name, old, new, expected in programs:
+            with self.subTest(program=name):
+                source = PROGRAMS[name].replace("let deep = 20000", "let deep = 1000000")
+                if old:
+                    source = source.replace(old, new)
+                self.assertEqual(build_and_run(source, timeout=60), (expected, 0))
+
+    def test_become_releases_the_values_it_copies(self):
+        # MYLA-131: each step's copy, with a longer string, is released; kept,
+        # they would take more than the 1 GiB arena
+        source = (
+            "struct Named { name: str, steps: [int] }\n"
+            "fun rename(t: Named, n: int) -> Named {\n"
+            "    if n == 0 { return t }\n"
+            "    become rename(Named { name: t.name + \"x\", steps: t.steps }, n - 1)\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(len(rename(Named { name: \"\", steps: [1] }, 50000).name))\n"
+            "}\n")
+        self.assertEqual(build_and_run(source, timeout=60), ("50000\n", 0))
+
     def test_overwritten_map_values_are_released(self):
         out, code = build_and_run(STRESS_MAP_OVERWRITE_SRC, timeout=60)
         self.assertEqual(code, 0)

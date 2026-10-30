@@ -1,15 +1,16 @@
 //~ type error: 'become' can only pass a 'Point' that is (a part of) a parameter
 //~ span: p
-// A struct made in the function lives in its frame, which the jump leaves
-// (D87); one the caller passed in (or a field of one) would do.
+// A function value gets a struct's address, and the struct made in the
+// function lives in its frame, which the jump leaves (D87, D88); a function
+// or method would take it by value.
 struct Point { x: int, y: int }
-fun norm(p: Point) -> int {
-    return p.x + p.y
-}
-fun shifted(x: int) -> int {
+fun shifted(norm: (Point) -> int, x: int) -> int {
     let p = Point { x: x + 1, y: 0 }
     become norm(p)
 }
+fun sum(p: Point) -> int {
+    return p.x + p.y
+}
 fun main() {
-    print(shifted(1))
+    print(shifted(sum, 1))
 }

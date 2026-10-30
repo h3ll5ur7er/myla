@@ -874,7 +874,7 @@ class Checker:
         self._param_scope: _Scope | None = None
         self.become_handovers: dict[tuple[str, int], tuple[str, ast.Expr]] = {}
         self._fun_path: str | None = None
-        self._passed_on: list[tuple[str, int, ast.Name, str | None]] = []
+        self._passed_on: list[tuple[str, int, str, ast.Expr, str | None]] = []
 
     # -- public entry --------------------------------------------------------
 
@@ -4328,36 +4328,34 @@ class Checker:
             if at is None or _has_error(at) or isinstance(at, _SCALARS):
                 continue
             frame = isinstance(at, _FRAME_VALUES)
-            if frame and not self._param_part(arg, scope):
-                raise TypeCheckError(
-                    f"'become' can only pass a '{type_name(at)}' that is "
-                    "(a part of) a parameter",
-                    at=arg,
-                )
-            # the method changes its receiver, and the copy of a part of it a
-            # call passes (MYLA-123) would live in the frame the jump leaves
-            if (frame and mutates and i > 0 and _root_name(arg) is not None
-                    and _root_name(arg) == _root_name(args[0])):
-                raise TypeCheckError(
-                    f"'become' can't pass a part of '{_root_name(arg)}' to the "
-                    "method that changes it",
-                    at=arg,
-                )
-            if not frame and callee_kind == "value" and not self._param_part(arg, scope):
-                raise TypeCheckError(
-                    f"'become' can only pass a '{type_name(at)}' to a function "
-                    "value when it is (a part of) a parameter",
-                    at=arg,
-                )
-            # what may own heap memory: handed over to a function, which owns
-            # it then, or passed on to a function value, which borrows it
-            if frame and not isinstance(at, _MAYBE_HEAP):
-                continue
             if callee_kind == "value":
-                if isinstance(arg, ast.Name):
-                    index = self._param_index(arg.ident)
-                    self._passed_on.append((self._fun_name, index, arg, self._fun_path))
-            elif not (i == 0 and mutates):
+                # a function value borrows what it gets: a pointer to an
+                # aggregate, a heap value
+                if not self._param_part(arg, scope):
+                    raise TypeCheckError(
+                        f"'become' can only pass a '{type_name(at)}' that is "
+                        "(a part of) a parameter" if frame else
+                        f"'become' can only pass a '{type_name(at)}' to a function "
+                        "value when it is (a part of) a parameter",
+                        at=arg,
+                    )
+                root = _root_name(arg)
+                self._passed_on.append((self._fun_name, self._param_index(root), root,
+                                        arg, self._fun_path))
+                continue
+            # a function or method takes a struct, tuple or enum by value
+            # (D88) and a heap value owned (D87); a function value it gets
+            # by its address
+            if isinstance(at, FuncType):
+                if not self._param_part(arg, scope):
+                    raise TypeCheckError(
+                        f"'become' can only pass a '{type_name(at)}' that is "
+                        "(a part of) a parameter",
+                        at=arg,
+                    )
+                continue
+            # (a `var self` receiver is its caller's variable)
+            if not (i == 0 and mutates):
                 self.become_handovers.setdefault((target, i), (self._fun_name, arg))
 
     def _param_part(self, expr: ast.Expr, scope: _Scope) -> bool:
@@ -4373,16 +4371,17 @@ class Checker:
         return list(self._param_scope.names).index(name)
 
     def _check_passed_on(self) -> None:
-        """A heap value a `become` passes on to a function value stays its
-        caller's, so a `become` can't hand one over to that parameter."""
-        for fun, index, arg, path in self._passed_on:
+        """What a `become` passes on to a function value stays its caller's,
+        so a `become` can't hand a value over to the parameter it is (a part
+        of): the function would drop it before the jump."""
+        for fun, index, root, arg, path in self._passed_on:
             handed = self.become_handovers.get((fun, index))
             if handed is None:
                 continue
             by, at = handed
             self._fail_part(
                 path,
-                f"'become' can't pass '{arg.ident}' on to a function value: a "
+                f"'become' can't pass '{root}' on to a function value: a "
                 f"'become' in '{by}' hands it over to '{fun}'",
                 arg, notes=[note("it is handed over here", at)],
             )
@@ -4866,11 +4865,11 @@ def _is_diverging(expr: ast.Expr) -> bool:
             and expr.callee.ident in _DIVERGING_BUILTINS)
 
 
-# What `become` passes freely (D87), and what lives in a frame, so it must be
-# (a part of) a parameter; a type parameter may stand for either.
+# What `become` passes freely (D87), and what lives in a frame, which a call
+# through a function value gets the address of (D88); a type parameter may
+# stand for either.
 _SCALARS = (IntType, FloatType, CharType, BoolType)
 _FRAME_VALUES = (StructType, TupleType, EnumType, FuncType, TypeParam, SelfType)
-_MAYBE_HEAP = (TypeParam, SelfType)
 
 
 def _root_name(expr: ast.Expr) -> str | None:

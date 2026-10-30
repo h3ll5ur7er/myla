@@ -348,10 +348,9 @@ fun root_name(e: Expr) -> str {
     }
 }
 
-fun is_maybe_heap(t: Type) -> bool {
+fun is_tfunc_type(t: Type) -> bool {
     return match t {
-        Type.TParam(n) => true,
-        Type.TSelf => true,
+        Type.TFunc(ps, r) => true,
         _ => false,
     }
 }
@@ -3578,26 +3577,24 @@ impl Checker {
                 let at = self.resolved[arg.id]
                 if !has_error(at) && !is_scalar_type(at) {
                     let frame = is_frame_value(at)
-                    if frame && !self.in_param(arg) { return Err(terr_at(arg.line, arg.col, arg.sp, format("'become' can only pass a '{}' that is (a part of) a parameter", type_name(at)))) }
-                    // the method changes its receiver, and the copy of a part
-                    // of it a call passes (MYLA-123) would live in the frame
-                    // the jump leaves
-                    if frame && self.call_mutates && i > 0 && root_name(arg) != "" && root_name(arg) == root_name(all[0]) { return Err(terr_at(arg.line, arg.col, arg.sp, format("'become' can't pass a part of '{}' to the method that changes it", root_name(arg)))) }
-                    if !frame && kind == "value" && !self.in_param(arg) { return Err(terr_at(arg.line, arg.col, arg.sp, format("'become' can only pass a '{}' to a function value when it is (a part of) a parameter", type_name(at)))) }
-                    // what may own heap memory: handed over to a function,
-                    // which owns it then, or passed on to a function value,
-                    // which borrows it
-                    if !frame || is_maybe_heap(at) {
-                        if kind == "value" {
-                            match arg.kind {
-                                ExprKind.Name(n) => { push(self.passed_on, PassedOn { func: self.fun_name, index: self.param_index(n), name: n, line: arg.line, col: arg.col, sp: arg.sp, decl: self.cur_decl }) },
-                                _ => {},
-                            }
-                        } else if !(i == 0 && self.call_mutates) {
-                            // (a `var self` receiver is its caller's variable)
-                            let key = format("{}\t{}", target, i)
-                            if !contains(self.handovers, key) { self.handovers[key] = Handover { func: target, index: i, by: self.fun_name, line: arg.line, col: arg.col, sp: arg.sp } }
+                    if kind == "value" {
+                        // a function value borrows what it gets: a pointer to
+                        // an aggregate, a heap value
+                        if !self.in_param(arg) {
+                            if frame { return Err(terr_at(arg.line, arg.col, arg.sp, format("'become' can only pass a '{}' that is (a part of) a parameter", type_name(at)))) }
+                            return Err(terr_at(arg.line, arg.col, arg.sp, format("'become' can only pass a '{}' to a function value when it is (a part of) a parameter", type_name(at))))
                         }
+                        let root = root_name(arg)
+                        push(self.passed_on, PassedOn { func: self.fun_name, index: self.param_index(root), name: root, line: arg.line, col: arg.col, sp: arg.sp, decl: self.cur_decl })
+                    } else if is_tfunc_type(at) {
+                        // a function or method takes a struct, tuple or enum
+                        // by value (D88) and a heap value owned (D87); a
+                        // function value it gets by its address
+                        if !self.in_param(arg) { return Err(terr_at(arg.line, arg.col, arg.sp, format("'become' can only pass a '{}' that is (a part of) a parameter", type_name(at)))) }
+                    } else if !(i == 0 && self.call_mutates) {
+                        // (a `var self` receiver is its caller's variable)
+                        let key = format("{}\t{}", target, i)
+                        if !contains(self.handovers, key) { self.handovers[key] = Handover { func: target, index: i, by: self.fun_name, line: arg.line, col: arg.col, sp: arg.sp } }
                     }
                 }
             }

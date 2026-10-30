@@ -1106,23 +1106,33 @@ class CodeGen:
 
         # bind parameters to their incoming stack slots (parameters are borrowed,
         # so they are never dropped — the caller owns the argument — but for
-        # those a `become` hands a value over to, D87)
+        # those a `become` hands a value over to: owned, D87, or an aggregate
+        # in its argument words, D88)
         self._push_scope()
         self._drop_scopes.append([])
-        param_base = 1 if self._struct_ret else 0
-        self._arg_words = param_base + len(sig.params)
+        word = 1 if self._struct_ret else 0
+        offsets: list = []
         for i, (param, ptype) in enumerate(zip(decl.params, sig.params)):
-            offset = 16 + 8 * (param_base + i)
+            offset = 16 + 8 * word
+            offsets.append(offset)
+            if self._param_byval(decl.name, i, ptype):
+                self._bind(param.name, ("local", offset, ptype), whole_function=True, param=True)
+                self._register_owner(offset, ptype)
+                word += self._value_words(ptype)
+                continue
             self._bind(param.name, ("param", offset, ptype), whole_function=True, param=True)
             if self._param_owned(decl.name, i, ptype):
                 self._drop_scopes[-1].append((offset, ptype))
+            word += 1
+        self._arg_words = word
 
         if getattr(decl, "tag_eq", False):
             # derived `eq` of an enum without payloads (MYLA-87): self and
-            # other arrive by address; equal tags, equal values
-            self._emit("movq 16(%rbp), %rax")
+            # other arrive by address (or by value, D88); equal tags, equal values
+            for k, reg in enumerate(("rax", "rcx")):
+                load = "leaq" if self._param_byval(decl.name, k, sig.params[k]) else "movq"
+                self._emit(f"{load} {offsets[k]}(%rbp), %{reg}")
             self._emit("movq (%rax), %rax")
-            self._emit("movq 24(%rbp), %rcx")
             self._emit("cmpq (%rcx), %rax")
             self._emit("sete %al")
             self._emit("movzbq %al, %rax")
@@ -4080,6 +4090,9 @@ class CodeGen:
         sig = self._sig(name)
         struct_ret = _is_aggregate(sig.ret)
         nargs = len(sig.params)
+        if any(self._param_byval(name, i, t) for i, t in enumerate(sig.params)):
+            self._emit_byval_fnval_thunk(name, sig, struct_ret)
+            return
         self._emit(f"myla_{name}__fnval:")
         # incoming (from 0(%rsp)): return address, [sret?], env, arg0, arg1, …
         arg0_off = 8 * (2 + (1 if struct_ret else 0))
@@ -4093,6 +4106,38 @@ class CodeGen:
         self._emit("movq (%rsp), %rax")           # return address
         self._emit("movq %rax, 8(%rsp)")
         self._emit("addq $8, %rsp")
+        self._emit(f"jmp myla_{name}")
+        self._emit("")
+
+    def _emit_byval_fnval_thunk(self, name: str, sig, struct_ret: bool) -> None:
+        """The adapter for a function with a parameter passed by value (D88):
+        the words rebuilt below a frame of its own, a copy (with references of
+        its own) of each such aggregate, whose address the closure convention
+        passes, and handed over in place of the adapter's words."""
+        self._emit(f"myla_{name}__fnval:")
+        self._emit("pushq %rbp")
+        self._emit("movq %rsp, %rbp")
+        arg0_off = 16 + 8 * ((1 if struct_ret else 0) + 1)
+        pushed = 0
+        for i in reversed(range(len(sig.params))):
+            t = sig.params[i]
+            self._emit(f"movq {arg0_off + 8 * i}(%rbp), %rax")
+            if self._param_byval(name, i, t):
+                words = self._value_words(t)
+                for w in reversed(range(words)):
+                    self._emit(f"pushq {8 * w}(%rax)")
+                self._retain("rsp", 0, t)
+                pushed += words
+                continue
+            if self._param_owned(name, i, t):
+                self._emit("incq -8(%rax)")
+            self._emit("pushq %rax")
+            pushed += 1
+        if struct_ret:
+            self._emit("pushq 16(%rbp)")          # sret pointer
+            pushed += 1
+        self._arg_words = len(sig.params) + 1 + (1 if struct_ret else 0)
+        self._frame_handover(pushed)
         self._emit(f"jmp myla_{name}")
         self._emit("")
 
@@ -4334,8 +4379,11 @@ class CodeGen:
             logical.append(("sret", self._locals[id(expr)]))
         aliased = {id(a) for a, _ in self._aliased_args(expr)}
         for i, arg in enumerate(expr.args):
-            logical.append(("staged" if id(arg) in aliased else "arg", arg, sig.params[i],
-                            self._param_owned(name, i, sig.params[i])))
+            if self._param_byval(name, i, sig.params[i]):
+                logical.append(("value", arg, sig.params[i]))
+            else:
+                logical.append(("staged" if id(arg) in aliased else "arg", arg, sig.params[i],
+                                self._param_owned(name, i, sig.params[i])))
         self._store_call_words(logical)
         self._emit(f"call myla_{name}")
         if aliased:
@@ -4348,6 +4396,15 @@ class CodeGen:
                     self._release(self._locals[f"staged:{id(item[1])}"], item[2], True)
             self._emit("popq %rax")
             self._emit("popq %rax")
+
+    def _param_byval(self, name: str, i: int, t: Type) -> bool:
+        """Whether parameter `i` of function `name`, of type `t`, is passed by
+        value: a struct, tuple or enum a `become` hands over to it (D88)."""
+        return (name, i) in self._become_owned and _is_aggregate(t)
+
+    def _value_words(self, t: Type) -> int:
+        """The argument words a value of type `t` takes by value (D88)."""
+        return max(1, (self._size(t) + 7) // 8)
 
     def _param_owned(self, name: str, i: int, t: Type) -> bool:
         """Whether parameter `i` of function `name`, of type `t`, is owned: a
@@ -4383,10 +4440,13 @@ class CodeGen:
             sig = self._sig(name)
             aliased = {id(a) for a, _ in self._aliased_args(call)}
             for i, arg in enumerate(call.args):
-                logical.append(("staged" if id(arg) in aliased else "arg", arg, sig.params[i],
-                                self._param_owned(name, i, sig.params[i])))
+                if self._param_byval(name, i, sig.params[i]):
+                    logical.append(("value", arg, sig.params[i]))
+                else:
+                    logical.append(("staged" if id(arg) in aliased else "arg", arg, sig.params[i],
+                                    self._param_owned(name, i, sig.params[i])))
             target = f"myla_{name}"
-        self._store_call_words(logical)
+        words = self._store_call_words(logical)
         # the copies passed (heap values, each with a reference of its own
         # now: the checker allows no aggregate), released
         for item in reversed(logical):
@@ -4403,7 +4463,7 @@ class CodeGen:
         self._emit_return_drops()
         if indirect:
             self._emit(f"movq {code_off}(%rbp), %rcx")
-        self._frame_handover(len(logical))
+        self._frame_handover(words)
         self._emit(f"jmp {target}")
 
     def _frame_handover(self, m: int) -> None:
@@ -4456,7 +4516,7 @@ class CodeGen:
                 if i > 0 and _place_root(a) == root
                 and (_is_aggregate(sig.params[i]) or self._owns_heap(sig.params[i]))]
 
-    def _store_call_words(self, logical: list) -> None:
+    def _store_call_words(self, logical: list) -> int:
         """Put the outgoing argument words on the stack, the first at the
         lowest address, evaluating the arguments left to right (MYLA-8): the
         words are reserved, then filled in source order. When at most one word
@@ -4465,14 +4525,29 @@ class CodeGen:
         Items: ("sret", slot), ("env", slot), ("arg", expr, type[, owned]) or
         ("staged", expr, type[, owned]), an argument passed as a copy
         (`_aliased_args`); an owned one gets a reference of its own (D87);
-        ("word", operand), a word as it is (`become`'s own sret pointer)."""
+        ("value", expr, type), an aggregate passed by value, its words copied
+        with references of their own to what it holds (D88); ("word",
+        operand), a word as it is (`become`'s own sret pointer). Returns how
+        many words it stored."""
         if not logical:
-            return
-        ordered = sum(1 for item in logical if item[0] in ("arg", "staged") and not _is_literal(item[1])) > 1
+            return 0
+        sizes = [self._value_words(item[2]) if item[0] == "value" else 1 for item in logical]
+        offsets = [8 * sum(sizes[:k]) for k in range(len(logical))]
+        total = sum(sizes)
+        ordered = (any(item[0] == "value" for item in logical)
+                   or sum(1 for item in logical if item[0] in ("arg", "staged") and not _is_literal(item[1])) > 1)
         if ordered:
-            self._emit(f"subq ${8 * len(logical)}, %rsp")
+            self._emit(f"subq ${8 * total}, %rsp")
         for k in range(len(logical)) if ordered else reversed(range(len(logical))):
             item = logical[k]
+            if item[0] == "value":
+                arg, ptype = item[1], item[2]
+                self._addr_of_aggregate(arg)
+                for w in range(sizes[k]):
+                    self._emit(f"movq {8 * w}(%rax), %rcx")
+                    self._emit(f"movq %rcx, {offsets[k] + 8 * w}(%rsp)")
+                self._retain("rsp", offsets[k], ptype)
+                continue
             if item[0] == "sret":
                 self._emit(f"leaq {item[1]}(%rbp), %rax")
             elif item[0] == "env":
@@ -4492,7 +4567,8 @@ class CodeGen:
                     self._eval(arg)
             if item[0] in ("arg", "staged") and len(item) > 3 and item[3]:
                 self._emit("incq -8(%rax)")
-            self._emit(f"movq %rax, {8 * k}(%rsp)" if ordered else "pushq %rax")
+            self._emit(f"movq %rax, {offsets[k]}(%rsp)" if ordered else "pushq %rax")
+        return total
 
     def _gen_intrinsic(self, expr: ast.Call) -> None:
         """`assert`/`panic`/`unreachable`: write a message to stderr and exit(1)
