@@ -21,3 +21,4 @@ From the concurrency stress tests ([[MYLA-144]], test 8, "failure while sibling 
 
 - Before: `t08_failure_cancels_a_looping_sibling` (a child panics while its sibling loops on an actor) timed out on both interpreters and natively ended with the failure at once, its sibling still running.
 - After: `runtime error: failure`, exit 1, on both interpreters and natively on 1, 4 and 16 workers. `t08_failing_child_cancels_its_children` (a child task fails while its two children loop on an actor the rest of the program keeps using): `main still runs`, then the child's failure, everywhere, 90 more runs on 2, 8 and 16 workers alike (`tests/burn/test_concurrency_stress.py`).
+- Unit 621, integration 2, burn 808 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (6,107,397 bytes).

@@ -17,3 +17,4 @@ From the concurrency stress tests ([[MYLA-144]], test 1, "shared mutation throug
 - Before: `t01a_closures` (two callbacks in a list, each incrementing a captured `Box`, run by two children 100,000 times) printed `100000 100000 0` on the Python interpreter and `1 1 0` on the self-hosted interpreter and natively.
 - After: `type error: a lambda can't change 'counter', a variable it captures: it holds a copy of its own` with `help: return the new value, or keep shared state in an actor`, from both checkers. The shared counter as an actor (`t01b_actor`) counts exactly 200,000 everywhere.
 - No example, standard library module or part of the self-hosted compiler changes a capture. The error corpus (201 cases) and the checker parity tests pass.
+- Unit 621, integration 2, burn 808 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (6,107,397 bytes).

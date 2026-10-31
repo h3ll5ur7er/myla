@@ -52,3 +52,4 @@ From the first runs (programs in `tests/burn/test_concurrency_stress.py` to come
 | 12 | Starvation | Every worker and every single request done | The same (`t12_progress_under_contention`) |
 
 The table is on the Concurrency page too ([[Language/Concurrency]]).
+- Unit 621, integration 2, burn 808 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (6,107,397 bytes).

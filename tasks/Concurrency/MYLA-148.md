@@ -21,3 +21,4 @@ From the concurrency stress tests ([[MYLA-144]], test 5), the user's decision: s
 
 - Before: `async let b = use(await a)` printed 2 on both interpreters and natively numbers such as 2097297, 738197649, 916455569 (the sibling's frame pointer read as a value).
 - After: `t05_child_awaits_sibling` prints 2 everywhere; `t05_siblings_share_a_result` (3,000 rounds of a child returning a list of structs holding strings, read by three siblings, one of which changes its copy, and by the parent) prints 60780 on both interpreters and natively on 1, 4 and 16 workers, at an 11 MB peak (`tests/burn/test_concurrency_stress.py`).
+- Unit 621, integration 2, burn 808 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (6,107,397 bytes).
