@@ -47,7 +47,8 @@ _REPO = os.path.abspath(
 INTERP_TOOL = os.path.join(_REPO, "selfhost", "interp_main.my")
 
 # Examples outside the v0.8 interpreter gate's scope (see module docstring).
-EXCLUDED: set[str] = set()
+# Concurrency runs in the Python interpreter only, until MYLA-139 (D89).
+EXCLUDED: set[str] = {"concurrency.my"}
 
 
 def _corpus() -> list[str]:

@@ -177,6 +177,16 @@ Numbers from text and back ([[MYLA-79]]). The conversions are exact, computed wi
 
 `format("{}", x)` writes a float with up to 17 significant digits (`0.10000000000000001`); `format_float` is the short form.
 
+## std.task
+
+Child tasks whose number is known only at run time (D89, [[Language/Concurrency]]).
+
+| Function | Result |
+| --- | --- |
+| `all<T>(fs: [async () -> T]) -> [T]` (async) | Runs each function of `fs` as a child task, all at once, and gives their results in the order of `fs` |
+
+It is written in Myla with `async let` alone, halving the list until one function is left, so the tasks nest about log2(len(fs)) deep.
+
 ## std.json
 
 JSON values, parsing and writing ([[MYLA-79]]), following Python's `json` module: the burn tests compare them on thousands of random and broken texts.

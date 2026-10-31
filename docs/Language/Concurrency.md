@@ -1,6 +1,6 @@
 # Concurrency
 
-> **Draft (D89).** Both checkers accept and check what this page describes ([[MYLA-135]]), except task groups, whose `std.task` module comes with [[MYLA-136]]. Neither interpreter nor backend runs it yet: they stop at the first construct of concurrency with an error ([[MYLA-136]] … [[MYLA-139]]).
+> **D89, in progress.** Both checkers check what this page describes ([[MYLA-135]]), and the Python interpreter runs it ([[MYLA-136]], `examples/concurrency.my`). The self-hosted interpreter and both backends stop at the first construct of concurrency with an error until [[MYLA-137]] … [[MYLA-139]].
 
 Myla's concurrency follows Swift's: `async` functions that may suspend, `await` at every suspension, structured tasks that never outlive the scope that starts them, and `actor`s, whose state only their own methods touch. Tasks run in parallel on several threads. A value crossing into another task or actor is copied, so tasks share nothing but actors (D89).
 
@@ -41,26 +41,25 @@ async fun total() -> int {
 - The scope that declared it waits for every child still running when it ends, even one never read: no task outlives its scope.
 - The child gets copies of what `e` uses, as a lambda does (D15, D48).
 
-## Task groups
+## A number of children: `std.task`
 
 For a number of children known only at run time:
 
 ```myla
-import std.task
+import std.task as task
 
 async fun squares(n: int) -> [int] {
-    return await task.group(async (g: task.Group<int>) => {
-        for i in 0..n {
-            g.spawn(async () => i * i)
-        }
-        return await g.all()
-    })
+    var fs: [async () -> int] = []
+    for i in 0..n {
+        push(fs, async () => i * i)
+    }
+    return await task.all(fs)
 }
 ```
 
-- `task.group(body)` runs `body` with a fresh group and waits, when the body returns, for every child it spawned.
-- `g.spawn(f)` starts the async function value `f` as a child task.
-- `await g.all()` gives the results in the order the children were spawned, so the outcome doesn't depend on which finished first.
+- `task.all(fs)` runs each async function value of `fs` as a child task, all at once, and waits for every one of them.
+- It gives the results in the order of `fs`, so the outcome doesn't depend on which finished first.
+- It is written in Myla with `async let` alone ([[src/myla/std/task.my]]), so every implementation that runs `async let` runs it.
 
 ## Actors
 

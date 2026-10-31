@@ -47,8 +47,9 @@ _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 )
 
-# Examples outside the v0.9 codegen gate's scope (see module docstring).
-EXCLUDED: set[str] = set()
+# Examples outside the v0.9 codegen gate's scope (see module docstring), and
+# concurrency, which the compiler builds from MYLA-137 on (D89).
+EXCLUDED: set[str] = {"concurrency.my"}
 
 # Programs of the Python backend's parity suite (test_compiler_parity.PROGRAMS)
 # for bugs both backends had: the value of a store is evaluated before the

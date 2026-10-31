@@ -5,9 +5,18 @@ checker attaches to expressions (for integer wrapping and for formatting values
 in `print`). Integer arithmetic wraps at each type's width; structs have value
 semantics (copied on binding, assignment, argument passing, return, and struct
 construction).
+
+Concurrency (D89, docs/Language/Concurrency.md): each child task of an `async
+let` runs on a Python thread, with copies of what it uses; `await f()` runs `f`
+in the task that awaits it. An actor is an `ActorRef`, its state and a lock: a
+call from outside takes the lock in the calling thread, and every point where
+a task waits (a call into an actor, a child's result) first lets go of the
+actor it holds, so its other calls run meanwhile (reentrancy) and no thread
+ever waits holding an actor.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 from . import ast
@@ -212,6 +221,34 @@ class ClosureValue:
         return f"<closure {len(self.params)} param(s), {len(self.env)} capture(s)>"
 
 
+class ActorRef:
+    """An actor's handle (D89): copying it copies the reference. `state` is the
+    actor's fields, reached only under `lock` (`Interpreter._on_actor`)."""
+
+    __slots__ = ("state", "lock")
+
+    def __init__(self, state: "StructValue"):
+        self.state = state
+        self.lock = threading.Lock()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<actor {self.state.name}>"
+
+
+class _Task:
+    """The child task of an `async let` (D89): a thread computing `value`, or
+    failing with `error`. `awaited`: its result was asked for, so a failure has
+    already reached the parent."""
+
+    __slots__ = ("thread", "value", "error", "awaited")
+
+    def __init__(self):
+        self.thread: threading.Thread | None = None
+        self.value = None
+        self.error: BaseException | None = None
+        self.awaited = False
+
+
 def _copy(value):
     if isinstance(value, (StructValue, TupleValue, EnumValue, ListValue, MapValue,
                           StringBuilderValue)):
@@ -220,9 +257,21 @@ def _copy(value):
 
 
 class _Env:
+    __slots__ = ("parent", "vars", "tasks")
+
     def __init__(self, parent: "_Env | None" = None):
         self.parent = parent
         self.vars: dict[str, object] = {}
+        # the child tasks started in this scope, which it waits for (D89)
+        self.tasks: list[_Task] | None = None
+
+    def lookup(self, name: str, default=None):
+        env: _Env | None = self
+        while env is not None:
+            if name in env.vars:
+                return env.vars[name]
+            env = env.parent
+        return default
 
     def define(self, name: str, value) -> None:
         self.vars[name] = value
@@ -243,6 +292,29 @@ class _Env:
                 return
             env = env.parent
         raise KeyError(name)  # pragma: no cover
+
+
+# The signals that leave a scope normally: a child of the scope may still fail.
+_LEAVING = (_ReturnSignal, _BecomeSignal, _BreakSignal, _ContinueSignal)
+_MISSING = object()
+
+
+def _names_in(node, out: set) -> set:
+    """The names `node` mentions (what an `async let`'s child may use)."""
+    if isinstance(node, ast.Name):
+        out.add(node.ident)
+    for value in vars(node).values():
+        if isinstance(value, ast.Node):
+            _names_in(value, out)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, ast.Node):
+                    _names_in(item, out)
+                elif isinstance(item, tuple):
+                    for part in item:
+                        if isinstance(part, ast.Node):
+                            _names_in(part, out)
+    return out
 
 
 @dataclass
@@ -275,6 +347,10 @@ class Interpreter:
         self._run_exit_code = 0
         self._run_signal = 0
         self._run_errno = 0
+        # concurrency (D89): the actor each thread holds (`actor`), and a lock
+        # that keeps lines written by tasks running at once whole
+        self._tls = threading.local()
+        self._out_lock = threading.Lock()
 
     # -- program entry -------------------------------------------------------
 
@@ -283,9 +359,6 @@ class Interpreter:
         completion, or the code passed to `std.process.exit`)."""
         if self.checker.entry is None:
             raise MylaRuntimeError("no entry point: define '#main' or a function named 'main'")
-        if self.checker.concurrency_at is not None:
-            raise MylaRuntimeError("the interpreter doesn't run concurrency yet (D89, MYLA-136)",
-                                   at=self.checker.concurrency_at)
         try:
             self._call(self.checker.entry, [])
         except _ExitSignal as sig:
@@ -373,12 +446,116 @@ class Interpreter:
 
     def _exec_block(self, block: ast.Block, parent: _Env) -> None:
         env = _Env(parent)
-        for stmt in block.statements:
-            self._exec_stmt(stmt, env)
+        try:
+            for stmt in block.statements:
+                self._exec_stmt(stmt, env)
+        except BaseException as exc:
+            if env.tasks:
+                self._close_scope(env, exc)
+            raise
+        if env.tasks:
+            self._close_scope(env, None)
+
+    # -- concurrency (D89) ---------------------------------------------------
+
+    def _close_scope(self, env: _Env, leaving: BaseException | None) -> None:
+        """Wait for the child tasks started in `env`'s scope. One that failed
+        unawaited fails the scope, unless it is already failing (`leaving`, not
+        a normal way out)."""
+        failed = None
+        for task in env.tasks:
+            self._released(task.thread.join)
+            if task.error is not None and not task.awaited and failed is None:
+                failed = task.error
+        env.tasks = None
+        if failed is not None and (leaving is None or isinstance(leaving, _LEAVING)):
+            raise failed
+
+    def _released(self, wait):
+        """Run `wait`, which may block, without holding the thread's actor, so
+        that the actor's other calls run meanwhile (reentrancy) and no thread
+        waits while holding one."""
+        held = getattr(self._tls, "actor", None)
+        if held is None:
+            return wait()
+        held.lock.release()
+        try:
+            return wait()
+        finally:
+            held.lock.acquire()
+
+    def _on_actor(self, ref: ActorRef, run):
+        """Run `run` (a call of one of `ref`'s methods) on the actor: under its
+        lock, one call at a time, its result copied out. A call from the actor's
+        own methods already holds it."""
+        if getattr(self._tls, "actor", None) is ref:
+            return run()
+
+        def hop():
+            prev = getattr(self._tls, "actor", None)
+            ref.lock.acquire()
+            self._tls.actor = ref
+            try:
+                return _copy(run())
+            finally:
+                self._tls.actor = prev
+                ref.lock.release()
+
+        return self._released(hop)
+
+    def _actor_field(self, ref: ActorRef, name: str):
+        """A field of the actor `ref`: read under its lock unless this thread
+        holds it (a child task of one of its methods reads through `self`)."""
+        if getattr(self._tls, "actor", None) is ref:
+            return ref.state.fields[name]
+
+        def read():
+            with ref.lock:
+                return _copy(ref.state.fields[name])
+
+        return self._released(read)
+
+    def _start_task(self, stmt: ast.VarDecl, env: _Env) -> _Task:
+        """`async let name = init`: a child task computing `init` on a thread,
+        with copies of the variables it uses."""
+        names = getattr(stmt, "task_names", None)
+        if names is None:
+            names = stmt.task_names = _names_in(stmt.init, set())
+        child = _Env()
+        for name in names:
+            value = env.lookup(name, _MISSING)
+            if value is not _MISSING:
+                child.define(name, _copy(value))
+        task = _Task()
+
+        def work():
+            self._tls.actor = None
+            try:
+                task.value = _copy(self._eval(stmt.init, child))
+            except BaseException as exc:   # reaches the parent at `await` or the scope's end
+                task.error = exc
+
+        task.thread = threading.Thread(target=work, daemon=True)
+        task.thread.start()
+        if env.tasks is None:
+            env.tasks = []
+        env.tasks.append(task)
+        return task
+
+    def _await_task(self, task: _Task):
+        """`await name` of an `async let`: its child's result, a copy."""
+        self._released(task.thread.join)
+        task.awaited = True
+        if task.error is not None:
+            raise task.error
+        return _copy(task.value)
 
     def _exec_stmt(self, stmt: ast.Stmt, env: _Env) -> None:
         if isinstance(stmt, ast.VarDecl):
-            env.define(stmt.name, _copy(self._eval(stmt.init, env)))
+            if stmt.kind == "async":
+                env.define(stmt.name, self._start_task(stmt, env))
+            else:
+                env.define(stmt.name, _copy(self._eval(stmt.init, env)))
 
         elif isinstance(stmt, ast.DestructDecl):
             value = self._eval(stmt.init, env)
@@ -436,8 +613,15 @@ class Interpreter:
                 body_env = _Env(env)
                 body_env.define(stmt.var_name, _copy(item))
                 try:
-                    for s in stmt.body.statements:
-                        self._exec_stmt(s, body_env)
+                    try:
+                        for s in stmt.body.statements:
+                            self._exec_stmt(s, body_env)
+                    except BaseException as exc:
+                        if body_env.tasks:
+                            self._close_scope(body_env, exc)
+                        raise
+                    if body_env.tasks:
+                        self._close_scope(body_env, None)
                 except _ContinueSignal:
                     continue
                 except _BreakSignal:
@@ -480,12 +664,21 @@ class Interpreter:
     def _eval_arm_body(self, body, env: _Env):
         if isinstance(body, ast.Block):
             inner = _Env(env)
-            stmts = body.statements
-            for i, s in enumerate(stmts):
-                if i == len(stmts) - 1 and isinstance(s, ast.ExprStmt):
-                    return self._eval(s.expr, inner)
-                self._exec_stmt(s, inner)
-            return None
+            try:
+                result = None
+                stmts = body.statements
+                for i, s in enumerate(stmts):
+                    if i == len(stmts) - 1 and isinstance(s, ast.ExprStmt):
+                        result = self._eval(s.expr, inner)
+                        break
+                    self._exec_stmt(s, inner)
+            except BaseException as exc:
+                if inner.tasks:
+                    self._close_scope(inner, exc)
+                raise
+            if inner.tasks:
+                self._close_scope(inner, None)
+            return result
         return self._eval(body, env)
 
     def _match_pattern(self, pat, value, binds: dict) -> bool:
@@ -543,7 +736,9 @@ class Interpreter:
     def _resolve_struct(self, expr: ast.Expr, env: _Env) -> StructValue:
         """Return the actual (non-copied) StructValue an lvalue chain refers to."""
         if isinstance(expr, ast.Name):
-            return env.get(expr.ident)
+            value = env.get(expr.ident)
+            # an actor's method changes the actor's state (it holds the actor)
+            return value.state if isinstance(value, ActorRef) else value
         if isinstance(expr, ast.FieldAccess):
             parent = self._resolve_struct(expr.target, env)
             return parent.fields[expr.field_name]
@@ -598,10 +793,19 @@ class Interpreter:
             if ctor is not None:  # no-payload variant, e.g. `Color.Red`
                 return EnumValue(ctor[0], ctor[1], [])
             container = self._eval(expr.target, env)
+            if isinstance(container, ActorRef):
+                return self._actor_field(container, expr.field_name)
             return container.fields[expr.field_name]
         if isinstance(expr, ast.StructLit):
             fields = {fi.name: _copy(self._eval(fi.value, env)) for fi in expr.fields}
+            if expr.type_name in self.checker.actors:   # starts the actor (D89)
+                return ActorRef(StructValue(expr.type_name, fields))
             return StructValue(expr.type_name, fields)
+        if isinstance(expr, ast.Await):
+            op = expr.operand
+            if isinstance(op, ast.Name):   # an `async let`'s child
+                return self._await_task(env.get(op.ident))
+            return self._eval(op, env)     # the call runs in this task
         if isinstance(expr, ast.TupleLit):
             return TupleValue([_copy(self._eval(e, env)) for e in expr.elems])
         if isinstance(expr, ast.TupleIndex):
@@ -861,7 +1065,9 @@ class Interpreter:
         if callee.ident == "print":
             arg = expr.args[0]
             value = self._eval(arg, env)
-            self._out.write(_format_value(value, arg.resolved_type) + "\n")
+            line = _format_value(value, arg.resolved_type) + "\n"
+            with self._out_lock:   # a line stays whole among tasks (D89)
+                self._out.write(line)
             return None
         if callee.ident in ("assert", "panic", "unreachable"):
             return self._eval_intrinsic(expr, env)
@@ -869,9 +1075,11 @@ class Interpreter:
             fd = self._eval(expr.args[0], env)
             s = self._eval(expr.args[1], env)
             if fd == 1:
-                self._out.write(s)
+                with self._out_lock:
+                    self._out.write(s)
             elif fd == 2:
-                self._err.write(s)
+                with self._out_lock:
+                    self._err.write(s)
             else:
                 import os
                 os.write(fd, _str_bytes(s))
@@ -1032,8 +1240,12 @@ class Interpreter:
 
     def _eval_method_call(self, expr: ast.Call, env: _Env, mfunc: str):
         decl = self.functions[mfunc].decl
-        return self._run(decl.body, self._method_frame(expr, env, decl),
-                         getattr(decl, "source_path", None))
+        frame = self._method_frame(expr, env, decl)
+        recv = frame.vars["self"]
+        if isinstance(recv, ActorRef):   # runs on the actor (D89)
+            return self._on_actor(recv, lambda: self._run(
+                decl.body, frame, getattr(decl, "source_path", None)))
+        return self._run(decl.body, frame, getattr(decl, "source_path", None))
 
     def _method_frame(self, expr: ast.Call, env: _Env, decl: ast.FunDecl) -> _Env:
         recv_expr = expr.callee.target
@@ -1041,7 +1253,9 @@ class Interpreter:
         # For `var self`, bind `self` to the *actual* receiver object (no copy)
         # so in-place field/element mutations write back to the caller. For a
         # read-only `self`, bind a copy (value semantics).
-        if is_var_self:
+        if getattr(expr, "method_func", "").rpartition(".")[0] in self.checker.actors:
+            recv = self._eval(recv_expr, env)   # the handle: its methods reach the actor
+        elif is_var_self:
             recv = self._resolve_struct(recv_expr, env)
         else:
             recv = _copy(self._eval(recv_expr, env))
