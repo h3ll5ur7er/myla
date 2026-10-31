@@ -60,8 +60,10 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // the value). `tail`: the next call lowered ends the function by `become`
 // (D87); `tailed`: it did.
 // `frame_fn`: an async function's frame function (D90), `result` the slot its
-// result goes to (-1: none); `tasks`: the child tasks of the open scopes.
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot] }
+// result goes to (-1: none); `tasks`: the child tasks of the open scopes;
+// `actor_self`: the slot of an actor method's `self`, whose actor its frame
+// function holds between suspensions (D92), or -1.
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32 }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
 // A child task of an `async let` (D89): the slot holding its frame, its
@@ -76,7 +78,7 @@ pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: 
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0 }
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
     // slots in its heap frame, the result in the first (D90)
@@ -138,6 +140,12 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         lw.add(Inst.Bind(fd.params[i].name, s))
         i = i + 1
     }
+    // an actor's async method holds the actor while it runs (D92)
+    if frame && len(fd.params) > 0 && has_receiver(fd) && is_actor_t(lw.f.slots[lw.lookup(fd.params[0].name)].ty) {
+        lw.actor_self = lw.lookup(fd.params[0].name)
+        lw.actor_off = actor_record_offset(cg, lw.f.slots[lw.actor_self].ty)
+        lw.enter_self()
+    }
     match fd.body {
         Some(b) => { lw.block(cg, b) },
         None => {},
@@ -156,7 +164,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0 }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -351,7 +359,21 @@ pub fun blocked_types(cg: CodeGen) -> [str] {
 // [task]`, then the result: D90, ir_x86's FRAME_HEADER).
 const FRAME_CALLER: int32 = 8
 const FRAME_TASK: int32 = 24
-const FRAME_RESULT: int32 = 32
+const FRAME_RESULT: int32 = 40
+
+// An actor's executor (D92), after its fields: `[lock][running][first
+// frame waiting][last]`.
+const ACTOR_RECORD: int32 = 32
+
+// Whether `fd` is a method (it has a receiver).
+fun has_receiver(fd: FunData) -> bool {
+    return match fd.receiver { Some(r) => true, None => false }
+}
+
+// Where an actor's executor begins in its cell: after its fields.
+fun actor_record_offset(cg: CodeGen, t: Type) -> int32 {
+    return (cg.size(Type.TStruct(actor_name(t), [])) + 7) / 8 * 8
+}
 
 // The function a call calls (Lower.call_target).
 struct CallTarget { name: str, params: [Type], ret: Option<Type> }
@@ -933,18 +955,16 @@ impl Lower {
             _ => {},
         }
         if target == "" {
+            if self.actor_call(cg, s, k, name, op) { return }
             // made here, its value bound as a `let`'s; then a turn for the others
             if cg.has_type(op.id) {
                 self.stmt_body(cg, Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: StmtKind.VarDecl(k, name, None, op) })
             } else {
                 self.discard(cg, op)
             }
-            let me = self.temp(Type.TInt(64, false))
-            self.add(Inst.Frame(me))
-            self.add(Inst.Rt(-1, "__exec_push", [me]))
-            let after = self.new_block()
-            self.finish(Term.Suspend(after))
-            self.start(after)
+            self.leave_self()
+            self.yield_turn()
+            self.enter_self()
             return
         }
         let sig = cg.sig_of(target)
@@ -1021,6 +1041,114 @@ impl Lower {
         }
     }
 
+    // `let name = await recv.m(args)` of an actor's synchronous method (D92):
+    // the receiver and the arguments into slots of their own while this
+    // function still holds its own actor, which it leaves; the call made in
+    // the receiver's actor, entered and left around it; then a turn for the
+    // others, and its own actor entered again. False when `op` isn't one.
+    fun actor_call(var self, cg: CodeGen, s: Stmt, k: str, name: str, op: Expr) -> bool {
+        match op.kind {
+            ExprKind.Call(callee, args) => {
+                match callee.kind {
+                    ExprKind.GetField(recv, m) => {
+                        let at = cg.type_of(recv.id)
+                        if !is_actor_t(at) { return false }
+                        let rs = self.held_value(cg, recv, format("%actor{}", op.id))
+                        var args2: [Expr] = []
+                        var i = 0
+                        while i < len(args) {
+                            let a = args[i]
+                            let an = format("%arg{}_{}", op.id, i)
+                            let held = self.held_value(cg, a, an)
+                            push(args2, Expr { id: a.id, line: a.line, col: a.col, sp: a.sp, kind: ExprKind.Name(an) })
+                            i = i + 1
+                        }
+                        let r2 = Expr { id: recv.id, line: recv.line, col: recv.col, sp: recv.sp, kind: ExprKind.Name(format("%actor{}", op.id)) }
+                        let c2 = Expr { id: callee.id, line: callee.line, col: callee.col, sp: callee.sp, kind: ExprKind.GetField(r2, m) }
+                        let op2 = Expr { id: op.id, line: op.line, col: op.col, sp: op.sp, kind: ExprKind.Call(c2, args2) }
+                        let off = actor_record_offset(cg, at)
+                        self.leave_self()
+                        self.enter_actor(rs, off)
+                        if cg.has_type(op.id) {
+                            self.stmt_body(cg, Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: StmtKind.VarDecl(k, name, None, op2) })
+                        } else {
+                            self.discard(cg, op2)
+                        }
+                        self.leave_actor(rs, off)
+                        self.yield_turn()
+                        self.enter_self()
+                        return true
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+        return false
+    }
+
+    // `e`'s value in a new owned slot named `nm`, with references of its own.
+    fun held_value(var self, cg: CodeGen, e: Expr, nm: str) -> int32 {
+        let t = cg.type_of(e.id)
+        let slot = self.value_slot(cg, nm, t, true)
+        if is_aggregate(t) {
+            let src = self.addr(cg, e)
+            let dst = self.slot_addr(slot)
+            self.add(Inst.Copy(dst, src, cg.size(t)))
+            self.retain(cg, t, dst)
+        } else {
+            let v = self.expr(cg, e)
+            self.add(Inst.Store(slot, v))
+            self.retain(cg, t, v)
+        }
+        self.declare_as(nm, slot, false)
+        self.own(slot)
+        return slot
+    }
+
+    // A turn for the other tasks: this frame queued again (D90).
+    fun yield_turn(var self) {
+        let me = self.temp(Type.TInt(64, false))
+        self.add(Inst.Frame(me))
+        self.add(Inst.Call(-1, "__yield", [me]))
+        let after = self.new_block()
+        self.finish(Term.Suspend(after))
+        self.start(after)
+    }
+
+    // The address of the executor of the actor whose handle is in `slot`.
+    fun actor_record(var self, slot: int32, off: int32) -> int32 {
+        let h = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(h, slot))
+        return self.offset(h, off)
+    }
+
+    // Into the actor in `slot` (D92): on at once when it is free, else after
+    // the frames queued before this one; then the running task holds it.
+    fun enter_actor(var self, slot: int32, off: int32) {
+        let rec = self.actor_record(slot, off)
+        let me = self.temp(Type.TInt(64, false))
+        self.add(Inst.Frame(me))
+        self.add(Inst.Call(-1, "__actor_enter", [rec, me]))
+        let inside = self.new_block()
+        self.finish(Term.Suspend(inside))
+        self.start(inside)
+        self.add(Inst.Rt(-1, "__actor_held", [self.actor_record(slot, off)]))
+    }
+
+    // Out of the actor in `slot`: the next frame waiting gets it.
+    fun leave_actor(var self, slot: int32, off: int32) {
+        self.add(Inst.Rt(-1, "__actor_leave", [self.actor_record(slot, off)]))
+    }
+
+    fun enter_self(var self) {
+        if self.actor_self >= 0 { self.enter_actor(self.actor_self, self.actor_off) }
+    }
+
+    fun leave_self(var self) {
+        if self.actor_self >= 0 { self.leave_actor(self.actor_self, self.actor_off) }
+    }
+
     // The frame `fr` made for an awaited call: its caller this function, the
     // call `resume(fr)` made in place of it (`suspend` after it), and when it
     // ends its result (`has`, of type `rt`) moved into the variable `name`,
@@ -1031,10 +1159,12 @@ impl Lower {
         self.add(Inst.StoreAt(fr, FRAME_CALLER, me))
         let held = self.new_slot("__callee", Type.TInt(64, false), 8, -1, false)
         self.add(Inst.Store(held, fr))
+        self.leave_self()
         self.add(Inst.Call(-1, resume, [fr]))
         let resumed = self.new_block()
         self.finish(Term.Suspend(resumed))
         self.start(resumed)
+        self.enter_self()
         let done = self.temp(Type.TInt(64, false))
         self.add(Inst.Load(done, held))
         if has {
@@ -1149,12 +1279,19 @@ impl Lower {
         self.add(Inst.Cmp(is_done, "<", Type.TInt(64, false), st, self.int_const(4)))
         self.finish(Term.Br(is_done, done, wait))
         self.start(wait)
+        // parked on the child (or on at once if it has just ended), any
+        // actor held left meanwhile
+        self.leave_self()
         let me = self.temp(Type.TInt(64, false))
         self.add(Inst.Frame(me))
         let fr2 = self.temp(Type.TInt(64, false))
         self.add(Inst.Load(fr2, ts))
-        self.add(Inst.StoreAt(fr2, FRAME_TASK, me))
-        self.finish(Term.Suspend(check))
+        self.add(Inst.Call(-1, "__wait", [fr2, me]))
+        let back = self.new_block()
+        self.finish(Term.Suspend(back))
+        self.start(back)
+        self.enter_self()
+        self.finish(Term.Jmp(done))
         self.start(done)
         let out = self.temp(Type.TInt(64, false))
         self.add(Inst.Load(out, ts))
@@ -1222,6 +1359,7 @@ impl Lower {
             return
         }
         if v >= 0 && self.result >= 0 && self.sret < 0 { self.add(Inst.Store(self.result, v)) }
+        self.leave_self()
         let fr = self.temp(Type.TInt(64, false))
         self.add(Inst.Frame(fr))
         self.add(Inst.Call(-1, "__finish", [fr]))
@@ -1887,10 +2025,16 @@ impl Lower {
     // `A { … }` of an actor: a new cell holding the fields, each with its
     // own references; the statement owns the handle (D89).
     fun actor_lit(var self, cg: CodeGen, t: Type, fields: [FieldInit]) -> int32 {
-        let st = Type.TStruct(actor_name(t), [])
-        let size = self.int_const(cg.size(st))
+        let off = actor_record_offset(cg, t)
+        let size = self.int_const(off + ACTOR_RECORD)
         let p = self.temp(t)
         self.add(Inst.Rt(p, "__alloc", [size]))
+        // its executor (D92), after the fields: free, no frame waiting
+        var w = 0
+        while w < ACTOR_RECORD {
+            self.add(Inst.StoreAt(p, off + w, self.int_const(0)))
+            w = w + 8
+        }
         for fi in fields { self.store_member(cg, fi.value, p, cg.field_offset(t, fi.name)) }
         return self.owned_value(cg, p, t)
     }

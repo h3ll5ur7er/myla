@@ -37,7 +37,7 @@ Considered: *a lock per actor*, held between suspension points (a worker would w
 ## Steps
 
 1. [x] Thread state through `%fs`, `exit_group`, one `write` per `print` line (still one worker)
-2. [ ] Suspensions as tail calls into the runtime; atomic `task` words; actor executors (still one worker: the parity programs unchanged)
+2. [x] Suspensions as tail calls into the runtime; atomic `task` words; actor executors (still one worker: the parity programs unchanged)
 3. [ ] Deep copies at crossings (`__deep_<T>`, a function value's environment through its drop function's neighbour), atomic actor counts
 4. [ ] Heaps per worker with remote frees
 5. [ ] Workers: `clone`, the shared queue, `futex` parking, `MYLA_THREADS`
@@ -46,3 +46,4 @@ Considered: *a lock per actor*, held between suspension points (a worker would w
 ## Evidence
 
 - Step 1: in a program with tasks the runtime's per-thread variables (heap, free lists, the executor's current frame and stack, `io` errno, `run`'s results) are words of a block `%fs` points at (`tv`, `tls_offset`); other programs keep their symbols. Every exit is `exit_group`. `print` writes its line with one `writev` (`__print_line`; `strace` shows one `writev` per line), in every program: a million prints take 0.21 s instead of 0.30 s. The concurrency, held-failure, deep-task, corpus and parity tests pass; zero, the most negative `int` and `int64`, the largest `uint64`, an empty string and a two-byte `char` print as the interpreter prints them.
+- Step 2: every suspension is a tail call into the runtime with the resume point stored first (`myla___yield`, `myla___wait`, `myla___actor_enter`, and the awaited call itself); the `task` word is swapped atomically (`lock cmpxchg` to park, `xchg` at the end and on failure). Actors have executors after their fields (`[lock][running][first][last]`, frames linked through a fifth header word, so `FRAME_RESULT` is 40): an awaited call of an actor's synchronous method takes the receiver and arguments into slots, leaves the caller's own actor, enters the receiver's, calls, leaves, yields and enters its own again; an actor's async method enters at its start and after every suspension and leaves before each and at its end; a failing task releases the actor it holds (`__actor_held`). On one worker an actor is never busy, so the order is unchanged: every concurrency, held-failure and deep-task test passes. 100,000 rounds of a synchronous and an async actor call with new strings as arguments print what the interpreter prints; a million, with an actor keeping nothing, peak at 11 MB.

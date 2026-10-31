@@ -1976,9 +1976,10 @@ fun frame_size(f: IrFunc) -> int32 {
     return cursor
 }
 
-// An async function's frame begins `[resume fn][caller frame][state][task]`
-// (D90); its first slot, its result when it has one, follows.
-const FRAME_HEADER: int32 = 32
+// An async function's frame begins `[resume fn][caller frame][state][task]
+// [link]` (D90; the link chains the frames waiting for an actor, D92); its
+// first slot, its result when it has one, follows.
+const FRAME_HEADER: int32 = 40
 
 // The frame offset of each slot of `f`: an argument word above %rbp, the
 // others below the first `below` bytes.
