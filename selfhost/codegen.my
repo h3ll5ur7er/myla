@@ -706,6 +706,7 @@ impl CodeGen {
                     i = i + 1
                 }
             },
+            Type.TAsync(f) => { return self.dbg_aggregate_lines(f) },
             Type.TFunc(ps, r) => {
                 // `fn…`: a name starting with `(` would make gdb take it for a tuple
                 let vp = self.dbg_void_pointer()
@@ -1253,6 +1254,7 @@ impl CodeGen {
     fun type_key(self, t: Type) -> str {
         return match t {
             Type.TStruct(n, a) => n,
+            Type.TActor(n) => n,
             Type.TEnum(n, a) => n,
             Type.TInt(w, s) => int_type_name_cg(w, s),
             Type.TBool => "bool",
@@ -1318,6 +1320,8 @@ impl CodeGen {
             Type.TSB => { return true },
             Type.TStr => { return true },
             Type.TFunc(ps, r) => { return true },
+            Type.TAsync(f) => { return true },
+            Type.TActor(n) => { return true },
             Type.TStruct(n, a) => {
                 if list_has_str(seen, n) { return false }
                 let info = self.struct_info(n)
@@ -1589,6 +1593,7 @@ impl CodeGen {
             Type.TTuple(es) => self.tuple_size(es),
             Type.TEnum(n, a) => 8 + self.enum_payload_size(n, a),
             Type.TFunc(ps, r) => 16,
+            Type.TAsync(f) => 16,
             _ => 8,
         }
     }
@@ -5251,6 +5256,8 @@ impl CodeGen {
                     Type.TList(e) => { self.emit_list_drop_helper(t) },
                     Type.TMap(k2, v) => { self.emit_map_drop_helper(t) },
                     Type.TEnum(n, a) => { self.emit_dropb_helper(t) },
+                    // an actor's cell: its fields, as a struct's (same token)
+                    Type.TActor(n) => { self.emit_dropb_helper(Type.TStruct(n, [])) },
                     _ => {},
                 }
             }
@@ -5635,6 +5642,7 @@ pub fun is_aggregate(t: Type) -> bool {
         Type.TTuple(es) => true,
         Type.TEnum(n, a) => true,
         Type.TFunc(ps, r) => true,
+        Type.TAsync(f) => true,
         _ => false,
     }
 }
@@ -5704,7 +5712,7 @@ pub fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => fal
 fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
 
 // A heap cell whose pointer is the value: retained and dropped as one pointer.
-pub fun is_cell_t(t: Type) -> bool { return is_list_t(t) || is_map_t(t) || is_sb_t(t) || is_str_t(t) }
+pub fun is_cell_t(t: Type) -> bool { return is_list_t(t) || is_map_t(t) || is_sb_t(t) || is_str_t(t) || is_actor_t(t) }
 
 // A `str` cell in the data section: the heap's `[size][refcount]` header, then
 // `[len][bytes]` at `label`; its count never reaches zero (MYLA-18, the Python
@@ -5953,7 +5961,7 @@ fun may_write_expr(e: Expr, name: str) -> bool {
 }
 
 fun struct_name_of(t: Type) -> str {
-    return match t { Type.TStruct(n, a) => n, _ => "" }
+    return match t { Type.TStruct(n, a) => n, Type.TActor(n) => n, _ => "" }
 }
 
 fun type_args_of(t: Type) -> [Type] {
@@ -5969,7 +5977,18 @@ pub fun is_struct_or_enum_t(t: Type) -> bool {
 }
 
 pub fun is_tfunc(t: Type) -> bool {
-    return match t { Type.TFunc(p, r) => true, _ => false }
+    return match t { Type.TFunc(p, r) => true, Type.TAsync(f) => true, _ => false }
+}
+
+// An async function type as its function type: with one task, an async
+// function runs as an ordinary one (D91, MYLA-138).
+pub fun unasync(t: Type) -> Type {
+    return match t { Type.TAsync(f) => f, _ => t }
+}
+
+// Whether `t` is an actor's handle: a cell holding its fields (D89).
+pub fun is_actor_t(t: Type) -> bool {
+    return match t { Type.TActor(n) => true, _ => false }
 }
 
 pub fun is_hole_expr(e: Expr) -> bool {
@@ -6010,13 +6029,13 @@ fun empty_str_list() -> [str] {
 }
 
 pub fun tfunc_params(t: Type) -> [Type] {
-    match t { Type.TFunc(p, r) => { return p }, _ => {} }
+    match unasync(t) { Type.TFunc(p, r) => { return p }, _ => {} }
     var empty: [Type] = []
     return empty
 }
 
 pub fun tfunc_ret(t: Type) -> Option<Type> {
-    match t { Type.TFunc(p, r) => { return r }, _ => {} }
+    match unasync(t) { Type.TFunc(p, r) => { return r }, _ => {} }
     return None
 }
 
@@ -6165,11 +6184,13 @@ fun mono_token(t: Type) -> str {
         Type.TFloat(w) => format(".f{}", w),
         Type.TSB => ".sb",
         Type.TStruct(n, a) => agg_token(n, a),
+        Type.TActor(n) => agg_token(n, []),
         Type.TEnum(n, a) => agg_token(n, a),
         Type.TTuple(es) => ".T" + join_tokens(es),
         Type.TList(e) => ".L" + lp(mono_token(e)),
         Type.TMap(k, v) => ".M" + map_token(k, v),
         Type.TFunc(ps, r) => ".F" + join_tokens(ps) + "R" + lp(ret_token(r)),
+        Type.TAsync(f) => mono_token(f),
         Type.TParam(n) => n,
         _ => ".X",
     }
@@ -6189,6 +6210,7 @@ fun parts_of(t: Type) -> [Type] {
         Type.TList(e) => [e],
         Type.TMap(k, v) => [k, v],
         Type.TFunc(ps, r) => func_parts(ps, r),
+        Type.TAsync(f) => parts_of(f),
         _ => [],
     }
 }

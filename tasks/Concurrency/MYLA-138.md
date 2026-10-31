@@ -2,7 +2,7 @@
 id: MYLA-138
 title: The stackless lowering of async functions
 type: feature
-status: todo
+status: in-progress
 priority: medium
 labels: [concurrency, ir, codegen, selfhost, design]
 ---
@@ -39,3 +39,16 @@ Where it stands: D85 names "slots live in the stack frame" as an assumption a st
 ## Decided (D90)
 
 Options 1a, 2a, 3a and 4a: every slot of an async function in its heap frame, a `suspend L` terminator, continuations resumed with guaranteed tail calls, a heap cell per frame to start.
+
+## Steps
+
+1. [x] Programs of one task (no `async let`): async functions and lambdas compiled as ordinary ones (a valid schedule when there is no other task), `await` as its operand, async function types as function types; actors as handles to reference-counted cells (`Type.TActor` in the self-hosted checker), their fields reached through the handle; the compiler refuses an `async let` ("the compiler doesn't build 'async let' yet").
+2. [ ] The IR: slot homes, `suspend L`, the verifier, the text form; frame slots in `ir_x86`; the executor of one thread in the runtime
+3. [ ] Async functions lowered as `__new`/`__resume` pairs; awaited calls of functions, methods and function values; continuations resumed with `become`
+4. [ ] Tasks: `async let`, awaiting a child, scopes waiting for their children, turns after awaited calls, a failure in a child held for its `await`
+5. [ ] `std.task` and every concurrency parity program natively; deep task trees; docs
+
+## Evidence (step 1)
+
+- `test_concurrency_programs_of_one_task_match_the_oracle` (`tests/burn/test_selfhost_codegen.py`): the 5 concurrency parity programs without `async let` and 4 actor programs (handles shared by copies, in a struct and a list; 200,000 actors made and released; reentrant calls; a recursive actor through `Option<Node>`) print what the Python interpreter prints. Releasing works: the 200,000-actor program peaks at 11 MB, at 24 MB when it keeps them all.
+- The Python checker no longer calls a recursive actor an infinite struct (a handle is a reference).

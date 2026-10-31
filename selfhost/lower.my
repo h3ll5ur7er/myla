@@ -30,7 +30,7 @@
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import Type, Subst, opt_subst_type, subst_type
-from .codegen import CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .codegen import is_actor_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 
 // A name in scope: the slot holding it.
@@ -214,6 +214,8 @@ fun member_lowerable(t: Type, blocked: [str]) -> bool {
             Some(rt) => member_lowerable(rt, blocked)
             None => true
         }
+        Type.TAsync(f) => member_lowerable(f, blocked)
+        Type.TActor(n) => !has_name(blocked, n)
         _ => false
     }
 }
@@ -270,6 +272,11 @@ pub fun blocked_types(cg: CodeGen) -> [str] {
 
 // Whether `t`'s values are a pointer to a heap cell held in 8 bytes (a
 // string so far): a scalar for the frame, with a reference count.
+// The name of the actor type `t` (D89).
+fun actor_name(t: Type) -> str {
+    return match t { Type.TActor(n) => n, _ => "" }
+}
+
 fun is_cell(t: Type) -> bool {
     return is_cell_t(t)
 }
@@ -789,6 +796,10 @@ impl Lower {
 
     fun discard(var self, cg: CodeGen, e: Expr) {
         match e.kind {
+            ExprKind.Await(x) => {
+                self.discard(cg, x)
+                return
+            },
             ExprKind.MatchE(scrut, arms) => {
                 let v = self.match_expr(cg, e, scrut, arms, false)
                 return
@@ -884,6 +895,11 @@ impl Lower {
                 if slot >= 0 { return self.slot_addr(slot) }
             },
             ExprKind.GetField(tgt, field) => {
+                // an actor's field: through its handle, shared (D89)
+                if is_actor_t(self.place_type(cg, tgt)) {
+                    let h = self.expr(cg, tgt)
+                    return self.offset(h, cg.field_offset(self.place_type(cg, tgt), field))
+                }
                 let base = self.place(cg, tgt)
                 return self.offset(base, cg.field_offset(self.place_type(cg, tgt), field))
             },
@@ -1150,7 +1166,7 @@ impl Lower {
             },
             ExprKind.GetField(tgt, field) => {
                 if is_aggregate(t) { return self.unsupported("an aggregate field used as a scalar") }
-                let base = self.addr(cg, tgt)
+                let base = self.field_base(cg, tgt)
                 let d = self.temp(t)
                 self.add(Inst.LoadAt(d, base, cg.field_offset(self.place_type(cg, tgt), field)))
                 return d
@@ -1172,6 +1188,11 @@ impl Lower {
             },
             ExprKind.ListLit(elems) => { return self.list_lit(cg, t, elems) },
             ExprKind.MapLit(entries) => { return self.map_lit(cg, t, entries) },
+            ExprKind.StructLit(name, fields) => {
+                if is_actor_t(t) { return self.actor_lit(cg, t, fields) }
+            },
+            // one task: the awaited call runs here (D91, MYLA-138)
+            ExprKind.Await(x) => { return self.expr(cg, x) },
             ExprKind.Try(inner) => { return self.try_expr(cg, e, inner) },
             _ => {},
         }
@@ -1333,9 +1354,10 @@ impl Lower {
             },
             ExprKind.Lambda(params, rt, body, asy) => { return self.lambda_value(cg, e, params, body) },
             ExprKind.GetField(tgt, field) => {
-                let base = self.addr(cg, tgt)
+                let base = self.field_base(cg, tgt)
                 return self.unbox(cg, t, self.offset(base, cg.field_offset(self.place_type(cg, tgt), field)))
             },
+            ExprKind.Await(x) => { return self.addr(cg, x) },
             ExprKind.TupleIndex(tgt, idx) => {
                 let base = self.addr(cg, tgt)
                 return self.unbox(cg, t, self.offset(base, cg.elem_offset(self.place_type(cg, tgt), idx as int32)))
@@ -1381,6 +1403,24 @@ impl Lower {
             _ => {},
         }
         return self.unsupported("that kind of aggregate expression")
+    }
+
+    // The address the fields of `tgt`'s value are at: its own, or an actor's
+    // cell, through its handle (D89).
+    fun field_base(var self, cg: CodeGen, tgt: Expr) -> int32 {
+        if is_actor_t(self.place_type(cg, tgt)) { return self.expr(cg, tgt) }
+        return self.addr(cg, tgt)
+    }
+
+    // `A { … }` of an actor: a new cell holding the fields, each with its
+    // own references; the statement owns the handle (D89).
+    fun actor_lit(var self, cg: CodeGen, t: Type, fields: [FieldInit]) -> int32 {
+        let st = Type.TStruct(actor_name(t), [])
+        let size = self.int_const(cg.size(st))
+        let p = self.temp(t)
+        self.add(Inst.Rt(p, "__alloc", [size]))
+        for fi in fields { self.store_member(cg, fi.value, p, cg.field_offset(t, fi.name)) }
+        return self.owned_value(cg, p, t)
     }
 
     // The address of the value of type `t` held by the member at `p`: `p`

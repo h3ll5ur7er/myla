@@ -1229,6 +1229,24 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     bad.add((fn, r))
         return sorted(bad)
 
+    def test_concurrency_programs_of_one_task_match_the_oracle(self) -> None:
+        from .test_selfhost_interp import CONCURRENCY_PROGRAMS
+
+        cases = dict(ACTOR_PROGRAMS)
+        for name, src in CONCURRENCY_PROGRAMS.items():
+            if "async let" not in src and "import" not in src:
+                cases[name] = src
+        self.assertGreater(len(cases), 8)
+        for name, src in cases.items():
+            with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(src)
+                out, code, peak = self._build_and_measure(self._emit_asm(path))
+                self.assertEqual((out, code), _oracle(path))
+                # 200,000 actors made and released: their cells are reused
+                self.assertLess(peak, 64, f"{name}: peak {peak:.1f} MB")
+
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS
 
@@ -1240,6 +1258,48 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 got = self._build_and_run(self._emit_asm(path))
                 self.assertEqual(got, _oracle(path))
 
+
+
+# Actors and concurrency natively (D89, D91, MYLA-138): one task so far, so
+# async functions are ordinary ones; an actor is a handle to a cell holding its
+# fields, shared by its copies and released with the last.
+_ACTOR_COUNTER = ("actor Counter {\n    count: int,\n    log: [str],\n}\n"
+                  "impl Counter {\n"
+                  "    fun bump(var self, by: int) -> int {\n        self.count = self.count + by\n"
+                  "        push(self.log, f\"+{by}\")\n        return self.count\n    }\n"
+                  "    fun get(self) -> int {\n        return self.count\n    }\n"
+                  "    fun entries(self) -> [str] {\n        return self.log\n    }\n}\n")
+ACTOR_PROGRAMS = {
+    "actor_handles_are_shared": _ACTOR_COUNTER + (
+        "struct Holder { c: Counter, tag: str }\n"
+        "async fun bump_all(cs: [Counter]) {\n    for c in cs {\n        let x = await c.bump(10)\n    }\n}\n"
+        "#main\nasync fun main() {\n    let c = Counter { count: 0, log: [] }\n    let d = c\n"
+        "    let h = Holder { c: d, tag: \"h\" }\n    let x = await h.c.bump(1)\n"
+        "    await bump_all([c, d, h.c])\n    print(await c.get())\n"
+        "    var es = await c.entries()\n    push(es, \"local\")\n    print(len(es))\n"
+        "    print(len(await d.entries()))\n}\n"),
+    "actors_are_released": _ACTOR_COUNTER + (
+        "async fun churn(n: int) -> int {\n    var total = 0\n    var i = 0\n    while i < n {\n"
+        "        let c = Counter { count: i, log: [\"start\"] }\n        let k = c\n"
+        "        total = total + await k.bump(1) % 7\n        i = i + 1\n    }\n    return total\n}\n"
+        "#main\nasync fun main() {\n    print(await churn(200000))\n}\n"),
+    "actor_reentrancy_one_task": (
+        "actor A {\n    n: int\n}\nactor B {\n    m: int\n}\n"
+        "impl A {\n    async fun ping(self, b: B) -> int {\n        return await b.pong(self)\n    }\n"
+        "    fun val(self) -> int {\n        return self.n\n    }\n}\n"
+        "impl B {\n    async fun pong(self, a: A) -> int {\n        return await a.val() + self.m\n    }\n}\n"
+        "#main\nasync fun main() {\n    let a = A { n: 1 }\n    let b = B { m: 2 }\n"
+        "    print(await a.ping(b))\n    print(await a.ping(b) + await b.pong(a))\n}\n"),
+    "recursive_actors": (
+        "actor Node {\n    val: int,\n    next: Option<Node>,\n}\n"
+        "impl Node {\n    async fun sum(self) -> int {\n        return match self.next {\n"
+        "            Some(n) => self.val + await n.sum(),\n            None => self.val,\n        }\n    }\n"
+        "    fun link(var self, n: Node) {\n        self.next = Some(n)\n    }\n}\n"
+        "#main\nasync fun main() {\n    var head = Node { val: 0, next: None }\n    var i = 1\n"
+        "    while i <= 20 {\n        let n = Node { val: i, next: Some(head) }\n        head = n\n        i = i + 1\n    }\n"
+        "    print(await head.sum())\n    let tail = Node { val: 1000, next: None }\n    await tail.link(head)\n"
+        "    print(await tail.sum())\n}\n"),
+}
 
 
 IR_SAMPLE = """\

@@ -40,6 +40,9 @@ pub enum Type {
     // an async function type (D89; types.py: FuncType.is_async), a TFunc
     // inside: a separate variant keeps every other type as small as before
     TAsync(Type),
+    // an actor's handle (D89): a reference to its state, which only its own
+    // methods reach; its fields are those of the struct it is declared like
+    TActor(str),
     TParam(str),
     TSelf,
     // the type of a declaration's part that failed to check (MYLA-110, D84;
@@ -183,6 +186,7 @@ pub fun type_name(t: Type) -> str {
         Type.TStr => "str",
         Type.TSB => "StringBuilder",
         Type.TStruct(n, args) => generic_name(n, args),
+        Type.TActor(n) => generic_name(n, []),
         Type.TEnum(n, args) => generic_name(n, args),
         Type.TParam(n) => n,
         Type.TSelf => "Self",
@@ -386,6 +390,7 @@ fun type_eq(a: Type, b: Type) -> bool {
         Type.TStr => match b { Type.TStr => true, _ => false },
         Type.TSB => match b { Type.TSB => true, _ => false },
         Type.TStruct(n1, a1) => match b { Type.TStruct(n2, a2) => n1 == n2 && type_list_eq(a1, a2), _ => false },
+        Type.TActor(n1) => match b { Type.TActor(n2) => n1 == n2, _ => false },
         Type.TEnum(n1, a1) => match b { Type.TEnum(n2, a2) => n1 == n2 && type_list_eq(a1, a2), _ => false },
         Type.TTuple(e1) => match b { Type.TTuple(e2) => type_list_eq(e1, e2), _ => false },
         Type.TList(e1) => match b { Type.TList(e2) => type_eq(e1, e2), _ => false },
@@ -1025,6 +1030,12 @@ pub struct Checker {
     suspended: int32,
     task_init: bool,                // checking an `async let`'s initializer, outside its lambdas
     in_guard: bool,                 // checking a match guard, outside its lambdas
+    // the first `async let`, which the compiler doesn't build yet (D91,
+    // MYLA-138; `task_line` 0: none)
+    task_line: int32,
+    task_col: int32,
+    task_sp: SrcSpan,
+    task_node: int32,
 }
 
 fun new_checker(decls: [Decl]) -> Checker {
@@ -1044,6 +1055,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false,
+        task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
     }
 }
 
@@ -1182,6 +1194,7 @@ impl Checker {
     fun type_key(self, t: Type) -> Option<str> {
         return match t {
             Type.TStruct(n, a) => Some(n),
+            Type.TActor(n) => Some(n),
             Type.TEnum(n, a) => Some(n),
             Type.TInt(w, s) => Some(int_type_name(w, s)),
             Type.TBool => Some("bool"),
@@ -1430,6 +1443,7 @@ impl Checker {
                 return Ok(Type.TEnum(name, ra))
             }
             let none_args: [Type] = []
+            if si >= 0 && self.is_actor(name) { return Ok(Type.TActor(name)) }
             if si >= 0 { return Ok(Type.TStruct(name, none_args)) }
             return Ok(Type.TEnum(name, none_args))
         }
@@ -2031,7 +2045,7 @@ impl Checker {
 
     // Whether an impl may add methods to `target` (types.py: _check_impl_target).
     fun check_impl_target(self, ln: int32, cl: int32, sp: SrcSpan, target: Type, key_opt: Option<str>, tps: [TypeParam], methods: [FunData]) -> Result<int32, CheckErr> {
-        let is_agg = match target { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, _ => false }
+        let is_agg = match target { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, Type.TActor(n) => true, _ => false }
         if is_agg {
             let targs = match target { Type.TStruct(n, a) => a, Type.TEnum(n, a) => a, _ => empty_types() }
             if len(tps) > 0 {
@@ -2762,7 +2776,7 @@ impl Checker {
             None => {},
         }
         let base = self.expect_value(target, None)?
-        match base {
+        match struct_view(base) {
             Type.TStruct(n, args) => {
                 self.check_isolation(n, target, field, e)?
                 let fields = self.struct_field_types(n, args)
@@ -2798,6 +2812,7 @@ impl Checker {
                 let vt = self.expect_value(init.value, Some(ft))?
                 if !type_eq(vt, ft) { return Err(terr_at(init.line, init.col, init.sp, format("field '{}': expected '{}', found '{}'", init.name, type_name(ft), type_name(vt)))) }
             }
+            if self.is_actor(sname) { return Ok(Type.TActor(sname)) }
             return Ok(Type.TStruct(sname, []))
         }
         // generic struct: solve type args from fields (declaration order)
@@ -3071,7 +3086,7 @@ impl Checker {
     }
 
     fun check_struct_pattern(var self, pat: Pattern, sname: str, fps: [FieldPat], t: Type) -> Result<int32, CheckErr> {
-        match t {
+        match struct_view(t) {
             Type.TStruct(tn, args) => {
                 if sname != tn { return Err(terr_at(pat.line, pat.col, pat.sp, format("pattern names struct '{}' but the value is '{}'", sname, tn))) }
                 if self.is_actor(tn) { return Err(terr_at(pat.line, pat.col, pat.sp, format("a pattern can't reach the fields of the actor '{}'", type_name(t)))) }
@@ -3863,6 +3878,12 @@ impl Checker {
     // is awaited by the task.
     fun check_async_let(var self, s: Stmt, name: str, ty: Option<TypeExpr>, init: Expr) -> Result<int32, CheckErr> {
         if !self.in_async { return Err(terr_at(s.line, s.col, s.sp, "'async let' can only stand in an async function")) }
+        if self.task_line == 0 {
+            self.task_line = s.line
+            self.task_col = s.col
+            self.task_sp = s.sp
+            self.task_node = self.cur_decl
+        }
         var declared: Option<Type> = None
         match ty { Some(te) => { declared = Some(self.resolve_annotation(te)?) }, None => {} }
         var t: Option<Type> = None
@@ -3932,7 +3953,7 @@ impl Checker {
             },
             ExprKind.GetField(target, field) => {
                 let base = self.check_lvalue(target)?
-                match base.ty {
+                match struct_view(base.ty) {
                     Type.TStruct(nm, args) => {
                         self.check_isolation(nm, target, field, e)?
                         let fields = self.struct_field_types(nm, args)
@@ -5073,7 +5094,7 @@ impl Checker {
         match sig_opt {
             None => {
                 // fallback: a struct field holding a function value
-                match recv_type {
+                match struct_view(recv_type) {
                     Type.TStruct(nm, sargs) => {
                         let fields = self.struct_field_types(nm, sargs)
                         let fopt = field_type_get(fields, field)
@@ -5355,7 +5376,7 @@ impl Checker {
             Some(pt) => { return Ok(pt) },
             None => {},
         }
-        match recv {
+        match struct_view(recv) {
             Type.TStruct(nm, sargs) => {
                 let fields = self.struct_field_types(nm, sargs)
                 if match field_type_get(fields, field) { Some(x) => true, None => false } { self.check_isolation(nm, target, field, callee)? }
@@ -5402,6 +5423,12 @@ fun func_to_partial_res(t: Type, e: Expr) -> Result<PartialTgt, CheckErr> {
         _ => {},
     }
     return Err(terr_at(e.line, e.col, e.sp, format("cannot partially apply a value of type '{}'", type_name(t))))
+}
+
+// The struct an actor's type is declared like, for its fields; any other type
+// as it is.
+fun struct_view(t: Type) -> Type {
+    return match t { Type.TActor(n) => Type.TStruct(n, []), _ => t }
 }
 
 // Whether `t` is an async function type (D89).

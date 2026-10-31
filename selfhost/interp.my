@@ -2736,6 +2736,7 @@ fun value_key(v: Value) -> str {
 fun type_key_of(t: Type) -> str {
     return match t {
         Type.TStruct(n, a) => n,
+        Type.TActor(n) => n,
         Type.TEnum(n, a) => n,
         Type.TInt(w, s) => int_type_name_i(w, s),
         Type.TBool => "bool",

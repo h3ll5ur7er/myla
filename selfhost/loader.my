@@ -68,11 +68,12 @@ pub fun file_of(prog: Loaded, id: int32) -> str {
 
 // The type errors `errs` (not empty) of the linked program `prog`, each in its
 // declaration's file, as one report (MYLA-65, D80).
-// The error for a program with concurrency, which the compiler doesn't build
-// yet (D89, MYLA-137); none without it.
+// The error for a program with an `async let`, which the compiler doesn't
+// build yet (D91, MYLA-138): its other concurrency is one task, its async
+// functions ordinary ones; none without one.
 pub fun concurrency_report(prog: Loaded, c: Checker) -> Option<Report> {
-    if c.conc_line == 0 { return None }
-    return Some(Report { kind: "runtime error", msg: "the compiler doesn't build concurrency yet (D89, MYLA-137)", path: file_of(prog, c.conc_node), line: c.conc_line, col: c.conc_col, sp: c.conc_sp, more: [], notes: [] })
+    if c.task_line == 0 { return None }
+    return Some(Report { kind: "runtime error", msg: "the compiler doesn't build 'async let' yet (D91, MYLA-138)", path: file_of(prog, c.task_node), line: c.task_line, col: c.task_col, sp: c.task_sp, more: [], notes: [] })
 }
 
 pub fun type_errors(prog: Loaded, errs: [CheckErr]) -> Report {
