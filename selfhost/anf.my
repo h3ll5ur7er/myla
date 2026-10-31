@@ -21,11 +21,12 @@ from .checker import Type
 // `wrap_children` (the compiler's too): an `async let x = e` starts an async
 // lambda made of `e`, `async let x = (async || await e)()` (no `await` unless
 // `e` is a call), whose body is the interpreter's child's (`task_body`) and
-// which gets copies of what `e` uses, as D89 says a child does.
-pub struct Norm { next: int32, resolved: [int32: Type], out: [Stmt], temps: int32, value_matches: bool, wrap_children: bool }
+// which gets copies of what `e` uses, as D89 says a child does; `children`:
+// those lambdas, whose captures are copied deeply (D92).
+pub struct Norm { next: int32, resolved: [int32: Type], out: [Stmt], temps: int32, value_matches: bool, wrap_children: bool, children: [int32: bool] }
 
 pub fun new_norm(next: int32) -> Norm {
-    return Norm { next: next, resolved: [:], out: [], temps: 0, value_matches: false, wrap_children: false }
+    return Norm { next: next, resolved: [:], out: [], temps: 0, value_matches: false, wrap_children: false, children: [:] }
 }
 
 // -- what can suspend -------------------------------------------------------
@@ -206,6 +207,7 @@ impl Norm {
                         }
                         let lam = self.fresh(init, ExprKind.Lambda([], None, lbody, true))
                         self.resolved[lam.id] = Type.TAsync(Type.TFunc([], ret))
+                        self.children[lam.id] = true
                         let call = self.fresh(init, ExprKind.Call(lam, []))
                         self.copy_type(init.id, call.id)
                         push(self.out, self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, call)))

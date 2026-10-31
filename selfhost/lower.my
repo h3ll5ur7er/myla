@@ -62,8 +62,9 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // `frame_fn`: an async function's frame function (D90), `result` the slot its
 // result goes to (-1: none); `tasks`: the child tasks of the open scopes;
 // `actor_self`: the slot of an actor method's `self`, whose actor its frame
-// function holds between suspensions (D92), or -1.
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32 }
+// function holds between suspensions (D92), or -1; `deep_res`: an actor
+// method's result is copied deeply before it leaves the actor (D92).
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
 // A child task of an `async let` (D89): the slot holding its frame, its
@@ -78,7 +79,7 @@ pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: 
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0 }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
     // slots in its heap frame, the result in the first (D90)
@@ -141,10 +142,22 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         i = i + 1
     }
     // an actor's async method holds the actor while it runs (D92)
-    if frame && len(fd.params) > 0 && has_receiver(fd) && is_actor_t(lw.f.slots[lw.lookup(fd.params[0].name)].ty) {
+    let actor_method = cg.frames && len(fd.params) > 0 && has_receiver(fd) && is_actor_t(lw.f.slots[lw.lookup(fd.params[0].name)].ty)
+    if frame && actor_method {
         lw.actor_self = lw.lookup(fd.params[0].name)
         lw.actor_off = actor_record_offset(cg, lw.f.slots[lw.actor_self].ty)
         lw.enter_self()
+    }
+    // an actor method's arguments and result are copied deeply, as they
+    // cross between the caller and the actor (D92)
+    if actor_method {
+        lw.deep_res = match ret { Some(t) => cg.owns_heap(t) && !is_actor_t(t), None => false }
+        var pi = 1
+        while pi < len(fd.params) {
+            let pt = subst_type(sig.params[pi], cg.subst)
+            if cg.owns_heap(pt) && !is_actor_t(pt) { lw.deep_param(cg, fd.params[pi].name, pt) }
+            pi = pi + 1
+        }
     }
     match fd.body {
         Some(b) => { lw.block(cg, b) },
@@ -164,7 +177,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0 }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -1041,6 +1054,38 @@ impl Lower {
         }
     }
 
+    // The parameter `name` (of type `t`) of an actor's method as a deep copy
+    // of its own (D92): in place when its slot owns its value, else a new
+    // owned slot copied from the borrowed one.
+    fun deep_param(var self, cg: CodeGen, name: str, t: Type) {
+        let s = self.lookup(name)
+        if self.f.slots[s].owns {
+            self.add(Inst.Deep(t, self.slot_addr(s)))
+            return
+        }
+        let c = self.value_slot(cg, name, t, true)
+        if is_aggregate(t) {
+            var src = -1
+            if self.f.slots[s].inline { src = self.slot_addr(s) }
+            else {
+                src = self.temp(Type.TInt(64, false))
+                self.add(Inst.Load(src, s))
+            }
+            let dst = self.slot_addr(c)
+            self.add(Inst.Copy(dst, src, cg.size(t)))
+            self.retain(cg, t, dst)
+        } else {
+            let v = self.temp(t)
+            self.add(Inst.Load(v, s))
+            self.add(Inst.Store(c, v))
+            self.retain(cg, t, v)
+        }
+        self.add(Inst.Deep(t, self.slot_addr(c)))
+        self.declare_as(name, c, true)
+        self.own(c)
+        self.add(Inst.Bind(name, c))
+    }
+
     // `let name = await recv.m(args)` of an actor's synchronous method (D92):
     // the receiver and the arguments into slots of their own while this
     // function still holds its own actor, which it leaves; the call made in
@@ -1234,14 +1279,22 @@ impl Lower {
     fun async_let(var self, cg: CodeGen, name: str, init: Expr) {
         let has = cg.has_type(init.id)
         let rt = cg.type_of(init.id)
+        // the lambda value released before the child is queued: the child
+        // alone then holds its env (D92)
+        self.begin_temps()
         let fr = self.frame_of_value(cg, init)
         if fr < 0 {
             let d = self.unsupported("an 'async let' not made a call of an async lambda")
             return
         }
-        self.add(Inst.Rt(-1, "__exec_push", [fr]))
+        let fs = self.new_slot("__child", Type.TInt(64, false), 8, -1, false)
+        self.add(Inst.Store(fs, fr))
+        self.end_temps()
+        let fr2 = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(fr2, fs))
+        self.add(Inst.Rt(-1, "__exec_push", [fr2]))
         let ts = self.new_slot("__task_" + name, Type.TInt(64, false), 8, -1, false)
-        self.add(Inst.Store(ts, fr))
+        self.add(Inst.Store(ts, fr2))
         self.declare_as(name, ts, true)
         push(self.tasks, TaskSlot { slot: ts, ty: rt, void: !has, owns: has && cg.owns_heap(rt), depth: len(self.owners) - 1 })
     }
@@ -1355,10 +1408,28 @@ impl Lower {
     // `__finish`, which resumes its caller or ends its task (D90).
     fun exit_fn(var self, v: int32, fall: bool) {
         if !self.frame_fn {
-            if fall { self.finish(Term.Ret(v)) } else { self.leave(Term.Ret(v)) }
+            var rv = v
+            if self.deep_res {
+                match self.f.ret {
+                    Some(t) => {
+                        if self.sret >= 0 { self.add(Inst.Deep(t, self.slot_addr(self.sret))) }
+                        else if v >= 0 {
+                            // through a slot of its own, which `deep` works on
+                            let r = self.new_slot("__deep_result", t, 8, -1, false)
+                            self.add(Inst.Store(r, v))
+                            self.add(Inst.Deep(t, self.slot_addr(r)))
+                            rv = self.temp(t)
+                            self.add(Inst.Load(rv, r))
+                        }
+                    },
+                    None => {},
+                }
+            }
+            if fall { self.finish(Term.Ret(rv)) } else { self.leave(Term.Ret(rv)) }
             return
         }
         if v >= 0 && self.result >= 0 && self.sret < 0 { self.add(Inst.Store(self.result, v)) }
+        if self.deep_res && self.result >= 0 { self.add(Inst.Deep(self.f.slots[self.result].ty, self.slot_addr(self.result))) }
         self.leave_self()
         let fr = self.temp(Type.TInt(64, false))
         self.add(Inst.Frame(fr))
@@ -2328,6 +2399,9 @@ impl Lower {
         var code = "myla_" + lifted
         if cg.frames && is_async_t(t) { code = code + "__new" }
         let made = self.fat_value(cg, t, code, size, drop)
+        // a child task's captures: copied deeply, as they cross to its thread
+        // (D92)
+        let child = cg.frames && contains(cg.norm.children, e.id)
         for c in caps {
             let slot = self.lookup(c.name)
             if is_aggregate(c.ty) {
@@ -2340,6 +2414,7 @@ impl Lower {
                 self.add(Inst.StoreAt(made.2, c.off, v))
                 self.retain(cg, c.ty, v)
             }
+            if child && cg.owns_heap(c.ty) && !is_actor_t(c.ty) { self.add(Inst.Deep(c.ty, self.offset(made.2, c.off))) }
         }
         self.made_value(made.0)
         return made.1

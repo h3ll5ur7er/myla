@@ -94,6 +94,11 @@ pub struct CodeGen {
     // aggregates whose retain or release walk is a helper of its own
     // (`walk_helper`), and whether each is the retain walk; emitted by name
     need_walk: [Type],
+    // D92: the types whose deep walk (`__deepw_<T>`) and the cell types whose
+    // deep copy (`deep_cell_name`) are still to be emitted
+    need_deep: [Type],
+    deep_inline: [bool],
+    need_deepc: [Type],
     walk_retain: [bool],
     walk_emitted: [str],
     // the drop, clone and walk helpers asked for so far, by kind and type
@@ -267,7 +272,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         uses_float: false,
         epilogue: "", ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
-        need_walk: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
+        need_walk: [], need_deep: [], deep_inline: [], need_deepc: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
         line_spans: [], prelude_id: 0,
         cur_path: "<input>", pos_labels: [:], posdata: [],
@@ -1386,7 +1391,8 @@ impl CodeGen {
             return
         }
         self.emit(format("movq {}(%{}), %rax", ptr_off, base))
-        self.emit("incq -8(%rax)")
+        // an actor handle may be shared between threads (D92)
+        if self.frames && is_actor_t(t) { self.emit("lock incq -8(%rax)") } else { self.emit("incq -8(%rax)") }
     }
 
     // Release a heap-pointer leaf at `off(base)` via its type-specific routine.
@@ -1925,6 +1931,346 @@ impl CodeGen {
         push(out, "\t.section .note.GNU-stack,\"\",@progbits")
         push(out, "")
         return join_lines(out)
+    }
+
+    // -- deep copies (D92, MYLA-137) -----------------------------------------
+
+    // The name of `t`'s deep walk (`__deepw_<T>`: %rdi = the address of a T,
+    // whose heap values it replaces by deep copies, releasing the originals),
+    // to be emitted.
+    fun register_deep(var self, t: Type) -> str {
+        let name = "__deepw_" + mono_token(t)
+        if !contains(self.helper_seen, name) {
+            self.helper_seen[name] = true
+            push(self.need_deep, t)
+            push(self.deep_inline, false)
+        }
+        return name
+    }
+
+    // The routine making a cell of type `t` (%rdi, one reference, consumed)
+    // unshared, deeply: %rax = the same cell when it was the only reference,
+    // else a copy; either way every heap value in it is a deep copy of its own.
+    fun deep_cell_name(var self, t: Type) -> str {
+        if is_str_t(t) { return "__deep_str" }
+        var name = ""
+        match t {
+            Type.TList(e) => { name = "__deep_list_" + mono_token(e) },
+            Type.TMap(k, v) => { name = "__deep_map_" + map_token(k, v) },
+            _ => {
+                if is_sb_t(t) { name = "__deep_sb" } else { name = "__deepb_" + mono_token(t) }
+            },
+        }
+        if !contains(self.helper_seen, name) {
+            self.helper_seen[name] = true
+            push(self.need_deepc, t)
+        }
+        return name
+    }
+
+    // One member of type `ft` at `off(base)` (`base` callee-saved) made a
+    // deep copy of its own; an actor handle stays shared.
+    fun deep_member(var self, base: str, off: int32, ft: Type) {
+        if is_actor_t(ft) { return }
+        if self.is_boxed(ft) || is_cell_t(ft) {
+            let name = self.deep_cell_name(ft)
+            self.emit(format("movq {}(%{}), %rdi", off, base))
+            self.emit("call " + name)
+            self.emit(format("movq %rax, {}(%{})", off, base))
+        } else if is_tfunc(ft) {
+            self.emit(format("movq {}(%{}), %rdi", off + 8, base))
+            self.emit("call __deep_env")
+            self.emit(format("movq %rax, {}(%{})", off + 8, base))
+        } else if self.owns_heap(ft) {
+            self.emit(format("leaq {}(%{}), %rdi", off, base))
+            self.emit("call " + self.register_deep(ft))
+        }
+    }
+
+    // `__deepw_<T>`: each member of the T at %rdi, kept in %rbx (`inline`:
+    // `__deepi_<E>`, the value in a boxed enum's cell).
+    fun emit_deep_walk(var self, t: Type, inline: bool) {
+        if inline { self.emit(format("__deepi_{}:", mono_token(t))) } else { self.emit(format("__deepw_{}:", mono_token(t))) }
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("movq %rdi, %rbx")
+        match t {
+            Type.TStruct(n, a) => {
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                var cur = 0
+                for f in info.fields {
+                    let ft = subst_type(f.ty, sub)
+                    self.deep_member("rbx", cur, ft)
+                    cur = cur + self.stored_size(ft)
+                }
+            },
+            Type.TTuple(es) => {
+                var cur = 0
+                for et in es {
+                    self.deep_member("rbx", cur, et)
+                    cur = cur + self.stored_size(et)
+                }
+            },
+            Type.TEnum(n, a) => {
+                if self.is_boxed(t) && !inline { self.deep_member("rbx", 0, t) }
+                else {
+                    let info = self.enum_info(n)
+                    let sub = self.type_subst(info.type_params, a)
+                    let done = self.label()
+                    var idx = 0
+                    for v in info.variants {
+                        if self.variant_owns(v, sub) {
+                            let nxt = self.label()
+                            self.emit(format("cmpq ${}, (%rbx)", idx))
+                            self.emit(format("jne {}", nxt))
+                            var cur = 8
+                            for ft0 in v.payload {
+                                let ft = subst_type(ft0, sub)
+                                self.deep_member("rbx", cur, ft)
+                                cur = cur + self.stored_size(ft)
+                            }
+                            self.emit(format("jmp {}", done))
+                            self.emit(format("{}:", nxt))
+                        }
+                        idx = idx + 1
+                    }
+                    self.emit(format("{}:", done))
+                }
+            },
+            _ => { self.deep_member("rbx", 0, t) },
+        }
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // The deep copy of a cell of type `t` (`deep_cell_name`): a shared cell
+    // is cloned first (its members retained, the original released), then
+    // each member is made a deep copy of its own.
+    fun emit_deep_cell(var self, t: Type) {
+        let name = self.deep_cell_name(t)
+        self.emit(format("{}:", name))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("pushq %r13")
+        self.emit("pushq %r14")
+        self.emit("movq %rdi, %rbx")
+        let unique = self.label()
+        self.emit("cmpq $1, -8(%rbx)")
+        self.emit(format("je {}", unique))
+        match t {
+            Type.TList(e) => {
+                self.register_clone(t)
+                self.emit("call " + self.clone_call_name(t))
+                self.emit("movq %rax, %rbx")
+            },
+            Type.TMap(k, v) => {
+                self.register_clone(t)
+                self.emit("call " + self.clone_call_name(t))
+                self.emit("movq %rax, %rbx")
+            },
+            _ => {
+                if is_sb_t(t) {
+                    self.need_sb = true
+                    self.emit("call __sb_clone")
+                    self.emit("movq %rax, %rbx")
+                } else {
+                    // a boxed enum: a copy of the box, its members retained
+                    self.emit("movq -16(%rbx), %rdi")
+                    self.emit("call __alloc")
+                    self.emit("movq %rax, %r12")
+                    self.emit("movq %rbx, %rsi")
+                    self.emit("movq %r12, %rdi")
+                    self.emit("movq -16(%rbx), %rcx")
+                    self.emit("cld")
+                    self.emit("rep movsb")
+                    self.owned_walk("r12", 0, t, true)
+                    self.emit("decq -8(%rbx)")
+                    self.emit("movq %r12, %rbx")
+                }
+            },
+        }
+        self.emit(format("{}:", unique))
+        match t {
+            Type.TList(e) => {
+                if self.owns_heap(e) {
+                    let stride = self.stored_size(e)
+                    self.emit("movq (%rbx), %r12")
+                    self.emit("xorq %r13, %r13")
+                    let loop = self.label()
+                    let done = self.label()
+                    self.emit(format("{}:", loop))
+                    self.emit("cmpq %r12, %r13")
+                    self.emit(format("jge {}", done))
+                    self.emit("movq %r13, %rax")
+                    self.emit(format("imulq ${}, %rax", stride))
+                    self.emit("leaq 16(%rbx,%rax), %r14")
+                    self.deep_member("r14", 0, e)
+                    self.emit("incq %r13")
+                    self.emit(format("jmp {}", loop))
+                    self.emit(format("{}:", done))
+                }
+            },
+            Type.TMap(k, v) => {
+                if self.owns_heap(k) || self.owns_heap(v) {
+                    let ss = self.map_slot_size(t)
+                    self.emit("movq 8(%rbx), %r12")
+                    self.emit("xorq %r13, %r13")
+                    let loop = self.label()
+                    let done = self.label()
+                    let cont = self.label()
+                    self.emit(format("{}:", loop))
+                    self.emit("cmpq %r12, %r13")
+                    self.emit(format("jge {}", done))
+                    self.emit("movq %r13, %rax")
+                    self.emit(format("imulq ${}, %rax", ss))
+                    self.emit("leaq 16(%rbx,%rax), %r14")
+                    self.emit("cmpq $1, (%r14)")
+                    self.emit(format("jne {}", cont))
+                    if self.owns_heap(k) { self.deep_member("r14", 8, k) }
+                    if self.owns_heap(v) { self.deep_member("r14", 16, v) }
+                    self.emit(format("{}:", cont))
+                    self.emit("incq %r13")
+                    self.emit(format("jmp {}", loop))
+                    self.emit(format("{}:", done))
+                }
+            },
+            _ => {
+                if !is_sb_t(t) {
+                    self.emit("movq %rbx, %rdi")
+                    self.emit("call " + self.register_deep_inline(t))
+                }
+            },
+        }
+        self.emit("movq %rbx, %rax")
+        self.emit("popq %r14")
+        self.emit("popq %r13")
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // The deep walk of a boxed enum's inline value (its cell's contents).
+    fun register_deep_inline(var self, t: Type) -> str {
+        let name = "__deepi_" + mono_token(t)
+        if !contains(self.helper_seen, name) {
+            self.helper_seen[name] = true
+            push(self.need_deep, t)
+            push(self.deep_inline, true)
+        }
+        return name
+    }
+
+    // `myla_<lifted>_env_deep`: an env's deep copy (`__deep_env`).
+    fun emit_env_deep(var self, lifted: str, owned: [DropEntry]) {
+        self.emit(format("myla_{}_env_deep:", lifted))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("movq %rdi, %rbx")
+        let unique = self.label()
+        self.emit("cmpq $1, -8(%rbx)")
+        self.emit(format("je {}", unique))
+        self.emit("movq -16(%rbx), %rdi")
+        self.emit("call __alloc")
+        self.emit("movq %rax, %r12")
+        self.emit("movq %rbx, %rsi")
+        self.emit("movq %r12, %rdi")
+        self.emit("movq -16(%rbx), %rcx")
+        self.emit("cld")
+        self.emit("rep movsb")
+        for d in owned { self.retain("r12", d.off, d.ty) }
+        self.emit("decq -8(%rbx)")
+        self.emit("movq %r12, %rbx")
+        self.emit(format("{}:", unique))
+        for d in owned { self.deep_member("rbx", d.off, d.ty) }
+        self.emit("movq %rbx, %rax")
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit(format("\t.quad myla_{}_env_deep", lifted))
+    }
+
+    // `__deep_str` and `__deep_env`, the deep copies every program with tasks
+    // may need (D92).
+    fun emit_deep_runtime(var self) {
+        // a string: itself when unshared or static (its count never reaches
+        // zero), else a copy
+        self.raw("__deep_str:")
+        self.raw("\tmovq -8(%rdi), %rax")
+        self.raw("\tcmpq $1, %rax")
+        self.raw("\tje .Lds_same")
+        self.raw("\tmovabsq $2305843009213693952, %rcx")
+        self.raw("\tcmpq %rcx, %rax")
+        self.raw("\tjae .Lds_same")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq -16(%rbx), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r12")
+        self.raw("\tmovq %rbx, %rsi")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq -16(%rbx), %rcx")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw("\tdecq -8(%rbx)")
+        self.raw("\tmovq %r12, %rax")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tret")
+        self.raw(".Lds_same:")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tret")
+        self.raw("")
+        // a function value's env: none; owning nothing (`__free` its drop),
+        // itself when unshared, else a copy; else the deep copy just before
+        // its drop function
+        self.raw("__deep_env:")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lde_none")
+        self.raw("\tmovq (%rdi), %rax")
+        self.raw("\tleaq __free(%rip), %rcx")
+        self.raw("\tcmpq %rcx, %rax")
+        self.raw("\tjne .Lde_owns")
+        self.raw("\tcmpq $1, -8(%rdi)")
+        self.raw("\tje .Lde_same")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq -16(%rbx), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r12")
+        self.raw("\tmovq %rbx, %rsi")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq -16(%rbx), %rcx")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw("\tdecq -8(%rbx)")
+        self.raw("\tmovq %r12, %rax")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tret")
+        self.raw(".Lde_owns:")
+        self.raw("\tjmp *-8(%rax)")
+        self.raw(".Lde_same:")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tret")
+        self.raw(".Lde_none:")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\tret")
+        self.raw("")
     }
 
     // -- thread state (D92, MYLA-137) ---------------------------------------
@@ -2861,6 +3207,9 @@ impl CodeGen {
     // `myla_<lifted>_env_drop(%rdi = env)`: release the env's owned values, then
     // tail-call __free on the cell (reached through __func_drop at refcount 0).
     fun emit_env_drop(var self, lifted: str, owned: [DropEntry]) {
+        // with tasks, the env's deep copy, found just before its drop
+        // function by `__deep_env` (D92)
+        if self.frames { self.emit_env_deep(lifted, owned) }
         self.emit(format("myla_{}_env_drop:", lifted))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
@@ -3172,7 +3521,10 @@ impl CodeGen {
         self.raw("\txorq %rdi, %rdi")
         self.raw("\tsyscall")
         self.raw("")
-        if self.frames { self.emit_executor() }
+        if self.frames {
+            self.emit_executor()
+            self.emit_deep_runtime()
+        }
         // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
         // (MYLA-17); the message is the interpreter's, without the values. The
         // caller passes the position record in %rsi; out of memory has none.
@@ -4759,6 +5111,41 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tjmp *%rcx")
         self.raw("")
+        if self.frames {
+            // the deep copy of a composition's env: both function values'
+            self.raw("__compose_env_deep:")
+            self.raw("\tpushq %rbx")
+            self.raw("\tpushq %r12")
+            self.raw("\tmovq %rdi, %rbx")
+            self.raw("\tcmpq $1, -8(%rbx)")
+            self.raw("\tje .Lced_unique")
+            self.raw("\tmovq $40, %rdi")
+            self.raw("\tcall __alloc")
+            self.raw("\tmovq %rax, %r12")
+            self.raw("\tmovq %rbx, %rsi")
+            self.raw("\tmovq %r12, %rdi")
+            self.raw("\tmovq $40, %rcx")
+            self.raw("\tcld")
+            self.raw("\trep movsb")
+            self.raw("\tmovq 16(%r12), %rdi")
+            self.raw("\tcall __func_retain")
+            self.raw("\tmovq 32(%r12), %rdi")
+            self.raw("\tcall __func_retain")
+            self.raw("\tdecq -8(%rbx)")
+            self.raw("\tmovq %r12, %rbx")
+            self.raw(".Lced_unique:")
+            self.raw("\tmovq 16(%rbx), %rdi")
+            self.raw("\tcall __deep_env")
+            self.raw("\tmovq %rax, 16(%rbx)")
+            self.raw("\tmovq 32(%rbx), %rdi")
+            self.raw("\tcall __deep_env")
+            self.raw("\tmovq %rax, 32(%rbx)")
+            self.raw("\tmovq %rbx, %rax")
+            self.raw("\tpopq %r12")
+            self.raw("\tpopq %rbx")
+            self.raw("\tret")
+            self.raw("\t.quad __compose_env_deep")
+        }
         self.raw("__compose_env_drop:")
         self.raw("\tpushq %rbx")
         self.raw("\tmovq %rdi, %rbx")
@@ -5648,7 +6035,9 @@ impl CodeGen {
         var i = 0
         var j = 0
         var k = 0
-        while i < len(self.need_drop) || j < len(self.need_clone) || k < len(self.need_walk) {
+        var dk = 0
+        var dc = 0
+        while i < len(self.need_drop) || j < len(self.need_clone) || k < len(self.need_walk) || dk < len(self.need_deep) || dc < len(self.need_deepc) {
             while i < len(self.need_drop) {
                 let t = self.need_drop[i]
                 i = i + 1
@@ -5658,9 +6047,9 @@ impl CodeGen {
                 match t {
                     Type.TList(e) => { self.emit_list_drop_helper(t) },
                     Type.TMap(k2, v) => { self.emit_map_drop_helper(t) },
-                    Type.TEnum(n, a) => { self.emit_dropb_helper(t) },
+                    Type.TEnum(n, a) => { self.emit_dropb_helper(t, false) },
                     // an actor's cell: its fields, as a struct's (same token)
-                    Type.TActor(n) => { self.emit_dropb_helper(Type.TStruct(n, [])) },
+                    Type.TActor(n) => { self.emit_dropb_helper(Type.TStruct(n, []), self.frames) },
                     _ => {},
                 }
             }
@@ -5675,6 +6064,17 @@ impl CodeGen {
                     Type.TMap(k2, v) => { self.emit_map_clone_helper(t) },
                     _ => {},
                 }
+            }
+            while dk < len(self.need_deep) {
+                let t = self.need_deep[dk]
+                let inl = self.deep_inline[dk]
+                dk = dk + 1
+                self.emit_deep_walk(t, inl)
+            }
+            while dc < len(self.need_deepc) {
+                let t = self.need_deepc[dc]
+                dc = dc + 1
+                self.emit_deep_cell(t)
             }
             while k < len(self.need_walk) {
                 let t = self.need_walk[k]
@@ -5902,9 +6302,10 @@ impl CodeGen {
 
     // `__dropb_<E>`: %rdi = boxed-enum cell. Decrement; at zero, drop the
     // children the inline value owns, then free the cell.
-    fun emit_dropb_helper(var self, t: Type) {
+    // `atomic`: an actor's cell, whose handles threads share (D92).
+    fun emit_dropb_helper(var self, t: Type, atomic: bool) {
         self.emit(format("__dropb_{}:", mono_token(t)))
-        self.emit("decq -8(%rdi)")
+        if atomic { self.emit("lock decq -8(%rdi)") } else { self.emit("decq -8(%rdi)") }
         let keep = self.label()
         self.emit(format("jnz {}", keep))
         self.emit("pushq %rbp")

@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, ret_popping, is_aggregate
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, ret_popping, is_aggregate, is_actor_t
 from .ir import IrFunc, Inst, Term, Touches, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 
 impl CodeGen {
@@ -441,11 +441,14 @@ impl CodeGen {
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
             Inst.RetainVal(t, v) => {
+                // an actor handle may be shared between threads (D92)
+                var inc = "incq"
+                if self.frames && is_actor_t(t) { inc = "lock incq" }
                 let at = self.reg_of(v)
-                if at != "" { self.emit(format("incq -8({})", at)) }
+                if at != "" { self.emit(format("{} -8({})", inc, at)) }
                 else {
                     self.load_temp(v, "rax", temp_base)
-                    self.emit("incq -8(%rax)")
+                    self.emit(format("{} -8(%rax)", inc))
                 }
             },
             Inst.Retain(t, p) => {
@@ -466,6 +469,11 @@ impl CodeGen {
                 self.load_temp(p, "rbx", temp_base)
                 self.walk_member("rbx", 0, t, false)
                 self.emit("popq %rbx")
+            },
+            Inst.Deep(t, p) => {
+                // the type's deep walk, the value's address in %rdi
+                self.load_temp(p, "rdi", temp_base)
+                self.emit("call " + self.register_deep(t))
             },
             Inst.Init(s) => {},
             Inst.Moved(s) => {},
