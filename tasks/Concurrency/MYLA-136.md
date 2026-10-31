@@ -2,7 +2,7 @@
 id: MYLA-136
 title: Concurrency in the Python interpreter
 type: feature
-status: in-progress
+status: done
 priority: medium
 labels: [concurrency, interpreter]
 ---
@@ -20,3 +20,10 @@ The draft page had `task.group(async (g: task.Group<T>) => { g.spawn(f) … awai
 ## Found on the way
 
 - The Python loader didn't rename the names under an `await` (`await m.f()` across modules failed with "unknown name 'm'"); fixed, with a test (the self-hosted loader already did).
+
+## Evidence
+
+- `tests/unit/test_concurrency.py` (26 tests): async functions and values, `await` inside expressions, `async let` (results, awaiting twice, a scope waiting for children never awaited, in a loop body, copies of what a child uses, a child without a result, an awaited and an unawaited child's error, `exit` in a child), actors (a copied handle, copies in and out, calls on `self`, a reentrant call back into a waiting actor, two actors calling each other from two tasks 50 deep, a child task reading through `self`), `task.all` (order, none, children updating an actor) and a module function under `await`. They all failed on the interpreter's refusal before.
+- The lock is what keeps an actor's calls apart: with the threads switching every microsecond, three tasks of 300 increments each give 900 every time; with the lock disabled, 360, 455 and 319. That run is a test now. The whole file passed 20 times in a row under frequent switching (no deadlock, no flaky result).
+- `examples/concurrency.my` prints its expected output; the self-hosted checker agrees on it and its mutants.
+- Unit 621, integration 2, burn 788 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,405,772 bytes).
