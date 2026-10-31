@@ -52,3 +52,5 @@ Options 1a, 2a, 3a and 4a: every slot of an async function in its heap frame, a 
 
 - `test_concurrency_programs_of_one_task_match_the_oracle` (`tests/burn/test_selfhost_codegen.py`): the 5 concurrency parity programs without `async let` and 4 actor programs (handles shared by copies, in a struct and a list; 200,000 actors made and released; reentrant calls; a recursive actor through `Option<Node>`) print what the Python interpreter prints. Releasing works: the 200,000-actor program peaks at 11 MB, at 24 MB when it keeps them all.
 - The Python checker no longer calls a recursive actor an infinite struct (a handle is a reference).
+- Compiling itself, the compiler runs 0.29% more instructions (2,587,410,658 → 2,594,793,999; one more `Type` variant to walk and one more kind of cell) with the same output.
+- Unit 621, integration 2, burn 792 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,426,552 bytes).
