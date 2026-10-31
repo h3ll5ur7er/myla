@@ -6,7 +6,7 @@ status: todo
 priority: medium
 labels: [concurrency, runtime, codegen, selfhost]
 ---
-D89 (3, 4), after [[MYLA-136]]: in both native backends' runtimes, without libc.
+D89 (3, 4), after [[MYLA-138]] (D91): the self-hosted backend's runtime, without libc, made multi-threaded under the parity programs of [[MYLA-138]]; the Python backend keeps refusing concurrency (D91).
 
 - [ ] OS threads (`clone`), parking with `futex`, one worker per CPU (`sched_getaffinity`)
 - [ ] A heap per thread (arena and free lists), a cell freed on another thread than the one that made it

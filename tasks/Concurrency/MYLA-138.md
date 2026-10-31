@@ -6,11 +6,11 @@ status: todo
 priority: medium
 labels: [concurrency, ir, codegen, selfhost, design]
 ---
-D89 (5), after [[MYLA-137]]: `async` functions as state machines with heap frames, in both native backends.
+D89 (5), first of the native steps (D91): `async` functions as state machines with heap frames in the self-hosted backend, on an executor with one thread; [[MYLA-137]] makes it multi-threaded after. The Python backend keeps refusing concurrency (D91).
 
 - [x] A decision under D85: how the IR holds an async function's frame (slots as members of a heap object, or a new home for slots), its suspension points and resumption, and its calling convention
-- [ ] The self-hosted backend, then the Python backend
-- [ ] Parity programs and deep task trees in both
+- [ ] The self-hosted backend, with an executor of one thread (D91)
+- [ ] The concurrency parity programs natively, and deep task trees
 
 ## Design options (for the D85 decision)
 
