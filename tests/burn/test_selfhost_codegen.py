@@ -1294,6 +1294,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         cases = {n: s for n, s in CONCURRENCY_PROGRAMS.items() if "async let" in s or "task." in s}
         cases["values_cross_deeply"] = ACTOR_PROGRAMS["values_cross_deeply"]
         cases["deep_task_trees"] = DEEP_TASKS
+        cases["task_tree"] = TASK_TREE
         stdlib = default_stdlib_root()
         for name, src in cases.items():
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
@@ -1451,6 +1452,34 @@ HELD_FAILURES = {
         "in scope\n", 1, "runtime error: index out of bounds\n"),
 }
 
+
+# A binary tree of 4,096 small child tasks: workers steal the oldest frames,
+# the biggest pieces of the tree (MYLA-140).
+TASK_TREE = """\
+fun work(n: int) -> int {
+    var x = n
+    var i = 0
+    while i < 200 {
+        x = (x * 17 + 5) % 1009
+        i = i + 1
+    }
+    return x
+}
+
+async fun tree(depth: int, n: int) -> int {
+    if depth == 0 {
+        return work(n)
+    }
+    async let a = tree(depth - 1, n * 2)
+    async let b = tree(depth - 1, n * 2 + 1)
+    return (await a + await b) % 1000003
+}
+
+#main
+async fun main() {
+    print(await tree(12, 1))
+}
+"""
 
 # Eight children each crunching numbers for a while; prints 1 when the results
 # agree with one another.
