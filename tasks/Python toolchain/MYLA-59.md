@@ -2,7 +2,7 @@
 id: MYLA-59
 title: A match ending a match-arm block must produce a value
 type: bug
-status: review
+status: done
 priority: low
 labels: [checker, match]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-8
 title: Native code evaluates operands and arguments right to left
 type: bug
-status: review
+status: done
 priority: medium
 labels: [native-backend, selfhost, parity, spec]
 ---

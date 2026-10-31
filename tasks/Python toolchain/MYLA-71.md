@@ -2,7 +2,7 @@
 id: MYLA-71
 title: Emit DWARF line tables so gdb can step through Myla source
 type: feature
-status: review
+status: done
 priority: medium
 labels: [native-backend, debugging, tooling]
 ---

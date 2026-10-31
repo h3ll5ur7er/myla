@@ -2,7 +2,7 @@
 id: MYLA-60
 title: Code generator spends almost all of stage 1 collecting list types
 type: improvement
-status: review
+status: done
 priority: high
 labels: [native-backend, performance, bootstrap]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-14
 title: Exhaustiveness check rejects exhaustive matches
 type: bug
-status: review
+status: done
 priority: low
 labels: [checker, match]
 ---

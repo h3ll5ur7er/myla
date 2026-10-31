@@ -2,7 +2,7 @@
 id: MYLA-4
 title: Python backend crashes the self-hosted checker on an unknown parameter type
 type: bug
-status: review
+status: done
 priority: high
 labels: [native-backend, selfhost, tests]
 ---

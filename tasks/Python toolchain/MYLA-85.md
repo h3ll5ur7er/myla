@@ -2,7 +2,7 @@
 id: MYLA-85
 title: A builtin that copies a byte range of a string
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, interpreter, selfhost, performance]
 ---

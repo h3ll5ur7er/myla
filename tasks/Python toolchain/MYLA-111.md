@@ -2,7 +2,7 @@
 id: MYLA-111
 title: "#test arguments and expected values are not type-checked"
 type: bug
-status: review
+status: done
 priority: low
 labels: [checker, attributes]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-20
 title: Code hygiene in the Python toolchain
 type: chore
-status: review
+status: done
 priority: low
 labels: [cleanup]
 ---

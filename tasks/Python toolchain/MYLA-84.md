@@ -2,7 +2,7 @@
 id: MYLA-84
 title: The lexers disagree on non-ASCII letters in identifiers
 type: bug
-status: review
+status: done
 priority: low
 labels: [lexer, selfhost, spec]
 ---

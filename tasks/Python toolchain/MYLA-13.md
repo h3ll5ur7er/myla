@@ -2,7 +2,7 @@
 id: MYLA-13
 title: "#derive(Eq) rejects char and float fields"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [checker, traits]
 ---

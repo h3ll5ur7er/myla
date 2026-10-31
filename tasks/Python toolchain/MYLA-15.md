@@ -2,7 +2,7 @@
 id: MYLA-15
 title: "`>=` right after generic type arguments is a parse error"
 type: bug
-status: review
+status: done
 priority: low
 labels: [parser]
 ---

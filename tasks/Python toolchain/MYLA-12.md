@@ -2,7 +2,7 @@
 id: MYLA-12
 title: "Interpreter crashes on strings that aren't valid UTF-8"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [interpreter, strings, parity]
 ---

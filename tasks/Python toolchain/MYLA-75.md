@@ -2,7 +2,7 @@
 id: MYLA-75
 title: "Partial application evaluates its filled arguments at every call"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [interpreter, native-backend, selfhost, parity, spec]
 ---

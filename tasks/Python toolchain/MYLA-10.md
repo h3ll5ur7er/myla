@@ -2,7 +2,7 @@
 id: MYLA-10
 title: Errors from imported modules are shown against the entry file
 type: bug
-status: review
+status: done
 priority: medium
 labels: [diagnostics, loader, cli, lsp]
 ---

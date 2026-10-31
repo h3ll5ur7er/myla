@@ -2,7 +2,7 @@
 id: MYLA-2
 title: "Native code keeps a dangling pointer when a match binding's list grows"
 type: bug
-status: review
+status: done
 priority: high
 labels: [native-backend, memory, parity]
 ---

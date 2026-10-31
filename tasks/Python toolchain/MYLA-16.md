@@ -2,7 +2,7 @@
 id: MYLA-16
 title: Native allocator scans one free list linearly
 type: improvement
-status: review
+status: done
 priority: high
 labels: [native-backend, performance, bootstrap]
 ---
