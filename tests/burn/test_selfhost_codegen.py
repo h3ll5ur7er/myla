@@ -76,6 +76,7 @@ PARITY_PROGRAMS = (
     "assign_heap_owning_struct_to_any_place",
     "assign_heap_owning_struct_to_itself",
     "method_arguments_survive_the_receivers_writes",
+    "var_self_method_on_a_shared_element_copies_it",
     "heap_free_arguments_survive_the_receivers_writes",
     "borrowed_lets_survive_a_moved_value",
     "become_keeps_the_stack_flat",
@@ -1390,6 +1391,10 @@ ACTOR_PROGRAMS = {
         "    while i <= 20 {\n        let n = Node { val: i, next: Some(head) }\n        head = n\n        i = i + 1\n    }\n"
         "    print(await head.sum())\n    let tail = Node { val: 1000, next: None }\n    await tail.link(head)\n"
         "    print(await tail.sum())\n}\n"),
+    # awaited `var self` methods on list elements and on a field's element
+    # (MYLA-142): the element's index computed once, the method's final
+    # `self` written back there; a copy of the list keeps its own (MYLA-143)
+    "var_self_on_elements": 'struct Counter {\n    n: int,\n    log: [str],\n}\n\nimpl Counter {\n    async fun bump(var self, by: int) -> int {\n        self.n = self.n + by\n        push(self.log, f"+{by}")\n        return self.n\n    }\n}\n\nstruct Board {\n    rows: [Counter],\n}\n\n\nfun pick(i: int) -> int {\n    print(f"pick {i}")\n    return i\n}\n\n#main\nasync fun main() {\n    var cs = [Counter { n: 0, log: [] }, Counter { n: 10, log: [] }]\n    let a = await cs[1].bump(5)\n    let b = await cs[pick(0)].bump(2)\n    var i = 0\n    while i < 3 {\n        let c = await cs[i % 2].bump(1)\n        i = i + 1\n    }\n    var board = Board { rows: [Counter { n: 100, log: [] }] }\n    let d = await board.rows[0].bump(7)\n    let copy = cs\n    let e = await cs[0].bump(1000)\n    print(f"{a} {b} {d} {e}")\n    print(f"{cs[0].n} {cs[1].n} {len(cs[0].log)} {len(cs[1].log)} {board.rows[0].n} {copy[0].n}")\n}\n',
     # every kind of value crossing into children and actors and back (D92):
     # copied deeply where it crosses (lists, maps, strings, builders, a
     # boxed and a list-recursive enum, tuples, closures with captures), an

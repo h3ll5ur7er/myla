@@ -983,14 +983,15 @@ impl Lower {
         let sig = cg.sig_of(target)
         let ct = self.call_target(cg, sig, argv)
         // a `var self` method of a struct: its final `self` goes back to the
-        // receiver, a variable or a field of one (an element could move
-        // while the method waits)
+        // receiver, a variable or a field or list element of one, its indices
+        // computed once (MYLA-142); nothing else reaches the place meanwhile
         var back = false
         if sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false } && is_aggregate(ct.params[0]) {
             if !self.local_place(cg, argv[0]) {
-                let d = self.unsupported("an awaited 'var self' method on an element")
+                let d = self.unsupported("an awaited 'var self' method on that receiver")
                 return
             }
+            argv[0] = self.fixed_receiver(cg, argv[0], op.id)
             back = true
         }
         var vals: [int32] = []
@@ -1050,7 +1051,25 @@ impl Lower {
         return match e.kind {
             ExprKind.Name(n) => self.lookup(n) >= 0,
             ExprKind.GetField(recv, f) => !is_actor_t(cg.type_of(recv.id)) && self.local_place(cg, recv),
+            ExprKind.Index(base, idx) => is_list_t(cg.type_of(base.id)) && self.local_place(cg, base),
             _ => false,
+        }
+    }
+
+    // The place `e` (`local_place`) with each index computed now into a slot
+    // of its own, so that reading the receiver and writing it back after the
+    // method name the same element.
+    fun fixed_receiver(var self, cg: CodeGen, e: Expr, call: int32) -> Expr {
+        return match e.kind {
+            ExprKind.GetField(recv, f) => Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.GetField(self.fixed_receiver(cg, recv, call), f) },
+            ExprKind.Index(base, idx) => {
+                let b2 = self.fixed_receiver(cg, base, call)
+                let nm = format("%index{}_{}", call, idx.id)
+                let held = self.held_value(cg, idx, nm)
+                let i2 = Expr { id: idx.id, line: idx.line, col: idx.col, sp: idx.sp, kind: ExprKind.Name(nm) }
+                Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(b2, i2) }
+            },
+            _ => e,
         }
     }
 
@@ -2588,6 +2607,10 @@ impl Lower {
                 if owned { self.moved(staged.0) }
                 push(vals, staged.1)
             }
+            // a method writing its receiver writes the place it names, each
+            // list on the way made unshared first (MYLA-143): a copy of the
+            // list must not see the write
+            else if i == 0 && root != "" && is_aggregate(params[0]) && self.lookup(root) >= 0 { push(vals, self.place(cg, argv[0])) }
             else if is_aggregate(params[i]) { push(vals, self.addr(cg, argv[i])) }
             else {
                 let v = self.expr(cg, argv[i])

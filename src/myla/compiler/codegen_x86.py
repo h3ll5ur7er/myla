@@ -4382,7 +4382,7 @@ class CodeGen:
             if self._param_byval(name, i, sig.params[i]):
                 logical.append(("value", arg, sig.params[i]))
             else:
-                logical.append(("staged" if id(arg) in aliased else "arg", arg, sig.params[i],
+                logical.append((self._arg_kind(expr, i, arg, aliased), arg, sig.params[i],
                                 self._param_owned(name, i, sig.params[i])))
         self._store_call_words(logical)
         self._emit(f"call myla_{name}")
@@ -4443,7 +4443,7 @@ class CodeGen:
                 if self._param_byval(name, i, sig.params[i]):
                     logical.append(("value", arg, sig.params[i]))
                 else:
-                    logical.append(("staged" if id(arg) in aliased else "arg", arg, sig.params[i],
+                    logical.append((self._arg_kind(call, i, arg, aliased), arg, sig.params[i],
                                     self._param_owned(name, i, sig.params[i])))
             target = f"myla_{name}"
         words = self._store_call_words(logical)
@@ -4516,13 +4516,30 @@ class CodeGen:
                 if i > 0 and _place_root(a) == root
                 and (_is_aggregate(sig.params[i]) or self._owns_heap(sig.params[i]))]
 
+    def _arg_kind(self, call: ast.Call, i: int, arg: ast.Expr, aliased: set) -> str:
+        """How argument `i` of a direct call is passed: "staged" (a copy,
+        `_aliased_args`), "place" (the receiver of a method writing it, a
+        field or element of a variable: its address with every list and map
+        on the way unshared, MYLA-143) or "arg"."""
+        if id(arg) in aliased:
+            return "staged"
+        if i == 0 and isinstance(arg, (ast.FieldAccess, ast.Index)) and isinstance(call.callee, ast.Name) \
+                and not getattr(call, "indirect_call", False):
+            sig = self.checker.functions.get(call.callee.ident)
+            if sig is not None and getattr(sig.decl, "receiver", None) == "var self" \
+                    and _is_aggregate(sig.params[0]) and _place_root(arg) is not None:
+                return "place"
+        return "arg"
+
     def _store_call_words(self, logical: list) -> int:
         """Put the outgoing argument words on the stack, the first at the
         lowest address, evaluating the arguments left to right (MYLA-8): the
         words are reserved, then filled in source order. When at most one word
         has effects or reads state (the others are literals, the sret pointer
         or the env), pushing them last to first is the same and shorter.
-        Items: ("sret", slot), ("env", slot), ("arg", expr, type[, owned]) or
+        Items: ("sret", slot), ("env", slot), ("arg", expr, type[, owned]),
+        ("place", expr, type[, owned]), a receiver passed as the writable
+        address of its place (`_arg_kind`), or
         ("staged", expr, type[, owned]), an argument passed as a copy
         (`_aliased_args`); an owned one gets a reference of its own (D87);
         ("value", expr, type), an aggregate passed by value, its words copied
@@ -4535,7 +4552,7 @@ class CodeGen:
         offsets = [8 * sum(sizes[:k]) for k in range(len(logical))]
         total = sum(sizes)
         ordered = (any(item[0] == "value" for item in logical)
-                   or sum(1 for item in logical if item[0] in ("arg", "staged") and not _is_literal(item[1])) > 1)
+                   or sum(1 for item in logical if item[0] in ("arg", "staged", "place") and not _is_literal(item[1])) > 1)
         if ordered:
             self._emit(f"subq ${8 * total}, %rsp")
         for k in range(len(logical)) if ordered else reversed(range(len(logical))):
@@ -4554,6 +4571,8 @@ class CodeGen:
                 self._emit(f"movq {item[1]}(%rbp), %rax")
             elif item[0] == "word":
                 self._emit(f"movq {item[1]}, %rax")
+            elif item[0] == "place":
+                self._mut_place_addr(item[1])
             elif item[0] == "staged":
                 arg, ptype = item[1], item[2]
                 slot = self._locals[f"staged:{id(arg)}"]
