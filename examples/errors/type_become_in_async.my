@@ -1,0 +1,8 @@
+//~ type error: 'become' can't stand in an async function
+//~ span: count(n - 1)
+// An async function's frame is a task's, not a stack frame (D87, D89).
+async fun count(n: int) -> int {
+    if n == 0 { return 0 }
+    become count(n - 1)
+}
+fun main() {}

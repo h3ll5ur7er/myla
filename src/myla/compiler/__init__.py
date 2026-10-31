@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 
+from ..errors import MylaRuntimeError
 from ..types import Checker
 from .codegen_x86 import generate as _generate
 from .monomorphize import monomorphize
@@ -29,6 +30,9 @@ def compile_to_asm(checker: Checker, debug: bool = False,
     `entry_path` is the entry file as the user named it: runtime errors print
     positions in files named as `myla run` would name them (MYLA-65).
     """
+    if checker.concurrency_at is not None:
+        raise MylaRuntimeError("the compiler doesn't build concurrency yet (D89, MYLA-137)",
+                               at=checker.concurrency_at)
     return _generate(monomorphize(checker), debug=debug, entry_path=entry_path)
 
 

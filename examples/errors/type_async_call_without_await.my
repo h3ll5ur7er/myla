@@ -1,0 +1,10 @@
+//~ type error: a call to the async function 'fetch' needs 'await'
+//~ span: fetch(1)
+// Every call that may suspend is marked with `await` (D89).
+async fun fetch(n: int) -> int {
+    return n
+}
+async fun forgot() -> int {
+    return fetch(1)
+}
+fun main() {}

@@ -24,7 +24,7 @@ pub enum TypeKind {
     TTuple([TypeExpr]),
     TList(TypeExpr),
     TMap(TypeExpr, TypeExpr),
-    TFn([TypeExpr], TypeExpr),    // params, return
+    TFn([TypeExpr], TypeExpr, bool),    // params, return, async (D89)
 }
 
 // --- expressions ---------------------------------------------------------
@@ -59,7 +59,8 @@ pub enum ExprKind {
     MatchE(Expr, [MatchArm]),
     Try(Expr),
     Cast(Expr, TypeExpr),
-    Lambda([Param], Option<TypeExpr>, ExprOrBlock),
+    Lambda([Param], Option<TypeExpr>, ExprOrBlock, bool),    // params, return, body, async (D89)
+    Await(Expr),                                              // D89
     Hole,
 }
 
@@ -142,12 +143,13 @@ pub struct FunData {
     type_params: [TypeParam],
     receiver: Option<str>,
     is_pub: bool,
+    is_async: bool,    // D89
 }
 
 pub struct Decl { id: int32, line: int32, col: int32, sp: SrcSpan, kind: DeclKind }
 
 pub enum DeclKind {
-    StructDecl(str, [Field], [Attribute], [TypeParam], bool),
+    StructDecl(str, [Field], [Attribute], [TypeParam], bool, bool),      // name,fields,attrs,typarams,pub,actor (D89)
     FunDecl(FunData),
     EnumDecl(str, [Variant], [Attribute], [TypeParam], bool),
     TypeAliasDecl(str, TypeExpr, [Attribute], bool),
@@ -220,13 +222,24 @@ fun opt_expr(o: Option<Expr>) -> str {
     }
 }
 
+fun choose(c: bool, a: str, b: str) -> str {
+    if c { return a }
+    return b
+}
+
+// `(async X)` for an async function type or lambda (D89).
+fun async_wrap(asy: bool, inner: str) -> str {
+    if asy { return format("(async {})", inner) }
+    return inner
+}
+
 pub fun dump_type(t: TypeExpr) -> str {
     return match t.kind {
         TypeKind.TRef(name, args) => format("(tref {} {})", sstr(name), join_map(args, dump_type)),
         TypeKind.TTuple(elems) => format("(ttype {})", join_map(elems, dump_type)),
         TypeKind.TList(elem) => format("(ltype {})", dump_type(elem)),
         TypeKind.TMap(k, v) => format("(mtype {} {})", dump_type(k), dump_type(v)),
-        TypeKind.TFn(params, ret) => format("(ftype {} {})", join_map(params, dump_type), dump_type(ret)),
+        TypeKind.TFn(params, ret, asy) => async_wrap(asy, format("(ftype {} {})", join_map(params, dump_type), dump_type(ret))),
     }
 }
 
@@ -265,6 +278,7 @@ pub fun dump_expr(e: Expr) -> str {
         ExprKind.BoolLit(b) => format("(bool {})", bstr(b)),
         ExprKind.Name(n) => format("(name {})", sstr(n)),
         ExprKind.Unary(op, x) => format("(unary {} {})", sstr(op), dump_expr(x)),
+        ExprKind.Await(x) => format("(await {})", dump_expr(x)),
         ExprKind.Binary(op, l, r) => format("(binary {} {} {})", sstr(op), dump_expr(l), dump_expr(r)),
         ExprKind.Call(c, args) => format("(call {} {})", dump_expr(c), join_map(args, dump_expr)),
         ExprKind.GetField(t, name) => format("(getfield {} {})", dump_expr(t), sstr(name)),
@@ -277,7 +291,7 @@ pub fun dump_expr(e: Expr) -> str {
         ExprKind.MatchE(s, arms) => format("(match {} {})", dump_expr(s), join_map(arms, dump_arm)),
         ExprKind.Try(x) => format("(try {})", dump_expr(x)),
         ExprKind.Cast(x, ty) => format("(cast {} {})", dump_expr(x), dump_type(ty)),
-        ExprKind.Lambda(params, ret, body) => format("(lambda {} {} {})", join_map(params, dump_param), opt_type(ret), dump_eb(body)),
+        ExprKind.Lambda(params, ret, body, asy) => async_wrap(asy, format("(lambda {} {} {})", join_map(params, dump_param), opt_type(ret), dump_eb(body))),
         ExprKind.Hole => "(hole)",
     }
 }
@@ -373,12 +387,12 @@ fun dump_fun(f: FunData) -> str {
         Some(b) => dump_block(b),
         None => "nil",
     }
-    return format("(fun {} {} {} {} {} {} {} {})", sstr(f.name), join_map(f.params, dump_param), opt_type(f.ret_type), body, join_map(f.attributes, dump_attr), join_map(f.type_params, dump_typaram), opt_sstr(f.receiver), bstr(f.is_pub))
+    return format("({} {} {} {} {} {} {} {} {})", choose(f.is_async, "async-fun", "fun"), sstr(f.name), join_map(f.params, dump_param), opt_type(f.ret_type), body, join_map(f.attributes, dump_attr), join_map(f.type_params, dump_typaram), opt_sstr(f.receiver), bstr(f.is_pub))
 }
 
 pub fun dump_decl(d: Decl) -> str {
     return match d.kind {
-        DeclKind.StructDecl(name, fields, attrs, tps, isp) => format("(struct {} {} {} {} {})", sstr(name), join_map(fields, dump_field), join_map(attrs, dump_attr), join_map(tps, dump_typaram), bstr(isp)),
+        DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => format("({} {} {} {} {} {})", choose(act, "actor", "struct"), sstr(name), join_map(fields, dump_field), join_map(attrs, dump_attr), join_map(tps, dump_typaram), bstr(isp)),
         DeclKind.FunDecl(f) => dump_fun(f),
         DeclKind.EnumDecl(name, variants, attrs, tps, isp) => format("(enum {} {} {} {} {})", sstr(name), join_map(variants, dump_variant), join_map(attrs, dump_attr), join_map(tps, dump_typaram), bstr(isp)),
         DeclKind.TypeAliasDecl(name, target, attrs, isp) => format("(typealias {} {} {} {})", sstr(name), dump_type(target), join_map(attrs, dump_attr), bstr(isp)),

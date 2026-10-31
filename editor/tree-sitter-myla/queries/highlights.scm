@@ -52,7 +52,9 @@
 [
   "pub"
   "struct"
+  "actor"
   "enum"
+  "async"
   "fun"
   "impl"
   "for"
@@ -70,6 +72,7 @@
   "in"
   "return"
   "become"
+  "await"
   "match"
 ] @keyword
 

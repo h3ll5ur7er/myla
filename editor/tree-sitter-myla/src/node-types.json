@@ -8,6 +8,10 @@
       "required": true,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "binary_expression",
           "named": true
         },
@@ -99,6 +103,133 @@
     }
   },
   {
+    "type": "async_let",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "boolean",
+          "named": true
+        },
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "cast_expression",
+          "named": true
+        },
+        {
+          "type": "char",
+          "named": true
+        },
+        {
+          "type": "field_expression",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "fstring",
+          "named": true
+        },
+        {
+          "type": "function_type",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "index_expression",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "lambda",
+          "named": true
+        },
+        {
+          "type": "list",
+          "named": true
+        },
+        {
+          "type": "list_type",
+          "named": true
+        },
+        {
+          "type": "map",
+          "named": true
+        },
+        {
+          "type": "map_type",
+          "named": true
+        },
+        {
+          "type": "match_expr",
+          "named": true
+        },
+        {
+          "type": "named_type",
+          "named": true
+        },
+        {
+          "type": "paren_expression",
+          "named": true
+        },
+        {
+          "type": "prim_type",
+          "named": true
+        },
+        {
+          "type": "self",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
+          "type": "tuple",
+          "named": true
+        },
+        {
+          "type": "tuple_type",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "attribute",
     "named": true,
     "fields": {},
@@ -118,6 +249,101 @@
     }
   },
   {
+    "type": "await_expression",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
+        {
+          "type": "boolean",
+          "named": true
+        },
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "char",
+          "named": true
+        },
+        {
+          "type": "field_expression",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "fstring",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "index_expression",
+          "named": true
+        },
+        {
+          "type": "integer",
+          "named": true
+        },
+        {
+          "type": "lambda",
+          "named": true
+        },
+        {
+          "type": "list",
+          "named": true
+        },
+        {
+          "type": "map",
+          "named": true
+        },
+        {
+          "type": "match_expr",
+          "named": true
+        },
+        {
+          "type": "paren_expression",
+          "named": true
+        },
+        {
+          "type": "self",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "try_expression",
+          "named": true
+        },
+        {
+          "type": "tuple",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "become_stmt",
     "named": true,
     "fields": {},
@@ -125,6 +351,10 @@
       "multiple": false,
       "required": false,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -224,6 +454,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -344,6 +578,14 @@
       "types": [
         {
           "type": "assignment",
+          "named": true
+        },
+        {
+          "type": "async_let",
+          "named": true
+        },
+        {
+          "type": "await_expression",
           "named": true
         },
         {
@@ -482,6 +724,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -673,6 +919,10 @@
       "required": true,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "boolean",
           "named": true
         },
@@ -791,6 +1041,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -993,6 +1247,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -1215,6 +1473,10 @@
       "required": true,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "binary_expression",
           "named": true
         },
@@ -1368,6 +1630,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -1635,6 +1901,10 @@
       "required": true,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "binary_expression",
           "named": true
         },
@@ -1838,6 +2108,10 @@
       "required": true,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "binary_expression",
           "named": true
         },
@@ -1937,6 +2211,10 @@
       "required": false,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "binary_expression",
           "named": true
         },
@@ -2035,6 +2313,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -2181,6 +2463,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -2331,6 +2617,10 @@
       "required": false,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "binary_expression",
           "named": true
         },
@@ -2465,6 +2755,10 @@
       "required": true,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "binary_expression",
           "named": true
         },
@@ -2591,6 +2885,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -2893,6 +3191,10 @@
       "required": false,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "binary_expression",
           "named": true
         },
@@ -3079,6 +3381,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -3367,6 +3673,10 @@
       "required": false,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "binary_expression",
           "named": true
         },
@@ -3645,6 +3955,10 @@
       "required": true,
       "types": [
         {
+          "type": "await_expression",
+          "named": true
+        },
+        {
           "type": "boolean",
           "named": true
         },
@@ -3735,6 +4049,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -3920,6 +4238,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "await_expression",
+          "named": true
+        },
         {
           "type": "binary_expression",
           "named": true
@@ -4153,7 +4475,19 @@
     "named": false
   },
   {
+    "type": "actor",
+    "named": false
+  },
+  {
     "type": "as",
+    "named": false
+  },
+  {
+    "type": "async",
+    "named": false
+  },
+  {
+    "type": "await",
     "named": false
   },
   {

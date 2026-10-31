@@ -119,6 +119,7 @@ class FuncType(Type):
     """
     params: tuple[Type, ...]
     ret: Type | None = None
+    is_async: bool = False  # `async (…) -> R` (D89): a call through it is awaited
 
 
 @dataclass(frozen=True)
@@ -228,7 +229,7 @@ def type_name(t: Type | None) -> str:
         return f"[{type_name(t.key)}: {type_name(t.value)}]"
     if isinstance(t, FuncType):
         params = ", ".join(type_name(p) for p in t.params)
-        return f"({params}) -> {type_name(t.ret)}"
+        return f"{'async ' if t.is_async else ''}({params}) -> {type_name(t.ret)}"
     return str(t)
 
 
@@ -633,6 +634,8 @@ class _Binding:
     mutable: bool
     # where it is declared, for notes (MYLA-65); None: no note
     at: object = None
+    # an `async let`'s name (D89): its child task's result, read with `await`
+    task: bool = False
 
 
 @dataclass
@@ -685,8 +688,9 @@ class _LambdaCtx:
     while it is being type-checked (v0.4.2). `boundary` is the lambda's own
     parameter scope; any binding resolved in a *strict ancestor* of `boundary`
     is captured by value (D15)."""
-    def __init__(self, boundary: "_Scope"):
+    def __init__(self, boundary: "_Scope", lam=None):
         self.boundary = boundary
+        self.lam = lam
         self._captures: dict[str, Type] = {}
 
     def add(self, name: str, t: Type) -> None:
@@ -797,6 +801,16 @@ class Checker:
         self.program = program
         self.structs: dict[str, dict[str, Type]] = {}
         self.struct_decls: dict[str, ast.StructDecl] = {}
+        # concurrency (D89): the actor types; whether the function or lambda
+        # being checked is async; the actor whose method is being checked (its
+        # `self` reaches the actor's fields); the calls under an `await`, by id
+        self.actors: set[str] = set()
+        # the first construct of concurrency met, which the interpreters and
+        # backends don't run yet ([[MYLA-136]]); None: none
+        self.concurrency_at: ast.Node | None = None
+        self._async = False
+        self._actor_self: str | None = None
+        self._awaited: set[int] = set()
         # enum name -> ordered {variant_name: [payload Types]}; order defines tags
         self.enums: dict[str, dict[str, list[Type]]] = {}
         self.enum_decls: dict[str, ast.EnumDecl] = {}
@@ -914,6 +928,8 @@ class Checker:
         self._lambda_infer = None
         self._current_ret = None
         self._ret_at = None
+        self._async = False
+        self._actor_self = None
         try:
             with in_file(_source_path(decl)):
                 check()
@@ -1001,6 +1017,13 @@ class Checker:
                 else [note(f"'{name}' is first declared here", first)],
             )
         seen[name] = decl
+        if isinstance(decl, ast.StructDecl) and decl.actor:
+            if decl.type_params:
+                raise TypeCheckError(f"an actor can't have type parameters", at=decl)
+            if decl.attributes:
+                raise TypeCheckError(f"an actor can't have attributes", at=decl.attributes[0])
+            self.actors.add(name)
+            self.concurrency_at = self.concurrency_at or decl
         if isinstance(decl, ast.StructDecl):
             self.struct_decls[name] = decl
             self.structs[name] = {}  # filled during resolution
@@ -1117,6 +1140,9 @@ class Checker:
                 if m.name in methods:
                     self._fail_part(path, f"duplicate method '{m.name}' in trait '{decl.name}'", m)
                     continue
+                if m.is_async:
+                    self._fail_part(path, "a trait method can't be async", m)
+                    continue
                 # `Self` and the trait's own type parameters are both in scope
                 # for the signatures (v0.5.5); the latter resolve to `TypeParam`s.
                 self._allow_self = True
@@ -1175,6 +1201,7 @@ class Checker:
                 tuple(self._subst_self(p, target, param_map) for p in t.params),
                 self._subst_self(t.ret, target, param_map)
                 if t.ret is not None else None,
+                t.is_async,
             )
         if isinstance(t, StructType):
             return StructType(t.name, tuple(self._subst_self(a, target, param_map)
@@ -1529,6 +1556,11 @@ class Checker:
         finally:
             self._type_params = frozenset()
         key = None if _has_error(target) else self._method_key(target)
+        if key in self.actors and impl.trait_name is not None:
+            # a trait's methods are called without `await` (D89)
+            self._fail_part(path, f"an actor can't implement a trait", impl)
+            self._lose_impl(impl)
+            return
         if _has_error(target) or not self._part(
                 path, lambda: self._check_impl_target(impl, target, key) or True, False):
             if key is None:
@@ -1639,7 +1671,7 @@ class Checker:
         fdecl = ast.FunDecl(
             mangled, [self_param] + list(m.params), m.ret_type, m.body,
             type_params=combined_tps, type_param_bounds=combined_bounds,
-            receiver=m.receiver,
+            receiver=m.receiver, is_async=m.is_async,
         ).at(m.line, m.column)
         fdecl.span = m.span
         fdecl.source_path = getattr(m, "source_path", None)
@@ -1691,7 +1723,7 @@ class Checker:
         if isinstance(ref, ast.FnTypeRef):
             params = tuple(self._resolve(p, visiting) for p in ref.params)
             ret = self._resolve(ref.ret, visiting) if ref.ret is not None else None
-            return FuncType(params, ret)
+            return FuncType(params, ret, ref.is_async)
         name = ref.name
         args = getattr(ref, "args", []) or []
         if name == "Self":
@@ -2051,6 +2083,8 @@ class Checker:
             raise TypeCheckError("'#main' takes no arguments", at=attr)
 
     def _check_test_attr(self, decl: ast.FunDecl, attr: ast.Attribute) -> None:
+        if decl.is_async:
+            raise TypeCheckError("'#test' can't run an async function", at=attr)
         sig = self.functions[decl.name]
         if attr.outputs is None:
             raise TypeCheckError(
@@ -2100,6 +2134,11 @@ class Checker:
         }
         self._fun_name = decl.name
         self._fun_path = _source_path(decl)
+        self._async = decl.is_async
+        if decl.is_async:
+            self.concurrency_at = self.concurrency_at or decl
+        key = decl.name.rpartition(".")[0] if decl.receiver else ""
+        self._actor_self = key if key in self.actors else None
         try:
             scope = _Scope()
             self._param_scope = scope
@@ -2128,6 +2167,9 @@ class Checker:
             self._check_stmt(stmt, scope, ret)
 
     def _check_stmt(self, stmt: ast.Stmt, scope: _Scope, ret: Type | None) -> None:
+        if isinstance(stmt, ast.VarDecl) and stmt.kind == "async":
+            self._check_async_let(stmt, scope)
+            return
         if isinstance(stmt, ast.VarDecl):
             declared = self._resolve_annotation(stmt.declared_type) if stmt.declared_type else None
             if _has_error(declared):
@@ -2369,6 +2411,7 @@ class Checker:
                 raise TypeCheckError(
                     f"type '{type_name(base_type)}' has no fields", at=expr
                 )
+            self._check_isolation(base_type, expr)
             fields = self._struct_field_types(base_type)
             if expr.field_name not in fields:
                 raise TypeCheckError(
@@ -2446,7 +2489,11 @@ class Checker:
         if isinstance(expr, ast.Binary):
             return self._infer_binary(expr, scope, expected)
         if isinstance(expr, ast.Call):
-            return self._infer_call(expr, scope, expected)
+            t = self._infer_call(expr, scope, expected)
+            self._check_suspension(expr)
+            return t
+        if isinstance(expr, ast.Await):
+            return self._infer_await(expr, scope, expected)
         if isinstance(expr, ast.FieldAccess):
             return self._infer_field(expr, scope, expected)
         if isinstance(expr, ast.StructLit):
@@ -2510,8 +2557,12 @@ class Checker:
                     f"duplicate lambda parameter '{p.name}'", at=p
                 )
         want_ret = exp.ret if exp is not None else None
-        ctx = _LambdaCtx(lam_scope)
+        ctx = _LambdaCtx(lam_scope, expr)
         self._lambda_stack.append(ctx)
+        saved_async = self._async
+        self._async = expr.is_async
+        if expr.is_async:
+            self.concurrency_at = self.concurrency_at or expr
         saved_ret = self._current_ret
         try:
             if isinstance(expr.body, ast.Block):
@@ -2550,8 +2601,9 @@ class Checker:
         finally:
             self._current_ret = saved_ret
             self._lambda_stack.pop()
+            self._async = saved_async
 
-        ft = FuncType(tuple(ptypes), ret_t)
+        ft = FuncType(tuple(ptypes), ret_t, expr.is_async)
         expr.captures = ctx.ordered()
         # Assign a lifted name once per checker (the monomorphizer re-checks a
         # deep-copied program, so a stale name carried by the copy is replaced).
@@ -2982,6 +3034,10 @@ class Checker:
                 f"pattern names struct '{pat.type_name}' but the value is '{t.name}'",
                 at=pat,
             )
+        if t.name in self.actors:
+            raise TypeCheckError(
+                f"a pattern can't reach the fields of the actor '{type_name(t)}'", at=pat
+            )
         fields = self._struct_field_types(t)
         seen: set[str] = set()
         for fp in pat.fields:
@@ -3250,6 +3306,12 @@ class Checker:
                 )
             raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr,
                                  notes=_did_you_mean(expr.ident, self._value_names(scope)))
+        if binding.task:
+            raise TypeCheckError(
+                f"'{expr.ident}' is the result of a child task: read it with "
+                f"'await {expr.ident}'",
+                at=expr,
+            )
         self._record_capture(expr.ident, binding.type, scope)
         expr.resolved_type = binding.type
         return binding.type
@@ -3265,7 +3327,7 @@ class Checker:
                 f"(its type parameters are unresolved)",
                 at=expr,
             )
-        ft = FuncType(tuple(sig.params), sig.ret)
+        ft = FuncType(tuple(sig.params), sig.ret, sig.decl.is_async)
         expr.func_ref = expr.ident
         expr.resolved_type = ft
         return ft
@@ -3280,6 +3342,12 @@ class Checker:
             return
         for ctx in self._lambda_stack:
             if _is_strict_ancestor(def_scope, ctx.boundary):
+                if name == "self" and self._actor_self is not None:
+                    raise TypeCheckError(
+                        f"a lambda can't capture the actor '{self._actor_self}''s "
+                        "'self': its state stays with its own methods",
+                        at=ctx.lam,
+                    )
                 ctx.add(name, t)
 
     def _infer_bare_variant(self, expr: ast.Expr, enum_name: str, variant: str,
@@ -3481,6 +3549,8 @@ class Checker:
                 f"both integers)",
                 at=expr,
             )
+        if lt.is_async or rt.is_async:
+            raise TypeCheckError("an async function can't be composed with '>>'", at=expr)
         if len(rt.params) != 1:
             raise TypeCheckError(
                 f"composition with '>>' needs a one-argument function on the "
@@ -3848,7 +3918,8 @@ class Checker:
                 at=expr, notes=_did_you_mean(callee.field_name, table or {}),
             )
         is_var_self = (sig.decl.receiver == "var self")
-        if is_var_self:
+        # an actor's handle needn't be mutable: its methods change the actor
+        if is_var_self and key not in self.actors:
             if not _is_lvalue_shape(recv):
                 raise TypeCheckError(
                     f"method '{callee.field_name}' mutates its receiver ('var "
@@ -4259,8 +4330,108 @@ class Checker:
                     at=arg,
                 )
         expr.indirect_call = True
+        expr.callee_type = ft
         expr.resolved_type = ft.ret
         return ft.ret
+
+    # -- concurrency (D89) ----------------------------------------------------
+
+    def _check_isolation(self, base: StructType, expr: ast.FieldAccess) -> None:
+        """An actor's fields are reachable only through `self` in its own
+        methods."""
+        if base.name not in self.actors:
+            return
+        target = expr.target
+        if isinstance(target, ast.Name) and target.ident == "self" and self._actor_self == base.name:
+            return
+        raise TypeCheckError(
+            f"'{expr.field_name}' belongs to the actor '{type_name(base)}': only its "
+            "own methods reach it",
+            at=expr,
+        )
+
+    def _infer_await(self, expr: ast.Await, scope: _Scope, expected: Type | None) -> Type | None:
+        """`await e`: in async code, a call that may suspend or an `async let`'s
+        name."""
+        if not self._async:
+            raise TypeCheckError("'await' can only stand in an async function", at=expr)
+        op = expr.operand
+        if isinstance(op, ast.Name):
+            binding = scope.lookup(op.ident)
+            if binding is not None and binding.task:
+                for ctx in self._lambda_stack:
+                    if _is_strict_ancestor(scope.lookup_scope(op.ident), ctx.boundary):
+                        raise TypeCheckError(
+                            f"a lambda can't await the child task '{op.ident}' of "
+                            "its function",
+                            at=op,
+                        )
+                op.resolved_type = binding.type
+                expr.resolved_type = binding.type
+                return binding.type
+        if isinstance(op, ast.Call):
+            self._awaited.add(id(op))
+            t = self._infer_node(op, scope, expected)
+            if getattr(op, "suspends", False):
+                expr.resolved_type = t
+                return t
+        raise TypeCheckError(
+            "'await' needs a call that may suspend (an async function, an actor's "
+            "method) or the name of an 'async let'",
+            at=expr,
+        )
+
+    def _check_suspension(self, call: ast.Call) -> None:
+        """A call that may suspend (an async function, method or function value,
+        or a method of an actor called from outside it) stands under `await`."""
+        why = None
+        mfunc = getattr(call, "method_func", None)
+        if mfunc is not None:
+            key = mfunc.rpartition(".")[0]
+            recv = call.callee.target
+            if key in self.actors and not (isinstance(recv, ast.Name) and recv.ident == "self"
+                                           and self._actor_self == key):
+                why = (f"a call into the actor '{type_name(recv.resolved_type)}' "
+                       "needs 'await'")
+            elif self.functions[mfunc].decl.is_async:
+                why = f"a call to the async method '{call.callee.field_name}' needs 'await'"
+        elif getattr(call, "indirect_call", False):
+            if getattr(call, "callee_type", None) is not None and call.callee_type.is_async:
+                why = "a call to an async function value needs 'await'"
+        elif getattr(call, "direct_call", False):
+            if self.functions[call.callee.ident].decl.is_async:
+                why = f"a call to the async function '{call.callee.ident}' needs 'await'"
+        if why is None:
+            return
+        call.suspends = True
+        if id(call) not in self._awaited:
+            raise TypeCheckError(why, at=call)
+
+    def _check_async_let(self, stmt: ast.VarDecl, scope: _Scope) -> None:
+        """`async let name = e`: a child task in async code; a call it makes is
+        awaited by the task."""
+        if not self._async:
+            raise TypeCheckError("'async let' can only stand in an async function", at=stmt)
+        declared = self._resolve_annotation(stmt.declared_type) if stmt.declared_type else None
+        if _has_error(declared):
+            t = declared   # a failed alias: the value isn't checked (MYLA-110)
+        else:
+            if isinstance(stmt.init, ast.Call):
+                self._awaited.add(id(stmt.init))
+            t = self._infer(stmt.init, scope, declared)
+            if declared is not None:
+                if not _has_error(t) and t != declared:
+                    raise TypeCheckError(
+                        f"type mismatch in 'async let': declared '{type_name(declared)}', "
+                        f"found '{type_name(t)}'",
+                        at=stmt,
+                    )
+                t = declared
+        if not scope.define(stmt.name, _Binding(t, mutable=False, at=stmt, task=True)):
+            raise TypeCheckError(
+                f"'{stmt.name}' is already declared in this scope", at=stmt,
+                notes=self._first_declared(stmt.name, scope),
+            )
 
     # -- guaranteed tail calls (`become`, D87) -------------------------------
 
@@ -4270,6 +4441,8 @@ class Checker:
         without the function's frame."""
         if self._lambda_stack:
             raise TypeCheckError("'become' can't stand in a lambda", at=value)
+        if self._async:
+            raise TypeCheckError("'become' can't stand in an async function", at=value)
         if isinstance(value, ast.Try):
             raise TypeCheckError("'become' needs a call, not a '?'", at=value)
         if not isinstance(value, ast.Call):
@@ -4457,6 +4630,8 @@ class Checker:
                     f"cannot partially apply a value of type '{type_name(ft)}'",
                     at=expr,
                 )
+            if ft.is_async:
+                raise TypeCheckError("an async function can't be partially applied", at=expr)
             return list(ft.params), ft.ret
         # method `recv.m(_, …)` (or a function-typed field), receiver captured
         if isinstance(callee, ast.FieldAccess):
@@ -4471,11 +4646,16 @@ class Checker:
                         f"'{callee.field_name}'",
                         at=expr,
                     )
+                if sig.decl.is_async or key in self.actors:
+                    raise TypeCheckError("an async function can't be partially applied", at=expr)
                 return list(sig.params[1:]), sig.ret
             if (isinstance(recv_type, StructType)
                     and callee.field_name in self.structs.get(recv_type.name, {})):
+                self._check_isolation(recv_type, callee)
                 field_t = self._struct_field_types(recv_type).get(callee.field_name)
                 if isinstance(field_t, FuncType):
+                    if field_t.is_async:
+                        raise TypeCheckError("an async function can't be partially applied", at=expr)
                     return list(field_t.params), field_t.ret
                 if _has_error(field_t):
                     raise _Poisoned()   # the field's type failed (MYLA-110)
@@ -4501,6 +4681,8 @@ class Checker:
                     f"'{callee.ident}'",
                     at=expr,
                 )
+            if sig.decl.is_async:
+                raise TypeCheckError("an async function can't be partially applied", at=expr)
             return list(sig.params), sig.ret
         raise TypeCheckError(
             "'_' partial application requires a function, method, or function "
@@ -4592,6 +4774,7 @@ class Checker:
             return FuncType(
                 tuple(self._subst_type(p, subst) for p in t.params),
                 self._subst_type(t.ret, subst),
+                t.is_async,
             )
         return t
 
@@ -4776,6 +4959,7 @@ class Checker:
             raise TypeCheckError(
                 f"type '{type_name(base)}' has no fields", at=expr
             )
+        self._check_isolation(base, expr)
         fields = self._struct_field_types(base)
         if expr.field_name not in fields:
             raise TypeCheckError(

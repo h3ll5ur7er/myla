@@ -56,13 +56,13 @@ item_decl    = struct_decl | enum_decl | fun_decl | trait_decl | typealias_decl 
 attribute    = "#" IDENT ( "(" expr_list? ")" )? ( "[" expr_list? "]" )? NL* ;
 expr_list    = NL+ | NL* expression NL* ( "," NL* expression NL* )* ;
 
-struct_decl  = "struct" IDENT type_params? "{" NL* ( field ( "," NL* field )* ","? NL* )? "}" ;
+struct_decl  = ( "struct" | "actor" ) IDENT type_params? "{" NL* ( field ( "," NL* field )* ","? NL* )? "}" ;
 field        = IDENT ":" type ;
 
 enum_decl    = "enum" IDENT type_params? "{" NL* ( variant ","? NL* )* "}" ;
 variant      = IDENT ( "(" type ( "," type )* ","? ")" )? ;
 
-fun_decl     = "fun" IDENT generics? "(" ( param ( "," param )* )? ")" ( "->" type )? block ;
+fun_decl     = "async"? "fun" IDENT generics? "(" ( param ( "," param )* )? ")" ( "->" type )? block ;
 param        = IDENT ":" type ;
 generics     = "<" generic ( "," generic )* ">" ;
 generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
@@ -70,7 +70,7 @@ type_params  = "<" IDENT ( "," IDENT )* ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;
 method       = method_head block ;
-method_head  = "fun" IDENT generics? "(" receiver ( "," param )* ","? ")" ( "->" type )? ;
+method_head  = "async"? "fun" IDENT generics? "(" receiver ( "," param )* ","? ")" ( "->" type )? ;
 receiver     = "self" | "var" "self" ;
 
 trait_decl   = "trait" IDENT type_params? "{" SEP* ( method_head SEP* )* "}" ;
@@ -95,17 +95,18 @@ type_args     = "<" type ( "," type )* ">" ;
 prim_type     = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
               | "uint8" | "uint16" | "uint32" | "uint64" ;
 tuple_type    = "(" type "," ( type ( "," type )* ","? )? ")" ;
-function_type = "(" ( type ( "," type )* ","? )? ")" "->" type ;
+function_type = "async"? "(" ( type ( "," type )* ","? )? ")" "->" type ;
 ```
 
 ## Statements
 
 ```ebnf
 block       = "{" SEP* ( statement ( SEP+ statement )* SEP* )? "}" ;
-statement   = var_decl | if_stmt | while_stmt | for_stmt | return_stmt | become_stmt
+statement   = var_decl | async_let | if_stmt | while_stmt | for_stmt | return_stmt | become_stmt
             | "break" | "continue" | assignment | expression ;
 
 var_decl    = ( "let" | "var" ) ( IDENT | bind_tuple ) ( ":" type )? "=" expression ;
+async_let   = "async" "let" IDENT ( ":" type )? "=" expression ;   (* a child task, D89 *)
 bind_tuple  = "(" bind_elem "," ( bind_elem ( "," bind_elem )* ","? )? ")" ;
 bind_elem   = IDENT | bind_tuple ;                  (* the name "_" discards *)
 
@@ -137,7 +138,8 @@ shift       = term ( ( "<<" | ">>" ) term )* ;   (* two touching "<" or ">" *)
 term        = factor ( ( "+" | "-" ) factor )* ;
 factor      = cast ( ( "*" | "/" | "%" ) cast )* ;
 cast        = unary ( "as" type )* ;
-unary       = ( "-" | "!" | "~" ) unary | postfix | lambda ;
+unary       = ( "-" | "!" | "~" ) unary | "await" unary
+            | postfix | lambda ;
               (* the parser also lets a suffix follow a lambda whose body
                  can't take it, as in (x) => x as T [0]; write ((x) => …)[0] *)
 postfix     = primary ( "(" call_args? ")" | "[" expression "]"
@@ -154,7 +156,7 @@ fstring     = 'f"' ( FSTRING_TEXT | "{{" | "}}"
 struct_literal = IDENT "{" NL* ( field_init ( "," NL* field_init )* ","? NL* )? "}" ;
 field_init  = IDENT ":" expression ;
 tuple       = "(" expression "," ( expression ( "," expression )* ","? )? ")" ;
-lambda      = "(" ( lambda_param ( "," lambda_param )* )? ")" "=>" ( block | expression ) ;
+lambda      = "async"? "(" ( lambda_param ( "," lambda_param )* )? ")" "=>" ( block | expression ) ;
 lambda_param = IDENT ( ":" type )? ;
 list        = "[" NL* ( expression NL* ( "," NL* expression NL* )* ( "," NL* )? )? "]" ;
 map         = "[" NL* ":" "]"

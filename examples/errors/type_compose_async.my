@@ -1,0 +1,12 @@
+//~ type error: an async function can't be composed with '>>'
+//~ span: inc >> twice
+// A composition is a synchronous function value (D89).
+async fun inc(n: int) -> int {
+    return n + 1
+}
+fun twice(n: int) -> int {
+    return n * 2
+}
+fun main() {
+    let f = inc >> twice
+}

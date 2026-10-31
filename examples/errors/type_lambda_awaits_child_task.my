@@ -1,0 +1,12 @@
+//~ type error: a lambda can't await the child task 'a' of its function
+//~ span: a
+// A child task belongs to the scope that started it (D89).
+async fun fetch(n: int) -> int {
+    return n
+}
+async fun outer() -> int {
+    async let a = fetch(1)
+    let f = async () => await a
+    return await f()
+}
+fun main() {}

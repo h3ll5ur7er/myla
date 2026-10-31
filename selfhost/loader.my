@@ -28,7 +28,7 @@
 from std.fs import read_to_string, exists, is_dir
 from .parser import parse_source_all
 from .diag import Report, reports, type_report, chain
-from .checker import CheckErr
+from .checker import CheckErr, Checker
 from .tokens import SrcSpan, no_span, keywords
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
@@ -68,6 +68,13 @@ pub fun file_of(prog: Loaded, id: int32) -> str {
 
 // The type errors `errs` (not empty) of the linked program `prog`, each in its
 // declaration's file, as one report (MYLA-65, D80).
+// The error for a program with concurrency, which the compiler doesn't build
+// yet (D89, MYLA-137); none without it.
+pub fun concurrency_report(prog: Loaded, c: Checker) -> Option<Report> {
+    if c.conc_line == 0 { return None }
+    return Some(Report { kind: "runtime error", msg: "the compiler doesn't build concurrency yet (D89, MYLA-137)", path: file_of(prog, c.conc_node), line: c.conc_line, col: c.conc_col, sp: c.conc_sp, more: [], notes: [] })
+}
+
 pub fun type_errors(prog: Loaded, errs: [CheckErr]) -> Report {
     var rs: [Report] = []
     for e in errs {
@@ -252,7 +259,7 @@ struct NamedDecl { name: str, is_pub: bool }
 
 fun named(d: Decl) -> Option<NamedDecl> {
     return match d.kind {
-        DeclKind.StructDecl(n, f, a, t, p) => Some(NamedDecl { name: n, is_pub: p }),
+        DeclKind.StructDecl(n, f, a, t, p, act) => Some(NamedDecl { name: n, is_pub: p }),
         DeclKind.FunDecl(fd) => Some(NamedDecl { name: fd.name, is_pub: fd.is_pub }),
         DeclKind.EnumDecl(n, v, a, t, p) => Some(NamedDecl { name: n, is_pub: p }),
         DeclKind.TypeAliasDecl(n, t, a, p) => Some(NamedDecl { name: n, is_pub: p }),
@@ -683,12 +690,12 @@ impl Renamer {
 
     fun decl(var self, d: Decl, mid: str) -> Decl {
         let k = match d.kind {
-            DeclKind.StructDecl(n, fields, attrs, tps, isp) => {
+            DeclKind.StructDecl(n, fields, attrs, tps, isp, act) => {
                 self.tys = tp_names(tps)
                 var fs: [Field] = []
                 for f in fields { push(fs, Field { line: f.line, col: f.col, sp: f.sp, name: f.name, ty: self.ty(f.ty) }) }
                 self.tys = []
-                DeclKind.StructDecl(qualify(mid, n), fs, attrs, tps, isp)
+                DeclKind.StructDecl(qualify(mid, n), fs, attrs, tps, isp, act)
             },
             DeclKind.EnumDecl(n, variants, attrs, tps, isp) => {
                 self.tys = tp_names(tps)
@@ -751,7 +758,7 @@ impl Renamer {
         let ps = self.params(m.params)
         let rt = self.opt_ty(m.ret_type)
         self.tys = saved
-        return FunData { line: m.line, col: m.col, sp: m.sp, name: m.name, params: ps, ret_type: rt, body: m.body, attributes: m.attributes, type_params: m.type_params, receiver: m.receiver, is_pub: m.is_pub }
+        return FunData { line: m.line, col: m.col, sp: m.sp, name: m.name, params: ps, ret_type: rt, body: m.body, attributes: m.attributes, type_params: m.type_params, receiver: m.receiver, is_pub: m.is_pub, is_async: m.is_async }
     }
 
     fun function(var self, fd: FunData, name: str, receiver: bool, impl_params: [str]) -> FunData {
@@ -770,7 +777,7 @@ impl Renamer {
         match fd.body { Some(b) => { body = Some(self.block(b)) }, None => {} }
         self.vals = []
         self.tys = saved
-        return FunData { line: fd.line, col: fd.col, sp: fd.sp, name: name, params: ps, ret_type: rt, body: body, attributes: attrs, type_params: tps, receiver: fd.receiver, is_pub: fd.is_pub }
+        return FunData { line: fd.line, col: fd.col, sp: fd.sp, name: name, params: ps, ret_type: rt, body: body, attributes: attrs, type_params: tps, receiver: fd.receiver, is_pub: fd.is_pub, is_async: fd.is_async }
     }
 
     // `#test` cases are expressions in the module's scope (MYLA-11)
@@ -805,7 +812,7 @@ impl Renamer {
             TypeKind.TTuple(es) => TypeKind.TTuple(self.ty_list(es)),
             TypeKind.TList(e) => TypeKind.TList(self.ty(e)),
             TypeKind.TMap(a, b) => TypeKind.TMap(self.ty(a), self.ty(b)),
-            TypeKind.TFn(ps, r) => TypeKind.TFn(self.ty_list(ps), self.ty(r)),
+            TypeKind.TFn(ps, r, asy) => TypeKind.TFn(self.ty_list(ps), self.ty(r), asy),
         }
         return TypeExpr { id: t.id, line: t.line, col: t.col, sp: t.sp, kind: k }
     }
@@ -931,7 +938,7 @@ impl Renamer {
                 }
                 return mk_expr(e, ExprKind.MatchE(scrut2, arms2))
             },
-            ExprKind.Lambda(ps, rt, body) => {
+            ExprKind.Lambda(ps, rt, body, asy) => {
                 let saved = self.vals
                 var ps2: [Param] = []
                 for p in ps {
@@ -941,12 +948,13 @@ impl Renamer {
                 let rt2 = self.opt_ty(rt)
                 let body2 = self.body(body)
                 self.vals = saved
-                return mk_expr(e, ExprKind.Lambda(ps2, rt2, body2))
+                return mk_expr(e, ExprKind.Lambda(ps2, rt2, body2, asy))
             },
             _ => {},
         }
         let k = match e.kind {
             ExprKind.Unary(op, x) => ExprKind.Unary(op, self.expr(x)),
+            ExprKind.Await(x) => ExprKind.Await(self.expr(x)),
             ExprKind.Binary(op, a, b) => {
                 let a2 = self.expr(a)
                 ExprKind.Binary(op, a2, self.expr(b))

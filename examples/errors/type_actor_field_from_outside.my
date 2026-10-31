@@ -1,0 +1,10 @@
+//~ type error: 'count' belongs to the actor 'Counter': only its own methods reach it
+//~ span: c.count
+// An actor's state is isolated: outside code calls its methods (D89).
+actor Counter {
+    count: int
+}
+fun peek(c: Counter) -> int {
+    return c.count
+}
+fun main() {}

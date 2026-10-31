@@ -1,0 +1,16 @@
+//~ type error: an actor can't implement a trait
+//~ span: impl Show for Counter {
+// A trait's methods are called without `await`, which would bypass the
+// actor's isolation (D89).
+trait Show {
+    fun show(self) -> str
+}
+actor Counter {
+    count: int
+}
+impl Show for Counter {
+    fun show(self) -> str {
+        return "counter"
+    }
+}
+fun main() {}

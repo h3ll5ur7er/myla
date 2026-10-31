@@ -274,6 +274,36 @@ TYPE_ERRORS: dict[str, str] = {
     "suggest_nothing_close": _main("let count = 1", "print(zzzzz)"),
     "suggest_alphabetically_first": _main("let rows_b = 1", "let rows_a = 2", "print(rows_c)"),
     "too_many": "".join(f"fun f{i}() {{\n    let x: int = true\n}}\n" for i in range(25)) + "fun main() {}\n",
+    # concurrency (D89, MYLA-135)
+    "async_method_without_await": (_SM.replace("    fun f(self", "    async fun f(self")
+                                   + "async fun k(s: S) -> int {\n    return s.f(1)\n}\nfun main() {}\n"),
+    "async_value_without_await": ("async fun k(f: async (int) -> int) -> int {\n    return f(1)\n}\n"
+                                  "fun main() {}\n"),
+    "async_let_mismatch": ("async fun g() -> int {\n    return 1\n}\n"
+                           "async fun k() {\n    async let a: bool = g()\n}\nfun main() {}\n"),
+    "async_let_duplicate": ("async fun g() -> int {\n    return 1\n}\n"
+                            "async fun k() {\n    let a = 1\n    async let a = g()\n}\nfun main() {}\n"),
+    "async_let_void": ("async fun g() {}\nasync fun k() -> int {\n    async let a = g()\n    await a\n"
+                       "    return await a\n}\nfun main() {}\n"),
+    "actor_field_assigned_from_outside": ("actor A { n: int }\nfun k(a: A) {\n    var b = a\n    b.n = 1\n}\n"
+                                          "fun main() {}\n"),
+    "actor_field_of_other_actor": ("actor A { n: int }\nactor B { m: int }\nimpl B {\n"
+                                   "    fun f(self, a: A) -> int {\n        return a.n\n    }\n}\nfun main() {}\n"),
+    "actor_partial_method": ("actor A { n: int }\nimpl A {\n    fun f(self, x: int) -> int {\n        return x\n    }\n}\n"
+                             + _main("let a = A { n: 1 }", "let g = a.f(_)")),
+    "actor_field_partial": ("actor A { cb: (int) -> int }\nfun k(a: A) {\n    let g = a.cb(_)\n}\nfun main() {}\n"),
+    "actor_field_called": ("actor A { cb: (int) -> int }\nfun k(a: A) -> int {\n    return a.cb(1)\n}\nfun main() {}\n"),
+    "async_partial_value": "async fun k(f: async (int) -> int) {\n    let g = f(_)\n}\nfun main() {}\n",
+    "async_type_mismatch": ("async fun g(n: int) -> int {\n    return n\n}\n"
+                            + _main("let f: (int) -> int = g")),
+    "async_generic_mismatch": ("async fun apply<T>(f: async (T) -> T, x: T) -> T {\n    return await f(x)\n}\n"
+                               "fun dec(n: int) -> int {\n    return n - 1\n}\n"
+                               "async fun k() -> int {\n    return await apply(dec, 1)\n}\nfun main() {}\n"),
+    "await_sync_call": "fun g() -> int {\n    return 1\n}\nasync fun k() -> int {\n    return await g()\n}\nfun main() {}\n",
+    "await_in_sync_lambda": ("async fun g() -> int {\n    return 1\n}\n"
+                             "async fun k() {\n    let f = () => await g()\n}\nfun main() {}\n"),
+    "actor_self_call_async_method": ("actor A { n: int }\nimpl A {\n    async fun f(self) -> int {\n        return 1\n    }\n"
+                                     "    fun g(self) -> int {\n        return self.f()\n    }\n}\nfun main() {}\n"),
 }
 
 

@@ -1,0 +1,12 @@
+//~ type error: 'await' can only stand in an async function
+//~ span: await fetch(1)
+// Only an async function can suspend (D89).
+async fun fetch(n: int) -> int {
+    return n
+}
+fun later() -> int {
+    return await fetch(1)
+}
+fun main() {
+    print(later())
+}

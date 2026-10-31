@@ -37,6 +37,9 @@ pub enum Type {
     TList(Type),
     TMap(Type, Type),
     TFunc([Type], Option<Type>),  // params, return (None = void)
+    // an async function type (D89; types.py: FuncType.is_async), a TFunc
+    // inside: a separate variant keeps every other type as small as before
+    TAsync(Type),
     TParam(str),
     TSelf,
     // the type of a declaration's part that failed to check (MYLA-110, D84;
@@ -187,6 +190,7 @@ pub fun type_name(t: Type) -> str {
         Type.TList(e) => format("[{}]", type_name(e)),
         Type.TMap(k, v) => format("[{}: {}]", type_name(k), type_name(v)),
         Type.TFunc(ps, r) => format("({}) -> {}", type_names(ps), opt_type_name(r)),
+        Type.TAsync(f) => "async " + type_name(f),
         Type.TError => "{error}",
     }
 }
@@ -201,6 +205,7 @@ fun has_error(t: Type) -> bool {
         Type.TList(e) => has_error(e),
         Type.TMap(k, v) => has_error(k) || has_error(v),
         Type.TFunc(ps, r) => list_has_error(ps) || opt_has_error(r),
+        Type.TAsync(f) => has_error(f),
         _ => false,
     }
 }
@@ -331,6 +336,7 @@ fun is_frame_value(t: Type) -> bool {
         Type.TTuple(es) => true,
         Type.TEnum(n, a) => true,
         Type.TFunc(ps, r) => true,
+        Type.TAsync(f) => true,
         Type.TParam(n) => true,
         Type.TSelf => true,
         _ => false,
@@ -351,6 +357,7 @@ fun root_name(e: Expr) -> str {
 fun is_tfunc_type(t: Type) -> bool {
     return match t {
         Type.TFunc(ps, r) => true,
+        Type.TAsync(f) => true,
         _ => false,
     }
 }
@@ -384,6 +391,7 @@ fun type_eq(a: Type, b: Type) -> bool {
         Type.TList(e1) => match b { Type.TList(e2) => type_eq(e1, e2), _ => false },
         Type.TMap(k1, v1) => match b { Type.TMap(k2, v2) => type_eq(k1, k2) && type_eq(v1, v2), _ => false },
         Type.TFunc(p1, r1) => match b { Type.TFunc(p2, r2) => type_list_eq(p1, p2) && opt_type_eq(r1, r2), _ => false },
+        Type.TAsync(f1) => match b { Type.TAsync(f2) => type_eq(f1, f2), _ => false },
         Type.TParam(n1) => match b { Type.TParam(n2) => n1 == n2, _ => false },
         Type.TSelf => match b { Type.TSelf => true, _ => false },
         Type.TError => match b { Type.TError => true, _ => false },
@@ -632,8 +640,9 @@ fun enum_args_hint(expected: Option<Type>, name: str) -> Option<[Type]> {
 fun func_hint(expected: Option<Type>, nparams: int32) -> Option<Type> {
     match expected {
         Some(et) => {
-            match et {
-                Type.TFunc(ps, r) => { if len(ps) == nparams { return Some(et) } },
+            let ft = strip_async(et)
+            match ft {
+                Type.TFunc(ps, r) => { if len(ps) == nparams { return Some(ft) } },
                 _ => {},
             }
             return None
@@ -644,7 +653,7 @@ fun func_hint(expected: Option<Type>, nparams: int32) -> Option<Type> {
 }
 
 fun func_params_of(t: Type) -> [Type] {
-    match t {
+    match strip_async(t) {
         Type.TFunc(ps, r) => { return ps },
         _ => {},
     }
@@ -652,7 +661,7 @@ fun func_params_of(t: Type) -> [Type] {
 }
 
 fun func_ret_of(t: Type) -> Option<Type> {
-    match t {
+    match strip_async(t) {
         Type.TFunc(ps, r) => { return r },
         _ => {},
     }
@@ -755,6 +764,7 @@ fun contains_type_param(t: Type) -> bool {
         Type.TStruct(n, args) => list_any_tp(args),
         Type.TEnum(n, args) => list_any_tp(args),
         Type.TFunc(ps, r) => list_any_tp(ps) || (match r { Some(rt) => contains_type_param(rt), None => false }),
+        Type.TAsync(f) => contains_type_param(f),
         _ => false,
     }
 }
@@ -773,6 +783,7 @@ pub fun subst_type(t: Type, subst: [Subst]) -> Type {
         Type.TStruct(n, args) => Type.TStruct(n, subst_type_list(args, subst)),
         Type.TEnum(n, args) => Type.TEnum(n, subst_type_list(args, subst)),
         Type.TFunc(ps, r) => Type.TFunc(subst_type_list(ps, subst), match r { Some(rt) => Some(subst_type(rt, subst)), None => None }),
+        Type.TAsync(f) => Type.TAsync(subst_type(f, subst)),
         _ => t,
     }
 }
@@ -831,7 +842,10 @@ fun unify_param(ptype: Type, at: Type, subst: [Subst]) -> UniRes {
             },
             _ => UniRes { ok: false, subst: subst },
         },
-        Type.TFunc(pp, pr) => match at {
+        // like types.py's, the unification doesn't compare asyncness: the
+        // types are compared after it
+        Type.TAsync(pf) => unify_param(pf, strip_async(at), subst),
+        Type.TFunc(pp, pr) => match strip_async(at) {
             Type.TFunc(ap, ar) => {
                 if len(pp) != len(ap) { return UniRes { ok: false, subst: subst } }
                 let r1 = unify_list(pp, ap, subst)
@@ -893,8 +907,11 @@ pub struct AliasCached { name: str, ty: Type }
 pub struct ConstDeclT { name: str, declared: TypeExpr, value: Expr, line: int32, col: int32, sp: SrcSpan, id: int32 }
 
 // A variable: its type, whether it can be assigned, and where it is declared,
-// for notes (`line` 0: no note; MYLA-65).
-pub struct Binding { ty: Type, mutable: bool, line: int32, col: int32, sp: SrcSpan }
+// for notes (`line` 0: no note; MYLA-65); `task`: 0, or an `async let`'s name
+// (D89), 1 with a result of type `ty`, 2 with none
+pub struct Binding { ty: Type, mutable: bool, line: int32, col: int32, sp: SrcSpan, task: int32 }
+// A lambda being checked (D89): its parameters' frame and where it is
+pub struct LamAt { base: int32, line: int32, col: int32, sp: SrcSpan }
 // A function with a `#main` attribute: where it is, its name and declaration.
 pub struct MainAt { line: int32, col: int32, sp: SrcSpan, name: str, id: int32 }
 pub struct Frame { names: [str], binds: [Binding] }
@@ -985,6 +1002,27 @@ pub struct Checker {
     fun_name: str,
     handovers: [str: Handover],
     passed_on: [PassedOn],
+    // concurrency (D89; types.py: Checker): the actor types; the first
+    // construct of concurrency met (`conc_line` 0: none), which the
+    // interpreters and backends don't run yet; whether the function or lambda
+    // being checked is async; the actor whose method is being checked ("":
+    // none) and the key of the type whose method it is ("": a function); the
+    // lambdas being checked; the calls under an `await`, by id; the type key
+    // of the method called last and whether that call's callee is async; the
+    // call found last to suspend
+    actors: [str: bool],
+    conc_line: int32,
+    conc_col: int32,
+    conc_sp: SrcSpan,
+    conc_node: int32,
+    in_async: bool,
+    actor_self: str,
+    cur_key: str,
+    lams: [LamAt],
+    awaited: [int32: bool],
+    call_key: str,
+    call_async: bool,
+    suspended: int32,
 }
 
 fun new_checker(decls: [Decl]) -> Checker {
@@ -1002,6 +1040,8 @@ fun new_checker(decls: [Decl]) -> Checker {
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], passed_on: [],
+        actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", cur_key: "",
+        lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1,
     }
 }
 
@@ -1176,8 +1216,29 @@ impl Checker {
         let top = len(self.frames) - 1
         for nm in self.frames[top].names { if nm == name { return false } }
         push(self.frames[top].names, name)
-        push(self.frames[top].binds, Binding { ty: ty, mutable: mutable, line: line, col: col, sp: sp })
+        push(self.frames[top].binds, Binding { ty: ty, mutable: mutable, line: line, col: col, sp: sp, task: 0 })
         return true
+    }
+    // `define_at` for an `async let`'s name (D89): `ty` its result's type, if any.
+    fun define_task(var self, name: str, ty: Option<Type>, line: int32, col: int32, sp: SrcSpan) -> bool {
+        let top = len(self.frames) - 1
+        for nm in self.frames[top].names { if nm == name { return false } }
+        push(self.frames[top].names, name)
+        let b = match ty {
+            Some(t) => Binding { ty: t, mutable: false, line: line, col: col, sp: sp, task: 1 },
+            None => Binding { ty: Type.TTuple([]), mutable: false, line: line, col: col, sp: sp, task: 2 },
+        }
+        push(self.frames[top].binds, b)
+        return true
+    }
+    // The index of the frame that defines `name`, or -1.
+    fun lookup_frame(self, name: str) -> int32 {
+        var i = len(self.frames) - 1
+        while i >= 0 {
+            for nm in self.frames[i].names { if nm == name { return i } }
+            i = i - 1
+        }
+        return -1
     }
     // Every name in scope, innermost scope first.
     fun scope_names(self) -> [str] {
@@ -1295,7 +1356,7 @@ fun tp_names(tps: [TypeParam]) -> [str] {
 
 fun decl_kind_name(d: Decl) -> str {
     return match d.kind {
-        DeclKind.StructDecl(n, f, a, t, p) => n,
+        DeclKind.StructDecl(n, f, a, t, p, act) => n,
         DeclKind.EnumDecl(n, v, a, t, p) => n,
         DeclKind.TypeAliasDecl(n, tt, a, p) => n,
         DeclKind.ConstDecl(n, tt, vv, a, p) => n,
@@ -1336,10 +1397,10 @@ impl Checker {
                 }
                 Ok(Type.TMap(kt, vt))
             },
-            TypeKind.TFn(params, ret) => {
+            TypeKind.TFn(params, ret, asy) => {
                 let ps = self.resolve_list(params, visiting)?
                 let rt = self.resolve(ret, visiting)?
-                Ok(Type.TFunc(ps, Some(rt)))
+                Ok(func_type(ps, Some(rt), asy))
             },
             TypeKind.TRef(name, args) => self.resolve_ref(name, args, ln, cl, sp, visiting),
         }
@@ -1448,7 +1509,8 @@ impl Checker {
                     fail = Some(with_notes(terr_at(ln, cl, sp, format("duplicate top-level declaration '{}'", name)), notes))
                 } else {
                     seen[name] = di
-                    self.register_decl(decl)
+                    fail = self.actor_fail(decl)
+                    match fail { Some(x) => {}, None => { self.register_decl(decl) } }
                 }
             }
             match fail {
@@ -1462,14 +1524,29 @@ impl Checker {
         return Ok(0)
     }
 
-    // Add `decl` to the tables (the parts are resolved later).
+    // An actor's declaration: why it can't be collected (D89), else none; the
+    // actor recorded.
+    fun actor_fail(var self, decl: Decl) -> Option<CheckErr> {
+        match decl.kind {
+            DeclKind.StructDecl(n, fields, attrs, tps, isp, act) => {
+                if !act { return None }
+                if len(tps) > 0 { return Some(terr_at(decl.line, decl.col, decl.sp, "an actor can't have type parameters")) }
+                if len(attrs) > 0 { return Some(terr_at(attrs[0].line, attrs[0].col, attrs[0].sp, "an actor can't have attributes")) }
+                self.actors[n] = true
+                self.met_concurrency(decl.line, decl.col, decl.sp, decl.id)
+            },
+            _ => {},
+        }
+        return None
+    }
+
     // Add `decl` to the tables; its parts are resolved later.
     fun register_decl(var self, decl: Decl) {
         let ln = decl.line
         let cl = decl.col
         let sp = decl.sp
         match decl.kind {
-            DeclKind.StructDecl(n, fields, attrs, tps, isp) => { self.add_struct(StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl, sp: sp, id: decl.id }) },
+            DeclKind.StructDecl(n, fields, attrs, tps, isp, act) => { self.add_struct(StructInfo { name: n, type_params: tp_names(tps), fields: [], line: ln, col: cl, sp: sp, id: decl.id }) },
             DeclKind.EnumDecl(n, variants, attrs, tps, isp) => { self.add_enum(EnumInfo { name: n, type_params: tp_names(tps), variants: [], line: ln, col: cl, sp: sp, id: decl.id }) },
             DeclKind.TypeAliasDecl(n, target, attrs, isp) => { push(self.aliases, AliasRaw { name: n, target: target, line: ln, col: cl, sp: sp, id: decl.id }) },
             DeclKind.ConstDecl(n, ty, value, attrs, isp) => { push(self.const_decls, ConstDeclT { name: n, declared: ty, value: value, line: ln, col: cl, sp: sp, id: decl.id }) },
@@ -1552,7 +1629,7 @@ impl Checker {
             pos = pos + 1
             if contains(self.skipped_decls, pos) { continue }
             match decl.kind {
-                DeclKind.StructDecl(n, fields, attrs, tps, isp) => {
+                DeclKind.StructDecl(n, fields, attrs, tps, isp, act) => {
                     self.cur_decl = decl.id
                     self.record_result(self.check_type_params(tp_names(tps), decl.line, decl.col, decl.sp))?
                     self.type_params = tp_names(tps)
@@ -1744,6 +1821,10 @@ impl Checker {
                             self.record(terr_at(m.line, m.col, m.sp, format("duplicate method '{}' in trait '{}'", m.name, name)))?
                             continue
                         }
+                        if m.is_async {
+                            self.record(terr_at(m.line, m.col, m.sp, "a trait method can't be async"))?
+                            continue
+                        }
                         self.allow_self = true
                         self.type_params = tp_names(tps)
                         var params: [Type] = [Type.TSelf]
@@ -1780,6 +1861,7 @@ fun subst_self(t: Type, target: Type, pmap: [Subst]) -> Type {
             for p in ps { push(o, subst_self(p, target, pmap)) }
             Type.TFunc(o, match r { Some(rt) => Some(subst_self(rt, target, pmap)), None => None })
         },
+        Type.TAsync(f) => Type.TAsync(subst_self(f, target, pmap)),
         Type.TStruct(n, a) => {
             var o: [Type] = []
             for x in a { push(o, subst_self(x, target, pmap)) }
@@ -1832,6 +1914,16 @@ impl Checker {
         self.type_params = []
         var key_opt: Option<str> = None
         var target_ok = !has_error(target)
+        if target_ok {
+            let k0 = match self.type_key(target) { Some(k) => k, None => "" }
+            let has_trait = match trait_name { Some(tn) => true, None => false }
+            if has_trait && self.is_actor(k0) {
+                // a trait's methods are called without `await` (D89)
+                self.record(terr_at(ln, cl, sp, "an actor can't implement a trait"))?
+                self.lose_impl(methods, trait_name)
+                return Ok(0)
+            }
+        }
         if target_ok {
             key_opt = self.type_key(target)
             match self.check_impl_target(ln, cl, sp, target, key_opt, tps, methods) {
@@ -1979,7 +2071,7 @@ impl Checker {
         let fdecl = FunData {
             line: m.line, col: m.col, sp: m.sp, name: mangled, params: sparams,
             ret_type: m.ret_type, body: m.body, attributes: [],
-            type_params: synth_typarams(combined_names), receiver: m.receiver, is_pub: false,
+            type_params: synth_typarams(combined_names), receiver: m.receiver, is_pub: false, is_async: m.is_async,
         }
         let sig = FuncSig { name: mangled, params: params, ret: rt, type_params: combined_names, bounds: combined_bounds, decl: fdecl, has_decl: true, decl_id: impl_id }
         self.add_function(sig)
@@ -2208,7 +2300,14 @@ impl Checker {
             ExprKind.Name(n) => Ok(Some(self.infer_name(e, n, expected)?)),
             ExprKind.Unary(op, x) => Ok(Some(self.infer_unary(e, op, x, expected)?)),
             ExprKind.Binary(op, l, r) => Ok(Some(self.infer_binary(e, op, l, r, expected)?)),
-            ExprKind.Call(c, args) => self.infer_call(e, c, args, expected),
+            ExprKind.Call(c, args) => {
+                self.call_kind_id = -1
+                let rc = self.infer_call(e, c, args, expected)
+                // a call that may suspend stands under `await` (D89); marked
+                // calls succeeded
+                if self.call_kind_id == e.id && (self.call_async || len(self.actors) > 0) { self.check_suspension(e, c)? }
+                rc
+            },
             ExprKind.GetField(t, name) => Ok(Some(self.infer_field(e, t, name, expected)?)),
             ExprKind.StructLit(name, fields) => Ok(Some(self.infer_struct_lit(e, name, fields, expected)?)),
             ExprKind.TupleLit(elems) => Ok(Some(self.infer_tuple_lit(e, elems, expected)?)),
@@ -2219,7 +2318,8 @@ impl Checker {
             ExprKind.MatchE(s, arms) => self.infer_match(e, s, arms, expected, as_stmt),
             ExprKind.Try(x) => Ok(Some(self.infer_try(e, x)?)),
             ExprKind.Cast(x, ty) => Ok(Some(self.infer_cast(e, x, ty)?)),
-            ExprKind.Lambda(ps, ret, body) => Ok(Some(self.infer_lambda(e, ps, ret, body, expected)?)),
+            ExprKind.Lambda(ps, ret, body, asy) => Ok(Some(self.infer_lambda(e, ps, ret, body, asy, expected)?)),
+            ExprKind.Await(x) => self.infer_await(e, x, expected),
             ExprKind.Hole => Err(terr_at(e.line, e.col, e.sp, "'_' placeholder is only valid as a call argument")),
         }
         match r { Ok(om) => { self.record_type(e.id, om) }, Err(x) => {} }
@@ -2287,7 +2387,17 @@ impl Checker {
     fun infer_name(var self, e: Expr, ident: str, expected: Option<Type>) -> Result<Type, CheckErr> {
         if ident == "_" { return Err(terr_at(e.line, e.col, e.sp, "'_' placeholder is only valid as a call argument")) }
         match self.lookup(ident) {
-            Some(b) => { return Ok(b.ty) },
+            Some(b) => {
+                if b.task > 0 { return Err(terr_at(e.line, e.col, e.sp, format("'{}' is the result of a child task: read it with 'await {}'", ident, ident))) }
+                if len(self.lams) > 0 && self.actor_self != "" && ident == "self" {
+                    // types.py: _record_capture
+                    let d = self.lookup_frame(ident)
+                    for lam in self.lams {
+                        if d < lam.base { return Err(terr_at(lam.line, lam.col, lam.sp, format("a lambda can't capture the actor '{}''s 'self': its state stays with its own methods", self.actor_self))) }
+                    }
+                }
+                return Ok(b.ty)
+            },
             None => {},
         }
         if self.const_decl_idx(ident) >= 0 {
@@ -2310,7 +2420,7 @@ impl Checker {
         let idx = self.func_idx(ident)
         let sig = self.functions[idx]
         if len(sig.type_params) > 0 { return Err(terr_at(e.line, e.col, e.sp, format("generic function '{}' cannot be used as a value (its type parameters are unresolved)", ident))) }
-        return Ok(Type.TFunc(sig.params, sig.ret))
+        return Ok(func_type(sig.params, sig.ret, sig.decl.is_async))
     }
 
     fun infer_bare_variant(var self, e: Expr, enum_name: str, variant: str, expected: Option<Type>) -> Result<Type, CheckErr> {
@@ -2416,7 +2526,7 @@ impl Checker {
             let hint = int_hint(expected)
             let lt = self.expect_value(l, hint)?
             if op == ">>" {
-                match lt { Type.TFunc(ps, rr) => { return self.infer_compose(e, lt, r) }, _ => {} }
+                if is_tfunc_type(lt) { return self.infer_compose(e, lt, r) }
             }
             if !is_int(lt) { return Err(terr_at(e.line, e.col, e.sp, format("operator '{}' requires an integer left operand", op))) }
             let rt = self.expect_value(r, None)?
@@ -2516,13 +2626,14 @@ impl Checker {
     }
 
     fun infer_compose(var self, e: Expr, lt: Type, r: Expr) -> Result<Type, CheckErr> {
-        let lparams = match lt { Type.TFunc(ps, rr) => ps, _ => empty_types() }
-        let lret: Option<Type> = match lt { Type.TFunc(ps, rr) => rr, _ => None }
+        let lparams = func_params_of(lt)
+        let lret: Option<Type> = func_ret_of(lt)
         if len(lparams) != 1 { return Err(terr_at(e.line, e.col, e.sp, format("composition with '>>' needs a one-argument function on the left, found '{}'", type_name(lt)))) }
         let rt = self.expect_value(r, None)?
-        match rt { Type.TFunc(ps, rr) => {}, _ => { return Err(terr_at(e.line, e.col, e.sp, format("cannot compose a function with a value of type '{}' (both operands of '>>' must be functions, or both integers)", type_name(rt)))) } }
-        let rparams = match rt { Type.TFunc(ps, rr) => ps, _ => empty_types() }
-        let rret: Option<Type> = match rt { Type.TFunc(ps, rr) => rr, _ => None }
+        match strip_async(rt) { Type.TFunc(ps, rr) => {}, _ => { return Err(terr_at(e.line, e.col, e.sp, format("cannot compose a function with a value of type '{}' (both operands of '>>' must be functions, or both integers)", type_name(rt)))) } }
+        if is_async_func(lt) || is_async_func(rt) { return Err(terr_at(e.line, e.col, e.sp, "an async function can't be composed with '>>'")) }
+        let rparams = func_params_of(rt)
+        let rret: Option<Type> = func_ret_of(rt)
         if len(rparams) != 1 { return Err(terr_at(e.line, e.col, e.sp, format("composition with '>>' needs a one-argument function on the right, found '{}'", type_name(rt)))) }
         let matches = match lret { Some(x) => type_eq(x, rparams[0]), None => false }
         if !matches {
@@ -2651,6 +2762,7 @@ impl Checker {
         let base = self.expect_value(target, None)?
         match base {
             Type.TStruct(n, args) => {
+                self.check_isolation(n, target, field, e)?
                 let fields = self.struct_field_types(n, args)
                 return match field_type_get(fields, field) { Some(ft) => Ok(ft), None => Err(with_notes(terr_at(e.line, e.col, e.sp, format("struct '{}' has no field '{}'", n, field)), did_you_mean(field, field_names(fields)))) }
             },
@@ -2951,6 +3063,7 @@ impl Checker {
         match t {
             Type.TStruct(tn, args) => {
                 if sname != tn { return Err(terr_at(pat.line, pat.col, pat.sp, format("pattern names struct '{}' but the value is '{}'", sname, tn))) }
+                if self.is_actor(tn) { return Err(terr_at(pat.line, pat.col, pat.sp, format("a pattern can't reach the fields of the actor '{}'", type_name(t)))) }
                 let fields = self.struct_field_types(tn, args)
                 var seen: [str] = []
                 for fp in fps {
@@ -3382,6 +3495,7 @@ impl Checker {
     fun check_stmt(var self, s: Stmt) -> Result<int32, CheckErr> {
         return match s.kind {
             StmtKind.VarDecl(kind, name, ty, init) => {
+                if kind == "async" { return self.check_async_let(s, name, ty, init) }
                 var declared: Option<Type> = None
                 match ty { Some(te) => { declared = Some(self.resolve_annotation(te)?) }, None => {} }
                 if opt_has_error(declared) {
@@ -3532,6 +3646,7 @@ impl Checker {
     // without the function's frame (types.py: _check_become).
     fun check_become(var self, ve: Expr) -> Result<int32, CheckErr> {
         if self.lambda_depth > 0 { return Err(terr_at(ve.line, ve.col, ve.sp, "'become' can't stand in a lambda")) }
+        if self.in_async { return Err(terr_at(ve.line, ve.col, ve.sp, "'become' can't stand in an async function")) }
         var callee = ve
         var args: [Expr] = []
         match ve.kind {
@@ -3647,12 +3762,124 @@ impl Checker {
         }
     }
 
-    // The kind of the call `e` just inferred, for `become`.
-    fun mark_call(var self, e: Expr, kind: str, target: str, mutates: bool) {
+    // -- concurrency (D89; types.py: _check_isolation, _infer_await, ...) ----
+
+    // Whether `key` names an actor (an empty table needs no hashing).
+    fun is_actor(self, key: str) -> bool {
+        return len(self.actors) > 0 && contains(self.actors, key)
+    }
+
+    // The first construct of concurrency met, which the interpreters and
+    // backends refuse until they run it (MYLA-136, MYLA-137).
+    fun met_concurrency(var self, line: int32, col: int32, sp: SrcSpan, node: int32) {
+        if self.conc_line == 0 {
+            self.conc_node = node
+            self.conc_line = line
+            self.conc_col = col
+            self.conc_sp = sp
+        }
+    }
+
+    // An actor's fields are reachable only through `self` in its own methods.
+    fun check_isolation(self, sname: str, target: Expr, field: str, e: Expr) -> Result<int32, CheckErr> {
+        if !self.is_actor(sname) { return Ok(0) }
+        let own = match target.kind { ExprKind.Name(n) => n == "self" && self.actor_self == sname, _ => false }
+        if own { return Ok(0) }
+        return Err(terr_at(e.line, e.col, e.sp, format("'{}' belongs to the actor '{}': only its own methods reach it", field, type_name(Type.TStruct(sname, [])))))
+    }
+
+    // `await x`: in async code, a call that may suspend or an `async let`'s name.
+    fun infer_await(var self, e: Expr, op: Expr, expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
+        if !self.in_async { return Err(terr_at(e.line, e.col, e.sp, "'await' can only stand in an async function")) }
+        match op.kind {
+            ExprKind.Name(n) => {
+                match self.lookup(n) {
+                    Some(b) => {
+                        if b.task > 0 {
+                            let d = self.lookup_frame(n)
+                            for lam in self.lams {
+                                if d < lam.base { return Err(terr_at(op.line, op.col, op.sp, format("a lambda can't await the child task '{}' of its function", n))) }
+                            }
+                            if b.task == 2 { return Ok(None) }
+                            self.record_type(op.id, Some(b.ty))
+                            return Ok(Some(b.ty))
+                        }
+                    },
+                    None => {},
+                }
+            },
+            ExprKind.Call(c, args) => {
+                self.awaited[op.id] = true
+                self.suspended = -1
+                let t = self.infer_node(op, expected)?
+                if self.suspended == op.id { return Ok(t) }
+            },
+            _ => {},
+        }
+        return Err(terr_at(e.line, e.col, e.sp, "'await' needs a call that may suspend (an async function, an actor's method) or the name of an 'async let'"))
+    }
+
+    // The call `e` just inferred (marked by `mark_call`) stands under `await`
+    // if it may suspend: a call of an async function, method or function
+    // value, or of an actor's method from outside it.
+    fun check_suspension(var self, e: Expr, callee: Expr) -> Result<int32, CheckErr> {
+        var why = ""
+        if self.call_kind == "method" {
+            var own = false
+            var field = ""
+            match callee.kind {
+                ExprKind.GetField(tg, f) => {
+                    field = f
+                    own = match tg.kind { ExprKind.Name(n) => n == "self" && self.actor_self == self.call_key, _ => false }
+                },
+                _ => {},
+            }
+            if self.is_actor(self.call_key) && !own { why = format("a call into the actor '{}' needs 'await'", type_name(Type.TStruct(self.call_key, []))) }
+            else if self.call_async { why = format("a call to the async method '{}' needs 'await'", field) }
+        } else if self.call_kind == "value" {
+            if self.call_async { why = "a call to an async function value needs 'await'" }
+        } else if self.call_async {
+            why = format("a call to the async function '{}' needs 'await'", self.call_target)
+        }
+        if why == "" { return Ok(0) }
+        self.suspended = e.id
+        if !contains(self.awaited, e.id) { return Err(terr_at(e.line, e.col, e.sp, why)) }
+        return Ok(0)
+    }
+
+    // `async let name = init` (s): a child task in async code; a call it makes
+    // is awaited by the task.
+    fun check_async_let(var self, s: Stmt, name: str, ty: Option<TypeExpr>, init: Expr) -> Result<int32, CheckErr> {
+        if !self.in_async { return Err(terr_at(s.line, s.col, s.sp, "'async let' can only stand in an async function")) }
+        var declared: Option<Type> = None
+        match ty { Some(te) => { declared = Some(self.resolve_annotation(te)?) }, None => {} }
+        var t: Option<Type> = None
+        if !opt_has_error(declared) {
+            match init.kind { ExprKind.Call(c, a) => { self.awaited[init.id] = true }, _ => {} }
+            t = self.infer(init, declared)?
+            match declared {
+                Some(d) => {
+                    if !opt_has_error(t) && !opt_type_eq(t, declared) { return Err(terr_at(s.line, s.col, s.sp, format("type mismatch in 'async let': declared '{}', found '{}'", type_name(d), opt_type_name(t)))) }
+                    t = declared
+                },
+                None => {},
+            }
+        } else {
+            t = declared
+        }
+        if !self.define_task(name, t, s.line, s.col, s.sp) { return Err(with_notes(terr_at(s.line, s.col, s.sp, format("'{}' is already declared in this scope", name)), self.first_declared(name))) }
+        return Ok(0)
+    }
+
+    // The kind of the call `e` just inferred, for `become`; for a method the
+    // key of its type, and whether the callee is async (D89).
+    fun mark_call(var self, e: Expr, kind: str, target: str, mutates: bool, key: str, asy: bool) {
         self.call_kind = kind
         self.call_kind_id = e.id
         self.call_target = target
         self.call_mutates = mutates
+        self.call_key = key
+        self.call_async = asy
     }
 
     fun bind_elem(var self, be: BindElem, t: Type, mutable: bool) -> Result<int32, CheckErr> {
@@ -3692,6 +3919,7 @@ impl Checker {
                 let base = self.check_lvalue(target)?
                 match base.ty {
                     Type.TStruct(nm, args) => {
+                        self.check_isolation(nm, target, field, e)?
                         let fields = self.struct_field_types(nm, args)
                         match field_type_get(fields, field) { Some(ft) => Ok(LValue { ty: ft, mutable: base.mutable }), None => Err(with_notes(terr_at(e.line, e.col, e.sp, format("struct '{}' has no field '{}'", nm, field)), did_you_mean(field, field_names(fields)))) }
                     },
@@ -3727,6 +3955,9 @@ impl Checker {
         self.bounds_cur = sig.bounds
         self.frames = []
         self.push_scope()
+        self.in_async = fd.is_async
+        if fd.is_async { self.met_concurrency(fd.line, fd.col, fd.sp, self.cur_decl) }
+        if self.is_actor(self.cur_key) { self.actor_self = self.cur_key } else { self.actor_self = "" }
         let recv = match fd.receiver { Some(r) => r, None => "" }
         var i = 0
         while i < len(fd.params) {
@@ -3780,7 +4011,7 @@ impl Checker {
             if contains(self.skipped_decls, pos) { continue }
             self.cur_decl = decl.id
             let attrs = decl_attrs(decl)
-            let is_se = match decl.kind { DeclKind.StructDecl(n, f, a, t, p) => true, DeclKind.EnumDecl(n, v, a, t, p) => true, _ => false }
+            let is_se = match decl.kind { DeclKind.StructDecl(n, f, a, t, p, act) => true, DeclKind.EnumDecl(n, v, a, t, p) => true, _ => false }
             for attr in attrs {
                 if attr.name != "derive" { continue }
                 match self.check_derive_attr(decl, attr) {
@@ -3838,7 +4069,7 @@ impl Checker {
             // register the synthesized Eq impl: method `eq: (Self,Self)->bool`
             var self_t = Type.TEnum(name, [])
             if self.is_struct(name) { self_t = Type.TStruct(name, []) }
-            let fdecl = FunData { line: decl.line, col: decl.col, sp: no_span(), name: format("{}.eq", name), params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: Some("self"), is_pub: false }
+            let fdecl = FunData { line: decl.line, col: decl.col, sp: no_span(), name: format("{}.eq", name), params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: Some("self"), is_pub: false, is_async: false }
             let sig = FuncSig { name: format("{}.eq", name), params: [self_t, self_t], ret: Some(Type.TBool), type_params: [], bounds: [], decl: fdecl, has_decl: true, decl_id: decl.id }
             self.add_method(MethodEntry { key: name, name: "eq", sig: sig })
             push(self.trait_impls, TraitImplPair { trait_name: "Eq", key: name })
@@ -3848,10 +4079,10 @@ impl Checker {
     }
 
     fun check_derive_attr(self, decl: Decl, attr: Attribute) -> Result<int32, CheckErr> {
-        let is_se = match decl.kind { DeclKind.StructDecl(n, f, a, t, p) => true, DeclKind.EnumDecl(n, v, a, t, p) => true, _ => false }
+        let is_se = match decl.kind { DeclKind.StructDecl(n, f, a, t, p, act) => true, DeclKind.EnumDecl(n, v, a, t, p) => true, _ => false }
         if !is_se { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' may only be applied to a struct or enum")) }
         let has_tps = match decl.kind {
-            DeclKind.StructDecl(n, f, a, t, p) => len(t) > 0,
+            DeclKind.StructDecl(n, f, a, t, p, act) => len(t) > 0,
             DeclKind.EnumDecl(n, v, a, t, p) => len(t) > 0,
             _ => false,
         }
@@ -3900,7 +4131,7 @@ impl Checker {
 
 fun decl_attrs(d: Decl) -> [Attribute] {
     return match d.kind {
-        DeclKind.StructDecl(n, f, a, t, p) => a,
+        DeclKind.StructDecl(n, f, a, t, p, act) => a,
         DeclKind.EnumDecl(n, v, a, t, p) => a,
         DeclKind.TypeAliasDecl(n, tt, a, p) => a,
         DeclKind.ConstDecl(n, tt, vv, a, p) => a,
@@ -4222,6 +4453,7 @@ impl Checker {
     }
 
     fun check_test_attr(var self, decl: Decl, fd: FunData, attr: Attribute) -> Result<int32, CheckErr> {
+        if fd.is_async { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' can't run an async function")) }
         let idx = self.func_idx(fd.name)
         let sig = self.functions[idx]
         let outs = match attr.outputs { Some(x) => x, None => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' requires an expected result, e.g. #test(args)[expected]")) } }
@@ -4267,11 +4499,11 @@ impl Checker {
         for decl in self.decls {
             pos = pos + 1
             if contains(self.skipped_decls, pos) { continue }
-            match decl.kind { DeclKind.FunDecl(fd) => { if !contains(self.skipped_fns, fd.name) { self.check_body(decl.id, fd) } }, _ => {} }
+            match decl.kind { DeclKind.FunDecl(fd) => { if !contains(self.skipped_fns, fd.name) { self.check_body(decl.id, fd, "") } }, _ => {} }
         }
         var i = 0
         while i < len(self.method_decls) {
-            if !contains(self.skipped_fns, self.method_decls[i].name) { self.check_body(self.method_decl_ids[i], self.method_decls[i]) }
+            if !contains(self.skipped_fns, self.method_decls[i].name) { self.check_body(self.method_decl_ids[i], self.method_decls[i], self.method_decl_keys[i]) }
             i = i + 1
         }
         self.check_passed_on()
@@ -4290,10 +4522,12 @@ impl Checker {
         return Ok(0)
     }
 
-    // The body of `fd` (declaration `id`), on its own: its error is collected.
-    fun check_body(var self, id: int32, fd: FunData) {
+    // The body of `fd` (declaration `id`; a method of the type with key
+    // `key`, else ""), on its own: its error is collected.
+    fun check_body(var self, id: int32, fd: FunData, key: str) {
         if self.full() { return }
         self.reset_state(id)
+        self.cur_key = key
         match self.check_function(fd) {
             Ok(x) => {},
             Err(e) => { self.note(e) },
@@ -4315,6 +4549,11 @@ impl Checker {
         self.ret_at = None
         self.type_params = []
         self.bounds_cur = []
+        self.in_async = false
+        self.actor_self = ""
+        self.cur_key = ""
+        self.lams = []
+        if len(self.awaited) > 0 { self.awaited = [:] }
     }
 
     // Collect `e`, an error in the declaration being checked.
@@ -4605,7 +4844,7 @@ impl Checker {
         let sig = self.functions[fi]
         if len(sig.type_params) > 0 {
             let gr = self.infer_generic_call(e, name, sig, args)?
-            self.mark_call(e, "function", name, sig_mutates(sig))
+            self.mark_call(e, "function", name, sig_mutates(sig), "", sig.decl.is_async)
             return Ok(gr)
         }
         if len(args) != len(sig.params) { return Err(terr_at(e.line, e.col, e.sp, format("function '{}' expects {} argument(s), got {}", name, len(sig.params), len(args)))) }
@@ -4617,7 +4856,7 @@ impl Checker {
             }
             i = i + 1
         }
-        self.mark_call(e, "function", name, sig_mutates(sig))
+        self.mark_call(e, "function", name, sig_mutates(sig), "", sig.decl.is_async)
         return Ok(sig.ret)
     }
 
@@ -4723,8 +4962,8 @@ impl Checker {
 
     fun infer_indirect_call(var self, e: Expr, callee: Expr, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         let ft = self.expect_value(callee, None)?
-        let ps = match ft { Type.TFunc(p, r) => p, _ => { return Err(terr_at(e.line, e.col, e.sp, format("cannot call a value of type '{}'", type_name(ft)))) } }
-        let rr: Option<Type> = match ft { Type.TFunc(p, r) => r, _ => None }
+        let ps = match strip_async(ft) { Type.TFunc(p, r) => p, _ => { return Err(terr_at(e.line, e.col, e.sp, format("cannot call a value of type '{}'", type_name(ft)))) } }
+        let rr: Option<Type> = func_ret_of(ft)
         if len(args) != len(ps) { return Err(terr_at(e.line, e.col, e.sp, format("this function value expects {} argument(s), got {}", len(ps), len(args)))) }
         var i = 0
         while i < len(args) {
@@ -4732,7 +4971,7 @@ impl Checker {
             if !type_eq(at, ps[i]) { return Err(terr_at(args[i].line, args[i].col, args[i].sp, format("argument type mismatch: expected '{}', found '{}'", type_name(ps[i]), type_name(at)))) }
             i = i + 1
         }
-        self.mark_call(e, "value", "", false)
+        self.mark_call(e, "value", "", false, "", is_async_func(ft))
         return Ok(rr)
     }
 
@@ -4822,7 +5061,7 @@ impl Checker {
                         let fields = self.struct_field_types(nm, sargs)
                         let fopt = field_type_get(fields, field)
                         let is_func = match fopt {
-                            Some(ft) => match ft { Type.TFunc(p, r) => true, _ => false },
+                            Some(ft) => is_tfunc_type(ft),
                             None => false,
                         }
                         if is_func { return self.infer_indirect_call(e, callee, args) }
@@ -4835,7 +5074,9 @@ impl Checker {
             },
             Some(sig) => {
                 let recv = match sig.decl.receiver { Some(r) => r, None => "self" }
-                if recv == "var self" {
+                let mkey = match key_opt { Some(k) => k, None => "" }
+                // an actor's handle needn't be mutable: its methods change the actor (D89)
+                if recv == "var self" && !self.is_actor(mkey) {
                     if !is_lvalue_shape(target) { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' mutates its receiver ('var self'); it needs a mutable variable (or one of its fields/elements), not a temporary", field))) }
                     let lv = self.check_lvalue(target)?
                     if !lv.mutable { return Err(with_notes(terr_at(e.line, e.col, e.sp, format("cannot call the mutating method '{}' on an immutable receiver (declare it with 'var')", field)), self.declared_at(target))) }
@@ -4844,7 +5085,7 @@ impl Checker {
                 if len(args) != nargs { return Err(terr_at(e.line, e.col, e.sp, format("method '{}' expects {} argument(s), got {}", field, nargs, len(args)))) }
                 if len(sig.type_params) > 0 {
                     let gr = self.infer_generic_method(e, sig, field, recv_type, args)?
-                    self.mark_call(e, "method", sig.name, recv == "var self")
+                    self.mark_call(e, "method", sig.name, recv == "var self", mkey, sig.decl.is_async)
                     return Ok(gr)
                 }
                 var i = 0
@@ -4856,7 +5097,7 @@ impl Checker {
                     }
                     i = i + 1
                 }
-                self.mark_call(e, "method", sig.name, recv == "var self")
+                self.mark_call(e, "method", sig.name, recv == "var self", mkey, sig.decl.is_async)
                 return Ok(sig.ret)
             },
         }
@@ -4934,7 +5175,7 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("'?' can only be applied to an Option or Result, not '{}'", type_name(ot))))
     }
 
-    fun infer_lambda(var self, e: Expr, params: [Param], ret_ann: Option<TypeExpr>, body: ExprOrBlock, expected: Option<Type>) -> Result<Type, CheckErr> {
+    fun infer_lambda(var self, e: Expr, params: [Param], ret_ann: Option<TypeExpr>, body: ExprOrBlock, asy: bool, expected: Option<Type>) -> Result<Type, CheckErr> {
         var have_exp = false
         var exp_params: [Type] = []
         var exp_ret: Option<Type> = None
@@ -4969,7 +5210,11 @@ impl Checker {
         let saved_has = self.has_cur_ret
         let saved_active = self.lambda_infer_active
         let saved_infer = self.lambda_infer
+        let saved_async = self.in_async
         self.lambda_depth = self.lambda_depth + 1
+        push(self.lams, LamAt { base: len(self.frames) - 1, line: e.line, col: e.col, sp: e.sp })
+        self.in_async = asy
+        if asy { self.met_concurrency(e.line, e.col, e.sp, e.id) }
         var ret_t: Option<Type> = None
         match body {
             ExprOrBlock.EB_Block(bl) => {
@@ -4978,7 +5223,7 @@ impl Checker {
                         self.cur_ret = Some(wr)
                         self.has_cur_ret = true
                         self.check_block(bl)?
-                        if !block_returns(bl) { self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer)
+                        if !block_returns(bl) { self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async)
             self.pop_scope()
             return Err(terr_at(e.line, e.col, e.sp, format("lambda may finish without returning a '{}'", type_name(wr)))) }
                         ret_t = Some(wr)
@@ -4996,7 +5241,7 @@ impl Checker {
                             var m = 1
                             while m < len(collected) {
                                 if !type_eq(collected[m].ty, collected[0].ty) {
-                                    self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer)
+                                    self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async)
                                     self.pop_scope()
                                     let ln = match collected[m].node { Some(nd) => nd.line, None => e.line }
                                     let cl = match collected[m].node { Some(nd) => nd.col, None => e.col }
@@ -5016,13 +5261,15 @@ impl Checker {
                 ret_t = self.infer(ex, want_ret)?
             },
         }
-        self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer)
+        self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async)
         self.pop_scope()
-        return Ok(Type.TFunc(ptypes, ret_t))
+        return Ok(func_type(ptypes, ret_t, asy))
     }
 
-    fun restore_lambda(var self, r: Option<Type>, h: bool, a: bool, inf: [MatchVal]) {
+    fun restore_lambda(var self, r: Option<Type>, h: bool, a: bool, inf: [MatchVal], asy: bool) {
         self.lambda_depth = self.lambda_depth - 1
+        pop(self.lams)
+        self.in_async = asy
         self.cur_ret = r
         self.has_cur_ret = h
         self.lambda_infer_active = a
@@ -5059,7 +5306,7 @@ impl Checker {
     fun partial_target(var self, e: Expr, callee: Expr) -> Result<PartialTgt, CheckErr> {
         match callee.kind {
             ExprKind.Name(nm) => { return self.partial_name(e, nm) },
-            ExprKind.GetField(target, field) => { return self.partial_field(e, target, field) },
+            ExprKind.GetField(target, field) => { return self.partial_field(e, callee, target, field) },
             _ => {},
         }
         return Err(terr_at(e.line, e.col, e.sp, "'_' partial application requires a function, method, or function value"))
@@ -5074,10 +5321,11 @@ impl Checker {
         if fi < 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot partially apply '{}' with '_' (only functions, methods, and function values are supported)", nm))) }
         let sig = self.functions[fi]
         if len(sig.type_params) > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot partially apply the generic function '{}'", nm))) }
+        if sig.decl.is_async { return Err(terr_at(e.line, e.col, e.sp, "an async function can't be partially applied")) }
         return Ok(PartialTgt { params: sig.params, ret: sig.ret, name: nm })
     }
 
-    fun partial_field(var self, e: Expr, target: Expr, field: str) -> Result<PartialTgt, CheckErr> {
+    fun partial_field(var self, e: Expr, callee: Expr, target: Expr, field: str) -> Result<PartialTgt, CheckErr> {
         let recv = self.expect_value(target, None)?
         match self.method_partial(recv, field, e)? {
             Some(pt) => { return Ok(pt) },
@@ -5086,8 +5334,9 @@ impl Checker {
         match recv {
             Type.TStruct(nm, sargs) => {
                 let fields = self.struct_field_types(nm, sargs)
+                if match field_type_get(fields, field) { Some(x) => true, None => false } { self.check_isolation(nm, target, field, callee)? }
                 let ft = match field_type_get(fields, field) { Some(x) => x, None => Type.TBool }
-                let is_fn = match ft { Type.TFunc(p, r) => true, _ => false }
+                let is_fn = is_tfunc_type(ft)
                 if is_fn { return func_to_partial_res(ft, e) }
                 if has_error(ft) { return Err(poisoned()) }   // the field's type failed (MYLA-110)
             },
@@ -5103,6 +5352,7 @@ impl Checker {
                 match self.method_sig(k, field) {
                     Some(sig) => {
                         if len(sig.type_params) > 0 { return Err(terr_at(e.line, e.col, e.sp, format("cannot partially apply the generic method '{}'", field))) }
+                        if sig.decl.is_async || self.is_actor(k) { return Err(terr_at(e.line, e.col, e.sp, "an async function can't be partially applied")) }
                         var rest: [Type] = []
                         var i = 1
                         while i < len(sig.params) {
@@ -5124,9 +5374,26 @@ impl Checker {
 fun func_to_partial_res(t: Type, e: Expr) -> Result<PartialTgt, CheckErr> {
     match t {
         Type.TFunc(p, r) => { return Ok(PartialTgt { params: p, ret: r, name: "" }) },
+        Type.TAsync(f) => { return Err(terr_at(e.line, e.col, e.sp, "an async function can't be partially applied")) },
         _ => {},
     }
     return Err(terr_at(e.line, e.col, e.sp, format("cannot partially apply a value of type '{}'", type_name(t))))
+}
+
+// Whether `t` is an async function type (D89).
+fun is_async_func(t: Type) -> bool {
+    return match t { Type.TAsync(f) => true, _ => false }
+}
+
+// The function type `t` is, without its asyncness.
+fun strip_async(t: Type) -> Type {
+    return match t { Type.TAsync(f) => f, _ => t }
+}
+
+// The function type with parameters `ps` and result `r`, async if `asy`.
+fun func_type(ps: [Type], r: Option<Type>, asy: bool) -> Type {
+    if asy { return Type.TAsync(Type.TFunc(ps, r)) }
+    return Type.TFunc(ps, r)
 }
 
 // A partially applied callee: its parameter and return types, and the name a

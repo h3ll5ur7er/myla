@@ -98,6 +98,9 @@ pub struct MatchRes { ok: bool, names: [str], vals: [Value] }
 // =========================================================================
 
 pub struct Interp {
+    // the checker's first construct of concurrency, which this interpreter
+    // doesn't run yet (D89, MYLA-139); none: no concurrency
+    concurrency: Option<RtError>,
     decls: [Decl],
     resolved: [int32: Type],
     func_names: [str],
@@ -179,7 +182,10 @@ enum PlaceOp {
 // An interpreter for the checked program `c`, run as `argv` (argv[0] is the
 // program's path, as for `myla run`).
 pub fun new_interp(c: Checker, argv: [str]) -> Interp {
+    var conc: Option<RtError> = None
+    if c.conc_line > 0 { conc = Some(RtError { msg: "the interpreter doesn't run concurrency yet (D89, MYLA-139)", line: c.conc_line, col: c.conc_col, sp: c.conc_sp, node: c.conc_node }) }
     var it = Interp {
+        concurrency: conc,
         decls: c.decls,
         resolved: c.resolved,
         func_names: [], func_decls: [],
@@ -332,6 +338,13 @@ impl Interp {
         if ei < 0 {
             self.rt_err = Some(RtError { msg: "no entry point: define '#main' or a function named 'main'", line: 0, col: 0, sp: no_span(), node: -1 })
             return 1
+        }
+        match self.concurrency {
+            Some(r) => {
+                self.rt_err = Some(r)
+                return 1
+            },
+            None => {},
         }
         self.call_func(ei, [])
         match self.ctrl { Ctrl.CExit => { return self.exit_code }, _ => {} }
@@ -871,7 +884,7 @@ impl Interp {
             ExprKind.StructLit(name, fields) => self.eval_struct_lit(name, fields),
             ExprKind.MatchE(scrut, arms) => self.eval_match(scrut, arms),
             ExprKind.Try(inner) => self.eval_try(inner),
-            ExprKind.Lambda(params, ret, body) => self.eval_lambda(params, body),
+            ExprKind.Lambda(params, ret, body, asy) => self.eval_lambda(params, body),
             _ => Value.VUnit,
         }
     }

@@ -162,6 +162,7 @@ fun simple_type(k: TokenKind) -> int32 {
         TokenKind.BOOL | TokenKind.STR | TokenKind.INT8 | TokenKind.INT16 | TokenKind.INT32 | TokenKind.INT64 => T_TYPE,
         TokenKind.UINT8 | TokenKind.UINT16 | TokenKind.UINT32 | TokenKind.UINT64 => T_TYPE,
         TokenKind.LET | TokenKind.VAR | TokenKind.FUN | TokenKind.RETURN | TokenKind.BECOME | TokenKind.STRUCT | TokenKind.ENUM => T_KEYWORD,
+        TokenKind.ACTOR | TokenKind.ASYNC | TokenKind.AWAIT => T_KEYWORD,
         TokenKind.IMPL | TokenKind.TRAIT | TokenKind.SELF | TokenKind.MATCH | TokenKind.TYPEALIAS | TokenKind.AS => T_KEYWORD,
         TokenKind.PUB | TokenKind.IMPORT | TokenKind.FROM | TokenKind.CONST | TokenKind.BREAK | TokenKind.CONTINUE => T_KEYWORD,
         TokenKind.IF | TokenKind.ELSE | TokenKind.WHILE | TokenKind.FOR | TokenKind.IN | TokenKind.TRUE | TokenKind.FALSE => T_KEYWORD,

@@ -1,0 +1,12 @@
+//~ type error: a lambda can't capture the actor 'Counter''s 'self': its state stays with its own methods
+//~ span: () => self.count
+// A lambda may run elsewhere, so it can't take the actor's state along (D89).
+actor Counter {
+    count: int
+}
+impl Counter {
+    fun reader(self) -> () -> int {
+        return () => self.count
+    }
+}
+fun main() {}

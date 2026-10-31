@@ -1,0 +1,10 @@
+//~ type error: 'async let' can only stand in an async function
+//~ span: async let a = fetch(1)
+// Starting a child task needs an async function to wait for it (D89).
+async fun fetch(n: int) -> int {
+    return n
+}
+fun start() {
+    async let a = fetch(1)
+}
+fun main() {}
