@@ -2,7 +2,7 @@
 id: MYLA-80
 title: Language server written in Myla
 type: feature
-status: review
+status: done
 priority: medium
 labels: [lsp, selfhost, editor]
 ---

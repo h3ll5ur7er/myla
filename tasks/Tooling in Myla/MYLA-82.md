@@ -2,7 +2,7 @@
 id: MYLA-82
 title: REPL written in Myla
 type: feature
-status: review
+status: done
 priority: low
 labels: [repl, selfhost]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-81
 title: "`myla test` parity in the self-hosted CLI"
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [testing, selfhost]
 ---

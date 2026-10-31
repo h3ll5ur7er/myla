@@ -2,7 +2,7 @@
 id: MYLA-78
 title: Read from stdin in the standard library
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, runtime, selfhost]
 ---

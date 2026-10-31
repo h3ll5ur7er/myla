@@ -2,7 +2,7 @@
 id: MYLA-83
 title: Retire the Python tools that have Myla replacements
 type: chore
-status: review
+status: done
 priority: low
 labels: [cleanup]
 ---

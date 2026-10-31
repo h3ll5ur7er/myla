@@ -2,7 +2,7 @@
 id: MYLA-77
 title: Grammar description and a tree-sitter grammar generated from it
 type: feature
-status: review
+status: done
 priority: medium
 labels: [grammar, tree-sitter, editor, selfhost]
 ---
