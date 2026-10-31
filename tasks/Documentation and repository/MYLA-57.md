@@ -2,7 +2,7 @@
 id: MYLA-57
 title: playground.my is a scratch file pinned by the test gates
 type: chore
-status: review
+status: done
 priority: low
 labels: [examples, tests]
 ---

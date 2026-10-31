@@ -2,7 +2,7 @@
 id: MYLA-58
 title: "Test tooling: pytest vs unittest, and a slow burn suite"
 type: chore
-status: review
+status: done
 priority: low
 labels: [tests]
 ---
