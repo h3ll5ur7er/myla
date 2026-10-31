@@ -29,7 +29,7 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
-from .checker import Type, Subst, opt_subst_type, subst_type
+from .checker import Type, Subst, FuncSig, opt_subst_type, subst_type
 from .codegen import is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 
@@ -60,10 +60,15 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // the value). `tail`: the next call lowered ends the function by `become`
 // (D87); `tailed`: it did.
 // `frame_fn`: an async function's frame function (D90), `result` the slot its
-// result goes to (-1: none).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, task_scopes: [[int32]], task_types: [int32: Type], task_void: [int32: bool], task_owns: [int32: bool] }
+// result goes to (-1: none); `tasks`: the child tasks of the open scopes.
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot] }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
+// A child task of an `async let` (D89): the slot holding its frame, its
+// result's type (`void`: none; `owns`: it owns heap memory), and the depth of
+// the scope that joins it.
+struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32 }
+
 pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
 
 // The IR of the function `fd`, generated as `mangled`; Err: why it can't be
@@ -71,7 +76,7 @@ pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: 
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, task_scopes: [[]], task_types: [:], task_void: [:], task_owns: [:] }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [] }
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
     // slots in its heap frame, the result in the first (D90)
@@ -151,7 +156,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, task_scopes: [[]], task_types: [:], task_void: [:], task_owns: [:] }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [] }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -584,16 +589,15 @@ impl Lower {
         push(self.scopes, names)
         var slots: [int32] = []
         push(self.owners, slots)
-        var tasks: [int32] = []
-        push(self.task_scopes, tasks)
         self.add(Inst.Scope(true))
     }
 
     fun close_scope(var self) {
-        self.drop_owners(len(self.owners) - 1)
+        let depth = len(self.owners) - 1
+        self.drop_owners(depth)
+        while len(self.tasks) > 0 && self.tasks[len(self.tasks) - 1].depth >= depth { let t = pop(self.tasks) }
         pop(self.scopes)
         pop(self.owners)
-        pop(self.task_scopes)
         self.add(Inst.Scope(false))
     }
 
@@ -601,14 +605,11 @@ impl Lower {
     // each scope's in reverse order (they stay registered); first, a scope
     // left waits for the child tasks it started (D89, D90).
     fun drop_owners(var self, depth: int32) {
-        var ts = len(self.task_scopes) - 1
-        while ts >= depth && ts >= 0 {
-            var j = len(self.task_scopes[ts]) - 1
-            while j >= 0 {
-                self.join_task(self.task_scopes[ts][j])
-                j = j - 1
-            }
-            ts = ts - 1
+        // the child tasks of those scopes first, the latest first (D89)
+        var j = len(self.tasks) - 1
+        while j >= 0 && self.tasks[j].depth >= depth {
+            self.join_task(self.tasks[j])
+            j = j - 1
         }
         var s = len(self.owners) - 1
         while s >= depth {
@@ -893,8 +894,9 @@ impl Lower {
         match op.kind {
             ExprKind.Name(n) => {
                 let ts = self.lookup(n)
-                if ts >= 0 && contains(self.task_types, ts) {
-                    self.await_task(cg, k, name, ts)
+                let ti = self.task_of(ts)
+                if ts >= 0 && ti >= 0 {
+                    self.await_task(cg, k, name, self.tasks[ti])
                     return
                 }
             },
@@ -945,8 +947,8 @@ impl Lower {
             self.start(after)
             return
         }
-        let ct = self.call_target(cg, target, argv)
         let sig = cg.sig_of(target)
+        let ct = self.call_target(cg, sig, argv)
         // a `var self` method of a struct: its final `self` goes back to the
         // receiver, a variable or a field of one (an element could move
         // while the method waits)
@@ -1111,10 +1113,18 @@ impl Lower {
         let ts = self.new_slot("__task_" + name, Type.TInt(64, false), 8, -1, false)
         self.add(Inst.Store(ts, fr))
         self.declare_as(name, ts, true)
-        self.task_types[ts] = rt
-        if !has { self.task_void[ts] = true }
-        if has && cg.owns_heap(rt) { self.task_owns[ts] = true }
-        push(self.task_scopes[len(self.task_scopes) - 1], ts)
+        push(self.tasks, TaskSlot { slot: ts, ty: rt, void: !has, owns: has && cg.owns_heap(rt), depth: len(self.owners) - 1 })
+    }
+
+    // The child task whose frame is in the slot `ts`: its index in `tasks`,
+    // or -1.
+    fun task_of(self, ts: int32) -> int32 {
+        var i = 0
+        while i < len(self.tasks) {
+            if self.tasks[i].slot == ts { return i }
+            i = i + 1
+        }
+        return -1
     }
 
     // Until the child task in `ts` ends: this function waits, its frame in
@@ -1155,10 +1165,10 @@ impl Lower {
 
     // `let name = await t` of an `async let`'s name: its child's result, with
     // references of its own (the child keeps its own until the scope ends).
-    fun await_task(var self, cg: CodeGen, k: str, name: str, ts: int32) {
-        let fr = self.wait_task(ts)
-        if contains(self.task_void, ts) { return }
-        let rt = self.task_types[ts]
+    fun await_task(var self, cg: CodeGen, k: str, name: str, t: TaskSlot) {
+        let fr = self.wait_task(t.slot)
+        if t.void { return }
+        let rt = t.ty
         let slot = self.value_slot(cg, name, rt, true)
         if is_aggregate(rt) {
             let dst = self.slot_addr(slot)
@@ -1175,9 +1185,11 @@ impl Lower {
         self.add(Inst.Bind(name, slot))
     }
 
-    // A scope's end for the child task in `ts`: once it ends, its result is
-    // released and its frame freed (0 then: done already on another way out).
-    fun join_task(var self, ts: int32) {
+    // A scope's end for the child task `t`: once it ends, its result is
+    // released and its frame freed (0 in its slot then: done already on
+    // another way out).
+    fun join_task(var self, t: TaskSlot) {
+        let ts = t.slot
         let start = self.new_block()
         self.finish(Term.Jmp(start))
         self.start(start)
@@ -1190,7 +1202,7 @@ impl Lower {
         self.finish(Term.Br(gone, end, live))
         self.start(live)
         let fr = self.wait_task(ts)
-        if contains(self.task_owns, ts) { self.add(Inst.DropAt(self.task_types[ts], self.offset(fr, FRAME_RESULT))) }
+        if t.owns { self.add(Inst.DropAt(t.ty, self.offset(fr, FRAME_RESULT))) }
         self.add(Inst.Rt(-1, "__free", [fr]))
         self.add(Inst.Store(ts, self.int_const(0)))
         self.finish(Term.Jmp(end))
@@ -2293,8 +2305,7 @@ impl Lower {
     // The function a call of `name` with `argv` calls: a generic one's
     // instance for the argument types, which the code generator stamps out
     // once this function is lowered, with its parameter and result types.
-    fun call_target(var self, cg: CodeGen, name: str, argv: [Expr]) -> CallTarget {
-        let sig = cg.sig_of(name)
+    fun call_target(var self, cg: CodeGen, sig: FuncSig, argv: [Expr]) -> CallTarget {
         if len(sig.type_params) == 0 { return CallTarget { name: sig.name, params: sig.params, ret: sig.ret } }
         let targs = cg.solve_targs(sig, argv)
         push(self.f.instances, Instance { orig: sig.name, targs: targs })
@@ -2311,7 +2322,7 @@ impl Lower {
 
     fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr], into: int32, tail: bool) -> int32 {
         let sig = cg.sig_of(name)
-        let ct = self.call_target(cg, name, argv)
+        let ct = self.call_target(cg, sig, argv)
         let target = ct.name
         let params = ct.params
         let ret = ct.ret

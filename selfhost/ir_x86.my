@@ -35,10 +35,9 @@ impl CodeGen {
         self.clear_regs(f)
         // an async function's frame function: its slots in the heap frame
         // %r15 holds (D90)
-        self.slot_base = "rbp"
+        self.in_frame = f.frame
         self.resume_blocks = []
         if f.frame {
-            self.slot_base = "r15"
             // the points reachable code resumes at
             var bi = 0
             while bi < len(f.blocks) {
@@ -193,7 +192,7 @@ impl CodeGen {
         self.dbg_end_function()
         self.emit("")
         if f.frame { self.emit_frame_new(f, mangled, slot_off) }
-        self.slot_base = "rbp"
+        self.in_frame = false
     }
 
     // -- async functions' frames (D90) -------------------------------------
@@ -275,13 +274,15 @@ impl CodeGen {
                 // read where it is used instead (`remat_texts`)
                 if self.temp_remat[d] == "" {
                     if self.slot_reg[s] != "" { self.emit(format("movq %{}, %rax", self.slot_reg[s])) }
-                    else { self.emit(format("movq {}(%{}), %rax", slot_off[s], self.slot_base)) }
+                    else if self.in_frame { self.emit(format("movq {}(%r15), %rax", slot_off[s])) }
+                    else { self.emit(format("movq {}(%rbp), %rax", slot_off[s])) }
                     self.store_temp(d, temp_base)
                 }
             },
             Inst.Store(s, v) => {
                 if self.slot_reg[s] != "" { self.load_temp(v, self.slot_reg[s], temp_base) }
-                else { self.emit(format("movq {}, {}(%{})", self.value_operand(v, temp_base), slot_off[s], self.slot_base)) }
+                else if self.in_frame { self.emit(format("movq {}, {}(%r15)", self.value_operand(v, temp_base), slot_off[s])) }
+                else { self.emit(format("movq {}, {}(%rbp)", self.value_operand(v, temp_base), slot_off[s])) }
             },
             Inst.Addr(d, s) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.Offset(d, p, off) => {
@@ -297,7 +298,8 @@ impl CodeGen {
                 // through a slot's address: straight from the frame (MYLA-120)
                 // or through a register (MYLA-121)
                 let base = self.reg_of(p)
-                if self.temp_frame[p] != 0 { self.emit(format("movq {}(%{}), %rax", self.temp_frame[p] + off, self.slot_base)) }
+                if self.temp_frame[p] != 0 && self.in_frame { self.emit(format("movq {}(%r15), %rax", self.temp_frame[p] + off)) }
+                else if self.temp_frame[p] != 0 { self.emit(format("movq {}(%rbp), %rax", self.temp_frame[p] + off)) }
                 else if base != "" { self.emit(format("movq {}({}), %rax", off, base)) }
                 else {
                     self.load_temp(p, "rax", temp_base)
@@ -307,7 +309,8 @@ impl CodeGen {
             },
             Inst.StoreAt(p, off, v) => {
                 let base = self.reg_of(p)
-                if self.temp_frame[p] != 0 { self.emit(format("movq {}, {}(%{})", self.value_operand(v, temp_base), self.temp_frame[p] + off, self.slot_base)) }
+                if self.temp_frame[p] != 0 && self.in_frame { self.emit(format("movq {}, {}(%r15)", self.value_operand(v, temp_base), self.temp_frame[p] + off)) }
+                else if self.temp_frame[p] != 0 { self.emit(format("movq {}, {}(%rbp)", self.value_operand(v, temp_base), self.temp_frame[p] + off)) }
                 else if base != "" { self.emit(format("movq {}, {}({})", self.value_operand(v, temp_base), off, base)) }
                 else {
                     self.load_temp(p, "rcx", temp_base)
@@ -449,7 +452,9 @@ impl CodeGen {
                 self.load_temp(p, "r8", temp_base)
                 self.retain("r8", 0, t)
             },
-            Inst.DropSlot(t, s) => { self.drop_value(self.slot_base, slot_off[s], t) },
+            Inst.DropSlot(t, s) => {
+                if self.in_frame { self.drop_value("r15", slot_off[s], t) } else { self.drop_value("rbp", slot_off[s], t) }
+            },
             Inst.Frame(d) => {
                 self.emit("movq %r15, %rax")
                 self.store_temp(d, temp_base)
@@ -926,7 +931,7 @@ impl CodeGen {
                 match inst {
                     Inst.Load(d, s) => {
                         if defs[d] == 1 && reads_before_writes(b.insts, b.term, i, d, self.temp_uses[d]) {
-                            if self.slot_reg[s] != "" { src[d] = "%" + self.slot_reg[s] } else { src[d] = format("{}(%{})", slot_off[s], self.slot_base) }
+                            if self.slot_reg[s] != "" { src[d] = "%" + self.slot_reg[s] } else if self.in_frame { src[d] = format("{}(%r15)", slot_off[s]) } else { src[d] = format("{}(%rbp)", slot_off[s]) }
                             out[d] = format("movq {}, %", src[d])
                         }
                     },
@@ -954,10 +959,17 @@ impl CodeGen {
                 _ => format("movq ${}, %", v)
             }
             Inst.Str(d, text) => format("leaq {}(%rip), %", self.string_label(text))
-            Inst.Addr(d, s) => format("leaq {}(%{}), %", slot_off[s], self.slot_base)
+            Inst.Addr(d, s) => self.slot_addr_text(slot_off[s])
             Inst.Label(d, sym) => format("leaq {}(%rip), %", sym)
             _ => ""
         }
+    }
+
+    // The code computing the address of the slot at `off`, up to its
+    // register's name: in the stack frame, or a frame function's heap frame.
+    fun slot_addr_text(self, off: int32) -> str {
+        if self.in_frame { return format("leaq {}(%r15), %", off) }
+        return format("leaq {}(%rbp), %", off)
     }
 
     // A constant or an address whose temporary is kept in its slot: computed

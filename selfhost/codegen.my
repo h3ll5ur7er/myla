@@ -173,10 +173,10 @@ pub struct CodeGen {
     temp_reg: [str],
     slot_reg: [str],
     saved_regs: [str],
-    // D90: what a slot's offset is from: %rbp, or in an async function's
-    // frame function %r15, which holds its heap frame; the resume points of
-    // the function being generated (block of each state, from 1)
-    slot_base: str,
+    // D90: whether the function being generated is an async function's frame
+    // function, whose slots are in the heap frame %r15 holds (else at %rbp);
+    // its resume points (the block of each state, from 1)
+    in_frame: bool,
     resume_blocks: [int32],
     // D91: whether async functions run on frames, the tasks taking turns
     // (the program has an `async let`, or `--async-frames`), and the
@@ -276,7 +276,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], slot_base: "rbp", resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
 }
 
