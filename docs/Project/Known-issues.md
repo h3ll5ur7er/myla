@@ -8,11 +8,13 @@ Open bugs and gaps found by the October 2026 review, by component. Each has a ta
 
 The reference implementation. Most problems are places where the native backend and the interpreter disagree.
 
-No open issues. (The lexers' disagreement on non-ASCII identifiers is settled: both take Unicode's XID, D72, [[MYLA-84]].)
+- To confirm: a `?` failing inside a list or map literal may leak the half-built literal in the Python backend ([[MYLA-157]]).
+
+(The lexers' disagreement on non-ASCII identifiers is settled: both take Unicode's XID, D72, [[MYLA-84]].)
 
 ## Self-hosted compiler
 
-No open issues.
+- A local closure named like a builtin (`let build = (n: int) => n + 1`, then `build(41)`) calls the builtin in the self-hosted interpreter and native code: nothing printed, a segfault, or a compile error ([[MYLA-152]]).
 
 Also by design (from the earlier known-issues list in [[Archive/known_issues]]): x86-64 Linux is the only target (D2). The stdlib root no longer has to be passed: `build/myla` finds it from its own location ([[MYLA-31]]).
 

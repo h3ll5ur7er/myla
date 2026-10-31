@@ -20,9 +20,9 @@ from .diag import render
 
 // How the assembly is generated: `debug`, DWARF debug information, so gdb
 // steps through the Myla source and shows its variables (MYLA-71, MYLA-66),
-// with the pretty-printers from `stdlib_root` embedded (D82);
-// `ir`, through the IR, with its statistics (`ir_stats`) or its text instead
-// of the assembly (`emit_ir`).
+// with the pretty-printers from `stdlib_root` embedded (D82); `emit_ir`, the
+// IR's text instead of the assembly (every function goes through the IR,
+// MYLA-107).
 // `frames`: async functions run on frames even without an `async let`
 // (`--async-frames`, for the tests of D90's lowering).
 struct Mode { debug: bool, emit_ir: bool, frames: bool }

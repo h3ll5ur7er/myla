@@ -1,14 +1,15 @@
 """Command-line interface for the Myla toolchain.
 
 Commands (see README "CLI"):
-    run <file.my>            interpret a program            (implemented)
-    test <file.my>           run #test cases                (implemented)
-    build <file.my> -o <bin> compile to a native binary     (implemented)
-    repl                     interactive interpreter        (planned: v0.0.2)
+    run <file.my>            interpret a program
+    test <file.my>           run #test cases
+    build <file.my> -o <bin> compile to a native binary
+    check <file.my>          type-check without running
+    repl                     points at `build/myla repl`, the self-hosted REPL
 
-Development/debug commands available now:
-    tokenize <file.my>       print the token stream (the lexer is implemented)
-    parse <file.my>          print the parsed AST (the parser is implemented)
+Development/debug commands:
+    tokenize <file.my>       print the token stream
+    parse <file.my>          print the parsed AST
 """
 from __future__ import annotations
 

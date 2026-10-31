@@ -12,7 +12,7 @@ The root cause was in the AST, not only in codegen: `FloatLit(Option<str>)` kept
 
 ## How
 
-- **Literals**: `FloatLit(str, Option<str>)` keeps the lexeme. [[selfhost/floatlit.my]] turns it into the IEEE bits with integer arithmetic only (big integers, exact division, round half to even, subnormals, overflow to infinity), exactly as the Python toolchain does (`float(text)`, then single-precision rounding for a float32), so the compiler itself needs no float arithmetic.
+- **Literals**: `FloatLit(str, Option<str>)` keeps the lexeme. `selfhost/floatlit.my` turns it into the IEEE bits with integer arithmetic only (big integers, exact division, round half to even, subnormals, overflow to infinity), exactly as the Python toolchain does (`float(text)`, then single-precision rounding for a float32), so the compiler itself needs no float arithmetic.
 - **Code generation** ([[selfhost/codegen.my]]): SSE2 arithmetic and comparisons (NaN unordered), negation by the sign bit, `%` through `__fmod`, conversions both ways (with the uint64 high-bit trick), float32 rounding after each operation, `print` and `format`/f-strings.
 - **Runtime**: `__fmod`, `__float_to_str` and its helpers and tables, and `__char_to_str`, are embedded verbatim from the Python backend: `scripts/gen_selfhost_runtime.py` renders the Python code generator's text into a marked region of `codegen.my` (as a few string chunks, so it costs no code), and a unit test fails when the two drift apart.
 - **Interpreter** ([[selfhost/interp.my]]): literal values (rebuilt exactly from the bits), float32 rounding, NaN-aware comparisons, float32 printed with 9 digits, uint64-to-float casts.

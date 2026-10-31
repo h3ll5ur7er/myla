@@ -13,4 +13,4 @@ Coding agents keep mistaking Myla for Rust or Swift (`fn`, semicolons, tail-expr
 - [x] A table of Rust/Swift habits and their Myla equivalents; every "doesn't work" row checked against `myla check`
 - [x] Types and conversions (incl. `float` = `float32`, literals vs variables), syntax notes, repository workflow
 - [x] A pointer from `AGENTS.md`, outside the Genbeya block
-- [ ] Review the wording; keep the skill in step with the language (update it with each language change, like the wiki)
+- [x] Review the wording; keep the skill in step with the language (update it with each language change, like the wiki): the rule is in [[Development/Conventions]]; updated for concurrency (D89 to D97), `become`, the generated grammar, `build/myla` and the `module` directive in the review triage of 2026-10-31

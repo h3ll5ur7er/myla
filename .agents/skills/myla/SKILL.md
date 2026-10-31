@@ -7,7 +7,7 @@ description: Write, read, review and debug code in the Myla programming language
 
 Myla is a small, statically typed language with sized integers, value semantics, enums with `match`, traits and closures. It compiles to x86-64 Linux binaries without libc and is self-hosted. **It is not Rust and not Swift**: code that looks right in either usually fails here. The full reference is the wiki: `docs/Language.md` and its subpages; the grammar is `docs/Language/Grammar.md`.
 
-Which implementation defines the language: the Python toolchain in `src/myla/` (the interpreter is the semantics). The self-hosted compiler in `selfhost/` follows it. A Rust prototype with a different dialect (actors, `async`, semicolons, no type checking) existed until October 2026 and was removed; its syntax is not Myla. Don't copy it from git history, and don't trust the tree-sitter grammar in `editor/`, which still follows it in places.
+Which implementation defines the language: the Python toolchain in `src/myla/` (the interpreter is the semantics). The self-hosted compiler in `selfhost/` follows it. A Rust prototype with a different dialect (semicolons, no type checking, its own actors) existed until October 2026 and was removed; its syntax is not Myla, so don't copy it from git history. Myla's own concurrency (`async`, `await`, `async let`, actors) is described below. The grammar is `grammar/myla.ebnf`; the tree-sitter grammar in `editor/` is generated from it.
 
 ## A complete program
 
@@ -111,12 +111,51 @@ fun main() {
 - Files (`std.fs`): `read_to_string(path)`, `write_to_file(path, s)`, `list_dir(path)` (`Result<[str], IoError>`, sorted, without `.`/`..`), `make_dir(path)`, `make_dir_all(path)`, `exists(path)`, `is_dir(path)`, `is_file(path)`.
 - Part of a string: `var sb = StringBuilder()`, `append(sb, s, start, end)` (byte offsets, must lie within `s`), `build(sb)`; there is no slicing syntax.
 - Constants: `const MAX: int = 10`; no global variables.
+- `become f(args)` is a guaranteed tail call: it ends the function like `return f(args)`, but the stack doesn't grow (D87). The call must be a function, a method or a function value that's a parameter (not a builtin, a variant or a partial application), and must not be followed by `?`.
+
+## Concurrency (D89 to D97, `docs/Language/Concurrency.md`)
+
+```myla
+import std.task as task
+
+actor Counter {
+    n: int,
+}
+
+impl Counter {
+    fun add(var self, k: int) -> int {
+        self.n = self.n + k
+        return self.n
+    }
+}
+
+async fun work(c: Counter, k: int) -> int {
+    return await c.add(k)
+}
+
+#main
+async fun main() {
+    let c = Counter { n: 0 }
+    async let a = work(c, 1)
+    async let b = work(c, 2)
+    print(await a + await b)
+}
+```
+
+- `async fun` can suspend; a call of it, or of an actor's method from outside, must be awaited (`await f(x)`), and only in async code. The entry point is `#main async fun main()`.
+- `async let x = e` starts a child task; read it once with `await x`. A scope waits for its children. Only async functions have them, and a lambda can't `await` or `task.cancel` them.
+- An actor's state is reached only through `self` in its own methods; one method runs at a time, but an `await` inside an async method lets other calls in (a warning flags a field checked before an `await` and changed after it, D95).
+- Values cross between tasks and actors as deep copies; nothing mutable is shared but an actor. Captures can't be changed (D93).
+- `std.task`: `await task.all(fs)` runs a list of `async () -> T` functions as children; `task.cancel(a)` asks the child `a` to stop and `task.cancelled()` is how a task checks (cooperative, D96).
+- A failure (panic, runtime error, `exit`) in any task ends the program at once: the others stop at their next `await` (D97).
+- Native concurrency is the self-hosted compiler's (`build/myla build`, D92: `MYLA_THREADS` workers); `python3 myla.py build` refuses it (D91), the interpreter runs it.
 
 ## Working in this repository
 
 - Run: `python3 myla.py run file.my`, test: `python3 myla.py test file.my`, compile: `python3 myla.py build file.my -o out`, type-check: `python3 myla.py check file.my`.
+- The self-hosted CLI, `build/myla` (built by `scripts/bootstrap.sh`), has the same commands plus `repl`, and in a project with a `myla.toml` `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` (D73).
 - Every value-returning function in `examples/` and `selfhost/` needs `#test(args)[expected]` cases; a burn test enforces it.
-- New examples must be registered in `tests/burn/test_examples_run.py` and `tests/burn/test_examples_compile.py`; programs that must be rejected go to `examples/errors/` with a first line `//~ <lex|parse|type|runtime> error: <message substring>`.
+- New examples must be registered in `tests/burn/test_examples_run.py` and `tests/burn/test_examples_compile.py`; programs that must be rejected go to `examples/errors/` with a first line `//~ <lex|parse|module|type|runtime> error: <message substring>` (more directives, such as `//~ span:`, in `tests/burn/test_error_corpus.py`).
 - The interpreter and the native backend must print the same output; check both (`run` and `build` + execute) after changing either.
 - Changes to `selfhost/` must keep the bootstrap fixed point: `scripts/bootstrap.sh`.
 - Before trusting a construct you're unsure of, write a five-line program and run `python3 myla.py check` on it: the checker's messages are precise.

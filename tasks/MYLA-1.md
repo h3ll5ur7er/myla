@@ -15,4 +15,4 @@ Set the repository up for [Genbeya](https://github.com/genbeya/genbeya): the tas
 - [x] One task per finding of the October 2026 code review, grouped by component (epics)
 - [x] Point the README at the wiki
 - [ ] Review the wiki and the task priorities
-- [ ] Open the repository in Genbeya and check that every reference resolves (no red links)
+- [x] Open the repository in Genbeya and check that every reference resolves (no red links): a scan of every `[[…]]` in `tasks/` and `docs/` resolves (the nine links to files deleted with the Python language server and `selfhost/floatlit.my` are plain paths now)

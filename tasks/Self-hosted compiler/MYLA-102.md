@@ -33,3 +33,7 @@ The parity program `local_closure_shadows_a_function` (a closure in an inner blo
 - self-hosted binary: crashed with SIGSEGV after `… 10`, once the dispatch was fixed but the slot was still there; the gate failed for both.
 
 After the fix both gates pass (`SelfHostedCodegenParity` and `SelfHostedInterpParity`, `test_parity_programs_match_the_oracle`), and `apply`'s assembly has no `__func_drop`.
+
+## Leftover
+
+A local closure named like a *builtin* (`build`, `len`) still calls the builtin in the self-hosted interpreter and lowering: [[MYLA-152]].

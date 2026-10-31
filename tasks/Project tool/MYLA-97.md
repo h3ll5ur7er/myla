@@ -43,3 +43,5 @@ The decisions are D81 on [[Project/Decisions]]; [[Architecture/Editor-tooling]] 
 
 - A Git dependency's own Git dependencies are checked out under the root package's `.myla/deps/`. Opening a file of a Git checkout makes the checkout's `myla.toml` the project, whose Git dependencies aren't found there: they show as not checked out. Opening a dependency's file through the consumer's project would need the server to remember which project led there.
 - The manifest's diagnostics come from checks of `.my` documents; an open `myla.toml` isn't checked itself (the extension's language client only syncs `myla` documents).
+
+Both open points are now [[MYLA-155]].

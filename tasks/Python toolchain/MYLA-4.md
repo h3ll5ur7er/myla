@@ -43,3 +43,5 @@ Every store into a container now stages the value first ([[Architecture/Native-b
 - [x] Bootstrap fixed point holds (4,465,925 bytes)
 
 Not covered: a `?` inside a list or map literal leaks the half-built literal (the cell isn't visible to anyone, so nothing breaks); the self-hosted `?` releases nothing at all ([[MYLA-22]]).
+
+The leak noted above is tracked as [[MYLA-157]].

@@ -14,7 +14,7 @@ The compilers' parsers are hand-written ([[src/myla/parser.py]], [[selfhost/pars
 - [x] A generator written in Myla emits `grammar.js` and the highlight queries; tokens (keywords, operators, type names, literal forms) come from [[selfhost/tokens.my]] / [[selfhost/lexer.my]]
 - [x] Newlines as a real token with explicit optional newlines in rules (no external C scanner); approximate where tree-sitter can't express the parser exactly (generic `<` vs less-than, struct literals in `if`/`while` headers, f-string holes)
 - [x] Tests: tree-sitter parses every `.my` file of `examples/`, `selfhost/` and the stdlib without an ERROR node; programs generated from the grammar file are accepted by the self-hosted parser; the syntax-error corpus gives ERROR nodes where feasible
-- [ ] Optionally emit the VS Code TextMate grammar from the same source (see [[MYLA-54]]): not done; the extension's TextMate grammar stays hand-written for now, and editors with tree-sitter support use the generated grammar
+- [x] Optionally emit the VS Code TextMate grammar (moved to [[MYLA-154]]) from the same source (see [[MYLA-54]]): not done; the extension's TextMate grammar stays hand-written for now, and editors with tree-sitter support use the generated grammar
 
 ## How
 

@@ -24,3 +24,7 @@ labels: [tests]
 - `uv run pytest tests/unit -q`: 466 passed.
 - The corpus test fails when a native directive is wrong (`'runtime error: WRONG' not found in 'runtime error: pop from an empty list\n'`) and passes with the real text; the 134 corpus tests pass.
 - Full run after the change: unit 466, integration 4, burn 384 (36 s, warm cache), all OK.
+
+## Since
+
+The burn suite grew back to about 4 minutes in CI (811 tests); a new tiering pass and honest timings are [[MYLA-153]].
