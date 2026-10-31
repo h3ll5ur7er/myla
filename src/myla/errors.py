@@ -186,6 +186,13 @@ class TypeCheckError(MylaError):
     kind = "type error"
 
 
+class CheckWarning(MylaError):
+    """A diagnostic that doesn't stop the program (D95): printed, then the
+    program is built or run anyway."""
+
+    kind = "warning"
+
+
 class ModuleError(MylaError):
     """Import/module resolution failures (v0.5): unresolved paths, ambiguous
     file/package names, visibility violations, import collisions, etc."""

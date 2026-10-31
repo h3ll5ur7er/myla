@@ -34,6 +34,9 @@ EXPECTED = {
     # 5. a child may await an earlier sibling (MYLA-148): no cycle can form
     "t05_child_awaits_sibling": ("2\n", 0),
     "t05_siblings_share_a_result": ("60780\n", 0),
+    # 6. an actor's state checked again after an `await` (without the second
+    # check a warning says it may have changed, D95)
+    "t06_recheck_after_the_await": ("successes 1 stock 0\n", 0),
     # 8. a failure cancels the failing task's other children, which stop at
     # their next suspension point; it waits for them, then ends the program
     # (D94), where it used to wait forever for a looping sibling
@@ -41,6 +44,8 @@ EXPECTED = {
     # ... and a failing child's own children, looping on an actor that the
     # rest of the program goes on using
     "t08_failing_child_cancels_its_children": ("main still runs\n", 1),
+    # 9. "latest request wins" is the program's to say: a request number
+    "t09_latest_request_wins": ("ui shows cats\n", 0),
     # 10. what an actor publishes is seen whole
     "t10_publication_through_an_actor": ("42\n", 0),
     # 12. every worker and every single request make progress

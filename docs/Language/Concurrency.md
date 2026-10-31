@@ -120,6 +120,25 @@ impl Account {
 }
 ```
 
+- The compiler warns when an actor's async method changes a field after an `await` on the strength of what it read before (D95): a field examined by a condition (`if`, `while`, a `match`'s scrutinee or guard, directly or through a local read from it) before an `await` and changed after it without being examined again, or set from a local read before an `await`. Without the second check above, `self.balance = self.balance - amount` gets `warning: 'self.balance' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile`, with a note at the `await`. Checking again after the `await`, or changing the field before it (reserving, and giving it back if need be), are the two ways out. The program is still built and run.
+
+## What Myla guarantees, and what it doesn't
+
+The concurrency stress tests ([[Development/Concurrency-stress-tests]], [[MYLA-144]], `tests/burn/test_concurrency_stress.py`) hold Myla to these answers, on every implementation and on 1 to 16 workers:
+
+| Problem | In Myla |
+| --- | --- |
+| Shared mutation through aliases | Prevented: nothing mutable is shared but an actor, whose methods run one at a time; a lambda can't change what it captures (D93) |
+| Check-then-act | One step in a synchronous actor method; across an `await` in an async one, a warning (D95) |
+| An invariant over several objects | Holds when they live in one actor; across actors, no transaction keeps it (a limit) |
+| Deadlock over resources | Prevented: no locks, reentrant actors whose executors never block a worker (D92) |
+| Waiting cycles | Prevented: no channels, a task only awaits its own children and its earlier siblings |
+| A failure while siblings run | Its siblings are cancelled at their next suspension point, then the failure goes on (D94); a sibling looping without one isn't stopped |
+| Cancellation and resource cleanup by the program | Not in the language yet |
+| A stale result | The program's to decide (a request number), as everywhere |
+| Memory visibility | Prevented: values cross as copies, what an actor publishes is seen whole |
+| Starvation | Actors queue their callers first in, first out; a turn goes behind the others |
+
 ## What crosses: copies, and sendable values
 
 An `async let`'s captures, a spawned child's captures and result, and an actor method's arguments and result are copied deeply when they cross (D89). Every value Myla has today can be copied this way: scalars, strings, lists, maps, structs, tuples, enums, function values (with their captures) and actor handles. So every value is *sendable*. The rule is for kinds of values that may come later.

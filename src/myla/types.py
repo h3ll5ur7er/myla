@@ -28,7 +28,7 @@ import struct
 from dataclasses import dataclass
 
 from . import ast
-from .errors import MAX_ERRORS, MylaError, Note, TypeCheckError, in_file, note
+from .errors import MAX_ERRORS, CheckWarning, MylaError, Note, TypeCheckError, in_file, note
 
 
 # --- type representations --------------------------------------------------
@@ -760,6 +760,195 @@ def _edit_distance(a: str, b: str) -> int:
     return prev[len(y)]
 
 
+class _Reentrancy:
+    """The reentrancy warnings of an actor's async method (D95, MYLA-146).
+    Each statement holding an `await` starts a new epoch, in which other calls
+    to the actor may have run. A field of `self` changed (assigned, or by
+    `push`, `pop`, `remove`, `append`) in a later epoch than the one it was
+    examined in by a condition (`if`, `while`, a `match`'s scrutinee or guard;
+    directly or through a local read from it), and not examined again or
+    changed since, warns; so does one set from a local read from it in an
+    earlier epoch. The
+    walk goes through the method's statements in order, both branches of a
+    condition one after the other, loops once; lambdas are left out."""
+
+    def __init__(self):
+        self.epoch = 0
+        self.checked: dict[str, int] = {}
+        self.locals: dict[str, tuple[set, int]] = {}
+        self.awaits: list = []
+        self.out: list = []
+
+    def scan(self, block: ast.Block) -> list:
+        self._block(block)
+        return self.out
+
+    # -- what an expression reads ------------------------------------------
+
+    def _reads(self, e, fields: set, names: list, awaits: list) -> None:
+        if e is None or isinstance(e, ast.Lambda):
+            return
+        if isinstance(e, ast.FieldAccess) and isinstance(e.target, ast.Name) and e.target.ident == "self":
+            fields.add(e.field_name)
+            return
+        if isinstance(e, ast.Name):
+            if e.ident in self.locals and e.ident not in names:
+                names.append(e.ident)
+            return
+        if isinstance(e, ast.Await) and not awaits:
+            awaits.append(e)
+        for f in getattr(e, "__dataclass_fields__", {}):
+            if f in ("resolved_type",):
+                continue
+            v = getattr(e, f, None)
+            if isinstance(v, ast.Node):
+                self._reads(v, fields, names, awaits)
+            elif isinstance(v, list):
+                for x in v:
+                    if isinstance(x, ast.Node):
+                        self._reads(x, fields, names, awaits)
+                    elif isinstance(x, tuple):          # a map literal's entries
+                        for y in x:
+                            self._reads(y, fields, names, awaits)
+
+    def _scan(self, e):
+        fields: set = set()
+        names: list = []        # in the order they appear
+        awaits: list = []
+        self._reads(e, fields, names, awaits)
+        return fields, names, awaits
+
+    def _taint(self, fields: set, names: list) -> set:
+        out = set(fields)
+        for n in names:
+            out |= self.locals[n][0]
+        return out
+
+    def _check(self, e) -> list:
+        """`e` examined as a condition; its awaits."""
+        fields, names, awaits = self._scan(e)
+        for n in names:
+            for f in self.locals[n][0]:
+                self.checked[f] = max(self.checked.get(f, -1), self.locals[n][1])
+        for f in fields:
+            self.checked[f] = self.epoch
+        return awaits
+
+    def _suspend(self, awaits: list) -> None:
+        if awaits:
+            self.awaits.append(awaits[0])
+            self.epoch += 1
+
+    # -- statements ----------------------------------------------------------
+
+    def _block(self, block) -> None:
+        for s in block.statements:
+            self._stmt(s)
+
+    def _value(self, e) -> list:
+        """A statement's value: a `match`'s scrutinee and guards are
+        conditions and its block arms statements; its awaits."""
+        if isinstance(e, ast.Match):
+            awaits = self._check(e.scrutinee)
+            for arm in e.arms:
+                if arm.guard is not None:
+                    awaits += self._check(arm.guard)
+                if isinstance(arm.body, ast.Block):
+                    self._block(arm.body)
+                else:
+                    awaits += self._scan(arm.body)[2]
+            return awaits
+        return self._scan(e)[2]
+
+    def _stmt(self, s) -> None:
+        if isinstance(s, ast.VarDecl):
+            if s.kind == "async":
+                return
+            fields, names, _ = self._scan(s.init)
+            before = self.epoch
+            awaits = self._value(s.init)
+            self.locals[s.name] = (self._taint(fields, names), before)
+            self._suspend(awaits)
+        elif isinstance(s, ast.Assign):
+            fields, names, _ = self._scan(s.value)
+            before = self.epoch
+            awaits = self._value(s.value)
+            self._suspend(awaits)
+            root = _self_field(s.target)
+            if root is not None:
+                self._write(root, names, s.target)
+            elif isinstance(s.target, ast.Name):
+                self.locals[s.target.ident] = (self._taint(fields, names), before)
+        elif isinstance(s, ast.If):
+            self._suspend(self._check(s.cond))
+            self._block(s.then)
+            if isinstance(s.otherwise, ast.Block):
+                self._block(s.otherwise)
+            elif isinstance(s.otherwise, ast.If):
+                self._stmt(s.otherwise)
+        elif isinstance(s, ast.While):
+            self._suspend(self._check(s.cond))
+            self._block(s.body)
+        elif isinstance(s, ast.For):
+            awaits = []
+            for e in (s.start, s.end, s.iterable):
+                if e is not None:
+                    awaits += self._scan(e)[2]
+            self._suspend(awaits)
+            self._block(s.body)
+        elif isinstance(s, ast.Return):
+            if s.value is not None:
+                self._suspend(self._value(s.value))
+        elif isinstance(s, ast.ExprStmt):
+            e = s.expr
+            if isinstance(e, ast.Call) and isinstance(e.callee, ast.Name) \
+                    and e.callee.ident in ("push", "pop", "remove", "append") and e.args:
+                root = _self_field(e.args[0])
+                names: list = []
+                awaits: list = []
+                for a in e.args[1:]:
+                    _, ns, aw = self._scan(a)
+                    names += [n for n in ns if n not in names]
+                    awaits += aw
+                self._suspend(awaits)
+                if root is not None:
+                    self._write(root, names, e)
+                return
+            self._suspend(self._value(e))
+        elif isinstance(s, ast.DestructDecl):
+            self._suspend(self._scan(s.init)[2])
+
+    def _write(self, f: str, names: list, at) -> None:
+        # a change settles the field's check: what comes after depends on it
+        checked = self.checked.pop(f, None)
+        if checked is not None and checked < self.epoch:
+            self._warn(f"'self.{f}' was checked before an 'await' and is changed after it: "
+                       "another call to this actor may have changed it meanwhile",
+                       at, self.awaits[checked], "check it again after the 'await', or change it before")
+            return
+        for n in names:
+            fs, ep = self.locals[n]
+            if f in fs and ep < self.epoch:
+                self._warn(f"'self.{f}' is set from a value read before an 'await': "
+                           "another call to this actor may have changed it meanwhile",
+                           at, self.awaits[ep], "read it again after the 'await'")
+                return
+
+    def _warn(self, msg: str, at, aw, help_: str) -> None:
+        w = CheckWarning(msg, at=at, notes=[note("other calls to the actor may run at this 'await'", aw),
+                                            Note("help", help_)])
+        self.out.append(w)
+
+
+def _self_field(e) -> str | None:
+    """The field of `self` a place starts from (`stock` of `self.stock[0].n`)."""
+    while isinstance(e, (ast.FieldAccess, ast.Index)):
+        if isinstance(e, ast.FieldAccess) and isinstance(e.target, ast.Name) and e.target.ident == "self":
+            return e.field_name
+        e = e.target
+    return None
+
+
 def _did_you_mean(name: str, candidates) -> list[Note]:
     """A help line naming the candidate closest to `name`, if one is within a
     third of its length in edits (so none for names under three bytes, where
@@ -805,6 +994,8 @@ class Checker:
         # being checked is async; the actor whose method is being checked (its
         # `self` reaches the actor's fields); the calls under an `await`, by id
         self.actors: set[str] = set()
+        # D95: the warnings found, in the order found (CheckWarning)
+        self.warnings: list = []
         # the first construct of concurrency met, which the interpreters and
         # backends don't run yet ([[MYLA-136]]); None: none
         self.concurrency_at: ast.Node | None = None
@@ -922,6 +1113,8 @@ class Checker:
             first = self._errors[0]
             first.more = self._errors[1:]
             raise first
+        # in the order of their places, as the self-hosted checker gives them
+        self.warnings.sort(key=lambda w: (w.line or 0, w.column or 0))
         return self
 
     def _on_its_own(self, decl: ast.Decl, check) -> None:
@@ -2165,6 +2358,12 @@ class Checker:
                     f"'{type_name(sig.ret)}'",
                     at=decl,
                 )
+            # an actor's async method: its state changed after an `await`
+            # on the strength of what was read before it (D95, MYLA-146)
+            if decl.is_async and self._actor_self is not None:
+                for w in _Reentrancy().scan(decl.body):
+                    w.path = self._fun_path
+                    self.warnings.append(w)
         finally:
             self._type_params = frozenset()
             self._type_param_bounds = {}

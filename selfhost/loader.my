@@ -78,6 +78,19 @@ pub fun type_errors(prog: Loaded, errs: [CheckErr]) -> Report {
     return chain(rs)
 }
 
+// The warnings `ws` of the linked program `prog` (D95), each in its
+// declaration's file, as reports of their own.
+pub fun warning_reports(prog: Loaded, ws: [CheckErr]) -> [Report] {
+    var rs: [Report] = []
+    for w in ws {
+        var r = type_report(w.line, w.col, w.sp, w.msg, file_of(prog, w.decl))
+        r.kind = "warning"
+        r.notes = w.notes
+        push(rs, r)
+    }
+    return rs
+}
+
 // How to load a program: the stdlib root ("" for none); the packages, each a
 // name and its directory (the project tool passes a package's `src/`); the
 // project root, the base of imports without dots ("" for the entry file's

@@ -30,7 +30,7 @@ import tempfile
 import unittest
 
 from myla.ast import ImportDecl
-from myla.canon import canonical_errors
+from myla.canon import canonical_errors, canonical_warning
 from myla.errors import MylaError
 from myla.interpreter import Interpreter
 from myla.lexer import tokenize
@@ -306,6 +306,18 @@ TYPE_ERRORS: dict[str, str] = {
                                      "    fun g(self) -> int {\n        return self.f()\n    }\n}\nfun main() {}\n"),
 }
 
+# D95 (MYLA-146): the reentrancy warnings of actors' async methods, which
+# both checkers give alike, the program still checking (and none where the
+# idioms re-check after the `await` or reserve before it)
+WARNINGS: dict[str, str] = {
+    'warn_reentrancy_stale_check': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun buy(var self, p: Pay) -> bool {\n        if self.stock == 0 {\n            return false\n        }\n        let paid = await p.charge()\n        self.stock = self.stock - 1\n        return true\n    }\n}\n',
+    'warn_reentrancy_recheck_is_quiet': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun buy(var self, p: Pay) -> bool {\n        if self.stock == 0 {\n            return false\n        }\n        let paid = await p.charge()\n        if self.stock > 0 {\n            self.stock = self.stock - 1\n            return true\n        }\n        return false\n    }\n}\n',
+    'warn_reentrancy_reserve_is_quiet': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun buy(var self, p: Pay) -> bool {\n        if self.stock == 0 {\n            return false\n        }\n        self.stock = self.stock - 1\n        let paid = await p.charge()\n        if !paid {\n            self.stock = self.stock + 1\n        }\n        return paid\n    }\n}\n',
+    'warn_reentrancy_stale_value': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun restock(var self, p: Pay) {\n        let s = self.stock\n        let paid = await p.charge()\n        self.stock = s + 10\n    }\n}\n',
+    'warn_reentrancy_push_and_loop': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n    sold: [str],\n    m: [str: int],\n}\nimpl Inv {\n    async fun record(var self, p: Pay, who: str) {\n        if len(self.sold) < 10 {\n            let paid = await p.charge()\n            push(self.sold, who)\n        }\n        let n = ["k": self.stock]\n        let again = await p.charge()\n        self.m = n\n    }\n    async fun drain(var self, p: Pay) {\n        while self.stock > 0 {\n            let paid = await p.charge()\n            self.stock = self.stock - 1\n        }\n    }\n}\n',
+    'warn_reentrancy_match_and_lambda': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: Option<int>,\n    hits: int,\n}\nimpl Inv {\n    async fun take(var self, p: Pay) -> int {\n        let f = () => { return 1 }\n        match self.stock {\n            Some(n) => {\n                let paid = await p.charge()\n                self.stock = Some(n - f())\n            },\n            None => {},\n        }\n        let x = await p.charge()\n        self.hits = self.hits + 1\n        return self.hits\n    }\n}\n',
+}
+
 
 def _corpus() -> list[str]:
     """Every single-file .my source the checker gate covers: the top-level
@@ -336,12 +348,17 @@ def _snippets() -> dict[str, str]:
     return cases
 
 
+def _ok(checker) -> str:
+    """`ok` after the checker's warnings (D95), as check_main prints them."""
+    return "\n".join([canonical_warning(w) for w in checker.warnings] + ["ok"])
+
+
 def _oracle_source(source: str) -> str:
     try:
-        check(parse(tokenize(source)))
+        checker = check(parse(tokenize(source)))
     except MylaError as err:
         return _canonical(err)
-    return "ok"
+    return _ok(checker)
 
 
 def _oracle(path: str) -> str | None:
@@ -357,13 +374,13 @@ def _oracle(path: str) -> str | None:
     if any(isinstance(d, ImportDecl) for d in program.decls):
         return None  # import-driven: the self-hosted check_main has no loader
     try:
-        check(link(path, stdlib_root=default_stdlib_root()))
+        checker = check(link(path, stdlib_root=default_stdlib_root()))
     except MylaError as err:
         kind = err.kind.split()[0]
         if kind != "type":
             return None  # only the `type` diagnostic class is in scope
         return _canonical(err)
-    return "ok"
+    return _ok(checker)
 
 
 def _check_file(path: str):
@@ -414,6 +431,18 @@ class SelfHostedCheckerParity(unittest.TestCase):
                 with self.subTest(case=name):
                     expected = _oracle_source(source)
                     self.assertIn(" type: ", expected, "not a type error in Python")
+                    path = os.path.join(tmp, name + ".my")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(source)
+                    self.assertEqual(self._myla_check(path), expected)
+
+    def test_warnings_match_the_oracle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, source in WARNINGS.items():
+                with self.subTest(case=name):
+                    expected = _oracle_source(source)
+                    self.assertTrue(expected.endswith("ok"), expected)
+                    self.assertEqual("warn " in expected, "quiet" not in name, expected)
                     path = os.path.join(tmp, name + ".my")
                     with open(path, "w", encoding="utf-8") as fh:
                         fh.write(source)

@@ -81,6 +81,12 @@ def canonical_error(err) -> str:
     return out
 
 
+def canonical_warning(w) -> str:
+    """A warning as the self-hosted drivers print it (D95): its
+    `canonical_error` line with `warn` for `err`, then its notes."""
+    return "warn" + canonical_error(w)[3:]
+
+
 def canonical_note(n) -> str:
     """A note on an error as the self-hosted drivers print it, after the error
     (MYLA-65): `<label> <line> <col> <span>: <message>`, `-` for a missing

@@ -64,8 +64,60 @@ class _Layout(unittest.TestCase):
         return subprocess.run([self.myla, *argv], cwd=self.work, capture_output=True, text=True)
 
 
+# An actor method changing its state after an `await` on the strength of a
+# check made before it: a warning (D95, MYLA-146), and the program runs.
+WARNED = """\
+actor Pay {
+    n: int,
+}
+
+impl Pay {
+    fun charge(var self) -> bool {
+        self.n = self.n + 1
+        return true
+    }
+}
+
+actor Inv {
+    stock: int,
+}
+
+impl Inv {
+    async fun buy(var self, p: Pay) -> bool {
+        if self.stock == 0 {
+            return false
+        }
+        let paid = await p.charge()
+        self.stock = self.stock - 1
+        return true
+    }
+}
+
+async fun main() {
+    let inv = Inv { stock: 1 }
+    print(await inv.buy(Pay { n: 0 }))
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedCli(_Layout):
+    def test_warnings_are_printed_and_the_program_runs(self):
+        # D95: both CLIs print the warning on stderr, then run the program
+        with open(os.path.join(self.work, "warned.my"), "w", encoding="utf-8") as fh:
+            fh.write(WARNED)
+        for command in ("run", "check"):
+            with self.subTest(command=command):
+                mine = self.myla_cmd(command, "warned.my")
+                python = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), command, "warned.my"],
+                                        cwd=self.work, capture_output=True, text=True)
+                self.assertEqual((mine.stdout, mine.stderr, mine.returncode),
+                                 (python.stdout, python.stderr, python.returncode))
+                self.assertEqual(mine.returncode, 0)
+                self.assertIn("warning: 'self.stock' was checked before an 'await'", mine.stderr)
+                self.assertIn("note: other calls to the actor may run at this 'await'", mine.stderr)
+        self.assertEqual(self.myla_cmd("run", "warned.my").stdout, "true\n")
+
     def test_run_finds_the_stdlib_and_passes_arguments(self):
         proc = self.myla_cmd("run", "prog.my", "a", "b c")
         self.assertEqual((proc.stdout, proc.stderr, proc.returncode),

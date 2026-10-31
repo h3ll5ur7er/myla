@@ -12,7 +12,7 @@
 from std.io import stdin
 from std.json import Json, field
 from std.fs import read_to_string
-from ...selfhost.loader import load_program_opts, normalize, type_errors
+from ...selfhost.loader import load_program_opts, normalize, type_errors, warning_reports
 from ...selfhost.diag import Report, all_reports, caret_range
 from ...selfhost.checker import build_checker_decls
 from ...selfhost.tokens import SrcSpan
@@ -191,11 +191,13 @@ impl Server {
         let ctx = self.context(path)
         let overrides = ctx.opts.overrides
         var found: Option<Report> = None
+        // the warnings of a program that checks (D95)
+        var warned: [Report] = []
         match load_program_opts(path, ctx.opts) {
             Err(r) => { found = Some(r) },
             Ok(prog) => {
                 match build_checker_decls(prog.decls, prog.next_id) {
-                    Ok(c) => {},
+                    Ok(c) => { warned = warning_reports(prog, c.warnings) },
                     Err(errs) => { found = Some(type_errors(prog, errs)) },
                 }
             },
@@ -227,6 +229,16 @@ impl Server {
                 }
             },
             None => {},
+        }
+        for r in warned {
+            let target = self.uri_of(r.path, path, uri)
+            var group: [Json] = []
+            match get(groups, target) {
+                Some(g) => { group = g },
+                None => {},
+            }
+            push(group, diagnostic(r, file_text(r.path, overrides), target))
+            groups[target] = group
         }
         // a problem of the project (MYLA-97): a manifest that doesn't load
         // (the document was checked alone), a dependency not checked out
@@ -663,7 +675,10 @@ fun diagnostic(r: Report, text: str, uri: str) -> Json {
             msg = msg + "\n" + n.label + ": " + n.msg
         }
     }
-    var fields = [("range", text_range(lines, r.line, r.col, r.sp)), ("message", Json.Str(msg)), ("severity", Json.Int(1)),
+    // an error 1, a warning 2 (D95)
+    var severity: int64 = 1
+    if r.kind == "warning" { severity = 2 }
+    var fields = [("range", text_range(lines, r.line, r.col, r.sp)), ("message", Json.Str(msg)), ("severity", Json.Int(severity)),
                   ("source", Json.Str("myla")), ("code", Json.Str(kind_code(r.kind)))]
     if len(related) > 0 { push(fields, ("relatedInformation", Json.Array(related))) }
     return Json.Object(fields)
