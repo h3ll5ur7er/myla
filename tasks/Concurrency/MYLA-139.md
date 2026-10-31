@@ -18,3 +18,8 @@ Stage 1 runs every program whose tasks needn't make progress side by side: what 
 ## Found on the way
 
 - A `?` in an `async let`'s initializer made the Python interpreter's parent return from its `await` with the child's value; it is a checker error now in both checkers ("'?' can't stand in an 'async let'…", `examples/errors/type_try_in_async_let.my`).
+
+## Evidence (stage 1)
+
+- `CONCURRENCY_PROGRAMS` (13 programs: awaited calls and values, an async method, `async let` results, scopes waiting for children, copies, an awaited and an unawaited child failing, `exit` in a child, an actor counter, copies in and out of an actor, reentrancy and two actors calling each other, `task.all`) and `examples/concurrency.my` print, fail and exit as in the Python CLI; before, the self-hosted interpreter refused every one of them.
+- Unit 621, integration 2, burn 790 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,407,346 bytes).
