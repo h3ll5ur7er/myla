@@ -16,6 +16,7 @@ ever waits holding an actor.
 """
 from __future__ import annotations
 
+import sys
 import threading
 from dataclasses import dataclass
 
@@ -344,6 +345,18 @@ class TestResult:
     detail: str
 
 
+# Python's default recursion limit (1000) is a few dozen Myla calls deep, since
+# every Myla call takes several evaluator frames. Pure-Python recursion lives on
+# the heap since Python 3.12, so a far higher limit is safe; a program that still
+# exhausts it is reported as a runtime error instead of a traceback.
+_RECURSION_LIMIT = 100_000
+
+
+def _deep_stack() -> None:
+    if sys.getrecursionlimit() < _RECURSION_LIMIT:
+        sys.setrecursionlimit(_RECURSION_LIMIT)
+
+
 class Interpreter:
     def __init__(self, checker: Checker, out=None, err=None, argv=None, stdin=None):
         self.checker = checker
@@ -382,13 +395,17 @@ class Interpreter:
         completion, or the code passed to `std.process.exit`)."""
         if self.checker.entry is None:
             raise MylaRuntimeError("no entry point: define '#main' or a function named 'main'")
+        _deep_stack()
         try:
             self._call(self.checker.entry, [])
         except _ExitSignal as sig:
             return sig.code
+        except RecursionError:
+            raise MylaRuntimeError("stack overflow") from None
         return 0
 
     def run_tests(self) -> list[TestResult]:
+        _deep_stack()
         results: list[TestResult] = []
         for decl in self.checker.program.decls:
             if not isinstance(decl, ast.FunDecl):

@@ -49,8 +49,11 @@ pub fun field(j: Json, key: str) -> Option<Json> {
 
 // --- Parsing ------------------------------------------------------------------
 
-// How deeply arrays and objects may nest.
-const MAX_DEPTH: int32 = 500
+// How deeply arrays and objects may nest. The parser recurses once per
+// level, and the interpreters run it on their own stack: the self-hosted
+// interpreter's frames are large (it dies at about 300 levels), so the limit
+// is what every implementation survives, not what native code could take.
+const MAX_DEPTH: int32 = 200
 
 struct Parser {
     s: str,
