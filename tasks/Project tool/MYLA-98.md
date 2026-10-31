@@ -2,7 +2,7 @@
 id: MYLA-98
 title: std.fs.current_dir and the __getcwd primitive
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, runtime, selfhost]
 ---

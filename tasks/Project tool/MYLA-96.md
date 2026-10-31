@@ -2,7 +2,7 @@
 id: MYLA-96
 title: Remove and rename files and directories in std.fs
 type: feature
-status: review
+status: done
 priority: low
 labels: [stdlib, runtime, selfhost]
 ---

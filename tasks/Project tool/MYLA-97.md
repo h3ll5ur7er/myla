@@ -2,7 +2,7 @@
 id: MYLA-97
 title: Language server - list files with list_dir and resolve into packages
 type: improvement
-status: review
+status: done
 priority: low
 labels: [lsp, tooling]
 ---

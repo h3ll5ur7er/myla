@@ -2,7 +2,7 @@
 id: MYLA-95
 title: Git dependencies and myla fetch
 type: feature
-status: review
+status: done
 priority: medium
 labels: [tooling, cli, selfhost]
 ---
