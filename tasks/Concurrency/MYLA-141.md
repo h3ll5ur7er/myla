@@ -21,3 +21,4 @@ A frame function's one argument is its frame, in the argument word at `16(%rbp)`
 - Before: at a line of an async function of a program with tasks, gdb printed `No arguments.` and `No locals.` (the frame line `myla_greet ()`).
 - After (`test_async_functions_show_their_variables`, one worker): the frame line reads `myla_greet (name=..., times=3)`; `info args` shows `name = "bo"`, `times = 3`; `info locals` shows `label = "bo!"`, `words = ["hi", "bo"]` (with the pretty-printers), `count = 6`; in `main` after `let r = await a`, `r = 9` and `print r + 1` gives 10; in the async lambda its captures `r = 9`, `base = 40`; no `%` name anywhere.
 - The 32 debug-information tests of both backends pass.
+- Unit 621, integration 2, burn 797 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,966,163 bytes).
