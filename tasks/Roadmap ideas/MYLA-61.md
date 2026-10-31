@@ -2,7 +2,7 @@
 id: MYLA-61
 title: Actors and structured concurrency, Swift style
 type: feature
-status: backlog
+status: in-progress
 priority: medium
 labels: [concurrency, language, design]
 ---
@@ -61,6 +61,39 @@ The design is made in and for the toolchains we have: the Python interpreter (th
 - `async fun` marks a function that may suspend; calling one requires `await`, and only an async function (or a task) can `await`. A synchronous function can't call an async one (no blocking wait in the first version). An actor's methods are async from outside and sync among themselves on `self`.
 - `#main async fun main()` (or a `main` that awaits) runs as the root task; the program ends when it does, and structured tasks guarantee nothing is left running.
 
+### Chosen so far
+
+1. **Stackless** (1b): `async` functions become state machines with heap frames.
+2. **Multi-threaded** (2b): tasks and actors run in parallel on a pool of OS threads.
+3. **`async let` and task groups** (3a).
+4. **Reentrant actors** (option 4).
+
+What this entails:
+
+- **The IR** (D85's pressure point "slots live in the frame"): an async function's slots move to a heap frame, its suspension points become ends of blocks with a resumption entry, and it gets a calling convention of its own. Either a lowering turns its slots into members of a heap object (today's instructions, but the verifier and the allocator no longer see them as slots) or slots get a new home. That needs a decision of its own under D85.
+- **Reference counts and the heap across threads** (D85's "one thread"): two tasks running at once must never touch the same count non-atomically, and the arena and free lists are global today. See question 6.
+- **The runtime:** OS threads via `clone` without libc, `futex` to park and wake, a run queue (work stealing later), an actor's mailbox and its "running" flag, one thread per CPU (`sched_getaffinity`). Each `print` writes its line with one `write`, so lines don't interleave.
+- **Output order isn't defined** between tasks running at once. Parity programs stay deterministic by what they print: results joined in order, actors' state read after the tasks end.
+- **The interpreters:** the Python interpreter can run each task on a Python thread (the GIL serialises them, but the semantics don't promise an order anyway). The self-hosted interpreter has to suspend an interpreted task in the middle of a tree walk. See question 7.
+
+### Questions this raises
+
+6. **Sharing across threads:**
+   - (a) Deep copy at every crossing (actor arguments and results, a child task's captures and result): no count is shared between threads, counts stay plain, and each thread gets its own arena and free lists. Copying is O(size) per crossing.
+   - (b) Atomic counts everywhere: simple, but every retain and drop pays a locked instruction.
+   - (c) Atomic only for cells marked shared when they cross: cheaper, but the most complex.
+7. **The self-hosted interpreter:**
+   - (a) Its evaluator becomes `async` (heap frames on every recursion, so slower).
+   - (b) It keeps an explicit stack of its own per interpreted task.
+   - (c) It runs each interpreted task on a native thread with a baton, through a primitive only the interpreters use (as the Python interpreter does).
+8. **Phasing:**
+   - (a) Semantics first: the language, both checkers and the Python interpreter, then the native runtime (threads, heaps, executor), then the stackless lowering.
+   - (b) Native single-threaded stackless first, then threads.
+
+### Decided (D89)
+
+6a (deep copy at crossings), 7: closest to Swift with a low overhead (a synchronous tree walker as today, plus an async evaluator only for what lies on the path to an `await`), 8a (semantics first). The work is split into [[MYLA-135]] (the language and both checkers), [[MYLA-136]] (the Python interpreter), [[MYLA-137]] (the native runtime), [[MYLA-138]] (the stackless lowering) and [[MYLA-139]] (the self-hosted interpreter).
+
 ### Order of work, once decided
 
 D89 recorded with the Language pages; the Python interpreter (the semantics, with parity programs and the error corpus for isolation and sendability); the Python checker and the self-hosted checker; the self-hosted interpreter; the runtime's stacks and scheduler in both native backends.
@@ -74,5 +107,6 @@ D89 recorded with the Language pages; the Python interpreter (the semantics, wit
 
 ## Done when
 
-- [ ] A design recorded as a decision on [[Project/Decisions]], prototyped in the Python toolchain's interpreter first (the semantics), then the native backend
+- [x] A design recorded as a decision on [[Project/Decisions]] (D89)
+- [ ] Prototyped in the Python toolchain's interpreter first (the semantics, [[MYLA-136]]), then the native backends ([[MYLA-137]], [[MYLA-138]])
 - [ ] Examples and parity tests, including the deadlock and send-safety cases
