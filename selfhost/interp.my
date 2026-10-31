@@ -114,8 +114,9 @@ struct AFrame { scopes: [RtFrame], conts: [Cont], place: Option<Place>, pend: Ct
 // its result or failure (a runtime error, or an `exit` with `code`), which
 // ends the program at once (D97, `failing`); `awaited`: it was asked for;
 // `waiters`: the tasks waiting for it. `cancelled`: a failure cancelled it
-// (D94, D97), so it stops when it next runs (after a suspension); `kids`: its child tasks, cancelled with
-// it; `requested`: `task.cancel` asked it, or a task above it, to stop (D96).
+// (D94, D97), so it stops when it next runs (after a suspension); `kids`:
+// its child tasks, cancelled with it; `requested`: `task.cancel` asked it,
+// or a task above it, to stop (D96).
 struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: Option<RtError>, code: int32, awaited: bool, waiters: [int32], cancelled: bool, kids: [int32], requested: bool }
 
 // A call whose async body the async evaluator takes over (Interp.defer).
