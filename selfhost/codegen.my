@@ -1919,8 +1919,10 @@ impl CodeGen {
             push(out, "\t.skip 8")
             push(out, "__exec_tail:")
             push(out, "\t.skip 8")
-            push(out, "__tls_main:")
-            push(out, format("\t.skip {}", TLS_SIZE))
+            push(out, "__tls_blocks:")
+            push(out, format("\t.skip {}", TLS_SIZE * MAX_WORKERS))
+            push(out, "__heap_base:")
+            push(out, "\t.skip 8")
             push(out, "__exec_main:")
             push(out, "\t.skip 8")
             push(out, "__exec_queue:")
@@ -1931,6 +1933,40 @@ impl CodeGen {
         push(out, "\t.section .note.GNU-stack,\"\",@progbits")
         push(out, "")
         return join_lines(out)
+    }
+
+    // `__alloc`'s way back from its bump with the cells other workers freed:
+    // the whole list taken at once, each cell onto this worker's free list,
+    // then the allocation again (with tasks, D92).
+    fun emit_heap_remote(var self) {
+        self.raw(".Lalloc_drain:")
+        self.raw("\tpushq %rdi")
+        self.raw("\txorl %eax, %eax")
+        self.raw(format("\txchgq %rax, {}", self.tv("__remote_free")))
+        self.raw(".Ldrain_next:")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Ldrain_done")
+        self.raw("\tmovq %rax, %rsi")
+        self.raw("\tmovq (%rsi), %rax")
+        self.raw("\tmovq -16(%rsi), %rcx")
+        self.raw("\tcmpq $4096, %rcx")
+        self.raw("\tja .Ldrain_large")
+        self.tls_addr("__free_buckets", 0, "r8")
+        self.raw("\taddq %rcx, %r8")
+        self.raw("\tjmp .Ldrain_push")
+        self.raw(".Ldrain_large:")
+        self.raw("\tbsrq %rcx, %rcx")
+        self.tls_addr("__free_buckets", 4104, "r8")
+        self.raw("\tleaq (%r8,%rcx,8), %r8")
+        self.raw(".Ldrain_push:")
+        self.raw("\tmovq (%r8), %rcx")
+        self.raw("\tmovq %rcx, (%rsi)")
+        self.raw("\tmovq %rsi, (%r8)")
+        self.raw("\tjmp .Ldrain_next")
+        self.raw(".Ldrain_done:")
+        self.raw("\tpopq %rdi")
+        self.raw("\tjmp .Lalloc_ready")
+        self.raw("")
     }
 
     // -- deep copies (D92, MYLA-137) -----------------------------------------
@@ -3492,13 +3528,26 @@ impl CodeGen {
         self.raw("\t.global _start")
         self.raw("_start:")
         if self.frames {
-            // the main thread's state block: arch_prctl(ARCH_SET_FS, block),
-            // its first word its own address
-            self.raw("\tleaq __tls_main(%rip), %rsi")
+            // the main thread's state block, worker 0's: arch_prctl(
+            // ARCH_SET_FS, block), its first word its own address
+            self.raw("\tleaq __tls_blocks(%rip), %rsi")
             self.raw("\tmovq %rsi, (%rsi)")
             self.raw("\tmovq $4098, %rdi")
             self.raw("\tmovq $158, %rax")
             self.raw("\tsyscall")
+            // the heap region, an arena per worker, reserved (MAP_NORESERVE)
+            self.raw("\tmovq $9, %rax")
+            self.raw("\txorq %rdi, %rdi")
+            // MAX_WORKERS (32) arenas of 4 GiB
+            self.raw("\tmovabsq $137438953472, %rsi")
+            self.raw("\tmovq $3, %rdx")
+            self.raw("\tmovq $16418, %r10")
+            self.raw("\tmovq $-1, %r8")
+            self.raw("\txorq %r9, %r9")
+            self.raw("\tsyscall")
+            self.raw("\tcmpq $-4096, %rax")
+            self.raw("\tja __trap_oom")
+            self.raw("\tmovq %rax, __heap_base(%rip)")
         }
         self.raw("\tmovq (%rsp), %rax")
         self.raw("\tmovq %rax, __argc(%rip)")
@@ -3906,24 +3955,38 @@ impl CodeGen {
         self.raw("\tret")
         self.raw("")
         self.raw("__heap_init:")
-        self.raw("\tpushq %rdi")
-        self.raw("\tmovq $9, %rax")
-        self.raw("\txorq %rdi, %rdi")
-        self.raw("\tmovabsq $4294967296, %rsi")
-        self.raw("\tmovq $3, %rdx")
-        self.raw("\tmovq $34, %r10")
-        self.raw("\tmovq $-1, %r8")
-        self.raw("\txorq %r9, %r9")
-        self.raw("\tsyscall")
-        self.raw("\tcmpq $-4096, %rax")
-        self.raw("\tja __trap_oom")
-        self.raw(format("\tmovq %rax, {}", self.tv("__heap_ptr")))
-        self.raw("\tmovabsq $4294967296, %rcx")
-        self.raw("\taddq %rcx, %rax")
-        self.raw(format("\tmovq %rax, {}", self.tv("__heap_end")))
-        self.raw("\tpopq %rdi")
-        self.raw("\tret")
-        self.raw("")
+        if self.frames {
+            // with tasks: this worker's arena of the region `_start` reserved
+            self.raw(format("\tmovq {}, %rax", self.tv("__worker_id")))
+            self.raw("\tshlq $32, %rax")
+            self.raw("\taddq __heap_base(%rip), %rax")
+            self.raw(format("\tmovq %rax, {}", self.tv("__heap_ptr")))
+            self.raw("\tmovabsq $4294967296, %rcx")
+            self.raw("\taddq %rcx, %rax")
+            self.raw(format("\tmovq %rax, {}", self.tv("__heap_end")))
+            self.raw("\tret")
+            self.raw("")
+            self.emit_heap_remote()
+        } else {
+            self.raw("\tpushq %rdi")
+            self.raw("\tmovq $9, %rax")
+            self.raw("\txorq %rdi, %rdi")
+            self.raw("\tmovabsq $4294967296, %rsi")
+            self.raw("\tmovq $3, %rdx")
+            self.raw("\tmovq $34, %r10")
+            self.raw("\tmovq $-1, %r8")
+            self.raw("\txorq %r9, %r9")
+            self.raw("\tsyscall")
+            self.raw("\tcmpq $-4096, %rax")
+            self.raw("\tja __trap_oom")
+            self.raw(format("\tmovq %rax, {}", self.tv("__heap_ptr")))
+            self.raw("\tmovabsq $4294967296, %rcx")
+            self.raw("\taddq %rcx, %rax")
+            self.raw(format("\tmovq %rax, {}", self.tv("__heap_end")))
+            self.raw("\tpopq %rdi")
+            self.raw("\tret")
+            self.raw("")
+        }
         self.raw("__alloc:")
         self.raw("\taddq $7, %rdi")
         self.raw("\tandq $-8, %rdi")
@@ -3959,6 +4022,11 @@ impl CodeGen {
         self.raw("\tmovq %rsi, %rax")
         self.raw("\tret")
         self.raw(".Lalloc_bump:")
+        if self.frames {
+            // cells other workers freed come back first
+            self.raw(format("\tcmpq $0, {}", self.tv("__remote_free")))
+            self.raw("\tjne .Lalloc_drain")
+        }
         self.raw(format("\tmovq {}, %rax", self.tv("__heap_ptr")))
         self.raw("\tleaq 16(%rax,%rdi), %rcx")
         self.raw(format("\tcmpq {}, %rcx", self.tv("__heap_end")))
@@ -3975,6 +4043,14 @@ impl CodeGen {
         self.raw("\tpushq %rsi")
         self.raw("\tpushq %r8")
         self.raw("\tpushq %rcx")
+        if self.frames {
+            // another worker's cell goes back to it (D92)
+            self.raw("\tmovq %rdi, %rax")
+            self.raw("\tsubq __heap_base(%rip), %rax")
+            self.raw("\tshrq $32, %rax")
+            self.raw(format("\tcmpq {}, %rax", self.tv("__worker_id")))
+            self.raw("\tjne .Lfree_remote")
+        }
         self.raw("\tmovq -16(%rdi), %rsi")
         self.raw("\tcmpq $4096, %rsi")
         self.raw("\tja .Lfree_large")
@@ -3989,6 +4065,19 @@ impl CodeGen {
         self.raw("\tmovq (%r8,%rcx,8), %rax")
         self.raw("\tmovq %rax, (%rdi)")
         self.raw("\tmovq %rdi, (%r8,%rcx,8)")
+        if self.frames {
+            self.raw("\tjmp .Lfree_done")
+            // pushed onto the owner's list of cells freed elsewhere
+            self.raw(".Lfree_remote:")
+            self.raw(format("\timulq ${}, %rax", TLS_SIZE))
+            self.raw("\tleaq __tls_blocks(%rip), %rcx")
+            self.raw(format("\tleaq {}(%rcx,%rax), %r8", tls_offset("__remote_free")))
+            self.raw(".Lfree_retry:")
+            self.raw("\tmovq (%r8), %rax")
+            self.raw("\tmovq %rax, (%rdi)")
+            self.raw("\tlock cmpxchgq %rdi, (%r8)")
+            self.raw("\tjne .Lfree_retry")
+        }
         self.raw(".Lfree_done:")
         self.raw("\tpopq %rcx")
         self.raw("\tpopq %r8")
@@ -6808,11 +6897,17 @@ fun tls_offset(sym: str) -> int32 {
     if sym == "__run_signal_val" { return 64 }
     if sym == "__run_errno_val" { return 72 }
     if sym == "__actor_held" { return 80 }
+    if sym == "__worker_id" { return 88 }
+    if sym == "__remote_free" { return 96 }
     if sym == "__free_buckets" { return 128 }
     return 0
 }
 
 const TLS_SIZE: int32 = 4800
+
+// The most workers a program runs (D92); each has a 4 GiB arena of the heap
+// region, so a cell's address tells whose heap it is.
+const MAX_WORKERS: int32 = 32
 
 pub fun is_tfunc(t: Type) -> bool {
     return match t { Type.TFunc(p, r) => true, Type.TAsync(f) => true, _ => false }
