@@ -1,0 +1,553 @@
+// anf.my — async bodies with each `await` in a statement of its own (D89,
+// MYLA-139), for the self-hosted interpreter's async evaluator.
+//
+// `Norm.block` rewrites the statements of an async function or lambda so that
+// an `await` stands only as `let t = await x`, `x` the name of an `async let`
+// or a call whose callee and arguments have no `await`. What is evaluated
+// before an `await` in the same expression is put into a temporary first, so
+// the order of evaluation stays. `&&` and `||` with an `await` on the right
+// become an `if`; a `match` with one in an arm becomes a statement assigning a
+// temporary; a `while` whose condition has one tests it at the top of its
+// body. Temporaries are named `%aw<n>`, which no program can spell; new nodes
+// take fresh ids from `next` and the types of the nodes they stand for.
+
+from .ast import Expr, ExprKind, Stmt, StmtKind, Block, ElseTail, ExprOrBlock, MatchArm, FieldInit, MapEntry
+from .checker import Type
+
+pub struct Norm { next: int32, resolved: [int32: Type], out: [Stmt], temps: int32 }
+
+pub fun new_norm(next: int32) -> Norm {
+    return Norm { next: next, resolved: [:], out: [], temps: 0 }
+}
+
+// -- what can suspend -------------------------------------------------------
+
+// Whether `e` has an `await` outside the lambdas in it.
+pub fun has_await(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Await(x) => true,
+        ExprKind.Unary(op, x) => has_await(x),
+        ExprKind.Binary(op, l, r) => has_await(l) || has_await(r),
+        ExprKind.Call(c, args) => has_await(c) || any_await(args),
+        ExprKind.GetField(t, f) => has_await(t),
+        ExprKind.StructLit(n, fs) => fields_await(fs),
+        ExprKind.TupleLit(es) => any_await(es),
+        ExprKind.TupleIndex(t, i) => has_await(t),
+        ExprKind.ListLit(es) => any_await(es),
+        ExprKind.MapLit(ents) => entries_await(ents),
+        ExprKind.Index(t, i) => has_await(t) || has_await(i),
+        ExprKind.MatchE(s, arms) => has_await(s) || arms_await(arms),
+        ExprKind.Try(x) => has_await(x),
+        ExprKind.Cast(x, t) => has_await(x),
+        _ => false,
+    }
+}
+
+fun any_await(es: [Expr]) -> bool {
+    for e in es { if has_await(e) { return true } }
+    return false
+}
+
+fun opt_await(e: Option<Expr>) -> bool {
+    return match e { Some(x) => has_await(x), None => false }
+}
+
+fun fields_await(fs: [FieldInit]) -> bool {
+    for f in fs { if has_await(f.value) { return true } }
+    return false
+}
+
+fun entries_await(ents: [MapEntry]) -> bool {
+    for en in ents { if has_await(en.key) || has_await(en.value) { return true } }
+    return false
+}
+
+fun arms_await(arms: [MatchArm]) -> bool {
+    for arm in arms {
+        if opt_await(arm.guard) || body_suspends(arm.body) { return true }
+    }
+    return false
+}
+
+pub fun body_suspends(b: ExprOrBlock) -> bool {
+    return match b {
+        ExprOrBlock.EB_Expr(e) => has_await(e),
+        ExprOrBlock.EB_Block(bl) => block_suspends(bl),
+    }
+}
+
+// Whether a block, or a statement, has an `await` or an `async let` outside
+// its lambdas: what the async evaluator runs.
+pub fun block_suspends(b: Block) -> bool {
+    for s in b.stmts { if stmt_suspends(s) { return true } }
+    return false
+}
+
+pub fun stmt_suspends(s: Stmt) -> bool {
+    return match s.kind {
+        StmtKind.VarDecl(kind, n, t, init) => kind == "async" || has_await(init),
+        StmtKind.DestructDecl(k, b, t, init) => has_await(init),
+        StmtKind.Assign(t, v) => has_await(t) || has_await(v),
+        StmtKind.IfS(c, th, el) => has_await(c) || block_suspends(th) || else_suspends(el),
+        StmtKind.WhileS(c, b) => has_await(c) || block_suspends(b),
+        StmtKind.ForS(v, st, en, b, it) => opt_await(st) || opt_await(en) || opt_await(it) || block_suspends(b),
+        StmtKind.ReturnS(v, t) => opt_await(v),
+        StmtKind.ExprStmt(e) => has_await(e),
+        _ => false,
+    }
+}
+
+fun else_suspends(el: Option<ElseTail>) -> bool {
+    return match el {
+        Some(et) => match et {
+            ElseTail.ElseBlock(b) => block_suspends(b),
+            ElseTail.ElseIf(s) => stmt_suspends(s),
+        },
+        None => false,
+    }
+}
+
+// A literal or a name: reading it later gives what reading it now would.
+fun is_simple(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.IntLit(v, s, c, b) => true,
+        ExprKind.FloatLit(l, s) => true,
+        ExprKind.StrLit(s) => true,
+        ExprKind.BoolLit(b) => true,
+        ExprKind.Name(n) => true,
+        ExprKind.Hole => true,
+        _ => false,
+    }
+}
+
+// A variable or a part of one: what a `var self` method changes in place.
+fun is_place(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Name(n) => true,
+        ExprKind.GetField(t, f) => is_place(t),
+        ExprKind.Index(t, i) => is_place(t) && is_simple(i),
+        _ => false,
+    }
+}
+
+fun with_kind(like: Expr, kind: ExprKind) -> Expr {
+    return Expr { id: like.id, line: like.line, col: like.col, sp: like.sp, kind: kind }
+}
+
+
+impl Norm {
+    // -- the rewriting --------------------------------------------------
+
+    // The statements of `b`, each `await` in a `let` of its own.
+    fun block(var self, b: Block) -> Block {
+        let saved = self.out
+        self.out = []
+        for s in b.stmts { self.stmt(s) }
+        let stmts = self.out
+        self.out = saved
+        return Block { line: b.line, col: b.col, sp: b.sp, stmts: stmts }
+    }
+
+    // The body of a lambda, or of an `async let`'s child: `return e`. A child
+    // awaits the call it makes (`awaited`).
+    fun returning(var self, e: Expr, awaited: bool) -> Block {
+        var value = e
+        match e.kind {
+            ExprKind.Call(c, a) => {
+                if awaited {
+                    value = self.fresh(e, ExprKind.Await(e))
+                    self.copy_type(e.id, value.id)
+                }
+            },
+            _ => {},
+        }
+        let ret = Stmt { id: self.id(), line: e.line, col: e.col, sp: e.sp, kind: StmtKind.ReturnS(Some(value), false) }
+        return self.block(Block { line: e.line, col: e.col, sp: e.sp, stmts: [ret] })
+    }
+
+    fun stmt(var self, s: Stmt) {
+        if !stmt_suspends(s) {
+            push(self.out, s)
+            return
+        }
+        match s.kind {
+            StmtKind.VarDecl(kind, name, ty, init) => {
+                if kind == "async" {
+                    push(self.out, s)
+                    return
+                }
+                match init.kind {
+                    ExprKind.Await(x) => {
+                        let op = self.await_operand(x)
+                        push(self.out, self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, with_kind(init, ExprKind.Await(op)))))
+                    },
+                    _ => {
+                        let v = self.expr(init)
+                        push(self.out, self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, v)))
+                    },
+                }
+            },
+            StmtKind.DestructDecl(kind, b, ty, init) => {
+                let v = self.expr(init)
+                push(self.out, self.with_stmt(s, StmtKind.DestructDecl(kind, b, ty, v)))
+            },
+            StmtKind.Assign(t, v) => {
+                // the value first, then the target's indices, as evaluated
+                let v2 = self.expr(v)
+                let t2 = self.place(t)
+                push(self.out, self.with_stmt(s, StmtKind.Assign(t2, v2)))
+            },
+            StmtKind.IfS(c, th, el) => {
+                let c2 = self.expr(c)
+                let th2 = self.block(th)
+                let el2 = self.else_tail(el)
+                push(self.out, self.with_stmt(s, StmtKind.IfS(c2, th2, el2)))
+            },
+            StmtKind.WhileS(c, b) => {
+                if !has_await(c) {
+                    push(self.out, self.with_stmt(s, StmtKind.WhileS(c, self.block(b))))
+                    return
+                }
+                // `while true { <c>; if !c { break }; body }`
+                let saved = self.out
+                self.out = []
+                let c2 = self.expr(c)
+                let not_c = self.fresh(c, ExprKind.Unary("!", c2))
+                self.copy_type(c.id, not_c.id)
+                let brk = Stmt { id: self.id(), line: c.line, col: c.col, sp: c.sp, kind: StmtKind.BreakS }
+                let stop = Block { line: c.line, col: c.col, sp: c.sp, stmts: [brk] }
+                push(self.out, Stmt { id: self.id(), line: c.line, col: c.col, sp: c.sp, kind: StmtKind.IfS(not_c, stop, None) })
+                for st in b.stmts { self.stmt(st) }
+                let body = self.out
+                self.out = saved
+                let yes = self.fresh(c, ExprKind.BoolLit(true))
+                push(self.out, self.with_stmt(s, StmtKind.WhileS(yes, Block { line: b.line, col: b.col, sp: b.sp, stmts: body })))
+            },
+            StmtKind.ForS(v, st, en, body, it) => {
+                let later_end = opt_await(en) || opt_await(it)
+                var st2 = self.opt_expr(st)
+                if later_end { st2 = self.opt_hoist(st2) }
+                var en2 = self.opt_expr(en)
+                if opt_await(it) { en2 = self.opt_hoist(en2) }
+                let it2 = self.opt_expr(it)
+                let body2 = self.block(body)
+                push(self.out, self.with_stmt(s, StmtKind.ForS(v, st2, en2, body2, it2)))
+            },
+            StmtKind.ReturnS(v, tail) => {
+                let v2 = self.opt_expr(v)
+                push(self.out, self.with_stmt(s, StmtKind.ReturnS(v2, tail)))
+            },
+            StmtKind.ExprStmt(x) => {
+                match x.kind {
+                    ExprKind.Await(op) => {
+                        let op2 = self.await_operand(op)
+                        let name = self.temp_name()
+                        push(self.out, self.with_stmt(s, StmtKind.VarDecl("let", name, None, with_kind(x, ExprKind.Await(op2)))))
+                    },
+                    ExprKind.MatchE(sc, arms) => {
+                        if arms_await(arms) {
+                            self.match_stmt(x, sc, arms, false)
+                        } else {
+                            push(self.out, self.with_stmt(s, StmtKind.ExprStmt(self.expr(x))))
+                        }
+                    },
+                    _ => {
+                        let x2 = self.expr(x)
+                        if !is_simple(x2) { push(self.out, self.with_stmt(s, StmtKind.ExprStmt(x2))) }
+                    },
+                }
+            },
+            _ => { push(self.out, s) },
+        }
+    }
+
+    fun else_tail(var self, el: Option<ElseTail>) -> Option<ElseTail> {
+        return match el {
+            Some(et) => match et {
+                ElseTail.ElseBlock(b) => Some(ElseTail.ElseBlock(self.block(b))),
+                ElseTail.ElseIf(s) => {
+                    if !stmt_suspends(s) { return Some(ElseTail.ElseIf(s)) }
+                    // its condition's statements go first: an `else` block
+                    let saved = self.out
+                    self.out = []
+                    self.stmt(s)
+                    let stmts = self.out
+                    self.out = saved
+                    Some(ElseTail.ElseBlock(Block { line: s.line, col: s.col, sp: s.sp, stmts: stmts }))
+                },
+            },
+            None => None,
+        }
+    }
+
+    // An assignment's target, its indices evaluated after the value.
+    fun place(var self, t: Expr) -> Expr {
+        return match t.kind {
+            ExprKind.GetField(x, f) => with_kind(t, ExprKind.GetField(self.place(x), f)),
+            ExprKind.Index(x, i) => {
+                let x2 = self.place(x)
+                with_kind(t, ExprKind.Index(x2, self.expr(i)))
+            },
+            _ => t,
+        }
+    }
+
+    // `e` without an `await`: the statements it needs go to `out` first.
+    fun expr(var self, e: Expr) -> Expr {
+        if !has_await(e) { return e }
+        return match e.kind {
+            ExprKind.Await(x) => {
+                let op = self.await_operand(x)
+                self.bind(with_kind(e, ExprKind.Await(op)), "let")
+            },
+            ExprKind.Unary(op, x) => with_kind(e, ExprKind.Unary(op, self.expr(x))),
+            ExprKind.Binary(op, l, r) => {
+                if (op == "&&" || op == "||") && has_await(r) { return self.short_circuit(e, op, l, r) }
+                var l2 = self.expr(l)
+                if has_await(r) { l2 = self.hoist(l2) }
+                let r2 = self.expr(r)
+                with_kind(e, ExprKind.Binary(op, l2, r2))
+            },
+            ExprKind.Call(c, args) => {
+                let c2 = self.callee(c, args)
+                with_kind(e, ExprKind.Call(c2, self.seq(args)))
+            },
+            ExprKind.GetField(t, f) => with_kind(e, ExprKind.GetField(self.expr(t), f)),
+            ExprKind.StructLit(n, fs) => {
+                var vals: [Expr] = []
+                for f in fs { push(vals, f.value) }
+                let vs = self.seq(vals)
+                var fs2: [FieldInit] = []
+                var i = 0
+                while i < len(fs) {
+                    push(fs2, FieldInit { line: fs[i].line, col: fs[i].col, sp: fs[i].sp, name: fs[i].name, value: vs[i] })
+                    i = i + 1
+                }
+                with_kind(e, ExprKind.StructLit(n, fs2))
+            },
+            ExprKind.TupleLit(es) => with_kind(e, ExprKind.TupleLit(self.seq(es))),
+            ExprKind.ListLit(es) => with_kind(e, ExprKind.ListLit(self.seq(es))),
+            ExprKind.MapLit(ents) => {
+                var flat: [Expr] = []
+                for en in ents {
+                    push(flat, en.key)
+                    push(flat, en.value)
+                }
+                let fl = self.seq(flat)
+                var ents2: [MapEntry] = []
+                var i = 0
+                while i < len(ents) {
+                    push(ents2, MapEntry { key: fl[2 * i], value: fl[2 * i + 1] })
+                    i = i + 1
+                }
+                with_kind(e, ExprKind.MapLit(ents2))
+            },
+            ExprKind.TupleIndex(t, i) => with_kind(e, ExprKind.TupleIndex(self.expr(t), i)),
+            ExprKind.Index(t, i) => {
+                let parts = self.seq([t, i])
+                with_kind(e, ExprKind.Index(parts[0], parts[1]))
+            },
+            ExprKind.MatchE(s, arms) => {
+                if !arms_await(arms) { return with_kind(e, ExprKind.MatchE(self.expr(s), arms)) }
+                self.match_stmt(e, s, arms, true)
+            },
+            ExprKind.Try(x) => with_kind(e, ExprKind.Try(self.expr(x))),
+            ExprKind.Cast(x, ty) => with_kind(e, ExprKind.Cast(self.expr(x), ty)),
+            _ => e,
+        }
+    }
+
+    fun opt_expr(var self, e: Option<Expr>) -> Option<Expr> {
+        return match e { Some(x) => Some(self.expr(x)), None => None }
+    }
+
+    fun opt_hoist(var self, e: Option<Expr>) -> Option<Expr> {
+        return match e { Some(x) => Some(self.hoist(x)), None => None }
+    }
+
+    // What `await` waits for: a name, or a call whose parts are ready.
+    fun await_operand(var self, x: Expr) -> Expr {
+        return match x.kind {
+            ExprKind.Call(c, args) => {
+                let c2 = self.callee(c, args)
+                with_kind(x, ExprKind.Call(c2, self.seq(args)))
+            },
+            _ => x,
+        }
+    }
+
+    // A call's callee, evaluated before its arguments: hoisted when an
+    // argument has an `await`, but for a variable a method may change in place.
+    fun callee(var self, c: Expr, args: [Expr]) -> Expr {
+        let later = any_await(args)
+        return match c.kind {
+            ExprKind.Name(n) => c,
+            ExprKind.GetField(recv, f) => {
+                var r2 = self.expr(recv)
+                if later && !is_place(r2) { r2 = self.hoist(r2) }
+                with_kind(c, ExprKind.GetField(r2, f))
+            },
+            _ => {
+                var c2 = self.expr(c)
+                if later { c2 = self.hoist(c2) }
+                c2
+            },
+        }
+    }
+
+    // `es` evaluated left to right: those before the last with an `await`
+    // are put into temporaries.
+    fun seq(var self, es: [Expr]) -> [Expr] {
+        var last = -1
+        var i = 0
+        while i < len(es) {
+            if has_await(es[i]) { last = i }
+            i = i + 1
+        }
+        var out: [Expr] = []
+        var j = 0
+        while j < len(es) {
+            if j < last { push(out, self.hoist(self.expr(es[j]))) }
+            else if j == last { push(out, self.expr(es[j])) }
+            else { push(out, es[j]) }
+            j = j + 1
+        }
+        return out
+    }
+
+    // `l && r` (`l || r`) with an `await` in `r`: `var t = l; if t { t = r }`
+    // (`if !t`).
+    fun short_circuit(var self, e: Expr, op: str, l: Expr, r: Expr) -> Expr {
+        let t = self.bind(self.expr(l), "var")
+        let saved = self.out
+        self.out = []
+        let r2 = self.expr(r)
+        push(self.out, Stmt { id: self.id(), line: r.line, col: r.col, sp: r.sp, kind: StmtKind.Assign(t, r2) })
+        let inner = self.out
+        self.out = saved
+        var cond = t
+        if op == "||" {
+            cond = self.fresh(e, ExprKind.Unary("!", t))
+            self.copy_type(t.id, cond.id)
+        }
+        let then = Block { line: r.line, col: r.col, sp: r.sp, stmts: inner }
+        push(self.out, Stmt { id: self.id(), line: e.line, col: e.col, sp: e.sp, kind: StmtKind.IfS(cond, then, None) })
+        return t
+    }
+
+    // A `match` with an `await` in an arm, as a statement; its value (`value`)
+    // in a temporary each arm assigns.
+    fun match_stmt(var self, e: Expr, s: Expr, arms: [MatchArm], value: bool) -> Expr {
+        let s2 = self.expr(s)
+        var result = self.fresh(e, ExprKind.Hole)
+        if value {
+            result = self.bind(result, "var")
+            self.copy_type(e.id, result.id)
+        }
+        var arms2: [MatchArm] = []
+        for arm in arms {
+            let body = self.arm_block(arm.body, result, value)
+            push(arms2, MatchArm { line: arm.line, col: arm.col, sp: arm.sp, pattern: arm.pattern, guard: arm.guard, body: ExprOrBlock.EB_Block(body) })
+        }
+        let m = with_kind(e, ExprKind.MatchE(s2, arms2))
+        push(self.out, Stmt { id: self.id(), line: e.line, col: e.col, sp: e.sp, kind: StmtKind.ExprStmt(m) })
+        return result
+    }
+
+    // An arm's body as a block, its value assigned to `result` (`value`).
+    fun arm_block(var self, body: ExprOrBlock, result: Expr, value: bool) -> Block {
+        let saved = self.out
+        self.out = []
+        var line = 0
+        var col = 0
+        var sp = result.sp
+        match body {
+            ExprOrBlock.EB_Expr(x) => {
+                line = x.line
+                col = x.col
+                sp = x.sp
+                self.arm_value(x, result, value)
+            },
+            ExprOrBlock.EB_Block(b) => {
+                line = b.line
+                col = b.col
+                sp = b.sp
+                let n = len(b.stmts)
+                var i = 0
+                while i < n {
+                    let st = b.stmts[i]
+                    // the trailing expression is the arm's value
+                    var is_value = false
+                    if i == n - 1 {
+                        match st.kind {
+                            StmtKind.ExprStmt(x) => {
+                                is_value = true
+                                self.arm_value(x, result, value)
+                            },
+                            _ => {},
+                        }
+                    }
+                    if !is_value { self.stmt(st) }
+                    i = i + 1
+                }
+            },
+        }
+        let stmts = self.out
+        self.out = saved
+        return Block { line: line, col: col, sp: sp, stmts: stmts }
+    }
+
+    fun arm_value(var self, x: Expr, result: Expr, value: bool) {
+        let x2 = self.expr(x)
+        if value {
+            push(self.out, Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.Assign(result, x2) })
+        } else if !is_simple(x2) {
+            push(self.out, Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.ExprStmt(x2) })
+        }
+    }
+
+    // -- new nodes --------------------------------------------------------
+
+    fun id(var self) -> int32 {
+        let i = self.next
+        self.next = self.next + 1
+        return i
+    }
+
+    // A rewritten statement: a fresh id, since what can suspend is cached by
+    // statement.
+    fun with_stmt(var self, like: Stmt, kind: StmtKind) -> Stmt {
+        return Stmt { id: self.id(), line: like.line, col: like.col, sp: like.sp, kind: kind }
+    }
+
+    fun fresh(var self, like: Expr, kind: ExprKind) -> Expr {
+        return Expr { id: self.id(), line: like.line, col: like.col, sp: like.sp, kind: kind }
+    }
+
+    fun copy_type(var self, src: int32, to: int32) {
+        match get(self.resolved, src) {
+            Some(t) => { self.resolved[to] = t },
+            None => {},
+        }
+    }
+
+    fun temp_name(var self) -> str {
+        self.temps = self.temps + 1
+        return format("%aw{}", self.temps)
+    }
+
+    // `let t = e` (or `var`), and the name `t`, with `e`'s type, in its place.
+    fun bind(var self, e: Expr, kind: str) -> Expr {
+        let name = self.temp_name()
+        push(self.out, Stmt { id: self.id(), line: e.line, col: e.col, sp: e.sp, kind: StmtKind.VarDecl(kind, name, None, e) })
+        let r = self.fresh(e, ExprKind.Name(name))
+        self.copy_type(e.id, r.id)
+        return r
+    }
+
+    // `e` in a temporary, unless reading it later can't differ.
+    fun hoist(var self, e: Expr) -> Expr {
+        if is_simple(e) { return e }
+        return self.bind(e, "let")
+    }
+}

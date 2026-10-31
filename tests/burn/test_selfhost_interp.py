@@ -136,6 +136,102 @@ INTERP_PROGRAMS = {
 }
 
 
+
+_FETCH = "async fun fetch(n: int) -> int {\n    return n * 10\n}\n"
+_COUNTER = ("actor Counter {\n    count: int\n}\n"
+            "impl Counter {\n"
+            "    fun increment(var self) -> int {\n        self.count = self.count + 1\n        return self.count\n    }\n"
+            "    fun get(self) -> int {\n        return self.count\n    }\n}\n")
+
+
+def _amain(*lines: str, before: str = "") -> str:
+    body = "".join(f"    {line}\n" for line in lines)
+    return f"{before}#main\nasync fun main() {{\n{body}}}\n"
+
+
+# Concurrency (D89, MYLA-139): what each prints doesn't depend on the order of
+# the tasks running at once, so the self-hosted interpreter, which runs a
+# child to its end when it starts, must print what the Python one does.
+CONCURRENCY_PROGRAMS = {
+    "await_calls": _amain("print(await fetch(4))", "print(await fetch(1) + await fetch(2))", before=_FETCH),
+    "async_values": _amain("let f = async (n: int) => await fetch(n) + 1", "print(await apply(f, 2))",
+                           "print(await apply(fetch, 3))", before=_FETCH + (
+        "async fun apply(f: async (int) -> int, x: int) -> int {\n    return await f(x)\n}\n")),
+    "async_method": _amain("let p = P { x: 21 }", "print(await p.twice())", before=(
+        "struct P { x: int }\nimpl P {\n    async fun twice(self) -> int {\n        return self.x * 2\n    }\n}\n")),
+    "async_let_results": _amain("async let a = fetch(1)", "async let b: int = fetch(2)", "print(await a + await b)",
+                                "print(await a)", before=_FETCH),
+    "scopes_wait_for_children": _amain("if true {", "    async let a = noisy(0)", "}", "for i in 1..3 {",
+                                       "    async let b = noisy(i)", "}", "print(\"after\")",
+                                       before="async fun noisy(i: int) {\n    print(i)\n}\n"),
+    "children_work_on_copies": _amain("var xs = [1, 2, 3]", "async let t = total(xs)", "xs[0] = 100",
+                                      "print(await t)", "print(xs[0])", "var p = P { x: 1 }",
+                                      "async let r = p.bump()", "print(p.x)", "print(await r)", before=(
+        "async fun total(xs: [int]) -> int {\n    var t = 0\n    for x in xs {\n        t = t + x\n    }\n    return t\n}\n"
+        "struct P { x: int }\nimpl P {\n    fun bump(var self) -> int {\n        self.x = self.x + 1\n        return self.x\n    }\n}\n")),
+    "awaited_child_fails": _amain("async let a = boom()", "print(\"between\")", "print(await a)", "print(\"never\")",
+                                  before="async fun boom() -> int {\n    panic(\"boom\")\n    return 0\n}\n"),
+    "unawaited_child_fails_its_scope": _amain("if true {", "    async let a = boom()", "    print(\"in scope\")", "}",
+                                              "print(\"never\")", before="async fun boom() {\n    panic(\"boom\")\n}\n"),
+    "child_exits": _amain("async let a = leave()", "print(\"between\")", "print(await a)", before=(
+        "from std.process import exit\nasync fun leave() -> int {\n    exit(3)\n    return 0\n}\n")),
+    "actor_counter": _amain("let c = Counter { count: 0 }", "async let a = count_up(c, 50)", "async let b = count_up(c, 50)",
+                            "await a", "await b", "let d = c", "let x = await d.increment()", "print(await c.get())",
+                            before=_COUNTER + (
+        "async fun count_up(c: Counter, n: int) {\n    for i in 0..n {\n        let x = await c.increment()\n    }\n}\n")),
+    "actor_copies_in_and_out": _amain("let b = Box { items: [] }", "var xs = [1, 2]", "await b.put(xs)", "xs[0] = 9",
+                                      "var ys = await b.all()", "ys[1] = 7", "print(await b.first())",
+                                      "print(len(await b.all()))", before=(
+        "actor Box {\n    items: [int]\n}\n"
+        "impl Box {\n    fun put(var self, xs: [int]) {\n        self.items = xs\n    }\n"
+        "    fun all(self) -> [int] {\n        return self.items\n    }\n"
+        "    fun first(self) -> int {\n        return self.items[0]\n    }\n}\n")),
+    "actor_reentrancy": _amain("let a = A { n: 1 }", "let b = B { m: 2 }", "async let x = a.ping(b)",
+                               "async let y = a.ping(b)", "print(await x + await y)", "let p = P { n: 1 }",
+                               "let q = P { n: 10 }", "print(await p.poke(q, 10))", "print(await a.peek())", before=(
+        "actor A {\n    n: int\n}\nactor B {\n    m: int\n}\n"
+        "impl A {\n    async fun ping(self, b: B) -> int {\n        return await b.pong(self)\n    }\n"
+        "    fun val(self) -> int {\n        return self.n\n    }\n"
+        "    async fun peek(self) -> int {\n        async let x = self.n + 1\n        return await x\n    }\n}\n"
+        "impl B {\n    async fun pong(self, a: A) -> int {\n        return await a.val() + self.m\n    }\n}\n"
+        "actor P {\n    n: int\n}\n"
+        "impl P {\n    async fun poke(self, other: P, depth: int) -> int {\n"
+        "        if depth == 0 {\n            return self.n\n        }\n"
+        "        return await other.poke(self, depth - 1) + self.n\n    }\n}\n")),
+    # needs the tasks to take turns: the child waits until its parent sets the flag
+    "child_waits_for_its_parent": _amain("let f = Flag { up: false }", "async let w = wait_up(f)", "await f.raise()",
+                                         "print(await w)", before=(
+        "actor Flag {\n    up: bool\n}\n"
+        "impl Flag {\n    fun raise(var self) {\n        self.up = true\n    }\n"
+        "    fun get(self) -> bool {\n        return self.up\n    }\n}\n"
+        "async fun wait_up(f: Flag) -> int {\n    var polls = 0\n"
+        "    while await f.get() == false {\n        polls = polls + 1\n    }\n    return 1\n}\n")),
+    "normalized_expressions": _amain(
+        "var xs = [await fetch(1), 2, await fetch(3)]", "print(xs[0] + xs[2])",
+        "let ok = await fetch(0) == 0 && await fetch(1) == 10", "print(ok)",
+        "let no = false && await fetch(1) == 10", "print(no)",
+        "let yes = true || await fetch(1) == 99", "print(yes)",
+        "let s = match await fetch(2) {", "    20 => await fetch(5) + 1,", "    _ => 0,", "}", "print(s)",
+        "var n = 0", "while await fetch(n) < 30 {", "    n = n + 1", "}", "print(n)",
+        "for i in 0..await fetch(1) {", "    if i == 3 {", "        break", "    }", "    print(await fetch(i))", "}",
+        "let p = P { x: await fetch(4), y: \"a\" }", "print(p.x)",
+        "print(f\"{await fetch(7)}!\")", "print(await twice(await fetch(1)))", "print(await opt(5))", before=_FETCH + (
+        "struct P { x: int, y: str }\n"
+        "async fun twice(n: int) -> int {\n    async let a = fetch(n)\n    return await a / 5\n}\n"
+        "async fun opt(n: int) -> int {\n    let r = await maybe(n)\n    return match r {\n"
+        "        Some(v) => v,\n        None => -1,\n    }\n}\n"
+        "async fun maybe(n: int) -> Option<int> {\n    let v = (await half(n))?\n    return Some(v + 100)\n}\n"
+        "async fun half(n: int) -> Option<int> {\n    if n % 2 == 0 {\n        return Some(n / 2)\n    }\n    return None\n}\n")),
+    "async_var_self_method": _amain("var c = C { n: 1 }", "print(await c.bump(5))", "print(c.n)", before=(
+        "struct C { n: int }\nimpl C {\n    async fun bump(var self, d: int) -> int {\n"
+        "        let x = await fetch(d)\n        self.n = self.n + x\n        return self.n\n    }\n}\n" + _FETCH)),
+    "task_all": _amain("var fs: [async () -> int] = []", "for i in 0..9 {", "    push(fs, async () => await fetch(i))", "}",
+                       "let rs = await task.all(fs)", "print(len(rs))", "print(rs[8])",
+                       "let none: [async () -> str] = []", "print(len(await task.all(none)))",
+                       before="import std.task as task\n" + _FETCH),
+}
+
+
 def _check_tool():
     return check(link(INTERP_TOOL, stdlib_root=default_stdlib_root()))
 
@@ -176,6 +272,17 @@ class SelfHostedInterpParity(unittest.TestCase):
                 fh.write("from .lib import third\nfun main() {\n    print(third([1, 2]))\n}\n")
             for name, path in sorted(cases.items()):
                 with self.subTest(case=name):
+                    self.assertEqual(self._myla_run_full(path), _cli_oracle(path))
+
+    def test_concurrency_matches_the_python_cli(self) -> None:
+        if self._binary is None:
+            self.skipTest("the self-hosted interpreter could not be built natively")
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, source in CONCURRENCY_PROGRAMS.items():
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(source)
+                with self.subTest(program=name):
                     self.assertEqual(self._myla_run_full(path), _cli_oracle(path))
 
     def _myla_run(self, path: str) -> tuple[str, int]:

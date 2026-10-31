@@ -1,0 +1,32 @@
+// std.task — running a number of child tasks known only at run time (D89,
+// docs/Language/Concurrency.md).
+//
+// `all(fs)` runs each async function value of `fs` as a child task, all of
+// them at once, and gives their results in the order of `fs`, whichever
+// finished first. It is written with `async let` alone: the list is halved
+// until each half holds one function, so the tasks nest about log2(len(fs))
+// deep and every child is awaited before `all` returns.
+
+// The results of `fs`, run as child tasks at once, in the order of `fs`.
+pub async fun all<T>(fs: [async () -> T]) -> [T] {
+    if len(fs) == 0 {
+        return []
+    }
+    return await run_range(fs, 0, len(fs))
+}
+
+// The results of `fs[lo]` … `fs[hi - 1]` (`lo < hi`), run as child tasks.
+async fun run_range<T>(fs: [async () -> T], lo: int, hi: int) -> [T] {
+    if hi - lo == 1 {
+        let f = fs[lo]
+        return [await f()]
+    }
+    let mid = lo + (hi - lo) / 2
+    async let left = run_range(fs, lo, mid)
+    async let right = run_range(fs, mid, hi)
+    var out = await left
+    for x in await right {
+        push(out, x)
+    }
+    return out
+}

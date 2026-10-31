@@ -1,0 +1,65 @@
+// Concurrency (D89): async functions, child tasks with `async let`, and actors,
+// whose state only their own methods change, one call at a time. What this
+// prints doesn't depend on the order the tasks run in.
+
+actor Account {
+    balance: int
+}
+
+impl Account {
+    fun deposit(var self, amount: int) -> int {
+        self.balance = self.balance + amount
+        return self.balance
+    }
+
+    fun total(self) -> int {
+        return self.balance
+    }
+
+    // While it waits for `to`, other calls may run on this account.
+    async fun transfer(var self, amount: int, to: Account) -> bool {
+        if self.balance < amount {
+            return false
+        }
+        self.balance = self.balance - amount
+        let received = await to.deposit(amount)
+        return true
+    }
+}
+
+async fun fetch(n: int) -> int {
+    return n * 10
+}
+
+async fun deposit_ones(a: Account, n: int) {
+    for i in 0..n {
+        let b = await a.deposit(1)
+    }
+}
+
+#main
+async fun main() {
+    print(await fetch(4))
+
+    // two child tasks, running in parallel with the rest of `main`
+    async let x = fetch(1)
+    async let y = fetch(2)
+    print(await x + await y)
+
+    // a handle reaches the same actor from both tasks
+    let a = Account { balance: 0 }
+    let b = Account { balance: 0 }
+    async let d1 = deposit_ones(a, 100)
+    async let d2 = deposit_ones(a, 100)
+    await d1
+    await d2
+    print(await a.total())
+
+    print(await a.transfer(50, b))
+    print(await a.transfer(500, b))
+    print(await a.total())
+    print(await b.total())
+
+    let plus_one = async (n: int) => await fetch(n) + 1
+    print(await plus_one(3))
+}

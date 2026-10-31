@@ -1,0 +1,11 @@
+//~ type error: '?' can't stand in an 'async let': its child task has no function to return from
+//~ span: (await f())?
+// The child task computes the value; a `?` in it would return from nothing (D89).
+async fun f() -> Option<int> {
+    return None
+}
+async fun g() -> Option<int> {
+    async let a = (await f())?
+    return Some(await a)
+}
+fun main() {}

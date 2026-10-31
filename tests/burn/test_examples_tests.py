@@ -45,6 +45,10 @@ class TestExamplesTestSuite(unittest.TestCase):
                 # concrete wrappers instead.
                 if decl.type_params:
                     continue
+                # `#test` can't run an async function (D89); its example's
+                # output covers it
+                if decl.is_async:
+                    continue
                 self.assertTrue(
                     _has_test_attr(decl),
                     f"{name}: function '{decl.name}' returns a value but has "

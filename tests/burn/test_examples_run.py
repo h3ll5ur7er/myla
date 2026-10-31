@@ -54,6 +54,7 @@ EXPECTED = {
                          "main.my:3:12: there is no error, this is just a test\n"),
     "traits_on_builtins.my": ("49\nhaha 67\n42\nI'm a teapot\nThis is not the error you are looking for. It is the answer to life, the universe, and everything.\nThis is not the error you are looking for. It is 13\nThis is not the error you are looking for. It is 15\nSuccess\n"),
     "semicolons.my": "12\nsize\n7\n15\n21\n42\n",
+    "concurrency.my": "40\n30\n200\ntrue\nfalse\n150\n50\n31\n",
 }
 
 def run_file(path: str) -> str:

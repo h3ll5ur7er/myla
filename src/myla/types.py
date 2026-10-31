@@ -811,6 +811,10 @@ class Checker:
         self._async = False
         self._actor_self: str | None = None
         self._awaited: set[int] = set()
+        # checking an `async let`'s initializer, outside any lambda in it
+        self._task_init = False
+        # checking a match guard, outside any lambda in it
+        self._in_guard = False
         # enum name -> ordered {variant_name: [payload Types]}; order defines tags
         self.enums: dict[str, dict[str, list[Type]]] = {}
         self.enum_decls: dict[str, ast.EnumDecl] = {}
@@ -930,6 +934,8 @@ class Checker:
         self._ret_at = None
         self._async = False
         self._actor_self = None
+        self._task_init = False
+        self._in_guard = False
         try:
             with in_file(_source_path(decl)):
                 check()
@@ -2560,7 +2566,11 @@ class Checker:
         ctx = _LambdaCtx(lam_scope, expr)
         self._lambda_stack.append(ctx)
         saved_async = self._async
+        saved_task_init = self._task_init
+        saved_guard = self._in_guard
         self._async = expr.is_async
+        self._task_init = False
+        self._in_guard = False
         if expr.is_async:
             self.concurrency_at = self.concurrency_at or expr
         saved_ret = self._current_ret
@@ -2602,6 +2612,8 @@ class Checker:
             self._current_ret = saved_ret
             self._lambda_stack.pop()
             self._async = saved_async
+            self._task_init = saved_task_init
+            self._in_guard = saved_guard
 
         ft = FuncType(tuple(ptypes), ret_t, expr.is_async)
         expr.captures = ctx.ordered()
@@ -2741,7 +2753,12 @@ class Checker:
             arm_scope = _Scope(scope)
             self._check_pattern(arm.pattern, st, arm_scope)
             if arm.guard is not None:
-                self._expect_type(arm.guard, arm_scope, BOOL, "match guard")
+                saved_guard = self._in_guard
+                self._in_guard = True
+                try:
+                    self._expect_type(arm.guard, arm_scope, BOOL, "match guard")
+                finally:
+                    self._in_guard = saved_guard
             bodies.append(self._check_arm_body(arm.body, arm_scope, expected, is_stmt))
 
         self._check_exhaustive(expr, st)
@@ -2771,6 +2788,12 @@ class Checker:
 
     def _infer_try(self, expr: ast.Try, scope: _Scope) -> Type:
         ot = self._expect_value(expr.operand, scope, None)
+        if self._task_init:
+            raise TypeCheckError(
+                "'?' can't stand in an 'async let': its child task has no function "
+                "to return from",
+                at=expr,
+            )
         ret = self._current_ret
         if _has_error(ret):
             raise _Poisoned()   # the return type failed (MYLA-110)
@@ -4355,6 +4378,12 @@ class Checker:
         name."""
         if not self._async:
             raise TypeCheckError("'await' can only stand in an async function", at=expr)
+        if self._in_guard:
+            raise TypeCheckError(
+                "'await' can't stand in a match guard: bind the awaited value before "
+                "the 'match'",
+                at=expr,
+            )
         op = expr.operand
         if isinstance(op, ast.Name):
             binding = scope.lookup(op.ident)
@@ -4418,7 +4447,11 @@ class Checker:
         else:
             if isinstance(stmt.init, ast.Call):
                 self._awaited.add(id(stmt.init))
-            t = self._infer(stmt.init, scope, declared)
+            self._task_init = True
+            try:
+                t = self._infer(stmt.init, scope, declared)
+            finally:
+                self._task_init = False
             if declared is not None:
                 if not _has_error(t) and t != declared:
                     raise TypeCheckError(

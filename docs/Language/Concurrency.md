@@ -1,6 +1,6 @@
 # Concurrency
 
-> **Draft (D89).** Both checkers accept and check what this page describes ([[MYLA-135]]), except task groups, whose `std.task` module comes with [[MYLA-136]]. Neither interpreter nor backend runs it yet: they stop at the first construct of concurrency with an error ([[MYLA-136]] … [[MYLA-139]]).
+> **D89, in progress.** Both checkers check what this page describes ([[MYLA-135]]). The Python interpreter runs it with a thread per task ([[MYLA-136]], `examples/concurrency.my`), the self-hosted interpreter with tasks taking turns at each `await` ([[MYLA-139]]). Both backends stop at the first construct of concurrency with an error until [[MYLA-137]] and [[MYLA-138]].
 
 Myla's concurrency follows Swift's: `async` functions that may suspend, `await` at every suspension, structured tasks that never outlive the scope that starts them, and `actor`s, whose state only their own methods touch. Tasks run in parallel on several threads. A value crossing into another task or actor is copied, so tasks share nothing but actors (D89).
 
@@ -20,7 +20,7 @@ async fun twice(n: int) -> int {
 ```
 
 - `async fun` declares a function that may suspend. Calling it needs `await`, and only an async function (or a task) can `await`.
-- `await` stands before the call, also inside an expression: `return await fetch(1) + await fetch(2)` awaits one after the other.
+- `await` stands before the call, also inside an expression: `return await fetch(1) + await fetch(2)` awaits one after the other. A match guard can't await: bind the value before the `match`.
 - A synchronous function can call synchronous ones only. There is no blocking wait for an async one.
 - A function type can be async too: `async (int) -> int`; so can a lambda: `async (n: int) => await fetch(n)`. An async function value is called with `await` too. It isn't a synchronous one: `let f: (int) -> int = fetch` is an error.
 - An async function can't be partially applied (`fetch(_)`) or composed with `>>`: either would make a synchronous function value of it.
@@ -41,26 +41,25 @@ async fun total() -> int {
 - The scope that declared it waits for every child still running when it ends, even one never read: no task outlives its scope.
 - The child gets copies of what `e` uses, as a lambda does (D15, D48).
 
-## Task groups
+## A number of children: `std.task`
 
 For a number of children known only at run time:
 
 ```myla
-import std.task
+import std.task as task
 
 async fun squares(n: int) -> [int] {
-    return await task.group(async (g: task.Group<int>) => {
-        for i in 0..n {
-            g.spawn(async () => i * i)
-        }
-        return await g.all()
-    })
+    var fs: [async () -> int] = []
+    for i in 0..n {
+        push(fs, async () => i * i)
+    }
+    return await task.all(fs)
 }
 ```
 
-- `task.group(body)` runs `body` with a fresh group and waits, when the body returns, for every child it spawned.
-- `g.spawn(f)` starts the async function value `f` as a child task.
-- `await g.all()` gives the results in the order the children were spawned, so the outcome doesn't depend on which finished first.
+- `task.all(fs)` runs each async function value of `fs` as a child task, all at once, and waits for every one of them.
+- It gives the results in the order of `fs`, so the outcome doesn't depend on which finished first.
+- It is written in Myla with `async let` alone ([[src/myla/std/task.my]]), so every implementation that runs `async let` runs it.
 
 ## Actors
 

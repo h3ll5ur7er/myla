@@ -473,6 +473,9 @@ class _Renamer:
         if isinstance(e, ast.Unary):
             e.operand = self._expr(e.operand)
             return e
+        if isinstance(e, ast.Await):
+            e.operand = self._expr(e.operand)
+            return e
         if isinstance(e, ast.Binary):
             e.left = self._expr(e.left)
             e.right = self._expr(e.right)

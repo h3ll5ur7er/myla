@@ -14,6 +14,8 @@
 | struct, tuple, enum | `StructValue(name, fields)`, `TupleValue(elems)`, `EnumValue(enum, variant, payload)` |
 | list, map, builder | `ListValue`, `MapValue` (a dict: insertion order), `StringBuilderValue` (a `bytearray`) |
 | function value | `ClosureValue(params, body, env, is_block)`; a `fun` used as a value has an empty env |
+| actor handle | `ActorRef(state, lock)`: `_copy` leaves it alone, so a copy reaches the same actor (D89) |
+| an `async let`'s name | `_Task(thread, value, error)` |
 
 **Value semantics by copying.** `_copy` deep-copies aggregates whenever a value is bound, assigned, passed, returned, stored or captured. There is no copy-on-write here; the observable behaviour matches the native backend's reference counting.
 
@@ -26,6 +28,17 @@
 - `var self` methods bind `self` to the caller's actual object (`_resolve_struct` finds it), so field writes reach the caller; read-only `self` gets a copy.
 - Operators on structs and enums inside a bounded generic body are dispatched at run time to `Type.add`, `Type.eq`, `Type.cmp`, … (`_dispatch_operator`); everywhere else they were desugared into method calls.
 - Runtime errors raise `MylaRuntimeError` with the node's position.
+
+## Concurrency
+
+D89, [[MYLA-136]], [[Language/Concurrency]].
+
+- **Async functions** are ordinary functions: `await f()` runs `f` in the task that awaits it. Only `async let` starts another task.
+- **`async let`** (`_start_task`) runs its initializer on a Python thread, in a frame holding copies of the variables it mentions (`_names_in`). `await name` joins the thread and gives a copy of the result, or raises the child's error. The scope that started a child waits for it when it ends, normally or not (`_close_scope`, from `_exec_block`, a `for` body and a match arm's block); a child that failed unawaited fails the scope, unless the scope is failing already.
+- **Actors.** A struct literal of an actor makes an `ActorRef`. A method of the actor is called on the handle: from outside it takes the actor's lock in the calling thread and gives a copy of the result (`_on_actor`); from the actor's own methods, which hold it, it is an ordinary call. The arguments were copied as for every call. `self` in its methods is the handle, so field reads and writes go to the state (`_resolve_struct`), and `self` passed on is the handle. A child task of one of its methods that reads through `self` takes the lock for the read (`_actor_field`).
+- **Reentrancy, and no deadlocks.** Wherever a task waits (calling into an actor, joining a child), it first lets go of the actor it holds and takes it back afterwards (`_released`). The actor's other calls run meanwhile, and since no thread waits while holding an actor, two actors calling each other can't deadlock. The calling thread runs an actor's method. That is the same as a mailbox served one message at a time, since only one thread holds the lock.
+- **Output.** `print` and `__write` write each piece under one lock, so lines of tasks running at once stay whole.
+- A test with `sys.setswitchinterval(1e-6)` checks the lock: without it, increments from three tasks get lost (`tests/unit/test_concurrency.py`).
 
 ## I/O primitives
 

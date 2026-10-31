@@ -21,6 +21,8 @@ EXAMPLES = [
     "pipelines.my", "traits.my", "floats.my", "chars.my",
     "generic_traits.my", "interpolation.my", "traits_on_builtins.my", "semicolons.my",
 ]
+# Examples the compiler doesn't build yet: concurrency (D89, MYLA-137).
+NOT_YET = {"concurrency.my"}
 
 
 class TestExamplesCompileCoverage(unittest.TestCase):
@@ -28,7 +30,7 @@ class TestExamplesCompileCoverage(unittest.TestCase):
 
     def test_compile_list_matches_examples(self):
         on_disk = {f for f in os.listdir(EXAMPLES_DIR) if f.endswith(".my")}
-        listed = set(EXAMPLES)
+        listed = set(EXAMPLES) | NOT_YET
         self.assertEqual(
             listed, on_disk,
             f"compile coverage out of sync: missing {sorted(on_disk - listed)}, "

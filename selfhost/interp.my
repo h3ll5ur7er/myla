@@ -10,6 +10,7 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
 from .tokens import SrcSpan, no_span
 from .checker import Checker, Type
+from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write
@@ -34,6 +35,8 @@ pub enum Value {
     VClosure([Param], ExprOrBlock, [str], [Value], str, bool),  // params, body, capNames, capVals, funcName, isFunc
     VCompose([Value]),                     // composed functions, applied left-to-right
     VPartial(Value, [Value], [bool]),      // base callable, arg slots, which slots are holes
+    VActor(int32),                         // an actor's handle: its state in Interp.actors (D89)
+    VTask(int32),                          // an `async let`'s child: Interp.tasks
 }
 impl Value {
     fun to_string(self) -> str {
@@ -53,6 +56,8 @@ impl Value {
             VClosure(params, body, capNames, capVals, funcName, isFunc) => f"VClosure({funcName}, {isFunc})"
             VCompose(c) => f"VCompose()"
             VPartial(func, slots, holes) => f"VPartial()"
+            VActor(i) => f"VActor({i})"
+            VTask(i) => f"VTask({i})"
         }
     }
 }
@@ -87,6 +92,33 @@ pub enum TailCall {
 
 pub struct RtFrame { names: [str], vals: [Value] }
 
+// -- concurrency (D89, MYLA-139) --------------------------------------------
+//
+// Where a call of an async function, method or lambda stands, for the async
+// evaluator: its continuations, innermost last.
+enum Cont {
+    KStmts([Stmt], int32),                     // a block's statements, from the i-th
+    KScope,                                    // a scope's end: its children, then the scope
+    KWhile(Expr, Block),                       // a `while`: its condition, then its body again
+    KFor(str, [Value], int64, int64, Block),   // variable, items (none: a range), next index or value, end, body
+    KLet(str, int32),                          // waiting: the child task awaited (-1: a call), its result for a name
+}
+
+// A call being evaluated asynchronously: its variables, where it stands, the
+// place a `var self` method's `self` goes back to, and how it is leaving
+// (`pend`: a `return`, `break`, `continue` or failure on its way out of the
+// blocks, with its value, error and exit code).
+struct AFrame { scopes: [RtFrame], conts: [Cont], place: Option<Place>, pend: Ctrl, pval: Value, perr: Option<RtError>, pcode: int32 }
+
+// A task: its calls, innermost last; `state` 0 ready, 1 waiting, 2 done with
+// its result or failure (a runtime error, or an `exit` with `code`), which
+// reaches the parent at `await` or at the end of the scope that started it;
+// `awaited`: it was asked for; `waiters`: the tasks waiting for it.
+struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: Option<RtError>, code: int32, awaited: bool, waiters: [int32] }
+
+// A call whose async body the async evaluator takes over (Interp.defer).
+struct Deferred { scopes: [RtFrame], body: Block }
+
 // What an input of the REPL did: the variables afterwards, the value to
 // show, the runtime error, or the `exit` that ends the session.
 pub struct SessionStep { names: [str], vals: [Value], shown: Option<Value>, err: Option<RtError>, exited: bool, code: int32 }
@@ -98,9 +130,6 @@ pub struct MatchRes { ok: bool, names: [str], vals: [Value] }
 // =========================================================================
 
 pub struct Interp {
-    // the checker's first construct of concurrency, which this interpreter
-    // doesn't run yet (D89, MYLA-139); none: no concurrency
-    concurrency: Option<RtError>,
     decls: [Decl],
     resolved: [int32: Type],
     func_names: [str],
@@ -117,6 +146,28 @@ pub struct Interp {
     cell: Value,            // the value `update_cell` is changing
     receivers: [Value],     // `var self` receivers on their way into a call
     tail: TailCall,         // the call a `become` left pending (Ctrl.CBecome)
+    // concurrency (D89): the actor types and the actors' states (by handle);
+    // the tasks, those ready to run (`queue` from `qhead`), the one running
+    // and its calls (`frames`; the innermost's variables are `scopes`); the
+    // normalizer, the normalized async bodies and what statements suspend, by
+    // node id; whether the next call of an async body is deferred to the
+    // async evaluator, the call deferred and its `var self` receiver's place;
+    // whether the running task waits (`parked`) or lets the others run
+    actor_types: [str: bool],
+    actors: [Value],
+    tasks: [Task],
+    queue: [int32],
+    qhead: int32,
+    cur: int32,
+    frames: [AFrame],
+    norm: Norm,
+    bodies: [int32: Block],
+    suspending: [int32: bool],
+    defer: bool,
+    deferred: Option<Deferred>,
+    deferred_place: Option<Place>,
+    parked: bool,
+    yielding: bool,
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
@@ -182,10 +233,7 @@ enum PlaceOp {
 // An interpreter for the checked program `c`, run as `argv` (argv[0] is the
 // program's path, as for `myla run`).
 pub fun new_interp(c: Checker, argv: [str]) -> Interp {
-    var conc: Option<RtError> = None
-    if c.conc_line > 0 { conc = Some(RtError { msg: "the interpreter doesn't run concurrency yet (D89, MYLA-139)", line: c.conc_line, col: c.conc_col, sp: c.conc_sp, node: c.conc_node }) }
     var it = Interp {
-        concurrency: conc,
         decls: c.decls,
         resolved: c.resolved,
         func_names: [], func_decls: [],
@@ -200,6 +248,14 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         cell: Value.VUnit,
         receivers: [],
         tail: TailCall.TNone,
+        actor_types: c.actors,
+        actors: [],
+        tasks: [],
+        queue: [], qhead: 0, cur: -1, frames: [],
+        norm: new_norm(2000000000),
+        bodies: [:], suspending: [:],
+        defer: false, deferred: None, deferred_place: None,
+        parked: false, yielding: false,
     }
     return it
 }
@@ -339,14 +395,8 @@ impl Interp {
             self.rt_err = Some(RtError { msg: "no entry point: define '#main' or a function named 'main'", line: 0, col: 0, sp: no_span(), node: -1 })
             return 1
         }
-        match self.concurrency {
-            Some(r) => {
-                self.rt_err = Some(r)
-                return 1
-            },
-            None => {},
-        }
-        self.call_func(ei, [])
+        if self.body_suspends_fd(self.func_decls[ei]) { self.run_async(ei) }
+        else { self.call_func(ei, []) }
         match self.ctrl { Ctrl.CExit => { return self.exit_code }, _ => {} }
         return 0
     }
@@ -483,6 +533,7 @@ impl Interp {
     // Whether every index on the path to `p` is still valid, without failing.
     fun place_valid(self, p: Place) -> bool {
         var v = self.lookup_or_unit(p.root)
+        if len(p.steps) > 0 { v = self.deref(v) }
         var i = 0
         while i < len(p.steps) {
             match p.steps[i] {
@@ -524,6 +575,7 @@ impl Interp {
     // The value at `p`, bounds-checked at every index (a read).
     fun read_place(var self, p: Place) -> Value {
         var v = self.lookup_or_unit(p.root)
+        if len(p.steps) > 0 { v = self.deref(v) }
         for st in p.steps {
             if self.stop() { return Value.VUnit }
             match st {
@@ -583,6 +635,20 @@ impl Interp {
             var j = len(self.scopes[i].names) - 1
             while j >= 0 {
                 if self.scopes[i].names[j] == p.root {
+                    match self.scopes[i].vals[j] {
+                        Value.VActor(id) => {
+                            if len(p.steps) > 0 {
+                                // a part of an actor's state, changed by its method
+                                self.cell = self.actors[id]
+                                self.actors[id] = Value.VUnit
+                                let r = self.update_cell(p.steps, 0, op)
+                                self.actors[id] = self.cell
+                                self.cell = Value.VUnit
+                                return r
+                            }
+                        },
+                        _ => {},
+                    }
                     self.cell = self.scopes[i].vals[j]
                     self.scopes[i].vals[j] = Value.VUnit
                     let r = self.update_cell(p.steps, 0, op)
@@ -718,6 +784,584 @@ impl Interp {
         }
         self.pop_scope()
     }
+
+    // -- concurrency (D89, MYLA-139) --------------------------------------
+    //
+    // An async body with an `await` or an `async let` runs on the async
+    // evaluator, normalized (anf.my): its statements are continuations
+    // (`Cont`) of its call (`AFrame`) in its task (`Task`), so that the task
+    // can stop at an `await` and go on later. Each statement without one runs
+    // on the synchronous evaluator, as everywhere else. The tasks take turns:
+    // each runs until it waits for a child, or until an `await` lets the
+    // others run; a scope waits for the children it started before it ends.
+    // Actors need no lock: one task runs at a time, and a method that waits
+    // doesn't hold its actor (reentrancy).
+
+    // Run the program from its async entry `fi`, as the first task.
+    fun run_async(var self, fi: int32) {
+        self.defer = true
+        self.deferred = None
+        self.enter_func(fi, [])
+        self.defer = false
+        match self.deferred {
+            Some(d) => {
+                self.deferred = None
+                self.new_task(d.scopes, d.body)
+            },
+            None => { return },
+        }
+        self.scopes = []
+        while self.qhead < len(self.queue) {
+            let t = self.queue[self.qhead]
+            self.qhead = self.qhead + 1
+            if self.qhead > 4096 && 2 * self.qhead > len(self.queue) { self.compact_queue() }
+            self.cur = t
+            self.frames = self.tasks[t].frames
+            self.tasks[t].frames = []
+            self.scopes = self.frames[len(self.frames) - 1].scopes
+            self.run_task()
+            if self.tasks[t].state != 2 {
+                self.frames[len(self.frames) - 1].scopes = self.scopes
+                self.tasks[t].frames = self.frames
+            }
+            self.frames = []
+            self.scopes = []
+        }
+        // the first task's failure is the program's
+        if self.tasks[0].failed {
+            self.rt_err = self.tasks[0].err
+            self.ctrl = Ctrl.CExit
+            self.exit_code = self.tasks[0].code
+        }
+    }
+
+    // A task running `body` with the variables `scopes`, ready to run.
+    fun new_task(var self, scopes: [RtFrame], body: Block) -> int32 {
+        var sc = scopes
+        push(sc, RtFrame { names: [], vals: [] })
+        let f = AFrame { scopes: sc, conts: [Cont.KScope, Cont.KStmts(body.stmts, 0)], place: None, pend: Ctrl.CNone, pval: Value.VUnit, perr: None, pcode: 0 }
+        push(self.tasks, Task { frames: [f], state: 0, value: Value.VUnit, failed: false, err: None, code: 0, awaited: false, waiters: [] })
+        let id = len(self.tasks) - 1
+        push(self.queue, id)
+        return id
+    }
+
+    fun compact_queue(var self) {
+        var rest: [int32] = []
+        var i = self.qhead
+        while i < len(self.queue) {
+            push(rest, self.queue[i])
+            i = i + 1
+        }
+        self.queue = rest
+        self.qhead = 0
+    }
+
+    // Run the current task until it waits, lets the others run, or ends.
+    fun run_task(var self) {
+        while len(self.frames) > 0 {
+            let top = len(self.frames) - 1
+            let leaving = match self.frames[top].pend { Ctrl.CNone => false, _ => true }
+            if leaving { self.unwind_step() }
+            else if len(self.frames[top].conts) == 0 { self.finish_frame(true, Value.VUnit, None, 0) }
+            else { self.step() }
+            if self.parked {
+                self.parked = false
+                return
+            }
+            if self.yielding {
+                self.yielding = false
+                if len(self.frames) > 0 {
+                    push(self.queue, self.cur)
+                    return
+                }
+            }
+        }
+    }
+
+    // One step of the current call: its innermost continuation.
+    fun step(var self) {
+        let top = len(self.frames) - 1
+        let ci = len(self.frames[top].conts) - 1
+        match self.frames[top].conts[ci] {
+            Cont.KStmts(stmts, i) => {
+                if i >= len(stmts) {
+                    pop(self.frames[top].conts)
+                    return
+                }
+                self.frames[top].conts[ci] = Cont.KStmts(stmts, i + 1)
+                let s = stmts[i]
+                if self.suspends(s) { self.exec_async(s) } else { self.exec_stmt(s) }
+                self.take_ctrl()
+            },
+            Cont.KScope => { self.close_scope() },
+            Cont.KWhile(c, b) => {
+                let cv = self.eval(c)
+                if self.stop() {
+                    self.take_ctrl()
+                    return
+                }
+                if as_bool(cv) { self.push_block(b) } else { pop(self.frames[top].conts) }
+            },
+            Cont.KFor(v, items, i, hi, body) => {
+                if i >= hi {
+                    pop(self.frames[top].conts)
+                    return
+                }
+                self.frames[top].conts[ci] = Cont.KFor(v, items, i + 1, hi, body)
+                var item = Value.VInt(i)
+                if len(items) > 0 { item = items[i as int32] }
+                self.push_scope()
+                self.define(v, item)
+                push(self.frames[top].conts, Cont.KScope)
+                self.push_block(body)
+            },
+            Cont.KLet(name, child) => {
+                pop(self.frames[top].conts)
+                self.deliver(name, child)
+                self.take_ctrl()
+            },
+        }
+    }
+
+    // A block of the current call: its scope, then its statements.
+    fun push_block(var self, b: Block) {
+        self.push_scope()
+        let top = len(self.frames) - 1
+        push(self.frames[top].conts, Cont.KScope)
+        push(self.frames[top].conts, Cont.KStmts(b.stmts, 0))
+    }
+
+    // A block: on this evaluator when it can suspend, else run now.
+    fun run_block(var self, b: Block) {
+        if self.block_has_suspend(b) { self.push_block(b) } else { self.exec_block(b) }
+    }
+
+    // A `return`, `break`, `continue` or failure a statement left: the
+    // current call leaves its blocks with it.
+    fun take_ctrl(var self) {
+        match self.ctrl {
+            Ctrl.CNone => { return },
+            _ => {},
+        }
+        let top = len(self.frames) - 1
+        self.frames[top].pend = self.ctrl
+        self.frames[top].pval = self.ctrl_val
+        self.frames[top].perr = self.rt_err
+        self.frames[top].pcode = self.exit_code
+        self.ctrl = Ctrl.CNone
+        self.ctrl_val = Value.VUnit
+        self.rt_err = None
+        self.exit_code = 0
+    }
+
+    // One step of leaving: the innermost continuation goes, a scope after its
+    // children; a loop stops at `break` and goes on at `continue`; the call
+    // ends when none is left.
+    fun unwind_step(var self) {
+        let top = len(self.frames) - 1
+        let n = len(self.frames[top].conts)
+        if n == 0 {
+            let pend = self.frames[top].pend
+            let pval = self.frames[top].pval
+            let perr = self.frames[top].perr
+            let pcode = self.frames[top].pcode
+            match pend {
+                Ctrl.CReturn => { self.finish_frame(true, pval, None, 0) },
+                Ctrl.CExit => { self.finish_frame(false, Value.VUnit, perr, pcode) },
+                _ => { self.finish_frame(true, Value.VUnit, None, 0) },
+            }
+            return
+        }
+        match self.frames[top].conts[n - 1] {
+            Cont.KScope => { self.close_scope() },
+            Cont.KWhile(c, b) => { self.leave_loop() },
+            Cont.KFor(v, items, i, hi, body) => { self.leave_loop() },
+            _ => { pop(self.frames[top].conts) },
+        }
+    }
+
+    fun leave_loop(var self) {
+        let top = len(self.frames) - 1
+        match self.frames[top].pend {
+            Ctrl.CBreak => {
+                pop(self.frames[top].conts)
+                self.frames[top].pend = Ctrl.CNone
+            },
+            Ctrl.CContinue => { self.frames[top].pend = Ctrl.CNone },
+            _ => { pop(self.frames[top].conts) },
+        }
+    }
+
+    // A scope's end: it waits for the children it started; one that failed
+    // unawaited fails the call, unless it is failing already; then the scope
+    // goes.
+    fun close_scope(var self) {
+        let s = len(self.scopes) - 1
+        for v in self.scopes[s].vals {
+            match v {
+                Value.VTask(id) => {
+                    if self.tasks[id].state != 2 {
+                        self.wait_for(id)
+                        return
+                    }
+                },
+                _ => {},
+            }
+        }
+        let top = len(self.frames) - 1
+        for v in self.scopes[s].vals {
+            match v {
+                Value.VTask(id) => {
+                    let failing = match self.frames[top].pend { Ctrl.CExit => true, _ => false }
+                    if self.tasks[id].failed && !self.tasks[id].awaited && !failing {
+                        self.frames[top].pend = Ctrl.CExit
+                        self.frames[top].perr = self.tasks[id].err
+                        self.frames[top].pcode = self.tasks[id].code
+                    }
+                    self.tasks[id].awaited = true
+                    self.tasks[id].value = Value.VUnit
+                },
+                _ => {},
+            }
+        }
+        self.pop_scope()
+        pop(self.frames[top].conts)
+    }
+
+    // The current task waits for the task `id` to end.
+    fun wait_for(var self, id: int32) {
+        push(self.tasks[id].waiters, self.cur)
+        self.tasks[self.cur].state = 1
+        self.parked = true
+    }
+
+    // A normalized statement with an `await` or an `async let`.
+    fun exec_async(var self, s: Stmt) {
+        match s.kind {
+            StmtKind.VarDecl(kind, name, ty, init) => {
+                if kind == "async" {
+                    self.start_child(name, init)
+                    return
+                }
+                match init.kind {
+                    ExprKind.Await(op) => { self.exec_await(name, op) },
+                    _ => { self.exec_stmt(s) },
+                }
+            },
+            StmtKind.IfS(c, th, el) => {
+                let cv = self.eval(c)
+                if self.stop() { return }
+                if as_bool(cv) {
+                    self.run_block(th)
+                    return
+                }
+                match el {
+                    Some(et) => {
+                        match et {
+                            ElseTail.ElseBlock(b) => { self.run_block(b) },
+                            ElseTail.ElseIf(s2) => {
+                                if self.suspends(s2) { self.exec_async(s2) } else { self.exec_stmt(s2) }
+                            },
+                        }
+                    },
+                    None => {},
+                }
+            },
+            StmtKind.WhileS(c, b) => { push(self.frames[len(self.frames) - 1].conts, Cont.KWhile(c, b)) },
+            StmtKind.ForS(v, st, en, body, it) => {
+                var items: [Value] = []
+                var lo: int64 = 0
+                var hi: int64 = 0
+                match it {
+                    Some(x) => {
+                        items = self.iter_items(self.eval(x))
+                        hi = len(items) as int64
+                    },
+                    None => {
+                        match st { Some(a) => { lo = as_int(self.eval(a)) }, None => {} }
+                        match en { Some(b) => { hi = as_int(self.eval(b)) }, None => {} }
+                    },
+                }
+                if self.stop() { return }
+                push(self.frames[len(self.frames) - 1].conts, Cont.KFor(v, items, lo, hi, body))
+            },
+            StmtKind.ExprStmt(x) => {
+                match x.kind {
+                    ExprKind.MatchE(sc, arms) => { self.async_match(sc, arms) },
+                    _ => { self.exec_stmt(s) },
+                }
+            },
+            _ => { self.exec_stmt(s) },
+        }
+    }
+
+    // A `match` statement whose arms can suspend: the arm is chosen now (its
+    // guard has no `await`), its body runs on this evaluator.
+    fun async_match(var self, sc: Expr, arms: [MatchArm]) {
+        let sv = self.eval(sc)
+        if self.stop() { return }
+        for arm in arms {
+            let mr = self.match_pattern(arm.pattern, sv)
+            if mr.ok {
+                self.push_scope()
+                var j = 0
+                while j < len(mr.names) {
+                    self.define(mr.names[j], mr.vals[j])
+                    j = j + 1
+                }
+                var guard_ok = true
+                match arm.guard { Some(g) => { guard_ok = as_bool(self.eval(g)) }, None => {} }
+                if self.stop() {
+                    self.pop_scope()
+                    return
+                }
+                if guard_ok {
+                    match arm.body {
+                        ExprOrBlock.EB_Block(b) => {
+                            if self.block_has_suspend(b) {
+                                push(self.frames[len(self.frames) - 1].conts, Cont.KScope)
+                                self.push_block(b)
+                            } else {
+                                self.exec_block(b)
+                                self.pop_scope()
+                            }
+                        },
+                        ExprOrBlock.EB_Expr(x) => {
+                            self.eval(x)
+                            self.pop_scope()
+                        },
+                    }
+                    return
+                }
+                self.pop_scope()
+            }
+        }
+    }
+
+    // `let name = await op`: the result of an `async let`'s child (waiting
+    // for it if it hasn't ended), or of a call. A call whose body can suspend
+    // is entered on this evaluator; any other runs now. After the value is
+    // there the other tasks may run.
+    fun exec_await(var self, name: str, op: Expr) {
+        match op.kind {
+            ExprKind.Name(n) => {
+                match self.lookup(n) {
+                    Some(v) => {
+                        match v {
+                            Value.VTask(id) => {
+                                if self.tasks[id].state == 2 {
+                                    self.deliver(name, id)
+                                    self.yielding = true
+                                } else {
+                                    push(self.frames[len(self.frames) - 1].conts, Cont.KLet(name, id))
+                                    self.wait_for(id)
+                                }
+                                return
+                            },
+                            _ => {},
+                        }
+                    },
+                    None => {},
+                }
+            },
+            _ => {},
+        }
+        self.deferred = None
+        self.deferred_place = None
+        self.defer = true
+        let v = self.eval(op)
+        self.defer = false
+        if self.stop() {
+            self.deferred = None
+            return
+        }
+        match self.deferred {
+            Some(d) => {
+                self.deferred = None
+                let place = self.deferred_place
+                self.deferred_place = None
+                let top = len(self.frames) - 1
+                push(self.frames[top].conts, Cont.KLet(name, -1))
+                self.frames[top].scopes = self.scopes
+                push(self.frames, AFrame { scopes: d.scopes, conts: [], place: place, pend: Ctrl.CNone, pval: Value.VUnit, perr: None, pcode: 0 })
+                self.scopes = d.scopes
+                self.push_block(d.body)
+            },
+            None => {
+                self.define(name, v)
+                self.yielding = true
+            },
+        }
+    }
+
+    // The ended child task `id`'s result, for `name`; its failure, the
+    // current call's.
+    fun deliver(var self, name: str, id: int32) {
+        self.tasks[id].awaited = true
+        if self.tasks[id].failed {
+            self.rt_err = self.tasks[id].err
+            self.ctrl = Ctrl.CExit
+            self.exit_code = self.tasks[id].code
+            return
+        }
+        self.define(name, self.tasks[id].value)
+    }
+
+    // The current call ends, returning `v` (`ok`) or failing; a `var self`
+    // method's `self` goes back to its receiver.
+    fun finish_frame(var self, ok: bool, v: Value, err: Option<RtError>, code: int32) {
+        let done = pop(self.frames)
+        var final_self = Value.VUnit
+        match done.place { Some(p) => { final_self = self.lookup_or_unit("self") }, None => {} }
+        if len(self.frames) == 0 {
+            self.end_task(ok, v, err, code)
+            return
+        }
+        let top = len(self.frames) - 1
+        self.scopes = self.frames[top].scopes
+        if ok {
+            match done.place { Some(p) => { self.write_place(p, final_self) }, None => {} }
+        }
+        let ci = len(self.frames[top].conts) - 1
+        match self.frames[top].conts[ci] {
+            Cont.KLet(name, child) => {
+                pop(self.frames[top].conts)
+                if ok {
+                    self.define(name, v)
+                } else {
+                    self.frames[top].pend = Ctrl.CExit
+                    self.frames[top].perr = err
+                    self.frames[top].pcode = code
+                }
+            },
+            _ => {},
+        }
+    }
+
+    // The current task ends; the tasks waiting for it are ready again.
+    fun end_task(var self, ok: bool, v: Value, err: Option<RtError>, code: int32) {
+        let t = self.cur
+        self.tasks[t].state = 2
+        self.tasks[t].value = v
+        self.tasks[t].failed = !ok
+        self.tasks[t].err = err
+        self.tasks[t].code = code
+        for w in self.tasks[t].waiters {
+            self.tasks[w].state = 0
+            push(self.queue, w)
+        }
+        self.tasks[t].waiters = []
+        self.scopes = []
+    }
+
+    // `async let name = init`: a child task with copies of the variables,
+    // awaiting the call `init` makes, ready to run after this one.
+    fun start_child(var self, name: str, init: Expr) {
+        let body = self.task_body(init)
+        let id = self.new_task(self.scopes, body)
+        self.define(name, Value.VTask(id))
+    }
+
+    // -- what goes to the async evaluator ---------------------------------
+
+    // Whether the call being entered, with the body `b`, goes to the async
+    // evaluator (Interp.defer): its body can suspend; it is deferred with the
+    // variables just made.
+    fun defer_block(var self, b: Option<Block>) -> bool {
+        if !self.defer { return false }
+        match b {
+            Some(bl) => {
+                if !self.block_has_suspend(bl) { return false }
+                self.defer = false
+                self.deferred = Some(Deferred { scopes: self.scopes, body: self.normalized(bl) })
+                return true
+            },
+            None => {},
+        }
+        return false
+    }
+
+    fun defer_lambda(var self, body: ExprOrBlock) -> bool {
+        if !self.defer { return false }
+        match body {
+            ExprOrBlock.EB_Block(bl) => { return self.defer_block(Some(bl)) },
+            ExprOrBlock.EB_Expr(e) => {
+                if !body_suspends(body) { return false }
+                self.defer = false
+                self.deferred = Some(Deferred { scopes: self.scopes, body: self.lambda_body(e) })
+                return true
+            },
+        }
+        return false
+    }
+
+    fun body_suspends_fd(var self, fd: FunData) -> bool {
+        return match fd.body { Some(b) => self.block_has_suspend(b), None => false }
+    }
+
+    fun block_has_suspend(var self, b: Block) -> bool {
+        for s in b.stmts { if self.suspends(s) { return true } }
+        return false
+    }
+
+    // Whether `s` has an `await` or an `async let` (by statement).
+    fun suspends(var self, s: Stmt) -> bool {
+        match get(self.suspending, s.id) { Some(r) => { return r }, None => {} }
+        let r = stmt_suspends(s)
+        self.suspending[s.id] = r
+        return r
+    }
+
+    // The normalized body of an async function or method (by its first
+    // statement), of a lambda's expression (by its id), of an `async let`'s
+    // child (by the initializer's id). The normalizer adds the types of the
+    // nodes it makes to `resolved`, which it holds meanwhile.
+    fun normalized(var self, b: Block) -> Block {
+        if len(b.stmts) == 0 { return b }
+        let key = b.stmts[0].id
+        match get(self.bodies, key) { Some(nb) => { return nb }, None => {} }
+        self.norm.resolved = self.resolved
+        self.resolved = [:]
+        let nb = self.norm.block(b)
+        self.resolved = self.norm.resolved
+        self.norm.resolved = [:]
+        self.bodies[key] = nb
+        return nb
+    }
+
+    fun lambda_body(var self, e: Expr) -> Block {
+        match get(self.bodies, e.id) { Some(nb) => { return nb }, None => {} }
+        self.norm.resolved = self.resolved
+        self.resolved = [:]
+        let nb = self.norm.returning(e, false)
+        self.resolved = self.norm.resolved
+        self.norm.resolved = [:]
+        self.bodies[e.id] = nb
+        return nb
+    }
+
+    fun task_body(var self, init: Expr) -> Block {
+        match get(self.bodies, init.id) { Some(nb) => { return nb }, None => {} }
+        self.norm.resolved = self.resolved
+        self.resolved = [:]
+        let nb = self.norm.returning(init, true)
+        self.resolved = self.norm.resolved
+        self.norm.resolved = [:]
+        self.bodies[init.id] = nb
+        return nb
+    }
+
+    // The value `v` reaches its fields through: an actor's state.
+    fun deref(self, v: Value) -> Value {
+        return match v { Value.VActor(id) => self.actors[id], _ => v }
+    }
+
+    // Whether `name` is an actor type (an empty table needs no hashing).
+    fun is_actor_type(self, name: str) -> bool {
+        return len(self.actor_types) > 0 && contains(self.actor_types, name)
+    }
+
 
     fun exec_stmt(var self, s: Stmt) {
         match s.kind {
@@ -885,6 +1529,7 @@ impl Interp {
             ExprKind.MatchE(scrut, arms) => self.eval_match(scrut, arms),
             ExprKind.Try(inner) => self.eval_try(inner),
             ExprKind.Lambda(params, ret, body, asy) => self.eval_lambda(params, body),
+            ExprKind.Await(x) => self.eval(x),     // unreachable: the async evaluator takes `await`s
             _ => Value.VUnit,
         }
     }
@@ -1192,7 +1837,7 @@ impl Interp {
             _ => {},
         }
         let c = self.eval(tgt)
-        return get_field(c, field)
+        return get_field(self.deref(c), field)
     }
 
     fun eval_tuple_lit(var self, elems: [Expr]) -> Value {
@@ -1218,6 +1863,10 @@ impl Interp {
         for f in fields {
             push(names, f.name)
             push(vals, self.eval(f.value))
+        }
+        if self.is_actor_type(name) {     // starts the actor (D89)
+            push(self.actors, Value.VStruct(name, names, vals))
+            return Value.VActor(len(self.actors) - 1)
         }
         return Value.VStruct(name, names, vals)
     }
@@ -1318,8 +1967,9 @@ impl Interp {
         }
         let fi = self.func_idx(format("{}.{}", key, method))
         if fi >= 0 {
-            // the receiver first (once), then the arguments, as in Python
-            if self.method_is_var_self(fi) {
+            // the receiver first (once), then the arguments, as in Python;
+            // an actor's handle is passed as it is: its methods change the actor
+            if self.method_is_var_self(fi) && !self.is_actor_type(key) {
                 // The receiver's value moves into the call, so the method can
                 // change it in place (MYLA-74); the arguments are evaluated
                 // first, and the final `self` is stored back after.
@@ -1333,6 +1983,8 @@ impl Interp {
                 if self.place_valid(p) { self.update_place(p, PlaceOp.OSet(Value.VUnit)) }
                 let (rv, final_self) = self.call_with_receiver(fi, argv)
                 self.write_place(p, final_self)
+                // an async body deferred: its `self` goes back here when it ends
+                match self.deferred { Some(d) => { self.deferred_place = Some(p) }, None => {} }
                 return rv
             }
             let rv0 = self.eval(recv)
@@ -1507,6 +2159,7 @@ impl Interp {
             self.define(fd.params[i].name, argv[i])
             i = i + 1
         }
+        if self.defer_block(fd.body) { return }
         self.exec_block_body(fd.body)
     }
 
@@ -1522,6 +2175,7 @@ impl Interp {
             self.define(fd.params[i].name, argv[i])
             i = i + 1
         }
+        if self.defer_block(fd.body) { return }
         self.exec_block_body(fd.body)
     }
 
@@ -1900,6 +2554,10 @@ impl Interp {
         while k < len(ps) {
             self.define(ps[k].name, argv[k])
             k = k + 1
+        }
+        if self.defer_lambda(body) {
+            self.scopes = saved
+            return Value.VUnit
         }
         var rv = Value.VUnit
         match body {
