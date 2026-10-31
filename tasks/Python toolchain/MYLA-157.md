@@ -1,12 +1,15 @@
 ---
 id: MYLA-157
-title: Check a leak when ? fails inside a list or map literal (Python backend)
+title: A ? failing inside a list or map literal leaks the half-built literal (both backends)
 type: bug
-status: backlog
-priority: low
-labels: [python-backend, memory]
+status: todo
+priority: medium
+labels: [python-backend, selfhost, memory]
 ---
 [[MYLA-4]] notes that in the Python backend, a `?` that returns early from inside a list or map literal leaves the literal's elements allocated so far unreleased; no task tracks it, and it wasn't measured. (The self-hosted backend's leaks went with [[MYLA-22]].)
 
-- [ ] Reproduce with a stress program that fails a `?` inside a literal many times, measuring memory
-- [ ] If it leaks: release the staged elements on the early way out, as the staging of call arguments does
+**Confirmed by the October 2026 review ([[Project/Review-2026-10]]), in both backends.** 900,000 iterations of `let xs = [f"...", fails(i)?]` reach 117 MB peak RSS against 13 MB with the `?` hoisted out of the literal; 100k/300k/900k iterations grow linearly (27/80/240 MB, about 115 bytes each), with the same numbers for the Python backend's binary. The IR shows why (`--emit-ir`): the fresh cell (`%t = rt __alloc`) is registered as an owning temporary only after every element is stored, so the failure block drops the staged elements but never frees the cell or the strings already moved into it (`moved`); the verifier can't see it because the cell isn't in a slot yet. Fix in [[selfhost/lower.my]] (`list_lit`, `map_lit`): own the fresh cell before evaluating the elements; the same in [[src/myla/compiler/codegen_x86.py]].
+
+- [x] Reproduce with a stress program that fails a `?` inside a literal many times, measuring memory: it leaks, in both backends
+- [ ] Own the fresh cell before the elements in both backends; release it on the early way out
+- [ ] A `?`-in-literal case in `test_stress_programs_reclaim_memory` (both backends and the codegen gate, with the 30 MB bound)

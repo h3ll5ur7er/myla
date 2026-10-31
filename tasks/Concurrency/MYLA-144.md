@@ -2,7 +2,7 @@
 id: MYLA-144
 title: The concurrency stress tests
 type: test
-status: done
+status: todo
 priority: medium
 labels: [concurrency, tests, design]
 ---
@@ -53,3 +53,12 @@ From the first runs (programs in `tests/burn/test_concurrency_stress.py` to come
 
 The table is on the Concurrency page too ([[Language/Concurrency]]).
 - Unit 621, integration 2, burn 808 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (6,107,397 bytes).
+
+## Follow-up (October 2026 review)
+
+Reopened on 2026-10-31: the review ([[Project/Review-2026-10]]) found four shapes none of the sixteen programs exercise, and each is where a problem was found. Each becomes a `t13_` to `t16_` program once its task settles the behaviour (an error-corpus file where the program is rejected):
+
+- [ ] `t13_child_of_an_actor_method`: an `async let` in an actor method reading `self` ([[MYLA-168]])
+- [ ] `t14_struct_method_in_actor`: an awaited `var self` struct method on an actor field ([[MYLA-169]])
+- [ ] `t15_failure_beside_a_busy_sibling`: a failure while a sibling loops without a suspension point ([[MYLA-170]])
+- [ ] `t16_long_lines`: lines longer than `PIPE_BUF` from several tasks ([[MYLA-173]])
