@@ -476,9 +476,53 @@ class TestGdbVariables(GdbVariables, unittest.TestCase):
         return binary
 
 
+# Async functions and an async lambda in a program with tasks: their variables
+# live in heap frames (D90, MYLA-141).
+TASKS = """\
+import std.task as task
+
+async fun greet(name: str, times: int) -> int {
+    var count = 0
+    let words = ["hi", name]
+    for i in 0..times {
+        count = count + len(words[1])
+    }
+    let label = f"{name}!"
+    return count + len(label)
+}
+
+#main
+async fun main() {
+    async let a = greet("bo", 3)
+    let r = await a
+    let base = 40
+    var fs: [async () -> int] = []
+    push(fs, async () => base + r)
+    let rs = await task.all(fs)
+    print(r)
+    print(rs[0])
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE and shutil.which("gdb"), "needs native builds and gdb")
 class TestSelfHostedGdbVariables(GdbVariables, unittest.TestCase):
     """The self-hosted backend (`gen_main … -g`)."""
+
+    @unittest.skipUnless(shutil.which("gdb"), "gdb is not installed")
+    def test_async_functions_show_their_variables(self):
+        # one worker, so the breakpoints come in a fixed order
+        session = gdb(self.build("tasks", TASKS), "set environment MYLA_THREADS 1",
+                      "break tasks.my:10", "break tasks.my:18", "rbreak _lam",
+                      "run", "info args", "info locals", "continue", "info locals",
+                      "print r + 1", "continue", "info locals", printers=True)
+        self.assertIn('name = "bo"\ntimes = 3\n', session)
+        for line in ("count = 6", 'words = ["hi", "bo"]'):
+            self.assertIn(line + "\n", session)
+        self.assertIn("r = 9\n", session)       # after the await
+        self.assertIn("$1 = 10\n", session)
+        self.assertIn("base = 40\n", session)   # the async lambda's capture
+        self.assertNotIn("%", session.split("Breakpoint 1,")[-1].split("[Inferior")[0])
 
     @classmethod
     def setUpClass(cls):

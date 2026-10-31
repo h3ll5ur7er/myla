@@ -602,10 +602,15 @@ impl CodeGen {
             },
             Inst.Loc(p) => { self.emit_loc(p.line, p.col) },
             Inst.Bind(name, s) => {
-                // a frame function's variables are in its heap frame, which
-                // the debug information doesn't describe yet
-                if f.frame { return }
                 let slot = f.slots[s]
+                // a frame function's variables are in its heap frame (D90,
+                // MYLA-141); its parameters, owned copies there, are visible
+                // in the whole function
+                if f.frame {
+                    let b = CgBinding { name: name, kind: "frame", offset: slot_off[s], ty: slot.ty, capoff: 0 }
+                    self.dbg_variable(b, slot.word >= 0, slot.word >= 0)
+                    return
+                }
                 // a parameter passed by value lives in its argument words as a
                 // local in its slot (D88)
                 if slot.word >= 0 && !slot.inline {

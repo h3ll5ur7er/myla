@@ -460,7 +460,16 @@ impl CodeGen {
         }
         // the address of the value
         var addr: [int32] = [OP_FBREG]
-        for x in sleb(b.offset) { push(addr, x) }
+        if b.kind == "frame" {
+            // in a frame function's heap frame, whose address is the
+            // function's argument word (D90, MYLA-141)
+            push(addr, 16)
+            push(addr, OP_DEREF)
+            push(addr, OP_PLUS_UCONST)
+            for x in uleb(b.offset) { push(addr, x) }
+        } else {
+            for x in sleb(b.offset) { push(addr, x) }
+        }
         if b.kind == "capture" {
             push(addr, OP_DEREF)
             if b.capoff != 0 {
@@ -7616,6 +7625,8 @@ fun ate_of(t: Type) -> int32 {
 #test("x")[false]
 #test("_")[false]
 pub fun is_internal_name(name: str) -> bool {
+    // the compiler's names (`__…`) and the async normalizer's (`%aw1`, …)
+    if len(name) >= 1 && name[0] == '%' { return true }
     return len(name) >= 2 && name[0] == '_' && name[1] == '_'
 }
 
