@@ -1,0 +1,49 @@
+// 8. A failing child task cancels its children, which loop on an actor that
+// the rest of the program keeps using
+actor Res {
+    n: int,
+}
+
+impl Res {
+    fun tick(var self) -> int {
+        self.n = self.n + 1
+        return self.n
+    }
+}
+
+async fun forever(r: Res) -> int {
+    while true {
+        let x = await r.tick()
+    }
+    return 0
+}
+
+async fun fail_soon(r: Res) -> int {
+    var i = 0
+    while i < 20 {
+        let x = await r.tick()
+        i = i + 1
+    }
+    panic("failure in a child")
+    return 0
+}
+
+async fun parent(r: Res) -> int {
+    async let g1 = forever(r)
+    async let g2 = forever(r)
+    async let f = fail_soon(r)
+    return await f
+}
+
+#main
+async fun main() {
+    let r = Res { n: 0 }
+    async let x = parent(r)
+    var i = 0
+    while i < 2000 {
+        let t = await r.tick()
+        i = i + 1
+    }
+    print("main still runs")
+    print(await x)
+}

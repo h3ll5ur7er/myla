@@ -39,6 +39,7 @@ async fun total() -> int {
 - `async let x = e` starts `e` as a child task, which runs in parallel with the rest of the function. Reading `x` awaits its result (`await x`), once. A call `e` makes needn't be awaited: the child task does that. `async let x: int = e` states the result's type.
 - Only an async function has child tasks. A lambda in it can't await them (`a lambda can't await the child task 'a' of its function`).
 - The scope that declared it waits for every child still running when it ends, even one never read: no task outlives its scope.
+- A failure (a panic, a runtime error or `exit`) in a task cancels the task's other children, and theirs (D94): each stops at its next suspension point where it gives up its worker (waiting for a child, the turn after an awaited call, waiting for a busy actor), running no more of its body. The failing task waits for them to stop, then its failure goes on. A child that loops without such an `await` isn't stopped.
 - The child gets copies of what `e` uses, as a lambda does (D15, D48).
 
 ## A number of children: `std.task`

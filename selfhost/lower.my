@@ -376,7 +376,12 @@ pub fun blocked_types(cg: CodeGen) -> [str] {
 // [task]`, then the result: D90, ir_x86's FRAME_HEADER).
 const FRAME_CALLER: int32 = 8
 const FRAME_TASK: int32 = 24
-const FRAME_RESULT: int32 = 40
+const FRAME_RESULT: int32 = 72
+
+// A frame's task (its first frame), a task's flags (1: its children are
+// cancelled, D94) and its parent task.
+const FRAME_ROOT: int32 = 40
+const FRAME_PARENT: int32 = 56
 
 // An actor's executor (D92), after its fields: `[lock][running][first
 // frame waiting][last]`.
@@ -1225,6 +1230,10 @@ impl Lower {
         let me = self.temp(Type.TInt(64, false))
         self.add(Inst.Frame(me))
         self.add(Inst.StoreAt(fr, FRAME_CALLER, me))
+        // the callee runs in this task
+        let root = self.temp(Type.TInt(64, false))
+        self.add(Inst.LoadAt(root, me, FRAME_ROOT))
+        self.add(Inst.StoreAt(fr, FRAME_ROOT, root))
         let held = self.new_slot("__callee", Type.TInt(64, false), 8, -1, false)
         self.add(Inst.Store(held, fr))
         self.leave_self()
@@ -1310,6 +1319,13 @@ impl Lower {
             let d = self.unsupported("an 'async let' not made a call of an async lambda")
             return
         }
+        // a task of its own, this function's task its parent (D94)
+        self.add(Inst.StoreAt(fr, FRAME_ROOT, fr))
+        let me = self.temp(Type.TInt(64, false))
+        self.add(Inst.Frame(me))
+        let parent = self.temp(Type.TInt(64, false))
+        self.add(Inst.LoadAt(parent, me, FRAME_ROOT))
+        self.add(Inst.StoreAt(fr, FRAME_PARENT, parent))
         let fs = self.new_slot("__child", Type.TInt(64, false), 8, -1, false)
         self.add(Inst.Store(fs, fr))
         self.end_temps()
