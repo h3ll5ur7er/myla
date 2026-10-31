@@ -515,17 +515,17 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.Global(d, sym, w) => {
-                if w == 4 { self.emit(format("movslq {}(%rip), %rax", sym)) } else { self.emit(format("movq {}(%rip), %rax", sym)) }
+                if w == 4 { self.emit(format("movslq {}, %rax", self.tv(sym))) } else { self.emit(format("movq {}, %rax", self.tv(sym))) }
                 self.store_temp(d, temp_base)
             },
             Inst.Exit(v) => {
-                // the exit system call; when tasks take turns, held for the
+                // exit_group (every thread ends); when tasks take turns, held for the
                 // parent if a task other than the entry's exits
                 self.load_temp(v, "rax", temp_base)
                 self.emit("movl %eax, %edi")
                 if self.frames { self.emit("call __task_exit") }
                 else {
-                    self.emit("movq $60, %rax")
+                    self.emit("movq $231, %rax")
                     self.emit("syscall")
                 }
             },
