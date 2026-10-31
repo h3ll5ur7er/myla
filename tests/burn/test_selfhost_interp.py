@@ -198,6 +198,33 @@ CONCURRENCY_PROGRAMS = {
         "impl P {\n    async fun poke(self, other: P, depth: int) -> int {\n"
         "        if depth == 0 {\n            return self.n\n        }\n"
         "        return await other.poke(self, depth - 1) + self.n\n    }\n}\n")),
+    # needs the tasks to take turns: the child waits until its parent sets the flag
+    "child_waits_for_its_parent": _amain("let f = Flag { up: false }", "async let w = wait_up(f)", "await f.raise()",
+                                         "print(await w)", before=(
+        "actor Flag {\n    up: bool\n}\n"
+        "impl Flag {\n    fun raise(var self) {\n        self.up = true\n    }\n"
+        "    fun get(self) -> bool {\n        return self.up\n    }\n}\n"
+        "async fun wait_up(f: Flag) -> int {\n    var polls = 0\n"
+        "    while await f.get() == false {\n        polls = polls + 1\n    }\n    return 1\n}\n")),
+    "normalized_expressions": _amain(
+        "var xs = [await fetch(1), 2, await fetch(3)]", "print(xs[0] + xs[2])",
+        "let ok = await fetch(0) == 0 && await fetch(1) == 10", "print(ok)",
+        "let no = false && await fetch(1) == 10", "print(no)",
+        "let yes = true || await fetch(1) == 99", "print(yes)",
+        "let s = match await fetch(2) {", "    20 => await fetch(5) + 1,", "    _ => 0,", "}", "print(s)",
+        "var n = 0", "while await fetch(n) < 30 {", "    n = n + 1", "}", "print(n)",
+        "for i in 0..await fetch(1) {", "    if i == 3 {", "        break", "    }", "    print(await fetch(i))", "}",
+        "let p = P { x: await fetch(4), y: \"a\" }", "print(p.x)",
+        "print(f\"{await fetch(7)}!\")", "print(await twice(await fetch(1)))", "print(await opt(5))", before=_FETCH + (
+        "struct P { x: int, y: str }\n"
+        "async fun twice(n: int) -> int {\n    async let a = fetch(n)\n    return await a / 5\n}\n"
+        "async fun opt(n: int) -> int {\n    let r = await maybe(n)\n    return match r {\n"
+        "        Some(v) => v,\n        None => -1,\n    }\n}\n"
+        "async fun maybe(n: int) -> Option<int> {\n    let v = (await half(n))?\n    return Some(v + 100)\n}\n"
+        "async fun half(n: int) -> Option<int> {\n    if n % 2 == 0 {\n        return Some(n / 2)\n    }\n    return None\n}\n")),
+    "async_var_self_method": _amain("var c = C { n: 1 }", "print(await c.bump(5))", "print(c.n)", before=(
+        "struct C { n: int }\nimpl C {\n    async fun bump(var self, d: int) -> int {\n"
+        "        let x = await fetch(d)\n        self.n = self.n + x\n        return self.n\n    }\n}\n" + _FETCH)),
     "task_all": _amain("var fs: [async () -> int] = []", "for i in 0..9 {", "    push(fs, async () => await fetch(i))", "}",
                        "let rs = await task.all(fs)", "print(len(rs))", "print(rs[8])",
                        "let none: [async () -> str] = []", "print(len(await task.all(none)))",

@@ -1,0 +1,13 @@
+//~ type error: 'await' can't stand in a match guard: bind the awaited value before the 'match'
+//~ span: await big(x)
+// A guard is tried between patterns; binding the value first keeps it simple (D89).
+async fun big(n: int) -> bool {
+    return n > 10
+}
+async fun size(n: int) -> str {
+    return match n {
+        x if await big(x) => "big",
+        _ => "small",
+    }
+}
+fun main() {}
