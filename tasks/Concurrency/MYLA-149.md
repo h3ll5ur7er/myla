@@ -2,7 +2,7 @@
 id: MYLA-149
 title: Cancelling a child task by asking it
 type: feature
-status: in-progress
+status: done
 priority: medium
 labels: [concurrency, checker, runtime, selfhost, stdlib]
 ---
@@ -21,3 +21,9 @@ From the concurrency stress tests ([[MYLA-144]], tests 7 and 9), after [[MYLA-14
 - Considered: stopping the child at its next suspension point, as a failure does (D94). Its cleanup would need a way to run code when stopped (a `defer`), and a resource taken but not yet recorded could be lost; the flag leaves every stop to the program.
 
 ## Evidence
+
+- Before: `task.cancel` and `task.cancelled` didn't exist (D94 (4)); test 7 couldn't be written, test 9 had only the request number.
+- Before the programs synchronized, a first probe gave 1 in the Python interpreter and -1 elsewhere: the flag is checked when the child gets to it, so the stress programs pause the child at an actor gate until the parent has cancelled.
+- After: `t07_cancelled_holder_gives_back`, cancelled at seven points (before taking, holding, three points of using, done using, after giving back), ends each one with the resource available and never given back twice; `t09_cancel_the_stale_request` shows "cats". Both give the same output in both interpreters and natively, with one outcome in 30 runs on each of 1, 2, 4, 8 and 16 workers.
+- The two error corpus cases give the same diagnostics in both checkers (the corpus now links files that import; the self-hosted CLI compares its output with Python's).
+- Unit 621, integration 2, burn 811 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (6,124,801 bytes).
