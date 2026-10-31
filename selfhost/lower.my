@@ -405,10 +405,6 @@ fun actor_name(t: Type) -> str {
     return match t { Type.TActor(n) => n, _ => "" }
 }
 
-fun is_cell(t: Type) -> bool {
-    return is_cell_t(t)
-}
-
 impl Lower {
     // --- building -------------------------------------------------------------
 
@@ -1438,8 +1434,6 @@ impl Lower {
         self.finish(Term.Jmp(end))
         self.start(end)
     }
-
-    // The function's end, returning the value in %v (-1: none, or an
 
     // The function's end, returning the value in %v (-1: none, or an
     // aggregate already in its result's storage); `fall`: the body fell

@@ -2,7 +2,7 @@
 id: MYLA-34
 title: Remove dead code and bring-up probes from selfhost
 type: chore
-status: review
+status: done
 priority: low
 labels: [selfhost, cleanup]
 ---
@@ -19,3 +19,7 @@ Removed: `is_place` (the last of the `eval_owned` → `clone_in_rax` chain; the 
 ## Evidence
 
 The bootstrap fixed point holds and every self-hosted gate passes (see the commit's suite run).
+
+## Evidence (sign-off, 2026-10-31)
+
+The review ([[Project/Review-2026-10]]) found leftovers: the unused `is_cell` in [[selfhost/lower.my]] (a wrapper of `is_cell_t`), a duplicated comment line before `exit_fn`, and in [[selfhost/codegen.my]] empty section headers from the bring-up (`ownership scopes & drop sites`, `statements`, `enum construction`, `match`, `the ? operator`), one saying "filled in later C4 sub-slices", and the executor's header still saying "D91: one thread" with a first sentence describing the one ring of the one-thread executor. All removed or rewritten (the executor's comment now describes the per-worker rings, MYLA-140). Checked and kept: `all_reports` in [[selfhost/diag.my]] is used by the language server; `load_program_with` in [[selfhost/loader.my]] is the loader's documented API with overrides ([[Architecture/Module-loader]]). The bootstrap reaches its fixed point (6,127,947 bytes, with the other changes of the day) and the codegen gate passes.

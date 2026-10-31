@@ -1303,8 +1303,6 @@ impl CodeGen {
         return Type.TInt(32, true)
     }
 
-    // -- ownership scopes & drop sites ------------------------------------
-
     // -- type layout ------------------------------------------------------
 
     fun struct_info(self, name: str) -> StructInfo {
@@ -2454,11 +2452,12 @@ impl CodeGen {
         self.raw(format("\tleaq {}(%{}), %{}", tls_offset(sym) + extra, reg, reg))
     }
 
-    // -- the executor (D90, D91: one thread) ------------------------------
+    // -- the executor (D90, D92, MYLA-140: workers and their queues) --------
 
-    // The ready frames, a ring of EXEC_CAP in `.bss`; `__exec_push` (%rdi: a
-    // frame) queues one, `__exec_run` resumes them in turn until none is
-    // left (each frame function pops its one argument word). `myla___resume`
+    // The ready frames: each worker has a ring of its own (`emit_executor`
+    // below); `__exec_push` (%rdi: a frame) queues one, `__exec_run` resumes
+    // frames until none is left anywhere (each frame function pops its one
+    // argument word). `myla___resume`
     // goes on with the frame at 8(%rsp), through its resume function;
     // `myla___finish`, at a frame function's end, resumes the frame's caller
     // in place of it, or ends its task and returns to the executor.
@@ -3263,8 +3262,6 @@ impl CodeGen {
         }
     }
 
-    // -- statements -------------------------------------------------------
-
     // -- expressions ------------------------------------------------------
 
     fun const_value_expr(self, name: str) -> Option<Expr> {
@@ -3617,7 +3614,7 @@ impl CodeGen {
         if inline { self.drop_value(base, off, t) } else { self.walk_member(base, off, t, false) }
     }
 
-    // -- maps / strings / chars (filled in later C4 sub-slices) -----------
+    // -- maps / strings / chars -------------------------------------------
 
     fun map_slot_size(self, mt: Type) -> int32 { return 16 + self.stored_size(map_val(mt)) }
     fun map_is_str(self, mt: Type) -> int32 {
@@ -3724,12 +3721,6 @@ impl CodeGen {
         let sub = self.type_subst(info.type_params, type_args_of(st))
         return subst_type(self.struct_field_type(name, field), sub)
     }
-
-    // -- enum construction ------------------------------------------------
-
-    // -- match ------------------------------------------------------------
-
-    // -- the `?` operator -------------------------------------------------
 
     // Emit a partial-application thunk, called as `thunk([sret,] env, holes…)`:
     // rebuild the full argument list from the env (filled; an aggregate passed
