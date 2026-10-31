@@ -1149,7 +1149,7 @@ impl CodeGen {
             ExprKind.Try(x) => { self.scan_expr(x, false) },
             ExprKind.Cast(x, ty) => { self.scan_expr(x, false) },
             // a lambda captures what it reads
-            ExprKind.Lambda(ps, rt, body) => {
+            ExprKind.Lambda(ps, rt, body, asy) => {
                 let names = match body {
                     ExprOrBlock.EB_Expr(x) => names_in_expr(x, []),
                     ExprOrBlock.EB_Block(blk) => names_in_block(blk, []),
@@ -1183,7 +1183,7 @@ impl CodeGen {
     fun derived_eq_routine(self, key: str) -> bool {
         for d in self.decls {
             match d.kind {
-                DeclKind.StructDecl(name, fields, attrs, tps, isp) => { if name == key { return len(tps) == 0 && attrs_have_derive_eq(attrs) } },
+                DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => { if name == key { return len(tps) == 0 && attrs_have_derive_eq(attrs) } },
                 DeclKind.EnumDecl(name, variants, attrs, tps, isp) => { if name == key { return len(tps) == 0 && attrs_have_derive_eq(attrs) } },
                 _ => {},
             }
@@ -2731,7 +2731,7 @@ impl CodeGen {
                     for v in self.free_expr(en.value, bound) { push(out, v) }
                 }
             },
-            ExprKind.Lambda(params, ret, body) => {
+            ExprKind.Lambda(params, ret, body, asy) => {
                 var b2 = bound
                 for p in params { push(b2, p.name) }
                 for v in self.free_eb(body, b2) { push(out, v) }
@@ -4436,7 +4436,7 @@ impl CodeGen {
     fun emit_derived_eq(var self) {
         for d in self.decls {
             match d.kind {
-                DeclKind.StructDecl(name, fields, attrs, tps, isp) => {
+                DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => {
                     if len(tps) == 0 && attrs_have_derive_eq(attrs) { self.emit_struct_eq(name) }
                 },
                 DeclKind.EnumDecl(name, variants, attrs, tps, isp) => {
@@ -5816,7 +5816,7 @@ fun names_in_expr(e: Expr, acc: [str]) -> [str] {
         },
         ExprKind.Try(x) => { out = names_in_expr(x, out) },
         ExprKind.Cast(x, ty) => { out = names_in_expr(x, out) },
-        ExprKind.Lambda(ps, rt, body) => {
+        ExprKind.Lambda(ps, rt, body, asy) => {
             match body {
                 ExprOrBlock.EB_Expr(x) => { out = names_in_expr(x, out) },
                 ExprOrBlock.EB_Block(blk) => { out = names_in_block(blk, out) },
@@ -5946,7 +5946,7 @@ fun may_write_expr(e: Expr, name: str) -> bool {
         ExprKind.MatchE(s, arms) => { return may_write_expr(s, name) || arms_may_write(arms, name) },
         ExprKind.Try(x) => { return may_write_expr(x, name) },
         ExprKind.Cast(x, ty) => { return may_write_expr(x, name) },
-        ExprKind.Lambda(ps, rt, body) => { return may_write_body(body, name) },
+        ExprKind.Lambda(ps, rt, body, asy) => { return may_write_body(body, name) },
         _ => {},
     }
     return false

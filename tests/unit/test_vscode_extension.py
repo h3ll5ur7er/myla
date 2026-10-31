@@ -21,7 +21,7 @@ TYPE_NAMES = {"int", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint
               "float", "float32", "float64", "bool", "str", "char"}
 # Words of the removed Rust dialect, and type names Myla doesn't have (`f32`
 # and `f64` are literal suffixes, never types: see `test_type_names`).
-NOT_MYLA = {"actor", "async", "await", "spawn", "go", "chan", "select", "void", "unit"}
+NOT_MYLA = {"spawn", "go", "chan", "select", "void", "unit"}
 # Snippets that are declarations; the others are statements or expressions.
 DECLARATIONS = {"fun", "funv", "struct", "enum", "trait", "impl", "implfor", "typealias", "const",
                 "import", "from", "test"}

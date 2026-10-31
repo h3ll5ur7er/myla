@@ -1331,7 +1331,7 @@ impl Lower {
                 if cg.has_func(n) { return self.fn_value(cg, e, n) }
                 return self.unsupported("that name as a value")
             },
-            ExprKind.Lambda(params, rt, body) => { return self.lambda_value(cg, e, params, body) },
+            ExprKind.Lambda(params, rt, body, asy) => { return self.lambda_value(cg, e, params, body) },
             ExprKind.GetField(tgt, field) => {
                 let base = self.addr(cg, tgt)
                 return self.unbox(cg, t, self.offset(base, cg.field_offset(self.place_type(cg, tgt), field)))

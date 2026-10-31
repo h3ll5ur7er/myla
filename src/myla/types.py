@@ -3034,6 +3034,10 @@ class Checker:
                 f"pattern names struct '{pat.type_name}' but the value is '{t.name}'",
                 at=pat,
             )
+        if t.name in self.actors:
+            raise TypeCheckError(
+                f"a pattern can't reach the fields of the actor '{type_name(t)}'", at=pat
+            )
         fields = self._struct_field_types(t)
         seen: set[str] = set()
         for fp in pat.fields:
@@ -3545,6 +3549,8 @@ class Checker:
                 f"both integers)",
                 at=expr,
             )
+        if lt.is_async or rt.is_async:
+            raise TypeCheckError("an async function can't be composed with '>>'", at=expr)
         if len(rt.params) != 1:
             raise TypeCheckError(
                 f"composition with '>>' needs a one-argument function on the "
@@ -4407,15 +4413,20 @@ class Checker:
         if not self._async:
             raise TypeCheckError("'async let' can only stand in an async function", at=stmt)
         declared = self._resolve_annotation(stmt.declared_type) if stmt.declared_type else None
-        if isinstance(stmt.init, ast.Call):
-            self._awaited.add(id(stmt.init))
-        t = self._infer(stmt.init, scope, declared)
-        if declared is not None and t != declared:
-            raise TypeCheckError(
-                f"type mismatch in 'async let': declared '{type_name(declared)}', "
-                f"found '{type_name(t)}'",
-                at=stmt,
-            )
+        if _has_error(declared):
+            t = declared   # a failed alias: the value isn't checked (MYLA-110)
+        else:
+            if isinstance(stmt.init, ast.Call):
+                self._awaited.add(id(stmt.init))
+            t = self._infer(stmt.init, scope, declared)
+            if declared is not None:
+                if not _has_error(t) and t != declared:
+                    raise TypeCheckError(
+                        f"type mismatch in 'async let': declared '{type_name(declared)}', "
+                        f"found '{type_name(t)}'",
+                        at=stmt,
+                    )
+                t = declared
         if not scope.define(stmt.name, _Binding(t, mutable=False, at=stmt, task=True)):
             raise TypeCheckError(
                 f"'{stmt.name}' is already declared in this scope", at=stmt,
@@ -4640,6 +4651,7 @@ class Checker:
                 return list(sig.params[1:]), sig.ret
             if (isinstance(recv_type, StructType)
                     and callee.field_name in self.structs.get(recv_type.name, {})):
+                self._check_isolation(recv_type, callee)
                 field_t = self._struct_field_types(recv_type).get(callee.field_name)
                 if isinstance(field_t, FuncType):
                     if field_t.is_async:

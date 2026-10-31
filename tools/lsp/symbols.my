@@ -142,8 +142,10 @@ pub fun outline_parsed(source: str, toks: [Token], program: Program) -> [Symbol]
 impl Builder {
     fun decl(var self, d: Decl) {
         match d.kind {
-            DeclKind.StructDecl(name, fields, attrs, tps, is_pub) => {
-                let k = self.add(d.line, d.col, name, SymKind.Struct, header(is_pub, "struct", name, tps), name, false, -1, len(fields) > 0)
+            DeclKind.StructDecl(name, fields, attrs, tps, is_pub, act) => {
+                var kw = "struct"
+                if act { kw = "actor" }
+                let k = self.add(d.line, d.col, name, SymKind.Struct, header(is_pub, kw, name, tps), name, false, -1, len(fields) > 0)
                 for f in fields { self.add(f.line, f.col, f.name, SymKind.Field, type_str(f.ty), f.name, false, k, false) }
             },
             DeclKind.EnumDecl(name, variants, attrs, tps, is_pub) => {
@@ -285,8 +287,13 @@ pub fun type_str(t: TypeExpr) -> str {
         TypeKind.TTuple(es) => "(" + type_list(es) + ")",
         TypeKind.TList(e) => "[" + type_str(e) + "]",
         TypeKind.TMap(k, v) => "[" + type_str(k) + ": " + type_str(v) + "]",
-        TypeKind.TFn(ps, r) => "(" + type_list(ps) + ") -> " + type_str(r),
+        TypeKind.TFn(ps, r, asy) => async_str(asy) + "(" + type_list(ps) + ") -> " + type_str(r),
     }
+}
+
+fun async_str(asy: bool) -> str {
+    if asy { return "async " }
+    return ""
 }
 
 fun type_list(ts: [TypeExpr]) -> str {
@@ -360,6 +367,7 @@ fun variant_detail(v: Variant) -> str {
 pub fun signature(fd: FunData) -> str {
     var sb = StringBuilder()
     if fd.is_pub { append(sb, "pub ") }
+    append(sb, async_str(fd.is_async))
     append(sb, "fun " + fd.name + type_params_str(fd.type_params) + "(")
     var first = true
     match fd.receiver {

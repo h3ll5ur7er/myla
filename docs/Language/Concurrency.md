@@ -1,6 +1,6 @@
 # Concurrency
 
-> **Draft (D89).** This page proposes the syntax and the rules of [[MYLA-135]]; nothing on it is implemented yet ([[MYLA-136]] … [[MYLA-139]]). The examples are what the checker and the interpreters are to accept.
+> **Draft (D89).** Both checkers accept and check what this page describes ([[MYLA-135]]), except task groups, whose `std.task` module comes with [[MYLA-136]]. Neither interpreter nor backend runs it yet: they stop at the first construct of concurrency with an error ([[MYLA-136]] … [[MYLA-139]]).
 
 Myla's concurrency follows Swift's: `async` functions that may suspend, `await` at every suspension, structured tasks that never outlive the scope that starts them, and `actor`s, whose state only their own methods touch. Tasks run in parallel on several threads. A value crossing into another task or actor is copied, so tasks share nothing but actors (D89).
 
@@ -22,7 +22,9 @@ async fun twice(n: int) -> int {
 - `async fun` declares a function that may suspend. Calling it needs `await`, and only an async function (or a task) can `await`.
 - `await` stands before the call, also inside an expression: `return await fetch(1) + await fetch(2)` awaits one after the other.
 - A synchronous function can call synchronous ones only. There is no blocking wait for an async one.
-- A function type can be async too: `async (int) -> int`; so can a lambda: `async (n: int) => await fetch(n)`.
+- A function type can be async too: `async (int) -> int`; so can a lambda: `async (n: int) => await fetch(n)`. An async function value is called with `await` too. It isn't a synchronous one: `let f: (int) -> int = fetch` is an error.
+- An async function can't be partially applied (`fetch(_)`) or composed with `>>`: either would make a synchronous function value of it.
+- `#test` can't run an async function, `become` can't stand in one, and a trait's methods can't be async.
 
 ## Child tasks: `async let`
 
@@ -34,7 +36,8 @@ async fun total() -> int {
 }
 ```
 
-- `async let x = e` starts `e` as a child task, which runs in parallel with the rest of the function. Reading `x` awaits its result (`await x`), once.
+- `async let x = e` starts `e` as a child task, which runs in parallel with the rest of the function. Reading `x` awaits its result (`await x`), once. A call `e` makes needn't be awaited: the child task does that. `async let x: int = e` states the result's type.
+- Only an async function has child tasks. A lambda in it can't await them (`a lambda can't await the child task 'a' of its function`).
 - The scope that declared it waits for every child still running when it ends, even one never read: no task outlives its scope.
 - The child gets copies of what `e` uses, as a lambda does (D15, D48).
 
@@ -95,8 +98,9 @@ async fun main() {
 ```
 
 - `actor` declares a type like a struct, and `impl` gives it methods. Making one (`Counter { count: 0 }`) starts the actor and gives a **handle**. Copying the handle copies the reference: `let d = c` reaches the same actor. It is the only reference type in Myla.
-- Its fields are reachable only through `self`, in its own methods. Outside them, `c.count` is an error.
-- From outside, every method call is awaited (`await c.increment()`). It runs on the actor, one call at a time, so its methods never race with each other. Its arguments go in, and its result comes out, as copies.
+- Its fields are reachable only through `self`, in its own methods. Outside them, `c.count` (read or assigned) and a pattern `Counter { count }` are errors. So is a lambda in its methods that captures `self`, as the lambda could run elsewhere.
+- An actor can't have type parameters or attributes (no `#derive`), and can't implement a trait, whose methods are called without `await`.
+- From outside, every method call is awaited (`await c.increment()`), also of a method declared without `async`; and the handle needn't be a `var` to call a `var self` method. The call runs on the actor, one call at a time, so its methods never race with each other. Its arguments go in, and its result comes out, as copies.
 - Inside its methods, a call on `self` is an ordinary call (`self.get()`), since the actor is already running it, unless the method is `async`.
 - An actor method may be `async`. While it waits, the actor runs other calls (it is *reentrant*), so two actors calling each other can't deadlock. Its fields may have changed when it resumes:
 
@@ -128,7 +132,7 @@ An `async let`'s captures, a spawned child's captures and result, and an actor m
 
 The order between lines printed by tasks running at once isn't defined. Each `print` writes its line whole. A program prints the same everywhere when its order comes from `await`: results joined in order, an actor's state read after its callers have finished.
 
-## Errors (proposed messages)
+## Errors
 
 ```myla
 fun peek(c: Counter) -> int {

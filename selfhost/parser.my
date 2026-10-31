@@ -48,14 +48,14 @@ const SYNC_DECL: int32 = 2
 #test(TokenKind.HASH)[true]
 #test(TokenKind.LET)[false]
 fun is_decl_start(k: TokenKind) -> bool {
-    return k == TokenKind.FUN || k == TokenKind.STRUCT || k == TokenKind.ENUM || k == TokenKind.IMPL || k == TokenKind.TRAIT || k == TokenKind.TYPEALIAS || k == TokenKind.CONST || k == TokenKind.IMPORT || k == TokenKind.FROM || k == TokenKind.PUB || k == TokenKind.HASH
+    return k == TokenKind.FUN || k == TokenKind.ACTOR || k == TokenKind.ASYNC || k == TokenKind.STRUCT || k == TokenKind.ENUM || k == TokenKind.IMPL || k == TokenKind.TRAIT || k == TokenKind.TYPEALIAS || k == TokenKind.CONST || k == TokenKind.IMPORT || k == TokenKind.FROM || k == TokenKind.PUB || k == TokenKind.HASH
 }
 
 // The tokens that begin a statement other than an expression.
 #test(TokenKind.RETURN)[true]
 #test(TokenKind.IDENT)[false]
 fun is_stmt_start(k: TokenKind) -> bool {
-    return k == TokenKind.LET || k == TokenKind.VAR || k == TokenKind.IF || k == TokenKind.WHILE || k == TokenKind.FOR || k == TokenKind.RETURN || k == TokenKind.BECOME || k == TokenKind.BREAK || k == TokenKind.CONTINUE
+    return k == TokenKind.LET || k == TokenKind.VAR || k == TokenKind.IF || k == TokenKind.WHILE || k == TokenKind.FOR || k == TokenKind.RETURN || k == TokenKind.BECOME || k == TokenKind.BREAK || k == TokenKind.CONTINUE || k == TokenKind.ASYNC
 }
 
 #test([TokenKind.LPAREN], TokenKind.LBRACE)[false]
@@ -406,9 +406,9 @@ impl Parser {
         }
         let tok = self.peek()
         let k = tok.kind
-        if k == TokenKind.STRUCT {
+        if k == TokenKind.STRUCT || k == TokenKind.ACTOR {
             return self.struct_decl(attrs, is_pub)
-        } else if k == TokenKind.FUN {
+        } else if k == TokenKind.FUN || (k == TokenKind.ASYNC && self.peek_kind_at(1) == TokenKind.FUN) {
             return self.fun_decl(attrs, is_pub)
         } else if k == TokenKind.ENUM {
             return self.enum_decl(attrs, is_pub)
@@ -433,7 +433,7 @@ impl Parser {
             }
             return d
         }
-        self.fail_at(tok, format("expected a declaration (struct/fun/enum/typealias/const/trait/impl/import), found '{}'", tok.lexeme))
+        self.fail_at(tok, format("expected a declaration (struct/actor/fun/enum/typealias/const/trait/impl/import), found '{}'", tok.lexeme))
         return self.mk_decl(0, 0, DeclKind.ImportDecl(ImportPath { line: 0, col: 0, sp: self.span_from(0, 0), dots: 0, segments: [] }, None, None, false))
     }
 
@@ -547,8 +547,11 @@ impl Parser {
     }
 
     fun struct_decl(var self, attrs: [Attribute], is_pub: bool) -> Decl {
-        let kw = self.advance()
-        let name = self.expect(TokenKind.IDENT, "struct name").lexeme
+        let kw = self.advance()    // struct / actor
+        let is_actor = kw.kind == TokenKind.ACTOR
+        var what = "struct name"
+        if is_actor { what = "actor name" }
+        let name = self.expect(TokenKind.IDENT, what).lexeme
         let tps = self.generics_no_bounds("a struct")
         self.expect(TokenKind.LBRACE, "'{'")
         self.skip_newlines()
@@ -565,7 +568,7 @@ impl Parser {
             self.skip_newlines()
         }
         self.expect(TokenKind.RBRACE, "'}'")
-        return self.mk_decl(kw.line, kw.column, DeclKind.StructDecl(name, fields, attrs, tps, is_pub))
+        return self.mk_decl(kw.line, kw.column, DeclKind.StructDecl(name, fields, attrs, tps, is_pub, is_actor))
     }
 
     fun enum_decl(var self, attrs: [Attribute], is_pub: bool) -> Decl {
@@ -600,7 +603,9 @@ impl Parser {
     }
 
     fun fun_decl(var self, attrs: [Attribute], is_pub: bool) -> Decl {
-        let kw = self.advance()
+        let kw = self.advance()    // fun, or async before it
+        let is_async = kw.kind == TokenKind.ASYNC
+        if is_async { self.skip() }
         let name = self.expect(TokenKind.IDENT, "function name").lexeme
         let tps = self.generics()
         self.expect(TokenKind.LPAREN, "'('")
@@ -625,7 +630,7 @@ impl Parser {
         let fd = FunData {
             line: kw.line, col: kw.column, sp: self.span_from(kw.line, kw.column), name: name, params: params,
             ret_type: ret, body: Some(body), attributes: attrs,
-            type_params: tps, receiver: None, is_pub: is_pub,
+            type_params: tps, receiver: None, is_pub: is_pub, is_async: is_async,
         }
         return self.mk_decl(kw.line, kw.column, DeclKind.FunDecl(fd))
     }
@@ -653,7 +658,7 @@ impl Parser {
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
             if self.leaves_body() { break }
             let start = self.pos
-            if self.check(TokenKind.FUN) {
+            if self.at_method() {
                 push(methods, self.method_decl())
             } else {
                 let tok = self.peek()
@@ -676,7 +681,7 @@ impl Parser {
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
             if self.leaves_body() { break }
             let start = self.pos
-            if self.check(TokenKind.FUN) {
+            if self.at_method() {
                 push(methods, self.method_sig())
             } else {
                 let tok = self.peek()
@@ -715,9 +720,17 @@ impl Parser {
         }
     }
 
+    // At `fun`, or `async fun` (D89).
+    fun at_method(self) -> bool {
+        let k = self.peek_kind()
+        return k == TokenKind.FUN || (k == TokenKind.ASYNC && self.peek_kind_at(1) == TokenKind.FUN)
+    }
+
     // Returns a FunData with body filled by the caller (method vs signature).
     fun method_header(var self) -> FunData {
-        let kw = self.advance()
+        let kw = self.advance()    // fun, or async before it
+        let is_async = kw.kind == TokenKind.ASYNC
+        if is_async { self.skip() }
         let name = self.expect(TokenKind.IDENT, "method name").lexeme
         let tps = self.generics()
         self.expect(TokenKind.LPAREN, "'('")
@@ -748,7 +761,7 @@ impl Parser {
         return FunData {
             line: kw.line, col: kw.column, sp: self.span_from(kw.line, kw.column), name: name, params: params,
             ret_type: ret, body: None, attributes: [],
-            type_params: tps, receiver: receiver, is_pub: false,
+            type_params: tps, receiver: receiver, is_pub: false, is_async: is_async,
         }
     }
 
@@ -760,7 +773,7 @@ impl Parser {
         return FunData {
             line: h.line, col: h.col, sp: self.span_from(h.line, h.col), name: h.name, params: h.params,
             ret_type: h.ret_type, body: Some(body), attributes: h.attributes,
-            type_params: h.type_params, receiver: h.receiver, is_pub: h.is_pub,
+            type_params: h.type_params, receiver: h.receiver, is_pub: h.is_pub, is_async: h.is_async,
         }
     }
 
@@ -791,6 +804,23 @@ impl Parser {
     fun parse_type(var self) -> TypeExpr {
         let tok = self.peek()
         let k = tok.kind
+        if k == TokenKind.ASYNC {
+            // `async (T, …) -> R` (D89)
+            self.skip()
+            if !self.check(TokenKind.LPAREN) {
+                let at = self.peek()
+                self.fail_at(at, format("expected a function type after 'async', found '{}'", at.lexeme))
+                return self.mk_type(tok.line, tok.column, TypeKind.TRef("", []))
+            }
+            let ft = self.paren_type()
+            match ft.kind {
+                TypeKind.TFn(ps, r, a) => { return self.mk_type(tok.line, tok.column, TypeKind.TFn(ps, r, true)) },
+                _ => {
+                    self.fail_at(tok, "only a function type can be 'async'")
+                    return ft
+                },
+            }
+        }
         if k == TokenKind.LPAREN {
             return self.paren_type()
         }
@@ -860,7 +890,7 @@ impl Parser {
         self.expect(TokenKind.RPAREN, "')'")
         if self.match1(TokenKind.ARROW) {
             let ret = self.parse_type()
-            return self.mk_type(lp.line, lp.column, TypeKind.TFn(params, ret))
+            return self.mk_type(lp.line, lp.column, TypeKind.TFn(params, ret, false))
         }
         if len(params) == 0 {
             self.fail_at(lp, "'()' is only valid as a function type '() -> R'")
@@ -919,6 +949,9 @@ impl Parser {
         if k == TokenKind.RETURN {
             return self.return_stmt()
         }
+        if k == TokenKind.ASYNC && self.peek_kind_at(1) == TokenKind.LET {
+            return self.async_let()
+        }
         if k == TokenKind.BECOME {
             let kw = self.advance()
             let value = self.expression()
@@ -958,6 +991,20 @@ impl Parser {
         self.expect(TokenKind.ASSIGN, "'=' in variable declaration")
         let init = self.expression()
         return self.mk_stmt(kw.line, kw.column, StmtKind.VarDecl(kind, name, ty, init))
+    }
+
+    // `async let name = e` (D89): a child task, its result read with `await name`.
+    fun async_let(var self) -> Stmt {
+        let kw = self.advance()    // async
+        self.skip()                // let
+        let name = self.expect(TokenKind.IDENT, "name of the 'async let'").lexeme
+        var ty: Option<TypeExpr> = None
+        if self.match1(TokenKind.COLON) {
+            ty = Some(self.parse_type())
+        }
+        self.expect(TokenKind.ASSIGN, "'=' in 'async let'")
+        let init = self.expression()
+        return self.mk_stmt(kw.line, kw.column, StmtKind.VarDecl("async", name, ty, init))
     }
 
     fun tuple_binding(var self) -> [BindElem] {
@@ -1243,6 +1290,11 @@ impl Parser {
 
     fun unary(var self) -> Expr {
         let k = self.peek_kind()
+        if k == TokenKind.AWAIT {
+            let kw = self.advance()
+            let operand = self.unary()
+            return self.mk_expr(kw.line, kw.column, ExprKind.Await(operand))
+        }
         if k == TokenKind.MINUS || k == TokenKind.BANG || k == TokenKind.TILDE {
             let op = self.advance()
             let operand = self.unary()
@@ -1333,6 +1385,19 @@ impl Parser {
                 return self.lambda_expr()
             }
             return self.paren_or_tuple()
+        }
+        if k == TokenKind.ASYNC && self.peek_kind_at(1) == TokenKind.LPAREN {
+            // `async (params) => body` (D89)
+            self.skip()
+            if !self.lambda_ahead() {
+                self.fail_at(self.peek(), "expected a lambda after 'async'")
+                return self.mk_expr(tok.line, tok.column, ExprKind.Hole)
+            }
+            let lam = self.lambda_expr()
+            match lam.kind {
+                ExprKind.Lambda(ps, r, body, a) => { return self.mk_expr(tok.line, tok.column, ExprKind.Lambda(ps, r, body, true)) },
+                _ => { return lam },
+            }
         }
         if k == TokenKind.LBRACKET {
             return self.list_or_map_lit()
@@ -1609,7 +1674,7 @@ impl Parser {
         } else {
             body = ExprOrBlock.EB_Expr(self.expression())
         }
-        return self.mk_expr(lp.line, lp.column, ExprKind.Lambda(params, None, body))
+        return self.mk_expr(lp.line, lp.column, ExprKind.Lambda(params, None, body, false))
     }
 
     fun paren_or_tuple(var self) -> Expr {

@@ -1,0 +1,12 @@
+//~ type error: a pattern can't reach the fields of the actor 'Counter'
+//~ span: Counter { count }
+// A pattern would read the actor's state from outside its methods (D89).
+actor Counter {
+    count: int
+}
+fun peek(c: Counter) -> int {
+    return match c {
+        Counter { count } => count,
+    }
+}
+fun main() {}

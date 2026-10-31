@@ -188,7 +188,7 @@
         },
         {
           "name": "meta.struct.myla",
-          "match": "\\b(struct)\\s+([_\\p{L}\\p{Nl}][\\p{L}\\p{Nl}\\p{Mn}\\p{Mc}\\p{Nd}\\p{Pc}]*)",
+          "match": "\\b(struct|actor)\\s+([_\\p{L}\\p{Nl}][\\p{L}\\p{Nl}\\p{Mn}\\p{Mc}\\p{Nd}\\p{Pc}]*)",
           "captures": {
             "1": {
               "name": "storage.type.struct.myla"
@@ -298,6 +298,10 @@
         {
           "name": "keyword.control.flow.myla",
           "match": "\\b(return|become)\\b"
+        },
+        {
+          "name": "keyword.control.async.myla",
+          "match": "\\b(async|await)\\b"
         },
         {
           "name": "storage.modifier.visibility.myla",

@@ -15,7 +15,7 @@ from std.io import write, eprintln
 from .checker import build_checker_decls
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
-from .loader import load_program_opts, load_options, parse_package_flag, Loaded, default_stdlib_root, type_errors
+from .loader import load_program_opts, load_options, parse_package_flag, Loaded, default_stdlib_root, type_errors, concurrency_report
 from .diag import render
 
 // How the assembly is generated: `debug`, DWARF debug information, so gdb
@@ -28,6 +28,13 @@ struct Mode { debug: bool, emit_ir: bool }
 fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
+            match concurrency_report(prog, c) {
+                Some(r) => {
+                    eprintln(render(r))
+                    return 1
+                },
+                None => {},
+            }
             var g = new_codegen(c)
             g.set_sources(prog.spans, prog.next_id)
             if mode.debug { g.enable_debug_info(read_gdb_script(stdlib_root)) }

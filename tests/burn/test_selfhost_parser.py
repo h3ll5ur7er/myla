@@ -155,6 +155,15 @@ SYNTAX_ERRORS = {
                                 "    let y = match 1 {\n        1 => { let = 2 }\n        _ => 3\n    }\n}\n"),
     "stray_closers": "fun main() {\n    let x = 1 ) ]\n    let = 2\n}\n}\nfun g() {\n    let = 3\n}\n",
     "too_many": "fun main() {\n" + "    let = 1\n" * 25 + "}\n",
+    # concurrency (D89, MYLA-135)
+    "async_before_non_function_type": "fun f(x: async int) {\n}\n",
+    "async_tuple_type": "fun f(x: async (int, int)) {\n}\n",
+    "async_without_lambda": "fun main() {\n    let f = async (1 + 2)\n}\n",
+    "async_let_without_name": "async fun f() {\n    async let = g()\n}\n",
+    "async_let_without_value": "async fun f() {\n    async let x: int\n}\n",
+    "actor_without_name": "actor {\n    n: int\n}\n",
+    "async_alone": "async struct S { a: int }\n",
+    "async_method_in_body": "struct S { a: int }\nimpl S {\n    async let x = 1\n}\n",
 }
 
 # Integer literals of 2^63 and above (MYLA-73): the canonical AST and token
@@ -174,6 +183,29 @@ BIG_LITERALS = (
     "}\n"
 )
 
+
+# Every construct of concurrency (D89, MYLA-135); the test parses it whole and
+# each prefix of it.
+CONCURRENCY = (
+    "import std.task\n"
+    "actor Counter {\n    count: int,\n}\n"
+    "impl Counter {\n"
+    "    fun increment(var self) -> int {\n        self.count = self.count + 1\n        return self.count\n    }\n"
+    "    async fun slow(self, f: async (int) -> int) -> int {\n        return await f(self.count)\n    }\n"
+    "}\n"
+    "trait T {\n    async fun t(self) -> int\n}\n"
+    "pub async fun fetch<U>(n: int, u: U) -> int {\n    return n * 10\n}\n"
+    "#main\n"
+    "async fun main() {\n"
+    "    let c = Counter { count: 0 }\n"
+    "    async let a = fetch(1, true)\n"
+    "    async let b: int = await fetch(2, 'x') + 1\n"
+    "    let f: async () -> int = async () => await a\n"
+    "    let g = async (n: int) => {\n        return await c.slow(async (m: int) => m)\n    }\n"
+    "    print(await -await b + await await_this(await a))\n"
+    "    var async_ = await (await c).increment()\n"
+    "}\n"
+)
 
 # Files whose every prefix (cut at each line end and in the middle of each
 # line) is parsed by both front ends: they must agree, and the self-hosted one
@@ -278,6 +310,21 @@ class SelfHostedParserParity(unittest.TestCase):
 
     def test_big_integer_literals_match_the_oracle(self) -> None:
         self.assertEqual(self._myla_parse_source(BIG_LITERALS), _canonical(BIG_LITERALS))
+
+    def test_concurrency_matches_the_oracle(self) -> None:
+        expected = _canonical(CONCURRENCY)
+        self.assertFalse(expected.startswith("err "), expected)
+        self.assertEqual(self._myla_parse_source(CONCURRENCY), expected)
+        cuts = set()
+        pos = 0
+        for line in CONCURRENCY.splitlines(keepends=True):
+            cuts.add(pos + len(line) // 2)
+            pos += len(line)
+            cuts.add(pos)
+        for cut in sorted(cuts):
+            prefix = CONCURRENCY[:cut]
+            with self.subTest(cut=cut):
+                self.assertEqual(self._myla_parse_source(prefix), _canonical(prefix))
 
     def test_garbled_sources_match_the_oracle(self) -> None:
         several = 0

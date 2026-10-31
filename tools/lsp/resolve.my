@@ -446,7 +446,7 @@ impl Resolver {
 
     fun decl(var self, d: Decl) {
         match d.kind {
-            DeclKind.StructDecl(name, fields, attrs, tps, is_pub) => {
+            DeclKind.StructDecl(name, fields, attrs, tps, is_pub, act) => {
                 self.attributes(attrs)
                 self.push_scope()
                 self.type_params(tps)
@@ -528,7 +528,7 @@ impl Resolver {
                 self.type_expr(k)
                 self.type_expr(v)
             },
-            TypeKind.TFn(ps, r) => {
+            TypeKind.TFn(ps, r, asy) => {
                 for p in ps { self.type_expr(p) }
                 self.type_expr(r)
             },
@@ -657,6 +657,7 @@ impl Resolver {
                 self.use_name(e.line, e.col, n)
             },
             ExprKind.Unary(op, x) => { self.expr(x) },
+            ExprKind.Await(x) => { self.expr(x) },
             ExprKind.Binary(op, l, r) => {
                 self.expr(l)
                 self.expr(r)
@@ -707,7 +708,7 @@ impl Resolver {
                 self.expr(x)
                 self.type_expr(t)
             },
-            ExprKind.Lambda(params, ret, b) => {
+            ExprKind.Lambda(params, ret, b, asy) => {
                 self.push_scope()
                 for p in params {
                     var shown = ""
@@ -943,6 +944,7 @@ impl Resolver {
                 if op == "!" { return "bool" }
                 return self.type_of(x)
             },
+            ExprKind.Await(x) => { return self.type_of(x) },
             ExprKind.Binary(op, l, r) => {
                 if op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" || op == "&&" || op == "||" { return "bool" }
                 // arithmetic, overloaded or not, gives the operands' type
