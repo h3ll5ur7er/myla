@@ -2,7 +2,7 @@
 id: MYLA-105
 title: IR: heap values, ownership and the verifier
 type: feature
-status: review
+status: done
 priority: high
 labels: [ir, codegen, selfhost]
 ---
@@ -85,3 +85,9 @@ Step 3 of [[MYLA-67]] ([[Architecture/IR]]): strings, lists, maps and builders t
 - **Old path:** byte-identical on `selfhost/gen_main.my` and `examples/methods.my`.
 - **Self-compile:** with 1,007 of its 1,108 functions through the IR, the compiler built with `--ir` emits the same assembly as the normal build, both with `--ir` and without.
 - **Coverage:** examples go from 184 to 198 of 227 functions, the compiler from 273 to 1,007 of 1,108. The verifier rejects none.
+
+## Evidence (sign-off, 2026-10-31)
+
+The review ([[Project/Review-2026-10]]) found the verifier weaker than [[Architecture/IR]] described: the page promised it rejects "a read of a moved slot", and `step` checked only drops, moves and stores. The verifier now follows three states per owning slot (holding nothing, holding a value, moved) and rejects a read (`load` of the slot; `load`, `copy` or `retain` at its address) of a slot that holds nothing: never stored, or dropped. A moved slot stays readable, since the lowering marks `moved` before whoever takes the value reads its bits (`take`, eleven callers; by-value arguments read a moved aggregate word by word), so the page says that now instead. Where a path with a moved slot joins one where it holds nothing (a staged value moved inside a branch), the block is checked again with the conservative state, so a read after such a join is rejected too. Six new `#test` cases in [[selfhost/ir.my]] (`verify_block`, `verify_join`); 84 of 84 pass in both CLIs.
+
+The rule found a real ordering hazard in every async actor method: at each exit the lowering dropped the method's handle to its actor (`drop Account $1`, possibly the actor's last reference) and then touched the actor's executor record through it (`load $1`, `__actor_leave`). `drop_owners` in [[selfhost/lower.my]] now leaves that handle to `exit_fn`, which drops it after `leave_self`. The bootstrap reaches its fixed point with every function of the compiler verified under the new rule (6,127,947 bytes); the codegen gate (every concurrency parity program, `examples/concurrency.my`, the any-number-of-workers runs) and the concurrency stress suite pass, but for `t08_failing_child_cancels_its_children`, which depends on timing at the unchanged `f46c8b8` too ([[MYLA-197]]).

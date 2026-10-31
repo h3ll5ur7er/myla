@@ -656,7 +656,9 @@ impl Lower {
             var i = len(self.owners[s]) - 1
             while i >= 0 {
                 let slot = self.owners[s][i]
-                self.add(Inst.DropSlot(self.f.slots[slot].ty, slot))
+                // an async actor method's handle to its actor is dropped by
+                // `exit_fn`, once the method has left the actor through it
+                if slot != self.actor_self { self.add(Inst.DropSlot(self.f.slots[slot].ty, slot)) }
                 i = i - 1
             }
             s = s - 1
@@ -1464,7 +1466,11 @@ impl Lower {
         }
         if v >= 0 && self.result >= 0 && self.sret < 0 { self.add(Inst.Store(self.result, v)) }
         if self.deep_res && self.result >= 0 { self.add(Inst.Deep(self.f.slots[self.result].ty, self.slot_addr(self.result))) }
+        // the actor is left through the handle in `self`, so that handle,
+        // possibly the actor's last reference, is dropped only afterwards
+        // (the other owners are dropped before `exit_fn` is called)
         self.leave_self()
+        if self.actor_self >= 0 { self.add(Inst.DropSlot(self.f.slots[self.actor_self].ty, self.actor_self)) }
         let fr = self.temp(Type.TInt(64, false))
         self.add(Inst.Frame(fr))
         self.add(Inst.Call(-1, "__finish", [fr]))

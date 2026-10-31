@@ -361,10 +361,20 @@ fun quoted(s: str) -> str {
 
 // The ownership errors in `f`, "" if there are none: along every path from
 // the entry, an owning slot is stored into only while it holds nothing, and
-// dropped only while it holds a value; at `ret` none holds a value; and where
-// paths join they agree on which slots hold one. A `copy` or `call … sret`
-// into an owning slot's address stores into it. Blocks no path reaches aren't
-// checked (the code after a `return`).
+// dropped only while it holds a value; it is read only while it holds one or
+// was moved (its taker reads the bits after `moved`), never after a drop or
+// before a store; at `ret` none holds a value; and where paths join they
+// agree on the state of every slot. A `copy` or `call … sret` into an owning
+// slot's address stores into it. Blocks no path reaches aren't checked (the
+// code after a `return`).
+//
+// A slot's state: NONE (nothing: never stored, or dropped), HOLDS (a value
+// it owns), MOVED (its reference handed over by `moved`; the bits are still
+// read by whoever took them).
+const NONE: int32 = 0
+const HOLDS: int32 = 1
+const MOVED: int32 = 2
+
 pub fun verify(f: IrFunc) -> str {
     let n = len(f.blocks)
     if n == 0 { return "" }
@@ -379,11 +389,11 @@ pub fun verify(f: IrFunc) -> str {
             }
         }
     }
-    // the state at each block's entry: which slots hold a value
+    // the state at each block's entry
     var known: [bool] = []
-    var entry: [[bool]] = []
-    var none: [bool] = []
-    for s in f.slots { push(none, false) }
+    var entry: [[int32]] = []
+    var none: [int32] = []
+    for s in f.slots { push(none, NONE) }
     for b in f.blocks {
         push(known, false)
         push(entry, none)
@@ -392,7 +402,7 @@ pub fun verify(f: IrFunc) -> str {
     var first = none
     var s = 0
     while s < len(f.slots) {
-        if f.slots[s].word >= 0 && f.slots[s].owns { first[s] = true }
+        if f.slots[s].word >= 0 && f.slots[s].owns { first[s] = HOLDS }
         s = s + 1
     }
     entry[0] = first
@@ -407,19 +417,19 @@ pub fun verify(f: IrFunc) -> str {
             if problem != "" { return format("L{}: {}", b, problem) }
             // the instruction's effect, in place, not on a copy (MYLA-124)
             match inst {
-                Inst.DropSlot(t, s) => { live[s] = false },
-                Inst.Moved(s) => { live[s] = false },
+                Inst.DropSlot(t, s) => { live[s] = NONE },
+                Inst.Moved(s) => { live[s] = MOVED },
                 _ => {},
             }
             let stored = stored_slot(f, inst, addr_of)
-            if stored >= 0 { live[stored] = true }
+            if stored >= 0 { live[stored] = HOLDS }
         }
         let succ = successors(f.blocks[b].term)
         match f.blocks[b].term {
             Term.Ret(v) => {
                 var i = 0
                 while i < len(live) {
-                    if live[i] { return format("L{}: ${} ({}) still holds a value at ret", b, i, f.slots[i].name) }
+                    if live[i] == HOLDS { return format("L{}: ${} ({}) still holds a value at ret", b, i, f.slots[i].name) }
                     i = i + 1
                 }
             },
@@ -427,7 +437,7 @@ pub fun verify(f: IrFunc) -> str {
                 if !ends_in_call(f.blocks[b].insts) { return format("L{}: become after no call", b) }
                 var i = 0
                 while i < len(live) {
-                    if live[i] { return format("L{}: ${} ({}) still holds a value at become", b, i, f.slots[i].name) }
+                    if live[i] == HOLDS { return format("L{}: ${} ({}) still holds a value at become", b, i, f.slots[i].name) }
                     i = i + 1
                 }
             },
@@ -439,14 +449,35 @@ pub fun verify(f: IrFunc) -> str {
                 entry[s] = live
                 push(work, s)
             } else {
+                // MOVED on one path and NONE on another (a staged value moved
+                // inside a branch, nothing on the path around it) agree that
+                // nothing is left to drop; the bits may be gone, so the block
+                // is checked again with NONE when it was first seen with MOVED
+                var again = false
                 var i = 0
                 while i < len(live) {
-                    if live[i] != entry[s][i] { return format("L{}: paths into L{} disagree on whether ${} ({}) holds a value", b, s, i, f.slots[i].name) }
+                    if live[i] != entry[s][i] {
+                        if live[i] == HOLDS || entry[s][i] == HOLDS { return format("L{}: paths into L{} disagree on whether ${} ({}) holds a value", b, s, i, f.slots[i].name) }
+                        if entry[s][i] != NONE {
+                            entry[s][i] = NONE
+                            again = true
+                        }
+                    }
                     i = i + 1
                 }
+                if again { push(work, s) }
             }
         }
     }
+    return ""
+}
+
+// What is wrong with reading slot `s` (a load, or a load, copy or retain of
+// what is at its address), "" if nothing: an owning slot is read only while
+// it holds a value or was moved (its taker reads the bits after `moved`),
+// so nothing reads a dropped value or one never stored (MYLA-105).
+fun read_of(f: IrFunc, s: int32, live: [int32]) -> str {
+    if f.slots[s].owns && live[s] == NONE { return format("read of ${} ({}), which holds no value", s, f.slots[s].name) }
     return ""
 }
 
@@ -465,23 +496,27 @@ fun stored_slot(f: IrFunc, inst: Inst, addr_of: [int32]) -> int32 {
     return -1
 }
 
-// What is wrong with `inst` given which slots hold a value, or "".
-fun step(f: IrFunc, inst: Inst, addr_of: [int32], live: [bool]) -> str {
+// What is wrong with `inst` given the state of every slot, or "".
+fun step(f: IrFunc, inst: Inst, addr_of: [int32], live: [int32]) -> str {
     match inst {
         Inst.DropSlot(t, s) => {
             if !f.slots[s].owns { return format("drop of ${} ({}), which owns nothing", s, f.slots[s].name) }
-            if !live[s] { return format("drop of ${} ({}), which holds no value", s, f.slots[s].name) }
+            if live[s] != HOLDS { return format("drop of ${} ({}), which holds no value", s, f.slots[s].name) }
             return ""
         },
         Inst.Moved(s) => {
             if !f.slots[s].owns { return format("move out of ${} ({}), which owns nothing", s, f.slots[s].name) }
-            if !live[s] { return format("move out of ${} ({}), which holds no value", s, f.slots[s].name) }
+            if live[s] != HOLDS { return format("move out of ${} ({}), which holds no value", s, f.slots[s].name) }
             return ""
         },
+        Inst.Load(d, s) => { return read_of(f, s, live) },
+        Inst.LoadAt(d, p, off) => { if addr_of[p] >= 0 { return read_of(f, addr_of[p], live) } },
+        Inst.Copy(d, src, size) => { if addr_of[src] >= 0 { return read_of(f, addr_of[src], live) } },
+        Inst.Retain(t, p) => { if addr_of[p] >= 0 { return read_of(f, addr_of[p], live) } },
         _ => {},
     }
     let s = stored_slot(f, inst, addr_of)
-    if s >= 0 && live[s] { return format("store into ${} ({}), which still holds a value", s, f.slots[s].name) }
+    if s >= 0 && live[s] == HOLDS { return format("store into ${} ({}), which still holds a value", s, f.slots[s].name) }
     return ""
 }
 
@@ -1063,6 +1098,12 @@ fun prepend(x: int32, xs: [int32]) -> [int32] {
 #test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Moved(0)])[""]
 #test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Moved(0), Inst.DropSlot(Type.TStr, 0)])["L0: drop of $0 (s), which holds no value"]
 #test([Inst.Moved(0)])["L0: move out of $0 (s), which holds no value"]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Load(1, 0), Inst.DropSlot(Type.TStr, 0)])[""]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Moved(0), Inst.Load(1, 0)])[""]
+#test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.DropSlot(Type.TStr, 0), Inst.Load(1, 0)])["L0: read of $0 (s), which holds no value"]
+#test([Inst.Load(1, 0)])["L0: read of $0 (s), which holds no value"]
+#test([Inst.Addr(1, 0), Inst.LoadAt(2, 1, 0)])["L0: read of $0 (s), which holds no value"]
+#test([Inst.Load(1, 1)])[""]
 fun verify_block(insts: [Inst]) -> str {
     return verify(test_func([IrBlock { insts: insts, term: Term.Ret(-1) }]))
 }
@@ -1085,6 +1126,23 @@ fun verify_diamond(left: [Inst], right: [Inst]) -> str {
         IrBlock { insts: left, term: Term.Jmp(3) },
         IrBlock { insts: right, term: Term.Jmp(3) },
         IrBlock { insts: [Inst.DropSlot(Type.TStr, 0)], term: Term.Ret(-1) },
+    ]))
+}
+
+// The same diamond with `after` as L3's instructions (no drop): a slot moved
+// on one path and dropped on the other holds nothing either way, but its
+// bits are gone on one of them, so a read after the join is rejected.
+#test([Inst.Moved(0)], [Inst.DropSlot(Type.TStr, 0)], [])[""]
+#test([Inst.Moved(0)], [Inst.Moved(0)], [Inst.Load(1, 0)])[""]
+#test([Inst.Moved(0)], [Inst.DropSlot(Type.TStr, 0)], [Inst.Load(1, 0)])["L3: read of $0 (s), which holds no value"]
+#test([Inst.DropSlot(Type.TStr, 0)], [Inst.Moved(0)], [Inst.Load(1, 0)])["L3: read of $0 (s), which holds no value"]
+#test([Inst.Moved(0)], [], [Inst.DropSlot(Type.TStr, 0)])["L1: paths into L3 disagree on whether $0 (s) holds a value"]
+fun verify_join(left: [Inst], right: [Inst], after: [Inst]) -> str {
+    return verify(test_func([
+        IrBlock { insts: [Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Const(1, Type.TBool, 1)], term: Term.Br(1, 1, 2) },
+        IrBlock { insts: left, term: Term.Jmp(3) },
+        IrBlock { insts: right, term: Term.Jmp(3) },
+        IrBlock { insts: after, term: Term.Ret(-1) },
     ]))
 }
 
