@@ -70,7 +70,9 @@ struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temp
 // A child task of an `async let` (D89): the slot holding its frame, its
 // result's type (`void`: none; `owns`: it owns heap memory), and the depth of
 // the scope that joins it.
-struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32 }
+// `foreign`: a sibling's, which a child awaits (MYLA-148): never joined here
+// (depth -1), its result read as a deep clone, the parent reading it too.
+struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, foreign: bool }
 
 pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
 
@@ -245,6 +247,8 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
         lw.declare_as(c.name, s, true)
         if frame { lw.own(s) }
         lw.add(Inst.Bind(c.name, s))
+        // a sibling's task: awaited here, joined by the parent (MYLA-148)
+        if c.task { push(lw.tasks, TaskSlot { slot: s, ty: c.task_ty, void: c.task_void, owns: cg.owns_heap(c.task_ty), depth: -1, foreign: true }) }
     }
     if frame {
         let e = lw.temp(Type.TInt(64, false))
@@ -1315,7 +1319,7 @@ impl Lower {
         let ts = self.new_slot("__task_" + name, Type.TInt(64, false), 8, -1, false)
         self.add(Inst.Store(ts, fr2))
         self.declare_as(name, ts, true)
-        push(self.tasks, TaskSlot { slot: ts, ty: rt, void: !has, owns: has && cg.owns_heap(rt), depth: len(self.owners) - 1 })
+        push(self.tasks, TaskSlot { slot: ts, ty: rt, void: !has, owns: has && cg.owns_heap(rt), depth: len(self.owners) - 1, foreign: false })
     }
 
     // The child task whose frame is in the slot `ts`: its index in `tasks`,
@@ -1382,12 +1386,15 @@ impl Lower {
         if is_aggregate(rt) {
             let dst = self.slot_addr(slot)
             self.add(Inst.Copy(dst, self.offset(fr, FRAME_RESULT), cg.size(rt)))
-            self.retain(cg, rt, dst)
+            if t.foreign { self.add(Inst.CloneDeep(rt, dst)) } else { self.retain(cg, rt, dst) }
         } else {
             let v = self.temp(rt)
             self.add(Inst.LoadAt(v, fr, FRAME_RESULT))
             self.add(Inst.Store(slot, v))
-            self.retain(cg, rt, v)
+            // a sibling's result, which the parent may read at the same time:
+            // a deep clone, the original's counts untouched (MYLA-148)
+            if t.foreign && cg.owns_heap(rt) { self.add(Inst.CloneDeep(rt, self.slot_addr(slot))) }
+            else if !t.foreign { self.retain(cg, rt, v) }
         }
         self.declare_as(name, slot, k == "let")
         self.own(slot)
@@ -2411,7 +2418,15 @@ impl Lower {
                 push(seen, nm)
                 let ct = self.f.slots[slot].ty
                 if !lowerable(cg, ct) { return self.unsupported("a capture of that type") }
-                push(caps, Cap { name: nm, ty: ct, off: size })
+                // a sibling child task, which this child may await (MYLA-148)
+                let ti = self.task_of(slot)
+                var tty = Type.TBool
+                var tvoid = true
+                if ti >= 0 {
+                    tty = self.tasks[ti].ty
+                    tvoid = self.tasks[ti].void
+                }
+                push(caps, Cap { name: nm, ty: ct, off: size, task: ti >= 0, task_ty: tty, task_void: tvoid })
                 size = size + cg.size(ct)
                 if cg.owns_heap(ct) { owns = true }
             }

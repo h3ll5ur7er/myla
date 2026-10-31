@@ -473,7 +473,11 @@ impl CodeGen {
             Inst.Deep(t, p) => {
                 // the type's deep walk, the value's address in %rdi
                 self.load_temp(p, "rdi", temp_base)
-                self.emit("call " + self.register_deep(t))
+                self.emit("call " + self.register_deep(t, false))
+            },
+            Inst.CloneDeep(t, p) => {
+                self.load_temp(p, "rdi", temp_base)
+                self.emit("call " + self.register_deep(t, true))
             },
             Inst.Init(s) => {},
             Inst.Moved(s) => {},

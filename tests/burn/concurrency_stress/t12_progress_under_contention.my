@@ -1,0 +1,70 @@
+// 12. Starvation under contention: 8 workers, 10,000 turns each at one actor,
+// and a greedy task while 50 others each need one turn
+import std.task as task
+
+actor Resource {
+    done: [int],
+    greedy: int,
+    singles: int,
+    stop: bool,
+}
+
+impl Resource {
+    fun work(var self, w: int) -> int {
+        self.done[w] = self.done[w] + 1
+        return self.done[w]
+    }
+    fun all(self) -> [int] {
+        return self.done
+    }
+    fun grab(var self) -> bool {
+        self.greedy = self.greedy + 1
+        return self.stop
+    }
+    fun single(var self) -> int {
+        self.singles = self.singles + 1
+        if self.singles == 50 {
+            self.stop = true
+        }
+        return self.singles
+    }
+}
+
+async fun worker(r: Resource, w: int) -> int {
+    var last = 0
+    for i in 0..10000 {
+        last = await r.work(w)
+    }
+    return last
+}
+
+async fun greedy(r: Resource) -> int {
+    var n = 0
+    while !(await r.grab()) {
+        n = n + 1
+    }
+    return n
+}
+
+#main
+async fun main() {
+    let r = Resource { done: [0, 0, 0, 0, 0, 0, 0, 0], greedy: 0, singles: 0, stop: false }
+    var fs: [async () -> int] = []
+    for w in 0..8 {
+        push(fs, async () => await worker(r, w))
+    }
+    let rs = await task.all(fs)
+    var full = 0
+    for x in await r.all() {
+        if x == 10000 { full = full + 1 }
+    }
+    print(f"workers done {full} of 8")
+    async let g = greedy(r)
+    var singles: [async () -> int] = []
+    for k in 0..50 {
+        push(singles, async () => await r.single())
+    }
+    let ss = await task.all(singles)
+    let turns = await g
+    print(f"singles done {len(ss)}, greedy stopped")
+}

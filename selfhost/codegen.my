@@ -27,7 +27,9 @@ from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_re
 pub struct CgBinding { name: str, kind: str, offset: int32, ty: Type, capoff: int32 }
 
 // A by-value captured variable in a closure environment cell.
-pub struct Cap { name: str, ty: Type, off: int32 }
+// `task`: the capture is a sibling child task's frame, which a child task
+// awaits (MYLA-148), its result's type `task_ty` (`task_void`: none).
+pub struct Cap { name: str, ty: Type, off: int32, task: bool, task_ty: Type, task_void: bool }
 
 // A Myla scope for the debug information: the label its lexical blocks end
 // at, and how many it opened (MYLA-66).
@@ -98,7 +100,9 @@ pub struct CodeGen {
     // deep copy (`deep_cell_name`) are still to be emitted
     need_deep: [Type],
     deep_inline: [bool],
+    deep_clone: [bool],
     need_deepc: [Type],
+    deepc_clone: [bool],
     walk_retain: [bool],
     walk_emitted: [str],
     // the drop, clone and walk helpers asked for so far, by kind and type
@@ -272,7 +276,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         uses_float: false,
         epilogue: "", ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
-        need_walk: [], need_deep: [], deep_inline: [], need_deepc: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
+        need_walk: [], need_deep: [], deep_inline: [], deep_clone: [], need_deepc: [], deepc_clone: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
         line_spans: [], prelude_id: 0,
         cur_path: "<input>", pos_labels: [:], posdata: [],
@@ -1990,13 +1994,17 @@ impl CodeGen {
 
     // The name of `t`'s deep walk (`__deepw_<T>`: %rdi = the address of a T,
     // whose heap values it replaces by deep copies, releasing the originals),
-    // to be emitted.
-    fun register_deep(var self, t: Type) -> str {
-        let name = "__deepw_" + mono_token(t)
+    // to be emitted. `clone` (MYLA-148): `__dclonew_<T>`, the T at %rdi a
+    // word-for-word copy of a value others hold, whose heap values it
+    // replaces by deep copies, only reading the originals.
+    fun register_deep(var self, t: Type, clone: bool) -> str {
+        var name = "__deepw_" + mono_token(t)
+        if clone { name = "__dclonew_" + mono_token(t) }
         if !contains(self.helper_seen, name) {
             self.helper_seen[name] = true
             push(self.need_deep, t)
             push(self.deep_inline, false)
+            push(self.deep_clone, clone)
         }
         return name
     }
@@ -2004,46 +2012,59 @@ impl CodeGen {
     // The routine making a cell of type `t` (%rdi, one reference, consumed)
     // unshared, deeply: %rax = the same cell when it was the only reference,
     // else a copy; either way every heap value in it is a deep copy of its own.
-    fun deep_cell_name(var self, t: Type) -> str {
-        if is_str_t(t) { return "__deep_str" }
+    // `clone`: %rax = a deep copy of the cell at %rdi, which is only read.
+    fun deep_cell_name(var self, t: Type, clone: bool) -> str {
+        var pre = "__deep"
+        if clone { pre = "__dclone" }
+        if is_str_t(t) { return pre + "_str" }
         var name = ""
         match t {
-            Type.TList(e) => { name = "__deep_list_" + mono_token(e) },
-            Type.TMap(k, v) => { name = "__deep_map_" + map_token(k, v) },
+            Type.TList(e) => { name = pre + "_list_" + mono_token(e) },
+            Type.TMap(k, v) => { name = pre + "_map_" + map_token(k, v) },
             _ => {
-                if is_sb_t(t) { name = "__deep_sb" } else { name = "__deepb_" + mono_token(t) }
+                if is_sb_t(t) { name = pre + "_sb" } else { name = pre + "b_" + mono_token(t) }
             },
         }
         if !contains(self.helper_seen, name) {
             self.helper_seen[name] = true
             push(self.need_deepc, t)
+            push(self.deepc_clone, clone)
         }
         return name
     }
 
     // One member of type `ft` at `off(base)` (`base` callee-saved) made a
-    // deep copy of its own; an actor handle stays shared.
-    fun deep_member(var self, base: str, off: int32, ft: Type) {
-        if is_actor_t(ft) { return }
+    // deep copy of its own; an actor handle stays shared (a clone takes a
+    // reference of its own to it, atomically).
+    fun deep_member(var self, base: str, off: int32, ft: Type, clone: bool) {
+        if is_actor_t(ft) {
+            if clone {
+                self.emit(format("movq {}(%{}), %rax", off, base))
+                self.emit("lock incq -8(%rax)")
+            }
+            return
+        }
         if self.is_boxed(ft) || is_cell_t(ft) {
-            let name = self.deep_cell_name(ft)
+            let name = self.deep_cell_name(ft, clone)
             self.emit(format("movq {}(%{}), %rdi", off, base))
             self.emit("call " + name)
             self.emit(format("movq %rax, {}(%{})", off, base))
         } else if is_tfunc(ft) {
             self.emit(format("movq {}(%{}), %rdi", off + 8, base))
-            self.emit("call __deep_env")
+            if clone { self.emit("call __dclone_env") } else { self.emit("call __deep_env") }
             self.emit(format("movq %rax, {}(%{})", off + 8, base))
         } else if self.owns_heap(ft) {
             self.emit(format("leaq {}(%{}), %rdi", off, base))
-            self.emit("call " + self.register_deep(ft))
+            self.emit("call " + self.register_deep(ft, clone))
         }
     }
 
     // `__deepw_<T>`: each member of the T at %rdi, kept in %rbx (`inline`:
     // `__deepi_<E>`, the value in a boxed enum's cell).
-    fun emit_deep_walk(var self, t: Type, inline: bool) {
-        if inline { self.emit(format("__deepi_{}:", mono_token(t))) } else { self.emit(format("__deepw_{}:", mono_token(t))) }
+    fun emit_deep_walk(var self, t: Type, inline: bool, clone: bool) {
+        var pre = "__deep"
+        if clone { pre = "__dclone" }
+        if inline { self.emit(format("{}i_{}:", pre, mono_token(t))) } else { self.emit(format("{}w_{}:", pre, mono_token(t))) }
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
         self.emit("pushq %rbx")
@@ -2056,19 +2077,19 @@ impl CodeGen {
                 var cur = 0
                 for f in info.fields {
                     let ft = subst_type(f.ty, sub)
-                    self.deep_member("rbx", cur, ft)
+                    self.deep_member("rbx", cur, ft, clone)
                     cur = cur + self.stored_size(ft)
                 }
             },
             Type.TTuple(es) => {
                 var cur = 0
                 for et in es {
-                    self.deep_member("rbx", cur, et)
+                    self.deep_member("rbx", cur, et, clone)
                     cur = cur + self.stored_size(et)
                 }
             },
             Type.TEnum(n, a) => {
-                if self.is_boxed(t) && !inline { self.deep_member("rbx", 0, t) }
+                if self.is_boxed(t) && !inline { self.deep_member("rbx", 0, t, clone) }
                 else {
                     let info = self.enum_info(n)
                     let sub = self.type_subst(info.type_params, a)
@@ -2082,7 +2103,7 @@ impl CodeGen {
                             var cur = 8
                             for ft0 in v.payload {
                                 let ft = subst_type(ft0, sub)
-                                self.deep_member("rbx", cur, ft)
+                                self.deep_member("rbx", cur, ft, clone)
                                 cur = cur + self.stored_size(ft)
                             }
                             self.emit(format("jmp {}", done))
@@ -2093,7 +2114,7 @@ impl CodeGen {
                     self.emit(format("{}:", done))
                 }
             },
-            _ => { self.deep_member("rbx", 0, t) },
+            _ => { self.deep_member("rbx", 0, t, clone) },
         }
         self.emit("popq %r12")
         self.emit("popq %rbx")
@@ -2105,8 +2126,9 @@ impl CodeGen {
     // The deep copy of a cell of type `t` (`deep_cell_name`): a shared cell
     // is cloned first (its members retained, the original released), then
     // each member is made a deep copy of its own.
-    fun emit_deep_cell(var self, t: Type) {
-        let name = self.deep_cell_name(t)
+    // `clone`: the cell copied word for word, then each member cloned.
+    fun emit_deep_cell(var self, t: Type, clone: bool) {
+        let name = self.deep_cell_name(t, clone)
         self.emit(format("{}:", name))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
@@ -2116,6 +2138,18 @@ impl CodeGen {
         self.emit("pushq %r14")
         self.emit("movq %rdi, %rbx")
         let unique = self.label()
+        if clone {
+            self.emit("movq -16(%rbx), %rdi")
+            self.emit("call __alloc")
+            self.emit("movq %rax, %r12")
+            self.emit("movq %rbx, %rsi")
+            self.emit("movq %r12, %rdi")
+            self.emit("movq -16(%rbx), %rcx")
+            self.emit("cld")
+            self.emit("rep movsb")
+            self.emit("movq %r12, %rbx")
+            self.emit(format("jmp {}", unique))
+        }
         self.emit("cmpq $1, -8(%rbx)")
         self.emit(format("je {}", unique))
         match t {
@@ -2165,7 +2199,7 @@ impl CodeGen {
                     self.emit("movq %r13, %rax")
                     self.emit(format("imulq ${}, %rax", stride))
                     self.emit("leaq 16(%rbx,%rax), %r14")
-                    self.deep_member("r14", 0, e)
+                    self.deep_member("r14", 0, e, clone)
                     self.emit("incq %r13")
                     self.emit(format("jmp {}", loop))
                     self.emit(format("{}:", done))
@@ -2187,8 +2221,8 @@ impl CodeGen {
                     self.emit("leaq 16(%rbx,%rax), %r14")
                     self.emit("cmpq $1, (%r14)")
                     self.emit(format("jne {}", cont))
-                    if self.owns_heap(k) { self.deep_member("r14", 8, k) }
-                    if self.owns_heap(v) { self.deep_member("r14", 16, v) }
+                    if self.owns_heap(k) { self.deep_member("r14", 8, k, clone) }
+                    if self.owns_heap(v) { self.deep_member("r14", 16, v, clone) }
                     self.emit(format("{}:", cont))
                     self.emit("incq %r13")
                     self.emit(format("jmp {}", loop))
@@ -2198,7 +2232,7 @@ impl CodeGen {
             _ => {
                 if !is_sb_t(t) {
                     self.emit("movq %rbx, %rdi")
-                    self.emit("call " + self.register_deep_inline(t))
+                    self.emit("call " + self.register_deep_inline(t, clone))
                 }
             },
         }
@@ -2213,12 +2247,14 @@ impl CodeGen {
     }
 
     // The deep walk of a boxed enum's inline value (its cell's contents).
-    fun register_deep_inline(var self, t: Type) -> str {
-        let name = "__deepi_" + mono_token(t)
+    fun register_deep_inline(var self, t: Type, clone: bool) -> str {
+        var name = "__deepi_" + mono_token(t)
+        if clone { name = "__dclonei_" + mono_token(t) }
         if !contains(self.helper_seen, name) {
             self.helper_seen[name] = true
             push(self.need_deep, t)
             push(self.deep_inline, true)
+            push(self.deep_clone, clone)
         }
         return name
     }
@@ -2246,12 +2282,37 @@ impl CodeGen {
         self.emit("decq -8(%rbx)")
         self.emit("movq %r12, %rbx")
         self.emit(format("{}:", unique))
-        for d in owned { self.deep_member("rbx", d.off, d.ty) }
+        for d in owned { self.deep_member("rbx", d.off, d.ty, false) }
         self.emit("movq %rbx, %rax")
         self.emit("popq %r12")
         self.emit("popq %rbx")
         self.emit("leave")
         self.emit("ret")
+        self.emit("")
+        // its clone (`__dclone_env`): a copy, each capture cloned (MYLA-148)
+        self.emit(format("myla_{}_env_clone:", lifted))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("movq %rdi, %rbx")
+        self.emit("movq -16(%rbx), %rdi")
+        self.emit("call __alloc")
+        self.emit("movq %rax, %r12")
+        self.emit("movq %rbx, %rsi")
+        self.emit("movq %r12, %rdi")
+        self.emit("movq -16(%rbx), %rcx")
+        self.emit("cld")
+        self.emit("rep movsb")
+        self.emit("movq %r12, %rbx")
+        for d in owned { self.deep_member("rbx", d.off, d.ty, true) }
+        self.emit("movq %rbx, %rax")
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        // just before the drop function: the clone, then the deep copy
+        self.emit(format("\t.quad myla_{}_env_clone", lifted))
         self.emit(format("\t.quad myla_{}_env_deep", lifted))
     }
 
@@ -2322,6 +2383,49 @@ impl CodeGen {
         self.raw("\tret")
         self.raw(".Lde_none:")
         self.raw("\txorl %eax, %eax")
+        self.raw("\tret")
+        self.raw("")
+        // the clones (MYLA-148), only reading the original: a string (a
+        // static one shared), a function value's env (owning nothing: a
+        // copy; else the clone two words before its drop function)
+        self.raw("__dclone_str:")
+        self.raw("\tmovq -8(%rdi), %rax")
+        self.raw("\tmovabsq $2305843009213693952, %rcx")
+        self.raw("\tcmpq %rcx, %rax")
+        self.raw("\tjae .Ldcs_same")
+        self.raw("\tjmp __dclone_cell")
+        self.raw(".Ldcs_same:")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__dclone_env:")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Ldce_none")
+        self.raw("\tmovq (%rdi), %rax")
+        self.raw("\tleaq __free(%rip), %rcx")
+        self.raw("\tcmpq %rcx, %rax")
+        self.raw("\tje __dclone_cell")
+        self.raw("\tjmp *-16(%rax)")
+        self.raw(".Ldce_none:")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\tret")
+        self.raw("")
+        // a cell copied word for word: %rdi -> %rax
+        self.raw("__dclone_cell:")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq -16(%rbx), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r12")
+        self.raw("\tmovq %rbx, %rsi")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq -16(%rbx), %rcx")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw("\tmovq %r12, %rax")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
         self.raw("\tret")
         self.raw("")
     }
@@ -2640,10 +2744,7 @@ impl CodeGen {
         self.raw("\tje .Lfinish_program")
         self.raw("\tmovq $1, %rdi")
         self.raw("\txchgq %rdi, 24(%rax)")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lfinish_none")
-        self.raw("\tcall __exec_push")
-        self.raw(".Lfinish_none:")
+        self.raw("\tcall __wake_waiters")
         self.raw("\tret $8")
         self.raw(".Lfinish_program:")
         self.raw("\tmovq $231, %rax")
@@ -2683,11 +2784,7 @@ impl CodeGen {
         self.raw("\tpopq %rax")
         self.raw(".Ltf_unheld:")
         self.raw("\txchgq %rdi, 24(%rax)")
-        self.raw("\tmovq %rdi, %rcx")
-        self.raw("\ttestq %rcx, %rcx")
-        self.raw("\tjz .Lexec_failed")
-        self.raw("\tmovq %rcx, %rdi")
-        self.raw("\tcall __exec_push")
+        self.raw("\tcall __wake_waiters")
         self.raw("\tjmp .Lexec_failed")
         self.raw(".Ltf_now:")
         self.raw("\txorl %eax, %eax")
@@ -2828,15 +2925,26 @@ impl CodeGen {
         self.raw("\tcall __exec_yield_push")
         self.raw("\tret $8")
         self.raw("")
-        // myla___wait(child, frame): the frame parks in the child task's
-        // `task` word if it is still running (0), else goes on at once
+        // myla___wait(child, frame): while the child task runs, the frame
+        // joins the frames waiting for it (its `task` word holds the first,
+        // each linked to the next through word 32: a parent and siblings,
+        // MYLA-148); once it has ended (1, 2 or 3), the frame goes on at once
         self.raw("myla___wait:")
         self.raw("\tmovq 8(%rsp), %rcx")
         self.raw("\tmovq 16(%rsp), %rdx")
-        self.raw("\txorl %eax, %eax")
+        self.raw("\tmovq 24(%rcx), %rax")
+        self.raw(".Lwait_again:")
+        self.raw("\tcmpq $4, %rax")
+        self.raw("\tjb .Lwait_ended")
+        self.raw(".Lwait_link:")
+        self.raw("\tmovq %rax, 32(%rdx)")
         self.raw("\tlock cmpxchgq %rdx, 24(%rcx)")
-        self.raw("\tjne .Lresume_second")
+        self.raw("\tjne .Lwait_again")
         self.raw("\tret $16")
+        // 0 (no frame waiting yet) is a list too
+        self.raw(".Lwait_ended:")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lwait_link")
         // the frame in the second argument word resumed in place of the
         // runtime function, the first word dropped
         self.raw(".Lresume_second:")
@@ -2913,6 +3021,23 @@ impl CodeGen {
         // now holds, for a failure to release it
         self.raw("__actor_held:")
         self.raw(format("\tmovq %rdi, {}", self.tv("__actor_held")))
+        self.raw("\tret")
+        self.raw("")
+        // __wake_waiters: %rdi = the first of the frames that waited for a
+        // task which has ended (0: none), each queued; the next one is read
+        // before a frame is queued, as it may run and change word 32 at once
+        self.raw("__wake_waiters:")
+        self.raw("\tpushq %rbx")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw(".Lww_next:")
+        self.raw("\ttestq %rbx, %rbx")
+        self.raw("\tjz .Lww_done")
+        self.raw("\tmovq %rbx, %rdi")
+        self.raw("\tmovq 32(%rbx), %rbx")
+        self.raw("\tcall __exec_push")
+        self.raw("\tjmp .Lww_next")
+        self.raw(".Lww_done:")
+        self.raw("\tpopq %rbx")
         self.raw("\tret")
         self.raw("")
         // __task_exit: `exit` (%edi the code) when tasks take turns
@@ -5619,6 +5744,30 @@ impl CodeGen {
             self.raw("\tpopq %r12")
             self.raw("\tpopq %rbx")
             self.raw("\tret")
+            self.raw("")
+            self.raw("__compose_env_clone:")
+            self.raw("\tpushq %rbx")
+            self.raw("\tpushq %r12")
+            self.raw("\tmovq %rdi, %rbx")
+            self.raw("\tmovq $40, %rdi")
+            self.raw("\tcall __alloc")
+            self.raw("\tmovq %rax, %r12")
+            self.raw("\tmovq %rbx, %rsi")
+            self.raw("\tmovq %r12, %rdi")
+            self.raw("\tmovq $40, %rcx")
+            self.raw("\tcld")
+            self.raw("\trep movsb")
+            self.raw("\tmovq 16(%r12), %rdi")
+            self.raw("\tcall __dclone_env")
+            self.raw("\tmovq %rax, 16(%r12)")
+            self.raw("\tmovq 32(%r12), %rdi")
+            self.raw("\tcall __dclone_env")
+            self.raw("\tmovq %rax, 32(%r12)")
+            self.raw("\tmovq %r12, %rax")
+            self.raw("\tpopq %r12")
+            self.raw("\tpopq %rbx")
+            self.raw("\tret")
+            self.raw("\t.quad __compose_env_clone")
             self.raw("\t.quad __compose_env_deep")
         }
         self.raw("__compose_env_drop:")
@@ -6543,13 +6692,15 @@ impl CodeGen {
             while dk < len(self.need_deep) {
                 let t = self.need_deep[dk]
                 let inl = self.deep_inline[dk]
+                let cl = self.deep_clone[dk]
                 dk = dk + 1
-                self.emit_deep_walk(t, inl)
+                self.emit_deep_walk(t, inl, cl)
             }
             while dc < len(self.need_deepc) {
                 let t = self.need_deepc[dc]
+                let cl = self.deepc_clone[dc]
                 dc = dc + 1
-                self.emit_deep_cell(t)
+                self.emit_deep_cell(t, cl)
             }
             while k < len(self.need_walk) {
                 let t = self.need_walk[k]

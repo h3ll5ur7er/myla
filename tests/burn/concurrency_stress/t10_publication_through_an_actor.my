@@ -1,0 +1,34 @@
+// 10. Publication through an actor: the payload and the flag in one actor
+actor Mailbox {
+    payload: int,
+    ready: bool,
+}
+
+impl Mailbox {
+    fun publish(var self, p: int) {
+        self.payload = p
+        self.ready = true
+    }
+    fun poll(self) -> int {
+        if self.ready {
+            return self.payload
+        }
+        return -1
+    }
+}
+
+async fun reader(m: Mailbox) -> int {
+    var v = await m.poll()
+    while v < 0 {
+        v = await m.poll()
+    }
+    return v
+}
+
+#main
+async fun main() {
+    let m = Mailbox { payload: 0, ready: false }
+    async let r = reader(m)
+    await m.publish(42)
+    print(await r)
+}

@@ -70,6 +70,10 @@ pub enum Inst {
     // copy of its own, the originals released (D92: values crossing between
     // threads share no count; an actor handle stays shared)
     Deep(Type, int32),
+    // clone T [%ptr]: the T at %ptr, a word-for-word copy of a value others
+    // hold, made a deep copy of its own; the original is only read (its
+    // counts untouched), an actor handle retained atomically (MYLA-148)
+    CloneDeep(Type, int32),
     // init $slot: the aggregate built member by member in the slot is
     // complete (for the verifier; no code)
     Init(int32),
@@ -242,6 +246,7 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.DropSlot(t, s) => format("drop {} ${}", type_name(t), s)
         Inst.DropAt(t, p) => format("drop {} [%t{}]", type_name(t), p)
         Inst.Deep(t, p) => format("deep {} [%t{}]", type_name(t), p)
+        Inst.CloneDeep(t, p) => format("clone {} [%t{}]", type_name(t), p)
         Inst.Init(s) => format("init ${}", s)
         Inst.Elem(d, c, i, stride, is_str, p) => format("%t{} = elem %t{}[%t{}] {}{} @{}:{}", d, c, i, stride, str_suffix(is_str), p.line, p.col)
         Inst.Load8(d, p) => format("%t{} = load8 [%t{}]", d, p)
@@ -532,6 +537,7 @@ pub fun inst_uses(inst: Inst) -> [int32] {
         Inst.DropSlot(t, s) => []
         Inst.DropAt(t, p) => [p]
         Inst.Deep(t, p) => [p]
+        Inst.CloneDeep(t, p) => [p]
         Inst.Init(s) => []
         Inst.Elem(d, c, i, stride, is_str, pos) => [c, i]
         Inst.Load8(d, p) => [p]
