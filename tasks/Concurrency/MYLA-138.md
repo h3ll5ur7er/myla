@@ -2,7 +2,7 @@
 id: MYLA-138
 title: The stackless lowering of async functions
 type: feature
-status: in-progress
+status: done
 priority: medium
 labels: [concurrency, ir, codegen, selfhost, design]
 ---
@@ -71,4 +71,5 @@ As built, two refinements: the task record is the child's first frame (its `task
 - Before: `async_var_self_method` with `--async-frames` failed to compile ("an awaited call of an async 'var self' method"); the held-failure programs printed only `1` (panic) and `1 / inner goes on / 3` (exit) before dying, the child's failure ending the program at once.
 - `test_concurrency_programs_match_the_interpreter`: the 16 concurrency parity programs and 5 actor and frame programs, natively, print and exit as the Python interpreter (those without `async let` also with `--async-frames`), each under 64 MB. `test_deep_task_trees_and_awaits`: 3,000 children through `task.all` calling an actor, and an async recursion 100,000 deep, in 11 MB. `test_child_failures_are_held_for_the_parent`: a panic, an `exit` from a grandchild, a trap in an unawaited child and children of synchronous calls, in the self-hosted interpreter's order. `examples/concurrency.my` joined the native corpus.
 - 200,000 awaited `var self` calls on a field holding strings: 11 MB peak.
-- Compiling itself: the compiler runs 0.16% more instructions on the same input (2,601,192,675 → 2,605,331,412 on the base commit's source, the same assembly); compiling its own larger source, 2,601,058,724 → about 2,780,000,000 (the source grew by 1,030 lines), reaching its fixed point.
+- Compiling itself: the compiler runs 0.16% more instructions on the same input (2,601,192,675 → 2,605,331,412 on the base commit's source, the same assembly); compiling its own larger source, 2,601,058,724 → 2,780,190,593 (the source grew by 1,030 lines), reaching its fixed point.
+- Unit 621, integration 2, burn 794 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,733,179 bytes).
