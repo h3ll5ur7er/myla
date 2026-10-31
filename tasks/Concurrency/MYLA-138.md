@@ -48,6 +48,15 @@ Options 1a, 2a, 3a and 4a: every slot of an async function in its heap frame, a 
 4. [ ] Tasks: `async let`, awaiting a child, scopes waiting for their children, turns after awaited calls, a failure in a child held for its `await`
 5. [ ] `std.task` and every concurrency parity program natively; deep task trees; docs
 
+## Design of steps 2–4 (within D90)
+
+- **Normalized first.** An async body is normalized as the self-hosted interpreter's is (`anf.my`): each `await` in a `let` of its own, so no temporary lives across a suspension; loop state, match copies and every other value that does live in slots.
+- **The IR.** `IrFunc.frame`: the function's slots are in its heap frame (D90 1, all of them). `Term.Suspend(label)`: the function records `label` as where it resumes and leaves; when the instruction before it is a call, the call is made in place of the function (as `become`), otherwise it returns to the executor. The verifier treats it as a `jmp label`. The text form: `fun myla_f frame {`, `suspend L3`.
+- **The frame.** A heap cell: `[resume fn][caller frame][state][task][result…][slots…]`. Parameters are slots in it holding owned copies (the caller may be gone when the callee runs): `myla_f__new(args)` allocates the frame, stores each argument (an aggregate's words, retained) and returns it; `myla_f__resume(frame)` is the IR function, its slots addressed from a register holding the frame (`%r15`, kept out of allocation there) instead of `%rbp`, none of them in a register, its entry dispatching on `state`.
+- **Calls.** `await g(args)`: `fr = g__new(args)`, `fr.caller = frame`, then `suspend L` after `call g__resume(fr)` (through `__resume`, which jumps to `[fr]`, for a function value). At `L` the result is moved out of `fr`, which is freed. A `return` moves the value into the frame's result and ends with `__finish(frame)`: it resumes the caller with a tail call, or ends the task.
+- **The executor (one thread).** A queue of ready frames; `_start` runs the entry's task and the loop. A frame that waits (a child not done, a scope's children) is parked with `suspend` and no call, and queued again when what it waits for ends. After an awaited call that didn't suspend (an actor's synchronous method), the frame goes to the back of the queue, so tasks take turns as in the interpreters.
+- **Tasks and failures.** A task record holds its result, its state and the frames waiting for it. A panic or `exit` in a task other than the first records the failure and goes back to the executor's stack; `await` or the scope's end raises it in the parent, as the interpreters do.
+
 ## Evidence (step 1)
 
 - `test_concurrency_programs_of_one_task_match_the_oracle` (`tests/burn/test_selfhost_codegen.py`): the 5 concurrency parity programs without `async let` and 4 actor programs (handles shared by copies, in a struct and a list; 200,000 actors made and released; reentrant calls; a recursive actor through `Option<Node>`) print what the Python interpreter prints. Releasing works: the 200,000-actor program peaks at 11 MB, at 24 MB when it keeps them all.
