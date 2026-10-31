@@ -30,3 +30,10 @@ Stage 1 ran every program whose tasks needn't make progress side by side. Stage 
 
 - `CONCURRENCY_PROGRAMS` (13 programs: awaited calls and values, an async method, `async let` results, scopes waiting for children, copies, an awaited and an unawaited child failing, `exit` in a child, an actor counter, copies in and out of an actor, reentrancy and two actors calling each other, `task.all`) and `examples/concurrency.my` print, fail and exit as in the Python CLI; before, the self-hosted interpreter refused every one of them.
 - Unit 621, integration 2, burn 790 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,407,346 bytes).
+
+## Evidence (stage 2)
+
+- `CONCURRENCY_PROGRAMS` has 16 programs now, all printing, failing and exiting as in the Python CLI. The new ones: a child polling an actor until its parent raises a flag (it never ended one task at a time); awaits normalized out of list literals, `&&`/`||`, a `match` arm, a `while` condition, a range bound, a struct literal, an f-string, nested calls and a `?`; an async `var self` method whose `self` goes back to its receiver after it waited.
+- `task.all` over 3,000 closures, each calling an actor: 0.55 s in the self-hosted interpreter, 15.6 s in the Python one (a thread per child), the same output.
+- Synchronous code doesn't pay: a loop over 20,000 structs and `fib(22)` run 1,122,461,752 instructions before and 1,121,130,584 after.
+- Unit 621, integration 2, burn 791 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,408,824 bytes).
