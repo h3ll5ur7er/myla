@@ -1,6 +1,6 @@
 # Concurrency
 
-> **D89, in progress.** Both checkers check what this page describes ([[MYLA-135]]), and the Python interpreter runs it ([[MYLA-136]], `examples/concurrency.my`). The self-hosted interpreter and both backends stop at the first construct of concurrency with an error until [[MYLA-137]] … [[MYLA-139]].
+> **D89, in progress.** Both checkers check what this page describes ([[MYLA-135]]). The Python interpreter runs it with a thread per task ([[MYLA-136]], `examples/concurrency.my`), the self-hosted interpreter one task at a time, each child to its end when it starts ([[MYLA-139]]). Both backends stop at the first construct of concurrency with an error until [[MYLA-137]] and [[MYLA-138]].
 
 Myla's concurrency follows Swift's: `async` functions that may suspend, `await` at every suspension, structured tasks that never outlive the scope that starts them, and `actor`s, whose state only their own methods touch. Tasks run in parallel on several threads. A value crossing into another task or actor is copied, so tasks share nothing but actors (D89).
 

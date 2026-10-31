@@ -811,6 +811,8 @@ class Checker:
         self._async = False
         self._actor_self: str | None = None
         self._awaited: set[int] = set()
+        # checking an `async let`'s initializer, outside any lambda in it
+        self._task_init = False
         # enum name -> ordered {variant_name: [payload Types]}; order defines tags
         self.enums: dict[str, dict[str, list[Type]]] = {}
         self.enum_decls: dict[str, ast.EnumDecl] = {}
@@ -930,6 +932,7 @@ class Checker:
         self._ret_at = None
         self._async = False
         self._actor_self = None
+        self._task_init = False
         try:
             with in_file(_source_path(decl)):
                 check()
@@ -2560,7 +2563,9 @@ class Checker:
         ctx = _LambdaCtx(lam_scope, expr)
         self._lambda_stack.append(ctx)
         saved_async = self._async
+        saved_task_init = self._task_init
         self._async = expr.is_async
+        self._task_init = False
         if expr.is_async:
             self.concurrency_at = self.concurrency_at or expr
         saved_ret = self._current_ret
@@ -2602,6 +2607,7 @@ class Checker:
             self._current_ret = saved_ret
             self._lambda_stack.pop()
             self._async = saved_async
+            self._task_init = saved_task_init
 
         ft = FuncType(tuple(ptypes), ret_t, expr.is_async)
         expr.captures = ctx.ordered()
@@ -2771,6 +2777,12 @@ class Checker:
 
     def _infer_try(self, expr: ast.Try, scope: _Scope) -> Type:
         ot = self._expect_value(expr.operand, scope, None)
+        if self._task_init:
+            raise TypeCheckError(
+                "'?' can't stand in an 'async let': its child task has no function "
+                "to return from",
+                at=expr,
+            )
         ret = self._current_ret
         if _has_error(ret):
             raise _Poisoned()   # the return type failed (MYLA-110)
@@ -4418,7 +4430,11 @@ class Checker:
         else:
             if isinstance(stmt.init, ast.Call):
                 self._awaited.add(id(stmt.init))
-            t = self._infer(stmt.init, scope, declared)
+            self._task_init = True
+            try:
+                t = self._infer(stmt.init, scope, declared)
+            finally:
+                self._task_init = False
             if declared is not None:
                 if not _has_error(t) and t != declared:
                     raise TypeCheckError(

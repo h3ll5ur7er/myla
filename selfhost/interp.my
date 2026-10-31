@@ -34,6 +34,8 @@ pub enum Value {
     VClosure([Param], ExprOrBlock, [str], [Value], str, bool),  // params, body, capNames, capVals, funcName, isFunc
     VCompose([Value]),                     // composed functions, applied left-to-right
     VPartial(Value, [Value], [bool]),      // base callable, arg slots, which slots are holes
+    VActor(int32),                         // an actor's handle: its state in Interp.actors (D89)
+    VTask(int32),                          // an `async let`'s child: Interp.tasks
 }
 impl Value {
     fun to_string(self) -> str {
@@ -53,6 +55,8 @@ impl Value {
             VClosure(params, body, capNames, capVals, funcName, isFunc) => f"VClosure({funcName}, {isFunc})"
             VCompose(c) => f"VCompose()"
             VPartial(func, slots, holes) => f"VPartial()"
+            VActor(i) => f"VActor({i})"
+            VTask(i) => f"VTask({i})"
         }
     }
 }
@@ -87,6 +91,11 @@ pub enum TailCall {
 
 pub struct RtFrame { names: [str], vals: [Value] }
 
+// The child task of an `async let` (D89): its result, or how it failed (a
+// runtime error, or an `exit` with `code`), which reaches the parent at
+// `await` or at the end of its scope; `awaited`: it has.
+pub struct TaskRec { value: Value, failed: bool, err: Option<RtError>, code: int32, awaited: bool }
+
 // What an input of the REPL did: the variables afterwards, the value to
 // show, the runtime error, or the `exit` that ends the session.
 pub struct SessionStep { names: [str], vals: [Value], shown: Option<Value>, err: Option<RtError>, exited: bool, code: int32 }
@@ -98,9 +107,6 @@ pub struct MatchRes { ok: bool, names: [str], vals: [Value] }
 // =========================================================================
 
 pub struct Interp {
-    // the checker's first construct of concurrency, which this interpreter
-    // doesn't run yet (D89, MYLA-139); none: no concurrency
-    concurrency: Option<RtError>,
     decls: [Decl],
     resolved: [int32: Type],
     func_names: [str],
@@ -117,6 +123,11 @@ pub struct Interp {
     cell: Value,            // the value `update_cell` is changing
     receivers: [Value],     // `var self` receivers on their way into a call
     tail: TailCall,         // the call a `become` left pending (Ctrl.CBecome)
+    // concurrency (D89): the actor types, the actors' states (by handle) and
+    // the child tasks of `async let`
+    actor_types: [str: bool],
+    actors: [Value],
+    tasks: [TaskRec],
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
@@ -182,10 +193,7 @@ enum PlaceOp {
 // An interpreter for the checked program `c`, run as `argv` (argv[0] is the
 // program's path, as for `myla run`).
 pub fun new_interp(c: Checker, argv: [str]) -> Interp {
-    var conc: Option<RtError> = None
-    if c.conc_line > 0 { conc = Some(RtError { msg: "the interpreter doesn't run concurrency yet (D89, MYLA-139)", line: c.conc_line, col: c.conc_col, sp: c.conc_sp, node: c.conc_node }) }
     var it = Interp {
-        concurrency: conc,
         decls: c.decls,
         resolved: c.resolved,
         func_names: [], func_decls: [],
@@ -200,6 +208,9 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         cell: Value.VUnit,
         receivers: [],
         tail: TailCall.TNone,
+        actor_types: c.actors,
+        actors: [],
+        tasks: [],
     }
     return it
 }
@@ -339,13 +350,6 @@ impl Interp {
             self.rt_err = Some(RtError { msg: "no entry point: define '#main' or a function named 'main'", line: 0, col: 0, sp: no_span(), node: -1 })
             return 1
         }
-        match self.concurrency {
-            Some(r) => {
-                self.rt_err = Some(r)
-                return 1
-            },
-            None => {},
-        }
         self.call_func(ei, [])
         match self.ctrl { Ctrl.CExit => { return self.exit_code }, _ => {} }
         return 0
@@ -483,6 +487,7 @@ impl Interp {
     // Whether every index on the path to `p` is still valid, without failing.
     fun place_valid(self, p: Place) -> bool {
         var v = self.lookup_or_unit(p.root)
+        if len(p.steps) > 0 { v = self.deref(v) }
         var i = 0
         while i < len(p.steps) {
             match p.steps[i] {
@@ -524,6 +529,7 @@ impl Interp {
     // The value at `p`, bounds-checked at every index (a read).
     fun read_place(var self, p: Place) -> Value {
         var v = self.lookup_or_unit(p.root)
+        if len(p.steps) > 0 { v = self.deref(v) }
         for st in p.steps {
             if self.stop() { return Value.VUnit }
             match st {
@@ -583,6 +589,20 @@ impl Interp {
             var j = len(self.scopes[i].names) - 1
             while j >= 0 {
                 if self.scopes[i].names[j] == p.root {
+                    match self.scopes[i].vals[j] {
+                        Value.VActor(id) => {
+                            if len(p.steps) > 0 {
+                                // a part of an actor's state, changed by its method
+                                self.cell = self.actors[id]
+                                self.actors[id] = Value.VUnit
+                                let r = self.update_cell(p.steps, 0, op)
+                                self.actors[id] = self.cell
+                                self.cell = Value.VUnit
+                                return r
+                            }
+                        },
+                        _ => {},
+                    }
                     self.cell = self.scopes[i].vals[j]
                     self.scopes[i].vals[j] = Value.VUnit
                     let r = self.update_cell(p.steps, 0, op)
@@ -716,13 +736,99 @@ impl Interp {
                 i = i + 1
             }
         }
+        self.close_tasks()
         self.pop_scope()
+    }
+
+    // -- concurrency (D89) ------------------------------------------------
+    //
+    // Tasks run one at a time: a child task runs to its end when its `async
+    // let` starts it, which is one of the orders tasks running at once may
+    // take. How it ended reaches the parent where it would in parallel: at
+    // `await`, or at the end of the scope that started it. An actor is a
+    // handle to a state only its methods change, one call at a time.
+
+    // `async let x = init`: the child task, run now on copies of the
+    // variables (whatever it changes stays with it).
+    fun start_task(var self, init: Expr) -> Value {
+        let saved = self.scopes
+        let v = self.eval(init)
+        self.scopes = saved
+        var rec = TaskRec { value: v, failed: false, err: None, code: 0, awaited: false }
+        match self.ctrl {
+            Ctrl.CExit => {
+                rec = TaskRec { value: Value.VUnit, failed: true, err: self.rt_err, code: self.exit_code, awaited: false }
+                self.ctrl = Ctrl.CNone
+                self.rt_err = None
+                self.exit_code = 0
+            },
+            _ => {},
+        }
+        push(self.tasks, rec)
+        return Value.VTask(len(self.tasks) - 1)
+    }
+
+    // The child's result, or its failure, now the parent's.
+    fun await_task(var self, id: int32) -> Value {
+        self.tasks[id].awaited = true
+        let rec = self.tasks[id]
+        if rec.failed {
+            self.rt_err = rec.err
+            self.ctrl = Ctrl.CExit
+            self.exit_code = rec.code
+            return Value.VUnit
+        }
+        return rec.value
+    }
+
+    // The end of a scope: a child it started that failed unawaited fails it,
+    // unless it is failing already; the children's records are let go.
+    fun close_tasks(var self) {
+        if len(self.tasks) == 0 { return }
+        let top = len(self.scopes) - 1
+        for v in self.scopes[top].vals {
+            match v {
+                Value.VTask(id) => {
+                    let rec = self.tasks[id]
+                    let failing = match self.ctrl { Ctrl.CExit => true, _ => false }
+                    if rec.failed && !rec.awaited && !failing {
+                        self.rt_err = rec.err
+                        self.ctrl = Ctrl.CExit
+                        self.exit_code = rec.code
+                    }
+                    self.tasks[id] = TaskRec { value: Value.VUnit, failed: false, err: None, code: 0, awaited: true }
+                },
+                _ => {},
+            }
+        }
+    }
+
+    fun eval_await(var self, x: Expr) -> Value {
+        match x.kind {
+            ExprKind.Name(n) => {
+                match self.lookup(n) {
+                    Some(v) => { match v { Value.VTask(id) => { return self.await_task(id) }, _ => {} } },
+                    None => {},
+                }
+            },
+            _ => {},
+        }
+        return self.eval(x)     // a call runs in the task that awaits it
+    }
+
+    // The value `v` reaches its fields through: an actor's state.
+    fun deref(self, v: Value) -> Value {
+        return match v { Value.VActor(id) => self.actors[id], _ => v }
     }
 
     fun exec_stmt(var self, s: Stmt) {
         match s.kind {
             StmtKind.ExprStmt(e) => { self.eval(e) },
             StmtKind.VarDecl(kind, name, ty, init) => {
+                if kind == "async" {
+                    self.define(name, self.start_task(init))
+                    return
+                }
                 let v = self.eval(init)
                 self.define(name, v)
             },
@@ -885,6 +991,7 @@ impl Interp {
             ExprKind.MatchE(scrut, arms) => self.eval_match(scrut, arms),
             ExprKind.Try(inner) => self.eval_try(inner),
             ExprKind.Lambda(params, ret, body, asy) => self.eval_lambda(params, body),
+            ExprKind.Await(x) => self.eval_await(x),
             _ => Value.VUnit,
         }
     }
@@ -947,6 +1054,7 @@ impl Interp {
                 i = i + 1
             }
         }
+        self.close_tasks()
         self.pop_scope()
         return result
     }
@@ -1192,7 +1300,7 @@ impl Interp {
             _ => {},
         }
         let c = self.eval(tgt)
-        return get_field(c, field)
+        return get_field(self.deref(c), field)
     }
 
     fun eval_tuple_lit(var self, elems: [Expr]) -> Value {
@@ -1218,6 +1326,10 @@ impl Interp {
         for f in fields {
             push(names, f.name)
             push(vals, self.eval(f.value))
+        }
+        if contains(self.actor_types, name) {     // starts the actor (D89)
+            push(self.actors, Value.VStruct(name, names, vals))
+            return Value.VActor(len(self.actors) - 1)
         }
         return Value.VStruct(name, names, vals)
     }
@@ -1318,8 +1430,9 @@ impl Interp {
         }
         let fi = self.func_idx(format("{}.{}", key, method))
         if fi >= 0 {
-            // the receiver first (once), then the arguments, as in Python
-            if self.method_is_var_self(fi) {
+            // the receiver first (once), then the arguments, as in Python;
+            // an actor's handle is passed as it is: its methods change the actor
+            if self.method_is_var_self(fi) && !contains(self.actor_types, key) {
                 // The receiver's value moves into the call, so the method can
                 // change it in place (MYLA-74); the arguments are evaluated
                 // first, and the final `self` is stored back after.

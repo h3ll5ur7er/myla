@@ -1023,6 +1023,7 @@ pub struct Checker {
     call_key: str,
     call_async: bool,
     suspended: int32,
+    task_init: bool,                // checking an `async let`'s initializer, outside its lambdas
 }
 
 fun new_checker(decls: [Decl]) -> Checker {
@@ -1041,7 +1042,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", cur_key: "",
-        lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1,
+        lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false,
     }
 }
 
@@ -3856,7 +3857,10 @@ impl Checker {
         var t: Option<Type> = None
         if !opt_has_error(declared) {
             match init.kind { ExprKind.Call(c, a) => { self.awaited[init.id] = true }, _ => {} }
-            t = self.infer(init, declared)?
+            self.task_init = true
+            let it = self.infer(init, declared)
+            self.task_init = false
+            t = it?
             match declared {
                 Some(d) => {
                     if !opt_has_error(t) && !opt_type_eq(t, declared) { return Err(terr_at(s.line, s.col, s.sp, format("type mismatch in 'async let': declared '{}', found '{}'", type_name(d), opt_type_name(t)))) }
@@ -4554,6 +4558,7 @@ impl Checker {
         self.cur_key = ""
         self.lams = []
         if len(self.awaited) > 0 { self.awaited = [:] }
+        self.task_init = false
     }
 
     // Collect `e`, an error in the declaration being checked.
@@ -5141,6 +5146,7 @@ impl Checker {
 
     fun infer_try(var self, e: Expr, operand: Expr) -> Result<Type, CheckErr> {
         let ot = self.expect_value(operand, None)?
+        if self.task_init { return Err(terr_at(e.line, e.col, e.sp, "'?' can't stand in an 'async let': its child task has no function to return from")) }
         if opt_has_error(self.cur_ret) { return Err(poisoned()) }   // the return type failed (MYLA-110)
         // `?` returns from the innermost function or lambda (MYLA-72)
         let where = if_str(self.lambda_depth > 0, "lambda", "function")
@@ -5211,6 +5217,8 @@ impl Checker {
         let saved_active = self.lambda_infer_active
         let saved_infer = self.lambda_infer
         let saved_async = self.in_async
+        let saved_task_init = self.task_init
+        self.task_init = false
         self.lambda_depth = self.lambda_depth + 1
         push(self.lams, LamAt { base: len(self.frames) - 1, line: e.line, col: e.col, sp: e.sp })
         self.in_async = asy
@@ -5223,7 +5231,7 @@ impl Checker {
                         self.cur_ret = Some(wr)
                         self.has_cur_ret = true
                         self.check_block(bl)?
-                        if !block_returns(bl) { self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async)
+                        if !block_returns(bl) { self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async, saved_task_init)
             self.pop_scope()
             return Err(terr_at(e.line, e.col, e.sp, format("lambda may finish without returning a '{}'", type_name(wr)))) }
                         ret_t = Some(wr)
@@ -5241,7 +5249,7 @@ impl Checker {
                             var m = 1
                             while m < len(collected) {
                                 if !type_eq(collected[m].ty, collected[0].ty) {
-                                    self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async)
+                                    self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async, saved_task_init)
                                     self.pop_scope()
                                     let ln = match collected[m].node { Some(nd) => nd.line, None => e.line }
                                     let cl = match collected[m].node { Some(nd) => nd.col, None => e.col }
@@ -5261,15 +5269,16 @@ impl Checker {
                 ret_t = self.infer(ex, want_ret)?
             },
         }
-        self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async)
+        self.restore_lambda(saved_ret, saved_has, saved_active, saved_infer, saved_async, saved_task_init)
         self.pop_scope()
         return Ok(func_type(ptypes, ret_t, asy))
     }
 
-    fun restore_lambda(var self, r: Option<Type>, h: bool, a: bool, inf: [MatchVal], asy: bool) {
+    fun restore_lambda(var self, r: Option<Type>, h: bool, a: bool, inf: [MatchVal], asy: bool, ti: bool) {
         self.lambda_depth = self.lambda_depth - 1
         pop(self.lams)
         self.in_async = asy
+        self.task_init = ti
         self.cur_ret = r
         self.has_cur_ret = h
         self.lambda_infer_active = a
