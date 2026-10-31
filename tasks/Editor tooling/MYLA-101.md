@@ -2,7 +2,7 @@
 id: MYLA-101
 title: Build the VS Code extension's .vsix in CI
 type: feature
-status: review
+status: done
 priority: medium
 labels: [vscode, ci]
 ---

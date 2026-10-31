@@ -2,7 +2,7 @@
 id: MYLA-55
 title: Workspace settings point at another machine
 type: chore
-status: review
+status: done
 priority: low
 labels: [vscode, repo]
 ---

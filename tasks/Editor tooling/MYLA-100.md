@@ -2,7 +2,7 @@
 id: MYLA-100
 title: VS Code extension overhaul
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [vscode]
 ---
