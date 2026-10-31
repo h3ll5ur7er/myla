@@ -10,7 +10,7 @@
 4. **After self-hosting**, the bootstrap was too slow to iterate on: building the Myla compiler took over a minute with the Python toolchain, and the first self-built round about four more. That led to three ideas:
    - rewrite the first stage in Rust to speed up and streamline the bootstrap: the origin of the [[Architecture/Rust-edition]] (removed in October 2026, [[MYLA-70]]);
    - write more sample programs, which motivated the language server ([[Architecture/Editor-tooling]]);
-   - a concurrency system close to Swift's actors, which is why the Rust edition has partial actors.
+   - a concurrency system close to Swift's actors, which the Rust edition prototyped partially ([[MYLA-61]] records what it taught).
 
 Measurements in October 2026 showed that the bootstrap's slowness comes from two hot spots in the Python toolchain's code generator and allocator, not from Python itself; fixing them brought the whole bootstrap down to about 8 seconds ([[MYLA-60]], [[MYLA-16]], [[Development/Bootstrap]]).
 
