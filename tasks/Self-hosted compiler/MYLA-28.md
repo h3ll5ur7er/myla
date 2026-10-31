@@ -2,7 +2,7 @@
 id: MYLA-28
 title: "Self-hosted diagnostics: shifted positions and no messages"
 type: bug
-status: review
+status: done
 priority: low
 labels: [selfhost, diagnostics]
 ---

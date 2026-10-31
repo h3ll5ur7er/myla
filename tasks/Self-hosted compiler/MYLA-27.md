@@ -2,7 +2,7 @@
 id: MYLA-27
 title: Const folding treats references to other consts as 0
 type: bug
-status: review
+status: done
 priority: medium
 labels: [selfhost, checker, consts]
 ---

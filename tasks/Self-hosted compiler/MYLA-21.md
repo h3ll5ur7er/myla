@@ -2,7 +2,7 @@
 id: MYLA-21
 title: Destructuring a tuple of boxed recursive enums is miscompiled
 type: bug
-status: review
+status: done
 priority: high
 labels: [selfhost, codegen]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-31
 title: Missing stdlib root makes std imports resolve to /std
 type: bug
-status: review
+status: done
 priority: low
 labels: [selfhost, scripts]
 ---

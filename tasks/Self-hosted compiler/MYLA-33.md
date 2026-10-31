@@ -2,7 +2,7 @@
 id: MYLA-33
 title: Latent issues in the self-hosted compiler
 type: chore
-status: review
+status: done
 priority: low
 labels: [selfhost, codegen, checker]
 ---

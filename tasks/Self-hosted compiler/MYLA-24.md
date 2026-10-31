@@ -2,7 +2,7 @@
 id: MYLA-24
 title: format() with a char or float argument segfaults
 type: bug
-status: review
+status: done
 priority: medium
 labels: [selfhost, codegen, strings]
 ---

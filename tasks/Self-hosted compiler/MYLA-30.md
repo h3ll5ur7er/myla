@@ -2,7 +2,7 @@
 id: MYLA-30
 title: Self-hosted loader concatenates modules as text
 type: bug
-status: review
+status: done
 priority: medium
 labels: [selfhost, loader, modules]
 ---

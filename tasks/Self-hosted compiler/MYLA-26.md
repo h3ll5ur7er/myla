@@ -2,7 +2,7 @@
 id: MYLA-26
 title: Partial application of a function returning an aggregate returns garbage
 type: bug
-status: review
+status: done
 priority: medium
 labels: [selfhost, codegen, closures]
 ---

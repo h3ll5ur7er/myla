@@ -2,7 +2,7 @@
 id: MYLA-102
 title: A local closure shadows a top-level function of the same name
 type: bug
-status: review
+status: done
 priority: high
 labels: [interpreter, codegen, selfhost]
 ---

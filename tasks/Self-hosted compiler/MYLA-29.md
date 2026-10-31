@@ -2,7 +2,7 @@
 id: MYLA-29
 title: Self-hosted compiler has no float support
 type: feature
-status: review
+status: done
 priority: medium
 labels: [selfhost, floats]
 ---

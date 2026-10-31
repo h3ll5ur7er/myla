@@ -2,7 +2,7 @@
 id: MYLA-87
 title: Derived Eq on an enum without payloads compares tags
 type: feature
-status: review
+status: done
 priority: medium
 labels: [checker, codegen, performance, selfhost]
 ---
