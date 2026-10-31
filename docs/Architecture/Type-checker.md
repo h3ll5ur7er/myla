@@ -6,7 +6,7 @@
 
 ## Types
 
-Frozen dataclasses, so they compare and hash structurally: `IntType(width, signed)`, `FloatType(width)`, `CharType`, `BoolType`, `StrType`, `StringBuilderType`, `StructType(name, args)`, `EnumType(name, args)`, `TupleType(elems)`, `ListType(elem)`, `MapType(key, value)`, `FuncType(params, ret)`, `TypeParam(name)` and `SelfType`. Aliases never survive resolution. `type_name` renders a type for messages.
+Frozen dataclasses, so they compare and hash structurally: `IntType(width, signed)`, `FloatType(width)`, `CharType`, `BoolType`, `StrType`, `StringBuilderType`, `StructType(name, args)`, `EnumType(name, args)`, `TupleType(elems)`, `ListType(elem)`, `MapType(key, value)`, `FuncType(params, ret, is_async)`, `TypeParam(name)` and `SelfType`. Aliases never survive resolution. `type_name` renders a type for messages.
 
 ## Passes
 
@@ -97,6 +97,10 @@ Synthesised lambdas get explicit parameter annotations (`_type_to_typeexpr`), so
 ## Methods and traits
 
 Every method becomes a function named `Type.method` (the dot can't occur in a user identifier) with a synthesised `self` parameter, registered in `functions` and in `methods[type_key]`. The key is the type's name, or the canonical name for built-in receivers (`int32`). Trait conformance substitutes `Self` (and a generic trait's parameters) and compares parameter and result types exactly. `trait_impls` records which user types implement which traits; primitives get built-in operator traits from `_primitive_default_trait`.
+
+## Concurrency
+
+D89, [[MYLA-135]], [[Language/Concurrency]]. The checker keeps the actor types (`actors`), whether the function or lambda being checked is async (`_async`), the actor whose method it is (`_actor_self`, whose `self` reaches the actor's fields: `_check_isolation`), and the calls under an `await` (`_awaited`). After a call is inferred, `_check_suspension` decides whether it may suspend (an async function, method or function value, or a method of an actor called from outside it, with the kind of call the inference recorded) and requires the `await`; `_infer_await` requires such a call, or the name of an `async let` (a binding with `task` set, which reads only under `await`). The first construct of concurrency met is `concurrency_at`, where the interpreters and backends stop until they run it. The self-hosted checker has the same state and functions (`actors`, `in_async`, `actor_self`, `awaited`, `check_isolation`, `check_suspension`, `infer_await`, `check_async_let`, `conc_line` …), gated on cheap tests so that a program without concurrency pays little (+0.35% instructions compiling itself, user time unchanged).
 
 ## Recursion classification
 
