@@ -21,3 +21,4 @@ Nothing reaches the caller's variable while the method waits: the method works o
 - Before: `main can't be lowered to the IR: an awaited 'var self' method on an element`.
 - `var_self_on_elements` (`test_concurrency_programs_match_the_interpreter`, natively with and without `--async-frames`): `await cs[1].bump(5)`, `await cs[pick(0)].bump(2)` (`pick` prints once), `await cs[i % 2].bump(1)` in a loop, `await board.rows[0].bump(7)`, and a copy of the list taken before a call keeping its value; it prints what the Python interpreter prints.
 - 300,000 rounds of an awaited call on an element holding a growing list of strings, with a copy of the list taken each round: the interpreter's result, 11 MB peak.
+- Unit 621, integration 2, burn 798 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,974,293 bytes).

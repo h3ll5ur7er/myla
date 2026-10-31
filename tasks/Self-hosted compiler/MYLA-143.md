@@ -22,3 +22,4 @@ print(copy[0].n)          // the interpreters: 0; both backends printed 1000
 ## Evidence
 
 - `var_self_method_on_a_shared_element_copies_it` (`tests/burn/test_compiler_parity.py`, and in the self-hosted backend's `PARITY_PROGRAMS`): an element, an element of a field, an element of a nested list, each with a copy of the list kept; both backends print what the interpreter prints. It fails on the Python backend without the fix.
+- Unit 621, integration 2, burn 798 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (5,974,293 bytes).
