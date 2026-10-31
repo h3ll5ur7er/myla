@@ -816,6 +816,11 @@ impl Interp {
         return self.eval(x)     // a call runs in the task that awaits it
     }
 
+    // Whether `name` is an actor type (an empty table needs no hashing).
+    fun is_actor_type(self, name: str) -> bool {
+        return len(self.actor_types) > 0 && contains(self.actor_types, name)
+    }
+
     // The value `v` reaches its fields through: an actor's state.
     fun deref(self, v: Value) -> Value {
         return match v { Value.VActor(id) => self.actors[id], _ => v }
@@ -1327,7 +1332,7 @@ impl Interp {
             push(names, f.name)
             push(vals, self.eval(f.value))
         }
-        if contains(self.actor_types, name) {     // starts the actor (D89)
+        if self.is_actor_type(name) {     // starts the actor (D89)
             push(self.actors, Value.VStruct(name, names, vals))
             return Value.VActor(len(self.actors) - 1)
         }
@@ -1432,7 +1437,7 @@ impl Interp {
         if fi >= 0 {
             // the receiver first (once), then the arguments, as in Python;
             // an actor's handle is passed as it is: its methods change the actor
-            if self.method_is_var_self(fi) && !contains(self.actor_types, key) {
+            if self.method_is_var_self(fi) && !self.is_actor_type(key) {
                 // The receiver's value moves into the call, so the method can
                 // change it in place (MYLA-74); the arguments are evaluated
                 // first, and the final `self` is stored back after.
