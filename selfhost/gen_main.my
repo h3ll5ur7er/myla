@@ -15,7 +15,7 @@ from std.io import write, eprintln
 from .checker import build_checker_decls
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
-from .loader import load_program_opts, load_options, parse_package_flag, Loaded, default_stdlib_root, type_errors, concurrency_report
+from .loader import load_program_opts, load_options, parse_package_flag, Loaded, default_stdlib_root, type_errors
 from .diag import render
 
 // How the assembly is generated: `debug`, DWARF debug information, so gdb
@@ -23,19 +23,15 @@ from .diag import render
 // with the pretty-printers from `stdlib_root` embedded (D82);
 // `ir`, through the IR, with its statistics (`ir_stats`) or its text instead
 // of the assembly (`emit_ir`).
-struct Mode { debug: bool, emit_ir: bool }
+// `frames`: async functions run on frames even without an `async let`
+// (`--async-frames`, for the tests of D90's lowering).
+struct Mode { debug: bool, emit_ir: bool, frames: bool }
 
 fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
-            match concurrency_report(prog, c) {
-                Some(r) => {
-                    eprintln(render(r))
-                    return 1
-                },
-                None => {},
-            }
             var g = new_codegen(c)
+            if mode.frames { g.frames = true }
             g.set_sources(prog.spans, prog.next_id)
             if mode.debug { g.enable_debug_info(read_gdb_script(stdlib_root)) }
             if mode.emit_ir { g.keep_ir_text() }
@@ -57,13 +53,15 @@ fun main() {
         exit(2)
     }
     var opts = load_options(default_stdlib_root(argv[0]))
-    var mode = Mode { debug: false, emit_ir: false }
+    var mode = Mode { debug: false, emit_ir: false, frames: false }
     var j = 2
     while j < len(argv) {
         if argv[j] == "-g" {
             mode.debug = true
         } else if argv[j] == "--emit-ir" {
             mode.emit_ir = true
+        } else if argv[j] == "--async-frames" {
+            mode.frames = true
         } else if argv[j] == "--package" && j + 1 < len(argv) {
             match parse_package_flag(argv[j + 1]) {
                 Ok(pkg) => { push(opts.packages, pkg) },

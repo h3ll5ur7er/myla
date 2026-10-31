@@ -28,7 +28,7 @@
 from std.fs import read_to_string, exists, is_dir
 from .parser import parse_source_all
 from .diag import Report, reports, type_report, chain
-from .checker import CheckErr, Checker
+from .checker import CheckErr
 from .tokens import SrcSpan, no_span, keywords
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import ImportPath, ImportItem, TypeExpr, TypeKind, Expr, ExprKind, FieldInit
@@ -68,14 +68,6 @@ pub fun file_of(prog: Loaded, id: int32) -> str {
 
 // The type errors `errs` (not empty) of the linked program `prog`, each in its
 // declaration's file, as one report (MYLA-65, D80).
-// The error for a program with an `async let`, which the compiler doesn't
-// build yet (D91, MYLA-138): its other concurrency is one task, its async
-// functions ordinary ones; none without one.
-pub fun concurrency_report(prog: Loaded, c: Checker) -> Option<Report> {
-    if c.task_line == 0 { return None }
-    return Some(Report { kind: "runtime error", msg: "the compiler doesn't build 'async let' yet (D91, MYLA-138)", path: file_of(prog, c.task_node), line: c.task_line, col: c.task_col, sp: c.task_sp, more: [], notes: [] })
-}
-
 pub fun type_errors(prog: Loaded, errs: [CheckErr]) -> Report {
     var rs: [Report] = []
     for e in errs {

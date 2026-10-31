@@ -17,6 +17,7 @@ from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
 from .ir import render_func, verify, moves, IrFunc, Inst
+from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
@@ -172,6 +173,17 @@ pub struct CodeGen {
     temp_reg: [str],
     slot_reg: [str],
     saved_regs: [str],
+    // D90: what a slot's offset is from: %rbp, or in an async function's
+    // frame function %r15, which holds its heap frame; the resume points of
+    // the function being generated (block of each state, from 1)
+    slot_base: str,
+    resume_blocks: [int32],
+    // D91: whether async functions run on frames, the tasks taking turns
+    // (the program has an `async let`, or `--async-frames`), and the
+    // normalizer of their bodies (anf.my), which adds the types of the nodes
+    // it makes to `resolved`
+    frames: bool,
+    norm: Norm,
     save_base: int32,               // MYLA-126: the saved registers' cells start below it
     arg_words: int32,               // MYLA-126: the argument words the function pops
     // MYLA-127: per function (by its signature's name), which parameters its
@@ -264,7 +276,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
+        temp_reg: [], slot_reg: [], saved_regs: [], slot_base: "rbp", resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
 }
 
@@ -1101,6 +1113,7 @@ impl CodeGen {
                 self.scan_expr(callee, false)
             },
             ExprKind.Unary(op, x) => { self.scan_expr(x, false) },
+            ExprKind.Await(x) => { self.scan_expr(x, false) },
             ExprKind.Binary(op, l, r) => {
                 self.scan_expr(l, false)
                 self.scan_expr(r, false)
@@ -1895,11 +1908,162 @@ impl CodeGen {
         push(out, "\t.skip 8")
         push(out, "__run_errno_val:")
         push(out, "\t.skip 8")
+        if self.frames {
+            push(out, "__exec_head:")
+            push(out, "\t.skip 8")
+            push(out, "__exec_tail:")
+            push(out, "\t.skip 8")
+            push(out, "__exec_cur:")
+            push(out, "\t.skip 8")
+            push(out, "__exec_sp:")
+            push(out, "\t.skip 8")
+            push(out, "__exec_main:")
+            push(out, "\t.skip 8")
+            push(out, "__exec_queue:")
+            push(out, format("\t.skip {}", 8 * EXEC_CAP))
+        }
         push(out, "")
         if len(self.line_files) > 0 { for l in self.dbg_sections() { push(out, l) } }
         push(out, "\t.section .note.GNU-stack,\"\",@progbits")
         push(out, "")
         return join_lines(out)
+    }
+
+    // -- the executor (D90, D91: one thread) ------------------------------
+
+    // The ready frames, a ring of EXEC_CAP in `.bss`; `__exec_push` (%rdi: a
+    // frame) queues one, `__exec_run` resumes them in turn until none is
+    // left (each frame function pops its one argument word). `myla___resume`
+    // goes on with the frame at 8(%rsp), through its resume function;
+    // `myla___finish`, at a frame function's end, resumes the frame's caller
+    // in place of it, or ends its task and returns to the executor.
+    // `__exec_cur` is the frame the executor resumed last: until control
+    // comes back, what runs is that frame's task, whose first frame is at the
+    // end of the chain of callers (word 8). `__exec_main` is the entry's.
+    //
+    // A task's first frame says in its `task` word (24) how the task is:
+    // 0 running, the frame waiting for it, 1 done, 2 failed by a panic (the
+    // message in word 0, the position record in word 16) or 3 by `exit`
+    // (the code in word 0); the frame is never resumed again then.
+    fun emit_executor(var self) {
+        self.raw("__exec_push:")
+        self.raw("\tmovq __exec_tail(%rip), %rax")
+        self.raw("\tmovq %rax, %rcx")
+        self.raw("\tsubq __exec_head(%rip), %rcx")
+        self.raw(format("\tcmpq ${}, %rcx", EXEC_CAP))
+        self.raw("\tjae __trap_oom")
+        self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
+        self.raw("\tleaq __exec_queue(%rip), %rcx")
+        self.raw("\tmovq %rdi, (%rcx,%rax,8)")
+        self.raw("\tincq __exec_tail(%rip)")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__exec_run:")
+        self.raw("\tpushq %rbx")
+        self.raw(".Lexec_next:")
+        self.raw("\tmovq __exec_head(%rip), %rax")
+        self.raw("\tcmpq __exec_tail(%rip), %rax")
+        self.raw("\tje .Lexec_done")
+        self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
+        self.raw("\tleaq __exec_queue(%rip), %rcx")
+        self.raw("\tmovq (%rcx,%rax,8), %rdi")
+        self.raw("\tincq __exec_head(%rip)")
+        self.raw("\tmovq %rdi, __exec_cur(%rip)")
+        self.raw("\tpushq %rdi")
+        self.raw("\tmovq %rsp, __exec_sp(%rip)")
+        self.raw("\tcall *(%rdi)")
+        self.raw("\tjmp .Lexec_next")
+        // a task failed (`__task_fail`): back to the loop, the stack as the
+        // resumed frame found it, its argument word popped
+        self.raw(".Lexec_failed:")
+        self.raw("\tmovq __exec_sp(%rip), %rsp")
+        self.raw("\taddq $8, %rsp")
+        self.raw("\tjmp .Lexec_next")
+        self.raw(".Lexec_done:")
+        self.raw("\tpopq %rbx")
+        self.raw("\tret")
+        self.raw("")
+        self.raw("myla___resume:")
+        self.raw("\tmovq 8(%rsp), %rax")
+        self.raw("\tjmp *(%rax)")
+        self.raw("")
+        self.raw("myla___finish:")
+        self.raw("\tmovq 8(%rsp), %rax")
+        self.raw("\tmovq 8(%rax), %rcx")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Lfinish_task")
+        self.raw("\tmovq %rcx, 8(%rsp)")
+        self.raw("\tjmp *(%rcx)")
+        // a task's first frame: its task ends; the frame waiting for it, in
+        // its `task` word, goes on, and the word says done (1)
+        self.raw(".Lfinish_task:")
+        self.raw("\tmovq 24(%rax), %rdi")
+        self.raw("\tmovq $1, 24(%rax)")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lfinish_none")
+        self.raw("\tcall __exec_push")
+        self.raw(".Lfinish_none:")
+        self.raw("\tret $8")
+        self.raw("")
+        // __task_fail: a panic (%rdi 2, %rsi the message, %rdx the position)
+        // or an `exit` (%rdi 3, %rsi the code) in a task other than the
+        // entry's is held for its parent's `await` or scope end, as in the
+        // interpreters (D89): recorded in the task's first frame, the frame
+        // waiting for it queued, and the executor goes on. Returns (%rax 0)
+        // when the entry's task fails or no task runs: the program ends.
+        self.raw("__task_fail:")
+        self.raw("\tmovq __exec_cur(%rip), %rax")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Ltf_now")
+        self.raw(".Ltf_root:")
+        self.raw("\tmovq 8(%rax), %rcx")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Ltf_found")
+        self.raw("\tmovq %rcx, %rax")
+        self.raw("\tjmp .Ltf_root")
+        self.raw(".Ltf_found:")
+        self.raw("\tcmpq __exec_main(%rip), %rax")
+        self.raw("\tje .Ltf_now")
+        self.raw("\tmovq %rsi, (%rax)")
+        self.raw("\tmovq %rdx, 16(%rax)")
+        self.raw("\tmovq 24(%rax), %rcx")
+        self.raw("\tmovq %rdi, 24(%rax)")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Lexec_failed")
+        self.raw("\tmovq %rcx, %rdi")
+        self.raw("\tcall __exec_push")
+        self.raw("\tjmp .Lexec_failed")
+        self.raw(".Ltf_now:")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\tret")
+        self.raw("")
+        // __task_exit: `exit` (%edi the code) when tasks take turns
+        self.raw("__task_exit:")
+        self.raw("\tpushq %rdi")
+        self.raw("\tmovslq %edi, %rsi")
+        self.raw("\tmovq $3, %rdi")
+        self.raw("\tcall __task_fail")
+        self.raw("\tpopq %rdi")
+        self.raw("\tmovq $60, %rax")
+        self.raw("\tsyscall")
+        self.raw("")
+        // __task_check: a waited-for task (%rdi, its first frame) has ended;
+        // a failure in it is raised here
+        self.raw("__task_check:")
+        self.raw("\tmovq 24(%rdi), %rax")
+        self.raw("\tcmpq $2, %rax")
+        self.raw("\tje .Ltc_panic")
+        self.raw("\tcmpq $3, %rax")
+        self.raw("\tje .Ltc_exit")
+        self.raw("\tret")
+        self.raw(".Ltc_panic:")
+        self.raw("\tmovq 16(%rdi), %rsi")
+        self.raw("\tmovq (%rdi), %rdi")
+        self.raw("\tjmp __panic")
+        self.raw(".Ltc_exit:")
+        self.raw("\tmovq (%rdi), %rdi")
+        self.raw("\tjmp __task_exit")
+        self.raw("")
     }
 
     // -- functions --------------------------------------------------------
@@ -1910,13 +2074,56 @@ impl CodeGen {
             self.ir_blocked = blocked_types(self)
             self.ir_ready = true
         }
-        self.emit_ir(self.take_ir(lower_function(self, fd, mangled), mangled), fd, mangled)
+        var body_fd = fd
+        if self.frames && fd.is_async { body_fd = self.normalized_fn(fd) }
+        self.emit_ir(self.take_ir(lower_function(self, body_fd, mangled), mangled), body_fd, mangled)
+    }
+
+    // `fd` with its body normalized for its frame function: each `await` in
+    // a `let` of its own (D90); the new nodes' types join `resolved`.
+    fun normalized_fn(var self, fd: FunData) -> FunData {
+        match fd.body {
+            Some(b) => {
+                self.norm.resolved = self.resolved
+                self.resolved = [:]
+                let nb = self.norm.block(b)
+                self.resolved = self.norm.resolved
+                self.norm.resolved = [:]
+                return FunData { line: fd.line, col: fd.col, sp: fd.sp, name: fd.name, params: fd.params, ret_type: fd.ret_type, body: Some(nb), attributes: fd.attributes, type_params: fd.type_params, receiver: fd.receiver, is_pub: fd.is_pub, is_async: fd.is_async }
+            },
+            None => {},
+        }
+        return fd
+    }
+
+    // Whether `name` is an async function or method that runs on a frame.
+    fun is_async_fn(self, name: str) -> bool {
+        if !self.frames || !self.has_func(name) { return false }
+        let sig = self.sig_of(name)
+        return sig.has_decl && sig.decl.is_async
+    }
+
+    // Whether node `id` has a type: an expression with a value.
+    fun has_type(self, id: int32) -> bool {
+        return contains(self.resolved, id)
     }
 
     // A lambda's body (MYLA-106), under the substitution of the function
     // that made it; then its environment's release function.
-    fun gen_any_lambda(var self, job: LamJob) {
-        self.subst = job.subst
+    fun gen_any_lambda(var self, job0: LamJob) {
+        self.subst = job0.subst
+        var job = job0
+        // an async lambda runs on a frame, its body normalized (D90)
+        if self.frames && is_async_t(job.ftype) {
+            self.norm.resolved = self.resolved
+            self.resolved = [:]
+            match job.body {
+                ExprOrBlock.EB_Block(b) => { job.body = ExprOrBlock.EB_Block(self.norm.block(b)) },
+                ExprOrBlock.EB_Expr(ex) => { job.body = ExprOrBlock.EB_Block(self.norm.returning(ex, false)) },
+            }
+            self.resolved = self.norm.resolved
+            self.norm.resolved = [:]
+        }
         let f = self.take_ir(lower_lambda(self, job), job.lifted)
         self.emit_ir_at(f, job.id, job.line, job.col, job.lifted)
         var owned: [DropEntry] = []
@@ -1965,6 +2172,15 @@ impl CodeGen {
     // its mangled name, and queued from `IrFunc.instances`).
     fun request_plain(var self, name: str) {
         if self.has_func(name) && len(self.sig_of(name).type_params) == 0 { let m = self.request_fn(name, []) }
+        // an async function's `__new` (D90): the function itself, whose
+        // frame function emits it
+        let n = len(name)
+        if n > 5 && name[n - 5] == '_' && name[n - 4] == '_' && name[n - 3] == 'n' && name[n - 2] == 'e' && name[n - 1] == 'w' {
+            var sb = StringBuilder()
+            append(sb, name, 0, n - 5)
+            let base = build(sb)
+            if self.has_func(base) && len(self.sig_of(base).type_params) == 0 { let m = self.request_fn(base, []) }
+        }
     }
 
     // -- statements -------------------------------------------------------
@@ -2540,6 +2756,17 @@ impl CodeGen {
     // `myla_<fn>`, which pops the arguments and so all its caller pushed.
     fun emit_fnval_thunk(var self, n: str) {
         let sig = self.sig_of(n)
+        if self.is_async_fn(n) {
+            // an async function's value makes its frame (D90): its env word
+            // dropped, `__new` takes the arguments (with references of its own)
+            self.emit(format("myla_{}__fnval:", n))
+            self.emit("movq (%rsp), %rax")
+            self.emit("movq %rax, 8(%rsp)")
+            self.emit("addq $8, %rsp")
+            self.emit(format("jmp myla_{}__new", n))
+            self.emit("")
+            return
+        }
         let struct_ret = is_aggregate_opt(sig.ret)
         var byval = false
         var k = 0
@@ -2705,6 +2932,7 @@ impl CodeGen {
         match e.kind {
             ExprKind.Name(n) => { if !list_has_str(bound, n) { push(out, n) } },
             ExprKind.Unary(op, x) => { for v in self.free_expr(x, bound) { push(out, v) } },
+            ExprKind.Await(x) => { for v in self.free_expr(x, bound) { push(out, v) } },
             ExprKind.Binary(op, l, r) => {
                 for v in self.free_expr(l, bound) { push(out, v) }
                 for v in self.free_expr(r, bound) { push(out, v) }
@@ -2796,11 +3024,21 @@ impl CodeGen {
         self.raw("\tmovq %rcx, __argv(%rip)")
         self.raw("\tleaq 16(%rsp,%rax,8), %rcx")
         self.raw("\tmovq %rcx, __envp(%rip)")
-        self.raw(format("\tcall myla_{}", entry_name))
+        if self.frames && self.sig_of(entry_name).decl.is_async {
+            // the entry's task: its frame queued, the executor run (D90)
+            self.raw(format("\tcall myla_{}__new", entry_name))
+            self.raw("\tmovq %rax, __exec_main(%rip)")
+            self.raw("\tmovq %rax, %rdi")
+            self.raw("\tcall __exec_push")
+            self.raw("\tcall __exec_run")
+        } else {
+            self.raw(format("\tcall myla_{}", entry_name))
+        }
         self.raw("\tmovq $60, %rax")
         self.raw("\txorq %rdi, %rdi")
         self.raw("\tsyscall")
         self.raw("")
+        if self.frames { self.emit_executor() }
         // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
         // (MYLA-17); the message is the interpreter's, without the values. The
         // caller passes the position record in %rsi; out of memory has none.
@@ -2835,6 +3073,17 @@ impl CodeGen {
         // __panic: %rdi -> the message, %rsi -> the position record or 0;
         // `runtime error: <message>`, then `  --> file:line:col` (MYLA-65).
         self.raw("__panic:")
+        if self.frames {
+            // held for the parent when a task other than the entry's fails
+            self.raw("\tpushq %rsi")
+            self.raw("\tpushq %rdi")
+            self.raw("\tmovq %rsi, %rdx")
+            self.raw("\tmovq %rdi, %rsi")
+            self.raw("\tmovq $2, %rdi")
+            self.raw("\tcall __task_fail")
+            self.raw("\tpopq %rdi")
+            self.raw("\tpopq %rsi")
+        }
         self.raw("\tpushq %rsi")
         self.raw("\tpushq %rdi")
         self.raw("\tleaq .Lmsg_rterr(%rip), %rdi")
@@ -5798,6 +6047,7 @@ fun names_in_expr(e: Expr, acc: [str]) -> [str] {
     var out = with_name(e, acc)
     match e.kind {
         ExprKind.Unary(op, x) => { out = names_in_expr(x, out) },
+        ExprKind.Await(x) => { out = names_in_expr(x, out) },
         ExprKind.Binary(op, l, r) => { out = names_in_expr(r, names_in_expr(l, out)) },
         ExprKind.Call(c, args) => {
             out = names_in_expr(c, out)
@@ -5931,6 +6181,7 @@ fun may_write_stmt(st: Stmt, name: str) -> bool {
 fun may_write_expr(e: Expr, name: str) -> bool {
     match e.kind {
         ExprKind.Unary(op, x) => { return may_write_expr(x, name) },
+        ExprKind.Await(x) => { return may_write_expr(x, name) },
         ExprKind.Binary(op, l, r) => { return may_write_expr(l, name) || may_write_expr(r, name) },
         ExprKind.Call(c, args) => {
             let writes = match c.kind {
@@ -5976,6 +6227,18 @@ pub fun is_struct_or_enum_t(t: Type) -> bool {
     return match t { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, _ => false }
 }
 
+// The normalizer of async bodies for frame functions (anf.my): a `match` with
+// an `await` in an arm stays a value; an `async let` starts an async lambda.
+fun compiler_norm() -> Norm {
+    var n = new_norm(2000000000)
+    n.value_matches = true
+    n.wrap_children = true
+    return n
+}
+
+// The ready-frame ring's size (D90): a power of two.
+const EXEC_CAP: int32 = 1048576
+
 pub fun is_tfunc(t: Type) -> bool {
     return match t { Type.TFunc(p, r) => true, Type.TAsync(f) => true, _ => false }
 }
@@ -5984,6 +6247,11 @@ pub fun is_tfunc(t: Type) -> bool {
 // function runs as an ordinary one (D91, MYLA-138).
 pub fun unasync(t: Type) -> Type {
     return match t { Type.TAsync(f) => f, _ => t }
+}
+
+// Whether `t` is an async function's type (D89).
+pub fun is_async_t(t: Type) -> bool {
+    return match t { Type.TAsync(f) => true, _ => false }
 }
 
 // Whether `t` is an actor's handle: a cell holding its fields (D89).

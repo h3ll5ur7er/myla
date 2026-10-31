@@ -47,9 +47,8 @@ _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 )
 
-# Examples outside the v0.9 codegen gate's scope (see module docstring), and
-# concurrency, which the compiler builds from MYLA-137 on (D89).
-EXCLUDED: set[str] = {"concurrency.my"}
+# Examples outside the v0.9 codegen gate's scope (see module docstring).
+EXCLUDED: set[str] = set()
 
 # Programs of the Python backend's parity suite (test_compiler_parity.PROGRAMS)
 # for bugs both backends had: the value of a store is evaluated before the
@@ -532,9 +531,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # emitting the assembly under test is a fast subprocess call.
         cls._binary = selfhost_tool("gen_main")
 
-    def _emit_asm(self, path: str, stdlib_root: str | None = None) -> str:
+    def _emit_asm(self, path: str, stdlib_root: str | None = None, flags: tuple = ()) -> str:
         """Assembly for `path`, produced by the self-hosted backend."""
-        extra = [stdlib_root] if stdlib_root is not None else []
+        extra = ([stdlib_root] if stdlib_root is not None else []) + list(flags)
         proc = subprocess.run(
             [self._binary, path, *extra], capture_output=True, text=True
         )
@@ -1229,23 +1228,59 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     bad.add((fn, r))
         return sorted(bad)
 
-    def test_concurrency_programs_of_one_task_match_the_oracle(self) -> None:
-        from .test_selfhost_interp import CONCURRENCY_PROGRAMS
+    def test_concurrency_programs_match_the_interpreter(self) -> None:
+        """Every concurrency parity program (D89) and the actor programs,
+        natively (D90, D91: tasks taking turns on one thread), print and exit
+        as the Python interpreter does; a program without `async let` also
+        with its async functions on frames (`--async-frames`)."""
+        from .test_selfhost_interp import CONCURRENCY_PROGRAMS, _cli_oracle
 
         cases = dict(ACTOR_PROGRAMS)
-        for name, src in CONCURRENCY_PROGRAMS.items():
-            if "async let" not in src and "import" not in src:
-                cases[name] = src
-        self.assertGreater(len(cases), 8)
+        cases.update(CONCURRENCY_PROGRAMS)
+        stdlib = default_stdlib_root()
         for name, src in cases.items():
+            modes = [()] if "async let" in src or "task." in src else [(), ("--async-frames",)]
+            for flags in modes:
+                with self.subTest(program=name, flags=flags), tempfile.TemporaryDirectory() as tmp:
+                    path = os.path.join(tmp, name + ".my")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(src)
+                    out, code, peak = self._build_and_measure(self._emit_asm(path, stdlib, flags))
+                    want = _cli_oracle(path)
+                    self.assertEqual((out, code), (want[0], want[2]))
+                    # 200,000 actors made and released: their cells are reused
+                    self.assertLess(peak, 64, f"{name}: peak {peak:.1f} MB")
+
+    def test_deep_task_trees_and_awaits(self) -> None:
+        """3,000 children through `task.all`, each calling an actor, and an
+        async recursion 100,000 deep: every await is a tail call, so the
+        stack stays flat, and the frames are freed as they end."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deep.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(DEEP_TASKS)
+            out, code, peak = self._build_and_measure(self._emit_asm(path, default_stdlib_root()))
+            self.assertEqual((out, code), ("8997000\n3000\n100000\n", 0))
+            self.assertLess(peak, 64, f"peak {peak:.1f} MB")
+
+    def test_child_failures_are_held_for_the_parent(self) -> None:
+        """A panic or `exit` in a child task waits for its parent's `await`
+        (or scope end) while the other tasks go on, as in the interpreters
+        (D89). On one thread the order is fixed: the self-hosted interpreter
+        prints the same; the Python interpreter's threads may interleave."""
+        stdlib = default_stdlib_root()
+        for name, (src, want_out, want_code, want_err) in HELD_FAILURES.items():
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, name + ".my")
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(src)
-                out, code, peak = self._build_and_measure(self._emit_asm(path))
-                self.assertEqual((out, code), _oracle(path))
-                # 200,000 actors made and released: their cells are reused
-                self.assertLess(peak, 64, f"{name}: peak {peak:.1f} MB")
+                exe = os.path.join(tmp, name)
+                with open(exe + ".s", "w", encoding="utf-8") as fh:
+                    fh.write(self._emit_asm(path, stdlib))
+                subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+                proc = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+                self.assertEqual((proc.stdout, proc.returncode), (want_out, want_code))
+                self.assertTrue(proc.stderr.startswith(want_err), proc.stderr)
 
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS
@@ -1299,7 +1334,109 @@ ACTOR_PROGRAMS = {
         "    while i <= 20 {\n        let n = Node { val: i, next: Some(head) }\n        head = n\n        i = i + 1\n    }\n"
         "    print(await head.sum())\n    let tail = Node { val: 1000, next: None }\n    await tail.link(head)\n"
         "    print(await tail.sum())\n}\n"),
+    # an awaited `var self` method of a struct on a frame: its final `self`
+    # goes back to the receiver, a variable or a field of one, releasing the
+    # old value
+    "var_self_write_back": (
+        "struct Log { lines: [str], name: str }\n"
+        "impl Log {\n    async fun add(var self, s: str) -> int {\n        push(self.lines, s)\n"
+        "        self.name = self.name + \".\"\n        return len(self.lines)\n    }\n"
+        "    async fun reset(var self) {\n        self.lines = []\n    }\n}\n"
+        "struct Box { log: Log, n: int }\n"
+        "async fun run() -> int {\n    var b = Box { log: Log { lines: [], name: \"x\" }, n: 0 }\n"
+        "    var total = 0\n    var i = 0\n    while i < 20000 {\n"
+        "        let k = await b.log.add(f\"line {i}\")\n        total = total + k\n"
+        "        if k == 50 { await b.log.reset() }\n        i = i + 1\n    }\n"
+        "    var l = Log { lines: [\"a\"], name: \"y\" }\n    let m = await l.add(\"b\")\n"
+        "    print(f\"{m} {len(l.lines)} {len(l.name)} {len(b.log.lines)} {len(b.log.name)}\")\n"
+        "    return total\n}\n"
+        "#main\nasync fun main() {\n    print(await run())\n}\n"),
 }
+
+
+_HELD_COUNTER = ("actor C { n: int }\nimpl C {\n    fun bump(var self) -> int {\n"
+                 "        self.n = self.n + 1\n        return self.n\n    }\n}\n")
+# (program, stdout, exit code, the start of stderr)
+HELD_FAILURES = {
+    "held_panic": (_HELD_COUNTER + (
+        "async fun boom(c: C) -> int {\n    let x = await c.bump()\n    panic(\"boom\")\n    return 0\n}\n"
+        "async fun fine(c: C) -> int {\n    return await c.bump() * 10\n}\n"
+        "#main\nasync fun main() {\n    let c = C { n: 0 }\n    async let a = boom(c)\n    async let b = fine(c)\n"
+        "    var i = 0\n    while i < 5 {\n        print(await c.bump())\n        i = i + 1\n    }\n"
+        "    print(await b)\n    print(\"before a\")\n    print(await a)\n    print(\"never\")\n}\n"),
+        "1\n4\n5\n6\n7\n30\nbefore a\n", 1, "runtime error: boom\n"),
+    # a grandchild's `exit` reaches its parent's scope end, then main's await
+    "held_exit": ("from std.process import exit\n" + _HELD_COUNTER + (
+        "async fun leave(c: C) {\n    let x = await c.bump()\n    exit(4)\n}\n"
+        "async fun inner(c: C) -> int {\n    async let l = leave(c)\n    let y = await c.bump()\n"
+        "    print(\"inner goes on\")\n    return y\n}\n"
+        "#main\nasync fun main() {\n    let c = C { n: 0 }\n    async let a = inner(c)\n"
+        "    for i in 0..4 {\n        print(await c.bump())\n    }\n    print(\"waiting\")\n"
+        "    print(await a)\n    print(\"never\")\n}\n"),
+        "1\ninner goes on\n3\n5\n6\nwaiting\n", 4, ""),
+    # children of synchronous calls are tasks too: they run when the parent
+    # waits, and their failure waits for the `await`
+    "held_sync_child": (
+        "fun noisy(i: int) -> int {\n    print(f\"noisy {i}\")\n    return i * 2\n}\n"
+        "fun pick(xs: [int], i: int) -> int {\n    return xs[i]\n}\n"
+        "#main\nasync fun main() {\n    async let a = noisy(1)\n    print(\"parent\")\n    print(await a)\n"
+        "    async let b = pick([1, 2], 5)\n    print(\"between\")\n    print(await b)\n}\n",
+        "parent\nnoisy 1\n2\nbetween\n", 1, "runtime error: index out of bounds\n"),
+    # an out-of-bounds index in a child that is never awaited: its scope's end
+    "held_trap": (
+        "async fun pick(xs: [int], i: int) -> int {\n    return xs[i]\n}\n"
+        "#main\nasync fun main() {\n    if true {\n        async let a = pick([1, 2], 5)\n"
+        "        print(\"in scope\")\n    }\n    print(\"never\")\n}\n",
+        "in scope\n", 1, "runtime error: index out of bounds\n"),
+}
+
+
+DEEP_TASKS = """\
+import std.task as task
+
+actor Counter {
+    count: int
+}
+
+impl Counter {
+    fun add(var self, n: int) -> int {
+        self.count = self.count + 1
+        return self.count
+    }
+    fun get(self) -> int {
+        return self.count
+    }
+}
+
+async fun work(c: Counter, i: int) -> int {
+    let x = await c.add(i)
+    return i * 2
+}
+
+async fun down(n: int) -> int {
+    if n == 0 {
+        return 0
+    }
+    return 1 + await down(n - 1)
+}
+
+#main
+async fun main() {
+    let c = Counter { count: 0 }
+    var fs: [async () -> int] = []
+    for i in 0..3000 {
+        push(fs, async () => await work(c, i))
+    }
+    let rs = await task.all(fs)
+    var sum = 0
+    for r in rs {
+        sum = sum + r
+    }
+    print(sum)
+    print(await c.get())
+    print(await down(100000))
+}
+"""
 
 
 IR_SAMPLE = """\
