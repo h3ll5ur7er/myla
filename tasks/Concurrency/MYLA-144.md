@@ -45,7 +45,7 @@ From the first runs (programs in `tests/burn/test_concurrency_stress.py` to come
 | 5 | Waiting cycles | A cycle doesn't check; a child awaiting a sibling printed garbage natively | Supported everywhere ([[MYLA-148]], `t05_child_awaits_sibling`, `t05_siblings_share_a_result`) |
 | 6 | Reentrancy across an await | The last item sold twice (stock -1) | A warning (D95, [[MYLA-146]]); checking again after the `await`: one sale (`t06_recheck_after_the_await`) |
 | 7 | Cancellation and cleanup | Not expressible | Cooperative cancelling (D96, [[MYLA-149]]): cancelled at each of seven points, the worker gives back the resource, never twice (`t07_cancelled_holder_gives_back`) |
-| 8 | Failure while siblings run | The interpreters hung, native code left the sibling running | The sibling cancelled, the failure ends the program, everywhere (D94, [[MYLA-147]], two `t08_` programs) |
+| 8 | Failure while siblings run | The interpreters hung, native code left the sibling running | The sibling cancelled, the failure ends the program, everywhere (D94, [[MYLA-147]]); at once, wherever the parent waits, also in a `task.all` group (D97, [[MYLA-150]]; four `t08_` programs) |
 | 9 | A stale result | "ca" shown | The program's to decide: a request number (`t09_latest_request_wins`), or cancelling the old request (`t09_cancel_the_stale_request`) |
 | 10 | Memory visibility | 42 | The same (`t10_publication_through_an_actor`) |
 | 11 | Retryable transactions | Not applicable (no transactions) | Not applicable |

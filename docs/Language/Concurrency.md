@@ -39,7 +39,7 @@ async fun total() -> int {
 - `async let x = e` starts `e` as a child task, which runs in parallel with the rest of the function. Reading `x` awaits its result (`await x`), once. A call `e` makes needn't be awaited: the child task does that. `async let x: int = e` states the result's type.
 - Only an async function has child tasks. A lambda in it can't await them (`a lambda can't await the child task 'a' of its function`).
 - The scope that declared it waits for every child still running when it ends, even one never read: no task outlives its scope.
-- A failure (a panic, a runtime error or `exit`) in a task cancels the task's other children, and theirs (D94): each stops at its next suspension point where it gives up its worker (waiting for a child, the turn after an awaited call, waiting for a busy actor), running no more of its body. The failing task waits for them to stop, then its failure goes on. A child that loops without such an `await` isn't stopped.
+- A failure (a panic, a runtime error or `exit`) can't be caught, so a failure in any task ends the program at once (D97): every other task, the entry's too, stops at its next suspension point where it gives up its worker (waiting for a child, the turn after an awaited call, waiting for a busy actor), running no more of its body (D94). Once none runs, the failure is reported as if the entry had failed: a panic's message and place, `exit`'s code. It doesn't wait for the parent to `await` the failing child, so a parent waiting for another child, or a group of `task.all` waiting for its first function, doesn't wait for ever. If tasks fail at about the same time, the first one is reported. A task that loops without such an `await` isn't stopped.
 - The child gets copies of what `e` uses, as a lambda does (D15, D48).
 
 ## A number of children: `std.task`
@@ -90,7 +90,7 @@ async fun run(pool: Pool) -> str {
 - `task.cancel(a)` takes the name of an `async let` of this function (`task.cancel() takes the name of an 'async let'`); a lambda in it can't cancel it (`a lambda can't cancel the child task 'a' of its function`). It sets a flag and goes on: it doesn't wait, and the child isn't stopped.
 - `task.cancelled()` is true in a task that was asked to stop, or whose parent (or theirs) was: a request reaches the whole tree below the child, its children started later too. Outside a task that was asked, and in a program without tasks, it is false.
 - `await a` still gives what the child returned, and a scope still waits for its children: whatever the child does when asked, it runs to its end, so it can give back what it holds. Cancelling a child that has ended does nothing.
-- The flag is the program's: unlike a failure's cancellation (D94), it stops nothing at a suspension point.
+- The flag is the program's: unlike a failure (D97), it stops nothing at a suspension point.
 
 ## Actors
 
@@ -163,7 +163,7 @@ The concurrency stress tests ([[Development/Concurrency-stress-tests]], [[MYLA-1
 | An invariant over several objects | Holds when they live in one actor; across actors, no transaction keeps it (a limit) |
 | Deadlock over resources | Prevented: no locks, reentrant actors whose executors never block a worker (D92) |
 | Waiting cycles | Prevented: no channels, a task only awaits its own children and its earlier siblings |
-| A failure while siblings run | Its siblings are cancelled at their next suspension point, then the failure goes on (D94); a sibling looping without one isn't stopped |
+| A failure while siblings run | It ends the program at once: every other task stops at its next suspension point, then the failure is reported (D94, D97), wherever its parent waits; a task looping without one isn't stopped |
 | Cancellation and resource cleanup by the program | Cooperative: `task.cancel(a)` asks, the child checks `task.cancelled()` where it can stop and gives back what it holds, wherever it was asked (D96) |
 | A stale result | The program's to decide (a request number, or cancelling the old request, which checks before publishing), as everywhere |
 | Memory visibility | Prevented: values cross as copies, what an actor publishes is seen whole |

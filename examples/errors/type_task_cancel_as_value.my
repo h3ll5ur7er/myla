@@ -1,0 +1,14 @@
+//~ type error: task.cancel can only be called, with the name of an 'async let'
+//~ span: task.cancel
+// The compiler takes a call of task.cancel itself (D96): as a function value
+// it would do nothing.
+import std.task as task
+async fun fetch(n: int) -> int {
+    return n
+}
+async fun outer() -> int {
+    async let a = fetch(1)
+    let stop = task.cancel
+    return await a
+}
+fun main() {}

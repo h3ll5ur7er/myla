@@ -112,10 +112,9 @@ struct AFrame { scopes: [RtFrame], conts: [Cont], place: Option<Place>, pend: Ct
 
 // A task: its calls, innermost last; `state` 0 ready, 1 waiting, 2 done with
 // its result or failure (a runtime error, or an `exit` with `code`), which
-// reaches the parent at `await` or at the end of the scope that started it;
-// `awaited`: it was asked for; `waiters`: the tasks waiting for it.
-// `cancelled`: a failure in its parent cancelled it (D94), so it stops when
-// it next runs (after a suspension); `kids`: its child tasks, cancelled with
+// ends the program at once (D97, `failing`); `awaited`: it was asked for;
+// `waiters`: the tasks waiting for it. `cancelled`: a failure cancelled it
+// (D94, D97), so it stops when it next runs (after a suspension); `kids`: its child tasks, cancelled with
 // it; `requested`: `task.cancel` asked it, or a task above it, to stop (D96).
 struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: Option<RtError>, code: int32, awaited: bool, waiters: [int32], cancelled: bool, kids: [int32], requested: bool }
 
@@ -171,6 +170,11 @@ pub struct Interp {
     deferred_place: Option<Place>,
     parked: bool,
     yielding: bool,
+    // D97: a task has failed, so the program ends: every other task stops at
+    // its next suspension point, the first task with this failure
+    failing: bool,
+    fail_err: Option<RtError>,
+    fail_code: int32,
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
@@ -259,6 +263,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         bodies: [:], suspending: [:],
         defer: false, deferred: None, deferred_place: None,
         parked: false, yielding: false,
+        failing: false, fail_err: None, fail_code: 0,
     }
     return it
 }
@@ -832,6 +837,12 @@ impl Interp {
                         self.frames[ft].pend = Ctrl.CExit
                         self.frames[ft].perr = None
                         self.frames[ft].pcode = 0
+                        // the first task stops with the failure that ends the
+                        // program (D97)
+                        if t == 0 && self.failing {
+                            self.frames[ft].perr = self.fail_err
+                            self.frames[ft].pcode = self.fail_code
+                        }
                     },
                     _ => {},
                 }
@@ -1288,6 +1299,14 @@ impl Interp {
         self.tasks[t].failed = !ok
         self.tasks[t].err = err
         self.tasks[t].code = code
+        // a failure, not a cancelled task's stop, ends the program at once
+        // (D97): the first one is the program's, every task is cancelled
+        if !ok && t != 0 && !self.tasks[t].cancelled && !self.failing {
+            self.failing = true
+            self.fail_err = err
+            self.fail_code = code
+            self.cancel_task(0)
+        }
         for w in self.tasks[t].waiters {
             self.tasks[w].state = 0
             push(self.queue, w)

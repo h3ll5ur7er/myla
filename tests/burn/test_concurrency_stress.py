@@ -52,8 +52,12 @@ EXPECTED = {
     # (D94), where it used to wait forever for a looping sibling
     "t08_failure_cancels_a_looping_sibling": ("", 1),
     # ... and a failing child's own children, looping on an actor that the
-    # rest of the program goes on using
-    "t08_failing_child_cancels_its_children": ("main still runs\n", 1),
+    # rest of the program uses; the failure reaches the program at once, so
+    # the entry stops at its next call of the actor (D97: it printed "main
+    # still runs" before), as does a parent waiting for another child
+    "t08_failing_child_cancels_its_children": ("", 1),
+    "t08_failure_reaches_a_waiting_parent": ("", 1),
+    "t08_group_fails_fast": ("", 1),
     # 9. "latest request wins" is the program's to say: a request number
     "t09_latest_request_wins": ("ui shows cats\n", 0),
     # ... or by cancelling the old request, which checks before publishing

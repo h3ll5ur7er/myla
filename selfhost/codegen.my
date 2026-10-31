@@ -1948,6 +1948,9 @@ impl CodeGen {
             }
             push(out, "__exec_main:")
             push(out, "\t.skip 8")
+            // 1 once a task has failed: the program ends (D97)
+            push(out, "__exec_failing:")
+            push(out, "\t.skip 8")
         }
         push(out, "")
         if len(self.line_files) > 0 { for l in self.dbg_sections() { push(out, l) } }
@@ -2464,9 +2467,9 @@ impl CodeGen {
     // end of the chain of callers (word 8). `__exec_main` is the entry's.
     //
     // A task's first frame says in its `task` word (24) how the task is:
-    // 0 running, the frame waiting for it, 1 done, 2 failed by a panic (the
-    // message in word 0, the position record in word 16) or 3 by `exit`
-    // (the code in word 0); the frame is never resumed again then.
+    // 0 running, the frame waiting for it, or 1 done; the frame is never
+    // resumed again then. A failure doesn't end a task this way: it ends
+    // the program (D97, `__task_fail`).
     fun emit_executor(var self) {
         // Each worker has a queue of ready frames (D92, MYLA-140): a ring of
         // its own (EXEC_CAP frames, at `__wq_rings` + its index * 8 MiB) and a
@@ -2672,22 +2675,15 @@ impl CodeGen {
         self.raw("\tcall __exec_find")
         self.raw("\ttestq %rdi, %rdi")
         self.raw("\tjz .Lexec_idle")
-        // the frame this worker runs, published before its task's
-        // cancellation is looked at (xchg: a full barrier; `__task_fail`
-        // sets the flag, then looks at what the workers run)
+        // the frame this worker runs, published before the failure flag is
+        // looked at (xchg: a full barrier; `__task_fail` sets the flag, then
+        // looks at what the workers run)
         self.raw("\tmovq %rdi, %rax")
         self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
-        // a frame of a task under a failing one is dropped, not resumed, an
-        // actor handed to it passed on (D94)
-        self.raw("\tmovq 40(%rdi), %rax")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lexec_live")
-        self.raw(".Lexec_up:")
-        self.raw("\tmovq 56(%rax), %rax")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lexec_live")
-        self.raw("\ttestq $1, 48(%rax)")
-        self.raw("\tjz .Lexec_up")
+        // once a task has failed, every frame is dropped, not resumed, an
+        // actor handed to it passed on (D94, D97)
+        self.raw("\tcmpq $0, __exec_failing(%rip)")
+        self.raw("\tje .Lexec_live")
         self.raw("\txorl %eax, %eax")
         self.raw("\txchgq %rax, 64(%rdi)")
         self.raw("\ttestq %rax, %rax")
@@ -2783,56 +2779,27 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("")
         // __task_fail: a panic (%rdi 2, %rsi the message, %rdx the position)
-        // or an `exit` (%rdi 3, %rsi the code) in a task other than the
-        // entry's is held for its parent's `await` or scope end, as in the
-        // interpreters (D89): recorded in the task's first frame, the frame
-        // waiting for it queued, and the executor goes on. Returns (%rax 0)
-        // when the entry's task fails or no task runs: the program ends.
+        // or an `exit` (%rdi 3, %rsi the code) in a task ends the program
+        // (D97): the first failure claims it, every other worker drops its
+        // frames, and once none runs one this returns (%rax 0) for the caller
+        // to report the failure and end the program. A later failure, or one
+        // in a task stopping, is not reported: its worker goes back to the
+        // executor. With no task running it returns at once.
         self.raw("__task_fail:")
         self.raw(format("\tmovq {}, %rax", self.tv("__exec_cur")))
         self.raw("\ttestq %rax, %rax")
         self.raw("\tjz .Ltf_now")
-        // the failing task's children (and theirs) are cancelled: their
-        // frames are dropped, and it waits until no other worker runs one
-        // (D94)
+        self.raw("\tmovq $1, %rcx")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\tlock cmpxchgq %rcx, __exec_failing(%rip)")
+        self.raw("\tjne .Lexec_failed")
         self.raw("\tpushq %rdi")
         self.raw("\tpushq %rsi")
         self.raw("\tpushq %rdx")
-        self.raw("\tmovq 40(%rax), %rdi")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Ltf_cancelled")
-        self.raw("\tlock orq $1, 48(%rdi)")
-        self.raw("\tcall __wait_cancelled")
-        self.raw(".Ltf_cancelled:")
+        self.raw("\tcall __wait_stopped")
         self.raw("\tpopq %rdx")
         self.raw("\tpopq %rsi")
         self.raw("\tpopq %rdi")
-        self.raw(format("\tmovq {}, %rax", self.tv("__exec_cur")))
-        self.raw(".Ltf_root:")
-        self.raw("\tmovq 8(%rax), %rcx")
-        self.raw("\ttestq %rcx, %rcx")
-        self.raw("\tjz .Ltf_found")
-        self.raw("\tmovq %rcx, %rax")
-        self.raw("\tjmp .Ltf_root")
-        self.raw(".Ltf_found:")
-        self.raw("\tcmpq __exec_main(%rip), %rax")
-        self.raw("\tje .Ltf_now")
-        self.raw("\tmovq %rsi, (%rax)")
-        self.raw("\tmovq %rdx, 16(%rax)")
-        // an actor the task held goes to the next frame waiting for it
-        self.raw(format("\tmovq {}, %rcx", self.tv("__actor_held")))
-        self.raw("\ttestq %rcx, %rcx")
-        self.raw("\tjz .Ltf_unheld")
-        self.raw("\tpushq %rax")
-        self.raw("\tpushq %rdi")
-        self.raw("\tmovq %rcx, %rdi")
-        self.raw("\tcall __actor_leave")
-        self.raw("\tpopq %rdi")
-        self.raw("\tpopq %rax")
-        self.raw(".Ltf_unheld:")
-        self.raw("\txchgq %rdi, 24(%rax)")
-        self.raw("\tcall __wake_waiters")
-        self.raw("\tjmp .Lexec_failed")
         self.raw(".Ltf_now:")
         self.raw("\txorl %eax, %eax")
         self.raw("\tret")
@@ -2975,7 +2942,7 @@ impl CodeGen {
         // myla___wait(child, frame): while the child task runs, the frame
         // joins the frames waiting for it (its `task` word holds the first,
         // each linked to the next through word 32: a parent and siblings,
-        // MYLA-148); once it has ended (1, 2 or 3), the frame goes on at once
+        // MYLA-148); once it has ended (1), the frame goes on at once
         self.raw("myla___wait:")
         self.raw("\tmovq 8(%rsp), %rcx")
         self.raw("\tmovq 16(%rsp), %rdx")
@@ -3004,10 +2971,19 @@ impl CodeGen {
         // myla___actor_enter(record, frame): an actor's executor (D92),
         // `[lock][running][first waiting][last]`; free, the frame goes on
         // holding it; busy, the frame joins its queue (linked through its
-        // word 32) and the worker returns to the executor
+        // word 32) and the worker returns to the executor. Busy with no frame
+        // queued, on more than one worker, it first waits a little for the
+        // holder to leave (MYLA-150): an actor's methods are mostly short,
+        // and a frame queued is handed the actor and keeps it until a worker
+        // resumes it, so every caller after it queues too (a convoy). No one
+        // waits before it, so the order stays first come, first served.
         self.raw("myla___actor_enter:")
         self.raw("\tmovq 8(%rsp), %rcx")
         self.raw("\tmovq 16(%rsp), %rdx")
+        self.raw("\txorl %r8d, %r8d")
+        self.raw("\tcmpl $1, __exec_workers(%rip)")
+        self.raw("\tjbe .Lae_lock")
+        self.raw("\tmovl $1000, %r8d")
         self.raw(".Lae_lock:")
         self.raw("\tmovl $1, %eax")
         self.raw("\txchgq %rax, (%rcx)")
@@ -3022,6 +2998,19 @@ impl CodeGen {
         self.raw("\tmovq $0, (%rcx)")
         self.raw("\tjmp .Lresume_second")
         self.raw(".Lae_busy:")
+        self.raw("\tcmpq $0, 16(%rcx)")
+        self.raw("\tjne .Lae_queue")
+        self.raw("\ttestl %r8d, %r8d")
+        self.raw("\tjz .Lae_queue")
+        self.raw("\tmovq $0, (%rcx)")
+        self.raw(".Lae_spin:")
+        self.raw("\tpause")
+        self.raw("\tcmpq $0, 8(%rcx)")
+        self.raw("\tje .Lae_lock")
+        self.raw("\tdecl %r8d")
+        self.raw("\tjnz .Lae_spin")
+        self.raw("\tjmp .Lae_lock")
+        self.raw(".Lae_queue:")
         self.raw("\tmovq $0, 32(%rdx)")
         self.raw("\tmovq 24(%rcx), %rax")
         self.raw("\ttestq %rax, %rax")
@@ -3072,10 +3061,9 @@ impl CodeGen {
         self.raw(format("\tmovq %rdi, {}", self.tv("__actor_held")))
         self.raw("\tret")
         self.raw("")
-        // __wait_cancelled: %rdi = a failing task; until no other worker runs
-        // a frame of a task below it (each worker's current frame, its
-        // task's chain of parents)
-        self.raw("__wait_cancelled:")
+        // __wait_stopped: until no other worker runs a frame (each worker's
+        // current frame), once a task has failed (D97)
+        self.raw("__wait_stopped:")
         self.raw("\tpushq %rbx")
         self.raw(".Lwk_scan:")
         self.raw("\txorl %ecx, %ecx")
@@ -3085,17 +3073,9 @@ impl CodeGen {
         self.raw("\tjae .Lwk_done")
         self.raw(format("\tcmpq {}, %rcx", self.tv("__worker_id")))
         self.raw("\tje .Lwk_skip")
-        self.raw(format("\tmovq {}(%rbx), %rax", tls_offset("__exec_cur")))
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lwk_skip")
-        self.raw("\tmovq 40(%rax), %rax")
-        self.raw(".Lwk_up:")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lwk_skip")
-        self.raw("\tmovq 56(%rax), %rax")
-        self.raw("\tcmpq %rdi, %rax")
-        self.raw("\tjne .Lwk_up")
-        // that worker runs a frame below the failing task: again later
+        self.raw(format("\tcmpq $0, {}(%rbx)", tls_offset("__exec_cur")))
+        self.raw("\tje .Lwk_skip")
+        // that worker runs a frame still: again later
         self.raw("\tpause")
         self.raw("\tjmp .Lwk_scan")
         self.raw(".Lwk_skip:")
@@ -3163,23 +3143,6 @@ impl CodeGen {
         self.raw("\tpopq %rdi")
         self.raw("\tmovq $231, %rax")
         self.raw("\tsyscall")
-        self.raw("")
-        // __task_check: a waited-for task (%rdi, its first frame) has ended;
-        // a failure in it is raised here
-        self.raw("__task_check:")
-        self.raw("\tmovq 24(%rdi), %rax")
-        self.raw("\tcmpq $2, %rax")
-        self.raw("\tje .Ltc_panic")
-        self.raw("\tcmpq $3, %rax")
-        self.raw("\tje .Ltc_exit")
-        self.raw("\tret")
-        self.raw(".Ltc_panic:")
-        self.raw("\tmovq 16(%rdi), %rsi")
-        self.raw("\tmovq (%rdi), %rdi")
-        self.raw("\tjmp __panic")
-        self.raw(".Ltc_exit:")
-        self.raw("\tmovq (%rdi), %rdi")
-        self.raw("\tjmp __task_exit")
         self.raw("")
     }
 

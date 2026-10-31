@@ -370,6 +370,10 @@ class Interpreter:
         # that keeps lines written by tasks running at once whole
         self._tls = threading.local()
         self._out_lock = threading.Lock()
+        # D97: the first failure of a task, which ends the program: every
+        # other task stops at its next suspension point, the entry's raising it
+        self._failing: BaseException | None = None
+        self._failing_lock = threading.Lock()
 
     # -- program entry -------------------------------------------------------
 
@@ -492,15 +496,28 @@ class Interpreter:
                     and not isinstance(task.error, _Cancelled):
                 failed = task.error
         env.tasks = None
-        if failed is not None and (leaving is None or isinstance(leaving, _LEAVING)):
-            raise failed
+        if leaving is None or isinstance(leaving, _LEAVING):
+            # waiting for the children was a suspension point (D97)
+            self._suspension_point()
+            if failed is not None:
+                raise failed
 
     def _suspension_point(self) -> None:
         """Where a task may give up its worker (waiting for a child, an awaited
-        actor call): a cancelled one stops here (D94)."""
+        actor call): a cancelled one stops here (D94), and once a task has
+        failed every other one does, the entry's raising that failure (D97)."""
         task = getattr(self._tls, "task", None)
-        if task is not None and task.cancelled.is_set():
+        if task is not None and (task.cancelled.is_set() or self._failing is not None):
             raise _Cancelled()
+        if task is None and self._failing is not None:
+            raise self._failing
+
+    def _task_failed(self, exc: BaseException) -> None:
+        """A task's failure (not its stopping when cancelled) reaches the
+        program at once (D97): the first one is the program's."""
+        with self._failing_lock:
+            if self._failing is None:
+                self._failing = exc
 
     def _released(self, wait):
         """Run `wait`, which may block, without holding the thread's actor, so
@@ -574,8 +591,10 @@ class Interpreter:
             self._tls.task = task
             try:
                 task.value = _copy(self._eval(stmt.init, child))
-            except BaseException as exc:   # reaches the parent at `await` or the scope's end
+            except BaseException as exc:   # the program's failure, at once (D97)
                 task.error = exc
+                if not isinstance(exc, _Cancelled):
+                    self._task_failed(exc)
 
         task.thread = threading.Thread(target=work, daemon=True)
         task.thread.start()

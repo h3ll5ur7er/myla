@@ -1,5 +1,6 @@
 // 8. A failing child task cancels its children, which loop on an actor that
-// the rest of the program keeps using
+// the rest of the program keeps using: the failure ends the program at once,
+// the entry stopping at its next call of the actor (D97)
 actor Res {
     n: int,
 }

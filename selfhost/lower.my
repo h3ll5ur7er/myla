@@ -378,8 +378,8 @@ const FRAME_CALLER: int32 = 8
 const FRAME_TASK: int32 = 24
 const FRAME_RESULT: int32 = 72
 
-// A frame's task (its first frame), a task's flags (1: its children are
-// cancelled, D94) and its parent task.
+// A frame's task (its first frame), a task's flags (2: `task.cancel` asked
+// it to stop, D96) and its parent task.
 const FRAME_ROOT: int32 = 40
 const FRAME_PARENT: int32 = 56
 
@@ -1319,7 +1319,7 @@ impl Lower {
             let d = self.unsupported("an 'async let' not made a call of an async lambda")
             return
         }
-        // a task of its own, this function's task its parent (D94)
+        // a task of its own, this function's task its parent (D96: a request reaches its children)
         self.add(Inst.StoreAt(fr, FRAME_ROOT, fr))
         let me = self.temp(Type.TInt(64, false))
         self.add(Inst.Frame(me))
@@ -1387,8 +1387,6 @@ impl Lower {
         self.start(done)
         let out = self.temp(Type.TInt(64, false))
         self.add(Inst.Load(out, ts))
-        // a failure in the child is raised here (D89)
-        self.add(Inst.Rt(-1, "__task_check", [out]))
         return out
     }
 

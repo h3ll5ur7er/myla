@@ -2,7 +2,7 @@
 id: MYLA-61
 title: Actors and structured concurrency, Swift style
 type: feature
-status: in-progress
+status: done
 priority: medium
 labels: [concurrency, language, design]
 ---
@@ -108,5 +108,9 @@ D89 recorded with the Language pages; the Python interpreter (the semantics, wit
 ## Done when
 
 - [x] A design recorded as a decision on [[Project/Decisions]] (D89)
-- [ ] Prototyped in the Python toolchain's interpreter first (the semantics, [[MYLA-136]]), then the native backends ([[MYLA-137]], [[MYLA-138]])
-- [ ] Examples and parity tests, including the deadlock and send-safety cases
+- [x] Prototyped in the Python toolchain's interpreter first (the semantics, [[MYLA-136]]), then the native backends ([[MYLA-137]], [[MYLA-138]])
+- [x] Examples and parity tests, including the deadlock and send-safety cases
+
+## Outcome
+
+Done in [[MYLA-135]] to [[MYLA-149]] (D89 to D96): the language and both checkers, both interpreters, and the self-hosted backend, with stackless frames on a multi-threaded work-stealing executor and actor executors as in Swift (the Python backend refuses concurrency, D91). The concurrency stress tests ([[MYLA-144]], `tests/burn/test_concurrency_stress.py`) hold every implementation, on 1 to 16 workers, to the guarantees on [[Language/Concurrency]]: deadlocks over resources and data races are prevented by design, captures can't be changed (D93), reentrancy across an `await` gets a warning (D95), failures cancel their scope's children (D94), and programs cancel cooperatively (D96).

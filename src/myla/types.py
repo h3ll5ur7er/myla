@@ -3530,6 +3530,12 @@ class Checker:
             enum_name = _PRELUDE_VARIANTS.get(expr.ident)
             if enum_name is not None:
                 return self._infer_bare_variant(expr, enum_name, expr.ident, expected)
+            if expr.ident == "std$task$cancel":
+                # D96: the compiler takes its calls; as a value it would do nothing
+                raise TypeCheckError(
+                    "task.cancel can only be called, with the name of an 'async let'",
+                    at=expr,
+                )
             if expr.ident in self.functions and "." not in expr.ident:
                 return self._infer_fun_value(expr, expected)
             if expr.ident in self._redefined_builtins:

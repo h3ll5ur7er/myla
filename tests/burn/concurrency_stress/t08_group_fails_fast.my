@@ -1,0 +1,37 @@
+// 8. In a group (task.all), the last function fails while the first loops:
+// the failure ends the program at once (D97), where the group used to wait
+// for the first for ever
+import std.task as task
+
+actor Feed {
+    n: int,
+}
+
+impl Feed {
+    fun next(var self) -> int {
+        self.n = self.n + 1
+        return self.n
+    }
+}
+
+#main
+async fun main() {
+    let f = Feed { n: 0 }
+    var fs: [async () -> int] = []
+    push(fs, async () => {
+        while true {
+            let x = await f.next()
+        }
+        return 0
+    })
+    for i in 0..5 {
+        push(fs, async () => await f.next())
+    }
+    push(fs, async () => {
+        let x = await f.next()
+        panic("one of the group failed")
+        return x
+    })
+    let rs = await task.all(fs)
+    print(len(rs))
+}

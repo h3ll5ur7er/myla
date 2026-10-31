@@ -2434,6 +2434,8 @@ impl Checker {
             Some(en) => { return self.infer_bare_variant(e, en, ident, expected) },
             None => {},
         }
+        // D96: the compiler takes its calls; as a value it would do nothing
+        if ident == "std$task$cancel" { return Err(terr_at(e.line, e.col, e.sp, "task.cancel can only be called, with the name of an 'async let'")) }
         if self.func_idx(ident) >= 0 {
             // a non-method top-level function referenced as a value
             return self.infer_fun_value(e, ident)
