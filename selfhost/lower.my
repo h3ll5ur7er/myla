@@ -1441,6 +1441,12 @@ impl Lower {
     // function's owners dropped and the call made in place of the function
     // (`tail_call`).
     fun become_call(var self, cg: CodeGen, e: Expr) {
+        // an actor method's result is copied before it leaves (D92), which a
+        // call in its place would skip: a `return` of the call instead
+        if self.deep_res {
+            self.ret_value(cg, e)
+            return
+        }
         match e.kind {
             ExprKind.Call(callee, args) => {
                 self.tail = true
