@@ -53,8 +53,8 @@ Bigger directions, collected as tasks in the `Roadmap ideas` epic. None is desig
 | --- | --- | --- |
 | Swift-style actors and structured concurrency | [[MYLA-61]] | Safety from the checker (isolation, sendability, no locks), not runtime deadlocks |
 | A mid-level IR between checker and code generators | [[MYLA-67]] | Checkable reference counting, optimisations (slot reuse, register allocation, retain/drop elision, inlining), small backends |
-| Optional LLVM backend | [[MYLA-62]] | Less hand-written assembly; textual IR keeps the compiler dependency-free |
-| A WebAssembly target | [[MYLA-158]] | Myla and its toolchain in the browser; after LLVM |
+| Optional LLVM backend, and other platforms through it | [[MYLA-62]] | Planned: decisions ([[MYLA-160]]), user code through LLVM ([[MYLA-161]]), the runtime off assembly ([[MYLA-162]]), then aarch64 Linux, macOS, wasm and Windows ([[MYLA-163]] to [[MYLA-165]], [[MYLA-158]]), and a C FFI ([[MYLA-166]]) |
+| A WebAssembly target | [[MYLA-158]] | Myla and its toolchain in the browser, through LLVM |
 | A website: Angular webapp with docs, an online editor and a gamified tutorial | [[MYLA-159]] | Static, data in IndexedDB; needs the wasm toolchain |
 | Debugger | [[MYLA-66]] | First step: line tables ([[MYLA-71]]) |
 | Better error messages | [[MYLA-65]] | Files, spans, notes, several errors per run |
