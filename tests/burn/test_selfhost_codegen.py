@@ -81,6 +81,7 @@ PARITY_PROGRAMS = (
     "become_keeps_the_stack_flat",
     "become_passes_aggregates_by_value",
     "derived_eq_called_by_name",
+    "strings_and_keys_around_eight_bytes",
     "assign_to_a_field_of_a_shared_element_copies_it",
     "match_binding_survives_writes_to_the_scrutinee",
     "destructure_boxed_enum_and_list_leaves",
@@ -1136,6 +1137,26 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn("jmp myla_walk", self._function_asm(asm, "walk"))
         self.assertRegex(ir, r"\$\d+ p: Pos \(argument 1, 16 bytes by value\)\n")
         self.assertRegex(ir, r"\$\d+ s: State \(argument 0, 16 bytes by value\) owns\n")
+
+    def test_payload_free_enums_compare_tags(self) -> None:
+        # MYLA-133: `==` on an enum without payloads whose `eq` is derived is
+        # a compare of the tags, no call
+        source = (
+            "#derive(Eq)\nenum Light { Red, Green }\n"
+            "#derive(Eq)\nenum Shape { Dot, Box(int) }\n"
+            "fun red(l: Light) -> bool {\n    return l == Light.Red\n}\n"
+            "fun dot(s: Shape) -> bool {\n    return s == Shape.Dot\n}\n"
+            "fun main() {\n"
+            "    print(red(Light.Red))\n    print(red(Light.Green))\n"
+            "    print(dot(Shape.Dot))\n    print(dot(Shape.Box(1)))\n}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("true\nfalse\ntrue\nfalse\n", 0))
+        self.assertNotIn("call myla_Light.eq", self._function_asm(asm, "red"))
+        self.assertIn("call myla_Shape.eq", self._function_asm(asm, "dot"))
 
     def test_partial_application_thunks_jump(self) -> None:
         # MYLA-130: a partial application's thunk jumps to its function (or

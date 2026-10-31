@@ -188,6 +188,7 @@ pub struct CodeGen {
     // (borrowed), as the checker found them
     handed: [str: [int32]],
     passed_on: [str: [int32]],
+    tag_enums: [str: bool],         // MYLA-133: the enums whose `==` compares tags only
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {
@@ -263,7 +264,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on,
+        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
 }
 
@@ -1190,6 +1191,32 @@ impl CodeGen {
         return false
     }
 
+    // Whether `==` on `t` compares tags only: an enum without payloads whose
+    // `eq` is derived (MYLA-133; `find_tag_enums`).
+    fun tag_only_eq(self, t: Type) -> bool {
+        return match t {
+            Type.TEnum(n, a) => contains(self.tag_enums, n),
+            _ => false,
+        }
+    }
+
+    fun find_tag_enums(var self) {
+        for d in self.decls {
+            match d.kind {
+                DeclKind.EnumDecl(name, variants, attrs, tps, isp) => {
+                    if len(tps) == 0 && attrs_have_derive_eq(attrs) {
+                        var payloads = false
+                        for v in self.enum_info(name).variants {
+                            if len(v.payload) > 0 { payloads = true }
+                        }
+                        if !payloads { self.tag_enums[name] = true }
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+
     // Whether some parameter of `sig` is passed by value (most have none).
     fun has_byval(self, sig: FuncSig) -> bool {
         return len(self.handed) > 0 && contains(self.handed, sig.name)
@@ -1720,6 +1747,7 @@ impl CodeGen {
         // emitted calls it, makes it a value or applies it partially (MYLA-108;
         // `take_ir`); generic ones stamped out per instance (D13).
         self.find_kept_params()
+        self.find_tag_enums()
         let m = self.request_fn(en, [])
         while len(self.fn_worklist) > 0 || len(self.lam_jobs) > 0 {
             if len(self.fn_worklist) > 0 {
@@ -2954,24 +2982,36 @@ impl CodeGen {
         self.raw("\tcall __print_nl")
         self.raw("\tret")
         self.raw("")
+        // __str_eq: the same string, or equal lengths and bytes, compared
+        // eight at a time (MYLA-133); %rax = 1 or 0, clobbers %rcx %rdi %rsi
         self.raw("__str_eq:")
+        self.raw("\tcmpq %rdi, %rsi")
+        self.raw("\tje .Lse_eq")
         self.raw("\tmovq (%rdi), %rcx")
-        self.raw("\tmovq (%rsi), %rdx")
-        self.raw("\tcmpq %rdx, %rcx")
+        self.raw("\tcmpq (%rsi), %rcx")
         self.raw("\tjne .Lse_ne")
         self.raw("\tleaq 8(%rdi), %rdi")
         self.raw("\tleaq 8(%rsi), %rsi")
-        self.raw(".Lse_loop:")
+        self.raw(".Lse_words:")
+        self.raw("\tcmpq $8, %rcx")
+        self.raw("\tjb .Lse_bytes")
+        self.raw("\tmovq (%rdi), %rax")
+        self.raw("\tcmpq (%rsi), %rax")
+        self.raw("\tjne .Lse_ne")
+        self.raw("\taddq $8, %rdi")
+        self.raw("\taddq $8, %rsi")
+        self.raw("\tsubq $8, %rcx")
+        self.raw("\tjmp .Lse_words")
+        self.raw(".Lse_bytes:")
         self.raw("\ttestq %rcx, %rcx")
         self.raw("\tjz .Lse_eq")
         self.raw("\tmovb (%rdi), %al")
-        self.raw("\tmovb (%rsi), %dl")
-        self.raw("\tcmpb %dl, %al")
+        self.raw("\tcmpb (%rsi), %al")
         self.raw("\tjne .Lse_ne")
         self.raw("\tincq %rdi")
         self.raw("\tincq %rsi")
         self.raw("\tdecq %rcx")
-        self.raw("\tjmp .Lse_loop")
+        self.raw("\tjmp .Lse_bytes")
         self.raw(".Lse_eq:")
         self.raw("\tmovq $1, %rax")
         self.raw("\tret")
@@ -4698,39 +4738,50 @@ impl CodeGen {
 
     // Map cell: [count:8][cap:8][slot0..]; slot = [state:8][key:8][value…] where
     // state 0=empty, 1=occupied, 2=tombstone. Open addressing, linear probing,
-    // FNV-1a hashing. cap is a power of two. Copy-on-write clones are per type
+    // multiplicative hashing (`__map_hash`). cap is a power of two. Copy-on-write clones are per type
     // (`__clone_map_*`, emit_map_clone_helper) and retain the values they share.
     fun emit_map_runtime(var self) {
-        // __map_hash: rsi=key (value or str cell), rcx=is_str -> rax=hash.
+        // __map_hash: rsi=key (value or str cell), rcx=is_str -> rax=hash,
+        // clobbers %rcx %r8 %r9 %r10. A value is multiplied by 2^64/phi; a
+        // string's length and its bytes, eight at a time, are mixed in with a
+        // multiply and a rotation; the high half is folded into the low one,
+        // which picks the slot (MYLA-133; it was FNV-1a, byte by byte).
         self.raw("__map_hash:")
-        self.raw("\tmovabsq $-3750763034362895579, %rax")
-        self.raw("\tmovabsq $1099511628211, %r8")
+        self.raw("\tmovabsq $-7046029254386353131, %r8")
         self.raw("\ttestq %rcx, %rcx")
         self.raw("\tjnz .Lhash_str")
-        self.raw("\tmovq %rsi, %r9")
-        self.raw("\tmovq $8, %rcx")
-        self.raw(".Lhash_int_loop:")
-        self.raw("\ttestq %rcx, %rcx")
-        self.raw("\tjz .Lhash_done")
-        self.raw("\tmovzbq %r9b, %r10")
-        self.raw("\txorq %r10, %rax")
+        self.raw("\tmovq %rsi, %rax")
         self.raw("\timulq %r8, %rax")
-        self.raw("\tshrq $8, %r9")
-        self.raw("\tdecq %rcx")
-        self.raw("\tjmp .Lhash_int_loop")
+        self.raw("\tjmp .Lhash_done")
         self.raw(".Lhash_str:")
         self.raw("\tmovq (%rsi), %rcx")
         self.raw("\tleaq 8(%rsi), %r9")
-        self.raw(".Lhash_str_loop:")
+        self.raw("\tmovq %rcx, %rax")
+        self.raw("\timulq %r8, %rax")
+        self.raw(".Lhash_words:")
+        self.raw("\tcmpq $8, %rcx")
+        self.raw("\tjb .Lhash_bytes")
+        self.raw("\txorq (%r9), %rax")
+        self.raw("\timulq %r8, %rax")
+        self.raw("\trolq $29, %rax")
+        self.raw("\taddq $8, %r9")
+        self.raw("\tsubq $8, %rcx")
+        self.raw("\tjmp .Lhash_words")
+        self.raw(".Lhash_bytes:")
         self.raw("\ttestq %rcx, %rcx")
-        self.raw("\tjz .Lhash_done")
+        self.raw("\tjz .Lhash_mixed")
         self.raw("\tmovzbq (%r9), %r10")
         self.raw("\txorq %r10, %rax")
         self.raw("\timulq %r8, %rax")
         self.raw("\tincq %r9")
         self.raw("\tdecq %rcx")
-        self.raw("\tjmp .Lhash_str_loop")
+        self.raw("\tjmp .Lhash_bytes")
+        self.raw(".Lhash_mixed:")
+        self.raw("\timulq %r8, %rax")
         self.raw(".Lhash_done:")
+        self.raw("\tmovq %rax, %r10")
+        self.raw("\tshrq $32, %r10")
+        self.raw("\txorq %r10, %rax")
         self.raw("\tret")
         self.raw("")
         // __key_eq: rdi=slot key, rsi=key, rcx=is_str -> rax=1/0.

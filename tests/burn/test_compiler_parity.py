@@ -2221,6 +2221,48 @@ PROGRAMS = {
         "    print(near(P { x: 1, s: \"k\" }, 2))\n"
         "}\n"
     ),
+    "strings_and_keys_around_eight_bytes": (
+        # MYLA-133: string equality and map keys compared and hashed eight
+        # bytes at a time: lengths around the word size, a difference at each
+        # position, value keys of every size
+        "#derive(Eq)\nenum Light { Red, Green, Blue }\n"
+        "fun word(n: int, c: str) -> str {\n"
+        "    var s = \"\"\n"
+        "    for i in 0..n { s = s + c }\n"
+        "    return s\n}\n"
+        "#main\nfun main() {\n"
+        "    var equal = 0\n"
+        "    var differ = 0\n"
+        "    for n in 0..18 {\n"
+        "        if word(n, \"a\") == word(n, \"a\") { equal = equal + 1 }\n"
+        "        for k in 0..n {\n"
+        "            let t = word(k, \"a\") + \"b\" + word(n - k - 1, \"a\")\n"
+        "            if t != word(n, \"a\") { differ = differ + 1 }\n"
+        "        }\n"
+        "        if word(n, \"a\") == word(n + 1, \"a\") { equal = equal + 100 }\n"
+        "    }\n"
+        "    print(equal)\n"
+        "    print(differ)\n"
+        "    var m: [str: int] = [:]\n"
+        "    for n in 0..40 { m[word(n, \"x\")] = n }\n"
+        "    var total = 0\n"
+        "    for n in 0..40 { total = total + m[word(n, \"x\")] }\n"
+        "    print(len(m))\n"
+        "    print(total)\n"
+        "    var ids: [int64: int] = [:]\n"
+        "    var big: int64 = 1\n"
+        "    for i in 0..60 {\n"
+        "        ids[big] = i\n"
+        "        ids[0 - big] = i\n"
+        "        big = big * 2\n"
+        "    }\n"
+        "    print(len(ids))\n"
+        "    print(ids[1i64 << 40] + ids[0 - (1i64 << 59)])\n"
+        "    let l = Light.Green\n"
+        "    print(l == Light.Green)\n"
+        "    print(l != Light.Blue)\n"
+        "    print(Light.Red == Light.Blue)\n}\n"
+    ),
     "method_arguments_survive_the_receivers_writes": (
         # MYLA-123: an argument read from the receiver of a `var self` method
         # is a copy taken before the call, which the method's writes to its

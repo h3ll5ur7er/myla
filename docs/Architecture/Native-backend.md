@@ -38,7 +38,7 @@ Internal and stack-based (never called from C):
 | boxed (recursive) enum, as a member | An 8-byte pointer to a heap cell holding the inline enum value |
 | function value | 16 bytes: `(code_ptr, env_ptr)`; `env_ptr` is 0 when nothing is captured |
 | list `[T]` | Pointer to a heap cell `[len:8][cap:8][elem…]`, stride = the element's stored size |
-| map `[K: V]` | Pointer to `[len:8][cap:8][slot…]`, slot = `[state:8][key:8][value]`, state 0 empty / 1 occupied; open addressing with linear probing, FNV-1a hash of the key bytes (string contents for `str`), capacity a power of two kept under 0.75 load. A map holds a reference to each `str` key: `__put_map` retains a key it inserts, rehashing (`grow`, `remove`) moves keys, and `drop`, `clone` and `keys` treat keys like values |
+| map `[K: V]` | Pointer to `[len:8][cap:8][slot…]`, slot = `[state:8][key:8][value]`, state 0 empty / 1 occupied; open addressing with linear probing, FNV-1a hash of the key bytes (string contents for `str`; the self-hosted runtime multiplies instead, a string eight bytes at a time, [[MYLA-133]]), capacity a power of two kept under 0.75 load. A map holds a reference to each `str` key: `__put_map` retains a key it inserts, rehashing (`grow`, `remove`) moves keys, and `drop`, `clone` and `keys` treat keys like values |
 | `StringBuilder` | Pointer to `[len:8][cap:8][bytes…]` (packed bytes) |
 
 ## Heap and reference counting

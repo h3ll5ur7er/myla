@@ -1246,6 +1246,16 @@ impl Lower {
     // `a == b`, `a != b` and the orderings on a user type: its `eq` or `cmp`
     // method, called with both operands' addresses.
     fun overloaded_scalar(var self, cg: CodeGen, op: str, l: Expr, r: Expr, lt: Type) -> int32 {
+        // the derived `eq` of an enum without payloads: equal tags (MYLA-133)
+        if (op == "==" || op == "!=") && cg.tag_only_eq(lt) {
+            let ta = self.temp(Type.TInt(64, true))
+            self.add(Inst.LoadAt(ta, self.addr(cg, l), 0))
+            let tb = self.temp(Type.TInt(64, true))
+            self.add(Inst.LoadAt(tb, self.addr(cg, r), 0))
+            let eq = self.temp(Type.TBool)
+            self.add(Inst.Cmp(eq, op, Type.TInt(64, true), ta, tb))
+            return eq
+        }
         let key = cg.type_key(lt)
         var method = ""
         if op == "==" || op == "!=" { method = "eq" } else if is_cmp(op) { method = "cmp" } else { return self.unsupported("an arithmetic operator on a user type used as a scalar") }
