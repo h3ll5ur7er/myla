@@ -888,14 +888,23 @@ class SelfHostedCodegenParity(unittest.TestCase):
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), ("285\n610\n125\n", 0))
         saved = r"%(rbx|r12|r13|r14|r15)"
+        scratch = r"%(r8|r9|r10|r11)"
         # the frame is touched only to save and restore those registers and
-        # to read the parameters into them
+        # to read the parameters into them; a value no call or runtime helper
+        # comes between the uses of lives in %r8-%r11, which need no save
+        # (MYLA-134)
         for name in ("sum_squares", "Acc.run"):
             body = self._function_asm(asm, name)
             frame = [l.strip() for l in body.split("\n") if "(%rbp)" in l]
             for line in frame:
-                self.assertRegex(line, rf"^movq ({saved}, -\d+\(%rbp\)|-?\d+\(%rbp\), {saved})$", body)
+                self.assertRegex(line, rf"^movq ({saved}, -\d+\(%rbp\)|-?\d+\(%rbp\), ({saved}|{scratch}))$", body)
             self.assertTrue(frame, body)
+        squares = self._function_asm(asm, "sum_squares")
+        self.assertRegex(squares, scratch)
+        self.assertNotRegex(squares, rf"movq {saved}, -\d+\(%rbp\)")
+        # the loop of `Acc.run` calls `fib`: what lives across it stays in
+        # the callee-saved registers
+        self.assertRegex(self._function_asm(asm, "Acc.run"), rf"movq {saved}, -\d+\(%rbp\)")
         self.assertEqual(self._unsaved_callee_saved(asm), [])
 
     def test_division_by_a_constant_tests_nothing(self) -> None:

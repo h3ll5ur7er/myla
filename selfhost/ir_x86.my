@@ -1026,6 +1026,9 @@ impl CodeGen {
             push(bstart, -1)
             push(bend, -1)
         }
+        // per position, how many before it call something or use %r8-%r11
+        // (`clobbers`), which values in those registers can't live across
+        var cpre: [int32] = [0]
         var pos = 0
         for b in f.order {
             if !reach[b] { continue }
@@ -1039,6 +1042,9 @@ impl CodeGen {
             var ii = tc.at[b]
             for inst in f.blocks[b].insts {
                 push(tat, len(tv))
+                var c = cpre[len(cpre) - 1]
+                if clobbers(inst) { c = c + 1 }
+                push(cpre, c)
                 // a variable read where it is used is read there (`temp_src`)
                 var k = tc.rat[ii]
                 while k < tc.rat[ii + 1] {
@@ -1064,6 +1070,7 @@ impl CodeGen {
                 ii = ii + 1
             }
             push(tat, len(tv))
+            push(cpre, cpre[len(cpre) - 1])
             for u in term_uses(f.blocks[b].term) {
                 if cand[u] { push(tv, u) }
                 if src_slot[u] >= 0 && cand[nt + src_slot[u]] { push(tv, nt + src_slot[u]) }
@@ -1115,30 +1122,37 @@ impl CodeGen {
             }
             i = i + 1
         }
-        let names = ["rbx", "r12", "r13", "r14", "r15"]
-        var owner = [-1, -1, -1, -1, -1]
+        // the callee-saved registers, then %r8-%r11 for a value no position
+        // of its interval clobbers (MYLA-134), which cost no save
+        let names = ["rbx", "r12", "r13", "r14", "r15", "r8", "r9", "r10", "r11"]
+        let nr = len(names)
+        var owner: [int32] = []
+        while len(owner) < nr { push(owner, -1) }
         var p = 0
         while p < pos {
             var v = head[p]
             while v >= 0 {
                 var r = 0
-                while r < 5 {
+                while r < nr {
                     // read for the last time where v is written: an
                     // instruction reads its operands before it writes
                     if owner[r] >= 0 && last[owner[r]] <= p { owner[r] = -1 }
                     r = r + 1
                 }
+                var top = 5
+                if cpre[last[v] + 1] - cpre[first[v]] == 0 { top = nr }
+                // a free register, a caller-saved one first
                 var pick = -1
-                r = 0
-                while r < 5 && pick < 0 {
+                r = top - 1
+                while r >= 0 && pick < 0 {
                     if owner[r] < 0 { pick = r }
-                    r = r + 1
+                    r = r - 1
                 }
                 if pick < 0 {
                     // the lightest holder gives way to a heavier value
                     var low = 0
                     r = 1
-                    while r < 5 {
+                    while r < top {
                         if weight[owner[r]] < weight[owner[low]] { low = r }
                         r = r + 1
                     }
@@ -1156,8 +1170,10 @@ impl CodeGen {
             p = p + 1
         }
 
-        // a register is worth its save and restore only with enough use
-        var used: [int64] = [0, 0, 0, 0, 0]
+        // a callee-saved register is worth its save and restore only with
+        // enough use
+        var used: [int64] = []
+        while len(used) < nr { push(used, 0) }
         i = 0
         while i < nv {
             if reg[i] >= 0 { used[reg[i]] = used[reg[i]] + weight[i] }
@@ -1165,7 +1181,7 @@ impl CodeGen {
         }
         i = 0
         while i < nv {
-            if reg[i] >= 0 && used[reg[i]] >= REG_MIN_USE {
+            if reg[i] >= 0 && (reg[i] >= 5 || used[reg[i]] >= REG_MIN_USE) {
                 if i < nt { self.temp_reg[i] = names[reg[i]] } else { self.slot_reg[i - nt] = names[reg[i]] }
             }
             i = i + 1
@@ -1584,6 +1600,47 @@ fun filled_from(insts: [Inst], at: int32, s: int32) -> [int32] {
         k = k + 1
     }
     return out
+}
+
+// Whether the code of `inst` calls something (a function, a runtime helper,
+// a retain or drop walk) or uses %r8-%r11 itself: a value in one of those
+// registers can't live across it (MYLA-134). A trap never returns.
+fun clobbers(inst: Inst) -> bool {
+    return match inst {
+        Inst.Const(d, t, v) => false,
+        Inst.Str(d, text) => false,
+        Inst.Load(d, s) => false,
+        Inst.Store(s, v) => false,
+        Inst.Addr(d, s) => false,
+        Inst.Offset(d, p, off) => false,
+        Inst.LoadAt(d, p, off) => false,
+        Inst.StoreAt(p, off, v) => false,
+        Inst.Copy(d, src, size) => false,
+        Inst.Bin(d, op, lt, rt, a, b, pos) => float_rem(op, lt),
+        Inst.Cmp(d, op, t, a, b) => false,
+        Inst.Un(d, op, t, a) => false,
+        Inst.Cast(d, from_t, to_t, a) => false,
+        Inst.Init(s) => false,
+        Inst.Elem(d, c, i, stride, is_str, pos) => false,
+        Inst.Load8(d, p) => false,
+        Inst.Check(v, kind, pos) => false,
+        Inst.Global(d, sym, width) => false,
+        Inst.Moved(s) => false,
+        Inst.Label(d, sym) => false,
+        Inst.Loc(p) => false,
+        Inst.Bind(name, s) => false,
+        Inst.Scope(open) => false,
+        _ => true,
+    }
+}
+
+// Whether a binary operation is a float `%`, which calls `__fmod`.
+fun float_rem(op: str, t: Type) -> bool {
+    if op != "%" { return false }
+    return match t {
+        Type.TFloat(w) => true,
+        _ => false,
+    }
 }
 
 #test([1, 2], 2)[true]
