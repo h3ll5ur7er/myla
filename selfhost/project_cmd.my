@@ -14,7 +14,7 @@ from std.io import write, eprintln
 from std.fs import exists, is_dir, list_dir, make_dir_all, write_to_file, current_dir, remove_dir_all
 from .loader import LoadOptions
 from .driver import cmd_build, cmd_interp, own_tests, load_and_check
-from .project import find_manifest, loader_packages, relative_path, name_error, Project
+from .project import find_manifest, loader_packages, relative_path, parent_dir, name_error, Project
 from .fetch import checked_out_project, fetch
 
 // The project found from the working directory `cwd`.
@@ -190,23 +190,26 @@ pub fun project_check(base: LoadOptions) -> int32 {
 }
 
 // `myla clean [--deps]`: remove `build/` (and `.myla/`, the fetched
-// dependencies).
+// dependencies). Only the manifest is needed: the dependencies aren't
+// resolved, so a lock file that is missing or stale doesn't stop cleaning.
 pub fun project_clean(deps: bool) -> int32 {
-    let h = match locate() {
-        Ok(h) => h
+    let found = match find_here() {
+        Ok(pair) => pair
         Err(msg) => {
             eprintln(msg)
             return 1
         }
     }
-    var dirs = [h.project.root.dir + "/build"]
-    if deps { push(dirs, h.project.root.dir + "/.myla") }
+    let (cwd, manifest) = found
+    let root = parent_dir(manifest)
+    var dirs = [root + "/build"]
+    if deps { push(dirs, root + "/.myla") }
     for d in dirs {
         if exists(d) {
             match remove_dir_all(d) {
                 Ok(n) => {},
                 Err(e) => {
-                    eprintln("myla: cannot remove " + shown(h, d))
+                    eprintln("myla: cannot remove " + relative_path(cwd, d))
                     return 1
                 },
             }
