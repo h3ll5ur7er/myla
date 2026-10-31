@@ -11,8 +11,8 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, ret_popping
-from .ir import IrFunc, Inst, Term, Touches, touches, use_counts, def_counts, inst_uses, term_uses, successors
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, ret_popping, is_aggregate, is_actor_t
+from .ir import IrFunc, Inst, Term, Touches, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 
 impl CodeGen {
     // Emit `f`, the IR of the function `fd`, as `myla_<mangled>`.
@@ -33,15 +33,30 @@ impl CodeGen {
         // cell or get a register depends on what is recomputed, which
         // depends on the slots' offsets and registers: laid out twice.
         self.clear_regs(f)
+        // an async function's frame function: its slots in the heap frame
+        // %r15 holds (D90)
+        self.in_frame = f.frame
+        self.resume_blocks = []
+        if f.frame {
+            // the points reachable code resumes at
+            var bi = 0
+            while bi < len(f.blocks) {
+                if reach[bi] {
+                    match f.blocks[bi].term { Term.Suspend(rb) => { if !contains_int(self.resume_blocks, rb) { push(self.resume_blocks, rb) } }, _ => {} }
+                }
+                bi = bi + 1
+            }
+        }
         let defs = def_counts(f, tc)
-        self.temp_remat = self.remat_texts(f, layout_slots(f, 0), defs)
+        self.temp_remat = self.remat_texts(f, slots_at(f, 0), defs)
         self.alloc_regs(f, reach, tc)
+        if f.frame { push(self.saved_regs, "r15") }
         let cells = self.alloc_temps(f, tc)
-        let slot_off = layout_slots(f, 8 * cells)
+        let slot_off = slots_at(f, 8 * cells)
         self.temp_remat = self.remat_texts(f, slot_off, defs)
         var cursor = 8 * cells
         for s in f.slots {
-            if s.word < 0 { cursor = cursor + (s.size + 7) / 8 * 8 }
+            if s.word < 0 && !f.frame { cursor = cursor + (s.size + 7) / 8 * 8 }
         }
         let saves = cursor
         cursor = cursor + 8 * len(self.saved_regs)
@@ -53,6 +68,8 @@ impl CodeGen {
             // a parameter passed by value takes as many words as it has (D88)
             if s.word >= 0 && s.word + s.size / 8 > words { words = s.word + s.size / 8 }
         }
+        // a frame function's one argument is its frame
+        if f.frame { words = 1 }
         var in_frame: [bool] = []
         self.save_base = saves
         self.arg_words = words
@@ -82,6 +99,19 @@ impl CodeGen {
             if f.slots[si].word >= 0 && self.slot_reg[si] != "" { self.emit(format("movq {}(%rbp), %{}", slot_off[si], self.slot_reg[si])) }
             si = si + 1
         }
+        if f.frame {
+            // the frame, and the point it resumes at (state 0: the start)
+            self.emit("movq 16(%rbp), %r15")
+            if len(self.resume_blocks) > 0 {
+                self.emit("movq 16(%r15), %rax")
+                var ri = 0
+                while ri < len(self.resume_blocks) {
+                    self.emit(format("cmpq ${}, %rax", ri + 1))
+                    self.emit(format("je {}", labels[self.resume_blocks[ri]]))
+                    ri = ri + 1
+                }
+            }
+        }
         self.dbg_push_scope()
 
         // a block nothing reaches (after a `return`, MYLA-120) has no code; its
@@ -105,10 +135,12 @@ impl CodeGen {
             let fused = self.fused_compare(insts, f.blocks[b].term)
             var tail = -1
             let becomes = match f.blocks[b].term { Term.Become => true, _ => false }
+            // `suspend` after a call: the call replaces the function (D90)
+            let suspend_call = match f.blocks[b].term { Term.Suspend(sb) => ends_in_call(insts), _ => false }
             // `become`'s call always replaces the function (D87), under -g too
-            if becomes { tail = len(insts) - 1 }
+            if becomes || suspend_call { tail = len(insts) - 1 }
             else {
-                if !self.debug { tail = tail_call_at(insts, f.blocks[b].term) }
+                if !self.debug && !f.frame { tail = tail_call_at(insts, f.blocks[b].term) }
                 if tail >= 0 && !drops_after_free(f, insts, tail) { tail = -1 }
                 if tail >= 0 {
                     if len(in_frame) == 0 { in_frame = frame_addresses(f) }
@@ -142,6 +174,7 @@ impl CodeGen {
                     }
                     j = j + 1
                 }
+                match f.blocks[b].term { Term.Suspend(sb) => { self.emit_state(sb) }, _ => {} }
                 self.emit_tail_call(insts[tail], temp_base)
             }
             else if fused >= 0 { self.emit_compare_branch(insts[fused], f.blocks[b].term, labels, next, temp_base) }
@@ -158,6 +191,77 @@ impl CodeGen {
         self.dbg_pop_scope()
         self.dbg_end_function()
         self.emit("")
+        if f.frame { self.emit_frame_new(f, mangled, slot_off) }
+        self.in_frame = false
+    }
+
+    // -- async functions' frames (D90) -------------------------------------
+
+    // `suspend L`: the state that resumes at L, into the frame.
+    fun emit_state(var self, b: int32) {
+        var k = 0
+        while k < len(self.resume_blocks) && self.resume_blocks[k] != b { k = k + 1 }
+        self.emit(format("movq ${}, 16(%r15)", k + 1))
+    }
+
+    // `suspend L` with no call before it: back to the executor.
+    fun emit_suspend(var self, b: int32, labels: [str]) {
+        self.emit_state(b)
+        self.emit(format("jmp {}", self.epilogue))
+    }
+
+    // `myla_<f>__new(args…)`: a new heap frame for the frame function `f`
+    // (`[resume fn][caller][state][task]`, then the slots, zeroed), each
+    // argument copied into its parameter's slot with references of its own
+    // (an aggregate from the address passed); the frame in %rax.
+    fun emit_frame_new(var self, f: IrFunc, mangled: str, slot_off: [int32]) {
+        let size = frame_size(f)
+        var words = 0
+        for s in f.slots { if s.word >= 0 && s.word + 1 > words { words = s.word + 1 } }
+        self.emit(format("myla_{}__new:", mangled))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("subq $8, %rsp")
+        self.emit(format("movq ${}, %rdi", size))
+        self.emit("call __alloc")
+        self.emit("movq %rax, %rbx")
+        self.emit("movq %rax, %rdi")
+        self.emit(format("movq ${}, %rcx", size / 8))
+        self.emit("xorl %eax, %eax")
+        self.emit("rep stosq")
+        self.emit(format("leaq myla_{}(%rip), %rax", mangled))
+        self.emit("movq %rax, 0(%rbx)")
+        var i = 0
+        while i < len(f.slots) {
+            let s = f.slots[i]
+            if s.word >= 0 {
+                if is_aggregate(s.ty) {
+                    self.emit(format("movq {}(%rbp), %rsi", 16 + 8 * s.word))
+                    var w = 0
+                    while w < s.size {
+                        self.emit(format("movq {}(%rsi), %rax", w))
+                        self.emit(format("movq %rax, {}(%rbx)", slot_off[i] + w))
+                        w = w + 8
+                    }
+                } else {
+                    self.emit(format("movq {}(%rbp), %rax", 16 + 8 * s.word))
+                    self.emit(format("movq %rax, {}(%rbx)", slot_off[i]))
+                }
+                if self.owns_heap(s.ty) { self.retain("rbx", slot_off[i], s.ty) }
+                // a lambda's environment, held until its captures are copied
+                if s.name == "__env" {
+                    self.emit(format("movq {}(%rbx), %rdi", slot_off[i]))
+                    self.emit("call __func_retain")
+                }
+            }
+            i = i + 1
+        }
+        self.emit("movq %rbx, %rax")
+        self.emit("movq -8(%rbp), %rbx")
+        self.emit("leave")
+        self.emit(ret_popping(words))
+        self.emit("")
     }
 
     fun emit_inst(var self, f: IrFunc, inst: Inst, slot_off: [int32], temp_base: int32) {
@@ -170,12 +274,14 @@ impl CodeGen {
                 // read where it is used instead (`remat_texts`)
                 if self.temp_remat[d] == "" {
                     if self.slot_reg[s] != "" { self.emit(format("movq %{}, %rax", self.slot_reg[s])) }
+                    else if self.in_frame { self.emit(format("movq {}(%r15), %rax", slot_off[s])) }
                     else { self.emit(format("movq {}(%rbp), %rax", slot_off[s])) }
                     self.store_temp(d, temp_base)
                 }
             },
             Inst.Store(s, v) => {
                 if self.slot_reg[s] != "" { self.load_temp(v, self.slot_reg[s], temp_base) }
+                else if self.in_frame { self.emit(format("movq {}, {}(%r15)", self.value_operand(v, temp_base), slot_off[s])) }
                 else { self.emit(format("movq {}, {}(%rbp)", self.value_operand(v, temp_base), slot_off[s])) }
             },
             Inst.Addr(d, s) => { self.def_into_temp(inst, d, slot_off, temp_base) },
@@ -192,7 +298,8 @@ impl CodeGen {
                 // through a slot's address: straight from the frame (MYLA-120)
                 // or through a register (MYLA-121)
                 let base = self.reg_of(p)
-                if self.temp_frame[p] != 0 { self.emit(format("movq {}(%rbp), %rax", self.temp_frame[p] + off)) }
+                if self.temp_frame[p] != 0 && self.in_frame { self.emit(format("movq {}(%r15), %rax", self.temp_frame[p] + off)) }
+                else if self.temp_frame[p] != 0 { self.emit(format("movq {}(%rbp), %rax", self.temp_frame[p] + off)) }
                 else if base != "" { self.emit(format("movq {}({}), %rax", off, base)) }
                 else {
                     self.load_temp(p, "rax", temp_base)
@@ -202,7 +309,8 @@ impl CodeGen {
             },
             Inst.StoreAt(p, off, v) => {
                 let base = self.reg_of(p)
-                if self.temp_frame[p] != 0 { self.emit(format("movq {}, {}(%rbp)", self.value_operand(v, temp_base), self.temp_frame[p] + off)) }
+                if self.temp_frame[p] != 0 && self.in_frame { self.emit(format("movq {}, {}(%r15)", self.value_operand(v, temp_base), self.temp_frame[p] + off)) }
+                else if self.temp_frame[p] != 0 { self.emit(format("movq {}, {}(%rbp)", self.value_operand(v, temp_base), self.temp_frame[p] + off)) }
                 else if base != "" { self.emit(format("movq {}, {}({})", self.value_operand(v, temp_base), off, base)) }
                 else {
                     self.load_temp(p, "rcx", temp_base)
@@ -333,18 +441,27 @@ impl CodeGen {
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
             Inst.RetainVal(t, v) => {
+                // an actor handle may be shared between threads (D92)
+                var inc = "incq"
+                if self.frames && is_actor_t(t) { inc = "lock incq" }
                 let at = self.reg_of(v)
-                if at != "" { self.emit(format("incq -8({})", at)) }
+                if at != "" { self.emit(format("{} -8({})", inc, at)) }
                 else {
                     self.load_temp(v, "rax", temp_base)
-                    self.emit("incq -8(%rax)")
+                    self.emit(format("{} -8(%rax)", inc))
                 }
             },
             Inst.Retain(t, p) => {
                 self.load_temp(p, "r8", temp_base)
                 self.retain("r8", 0, t)
             },
-            Inst.DropSlot(t, s) => { self.drop_value("rbp", slot_off[s], t) },
+            Inst.DropSlot(t, s) => {
+                if self.in_frame { self.drop_value("r15", slot_off[s], t) } else { self.drop_value("rbp", slot_off[s], t) }
+            },
+            Inst.Frame(d) => {
+                self.emit("movq %r15, %rax")
+                self.store_temp(d, temp_base)
+            },
             Inst.DropAt(t, p) => {
                 // the walk keeps the address in callee-saved %rbx across the
                 // drop calls
@@ -352,6 +469,11 @@ impl CodeGen {
                 self.load_temp(p, "rbx", temp_base)
                 self.walk_member("rbx", 0, t, false)
                 self.emit("popq %rbx")
+            },
+            Inst.Deep(t, p) => {
+                // the type's deep walk, the value's address in %rdi
+                self.load_temp(p, "rdi", temp_base)
+                self.emit("call " + self.register_deep(t))
             },
             Inst.Init(s) => {},
             Inst.Moved(s) => {},
@@ -401,15 +523,19 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.Global(d, sym, w) => {
-                if w == 4 { self.emit(format("movslq {}(%rip), %rax", sym)) } else { self.emit(format("movq {}(%rip), %rax", sym)) }
+                if w == 4 { self.emit(format("movslq {}, %rax", self.tv(sym))) } else { self.emit(format("movq {}, %rax", self.tv(sym))) }
                 self.store_temp(d, temp_base)
             },
             Inst.Exit(v) => {
-                // the exit system call
+                // exit_group (every thread ends); when tasks take turns, held for the
+                // parent if a task other than the entry's exits
                 self.load_temp(v, "rax", temp_base)
                 self.emit("movl %eax, %edi")
-                self.emit("movq $60, %rax")
-                self.emit("syscall")
+                if self.frames { self.emit("call __task_exit") }
+                else {
+                    self.emit("movq $231, %rax")
+                    self.emit("syscall")
+                }
             },
             Inst.MapRemove(mt, h, c, k) => {
                 // the holder, then the cell, below the key
@@ -477,6 +603,14 @@ impl CodeGen {
             Inst.Loc(p) => { self.emit_loc(p.line, p.col) },
             Inst.Bind(name, s) => {
                 let slot = f.slots[s]
+                // a frame function's variables are in its heap frame (D90,
+                // MYLA-141); its parameters, owned copies there, are visible
+                // in the whole function
+                if f.frame {
+                    let b = CgBinding { name: name, kind: "frame", offset: slot_off[s], ty: slot.ty, capoff: 0 }
+                    self.dbg_variable(b, slot.word >= 0, slot.word >= 0)
+                    return
+                }
                 // a parameter passed by value lives in its argument words as a
                 // local in its slot (D88)
                 if slot.word >= 0 && !slot.inline {
@@ -687,6 +821,7 @@ impl CodeGen {
             },
             // the call before it is the jump (`emit_tail_call`)
             Term.Become => {},
+            Term.Suspend(b) => { self.emit_suspend(b, labels) },
             Term.Trap(kind, p) => { self.trap("jmp", "__trap_" + kind, p.line, p.col) },
             Term.Panic(m, p) => {
                 self.load_temp(m, "rdi", temp_base)
@@ -809,7 +944,7 @@ impl CodeGen {
                 match inst {
                     Inst.Load(d, s) => {
                         if defs[d] == 1 && reads_before_writes(b.insts, b.term, i, d, self.temp_uses[d]) {
-                            if self.slot_reg[s] != "" { src[d] = "%" + self.slot_reg[s] } else { src[d] = format("{}(%rbp)", slot_off[s]) }
+                            if self.slot_reg[s] != "" { src[d] = "%" + self.slot_reg[s] } else if self.in_frame { src[d] = format("{}(%r15)", slot_off[s]) } else { src[d] = format("{}(%rbp)", slot_off[s]) }
                             out[d] = format("movq {}, %", src[d])
                         }
                     },
@@ -837,10 +972,17 @@ impl CodeGen {
                 _ => format("movq ${}, %", v)
             }
             Inst.Str(d, text) => format("leaq {}(%rip), %", self.string_label(text))
-            Inst.Addr(d, s) => format("leaq {}(%rbp), %", slot_off[s])
+            Inst.Addr(d, s) => self.slot_addr_text(slot_off[s])
             Inst.Label(d, sym) => format("leaq {}(%rip), %", sym)
             _ => ""
         }
+    }
+
+    // The code computing the address of the slot at `off`, up to its
+    // register's name: in the stack frame, or a frame function's heap frame.
+    fun slot_addr_text(self, off: int32) -> str {
+        if self.in_frame { return format("leaq {}(%r15), %", off) }
+        return format("leaq {}(%rbp), %", off)
     }
 
     // A constant or an address whose temporary is kept in its slot: computed
@@ -983,7 +1125,8 @@ impl CodeGen {
             push(cand, self.temp_remat[i] == "" && self.temp_uses[i] > 0)
             i = i + 1
         }
-        for sl in f.slots { push(cand, sl.size == 8 && !sl.owns) }
+        // a frame function's slots are in its frame, never in a register
+        for sl in f.slots { push(cand, sl.size == 8 && !sl.owns && !f.frame) }
         for b in f.blocks {
             for inst in b.insts {
                 match inst {
@@ -1124,7 +1267,14 @@ impl CodeGen {
         }
         // the callee-saved registers, then %r8-%r11 for a value no position
         // of its interval clobbers (MYLA-134), which cost no save
-        let names = ["rbx", "r12", "r13", "r14", "r15", "r8", "r9", "r10", "r11"]
+        var names = ["rbx", "r12", "r13", "r14", "r15", "r8", "r9", "r10", "r11"]
+        // the callee-saved registers come first; %r15 holds a frame
+        // function's frame (D90)
+        var ncallee = 5
+        if f.frame {
+            names = ["rbx", "r12", "r13", "r14", "r8", "r9", "r10", "r11"]
+            ncallee = 4
+        }
         let nr = len(names)
         var owner: [int32] = []
         while len(owner) < nr { push(owner, -1) }
@@ -1139,7 +1289,7 @@ impl CodeGen {
                     if owner[r] >= 0 && last[owner[r]] <= p { owner[r] = -1 }
                     r = r + 1
                 }
-                var top = 5
+                var top = ncallee
                 if cpre[last[v] + 1] - cpre[first[v]] == 0 { top = nr }
                 // a free register, a caller-saved one first
                 var pick = -1
@@ -1181,13 +1331,13 @@ impl CodeGen {
         }
         i = 0
         while i < nv {
-            if reg[i] >= 0 && (reg[i] >= 5 || used[reg[i]] >= REG_MIN_USE) {
+            if reg[i] >= 0 && (reg[i] >= ncallee || used[reg[i]] >= REG_MIN_USE) {
                 if i < nt { self.temp_reg[i] = names[reg[i]] } else { self.slot_reg[i - nt] = names[reg[i]] }
             }
             i = i + 1
         }
         var r = 0
-        while r < 5 {
+        while r < ncallee {
             if used[r] >= REG_MIN_USE { push(self.saved_regs, names[r]) }
             r = r + 1
         }
@@ -1818,6 +1968,31 @@ fun writes_no_slot(inst: Inst) -> bool {
     }
 }
 
+
+// The offsets of `f`'s slots: in its heap frame after the header (D90) for a
+// frame function, else `layout_slots`'.
+fun slots_at(f: IrFunc, below: int32) -> [int32] {
+    if !f.frame { return layout_slots(f, below) }
+    var off: [int32] = []
+    var cursor = FRAME_HEADER
+    for s in f.slots {
+        push(off, cursor)
+        cursor = cursor + (s.size + 7) / 8 * 8
+    }
+    return off
+}
+
+// The size of a frame function's heap frame: the header, then its slots.
+fun frame_size(f: IrFunc) -> int32 {
+    var cursor = FRAME_HEADER
+    for s in f.slots { cursor = cursor + (s.size + 7) / 8 * 8 }
+    return cursor
+}
+
+// An async function's frame begins `[resume fn][caller frame][state][task]
+// [link]` (D90; the link chains the frames waiting for an actor, D92); its
+// first slot, its result when it has one, follows.
+const FRAME_HEADER: int32 = 40
 
 // The frame offset of each slot of `f`: an argument word above %rbp, the
 // others below the first `below` bytes.

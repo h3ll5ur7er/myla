@@ -1823,6 +1823,8 @@ class Checker:
 
         def agg_refs(t: Type) -> list[tuple[str, bool]]:
             """Aggregate (name, is_enum) references appearing inline within `t`."""
+            if isinstance(t, StructType) and t.name in self.actors:
+                return []   # an actor's handle: a reference, not inline (D89)
             if isinstance(t, StructType):
                 out = [(t.name, False)]
                 for a in t.args:

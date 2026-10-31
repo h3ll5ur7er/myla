@@ -12,7 +12,7 @@
 from std.process import run, Output, ExitStatus, SpawnError
 from std.io import write, eprintln
 from std.fs import write_to_file, remove_file
-from .loader import load_program_opts, LoadOptions, file_of, Loaded, type_errors, concurrency_report
+from .loader import load_program_opts, LoadOptions, file_of, Loaded, type_errors
 from .diag import render, Report
 from .checker import build_checker_decls, Checker, CheckErr
 from .codegen import new_codegen
@@ -48,7 +48,6 @@ pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
 // first, MYLA-103).
 fun compile_asm(file: str, opts: LoadOptions, debug: bool) -> Result<str, str> {
     let ch = load_and_check(file, opts)?
-    match concurrency_report(ch.prog, ch.checker) { Some(r) => { return Err(render(r)) }, None => {} }
     var g = new_codegen(ch.checker)
     g.set_sources(ch.prog.spans, ch.prog.next_id)
     if debug { g.enable_debug_info(read_gdb_script(opts.stdlib_root)) }

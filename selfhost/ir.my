@@ -66,6 +66,10 @@ pub enum Inst {
     // drop T [%ptr]: release what the member at %ptr holds (before it is
     // overwritten)
     DropAt(Type, int32),
+    // deep T [%ptr]: every heap value the T at %ptr owns replaced by a deep
+    // copy of its own, the originals released (D92: values crossing between
+    // threads share no count; an actor handle stays shared)
+    Deep(Type, int32),
     // init $slot: the aggregate built member by member in the slot is
     // complete (for the verifier; no code)
     Init(int32),
@@ -128,6 +132,8 @@ pub enum Inst {
     Bind(str, int32),
     // scope open / close: the lexical scopes of debug information
     Scope(bool),
+    // %dst = frame: an async function's heap frame (D90), its one argument
+    Frame(int32),
 }
 
 // How a block ends.
@@ -148,6 +154,11 @@ pub enum Term {
     // panic %msg @pos: the runtime error with the message string %msg at a
     // position (`panic`, `unreachable`, a failed `assert`)
     Panic(int32, Pos),
+    // suspend L (D90): an async function's frame records L as where it
+    // resumes, and the function leaves: the call that ends the block, if
+    // any, is made in place of it (as `become`), else it returns to the
+    // executor. For the verifier, a `jmp L`: its slots live in the frame.
+    Suspend(int32),
 }
 
 pub struct IrBlock { insts: [Inst], term: Term }
@@ -168,8 +179,9 @@ pub struct Instance { orig: str, targs: [Type] }
 // A function: its assembly name (without `myla_`), its result type (None:
 // none), its slots, the type of each temporary, its blocks, the order in
 // which lowering started the blocks, which is the order they are emitted in,
-// and the generic instances it calls.
-pub struct IrFunc { name: str, ret: Option<Type>, slots: [Slot], temps: [Type], blocks: [IrBlock], order: [int32], instances: [Instance] }
+// and the generic instances it calls; `frame`: an async function's, whose
+// slots are in its heap frame (D90), its one argument the frame.
+pub struct IrFunc { name: str, ret: Option<Type>, slots: [Slot], temps: [Type], blocks: [IrBlock], order: [int32], instances: [Instance], frame: bool }
 
 // --- The text form --------------------------------------------------------------
 
@@ -180,7 +192,9 @@ pub fun render_func(f: IrFunc) -> str {
         Some(t) => { ret = " -> " + type_name(t) },
         None => {},
     }
-    append(sb, format("fun myla_{}{} {{\n", f.name, ret))
+    var kind = ""
+    if f.frame { kind = " frame" }
+    append(sb, format("fun myla_{}{}{} {{\n", f.name, ret, kind))
     var i = 0
     while i < len(f.slots) {
         let s = f.slots[i]
@@ -211,6 +225,7 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Load(d, s) => format("%t{} = load ${}", d, s)
         Inst.Store(s, v) => format("store ${}, %t{}", s, v)
         Inst.Addr(d, s) => format("%t{} = addr ${}", d, s)
+        Inst.Frame(d) => format("%t{} = frame", d)
         Inst.Offset(d, p, off) => format("%t{} = %t{} + {}", d, p, off)
         Inst.LoadAt(d, p, off) => format("%t{} = load [%t{} + {}]", d, p, off)
         Inst.StoreAt(p, off, v) => format("store [%t{} + {}], %t{}", p, off, v)
@@ -226,6 +241,7 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Retain(t, p) => format("retain {} [%t{}]", type_name(t), p)
         Inst.DropSlot(t, s) => format("drop {} ${}", type_name(t), s)
         Inst.DropAt(t, p) => format("drop {} [%t{}]", type_name(t), p)
+        Inst.Deep(t, p) => format("deep {} [%t{}]", type_name(t), p)
         Inst.Init(s) => format("init ${}", s)
         Inst.Elem(d, c, i, stride, is_str, p) => format("%t{} = elem %t{}[%t{}] {}{} @{}:{}", d, c, i, stride, str_suffix(is_str), p.line, p.col)
         Inst.Load8(d, p) => format("%t{} = load8 [%t{}]", d, p)
@@ -302,6 +318,7 @@ fun render_rt(d: int32, name: str, args: [int32]) -> str {
 #test(Term.Br(1, 2, 3))["br %t1, L2, L3"]
 #test(Term.Ret(-1))["ret"]
 #test(Term.Become)["become"]
+#test(Term.Suspend(4))["suspend L4"]
 #test(Term.Panic(2, Pos { line: 3, col: 4 }))["panic %t2 @3:4"]
 pub fun render_term(t: Term) -> str {
     return match t {
@@ -315,6 +332,7 @@ pub fun render_term(t: Term) -> str {
         Term.Become => "become"
         Term.Trap(kind, p) => format("trap {} @{}:{}", kind, p.line, p.col)
         Term.Panic(m, p) => format("panic %t{} @{}:{}", m, p.line, p.col)
+        Term.Suspend(b) => format("suspend L{}", b)
     }
 }
 
@@ -479,6 +497,7 @@ pub fun successors(t: Term) -> [int32] {
     return match t {
         Term.Jmp(b) => [b]
         Term.Br(c, a, b) => [a, b]
+        Term.Suspend(b) => [b]
         _ => []
     }
 }
@@ -512,6 +531,7 @@ pub fun inst_uses(inst: Inst) -> [int32] {
         Inst.Retain(t, p) => [p]
         Inst.DropSlot(t, s) => []
         Inst.DropAt(t, p) => [p]
+        Inst.Deep(t, p) => [p]
         Inst.Init(s) => []
         Inst.Elem(d, c, i, stride, is_str, pos) => [c, i]
         Inst.Load8(d, p) => [p]
@@ -535,6 +555,7 @@ pub fun inst_uses(inst: Inst) -> [int32] {
         Inst.Loc(p) => []
         Inst.Bind(name, s) => []
         Inst.Scope(open) => []
+        Inst.Frame(d) => []
     }
 }
 
@@ -558,6 +579,7 @@ pub fun term_uses(t: Term) -> [int32] {
 #test(Inst.Store(0, 4))[[]]
 pub fun inst_defs(inst: Inst) -> [int32] {
     return match inst {
+        Inst.Frame(d) => [d]
         Inst.Const(d, t, v) => [d]
         Inst.Str(d, text) => [d]
         Inst.Load(d, s) => [d]
@@ -1070,6 +1092,6 @@ fun test_func(blocks: [IrBlock]) -> IrFunc {
     return IrFunc {
         name: "f", ret: None,
         slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true, inline: false }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false, inline: false }],
-        temps: [Type.TStr, Type.TBool], blocks: blocks, order: order, instances: [],
+        temps: [Type.TStr, Type.TBool], blocks: blocks, order: order, instances: [], frame: false,
     }
 }

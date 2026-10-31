@@ -14,10 +14,19 @@
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, ElseTail, ExprOrBlock, MatchArm, FieldInit, MapEntry
 from .checker import Type
 
-pub struct Norm { next: int32, resolved: [int32: Type], out: [Stmt], temps: int32 }
+// `value_matches`: a `match` with an `await` in an arm, as a value, stays a
+// `match` whose arms are blocks ending in their value, bound by a `let` of its
+// own (the compiler's frames keep its state in slots); else (the interpreter's
+// async evaluator) a statement assigning a temporary.
+// `wrap_children` (the compiler's too): an `async let x = e` starts an async
+// lambda made of `e`, `async let x = (async || await e)()` (no `await` unless
+// `e` is a call), whose body is the interpreter's child's (`task_body`) and
+// which gets copies of what `e` uses, as D89 says a child does; `children`:
+// those lambdas, whose captures are copied deeply (D92).
+pub struct Norm { next: int32, resolved: [int32: Type], out: [Stmt], temps: int32, value_matches: bool, wrap_children: bool, children: [int32: bool] }
 
 pub fun new_norm(next: int32) -> Norm {
-    return Norm { next: next, resolved: [:], out: [], temps: 0 }
+    return Norm { next: next, resolved: [:], out: [], temps: 0, value_matches: false, wrap_children: false, children: [:] }
 }
 
 // -- what can suspend -------------------------------------------------------
@@ -173,6 +182,37 @@ impl Norm {
         match s.kind {
             StmtKind.VarDecl(kind, name, ty, init) => {
                 if kind == "async" {
+                    if self.wrap_children {
+                        var ret: Option<Type> = None
+                        match get(self.resolved, init.id) {
+                            Some(t) => { ret = Some(t) },
+                            None => {},
+                        }
+                        var body = init
+                        match init.kind {
+                            ExprKind.Call(c, a) => {
+                                body = self.fresh(init, ExprKind.Await(init))
+                                self.copy_type(init.id, body.id)
+                            },
+                            _ => {},
+                        }
+                        // a void one's body a block: a `return` would have no value
+                        var lbody = ExprOrBlock.EB_Expr(body)
+                        match ret {
+                            None => {
+                                let st = Stmt { id: self.id(), line: init.line, col: init.col, sp: init.sp, kind: StmtKind.ExprStmt(body) }
+                                lbody = ExprOrBlock.EB_Block(Block { line: init.line, col: init.col, sp: init.sp, stmts: [st] })
+                            },
+                            Some(t) => {},
+                        }
+                        let lam = self.fresh(init, ExprKind.Lambda([], None, lbody, true))
+                        self.resolved[lam.id] = Type.TAsync(Type.TFunc([], ret))
+                        self.children[lam.id] = true
+                        let call = self.fresh(init, ExprKind.Call(lam, []))
+                        self.copy_type(init.id, call.id)
+                        push(self.out, self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, call)))
+                        return
+                    }
                     push(self.out, s)
                     return
                 }
@@ -439,6 +479,15 @@ impl Norm {
     // in a temporary each arm assigns.
     fun match_stmt(var self, e: Expr, s: Expr, arms: [MatchArm], value: bool) -> Expr {
         let s2 = self.expr(s)
+        if value && self.value_matches {
+            var varms: [MatchArm] = []
+            let none = self.fresh(e, ExprKind.Hole)
+            for arm in arms {
+                let body = self.arm_block(arm.body, none, true)
+                push(varms, MatchArm { line: arm.line, col: arm.col, sp: arm.sp, pattern: arm.pattern, guard: arm.guard, body: ExprOrBlock.EB_Block(body) })
+            }
+            return self.bind(with_kind(e, ExprKind.MatchE(s2, varms)), "let")
+        }
         var result = self.fresh(e, ExprKind.Hole)
         if value {
             result = self.bind(result, "var")
@@ -499,7 +548,9 @@ impl Norm {
 
     fun arm_value(var self, x: Expr, result: Expr, value: bool) {
         let x2 = self.expr(x)
-        if value {
+        if value && self.value_matches {
+            push(self.out, Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.ExprStmt(x2) })
+        } else if value {
             push(self.out, Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.Assign(result, x2) })
         } else if !is_simple(x2) {
             push(self.out, Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.ExprStmt(x2) })

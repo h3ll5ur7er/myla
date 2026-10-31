@@ -47,9 +47,8 @@ _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 )
 
-# Examples outside the v0.9 codegen gate's scope (see module docstring), and
-# concurrency, which the compiler builds from MYLA-137 on (D89).
-EXCLUDED: set[str] = {"concurrency.my"}
+# Examples outside the v0.9 codegen gate's scope (see module docstring).
+EXCLUDED: set[str] = set()
 
 # Programs of the Python backend's parity suite (test_compiler_parity.PROGRAMS)
 # for bugs both backends had: the value of a store is evaluated before the
@@ -77,6 +76,7 @@ PARITY_PROGRAMS = (
     "assign_heap_owning_struct_to_any_place",
     "assign_heap_owning_struct_to_itself",
     "method_arguments_survive_the_receivers_writes",
+    "var_self_method_on_a_shared_element_copies_it",
     "heap_free_arguments_survive_the_receivers_writes",
     "borrowed_lets_survive_a_moved_value",
     "become_keeps_the_stack_flat",
@@ -532,9 +532,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
         # emitting the assembly under test is a fast subprocess call.
         cls._binary = selfhost_tool("gen_main")
 
-    def _emit_asm(self, path: str, stdlib_root: str | None = None) -> str:
+    def _emit_asm(self, path: str, stdlib_root: str | None = None, flags: tuple = ()) -> str:
         """Assembly for `path`, produced by the self-hosted backend."""
-        extra = [stdlib_root] if stdlib_root is not None else []
+        extra = ([stdlib_root] if stdlib_root is not None else []) + list(flags)
         proc = subprocess.run(
             [self._binary, path, *extra], capture_output=True, text=True
         )
@@ -1229,6 +1229,116 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     bad.add((fn, r))
         return sorted(bad)
 
+    def test_concurrency_programs_match_the_interpreter(self) -> None:
+        """Every concurrency parity program (D89) and the actor programs,
+        natively (D90, D91: tasks taking turns on one thread), print and exit
+        as the Python interpreter does; a program without `async let` also
+        with its async functions on frames (`--async-frames`)."""
+        from .test_selfhost_interp import CONCURRENCY_PROGRAMS, _cli_oracle
+
+        cases = dict(ACTOR_PROGRAMS)
+        cases.update(CONCURRENCY_PROGRAMS)
+        stdlib = default_stdlib_root()
+        for name, src in cases.items():
+            modes = [()] if "async let" in src or "task." in src else [(), ("--async-frames",)]
+            for flags in modes:
+                with self.subTest(program=name, flags=flags), tempfile.TemporaryDirectory() as tmp:
+                    path = os.path.join(tmp, name + ".my")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(src)
+                    out, code, peak = self._build_and_measure(self._emit_asm(path, stdlib, flags))
+                    want = _cli_oracle(path)
+                    self.assertEqual((out, code), (want[0], want[2]))
+                    # 200,000 actors made and released: their cells are reused
+                    self.assertLess(peak, 64, f"{name}: peak {peak:.1f} MB")
+
+    def test_deep_task_trees_and_awaits(self) -> None:
+        """3,000 children through `task.all`, each calling an actor, and an
+        async recursion 100,000 deep: every await is a tail call, so the
+        stack stays flat, and the frames are freed as they end."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deep.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(DEEP_TASKS)
+            out, code, peak = self._build_and_measure(self._emit_asm(path, default_stdlib_root()))
+            self.assertEqual((out, code), ("8997000\n3000\n100000\n", 0))
+            self.assertLess(peak, 64, f"peak {peak:.1f} MB")
+
+    def test_child_failures_are_held_for_the_parent(self) -> None:
+        """A panic or `exit` in a child task waits for its parent's `await`
+        (or scope end) while the other tasks go on, as in the interpreters
+        (D89). On one thread the order is fixed: the self-hosted interpreter
+        prints the same; the Python interpreter's threads may interleave."""
+        stdlib = default_stdlib_root()
+        for name, (src, want_out, want_code, want_err) in HELD_FAILURES.items():
+            with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(src)
+                exe = os.path.join(tmp, name)
+                with open(exe + ".s", "w", encoding="utf-8") as fh:
+                    fh.write(self._emit_asm(path, stdlib))
+                subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+                # one worker: the order the self-hosted interpreter has (D92)
+                env = dict(os.environ, MYLA_THREADS="1")
+                proc = subprocess.run([exe], capture_output=True, text=True, timeout=60, env=env)
+                self.assertEqual((proc.stdout, proc.returncode), (want_out, want_code))
+                self.assertTrue(proc.stderr.startswith(want_err), proc.stderr)
+
+    def test_tasks_on_any_number_of_workers(self) -> None:
+        """The concurrency programs with child tasks print and exit alike on
+        1 to 16 workers (D92), run several times each: tasks on other threads,
+        actors entered from several at once, cells freed on another worker's
+        heap, values copied deeply as they cross."""
+        from .test_selfhost_interp import CONCURRENCY_PROGRAMS, _cli_oracle
+
+        cases = {n: s for n, s in CONCURRENCY_PROGRAMS.items() if "async let" in s or "task." in s}
+        cases["values_cross_deeply"] = ACTOR_PROGRAMS["values_cross_deeply"]
+        cases["deep_task_trees"] = DEEP_TASKS
+        cases["task_tree"] = TASK_TREE
+        stdlib = default_stdlib_root()
+        for name, src in cases.items():
+            with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(src)
+                exe = os.path.join(tmp, name)
+                with open(exe + ".s", "w", encoding="utf-8") as fh:
+                    fh.write(self._emit_asm(path, stdlib))
+                subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+                want = None
+                for workers in ["1", "2", "4", "8", "16"]:
+                    for _ in range(4):
+                        env = dict(os.environ, MYLA_THREADS=workers)
+                        proc = subprocess.run([exe], capture_output=True, text=True, timeout=60, env=env)
+                        got = (proc.stdout, proc.returncode)
+                        if want is None:
+                            want = got
+                        self.assertEqual(got, want, f"{workers} workers")
+
+    def test_children_run_in_parallel(self) -> None:
+        """Eight CPU-bound children on as many workers as CPUs: the process
+        uses well over one CPU's time per second of wall time (D89 (3))."""
+        if (os.cpu_count() or 1) < 2:
+            self.skipTest("one CPU")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "par.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(PARALLEL_WORK)
+            exe = os.path.join(tmp, "par")
+            with open(exe + ".s", "w", encoding="utf-8") as fh:
+                fh.write(self._emit_asm(path, default_stdlib_root()))
+            subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+            env = dict(os.environ)
+            env.pop("MYLA_THREADS", None)
+            proc = subprocess.run(
+                [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, exe],
+                capture_output=True, text=True, env=env,
+            )
+            out, cpu, wall = proc.stdout, *map(float, proc.stderr.split()[-2:])
+            self.assertEqual(out, "1\n")
+            self.assertGreater(cpu, 1.5 * wall, f"cpu {cpu:.2f} s, wall {wall:.2f} s")
+
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS
 
@@ -1240,6 +1350,232 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 got = self._build_and_run(self._emit_asm(path))
                 self.assertEqual(got, _oracle(path))
 
+
+
+# Actors and concurrency natively (D89, D91, MYLA-138): one task so far, so
+# async functions are ordinary ones; an actor is a handle to a cell holding its
+# fields, shared by its copies and released with the last.
+_ACTOR_COUNTER = ("actor Counter {\n    count: int,\n    log: [str],\n}\n"
+                  "impl Counter {\n"
+                  "    fun bump(var self, by: int) -> int {\n        self.count = self.count + by\n"
+                  "        push(self.log, f\"+{by}\")\n        return self.count\n    }\n"
+                  "    fun get(self) -> int {\n        return self.count\n    }\n"
+                  "    fun entries(self) -> [str] {\n        return self.log\n    }\n}\n")
+ACTOR_PROGRAMS = {
+    "actor_handles_are_shared": _ACTOR_COUNTER + (
+        "struct Holder { c: Counter, tag: str }\n"
+        "async fun bump_all(cs: [Counter]) {\n    for c in cs {\n        let x = await c.bump(10)\n    }\n}\n"
+        "#main\nasync fun main() {\n    let c = Counter { count: 0, log: [] }\n    let d = c\n"
+        "    let h = Holder { c: d, tag: \"h\" }\n    let x = await h.c.bump(1)\n"
+        "    await bump_all([c, d, h.c])\n    print(await c.get())\n"
+        "    var es = await c.entries()\n    push(es, \"local\")\n    print(len(es))\n"
+        "    print(len(await d.entries()))\n}\n"),
+    "actors_are_released": _ACTOR_COUNTER + (
+        "async fun churn(n: int) -> int {\n    var total = 0\n    var i = 0\n    while i < n {\n"
+        "        let c = Counter { count: i, log: [\"start\"] }\n        let k = c\n"
+        "        total = total + await k.bump(1) % 7\n        i = i + 1\n    }\n    return total\n}\n"
+        "#main\nasync fun main() {\n    print(await churn(200000))\n}\n"),
+    "actor_reentrancy_one_task": (
+        "actor A {\n    n: int\n}\nactor B {\n    m: int\n}\n"
+        "impl A {\n    async fun ping(self, b: B) -> int {\n        return await b.pong(self)\n    }\n"
+        "    fun val(self) -> int {\n        return self.n\n    }\n}\n"
+        "impl B {\n    async fun pong(self, a: A) -> int {\n        return await a.val() + self.m\n    }\n}\n"
+        "#main\nasync fun main() {\n    let a = A { n: 1 }\n    let b = B { m: 2 }\n"
+        "    print(await a.ping(b))\n    print(await a.ping(b) + await b.pong(a))\n}\n"),
+    "recursive_actors": (
+        "actor Node {\n    val: int,\n    next: Option<Node>,\n}\n"
+        "impl Node {\n    async fun sum(self) -> int {\n        return match self.next {\n"
+        "            Some(n) => self.val + await n.sum(),\n            None => self.val,\n        }\n    }\n"
+        "    fun link(var self, n: Node) {\n        self.next = Some(n)\n    }\n}\n"
+        "#main\nasync fun main() {\n    var head = Node { val: 0, next: None }\n    var i = 1\n"
+        "    while i <= 20 {\n        let n = Node { val: i, next: Some(head) }\n        head = n\n        i = i + 1\n    }\n"
+        "    print(await head.sum())\n    let tail = Node { val: 1000, next: None }\n    await tail.link(head)\n"
+        "    print(await tail.sum())\n}\n"),
+    # awaited `var self` methods on list elements and on a field's element
+    # (MYLA-142): the element's index computed once, the method's final
+    # `self` written back there; a copy of the list keeps its own (MYLA-143)
+    "var_self_on_elements": 'struct Counter {\n    n: int,\n    log: [str],\n}\n\nimpl Counter {\n    async fun bump(var self, by: int) -> int {\n        self.n = self.n + by\n        push(self.log, f"+{by}")\n        return self.n\n    }\n}\n\nstruct Board {\n    rows: [Counter],\n}\n\n\nfun pick(i: int) -> int {\n    print(f"pick {i}")\n    return i\n}\n\n#main\nasync fun main() {\n    var cs = [Counter { n: 0, log: [] }, Counter { n: 10, log: [] }]\n    let a = await cs[1].bump(5)\n    let b = await cs[pick(0)].bump(2)\n    var i = 0\n    while i < 3 {\n        let c = await cs[i % 2].bump(1)\n        i = i + 1\n    }\n    var board = Board { rows: [Counter { n: 100, log: [] }] }\n    let d = await board.rows[0].bump(7)\n    let copy = cs\n    let e = await cs[0].bump(1000)\n    print(f"{a} {b} {d} {e}")\n    print(f"{cs[0].n} {cs[1].n} {len(cs[0].log)} {len(cs[1].log)} {board.rows[0].n} {copy[0].n}")\n}\n',
+    # every kind of value crossing into children and actors and back (D92):
+    # copied deeply where it crosses (lists, maps, strings, builders, a
+    # boxed and a list-recursive enum, tuples, closures with captures), an
+    # actor handle shared; what the children and the actor change never shows
+    # in the parent
+    "values_cross_deeply": 'import std.task as task\n\nenum Tree {\n    Leaf(str),\n    Node([Tree]),\n}\n\nenum Ex {\n    Num(int),\n    Neg(Ex),\n    Add(Ex, Ex),\n}\n\nfun eval(e: Ex) -> int {\n    return match e {\n        Ex.Num(n) => n,\n        Ex.Neg(x) => 0 - eval(x),\n        Ex.Add(a, b) => eval(a) + eval(b),\n    }\n}\n\nstruct Rec {\n    ex: Ex,\n    sb: StringBuilder,\n    name: str,\n    tags: [str],\n    scores: [str: int],\n    tree: Tree,\n    pair: (str, [int]),\n}\n\nactor Store {\n    items: [Rec],\n    names: [str: int],\n}\n\nimpl Store {\n    fun put(var self, r: Rec, extra: [str]) -> int {\n        push(self.items, r)\n        for e in extra {\n            self.names[e] = len(self.items)\n        }\n        return len(r.tags) + len(extra)\n    }\n    fun find(self, name: str) -> Rec {\n        var i = len(self.items) - 1\n        while i >= 0 {\n            if self.items[i].name == name {\n                return self.items[i]\n            }\n            i = i - 1\n        }\n        return self.items[0]\n    }\n    async fun summary(self, prefix: str) -> [str] {\n        var out: [str] = []\n        for r in self.items {\n            push(out, prefix + r.name)\n        }\n        return out\n    }\n    fun clear(var self) {\n        self.items = []\n    }\n}\n\nfun count(t: Tree) -> int {\n    return match t {\n        Tree.Leaf(s) => len(s),\n        Tree.Node(ts) => {\n            var n = 0\n            for c in ts {\n                n = n + count(c)\n            }\n            n\n        },\n    }\n}\n\nfun make(i: int) -> Rec {\n    var scores: [str: int] = [:]\n    scores[f"s{i}"] = i\n    let tree = Tree.Node([Tree.Leaf(f"leaf{i}"), Tree.Node([Tree.Leaf("x"), Tree.Leaf(f"{i}")])])\n    var sb = StringBuilder()\n    append(sb, f"sb{i}")\n    return Rec { ex: Ex.Add(Ex.Num(i), Ex.Neg(Ex.Num(2))), sb: sb, name: f"rec{i}", tags: [f"t{i}", "u"], scores: scores, tree: tree, pair: (f"p{i}", [i, i + 1]) }\n}\n\nasync fun work(r: Rec, s: Store, f: (int) -> int) -> int {\n    let k = await s.put(r, r.tags)\n    let back = await s.find(r.name)\n    var sb = StringBuilder()\n    append(sb, back.name)\n    var bsb = back.sb\n    append(bsb, "!")\n    let text = build(sb) + build(bsb)\n    return k + eval(back.ex) + count(back.tree) + len(text) + f(len(back.pair.1))\n}\n\n#main\nasync fun main() {\n    let s = Store { items: [], names: [:] }\n    var total = 0\n    var round = 0\n    while round < 300 {\n        let base = round * 3\n        let add = (x: int) => x + base\n        var r = make(round)\n        async let a = work(r, s, add)\n        r.name = "changed"\n        push(r.tags, "parent")\n        async let b = work(make(round + 1), s, add)\n        var fs: [async () -> int] = []\n        for j in 0..3 {\n            let rj = make(j)\n            push(fs, async () => count(rj.tree) + len(rj.name))\n        }\n        let rs = await task.all(fs)\n        for x in rs {\n            total = total + x\n        }\n        total = total + await a + await b + len(r.tags)\n        let sm = await s.summary("> ")\n        var chars = 0\n        for line in sm {\n            chars = chars + len(line)\n        }\n        total = total + len(sm) * 1000 + chars\n        if round % 50 == 49 {\n            await s.clear()\n        }\n        round = round + 1\n    }\n    print(total)\n}\n',
+    # an awaited `var self` method of a struct on a frame: its final `self`
+    # goes back to the receiver, a variable or a field of one, releasing the
+    # old value
+    "var_self_write_back": (
+        "struct Log { lines: [str], name: str }\n"
+        "impl Log {\n    async fun add(var self, s: str) -> int {\n        push(self.lines, s)\n"
+        "        self.name = self.name + \".\"\n        return len(self.lines)\n    }\n"
+        "    async fun reset(var self) {\n        self.lines = []\n    }\n}\n"
+        "struct Box { log: Log, n: int }\n"
+        "async fun run() -> int {\n    var b = Box { log: Log { lines: [], name: \"x\" }, n: 0 }\n"
+        "    var total = 0\n    var i = 0\n    while i < 20000 {\n"
+        "        let k = await b.log.add(f\"line {i}\")\n        total = total + k\n"
+        "        if k == 50 { await b.log.reset() }\n        i = i + 1\n    }\n"
+        "    var l = Log { lines: [\"a\"], name: \"y\" }\n    let m = await l.add(\"b\")\n"
+        "    print(f\"{m} {len(l.lines)} {len(l.name)} {len(b.log.lines)} {len(b.log.name)}\")\n"
+        "    return total\n}\n"
+        "#main\nasync fun main() {\n    print(await run())\n}\n"),
+}
+
+
+_HELD_COUNTER = ("actor C { n: int }\nimpl C {\n    fun bump(var self) -> int {\n"
+                 "        self.n = self.n + 1\n        return self.n\n    }\n}\n")
+# (program, stdout, exit code, the start of stderr)
+HELD_FAILURES = {
+    "held_panic": (_HELD_COUNTER + (
+        "async fun boom(c: C) -> int {\n    let x = await c.bump()\n    panic(\"boom\")\n    return 0\n}\n"
+        "async fun fine(c: C) -> int {\n    return await c.bump() * 10\n}\n"
+        "#main\nasync fun main() {\n    let c = C { n: 0 }\n    async let a = boom(c)\n    async let b = fine(c)\n"
+        "    var i = 0\n    while i < 5 {\n        print(await c.bump())\n        i = i + 1\n    }\n"
+        "    print(await b)\n    print(\"before a\")\n    print(await a)\n    print(\"never\")\n}\n"),
+        "1\n4\n5\n6\n7\n30\nbefore a\n", 1, "runtime error: boom\n"),
+    # a grandchild's `exit` reaches its parent's scope end, then main's await
+    "held_exit": ("from std.process import exit\n" + _HELD_COUNTER + (
+        "async fun leave(c: C) {\n    let x = await c.bump()\n    exit(4)\n}\n"
+        "async fun inner(c: C) -> int {\n    async let l = leave(c)\n    let y = await c.bump()\n"
+        "    print(\"inner goes on\")\n    return y\n}\n"
+        "#main\nasync fun main() {\n    let c = C { n: 0 }\n    async let a = inner(c)\n"
+        "    for i in 0..4 {\n        print(await c.bump())\n    }\n    print(\"waiting\")\n"
+        "    print(await a)\n    print(\"never\")\n}\n"),
+        "1\ninner goes on\n3\n5\n6\nwaiting\n", 4, ""),
+    # children of synchronous calls are tasks too: they run when the parent
+    # waits, and their failure waits for the `await`
+    "held_sync_child": (
+        "fun noisy(i: int) -> int {\n    print(f\"noisy {i}\")\n    return i * 2\n}\n"
+        "fun pick(xs: [int], i: int) -> int {\n    return xs[i]\n}\n"
+        "#main\nasync fun main() {\n    async let a = noisy(1)\n    print(\"parent\")\n    print(await a)\n"
+        "    async let b = pick([1, 2], 5)\n    print(\"between\")\n    print(await b)\n}\n",
+        "parent\nnoisy 1\n2\nbetween\n", 1, "runtime error: index out of bounds\n"),
+    # an out-of-bounds index in a child that is never awaited: its scope's end
+    "held_trap": (
+        "async fun pick(xs: [int], i: int) -> int {\n    return xs[i]\n}\n"
+        "#main\nasync fun main() {\n    if true {\n        async let a = pick([1, 2], 5)\n"
+        "        print(\"in scope\")\n    }\n    print(\"never\")\n}\n",
+        "in scope\n", 1, "runtime error: index out of bounds\n"),
+}
+
+
+# A binary tree of 4,096 small child tasks: workers steal the oldest frames,
+# the biggest pieces of the tree (MYLA-140).
+TASK_TREE = """\
+fun work(n: int) -> int {
+    var x = n
+    var i = 0
+    while i < 200 {
+        x = (x * 17 + 5) % 1009
+        i = i + 1
+    }
+    return x
+}
+
+async fun tree(depth: int, n: int) -> int {
+    if depth == 0 {
+        return work(n)
+    }
+    async let a = tree(depth - 1, n * 2)
+    async let b = tree(depth - 1, n * 2 + 1)
+    return (await a + await b) % 1000003
+}
+
+#main
+async fun main() {
+    print(await tree(12, 1))
+}
+"""
+
+# Eight children each crunching numbers for a while; prints 1 when the results
+# agree with one another.
+PARALLEL_WORK = """\
+import std.task as task
+
+fun crunch(seed: int64) -> int64 {
+    var x: int64 = seed
+    var acc: int64 = 0
+    var i = 0
+    while i < 15000000 {
+        x = (x * 48271) % 2147483647
+        acc = (acc + x % 7) % 1000000007
+        i = i + 1
+    }
+    return acc - acc + 1
+}
+
+#main
+async fun main() {
+    var fs: [async () -> int64] = []
+    for k in 0..8 {
+        let seed: int64 = (k + 1) as int64
+        push(fs, async () => crunch(seed))
+    }
+    var ones: int64 = 0
+    for r in await task.all(fs) {
+        ones = ones + r
+    }
+    print(ones / 8)
+}
+"""
+
+# The program's CPU time (user and system) and wall time, on stderr.
+_CPU_AND_WALL = (
+    "import resource, subprocess, sys, time\n"
+    "t = time.time()\n"
+    "p = subprocess.run(sys.argv[1:], capture_output=True, text=True)\n"
+    "wall = time.time() - t\n"
+    "u = resource.getrusage(resource.RUSAGE_CHILDREN)\n"
+    "sys.stdout.write(p.stdout)\n"
+    "sys.stderr.write(f'{u.ru_utime + u.ru_stime} {wall}')\n"
+)
+
+
+DEEP_TASKS = """\
+import std.task as task
+
+actor Counter {
+    count: int
+}
+
+impl Counter {
+    fun add(var self, n: int) -> int {
+        self.count = self.count + 1
+        return self.count
+    }
+    fun get(self) -> int {
+        return self.count
+    }
+}
+
+async fun work(c: Counter, i: int) -> int {
+    let x = await c.add(i)
+    return i * 2
+}
+
+async fun down(n: int) -> int {
+    if n == 0 {
+        return 0
+    }
+    return 1 + await down(n - 1)
+}
+
+#main
+async fun main() {
+    let c = Counter { count: 0 }
+    var fs: [async () -> int] = []
+    for i in 0..3000 {
+        push(fs, async () => await work(c, i))
+    }
+    let rs = await task.all(fs)
+    var sum = 0
+    for r in rs {
+        sum = sum + r
+    }
+    print(sum)
+    print(await c.get())
+    print(await down(100000))
+}
+"""
 
 
 IR_SAMPLE = """\

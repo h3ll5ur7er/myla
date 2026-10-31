@@ -17,6 +17,7 @@ from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
 from .ir import render_func, verify, moves, IrFunc, Inst
+from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
@@ -93,6 +94,11 @@ pub struct CodeGen {
     // aggregates whose retain or release walk is a helper of its own
     // (`walk_helper`), and whether each is the retain walk; emitted by name
     need_walk: [Type],
+    // D92: the types whose deep walk (`__deepw_<T>`) and the cell types whose
+    // deep copy (`deep_cell_name`) are still to be emitted
+    need_deep: [Type],
+    deep_inline: [bool],
+    need_deepc: [Type],
     walk_retain: [bool],
     walk_emitted: [str],
     // the drop, clone and walk helpers asked for so far, by kind and type
@@ -172,6 +178,17 @@ pub struct CodeGen {
     temp_reg: [str],
     slot_reg: [str],
     saved_regs: [str],
+    // D90: whether the function being generated is an async function's frame
+    // function, whose slots are in the heap frame %r15 holds (else at %rbp);
+    // its resume points (the block of each state, from 1)
+    in_frame: bool,
+    resume_blocks: [int32],
+    // D91: whether async functions run on frames, the tasks taking turns
+    // (the program has an `async let`, or `--async-frames`), and the
+    // normalizer of their bodies (anf.my), which adds the types of the nodes
+    // it makes to `resolved`
+    frames: bool,
+    norm: Norm,
     save_base: int32,               // MYLA-126: the saved registers' cells start below it
     arg_words: int32,               // MYLA-126: the argument words the function pops
     // MYLA-127: per function (by its signature's name), which parameters its
@@ -255,7 +272,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         uses_float: false,
         epilogue: "", ret_type: None,
         need_drop: [], drop_emitted: [], need_clone: [], clone_emitted: [],
-        need_walk: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
+        need_walk: [], need_deep: [], deep_inline: [], need_deepc: [], walk_retain: [], walk_emitted: [], helper_seen: [:],
         need_sb: false,
         line_spans: [], prelude_id: 0,
         cur_path: "<input>", pos_labels: [:], posdata: [],
@@ -264,7 +281,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
 }
 
@@ -443,7 +460,16 @@ impl CodeGen {
         }
         // the address of the value
         var addr: [int32] = [OP_FBREG]
-        for x in sleb(b.offset) { push(addr, x) }
+        if b.kind == "frame" {
+            // in a frame function's heap frame, whose address is the
+            // function's argument word (D90, MYLA-141)
+            push(addr, 16)
+            push(addr, OP_DEREF)
+            push(addr, OP_PLUS_UCONST)
+            for x in uleb(b.offset) { push(addr, x) }
+        } else {
+            for x in sleb(b.offset) { push(addr, x) }
+        }
         if b.kind == "capture" {
             push(addr, OP_DEREF)
             if b.capoff != 0 {
@@ -706,6 +732,7 @@ impl CodeGen {
                     i = i + 1
                 }
             },
+            Type.TAsync(f) => { return self.dbg_aggregate_lines(f) },
             Type.TFunc(ps, r) => {
                 // `fn…`: a name starting with `(` would make gdb take it for a tuple
                 let vp = self.dbg_void_pointer()
@@ -1100,6 +1127,7 @@ impl CodeGen {
                 self.scan_expr(callee, false)
             },
             ExprKind.Unary(op, x) => { self.scan_expr(x, false) },
+            ExprKind.Await(x) => { self.scan_expr(x, false) },
             ExprKind.Binary(op, l, r) => {
                 self.scan_expr(l, false)
                 self.scan_expr(r, false)
@@ -1253,6 +1281,7 @@ impl CodeGen {
     fun type_key(self, t: Type) -> str {
         return match t {
             Type.TStruct(n, a) => n,
+            Type.TActor(n) => n,
             Type.TEnum(n, a) => n,
             Type.TInt(w, s) => int_type_name_cg(w, s),
             Type.TBool => "bool",
@@ -1318,6 +1347,8 @@ impl CodeGen {
             Type.TSB => { return true },
             Type.TStr => { return true },
             Type.TFunc(ps, r) => { return true },
+            Type.TAsync(f) => { return true },
+            Type.TActor(n) => { return true },
             Type.TStruct(n, a) => {
                 if list_has_str(seen, n) { return false }
                 let info = self.struct_info(n)
@@ -1369,7 +1400,8 @@ impl CodeGen {
             return
         }
         self.emit(format("movq {}(%{}), %rax", ptr_off, base))
-        self.emit("incq -8(%rax)")
+        // an actor handle may be shared between threads (D92)
+        if self.frames && is_actor_t(t) { self.emit("lock incq -8(%rax)") } else { self.emit("incq -8(%rax)") }
     }
 
     // Release a heap-pointer leaf at `off(base)` via its type-specific routine.
@@ -1589,6 +1621,7 @@ impl CodeGen {
             Type.TTuple(es) => self.tuple_size(es),
             Type.TEnum(n, a) => 8 + self.enum_payload_size(n, a),
             Type.TFunc(ps, r) => 16,
+            Type.TAsync(f) => 16,
             _ => 8,
         }
     }
@@ -1846,6 +1879,10 @@ impl CodeGen {
         }
         push(out, ".Lmsg_rterr:\n\t.quad 15\n\t.ascii \"runtime error: \"")
         push(out, ".Lmsg_at:\n\t.quad 7\n\t.ascii \"\\n  --> \"")
+        if self.frames {
+            push(out, ".Lmsg_stuck:\n\t.quad 48\n\t.ascii \"runtime error: every task waits for another one\\n\"")
+            push(out, ".Lmyla_threads:\n\t.ascii \"MYLA_THREADS=\"")
+        }
         for line in self.posdata { push(out, line) }
         for line in self.rodata { push(out, line) }
         if self.uses_float { for chunk in self.float_rodata_text() { push(out, chunk) } }
@@ -1890,11 +1927,1021 @@ impl CodeGen {
         push(out, "\t.skip 8")
         push(out, "__run_errno_val:")
         push(out, "\t.skip 8")
+        if self.frames {
+            // each worker's queue: `[lock][head][tail]`, a cache line each
+            push(out, "\t.balign 64")
+            push(out, "__wq:")
+            push(out, format("\t.skip {}", 64 * MAX_WORKERS))
+            push(out, "__wq_rings:")
+            push(out, "\t.skip 8")
+            push(out, "__tls_blocks:")
+            push(out, format("\t.skip {}", TLS_SIZE * MAX_WORKERS))
+            push(out, "__heap_base:")
+            push(out, "\t.skip 8")
+            for g in ["__exec_seq", "__exec_idle", "__exec_sleepers", "__exec_workers"] {
+                push(out, g + ":")
+                push(out, "\t.skip 8")
+            }
+            push(out, "__exec_main:")
+            push(out, "\t.skip 8")
+        }
         push(out, "")
         if len(self.line_files) > 0 { for l in self.dbg_sections() { push(out, l) } }
         push(out, "\t.section .note.GNU-stack,\"\",@progbits")
         push(out, "")
         return join_lines(out)
+    }
+
+    // `__alloc`'s way back from its bump with the cells other workers freed:
+    // the whole list taken at once, each cell onto this worker's free list,
+    // then the allocation again (with tasks, D92).
+    fun emit_heap_remote(var self) {
+        self.raw(".Lalloc_drain:")
+        self.raw("\tpushq %rdi")
+        self.raw("\txorl %eax, %eax")
+        self.raw(format("\txchgq %rax, {}", self.tv("__remote_free")))
+        self.raw(".Ldrain_next:")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Ldrain_done")
+        self.raw("\tmovq %rax, %rsi")
+        self.raw("\tmovq (%rsi), %rax")
+        self.raw("\tmovq -16(%rsi), %rcx")
+        self.raw("\tcmpq $4096, %rcx")
+        self.raw("\tja .Ldrain_large")
+        self.tls_addr("__free_buckets", 0, "r8")
+        self.raw("\taddq %rcx, %r8")
+        self.raw("\tjmp .Ldrain_push")
+        self.raw(".Ldrain_large:")
+        self.raw("\tbsrq %rcx, %rcx")
+        self.tls_addr("__free_buckets", 4104, "r8")
+        self.raw("\tleaq (%r8,%rcx,8), %r8")
+        self.raw(".Ldrain_push:")
+        self.raw("\tmovq (%r8), %rcx")
+        self.raw("\tmovq %rcx, (%rsi)")
+        self.raw("\tmovq %rsi, (%r8)")
+        self.raw("\tjmp .Ldrain_next")
+        self.raw(".Ldrain_done:")
+        self.raw("\tpopq %rdi")
+        self.raw("\tjmp .Lalloc_ready")
+        self.raw("")
+    }
+
+    // -- deep copies (D92, MYLA-137) -----------------------------------------
+
+    // The name of `t`'s deep walk (`__deepw_<T>`: %rdi = the address of a T,
+    // whose heap values it replaces by deep copies, releasing the originals),
+    // to be emitted.
+    fun register_deep(var self, t: Type) -> str {
+        let name = "__deepw_" + mono_token(t)
+        if !contains(self.helper_seen, name) {
+            self.helper_seen[name] = true
+            push(self.need_deep, t)
+            push(self.deep_inline, false)
+        }
+        return name
+    }
+
+    // The routine making a cell of type `t` (%rdi, one reference, consumed)
+    // unshared, deeply: %rax = the same cell when it was the only reference,
+    // else a copy; either way every heap value in it is a deep copy of its own.
+    fun deep_cell_name(var self, t: Type) -> str {
+        if is_str_t(t) { return "__deep_str" }
+        var name = ""
+        match t {
+            Type.TList(e) => { name = "__deep_list_" + mono_token(e) },
+            Type.TMap(k, v) => { name = "__deep_map_" + map_token(k, v) },
+            _ => {
+                if is_sb_t(t) { name = "__deep_sb" } else { name = "__deepb_" + mono_token(t) }
+            },
+        }
+        if !contains(self.helper_seen, name) {
+            self.helper_seen[name] = true
+            push(self.need_deepc, t)
+        }
+        return name
+    }
+
+    // One member of type `ft` at `off(base)` (`base` callee-saved) made a
+    // deep copy of its own; an actor handle stays shared.
+    fun deep_member(var self, base: str, off: int32, ft: Type) {
+        if is_actor_t(ft) { return }
+        if self.is_boxed(ft) || is_cell_t(ft) {
+            let name = self.deep_cell_name(ft)
+            self.emit(format("movq {}(%{}), %rdi", off, base))
+            self.emit("call " + name)
+            self.emit(format("movq %rax, {}(%{})", off, base))
+        } else if is_tfunc(ft) {
+            self.emit(format("movq {}(%{}), %rdi", off + 8, base))
+            self.emit("call __deep_env")
+            self.emit(format("movq %rax, {}(%{})", off + 8, base))
+        } else if self.owns_heap(ft) {
+            self.emit(format("leaq {}(%{}), %rdi", off, base))
+            self.emit("call " + self.register_deep(ft))
+        }
+    }
+
+    // `__deepw_<T>`: each member of the T at %rdi, kept in %rbx (`inline`:
+    // `__deepi_<E>`, the value in a boxed enum's cell).
+    fun emit_deep_walk(var self, t: Type, inline: bool) {
+        if inline { self.emit(format("__deepi_{}:", mono_token(t))) } else { self.emit(format("__deepw_{}:", mono_token(t))) }
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("movq %rdi, %rbx")
+        match t {
+            Type.TStruct(n, a) => {
+                let info = self.struct_info(n)
+                let sub = self.type_subst(info.type_params, a)
+                var cur = 0
+                for f in info.fields {
+                    let ft = subst_type(f.ty, sub)
+                    self.deep_member("rbx", cur, ft)
+                    cur = cur + self.stored_size(ft)
+                }
+            },
+            Type.TTuple(es) => {
+                var cur = 0
+                for et in es {
+                    self.deep_member("rbx", cur, et)
+                    cur = cur + self.stored_size(et)
+                }
+            },
+            Type.TEnum(n, a) => {
+                if self.is_boxed(t) && !inline { self.deep_member("rbx", 0, t) }
+                else {
+                    let info = self.enum_info(n)
+                    let sub = self.type_subst(info.type_params, a)
+                    let done = self.label()
+                    var idx = 0
+                    for v in info.variants {
+                        if self.variant_owns(v, sub) {
+                            let nxt = self.label()
+                            self.emit(format("cmpq ${}, (%rbx)", idx))
+                            self.emit(format("jne {}", nxt))
+                            var cur = 8
+                            for ft0 in v.payload {
+                                let ft = subst_type(ft0, sub)
+                                self.deep_member("rbx", cur, ft)
+                                cur = cur + self.stored_size(ft)
+                            }
+                            self.emit(format("jmp {}", done))
+                            self.emit(format("{}:", nxt))
+                        }
+                        idx = idx + 1
+                    }
+                    self.emit(format("{}:", done))
+                }
+            },
+            _ => { self.deep_member("rbx", 0, t) },
+        }
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // The deep copy of a cell of type `t` (`deep_cell_name`): a shared cell
+    // is cloned first (its members retained, the original released), then
+    // each member is made a deep copy of its own.
+    fun emit_deep_cell(var self, t: Type) {
+        let name = self.deep_cell_name(t)
+        self.emit(format("{}:", name))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("pushq %r13")
+        self.emit("pushq %r14")
+        self.emit("movq %rdi, %rbx")
+        let unique = self.label()
+        self.emit("cmpq $1, -8(%rbx)")
+        self.emit(format("je {}", unique))
+        match t {
+            Type.TList(e) => {
+                self.register_clone(t)
+                self.emit("call " + self.clone_call_name(t))
+                self.emit("movq %rax, %rbx")
+            },
+            Type.TMap(k, v) => {
+                self.register_clone(t)
+                self.emit("call " + self.clone_call_name(t))
+                self.emit("movq %rax, %rbx")
+            },
+            _ => {
+                if is_sb_t(t) {
+                    self.need_sb = true
+                    self.emit("call __sb_clone")
+                    self.emit("movq %rax, %rbx")
+                } else {
+                    // a boxed enum: a copy of the box, its members retained
+                    self.emit("movq -16(%rbx), %rdi")
+                    self.emit("call __alloc")
+                    self.emit("movq %rax, %r12")
+                    self.emit("movq %rbx, %rsi")
+                    self.emit("movq %r12, %rdi")
+                    self.emit("movq -16(%rbx), %rcx")
+                    self.emit("cld")
+                    self.emit("rep movsb")
+                    self.owned_walk("r12", 0, t, true)
+                    self.emit("decq -8(%rbx)")
+                    self.emit("movq %r12, %rbx")
+                }
+            },
+        }
+        self.emit(format("{}:", unique))
+        match t {
+            Type.TList(e) => {
+                if self.owns_heap(e) {
+                    let stride = self.stored_size(e)
+                    self.emit("movq (%rbx), %r12")
+                    self.emit("xorq %r13, %r13")
+                    let loop = self.label()
+                    let done = self.label()
+                    self.emit(format("{}:", loop))
+                    self.emit("cmpq %r12, %r13")
+                    self.emit(format("jge {}", done))
+                    self.emit("movq %r13, %rax")
+                    self.emit(format("imulq ${}, %rax", stride))
+                    self.emit("leaq 16(%rbx,%rax), %r14")
+                    self.deep_member("r14", 0, e)
+                    self.emit("incq %r13")
+                    self.emit(format("jmp {}", loop))
+                    self.emit(format("{}:", done))
+                }
+            },
+            Type.TMap(k, v) => {
+                if self.owns_heap(k) || self.owns_heap(v) {
+                    let ss = self.map_slot_size(t)
+                    self.emit("movq 8(%rbx), %r12")
+                    self.emit("xorq %r13, %r13")
+                    let loop = self.label()
+                    let done = self.label()
+                    let cont = self.label()
+                    self.emit(format("{}:", loop))
+                    self.emit("cmpq %r12, %r13")
+                    self.emit(format("jge {}", done))
+                    self.emit("movq %r13, %rax")
+                    self.emit(format("imulq ${}, %rax", ss))
+                    self.emit("leaq 16(%rbx,%rax), %r14")
+                    self.emit("cmpq $1, (%r14)")
+                    self.emit(format("jne {}", cont))
+                    if self.owns_heap(k) { self.deep_member("r14", 8, k) }
+                    if self.owns_heap(v) { self.deep_member("r14", 16, v) }
+                    self.emit(format("{}:", cont))
+                    self.emit("incq %r13")
+                    self.emit(format("jmp {}", loop))
+                    self.emit(format("{}:", done))
+                }
+            },
+            _ => {
+                if !is_sb_t(t) {
+                    self.emit("movq %rbx, %rdi")
+                    self.emit("call " + self.register_deep_inline(t))
+                }
+            },
+        }
+        self.emit("movq %rbx, %rax")
+        self.emit("popq %r14")
+        self.emit("popq %r13")
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit("")
+    }
+
+    // The deep walk of a boxed enum's inline value (its cell's contents).
+    fun register_deep_inline(var self, t: Type) -> str {
+        let name = "__deepi_" + mono_token(t)
+        if !contains(self.helper_seen, name) {
+            self.helper_seen[name] = true
+            push(self.need_deep, t)
+            push(self.deep_inline, true)
+        }
+        return name
+    }
+
+    // `myla_<lifted>_env_deep`: an env's deep copy (`__deep_env`).
+    fun emit_env_deep(var self, lifted: str, owned: [DropEntry]) {
+        self.emit(format("myla_{}_env_deep:", lifted))
+        self.emit("pushq %rbp")
+        self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rbx")
+        self.emit("pushq %r12")
+        self.emit("movq %rdi, %rbx")
+        let unique = self.label()
+        self.emit("cmpq $1, -8(%rbx)")
+        self.emit(format("je {}", unique))
+        self.emit("movq -16(%rbx), %rdi")
+        self.emit("call __alloc")
+        self.emit("movq %rax, %r12")
+        self.emit("movq %rbx, %rsi")
+        self.emit("movq %r12, %rdi")
+        self.emit("movq -16(%rbx), %rcx")
+        self.emit("cld")
+        self.emit("rep movsb")
+        for d in owned { self.retain("r12", d.off, d.ty) }
+        self.emit("decq -8(%rbx)")
+        self.emit("movq %r12, %rbx")
+        self.emit(format("{}:", unique))
+        for d in owned { self.deep_member("rbx", d.off, d.ty) }
+        self.emit("movq %rbx, %rax")
+        self.emit("popq %r12")
+        self.emit("popq %rbx")
+        self.emit("leave")
+        self.emit("ret")
+        self.emit(format("\t.quad myla_{}_env_deep", lifted))
+    }
+
+    // `__deep_str` and `__deep_env`, the deep copies every program with tasks
+    // may need (D92).
+    fun emit_deep_runtime(var self) {
+        // a string: itself when unshared or static (its count never reaches
+        // zero), else a copy
+        self.raw("__deep_str:")
+        self.raw("\tmovq -8(%rdi), %rax")
+        self.raw("\tcmpq $1, %rax")
+        self.raw("\tje .Lds_same")
+        self.raw("\tmovabsq $2305843009213693952, %rcx")
+        self.raw("\tcmpq %rcx, %rax")
+        self.raw("\tjae .Lds_same")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq -16(%rbx), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r12")
+        self.raw("\tmovq %rbx, %rsi")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq -16(%rbx), %rcx")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw("\tdecq -8(%rbx)")
+        self.raw("\tmovq %r12, %rax")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tret")
+        self.raw(".Lds_same:")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tret")
+        self.raw("")
+        // a function value's env: none; owning nothing (`__free` its drop),
+        // itself when unshared, else a copy; else the deep copy just before
+        // its drop function
+        self.raw("__deep_env:")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lde_none")
+        self.raw("\tmovq (%rdi), %rax")
+        self.raw("\tleaq __free(%rip), %rcx")
+        self.raw("\tcmpq %rcx, %rax")
+        self.raw("\tjne .Lde_owns")
+        self.raw("\tcmpq $1, -8(%rdi)")
+        self.raw("\tje .Lde_same")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tmovq %rdi, %rbx")
+        self.raw("\tmovq -16(%rbx), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %rax, %r12")
+        self.raw("\tmovq %rbx, %rsi")
+        self.raw("\tmovq %r12, %rdi")
+        self.raw("\tmovq -16(%rbx), %rcx")
+        self.raw("\tcld")
+        self.raw("\trep movsb")
+        self.raw("\tdecq -8(%rbx)")
+        self.raw("\tmovq %r12, %rax")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tret")
+        self.raw(".Lde_owns:")
+        self.raw("\tjmp *-8(%rax)")
+        self.raw(".Lde_same:")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tret")
+        self.raw(".Lde_none:")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // -- thread state (D92, MYLA-137) ---------------------------------------
+
+    // The operand of the runtime variable `sym`, which is a thread's own in a
+    // program with tasks: in the block `%fs` holds (`tls_offset`), else at
+    // its symbol.
+    fun tv(self, sym: str) -> str {
+        if !self.frames { return sym + "(%rip)" }
+        return format("%fs:{}", tls_offset(sym))
+    }
+
+    // `reg` = the address of the runtime variable `sym`, plus `extra`.
+    fun tls_addr(var self, sym: str, extra: int32, reg: str) {
+        if !self.frames {
+            if extra == 0 { self.raw(format("\tleaq {}(%rip), %{}", sym, reg)) }
+            else { self.raw(format("\tleaq {}+{}(%rip), %{}", sym, extra, reg)) }
+            return
+        }
+        self.raw(format("\tmovq %fs:0, %{}", reg))
+        self.raw(format("\tleaq {}(%{}), %{}", tls_offset(sym) + extra, reg, reg))
+    }
+
+    // -- the executor (D90, D91: one thread) ------------------------------
+
+    // The ready frames, a ring of EXEC_CAP in `.bss`; `__exec_push` (%rdi: a
+    // frame) queues one, `__exec_run` resumes them in turn until none is
+    // left (each frame function pops its one argument word). `myla___resume`
+    // goes on with the frame at 8(%rsp), through its resume function;
+    // `myla___finish`, at a frame function's end, resumes the frame's caller
+    // in place of it, or ends its task and returns to the executor.
+    // `__exec_cur` is the frame the executor resumed last: until control
+    // comes back, what runs is that frame's task, whose first frame is at the
+    // end of the chain of callers (word 8). `__exec_main` is the entry's.
+    //
+    // A task's first frame says in its `task` word (24) how the task is:
+    // 0 running, the frame waiting for it, 1 done, 2 failed by a panic (the
+    // message in word 0, the position record in word 16) or 3 by `exit`
+    // (the code in word 0); the frame is never resumed again then.
+    fun emit_executor(var self) {
+        // Each worker has a queue of ready frames (D92, MYLA-140): a ring of
+        // its own (EXEC_CAP frames, at `__wq_rings` + its index * 8 MiB) and a
+        // record `[lock][head][tail]` (a cache line of `__wq`; the counters
+        // run either way, the ring index is the counter masked). A worker
+        // pushes onto its own queue's tail and takes its newest frame (depth
+        // first: a task's children before its siblings'), else steals the
+        // oldest frame of the next queue that has one (the biggest piece of
+        // a tree of tasks); a frame yielding a turn goes to the oldest end,
+        // behind the others. One worker keeps first in, first out: the order
+        // of the self-hosted interpreter.
+        // `__exec_seq` counts pushes, the word sleeping workers wait on
+        // (futex); `__exec_idle` counts the workers with nothing to run
+        // (spinning a while, then asleep), `__exec_sleepers` those asleep.
+        //
+        // __wq_lock: %rcx = a queue's record, whose lock is taken (clobbers
+        // %eax)
+        self.raw("__wq_lock:")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\txchgl %eax, (%rcx)")
+        self.raw("\ttestl %eax, %eax")
+        self.raw("\tjz .Lwql_got")
+        self.raw("\tpause")
+        self.raw("\tjmp __wq_lock")
+        self.raw(".Lwql_got:")
+        self.raw("\tret")
+        self.raw("")
+        // __exec_push: %rdi = a frame, onto the running worker's queue; a
+        // sleeping worker woken. Clobbers %rax and %rcx.
+        self.raw("__exec_push:")
+        self.raw("\tpushq %rdx")
+        self.raw(format("\tmovq {}, %rcx", self.tv("__worker_id")))
+        self.raw("\tmovq %rcx, %rdx")
+        self.raw("\tshlq $6, %rcx")
+        self.raw("\tleaq __wq(%rip), %rax")
+        self.raw("\taddq %rax, %rcx")
+        self.raw("\tshlq $23, %rdx")
+        self.raw("\taddq __wq_rings(%rip), %rdx")
+        self.raw("\tcall __wq_lock")
+        self.raw("\tmovq 16(%rcx), %rax")
+        self.raw("\tpushq %rax")
+        self.raw("\tsubq 8(%rcx), %rax")
+        self.raw(format("\tcmpq ${}, %rax", EXEC_CAP))
+        self.raw("\tpopq %rax")
+        self.raw("\tjae .Lexp_full")
+        self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
+        self.raw("\tmovq %rdi, (%rdx,%rax,8)")
+        self.raw("\tincq 16(%rcx)")
+        self.raw("\tmovl $0, (%rcx)")
+        self.raw("\tpopq %rdx")
+        // a worker that went to sleep before this push saw the queue empty
+        // after counting itself a sleeper: the count is read after the push
+        self.raw("\tlock incl __exec_seq(%rip)")
+        self.raw("\tcmpl $0, __exec_sleepers(%rip)")
+        self.raw("\tjne .Lexp_wake")
+        self.raw("\tret")
+        // the ring full: out of memory, the lock given back first
+        self.raw(".Lexp_full:")
+        self.raw("\tmovl $0, (%rcx)")
+        self.raw("\tpopq %rdx")
+        self.raw("\tjmp __trap_oom")
+        self.raw(".Lexp_wake:")
+        self.raw("\tpushq %rdi")
+        self.raw("\tpushq %rsi")
+        self.raw("\tpushq %rdx")
+        self.raw("\tpushq %r11")
+        self.raw("\tleaq __exec_seq(%rip), %rdi")
+        self.raw("\tmovq $129, %rsi")
+        self.raw("\tmovq $1, %rdx")
+        self.raw("\tmovq $202, %rax")
+        self.raw("\tsyscall")
+        self.raw("\tpopq %r11")
+        self.raw("\tpopq %rdx")
+        self.raw("\tpopq %rsi")
+        self.raw("\tpopq %rdi")
+        self.raw("\tret")
+        self.raw("")
+        // __exec_yield_push: %rdi = a frame yielding a turn, onto the oldest
+        // end of the running worker's queue (one worker: the newest, as any
+        // push). Clobbers %rax and %rcx.
+        self.raw("__exec_yield_push:")
+        self.raw("\tcmpl $1, __exec_workers(%rip)")
+        self.raw("\tje __exec_push")
+        self.raw("\tpushq %rdx")
+        self.raw(format("\tmovq {}, %rcx", self.tv("__worker_id")))
+        self.raw("\tmovq %rcx, %rdx")
+        self.raw("\tshlq $6, %rcx")
+        self.raw("\tleaq __wq(%rip), %rax")
+        self.raw("\taddq %rax, %rcx")
+        self.raw("\tshlq $23, %rdx")
+        self.raw("\taddq __wq_rings(%rip), %rdx")
+        self.raw("\tcall __wq_lock")
+        self.raw("\tmovq 16(%rcx), %rax")
+        self.raw("\tsubq 8(%rcx), %rax")
+        self.raw(format("\tcmpq ${}, %rax", EXEC_CAP))
+        self.raw("\tjae .Lexp_full")
+        self.raw("\tmovq 8(%rcx), %rax")
+        self.raw("\tdecq %rax")
+        self.raw("\tmovq %rax, 8(%rcx)")
+        self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
+        self.raw("\tmovq %rdi, (%rdx,%rax,8)")
+        self.raw("\tmovl $0, (%rcx)")
+        self.raw("\tpopq %rdx")
+        self.raw("\tlock incl __exec_seq(%rip)")
+        self.raw("\tcmpl $0, __exec_sleepers(%rip)")
+        self.raw("\tjne .Lexp_wake")
+        self.raw("\tret")
+        self.raw("")
+        // __exec_find: %rdi = the running worker's newest frame (one worker:
+        // its oldest), else the oldest frame of the next queue that has one;
+        // 0 when none has. Clobbers %rax, %rcx, %rdx, %rsi, %r8.
+        self.raw("__exec_find:")
+        self.raw(format("\tmovq {}, %rsi", self.tv("__worker_id")))
+        self.raw("\tcmpl $1, __exec_workers(%rip)")
+        self.raw("\tje .Lef_steal")
+        self.raw("\tmovq %rsi, %rcx")
+        self.raw("\tshlq $6, %rcx")
+        self.raw("\tleaq __wq(%rip), %rax")
+        self.raw("\taddq %rax, %rcx")
+        self.raw("\tmovq 8(%rcx), %rax")
+        self.raw("\tcmpq 16(%rcx), %rax")
+        self.raw("\tje .Lef_steal")
+        self.raw("\tcall __wq_lock")
+        self.raw("\tmovq 16(%rcx), %rax")
+        self.raw("\tcmpq 8(%rcx), %rax")
+        self.raw("\tje .Lef_mine_gone")
+        self.raw("\tdecq %rax")
+        self.raw("\tmovq %rax, 16(%rcx)")
+        self.raw("\tmovq %rsi, %rdx")
+        self.raw("\tshlq $23, %rdx")
+        self.raw("\taddq __wq_rings(%rip), %rdx")
+        self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
+        self.raw("\tmovq (%rdx,%rax,8), %rdi")
+        self.raw("\tmovl $0, (%rcx)")
+        self.raw("\tret")
+        self.raw(".Lef_mine_gone:")
+        self.raw("\tmovl $0, (%rcx)")
+        // the oldest frame of each queue in turn, starting with its own
+        self.raw(".Lef_steal:")
+        self.raw("\tmovl __exec_workers(%rip), %r8d")
+        self.raw(".Lef_next:")
+        self.raw("\tmovq %rsi, %rcx")
+        self.raw("\tshlq $6, %rcx")
+        self.raw("\tleaq __wq(%rip), %rax")
+        self.raw("\taddq %rax, %rcx")
+        // a glance first: an empty queue's lock isn't taken
+        self.raw("\tmovq 8(%rcx), %rax")
+        self.raw("\tcmpq 16(%rcx), %rax")
+        self.raw("\tje .Lef_skip")
+        self.raw("\tcall __wq_lock")
+        self.raw("\tmovq 8(%rcx), %rax")
+        self.raw("\tcmpq 16(%rcx), %rax")
+        self.raw("\tje .Lef_gone")
+        self.raw("\tmovq %rsi, %rdx")
+        self.raw("\tshlq $23, %rdx")
+        self.raw("\taddq __wq_rings(%rip), %rdx")
+        self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
+        self.raw("\tmovq (%rdx,%rax,8), %rdi")
+        self.raw("\tincq 8(%rcx)")
+        self.raw("\tmovl $0, (%rcx)")
+        self.raw("\tret")
+        self.raw(".Lef_gone:")
+        self.raw("\tmovl $0, (%rcx)")
+        self.raw(".Lef_skip:")
+        self.raw("\tincl %esi")
+        self.raw("\tcmpl __exec_workers(%rip), %esi")
+        self.raw("\tjb .Lef_wrap")
+        self.raw("\txorl %esi, %esi")
+        self.raw(".Lef_wrap:")
+        self.raw("\tdecl %r8d")
+        self.raw("\tjnz .Lef_next")
+        self.raw("\txorl %edi, %edi")
+        self.raw("\tret")
+        self.raw("")
+        // __exec_peek: %eax = 1 when some queue has a frame (a glance, no
+        // lock taken). Clobbers %rcx, %esi.
+        self.raw("__exec_peek:")
+        self.raw("\txorl %esi, %esi")
+        self.raw("\tleaq __wq(%rip), %rcx")
+        self.raw(".Lep_next:")
+        self.raw("\tcmpl __exec_workers(%rip), %esi")
+        self.raw("\tjae .Lep_none")
+        self.raw("\tmovq 8(%rcx), %rax")
+        self.raw("\tcmpq 16(%rcx), %rax")
+        self.raw("\tjne .Lep_some")
+        self.raw("\taddq $64, %rcx")
+        self.raw("\tincl %esi")
+        self.raw("\tjmp .Lep_next")
+        self.raw(".Lep_none:")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\tret")
+        self.raw(".Lep_some:")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\tret")
+        self.raw("")
+        // __exec_run: a worker's loop, resuming ready frames for good. With
+        // none anywhere it counts itself idle and only glances at the queues
+        // (it stops counting before it takes a frame, so the count is exact):
+        // a while spinning, then asleep until a push. Every worker idle and
+        // nothing queued: no task can go on, a runtime error
+        self.raw("__exec_run:")
+        self.raw(".Lexec_next:")
+        self.raw("\tcall __exec_find")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lexec_idle")
+        self.raw(format("\tmovq %rdi, {}", self.tv("__exec_cur")))
+        self.raw("\tpushq %rdi")
+        self.raw(format("\tmovq %rsp, {}", self.tv("__exec_sp")))
+        self.raw("\tcall *(%rdi)")
+        self.raw("\tjmp .Lexec_next")
+        self.raw(".Lexec_idle:")
+        self.raw("\tlock incl __exec_idle(%rip)")
+        self.raw("\tcall __exec_peek")
+        self.raw("\ttestl %eax, %eax")
+        self.raw("\tjnz .Lexec_back")
+        // everyone idle after the glance found nothing (a worker that found
+        // a frame stopped counting before it took it)
+        self.raw("\tmovl __exec_idle(%rip), %eax")
+        self.raw("\tcmpl __exec_workers(%rip), %eax")
+        self.raw("\tjae .Lexec_stuck")
+        self.raw("\tmovl $4000, %edx")
+        self.raw(".Lexec_spin:")
+        self.raw("\tcall __exec_peek")
+        self.raw("\ttestl %eax, %eax")
+        self.raw("\tjnz .Lexec_back")
+        self.raw("\tpause")
+        self.raw("\tdecl %edx")
+        self.raw("\tjnz .Lexec_spin")
+        // asleep: counted a sleeper first, then the pushes seen, then a last
+        // glance (a push after it changes `__exec_seq`, and the wait returns)
+        self.raw("\tlock incl __exec_sleepers(%rip)")
+        self.raw("\tmovl __exec_seq(%rip), %edx")
+        self.raw("\tcall __exec_peek")
+        self.raw("\ttestl %eax, %eax")
+        self.raw("\tjnz .Lexec_awake")
+        self.raw("\tleaq __exec_seq(%rip), %rdi")
+        self.raw("\tmovq $128, %rsi")
+        self.raw("\txorq %r10, %r10")
+        self.raw("\tmovq $202, %rax")
+        self.raw("\tsyscall")
+        self.raw(".Lexec_awake:")
+        self.raw("\tlock decl __exec_sleepers(%rip)")
+        self.raw(".Lexec_back:")
+        self.raw("\tlock decl __exec_idle(%rip)")
+        self.raw("\tjmp .Lexec_next")
+        // a task failed (`__task_fail`): back to the loop, the stack as the
+        // resumed frame found it, its argument word popped
+        self.raw(".Lexec_failed:")
+        self.raw(format("\tmovq {}, %rsp", self.tv("__exec_sp")))
+        self.raw("\taddq $8, %rsp")
+        self.raw("\tjmp .Lexec_next")
+        self.raw(".Lexec_stuck:")
+        self.raw("\tleaq .Lmsg_stuck(%rip), %rdi")
+        self.raw("\tcall __write_err")
+        self.raw("\tmovq $231, %rax")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tsyscall")
+        self.raw("")
+        self.raw("myla___resume:")
+        self.raw("\tmovq 8(%rsp), %rax")
+        self.raw("\tjmp *(%rax)")
+        self.raw("")
+        self.raw("myla___finish:")
+        self.raw("\tmovq 8(%rsp), %rax")
+        self.raw("\tmovq 8(%rax), %rcx")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Lfinish_task")
+        self.raw("\tmovq %rcx, 8(%rsp)")
+        self.raw("\tjmp *(%rcx)")
+        // a task's first frame: its task ends; the frame waiting for it, in
+        // its `task` word, goes on, and the word says done (1)
+        self.raw(".Lfinish_task:")
+        // the entry's task: the program ends (its children have ended)
+        self.raw("\tcmpq __exec_main(%rip), %rax")
+        self.raw("\tje .Lfinish_program")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\txchgq %rdi, 24(%rax)")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lfinish_none")
+        self.raw("\tcall __exec_push")
+        self.raw(".Lfinish_none:")
+        self.raw("\tret $8")
+        self.raw(".Lfinish_program:")
+        self.raw("\tmovq $231, %rax")
+        self.raw("\txorq %rdi, %rdi")
+        self.raw("\tsyscall")
+        self.raw("")
+        // __task_fail: a panic (%rdi 2, %rsi the message, %rdx the position)
+        // or an `exit` (%rdi 3, %rsi the code) in a task other than the
+        // entry's is held for its parent's `await` or scope end, as in the
+        // interpreters (D89): recorded in the task's first frame, the frame
+        // waiting for it queued, and the executor goes on. Returns (%rax 0)
+        // when the entry's task fails or no task runs: the program ends.
+        self.raw("__task_fail:")
+        self.raw(format("\tmovq {}, %rax", self.tv("__exec_cur")))
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Ltf_now")
+        self.raw(".Ltf_root:")
+        self.raw("\tmovq 8(%rax), %rcx")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Ltf_found")
+        self.raw("\tmovq %rcx, %rax")
+        self.raw("\tjmp .Ltf_root")
+        self.raw(".Ltf_found:")
+        self.raw("\tcmpq __exec_main(%rip), %rax")
+        self.raw("\tje .Ltf_now")
+        self.raw("\tmovq %rsi, (%rax)")
+        self.raw("\tmovq %rdx, 16(%rax)")
+        // an actor the task held goes to the next frame waiting for it
+        self.raw(format("\tmovq {}, %rcx", self.tv("__actor_held")))
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Ltf_unheld")
+        self.raw("\tpushq %rax")
+        self.raw("\tpushq %rdi")
+        self.raw("\tmovq %rcx, %rdi")
+        self.raw("\tcall __actor_leave")
+        self.raw("\tpopq %rdi")
+        self.raw("\tpopq %rax")
+        self.raw(".Ltf_unheld:")
+        self.raw("\txchgq %rdi, 24(%rax)")
+        self.raw("\tmovq %rdi, %rcx")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjz .Lexec_failed")
+        self.raw("\tmovq %rcx, %rdi")
+        self.raw("\tcall __exec_push")
+        self.raw("\tjmp .Lexec_failed")
+        self.raw(".Ltf_now:")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\tret")
+        self.raw("")
+        // __start_workers: the workers besides the main thread (worker 0),
+        // as many as `__workers_count` says; each a thread (clone: the
+        // address space, files, signal handlers and thread group shared,
+        // CLONE_SETTLS) with its state block and an 8 MiB stack, running
+        // `__exec_run`
+        self.raw("__start_workers:")
+        self.raw("\tpushq %rbx")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tcall __workers_count")
+        self.raw("\tmovl %eax, __exec_workers(%rip)")
+        self.raw("\tmovq $1, %rbx")
+        self.raw(".Lsw_next:")
+        self.raw("\tcmpl __exec_workers(%rip), %ebx")
+        self.raw("\tjae .Lsw_done")
+        self.raw("\tmovq %rbx, %r12")
+        self.raw(format("\timulq ${}, %r12", TLS_SIZE))
+        self.raw("\tleaq __tls_blocks(%rip), %rax")
+        self.raw("\taddq %rax, %r12")
+        self.raw("\tmovq %r12, (%r12)")
+        self.raw(format("\tmovq %rbx, {}(%r12)", tls_offset("__worker_id")))
+        self.raw("\tmovq $9, %rax")
+        self.raw("\txorq %rdi, %rdi")
+        self.raw("\tmovq $8388608, %rsi")
+        self.raw("\tmovq $3, %rdx")
+        self.raw("\tmovq $147490, %r10")
+        self.raw("\tmovq $-1, %r8")
+        self.raw("\txorq %r9, %r9")
+        self.raw("\tsyscall")
+        self.raw("\tcmpq $-4096, %rax")
+        self.raw("\tja .Lsw_short")
+        self.raw("\tleaq 8388608(%rax), %rsi")
+        self.raw("\tmovq $855808, %rdi")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw("\txorq %r10, %r10")
+        self.raw("\tmovq %r12, %r8")
+        self.raw("\tmovq $56, %rax")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lsw_child")
+        self.raw("\tjs .Lsw_short")
+        self.raw("\tincq %rbx")
+        self.raw("\tjmp .Lsw_next")
+        // the new thread, on its stack
+        self.raw(".Lsw_child:")
+        self.raw("\tjmp __exec_run")
+        // no more threads to be had: the workers made so far
+        self.raw(".Lsw_short:")
+        self.raw("\tmovl %ebx, __exec_workers(%rip)")
+        self.raw(".Lsw_done:")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbx")
+        self.raw("\tret")
+        self.raw("")
+        // __workers_count: %eax = MYLA_THREADS when the environment has it,
+        // else the CPUs this process may run on (sched_getaffinity); at least
+        // 1, at most MAX_WORKERS
+        self.raw("__workers_count:")
+        self.raw("\tmovq __envp(%rip), %rsi")
+        self.raw(".Lwc_env:")
+        self.raw("\tmovq (%rsi), %rdi")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lwc_cpus")
+        self.raw("\tleaq .Lmyla_threads(%rip), %rcx")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw(".Lwc_cmp:")
+        self.raw("\tmovb (%rcx,%rdx), %al")
+        self.raw("\tcmpb (%rdi,%rdx), %al")
+        self.raw("\tjne .Lwc_skip")
+        self.raw("\tincq %rdx")
+        self.raw("\tcmpq $13, %rdx")
+        self.raw("\tjb .Lwc_cmp")
+        // the digits after `MYLA_THREADS=`
+        self.raw("\taddq $13, %rdi")
+        self.raw("\txorl %eax, %eax")
+        self.raw(".Lwc_digit:")
+        self.raw("\tmovzbl (%rdi), %ecx")
+        self.raw("\tsubl $48, %ecx")
+        self.raw("\tcmpl $9, %ecx")
+        self.raw("\tja .Lwc_clamp")
+        self.raw("\timull $10, %eax")
+        self.raw("\taddl %ecx, %eax")
+        self.raw("\tcmpl $100000, %eax")
+        self.raw("\tja .Lwc_clamp")
+        self.raw("\tincq %rdi")
+        self.raw("\tjmp .Lwc_digit")
+        self.raw(".Lwc_skip:")
+        self.raw("\taddq $8, %rsi")
+        self.raw("\tjmp .Lwc_env")
+        self.raw(".Lwc_cpus:")
+        self.raw("\tsubq $128, %rsp")
+        self.raw("\tmovq $204, %rax")
+        self.raw("\txorq %rdi, %rdi")
+        self.raw("\tmovq $128, %rsi")
+        self.raw("\tmovq %rsp, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\tmovq %rax, %rsi")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\ttestq %rsi, %rsi")
+        self.raw("\tjle .Lwc_counted")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw(".Lwc_byte:")
+        self.raw("\tmovzbl (%rsp,%rdx), %ecx")
+        self.raw(".Lwc_bit:")
+        self.raw("\ttestl %ecx, %ecx")
+        self.raw("\tjz .Lwc_bytedone")
+        self.raw("\tleal -1(%rcx), %edi")
+        self.raw("\tandl %edi, %ecx")
+        self.raw("\tincl %eax")
+        self.raw("\tjmp .Lwc_bit")
+        self.raw(".Lwc_bytedone:")
+        self.raw("\tincq %rdx")
+        self.raw("\tcmpq %rsi, %rdx")
+        self.raw("\tjb .Lwc_byte")
+        self.raw(".Lwc_counted:")
+        self.raw("\taddq $128, %rsp")
+        self.raw(".Lwc_clamp:")
+        self.raw("\ttestl %eax, %eax")
+        self.raw("\tjnz .Lwc_some")
+        self.raw("\tmovl $1, %eax")
+        self.raw(".Lwc_some:")
+        self.raw(format("\tcmpl ${}, %eax", MAX_WORKERS))
+        self.raw("\tjbe .Lwc_ok")
+        self.raw(format("\tmovl ${}, %eax", MAX_WORKERS))
+        self.raw(".Lwc_ok:")
+        self.raw("\tret")
+        self.raw("")
+        // myla___yield(frame): a turn for the others, the frame queued again
+        // (its resume point stored before this tail call, D92)
+        self.raw("myla___yield:")
+        self.raw("\tmovq 8(%rsp), %rdi")
+        self.raw("\tcall __exec_yield_push")
+        self.raw("\tret $8")
+        self.raw("")
+        // myla___wait(child, frame): the frame parks in the child task's
+        // `task` word if it is still running (0), else goes on at once
+        self.raw("myla___wait:")
+        self.raw("\tmovq 8(%rsp), %rcx")
+        self.raw("\tmovq 16(%rsp), %rdx")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\tlock cmpxchgq %rdx, 24(%rcx)")
+        self.raw("\tjne .Lresume_second")
+        self.raw("\tret $16")
+        // the frame in the second argument word resumed in place of the
+        // runtime function, the first word dropped
+        self.raw(".Lresume_second:")
+        self.raw("\tmovq 16(%rsp), %rax")
+        self.raw("\tmovq (%rsp), %rcx")
+        self.raw("\taddq $8, %rsp")
+        self.raw("\tmovq %rcx, (%rsp)")
+        self.raw("\tjmp *(%rax)")
+        self.raw("")
+        // myla___actor_enter(record, frame): an actor's executor (D92),
+        // `[lock][running][first waiting][last]`; free, the frame goes on
+        // holding it; busy, the frame joins its queue (linked through its
+        // word 32) and the worker returns to the executor
+        self.raw("myla___actor_enter:")
+        self.raw("\tmovq 8(%rsp), %rcx")
+        self.raw("\tmovq 16(%rsp), %rdx")
+        self.raw(".Lae_lock:")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\txchgq %rax, (%rcx)")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lae_locked")
+        self.raw("\tpause")
+        self.raw("\tjmp .Lae_lock")
+        self.raw(".Lae_locked:")
+        self.raw("\tcmpq $0, 8(%rcx)")
+        self.raw("\tjne .Lae_busy")
+        self.raw("\tmovq $1, 8(%rcx)")
+        self.raw("\tmovq $0, (%rcx)")
+        self.raw("\tjmp .Lresume_second")
+        self.raw(".Lae_busy:")
+        self.raw("\tmovq $0, 32(%rdx)")
+        self.raw("\tmovq 24(%rcx), %rax")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lae_first")
+        self.raw("\tmovq %rdx, 32(%rax)")
+        self.raw("\tjmp .Lae_linked")
+        self.raw(".Lae_first:")
+        self.raw("\tmovq %rdx, 16(%rcx)")
+        self.raw(".Lae_linked:")
+        self.raw("\tmovq %rdx, 24(%rcx)")
+        self.raw("\tmovq $0, (%rcx)")
+        self.raw("\tret $16")
+        self.raw("")
+        // __actor_leave: %rdi = an actor's executor; the first frame waiting
+        // is queued to run, holding the actor, or the actor is free
+        self.raw("__actor_leave:")
+        self.raw(format("\tmovq $0, {}", self.tv("__actor_held")))
+        self.raw(".Lal_lock:")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\txchgq %rax, (%rdi)")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lal_locked")
+        self.raw("\tpause")
+        self.raw("\tjmp .Lal_lock")
+        self.raw(".Lal_locked:")
+        self.raw("\tmovq 16(%rdi), %rax")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Lal_free")
+        self.raw("\tmovq 32(%rax), %rcx")
+        self.raw("\tmovq %rcx, 16(%rdi)")
+        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tjnz .Lal_more")
+        self.raw("\tmovq $0, 24(%rdi)")
+        self.raw(".Lal_more:")
+        self.raw("\tmovq $0, (%rdi)")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tjmp __exec_push")
+        self.raw(".Lal_free:")
+        self.raw("\tmovq $0, 8(%rdi)")
+        self.raw("\tmovq $0, (%rdi)")
+        self.raw("\tret")
+        self.raw("")
+        // __actor_held: %rdi = the executor of the actor the running task
+        // now holds, for a failure to release it
+        self.raw("__actor_held:")
+        self.raw(format("\tmovq %rdi, {}", self.tv("__actor_held")))
+        self.raw("\tret")
+        self.raw("")
+        // __task_exit: `exit` (%edi the code) when tasks take turns
+        self.raw("__task_exit:")
+        self.raw("\tpushq %rdi")
+        self.raw("\tmovslq %edi, %rsi")
+        self.raw("\tmovq $3, %rdi")
+        self.raw("\tcall __task_fail")
+        self.raw("\tpopq %rdi")
+        self.raw("\tmovq $231, %rax")
+        self.raw("\tsyscall")
+        self.raw("")
+        // __task_check: a waited-for task (%rdi, its first frame) has ended;
+        // a failure in it is raised here
+        self.raw("__task_check:")
+        self.raw("\tmovq 24(%rdi), %rax")
+        self.raw("\tcmpq $2, %rax")
+        self.raw("\tje .Ltc_panic")
+        self.raw("\tcmpq $3, %rax")
+        self.raw("\tje .Ltc_exit")
+        self.raw("\tret")
+        self.raw(".Ltc_panic:")
+        self.raw("\tmovq 16(%rdi), %rsi")
+        self.raw("\tmovq (%rdi), %rdi")
+        self.raw("\tjmp __panic")
+        self.raw(".Ltc_exit:")
+        self.raw("\tmovq (%rdi), %rdi")
+        self.raw("\tjmp __task_exit")
+        self.raw("")
     }
 
     // -- functions --------------------------------------------------------
@@ -1905,13 +2952,56 @@ impl CodeGen {
             self.ir_blocked = blocked_types(self)
             self.ir_ready = true
         }
-        self.emit_ir(self.take_ir(lower_function(self, fd, mangled), mangled), fd, mangled)
+        var body_fd = fd
+        if self.frames && fd.is_async { body_fd = self.normalized_fn(fd) }
+        self.emit_ir(self.take_ir(lower_function(self, body_fd, mangled), mangled), body_fd, mangled)
+    }
+
+    // `fd` with its body normalized for its frame function: each `await` in
+    // a `let` of its own (D90); the new nodes' types join `resolved`.
+    fun normalized_fn(var self, fd: FunData) -> FunData {
+        match fd.body {
+            Some(b) => {
+                self.norm.resolved = self.resolved
+                self.resolved = [:]
+                let nb = self.norm.block(b)
+                self.resolved = self.norm.resolved
+                self.norm.resolved = [:]
+                return FunData { line: fd.line, col: fd.col, sp: fd.sp, name: fd.name, params: fd.params, ret_type: fd.ret_type, body: Some(nb), attributes: fd.attributes, type_params: fd.type_params, receiver: fd.receiver, is_pub: fd.is_pub, is_async: fd.is_async }
+            },
+            None => {},
+        }
+        return fd
+    }
+
+    // Whether `name` is an async function or method that runs on a frame.
+    fun is_async_fn(self, name: str) -> bool {
+        if !self.frames || !self.has_func(name) { return false }
+        let sig = self.sig_of(name)
+        return sig.has_decl && sig.decl.is_async
+    }
+
+    // Whether node `id` has a type: an expression with a value.
+    fun has_type(self, id: int32) -> bool {
+        return contains(self.resolved, id)
     }
 
     // A lambda's body (MYLA-106), under the substitution of the function
     // that made it; then its environment's release function.
-    fun gen_any_lambda(var self, job: LamJob) {
-        self.subst = job.subst
+    fun gen_any_lambda(var self, job0: LamJob) {
+        self.subst = job0.subst
+        var job = job0
+        // an async lambda runs on a frame, its body normalized (D90)
+        if self.frames && is_async_t(job.ftype) {
+            self.norm.resolved = self.resolved
+            self.resolved = [:]
+            match job.body {
+                ExprOrBlock.EB_Block(b) => { job.body = ExprOrBlock.EB_Block(self.norm.block(b)) },
+                ExprOrBlock.EB_Expr(ex) => { job.body = ExprOrBlock.EB_Block(self.norm.returning(ex, false)) },
+            }
+            self.resolved = self.norm.resolved
+            self.norm.resolved = [:]
+        }
         let f = self.take_ir(lower_lambda(self, job), job.lifted)
         self.emit_ir_at(f, job.id, job.line, job.col, job.lifted)
         var owned: [DropEntry] = []
@@ -1960,6 +3050,15 @@ impl CodeGen {
     // its mangled name, and queued from `IrFunc.instances`).
     fun request_plain(var self, name: str) {
         if self.has_func(name) && len(self.sig_of(name).type_params) == 0 { let m = self.request_fn(name, []) }
+        // an async function's `__new` (D90): the function itself, whose
+        // frame function emits it
+        let n = len(name)
+        if n > 5 && name[n - 5] == '_' && name[n - 4] == '_' && name[n - 3] == 'n' && name[n - 2] == 'e' && name[n - 1] == 'w' {
+            var sb = StringBuilder()
+            append(sb, name, 0, n - 5)
+            let base = build(sb)
+            if self.has_func(base) && len(self.sig_of(base).type_params) == 0 { let m = self.request_fn(base, []) }
+        }
     }
 
     // -- statements -------------------------------------------------------
@@ -2516,6 +3615,9 @@ impl CodeGen {
     // `myla_<lifted>_env_drop(%rdi = env)`: release the env's owned values, then
     // tail-call __free on the cell (reached through __func_drop at refcount 0).
     fun emit_env_drop(var self, lifted: str, owned: [DropEntry]) {
+        // with tasks, the env's deep copy, found just before its drop
+        // function by `__deep_env` (D92)
+        if self.frames { self.emit_env_deep(lifted, owned) }
         self.emit(format("myla_{}_env_drop:", lifted))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
@@ -2535,6 +3637,17 @@ impl CodeGen {
     // `myla_<fn>`, which pops the arguments and so all its caller pushed.
     fun emit_fnval_thunk(var self, n: str) {
         let sig = self.sig_of(n)
+        if self.is_async_fn(n) {
+            // an async function's value makes its frame (D90): its env word
+            // dropped, `__new` takes the arguments (with references of its own)
+            self.emit(format("myla_{}__fnval:", n))
+            self.emit("movq (%rsp), %rax")
+            self.emit("movq %rax, 8(%rsp)")
+            self.emit("addq $8, %rsp")
+            self.emit(format("jmp myla_{}__new", n))
+            self.emit("")
+            return
+        }
         let struct_ret = is_aggregate_opt(sig.ret)
         var byval = false
         var k = 0
@@ -2700,6 +3813,7 @@ impl CodeGen {
         match e.kind {
             ExprKind.Name(n) => { if !list_has_str(bound, n) { push(out, n) } },
             ExprKind.Unary(op, x) => { for v in self.free_expr(x, bound) { push(out, v) } },
+            ExprKind.Await(x) => { for v in self.free_expr(x, bound) { push(out, v) } },
             ExprKind.Binary(op, l, r) => {
                 for v in self.free_expr(l, bound) { push(out, v) }
                 for v in self.free_expr(r, bound) { push(out, v) }
@@ -2785,17 +3899,67 @@ impl CodeGen {
     fun emit_runtime_prelude(var self, entry_name: str) {
         self.raw("\t.global _start")
         self.raw("_start:")
+        if self.frames {
+            // the main thread's state block, worker 0's: arch_prctl(
+            // ARCH_SET_FS, block), its first word its own address
+            self.raw("\tleaq __tls_blocks(%rip), %rsi")
+            self.raw("\tmovq %rsi, (%rsi)")
+            self.raw("\tmovq $4098, %rdi")
+            self.raw("\tmovq $158, %rax")
+            self.raw("\tsyscall")
+            // the heap region, an arena per worker, reserved (MAP_NORESERVE)
+            self.raw("\tmovq $9, %rax")
+            self.raw("\txorq %rdi, %rdi")
+            // MAX_WORKERS (32) arenas of 4 GiB
+            self.raw("\tmovabsq $137438953472, %rsi")
+            self.raw("\tmovq $3, %rdx")
+            self.raw("\tmovq $16418, %r10")
+            self.raw("\tmovq $-1, %r8")
+            self.raw("\txorq %r9, %r9")
+            self.raw("\tsyscall")
+            self.raw("\tcmpq $-4096, %rax")
+            self.raw("\tja __trap_oom")
+            self.raw("\tmovq %rax, __heap_base(%rip)")
+            // the workers' rings of ready frames, EXEC_CAP frames each
+            self.raw("\tmovq $9, %rax")
+            self.raw("\txorq %rdi, %rdi")
+            self.raw(format("\tmovq ${}, %rsi", 8 * EXEC_CAP * MAX_WORKERS))
+            self.raw("\tmovq $3, %rdx")
+            self.raw("\tmovq $16418, %r10")
+            self.raw("\tmovq $-1, %r8")
+            self.raw("\txorq %r9, %r9")
+            self.raw("\tsyscall")
+            self.raw("\tcmpq $-4096, %rax")
+            self.raw("\tja __trap_oom")
+            self.raw("\tmovq %rax, __wq_rings(%rip)")
+        }
         self.raw("\tmovq (%rsp), %rax")
         self.raw("\tmovq %rax, __argc(%rip)")
         self.raw("\tleaq 8(%rsp), %rcx")
         self.raw("\tmovq %rcx, __argv(%rip)")
         self.raw("\tleaq 16(%rsp,%rax,8), %rcx")
         self.raw("\tmovq %rcx, __envp(%rip)")
-        self.raw(format("\tcall myla_{}", entry_name))
-        self.raw("\tmovq $60, %rax")
+        // with tasks, the other workers (D92)
+        if self.frames { self.raw("\tcall __start_workers") }
+        if self.frames && self.sig_of(entry_name).decl.is_async {
+            // the entry's task: its frame queued, the executor run (D90)
+            self.raw(format("\tcall myla_{}__new", entry_name))
+            self.raw("\tmovq %rax, __exec_main(%rip)")
+            self.raw("\tmovq %rax, %rdi")
+            self.raw("\tcall __exec_push")
+            self.raw("\tcall __exec_run")
+        } else {
+            self.raw(format("\tcall myla_{}", entry_name))
+        }
+        // exit_group: every thread ends (D89 (3))
+        self.raw("\tmovq $231, %rax")
         self.raw("\txorq %rdi, %rdi")
         self.raw("\tsyscall")
         self.raw("")
+        if self.frames {
+            self.emit_executor()
+            self.emit_deep_runtime()
+        }
         // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
         // (MYLA-17); the message is the interpreter's, without the values. The
         // caller passes the position record in %rsi; out of memory has none.
@@ -2830,6 +3994,17 @@ impl CodeGen {
         // __panic: %rdi -> the message, %rsi -> the position record or 0;
         // `runtime error: <message>`, then `  --> file:line:col` (MYLA-65).
         self.raw("__panic:")
+        if self.frames {
+            // held for the parent when a task other than the entry's fails
+            self.raw("\tpushq %rsi")
+            self.raw("\tpushq %rdi")
+            self.raw("\tmovq %rsi, %rdx")
+            self.raw("\tmovq %rdi, %rsi")
+            self.raw("\tmovq $2, %rdi")
+            self.raw("\tcall __task_fail")
+            self.raw("\tpopq %rdi")
+            self.raw("\tpopq %rsi")
+        }
         self.raw("\tpushq %rsi")
         self.raw("\tpushq %rdi")
         self.raw("\tleaq .Lmsg_rterr(%rip), %rdi")
@@ -2859,7 +4034,7 @@ impl CodeGen {
         self.raw("\tmovq $1, %rdx")
         self.raw("\tcall __write_all")
         self.raw("\taddq $16, %rsp")
-        self.raw("\tmovq $60, %rax")
+        self.raw("\tmovq $231, %rax")
         self.raw("\tmovq $1, %rdi")
         self.raw("\tsyscall")
         self.raw("")
@@ -2894,24 +4069,51 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
-        self.raw("__print_nl:")
-        self.raw("\tsubq $16, %rsp")
-        self.raw("\tmovb $10, (%rsp)")
+        // __print_line: the %rdx bytes at %rsi and a newline, written to
+        // stdout with one `writev`, so a line printed while other threads
+        // print stays whole (D89 (3)); a short write finishes the rest
+        self.raw("__print_line:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tsubq $48, %rsp")
+        self.raw("\tmovq %rsi, -48(%rbp)")
+        self.raw("\tmovq %rdx, -40(%rbp)")
+        self.raw("\tmovb $10, -1(%rbp)")
+        self.raw("\tleaq -1(%rbp), %rax")
+        self.raw("\tmovq %rax, -32(%rbp)")
+        self.raw("\tmovq $1, -24(%rbp)")
+        self.raw(".Lpln_again:")
+        self.raw("\tmovq $20, %rax")
         self.raw("\tmovq $1, %rdi")
-        self.raw("\tmovq %rsp, %rsi")
+        self.raw("\tleaq -48(%rbp), %rsi")
+        self.raw("\tmovq $2, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\tcmpq $-4, %rax")
+        self.raw("\tje .Lpln_again")
+        self.raw("\tcmpq $-11, %rax")
+        self.raw("\tje .Lpln_again")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjs .Lpln_done")
+        self.raw("\tmovq -40(%rbp), %rdx")
+        self.raw("\tcmpq %rdx, %rax")
+        self.raw("\tjae .Lpln_tail")
+        self.raw("\tmovq -48(%rbp), %rsi")
+        self.raw("\taddq %rax, %rsi")
+        self.raw("\tsubq %rax, %rdx")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tcall __write_all")
+        self.raw("\tjmp .Lpln_nl")
+        self.raw(".Lpln_tail:")
+        self.raw("\tleaq 1(%rdx), %rcx")
+        self.raw("\tcmpq %rcx, %rax")
+        self.raw("\tje .Lpln_done")
+        self.raw(".Lpln_nl:")
+        self.raw("\tmovq $1, %rdi")
+        self.raw("\tleaq -1(%rbp), %rsi")
         self.raw("\tmovq $1, %rdx")
         self.raw("\tcall __write_all")
-        self.raw("\taddq $16, %rsp")
-        self.raw("\tret")
-        self.raw("")
-        self.raw("__print_minus:")
-        self.raw("\tsubq $16, %rsp")
-        self.raw("\tmovb $45, (%rsp)")
-        self.raw("\tmovq $1, %rdi")
-        self.raw("\tmovq %rsp, %rsi")
-        self.raw("\tmovq $1, %rdx")
-        self.raw("\tcall __write_all")
-        self.raw("\taddq $16, %rsp")
+        self.raw(".Lpln_done:")
+        self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
         self.raw("__print_uint:")
@@ -2921,43 +4123,44 @@ impl CodeGen {
         self.raw("\tmovq %rdi, %rax")
         self.raw("\tleaq -1(%rbp), %rsi")
         self.raw("\tmovq $10, %rcx")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjnz .Lpu_loop")
-        self.raw("\tmovb $48, (%rsi)")
-        self.raw("\tdecq %rsi")
-        self.raw("\tjmp .Lpu_done")
         self.raw(".Lpu_loop:")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lpu_done")
         self.raw("\txorq %rdx, %rdx")
         self.raw("\tdivq %rcx")
         self.raw("\taddb $48, %dl")
         self.raw("\tmovb %dl, (%rsi)")
         self.raw("\tdecq %rsi")
-        self.raw("\tjmp .Lpu_loop")
-        self.raw(".Lpu_done:")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjnz .Lpu_loop")
         self.raw("\tincq %rsi")
+        self.raw(".Lpu_done:")
         self.raw("\tmovq %rbp, %rdx")
         self.raw("\tsubq %rsi, %rdx")
-        self.raw("\tmovq $1, %rdi")
-        self.raw("\tcall __write_all")
-        self.raw("\tcall __print_nl")
+        self.raw("\tcall __print_line")
         self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
+        // a negative one: its magnitude's digits (unsigned, so the most
+        // negative too) after a '-'
         self.raw("__print_int:")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjns __print_uint")
         self.raw("\tpushq %rbp")
         self.raw("\tmovq %rsp, %rbp")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjns .Lpi_pos")
-        self.raw("\tpushq %rdi")
-        self.raw("\tcall __print_minus")
-        self.raw("\tpopq %rdi")
-        self.raw("\tnegq %rdi")
-        self.raw(".Lpi_pos:")
-        self.raw("\tcall __print_uint")
-        self.raw("\tleave")
-        self.raw("\tret")
+        self.raw("\tsubq $48, %rsp")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tnegq %rax")
+        self.raw("\tleaq -1(%rbp), %rsi")
+        self.raw("\tmovq $10, %rcx")
+        self.raw(".Lpi_loop:")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw("\tdivq %rcx")
+        self.raw("\taddb $48, %dl")
+        self.raw("\tmovb %dl, (%rsi)")
+        self.raw("\tdecq %rsi")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjnz .Lpi_loop")
+        self.raw("\tmovb $45, (%rsi)")
+        self.raw("\tjmp .Lpu_done")
         self.raw("")
         self.raw("__print_bool:")
         self.raw("\ttestq %rdi, %rdi")
@@ -2969,18 +4172,12 @@ impl CodeGen {
         self.raw("\tleaq .Lbool_false(%rip), %rsi")
         self.raw("\tmovq $5, %rdx")
         self.raw(".Lpb_write:")
-        self.raw("\tmovq $1, %rdi")
-        self.raw("\tcall __write_all")
-        self.raw("\tcall __print_nl")
-        self.raw("\tret")
+        self.raw("\tjmp __print_line")
         self.raw("")
         self.raw("__print_str:")
         self.raw("\tmovq (%rdi), %rdx")
         self.raw("\tleaq 8(%rdi), %rsi")
-        self.raw("\tmovq $1, %rdi")
-        self.raw("\tcall __write_all")
-        self.raw("\tcall __print_nl")
-        self.raw("\tret")
+        self.raw("\tjmp __print_line")
         self.raw("")
         // __str_eq: the same string, or equal lengths and bytes, compared
         // eight at a time (MYLA-133); %rax = 1 or 0, clobbers %rcx %rdi %rsi
@@ -3144,35 +4341,49 @@ impl CodeGen {
         self.raw("\tret")
         self.raw("")
         self.raw("__heap_init:")
-        self.raw("\tpushq %rdi")
-        self.raw("\tmovq $9, %rax")
-        self.raw("\txorq %rdi, %rdi")
-        self.raw("\tmovabsq $4294967296, %rsi")
-        self.raw("\tmovq $3, %rdx")
-        self.raw("\tmovq $34, %r10")
-        self.raw("\tmovq $-1, %r8")
-        self.raw("\txorq %r9, %r9")
-        self.raw("\tsyscall")
-        self.raw("\tcmpq $-4096, %rax")
-        self.raw("\tja __trap_oom")
-        self.raw("\tmovq %rax, __heap_ptr(%rip)")
-        self.raw("\tmovabsq $4294967296, %rcx")
-        self.raw("\taddq %rcx, %rax")
-        self.raw("\tmovq %rax, __heap_end(%rip)")
-        self.raw("\tpopq %rdi")
-        self.raw("\tret")
-        self.raw("")
+        if self.frames {
+            // with tasks: this worker's arena of the region `_start` reserved
+            self.raw(format("\tmovq {}, %rax", self.tv("__worker_id")))
+            self.raw("\tshlq $32, %rax")
+            self.raw("\taddq __heap_base(%rip), %rax")
+            self.raw(format("\tmovq %rax, {}", self.tv("__heap_ptr")))
+            self.raw("\tmovabsq $4294967296, %rcx")
+            self.raw("\taddq %rcx, %rax")
+            self.raw(format("\tmovq %rax, {}", self.tv("__heap_end")))
+            self.raw("\tret")
+            self.raw("")
+            self.emit_heap_remote()
+        } else {
+            self.raw("\tpushq %rdi")
+            self.raw("\tmovq $9, %rax")
+            self.raw("\txorq %rdi, %rdi")
+            self.raw("\tmovabsq $4294967296, %rsi")
+            self.raw("\tmovq $3, %rdx")
+            self.raw("\tmovq $34, %r10")
+            self.raw("\tmovq $-1, %r8")
+            self.raw("\txorq %r9, %r9")
+            self.raw("\tsyscall")
+            self.raw("\tcmpq $-4096, %rax")
+            self.raw("\tja __trap_oom")
+            self.raw(format("\tmovq %rax, {}", self.tv("__heap_ptr")))
+            self.raw("\tmovabsq $4294967296, %rcx")
+            self.raw("\taddq %rcx, %rax")
+            self.raw(format("\tmovq %rax, {}", self.tv("__heap_end")))
+            self.raw("\tpopq %rdi")
+            self.raw("\tret")
+            self.raw("")
+        }
         self.raw("__alloc:")
         self.raw("\taddq $7, %rdi")
         self.raw("\tandq $-8, %rdi")
-        self.raw("\tmovq __heap_end(%rip), %rax")
+        self.raw(format("\tmovq {}, %rax", self.tv("__heap_end")))
         self.raw("\ttestq %rax, %rax")
         self.raw("\tjnz .Lalloc_ready")
         self.raw("\tcall __heap_init")
         self.raw(".Lalloc_ready:")
         self.raw("\tcmpq $4096, %rdi")
         self.raw("\tja .Lalloc_large")
-        self.raw("\tleaq __free_buckets(%rip), %r8")
+        self.tls_addr("__free_buckets", 0, "r8")
         self.raw("\tmovq (%r8,%rdi), %rsi")
         self.raw("\ttestq %rsi, %rsi")
         self.raw("\tjz .Lalloc_bump")
@@ -3187,7 +4398,7 @@ impl CodeGen {
         self.raw("\taddq $1, %rcx")
         self.raw("\tmovq $1, %rdi")
         self.raw("\tshlq %cl, %rdi")
-        self.raw("\tleaq __free_buckets+4104(%rip), %r8")
+        self.tls_addr("__free_buckets", 4104, "r8")
         self.raw("\tmovq (%r8,%rcx,8), %rsi")
         self.raw("\ttestq %rsi, %rsi")
         self.raw("\tjz .Lalloc_bump")
@@ -3197,11 +4408,16 @@ impl CodeGen {
         self.raw("\tmovq %rsi, %rax")
         self.raw("\tret")
         self.raw(".Lalloc_bump:")
-        self.raw("\tmovq __heap_ptr(%rip), %rax")
+        if self.frames {
+            // cells other workers freed come back first
+            self.raw(format("\tcmpq $0, {}", self.tv("__remote_free")))
+            self.raw("\tjne .Lalloc_drain")
+        }
+        self.raw(format("\tmovq {}, %rax", self.tv("__heap_ptr")))
         self.raw("\tleaq 16(%rax,%rdi), %rcx")
-        self.raw("\tcmpq __heap_end(%rip), %rcx")
+        self.raw(format("\tcmpq {}, %rcx", self.tv("__heap_end")))
         self.raw("\tja __trap_oom")
-        self.raw("\tmovq %rcx, __heap_ptr(%rip)")
+        self.raw(format("\tmovq %rcx, {}", self.tv("__heap_ptr")))
         self.raw("\tmovq %rdi, (%rax)")
         self.raw("\tmovq $1, 8(%rax)")
         self.raw("\tleaq 16(%rax), %rax")
@@ -3213,20 +4429,41 @@ impl CodeGen {
         self.raw("\tpushq %rsi")
         self.raw("\tpushq %r8")
         self.raw("\tpushq %rcx")
+        if self.frames {
+            // another worker's cell goes back to it (D92)
+            self.raw("\tmovq %rdi, %rax")
+            self.raw("\tsubq __heap_base(%rip), %rax")
+            self.raw("\tshrq $32, %rax")
+            self.raw(format("\tcmpq {}, %rax", self.tv("__worker_id")))
+            self.raw("\tjne .Lfree_remote")
+        }
         self.raw("\tmovq -16(%rdi), %rsi")
         self.raw("\tcmpq $4096, %rsi")
         self.raw("\tja .Lfree_large")
-        self.raw("\tleaq __free_buckets(%rip), %r8")
+        self.tls_addr("__free_buckets", 0, "r8")
         self.raw("\tmovq (%r8,%rsi), %rax")
         self.raw("\tmovq %rax, (%rdi)")
         self.raw("\tmovq %rdi, (%r8,%rsi)")
         self.raw("\tjmp .Lfree_done")
         self.raw(".Lfree_large:")
         self.raw("\tbsrq %rsi, %rcx")
-        self.raw("\tleaq __free_buckets+4104(%rip), %r8")
+        self.tls_addr("__free_buckets", 4104, "r8")
         self.raw("\tmovq (%r8,%rcx,8), %rax")
         self.raw("\tmovq %rax, (%rdi)")
         self.raw("\tmovq %rdi, (%r8,%rcx,8)")
+        if self.frames {
+            self.raw("\tjmp .Lfree_done")
+            // pushed onto the owner's list of cells freed elsewhere
+            self.raw(".Lfree_remote:")
+            self.raw(format("\timulq ${}, %rax", TLS_SIZE))
+            self.raw("\tleaq __tls_blocks(%rip), %rcx")
+            self.raw(format("\tleaq {}(%rcx,%rax), %r8", tls_offset("__remote_free")))
+            self.raw(".Lfree_retry:")
+            self.raw("\tmovq (%r8), %rax")
+            self.raw("\tmovq %rax, (%rdi)")
+            self.raw("\tlock cmpxchgq %rdi, (%r8)")
+            self.raw("\tjne .Lfree_retry")
+        }
         self.raw(".Lfree_done:")
         self.raw("\tpopq %rcx")
         self.raw("\tpopq %r8")
@@ -3343,7 +4580,7 @@ impl CodeGen {
         self.raw("\tpushq %r13")
         self.raw("\tpushq %r14")
         self.raw("\tpushq %r15")
-        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq (%rdi), %r12")
         self.raw("\tleaq 8(%rdi), %r13")
         self.raw("\tleaq 16(%r12), %rax")
@@ -3404,7 +4641,7 @@ impl CodeGen {
         self.raw("\tjmp .Lrf_ret")
         self.raw(".Lrf_read_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq $3, %rax")
         self.raw("\tmovq %rbx, %rdi")
         self.raw("\tsyscall")
@@ -3412,7 +4649,7 @@ impl CodeGen {
         self.raw("\tjmp .Lrf_ret")
         self.raw(".Lrf_open_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq $8, %rdi")
         self.raw("\tcall __alloc")
         self.raw("\tmovq $0, (%rax)")
@@ -3448,7 +4685,7 @@ impl CodeGen {
         self.raw("\tpushq %rbp")
         self.raw("\tmovq %rsp, %rbp")
         self.raw("\tsubq $16, %rsp")
-        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
         self.raw("\tmovl %edi, (%rsp)")
         self.raw("\tmovw $1, 4(%rsp)")
         self.raw("\tmovw $0, 6(%rsp)")
@@ -3468,7 +4705,7 @@ impl CodeGen {
         self.raw("\tjmp .Lpl_done")
         self.raw(".Lpl_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq $-1, %rax")
         self.raw(".Lpl_done:")
         self.raw("\tleave")
@@ -3515,7 +4752,7 @@ impl CodeGen {
         self.raw("\tpushq %r13")
         self.raw("\tpushq %r14")
         self.raw("\tpushq %r15")
-        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
         self.emit_c_path(".Lld_path", "%r12")
         self.raw("\tmovq $2, %rax")
         self.raw("\tmovq %r12, %rdi")
@@ -3601,7 +4838,7 @@ impl CodeGen {
         self.raw("\tjmp .Lld_entry")
         self.raw(".Lld_read_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq $0, (%r13)")
         self.raw(".Lld_close:")
         self.raw("\tmovq $3, %rax")
@@ -3611,7 +4848,7 @@ impl CodeGen {
         self.raw("\tjmp .Lld_ret")
         self.raw(".Lld_open_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq $8, %rdi")
         self.raw("\tcall __alloc")
         self.raw("\tmovq $0, (%rax)")
@@ -3638,7 +4875,7 @@ impl CodeGen {
         self.raw("\tmovq %rsp, %rbp")
         self.raw("\tpushq %r12")
         self.raw("\tpushq %r12")
-        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
         self.emit_c_path(label + "_path", "%r12")
         self.raw(format("\tmovq ${}, %rax", nr))
         self.raw("\tmovq %r12, %rdi")
@@ -3646,7 +4883,7 @@ impl CodeGen {
         self.raw("\ttestq %rax, %rax")
         self.raw(format("\tjns {}_ret", label))
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw(label + "_ret:")
         self.raw("\tleaq -16(%rbp), %rsp")
         self.raw("\tpopq %r12")
@@ -3664,7 +4901,7 @@ impl CodeGen {
         self.raw("\tmovq %rsp, %rbp")
         self.raw("\tpushq %r12")
         self.raw("\tpushq %r13")
-        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
         self.emit_c_path(".Lrn_from", "%r12")
         self.raw("\tmovq %rsi, %rdi")
         self.emit_c_path(".Lrn_to", "%r13")
@@ -3675,7 +4912,7 @@ impl CodeGen {
         self.raw("\ttestq %rax, %rax")
         self.raw("\tjns .Lrn_ret")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw(".Lrn_ret:")
         self.raw("\tleaq -16(%rbp), %rsp")
         self.raw("\tpopq %r13")
@@ -3691,7 +4928,7 @@ impl CodeGen {
         self.raw("\tmovq %rsp, %rbp")
         self.raw("\tpushq %rbx")
         self.raw("\tpushq %r12")
-        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
         self.raw("\tmovl %esi, %ebx")
         self.emit_c_path(".Lmd_path", "%r12")
         self.raw("\tmovq $83, %rax")
@@ -3701,7 +4938,7 @@ impl CodeGen {
         self.raw("\ttestq %rax, %rax")
         self.raw("\tjns .Lmd_ret")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw(".Lmd_ret:")
         self.raw("\tleaq -16(%rbp), %rsp")
         self.raw("\tpopq %r12")
@@ -3722,7 +4959,7 @@ impl CodeGen {
         self.raw("\tmovq %rsp, %rbp")
         self.raw("\tpushq %r12")
         self.raw("\tpushq %r13")
-        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
         self.raw("\tsubq $4096, %rsp")
         self.raw("\tmovq %rsp, %r12")
         self.raw("\tmovq $79, %rax")
@@ -3745,7 +4982,7 @@ impl CodeGen {
         self.raw("\tjmp .Lgc_copy")
         self.raw(".Lgc_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq $8, %rdi")
         self.raw("\tcall __alloc")
         self.raw("\tmovq $0, (%rax)")
@@ -3766,7 +5003,7 @@ impl CodeGen {
         self.raw("\tpushq %rbp")
         self.raw("\tmovq %rsp, %rbp")
         self.raw("\tpushq %r12")
-        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
         self.emit_c_path(".Lst_path", "%r12")
         self.raw("\tsubq $144, %rsp")
         self.raw("\tmovq $4, %rax")
@@ -3779,7 +5016,7 @@ impl CodeGen {
         self.raw("\tjmp .Lst_ret")
         self.raw(".Lst_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq $-1, %rax")
         self.raw(".Lst_ret:")
         self.raw("\tleaq -8(%rbp), %rsp")
@@ -3800,7 +5037,7 @@ impl CodeGen {
         self.raw("\tpushq %rbx")
         self.raw("\tpushq %r12")
         self.raw("\tpushq %r13")
-        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq %rdi, %rbx")
         self.raw("\tmovq %rsi, %r12")
         self.raw("\ttestq %r12, %r12")
@@ -3827,7 +5064,7 @@ impl CodeGen {
         self.raw("\tjmp .Lrd_done")
         self.raw(".Lrd_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw(".Lrd_done:")
         self.raw("\tmovq %r13, %rax")
         self.raw("\tpopq %r13")
@@ -3851,7 +5088,7 @@ impl CodeGen {
         self.raw("\tpushq %r13")
         self.raw("\tpushq %r14")
         self.raw("\tpushq %r15")
-        self.raw("\tmovq $0, __io_errno_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq %rsi, %r12")
         self.raw("\tmovq (%rdi), %r13")
         self.raw("\tleaq 8(%rdi), %r14")
@@ -3900,14 +5137,14 @@ impl CodeGen {
         self.raw("\tjmp .Lwf_ret")
         self.raw(".Lwf_write_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw("\tmovq $3, %rax")
         self.raw("\tmovq %rbx, %rdi")
         self.raw("\tsyscall")
         self.raw("\tjmp .Lwf_ret")
         self.raw(".Lwf_open_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovq %rax, __io_errno_val(%rip)")
+        self.raw(format("\tmovq %rax, {}", self.tv("__io_errno_val")))
         self.raw(".Lwf_ret:")
         self.raw("\tleaq -40(%rbp), %rsp")
         self.raw("\tpopq %r15")
@@ -4023,9 +5260,9 @@ impl CodeGen {
         self.raw("\tsubq $4176, %rsp")
         self.raw("\tmovq %rdi, %r12")
         self.raw("\tmovq %rsi, %r13")
-        self.raw("\tmovq $0, __run_errno_val(%rip)")
-        self.raw("\tmovq $0, __run_exit_val(%rip)")
-        self.raw("\tmovq $0, __run_signal_val(%rip)")
+        self.raw(format("\tmovq $0, {}", self.tv("__run_errno_val")))
+        self.raw(format("\tmovq $0, {}", self.tv("__run_exit_val")))
+        self.raw(format("\tmovq $0, {}", self.tv("__run_signal_val")))
         self.raw("\tmovq (%r13), %rbx")
         self.raw("\tleaq 8(%rbx), %rdi")
         self.raw("\tshlq $3, %rdi")
@@ -4156,7 +5393,7 @@ impl CodeGen {
         self.raw("\ttestq %rax, %rax")
         self.raw("\tjle .Lrun_exec_ok")
         self.raw("\tmovl -4208(%rbp), %eax")
-        self.raw("\tmovl %eax, __run_errno_val(%rip)")
+        self.raw(format("\tmovl %eax, {}", self.tv("__run_errno_val")))
         self.raw("\tmovl -64(%rbp), %edi")
         self.raw("\tmovq $3, %rax")
         self.raw("\tsyscall")
@@ -4290,19 +5527,19 @@ impl CodeGen {
         self.raw("\tjnz .Lrun_signaled")
         self.raw("\tshrl $8, %eax")
         self.raw("\tandl $255, %eax")
-        self.raw("\tmovl %eax, __run_exit_val(%rip)")
-        self.raw("\tmovl $0, __run_signal_val(%rip)")
+        self.raw(format("\tmovl %eax, {}", self.tv("__run_exit_val")))
+        self.raw(format("\tmovl $0, {}", self.tv("__run_signal_val")))
         self.raw("\tjmp .Lrun_finish")
         self.raw(".Lrun_signaled:")
-        self.raw("\tmovl %ecx, __run_signal_val(%rip)")
-        self.raw("\tmovl $-1, __run_exit_val(%rip)")
+        self.raw(format("\tmovl %ecx, {}", self.tv("__run_signal_val")))
+        self.raw(format("\tmovl $-1, {}", self.tv("__run_exit_val")))
         self.raw(".Lrun_finish:")
-        self.raw("\tmovq %r15, __run_stderr_val(%rip)")
+        self.raw(format("\tmovq %r15, {}", self.tv("__run_stderr_val")))
         self.raw("\tmovq %r14, %rax")
         self.raw("\tjmp .Lrun_ret")
         self.raw(".Lrun_spawn_err:")
         self.raw("\tnegq %rax")
-        self.raw("\tmovl %eax, __run_errno_val(%rip)")
+        self.raw(format("\tmovl %eax, {}", self.tv("__run_errno_val")))
         self.raw(".Lrun_empty_ret:")
         self.raw("\tmovq $0, %rdi")
         self.raw("\tcall __u8list_new")
@@ -4310,7 +5547,7 @@ impl CodeGen {
         self.raw("\tmovq $0, %rdi")
         self.raw("\tcall __u8list_new")
         self.raw("\tmovq %rax, %r15")
-        self.raw("\tmovq %r15, __run_stderr_val(%rip)")
+        self.raw(format("\tmovq %r15, {}", self.tv("__run_stderr_val")))
         self.raw("\tmovq %r14, %rax")
         self.raw(".Lrun_ret:")
         self.raw("\tleaq -40(%rbp), %rsp")
@@ -4349,6 +5586,41 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tjmp *%rcx")
         self.raw("")
+        if self.frames {
+            // the deep copy of a composition's env: both function values'
+            self.raw("__compose_env_deep:")
+            self.raw("\tpushq %rbx")
+            self.raw("\tpushq %r12")
+            self.raw("\tmovq %rdi, %rbx")
+            self.raw("\tcmpq $1, -8(%rbx)")
+            self.raw("\tje .Lced_unique")
+            self.raw("\tmovq $40, %rdi")
+            self.raw("\tcall __alloc")
+            self.raw("\tmovq %rax, %r12")
+            self.raw("\tmovq %rbx, %rsi")
+            self.raw("\tmovq %r12, %rdi")
+            self.raw("\tmovq $40, %rcx")
+            self.raw("\tcld")
+            self.raw("\trep movsb")
+            self.raw("\tmovq 16(%r12), %rdi")
+            self.raw("\tcall __func_retain")
+            self.raw("\tmovq 32(%r12), %rdi")
+            self.raw("\tcall __func_retain")
+            self.raw("\tdecq -8(%rbx)")
+            self.raw("\tmovq %r12, %rbx")
+            self.raw(".Lced_unique:")
+            self.raw("\tmovq 16(%rbx), %rdi")
+            self.raw("\tcall __deep_env")
+            self.raw("\tmovq %rax, 16(%rbx)")
+            self.raw("\tmovq 32(%rbx), %rdi")
+            self.raw("\tcall __deep_env")
+            self.raw("\tmovq %rax, 32(%rbx)")
+            self.raw("\tmovq %rbx, %rax")
+            self.raw("\tpopq %r12")
+            self.raw("\tpopq %rbx")
+            self.raw("\tret")
+            self.raw("\t.quad __compose_env_deep")
+        }
         self.raw("__compose_env_drop:")
         self.raw("\tpushq %rbx")
         self.raw("\tmovq %rdi, %rbx")
@@ -4616,9 +5888,7 @@ impl CodeGen {
         self.raw("\tmovb %al, (%rsi)")
         self.raw("\tmovq $1, %rdx")
         self.raw(".Lpc_write:")
-        self.raw("\tmovq $1, %rdi")
-        self.raw("\tcall __write_all")
-        self.raw("\tcall __print_nl")
+        self.raw("\tcall __print_line")
         self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
@@ -5240,7 +6510,9 @@ impl CodeGen {
         var i = 0
         var j = 0
         var k = 0
-        while i < len(self.need_drop) || j < len(self.need_clone) || k < len(self.need_walk) {
+        var dk = 0
+        var dc = 0
+        while i < len(self.need_drop) || j < len(self.need_clone) || k < len(self.need_walk) || dk < len(self.need_deep) || dc < len(self.need_deepc) {
             while i < len(self.need_drop) {
                 let t = self.need_drop[i]
                 i = i + 1
@@ -5250,7 +6522,9 @@ impl CodeGen {
                 match t {
                     Type.TList(e) => { self.emit_list_drop_helper(t) },
                     Type.TMap(k2, v) => { self.emit_map_drop_helper(t) },
-                    Type.TEnum(n, a) => { self.emit_dropb_helper(t) },
+                    Type.TEnum(n, a) => { self.emit_dropb_helper(t, false) },
+                    // an actor's cell: its fields, as a struct's (same token)
+                    Type.TActor(n) => { self.emit_dropb_helper(Type.TStruct(n, []), self.frames) },
                     _ => {},
                 }
             }
@@ -5265,6 +6539,17 @@ impl CodeGen {
                     Type.TMap(k2, v) => { self.emit_map_clone_helper(t) },
                     _ => {},
                 }
+            }
+            while dk < len(self.need_deep) {
+                let t = self.need_deep[dk]
+                let inl = self.deep_inline[dk]
+                dk = dk + 1
+                self.emit_deep_walk(t, inl)
+            }
+            while dc < len(self.need_deepc) {
+                let t = self.need_deepc[dc]
+                dc = dc + 1
+                self.emit_deep_cell(t)
             }
             while k < len(self.need_walk) {
                 let t = self.need_walk[k]
@@ -5492,9 +6777,10 @@ impl CodeGen {
 
     // `__dropb_<E>`: %rdi = boxed-enum cell. Decrement; at zero, drop the
     // children the inline value owns, then free the cell.
-    fun emit_dropb_helper(var self, t: Type) {
+    // `atomic`: an actor's cell, whose handles threads share (D92).
+    fun emit_dropb_helper(var self, t: Type, atomic: bool) {
         self.emit(format("__dropb_{}:", mono_token(t)))
-        self.emit("decq -8(%rdi)")
+        if atomic { self.emit("lock decq -8(%rdi)") } else { self.emit("decq -8(%rdi)") }
         let keep = self.label()
         self.emit(format("jnz {}", keep))
         self.emit("pushq %rbp")
@@ -5635,6 +6921,7 @@ pub fun is_aggregate(t: Type) -> bool {
         Type.TTuple(es) => true,
         Type.TEnum(n, a) => true,
         Type.TFunc(ps, r) => true,
+        Type.TAsync(f) => true,
         _ => false,
     }
 }
@@ -5704,7 +6991,7 @@ pub fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => fal
 fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
 
 // A heap cell whose pointer is the value: retained and dropped as one pointer.
-pub fun is_cell_t(t: Type) -> bool { return is_list_t(t) || is_map_t(t) || is_sb_t(t) || is_str_t(t) }
+pub fun is_cell_t(t: Type) -> bool { return is_list_t(t) || is_map_t(t) || is_sb_t(t) || is_str_t(t) || is_actor_t(t) }
 
 // A `str` cell in the data section: the heap's `[size][refcount]` header, then
 // `[len][bytes]` at `label`; its count never reaches zero (MYLA-18, the Python
@@ -5790,6 +7077,7 @@ fun names_in_expr(e: Expr, acc: [str]) -> [str] {
     var out = with_name(e, acc)
     match e.kind {
         ExprKind.Unary(op, x) => { out = names_in_expr(x, out) },
+        ExprKind.Await(x) => { out = names_in_expr(x, out) },
         ExprKind.Binary(op, l, r) => { out = names_in_expr(r, names_in_expr(l, out)) },
         ExprKind.Call(c, args) => {
             out = names_in_expr(c, out)
@@ -5923,6 +7211,7 @@ fun may_write_stmt(st: Stmt, name: str) -> bool {
 fun may_write_expr(e: Expr, name: str) -> bool {
     match e.kind {
         ExprKind.Unary(op, x) => { return may_write_expr(x, name) },
+        ExprKind.Await(x) => { return may_write_expr(x, name) },
         ExprKind.Binary(op, l, r) => { return may_write_expr(l, name) || may_write_expr(r, name) },
         ExprKind.Call(c, args) => {
             let writes = match c.kind {
@@ -5953,7 +7242,7 @@ fun may_write_expr(e: Expr, name: str) -> bool {
 }
 
 fun struct_name_of(t: Type) -> str {
-    return match t { Type.TStruct(n, a) => n, _ => "" }
+    return match t { Type.TStruct(n, a) => n, Type.TActor(n) => n, _ => "" }
 }
 
 fun type_args_of(t: Type) -> [Type] {
@@ -5968,8 +7257,62 @@ pub fun is_struct_or_enum_t(t: Type) -> bool {
     return match t { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, _ => false }
 }
 
+// The normalizer of async bodies for frame functions (anf.my): a `match` with
+// an `await` in an arm stays a value; an `async let` starts an async lambda.
+fun compiler_norm() -> Norm {
+    var n = new_norm(2000000000)
+    n.value_matches = true
+    n.wrap_children = true
+    return n
+}
+
+// The ready-frame ring's size (D90): a power of two.
+const EXEC_CAP: int32 = 1048576
+
+// A thread's block of runtime state in a program with tasks (D92), which
+// `%fs` points at: its own address first (for `tls_addr`), then each
+// variable's word, then the free lists (4616 bytes).
+fun tls_offset(sym: str) -> int32 {
+    if sym == "__heap_ptr" { return 8 }
+    if sym == "__heap_end" { return 16 }
+    if sym == "__exec_cur" { return 24 }
+    if sym == "__exec_sp" { return 32 }
+    if sym == "__io_errno_val" { return 40 }
+    if sym == "__run_stderr_val" { return 48 }
+    if sym == "__run_exit_val" { return 56 }
+    if sym == "__run_signal_val" { return 64 }
+    if sym == "__run_errno_val" { return 72 }
+    if sym == "__actor_held" { return 80 }
+    if sym == "__worker_id" { return 88 }
+    if sym == "__remote_free" { return 96 }
+    if sym == "__free_buckets" { return 128 }
+    return 0
+}
+
+const TLS_SIZE: int32 = 4800
+
+// The most workers a program runs (D92); each has a 4 GiB arena of the heap
+// region, so a cell's address tells whose heap it is.
+const MAX_WORKERS: int32 = 32
+
 pub fun is_tfunc(t: Type) -> bool {
-    return match t { Type.TFunc(p, r) => true, _ => false }
+    return match t { Type.TFunc(p, r) => true, Type.TAsync(f) => true, _ => false }
+}
+
+// An async function type as its function type: with one task, an async
+// function runs as an ordinary one (D91, MYLA-138).
+pub fun unasync(t: Type) -> Type {
+    return match t { Type.TAsync(f) => f, _ => t }
+}
+
+// Whether `t` is an async function's type (D89).
+pub fun is_async_t(t: Type) -> bool {
+    return match t { Type.TAsync(f) => true, _ => false }
+}
+
+// Whether `t` is an actor's handle: a cell holding its fields (D89).
+pub fun is_actor_t(t: Type) -> bool {
+    return match t { Type.TActor(n) => true, _ => false }
 }
 
 pub fun is_hole_expr(e: Expr) -> bool {
@@ -6010,13 +7353,13 @@ fun empty_str_list() -> [str] {
 }
 
 pub fun tfunc_params(t: Type) -> [Type] {
-    match t { Type.TFunc(p, r) => { return p }, _ => {} }
+    match unasync(t) { Type.TFunc(p, r) => { return p }, _ => {} }
     var empty: [Type] = []
     return empty
 }
 
 pub fun tfunc_ret(t: Type) -> Option<Type> {
-    match t { Type.TFunc(p, r) => { return r }, _ => {} }
+    match unasync(t) { Type.TFunc(p, r) => { return r }, _ => {} }
     return None
 }
 
@@ -6165,11 +7508,13 @@ fun mono_token(t: Type) -> str {
         Type.TFloat(w) => format(".f{}", w),
         Type.TSB => ".sb",
         Type.TStruct(n, a) => agg_token(n, a),
+        Type.TActor(n) => agg_token(n, []),
         Type.TEnum(n, a) => agg_token(n, a),
         Type.TTuple(es) => ".T" + join_tokens(es),
         Type.TList(e) => ".L" + lp(mono_token(e)),
         Type.TMap(k, v) => ".M" + map_token(k, v),
         Type.TFunc(ps, r) => ".F" + join_tokens(ps) + "R" + lp(ret_token(r)),
+        Type.TAsync(f) => mono_token(f),
         Type.TParam(n) => n,
         _ => ".X",
     }
@@ -6189,6 +7534,7 @@ fun parts_of(t: Type) -> [Type] {
         Type.TList(e) => [e],
         Type.TMap(k, v) => [k, v],
         Type.TFunc(ps, r) => func_parts(ps, r),
+        Type.TAsync(f) => parts_of(f),
         _ => [],
     }
 }
@@ -6279,6 +7625,8 @@ fun ate_of(t: Type) -> int32 {
 #test("x")[false]
 #test("_")[false]
 pub fun is_internal_name(name: str) -> bool {
+    // the compiler's names (`__…`) and the async normalizer's (`%aw1`, …)
+    if len(name) >= 1 && name[0] == '%' { return true }
     return len(name) >= 2 && name[0] == '_' && name[1] == '_'
 }
 
