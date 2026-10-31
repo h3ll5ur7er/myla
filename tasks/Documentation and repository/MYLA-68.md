@@ -2,7 +2,7 @@
 id: MYLA-68
 title: Agent skill that teaches coding agents Myla
 type: improvement
-status: review
+status: done
 priority: high
 labels: [docs, agents]
 ---
@@ -14,3 +14,7 @@ Coding agents keep mistaking Myla for Rust or Swift (`fn`, semicolons, tail-expr
 - [x] Types and conversions (incl. `float` = `float32`, literals vs variables), syntax notes, repository workflow
 - [x] A pointer from `AGENTS.md`, outside the Genbeya block
 - [x] Review the wording; keep the skill in step with the language (update it with each language change, like the wiki): the rule is in [[Development/Conventions]]; updated for concurrency (D89 to D97), `become`, the generated grammar, `build/myla` and the `module` directive in the review triage of 2026-10-31
+
+## Evidence (sign-off, 2026-10-31)
+
+The review of 31 October 2026 ([[Project/Review-2026-10]]) found one wrong rule in the skill: "nested patterns like `Some(Ok(x))` need a `_` arm". They don't: `Some(Ok(v))`, `Some(Err(e))` and `None` are exhaustive (`python3 myla.py check` accepts the program without a `_` arm, as [[Language/Structs-enums-and-match]] says). The line is corrected in both copies, and the standard-library line names `std.json`, `std.toml`, `std.num`, `std.task` and the `remove_*`/`rename`/`current_dir` functions of `std.fs` it left out. `diff -q .agents/skills/myla/SKILL.md .claude/skills/myla/SKILL.md`: identical.
