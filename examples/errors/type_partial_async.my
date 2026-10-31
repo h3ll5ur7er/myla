@@ -1,0 +1,9 @@
+//~ type error: an async function can't be partially applied
+//~ span: add(1, _)
+// A partial application is a synchronous function value (D89).
+async fun add(a: int, b: int) -> int {
+    return a + b
+}
+fun main() {
+    let f = add(1, _)
+}

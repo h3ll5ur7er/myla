@@ -392,6 +392,7 @@ class _Monomorphizer:
             return FuncType(
                 tuple(self._subst_type(p, subst) for p in t.params),
                 self._subst_type(t.ret, subst),
+                t.is_async,
             )
         return t
 

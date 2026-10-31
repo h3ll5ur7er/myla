@@ -75,9 +75,11 @@ class MapTypeRef(Node):
 @dataclass
 class FnTypeRef(Node):
     """A function-type annotation `(T0, T1, …) -> R` (v0.4.2). `params` may be
-    empty (`() -> R`); `ret` is the result type."""
+    empty (`() -> R`); `ret` is the result type; `is_async`: `async (…) -> R`
+    (D89)."""
     params: list["TypeExpr"] = field(default_factory=list["TypeExpr"])
     ret: "TypeExpr" = None  # type: ignore[assignment]
+    is_async: bool = False
 
 
 # A type annotation as written in source (resolved to a `types.Type` later).
@@ -129,6 +131,12 @@ class Name(Node):
 @dataclass
 class Unary(Node):
     op: str
+    operand: "Expr"
+
+
+@dataclass
+class Await(Node):
+    """`await e` (D89): a call that may suspend, or an `async let` read."""
     operand: "Expr"
 
 
@@ -239,6 +247,7 @@ class Lambda(Node):
     params: list["Param"] = field(default_factory=list["Param"])
     body: "Union[Expr, Block]" = None  # type: ignore[assignment]
     ret_type: "Optional[TypeExpr]" = None
+    is_async: bool = False  # `async (…) => body` (D89)
     # Filled in by the checker. Plain attributes, not dataclass fields, so they
     # take no part in AST equality or dumps (like `resolved_type`).
     captures = ()          # [(name, Type)]
@@ -333,7 +342,7 @@ class Block(Node):
 
 @dataclass
 class VarDecl(Node):
-    kind: str  # "let" or "var"
+    kind: str  # "let", "var", or "async" for `async let` (D89)
     name: str
     declared_type: Optional["TypeExpr"]
     init: "Expr"
@@ -455,6 +464,8 @@ class StructDecl(Node):
     # `pub` marks the declaration as part of its module's public surface (v0.5,
     # D22). False = file-local (the default).
     is_pub: bool = False
+    # an `actor` (D89): the same fields, a reference type with isolated state
+    actor: bool = False
 
 
 @dataclass
@@ -477,6 +488,8 @@ class FunDecl(Node):
     receiver: Optional[str] = None
     # `pub` export marker (v0.5, D22); ignored for methods inside an `impl`.
     is_pub: bool = False
+    # `async fun` (D89): it may suspend, and a call to it is awaited
+    is_async: bool = False
 
 
 @dataclass

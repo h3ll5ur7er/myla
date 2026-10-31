@@ -1,0 +1,7 @@
+//~ type error: an actor can't have type parameters
+//~ span: actor Box<T> {
+// Actors aren't generic in the first version (D89).
+actor Box<T> {
+    item: T
+}
+fun main() {}

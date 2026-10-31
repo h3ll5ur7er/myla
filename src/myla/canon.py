@@ -162,7 +162,8 @@ def _ct(node) -> str:
     if k == "MapTypeRef":
         return "(mtype " + _ct(node.key) + " " + _ct(node.value) + ")"
     if k == "FnTypeRef":
-        return "(ftype " + _lst(node.params, _ct) + " " + _ct(node.ret) + ")"
+        ft = "(ftype " + _lst(node.params, _ct) + " " + _ct(node.ret) + ")"
+        return "(async " + ft + ")" if node.is_async else ft
 
     # -- expressions --
     if k == "IntLit":
@@ -176,6 +177,8 @@ def _ct(node) -> str:
         return "(bool " + _b(node.value) + ")"
     if k == "Name":
         return "(name " + _s(node.ident) + ")"
+    if k == "Await":
+        return "(await " + _ct(node.operand) + ")"
     if k == "Unary":
         return "(unary " + _s(node.op) + " " + _ct(node.operand) + ")"
     if k == "Binary":
@@ -208,8 +211,9 @@ def _ct(node) -> str:
         return "(cast " + _ct(node.operand) + " " + _ct(node.target) + ")"
     if k == "Lambda":
         ret = "nil" if node.ret_type is None else _ct(node.ret_type)
-        return ("(lambda " + _lst(node.params, _param) + " " + ret
-                + " " + _eb(node.body) + ")")
+        lam = ("(lambda " + _lst(node.params, _param) + " " + ret
+               + " " + _eb(node.body) + ")")
+        return "(async " + lam + ")" if node.is_async else lam
     if k == "Hole":
         return "(hole)"
 
@@ -279,7 +283,7 @@ def _ct(node) -> str:
 
     # -- declarations --
     if k == "StructDecl":
-        return ("(struct " + _s(node.name) + " "
+        return ("(" + ("actor " if node.actor else "struct ") + _s(node.name) + " "
                 + _lst(node.fields, lambda f: "(field " + _s(f.name) + " "
                        + _ct(f.type) + ")") + " " + _attrs(node.attributes) + " "
                 + _typarams(node.type_params, {}) + " " + _b(node.is_pub) + ")")
@@ -338,7 +342,7 @@ def _eb(body) -> str:
 def _fun(node: "_ast.FunDecl") -> str:
     ret = "nil" if node.ret_type is None else _ct(node.ret_type)
     body = "nil" if node.body is None else _ct(node.body)
-    return ("(fun " + _s(node.name) + " " + _lst(node.params, _param) + " "
+    return (("(async-fun " if node.is_async else "(fun ") + _s(node.name) + " " + _lst(node.params, _param) + " "
             + ret + " " + body + " " + _attrs(node.attributes) + " "
             + _typarams(node.type_params, node.type_param_bounds) + " "
             + _opt_s(node.receiver) + " " + _b(node.is_pub) + ")")

@@ -1,0 +1,15 @@
+//~ type error: a call into the actor 'Counter' needs 'await'
+//~ span: c.get()
+// A method call from outside runs on the actor, so it may suspend (D89).
+actor Counter {
+    count: int
+}
+impl Counter {
+    fun get(self) -> int {
+        return self.count
+    }
+}
+async fun bump(c: Counter) -> int {
+    return c.get()
+}
+fun main() {}

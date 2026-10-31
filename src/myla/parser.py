@@ -27,9 +27,9 @@ from .tokens import Token, TokenKind as T
 
 # The tokens that begin a declaration, and those that begin a statement other
 # than an expression: where the parser resumes after an error (`_sync`).
-_DECL_START = {T.FUN, T.STRUCT, T.ENUM, T.IMPL, T.TRAIT, T.TYPEALIAS, T.CONST,
+_DECL_START = {T.FUN, T.ACTOR, T.ASYNC, T.STRUCT, T.ENUM, T.IMPL, T.TRAIT, T.TYPEALIAS, T.CONST,
                T.IMPORT, T.FROM, T.PUB, T.HASH}
-_STMT_START = {T.LET, T.VAR, T.IF, T.WHILE, T.FOR, T.RETURN, T.BECOME, T.BREAK, T.CONTINUE}
+_STMT_START = {T.LET, T.VAR, T.IF, T.WHILE, T.FOR, T.RETURN, T.BECOME, T.BREAK, T.CONTINUE, T.ASYNC}
 
 # What `_sync` skips to: the next statement of a block, the next member of an
 # impl or trait body, the next top-level declaration.
@@ -220,9 +220,9 @@ class Parser:
         pub_tok = self._advance() if self._check(T.PUB) else None
         is_pub = pub_tok is not None
         tok = self._peek()
-        if tok.kind is T.STRUCT:
+        if tok.kind is T.STRUCT or tok.kind is T.ACTOR:
             decl: ast.Decl = self._struct_decl()
-        elif tok.kind is T.FUN:
+        elif tok.kind is T.FUN or (tok.kind is T.ASYNC and self._peek(1).kind is T.FUN):
             decl = self._fun_decl()
         elif tok.kind is T.ENUM:
             decl = self._enum_decl()
@@ -238,7 +238,7 @@ class Parser:
             decl = self._import_decl(is_pub)
         else:
             raise ParseError(
-                "expected a declaration (struct/fun/enum/typealias/const/trait/"
+                "expected a declaration (struct/actor/fun/enum/typealias/const/trait/"
                 f"impl/import), found '{tok.lexeme}'",
                 at=tok,
             )
@@ -361,8 +361,9 @@ class Parser:
         return names
 
     def _struct_decl(self) -> ast.StructDecl:
-        kw = self._advance()  # struct
-        name = self._expect(T.IDENT, "struct name")
+        kw = self._advance()  # struct / actor
+        is_actor = kw.kind is T.ACTOR
+        name = self._expect(T.IDENT, "actor name" if is_actor else "struct name")
         type_params = self._generics_no_bounds("a struct")
         self._expect(T.LBRACE, "'{'")
         self._skip_newlines()
@@ -377,7 +378,8 @@ class Parser:
                 break
             self._skip_newlines()
         self._expect(T.RBRACE, "'}'")
-        return ast.StructDecl(name.value, fields, type_params=type_params).at(kw.line, kw.column, self._end())
+        return ast.StructDecl(name.value, fields, type_params=type_params,
+                              actor=is_actor).at(kw.line, kw.column, self._end())
 
     def _enum_decl(self) -> ast.EnumDecl:
         kw = self._advance()  # enum
@@ -406,7 +408,10 @@ class Parser:
         return ast.EnumDecl(name.value, variants, type_params=type_params).at(kw.line, kw.column, self._end())
 
     def _fun_decl(self) -> ast.FunDecl:
-        kw = self._advance()  # fun
+        kw = self._advance()  # fun, or async before it
+        is_async = kw.kind is T.ASYNC
+        if is_async:
+            self._advance()   # fun
         name = self._expect(T.IDENT, "function name")
         type_params, bounds = self._generics()
         self._expect(T.LPAREN, "'('")
@@ -425,8 +430,8 @@ class Parser:
             ret_type = self._type()
         body = self._block()
         return ast.FunDecl(name.value, params, ret_type, body,
-                           type_params=type_params,
-                           type_param_bounds=bounds).at(kw.line, kw.column, self._end())
+                           type_params=type_params, type_param_bounds=bounds,
+                           is_async=is_async).at(kw.line, kw.column, self._end())
 
     def _impl_decl(self) -> ast.ImplDecl:
         kw = self._advance()  # impl
@@ -488,7 +493,7 @@ class Parser:
             raise _Unwind()
         start = self.pos
         try:
-            if not self._check(T.FUN):
+            if not (self._check(T.FUN) or (self._check(T.ASYNC) and self._peek(1).kind is T.FUN)):
                 raise ParseError(f"expected {what}, found '{tok.lexeme}'", at=tok)
             parse_method()
         except ParseError as err:
@@ -501,7 +506,9 @@ class Parser:
         """Parse a method header `fun name<…>(self|var self, params…) -> ret`,
         shared by `impl` methods and `trait` signatures. Returns the parts; the
         caller appends a body (or leaves it `None` for a signature)."""
-        kw = self._advance()  # fun
+        kw = self._advance()  # fun, or async before it
+        if kw.kind is T.ASYNC:
+            self._advance()   # fun
         name = self._expect(T.IDENT, "method name")
         type_params, bounds = self._generics()
         self._expect(T.LPAREN, "'('")
@@ -537,13 +544,13 @@ class Parser:
         body = self._block()
         return ast.FunDecl(name.value, params, ret_type, body,
                            type_params=type_params, type_param_bounds=bounds,
-                           receiver=receiver).at(kw.line, kw.column, self._end())
+                           receiver=receiver, is_async=kw.kind is T.ASYNC).at(kw.line, kw.column, self._end())
 
     def _method_sig(self) -> ast.FunDecl:
         kw, name, type_params, bounds, receiver, params, ret_type = self._method_header()
         return ast.FunDecl(name.value, params, ret_type, None,
                            type_params=type_params, type_param_bounds=bounds,
-                           receiver=receiver).at(kw.line, kw.column, self._end())
+                           receiver=receiver, is_async=kw.kind is T.ASYNC).at(kw.line, kw.column, self._end())
 
     def _typealias_decl(self) -> ast.TypeAliasDecl:
         kw = self._advance()  # typealias
@@ -563,6 +570,17 @@ class Parser:
 
     def _type(self):
         tok = self._peek()
+        if tok.kind is T.ASYNC:
+            # `async (T, …) -> R` (D89)
+            self._advance()
+            if not self._check(T.LPAREN):
+                raise ParseError(f"expected a function type after 'async', found '{self._peek().lexeme}'",
+                                 at=self._peek())
+            ft = self._paren_type()
+            if not isinstance(ft, ast.FnTypeRef):
+                raise ParseError("only a function type can be 'async'", at=tok)
+            ft.is_async = True
+            return ft.at(tok.line, tok.column, self._end())
         if tok.kind is T.LPAREN:
             return self._paren_type()
         if tok.kind is T.LBRACKET:
@@ -678,6 +696,8 @@ class Parser:
             return self._for_stmt()
         if tok.kind is T.RETURN:
             return self._return_stmt()
+        if tok.kind is T.ASYNC and self._peek(1).kind is T.LET:
+            return self._async_let()
         if tok.kind is T.BECOME:
             kw = self._advance()  # become
             value = self._expression()
@@ -707,6 +727,19 @@ class Parser:
         self._expect(T.ASSIGN, "'=' in variable declaration")
         init = self._expression()
         return ast.VarDecl(kw.lexeme, name.value, declared_type, init).at(kw.line, kw.column, self._end())
+
+    def _async_let(self) -> ast.Stmt:
+        """`async let name = e` (D89): a child task, its result read with
+        `await name`."""
+        kw = self._advance()  # async
+        self._advance()       # let
+        name = self._expect(T.IDENT, "name of the 'async let'")
+        declared_type = None
+        if self._match(T.COLON):
+            declared_type = self._type()
+        self._expect(T.ASSIGN, "'=' in 'async let'")
+        init = self._expression()
+        return ast.VarDecl("async", name.value, declared_type, init).at(kw.line, kw.column, self._end())
 
     def _tuple_binding(self) -> ast.BindTuple:
         lp = self._advance()  # (
@@ -903,6 +936,10 @@ class Parser:
         return expr
 
     def _unary(self) -> ast.Expr:
+        if self._check(T.AWAIT):
+            kw = self._advance()
+            operand = self._unary()
+            return ast.Await(operand).at(kw.line, kw.column, self._end())
         if self._peek().kind in (T.MINUS, T.BANG, T.TILDE):
             op = self._advance()
             operand = self._unary()
@@ -974,6 +1011,14 @@ class Parser:
             if self._lambda_ahead():
                 return self._lambda(tok)
             return self._paren_or_tuple(tok)
+        if tok.kind is T.ASYNC and self._peek(1).kind is T.LPAREN:
+            # `async (params) => body` (D89)
+            self._advance()
+            if not self._lambda_ahead():
+                raise ParseError("expected a lambda after 'async'", at=self._peek())
+            lam = self._lambda(self._peek())
+            lam.is_async = True
+            return lam.at(tok.line, tok.column, self._end())
         if tok.kind is T.LBRACKET:
             return self._list_or_map_lit(tok)
         raise ParseError(f"expected an expression, found '{tok.lexeme}'", at=tok)

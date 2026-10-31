@@ -1,0 +1,10 @@
+//~ type error: 'await' needs a call that may suspend (an async function, an actor's method) or the name of an 'async let'
+//~ span: await twice(2)
+// `await` marks a suspension; a synchronous call has none (D89).
+fun twice(n: int) -> int {
+    return n * 2
+}
+async fun wrong() -> int {
+    return await twice(2)
+}
+fun main() {}

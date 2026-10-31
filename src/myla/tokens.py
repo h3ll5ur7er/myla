@@ -27,6 +27,9 @@ class TokenKind(Enum):
     FUN = auto()
     RETURN = auto()
     BECOME = auto()
+    ACTOR = auto()
+    ASYNC = auto()
+    AWAIT = auto()
     STRUCT = auto()
     ENUM = auto()
     IMPL = auto()
@@ -108,6 +111,9 @@ KEYWORDS: dict[str, TokenKind] = {
     "fun": TokenKind.FUN,
     "return": TokenKind.RETURN,
     "become": TokenKind.BECOME,
+    "actor": TokenKind.ACTOR,
+    "async": TokenKind.ASYNC,
+    "await": TokenKind.AWAIT,
     "struct": TokenKind.STRUCT,
     "enum": TokenKind.ENUM,
     "impl": TokenKind.IMPL,

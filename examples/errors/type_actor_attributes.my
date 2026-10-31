@@ -1,0 +1,8 @@
+//~ type error: an actor can't have attributes
+//~ span: #derive(Eq)
+// An actor is compared by identity, not derived equality (D89).
+#derive(Eq)
+actor Counter {
+    count: int
+}
+fun main() {}

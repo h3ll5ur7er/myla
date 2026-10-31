@@ -1,0 +1,7 @@
+//~ type error: a trait method can't be async
+//~ span: async fun load(self) -> int
+// Trait methods stay synchronous in the first version (D89).
+trait Source {
+    async fun load(self) -> int
+}
+fun main() {}

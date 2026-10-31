@@ -1,0 +1,8 @@
+//~ type error: '#test' can't run an async function
+//~ span: #test(1)[10]
+// The test runner calls functions synchronously (D89).
+#test(1)[10]
+async fun fetch(n: int) -> int {
+    return n * 10
+}
+fun main() {}

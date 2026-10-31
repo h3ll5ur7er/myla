@@ -283,6 +283,9 @@ class Interpreter:
         completion, or the code passed to `std.process.exit`)."""
         if self.checker.entry is None:
             raise MylaRuntimeError("no entry point: define '#main' or a function named 'main'")
+        if self.checker.concurrency_at is not None:
+            raise MylaRuntimeError("the interpreter doesn't run concurrency yet (D89, MYLA-136)",
+                                   at=self.checker.concurrency_at)
         try:
             self._call(self.checker.entry, [])
         except _ExitSignal as sig:
