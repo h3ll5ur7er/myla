@@ -1343,6 +1343,16 @@ impl Checker {
         }
         return out
     }
+    // The index of the innermost frame defining `name`, or -1.
+    fun frame_of(self, name: str) -> int32 {
+        var i = len(self.frames) - 1
+        while i >= 0 {
+            for nm in self.frames[i].names { if nm == name { return i } }
+            i = i - 1
+        }
+        return -1
+    }
+
     fun lookup(self, name: str) -> Option<Binding> {
         var i = len(self.frames) - 1
         while i >= 0 {
@@ -3949,6 +3959,11 @@ impl Checker {
     fun check_lvalue_node(var self, e: Expr) -> Result<LValue, CheckErr> {
         return match e.kind {
             ExprKind.Name(n) => {
+                // a lambda holds copies of what it captures (D48): a change to
+                // one would reach neither the variable nor its next call (D93)
+                if len(self.lams) > 0 && self.frame_of(n) >= 0 && self.frame_of(n) < self.lams[len(self.lams) - 1].base {
+                    return Err(with_notes(terr_at(e.line, e.col, e.sp, format("a lambda can't change '{}', a variable it captures: it holds a copy of its own", n)), [Note { label: "help", msg: "return the new value, or keep shared state in an actor", line: 0, col: 0, sp: no_span() }]))
+                }
                 match self.lookup(n) { Some(b) => Ok(LValue { ty: b.ty, mutable: b.mutable }), None => Err(with_notes(terr_at(e.line, e.col, e.sp, format("unknown name '{}'", n)), did_you_mean(n, self.scope_names()))) }
             },
             ExprKind.GetField(target, field) => {

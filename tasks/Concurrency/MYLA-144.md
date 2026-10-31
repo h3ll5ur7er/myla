@@ -2,7 +2,7 @@
 id: MYLA-144
 title: The concurrency stress tests
 type: test
-status: todo
+status: in-progress
 priority: medium
 labels: [concurrency, tests, design]
 ---
@@ -29,3 +29,7 @@ After the actors' implementation ([[MYLA-135]] to [[MYLA-142]]): turn the langua
 | 10 | Publication and memory visibility | No shared mutable memory between tasks: not expressible; values crossing are deep copies (D92) |
 | 11 | Retryable transactions with side effects | No transactions: not applicable |
 | 12 | Starvation under contention | Actor executors queue frames first in, first out; a yielding frame goes behind the others (MYLA-140): expected to make progress; measurable |
+
+## Decisions so far
+
+From the first runs (programs in `tests/burn/test_concurrency_stress.py` to come): test 1 → [[MYLA-145]] (D93, captures can't be changed: done); test 6 → [[MYLA-146]] (a diagnostic); test 8 → [[MYLA-147]] (cancellation); test 5's sibling await → [[MYLA-148]] (supported natively).

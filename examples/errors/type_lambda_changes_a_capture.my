@@ -1,0 +1,17 @@
+//~ type error: a lambda can't change 'counter', a variable it captures: it holds a copy of its own
+//~ span: counter
+//~ help: return the new value, or keep shared state in an actor
+// A lambda holds copies of the variables it captures (D48), so a change to one
+// would reach neither the variable nor the lambda's next call; changing a
+// field, an element or a list through it is the same (D93, MYLA-145).
+struct Box {
+    value: int,
+}
+fun main() {
+    var counter = Box { value: 0 }
+    let inc = () => {
+        counter.value = counter.value + 1
+        return counter.value
+    }
+    print(inc())
+}

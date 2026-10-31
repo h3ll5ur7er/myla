@@ -2411,6 +2411,17 @@ class Checker:
             if binding is None:
                 raise TypeCheckError(f"unknown name '{expr.ident}'", at=expr,
                                      notes=_did_you_mean(expr.ident, scope.all_names()))
+            # a lambda holds copies of what it captures (D48): a change to one
+            # would reach neither the variable nor the lambda's next call (D93)
+            if self._lambda_stack:
+                def_scope = scope.lookup_scope(expr.ident)
+                if def_scope is not None and _is_strict_ancestor(def_scope, self._lambda_stack[-1].boundary):
+                    raise TypeCheckError(
+                        f"a lambda can't change '{expr.ident}', a variable it captures: "
+                        "it holds a copy of its own",
+                        at=expr,
+                        notes=[Note("help", "return the new value, or keep shared state in an actor")],
+                    )
             expr.resolved_type = binding.type
             return binding.type, binding.mutable
         if isinstance(expr, ast.FieldAccess):
