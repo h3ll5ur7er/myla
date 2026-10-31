@@ -1278,9 +1278,64 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 with open(exe + ".s", "w", encoding="utf-8") as fh:
                     fh.write(self._emit_asm(path, stdlib))
                 subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
-                proc = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+                # one worker: the order the self-hosted interpreter has (D92)
+                env = dict(os.environ, MYLA_THREADS="1")
+                proc = subprocess.run([exe], capture_output=True, text=True, timeout=60, env=env)
                 self.assertEqual((proc.stdout, proc.returncode), (want_out, want_code))
                 self.assertTrue(proc.stderr.startswith(want_err), proc.stderr)
+
+    def test_tasks_on_any_number_of_workers(self) -> None:
+        """The concurrency programs with child tasks print and exit alike on
+        1 to 16 workers (D92), run several times each: tasks on other threads,
+        actors entered from several at once, cells freed on another worker's
+        heap, values copied deeply as they cross."""
+        from .test_selfhost_interp import CONCURRENCY_PROGRAMS, _cli_oracle
+
+        cases = {n: s for n, s in CONCURRENCY_PROGRAMS.items() if "async let" in s or "task." in s}
+        cases["values_cross_deeply"] = ACTOR_PROGRAMS["values_cross_deeply"]
+        cases["deep_task_trees"] = DEEP_TASKS
+        stdlib = default_stdlib_root()
+        for name, src in cases.items():
+            with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, name + ".my")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(src)
+                exe = os.path.join(tmp, name)
+                with open(exe + ".s", "w", encoding="utf-8") as fh:
+                    fh.write(self._emit_asm(path, stdlib))
+                subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+                want = None
+                for workers in ["1", "2", "4", "8", "16"]:
+                    for _ in range(4):
+                        env = dict(os.environ, MYLA_THREADS=workers)
+                        proc = subprocess.run([exe], capture_output=True, text=True, timeout=60, env=env)
+                        got = (proc.stdout, proc.returncode)
+                        if want is None:
+                            want = got
+                        self.assertEqual(got, want, f"{workers} workers")
+
+    def test_children_run_in_parallel(self) -> None:
+        """Eight CPU-bound children on as many workers as CPUs: the process
+        uses well over one CPU's time per second of wall time (D89 (3))."""
+        if (os.cpu_count() or 1) < 2:
+            self.skipTest("one CPU")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "par.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(PARALLEL_WORK)
+            exe = os.path.join(tmp, "par")
+            with open(exe + ".s", "w", encoding="utf-8") as fh:
+                fh.write(self._emit_asm(path, default_stdlib_root()))
+            subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
+            env = dict(os.environ)
+            env.pop("MYLA_THREADS", None)
+            proc = subprocess.run(
+                [sys.executable, "-I", "-S", "-c", _CPU_AND_WALL, exe],
+                capture_output=True, text=True, env=env,
+            )
+            out, cpu, wall = proc.stdout, *map(float, proc.stderr.split()[-2:])
+            self.assertEqual(out, "1\n")
+            self.assertGreater(cpu, 1.5 * wall, f"cpu {cpu:.2f} s, wall {wall:.2f} s")
 
     def test_parity_programs_match_the_oracle(self) -> None:
         from .test_compiler_parity import PROGRAMS
@@ -1395,6 +1450,50 @@ HELD_FAILURES = {
         "        print(\"in scope\")\n    }\n    print(\"never\")\n}\n",
         "in scope\n", 1, "runtime error: index out of bounds\n"),
 }
+
+
+# Eight children each crunching numbers for a while; prints 1 when the results
+# agree with one another.
+PARALLEL_WORK = """\
+import std.task as task
+
+fun crunch(seed: int64) -> int64 {
+    var x: int64 = seed
+    var acc: int64 = 0
+    var i = 0
+    while i < 15000000 {
+        x = (x * 48271) % 2147483647
+        acc = (acc + x % 7) % 1000000007
+        i = i + 1
+    }
+    return acc - acc + 1
+}
+
+#main
+async fun main() {
+    var fs: [async () -> int64] = []
+    for k in 0..8 {
+        let seed: int64 = (k + 1) as int64
+        push(fs, async () => crunch(seed))
+    }
+    var ones: int64 = 0
+    for r in await task.all(fs) {
+        ones = ones + r
+    }
+    print(ones / 8)
+}
+"""
+
+# The program's CPU time (user and system) and wall time, on stderr.
+_CPU_AND_WALL = (
+    "import resource, subprocess, sys, time\n"
+    "t = time.time()\n"
+    "p = subprocess.run(sys.argv[1:], capture_output=True, text=True)\n"
+    "wall = time.time() - t\n"
+    "u = resource.getrusage(resource.RUSAGE_CHILDREN)\n"
+    "sys.stdout.write(p.stdout)\n"
+    "sys.stderr.write(f'{u.ru_utime + u.ru_stime} {wall}')\n"
+)
 
 
 DEEP_TASKS = """\
