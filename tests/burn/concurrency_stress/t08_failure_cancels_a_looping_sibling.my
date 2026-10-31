@@ -1,0 +1,40 @@
+// 8. A child fails while its sibling loops forever
+actor Feed {
+    n: int,
+}
+
+impl Feed {
+    fun next(var self) -> int {
+        self.n = self.n + 1
+        return self.n
+    }
+}
+
+async fun forever(f: Feed) -> int {
+    var buffer: [int] = []
+    while true {
+        push(buffer, await f.next())
+        if len(buffer) > 100 {
+            buffer = []
+        }
+    }
+    return 0
+}
+
+async fun fail_soon(f: Feed) -> int {
+    let x = await f.next()
+    panic("failure")
+    return x
+}
+
+async fun operation(f: Feed) -> int {
+    async let a = forever(f)
+    async let b = fail_soon(f)
+    return await b
+}
+
+#main
+async fun main() {
+    let f = Feed { n: 0 }
+    print(await operation(f))
+}

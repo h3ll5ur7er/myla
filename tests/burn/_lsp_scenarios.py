@@ -158,6 +158,24 @@ class LspScenarios:
                                            "end": {"line": 1, "character": 15}})
         self.assertEqual((got[0]["severity"], got[0]["source"], got[0]["code"]), (1, "myla", "type"))
 
+    def test_warnings_have_their_severity(self):
+        # D95 (MYLA-146): a warning is published as one, with its note as
+        # related information; the program has no error
+        src = ("actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n"
+               "        self.n = self.n + 1\n        return true\n    }\n}\n"
+               "actor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun buy(var self, p: Pay) -> bool {\n"
+               "        if self.stock == 0 {\n            return false\n        }\n"
+               "        let paid = await p.charge()\n        self.stock = self.stock - 1\n        return true\n    }\n}\n"
+               "async fun main() {\n    let i = Inv { stock: 1 }\n    print(await i.buy(Pay { n: 0 }))\n}\n")
+        self.open(self.main, src)
+        got = self.client.diagnostics(1, full=True)[_uri(self.main)]
+        self.assertEqual(len(got), 1)
+        self.assertEqual((got[0]["severity"], got[0]["code"]), (2, "warning"))
+        self.assertEqual(got[0]["range"], {"start": {"line": 18, "character": 8},
+                                           "end": {"line": 18, "character": 18}})
+        self.assertIn("'self.stock' was checked before an 'await'", got[0]["message"])
+        self.assertEqual(got[0]["relatedInformation"][0]["location"]["range"]["start"], {"line": 17, "character": 19})
+
     def test_other_open_buffers_are_used_unsaved(self):
         # MYLA-49: bad.my is fixed in the editor but not on disk
         self.open(self.bad, "pub fun f() -> int {\n    return 1\n}\n")

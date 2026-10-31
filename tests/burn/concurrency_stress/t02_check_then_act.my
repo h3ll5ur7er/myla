@@ -1,0 +1,32 @@
+// 2. Check-then-act in one synchronous actor method
+actor Account {
+    balance: int,
+}
+
+impl Account {
+    fun withdraw(var self, amount: int) -> bool {
+        if self.balance >= amount {
+            self.balance = self.balance - amount
+            return true
+        }
+        return false
+    }
+    fun get(self) -> int {
+        return self.balance
+    }
+}
+
+async fun take(a: Account, amount: int) -> bool {
+    return await a.withdraw(amount)
+}
+
+#main
+async fun main() {
+    let account = Account { balance: 100 }
+    async let r1 = take(account, 80)
+    async let r2 = take(account, 80)
+    var ok = 0
+    if await r1 { ok = ok + 1 }
+    if await r2 { ok = ok + 1 }
+    print(f"{ok} {await account.get()}")
+}

@@ -1,0 +1,15 @@
+// 5. A child waiting for its sibling: the nearest thing to a waiting cycle
+async fun slow(n: int) -> int {
+    return n
+}
+
+async fun use(n: int) -> int {
+    return n + 1
+}
+
+#main
+async fun main() {
+    async let a = slow(1)
+    async let b = use(await a)
+    print(await b)
+}

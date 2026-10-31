@@ -1,0 +1,45 @@
+// 6. Reentrancy across an await: the stock checked again after the payment
+// (the version without the second check gets a warning, D95)
+actor Payments {
+    charged: int,
+}
+
+impl Payments {
+    fun charge(var self) -> bool {
+        self.charged = self.charged + 1
+        return true
+    }
+}
+
+actor Inventory {
+    stock: int,
+}
+
+impl Inventory {
+    async fun buy(var self, p: Payments) -> bool {
+        if self.stock == 0 {
+            return false
+        }
+        let paid = await p.charge()
+        if self.stock == 0 {
+            return false
+        }
+        self.stock = self.stock - 1
+        return true
+    }
+    fun get(self) -> int {
+        return self.stock
+    }
+}
+
+#main
+async fun main() {
+    let inv = Inventory { stock: 1 }
+    let pay = Payments { charged: 0 }
+    async let a = inv.buy(pay)
+    async let b = inv.buy(pay)
+    var ok = 0
+    if await a { ok = ok + 1 }
+    if await b { ok = ok + 1 }
+    print(f"successes {ok} stock {await inv.get()}")
+}

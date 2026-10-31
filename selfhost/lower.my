@@ -29,8 +29,8 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
-from .checker import Type, Subst, opt_subst_type, subst_type
-from .codegen import CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .checker import Type, Subst, FuncSig, opt_subst_type, subst_type
+from .codegen import is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 
 // A name in scope: the slot holding it.
@@ -59,9 +59,21 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // of a value built there (a flag would be overwritten by a `return` nested in
 // the value). `tail`: the next call lowered ends the function by `become`
 // (D87); `tailed`: it did.
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool }
+// `frame_fn`: an async function's frame function (D90), `result` the slot its
+// result goes to (-1: none); `tasks`: the child tasks of the open scopes;
+// `actor_self`: the slot of an actor method's `self`, whose actor its frame
+// function holds between suspensions (D92), or -1; `deep_res`: an actor
+// method's result is copied deeply before it leaves the actor (D92).
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
+// A child task of an `async let` (D89): the slot holding its frame, its
+// result's type (`void`: none; `owns`: it owns heap memory), and the depth of
+// the scope that joins it.
+// `foreign`: a sibling's, which a child awaits (MYLA-148): never joined here
+// (depth -1), its result read as a deep clone, the parent reading it too.
+struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, foreign: bool }
+
 pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
 
 // The IR of the function `fd`, generated as `mangled`; Err: why it can't be
@@ -69,12 +81,24 @@ pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: 
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
     var first_word = 0
+    // an async function, when tasks take turns: its frame function, its
+    // slots in its heap frame, the result in the first (D90)
+    let frame = cg.frames && fd.is_async
+    if frame {
+        lw.f.frame = true
+        lw.frame_fn = true
+    }
     match ret {
         Some(t) => {
             if !lowerable(cg, t) { return Err("its result type") }
-            if is_aggregate(t) {
+            if frame {
+                var rsize = 8
+                if is_aggregate(t) { rsize = cg.size(t) }
+                lw.result = lw.new_slot("__result", t, rsize, -1, false)
+                if is_aggregate(t) { lw.sret = lw.result }
+            } else if is_aggregate(t) {
                 lw.sret = lw.new_slot("__sret", t, 8, 0, false)
                 first_word = 1
             }
@@ -88,6 +112,21 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
     while i < len(fd.params) {
         let t = subst_type(sig.params[i], cg.subst)
         if !lowerable(cg, t) { return Err("a parameter's type") }
+        if frame {
+            // an owned copy in the frame, which `__new` makes; a `var self`
+            // method's struct goes back to its caller, which takes it at the
+            // end (`await_let`), so the frame doesn't drop it
+            var psize = 8
+            if is_aggregate(t) { psize = cg.size(t) }
+            let goes_back = i == 0 && is_aggregate(t) && match fd.receiver { Some(r) => r == "var self", None => false }
+            let ps = lw.new_slot(fd.params[i].name, t, psize, i, cg.owns_heap(t) && !goes_back)
+            lw.f.slots[ps].inline = true
+            lw.declare_as(fd.params[i].name, ps, i > 0 || match fd.receiver { Some(r) => r != "var self", None => true })
+            lw.own(ps)
+            lw.add(Inst.Bind(fd.params[i].name, ps))
+            i = i + 1
+            continue
+        }
         // a parameter passed owned holds the caller's reference, which the
         // function drops on every exit unless it moves it on (MYLA-127); one
         // passed by value holds the aggregate in its argument words, owning
@@ -104,6 +143,24 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
         lw.add(Inst.Bind(fd.params[i].name, s))
         i = i + 1
     }
+    // an actor's async method holds the actor while it runs (D92)
+    let actor_method = cg.frames && len(fd.params) > 0 && has_receiver(fd) && is_actor_t(lw.f.slots[lw.lookup(fd.params[0].name)].ty)
+    if frame && actor_method {
+        lw.actor_self = lw.lookup(fd.params[0].name)
+        lw.actor_off = actor_record_offset(cg, lw.f.slots[lw.actor_self].ty)
+        lw.enter_self()
+    }
+    // an actor method's arguments and result are copied deeply, as they
+    // cross between the caller and the actor (D92)
+    if actor_method {
+        lw.deep_res = match ret { Some(t) => cg.owns_heap(t) && !is_actor_t(t), None => false }
+        var pi = 1
+        while pi < len(fd.params) {
+            let pt = subst_type(sig.params[pi], cg.subst)
+            if cg.owns_heap(pt) && !is_actor_t(pt) { lw.deep_param(cg, fd.params[pi].name, pt) }
+            pi = pi + 1
+        }
+    }
     match fd.body {
         Some(b) => { lw.block(cg, b) },
         None => {},
@@ -111,7 +168,8 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
     if lw.err != "" { return Err(lw.err) }
     // the end of the body falls through to the epilogue
     lw.drop_owners(0)
-    lw.finish(Term.Ret(-1))
+    lw.exit_fn(-1, true)
+    if lw.err != "" { return Err(lw.err) }
     return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
 }
 
@@ -121,12 +179,24 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [] }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
+    // an async lambda, when tasks take turns: a frame function, as an async
+    // function's (D90); its frame holds the environment and the arguments
+    let frame = cg.frames && is_async_t(job.ftype)
+    if frame {
+        lw.f.frame = true
+        lw.frame_fn = true
+    }
     var first_word = 0
     match ret {
         Some(t) => {
             if !lowerable(cg, t) { return Err("its result type") }
-            if is_aggregate(t) {
+            if frame {
+                var rsize = 8
+                if is_aggregate(t) { rsize = cg.size(t) }
+                lw.result = lw.new_slot("__result", t, rsize, -1, false)
+                if is_aggregate(t) { lw.sret = lw.result }
+            } else if is_aggregate(t) {
                 lw.sret = lw.new_slot("__sret", t, 8, 0, false)
                 first_word = 1
             }
@@ -136,11 +206,23 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let entry = lw.new_block()
     lw.start(entry)
     let env = lw.new_slot("__env", Type.TInt(64, false), 8, first_word, false)
+    if frame { lw.f.slots[env].inline = true }
     let ptypes = tfunc_params(job.ftype)
     var i = 0
     while i < len(job.params) {
         let t = subst_type(ptypes[i], cg.subst)
         if !lowerable(cg, t) { return Err("a parameter's type") }
+        if frame {
+            var psize = 8
+            if is_aggregate(t) { psize = cg.size(t) }
+            let ps = lw.new_slot(job.params[i].name, t, psize, first_word + 1 + i, cg.owns_heap(t))
+            lw.f.slots[ps].inline = true
+            lw.declare_as(job.params[i].name, ps, true)
+            lw.own(ps)
+            lw.add(Inst.Bind(job.params[i].name, ps))
+            i = i + 1
+            continue
+        }
         let s = lw.new_slot(job.params[i].name, t, 8, first_word + 1 + i, false)
         lw.declare_as(job.params[i].name, s, true)
         lw.add(Inst.Bind(job.params[i].name, s))
@@ -148,18 +230,30 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     }
     for c in job.caps {
         if !lowerable(cg, c.ty) { return Err("a capture's type") }
-        let s = lw.value_slot(cg, c.name, c.ty, false)
+        // a frame's copy owns what it holds: the environment goes before
+        // the frame does
+        let s = lw.value_slot(cg, c.name, c.ty, frame)
         let e = lw.temp(Type.TInt(64, false))
         lw.add(Inst.Load(e, env))
         if is_aggregate(c.ty) {
             lw.add(Inst.Copy(lw.slot_addr(s), lw.offset(e, c.off), cg.size(c.ty)))
+            if frame { lw.retain(cg, c.ty, lw.slot_addr(s)) }
         } else {
             let v = lw.temp(c.ty)
             lw.add(Inst.LoadAt(v, e, c.off))
             lw.add(Inst.Store(s, v))
+            if frame { lw.retain(cg, c.ty, v) }
         }
         lw.declare_as(c.name, s, true)
+        if frame { lw.own(s) }
         lw.add(Inst.Bind(c.name, s))
+        // a sibling's task: awaited here, joined by the parent (MYLA-148)
+        if c.task { push(lw.tasks, TaskSlot { slot: s, ty: c.task_ty, void: c.task_void, owns: cg.owns_heap(c.task_ty), depth: -1, foreign: true }) }
+    }
+    if frame {
+        let e = lw.temp(Type.TInt(64, false))
+        lw.add(Inst.Load(e, env))
+        lw.add(Inst.Rt(-1, "__func_drop", [e]))
     }
     match job.body {
         ExprOrBlock.EB_Block(b) => { lw.block(cg, b) },
@@ -174,7 +268,13 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
         },
     }
     if lw.err != "" { return Err(lw.err) }
-    lw.finish(Term.Ret(-1))
+    if frame {
+        lw.drop_owners(0)
+        lw.exit_fn(-1, true)
+        if lw.err != "" { return Err(lw.err) }
+    } else {
+        lw.finish(Term.Ret(-1))
+    }
     return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
 }
 
@@ -214,6 +314,8 @@ fun member_lowerable(t: Type, blocked: [str]) -> bool {
             Some(rt) => member_lowerable(rt, blocked)
             None => true
         }
+        Type.TAsync(f) => member_lowerable(f, blocked)
+        Type.TActor(n) => !has_name(blocked, n)
         _ => false
     }
 }
@@ -270,6 +372,39 @@ pub fun blocked_types(cg: CodeGen) -> [str] {
 
 // Whether `t`'s values are a pointer to a heap cell held in 8 bytes (a
 // string so far): a scalar for the frame, with a reference count.
+// Where a frame's caller and its result are (`[resume fn][caller][state]
+// [task]`, then the result: D90, ir_x86's FRAME_HEADER).
+const FRAME_CALLER: int32 = 8
+const FRAME_TASK: int32 = 24
+const FRAME_RESULT: int32 = 72
+
+// A frame's task (its first frame), a task's flags (1: its children are
+// cancelled, D94) and its parent task.
+const FRAME_ROOT: int32 = 40
+const FRAME_PARENT: int32 = 56
+
+// An actor's executor (D92), after its fields: `[lock][running][first
+// frame waiting][last]`.
+const ACTOR_RECORD: int32 = 32
+
+// Whether `fd` is a method (it has a receiver).
+fun has_receiver(fd: FunData) -> bool {
+    return match fd.receiver { Some(r) => true, None => false }
+}
+
+// Where an actor's executor begins in its cell: after its fields.
+fun actor_record_offset(cg: CodeGen, t: Type) -> int32 {
+    return (cg.size(Type.TStruct(actor_name(t), [])) + 7) / 8 * 8
+}
+
+// The function a call calls (Lower.call_target).
+struct CallTarget { name: str, params: [Type], ret: Option<Type> }
+
+// The name of the actor type `t` (D89).
+fun actor_name(t: Type) -> str {
+    return match t { Type.TActor(n) => n, _ => "" }
+}
+
 fun is_cell(t: Type) -> bool {
     return is_cell_t(t)
 }
@@ -502,15 +637,24 @@ impl Lower {
     }
 
     fun close_scope(var self) {
-        self.drop_owners(len(self.owners) - 1)
+        let depth = len(self.owners) - 1
+        self.drop_owners(depth)
+        while len(self.tasks) > 0 && self.tasks[len(self.tasks) - 1].depth >= depth { let t = pop(self.tasks) }
         pop(self.scopes)
         pop(self.owners)
         self.add(Inst.Scope(false))
     }
 
     // Drop the owners of the scopes from the innermost down to index `depth`,
-    // each scope's in reverse order (they stay registered).
+    // each scope's in reverse order (they stay registered); first, a scope
+    // left waits for the child tasks it started (D89, D90).
     fun drop_owners(var self, depth: int32) {
+        // the child tasks of those scopes first, the latest first (D89)
+        var j = len(self.tasks) - 1
+        while j >= 0 && self.tasks[j].depth >= depth {
+            self.join_task(self.tasks[j])
+            j = j - 1
+        }
         var s = len(self.owners) - 1
         while s >= depth {
             var i = len(self.owners[s]) - 1
@@ -612,6 +756,21 @@ impl Lower {
         match s.kind {
             StmtKind.ExprStmt(e) => { self.discard(cg, e) },
             StmtKind.VarDecl(k, name, ty, init) => {
+                if k == "async" {
+                    self.async_let(cg, name, init)
+                    return
+                }
+                // `let x = await …` in a frame function (normalized: the only
+                // place an `await` stands, D90)
+                if self.frame_fn {
+                    match init.kind {
+                        ExprKind.Await(op) => {
+                            self.await_let(cg, s, k, name, op)
+                            return
+                        },
+                        _ => {},
+                    }
+                }
                 let t = cg.type_of(init.id)
                 if !lowerable(cg, t) {
                     let d = self.unsupported("a local's type")
@@ -653,7 +812,7 @@ impl Lower {
                     None => {
                         self.drop_temps(0)
                         self.drop_owners(0)
-                        self.leave(Term.Ret(-1))
+                        self.exit_fn(-1, false)
                     },
                 }
             },
@@ -749,20 +908,587 @@ impl Lower {
             }
             self.drop_temps(0)
             self.drop_owners(0)
-            self.leave(Term.Ret(dst))
+            self.exit_fn(dst, false)
             return
         }
         let v = self.expr(cg, e)
         self.retain_or_take(cg, t, v)
+        if self.frame_fn {
+            // in the frame before the scopes end, which may wait for their
+            // children (no temporary lives across a suspension)
+            if self.result >= 0 { self.add(Inst.Store(self.result, v)) }
+            self.drop_temps(0)
+            self.drop_owners(0)
+            self.exit_fn(-1, false)
+            return
+        }
         self.drop_temps(0)
         self.drop_owners(0)
-        self.leave(Term.Ret(v))
+        self.exit_fn(v, false)
+    }
+
+    // `let name = await op` (`s`) in a frame function (D90). A call of an
+    // async function or method runs on a frame of its own: `__new` makes it
+    // with copies of the arguments, the call is made in place of this
+    // function (`suspend` after it) and this one goes on when it ends, its
+    // result moved out of its frame, which is freed. Any other call is made
+    // here, and then the other tasks take a turn.
+    fun await_let(var self, cg: CodeGen, s: Stmt, k: str, name: str, op: Expr) {
+        // an `async let`'s name: its child's result
+        match op.kind {
+            ExprKind.Name(n) => {
+                let ts = self.lookup(n)
+                let ti = self.task_of(ts)
+                if ts >= 0 && ti >= 0 {
+                    self.await_task(cg, k, name, self.tasks[ti])
+                    return
+                }
+            },
+            _ => {},
+        }
+        // a call through an async function value
+        let via = self.frame_of_value(cg, op)
+        if via >= 0 {
+            let held = self.run_frame(cg, k, name, via, "__resume", cg.has_type(op.id), cg.type_of(op.id), false)
+            return
+        }
+        var target = ""
+        var argv: [Expr] = []
+        match op.kind {
+            ExprKind.Call(callee, args) => {
+                match callee.kind {
+                    ExprKind.Name(nm) => {
+                        if self.lookup(nm) < 0 && !cg.called_as_value(callee) && cg.is_async_fn(nm) {
+                            target = nm
+                            argv = args
+                        }
+                    },
+                    ExprKind.GetField(recv, field) => {
+                        let mname = format("{}.{}", cg.type_key(cg.type_of(recv.id)), field)
+                        if cg.is_async_fn(mname) {
+                            target = mname
+                            push(argv, recv)
+                            for a in args { push(argv, a) }
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+        if target == "" {
+            if self.actor_call(cg, s, k, name, op) { return }
+            // made here, its value bound as a `let`'s; then a turn for the others
+            if cg.has_type(op.id) {
+                self.stmt_body(cg, Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: StmtKind.VarDecl(k, name, None, op) })
+            } else {
+                self.discard(cg, op)
+            }
+            self.leave_self()
+            self.yield_turn()
+            self.enter_self()
+            return
+        }
+        let sig = cg.sig_of(target)
+        let ct = self.call_target(cg, sig, argv)
+        // a `var self` method of a struct: its final `self` goes back to the
+        // receiver, a variable or a field or list element of one, its indices
+        // computed once (MYLA-142); nothing else reaches the place meanwhile
+        var back = false
+        if sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false } && is_aggregate(ct.params[0]) {
+            if !self.local_place(cg, argv[0]) {
+                let d = self.unsupported("an awaited 'var self' method on that receiver")
+                return
+            }
+            argv[0] = self.fixed_receiver(cg, argv[0], op.id)
+            back = true
+        }
+        var vals: [int32] = []
+        var i = 0
+        while i < len(argv) && i < len(ct.params) {
+            if !lowerable(cg, ct.params[i]) {
+                let d = self.unsupported("a call with an argument of that type")
+                return
+            }
+            if is_aggregate(ct.params[i]) { push(vals, self.addr(cg, argv[i])) } else { push(vals, self.expr(cg, argv[i])) }
+            i = i + 1
+        }
+        let fr = self.temp(Type.TInt(64, false))
+        self.add(Inst.Call(fr, ct.name + "__new", vals))
+        var rt = Type.TBool
+        var has = false
+        var self_off = FRAME_RESULT
+        match ct.ret {
+            Some(r) => {
+                rt = r
+                has = true
+                // after the result slot `lower_function` makes
+                var rsize = 8
+                if is_aggregate(r) { rsize = cg.size(r) }
+                self_off = FRAME_RESULT + (rsize + 7) / 8 * 8
+            },
+            None => {},
+        }
+        let held = self.run_frame(cg, k, name, fr, ct.name, has, rt, back)
+        if back {
+            // the receiver's old value goes, the method's `self` moves in,
+            // then the callee's frame (kept by `run_frame` for it) is freed
+            let done = self.temp(Type.TInt(64, false))
+            self.add(Inst.Load(done, held))
+            let t = ct.params[0]
+            let local = match argv[0].kind {
+                ExprKind.Name(n) => self.lookup(n)
+                _ => -1
+            }
+            var dst = -1
+            if local >= 0 && self.f.slots[local].owns {
+                self.add(Inst.DropSlot(t, local))
+                dst = self.slot_addr(local)
+            } else {
+                dst = self.place(cg, argv[0])
+                if cg.owns_heap(t) { self.add(Inst.DropAt(t, dst)) }
+            }
+            self.add(Inst.Copy(dst, self.offset(done, self_off), cg.size(t)))
+            self.add(Inst.Rt(-1, "__free", [done]))
+        }
+    }
+
+    // Whether `e` is a local variable or a field of one, through structs
+    // only: a place no other task or call reaches while this function waits
+    // (an actor's field could change meanwhile, D89).
+    fun local_place(var self, cg: CodeGen, e: Expr) -> bool {
+        return match e.kind {
+            ExprKind.Name(n) => self.lookup(n) >= 0,
+            ExprKind.GetField(recv, f) => !is_actor_t(cg.type_of(recv.id)) && self.local_place(cg, recv),
+            ExprKind.Index(base, idx) => is_list_t(cg.type_of(base.id)) && self.local_place(cg, base),
+            _ => false,
+        }
+    }
+
+    // The place `e` (`local_place`) with each index computed now into a slot
+    // of its own, so that reading the receiver and writing it back after the
+    // method name the same element.
+    fun fixed_receiver(var self, cg: CodeGen, e: Expr, call: int32) -> Expr {
+        return match e.kind {
+            ExprKind.GetField(recv, f) => Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.GetField(self.fixed_receiver(cg, recv, call), f) },
+            ExprKind.Index(base, idx) => {
+                let b2 = self.fixed_receiver(cg, base, call)
+                let nm = format("%index{}_{}", call, idx.id)
+                let held = self.held_value(cg, idx, nm)
+                let i2 = Expr { id: idx.id, line: idx.line, col: idx.col, sp: idx.sp, kind: ExprKind.Name(nm) }
+                Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(b2, i2) }
+            },
+            _ => e,
+        }
+    }
+
+    // The parameter `name` (of type `t`) of an actor's method as a deep copy
+    // of its own (D92): in place when its slot owns its value, else a new
+    // owned slot copied from the borrowed one.
+    fun deep_param(var self, cg: CodeGen, name: str, t: Type) {
+        let s = self.lookup(name)
+        if self.f.slots[s].owns {
+            self.add(Inst.Deep(t, self.slot_addr(s)))
+            return
+        }
+        let c = self.value_slot(cg, name, t, true)
+        if is_aggregate(t) {
+            var src = -1
+            if self.f.slots[s].inline { src = self.slot_addr(s) }
+            else {
+                src = self.temp(Type.TInt(64, false))
+                self.add(Inst.Load(src, s))
+            }
+            let dst = self.slot_addr(c)
+            self.add(Inst.Copy(dst, src, cg.size(t)))
+            self.retain(cg, t, dst)
+        } else {
+            let v = self.temp(t)
+            self.add(Inst.Load(v, s))
+            self.add(Inst.Store(c, v))
+            self.retain(cg, t, v)
+        }
+        self.add(Inst.Deep(t, self.slot_addr(c)))
+        self.declare_as(name, c, true)
+        self.own(c)
+        self.add(Inst.Bind(name, c))
+    }
+
+    // `let name = await recv.m(args)` of an actor's synchronous method (D92):
+    // the receiver and the arguments into slots of their own while this
+    // function still holds its own actor, which it leaves; the call made in
+    // the receiver's actor, entered and left around it; then a turn for the
+    // others, and its own actor entered again. False when `op` isn't one.
+    fun actor_call(var self, cg: CodeGen, s: Stmt, k: str, name: str, op: Expr) -> bool {
+        match op.kind {
+            ExprKind.Call(callee, args) => {
+                match callee.kind {
+                    ExprKind.GetField(recv, m) => {
+                        let at = cg.type_of(recv.id)
+                        if !is_actor_t(at) { return false }
+                        let rs = self.held_value(cg, recv, format("%actor{}", op.id))
+                        var args2: [Expr] = []
+                        var i = 0
+                        while i < len(args) {
+                            let a = args[i]
+                            let an = format("%arg{}_{}", op.id, i)
+                            let held = self.held_value(cg, a, an)
+                            push(args2, Expr { id: a.id, line: a.line, col: a.col, sp: a.sp, kind: ExprKind.Name(an) })
+                            i = i + 1
+                        }
+                        let r2 = Expr { id: recv.id, line: recv.line, col: recv.col, sp: recv.sp, kind: ExprKind.Name(format("%actor{}", op.id)) }
+                        let c2 = Expr { id: callee.id, line: callee.line, col: callee.col, sp: callee.sp, kind: ExprKind.GetField(r2, m) }
+                        let op2 = Expr { id: op.id, line: op.line, col: op.col, sp: op.sp, kind: ExprKind.Call(c2, args2) }
+                        let off = actor_record_offset(cg, at)
+                        self.leave_self()
+                        self.enter_actor(rs, off)
+                        if cg.has_type(op.id) {
+                            self.stmt_body(cg, Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: StmtKind.VarDecl(k, name, None, op2) })
+                        } else {
+                            self.discard(cg, op2)
+                        }
+                        self.leave_actor(rs, off)
+                        self.yield_turn()
+                        self.enter_self()
+                        return true
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+        return false
+    }
+
+    // `e`'s value in a new owned slot named `nm`, with references of its own.
+    fun held_value(var self, cg: CodeGen, e: Expr, nm: str) -> int32 {
+        let t = cg.type_of(e.id)
+        let slot = self.value_slot(cg, nm, t, true)
+        if is_aggregate(t) {
+            let src = self.addr(cg, e)
+            let dst = self.slot_addr(slot)
+            self.add(Inst.Copy(dst, src, cg.size(t)))
+            self.retain(cg, t, dst)
+        } else {
+            let v = self.expr(cg, e)
+            self.add(Inst.Store(slot, v))
+            self.retain(cg, t, v)
+        }
+        self.declare_as(nm, slot, false)
+        self.own(slot)
+        return slot
+    }
+
+    // A turn for the other tasks: this frame queued again (D90).
+    fun yield_turn(var self) {
+        let me = self.temp(Type.TInt(64, false))
+        self.add(Inst.Frame(me))
+        self.add(Inst.Call(-1, "__yield", [me]))
+        let after = self.new_block()
+        self.finish(Term.Suspend(after))
+        self.start(after)
+    }
+
+    // The address of the executor of the actor whose handle is in `slot`.
+    fun actor_record(var self, slot: int32, off: int32) -> int32 {
+        let h = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(h, slot))
+        return self.offset(h, off)
+    }
+
+    // Into the actor in `slot` (D92): on at once when it is free, else after
+    // the frames queued before this one; then the running task holds it.
+    fun enter_actor(var self, slot: int32, off: int32) {
+        let rec = self.actor_record(slot, off)
+        let me = self.temp(Type.TInt(64, false))
+        self.add(Inst.Frame(me))
+        self.add(Inst.Call(-1, "__actor_enter", [rec, me]))
+        let inside = self.new_block()
+        self.finish(Term.Suspend(inside))
+        self.start(inside)
+        self.add(Inst.Rt(-1, "__actor_held", [self.actor_record(slot, off)]))
+    }
+
+    // Out of the actor in `slot`: the next frame waiting gets it.
+    fun leave_actor(var self, slot: int32, off: int32) {
+        self.add(Inst.Rt(-1, "__actor_leave", [self.actor_record(slot, off)]))
+    }
+
+    fun enter_self(var self) {
+        if self.actor_self >= 0 { self.enter_actor(self.actor_self, self.actor_off) }
+    }
+
+    fun leave_self(var self) {
+        if self.actor_self >= 0 { self.leave_actor(self.actor_self, self.actor_off) }
+    }
+
+    // The frame `fr` made for an awaited call: its caller this function, the
+    // call `resume(fr)` made in place of it (`suspend` after it), and when it
+    // ends its result (`has`, of type `rt`) moved into the variable `name`,
+    // the frame freed unless the caller `keep`s it, in the slot returned.
+    fun run_frame(var self, cg: CodeGen, k: str, name: str, fr: int32, resume: str, has: bool, rt: Type, keep: bool) -> int32 {
+        let me = self.temp(Type.TInt(64, false))
+        self.add(Inst.Frame(me))
+        self.add(Inst.StoreAt(fr, FRAME_CALLER, me))
+        // the callee runs in this task
+        let root = self.temp(Type.TInt(64, false))
+        self.add(Inst.LoadAt(root, me, FRAME_ROOT))
+        self.add(Inst.StoreAt(fr, FRAME_ROOT, root))
+        let held = self.new_slot("__callee", Type.TInt(64, false), 8, -1, false)
+        self.add(Inst.Store(held, fr))
+        self.leave_self()
+        self.add(Inst.Call(-1, resume, [fr]))
+        let resumed = self.new_block()
+        self.finish(Term.Suspend(resumed))
+        self.start(resumed)
+        self.enter_self()
+        let done = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(done, held))
+        if has {
+            if !lowerable(cg, rt) {
+                let d = self.unsupported("a call whose result has that type")
+                return held
+            }
+            let slot = self.value_slot(cg, name, rt, true)
+            // the callee's references move to the variable
+            if is_aggregate(rt) { self.add(Inst.Copy(self.slot_addr(slot), self.offset(done, FRAME_RESULT), cg.size(rt))) }
+            else {
+                let v = self.temp(rt)
+                self.add(Inst.LoadAt(v, done, FRAME_RESULT))
+                self.add(Inst.Store(slot, v))
+            }
+            if !keep { self.add(Inst.Rt(-1, "__free", [done])) }
+            self.declare_as(name, slot, k == "let")
+            self.own(slot)
+            self.add(Inst.Bind(name, slot))
+        } else if !keep {
+            self.add(Inst.Rt(-1, "__free", [done]))
+        }
+        return held
+    }
+
+    // The frame a call through an async function value makes (its code, the
+    // async function's `__new`, takes the environment and the arguments),
+    // or -1 when `op` is no such call.
+    fun frame_of_value(var self, cg: CodeGen, op: Expr) -> int32 {
+        if !cg.frames { return -1 }
+        match op.kind {
+            ExprKind.Call(callee, args) => {
+                var through_value = false
+                match callee.kind {
+                    ExprKind.Name(nm) => { through_value = self.lookup(nm) >= 0 || cg.called_as_value(callee) },
+                    ExprKind.GetField(recv, field) => {
+                        let mname = format("{}.{}", cg.type_key(cg.type_of(recv.id)), field)
+                        through_value = !cg.has_func(mname)
+                    },
+                    _ => { through_value = true },
+                }
+                if !through_value { return -1 }
+                let ft = self.place_type(cg, callee)
+                if !is_async_t(ft) || !lowerable(cg, ft) { return -1 }
+                let params = tfunc_params(ft)
+                let fv = self.addr(cg, callee)
+                var vals: [int32] = []
+                var i = 0
+                while i < len(args) && i < len(params) {
+                    if is_aggregate(params[i]) { push(vals, self.addr(cg, args[i])) } else { push(vals, self.expr(cg, args[i])) }
+                    i = i + 1
+                }
+                let fr = self.temp(Type.TInt(64, false))
+                self.add(Inst.CallInd(fr, fv, vals))
+                return fr
+            },
+            _ => {},
+        }
+        return -1
+    }
+
+    // `async let name = init` (D89): a child task. The normalizer made
+    // `init` a call of an async lambda holding copies of what it uses (anf.my,
+    // `wrap_children`), which runs on a frame of its own, made now and queued
+    // to run while this function goes on. Its frame, in a slot of its own, is
+    // what `await name` and the end of the scope (`join_task`) read.
+    fun async_let(var self, cg: CodeGen, name: str, init: Expr) {
+        let has = cg.has_type(init.id)
+        let rt = cg.type_of(init.id)
+        // the lambda value released before the child is queued: the child
+        // alone then holds its env (D92)
+        self.begin_temps()
+        let fr = self.frame_of_value(cg, init)
+        if fr < 0 {
+            let d = self.unsupported("an 'async let' not made a call of an async lambda")
+            return
+        }
+        // a task of its own, this function's task its parent (D94)
+        self.add(Inst.StoreAt(fr, FRAME_ROOT, fr))
+        let me = self.temp(Type.TInt(64, false))
+        self.add(Inst.Frame(me))
+        let parent = self.temp(Type.TInt(64, false))
+        self.add(Inst.LoadAt(parent, me, FRAME_ROOT))
+        self.add(Inst.StoreAt(fr, FRAME_PARENT, parent))
+        let fs = self.new_slot("__child", Type.TInt(64, false), 8, -1, false)
+        self.add(Inst.Store(fs, fr))
+        self.end_temps()
+        let fr2 = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(fr2, fs))
+        self.add(Inst.Rt(-1, "__exec_push", [fr2]))
+        let ts = self.new_slot("__task_" + name, Type.TInt(64, false), 8, -1, false)
+        self.add(Inst.Store(ts, fr2))
+        self.declare_as(name, ts, true)
+        push(self.tasks, TaskSlot { slot: ts, ty: rt, void: !has, owns: has && cg.owns_heap(rt), depth: len(self.owners) - 1, foreign: false })
+    }
+
+    // The child task whose frame is in the slot `ts`: its index in `tasks`,
+    // or -1.
+    fun task_of(self, ts: int32) -> int32 {
+        var i = 0
+        while i < len(self.tasks) {
+            if self.tasks[i].slot == ts { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    // Until the child task in `ts` ends: this function waits, its frame in
+    // the child's `task` word, which the child's end queues again.
+    fun wait_task(var self, ts: int32) -> int32 {
+        let check = self.new_block()
+        self.finish(Term.Jmp(check))
+        self.start(check)
+        let fr = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(fr, ts))
+        let st = self.temp(Type.TInt(64, false))
+        self.add(Inst.LoadAt(st, fr, FRAME_TASK))
+        // running (0) or a frame waiting already: wait; 1, 2 or 3: ended
+        let running = self.temp(Type.TBool)
+        self.add(Inst.Cmp(running, "==", Type.TInt(64, false), st, self.int_const(0)))
+        let wait = self.new_block()
+        let done = self.new_block()
+        let ended = self.new_block()
+        self.finish(Term.Br(running, wait, ended))
+        self.start(ended)
+        let is_done = self.temp(Type.TBool)
+        self.add(Inst.Cmp(is_done, "<", Type.TInt(64, false), st, self.int_const(4)))
+        self.finish(Term.Br(is_done, done, wait))
+        self.start(wait)
+        // parked on the child (or on at once if it has just ended), any
+        // actor held left meanwhile
+        self.leave_self()
+        let me = self.temp(Type.TInt(64, false))
+        self.add(Inst.Frame(me))
+        let fr2 = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(fr2, ts))
+        self.add(Inst.Call(-1, "__wait", [fr2, me]))
+        let back = self.new_block()
+        self.finish(Term.Suspend(back))
+        self.start(back)
+        self.enter_self()
+        self.finish(Term.Jmp(done))
+        self.start(done)
+        let out = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(out, ts))
+        // a failure in the child is raised here (D89)
+        self.add(Inst.Rt(-1, "__task_check", [out]))
+        return out
+    }
+
+    // `let name = await t` of an `async let`'s name: its child's result, with
+    // references of its own (the child keeps its own until the scope ends).
+    fun await_task(var self, cg: CodeGen, k: str, name: str, t: TaskSlot) {
+        let fr = self.wait_task(t.slot)
+        if t.void { return }
+        let rt = t.ty
+        let slot = self.value_slot(cg, name, rt, true)
+        if is_aggregate(rt) {
+            let dst = self.slot_addr(slot)
+            self.add(Inst.Copy(dst, self.offset(fr, FRAME_RESULT), cg.size(rt)))
+            if t.foreign { self.add(Inst.CloneDeep(rt, dst)) } else { self.retain(cg, rt, dst) }
+        } else {
+            let v = self.temp(rt)
+            self.add(Inst.LoadAt(v, fr, FRAME_RESULT))
+            self.add(Inst.Store(slot, v))
+            // a sibling's result, which the parent may read at the same time:
+            // a deep clone, the original's counts untouched (MYLA-148)
+            if t.foreign && cg.owns_heap(rt) { self.add(Inst.CloneDeep(rt, self.slot_addr(slot))) }
+            else if !t.foreign { self.retain(cg, rt, v) }
+        }
+        self.declare_as(name, slot, k == "let")
+        self.own(slot)
+        self.add(Inst.Bind(name, slot))
+    }
+
+    // A scope's end for the child task `t`: once it ends, its result is
+    // released and its frame freed (0 in its slot then: done already on
+    // another way out).
+    fun join_task(var self, t: TaskSlot) {
+        let ts = t.slot
+        let start = self.new_block()
+        self.finish(Term.Jmp(start))
+        self.start(start)
+        let fr0 = self.temp(Type.TInt(64, false))
+        self.add(Inst.Load(fr0, ts))
+        let gone = self.temp(Type.TBool)
+        self.add(Inst.Cmp(gone, "==", Type.TInt(64, false), fr0, self.int_const(0)))
+        let live = self.new_block()
+        let end = self.new_block()
+        self.finish(Term.Br(gone, end, live))
+        self.start(live)
+        let fr = self.wait_task(ts)
+        if t.owns { self.add(Inst.DropAt(t.ty, self.offset(fr, FRAME_RESULT))) }
+        self.add(Inst.Rt(-1, "__free", [fr]))
+        self.add(Inst.Store(ts, self.int_const(0)))
+        self.finish(Term.Jmp(end))
+        self.start(end)
+    }
+
+    // The function's end, returning the value in %v (-1: none, or an
+
+    // The function's end, returning the value in %v (-1: none, or an
+    // aggregate already in its result's storage); `fall`: the body fell
+    // through (`finish`), else a statement ended it (`leave`). A frame
+    // function stores a scalar result in its frame and ends with
+    // `__finish`, which resumes its caller or ends its task (D90).
+    fun exit_fn(var self, v: int32, fall: bool) {
+        if !self.frame_fn {
+            var rv = v
+            if self.deep_res {
+                match self.f.ret {
+                    Some(t) => {
+                        if self.sret >= 0 { self.add(Inst.Deep(t, self.slot_addr(self.sret))) }
+                        else if v >= 0 {
+                            // through a slot of its own, which `deep` works on
+                            let r = self.new_slot("__deep_result", t, 8, -1, false)
+                            self.add(Inst.Store(r, v))
+                            self.add(Inst.Deep(t, self.slot_addr(r)))
+                            rv = self.temp(t)
+                            self.add(Inst.Load(rv, r))
+                        }
+                    },
+                    None => {},
+                }
+            }
+            if fall { self.finish(Term.Ret(rv)) } else { self.leave(Term.Ret(rv)) }
+            return
+        }
+        if v >= 0 && self.result >= 0 && self.sret < 0 { self.add(Inst.Store(self.result, v)) }
+        if self.deep_res && self.result >= 0 { self.add(Inst.Deep(self.f.slots[self.result].ty, self.slot_addr(self.result))) }
+        self.leave_self()
+        let fr = self.temp(Type.TInt(64, false))
+        self.add(Inst.Frame(fr))
+        self.add(Inst.Call(-1, "__finish", [fr]))
+        if fall { self.finish(Term.Become) } else { self.leave(Term.Become) }
     }
 
     // `become e` (D87): the call `e`, its arguments evaluated, then the
     // function's owners dropped and the call made in place of the function
     // (`tail_call`).
     fun become_call(var self, cg: CodeGen, e: Expr) {
+        // an actor method's result is copied before it leaves (D92), which a
+        // call in its place would skip: a `return` of the call instead
+        if self.deep_res {
+            self.ret_value(cg, e)
+            return
+        }
         match e.kind {
             ExprKind.Call(callee, args) => {
                 self.tail = true
@@ -789,6 +1515,14 @@ impl Lower {
 
     fun discard(var self, cg: CodeGen, e: Expr) {
         match e.kind {
+            ExprKind.Await(x) => {
+                if cg.frames {
+                    let d = self.unsupported("an 'await' outside an async function's frame (in an async lambda)")
+                    return
+                }
+                self.discard(cg, x)
+                return
+            },
             ExprKind.MatchE(scrut, arms) => {
                 let v = self.match_expr(cg, e, scrut, arms, false)
                 return
@@ -884,6 +1618,11 @@ impl Lower {
                 if slot >= 0 { return self.slot_addr(slot) }
             },
             ExprKind.GetField(tgt, field) => {
+                // an actor's field: through its handle, shared (D89)
+                if is_actor_t(self.place_type(cg, tgt)) {
+                    let h = self.expr(cg, tgt)
+                    return self.offset(h, cg.field_offset(self.place_type(cg, tgt), field))
+                }
                 let base = self.place(cg, tgt)
                 return self.offset(base, cg.field_offset(self.place_type(cg, tgt), field))
             },
@@ -1150,7 +1889,7 @@ impl Lower {
             },
             ExprKind.GetField(tgt, field) => {
                 if is_aggregate(t) { return self.unsupported("an aggregate field used as a scalar") }
-                let base = self.addr(cg, tgt)
+                let base = self.field_base(cg, tgt)
                 let d = self.temp(t)
                 self.add(Inst.LoadAt(d, base, cg.field_offset(self.place_type(cg, tgt), field)))
                 return d
@@ -1172,6 +1911,14 @@ impl Lower {
             },
             ExprKind.ListLit(elems) => { return self.list_lit(cg, t, elems) },
             ExprKind.MapLit(entries) => { return self.map_lit(cg, t, entries) },
+            ExprKind.StructLit(name, fields) => {
+                if is_actor_t(t) { return self.actor_lit(cg, t, fields) }
+            },
+            // one task: the awaited call runs here (D91, MYLA-138)
+            ExprKind.Await(x) => {
+                if cg.frames { return self.unsupported("an 'await' outside an async function's frame (in an async lambda)") }
+                return self.expr(cg, x)
+            },
             ExprKind.Try(inner) => { return self.try_expr(cg, e, inner) },
             _ => {},
         }
@@ -1333,8 +2080,12 @@ impl Lower {
             },
             ExprKind.Lambda(params, rt, body, asy) => { return self.lambda_value(cg, e, params, body) },
             ExprKind.GetField(tgt, field) => {
-                let base = self.addr(cg, tgt)
+                let base = self.field_base(cg, tgt)
                 return self.unbox(cg, t, self.offset(base, cg.field_offset(self.place_type(cg, tgt), field)))
+            },
+            ExprKind.Await(x) => {
+                if cg.frames { return self.unsupported("an 'await' outside an async function's frame (in an async lambda)") }
+                return self.addr(cg, x)
             },
             ExprKind.TupleIndex(tgt, idx) => {
                 let base = self.addr(cg, tgt)
@@ -1381,6 +2132,30 @@ impl Lower {
             _ => {},
         }
         return self.unsupported("that kind of aggregate expression")
+    }
+
+    // The address the fields of `tgt`'s value are at: its own, or an actor's
+    // cell, through its handle (D89).
+    fun field_base(var self, cg: CodeGen, tgt: Expr) -> int32 {
+        if is_actor_t(self.place_type(cg, tgt)) { return self.expr(cg, tgt) }
+        return self.addr(cg, tgt)
+    }
+
+    // `A { … }` of an actor: a new cell holding the fields, each with its
+    // own references; the statement owns the handle (D89).
+    fun actor_lit(var self, cg: CodeGen, t: Type, fields: [FieldInit]) -> int32 {
+        let off = actor_record_offset(cg, t)
+        let size = self.int_const(off + ACTOR_RECORD)
+        let p = self.temp(t)
+        self.add(Inst.Rt(p, "__alloc", [size]))
+        // its executor (D92), after the fields: free, no frame waiting
+        var w = 0
+        while w < ACTOR_RECORD {
+            self.add(Inst.StoreAt(p, off + w, self.int_const(0)))
+            w = w + 8
+        }
+        for fi in fields { self.store_member(cg, fi.value, p, cg.field_offset(t, fi.name)) }
+        return self.owned_value(cg, p, t)
     }
 
     // The address of the value of type `t` held by the member at `p`: `p`
@@ -1510,6 +2285,21 @@ impl Lower {
                     return self.owned_value(cg, d, Type.TStr)
                 }
                 if is_builtin_call_name(nm) { return self.io_call(cg, e, nm, args) }
+                // `task.cancel(a)` (D96): the child's first frame flagged
+                if nm == "std$task$cancel" && len(args) == 1 {
+                    match args[0].kind {
+                        ExprKind.Name(an) => {
+                            let ts = self.lookup(an)
+                            if ts >= 0 && self.task_of(ts) >= 0 {
+                                let fr = self.temp(Type.TInt(64, false))
+                                self.add(Inst.Load(fr, ts))
+                                self.add(Inst.Rt(-1, "__task_cancel", [fr]))
+                                return -1
+                            }
+                        },
+                        _ => {},
+                    }
+                }
                 if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.indirect_call(cg, e, callee, args, tail) }
                 return self.direct_call(cg, e, nm, args, into, tail)
             },
@@ -1540,7 +2330,7 @@ impl Lower {
         if tail {
             self.drop_temps(0)
             self.drop_owners(0)
-            self.leave(Term.Ret(res))
+            self.exit_fn(res, false)
             self.tailed = true
         }
         return res
@@ -1659,7 +2449,15 @@ impl Lower {
                 push(seen, nm)
                 let ct = self.f.slots[slot].ty
                 if !lowerable(cg, ct) { return self.unsupported("a capture of that type") }
-                push(caps, Cap { name: nm, ty: ct, off: size })
+                // a sibling child task, which this child may await (MYLA-148)
+                let ti = self.task_of(slot)
+                var tty = Type.TBool
+                var tvoid = true
+                if ti >= 0 {
+                    tty = self.tasks[ti].ty
+                    tvoid = self.tasks[ti].void
+                }
+                push(caps, Cap { name: nm, ty: ct, off: size, task: ti >= 0, task_ty: tty, task_void: tvoid })
                 size = size + cg.size(ct)
                 if cg.owns_heap(ct) { owns = true }
             }
@@ -1668,7 +2466,13 @@ impl Lower {
         if len(caps) == 0 { size = -1 }
         var drop = "__free"
         if owns { drop = format("myla_{}_env_drop", lifted) }
-        let made = self.fat_value(cg, t, "myla_" + lifted, size, drop)
+        // an async lambda's code makes its frame (D90)
+        var code = "myla_" + lifted
+        if cg.frames && is_async_t(t) { code = code + "__new" }
+        let made = self.fat_value(cg, t, code, size, drop)
+        // a child task's captures: copied deeply, as they cross to its thread
+        // (D92)
+        let child = cg.frames && contains(cg.norm.children, e.id)
         for c in caps {
             let slot = self.lookup(c.name)
             if is_aggregate(c.ty) {
@@ -1681,6 +2485,7 @@ impl Lower {
                 self.add(Inst.StoreAt(made.2, c.off, v))
                 self.retain(cg, c.ty, v)
             }
+            if child && cg.owns_heap(c.ty) && !is_actor_t(c.ty) { self.add(Inst.Deep(c.ty, self.offset(made.2, c.off))) }
         }
         self.made_value(made.0)
         return made.1
@@ -1787,28 +2592,30 @@ impl Lower {
     // address, both borrowed; an aggregate result through storage of its own.
     // With `tail`, by `become`: the parameters it passes heap values to are
     // owned (`find_kept_params`).
+    // The function a call of `name` with `argv` calls: a generic one's
+    // instance for the argument types, which the code generator stamps out
+    // once this function is lowered, with its parameter and result types.
+    fun call_target(var self, cg: CodeGen, sig: FuncSig, argv: [Expr]) -> CallTarget {
+        if len(sig.type_params) == 0 { return CallTarget { name: sig.name, params: sig.params, ret: sig.ret } }
+        let targs = cg.solve_targs(sig, argv)
+        push(self.f.instances, Instance { orig: sig.name, targs: targs })
+        var sub: [Subst] = []
+        var k = 0
+        while k < len(sig.type_params) {
+            push(sub, Subst { name: sig.type_params[k], ty: targs[k] })
+            k = k + 1
+        }
+        var cp: [Type] = []
+        for p in sig.params { push(cp, subst_type(p, sub)) }
+        return CallTarget { name: mangle_fn(sig.name, targs), params: cp, ret: opt_subst_type(sig.ret, sub) }
+    }
+
     fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr], into: int32, tail: bool) -> int32 {
         let sig = cg.sig_of(name)
-        // a generic function: the instance for the argument types, which the
-        // code generator stamps out once this function is lowered
-        var target = sig.name
-        var params = sig.params
-        var ret = sig.ret
-        if len(sig.type_params) > 0 {
-            let targs = cg.solve_targs(sig, argv)
-            target = mangle_fn(sig.name, targs)
-            push(self.f.instances, Instance { orig: sig.name, targs: targs })
-            var sub: [Subst] = []
-            var k = 0
-            while k < len(sig.type_params) {
-                push(sub, Subst { name: sig.type_params[k], ty: targs[k] })
-                k = k + 1
-            }
-            var cp: [Type] = []
-            for p in sig.params { push(cp, subst_type(p, sub)) }
-            params = cp
-            ret = opt_subst_type(sig.ret, sub)
-        }
+        let ct = self.call_target(cg, sig, argv)
+        let target = ct.name
+        let params = ct.params
+        let ret = ct.ret
         for p in params {
             if !lowerable(cg, p) { return self.unsupported("a call with an argument of that type") }
         }
@@ -1846,6 +2653,10 @@ impl Lower {
                 if owned { self.moved(staged.0) }
                 push(vals, staged.1)
             }
+            // a method writing its receiver writes the place it names, each
+            // list on the way made unshared first (MYLA-143): a copy of the
+            // list must not see the write
+            else if i == 0 && root != "" && is_aggregate(params[0]) && self.lookup(root) >= 0 { push(vals, self.place(cg, argv[0])) }
             else if is_aggregate(params[i]) { push(vals, self.addr(cg, argv[i])) }
             else {
                 let v = self.expr(cg, argv[i])
@@ -2269,7 +3080,7 @@ impl Lower {
         self.retain(cg, self.f.slots[self.sret].ty, dst)
         self.drop_temps(0)
         self.drop_owners(0)
-        self.finish(Term.Ret(dst))
+        self.exit_fn(dst, true)
         self.start(ok_b)
         let rt = cg.type_of(e.id)
         let off = cg.variant_field_offset(carrier, success_variant(en), 0)
@@ -2332,7 +3143,7 @@ impl Lower {
         }
         // helpers without a result, then those with one
         let effects = ["__exit", "__write", "__write_file", "__mkdir", "__unlink", "__rmdir", "__rename"]
-        let results = ["__args", "__read_file", "__read", "__poll", "__getcwd", "__list_dir", "__stat", "__run"]
+        let results = ["__args", "__read_file", "__read", "__poll", "__getcwd", "__list_dir", "__stat", "__run", "__task_cancelled"]
         var has_result = false
         var known = false
         for r in effects { if r == nm { known = true } }

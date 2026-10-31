@@ -114,7 +114,10 @@ struct AFrame { scopes: [RtFrame], conts: [Cont], place: Option<Place>, pend: Ct
 // its result or failure (a runtime error, or an `exit` with `code`), which
 // reaches the parent at `await` or at the end of the scope that started it;
 // `awaited`: it was asked for; `waiters`: the tasks waiting for it.
-struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: Option<RtError>, code: int32, awaited: bool, waiters: [int32] }
+// `cancelled`: a failure in its parent cancelled it (D94), so it stops when
+// it next runs (after a suspension); `kids`: its child tasks, cancelled with
+// it; `requested`: `task.cancel` asked it, or a task above it, to stop (D96).
+struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: Option<RtError>, code: int32, awaited: bool, waiters: [int32], cancelled: bool, kids: [int32], requested: bool }
 
 // A call whose async body the async evaluator takes over (Interp.defer).
 struct Deferred { scopes: [RtFrame], body: Block }
@@ -819,6 +822,20 @@ impl Interp {
             self.frames = self.tasks[t].frames
             self.tasks[t].frames = []
             self.scopes = self.frames[len(self.frames) - 1].scopes
+            // a cancelled task stops here, at a suspension point: it leaves
+            // its calls as a failing one does, its scopes cancelling and
+            // waiting for its own children (D94)
+            if self.tasks[t].cancelled {
+                let ft = len(self.frames) - 1
+                match self.frames[ft].pend {
+                    Ctrl.CNone => {
+                        self.frames[ft].pend = Ctrl.CExit
+                        self.frames[ft].perr = None
+                        self.frames[ft].pcode = 0
+                    },
+                    _ => {},
+                }
+            }
             self.run_task()
             if self.tasks[t].state != 2 {
                 self.frames[len(self.frames) - 1].scopes = self.scopes
@@ -840,7 +857,7 @@ impl Interp {
         var sc = scopes
         push(sc, RtFrame { names: [], vals: [] })
         let f = AFrame { scopes: sc, conts: [Cont.KScope, Cont.KStmts(body.stmts, 0)], place: None, pend: Ctrl.CNone, pval: Value.VUnit, perr: None, pcode: 0 }
-        push(self.tasks, Task { frames: [f], state: 0, value: Value.VUnit, failed: false, err: None, code: 0, awaited: false, waiters: [] })
+        push(self.tasks, Task { frames: [f], state: 0, value: Value.VUnit, failed: false, err: None, code: 0, awaited: false, waiters: [], cancelled: false, kids: [], requested: false })
         let id = len(self.tasks) - 1
         push(self.queue, id)
         return id
@@ -998,6 +1015,17 @@ impl Interp {
     // goes.
     fun close_scope(var self) {
         let s = len(self.scopes) - 1
+        // a failing scope cancels its children first (D94)
+        let ft = len(self.frames) - 1
+        let fails = match self.frames[ft].pend { Ctrl.CExit => true, _ => false }
+        if fails {
+            for v in self.scopes[s].vals {
+                match v {
+                    Value.VTask(id) => { if self.tasks[id].state != 2 { self.cancel_task(id) } },
+                    _ => {},
+                }
+            }
+        }
         for v in self.scopes[s].vals {
             match v {
                 Value.VTask(id) => {
@@ -1027,6 +1055,19 @@ impl Interp {
         }
         self.pop_scope()
         pop(self.frames[top].conts)
+    }
+
+    // The task `id` and its children, cancelled: each stops when it next runs.
+    fun cancel_task(var self, id: int32) {
+        if self.tasks[id].cancelled { return }
+        self.tasks[id].cancelled = true
+        for k in self.tasks[id].kids { self.cancel_task(k) }
+    }
+
+    // `task.cancel` of the task `id`: it and its children asked to stop (D96).
+    fun request_cancel(var self, id: int32) {
+        self.tasks[id].requested = true
+        for k in self.tasks[id].kids { self.request_cancel(k) }
     }
 
     // The current task waits for the task `id` to end.
@@ -1260,6 +1301,9 @@ impl Interp {
     fun start_child(var self, name: str, init: Expr) {
         let body = self.task_body(init)
         let id = self.new_task(self.scopes, body)
+        push(self.tasks[self.cur].kids, id)
+        if self.tasks[self.cur].cancelled { self.tasks[id].cancelled = true }
+        if self.tasks[self.cur].requested { self.tasks[id].requested = true }
         self.define(name, Value.VTask(id))
     }
 
@@ -2298,6 +2342,16 @@ impl Interp {
     }
 
     fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
+        if nm == "std$task$cancel" {
+            match self.eval(args[0]) {
+                Value.VTask(id) => { self.request_cancel(id) },
+                _ => {},
+            }
+            return Value.VUnit
+        }
+        if nm == "__task_cancelled" {
+            return Value.VBool(self.cur < len(self.tasks) && self.tasks[self.cur].requested)
+        }
         if nm == "print" {
             let v = self.eval(args[0])
             if self.stop() { return Value.VUnit }
@@ -2736,6 +2790,7 @@ fun value_key(v: Value) -> str {
 fun type_key_of(t: Type) -> str {
     return match t {
         Type.TStruct(n, a) => n,
+        Type.TActor(n) => n,
         Type.TEnum(n, a) => n,
         Type.TInt(w, s) => int_type_name_i(w, s),
         Type.TBool => "bool",

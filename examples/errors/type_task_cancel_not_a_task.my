@@ -1,0 +1,9 @@
+//~ type error: task.cancel() takes the name of an 'async let'
+//~ span: n
+// Cancelling names a child task of this function (D96).
+import std.task as task
+async fun outer() {
+    let n = 3
+    task.cancel(n)
+}
+fun main() {}

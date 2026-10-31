@@ -1,0 +1,38 @@
+// 4. Transfers in both directions, and a self-transfer, between actors whose
+// methods await each other
+actor Account {
+    balance: int,
+}
+
+impl Account {
+    fun deposit(var self, n: int) {
+        self.balance = self.balance + n
+    }
+    fun get(self) -> int {
+        return self.balance
+    }
+    async fun transfer_to(var self, other: Account, n: int) {
+        self.balance = self.balance - n
+        await other.deposit(n)
+    }
+}
+
+async fun many(from_: Account, to: Account, n: int, times: int) {
+    for i in 0..times {
+        await from_.transfer_to(to, n)
+    }
+}
+
+#main
+async fun main() {
+    let a = Account { balance: 1000 }
+    let b = Account { balance: 1000 }
+    async let x = many(a, b, 10, 1000)
+    async let y = many(b, a, 20, 1000)
+    await x
+    await y
+    await a.transfer_to(a, 10)
+    let ta = await a.get()
+    let tb = await b.get()
+    print(f"{ta} {tb} total {ta + tb}")
+}

@@ -1,0 +1,33 @@
+// 1. The same with a shared counter, which in Myla is an actor
+actor Counter {
+    value: int,
+}
+
+impl Counter {
+    fun inc(var self) -> int {
+        self.value = self.value + 1
+        return self.value
+    }
+    fun get(self) -> int {
+        return self.value
+    }
+}
+
+async fun run(c: Counter, n: int) -> int {
+    var last = 0
+    for i in 0..n {
+        last = await c.inc()
+    }
+    return last
+}
+
+#main
+async fun main() {
+    let counter = Counter { value: 0 }
+    let handles = [counter, counter]
+    async let a = run(handles[0], 100000)
+    async let b = run(handles[1], 100000)
+    let x = await a
+    let y = await b
+    print(await counter.get())
+}

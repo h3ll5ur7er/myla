@@ -49,7 +49,7 @@ fun main() {
 
 - A **lambda** is `(params) => expression` or `(params) => { block }`. Parameter types may be left out when the lambda is passed where a function type is expected; otherwise they're required. The result type is inferred from the body (for a block, from its `return`s).
 - A non-generic top-level `fun` can be used as a value. Generic functions can't.
-- **Captures are by value** (D48): a lambda copies every outer variable it uses when it is created. Captured values are immutable inside the lambda, and changing the original afterwards doesn't affect the copy. By-reference capture (`ref`) is a planned extension (D15).
+- **Captures are by value** (D48): a lambda copies every outer variable it uses when it is created. Captured values are immutable inside the lambda: assigning to one, to a field or element of one, or changing it with `push`, `pop`, `remove`, `append` or a `var self` method is an error (`a lambda can't change 'x', a variable it captures: it holds a copy of its own`, D93). Changing the original afterwards doesn't affect the copy. To share state between functions or tasks, use an actor. By-reference capture (`ref`) is a planned extension (D15).
 - A function value is called like a function. Calling through a struct field works too: `handler.on_event(x)`, when `on_event` is a field of function type (and not a method).
 - Closures and plain functions have the same type; the representation is a pair of a code pointer and a reference-counted environment (D49, [[Architecture/Native-backend]]).
 

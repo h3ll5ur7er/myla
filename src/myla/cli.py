@@ -60,6 +60,13 @@ def _report(err: MylaError, entry: str, entry_source: str) -> None:
     print(report_text(err, entry, entry_source), file=sys.stderr)
 
 
+def _warn(checker, entry: str, entry_source: str) -> None:
+    """The checker's warnings (D95), each in its file, before the program is
+    run or built."""
+    for w in checker.warnings:
+        print(_render_in_file(w, entry, entry_source) + "\n", file=sys.stderr)
+
+
 def _cmd_tokenize(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     try:
@@ -128,6 +135,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     argv = [args.file, *_split_package_flags(args.args, args.package)]
     try:
         checker = _front_end(args.file, args)
+        _warn(checker, args.file, source)
         return Interpreter(checker, argv=argv).run()
     except MylaError as err:
         _report(err, args.file, source)
@@ -138,6 +146,7 @@ def _cmd_test(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     try:
         checker = _front_end(args.file, args)
+        _warn(checker, args.file, source)
         results = Interpreter(checker).run_tests()
     except MylaError as err:
         _report(err, args.file, source)
@@ -163,6 +172,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     try:
         checker = _front_end(args.file, args)
+        _warn(checker, args.file, source)
         path = build_program(checker, args.output, keep_asm=args.keep_asm,
                              debug=args.debug, entry_path=args.file)
     except MylaError as err:
@@ -184,7 +194,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
     source = _read_source(args.file)
     canonical = getattr(args, "canonical", False)
     try:
-        _front_end(args.file, args)
+        checker = _front_end(args.file, args)
     except MylaError as err:
         if canonical:
             for e in (err, *err.more):
@@ -194,6 +204,12 @@ def _cmd_check(args: argparse.Namespace) -> int:
             return 0
         _report(err, args.file, source)
         return 1
+    if canonical:
+        from .canon import canonical_warning
+        for w in checker.warnings:
+            print(canonical_warning(w))
+    else:
+        _warn(checker, args.file, source)
     print("ok")
     return 0
 

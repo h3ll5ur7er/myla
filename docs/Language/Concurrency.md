@@ -1,6 +1,6 @@
 # Concurrency
 
-> **D89, in progress.** Both checkers check what this page describes ([[MYLA-135]]). The Python interpreter runs it with a thread per task ([[MYLA-136]], `examples/concurrency.my`), the self-hosted interpreter with tasks taking turns at each `await` ([[MYLA-139]]). Both backends stop at the first construct of concurrency with an error until [[MYLA-137]] and [[MYLA-138]].
+> **D89, in progress.** Both checkers check what this page describes ([[MYLA-135]]). The Python interpreter runs it with a thread per task ([[MYLA-136]], `examples/concurrency.my`), the self-hosted interpreter with tasks taking turns at each `await` ([[MYLA-139]]). The self-hosted compiler builds every concurrent program ([[MYLA-138]], D91): its async functions as stackless state machines on heap frames, its tasks in parallel on a pool of OS threads, one per CPU unless the environment variable `MYLA_THREADS` says how many (with `MYLA_THREADS=1` in the same order as the self-hosted interpreter's), its actors with executors of their own ([[MYLA-137]], D92, [[Architecture/Native-backend]]). The Python backend refuses concurrency.
 
 Myla's concurrency follows Swift's: `async` functions that may suspend, `await` at every suspension, structured tasks that never outlive the scope that starts them, and `actor`s, whose state only their own methods touch. Tasks run in parallel on several threads. A value crossing into another task or actor is copied, so tasks share nothing but actors (D89).
 
@@ -39,6 +39,7 @@ async fun total() -> int {
 - `async let x = e` starts `e` as a child task, which runs in parallel with the rest of the function. Reading `x` awaits its result (`await x`), once. A call `e` makes needn't be awaited: the child task does that. `async let x: int = e` states the result's type.
 - Only an async function has child tasks. A lambda in it can't await them (`a lambda can't await the child task 'a' of its function`).
 - The scope that declared it waits for every child still running when it ends, even one never read: no task outlives its scope.
+- A failure (a panic, a runtime error or `exit`) in a task cancels the task's other children, and theirs (D94): each stops at its next suspension point where it gives up its worker (waiting for a child, the turn after an awaited call, waiting for a busy actor), running no more of its body. The failing task waits for them to stop, then its failure goes on. A child that loops without such an `await` isn't stopped.
 - The child gets copies of what `e` uses, as a lambda does (D15, D48).
 
 ## A number of children: `std.task`
@@ -60,6 +61,36 @@ async fun squares(n: int) -> [int] {
 - `task.all(fs)` runs each async function value of `fs` as a child task, all at once, and waits for every one of them.
 - It gives the results in the order of `fs`, so the outcome doesn't depend on which finished first.
 - It is written in Myla with `async let` alone ([[src/myla/std/task.my]]), so every implementation that runs `async let` runs it.
+
+## Asking a child to stop: `task.cancel` and `task.cancelled`
+
+Cancelling is cooperative (D96): `task.cancel(a)` asks the child task of `async let a` to stop, and the child decides where it can stop safely, by checking `task.cancelled()`:
+
+```myla
+import std.task as task
+
+async fun worker(pool: Pool) -> str {
+    let r = await pool.acquire()
+    if task.cancelled() {
+        await pool.release(r)
+        return "stopped, gave back"
+    }
+    // ... use r ...
+    await pool.release(r)
+    return "finished"
+}
+
+async fun run(pool: Pool) -> str {
+    async let w = worker(pool)
+    task.cancel(w)
+    return await w
+}
+```
+
+- `task.cancel(a)` takes the name of an `async let` of this function (`task.cancel() takes the name of an 'async let'`); a lambda in it can't cancel it (`a lambda can't cancel the child task 'a' of its function`). It sets a flag and goes on: it doesn't wait, and the child isn't stopped.
+- `task.cancelled()` is true in a task that was asked to stop, or whose parent (or theirs) was: a request reaches the whole tree below the child, its children started later too. Outside a task that was asked, and in a program without tasks, it is false.
+- `await a` still gives what the child returned, and a scope still waits for its children: whatever the child does when asked, it runs to its end, so it can give back what it holds. Cancelling a child that has ended does nothing.
+- The flag is the program's: unlike a failure's cancellation (D94), it stops nothing at a suspension point.
 
 ## Actors
 
@@ -118,6 +149,25 @@ impl Account {
     }
 }
 ```
+
+- The compiler warns when an actor's async method changes a field after an `await` on the strength of what it read before (D95): a field examined by a condition (`if`, `while`, a `match`'s scrutinee or guard, directly or through a local read from it) before an `await` and changed after it without being examined again, or set from a local read before an `await`. Without the second check above, `self.balance = self.balance - amount` gets `warning: 'self.balance' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile`, with a note at the `await`. Checking again after the `await`, or changing the field before it (reserving, and giving it back if need be), are the two ways out. The program is still built and run.
+
+## What Myla guarantees, and what it doesn't
+
+The concurrency stress tests ([[Development/Concurrency-stress-tests]], [[MYLA-144]], `tests/burn/test_concurrency_stress.py`) hold Myla to these answers, on every implementation and on 1 to 16 workers:
+
+| Problem | In Myla |
+| --- | --- |
+| Shared mutation through aliases | Prevented: nothing mutable is shared but an actor, whose methods run one at a time; a lambda can't change what it captures (D93) |
+| Check-then-act | One step in a synchronous actor method; across an `await` in an async one, a warning (D95) |
+| An invariant over several objects | Holds when they live in one actor; across actors, no transaction keeps it (a limit) |
+| Deadlock over resources | Prevented: no locks, reentrant actors whose executors never block a worker (D92) |
+| Waiting cycles | Prevented: no channels, a task only awaits its own children and its earlier siblings |
+| A failure while siblings run | Its siblings are cancelled at their next suspension point, then the failure goes on (D94); a sibling looping without one isn't stopped |
+| Cancellation and resource cleanup by the program | Cooperative: `task.cancel(a)` asks, the child checks `task.cancelled()` where it can stop and gives back what it holds, wherever it was asked (D96) |
+| A stale result | The program's to decide (a request number, or cancelling the old request, which checks before publishing), as everywhere |
+| Memory visibility | Prevented: values cross as copies, what an actor publishes is seen whole |
+| Starvation | Actors queue their callers first in, first out; a turn goes behind the others |
 
 ## What crosses: copies, and sendable values
 

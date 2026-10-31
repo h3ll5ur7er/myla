@@ -1,0 +1,29 @@
+// 3. The invariant kept in one actor: the check and the change in one method
+actor Roster {
+    alice: bool,
+    bob: bool,
+}
+
+impl Roster {
+    fun leave(var self, who: str) {
+        if who == "alice" && self.bob {
+            self.alice = false
+        }
+        if who == "bob" && self.alice {
+            self.bob = false
+        }
+    }
+    fun ok(self) -> bool {
+        return self.alice || self.bob
+    }
+}
+
+#main
+async fun main() {
+    let r = Roster { alice: true, bob: true }
+    async let a = r.leave("alice")
+    async let b = r.leave("bob")
+    await a
+    await b
+    print(f"invariant {await r.ok()}")
+}

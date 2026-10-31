@@ -2263,6 +2263,36 @@ PROGRAMS = {
         "    print(l != Light.Blue)\n"
         "    print(Light.Red == Light.Blue)\n}\n"
     ),
+    "var_self_method_on_a_shared_element_copies_it": (
+        # MYLA-143: a method writing its receiver, called on an element or a
+        # field of one, writes the place it names: each list on the way is
+        # made unshared first, so a copy of the list doesn't see the write
+        "struct C { n: int, tags: [str] }\n"
+        "impl C {\n"
+        "    fun bump(var self, by: int) -> int {\n"
+        "        self.n = self.n + by\n"
+        "        push(self.tags, \"t\")\n"
+        "        return self.n\n"
+        "    }\n"
+        "}\n"
+        "struct Board { rows: [C], name: str }\n"
+        "fun main() {\n"
+        "    var cs = [C { n: 0, tags: [] }, C { n: 1, tags: [] }]\n"
+        "    let copy = cs\n"
+        "    print(cs[1].bump(10))\n"
+        "    print(copy[1].n)\n"
+        "    print(len(copy[1].tags))\n"
+        "    var b = Board { rows: [C { n: 5, tags: [] }], name: \"b\" }\n"
+        "    let b2 = b\n"
+        "    print(b.rows[0].bump(1))\n"
+        "    print(b2.rows[0].n)\n"
+        "    var grid = [[C { n: 7, tags: [] }]]\n"
+        "    let g2 = grid\n"
+        "    print(grid[0][0].bump(2))\n"
+        "    print(g2[0][0].n)\n"
+        "    print(cs[1].n + b.rows[0].n + grid[0][0].n)\n"
+        "}\n"
+    ),
     "method_arguments_survive_the_receivers_writes": (
         # MYLA-123: an argument read from the receiver of a `var self` method
         # is a copy taken before the call, which the method's writes to its

@@ -1,0 +1,53 @@
+// 5. Three siblings and the parent all reading one child's heap result
+struct Rec {
+    name: str,
+    tags: [str],
+}
+
+actor Log {
+    n: int,
+}
+
+impl Log {
+    fun tick(var self) -> int {
+        self.n = self.n + 1
+        return self.n
+    }
+}
+
+async fun make(i: int, log: Log) -> [Rec] {
+    let x = await log.tick()
+    return [Rec { name: f"r{i}", tags: ["a", f"t{i}"] }, Rec { name: "s", tags: [] }]
+}
+
+async fun size(rs: [Rec], log: Log) -> int {
+    let x = await log.tick()
+    var n = 0
+    for r in rs {
+        n = n + len(r.name) + len(r.tags)
+    }
+    return n
+}
+
+async fun extend(rs: [Rec]) -> int {
+    var mine = rs
+    push(mine[0].tags, "more")
+    return len(mine[0].tags)
+}
+
+#main
+async fun main() {
+    let log = Log { n: 0 }
+    var total = 0
+    var round = 0
+    while round < 3000 {
+        async let a = make(round, log)
+        async let b = size(await a, log)
+        async let c = extend(await a)
+        async let d = size(await a, log)
+        let mine = await a
+        total = total + await b + await c + await d + len(mine[0].tags)
+        round = round + 1
+    }
+    print(total)
+}

@@ -40,6 +40,9 @@ pub enum Type {
     // an async function type (D89; types.py: FuncType.is_async), a TFunc
     // inside: a separate variant keeps every other type as small as before
     TAsync(Type),
+    // an actor's handle (D89): a reference to its state, which only its own
+    // methods reach; its fields are those of the struct it is declared like
+    TActor(str),
     TParam(str),
     TSelf,
     // the type of a declaration's part that failed to check (MYLA-110, D84;
@@ -183,6 +186,7 @@ pub fun type_name(t: Type) -> str {
         Type.TStr => "str",
         Type.TSB => "StringBuilder",
         Type.TStruct(n, args) => generic_name(n, args),
+        Type.TActor(n) => generic_name(n, []),
         Type.TEnum(n, args) => generic_name(n, args),
         Type.TParam(n) => n,
         Type.TSelf => "Self",
@@ -386,6 +390,7 @@ fun type_eq(a: Type, b: Type) -> bool {
         Type.TStr => match b { Type.TStr => true, _ => false },
         Type.TSB => match b { Type.TSB => true, _ => false },
         Type.TStruct(n1, a1) => match b { Type.TStruct(n2, a2) => n1 == n2 && type_list_eq(a1, a2), _ => false },
+        Type.TActor(n1) => match b { Type.TActor(n2) => n1 == n2, _ => false },
         Type.TEnum(n1, a1) => match b { Type.TEnum(n2, a2) => n1 == n2 && type_list_eq(a1, a2), _ => false },
         Type.TTuple(e1) => match b { Type.TTuple(e2) => type_list_eq(e1, e2), _ => false },
         Type.TList(e1) => match b { Type.TList(e2) => type_eq(e1, e2), _ => false },
@@ -521,7 +526,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 }
 
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__unlink" || name == "__rmdir" || name == "__rename"
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled"
 }
 
 fun is_diverging_builtin(name: str) -> bool {
@@ -976,6 +981,7 @@ pub struct Checker {
     stmt_match: bool,
     resolved: [int32: Type],        // expr node id -> resolved type (v0.8 interp side table)
     errs: [CheckErr],               // the errors of the functions checked so far (MYLA-65, D80)
+    warnings: [CheckErr],           // D95: the warnings found, in the order found
     // going on after a declaration's error (MYLA-110, D84; types.py: Checker):
     // the declarations left out and the functions not checked (by
     // name: a function with a bad bound); the `trait\tkey` pairs whose impl or
@@ -1025,6 +1031,12 @@ pub struct Checker {
     suspended: int32,
     task_init: bool,                // checking an `async let`'s initializer, outside its lambdas
     in_guard: bool,                 // checking a match guard, outside its lambdas
+    // the first `async let`, which the compiler doesn't build yet (D91,
+    // MYLA-138; `task_line` 0: none)
+    task_line: int32,
+    task_col: int32,
+    task_sp: SrcSpan,
+    task_node: int32,
 }
 
 fun new_checker(decls: [Decl]) -> Checker {
@@ -1038,12 +1050,13 @@ fun new_checker(decls: [Decl]) -> Checker {
         allow_self: false, type_params: [], bounds_cur: [],
         cur_ret: None, has_cur_ret: false, ret_at: None, loop_depth: 0,
         frames: [], lambda_infer_active: false, lambda_depth: 0, cur_decl: -1, lambda_infer: [], stmt_match: false,
-        resolved: [:], errs: [], mains: [],
+        resolved: [:], errs: [], warnings: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false,
+        task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
     }
 }
 
@@ -1182,6 +1195,7 @@ impl Checker {
     fun type_key(self, t: Type) -> Option<str> {
         return match t {
             Type.TStruct(n, a) => Some(n),
+            Type.TActor(n) => Some(n),
             Type.TEnum(n, a) => Some(n),
             Type.TInt(w, s) => Some(int_type_name(w, s)),
             Type.TBool => Some("bool"),
@@ -1330,6 +1344,16 @@ impl Checker {
         }
         return out
     }
+    // The index of the innermost frame defining `name`, or -1.
+    fun frame_of(self, name: str) -> int32 {
+        var i = len(self.frames) - 1
+        while i >= 0 {
+            for nm in self.frames[i].names { if nm == name { return i } }
+            i = i - 1
+        }
+        return -1
+    }
+
     fun lookup(self, name: str) -> Option<Binding> {
         var i = len(self.frames) - 1
         while i >= 0 {
@@ -1430,6 +1454,7 @@ impl Checker {
                 return Ok(Type.TEnum(name, ra))
             }
             let none_args: [Type] = []
+            if si >= 0 && self.is_actor(name) { return Ok(Type.TActor(name)) }
             if si >= 0 { return Ok(Type.TStruct(name, none_args)) }
             return Ok(Type.TEnum(name, none_args))
         }
@@ -2031,7 +2056,7 @@ impl Checker {
 
     // Whether an impl may add methods to `target` (types.py: _check_impl_target).
     fun check_impl_target(self, ln: int32, cl: int32, sp: SrcSpan, target: Type, key_opt: Option<str>, tps: [TypeParam], methods: [FunData]) -> Result<int32, CheckErr> {
-        let is_agg = match target { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, _ => false }
+        let is_agg = match target { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, Type.TActor(n) => true, _ => false }
         if is_agg {
             let targs = match target { Type.TStruct(n, a) => a, Type.TEnum(n, a) => a, _ => empty_types() }
             if len(tps) > 0 {
@@ -2762,7 +2787,7 @@ impl Checker {
             None => {},
         }
         let base = self.expect_value(target, None)?
-        match base {
+        match struct_view(base) {
             Type.TStruct(n, args) => {
                 self.check_isolation(n, target, field, e)?
                 let fields = self.struct_field_types(n, args)
@@ -2798,6 +2823,7 @@ impl Checker {
                 let vt = self.expect_value(init.value, Some(ft))?
                 if !type_eq(vt, ft) { return Err(terr_at(init.line, init.col, init.sp, format("field '{}': expected '{}', found '{}'", init.name, type_name(ft), type_name(vt)))) }
             }
+            if self.is_actor(sname) { return Ok(Type.TActor(sname)) }
             return Ok(Type.TStruct(sname, []))
         }
         // generic struct: solve type args from fields (declaration order)
@@ -3071,7 +3097,7 @@ impl Checker {
     }
 
     fun check_struct_pattern(var self, pat: Pattern, sname: str, fps: [FieldPat], t: Type) -> Result<int32, CheckErr> {
-        match t {
+        match struct_view(t) {
             Type.TStruct(tn, args) => {
                 if sname != tn { return Err(terr_at(pat.line, pat.col, pat.sp, format("pattern names struct '{}' but the value is '{}'", sname, tn))) }
                 if self.is_actor(tn) { return Err(terr_at(pat.line, pat.col, pat.sp, format("a pattern can't reach the fields of the actor '{}'", type_name(t)))) }
@@ -3799,6 +3825,34 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("'{}' belongs to the actor '{}': only its own methods reach it", field, type_name(Type.TStruct(sname, [])))))
     }
 
+    // `task.cancel(a)` (D96): `a` names an `async let` in scope, as an `await`
+    // of it would; the call has no result (types.py: _infer_task_cancel).
+    fun infer_task_cancel(var self, e: Expr, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+        if len(args) == 1 {
+            match args[0].kind {
+                ExprKind.Name(n) => {
+                    match self.lookup(n) {
+                        Some(b) => {
+                            if b.task > 0 {
+                                let d = self.lookup_frame(n)
+                                for lam in self.lams {
+                                    if d < lam.base { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("a lambda can't cancel the child task '{}' of its function", n))) }
+                                }
+                                self.met_concurrency(e.line, e.col, e.sp, e.id)
+                                if b.task != 2 { self.record_type(args[0].id, Some(b.ty)) }
+                                return Ok(None)
+                            }
+                        },
+                        None => {},
+                    }
+                },
+                _ => {},
+            }
+            return Err(terr_at(args[0].line, args[0].col, args[0].sp, "task.cancel() takes the name of an 'async let'"))
+        }
+        return Err(terr_at(e.line, e.col, e.sp, "task.cancel() takes the name of an 'async let'"))
+    }
+
     // `await x`: in async code, a call that may suspend or an `async let`'s name.
     fun infer_await(var self, e: Expr, op: Expr, expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         if !self.in_async { return Err(terr_at(e.line, e.col, e.sp, "'await' can only stand in an async function")) }
@@ -3863,6 +3917,12 @@ impl Checker {
     // is awaited by the task.
     fun check_async_let(var self, s: Stmt, name: str, ty: Option<TypeExpr>, init: Expr) -> Result<int32, CheckErr> {
         if !self.in_async { return Err(terr_at(s.line, s.col, s.sp, "'async let' can only stand in an async function")) }
+        if self.task_line == 0 {
+            self.task_line = s.line
+            self.task_col = s.col
+            self.task_sp = s.sp
+            self.task_node = self.cur_decl
+        }
         var declared: Option<Type> = None
         match ty { Some(te) => { declared = Some(self.resolve_annotation(te)?) }, None => {} }
         var t: Option<Type> = None
@@ -3928,11 +3988,16 @@ impl Checker {
     fun check_lvalue_node(var self, e: Expr) -> Result<LValue, CheckErr> {
         return match e.kind {
             ExprKind.Name(n) => {
+                // a lambda holds copies of what it captures (D48): a change to
+                // one would reach neither the variable nor its next call (D93)
+                if len(self.lams) > 0 && self.frame_of(n) >= 0 && self.frame_of(n) < self.lams[len(self.lams) - 1].base {
+                    return Err(with_notes(terr_at(e.line, e.col, e.sp, format("a lambda can't change '{}', a variable it captures: it holds a copy of its own", n)), [Note { label: "help", msg: "return the new value, or keep shared state in an actor", line: 0, col: 0, sp: no_span() }]))
+                }
                 match self.lookup(n) { Some(b) => Ok(LValue { ty: b.ty, mutable: b.mutable }), None => Err(with_notes(terr_at(e.line, e.col, e.sp, format("unknown name '{}'", n)), did_you_mean(n, self.scope_names()))) }
             },
             ExprKind.GetField(target, field) => {
                 let base = self.check_lvalue(target)?
-                match base.ty {
+                match struct_view(base.ty) {
                     Type.TStruct(nm, args) => {
                         self.check_isolation(nm, target, field, e)?
                         let fields = self.struct_field_types(nm, args)
@@ -4523,6 +4588,7 @@ impl Checker {
         }
         self.check_passed_on()
         if len(self.errs) > 0 { return Err(self.errs) }
+        self.warnings = sort_by_place(self.warnings)
         return Ok(0)
     }
 
@@ -4544,7 +4610,20 @@ impl Checker {
         self.reset_state(id)
         self.cur_key = key
         match self.check_function(fd) {
-            Ok(x) => {},
+            Ok(x) => {
+                // an actor's async method: its state changed after an `await`
+                // on the strength of what was read before it (D95, MYLA-146)
+                if fd.is_async && self.actor_self != "" {
+                    match fd.body {
+                        Some(b) => {
+                            var r = Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [] }
+                            r.block(b)
+                            for w in r.out { push(self.warnings, CheckErr { line: w.line, col: w.col, sp: w.sp, msg: w.msg, decl: id, notes: w.notes }) }
+                        },
+                        None => {},
+                    }
+                }
+            },
             Err(e) => { self.note(e) },
         }
     }
@@ -4638,13 +4717,16 @@ fun prelude(first_id: int32) -> Parsed {
     }
 }
 
-pub fun check_program(user: Program) -> Result<int32, [CheckErr]> {
+// Type-check a program; its warnings (D95), or its errors.
+pub fun check_program(user: Program) -> Result<[CheckErr], [CheckErr]> {
     let pre = prelude(0)
     var decls: [Decl] = []
     for d in pre.program.decls { push(decls, d) }
     for d in user.decls { push(decls, d) }
     var c = new_checker(decls)
-    return c.run_all()
+    let r = c.run_all()
+    match r { Ok(x) => {}, Err(e) => { return Err(e) } }
+    return Ok(c.warnings)
 }
 
 // Type-check a linked program (selfhost/loader.my: its declarations, whose node
@@ -4824,6 +4906,10 @@ impl Checker {
             if len(args) > 0 { return Err(terr_at(e.line, e.col, e.sp, "__run_stderr() takes no arguments")) }
             return Ok(Some(Type.TList(t_byte())))
         }
+        if name == "__task_cancelled" {
+            if len(args) > 0 { return Err(terr_at(e.line, e.col, e.sp, "__task_cancelled() takes no arguments")) }
+            return Ok(Some(Type.TBool))
+        }
         if name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" {
             if len(args) > 0 { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes no arguments", name))) }
             return Ok(Some(t_int()))
@@ -4841,6 +4927,7 @@ impl Checker {
             if !is_str(at) { return Err(terr_at(e.line, e.col, e.sp, format("chars() requires a string, found '{}'", type_name(at)))) }
             return Ok(Some(Type.TList(Type.TChar)))
         }
+        if name == "std$task$cancel" { return self.infer_task_cancel(e, args) }
         if name == "push" || name == "pop" { return self.infer_list_mutation(e, name, args) }
         if name == "contains" || name == "remove" || name == "keys" { return self.infer_map_builtin(e, name, args) }
         if name == "format" { return Ok(Some(self.infer_format(e, args)?)) }
@@ -5073,7 +5160,7 @@ impl Checker {
         match sig_opt {
             None => {
                 // fallback: a struct field holding a function value
-                match recv_type {
+                match struct_view(recv_type) {
                     Type.TStruct(nm, sargs) => {
                         let fields = self.struct_field_types(nm, sargs)
                         let fopt = field_type_get(fields, field)
@@ -5355,7 +5442,7 @@ impl Checker {
             Some(pt) => { return Ok(pt) },
             None => {},
         }
-        match recv {
+        match struct_view(recv) {
             Type.TStruct(nm, sargs) => {
                 let fields = self.struct_field_types(nm, sargs)
                 if match field_type_get(fields, field) { Some(x) => true, None => false } { self.check_isolation(nm, target, field, callee)? }
@@ -5404,6 +5491,12 @@ fun func_to_partial_res(t: Type, e: Expr) -> Result<PartialTgt, CheckErr> {
     return Err(terr_at(e.line, e.col, e.sp, format("cannot partially apply a value of type '{}'", type_name(t))))
 }
 
+// The struct an actor's type is declared like, for its fields; any other type
+// as it is.
+fun struct_view(t: Type) -> Type {
+    return match t { Type.TActor(n) => Type.TStruct(n, []), _ => t }
+}
+
 // Whether `t` is an async function type (D89).
 fun is_async_func(t: Type) -> bool {
     return match t { Type.TAsync(f) => true, _ => false }
@@ -5431,5 +5524,362 @@ fun index_in(m: [str: int32], name: str) -> int32 {
     return match get(m, name) {
         Some(i) => i
         None => -1
+    }
+}
+
+// -- reentrancy warnings (D95, MYLA-146; types.py: _Reentrancy) ------------
+
+// What a local was read from: fields of `self`, and the epoch of the read.
+struct Taint { fields: [str], epoch: int32 }
+
+// What an expression reads: fields of `self`, the locals with a taint (in the
+// order they appear), and its first `await`.
+struct Reads { fields: [str], names: [str], awaits: [Expr] }
+
+fun add_name(xs: [str], n: str) -> [str] {
+    for x in xs { if x == n { return xs } }
+    var out = xs
+    push(out, n)
+    return out
+}
+
+fun has_name(xs: [str], n: str) -> bool {
+    for x in xs { if x == n { return true } }
+    return false
+}
+
+// The field of `self` a place starts from (`stock` of `self.stock[0].n`), or "".
+fun self_field(e: Expr) -> str {
+    match e.kind {
+        ExprKind.GetField(t, f) => {
+            match t.kind {
+                ExprKind.Name(n) => {
+                    if n == "self" { return f }
+                    return ""
+                },
+                _ => { return self_field(t) },
+            }
+        },
+        ExprKind.Index(t, i) => { return self_field(t) },
+        _ => {},
+    }
+    return ""
+}
+
+// `ws` in the order of their places (line, then column), stable.
+fun sort_by_place(ws: [CheckErr]) -> [CheckErr] {
+    var out: [CheckErr] = []
+    for w in ws {
+        var i = len(out)
+        push(out, w)
+        while i > 0 && (out[i - 1].line > w.line || (out[i - 1].line == w.line && out[i - 1].col > w.col)) {
+            out[i] = out[i - 1]
+            i = i - 1
+        }
+        out[i] = w
+    }
+    return out
+}
+
+impl Reads {
+    fun expr(var self, e: Expr, locals: [str: Taint]) {
+        match e.kind {
+            ExprKind.Lambda(ps, rt, body, asy) => { return },
+            ExprKind.GetField(t, f) => {
+                match t.kind {
+                    ExprKind.Name(n) => {
+                        if n == "self" {
+                            self.fields = add_name(self.fields, f)
+                            return
+                        }
+                    },
+                    _ => {},
+                }
+                self.expr(t, locals)
+            },
+            ExprKind.Name(n) => { if contains(locals, n) { self.names = add_name(self.names, n) } },
+            ExprKind.Await(x) => {
+                if len(self.awaits) == 0 { push(self.awaits, e) }
+                self.expr(x, locals)
+            },
+            ExprKind.Unary(op, x) => { self.expr(x, locals) },
+            ExprKind.Binary(op, l, r) => {
+                self.expr(l, locals)
+                self.expr(r, locals)
+            },
+            ExprKind.Call(c, args) => {
+                self.expr(c, locals)
+                for a in args { self.expr(a, locals) }
+            },
+            ExprKind.StructLit(n, fs) => { for fi in fs { self.expr(fi.value, locals) } },
+            ExprKind.TupleLit(es) => { for x in es { self.expr(x, locals) } },
+            ExprKind.ListLit(es) => { for x in es { self.expr(x, locals) } },
+            ExprKind.MapLit(ents) => {
+                for en in ents {
+                    self.expr(en.key, locals)
+                    self.expr(en.value, locals)
+                }
+            },
+            ExprKind.TupleIndex(t, i) => { self.expr(t, locals) },
+            ExprKind.Index(t, i) => {
+                self.expr(t, locals)
+                self.expr(i, locals)
+            },
+            ExprKind.MatchE(sc, arms) => {
+                self.expr(sc, locals)
+                for arm in arms {
+                    match arm.guard { Some(g) => { self.expr(g, locals) }, None => {} }
+                    match arm.body {
+                        ExprOrBlock.EB_Expr(x) => { self.expr(x, locals) },
+                        ExprOrBlock.EB_Block(b) => { self.block(b, locals) },
+                    }
+                }
+            },
+            ExprKind.Try(x) => { self.expr(x, locals) },
+            ExprKind.Cast(x, ty) => { self.expr(x, locals) },
+            _ => {},
+        }
+    }
+
+    fun opt(var self, e: Option<Expr>, locals: [str: Taint]) {
+        match e { Some(x) => { self.expr(x, locals) }, None => {} }
+    }
+
+    fun block(var self, b: Block, locals: [str: Taint]) {
+        for s in b.stmts { self.stmt(s, locals) }
+    }
+
+    fun stmt(var self, s: Stmt, locals: [str: Taint]) {
+        match s.kind {
+            StmtKind.VarDecl(k, n, ty, init) => { self.expr(init, locals) },
+            StmtKind.DestructDecl(k, b, ty, init) => { self.expr(init, locals) },
+            StmtKind.Assign(t, v) => {
+                self.expr(t, locals)
+                self.expr(v, locals)
+            },
+            StmtKind.IfS(c, th, el) => {
+                self.expr(c, locals)
+                self.block(th, locals)
+                match el {
+                    Some(ElseTail.ElseBlock(b)) => { self.block(b, locals) },
+                    Some(ElseTail.ElseIf(x)) => { self.stmt(x, locals) },
+                    None => {},
+                }
+            },
+            StmtKind.WhileS(c, b) => {
+                self.expr(c, locals)
+                self.block(b, locals)
+            },
+            StmtKind.ForS(v, st, en, body, it) => {
+                self.opt(st, locals)
+                self.opt(en, locals)
+                self.block(body, locals)
+                self.opt(it, locals)
+            },
+            StmtKind.ReturnS(v, t) => { self.opt(v, locals) },
+            StmtKind.ExprStmt(x) => { self.expr(x, locals) },
+            _ => {},
+        }
+    }
+}
+
+// The walk of an actor's async method (types.py: _Reentrancy): `epoch`
+// counts the statements with an `await` so far, `checked` the epoch each
+// field was last examined in by a condition, `locals` what each local was read
+// from, `awaits` the `await` that started each epoch after the first.
+struct Reentrancy { epoch: int32, checked: [str: int32], locals: [str: Taint], awaits: [Expr], out: [CheckErr] }
+
+impl Reentrancy {
+    fun scan(self, e: Expr) -> Reads {
+        var r = Reads { fields: [], names: [], awaits: [] }
+        r.expr(e, self.locals)
+        return r
+    }
+
+    fun taint(self, r: Reads) -> [str] {
+        var out = r.fields
+        for n in r.names {
+            match get(self.locals, n) {
+                Some(t) => { for f in t.fields { out = add_name(out, f) } },
+                None => {},
+            }
+        }
+        return out
+    }
+
+    // `e` examined as a condition; its awaits.
+    fun check(var self, e: Expr) -> [Expr] {
+        let r = self.scan(e)
+        for n in r.names {
+            match get(self.locals, n) {
+                Some(t) => {
+                    for f in t.fields {
+                        var prev = -1
+                        match get(self.checked, f) { Some(p) => { prev = p }, None => {} }
+                        if t.epoch > prev { self.checked[f] = t.epoch } else { self.checked[f] = prev }
+                    }
+                },
+                None => {},
+            }
+        }
+        for f in r.fields { self.checked[f] = self.epoch }
+        return r.awaits
+    }
+
+    fun suspend(var self, awaits: [Expr]) {
+        if len(awaits) > 0 {
+            push(self.awaits, awaits[0])
+            self.epoch = self.epoch + 1
+        }
+    }
+
+    fun block(var self, b: Block) {
+        for s in b.stmts { self.stmt(s) }
+    }
+
+    // A statement's value: a `match`'s scrutinee and guards are conditions and
+    // its block arms statements; its awaits.
+    fun value(var self, e: Expr) -> [Expr] {
+        match e.kind {
+            ExprKind.MatchE(sc, arms) => {
+                var awaits = self.check(sc)
+                for arm in arms {
+                    match arm.guard {
+                        Some(g) => { for a in self.check(g) { push(awaits, a) } },
+                        None => {},
+                    }
+                    match arm.body {
+                        ExprOrBlock.EB_Block(b) => { self.block(b) },
+                        ExprOrBlock.EB_Expr(x) => { for a in self.scan(x).awaits { push(awaits, a) } },
+                    }
+                }
+                return awaits
+            },
+            _ => {},
+        }
+        return self.scan(e).awaits
+    }
+
+    fun stmt(var self, s: Stmt) {
+        match s.kind {
+            StmtKind.VarDecl(k, name, ty, init) => {
+                if k == "async" { return }
+                let r = self.scan(init)
+                let before = self.epoch
+                let awaits = self.value(init)
+                self.locals[name] = Taint { fields: self.taint(r), epoch: before }
+                self.suspend(awaits)
+            },
+            StmtKind.Assign(target, v) => {
+                let r = self.scan(v)
+                let before = self.epoch
+                let awaits = self.value(v)
+                self.suspend(awaits)
+                let root = self_field(target)
+                if root != "" {
+                    self.write(root, r.names, target)
+                } else {
+                    match target.kind {
+                        ExprKind.Name(n) => { self.locals[n] = Taint { fields: self.taint(r), epoch: before } },
+                        _ => {},
+                    }
+                }
+            },
+            StmtKind.IfS(c, th, el) => {
+                let aw = self.check(c)
+                self.suspend(aw)
+                self.block(th)
+                match el {
+                    Some(ElseTail.ElseBlock(b)) => { self.block(b) },
+                    Some(ElseTail.ElseIf(x)) => { self.stmt(x) },
+                    None => {},
+                }
+            },
+            StmtKind.WhileS(c, b) => {
+                let aw = self.check(c)
+                self.suspend(aw)
+                self.block(b)
+            },
+            StmtKind.ForS(v, st, en, body, it) => {
+                var awaits: [Expr] = []
+                match st { Some(x) => { for a in self.scan(x).awaits { push(awaits, a) } }, None => {} }
+                match en { Some(x) => { for a in self.scan(x).awaits { push(awaits, a) } }, None => {} }
+                match it { Some(x) => { for a in self.scan(x).awaits { push(awaits, a) } }, None => {} }
+                self.suspend(awaits)
+                self.block(body)
+            },
+            StmtKind.ReturnS(v, t) => {
+                match v {
+                    Some(x) => {
+                        let aw = self.value(x)
+                        self.suspend(aw)
+                    },
+                    None => {},
+                }
+            },
+            StmtKind.ExprStmt(e) => {
+                match e.kind {
+                    ExprKind.Call(c, args) => {
+                        match c.kind {
+                            ExprKind.Name(f) => {
+                                if (f == "push" || f == "pop" || f == "remove" || f == "append") && len(args) > 0 {
+                                    let root = self_field(args[0])
+                                    var names: [str] = []
+                                    var awaits: [Expr] = []
+                                    var i = 1
+                                    while i < len(args) {
+                                        let r = self.scan(args[i])
+                                        for n in r.names { names = add_name(names, n) }
+                                        for a in r.awaits { push(awaits, a) }
+                                        i = i + 1
+                                    }
+                                    self.suspend(awaits)
+                                    if root != "" { self.write(root, names, e) }
+                                    return
+                                }
+                            },
+                            _ => {},
+                        }
+                    },
+                    _ => {},
+                }
+                let aw = self.value(e)
+                self.suspend(aw)
+            },
+            StmtKind.DestructDecl(k, b, ty, init) => {
+                let aw = self.scan(init).awaits
+                self.suspend(aw)
+            },
+            _ => {},
+        }
+    }
+
+    fun write(var self, f: str, names: [str], at: Expr) {
+        // a change settles the field's check: what comes after depends on it
+        match get(self.checked, f) {
+            Some(c) => {
+                remove(self.checked, f)
+                if c < self.epoch {
+                    self.warn(format("'self.{}' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile", f), at, self.awaits[c], "check it again after the 'await', or change it before")
+                    return
+                }
+            },
+            None => {},
+        }
+        for n in names {
+            match get(self.locals, n) {
+                Some(t) => {
+                    if has_name(t.fields, f) && t.epoch < self.epoch {
+                        self.warn(format("'self.{}' is set from a value read before an 'await': another call to this actor may have changed it meanwhile", f), at, self.awaits[t.epoch], "read it again after the 'await'")
+                        return
+                    }
+                },
+                None => {},
+            }
+        }
+    }
+
+    fun warn(var self, msg: str, at: Expr, aw: Expr, help: str) {
+        push(self.out, CheckErr { line: at.line, col: at.col, sp: at.sp, msg: msg, decl: -1, notes: [note_at("other calls to the actor may run at this 'await'", aw.line, aw.col, aw.sp), Note { label: "help", msg: help, line: 0, col: 0, sp: no_span() }] })
     }
 }

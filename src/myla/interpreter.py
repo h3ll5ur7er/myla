@@ -238,15 +238,34 @@ class ActorRef:
 class _Task:
     """The child task of an `async let` (D89): a thread computing `value`, or
     failing with `error`. `awaited`: its result was asked for, so a failure has
-    already reached the parent."""
+    already reached the parent. `cancelled`: set when a failure in its parent
+    cancels it (D94), `kids`: its own child tasks, cancelled with it."""
 
-    __slots__ = ("thread", "value", "error", "awaited")
+    __slots__ = ("thread", "value", "error", "awaited", "cancelled", "kids", "requested")
 
     def __init__(self):
         self.thread: threading.Thread | None = None
         self.value = None
         self.error: BaseException | None = None
         self.awaited = False
+        self.cancelled = threading.Event()
+        self.kids: list = []
+        # D96: `task.cancel` asked it (or a task above it) to stop
+        self.requested = threading.Event()
+
+    def request(self) -> None:
+        self.requested.set()
+        for kid in self.kids:
+            kid.request()
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+        for kid in self.kids:
+            kid.cancel()
+
+
+class _Cancelled(BaseException):
+    """A cancelled task stopping at a suspension point (D94); never a failure."""
 
 
 def _copy(value):
@@ -461,15 +480,27 @@ class Interpreter:
     def _close_scope(self, env: _Env, leaving: BaseException | None) -> None:
         """Wait for the child tasks started in `env`'s scope. One that failed
         unawaited fails the scope, unless it is already failing (`leaving`, not
-        a normal way out)."""
+        a normal way out). A failing scope (or one of a cancelled task) cancels
+        its children first, which stop at their next suspension point (D94)."""
+        if leaving is not None and not isinstance(leaving, _LEAVING):
+            for task in env.tasks:
+                task.cancel()
         failed = None
         for task in env.tasks:
             self._released(task.thread.join)
-            if task.error is not None and not task.awaited and failed is None:
+            if task.error is not None and not task.awaited and failed is None \
+                    and not isinstance(task.error, _Cancelled):
                 failed = task.error
         env.tasks = None
         if failed is not None and (leaving is None or isinstance(leaving, _LEAVING)):
             raise failed
+
+    def _suspension_point(self) -> None:
+        """Where a task may give up its worker (waiting for a child, an awaited
+        actor call): a cancelled one stops here (D94)."""
+        task = getattr(self._tls, "task", None)
+        if task is not None and task.cancelled.is_set():
+            raise _Cancelled()
 
     def _released(self, wait):
         """Run `wait`, which may block, without holding the thread's actor, so
@@ -490,6 +521,7 @@ class Interpreter:
         own methods already holds it."""
         if getattr(self._tls, "actor", None) is ref:
             return run()
+        self._suspension_point()
 
         def hop():
             prev = getattr(self._tls, "actor", None)
@@ -501,7 +533,9 @@ class Interpreter:
                 self._tls.actor = prev
                 ref.lock.release()
 
-        return self._released(hop)
+        result = self._released(hop)
+        self._suspension_point()
+        return result
 
     def _actor_field(self, ref: ActorRef, name: str):
         """A field of the actor `ref`: read under its lock unless this thread
@@ -527,9 +561,17 @@ class Interpreter:
             if value is not _MISSING:
                 child.define(name, _copy(value))
         task = _Task()
+        parent = getattr(self._tls, "task", None)
+        if parent is not None:
+            parent.kids.append(task)
+            if parent.cancelled.is_set():
+                task.cancelled.set()
+            if parent.requested.is_set():
+                task.requested.set()
 
         def work():
             self._tls.actor = None
+            self._tls.task = task
             try:
                 task.value = _copy(self._eval(stmt.init, child))
             except BaseException as exc:   # reaches the parent at `await` or the scope's end
@@ -544,7 +586,9 @@ class Interpreter:
 
     def _await_task(self, task: _Task):
         """`await name` of an `async let`: its child's result, a copy."""
+        self._suspension_point()
         self._released(task.thread.join)
+        self._suspension_point()
         task.awaited = True
         if task.error is not None:
             raise task.error
@@ -1234,6 +1278,13 @@ class Interpreter:
         if callee.ident == "keys":
             m = self._eval(expr.args[0], env)
             return ListValue([_copy(k) for k in m.entries.keys()])
+        if callee.ident == "std$task$cancel":
+            # D96: the named child, and its own children, asked to stop
+            env.lookup(expr.args[0].ident).request()
+            return None
+        if callee.ident == "__task_cancelled":
+            task = getattr(self._tls, "task", None)
+            return task is not None and task.requested.is_set()
         sig = self.functions[callee.ident]
         args = [self._eval(a, env) for a in expr.args]
         return self._call(sig.decl, args)

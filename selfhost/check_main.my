@@ -24,7 +24,14 @@ fun check_and_report(src: str) {
         },
     }
     match check_program(parsed.program) {
-        Ok(x) => println("ok"),
+        Ok(ws) => {
+            // its warnings first (D95), as `check --canonical` prints them
+            for w in ws {
+                println("warn" + slice_from(canonical(w.line, w.col, w.sp, "warning", w.msg), 3))
+                for n in w.notes { println(canonical_note(n)) }
+            }
+            println("ok")
+        },
         Err(errs) => {
             for e in errs {
                 println(canonical(e.line, e.col, e.sp, "type", e.msg))
@@ -32,6 +39,13 @@ fun check_and_report(src: str) {
             }
         },
     }
+}
+
+// `s` from byte `i` on.
+fun slice_from(s: str, i: int32) -> str {
+    var sb = StringBuilder()
+    append(sb, s, i, len(s))
+    return build(sb)
 }
 
 fun main() {

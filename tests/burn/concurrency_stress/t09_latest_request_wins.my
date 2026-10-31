@@ -1,0 +1,52 @@
+// 9. A stale result: the UI keeps the number of the latest request and shows
+// only its result (the language doesn't decide which result is the latest)
+actor Server {
+    calls: int,
+}
+
+impl Server {
+    fun step(var self) -> int {
+        self.calls = self.calls + 1
+        return self.calls
+    }
+}
+
+actor Ui {
+    results: str,
+    latest: int,
+}
+
+impl Ui {
+    fun begin(var self) -> int {
+        self.latest = self.latest + 1
+        return self.latest
+    }
+    fun show(var self, r: str, request: int) {
+        if request == self.latest {
+            self.results = r
+        }
+    }
+    fun get(self) -> str {
+        return self.results
+    }
+}
+
+async fun search(s: Server, ui: Ui, query: str, request: int, delay: int) {
+    for i in 0..delay {
+        let x = await s.step()
+    }
+    await ui.show(query, request)
+}
+
+#main
+async fun main() {
+    let s = Server { calls: 0 }
+    let ui = Ui { results: "", latest: 0 }
+    let r1 = await ui.begin()
+    async let first = search(s, ui, "ca", r1, 50)
+    let r2 = await ui.begin()
+    async let second = search(s, ui, "cats", r2, 1)
+    await first
+    await second
+    print(f"ui shows {await ui.get()}")
+}
