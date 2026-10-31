@@ -2,7 +2,7 @@
 id: MYLA-107
 title: IR: the default, and the old path removed
 type: feature
-status: review
+status: done
 priority: medium
 labels: [ir, codegen, selfhost]
 ---

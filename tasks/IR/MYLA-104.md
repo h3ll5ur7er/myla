@@ -2,7 +2,7 @@
 id: MYLA-104
 title: IR: aggregates
 type: feature
-status: review
+status: done
 priority: high
 labels: [ir, codegen, selfhost]
 ---

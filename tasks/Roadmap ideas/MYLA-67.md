@@ -2,7 +2,7 @@
 id: MYLA-67
 title: A mid-level IR between the checker and the code generators
 type: improvement
-status: review
+status: done
 priority: high
 labels: [backend, design, memory]
 ---
