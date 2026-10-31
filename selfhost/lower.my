@@ -2285,6 +2285,21 @@ impl Lower {
                     return self.owned_value(cg, d, Type.TStr)
                 }
                 if is_builtin_call_name(nm) { return self.io_call(cg, e, nm, args) }
+                // `task.cancel(a)` (D96): the child's first frame flagged
+                if nm == "std$task$cancel" && len(args) == 1 {
+                    match args[0].kind {
+                        ExprKind.Name(an) => {
+                            let ts = self.lookup(an)
+                            if ts >= 0 && self.task_of(ts) >= 0 {
+                                let fr = self.temp(Type.TInt(64, false))
+                                self.add(Inst.Load(fr, ts))
+                                self.add(Inst.Rt(-1, "__task_cancel", [fr]))
+                                return -1
+                            }
+                        },
+                        _ => {},
+                    }
+                }
                 if self.lookup(nm) >= 0 || cg.called_as_value(callee) || !cg.has_func(nm) { return self.indirect_call(cg, e, callee, args, tail) }
                 return self.direct_call(cg, e, nm, args, into, tail)
             },
@@ -3128,7 +3143,7 @@ impl Lower {
         }
         // helpers without a result, then those with one
         let effects = ["__exit", "__write", "__write_file", "__mkdir", "__unlink", "__rmdir", "__rename"]
-        let results = ["__args", "__read_file", "__read", "__poll", "__getcwd", "__list_dir", "__stat", "__run"]
+        let results = ["__args", "__read_file", "__read", "__poll", "__getcwd", "__list_dir", "__stat", "__run", "__task_cancelled"]
         var has_result = false
         var known = false
         for r in effects { if r == nm { known = true } }

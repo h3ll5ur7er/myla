@@ -41,3 +41,19 @@ async fun run_halves<T>(fs: [async () -> T]) -> [T] {
     }
     return out
 }
+
+// `task.cancel(a)`: the child task of the `async let` named `a` (and its own
+// children) is asked to stop (D96). Only a flag: the child sees it with
+// `cancelled()` and finishes as it chooses (giving back what it holds,
+// returning early); nothing stops on its own, and `await a` gives what it
+// returned. Cancelling a task that has ended does nothing. The argument is the
+// name of an `async let`, as for `await`: the compiler takes this call itself,
+// and this body never runs.
+pub fun cancel(child: int) {
+}
+
+// Whether the running task, or a task above it, was cancelled (D96): false
+// in the program's first task and outside any task.
+pub fun cancelled() -> bool {
+    return __task_cancelled()
+}

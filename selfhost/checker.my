@@ -526,7 +526,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 }
 
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__unlink" || name == "__rmdir" || name == "__rename"
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled"
 }
 
 fun is_diverging_builtin(name: str) -> bool {
@@ -3825,6 +3825,34 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("'{}' belongs to the actor '{}': only its own methods reach it", field, type_name(Type.TStruct(sname, [])))))
     }
 
+    // `task.cancel(a)` (D96): `a` names an `async let` in scope, as an `await`
+    // of it would; the call has no result (types.py: _infer_task_cancel).
+    fun infer_task_cancel(var self, e: Expr, args: [Expr]) -> Result<Option<Type>, CheckErr> {
+        if len(args) == 1 {
+            match args[0].kind {
+                ExprKind.Name(n) => {
+                    match self.lookup(n) {
+                        Some(b) => {
+                            if b.task > 0 {
+                                let d = self.lookup_frame(n)
+                                for lam in self.lams {
+                                    if d < lam.base { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("a lambda can't cancel the child task '{}' of its function", n))) }
+                                }
+                                self.met_concurrency(e.line, e.col, e.sp, e.id)
+                                if b.task != 2 { self.record_type(args[0].id, Some(b.ty)) }
+                                return Ok(None)
+                            }
+                        },
+                        None => {},
+                    }
+                },
+                _ => {},
+            }
+            return Err(terr_at(args[0].line, args[0].col, args[0].sp, "task.cancel() takes the name of an 'async let'"))
+        }
+        return Err(terr_at(e.line, e.col, e.sp, "task.cancel() takes the name of an 'async let'"))
+    }
+
     // `await x`: in async code, a call that may suspend or an `async let`'s name.
     fun infer_await(var self, e: Expr, op: Expr, expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         if !self.in_async { return Err(terr_at(e.line, e.col, e.sp, "'await' can only stand in an async function")) }
@@ -4878,6 +4906,10 @@ impl Checker {
             if len(args) > 0 { return Err(terr_at(e.line, e.col, e.sp, "__run_stderr() takes no arguments")) }
             return Ok(Some(Type.TList(t_byte())))
         }
+        if name == "__task_cancelled" {
+            if len(args) > 0 { return Err(terr_at(e.line, e.col, e.sp, "__task_cancelled() takes no arguments")) }
+            return Ok(Some(Type.TBool))
+        }
         if name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" {
             if len(args) > 0 { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes no arguments", name))) }
             return Ok(Some(t_int()))
@@ -4895,6 +4927,7 @@ impl Checker {
             if !is_str(at) { return Err(terr_at(e.line, e.col, e.sp, format("chars() requires a string, found '{}'", type_name(at)))) }
             return Ok(Some(Type.TList(Type.TChar)))
         }
+        if name == "std$task$cancel" { return self.infer_task_cancel(e, args) }
         if name == "push" || name == "pop" { return self.infer_list_mutation(e, name, args) }
         if name == "contains" || name == "remove" || name == "keys" { return self.infer_map_builtin(e, name, args) }
         if name == "format" { return Ok(Some(self.infer_format(e, args)?)) }

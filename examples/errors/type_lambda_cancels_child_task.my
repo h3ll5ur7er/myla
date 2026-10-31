@@ -1,0 +1,14 @@
+//~ type error: a lambda can't cancel the child task 'a' of its function
+//~ span: a
+// A child task belongs to the scope that started it (D89, D96).
+import std.task as task
+async fun fetch(n: int) -> int {
+    return n
+}
+async fun outer() -> int {
+    async let a = fetch(1)
+    let f = () => task.cancel(a)
+    f()
+    return await a
+}
+fun main() {}

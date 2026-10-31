@@ -241,7 +241,7 @@ class _Task:
     already reached the parent. `cancelled`: set when a failure in its parent
     cancels it (D94), `kids`: its own child tasks, cancelled with it."""
 
-    __slots__ = ("thread", "value", "error", "awaited", "cancelled", "kids")
+    __slots__ = ("thread", "value", "error", "awaited", "cancelled", "kids", "requested")
 
     def __init__(self):
         self.thread: threading.Thread | None = None
@@ -250,6 +250,13 @@ class _Task:
         self.awaited = False
         self.cancelled = threading.Event()
         self.kids: list = []
+        # D96: `task.cancel` asked it (or a task above it) to stop
+        self.requested = threading.Event()
+
+    def request(self) -> None:
+        self.requested.set()
+        for kid in self.kids:
+            kid.request()
 
     def cancel(self) -> None:
         self.cancelled.set()
@@ -559,6 +566,8 @@ class Interpreter:
             parent.kids.append(task)
             if parent.cancelled.is_set():
                 task.cancelled.set()
+            if parent.requested.is_set():
+                task.requested.set()
 
         def work():
             self._tls.actor = None
@@ -1269,6 +1278,13 @@ class Interpreter:
         if callee.ident == "keys":
             m = self._eval(expr.args[0], env)
             return ListValue([_copy(k) for k in m.entries.keys()])
+        if callee.ident == "std$task$cancel":
+            # D96: the named child, and its own children, asked to stop
+            env.lookup(expr.args[0].ident).request()
+            return None
+        if callee.ident == "__task_cancelled":
+            task = getattr(self._tls, "task", None)
+            return task is not None and task.requested.is_set()
         sig = self.functions[callee.ident]
         args = [self._eval(a, env) for a in expr.args]
         return self._call(sig.decl, args)

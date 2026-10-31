@@ -25,7 +25,8 @@ has no values in it (MYLA-17, MYLA-58)::
 and is built with the Python backend, which must exit with status 1 and print
 exactly that line and the interpreter's position, `  --> <file>:<line>:<col>`
 (MYLA-65, MYLA-66), on stderr. Module errors are checked through the loader,
-with the bundled standard library.
+with the bundled standard library, as are the type errors of a file that
+imports.
 
 A file may also pin the source text the diagnostic underlines (MYLA-65)::
 
@@ -51,6 +52,7 @@ import os
 import re
 import unittest
 
+from myla.ast import ImportDecl
 from myla.errors import (LexError, ModuleError, MylaRuntimeError, ParseError, TypeCheckError,
                          caret_range)
 from myla.interpreter import Interpreter
@@ -94,6 +96,9 @@ def _drive(phase: str, source: str, path: str) -> None:
     program = parse(tokens)
     if phase == "parse":
         return
+    if any(isinstance(d, ImportDecl) for d in program.decls):
+        # a program that imports is checked as 'myla check' does, linked
+        program = link(path, stdlib_root=default_stdlib_root())
     checker = check(program)
     if phase == "type":
         return

@@ -1,0 +1,124 @@
+// 7. Cancellation during ownership transfer: a worker takes a resource from a
+// pool; the parent cancels it at a chosen point (before it takes it, while it
+// holds it, while it uses it, before and after it gives it back). The flag
+// is cooperative (D96): the worker checks it where it can stop safely, and
+// gives back what it holds. Each point runs on a fresh pool and gate.
+import std.task as task
+
+actor Pool {
+    free: [int],
+    released: [int],
+}
+
+impl Pool {
+    fun acquire(var self) -> int {
+        if len(self.free) == 0 {
+            return -1
+        }
+        return pop(self.free)
+    }
+    fun release(var self, r: int) {
+        push(self.free, r)
+        push(self.released, r)
+    }
+    fun available(self) -> int {
+        return len(self.free)
+    }
+    fun duplicates(self) -> int {
+        var d = 0
+        var i = 0
+        while i < len(self.released) {
+            var j = i + 1
+            while j < len(self.released) {
+                if self.released[i] == self.released[j] {
+                    d = d + 1
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        return d
+    }
+}
+
+// Where the worker stops until the parent opens it again: point `stop_at`.
+actor Gate {
+    reached: bool,
+    open: bool,
+}
+
+impl Gate {
+    fun arrive(var self) {
+        self.reached = true
+    }
+    fun has_arrived(self) -> bool {
+        return self.reached
+    }
+    fun let_through(var self) {
+        self.open = true
+    }
+    fun is_open(self) -> bool {
+        return self.open
+    }
+}
+
+async fun pause(gate: Gate, point: int, stop_at: int) {
+    if point != stop_at {
+        return
+    }
+    await gate.arrive()
+    while !(await gate.is_open()) {
+    }
+}
+
+async fun worker(pool: Pool, gate: Gate, stop_at: int) -> str {
+    await pause(gate, 0, stop_at)
+    if task.cancelled() {
+        return "stopped before taking"
+    }
+    let r = await pool.acquire()
+    await pause(gate, 1, stop_at)
+    if task.cancelled() {
+        await pool.release(r)
+        return "stopped holding, gave back"
+    }
+    var used = 0
+    for i in 0..3 {
+        used = used + r
+        await pause(gate, 2 + i, stop_at)
+        if task.cancelled() {
+            await pool.release(r)
+            return "stopped using, gave back"
+        }
+    }
+    await pause(gate, 5, stop_at)
+    if task.cancelled() {
+        await pool.release(r)
+        return "stopped done using, gave back"
+    }
+    await pool.release(r)
+    await pause(gate, 6, stop_at)
+    if task.cancelled() {
+        return "stopped after giving back"
+    }
+    return "finished"
+}
+
+async fun run(stop_at: int) -> str {
+    let pool = Pool { free: [7], released: [] }
+    let gate = Gate { reached: false, open: false }
+    async let w = worker(pool, gate, stop_at)
+    while !(await gate.has_arrived()) {
+    }
+    task.cancel(w)
+    await gate.let_through()
+    let said = await w
+    return f"{stop_at}: {said}, available {await pool.available()}, duplicates {await pool.duplicates()}"
+}
+
+#main
+async fun main() {
+    for point in 0..7 {
+        print(await run(point))
+    }
+}

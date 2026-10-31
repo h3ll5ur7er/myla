@@ -3106,6 +3106,37 @@ impl CodeGen {
         self.raw("\tpopq %rbx")
         self.raw("\tret")
         self.raw("")
+        // __task_cancel: %rdi = a child task's first frame, asked to stop
+        // (D96): bit 2 of its flags, which its own children see through
+        // their chain of parents; none (0: joined already) is left alone
+        self.raw("__task_cancel:")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Ltcn_none")
+        self.raw("\tlock orq $2, 48(%rdi)")
+        self.raw(".Ltcn_none:")
+        self.raw("\tret")
+        self.raw("")
+        // __task_cancelled: %rax = 1 when the running task or a task above it
+        // was asked to stop, else 0
+        self.raw("__task_cancelled:")
+        self.raw(format("\tmovq {}, %rax", self.tv("__exec_cur")))
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Ltcd_no")
+        self.raw("\tmovq 40(%rax), %rax")
+        self.raw(".Ltcd_up:")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjz .Ltcd_no")
+        self.raw("\ttestq $2, 48(%rax)")
+        self.raw("\tjnz .Ltcd_yes")
+        self.raw("\tmovq 56(%rax), %rax")
+        self.raw("\tjmp .Ltcd_up")
+        self.raw(".Ltcd_yes:")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\tret")
+        self.raw(".Ltcd_no:")
+        self.raw("\txorl %eax, %eax")
+        self.raw("\tret")
+        self.raw("")
         // __wake_waiters: %rdi = the first of the frames that waited for a
         // task which has ended (0: none), each queued; the next one is read
         // before a frame is queued, as it may run and change word 32 at once
@@ -4168,6 +4199,12 @@ impl CodeGen {
         if self.frames {
             self.emit_executor()
             self.emit_deep_runtime()
+        } else {
+            // no task but the first: nothing is ever cancelled (D96)
+            self.raw("__task_cancelled:")
+            self.raw("\txorl %eax, %eax")
+            self.raw("\tret")
+            self.raw("")
         }
         // Runtime errors: `runtime error: <message>` on stderr, then exit(1)
         // (MYLA-17); the message is the interpreter's, without the values. The
@@ -7609,6 +7646,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__run_signal" || nm == "__run_errno" { return true }
     if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" || nm == "__getcwd" { return true }
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
+    if nm == "__task_cancelled" { return true }
     return false
 }
 

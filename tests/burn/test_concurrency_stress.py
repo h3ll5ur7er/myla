@@ -37,6 +37,16 @@ EXPECTED = {
     # 6. an actor's state checked again after an `await` (without the second
     # check a warning says it may have changed, D95)
     "t06_recheck_after_the_await": ("successes 1 stock 0\n", 0),
+    # 7. a cancelled worker gives back what it holds, wherever it was asked to
+    # stop: cancellation is a flag it checks (D96)
+    "t07_cancelled_holder_gives_back": (
+        "0: stopped before taking, available 1, duplicates 0\n"
+        "1: stopped holding, gave back, available 1, duplicates 0\n"
+        "2: stopped using, gave back, available 1, duplicates 0\n"
+        "3: stopped using, gave back, available 1, duplicates 0\n"
+        "4: stopped using, gave back, available 1, duplicates 0\n"
+        "5: stopped done using, gave back, available 1, duplicates 0\n"
+        "6: stopped after giving back, available 1, duplicates 0\n", 0),
     # 8. a failure cancels the failing task's other children, which stop at
     # their next suspension point; it waits for them, then ends the program
     # (D94), where it used to wait forever for a looping sibling
@@ -46,6 +56,8 @@ EXPECTED = {
     "t08_failing_child_cancels_its_children": ("main still runs\n", 1),
     # 9. "latest request wins" is the program's to say: a request number
     "t09_latest_request_wins": ("ui shows cats\n", 0),
+    # ... or by cancelling the old request, which checks before publishing
+    "t09_cancel_the_stale_request": ("ui shows cats\n", 0),
     # 10. what an actor publishes is seen whole
     "t10_publication_through_an_actor": ("42\n", 0),
     # 12. every worker and every single request make progress

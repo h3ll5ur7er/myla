@@ -1,0 +1,59 @@
+// 9. A stale result, by cancelling: the new search cancels the old one, which
+// checks the flag before it publishes (D96)
+import std.task as task
+
+actor Server {
+    calls: int,
+}
+
+impl Server {
+    fun step(var self) -> int {
+        self.calls = self.calls + 1
+        return self.calls
+    }
+}
+
+actor Ui {
+    results: str,
+    decided: bool,
+}
+
+impl Ui {
+    fun show(var self, r: str) {
+        self.results = r
+    }
+    fun get(self) -> str {
+        return self.results
+    }
+    fun decide(var self) {
+        self.decided = true
+    }
+    fun is_decided(self) -> bool {
+        return self.decided
+    }
+}
+
+async fun search(s: Server, ui: Ui, query: str, delay: int) {
+    for i in 0..delay {
+        let x = await s.step()
+    }
+    while !(await ui.is_decided()) {
+    }
+    if task.cancelled() {
+        return
+    }
+    await ui.show(query)
+}
+
+#main
+async fun main() {
+    let s = Server { calls: 0 }
+    let ui = Ui { results: "", decided: false }
+    async let first = search(s, ui, "ca", 50)
+    async let second = search(s, ui, "cats", 1)
+    task.cancel(first)
+    await ui.decide()
+    await first
+    await second
+    print(f"ui shows {await ui.get()}")
+}

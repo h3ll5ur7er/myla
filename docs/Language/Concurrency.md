@@ -62,6 +62,36 @@ async fun squares(n: int) -> [int] {
 - It gives the results in the order of `fs`, so the outcome doesn't depend on which finished first.
 - It is written in Myla with `async let` alone ([[src/myla/std/task.my]]), so every implementation that runs `async let` runs it.
 
+## Asking a child to stop: `task.cancel` and `task.cancelled`
+
+Cancelling is cooperative (D96): `task.cancel(a)` asks the child task of `async let a` to stop, and the child decides where it can stop safely, by checking `task.cancelled()`:
+
+```myla
+import std.task as task
+
+async fun worker(pool: Pool) -> str {
+    let r = await pool.acquire()
+    if task.cancelled() {
+        await pool.release(r)
+        return "stopped, gave back"
+    }
+    // ... use r ...
+    await pool.release(r)
+    return "finished"
+}
+
+async fun run(pool: Pool) -> str {
+    async let w = worker(pool)
+    task.cancel(w)
+    return await w
+}
+```
+
+- `task.cancel(a)` takes the name of an `async let` of this function (`task.cancel() takes the name of an 'async let'`); a lambda in it can't cancel it (`a lambda can't cancel the child task 'a' of its function`). It sets a flag and goes on: it doesn't wait, and the child isn't stopped.
+- `task.cancelled()` is true in a task that was asked to stop, or whose parent (or theirs) was: a request reaches the whole tree below the child, its children started later too. Outside a task that was asked, and in a program without tasks, it is false.
+- `await a` still gives what the child returned, and a scope still waits for its children: whatever the child does when asked, it runs to its end, so it can give back what it holds. Cancelling a child that has ended does nothing.
+- The flag is the program's: unlike a failure's cancellation (D94), it stops nothing at a suspension point.
+
 ## Actors
 
 ```myla
@@ -134,8 +164,8 @@ The concurrency stress tests ([[Development/Concurrency-stress-tests]], [[MYLA-1
 | Deadlock over resources | Prevented: no locks, reentrant actors whose executors never block a worker (D92) |
 | Waiting cycles | Prevented: no channels, a task only awaits its own children and its earlier siblings |
 | A failure while siblings run | Its siblings are cancelled at their next suspension point, then the failure goes on (D94); a sibling looping without one isn't stopped |
-| Cancellation and resource cleanup by the program | Not in the language yet |
-| A stale result | The program's to decide (a request number), as everywhere |
+| Cancellation and resource cleanup by the program | Cooperative: `task.cancel(a)` asks, the child checks `task.cancelled()` where it can stop and gives back what it holds, wherever it was asked (D96) |
+| A stale result | The program's to decide (a request number, or cancelling the old request, which checks before publishing), as everywhere |
 | Memory visibility | Prevented: values cross as copies, what an actor publishes is seen whole |
 | Starvation | Actors queue their callers first in, first out; a turn goes behind the others |
 

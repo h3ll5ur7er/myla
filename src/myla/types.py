@@ -711,7 +711,7 @@ _BUILTIN_FUNCS = {"print", "assert", "panic", "unreachable", "len", "push", "pop
                   "__run", "__run_stderr", "__run_exit_code", "__run_signal",
                   "__run_errno", "__write_file", "__read", "__poll",
                   "__list_dir", "__mkdir", "__stat", "__getcwd",
-                  "__unlink", "__rmdir", "__rename"}
+                  "__unlink", "__rmdir", "__rename", "__task_cancelled"}
 
 # builtin calls that never return (the checker treats them like a `return`)
 _DIVERGING_BUILTINS = {"panic", "unreachable", "__exit"}
@@ -3950,6 +3950,25 @@ class Checker:
             at=ln,
         )
 
+    def _infer_task_cancel(self, expr: ast.Call, scope: _Scope) -> Type | None:
+        """`task.cancel(a)` (D96): `a` names an `async let` in scope, as an
+        `await` of it would; the call has no result."""
+        arg = expr.args[0] if len(expr.args) == 1 else None
+        binding = scope.lookup(arg.ident) if isinstance(arg, ast.Name) else None
+        if binding is None or not binding.task:
+            raise TypeCheckError("task.cancel() takes the name of an 'async let'",
+                                 at=arg if arg is not None else expr)
+        for ctx in self._lambda_stack:
+            if _is_strict_ancestor(scope.lookup_scope(arg.ident), ctx.boundary):
+                raise TypeCheckError(
+                    f"a lambda can't cancel the child task '{arg.ident}' of its function",
+                    at=arg,
+                )
+        self.concurrency_at = self.concurrency_at or expr
+        arg.resolved_type = binding.type
+        expr.resolved_type = None
+        return None
+
     def _infer_intrinsic(self, expr: ast.Call, name: str,
                          scope: _Scope) -> Type | None:
         """`assert(cond[, msg])`, `panic(msg)`, `unreachable()` (D-, §7).
@@ -4469,6 +4488,11 @@ class Checker:
             t = ListType(BYTE)
             expr.resolved_type = t
             return t
+        if name == "__task_cancelled":
+            if expr.args:
+                raise TypeCheckError("__task_cancelled() takes no arguments", at=expr)
+            expr.resolved_type = BOOL
+            return BOOL
         if name in ("__run_exit_code", "__run_signal", "__run_errno"):
             if expr.args:
                 raise TypeCheckError(f"{name}() takes no arguments",
@@ -4501,6 +4525,8 @@ class Checker:
             t = ListType(CHAR)
             expr.resolved_type = t
             return t
+        if name == "std$task$cancel":
+            return self._infer_task_cancel(expr, scope)
         if name in ("push", "pop"):
             return self._infer_list_mutation(expr, name, scope)
         if name in ("contains", "remove", "keys"):
