@@ -2,7 +2,7 @@
 id: MYLA-184
 title: "The #test convention in selfhost/: 1,164 of 1,259 value-returning functions have none"
 type: chore
-status: todo
+status: review
 priority: low
 labels: [selfhost, tests, docs]
 ---
@@ -44,12 +44,16 @@ The harvester: the Python interpreter runs the self-hosted compiler (`selfhost/g
 - [x] The burn test: coverage per module and overall, a warning below 80 % (in the test output and as a CI annotation): `tests/burn/test_selfhost_coverage.py`, `scripts/test_coverage.py`
 - [x] `#test` on methods (D116, [[MYLA-236]])
 - [x] The harvester (`scripts/harvest_tests.py`); a first round of cases generated, validated by both runners and committed
-- [ ] The share past 80 %
-- [ ] Receivers for the methods on the compiler's state objects, or a decision on how they count (see Evidence)
+- [x] The share past 80 %
+- [x] Receivers for the methods on the compiler's state objects: receiver factories and AST factories (the owner's choice, with more workloads)
 
 ## Evidence
 
 - First round (2026-11-01): the harvester ran the self-hosted CLI in the Python interpreter over 342 workloads (`check`, `build`, `test`, `run` of the 32 examples, `check` of the error corpus) in about 40 minutes on 4 cores, recorded calls of 335 functions and wrote 852 cases (at most three per function, spread over the recorded sizes, each at most 220 characters of arguments and result). Both runners pass every case; validation removed none.
 - Coverage of value-returning functions in `selfhost/`: 97 of 1,274 (8 %) before, 432 of 1,274 (34 %) after.
 - What stops it at a third: 540 of the functions without cases are methods on the compiler's state objects (`Checker` 150, `CodeGen` 106, `Parser` 98, `Interp` 93, `Lower` 74, `Norm` 19), whose receiver is the whole state and can't be written as a literal; and most of the 259 free functions without cases are on paths the examples don't reach (the REPL, the project commands, `fetch`, rare diagnostics) or take compiler state. Raising the size limit adds almost nothing (5 functions under 400 characters on a probe).
+- Second and third rounds (2026-11-01, after the owner chose receiver factories and more workloads): factories build the compiler's state from a one-line snippet (`parser_on`, `checker_on` without the prelude, `interp_on`, `codegen_on`, `lower_on` with an entry block) and AST values from snippets (`expr_of`, `stmt_of`, `type_expr_of`, `block_of`, `pattern_of`, `fun_of`); `generate` runs every function without cases in the Python interpreter, factory parameters from snippet sets, other parameters from recorded values or pools by type, and stops a call before any I/O primitive runs. New workloads: five REPL sessions, a project with a path dependency (`build`, `run`, `test`, `check`), `clean`, `new`, `fetch` from a local Git repository, `build -g`. Three small functions got hand-written cases.
+- Coverage of value-returning functions in `selfhost/`: 8 % → 34 % → 61 % → 70 % → **80.2 %** (1,030 of 1,285); `#test` lines in `selfhost/` 297 → 1,898, 524 of them with a factory. One case per function that needs factory state, as each costs a factory call in each runner: the burn suite went from 383 s to about 430 s.
+- Validation found a bug: the self-hosted interpreter dropped an argument's change to a `var self` receiver ([[MYLA-238]], fixed), and with it a difference in the read-only receiver's order between the interpreters and native code ([[MYLA-237]]).
+- A first version of `generate` let a function that makes directories run with pooled names: seven `myla new` skeletons appeared in the checkout (removed; no tracked file was touched). Generated calls now stop before any I/O primitive runs and work in `build/harvest/sandbox`.
 

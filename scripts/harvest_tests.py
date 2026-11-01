@@ -535,6 +535,10 @@ def record_one(checker, names_of, elig, work: dict, out_path: str) -> None:
                    "args": {k: [[json.loads(t), b] for t, b in v.items()] for k, v in argsets.items()}}, fh)
 
 
+class _Impure(BaseException):
+    """Raised when a generated call reaches an I/O primitive, before it runs."""
+
+
 class _Timeout(BaseException):
     """Raised by the alarm; a BaseException so the interpreter's handlers of
     runtime errors don't catch it."""
@@ -678,15 +682,22 @@ def generate_chunk(checker, names_of, decls: list, out_path: str) -> None:
     pools = build_pools(checker, argsets)
     devnull = open(os.devnull, "w")
     os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+    sandbox = os.path.join(STATE, "sandbox")   # where a stray relative path would land
+    os.makedirs(sandbox, exist_ok=True)
+    os.chdir(sandbox)
     sys.setrecursionlimit(100_000)
     interp = Interpreter(checker, out=devnull, err=devnull, argv=[ENTRY])
     impure = [False]
     orig_call = Interpreter._eval_call
 
     def call_hook(self, expr, env):
+        # a generated call never does I/O: it stops before the primitive runs
+        # (a function that makes directories or deletes files called with
+        # pooled arguments must not touch anything)
         callee = expr.callee
         if isinstance(callee, ast.Name) and callee.ident in IMPURE:
             impure[0] = True
+            raise _Impure()
         return orig_call(self, expr, env)
 
     Interpreter._eval_call = call_hook
