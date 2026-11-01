@@ -317,6 +317,7 @@ impl CodeGen {
     }
 
     // The IR of every function, as text.
+    #test(codegen_on("[int]"))[""]
     fun ir_text(self) -> str {
         var sb = StringBuilder()
         for t in self.ir_texts { append(sb, t) }
@@ -326,6 +327,7 @@ impl CodeGen {
     // The path of the file node `id` is in, as the loader names it (the entry
     // file as given, the self-hosted CLI's diagnostics name the same), or
     // `<input>` without one.
+    #test(codegen_on("[int]"), 16)["<input>"]
     fun path_of(self, id: int32) -> str {
         if len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return "<input>" }
         var path = self.line_spans[0].path
@@ -381,6 +383,7 @@ impl CodeGen {
     // parameters and captures, its locals in lexical blocks (one opens where a
     // binding starts and ends with the Myla scope), and the types they use.
 
+    #test(codegen_on("[int]"), "b")[".Ldb1"]
     fun dbg_label(var self, kind: str) -> str {
         self.dbg_n = self.dbg_n + 1
         return format(".Ld{}{}", kind, self.dbg_n)
@@ -412,6 +415,7 @@ impl CodeGen {
     // The type `finish` reads a function's result as, from `%rax` ("": none
     // it can read). An aggregate comes back through the hidden pointer `%rax`
     // returns; a float in `%rax`, where gdb would read `%xmm0`.
+    #test(codegen_on("[int]"), None)[""]
     fun dbg_return_type(var self, ret: Option<Type>) -> str {
         let t = match ret {
             Some(t) => t,
@@ -535,6 +539,7 @@ impl CodeGen {
 
     // The location of a float32 variable: the double it is kept as, converted
     // to the type `f32`.
+    #test(codegen_on("[int]"), [145, 104], ".Ldty0")[["\t.uleb128 .Ldx2 - .Ldx1", ".Ldx1:", "\t.byte 145, 104", "\t.byte 246, 8", "\t.uleb128 .Ldty0 - .Ldebug_info0", "\t.byte 247", "\t.uleb128 .Ldty0 - .Ldebug_info0", "\t.byte 159", ".Ldx2:"]]
     fun dbg_convert(var self, addr: [int32], f32: str) -> [str] {
         let f64 = self.dbg_base(Type.TFloat(64), 8)
         let start = self.dbg_label("x")
@@ -550,6 +555,7 @@ impl CodeGen {
     }
 
     // The label of the type DIE `key` names, registered the first time.
+    #test(codegen_on("[int]"), "byte", "byte", Type.TBool, "", 0, 0)[".Ldty0"]
     fun dbg_type(var self, key: str, kind: str, ty: Type, target: str, n: int32, m: int32) -> str {
         match get(self.dbg_types, key) {
             Some(l) => { return l },
@@ -562,45 +568,55 @@ impl CodeGen {
     }
 
     // A scalar's base type, `size` bytes wide.
+    #test(codegen_on("[int]"), Type.TFloat(32), 4)[".Ldty0"]
     fun dbg_base(var self, t: Type, size: int32) -> str {
         return self.dbg_type(format("base:{}:{}", type_name(t), size), "base", t, "", size, 0)
     }
 
     // A string's byte, shown with its character.
+    #test(codegen_on("[int]"))[".Ldty0"]
     fun dbg_byte(var self) -> str { return self.dbg_type("byte", "byte", Type.TBool, "", 0, 0) }
 
+    #test(codegen_on("[int]"), ".Ldty0")[".Ldty0"]
     fun dbg_pointer(var self, target: str) -> str {
         return self.dbg_type(format("ptr:{}", target), "ptr", Type.TBool, target, 0, 0)
     }
 
+    #test(codegen_on("[int]"))[".Ldty0"]
     fun dbg_void_pointer(var self) -> str { return self.dbg_type("voidptr", "voidptr", Type.TBool, "", 0, 0) }
 
     // A Rust `&str`, which gdb prints as a string literal.
+    #test(codegen_on("[int]"))[".Ldty0"]
     fun dbg_slice(var self) -> str { return self.dbg_type("slice", "slice", Type.TBool, "", 0, 0) }
 
     // An array of `elem`s `stride` bytes apart, as many as the 8 bytes
     // `header` bytes before the first say (a cell's length).
+    #test(codegen_on("[int]"), ".Ldty6", 1, 8)[".Ldty0"]
     fun dbg_array(var self, elem: str, stride: int32, header: int32) -> str {
         return self.dbg_type(format("array:{}:{}:{}", elem, stride, header), "array", Type.TBool, elem, stride, header)
     }
 
     // The elements of a list of `e`s, at its cell + 16.
+    #test(codegen_on("[int]"), Type.TFloat(64))[".Ldty1"]
     fun dbg_items(var self, e: Type) -> str {
         let elem = self.dbg_element(e)
         return self.dbg_array(elem, self.stored_size(e), 16)
     }
 
     // The heap cell of a `str`, list, builder or map, for a pointer to it.
+    #test(codegen_on("[int]"), Type.TStr)[".Ldty0"]
     fun dbg_cell(var self, t: Type) -> str {
         return self.dbg_type(format("cell:{}", type_name(t)), "cell", t, "", 0, 0)
     }
 
+    #test(codegen_on("[int]"), Type.TEnum("Color", []))[".Ldty0"]
     fun dbg_aggregate(var self, t: Type) -> str {
         return self.dbg_type(format("agg:{}", type_name(t)), "agg", t, "", 0, 0)
     }
 
     // The type of a value inside an aggregate or a list (or of a scalar
     // variable): types of a fixed size only.
+    #test(codegen_on("[int]"), Type.TStr)[".Ldty1"]
     fun dbg_element(var self, t: Type) -> str {
         match t {
             Type.TInt(w, sg) => {
@@ -627,6 +643,7 @@ impl CodeGen {
     }
 
     // A structure type's lines: `members` of `types` at `offs`.
+    #test(codegen_on("[int]"), "Point", 16, ["x", "y"], [".Ldty1", ".Ldty1"], [0, 8])[["\t.uleb128 9", "\t.string \"Point\"", "\t.uleb128 16", "\t.uleb128 10", "\t.string \"x\"", "\t.long .Ldty1 - .Ldebug_info0", "\t.uleb128 0", "\t.uleb128 10", "\t.string \"y\"", "\t.long .Ldty1 - .Ldebug_info0", "\t.uleb128 8", "\t.byte 0"]]
     fun dbg_struct_lines(self, name: str, size: int32, members: [str], types: [str], offs: [int32]) -> [str] {
         var out = [format("\t.uleb128 {}", AB_STRUCT), dw_string(name), format("\t.uleb128 {}", size)]
         var i = 0
@@ -642,6 +659,7 @@ impl CodeGen {
     }
 
     // The lines of the type DIE `p` describes.
+    #test(codegen_on("[int]"), DbgType { label: ".Ldty1", kind: "ptr", ty: Type.TBool, target: ".Ldty0", n: 0, m: 0 })[["\t.uleb128 7", "\t.byte 8", "\t.long .Ldty0 - .Ldebug_info0"]]
     fun dbg_build(var self, p: DbgType) -> [str] {
         let i64 = Type.TInt(64, true)
         if p.kind == "base" {
@@ -669,6 +687,7 @@ impl CodeGen {
         return self.dbg_aggregate_lines(p.ty)
     }
 
+    #test(codegen_on("[int]"), Type.TStr)[["\t.uleb128 9", "\t.string \"str\"", "\t.uleb128 8", "\t.uleb128 10", "\t.string \"len\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 0", "\t.uleb128 10", "\t.string \"bytes\"", "\t.long .Ldty2 - .Ldebug_info0", "\t.uleb128 8", "\t.byte 0"]]
     fun dbg_cell_lines(var self, t: Type) -> [str] {
         let len_t = self.dbg_base(Type.TInt(64, true), 8)
         match t {
@@ -713,6 +732,7 @@ impl CodeGen {
         return []
     }
 
+    #test(codegen_on("struct P { x: int, y: int }"), Type.TStruct("Adder", []))[["\t.uleb128 9", "\t.string \"Adder\"", "\t.uleb128 16", "\t.uleb128 10", "\t.string \"x\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 0", "\t.uleb128 10", "\t.string \"y\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 8", "\t.byte 0"]]
     fun dbg_aggregate_lines(var self, t: Type) -> [str] {
         let name = type_name(t)
         let size = self.size(t)
@@ -844,6 +864,7 @@ impl CodeGen {
 
     // The `.file` number of the module node `id` is in, registered on first
     // use; 0 when line tables are off or the node is the prelude's.
+    #test(codegen_on("[int]"), 16)[0]
     fun file_number(var self, id: int32) -> int32 {
         if !self.debug || len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return 0 }
         let path = self.path_of(id)
@@ -918,11 +939,13 @@ impl CodeGen {
         self.pend_temp = -1
     }
 
+    #test(codegen_on("[int]"))[".L1"]
     fun label(var self) -> str {
         self.label_n = self.label_n + 1
         return format(".L{}", self.label_n)
     }
 
+    #test(codegen_on("[int]"), "héλ")[-1]
     fun str_index(self, text: str) -> int32 {
         return match get(self.str_ix, text) {
             Some(i) => i
@@ -931,6 +954,7 @@ impl CodeGen {
     }
 
     // Intern a string literal, emitting a static `str` cell (MYLA-18).
+    #test(codegen_on("[int]"), "héλ")[".Lstr0"]
     fun string_label(var self, text: str) -> str {
         let existing = self.str_index(text)
         if existing >= 0 { return self.str_labels[existing] }
@@ -952,6 +976,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("[int]"), "add")[false]
     fun has_func(self, name: str) -> bool {
         return contains(self.func_ix, name)
     }
@@ -1231,6 +1256,7 @@ impl CodeGen {
 
     // Whether `==` on `t` compares tags only: an enum without payloads whose
     // `eq` is derived (MYLA-133; `find_tag_enums`).
+    #test(codegen_on("[int]"), Type.TEnum("Color", []))[false]
     fun tag_only_eq(self, t: Type) -> bool {
         return match t {
             Type.TEnum(n, a) => contains(self.tag_enums, n),
@@ -1288,6 +1314,7 @@ impl CodeGen {
     }
 
     // The method-table key for a receiver type (mirrors Checker.type_key).
+    #test(codegen_on("[int]"), Type.TInt(32, true))["int32"]
     fun type_key(self, t: Type) -> str {
         return match t {
             Type.TStruct(n, a) => n,
@@ -1304,6 +1331,7 @@ impl CodeGen {
 
     // The resolved type of a node, with the active generic substitution applied
     // (identity outside a specialized generic body).
+    #test(codegen_on("[int]"), 23)[Type.TInt(32, true)]
     fun type_of(self, id: int32) -> Type {
         match get(self.resolved, id) { Some(t) => { return subst_type(t, self.subst) }, None => {} }
         return Type.TInt(32, true)
@@ -1325,6 +1353,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("[int]"), Type.TStr)[false]
     fun is_boxed(self, t: Type) -> bool {
         return match t {
             Type.TEnum(n, a) => list_has_str(self.recursive_enums, n),
@@ -1332,6 +1361,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("[int]"), Type.TStr)[8]
     fun stored_size(self, t: Type) -> int32 {
         if self.is_boxed(t) { return 8 }
         return self.size(t)
@@ -1343,10 +1373,12 @@ impl CodeGen {
     // pointer (a boxed enum, list, map, builder, or closure env), i.e. it
     // participates in reference counting and must be retained/dropped on
     // copy/release. Strings and scalars are immortal arena blobs.
+    #test(codegen_on("[int]"), Type.TStr)[true]
     fun owns_heap(self, t: Type) -> bool {
         return self.owns_heap_seen(t, [])
     }
 
+    #test(codegen_on("[int]"), Type.TStr, [])[true]
     fun owns_heap_seen(self, t: Type, seen: [str]) -> bool {
         if self.is_boxed(t) { return true }
         match t {
@@ -1389,6 +1421,7 @@ impl CodeGen {
     }
 
     // The drop routine for a heap-pointer leaf of type `t`.
+    #test(codegen_on("[int]"), Type.TStr)["__str_drop"]
     fun drop_call_name(self, t: Type) -> str {
         return match t {
             Type.TList(e) => "__drop_list_" + mono_token(e),
@@ -1451,6 +1484,7 @@ impl CodeGen {
     }
 
     // The clone routine for a list/map/builder cow site.
+    #test(codegen_on("[int]"), Type.TSB)["__sb_clone"]
     fun clone_call_name(self, t: Type) -> str {
         return match t {
             Type.TList(e) => "__clone_list_" + mono_token(e),
@@ -1460,6 +1494,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("[int]"), VariantT { name: "Nil", payload: [] }, [])[false]
     fun variant_owns(self, v: VariantT, sub: [Subst]) -> bool {
         for ft0 in v.payload {
             let ft = subst_type(ft0, sub)
@@ -1487,6 +1522,7 @@ impl CodeGen {
 
     // Whether `t`'s walk goes through a helper: an enum, or a struct or tuple
     // with more than one member owning heap values.
+    #test(codegen_on("[int]"), Type.TEnum("List", []))[true]
     fun walk_helper(self, t: Type) -> bool {
         var members: [Type] = []
         match t {
@@ -1507,6 +1543,7 @@ impl CodeGen {
     }
 
     // The name of `t`'s retain or release walk helper, to be emitted.
+    #test(codegen_on("[int]"), Type.TEnum("List", []), true)["__walkr_List"]
     fun register_walk(var self, t: Type, retain: bool) -> str {
         let tok = mono_token(t)
         var name = "__walkd_" + tok
@@ -1613,6 +1650,7 @@ impl CodeGen {
     // parameters are substituted so a generic container instantiated with an
     // inline aggregate (e.g. `Option<TypeExpr>`) reserves the real payload size,
     // not a single 8-byte slot. Mirrors the oracle's monomorphized layout.
+    #test(codegen_on("[int]"), [], [])[[]]
     fun type_subst(self, type_params: [str], args: [Type]) -> [Subst] {
         var sub: [Subst] = []
         var i = 0
@@ -1623,6 +1661,7 @@ impl CodeGen {
         return sub
     }
 
+    #test(codegen_on("[int]"), Type.TStr)[8]
     fun size(self, t: Type) -> int32 {
         return match t {
             Type.TStruct(n, a) => self.struct_size(n, a),
@@ -1634,6 +1673,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("struct P { x: int, y: int }"), "Name", [])[16]
     fun struct_size(self, name: str, args: [Type]) -> int32 {
         let info = self.struct_info(name)
         let sub = self.type_subst(info.type_params, args)
@@ -1642,12 +1682,14 @@ impl CodeGen {
         return total
     }
 
+    #test(codegen_on("[int]"), [Type.TInt(32, true)])[8]
     fun tuple_size(self, es: [Type]) -> int32 {
         var total = 0
         for e in es { total = total + self.stored_size(e) }
         return total
     }
 
+    #test(codegen_on("enum E { A, B(int) }"), "Color", [])[8]
     fun enum_payload_size(self, name: str, args: [Type]) -> int32 {
         let info = self.enum_info(name)
         let sub = self.type_subst(info.type_params, args)
@@ -1660,6 +1702,7 @@ impl CodeGen {
         return maxp
     }
 
+    #test(codegen_on("struct P { x: int, y: int }"), Type.TStruct("Point", []), "x")[0]
     fun field_offset(self, st: Type, field: str) -> int32 {
         let name = struct_name_of(st)
         let info = self.struct_info(name)
@@ -1672,6 +1715,7 @@ impl CodeGen {
         return off
     }
 
+    #test(codegen_on("[int]"), Type.TTuple([Type.TInt(32, true)]), 0)[0]
     fun elem_offset(self, t: Type, index: int32) -> int32 {
         var off = 0
         var i = 0
@@ -1685,6 +1729,7 @@ impl CodeGen {
 
     // -- enum layout ------------------------------------------------------
 
+    #test(codegen_on("enum E { A, B(int) }"), "Color", "Red")[0]
     fun variant_tag(self, enum_name: str, variant: str) -> int32 {
         var i = 0
         for v in self.enum_info(enum_name).variants {
@@ -1695,6 +1740,7 @@ impl CodeGen {
     }
 
     // Declared payload types of `variant` (generic type parameters unsubstituted).
+    #test(codegen_on("enum E { A, B(int) }"), "List", "Cons")[[]]
     fun variant_payload_decl(self, enum_name: str, variant: str) -> [Type] {
         for v in self.enum_info(enum_name).variants {
             if v.name == variant { return v.payload }
@@ -1705,6 +1751,7 @@ impl CodeGen {
     // Payload types of `variant` with the enum value `et`'s concrete type
     // arguments substituted in (so payloads carrying a type parameter resolve to
     // their instantiated type, matching this value's layout).
+    #test(codegen_on("enum E { A, B(int) }"), Type.TEnum("Shape", []), "Rect")[[]]
     fun variant_payload(self, et: Type, variant: str) -> [Type] {
         let name = enum_name_of(et)
         let info = self.enum_info(name)
@@ -1714,6 +1761,7 @@ impl CodeGen {
         return out
     }
 
+    #test(codegen_on("enum E { A, B(int) }"), Type.TEnum("Shape", []), "Rect", 0)[8]
     fun variant_field_offset(self, et: Type, variant: str, index: int32) -> int32 {
         var off = 8
         let payload = self.variant_payload(et, variant)
@@ -1725,18 +1773,22 @@ impl CodeGen {
         return off
     }
 
+    #test(codegen_on("[int]"), "a")[false]
     fun is_enum_name(self, n: str) -> bool {
         return contains(self.enum_names, n)
     }
 
+    #test(codegen_on("[int]"), "a")[false]
     fun is_nullary_variant(self, n: str) -> bool {
         return contains(self.nullary_names, n)
     }
 
+    #test(codegen_on("[int]"), "Ok")[false]
     fun is_variant_name(self, n: str) -> bool {
         return contains(self.variant_names, n)
     }
 
+    #test(codegen_on("[int]"), "push")[false]
     fun has_function(self, n: str) -> bool {
         return contains(self.func_ix, n)
     }
@@ -1812,6 +1864,7 @@ impl CodeGen {
 
     // Register an instantiation (or non-generic function) and return its emitted
     // (mangled) name, enqueueing it for stamping the first time it is seen.
+    #test(codegen_on("fun main() { print(1 + 2) }"), "add", [])["add"]
     fun request_fn(var self, orig: str, targs: [Type]) -> str {
         let sig = self.sig_of(orig)
         if len(sig.type_params) == 0 {
@@ -1851,6 +1904,7 @@ impl CodeGen {
         return out
     }
 
+    #test(codegen_on("[int]"))["main"]
     fun entry_name(self) -> str {
         for d in self.decls {
             match d.kind {
@@ -2442,6 +2496,7 @@ impl CodeGen {
     // The operand of the runtime variable `sym`, which is a thread's own in a
     // program with tasks: in the block `%fs` holds (`tls_offset`), else at
     // its symbol.
+    #test(codegen_on("[int]"), "__heap_end")["__heap_end(%rip)"]
     fun tv(self, sym: str) -> str {
         if !self.frames { return sym + "(%rip)" }
         return format("%fs:{}", tls_offset(sym))
@@ -3185,6 +3240,7 @@ impl CodeGen {
     }
 
     // Whether `name` is an async function or method that runs on a frame.
+    #test(codegen_on("[int]"), "inc")[false]
     fun is_async_fn(self, name: str) -> bool {
         if !self.frames || !self.has_func(name) { return false }
         let sig = self.sig_of(name)
@@ -3192,6 +3248,7 @@ impl CodeGen {
     }
 
     // Whether node `id` has a type: an expression with a value.
+    #test(codegen_on("[int]"), 112)[false]
     fun has_type(self, id: int32) -> bool {
         return contains(self.resolved, id)
     }
@@ -3273,6 +3330,7 @@ impl CodeGen {
 
     // -- expressions ------------------------------------------------------
 
+    #test(codegen_on("[int]"), "H")[None]
     fun const_value_expr(self, name: str) -> Option<Expr> {
         for d in self.decls {
             match d.kind {
@@ -3564,6 +3622,7 @@ impl CodeGen {
     // The memory operand of the element %rcx of the list or string %rax
     // (bounds-checked already); for a stride that isn't a scale, %rcx is
     // multiplied first (MYLA-120).
+    #test(codegen_on("[int]"), true, 1)["8(%rax,%rcx)"]
     fun elem_operand(var self, is_str: bool, stride: int32) -> str {
         if is_str { return "8(%rax,%rcx)" }
         if stride == 1 || stride == 2 || stride == 4 || stride == 8 { return format("16(%rax,%rcx,{})", stride) }
@@ -3625,7 +3684,9 @@ impl CodeGen {
 
     // -- maps / strings / chars -------------------------------------------
 
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[24]
     fun map_slot_size(self, mt: Type) -> int32 { return 16 + self.stored_size(map_val(mt)) }
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[1]
     fun map_is_str(self, mt: Type) -> int32 {
         if is_str_t(map_key(mt)) { return 1 }
         return 0
@@ -3716,6 +3777,7 @@ impl CodeGen {
         self.emit("popq %rax")
     }
 
+    #test(codegen_on("struct P { x: int, y: int }"), "Box", "v")[Type.TInt(32, true)]
     fun struct_field_type(self, name: str, field: str) -> Type {
         for f in self.struct_info(name).fields {
             if f.name == field { return f.ty }
@@ -3724,6 +3786,7 @@ impl CodeGen {
     }
 
     // Field type with the struct value `st`'s concrete type arguments substituted.
+    #test(codegen_on("struct P { x: int, y: int }"), Type.TStruct("Box", []), "v")[Type.TInt(32, true)]
     fun struct_field_type_t(self, st: Type, field: str) -> Type {
         let name = struct_name_of(st)
         let info = self.struct_info(name)
@@ -8264,6 +8327,9 @@ pub fun cmp_set(op: str, signed: bool) -> str {
 }
 
 // `s` as the body of an assembler string literal (a `.file` path).
+#test("examples/maps.my")["examples/maps.my"]
+#test("examples/floats.my")["examples/floats.my"]
+#test("examples/closures.my")["examples/closures.my"]
 fun asm_string(s: str) -> str {
     var sb = StringBuilder()
     var i = 0

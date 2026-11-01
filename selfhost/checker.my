@@ -1357,8 +1357,11 @@ fun is_lvalue_shape(e: Expr) -> bool {
 // --- lookups -------------------------------------------------------------
 
 impl Checker {
+    #test(checker_on("[int]"), "int")[-1]
     fun struct_idx(self, name: str) -> int32 { return index_in(self.struct_map, name) }
+    #test(checker_on("[int]"), "int")[-1]
     fun enum_idx(self, name: str) -> int32 { return index_in(self.enum_map, name) }
+    #test(checker_on("[int]"), "add")[-1]
     fun func_idx(self, name: str) -> int32 { return index_in(self.func_map, name) }
 
     // Append to the tables, keeping their maps (the first of a name wins, as
@@ -1380,6 +1383,7 @@ impl Checker {
         if !contains(self.method_map, k) { self.method_map[k] = len(self.methods) }
         push(self.methods, m)
     }
+    #test(checker_on("[int]"), "Eq")[5]
     fun trait_idx(self, name: str) -> int32 {
         var i = 0
         while i < len(self.traits) { if self.traits[i].name == name { return i }
@@ -1387,6 +1391,7 @@ impl Checker {
         }
         return -1
     }
+    #test(checker_on("[int]"), "A")[-1]
     fun alias_idx(self, name: str) -> int32 {
         var i = 0
         while i < len(self.aliases) { if self.aliases[i].name == name { return i }
@@ -1394,10 +1399,12 @@ impl Checker {
         }
         return -1
     }
+    #test(checker_on("[int]"), "A")[None]
     fun alias_cache_get(self, name: str) -> Option<Type> {
         for a in self.alias_cache { if a.name == name { return Some(a.ty) } }
         return None
     }
+    #test(checker_on("[int]"), "KIB")[-1]
     fun const_decl_idx(self, name: str) -> int32 {
         var i = 0
         while i < len(self.const_decls) { if self.const_decls[i].name == name { return i }
@@ -1405,14 +1412,18 @@ impl Checker {
         }
         return -1
     }
+    #test(checker_on("[int]"), "Box")[false]
     fun is_struct(self, name: str) -> bool { return self.struct_idx(name) >= 0 }
+    #test(checker_on("[int]"), "a")[false]
     fun is_enum(self, name: str) -> bool { return self.enum_idx(name) >= 0 }
 
+    #test(checker_on("[int]"), "Adder", "f")[None]
     fun method_sig(self, key: str, name: str) -> Option<FuncSig> {
         let i = index_in(self.method_map, key + "\t" + name)
         if i < 0 { return None }
         return Some(self.methods[i].sig)
     }
+    #test(checker_on("[int]"), Type.TInt(32, true))[Some("int32")]
     fun type_key(self, t: Type) -> Option<str> {
         return match t {
             Type.TStruct(n, a) => Some(n),
@@ -1425,10 +1436,12 @@ impl Checker {
             _ => None,
         }
     }
+    #test(checker_on("[int]"), "Vec2", "Eq")[false]
     fun trait_implements_pair(self, key: str, trnm: str) -> bool {
         for p in self.trait_impls { if p.key == key && p.trait_name == trnm { return true } }
         return false
     }
+    #test(checker_on("[int]"), Type.TInt(32, true), "Add")[Ok(true)]
     fun type_implements(self, t: Type, trnm: str) -> Result<bool, CheckErr> {
         match self.type_key(t) {
             Some(k) => {
@@ -1445,10 +1458,12 @@ impl Checker {
     // --- scope -----------------------------------------------------------
     fun push_scope(var self) { push(self.frames, Frame { names: [], binds: [] }) }
     fun pop_scope(var self) { pop(self.frames) }
+    #test(checker_on("fun main() { print(1 + 2) }"), "c", Type.TChar, false)[true]
     fun define(var self, name: str, ty: Type, mutable: bool) -> bool {
         return self.define_at(name, ty, mutable, 0, 0, no_span())
     }
     // `define`, for a variable declared at `line`, `col`, `sp`.
+    #test(checker_on("fun main() { print(1 + 2) }"), "c", Type.TChar, false, 7, 14, SrcSpan { sline: 7, scol: 14, eline: 7, ecol: 21 })[true]
     fun define_at(var self, name: str, ty: Type, mutable: bool, line: int32, col: int32, sp: SrcSpan) -> bool {
         let top = len(self.frames) - 1
         for nm in self.frames[top].names { if nm == name { return false } }
@@ -1457,6 +1472,7 @@ impl Checker {
         return true
     }
     // `define_at` for an `async let`'s name (D89): `ty` its result's type, if any.
+    #test(checker_on("fun main() { print(1 + 2) }"), "d1", None, 52, 5, SrcSpan { sline: 52, scol: 5, eline: 52, ecol: 40 })[true]
     fun define_task(var self, name: str, ty: Option<Type>, line: int32, col: int32, sp: SrcSpan) -> bool {
         let top = len(self.frames) - 1
         for nm in self.frames[top].names { if nm == name { return false } }
@@ -1469,6 +1485,7 @@ impl Checker {
         return true
     }
     // The index of the frame that defines `name`, or -1.
+    #test(checker_on("[int]"), "a")[-1]
     fun lookup_frame(self, name: str) -> int32 {
         var i = len(self.frames) - 1
         while i >= 0 {
@@ -1478,6 +1495,7 @@ impl Checker {
         return -1
     }
     // Every name in scope, innermost scope first.
+    #test(checker_on("[int]"))[[]]
     fun scope_names(self) -> [str] {
         var out: [str] = []
         var i = len(self.frames) - 1
@@ -1491,6 +1509,7 @@ impl Checker {
     // --- notes (MYLA-65) -------------------------------------------------
     // A note on where the variable the assigned place `target` starts from is
     // declared (types.py: _declared_at).
+    #test(checker_on("[int]"), Expr { id: 2, line: 9, col: 5, sp: SrcSpan { sline: 9, scol: 5, eline: 9, ecol: 6 }, kind: ExprKind.Name("x") })[[]]
     fun declared_at(self, target: Expr) -> [Note] {
         var e = target
         var going = true
@@ -1515,6 +1534,7 @@ impl Checker {
     }
     // A note on the declaration `name` repeats in the innermost scope (types.py:
     // _first_declared).
+    #test(checker_on("fun main() { print(1 + 2) }"), "total")[[]]
     fun first_declared(self, name: str) -> [Note] {
         let top = len(self.frames) - 1
         var j = 0
@@ -1530,6 +1550,7 @@ impl Checker {
     }
     // The names a value can be: variables, constants, functions and the
     // prelude's variants (types.py: _value_names).
+    #test(checker_on("[int]"))[["Some", "None", "Ok", "Err"]]
     fun value_names(self) -> [str] {
         var out = self.scope_names()
         for c in self.const_decls { push(out, c.name) }
@@ -1538,6 +1559,7 @@ impl Checker {
         return out
     }
     // The names a call can name (types.py: _callable_names).
+    #test(checker_on("[int]"))[["print", "assert", "panic", "unreachable", "len", "push", "pop", "contains", "remove", "keys", "format", "chars", "StringBuilder", "append", "append_byte", "build"]]
     fun callable_names(self) -> [str] {
         var out: [str] = []
         for f in self.functions { push(out, f.name) }
@@ -1546,6 +1568,7 @@ impl Checker {
         return out
     }
     // The names a type can be (types.py: _type_names).
+    #test(checker_on("[int]"))[["bool", "str", "StringBuilder", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64", "char", "int", "float"]]
     fun type_names(self) -> [str] {
         var out = primitive_type_names()
         push(out, "int")
@@ -1557,6 +1580,7 @@ impl Checker {
         return out
     }
     // The methods of the type with key `key`.
+    #test(checker_on("[int]"), Some("P"))[[]]
     fun method_names(self, key: Option<str>) -> [str] {
         var out: [str] = []
         match key {
@@ -1566,6 +1590,7 @@ impl Checker {
         return out
     }
     // The index of the innermost frame defining `name`, or -1.
+    #test(checker_on("[int]"), "xs")[-1]
     fun frame_of(self, name: str) -> int32 {
         var i = len(self.frames) - 1
         while i >= 0 {
@@ -1575,6 +1600,7 @@ impl Checker {
         return -1
     }
 
+    #test(checker_on("[int]"), "a")[None]
     fun lookup(self, name: str) -> Option<Binding> {
         var i = len(self.frames) - 1
         while i >= 0 {
@@ -1622,17 +1648,20 @@ fun decl_kind_name(d: Decl) -> str {
 // =========================================================================
 
 impl Checker {
+    #test(checker_on("[int]"), TypeExpr { id: 9, line: 8, col: 12, sp: SrcSpan { sline: 8, scol: 12, eline: 8, ecol: 15 }, kind: TypeKind.TRef("int", []) })[Ok(Type.TInt(32, true))]
     fun resolve0(var self, ref: TypeExpr) -> Result<Type, CheckErr> {
         let empty: [str] = []
         return self.resolve(ref, empty)
     }
 
+    #test(checker_on("[int]"), [TypeExpr { id: 0, line: 12, col: 9, sp: SrcSpan { sline: 12, scol: 9, eline: 12, ecol: 12 }, kind: TypeKind.TRef("int", []) }], [])[Ok([Type.TInt(32, true)])]
     fun resolve_list(var self, refs: [TypeExpr], visiting: [str]) -> Result<[Type], CheckErr> {
         var out: [Type] = []
         for r in refs { push(out, self.resolve(r, visiting)?) }
         return Ok(out)
     }
 
+    #test(checker_on("enum E { A, B(int) }"), TypeExpr { id: 43, line: 2, col: 32, sp: SrcSpan { sline: 2, scol: 32, eline: 2, ecol: 33 }, kind: TypeKind.TRef("E", []) }, [])[Ok(Type.TEnum("E", []))]
     fun resolve(var self, ref: TypeExpr, visiting: [str]) -> Result<Type, CheckErr> {
         let ln = ref.line
         let cl = ref.col
@@ -1657,6 +1686,7 @@ impl Checker {
         }
     }
 
+    #test(checker_on("enum E { A, B(int) }"), "E", [], 2, 32, SrcSpan { sline: 2, scol: 32, eline: 2, ecol: 33 }, [])[Ok(Type.TEnum("E", []))]
     fun resolve_ref(var self, name: str, args: [TypeExpr], ln: int32, cl: int32, sp: SrcSpan, visiting: [str]) -> Result<Type, CheckErr> {
         if name == "Self" {
             if !self.allow_self { return Err(terr_at(ln, cl, sp, "'Self' is only valid inside a trait declaration")) }
@@ -1719,6 +1749,7 @@ impl Checker {
 // =========================================================================
 
 impl Checker {
+    #test(checker_on("[int]"))[Ok(0)]
     fun collect_globals(var self) -> Result<int32, CheckErr> {
         var seen: [str: int32] = [:]       // name -> its first declaration's index
         // the prelude's declarations come first (check_program,
@@ -1778,6 +1809,7 @@ impl Checker {
 
     // An actor's declaration: why it can't be collected (D89), else none; the
     // actor recorded.
+    #test(checker_on("[int]"), Decl { id: 1, line: 2, col: 1, sp: SrcSpan { sline: 2, scol: 1, eline: 2, ecol: 16 }, kind: DeclKind.TypeAliasDecl("A", TypeExpr { id: 0, line: 2, col: 15, sp: SrcSpan { sline: 2, scol: 15, eline: 2, ecol: 16 }, kind: TypeKind.TRef("B", []) }, [], false) })[None]
     fun actor_fail(var self, decl: Decl) -> Option<CheckErr> {
         match decl.kind {
             DeclKind.StructDecl(n, fields, attrs, tps, isp, act) => {
@@ -1808,6 +1840,7 @@ impl Checker {
     }
 
     // shadow built-in / duplicate type-parameter names
+    #test(checker_on("[int]"), [], 7, 1, SrcSpan { sline: 7, scol: 1, eline: 9, ecol: 2 })[Ok(0)]
     fun check_type_params(self, tps: [str], ln: int32, cl: int32, sp: SrcSpan) -> Result<int32, CheckErr> {
         var seen: [str] = []
         for tp in tps {
@@ -1821,6 +1854,7 @@ impl Checker {
 
     // `te` resolved in a body, where a failed alias gives the error type
     // instead of poisoned() (types.py: _resolve_annotation).
+    #test(checker_on("[int]"), TypeExpr { id: 45, line: 27, col: 12, sp: SrcSpan { sline: 27, scol: 12, eline: 27, ecol: 16 }, kind: TypeKind.TRef("char", []) })[Ok(Type.TChar)]
     fun resolve_annotation(var self, te: TypeExpr) -> Result<Type, CheckErr> {
         match self.resolve0(te) {
             Ok(t) => { return Ok(t) },
@@ -1829,6 +1863,7 @@ impl Checker {
         return Ok(Type.TError)
     }
 
+    #test(checker_on("[int]"), Param { line: 7, col: 14, sp: SrcSpan { sline: 7, scol: 14, eline: 7, ecol: 21 }, name: "c", ty: Some(TypeExpr { id: 8, line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 21 }, kind: TypeKind.TRef("char", []) }) })[Ok(Type.TChar)]
     fun param_type(var self, p: Param) -> Result<Type, CheckErr> {
         return match p.ty {
             Some(te) => self.resolve0(te),
@@ -1859,6 +1894,7 @@ fun synth_typarams(names: [str]) -> [TypeParam] {
 // =========================================================================
 
 impl Checker {
+    #test(checker_on("[int]"))[Ok(0)]
     fun resolve_signatures(var self) -> Result<int32, CheckErr> {
         // aliases eagerly (catch cycles / bad targets even when unreferenced)
         // one that fails is the error type, and so is every alias naming it
@@ -1971,6 +2007,7 @@ impl Checker {
 pub struct AggRef { name: str, is_enum: bool }
 
 impl Checker {
+    #test(checker_on("[int]"), "Adder")[[]]
     fun member_types(self, name: str) -> [Type] {
         let si = self.struct_idx(name)
         if si >= 0 {
@@ -1986,6 +2023,7 @@ impl Checker {
         return out2
     }
 
+    #test(checker_on("[int]"), "Adder", "Adder", ["Adder"], true)[false]
     fun find_cycle(self, root: str, current: str, seen: [str], stop_at_boxed: bool) -> bool {
         for m in self.member_types(current) {
             for ar in agg_refs(m) {
@@ -2000,6 +2038,7 @@ impl Checker {
         return false
     }
 
+    #test(checker_on("[int]"))[Ok(0)]
     fun resolve_recursion(var self) -> Result<int32, CheckErr> {
         for e in self.enums {
             if self.find_cycle(e.name, e.name, [e.name], false) {
@@ -2053,6 +2092,7 @@ impl Checker {
         push(self.traits, TraitInfo { name: "Ord", methods: [TraitMethodSig { name: "cmp", params: [Type.TSelf, Type.TSelf], ret: Some(t_int()), receiver: "self" }], type_params: [], builtin: true, line: 0, col: 0 })
     }
 
+    #test(checker_on("[int]"))[Ok(0)]
     fun resolve_traits(var self) -> Result<int32, CheckErr> {
         self.register_builtin_op_traits()
         for decl in self.trait_decls {
@@ -2151,6 +2191,7 @@ fun opt_subst_self(t: Option<Type>, target: Type, pmap: [Subst]) -> Option<Type>
 // =========================================================================
 
 impl Checker {
+    #test(checker_on("[int]"))[Ok(0)]
     fun resolve_impls(var self) -> Result<int32, CheckErr> {
         for decl in self.impl_decls {
             self.cur_decl = decl.id
@@ -2349,6 +2390,7 @@ impl Checker {
     }
 
     // Ok(false): a method that failed earlier couldn't be compared (MYLA-110).
+    #test(checker_on("[int]"), 11, 1, SrcSpan { sline: 11, scol: 1, eline: 15, ecol: 2 }, "Sq", Type.TStruct("Sq", []), TraitInfo { name: "Shape", methods: [TraitMethodSig { name: "area", params: [Type.TSelf], ret: Some(Type.TError), receiver: "self" }], type_params: [], builtin: false, line: 5, col: 1 }, [], ["area"])[Ok(false)]
     fun check_trait_conformance(var self, ln: int32, cl: int32, sp: SrcSpan, key: str, target: Type, trinfo: TraitInfo, pmap: [Subst], impl_names: [str]) -> Result<bool, CheckErr> {
         // missing: trait methods not provided by this impl
         var missing: [str] = []
@@ -2402,6 +2444,7 @@ impl Checker {
 
     // A bad bound is left out, so calls don't check it, and the function's
     // body, which may rely on it, isn't checked (MYLA-110).
+    #test(checker_on("[int]"))[Ok(0)]
     fun validate_bounds(var self) -> Result<int32, CheckErr> {
         var fi = 0
         while fi < len(self.functions) {
@@ -2475,6 +2518,7 @@ fun field_type_get(fields: [FieldT], name: str) -> Option<Type> {
 // =========================================================================
 
 impl Checker {
+    #test(checker_on("[int]"), "Name", [])[[]]
     fun struct_field_types(self, name: str, args: [Type]) -> [FieldT] {
         let si = self.struct_idx(name)
         if si < 0 { return [] }
@@ -2488,6 +2532,7 @@ impl Checker {
         for f in info.fields { push(out, FieldT { name: f.name, ty: subst_type(f.ty, subst) }) }
         return out
     }
+    #test(checker_on("[int]"), "Shape", [], "Rect")[None]
     fun enum_variant_payload(self, name: str, args: [Type], variant: str) -> Option<[Type]> {
         let ei = self.enum_idx(name)
         if ei < 0 { return None }
@@ -2505,22 +2550,26 @@ impl Checker {
             i = i + 1 }
         return Some(subst_type_list(payload, subst))
     }
+    #test(checker_on("[int]"), "List")[[]]
     fun enum_variant_names(self, name: str) -> [str] {
         let ei = self.enum_idx(name)
         var out: [str] = []
         if ei >= 0 { for v in self.enums[ei].variants { push(out, v.name) } }
         return out
     }
+    #test(checker_on("[int]"), "Color", "Red")[false]
     fun enum_has_variant(self, name: str, variant: str) -> bool {
         return contains_str(self.enum_variant_names(name), variant)
     }
     // a bare no-payload variant name of enum `name`?
+    #test(checker_on("[int]"), "C", "A")[false]
     fun is_novpayload_variant(self, name: str, variant: str) -> bool {
         return match self.enum_variant_payload(name, [], variant) {
             Some(p) => len(p) == 0,
             None => false,
         }
     }
+    #test(checker_on("[int]"), Expr { id: 56, line: 36, col: 23, sp: SrcSpan { sline: 36, scol: 23, eline: 36, ecol: 24 }, kind: ExprKind.Name("a") })[None]
     fun enum_name_ref(self, e: Expr) -> Option<str> {
         match e.kind {
             ExprKind.Name(n) => {
@@ -2538,6 +2587,7 @@ impl Checker {
 // =========================================================================
 
 impl Checker {
+    #test(checker_on("[int]"), Expr { id: 0, line: 5, col: 7, sp: SrcSpan { sline: 5, scol: 7, eline: 5, ecol: 8 }, kind: ExprKind.IntLit(1, None, false, "") }, Some(Type.TInt(32, true)))[Ok(Type.TInt(32, true))]
     fun expect_value(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         return match self.infer(e, expected)? {
             Some(t) => Ok(t),
@@ -2546,6 +2596,7 @@ impl Checker {
     }
 
     // `e` must have type `want`; `ctx` names it in the message ("if condition").
+    #test(checker_on("[int]"), Expr { id: 104, line: 49, col: 10, sp: SrcSpan { sline: 49, scol: 10, eline: 49, ecol: 13 }, kind: ExprKind.IntLit(120, None, true, "") }, Type.TChar, "map key")[Ok(0)]
     fun expect_type(var self, e: Expr, want: Type, ctx: str) -> Result<int32, CheckErr> {
         let t = self.expect_value(e, Some(want))?
         if !type_eq(t, want) { return Err(terr_at(e.line, e.col, e.sp, format("{} must be '{}', found '{}'", ctx, type_name(want), type_name(t)))) }
@@ -2554,12 +2605,14 @@ impl Checker {
 
     // `e`'s type; poisoned() where it contains the error type, since what uses
     // the value depends on a declaration that failed (MYLA-110).
+    #test(checker_on("[int]"), Expr { id: 0, line: 5, col: 7, sp: SrcSpan { sline: 5, scol: 7, eline: 5, ecol: 8 }, kind: ExprKind.IntLit(1, None, false, "") }, Some(Type.TInt(32, true)))[Ok(Some(Type.TInt(32, true)))]
     fun infer(var self, e: Expr, expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         let r = self.infer_node(e, expected)?
         if opt_has_error(r) { return Err(poisoned()) }
         return Ok(r)
     }
 
+    #test(checker_on("[int]"), Expr { id: 0, line: 5, col: 7, sp: SrcSpan { sline: 5, scol: 7, eline: 5, ecol: 8 }, kind: ExprKind.IntLit(1, None, false, "") }, Some(Type.TInt(32, true)))[Ok(Some(Type.TInt(32, true)))]
     fun infer_node(var self, e: Expr, expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         let as_stmt = self.stmt_match
         self.stmt_match = false
@@ -2601,6 +2654,7 @@ impl Checker {
         match ot { Some(t) => { self.resolved[id] = t }, None => {} }
     }
 
+    #test(checker_on("[int]"), Expr { id: 0, line: 5, col: 7, sp: SrcSpan { sline: 5, scol: 7, eline: 5, ecol: 8 }, kind: ExprKind.IntLit(1, None, false, "") }, Some(Type.TInt(32, true)))[Ok(Type.TInt(32, true))]
     fun infer_int_lit(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         return match e.kind {
             ExprKind.IntLit(v, suf, isc, big) => {
@@ -2630,6 +2684,7 @@ impl Checker {
         }
     }
 
+    #test(checker_on("[int]"), Expr { id: 12, line: 6, col: 15, sp: SrcSpan { sline: 6, scol: 15, eline: 6, ecol: 21 }, kind: ExprKind.FloatLit("0.0f64", Some("f64")) }, None)[Ok(Type.TFloat(64))]
     fun infer_float_lit(var self, e: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         match e.kind {
             ExprKind.FloatLit(lex, suf) => {
@@ -2655,6 +2710,7 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, "expected a float literal"))   // unreachable
     }
 
+    #test(checker_on("[int]"), Expr { id: 52, line: 4, col: 17, sp: SrcSpan { sline: 4, scol: 17, eline: 4, ecol: 18 }, kind: ExprKind.Name("m") }, "m", None)[Err(CheckErr { line: 4, col: 17, sp: SrcSpan { sline: 4, scol: 17, eline: 4, ecol: 18 }, msg: "unknown name 'm'", decl: -1, notes: [] })]
     fun infer_name(var self, e: Expr, ident: str, expected: Option<Type>) -> Result<Type, CheckErr> {
         if ident == "_" { return Err(terr_at(e.line, e.col, e.sp, "'_' placeholder is only valid as a call argument")) }
         match self.lookup(ident) {
@@ -2745,6 +2801,7 @@ impl Checker {
         return Ok(target)
     }
 
+    #test(checker_on("[int]"), Expr { id: 10, line: 8, col: 12, sp: SrcSpan { sline: 8, scol: 12, eline: 8, ecol: 13 }, kind: ExprKind.Name("c") }, Type.TChar, Expr { id: 11, line: 8, col: 17, sp: SrcSpan { sline: 8, scol: 17, eline: 8, ecol: 20 }, kind: ExprKind.IntLit(97, None, true, "") }, Type.TChar)[Ok(Type.TChar)]
     fun unify(var self, ln: Expr, lt0: Type, rn: Expr, rt0: Type) -> Result<Type, CheckErr> {
         var lt = lt0
         var rt = rt0
@@ -2898,6 +2955,7 @@ impl Checker {
         return Ok(result)
     }
 
+    #test(checker_on("[int]"), "T", "Eq")[false]
     fun bound_has(self, pname: str, trnm: str) -> bool {
         for b in self.bounds_cur { if b.tp == pname { if contains_str(b.traits, trnm) { return true } } }
         return false
@@ -2953,6 +3011,7 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("type '{}' is not a tuple and cannot be indexed with '.{}'", type_name(base), idx)))
     }
 
+    #test(checker_on("[int]"), Expr { id: 40, line: 30, col: 20, sp: SrcSpan { sline: 30, scol: 20, eline: 30, ecol: 22 }, kind: ExprKind.ListLit([]) }, [], Some(Type.TList(Type.TParam("T"))))[Ok(Type.TList(Type.TParam("T")))]
     fun infer_list_lit(var self, e: Expr, elems: [Expr], expected: Option<Type>) -> Result<Type, CheckErr> {
         var exp_elem: Option<Type> = list_elem_hint(expected)
         if len(elems) == 0 {
@@ -2968,6 +3027,7 @@ impl Checker {
         return Ok(Type.TList(elem_t))
     }
 
+    #test(checker_on("[int]"), Expr { id: 101, line: 48, col: 29, sp: SrcSpan { sline: 48, scol: 29, eline: 48, ecol: 32 }, kind: ExprKind.MapLit([]) }, [], Some(Type.TMap(Type.TChar, Type.TInt(32, true))))[Ok(Type.TMap(Type.TChar, Type.TInt(32, true)))]
     fun infer_map_lit(var self, e: Expr, entries: [MapEntry], expected: Option<Type>) -> Result<Type, CheckErr> {
         var exp_k: Option<Type> = None
         var exp_v: Option<Type> = None
@@ -3281,11 +3341,13 @@ impl Checker {
         return Ok(first)
     }
 
+    #test(checker_on("[int]"), Pattern { id: 120, line: 51, col: 31, sp: SrcSpan { sline: 51, scol: 31, eline: 51, ecol: 32 }, kind: PatternKind.PWild }, Type.TChar)[Ok(0)]
     fun check_pattern(var self, pat: Pattern, t: Type) -> Result<int32, CheckErr> {
         if has_error(t) { return Err(poisoned()) }
         return self.check_pattern_node(pat, t)
     }
 
+    #test(checker_on("[int]"), Pattern { id: 120, line: 51, col: 31, sp: SrcSpan { sline: 51, scol: 31, eline: 51, ecol: 32 }, kind: PatternKind.PWild }, Type.TChar)[Ok(0)]
     fun check_pattern_node(var self, pat: Pattern, t: Type) -> Result<int32, CheckErr> {
         return match pat.kind {
             PatternKind.PWild => Ok(0),
@@ -3412,10 +3474,12 @@ impl Checker {
     // `NPat`s first; a constructor's key is an enum variant's name, or `#t` /
     // `#f`, `#()` (a tuple), `#{}` (a struct), `#i<n>` / `#s<text>` (literals).
 
+    #test(checker_on("[int]"), Pattern { id: 120, line: 51, col: 31, sp: SrcSpan { sline: 51, scol: 31, eline: 51, ecol: 32 }, kind: PatternKind.PWild }, Type.TChar)[true]
     fun irrefutable(self, pat: Pattern, t: Type) -> bool {
         return !self.useful([[self.norm_pat(pat, t)]], [NPat.NWild], [t])
     }
 
+    #test(checker_on("[int]"), Pattern { id: 120, line: 51, col: 31, sp: SrcSpan { sline: 51, scol: 31, eline: 51, ecol: 32 }, kind: PatternKind.PWild }, Type.TChar)[NPat.NWild]
     fun norm_pat(self, pat: Pattern, t: Type) -> NPat {
         match pat.kind {
             PatternKind.PWild => { return NPat.NWild },
@@ -3483,6 +3547,7 @@ impl Checker {
 
     // All constructors of `t` with their field types; none for values that
     // can't be enumerated (integers, strings, chars).
+    #test(checker_on("[int]"), Type.TChar)[None]
     fun signature(self, t: Type) -> Option<[SigCon]> {
         var out: [SigCon] = []
         match t {
@@ -3521,6 +3586,7 @@ impl Checker {
         return Some(out)
     }
 
+    #test(checker_on("[int]"), [], [], [])[true]
     fun useful(self, rows0: [[NPat]], q: [NPat], types: [Type]) -> bool {
         if len(q) == 0 { return len(rows0) == 0 }
         let rows = expand_or(rows0)
@@ -3560,6 +3626,7 @@ impl Checker {
         return self.useful(def, rest, trest)
     }
 
+    #test(checker_on("[int]"), Pattern { id: 55, line: 29, col: 9, sp: SrcSpan { sline: 29, scol: 9, eline: 29, ecol: 12 }, kind: PatternKind.PBind("Red") }, "Color", [])[[]]
     fun covered_variants(self, pat: Pattern, tn: str, args: [Type]) -> [str] {
         if self.irrefutable(pat, Type.TEnum(tn, args)) { return self.enum_variant_names(tn) }
         match pat.kind {
@@ -3801,6 +3868,7 @@ fun bindmaps_eq(an: [str], at: [Type], bn: [str], bt: [Type]) -> bool {
 pub struct LValue { ty: Type, mutable: bool }
 
 impl Checker {
+    #test(checker_on("[int]"), Block { line: 7, col: 12, sp: SrcSpan { sline: 7, scol: 12, eline: 7, ecol: 14 }, stmts: [] })[Ok(0)]
     fun check_block(var self, b: Block) -> Result<int32, CheckErr> {
         self.push_scope()
         for s in b.stmts { self.check_stmt(s)? }
@@ -3808,6 +3876,7 @@ impl Checker {
         return Ok(0)
     }
 
+    #test(checker_on("fun main() { print(1 + 2) }"), Stmt { id: 89, line: 44, col: 5, sp: SrcSpan { sline: 44, scol: 5, eline: 44, ecol: 20 }, kind: StmtKind.VarDecl("let", "s", None, Expr { id: 88, line: 44, col: 13, sp: SrcSpan { sline: 44, scol: 13, eline: 44, ecol: 20 }, kind: ExprKind.StrLit("hello") }) })[Ok(0)]
     fun check_stmt(var self, s: Stmt) -> Result<int32, CheckErr> {
         return match s.kind {
             StmtKind.VarDecl(kind, name, ty, init) => {
@@ -4036,6 +4105,7 @@ impl Checker {
 
     // Whether `e` is a parameter of the function being checked or a field or
     // element of one, which lives in its caller's storage.
+    #test(checker_on("[int]"), Expr { id: 5, line: 8, col: 12, sp: SrcSpan { sline: 8, scol: 12, eline: 8, ecol: 13 }, kind: ExprKind.Name("g") })[false]
     fun in_param(self, e: Expr) -> bool {
         var x = e
         var walking = true
@@ -4056,6 +4126,7 @@ impl Checker {
         return false
     }
 
+    #test(checker_on("fun main() { print(1 + 2) }"), "p")[-1]
     fun param_index(self, name: str) -> int32 {
         var i = 0
         while i < len(self.frames[0].names) {
@@ -4081,6 +4152,7 @@ impl Checker {
     // -- concurrency (D89; types.py: _check_isolation, _infer_await, ...) ----
 
     // Whether `key` names an actor (an empty table needs no hashing).
+    #test(checker_on("[int]"), "")[false]
     fun is_actor(self, key: str) -> bool {
         return len(self.actors) > 0 && contains(self.actors, key)
     }
@@ -4238,6 +4310,7 @@ impl Checker {
         self.call_async = asy
     }
 
+    #test(checker_on("[int]"), BindElem.BWild, Type.TParam("T"), false)[Ok(0)]
     fun bind_elem(var self, be: BindElem, t: Type, mutable: bool) -> Result<int32, CheckErr> {
         return match be {
             BindElem.BWild => Ok(0),
@@ -4260,12 +4333,14 @@ impl Checker {
         }
     }
 
+    #test(checker_on("[int]"), Expr { id: 22, line: 24, col: 9, sp: SrcSpan { sline: 24, scol: 9, eline: 24, ecol: 10 }, kind: ExprKind.Name("i") })[Err(CheckErr { line: 24, col: 9, sp: SrcSpan { sline: 24, scol: 9, eline: 24, ecol: 10 }, msg: "unknown name 'i'", decl: -1, notes: [] })]
     fun check_lvalue(var self, e: Expr) -> Result<LValue, CheckErr> {
         let lv = self.check_lvalue_node(e)?
         if has_error(lv.ty) { return Err(poisoned()) }
         return Ok(lv)
     }
 
+    #test(checker_on("[int]"), Expr { id: 22, line: 24, col: 9, sp: SrcSpan { sline: 24, scol: 9, eline: 24, ecol: 10 }, kind: ExprKind.Name("i") })[Err(CheckErr { line: 24, col: 9, sp: SrcSpan { sline: 24, scol: 9, eline: 24, ecol: 10 }, msg: "unknown name 'i'", decl: -1, notes: [] })]
     fun check_lvalue_node(var self, e: Expr) -> Result<LValue, CheckErr> {
         return match e.kind {
             ExprKind.Name(n) => {
@@ -4367,6 +4442,7 @@ fun is_eq_type(t: Type, eq_names: [str]) -> bool {
 }
 
 impl Checker {
+    #test(checker_on("[int]"))[Ok(0)]
     fun synthesize_derives(var self) -> Result<int32, CheckErr> {
         var targets: [Decl] = []
         var pos = -1
@@ -4455,12 +4531,14 @@ impl Checker {
     }
 
     // Whether `name` is a type the program or the language declares.
+    #test(checker_on("[int]"), "Vec2")[false]
     fun names_a_type(self, name: str) -> bool {
         if self.struct_idx(name) >= 0 || self.enum_idx(name) >= 0 || self.alias_idx(name) >= 0 { return true }
         match prim_type(name) { Some(t) => { return true }, None => {} }
         return name == "int" || name == "float"
     }
 
+    #test(checker_on("[int]"), Attribute { line: 5, col: 1, sp: SrcSpan { sline: 5, scol: 1, eline: 5, ecol: 12 }, name: "derive", args: [Expr { id: 2, line: 5, col: 9, sp: SrcSpan { sline: 5, scol: 9, eline: 5, ecol: 11 }, kind: ExprKind.Name("Eq") }], outputs: None })[Ok(0)]
     fun validate_derive_attr(self, attr: Attribute) -> Result<int32, CheckErr> {
         match attr.outputs { Some(x) => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' takes trait names in parentheses, e.g. #derive(Eq)")) }, None => {} }
         if len(attr.args) == 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' needs at least one trait, e.g. #derive(Eq)")) }
@@ -4512,6 +4590,7 @@ fun decl_attrs(d: Decl) -> [Attribute] {
 pub enum CV { CVInt(int64), CVFloat, CVBool(bool), CVStr(str), CVUnknown }
 
 impl Checker {
+    #test(checker_on("[int]"))[Ok(0)]
     fun fold_consts(var self) -> Result<int32, CheckErr> {
         var i = 0
         while i < len(self.const_decls) {
@@ -4524,6 +4603,7 @@ impl Checker {
         return Ok(0)
     }
 
+    #test(checker_on("[int]"), "H")[-1]
     fun const_done_idx(self, name: str) -> int32 {
         var i = 0
         while i < len(self.consts) { if self.consts[i].name == name { return i }
@@ -4592,6 +4672,7 @@ impl Checker {
     // The value of a const initializer, as types.py folds it: integers wrapped
     // to each node's type. Float values aren't tracked (`CVFloat`), so a float
     // cast to an integer folds to an unknown value (`CVUnknown`).
+    #test(checker_on("[int]"), Expr { id: 19, line: 14, col: 21, sp: SrcSpan { sline: 14, scol: 21, eline: 14, ecol: 27 }, kind: ExprKind.StrLit("myla") })[Ok(CV.CVStr("myla"))]
     fun fold_const_expr(var self, e: Expr) -> Result<CV, CheckErr> {
         let t = self.node_type(e)
         return match e.kind {
@@ -4634,6 +4715,7 @@ impl Checker {
         }
     }
 
+    #test(checker_on("[int]"), Expr { id: 7, line: 11, col: 25, sp: SrcSpan { sline: 11, scol: 25, eline: 11, ecol: 28 }, kind: ExprKind.Name("KIB") })[Type.TInt(32, true)]
     fun node_type(self, e: Expr) -> Type {
         return match get(self.resolved, e.id) { Some(t) => t, None => t_int() }
     }
@@ -4817,6 +4899,7 @@ impl Checker {
 
     // `decl`'s attributes (types.py: _check_attributes); each `#main`
     // function goes to `mains`.
+    #test(checker_on("[int]"), Decl { id: 1, line: 2, col: 1, sp: SrcSpan { sline: 2, scol: 1, eline: 2, ecol: 16 }, kind: DeclKind.TypeAliasDecl("A", TypeExpr { id: 0, line: 2, col: 15, sp: SrcSpan { sline: 2, scol: 15, eline: 2, ecol: 16 }, kind: TypeKind.TRef("B", []) }, [], false) })[Ok(0)]
     fun check_attributes(var self, decl: Decl) -> Result<int32, CheckErr> {
         let attrs = decl_attrs(decl)
         let is_fun = match decl.kind { DeclKind.FunDecl(fd) => true, _ => false }
@@ -4886,6 +4969,7 @@ impl Checker {
     // error and go on (MYLA-110, D84), then every function's attributes and
     // body on its own (types.py: Checker.check). Err: the errors, in the order
     // found (MYLA-65, D80).
+    #test(checker_on("[int]"))[Ok(0)]
     fun run_all(var self) -> Result<int32, [CheckErr]> {
         match self.run_phases() {
             Ok(x) => {},
@@ -4922,6 +5006,7 @@ impl Checker {
         push(self.warnings, CheckErr { line: at.line, col: at.col, sp: at.sp, msg: msg, decl: self.cur_decl, notes: [Note { label: "help", msg: "call the function of `std` that wraps it; a primitive's behaviour may change with the standard library", line: 0, col: 0, sp: no_span() }] })
     }
 
+    #test(checker_on("[int]"))[Ok(0)]
     fun run_phases(var self) -> Result<int32, CheckErr> {
         self.collect_globals()?
         self.resolve_signatures()?
@@ -4989,6 +5074,7 @@ impl Checker {
     }
 
     // Whether MAX_ERRORS errors were collected: the check ends.
+    #test(checker_on("[int]"))[false]
     fun full(self) -> bool {
         return len(self.errs) >= MAX_ERRORS
     }
@@ -4996,6 +5082,7 @@ impl Checker {
     // Collect `e`, the error of a declaration's part, and go on (types.py:
     // _record): Err(stopped()) at MAX_ERRORS. A part that depends on the
     // error type has nothing to collect.
+    #test(checker_on("[int]"), CheckErr { line: 5, col: 5, sp: SrcSpan { sline: 5, scol: 5, eline: 5, ecol: 32 }, msg: "a trait method can't be async", decl: -1, notes: [] })[Ok(0)]
     fun record(var self, e: CheckErr) -> Result<int32, CheckErr> {
         if is_poisoned(e) { return Ok(0) }
         if is_stopped(e) { return Err(e) }
@@ -5005,6 +5092,7 @@ impl Checker {
     }
 
     // `te` resolved, else the error type, its error collected (types.py: _part).
+    #test(checker_on("[int]"), TypeExpr { id: 40, line: 1, col: 23, sp: SrcSpan { sline: 1, scol: 23, eline: 1, ecol: 24 }, kind: TypeKind.TRef("T", []) })[Ok(Type.TError)]
     fun resolve_part(var self, te: TypeExpr) -> Result<Type, CheckErr> {
         return match self.resolve0(te) {
             Ok(t) => Ok(t),
@@ -5015,6 +5103,7 @@ impl Checker {
         }
     }
 
+    #test(checker_on("[int]"), Param { line: 3, col: 26, sp: SrcSpan { sline: 3, scol: 26, eline: 3, ecol: 30 }, name: "k", ty: Some(TypeExpr { id: 48, line: 3, col: 29, sp: SrcSpan { sline: 3, scol: 29, eline: 3, ecol: 30 }, kind: TypeKind.TRef("K", []) }) })[Ok(Type.TError)]
     fun param_part(var self, p: Param) -> Result<Type, CheckErr> {
         return match self.param_type(p) {
             Ok(t) => Ok(t),
@@ -5026,6 +5115,7 @@ impl Checker {
     }
 
     // `r`'s error, if any, collected.
+    #test(checker_on("[int]"), Ok(0))[Ok(0)]
     fun record_result(var self, r: Result<int32, CheckErr>) -> Result<int32, CheckErr> {
         match r {
             Ok(x) => {},
@@ -5371,6 +5461,7 @@ impl Checker {
         return Ok(Type.TStr)
     }
 
+    #test(checker_on("[int]"), Expr { id: 1, line: 5, col: 27, sp: SrcSpan { sline: 5, scol: 14, eline: 5, ecol: 29 }, kind: ExprKind.Call(Expr { id: 0, line: 5, col: 14, sp: SrcSpan { sline: 5, scol: 14, eline: 5, ecol: 27 }, kind: ExprKind.Name("StringBuilder") }, []) }, "StringBuilder", [])[Ok(Some(Type.TSB))]
     fun infer_string_builder(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         if name == "StringBuilder" {
             if len(args) > 0 { return Err(terr_at(e.line, e.col, e.sp, "StringBuilder() takes no arguments")) }
@@ -5400,6 +5491,7 @@ impl Checker {
         return Ok(None)
     }
 
+    #test(checker_on("[int]"), Expr { id: 16, line: 7, col: 16, sp: SrcSpan { sline: 7, scol: 5, eline: 7, ecol: 18 }, kind: ExprKind.Call(Expr { id: 15, line: 7, col: 5, sp: SrcSpan { sline: 7, scol: 5, eline: 7, ecol: 16 }, kind: ExprKind.Name("unreachable") }, []) }, "unreachable", [])[Ok(None)]
     fun infer_intrinsic(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         if name == "assert" {
             if !(len(args) == 1 || len(args) == 2) { return Err(terr_at(e.line, e.col, e.sp, "assert() takes a condition and an optional message")) }

@@ -139,6 +139,7 @@ fun is_lvalue(e: Expr) -> bool {
 impl Parser {
     // -- node constructors (assign a NodeId + position) --------------------
 
+    #test(parser_on("[int]"))[0]
     fun fresh(var self) -> int32 {
         let i = self.next_id
         self.next_id = self.next_id + 1
@@ -146,12 +147,14 @@ impl Parser {
     }
 
     // From `sline`:`scol` to the end of the last token consumed.
+    #test(parser_on("[int]"), 5, 1)[SrcSpan { sline: 5, scol: 1, eline: 1, ecol: 2 }]
     fun span_from(self, sline: int32, scol: int32) -> SrcSpan {
         var i = self.pos - 1
         if i < 0 { i = 0 }
         return SrcSpan { sline: sline, scol: scol, eline: self.toks[i].eline, ecol: self.toks[i].ecol }
     }
 
+    #test(parser_on("[int]"), 5, 7, ExprKind.IntLit(1, None, false, ""))[Expr { id: 0, line: 5, col: 7, sp: SrcSpan { sline: 5, scol: 7, eline: 1, ecol: 2 }, kind: ExprKind.IntLit(1, None, false, "") }]
     fun mk_expr(var self, line: int32, col: int32, k: ExprKind) -> Expr {
         return Expr { id: self.fresh(), line: line, col: col, sp: self.span_from(line, col), kind: k }
     }
@@ -170,14 +173,17 @@ impl Parser {
         return Stmt { id: self.fresh(), line: line, col: col, sp: self.span_from(st.line, st.column), kind: k }
     }
 
+    #test(parser_on("[int]"), 51, 31, PatternKind.PWild)[Pattern { id: 0, line: 51, col: 31, sp: SrcSpan { sline: 51, scol: 31, eline: 1, ecol: 2 }, kind: PatternKind.PWild }]
     fun mk_pat(var self, line: int32, col: int32, k: PatternKind) -> Pattern {
         return Pattern { id: self.fresh(), line: line, col: col, sp: self.span_from(line, col), kind: k }
     }
 
+    #test(parser_on("[int]"), 20, 9, 20, 15, PatternKind.PEnum(Some("Shape"), "Empty", [], false))[Pattern { id: 0, line: 20, col: 15, sp: SrcSpan { sline: 20, scol: 9, eline: 1, ecol: 2 }, kind: PatternKind.PEnum(Some("Shape"), "Empty", [], false) }]
     fun mk_pat_from(var self, sline: int32, scol: int32, line: int32, col: int32, k: PatternKind) -> Pattern {
         return Pattern { id: self.fresh(), line: line, col: col, sp: self.span_from(sline, scol), kind: k }
     }
 
+    #test(parser_on("[int]"), 1, 23, TypeKind.TRef("T", []))[TypeExpr { id: 0, line: 1, col: 23, sp: SrcSpan { sline: 1, scol: 23, eline: 1, ecol: 2 }, kind: TypeKind.TRef("T", []) }]
     fun mk_type(var self, line: int32, col: int32, k: TypeKind) -> TypeExpr {
         return TypeExpr { id: self.fresh(), line: line, col: col, sp: self.span_from(line, col), kind: k }
     }
@@ -188,6 +194,7 @@ impl Parser {
 
     // -- cursor helpers ----------------------------------------------------
 
+    #test(parser_on("a.b[0]"))[Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }]
     fun peek(self) -> Token {
         if self.pos >= len(self.toks) {
             return self.toks[len(self.toks) - 1]
@@ -195,6 +202,7 @@ impl Parser {
         return self.toks[self.pos]
     }
 
+    #test(parser_on("a.b[0]"), 1)[Token { kind: TokenKind.DOT, lexeme: ".", line: 1, column: 2, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }]
     fun peek_at(self, offset: int32) -> Token {
         let idx = self.pos + offset
         if idx >= len(self.toks) {
@@ -205,25 +213,30 @@ impl Parser {
 
     // The kind of the current token, or of the one `offset` further, read in
     // place: `peek` copies the token and its strings (MYLA-124).
+    #test(parser_on("a.b[0]"))[TokenKind.IDENT]
     fun peek_kind(self) -> TokenKind {
         if self.pos >= len(self.toks) { return self.toks[len(self.toks) - 1].kind }
         return self.toks[self.pos].kind
     }
 
+    #test(parser_on("a.b[0]"), 1)[TokenKind.DOT]
     fun peek_kind_at(self, offset: int32) -> TokenKind {
         let idx = self.pos + offset
         if idx >= len(self.toks) { return self.toks[len(self.toks) - 1].kind }
         return self.toks[idx].kind
     }
 
+    #test(parser_on("[int]"))[false]
     fun at_end(self) -> bool {
         return self.peek_kind() == TokenKind.EOF
     }
 
+    #test(parser_on("[int]"), TokenKind.DOT)[false]
     fun check(self, k: TokenKind) -> bool {
         return self.peek_kind() == k
     }
 
+    #test(parser_on("a.b[0]"))[Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }]
     fun advance(var self) -> Token {
         let tok = self.peek()
         self.skip()
@@ -238,6 +251,7 @@ impl Parser {
         }
     }
 
+    #test(parser_on("[int]"), TokenKind.IF)[false]
     fun match1(var self, k: TokenKind) -> bool {
         if self.peek_kind() == k {
             self.skip()
@@ -277,6 +291,7 @@ impl Parser {
     // one, go back to where it was found and skip to where a `mode` can begin
     // (`sync`), past `start` unless a block or body ends there. Whether the
     // parse went wrong: also while unwinding or stopped.
+    #test(parser_on("[int]"), 0, 2)[false]
     fun recovered(var self, start: int32, mode: int32) -> bool {
         match self.pending {
             Some(d) => {
@@ -302,6 +317,7 @@ impl Parser {
         return self.unwinding || self.stopped
     }
 
+    #test(parser_on("[int]"))[true]
     fun at_line_start(self) -> bool {
         if self.pos == 0 { return true }
         let k = self.toks[self.pos - 1].kind
@@ -343,6 +359,7 @@ impl Parser {
     // Whether the last error is at the next token, which starts a declaration
     // on its line: then the block or body being parsed is missing its `}`,
     // and the parse resumes at the declaration.
+    #test(parser_on("[int]"))[false]
     fun resuming_at_declaration(self) -> bool {
         let tok = self.peek()
         let n = len(self.errs)
@@ -363,6 +380,7 @@ impl Parser {
         self.fail(tok.line, tok.column, SrcSpan { sline: tok.line, scol: tok.column, eline: tok.eline, ecol: tok.ecol }, msg)
     }
 
+    #test(parser_on("a.b[0]"), TokenKind.COLON, "':'")[Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }]
     fun expect(var self, k: TokenKind, what: str) -> Token {
         let tok = self.peek()
         if tok.kind != k {
@@ -385,12 +403,14 @@ impl Parser {
         }
     }
 
+    #test(parser_on("[int]"))[false]
     fun at_separator(self) -> bool {
         return self.check(TokenKind.NEWLINE) || self.check(TokenKind.SEMI)
     }
 
     // -- entry point -------------------------------------------------------
 
+    #test(parser_on("[int]"))[Program { decls: [] }]
     fun parse_program(var self) -> Program {
         var decls: [Decl] = []
         self.skip_separators()
@@ -424,6 +444,7 @@ impl Parser {
 
     // -- declarations ------------------------------------------------------
 
+    #test(parser_on("[int]"))[Decl { id: 0, line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 1, ecol: 6 }, kind: DeclKind.ImportDecl(ImportPath { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 1, ecol: 6 }, dots: 0, segments: [] }, None, None, false) }]
     fun declaration(var self) -> Decl {
         let attrs = self.attributes()
         var is_pub = false
@@ -465,6 +486,7 @@ impl Parser {
         return self.mk_decl(0, 0, DeclKind.ImportDecl(ImportPath { line: 0, col: 0, sp: self.span_from(0, 0), dots: 0, segments: [] }, None, None, false))
     }
 
+    #test(parser_on("[int]"), false)[Decl { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: DeclKind.ImportDecl(ImportPath { line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 6 }, dots: 0, segments: [""] }, None, None, false) }]
     fun import_decl(var self, is_pub: bool) -> Decl {
         let start = self.peek()
         if self.match1(TokenKind.FROM) {
@@ -489,6 +511,7 @@ impl Parser {
         return self.mk_decl(start.line, start.column, DeclKind.ImportDecl(path, None, alias, is_pub))
     }
 
+    #test(parser_on("[int]"))[ImportPath { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, dots: 0, segments: ["["] }]
     fun import_path(var self) -> ImportPath {
         let tok = self.peek()
         var dots = 0
@@ -507,6 +530,7 @@ impl Parser {
         return ImportPath { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), dots: dots, segments: segments }
     }
 
+    #test(parser_on("[int]"))[ImportItem { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, name: "[", alias: None }]
     fun import_item(var self) -> ImportItem {
         let tok = self.expect(TokenKind.IDENT, "an imported name")
         var alias: Option<str> = None
@@ -516,6 +540,7 @@ impl Parser {
         return ImportItem { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), name: tok.lexeme, alias: alias }
     }
 
+    #test(parser_on("[int]"))[[]]
     fun attributes(var self) -> [Attribute] {
         var attrs: [Attribute] = []
         while self.check(TokenKind.HASH) {
@@ -537,6 +562,7 @@ impl Parser {
         return attrs
     }
 
+    #test(parser_on("[int]"))[[]]
     fun generics(var self) -> [TypeParam] {
         var params: [TypeParam] = []
         if !self.check(TokenKind.LT) {
@@ -564,6 +590,7 @@ impl Parser {
         return params
     }
 
+    #test(parser_on("[int]"), "a trait")[[]]
     fun generics_no_bounds(var self, where: str) -> [TypeParam] {
         let ps = self.generics()
         for p in ps {
@@ -574,6 +601,7 @@ impl Parser {
         return ps
     }
 
+    #test(parser_on("a.b[0]"), [], true)[Decl { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.StructDecl(".", [], [], [], true, false) }]
     fun struct_decl(var self, attrs: [Attribute], is_pub: bool) -> Decl {
         let kw = self.advance()    // struct / actor
         let is_actor = kw.kind == TokenKind.ACTOR
@@ -599,6 +627,7 @@ impl Parser {
         return self.mk_decl(kw.line, kw.column, DeclKind.StructDecl(name, fields, attrs, tps, is_pub, is_actor))
     }
 
+    #test(parser_on("a.b[0]"), [], true)[Decl { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.EnumDecl(".", [], [], [], true) }]
     fun enum_decl(var self, attrs: [Attribute], is_pub: bool) -> Decl {
         let kw = self.advance()
         let name = self.expect(TokenKind.IDENT, "enum name").lexeme
@@ -663,6 +692,7 @@ impl Parser {
         return self.mk_decl(kw.line, kw.column, DeclKind.FunDecl(fd))
     }
 
+    #test(parser_on("a.b[0]"))[Decl { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.ImplDecl(TypeExpr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: TypeKind.TRef("", []) }, [], [], None, []) }]
     fun impl_decl(var self) -> Decl {
         let kw = self.advance()
         let tps = self.generics()
@@ -700,6 +730,7 @@ impl Parser {
         return self.mk_decl(kw.line, kw.column, DeclKind.ImplDecl(target, methods, tps, trait_name, trait_args))
     }
 
+    #test(parser_on("a.b[0]"), [], false)[Decl { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.TraitDecl(".", [], [], false) }]
     fun trait_decl(var self, attrs: [Attribute], is_pub: bool) -> Decl {
         let kw = self.advance()
         let name = self.expect(TokenKind.IDENT, "trait name").lexeme
@@ -726,6 +757,7 @@ impl Parser {
     // Before a member of an impl or trait body (parser.py: _member): after an
     // error, a line starting another declaration, or one at column 1, leaves
     // the body (unwinding). In an impl body a member may start with `#`.
+    #test(parser_on("[int]"), true)[false]
     fun leaves_body(var self, attributes: bool) -> bool {
         let tok = self.peek()
         if self.resuming_at_declaration() && (!starts_member(tok.kind, attributes) || tok.column == 1) {
@@ -750,12 +782,14 @@ impl Parser {
     }
 
     // At `fun`, or `async fun` (D89).
+    #test(parser_on("[int]"))[false]
     fun at_method(self) -> bool {
         let k = self.peek_kind()
         return k == TokenKind.FUN || (k == TokenKind.ASYNC && self.peek_kind_at(1) == TokenKind.FUN)
     }
 
     // Returns a FunData with body filled by the caller (method vs signature).
+    #test(parser_on("a.b[0]"))[FunData { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, name: ".", params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }]
     fun method_header(var self) -> FunData {
         let kw = self.advance()    // fun, or async before it
         let is_async = kw.kind == TokenKind.ASYNC
@@ -792,6 +826,7 @@ impl Parser {
         }
     }
 
+    #test(parser_on("a.b[0]"), [])[FunData { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, name: ".", params: [], ret_type: None, body: Some(Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }), attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }]
     fun method_decl(var self, attrs: [Attribute]) -> FunData {
         let h = self.method_header()
         let body = self.block()
@@ -804,10 +839,12 @@ impl Parser {
         }
     }
 
+    #test(parser_on("a.b[0]"))[FunData { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, name: ".", params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }]
     fun method_sig(var self) -> FunData {
         return self.method_header()
     }
 
+    #test(parser_on("a.b[0]"), [], false)[Decl { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.TypeAliasDecl(".", TypeExpr { id: 0, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: TypeKind.TRef("", []) }, [], false) }]
     fun typealias_decl(var self, attrs: [Attribute], is_pub: bool) -> Decl {
         let kw = self.advance()
         let name = self.expect(TokenKind.IDENT, "alias name").lexeme
@@ -828,6 +865,7 @@ impl Parser {
 
     // -- types -------------------------------------------------------------
 
+    #test(parser_on("a.b[0]"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: TypeKind.TRef("a", []) }]
     fun parse_type(var self) -> TypeExpr {
         self.enter("type")
         let t = self.parse_type_inner()
@@ -835,6 +873,7 @@ impl Parser {
         return t
     }
 
+    #test(parser_on("a.b[0]"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: TypeKind.TRef("a", []) }]
     fun parse_type_inner(var self) -> TypeExpr {
         let tok = self.peek()
         let k = tok.kind
@@ -882,10 +921,12 @@ impl Parser {
         return self.mk_type(tok.line, tok.column, TypeKind.TRef("", []))
     }
 
+    #test(parser_on("[int]"), TokenKind.STR)[true]
     fun is_prim_type(self, k: TokenKind) -> bool {
         return k == TokenKind.BOOL || k == TokenKind.STR || k == TokenKind.INT8 || k == TokenKind.INT16 || k == TokenKind.INT32 || k == TokenKind.INT64 || k == TokenKind.UINT8 || k == TokenKind.UINT16 || k == TokenKind.UINT32 || k == TokenKind.UINT64
     }
 
+    #test(parser_on("[int]"))[[]]
     fun type_args(var self) -> [TypeExpr] {
         var args: [TypeExpr] = []
         if !self.check(TokenKind.LT) {
@@ -907,6 +948,7 @@ impl Parser {
         return args
     }
 
+    #test(parser_on("a.b[0]"))[TypeExpr { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: TypeKind.TTuple([TypeExpr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: TypeKind.TRef("", []) }]) }]
     fun paren_type(var self) -> TypeExpr {
         let lp = self.advance()
         var params: [TypeExpr] = []
@@ -937,6 +979,7 @@ impl Parser {
 
     // -- statements --------------------------------------------------------
 
+    #test(parser_on("[int]"))[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, stmts: [] }]
     fun block(var self) -> Block {
         self.enter("block")
         let b = self.block_inner()
@@ -944,6 +987,7 @@ impl Parser {
         return b
     }
 
+    #test(parser_on("[int]"))[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, stmts: [] }]
     fun block_inner(var self) -> Block {
         let lbrace = self.expect(TokenKind.LBRACE, "'{'")
         var stmts: [Stmt] = []
@@ -973,6 +1017,7 @@ impl Parser {
         return Block { line: lbrace.line, col: lbrace.column, sp: self.span_from(lbrace.line, lbrace.column), stmts: stmts }
     }
 
+    #test(parser_on("enum E { A, B(int) }"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 21 }, kind: StmtKind.ExprStmt(Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 21 }, kind: ExprKind.Hole }) }]
     fun statement(var self) -> Stmt {
         let k = self.peek_kind()
         if k == TokenKind.LET || k == TokenKind.VAR {
@@ -1009,6 +1054,7 @@ impl Parser {
         return self.assign_or_expr()
     }
 
+    #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.VarDecl("a", ".", None, Expr { id: 0, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: ExprKind.Hole }) }]
     fun var_decl(var self) -> Stmt {
         let kw = self.advance()
         let kind = kw.lexeme
@@ -1035,6 +1081,7 @@ impl Parser {
     }
 
     // `async let name = e` (D89): a child task, its result read with `await name`.
+    #test(parser_on("[int]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: StmtKind.VarDecl("async", "]", None, Expr { id: 0, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 6 }, kind: ExprKind.Hole }) }]
     fun async_let(var self) -> Stmt {
         let kw = self.advance()    // async
         self.skip()                // let
@@ -1048,6 +1095,7 @@ impl Parser {
         return self.mk_stmt(kw.line, kw.column, StmtKind.VarDecl("async", name, ty, init))
     }
 
+    #test(parser_on("a.b[0]"))[[BindElem.BWild, BindElem.BWild]]
     fun tuple_binding(var self) -> [BindElem] {
         self.skip()
         var elems: [BindElem] = [self.binding_elem()]
@@ -1064,6 +1112,7 @@ impl Parser {
         return elems
     }
 
+    #test(parser_on("[int]"))[BindElem.BWild]
     fun binding_elem(var self) -> BindElem {
         let tok = self.peek()
         if tok.kind == TokenKind.LPAREN {
@@ -1081,6 +1130,7 @@ impl Parser {
         return BindElem.BWild
     }
 
+    #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.IfS(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }, None) }]
     fun if_stmt(var self) -> Stmt {
         let kw = self.advance()
         let cond = self.expression_ns()
@@ -1100,6 +1150,7 @@ impl Parser {
         return self.mk_stmt(kw.line, kw.column, StmtKind.IfS(cond, then, otherwise))
     }
 
+    #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.WhileS(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }) }]
     fun while_stmt(var self) -> Stmt {
         let kw = self.advance()
         let cond = self.expression_ns()
@@ -1121,6 +1172,7 @@ impl Parser {
         return self.mk_stmt(kw.line, kw.column, StmtKind.ForS(v, None, None, body, Some(first)))
     }
 
+    #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.ReturnS(Some(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }), false) }]
     fun return_stmt(var self) -> Stmt {
         let kw = self.advance()
         if self.at_separator() || self.check(TokenKind.RBRACE) || self.at_end() {
@@ -1140,6 +1192,7 @@ impl Parser {
         return self.mk_stmt(kw.line, kw.column, StmtKind.ReturnS(Some(value), false))
     }
 
+    #test(parser_on("let x = 1"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: StmtKind.ExprStmt(Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }) }]
     fun assign_or_expr(var self) -> Stmt {
         let st = self.peek()
         let expr = self.expression()
@@ -1156,14 +1209,17 @@ impl Parser {
 
     // -- expressions (precedence climbing) ---------------------------------
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun expression(var self) -> Expr {
         return self.expression_with(true)
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun expression_ns(var self) -> Expr {
         return self.expression_with(false)
     }
 
+    #test(parser_on("let x = 1"), true)[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun expression_with(var self, allow: bool) -> Expr {
         let prev = self.allow_struct_lit
         self.allow_struct_lit = allow
@@ -1174,6 +1230,7 @@ impl Parser {
         return e
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun pipe(var self) -> Expr {
         let st = self.peek()
         var expr = self.logic_or()
@@ -1189,6 +1246,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun logic_or(var self) -> Expr {
         let st = self.peek()
         var expr = self.logic_and()
@@ -1200,6 +1258,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun logic_and(var self) -> Expr {
         let st = self.peek()
         var expr = self.equality()
@@ -1211,6 +1270,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun equality(var self) -> Expr {
         let st = self.peek()
         var expr = self.comparison()
@@ -1222,6 +1282,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun comparison(var self) -> Expr {
         let st = self.peek()
         var expr = self.bit_or()
@@ -1233,6 +1294,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun bit_or(var self) -> Expr {
         let st = self.peek()
         var expr = self.bit_xor()
@@ -1244,6 +1306,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun bit_xor(var self) -> Expr {
         let st = self.peek()
         var expr = self.bit_and()
@@ -1255,6 +1318,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun bit_and(var self) -> Expr {
         let st = self.peek()
         var expr = self.shift()
@@ -1266,6 +1330,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("[int]"))[""]
     fun adjacent_shift(self) -> str {
         let a = self.peek()
         let b = self.peek_at(1)
@@ -1281,6 +1346,7 @@ impl Parser {
         return ""
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun shift(var self) -> Expr {
         let st = self.peek()
         var expr = self.term()
@@ -1298,6 +1364,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun term(var self) -> Expr {
         let st = self.peek()
         var expr = self.factor()
@@ -1309,6 +1376,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun factor(var self) -> Expr {
         let st = self.peek()
         var expr = self.cast()
@@ -1320,6 +1388,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun cast(var self) -> Expr {
         let st = self.peek()
         var expr = self.unary()
@@ -1331,6 +1400,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun unary(var self) -> Expr {
         let k = self.peek_kind()
         if k == TokenKind.AWAIT {
@@ -1350,6 +1420,7 @@ impl Parser {
         return self.postfix()
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun postfix(var self) -> Expr {
         let st = self.peek()
         var expr = self.primary()
@@ -1386,6 +1457,7 @@ impl Parser {
         return expr
     }
 
+    #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun primary(var self) -> Expr {
         let tok = self.peek()
         let k = tok.kind
@@ -1453,6 +1525,7 @@ impl Parser {
         return self.mk_expr(tok.line, tok.column, ExprKind.Hole)
     }
 
+    #test(parser_on("a.b[0]"))[Expr { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.ListLit([Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }]) }]
     fun list_or_map_lit(var self) -> Expr {
         let lb = self.advance()
         self.skip_newlines()
@@ -1505,6 +1578,7 @@ impl Parser {
         return self.mk_expr(lb.line, lb.column, ExprKind.MapLit(entries))
     }
 
+    #test(parser_on("a.b[0]"))[Expr { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.MatchE(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }, []) }]
     fun match_expr(var self) -> Expr {
         let kw = self.advance()
         let scrutinee = self.expression_ns()
@@ -1552,6 +1626,7 @@ impl Parser {
         return MatchArm { line: arrow.line, col: arrow.column, sp: self.span_from(st.line, st.column), pattern: pattern, guard: guard, body: body }
     }
 
+    #test(parser_on("[int]"))[Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PWild }]
     fun pattern(var self) -> Pattern {
         self.enter("pattern")
         let p = self.pattern_inner()
@@ -1559,6 +1634,7 @@ impl Parser {
         return p
     }
 
+    #test(parser_on("[int]"))[Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PWild }]
     fun pattern_inner(var self) -> Pattern {
         let first = self.base_pattern()
         if !self.check(TokenKind.PIPE) {
@@ -1573,6 +1649,7 @@ impl Parser {
         return self.mk_pat_from(first.sp.sline, first.sp.scol, pl, pc, PatternKind.POr(alts))
     }
 
+    #test(parser_on("[int]"))[Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PWild }]
     fun base_pattern(var self) -> Pattern {
         let tok = self.peek()
         let k = tok.kind
@@ -1602,6 +1679,7 @@ impl Parser {
         return self.mk_pat(tok.line, tok.column, PatternKind.PWild)
     }
 
+    #test(parser_on("[int]"), Token { kind: TokenKind.IDENT, lexeme: "_", line: 51, column: 31, eline: 51, ecol: 32, ival: 0, suffix: "", big: "" })[Pattern { id: 0, line: 51, col: 31, sp: SrcSpan { sline: 51, scol: 31, eline: 1, ecol: 2 }, kind: PatternKind.PWild }]
     fun ident_pattern(var self, first: Token) -> Pattern {
         self.skip()
         if first.lexeme == "_" {
@@ -1658,6 +1736,7 @@ impl Parser {
         return self.mk_pat(lp.line, lp.column, PatternKind.PTuple(elems))
     }
 
+    #test(parser_on("[int]"), Token { kind: TokenKind.IDENT, lexeme: "Counter", line: 9, column: 9, eline: 9, ecol: 16, ival: 0, suffix: "", big: "" })[Pattern { id: 0, line: 9, col: 9, sp: SrcSpan { sline: 9, scol: 9, eline: 1, ecol: 6 }, kind: PatternKind.PStruct("Counter", []) }]
     fun struct_pattern(var self, name_tok: Token) -> Pattern {
         self.expect(TokenKind.LBRACE, "'{'")
         self.skip_newlines()
@@ -1682,6 +1761,7 @@ impl Parser {
         return self.mk_pat(name_tok.line, name_tok.column, PatternKind.PStruct(name_tok.lexeme, fields))
     }
 
+    #test(parser_on("[int]"))[false]
     fun lambda_ahead(self) -> bool {
         var depth = 0
         var i = self.pos
@@ -1731,6 +1811,7 @@ impl Parser {
         return self.mk_expr(lp.line, lp.column, ExprKind.Lambda(params, None, body, false))
     }
 
+    #test(parser_on("a.b[0]"))[Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }]
     fun paren_or_tuple(var self) -> Expr {
         let lp = self.advance()
         let first = self.expression()
@@ -1750,6 +1831,7 @@ impl Parser {
         return self.mk_expr(lp.line, lp.column, ExprKind.TupleLit(elems))
     }
 
+    #test(parser_on("[int]"), Token { kind: TokenKind.IDENT, lexeme: "Box", line: 70, column: 13, eline: 70, ecol: 16, ival: 0, suffix: "", big: "" })[Expr { id: 0, line: 70, col: 13, sp: SrcSpan { sline: 70, scol: 13, eline: 1, ecol: 6 }, kind: ExprKind.StructLit("Box", []) }]
     fun struct_lit(var self, name_tok: Token) -> Expr {
         self.expect(TokenKind.LBRACE, "'{'")
         self.skip_newlines()
@@ -1769,6 +1851,7 @@ impl Parser {
         return self.mk_expr(name_tok.line, name_tok.column, ExprKind.StructLit(name_tok.lexeme, fields))
     }
 
+    #test(parser_on("let x = 1"), TokenKind.RPAREN)[[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]]
     fun expr_list(var self, closing: TokenKind) -> [Expr] {
         var args: [Expr] = []
         self.skip_newlines()
@@ -1787,6 +1870,7 @@ impl Parser {
         return args
     }
 
+    #test(parser_on("let x = 1"))[[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]]
     fun call_args(var self) -> [Expr] {
         var args: [Expr] = []
         self.skip_newlines()
@@ -1810,6 +1894,7 @@ impl Parser {
         return args
     }
 
+    #test(parser_on("[int]"))[false]
     fun hole_ahead(self) -> bool {
         let t = self.peek()
         if !(t.kind == TokenKind.IDENT && t.lexeme == "_") {

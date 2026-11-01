@@ -402,6 +402,7 @@ impl Norm {
         }
     }
 
+    #test(new_norm(0), None)[None]
     fun opt_expr(var self, e: Option<Expr>) -> Option<Expr> {
         return match e { Some(x) => Some(self.expr(x)), None => None }
     }
@@ -442,6 +443,7 @@ impl Norm {
 
     // `es` evaluated left to right: those before the last with an `await`
     // are put into temporaries.
+    #test(new_norm(0), [])[[]]
     fun seq(var self, es: [Expr]) -> [Expr] {
         var last = -1
         var i = 0
@@ -564,6 +566,7 @@ impl Norm {
 
     // -- new nodes --------------------------------------------------------
 
+    #test(new_norm(0))[0]
     fun id(var self) -> int32 {
         let i = self.next
         self.next = self.next + 1
@@ -587,6 +590,7 @@ impl Norm {
         }
     }
 
+    #test(new_norm(0))["%aw1"]
     fun temp_name(var self) -> str {
         self.temps = self.temps + 1
         return format("%aw{}", self.temps)

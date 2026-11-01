@@ -74,6 +74,7 @@ struct CliError { msg: str, usage: bool }
 // file if it ends in `.my` (else there is none: project mode); then `run`
 // passes the rest to the program, `test` too with a file, `new` takes one
 // name, and other commands reject them.
+#test(["/home/user/myla/selfhost/main.my", "new", "--lib", "freshlib"])[Err(CliError { msg: "myla: unknown option 'freshlib'", usage: true })]
 fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
     let cmd = argv[1]
     var cl = CommandLine { file: "", opts: load_options(default_stdlib_root(argv[0])), output: "a.out", debug: false, deps: false, update: false, name: "", rest: [] }

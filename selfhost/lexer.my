@@ -168,6 +168,7 @@ impl Lexer {
         self.fail(sl, sc, "unterminated block comment")
     }
 
+    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None }, 10)["1"]
     fun scan_digits(var self, base: int32) -> str {
         var sb = StringBuilder()
         var prev_us = false
@@ -199,6 +200,7 @@ impl Lexer {
         return build(sb)
     }
 
+    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 1, line: 1, col: 2, n: 5, toks: [], err: None }, 1, 1)[""]
     fun scan_int_suffix(var self, sl: int32, sc: int32) -> str {
         if self.peek() == 105 || self.peek() == 117 {
             let sp = self.pos
@@ -479,6 +481,9 @@ impl Lexer {
         }
     }
 
+    #test(Lexer { cps: ['[', '1', ',', ' ', '2', ']'], pos: 0, line: 1, col: 1, n: 6, toks: [], err: None }, 91)[TokenKind.LBRACKET]
+    #test(Lexer { cps: ['(', '1', ',', ' ', '\'', 'c', '\'', ',', ' ', 't', 'r', 'u', 'e', ')'], pos: 0, line: 1, col: 1, n: 14, toks: [], err: None }, 40)[TokenKind.LPAREN]
+    #test(Lexer { cps: ['p', '.', 'x'], pos: 1, line: 1, col: 2, n: 3, toks: [Token { kind: TokenKind.IDENT, lexeme: "p", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None }, 46)[TokenKind.DOT]
     fun one_char_kind(self, c: int32) -> TokenKind {
         if c == 43 { return TokenKind.PLUS }
         if c == 45 { return TokenKind.MINUS }
@@ -742,6 +747,9 @@ fun big_text(digits: str, base: int64) -> str {
 }
 
 // `a < b` for decimal texts of the same length.
+#test("4591870180066957722", "9223372036854775808")[true]
+#test("4591870180174331904", "9223372036854775808")[true]
+#test("9223372036854775808", "9223372036854775808")[false]
 fun text_less(a: str, b: str) -> bool {
     var i = 0
     while i < len(a) {

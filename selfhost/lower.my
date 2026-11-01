@@ -302,6 +302,7 @@ fun is_scalar(t: Type) -> bool {
 // Whether values of type `t` can be lowered: scalars, strings, lists, maps,
 // builders, function values, and structs, tuples and enums (recursive ones
 // too, whose members are boxed) of such values.
+#test(codegen_on("[int]"), Type.TStr)[true]
 fun lowerable(cg: CodeGen, t: Type) -> bool {
     return member_lowerable(t, cg.ir_blocked)
 }
@@ -356,6 +357,7 @@ fun has_name(names: [str], n: str) -> bool {
 // The structs and enums whose declared members can't be lowered (through
 // another such type, to a fixed point; `Self`); a generic one is lowerable
 // for lowerable type arguments.
+#test(codegen_on("[int]"))[[]]
 pub fun blocked_types(cg: CodeGen) -> [str] {
     var blocked: [str] = []
     var changed = true
@@ -412,6 +414,7 @@ fun has_receiver(fd: FunData) -> bool {
 }
 
 // Where an actor's executor begins in its cell: after its fields.
+#test(codegen_on("struct P { x: int, y: int }"), Type.TActor("Account"))[16]
 fun actor_record_offset(cg: CodeGen, t: Type) -> int32 {
     return (cg.size(Type.TStruct(actor_name(t), [])) + 7) / 8 * 8
 }
@@ -428,6 +431,7 @@ fun actor_name(t: Type) -> str {
 impl Lower {
     // --- building -------------------------------------------------------------
 
+    #test(lower_on())[0]
     fun new_block(var self) -> int32 {
         push(self.f.blocks, IrBlock { insts: [], term: Term.Open })
         return len(self.f.blocks) - 1
@@ -465,6 +469,7 @@ impl Lower {
         self.start(next)
     }
 
+    #test(lower_on(), Type.TStr)[0]
     fun temp(var self, t: Type) -> int32 {
         push(self.f.temps, t)
         push(self.holder, -1)
@@ -492,6 +497,7 @@ impl Lower {
 
     // Whether the value `v` of type `t`, which owns heap values, is taken
     // from an owned temporary (`take`).
+    #test(lower_on(), codegen_on("[int]"), Type.TChar, 0)[false]
     fun took(var self, cg: CodeGen, t: Type, v: int32) -> bool {
         return cg.owns_heap(t) && self.take(v)
     }
@@ -532,6 +538,7 @@ impl Lower {
         self.retain(cg, t, v)
     }
 
+    #test(lower_on(), "s", Type.TStr, 8, -1, true)[0]
     fun new_slot(var self, name: str, t: Type, size: int32, word: int32, owns: bool) -> int32 {
         push(self.f.slots, Slot { name: name, ty: t, size: size, word: word, owns: owns, inline: false })
         return len(self.f.slots) - 1
@@ -539,6 +546,7 @@ impl Lower {
 
     // A slot for a value of type `t` (its size, at least 8 bytes); `owns`: it
     // owns the heap values it will hold.
+    #test(lower_on(), codegen_on("[int]"), "s", Type.TStr, true)[0]
     fun value_slot(var self, cg: CodeGen, name: str, t: Type, owns: bool) -> int32 {
         var size = 8
         if is_aggregate(t) { size = cg.size(t) }
@@ -581,11 +589,13 @@ impl Lower {
     // Whether `name` is the `self` of an async actor method, whose fields
     // the actor's other calls change while it waits (its `let`s, loops and
     // matches can't borrow from them).
+    #test(lower_on(), "a")[false]
     fun shared_self(self, name: str) -> bool {
         return self.actor_self >= 0 && self.lookup(name) == self.actor_self
     }
 
     // The slot of the innermost `name` in scope, or -1.
+    #test(lower_on(), "a")[-1]
     fun lookup(self, name: str) -> int32 {
         var i = len(self.scopes) - 1
         while i >= 0 {
@@ -739,6 +749,7 @@ impl Lower {
 
     // The cell value `v` of type `t` is a new reference (a call's result, a
     // concatenation): keep it in an owning slot dropped with the statement.
+    #test(lower_on(), codegen_on("[int]"), 7, Type.TBool)[7]
     fun owned_value(var self, cg: CodeGen, v: int32, t: Type) -> int32 {
         if !cg.owns_heap(t) { return v }
         let slot = self.value_slot(cg, "__temp", t, true)
@@ -1397,6 +1408,7 @@ impl Lower {
 
     // The child task whose frame is in the slot `ts`: its index in `tasks`,
     // or -1.
+    #test(lower_on(), 1)[-1]
     fun task_of(self, ts: int32) -> int32 {
         var i = 0
         while i < len(self.tasks) {
@@ -1996,6 +2008,7 @@ impl Lower {
         return self.unsupported("that kind of expression")
     }
 
+    #test(lower_on(), codegen_on("[int]"), "s", Type.TStr)[0]
     fun name(var self, cg: CodeGen, n: str, t: Type) -> int32 {
         let slot = self.lookup(n)
         if slot >= 0 {
@@ -2231,6 +2244,7 @@ impl Lower {
 
     // The address of the value of type `t` held by the member at `p`: `p`
     // itself, or for a recursive enum (a boxed member) the box's, borrowed.
+    #test(lower_on(), codegen_on("[int]"), Type.TStruct("Box", []), 7)[7]
     fun unbox(var self, cg: CodeGen, t: Type, p: int32) -> int32 {
         if !cg.is_boxed(t) { return p }
         let q = self.temp(Type.TInt(64, false))
@@ -2268,6 +2282,7 @@ impl Lower {
     }
 
     // Whether `v` is the address of a value built in its destination.
+    #test(lower_on(), 0)[false]
     fun is_placed(self, v: int32) -> bool {
         return v >= 0 && v < len(self.placed) && self.placed[v]
     }
@@ -2275,6 +2290,7 @@ impl Lower {
     // The slot an aggregate value is built in: `into`, the destination its
     // statement offers (a new variable's slot, or the function's result), or
     // a temporary of its own (MYLA-108: no copy from one to the other).
+    #test(lower_on(), codegen_on("[int]"), "__struct", Type.TStruct("Adder", []), 1)[1]
     fun build_slot(var self, cg: CodeGen, name: str, t: Type, into: int32) -> int32 {
         if into >= 0 { return into }
         return self.value_slot(cg, name, t, true)
@@ -3512,6 +3528,7 @@ impl Lower {
 
     // The slot of the binding `n` in the current arm (made the first time); it
     // borrows from the scrutinee's copy.
+    #test(lower_on(), codegen_on("[int]"), "e", Type.TStr)[0]
     fun arm_slot(var self, cg: CodeGen, n: str, t: Type) -> int32 {
         for b in self.arm_binds {
             if b.name == n { return b.slot }

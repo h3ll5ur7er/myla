@@ -77,6 +77,9 @@ pub fun repl(stdlib: str, packages: [(str, str)]) -> int32 {
 impl Session {
     // Check and run one input; the exit status when it ends the session,
     // else -1.
+    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "let xs = [1]")[-1]
+    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "let x = 1 + 2")[-1]
+    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "let q = [1, 2, 3]")[-1]
     fun enter(var self, input: str) -> int32 {
         let decl = starts_a_declaration(input)
         var t = self.text("", input)
@@ -124,6 +127,9 @@ impl Session {
 
     // The session's text with a new declaration or new statements (the
     // other ""), and the line the new input starts on.
+    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "", "let xs = [1]")[Text { source: "fun __repl() {\nlet xs = [1]\n}\n", start: 2 }]
+    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "", "let x = 1 + 2")[Text { source: "fun __repl() {\nlet x = 1 + 2\n}\n", start: 2 }]
+    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "", "let q = [1, 2, 3]")[Text { source: "fun __repl() {\nlet q = [1, 2, 3]\n}\n", start: 2 }]
     fun text(self, new_decl: str, new_stmts: str) -> Text {
         var sb = StringBuilder()
         append(sb, self.decls)
@@ -285,6 +291,9 @@ pub fun show(v: Value) -> str {
     }
 }
 
+#test([Value.VInt(1)])["1"]
+#test([Value.VInt(1), Value.VInt(2)])["1, 2"]
+#test([Value.VInt(1), Value.VChar(99), Value.VBool(true)])["1, 'c', true"]
 fun shows(vs: [Value]) -> str {
     var sb = StringBuilder()
     var i = 0
@@ -296,6 +305,7 @@ fun shows(vs: [Value]) -> str {
     return build(sb)
 }
 
+#test("P", ["x", "name"], [Value.VInt(5), Value.VStr("a")])["P { x: 5, name: \"a\" }"]
 fun show_struct(n: str, names: [str], vals: [Value]) -> str {
     if len(names) == 0 { return n + " {}" }
     var sb = StringBuilder()
@@ -311,6 +321,7 @@ fun show_struct(n: str, names: [str], vals: [Value]) -> str {
 }
 
 // Option and Result variants are written bare, others with their enum.
+#test("Option", "Some", [Value.VFloat(1.5)])["Some(1.5)"]
 fun show_enum(en: str, vr: str, pl: [Value]) -> str {
     var head = unqualified(en) + "." + vr
     if en == "Option" || en == "Result" { head = vr }
@@ -318,6 +329,7 @@ fun show_enum(en: str, vr: str, pl: [Value]) -> str {
     return head + "(" + shows(pl) + ")"
 }
 
+#test([Value.VStr("a")], [Value.VList([Value.VInt(1)])])["[\"a\": [1]]"]
 fun show_map(ks: [Value], vs: [Value]) -> str {
     if len(ks) == 0 { return "[:]" }
     var sb = StringBuilder()
@@ -332,6 +344,8 @@ fun show_map(ks: [Value], vs: [Value]) -> str {
     return build(sb)
 }
 
+#test("a")["\"a\""]
+#test("now a string")["\"now a string\""]
 fun show_str(t: str) -> str {
     var sb = StringBuilder()
     append(sb, "\"")
@@ -341,6 +355,9 @@ fun show_str(t: str) -> str {
 }
 
 // The code point `c` inside quotes `quote` (39 or 34), escaped as needed.
+#test(32, 34)[" "]
+#test(110, 34)["n"]
+#test(119, 34)["w"]
 fun escaped(c: int64, quote: int64) -> str {
     if c == quote || c == 92 { return "\\" + cp_utf8(c as int32) }
     if c == 10 { return "\\n" }
@@ -366,6 +383,9 @@ fun unqualified(n: str) -> str {
     return part(n, start, len(n))
 }
 
+#test("P", 0, 1)["P"]
+#test("y + 1", 0, 5)["y + 1"]
+#test("fun bad() -> int {\n    return \"no\"\n}", 19, 34)["    return \"no\""]
 fun part(s: str, a: int32, b: int32) -> str {
     var sb = StringBuilder()
     append(sb, s, a, b)
@@ -385,6 +405,9 @@ fun count_lines(s: str) -> int32 {
     return n
 }
 
+#test("1 / 0", 1)["1 / 0"]
+#test("y + 1", 1)["y + 1"]
+#test("fun bad() -> int {\n    return \"no\"\n}", 1)["fun bad() -> int {"]
 fun input_line(input: str, n: int32) -> str {
     var line = 1
     var start = 0
@@ -398,6 +421,9 @@ fun input_line(input: str, n: int32) -> str {
     return part(input, start, len(input))
 }
 
+#test("p")[false]
+#test("x")[false]
+#test("xs")[false]
 fun is_blank(s: str) -> bool {
     for i in 0..len(s) {
         if s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && s[i] != 13u8 { return false }

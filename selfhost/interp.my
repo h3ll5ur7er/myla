@@ -317,6 +317,7 @@ impl Interp {
         push(self.func_decls, fd)
     }
 
+    #test(interp_on("[int]"), "inc")[-1]
     fun func_idx(self, name: str) -> int32 {
         var i = 0
         while i < len(self.func_names) {
@@ -326,6 +327,7 @@ impl Interp {
         return -1
     }
 
+    #test(interp_on("[int]"), TypeExpr { id: 87, line: 46, col: 6, sp: SrcSpan { sline: 46, scol: 6, eline: 46, ecol: 9 }, kind: TypeKind.TRef("int", []) })["int"]
     fun type_name_of(self, te: TypeExpr) -> str {
         return match te.kind {
             TypeKind.TRef(name, args) => name,
@@ -333,11 +335,13 @@ impl Interp {
         }
     }
 
+    #test(interp_on("[int]"), "a")[false]
     fun is_enum_name(self, n: str) -> bool {
         for e in self.enum_names { if e == n { return true } }
         return false
     }
 
+    #test(interp_on("[int]"), "KIB")[-1]
     fun const_idx(self, name: str) -> int32 {
         var i = 0
         while i < len(self.const_names) {
@@ -358,6 +362,7 @@ impl Interp {
         push(self.scopes[top].vals, v)
     }
 
+    #test(interp_on("[int]"), "a")[None]
     fun lookup(self, name: str) -> Option<Value> {
         var i = len(self.scopes) - 1
         while i >= 0 {
@@ -422,6 +427,7 @@ impl Interp {
         return SessionStep { names: self.scopes[0].names, vals: self.scopes[0].vals, shown: shown, err: self.rt_err, exited: exited, code: self.exit_code }
     }
 
+    #test(interp_on("[int]"))[1]
     fun run(var self) -> int32 {
         self.collect()
         self.eval_consts()
@@ -458,6 +464,7 @@ impl Interp {
     // of a file, MYLA-187, and in a project, MYLA-94: the entry's names are
     // the ones the loader doesn't qualify with a module id), and collect a
     // PASS/FAIL line for each.
+    #test(interp_on("[int]"))[TestRun { report: [], passed: 0, total: 0 }]
     fun run_test_cases(var self) -> TestRun {
         self.collect()
         self.eval_consts()
@@ -541,6 +548,7 @@ impl Interp {
         }
     }
 
+    #test(interp_on("[int]"))[-1]
     fun entry_idx(self) -> int32 {
         // prefer a function carrying the #main attribute, else one named `main`.
         var i = 0
@@ -551,14 +559,17 @@ impl Interp {
         return self.func_idx("main")
     }
 
+    #test(interp_on("[int]"))[false]
     fun stop(self) -> bool {
         return match self.ctrl { Ctrl.CNone => false, _ => true }
     }
 
+    #test(interp_on("[int]"))[false]
     fun returning(self) -> bool {
         return match self.ctrl { Ctrl.CReturn => true, _ => false }
     }
 
+    #test(interp_on("[int]"))[false]
     fun becoming(self) -> bool {
         return match self.ctrl { Ctrl.CBecome => true, _ => false }
     }
@@ -583,6 +594,7 @@ impl Interp {
     }
 
     // Whether every index on the path to `p` is still valid, without failing.
+    #test(interp_on("[int]"), Place { root: "b", steps: [] })[true]
     fun place_valid(self, p: Place) -> bool {
         var v = self.lookup_or_unit(p.root)
         if len(p.steps) > 0 { v = self.deref(v) }
@@ -605,6 +617,7 @@ impl Interp {
 
     // Resolve the place `e` names, evaluating each index once, left to right;
     // a containing index is read (and bounds-checked) before the next key.
+    #test(interp_on("[int]"), Expr { id: 22, line: 24, col: 9, sp: SrcSpan { sline: 24, scol: 9, eline: 24, ecol: 10 }, kind: ExprKind.Name("i") })[Place { root: "i", steps: [] }]
     fun place_of(var self, e: Expr) -> Place {
         return match e.kind {
             ExprKind.GetField(t, f) => {
@@ -625,6 +638,7 @@ impl Interp {
     }
 
     // The value at `p`, bounds-checked at every index (a read).
+    #test(interp_on("[int]"), Place { root: "b", steps: [] })[Value.VUnit]
     fun read_place(var self, p: Place) -> Value {
         var v = self.lookup_or_unit(p.root)
         if len(p.steps) > 0 { v = self.deref(v) }
@@ -669,6 +683,7 @@ impl Interp {
     // Whether `p` can be read: every index on the way is checked, failing
     // like a read. The value read is released before anything is written, so
     // the write doesn't copy the containers on the way (MYLA-74).
+    #test(interp_on("[int]"), Place { root: "c", steps: [] })[true]
     fun readable(var self, p: Place) -> bool {
         self.read_place(p)
         return !self.stop()
@@ -681,6 +696,7 @@ impl Interp {
     // when the interpreted program shares nothing the interpreter holds the
     // only reference and the native copy-on-write doesn't copy: `push` and
     // `xs[i] = v` cost O(1) instead of rebuilding the container (MYLA-74).
+    #test(interp_on("[int]"), Place { root: "i", steps: [] }, PlaceOp.OSet(Value.VInt(1)))[Value.VUnit]
     fun update_place(var self, p: Place, op: PlaceOp) -> Value {
         var i = len(self.scopes) - 1
         while i >= 0 {
@@ -718,6 +734,7 @@ impl Interp {
     // Apply `op` at `steps[i..]` below `self.cell`, in place. Each container
     // on the path is taken apart (its parts held only here), the child moves
     // into the cell for the next step, and everything is put back after.
+    #test(interp_on("[int]"), [], 0, PlaceOp.OSet(Value.VInt(1)))[Value.VUnit]
     fun update_cell(var self, steps: [Step], i: int32, op: PlaceOp) -> Value {
         if i == len(steps) { return self.apply_op(op) }
         var r = Value.VUnit
@@ -770,6 +787,7 @@ impl Interp {
     }
 
     // Apply `op` to `self.cell` itself.
+    #test(interp_on("[int]"), PlaceOp.OSet(Value.VInt(1)))[Value.VUnit]
     fun apply_op(var self, op: PlaceOp) -> Value {
         match op {
             PlaceOp.OSet(v) => { self.cell = v },
@@ -811,6 +829,7 @@ impl Interp {
     }
 
     // The length of the value at `p`, its indices checked (a read).
+    #test(interp_on("[int]"), Place { root: "ys", steps: [] })[0]
     fun place_len(var self, p: Place) -> int64 {
         return value_len(self.read_place(p))
     }
@@ -1417,6 +1436,7 @@ impl Interp {
     }
 
     // Whether `s` has an `await` or an `async let` (by statement).
+    #test(interp_on("[int]"), Stmt { id: 89, line: 44, col: 5, sp: SrcSpan { sline: 44, scol: 5, eline: 44, ecol: 20 }, kind: StmtKind.VarDecl("let", "s", None, Expr { id: 88, line: 44, col: 13, sp: SrcSpan { sline: 44, scol: 13, eline: 44, ecol: 20 }, kind: ExprKind.StrLit("hello") }) })[false]
     fun suspends(var self, s: Stmt) -> bool {
         match get(self.suspending, s.id) { Some(r) => { return r }, None => {} }
         let r = stmt_suspends(s)
@@ -1464,11 +1484,13 @@ impl Interp {
     }
 
     // The value `v` reaches its fields through: an actor's state.
+    #test(interp_on("[int]"), Value.VStruct("Counter", ["n"], [Value.VInt(0)]))[Value.VStruct("Counter", ["n"], [Value.VInt(0)])]
     fun deref(self, v: Value) -> Value {
         return match v { Value.VActor(id) => self.actors[id], _ => v }
     }
 
     // Whether `name` is an actor type (an empty table needs no hashing).
+    #test(interp_on("[int]"), "Box")[false]
     fun is_actor_type(self, name: str) -> bool {
         return len(self.actor_types) > 0 && contains(self.actor_types, name)
     }
@@ -1582,6 +1604,7 @@ impl Interp {
         }
     }
 
+    #test(interp_on("[int]"), Value.VList([]))[[]]
     fun iter_items(self, v: Value) -> [Value] {
         return match v {
             Value.VList(xs) => xs,
@@ -1618,6 +1641,7 @@ impl Interp {
 
     // -- expressions ------------------------------------------------------
 
+    #test(interp_on("[int]"), Expr { id: 12, line: 9, col: 12, sp: SrcSpan { sline: 9, scol: 12, eline: 9, ecol: 13 }, kind: ExprKind.Name("a") })[Value.VUnit]
     fun eval(var self, e: Expr) -> Value {
         if self.stop() { return Value.VUnit }
         return match e.kind {
@@ -1674,6 +1698,7 @@ impl Interp {
         return Value.VUnit
     }
 
+    #test(interp_on("[int]"), ExprOrBlock.EB_Expr(Expr { id: 57, line: 29, col: 25, sp: SrcSpan { sline: 29, scol: 25, eline: 29, ecol: 31 }, kind: ExprKind.StrLit("warm") }))[Value.VStr("warm")]
     fun eval_arm_body(var self, body: ExprOrBlock) -> Value {
         return match body {
             ExprOrBlock.EB_Expr(ex) => self.eval(ex),
@@ -1707,6 +1732,7 @@ impl Interp {
         return result
     }
 
+    #test(interp_on("[int]"), Pattern { id: 22, line: 18, col: 22, sp: SrcSpan { sline: 18, scol: 22, eline: 18, ecol: 23 }, kind: PatternKind.PBind("r") }, Value.VInt(2))[MatchRes { ok: true, names: ["r"], vals: [Value.VInt(2)] }]
     fun match_pattern(var self, p: Pattern, v: Value) -> MatchRes {
         return match p.kind {
             PatternKind.PWild => mr_ok(),
@@ -1721,6 +1747,7 @@ impl Interp {
 
     // A bare name pattern is a no-payload variant match if it names a known
     // nullary variant (the checker reclassifies these); otherwise a binding.
+    #test(interp_on("[int]"), "h", Value.VInt(4))[MatchRes { ok: true, names: ["h"], vals: [Value.VInt(4)] }]
     fun match_bind_or_variant(var self, n: str, v: Value) -> MatchRes {
         match self.nullary_variant_enum(n) {
             Some(en) => {
@@ -1733,6 +1760,7 @@ impl Interp {
         return mr_bind(n, v)
     }
 
+    #test(interp_on("[int]"), "Empty", [], Value.VEnum("Shape", "Empty", []))[MatchRes { ok: true, names: [], vals: [] }]
     fun match_enum(var self, variant: str, elems: [Pattern], v: Value) -> MatchRes {
         let info = enum_info(v)
         if !info.ok { return mr_fail() }
@@ -1753,6 +1781,7 @@ impl Interp {
         return res
     }
 
+    #test(interp_on("[int]"), [], [])[MatchRes { ok: true, names: [], vals: [] }]
     fun match_seq(var self, pats: [Pattern], vals: [Value]) -> MatchRes {
         var res = mr_ok()
         var i = 0
@@ -1783,6 +1812,7 @@ impl Interp {
         }
     }
 
+    #test(interp_on("[int]"), Value.VEnum("Option", "None", []), "None", [])[Value.VUnit]
     fun try_unwrap(var self, v: Value, vr: str, pl: [Value]) -> Value {
         if vr == "Some" || vr == "Ok" { return pl[0] }
         // None / Err: propagate the same carrier as the function's result
@@ -1791,11 +1821,13 @@ impl Interp {
         return Value.VUnit
     }
 
+    #test(interp_on("[int]"), Expr { id: 0, line: 5, col: 7, sp: SrcSpan { sline: 5, scol: 7, eline: 5, ecol: 8 }, kind: ExprKind.IntLit(1, None, false, "") }, 1, false)[Value.VInt(1)]
     fun eval_int_lit(self, e: Expr, v: int64, isc: bool) -> Value {
         if isc { return Value.VChar(v) }
         return Value.VInt(wrap_opt(v, self.resolved_of(e.id)))
     }
 
+    #test(interp_on("[int]"), Expr { id: 10, line: 8, col: 12, sp: SrcSpan { sline: 8, scol: 12, eline: 8, ecol: 13 }, kind: ExprKind.Name("c") }, "c")[Value.VUnit]
     fun eval_name(var self, e: Expr, n: str) -> Value {
         match self.lookup(n) {
             Some(v) => { return v },
@@ -1814,6 +1846,7 @@ impl Interp {
         return Value.VUnit
     }
 
+    #test(interp_on("[int]"), "h")[None]
     fun nullary_variant_enum(self, name: str) -> Option<str> {
         for d in self.decls {
             match d.kind {
@@ -1905,6 +1938,7 @@ impl Interp {
         return Value.VInt(wrap_opt(res, rt))
     }
 
+    #test(interp_on("[int]"), "<", Value.VInt(0), Value.VInt(3))[true]
     fun compare(self, op: str, lv: Value, rv: Value) -> bool {
         match lv {
             Value.VFloat(f) => { return fcompare(op, f, as_float(rv)) },
@@ -1924,6 +1958,7 @@ impl Interp {
 
     // A float literal's value: the correctly rounded double of its text, and
     // for a float32 that rounded again to single precision (MYLA-29).
+    #test(interp_on("[int]"), Expr { id: 0, line: 3, col: 8, sp: SrcSpan { sline: 3, scol: 8, eline: 3, ecol: 14 }, kind: ExprKind.FloatLit("2.0f64", Some("f64")) }, "2.0f64")[Value.VFloat(2.0)]
     fun eval_float_lit(self, e: Expr, lex: str) -> Value {
         var bits = f64_literal_bits(lex)
         if is_float32_type(self.resolved_of(e.id)) { bits = f32_round_bits(bits) }
@@ -1962,23 +1997,27 @@ impl Interp {
         return get_field(self.deref(c), field)
     }
 
+    #test(interp_on("[int]"), [Expr { id: 43, line: 36, col: 13, sp: SrcSpan { sline: 36, scol: 13, eline: 36, ecol: 14 }, kind: ExprKind.Name("x") }])[Value.VTuple([Value.VUnit])]
     fun eval_tuple_lit(var self, elems: [Expr]) -> Value {
         var vs: [Value] = []
         for el in elems { push(vs, self.eval(el)) }
         return Value.VTuple(vs)
     }
 
+    #test(interp_on("[int]"), Expr { id: 53, line: 41, col: 12, sp: SrcSpan { sline: 41, scol: 12, eline: 41, ecol: 13 }, kind: ExprKind.Name("t") }, 0)[Value.VUnit]
     fun eval_tuple_index(var self, tgt: Expr, idx: int64) -> Value {
         let c = self.eval(tgt)
         return match c { Value.VTuple(es) => es[idx as int32], _ => Value.VUnit }
     }
 
+    #test(interp_on("[int]"), [])[Value.VList([])]
     fun eval_list_lit(var self, elems: [Expr]) -> Value {
         var vs: [Value] = []
         for el in elems { push(vs, self.eval(el)) }
         return Value.VList(vs)
     }
 
+    #test(interp_on("[int]"), "Name", [FieldInit { line: 54, col: 20, sp: SrcSpan { sline: 54, scol: 20, eline: 54, ecol: 27 }, name: "text", value: Expr { id: 96, line: 54, col: 26, sp: SrcSpan { sline: 54, scol: 26, eline: 54, ecol: 27 }, kind: ExprKind.Name("a") } }])[Value.VStruct("Name", ["text"], [Value.VUnit])]
     fun eval_struct_lit(var self, name: str, fields: [FieldInit]) -> Value {
         var names: [str] = []
         var vals: [Value] = []
@@ -1993,6 +2032,7 @@ impl Interp {
         return Value.VStruct(name, names, vals)
     }
 
+    #test(interp_on("[int]"), [])[Value.VMap([], [])]
     fun eval_map_lit(var self, entries: [MapEntry]) -> Value {
         var ks: [Value] = []
         var vs: [Value] = []
@@ -2010,6 +2050,7 @@ impl Interp {
         return index_get(c, k)
     }
 
+    #test(interp_on("[int]"), 0)[None]
     fun resolved_of(self, id: int32) -> Option<Type> {
         return get(self.resolved, id)
     }
@@ -2132,6 +2173,7 @@ impl Interp {
 
     // The runtime method-dispatch key for a receiver: its checker-resolved type
     // key when known (needed for builtins like int), else the value's own tag.
+    #test(interp_on("[int]"), Expr { id: 116, line: 57, col: 5, sp: SrcSpan { sline: 57, scol: 5, eline: 57, ecol: 6 }, kind: ExprKind.Name("c") })[""]
     fun recv_key(self, recv: Expr) -> str {
         match self.resolved_of(recv.id) {
             Some(t) => {
@@ -2151,6 +2193,7 @@ impl Interp {
         }
     }
 
+    #test(interp_on("[int]"), "b")[Value.VUnit]
     fun lookup_or_unit(self, n: str) -> Value {
         match self.lookup(n) { Some(v) => { return v }, None => {} }
         return Value.VUnit
@@ -2196,6 +2239,7 @@ impl Interp {
     // One call deeper; past MAX_CALL_DEPTH a runtime error, as the Python
     // interpreter's `stack overflow`, instead of running out of native stack
     // (MYLA-182) and false.
+    #test(interp_on("[int]"))[true]
     fun enter_call(var self) -> bool {
         if self.depth >= MAX_CALL_DEPTH {
             if !self.stop() {
@@ -2209,6 +2253,7 @@ impl Interp {
         return true
     }
 
+    #test(interp_on("[int]"))[false]
     fun tail_on_self(self) -> bool {
         return match self.tail { TailCall.TSelfMethod(fi, args) => true, _ => false }
     }
@@ -2275,6 +2320,7 @@ impl Interp {
 
     // Run the calls `become` leaves pending one after another in this loop,
     // instead of recursing, and yield the last one's result.
+    #test(interp_on("[int]"))[Value.VUnit]
     fun run_tail(var self) -> Value {
         while self.becoming() {
             self.ctrl = Ctrl.CNone
@@ -2391,10 +2437,12 @@ impl Interp {
     }
 
     // Whether `recv.method(args)` calls the `eq` of a `#derive(Eq)` type.
+    #test(interp_on("[int]"), "Shape", "area", [])[false]
     fun derived_eq(self, key: str, method: str, args: [Expr]) -> bool {
         return method == "eq" && len(args) == 1 && !self.has_method_body(key, "eq")
     }
 
+    #test(interp_on("[int]"), "Vec2", "eq")[false]
     fun has_method_body(self, key: str, name: str) -> bool {
         let fi = self.func_idx(format("{}.{}", key, name))
         if fi < 0 { return false }
@@ -2404,6 +2452,7 @@ impl Interp {
     // Dispatch a binary operator on a user-defined struct/enum to its trait
     // method. `==`/`!=` fall back to structural equality for `#derive(Eq)`
     // types, whose synthesized `eq` has no body.
+    #test(interp_on("[int]"), "==", Value.VEnum("Color", "Green", []), Value.VEnum("Color", "Blue", []))[Value.VBool(false)]
     fun eval_op_overload(var self, op: str, lv: Value, rv: Value) -> Value {
         let key = value_key(lv)
         if op == "==" || op == "!=" {
@@ -2425,6 +2474,7 @@ impl Interp {
         return rr
     }
 
+    #test(interp_on("[int]"), [Expr { id: 244, line: 126, col: 19, sp: SrcSpan { sline: 126, scol: 19, eline: 126, ecol: 45 }, kind: ExprKind.StrLit("braces {{}} stay literal") }])[Value.VStr("braces {} stay literal")]
     fun eval_format(var self, args: [Expr]) -> Value {
         let fmt = as_str(self.eval(args[0]))
         var parts: [str] = []
@@ -2436,17 +2486,20 @@ impl Interp {
         return Value.VStr(render_format(fmt, parts))
     }
 
+    #test(interp_on("[int]"), "List")[false]
     fun has_local(self, n: str) -> bool {
         match self.lookup(n) { Some(x) => { return true }, None => {} }
         return false
     }
 
+    #test(interp_on("[int]"), [Expr { id: 46, line: 32, col: 21, sp: SrcSpan { sline: 32, scol: 21, eline: 32, ecol: 22 }, kind: ExprKind.Name("x") }])[[Value.VUnit]]
     fun eval_args(var self, args: [Expr]) -> [Value] {
         var argv: [Value] = []
         for a in args { push(argv, self.eval(a)) }
         return argv
     }
 
+    #test(interp_on("[int]"), Expr { id: 133, line: 83, col: 20, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 22 }, kind: ExprKind.Call(Expr { id: 132, line: 83, col: 11, sp: SrcSpan { sline: 83, scol: 11, eline: 83, ecol: 20 }, kind: ExprKind.Name("page_size") }, []) }, "page_size", [])[Value.VUnit]
     fun eval_name_call(var self, e: Expr, nm: str, args: [Expr]) -> Value {
         if nm == "std$task$cancel" {
             match self.eval(args[0]) {
@@ -2633,6 +2686,7 @@ impl Interp {
         return Value.VUnit
     }
 
+    #test(interp_on("[int]"), "length")[None]
     fun variant_enum(self, name: str) -> Option<str> {
         for d in self.decls {
             match d.kind {
@@ -2645,6 +2699,7 @@ impl Interp {
         return None
     }
 
+    #test(interp_on("[int]"), Value.VClosure([], ExprOrBlock.EB_Block(Block { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, stmts: [] }), [], [], "inc", true), [Value.VInt(3)])[Value.VUnit]
     fun call_value(var self, v: Value, argv: [Value]) -> Value {
         return match v {
             Value.VClosure(ps, body, cnames, cvals, fname, isfunc) => self.call_closure(ps, body, cnames, cvals, fname, isfunc, argv),
@@ -2662,6 +2717,7 @@ impl Interp {
     }
 
     // Fill a partial application's holes with the supplied args, in order.
+    #test(interp_on("[int]"), Value.VClosure([], ExprOrBlock.EB_Block(Block { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, stmts: [] }), [], [], "mul", true), [Value.VInt(2), Value.VUnit], [false, true], [Value.VInt(4)])[Value.VUnit]
     fun call_partial(var self, base: Value, slots: [Value], holes: [bool], argv: [Value]) -> Value {
         return self.call_value(base, fill_holes(slots, holes, argv))
     }
@@ -2685,6 +2741,7 @@ impl Interp {
         return Value.VClosure(params, body, cnames, cvals, "", false)
     }
 
+    #test(interp_on("[int]"), [], ExprOrBlock.EB_Block(Block { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, stmts: [] }), [], [], "inc", true, [Value.VInt(3)])[Value.VUnit]
     fun call_closure(var self, ps: [Param], body: ExprOrBlock, cnames: [str], cvals: [Value], fname: str, isfunc: bool, argv: [Value]) -> Value {
         if isfunc {
             let fi = self.func_idx(fname)
@@ -2750,6 +2807,7 @@ impl Interp {
 
     // Consume a pending `return`/`?` control signal, yielding its value. Leaves
     // `exit` pending so it propagates out to `run`; clears stray break/continue.
+    #test(interp_on("[int]"))[Value.VUnit]
     fun take_return(var self) -> Value {
         return match self.ctrl {
             Ctrl.CReturn => {
@@ -3350,6 +3408,9 @@ fun keys_contain(ks: [Value], k: Value) -> bool {
     return key_index(ks, k) >= 0
 }
 
+#test(Value.VMap([Value.VInt(1), Value.VInt(2)], [Value.VInt(10), Value.VInt(20)]), Value.VInt(1))[Value.VMap([Value.VInt(2)], [Value.VInt(20)])]
+#test(Value.VMap([Value.VInt(1), Value.VInt(2)], [Value.VInt(999), Value.VInt(200)]), Value.VInt(2))[Value.VMap([Value.VInt(1)], [Value.VInt(999)])]
+#test(Value.VMap([Value.VInt(1), Value.VInt(3)], [Value.VInt(10), Value.VInt(30)]), Value.VInt(999))[Value.VMap([Value.VInt(1), Value.VInt(3)], [Value.VInt(10), Value.VInt(30)])]
 fun map_remove(c: Value, k: Value) -> Value {
     return match c {
         Value.VMap(ks, vs) => map_without(ks, vs, k),
@@ -3357,6 +3418,9 @@ fun map_remove(c: Value, k: Value) -> Value {
     }
 }
 
+#test([Value.VInt(1), Value.VInt(2)], [Value.VInt(10), Value.VInt(20)], Value.VInt(1))[Value.VMap([Value.VInt(2)], [Value.VInt(20)])]
+#test([Value.VInt(1), Value.VInt(2)], [Value.VInt(999), Value.VInt(200)], Value.VInt(2))[Value.VMap([Value.VInt(1)], [Value.VInt(999)])]
+#test([Value.VInt(1), Value.VInt(3)], [Value.VInt(10), Value.VInt(30)], Value.VInt(999))[Value.VMap([Value.VInt(1), Value.VInt(3)], [Value.VInt(10), Value.VInt(30)])]
 fun map_without(ks: [Value], vs: [Value], k: Value) -> Value {
     var nks: [Value] = []
     var nvs: [Value] = []
@@ -3371,6 +3435,9 @@ fun map_without(ks: [Value], vs: [Value], k: Value) -> Value {
     return Value.VMap(nks, nvs)
 }
 
+#test(Value.VMap([], []))[Value.VList([])]
+#test(Value.VMap([Value.VInt(0), Value.VInt(1), Value.VInt(2)], [Value.VInt(1), Value.VInt(2), Value.VInt(3)]))[Value.VList([Value.VInt(0), Value.VInt(1), Value.VInt(2)])]
+#test(Value.VMap([Value.VStr("a"), Value.VStr("c"), Value.VStr("d")], [Value.VInt(10), Value.VInt(3), Value.VInt(4)]))[Value.VList([Value.VStr("a"), Value.VStr("c"), Value.VStr("d")])]
 fun map_keys(c: Value) -> Value {
     return match c {
         Value.VMap(ks, vs) => Value.VList(ks),
