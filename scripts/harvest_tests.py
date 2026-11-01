@@ -7,7 +7,9 @@ the Python toolchain on the whole test corpus and compiles itself to a
 byte-identical fixed point. So whatever its functions return today is a valid
 expected result, and recording calls gives regression tests for free.
 
-    scripts/harvest_tests.py record   # run the workloads, keep the calls
+    scripts/harvest_tests.py record   # run the workloads, keep the calls (resumes;
+                                      # FRESH=1 starts over, ONLY=regex selects)
+    scripts/harvest_tests.py merge    # merge the parts of a stopped `record`
     scripts/harvest_tests.py write    # write the chosen cases into selfhost/
     scripts/harvest_tests.py validate # drop every case a runner rejects
 
@@ -368,7 +370,14 @@ def cmd_record(jobs: int) -> None:
     print(f"{len(elig)} functions without cases; loaded in {time.time() - t0:.1f} s", flush=True)
     os.chdir(REPO)
     only = re.compile(os.environ.get("ONLY", ""))
-    todo = [(i, w) for i, w in enumerate(workloads()) if only.search(" ".join(w))]
+    parts = os.path.join(STATE, "parts")
+    # a workload whose part exists already ran: `record` resumes (FRESH=1 starts over)
+    if os.environ.get("FRESH"):
+        for f in os.listdir(parts):
+            os.unlink(os.path.join(parts, f))
+    todo = [(i, w) for i, w in enumerate(workloads()) if only.search(" ".join(w))
+            and not os.path.exists(os.path.join(parts, f"{i:04d}.json"))]
+    print(f"{len(todo)} workloads to run", flush=True)
     running: dict[int, tuple] = {}
     while todo or running:
         while todo and len(running) < jobs:
@@ -384,6 +393,11 @@ def cmd_record(jobs: int) -> None:
         pid, _ = os.wait()
         i, argv, started = running.pop(pid)
         print(f"  [{i}] {' '.join(argv[:2])}: {time.time() - started:.0f} s", flush=True)
+    merge_parts()
+    print(f"done in {time.time() - t0:.0f} s")
+
+
+def merge_parts() -> None:
     merged: dict[str, list] = {}
     for part in sorted(os.listdir(os.path.join(STATE, "parts"))):
         with open(os.path.join(STATE, "parts", part), encoding="utf-8") as fh:
@@ -394,25 +408,28 @@ def cmd_record(jobs: int) -> None:
                         seen.append(c)
     with open(RECORDS, "w", encoding="utf-8") as fh:
         json.dump(merged, fh, indent=0, sort_keys=True)
-    print(f"{len(merged)} functions with recorded calls, in {time.time() - t0:.0f} s")
+    print(f"{len(merged)} functions with recorded calls")
 
 
 # -- writing ------------------------------------------------------------------
 
 def choose(cases: list[str]) -> list[tuple[list[str], str]]:
-    """Up to CASES_PER_FUNCTION small cases, distinct results first."""
+    """Up to CASES_PER_FUNCTION cases spread over the sizes recorded (the
+    smallest, the largest, then the middle), each with a result of its own
+    where the calls allow."""
     parsed = sorted((json.loads(c) for c in cases), key=lambda c: (len(", ".join(c[0])) + len(c[1]), c))
-    out, results = [], set()
-    for args, res in parsed:
-        if res not in results:
-            out.append((args, res))
-            results.add(res)
-        if len(out) == CASES_PER_FUNCTION:
-            return out
-    for args, res in parsed:
-        if (args, res) not in out and len(out) < CASES_PER_FUNCTION:
-            out.append((args, res))
-    return out
+    by_result: dict[str, list] = {}
+    for c in parsed:
+        by_result.setdefault(c[1], c)          # the smallest call per result
+    pool = sorted(by_result.values(), key=lambda c: (len(", ".join(c[0])) + len(c[1]), c))
+    if len(pool) < CASES_PER_FUNCTION:        # too few results: other calls too
+        pool += [c for c in parsed if c not in pool][:CASES_PER_FUNCTION - len(pool)]
+        pool.sort(key=lambda c: (len(", ".join(c[0])) + len(c[1]), c))
+    picks = []
+    for i in (0, len(pool) - 1, len(pool) // 2):
+        if pool and pool[i] not in picks and len(picks) < CASES_PER_FUNCTION:
+            picks.append(pool[i])
+    return [(a, r) for a, r in sorted(picks, key=lambda c: (len(", ".join(c[0])) + len(c[1]), c))]
 
 
 def cmd_write() -> None:
@@ -531,6 +548,8 @@ def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "record":
         cmd_record(int(os.environ.get("JOBS", os.cpu_count() or 2)))
+    elif cmd == "merge":
+        merge_parts()
     elif cmd == "write":
         cmd_write()
     elif cmd == "validate":
