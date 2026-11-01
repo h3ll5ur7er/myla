@@ -14,6 +14,7 @@
 
 from .util import escape
 from .tokens import SrcSpan
+from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // --- types ---------------------------------------------------------------
 

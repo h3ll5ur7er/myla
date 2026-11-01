@@ -72,42 +72,50 @@ MAX_ARGSETS = 8         # recorded argument lists kept per function with state p
 MAX_GENERATED = 300     # characters of a generated case's other arguments and result
 CALL_SECONDS = 3
 
-# The compiler's state objects can't be written as literals; a factory in the
-# type's own module builds one (MYLA-184): from each snippet, without
+# The compiler's state objects can't be written as literals, and its AST
+# values only at great length; a factory in the parser or the type's own
+# module builds one (MYLA-184): from each source of a snippet set, without
 # arguments, or from fixed arguments. A parameter of such a type (a method's
 # receiver, or any other) takes the factory's call in a generated case.
 FACTORIES = {
-    "Parser": ("parser.my", "parser_on", "snippets"),
-    "Checker": ("checker.my", "checker_on", "snippets"),
-    "Interp": ("interp.my", "interp_on", "snippets"),
-    "CodeGen": ("codegen.my", "codegen_on", "snippets"),
+    "Parser": ("parser.my", "parser_on", "fragments"),
+    "Checker": ("checker.my", "checker_on", "programs"),
+    "Interp": ("interp.my", "interp_on", "programs"),
+    "CodeGen": ("codegen.my", "codegen_on", "programs"),
     "Lower": ("lower.my", "lower_on", []),
     "Norm": ("anf.my", "new_norm", [0]),
+    "Expr": ("parser.my", "expr_of", "exprs"),
+    "Stmt": ("parser.my", "stmt_of", "stmts"),
+    "TypeExpr": ("parser.my", "type_expr_of", "types"),
+    "Block": ("parser.my", "block_of", "blocks"),
+    "Pattern": ("parser.my", "pattern_of", "patterns"),
+    "FunData": ("parser.my", "fun_of", "funs"),
 }
 
-# Sources the factories build state from: fragments for the parser's
-# methods, small programs for the checker, the interpreter and the code
-# generator (one line each, so a case stays one line).
-SNIPPETS = [
-    "1 + 2 * 3",
-    "f(x, 2)",
-    "a.b[0]",
-    "let x = 1",
-    "[int]",
-    "Some(n)",
-    "fun f(n: int) -> int { return n * 2 }",
-    "struct P { x: int, y: int }",
-    "enum E { A, B(int) }",
-    "fun main() { print(1 + 2) }",
-    "const N: int = 4; fun g() -> int { return N }",
-    "fun h(xs: [int]) -> int { var t = 0; for x in xs { t = t + x }; return t }",
-]
-
-# primitives whose result or effect depends on the world outside the call
-IMPURE = {"print", "__write", "__exit", "__args", "__read_file", "__read", "__poll",
-          "__io_errno", "__getcwd", "__write_file", "__list_dir", "__stat", "__mkdir",
-          "__unlink", "__rmdir", "__rename", "__run", "__run_errno", "__run_exit_code",
-          "__run_signal", "__run_stderr", "__task_cancelled"}
+# The sources the factories build from, one line each so a case stays one
+# line; the sets take turns together (the k-th source of each).
+SNIPPETS = {
+    "fragments": ["1 + 2 * 3", "f(x, 2)", "a.b[0]", "let x = 1", "[int]", "Some(n)",
+                  "fun f(n: int) -> int { return n * 2 }", "struct P { x: int, y: int }",
+                  "enum E { A, B(int) }", "fun main() { print(1 + 2) }",
+                  "const N: int = 4; fun g() -> int { return N }",
+                  "fun h(xs: [int]) -> int { var t = 0; for x in xs { t = t + x }; return t }"],
+    "programs": ["fun f(n: int) -> int { return n * 2 }", "struct P { x: int, y: int }",
+                 "enum E { A, B(int) }", "fun main() { print(1 + 2) }",
+                 "const N: int = 4; fun g() -> int { return N }",
+                 "fun h(xs: [int]) -> int { var t = 0; for x in xs { t = t + x }; return t }",
+                 "struct P { x: int }; fun get(p: P) -> int { return p.x }",
+                 "fun s(a: str) -> str { return a + \"!\" }"],
+    "exprs": ["1 + 2 * 3", "f(x, 2)", "a.b[0]", "Some(n)", "[1, 2, 3]", "x |> f(_, 2)",
+              "-n * 2", "\"s\" + t", "p.x == 3 && !done", "E.B(4)", "(a, 'c')", "[\"k\": 1]"],
+    "stmts": ["let x = 1", "var y: int = 2", "x = x + 1", "return a", "while i < 3 { i = i + 1 }",
+              "for v in xs { print(v) }", "if a { b() } else { c() }", "print(1)"],
+    "types": ["int", "[str]", "[str: int]", "(int, bool)", "Option<P>", "(int) -> bool", "uint8", "Box<T>"],
+    "blocks": ["{ return 1 }", "{ print(1); print(2) }", "{ let x = 1; return x }", "{ }"],
+    "patterns": ["Some(x)", "E.B(n)", "(a, _)", "P { x, y: 0 }", "3", "_", "\"s\"", "None"],
+    "funs": ["fun f(n: int) -> int { return n * 2 }", "fun g() { print(1) }",
+             "fun h(xs: [int]) -> int { return len(xs) }", "fun k(a: str, b: bool) -> str { return a }"],
+}
 
 
 class Unprintable(Exception):
@@ -641,20 +649,24 @@ def generate_chunk(checker, names_of, decls: list, out_path: str) -> None:
         sets = argsets.get(decl.name, []) if others else [[[], None]]
         if not sets:
             continue
-        uses_snippets = any(FACTORIES[t][2] == "snippets" for t in tnames.values())
-        choices = SNIPPETS if uses_snippets else [None]
+        sets_used = [FACTORIES[t][2] for t in tnames.values() if isinstance(FACTORIES[t][2], str)]
+        rounds = max((len(SNIPPETS[n]) for n in sets_used), default=1)
         cases: dict[str, None] = {}
-        for snippet in choices:
+        for k in range(rounds):
             texts, values, ok = {}, {}, True
             for i, t in tnames.items():
                 how = FACTORIES[t][2]
-                choice = snippet if how == "snippets" else (how[0] if how else None)
+                if isinstance(how, str):
+                    snippet = SNIPPETS[how][k % len(SNIPPETS[how])]
+                    choice = snippet
+                else:
+                    choice = how[0] if how else None
                 q, value = state(t, choice)
                 local = pr.names.get(q) if q else None
                 if value is None or local is None:
                     ok = False
                     break
-                if how == "snippets":
+                if isinstance(how, str):
                     texts[i] = f'{local}("' + "".join(_escape_char(ord(c), '"') for c in snippet) + '")'
                 elif how:
                     texts[i] = f"{local}({how[0]})"

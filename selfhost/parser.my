@@ -14,7 +14,7 @@
 // Parser desugarings are preserved exactly: `|>` -> Call, `return a, b` -> Return(TupleLit), adjacent
 // `<`/`>` -> shift Binary, char literal -> IntLit(is_char=true).
 
-from .tokens import Token, TokenKind, Diag, SrcSpan, MAX_ERRORS
+from .tokens import Token, TokenKind, Diag, SrcSpan, MAX_ERRORS, no_span
 from .lexer import lex
 from .ast import TypeExpr, TypeKind, Expr, ExprKind, Stmt, StmtKind
 from .ast import Pattern, PatternKind, Decl, DeclKind, Block, ExprOrBlock, ElseTail
@@ -49,6 +49,43 @@ pub fun parser_on(src: str) -> Parser {
     return match lex(src) {
         Ok(toks) => new_parser(toks),
         Err(d) => new_parser([]),
+    }
+}
+
+// AST values parsed from `src` alone, the arguments of `#test` cases of
+// functions that take them (MYLA-184).
+pub fun expr_of(src: str) -> Expr {
+    var p = parser_on(src)
+    return p.expression()
+}
+
+pub fun stmt_of(src: str) -> Stmt {
+    var p = parser_on(src)
+    return p.statement()
+}
+
+pub fun type_expr_of(src: str) -> TypeExpr {
+    var p = parser_on(src)
+    return p.parse_type()
+}
+
+pub fun block_of(src: str) -> Block {
+    var p = parser_on(src)
+    return p.block()
+}
+
+pub fun pattern_of(src: str) -> Pattern {
+    var p = parser_on(src)
+    return p.pattern()
+}
+
+// The function `src` declares; an empty one when it declares none.
+pub fun fun_of(src: str) -> FunData {
+    var p = parser_on(src)
+    let d = p.declaration()
+    return match d.kind {
+        DeclKind.FunDecl(fd) => fd,
+        _ => FunData { line: 0, col: 0, sp: no_span(), name: "", params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false },
     }
 }
 

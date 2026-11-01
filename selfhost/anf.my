@@ -13,6 +13,7 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, ElseTail, ExprOrBlock, MatchArm, FieldInit, MapEntry
 from .checker import Type
+from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // `value_matches`: a `match` with an `await` in an arm, as a value, stays a
 // `match` whose arms are blocks ending in their value, bound by a `let` of its

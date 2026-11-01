@@ -12,7 +12,7 @@
 // collected, up to MAX_ERRORS: the same errors in the same order as types.py
 // (MYLA-65, D80).
 
-from .parser import parse_source, Parsed
+from .parser import parse_source, Parsed, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .ast import int_text
 from .ast import Program, Decl, DeclKind, FunData, Param, TypeParam, Field, Variant
 from .ast import Attribute, TypeExpr, TypeKind, Expr, ExprKind, FieldInit, MapEntry

@@ -23,6 +23,7 @@ from .diag import render_one, Report, carets
 from .tokens import SrcSpan
 from .interp import new_interp, Value, SessionStep
 from .util import cp_utf8
+from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 const ENTRY: str = "__repl__.my"
 

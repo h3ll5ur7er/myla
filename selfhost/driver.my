@@ -18,6 +18,7 @@ from .checker import build_checker_decls, Checker, CheckErr
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
 from .interp import new_interp, RtError, TestRun
+from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
 fun decode(bytes: [uint8]) -> str {

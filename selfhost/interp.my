@@ -14,6 +14,7 @@ from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write
+from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // =========================================================================
 // Runtime values

@@ -26,7 +26,7 @@
 // the project root and then the stdlib root.
 
 from std.fs import read_to_string, exists, is_dir
-from .parser import parse_source_all
+from .parser import parse_source_all, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
 from .checker import CheckErr
 from .tokens import SrcSpan, no_span, keywords
