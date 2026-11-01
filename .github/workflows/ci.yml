@@ -43,7 +43,7 @@ jobs:
       - uses: actions/cache@v6
         with:
           path: build/test-tools
-          key: test-tools-${{ hashFiles('src/myla/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed.s') }}
+          key: test-tools-${{ hashFiles('lib/std/*.my', 'selfhost/*.my', 'tools/**/*.my', 'bootstrap/seed.s') }}
       - name: tree-sitter CLI for the editor-grammar tests (MYLA-77)
         run: |
           npm ci --no-audit --no-fund --ignore-scripts --prefix editor/tree-sitter-myla
@@ -70,7 +70,7 @@ jobs:
         run: scripts/check-seed.sh build
       - name: Self-hosted compiler builds and runs an example
         run: |
-          build/stage3 examples/hello.my src/myla > build/hello.s
+          build/stage3 examples/hello.my lib > build/hello.s
           as --64 -o build/hello.o build/hello.s
           ld -o build/hello build/hello.o
           build/hello

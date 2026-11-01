@@ -6,7 +6,7 @@
 # on for a clone. MYLA_SKIP_SEED_CHECK=1 git push skips it once.
 #
 # It checks the working tree's sources, so commit (or stash) changes to
-# selfhost/ and src/myla/std/ first.
+# selfhost/ and lib/std/ first.
 
 set -euo pipefail
 
@@ -22,14 +22,14 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     else
         base="$remote_sha"
     fi
-    if [ -z "$base" ] || [ -n "$(git diff --name-only "$base" "$local_sha" -- selfhost src/myla/std bootstrap/seed.s)" ]; then
+    if [ -z "$base" ] || [ -n "$(git diff --name-only "$base" "$local_sha" -- selfhost lib/std bootstrap/seed.s)" ]; then
         relevant=1
     fi
 done
 [ "$relevant" = 1 ] || exit 0
 
-if [ -n "$(git status --porcelain -- selfhost src/myla/std bootstrap/seed.s)" ]; then
-    echo "pre-push: uncommitted changes in selfhost/, src/myla/std/ or the seed are checked as they are" >&2
+if [ -n "$(git status --porcelain -- selfhost lib/std bootstrap/seed.s)" ]; then
+    echo "pre-push: uncommitted changes in selfhost/, lib/std/ or the seed are checked as they are" >&2
 fi
 echo "pre-push: checking that bootstrap/seed.s is the current compiler (about 5 s)"
 scripts/check-seed.sh

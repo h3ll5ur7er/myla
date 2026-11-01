@@ -85,7 +85,7 @@ class TestMylaLsp(LspScenarios, unittest.TestCase):
         # std/json.my matches on Option and Result throughout: checking it
         # leaked about 7 kB a time before loops released what they iterate on
         # an early return, and the Python backend reused large cells (MYLA-80)
-        path = os.path.join(_REPO, "src", "myla", "std", "json.my")
+        path = os.path.join(_REPO, "lib", "std", "json.my")
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         uri = _uri(path)
@@ -524,7 +524,7 @@ def _corpus() -> list[str]:
     import glob
     return sorted(glob.glob(os.path.join(_REPO, "examples", "*.my")) + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
                   + glob.glob(os.path.join(_REPO, "tools", "*", "*.my"))
-                  + glob.glob(os.path.join(_REPO, "src", "myla", "std", "*.my")))
+                  + glob.glob(os.path.join(_REPO, "lib", "std", "*.my")))
 
 
 @golden("lsp.identifiers")
@@ -879,8 +879,8 @@ class TestExtensionStartsTheServer(unittest.TestCase):
         return s
 
     def test_the_built_server(self):
-        c = self.choose(self.settings(), ["/r/build/myla-lsp", "/r/src/myla/std"])
-        self.assertEqual((c["command"], c["args"]), ("/r/build/myla-lsp", ["--stdlib", "/r/src/myla"]))
+        c = self.choose(self.settings(), ["/r/build/myla-lsp", "/r/lib/std"])
+        self.assertEqual((c["command"], c["args"]), ("/r/build/myla-lsp", ["--stdlib", "/r/lib"]))
 
     def test_a_configured_binary(self):
         c = self.choose(self.settings(serverPath="/opt/myla-lsp", compilerEntry=None), ["/opt/myla-lsp"])
@@ -896,10 +896,10 @@ class TestExtensionStartsTheServer(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "build"))
             os.symlink(binary, os.path.join(tmp, "build", "myla-lsp"))
-            os.symlink(os.path.join(_REPO, "src"), os.path.join(tmp, "src"))
+            os.symlink(os.path.join(_REPO, "lib"), os.path.join(tmp, "lib"))
             entry = os.path.join(tmp, "selfhost", "main.my")
             c = self.choose(self.settings(compilerEntry=entry),
-                            [os.path.join(tmp, "build", "myla-lsp"), os.path.join(tmp, "src", "myla", "std")])
+                            [os.path.join(tmp, "build", "myla-lsp"), os.path.join(tmp, "lib", "std")])
             client = _Client([c["command"], *c["args"]])
             self.addCleanup(client.close)
             rid = client.send("initialize", {"processId": None, "rootUri": _uri(tmp), "capabilities": {}}, request=True)

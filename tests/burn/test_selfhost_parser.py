@@ -39,7 +39,7 @@ def _corpus() -> list[str]:
         os.path.join(_REPO, "examples", "*.my"),
         os.path.join(_REPO, "examples", "**", "*.my"),
         os.path.join(_REPO, "examples", "errors", "*.my"),
-        os.path.join(_REPO, "src", "myla", "std", "*.my"),
+        os.path.join(_REPO, "lib", "std", "*.my"),
         os.path.join(_REPO, "selfhost", "*.my"),
     ]
     files: set[str] = set()

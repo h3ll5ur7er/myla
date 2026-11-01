@@ -48,8 +48,7 @@ class TestDebugAdapter(unittest.TestCase):
         # the CLI in a checkout's layout, so it finds the standard library
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, "build"))
-            os.makedirs(os.path.join(root, "src"))
-            os.symlink(STDLIB_ROOT, os.path.join(root, "src", "myla"))
+            os.symlink(STDLIB_ROOT, os.path.join(root, "lib"))
             cli = os.path.join(root, "build", "myla")
             shutil.copy(selfhost_tool("main"), cli)
             self.run_adapter_tests(cli)

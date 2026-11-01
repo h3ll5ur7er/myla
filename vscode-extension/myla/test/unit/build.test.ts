@@ -48,10 +48,10 @@ test("a message without a position is not a diagnostic", () => {
 });
 
 test("the build command line", () => {
-  const cli = { command: "/opt/myla", args: ["--stdlib", "/r/src/myla"] };
+  const cli = { command: "/opt/myla", args: ["--stdlib", "/r/lib"] };
   assert.deepEqual(buildCommand(cli, "/w/a.my", "/tmp/out/a", true), {
     command: "/opt/myla",
-    args: ["--stdlib", "/r/src/myla", "build", "/w/a.my", "-o", "/tmp/out/a", "-g"],
+    args: ["--stdlib", "/r/lib", "build", "/w/a.my", "-o", "/tmp/out/a", "-g"],
   });
   assert.deepEqual(buildCommand({ command: "/r/build/myla", args: [] }, "/w/a.my", "/o/a", false).args, [
     "build",

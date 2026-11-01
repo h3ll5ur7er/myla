@@ -24,7 +24,7 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pa
 _CACHE = os.path.join(_REPO, "build", "test-tools")
 
 # the folder holding the standard library (`std/`) and `debug/myla_gdb.py`
-STDLIB_ROOT = os.path.join(_REPO, "src", "myla")
+STDLIB_ROOT = os.path.join(_REPO, "lib")
 BACKEND = "selfhost"
 
 

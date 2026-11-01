@@ -31,7 +31,7 @@ cd "$REPO_ROOT"
 OUT_DIR="${1:-build}"
 SEED="bootstrap/seed.s"
 ENTRY="selfhost/gen_main.my"   # amalgamating front end + codegen entry point
-STDLIB_ROOT="src/myla"         # where the bundled `std/` package lives
+STDLIB_ROOT="lib"              # where the bundled `std/` package lives
 
 mkdir -p "$OUT_DIR"
 

@@ -31,7 +31,7 @@ scripts/bootstrap.sh "$OUT_DIR"
 # sources names the commit it will sit on, not its own (which it can't know)
 commit="$(git rev-parse HEAD)"
 source="commit ${commit}"
-if [ -n "$(git status --porcelain -- selfhost src/myla/std)" ]; then
+if [ -n "$(git status --porcelain -- selfhost lib/std)" ]; then
     source="the sources of the commit that adds it, on top of ${commit}"
 fi
 body="$OUT_DIR/stage3.s"

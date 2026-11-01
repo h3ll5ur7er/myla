@@ -66,7 +66,7 @@ def _corpus() -> list[str]:
     files = (glob.glob(os.path.join(_REPO, "examples", "**", "*.my"), recursive=True)
              + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
              + glob.glob(os.path.join(_REPO, "tools", "**", "*.my"), recursive=True)
-             + glob.glob(os.path.join(_REPO, "src", "myla", "std", "*.my")))
+             + glob.glob(os.path.join(_REPO, "lib", "std", "*.my")))
     errors = os.path.join(_REPO, "examples", "errors") + os.sep
     return sorted(f for f in files if not f.startswith(errors))
 

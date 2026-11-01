@@ -49,7 +49,7 @@ export function chooseServer(
   }
   // the binary finds the standard library next to its build/ directory;
   // name the repository's when it is known
-  const stdlib = repoRoot ? path.join(repoRoot, "src", "myla") : "";
+  const stdlib = repoRoot ? path.join(repoRoot, "lib") : "";
   const args =
     stdlib && exists(path.join(stdlib, "std")) ? ["--stdlib", stdlib] : [];
   return { command: binary, args, cwd: repoRoot };

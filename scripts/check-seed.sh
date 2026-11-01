@@ -24,7 +24,7 @@ cd "$REPO_ROOT"
 
 SEED="bootstrap/seed.s"
 ENTRY="selfhost/gen_main.my"
-STDLIB_ROOT="src/myla"
+STDLIB_ROOT="lib"
 
 asm_to_bin() {  # <src.s> <out-bin>
     as --64 -o "${2}.o" "$1"

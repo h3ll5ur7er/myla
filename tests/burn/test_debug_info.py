@@ -172,7 +172,7 @@ class TestSelfHostedLineTables(unittest.TestCase):
         self.assertEqual(_abbrev_table(selfhosted), python)
 
     def test_the_pretty_printers_are_embedded(self):
-        # an inline Python script (kind 4) in .debug_gdb_scripts: src/myla/debug/myla_gdb.py
+        # an inline Python script (kind 4) in .debug_gdb_scripts: lib/debug/myla_gdb.py
         # (the Python backend embedded it too until it was retired, MYLA-219)
         def section(binary: str) -> bytes:
             names = subprocess.run(["readelf", "-S", "-W", binary], capture_output=True,

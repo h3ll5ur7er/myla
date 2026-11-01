@@ -1,7 +1,7 @@
 """Burn test: the self-hosted `myla` CLI ([[selfhost/main.my]], MYLA-31, MYLA-35).
 
 The CLI is built by the self-hosted compiler and copied to `<tmp>/build/myla`,
-next to a `<tmp>/src/myla` that links to this repository's stdlib, the layout
+next to a `<tmp>/lib` that links to this repository's stdlib, the layout
 of a checkout. It is run from another directory, so the stdlib root must come
 from the binary's own location.
 
@@ -74,8 +74,7 @@ class _Layout(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory()
         root = cls._tmp.name
         os.makedirs(os.path.join(root, "build"))
-        os.makedirs(os.path.join(root, "src"))
-        os.symlink(os.path.join(_REPO, "src", "myla"), os.path.join(root, "src", "myla"))
+        os.symlink(os.path.join(_REPO, "lib"), os.path.join(root, "lib"))
         cls.myla = os.path.join(root, "build", "myla")
         shutil.copy(selfhost_tool("main"), cls.myla)
         cls.work = os.path.join(root, "work")       # the directory commands run in
@@ -171,7 +170,7 @@ class SelfHostedCli(_Layout):
                          ("3\nprog.my\na\nb c\n42\n", "", 0))
 
     def test_explicit_stdlib(self):
-        proc = self.myla_cmd("run", "prog.my", "--stdlib", os.path.join(_REPO, "src", "myla"), "x")
+        proc = self.myla_cmd("run", "prog.my", "--stdlib", os.path.join(_REPO, "lib"), "x")
         self.assertEqual(proc.stdout, "2\nprog.my\nx\n42\n")
         proc = self.myla_cmd("run", "prog.my", "--stdlib", "/nowhere")
         self.assertEqual(proc.returncode, 1)
@@ -258,7 +257,7 @@ fun after() -> int { return 7 }
 def _sources_with_tests() -> list[str]:
     files = (glob.glob(os.path.join(_REPO, "examples", "*.my")) + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
              + glob.glob(os.path.join(_REPO, "tools", "*", "*.my"))
-             + glob.glob(os.path.join(_REPO, "src", "myla", "std", "*.my")))
+             + glob.glob(os.path.join(_REPO, "lib", "std", "*.my")))
     out = []
     for f in sorted(files):
         with open(f, encoding="utf-8") as fh:

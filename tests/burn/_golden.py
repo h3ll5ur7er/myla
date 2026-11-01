@@ -12,7 +12,7 @@ an argument standing for its content (and its path under the repository, or
 its name elsewhere), so a test that asks something new, or about a changed
 file, finds no answer and fails, saying so. A question about a file of the
 self-hosted compiler, the tools or the standard library (`selfhost/`,
-`tools/`, `src/myla/std/`), which change all the time and which nobody can ask
+`tools/`, `lib/std/`), which change all the time and which nobody can ask
 the Python toolchain about any more, is skipped instead when it has no answer:
 the skip count shows how much of that corpus has changed since. A temporary
 directory in an argument is replaced in the answer by a placeholder and put
@@ -141,7 +141,7 @@ class NoGolden(AssertionError):
 
 
 # where the files keep changing after the retirement (see the module docstring)
-_CHANGING = tuple(os.path.join(_REPO, d) + os.sep for d in ("selfhost", "tools", os.path.join("src", "myla", "std")))
+_CHANGING = tuple(os.path.join(_REPO, d) + os.sep for d in ("selfhost", "tools", os.path.join("lib", "std")))
 
 
 def answer_for_file(path: str, ask):
