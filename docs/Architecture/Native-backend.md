@@ -14,7 +14,7 @@ The self-hosted code generator ([[Architecture/Self-hosted-compiler]]) began as 
 
 ## Calling convention
 
-The main thread's stack may grow to 120 MiB: `_start` raises the soft `RLIMIT_STACK` to that (or to the hard limit, if lower) with `prlimit64`; Linux reads the limit at each growth of the stack and keeps at least 128 MiB free below it, so deep recursion runs where 8 MiB ended in a segfault (both backends, [[MYLA-182]]). Workers' stacks are 8 MiB.
+The main thread's stack may grow to 120 MiB: `_start` raises the soft `RLIMIT_STACK` to that (or to the hard limit, if lower) with `prlimit64`; Linux reads the limit at each growth of the stack and keeps at least 128 MiB free below it, so deep recursion runs where 8 MiB ended in a segfault (both backends, [[MYLA-182]]). Running out of it is `runtime error: stack overflow`: `_start` installs a SIGSEGV handler on a 64 KiB alternate stack (`__on_segv`), which takes a fault within 64 KiB below or 1 MiB above the interrupted stack pointer for the stack's end, prints the error and exits with 1; any other fault gets the default action back and happens again. Workers' stacks are 8 MiB, without a guard page or the handler's alternate stack yet ([[MYLA-172]]).
 
 Internal and stack-based (never called from C):
 

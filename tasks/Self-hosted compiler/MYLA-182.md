@@ -2,7 +2,7 @@
 id: MYLA-182
 title: "Deep input segfaults the self-hosted parser and interpreter: a stack depth guard"
 type: bug
-status: in-progress
+status: review
 priority: high
 labels: [selfhost, parser, interpreter, lsp]
 ---
@@ -14,11 +14,11 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 
 - [x] A depth counter in both parsers: "expression nested too deeply" as a parse error at a documented depth, in both toolchains alike (error-corpus file; the language server reports it as a diagnostic)
 - [x] The self-hosted interpreter reports `runtime error: stack overflow` instead of dying: a depth counter in `eval`/`exec_stmt`, or a guard page with a signal handler
-- [ ] Native binaries report `runtime error: stack overflow` on the main stack's guard page (with [[MYLA-172]] for worker stacks)
+- [x] Native binaries report `runtime error: stack overflow` on the main stack's guard page (with [[MYLA-172]] for worker stacks)
 
 ## Evidence
 
 - Parsers: one counter in both, raised on entering an expression, a unary operand, a type, a block or a pattern; past 256 (`MAX_NESTING`) `expression (type, block, pattern) nested too deeply` at the current token. Seven deeply nested inputs give the same errors, positions and trees from both (parser gate: four new `SYNTAX_ERRORS`; corpus `parse_nested_too_deeply.my`); `python3 myla.py check` no longer dies with a `RecursionError` (`parse` raises Python's recursion limit to 100,000).
 - Self-hosted interpreter: past 2,500 calls (`MAX_CALL_DEPTH`) `runtime error: stack overflow`, exit 1, instead of a segfault at about 900; heavy recursive functions take some 25 KB per call. Both backends' `_start` raise the main stack's soft limit to 120 MiB (`prlimit64`), which makes room for it: `down(5000)` ran in the interpreter after it, `down(2600)` is now the error.
-- Left: native binaries' own guard page and `stack overflow` message (with [[MYLA-172]]).
+- Native binaries (both backends): a SIGSEGV handler on a 64 KiB alternate stack, installed by `_start`, reports a fault next to the stack pointer as `runtime error: stack overflow`, exit 1 (`test_a_stack_overflow_is_reported`: `down(1000000)` runs, `down(100000000)` gives the error, from both backends; the interpreters print the same). Any other fault still kills the program with SIGSEGV and no message (checked with a null dereference put into a compiled program). Workers' stacks: [[MYLA-172]].
 - Unit 622, integration 2, burn 826 (5 skipped) and the extension's 54 tests pass on commit 12f6e94; the bootstrap reaches its byte-identical fixed point (6,153,392 bytes).

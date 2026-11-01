@@ -20,7 +20,7 @@ The reference implementation.
 
 ## Self-hosted compiler
 
-- Deep input segfaults the self-hosted parser, interpreter and language server: about 1,000 nested parentheses or 900 levels of recursion ([[MYLA-182]]; the structural fix is a frame layout by liveness, [[MYLA-183]]). *Partly: the parsers and the self-hosted interpreter fixed, in review; native binaries' guard page left.*
+- Deep input segfaults the self-hosted parser, interpreter and language server: about 1,000 nested parentheses or 900 levels of recursion ([[MYLA-182]]; the structural fix is a frame layout by liveness, [[MYLA-183]]). *Fixed, in review.*
 - A local closure named like a builtin (`let build = (n: int) => n + 1`) calls the builtin in the self-hosted interpreter and native code ([[MYLA-152]]). *Fixed, in review.*
 - The convention that every value-returning function in `selfhost/` has `#test` cases is 8 % true ([[MYLA-184]]).
 
