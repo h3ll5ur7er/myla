@@ -2,7 +2,7 @@
 id: MYLA-211
 title: "Decision: the standard-library round, its scope, API shape and order"
 type: chore
-status: todo
+status: review
 priority: medium
 labels: [decision, stdlib]
 ---
@@ -27,7 +27,7 @@ Decide [[MYLA-204]] first. Then the pure modules, written in Myla, which cost no
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D113 (2026-11-01): the recommendation.** Implementation: [[MYLA-189]] (pure modules, `Ord`, format specs), [[MYLA-190]] (I/O and processes), after [[MYLA-221]].
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

@@ -2,7 +2,7 @@
 id: MYLA-209
 title: "Decision: the generated tree-sitter grammar and its bindings in the repository"
 type: chore
-status: todo
+status: review
 priority: low
 labels: [decision, editor, repository]
 ---
@@ -24,7 +24,7 @@ What of the tree-sitter output lives in the repository?
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D111 (2026-11-01): the recommendation.** Implementation: [[MYLA-232]].
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

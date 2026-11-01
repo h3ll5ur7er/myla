@@ -2,7 +2,7 @@
 id: MYLA-184
 title: "The #test convention in selfhost/: 1,164 of 1,259 value-returning functions have none"
 type: chore
-status: backlog
+status: todo
 priority: low
 labels: [selfhost, tests, docs]
 ---
@@ -23,7 +23,9 @@ Also a decision question from the review's §11.10, tracked with the others in `
 
 ## Decision
 
-*Open.*
+**D109 (2026-11-01).** The owner: "soft enforce >80 % coverage". A burn test reports the share of value-returning functions with `#test` cases per module and overall, and warns without failing while the overall share is below 80 %.
 
-- [ ] Decide: enforce the convention for `selfhost/` (and start with the pure helpers of `ir.my`, `lower.my`, `util.my`), or restate it as "the examples, and the self-hosted compiler where a function is testable in isolation"
+- [x] Decided (D109): at least 80 %, softly enforced; it used to read: enforce the convention for `selfhost/` (and start with the pure helpers of `ir.my`, `lower.my`, `util.my`), or restate it as "the examples, and the self-hosted compiler where a function is testable in isolation"
 - [ ] The three places that state it agree with the decision
+- [ ] The burn test: coverage per module and overall, a warning below 80 % (in the test output and as a CI annotation)
+- [ ] Cases added, the pure helpers first, until the share passes 80 %

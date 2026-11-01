@@ -2,7 +2,7 @@
 id: MYLA-214
 title: "Decision: board and process rules (done, task types, epics, pull requests)"
 type: chore
-status: todo
+status: review
 priority: low
 labels: [decision, process, genbeya]
 ---
@@ -18,7 +18,7 @@ From the October 2026 review ([[Project/Review-2026-10]], §13.8). The rules the
 
 ## Decision
 
-**`done` (2026-11-01):** agents put tasks into `review` when they are done; the owner moves them to `done`, or asks for it explicitly, as until now (written into [[Development/Conventions]]). The other sub-questions (types, epic parents, pull requests, evidence) are open.
+**`done` (2026-11-01):** agents put tasks into `review` when they are done; the owner moves them to `done`, or asks for it explicitly, as until now (written into [[Development/Conventions]]). **The rest (2026-11-01): the recommendations, except the `decision` type.** The owner: Genbeya will get its own convention for decisions, neither as tasks nor in the wiki, so no `decision` type: the invalid types are recoded (`design` and `test` as `chore`). Epic parents move into their epics' folders with a `## Children` list; one pull request per theme (an epic step or a review round), named after its tasks; `## Evidence` is the one evidence heading (both rules written into [[Development/Conventions]]). Implementation: [[MYLA-194]]. Process rules, so no decision number.
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded in [[Development/Conventions]] and here
+- [x] The implementation tasks created or updated to match

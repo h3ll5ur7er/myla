@@ -2,7 +2,7 @@
 id: MYLA-207
 title: "Decision: scheduling order on one worker (FIFO for parity, or depth-first)"
 type: chore
-status: todo
+status: review
 priority: medium
 labels: [decision, concurrency, runtime]
 ---
@@ -24,7 +24,7 @@ Which order do the implementations promise, and how do tests get determinism?
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D110 (2026-11-01): the recommendation.** Implementation: [[MYLA-231]].
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

@@ -14,4 +14,4 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 
 - [ ] Each decided and done, with the parity tests of `test_stdio.py`, `test_fs.py` and `test_process.py` extended
 
-Waits for the decision in [[MYLA-211]].
+Decided by D113 ([[MYLA-211]]): I/O and process functions return `Result<T, IoError>` with an enum of causes; file handles have an explicit `close` and a scoped helper; `defer` follows [[MYLA-229]].

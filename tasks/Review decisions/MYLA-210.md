@@ -2,7 +2,7 @@
 id: MYLA-210
 title: "Decision: frame layout by liveness, its approach and timing"
 type: chore
-status: todo
+status: review
 priority: medium
 labels: [decision, selfhost, backend]
 ---
@@ -24,7 +24,7 @@ How do slots share frame cells, and is it worth doing before LLVM?
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D112 (2026-11-01): the recommendation.** Implementation: [[MYLA-183]].
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

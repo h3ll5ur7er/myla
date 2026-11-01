@@ -1,8 +1,8 @@
 ---
 id: MYLA-183
-title: "Frame layout by liveness: slots of disjoint scopes share cells"
+title: "Frame layout: slots of disjoint scopes share cells"
 type: improvement
-status: backlog
+status: todo
 priority: medium
 labels: [selfhost, ir, performance]
 ---
@@ -11,4 +11,4 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 - [ ] Slots of disjoint scopes and match arms share cells (the temporaries already do, `alloc_temps`), measured on the self-compile (time, peak memory, frame sizes of the interpreter's functions)
 - [ ] The interpreter's recursion depth before and after
 
-Waits for the decision in [[MYLA-210]].
+Decided by D112 ([[MYLA-210]]): by scope; a liveness analysis only if the measurements after this still show a need.
