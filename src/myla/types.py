@@ -4610,11 +4610,23 @@ class Checker:
             return
         target = expr.target
         if isinstance(target, ast.Name) and target.ident == "self" and self._actor_self == base.name:
+            if self._task_init:
+                self._child_reaches_self(expr)
             return
         raise TypeCheckError(
             f"'{expr.field_name}' belongs to the actor '{type_name(base)}': only its "
             "own methods reach it",
             at=expr,
+        )
+
+    def _child_reaches_self(self, at: ast.Node) -> None:
+        """An `async let`'s initializer in an actor's method reads a field of
+        `self` or calls one of its synchronous methods: the child task would
+        do it off the actor (MYLA-168)."""
+        raise TypeCheckError(
+            "an 'async let' can't reach the actor's state through 'self': its child task runs off the actor",
+            at=at,
+            notes=[Note("help", "read what the child needs into a 'let' before the 'async let'")],
         )
 
     def _infer_await(self, expr: ast.Await, scope: _Scope, expected: Type | None) -> Type | None:
@@ -4662,8 +4674,11 @@ class Checker:
         if mfunc is not None:
             key = mfunc.rpartition(".")[0]
             recv = call.callee.target
-            if key in self.actors and not (isinstance(recv, ast.Name) and recv.ident == "self"
-                                           and self._actor_self == key):
+            own = (isinstance(recv, ast.Name) and recv.ident == "self"
+                   and self._actor_self == key)
+            if own and self._task_init and not self.functions[mfunc].decl.is_async:
+                self._child_reaches_self(call)
+            if key in self.actors and not own:
                 why = (f"a call into the actor '{type_name(recv.resolved_type)}' "
                        "needs 'await'")
             elif self.functions[mfunc].decl.is_async:

@@ -7,7 +7,7 @@ actor running one call at a time."""
 import io
 import unittest
 
-from myla.errors import MylaRuntimeError
+from myla.errors import MylaRuntimeError, TypeCheckError
 from myla.interpreter import Interpreter
 from myla.lexer import tokenize
 from myla.parser import parse
@@ -204,10 +204,17 @@ class TestActors(unittest.TestCase):
                 "    print(await x)\n    print(await y)")
         self.assertEqual(run_main(body, src), "276\n285\n")
 
-    def test_a_child_of_an_actor_method_reads_through_self(self):
+    def test_a_child_of_an_actor_method_cant_read_through_self(self):
+        # the child would read the actor's state off the actor (MYLA-168)
         src = ("actor A {\n    n: int\n}\n"
                "impl A {\n    async fun peek(self) -> int {\n        async let x = self.n + 1\n"
                "        return await x\n    }\n}\n")
+        with self.assertRaises(TypeCheckError) as ctx:
+            run_main("    let a = A { n: 4 }\n    print(await a.peek())", src)
+        self.assertIn("can't reach the actor's state through 'self'", str(ctx.exception))
+        # read into a `let` first: the parent reads it, on the actor
+        src = src.replace("        async let x = self.n + 1\n",
+                          "        let n = self.n\n        async let x = n + 1\n")
         self.assertEqual(run_main("    let a = A { n: 4 }\n    print(await a.peek())", src), "5\n")
 
 

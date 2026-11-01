@@ -52,16 +52,25 @@ EXPECTED = {
     # (D94), where it used to wait forever for a looping sibling
     "t08_failure_cancels_a_looping_sibling": ("", 1),
     # ... and a failing child's own children, looping on an actor that the
-    # rest of the program uses; the failure reaches the program at once, so
-    # the entry stops at its next call of the actor (D97: it printed "main
-    # still runs" before), as does a parent waiting for another child
+    # rest of the program uses for ever; the failure reaches the program at
+    # once, so the entry stops at its next call of the actor (D97), as does a
+    # parent waiting for another child
     "t08_failing_child_cancels_its_children": ("", 1),
     "t08_failure_reaches_a_waiting_parent": ("", 1),
     "t08_group_fails_fast": ("", 1),
+    # ... reported at once while a sibling computes without a suspension
+    # point, which ends the program once it reaches one (MYLA-170)
+    "t15_failure_beside_a_busy_sibling": ("", 1),
     # 9. "latest request wins" is the program's to say: a request number
     "t09_latest_request_wins": ("ui shows cats\n", 0),
     # ... or by cancelling the old request, which checks before publishing
     "t09_cancel_the_stale_request": ("ui shows cats\n", 0),
+    # 13. a child task of an actor method works on what the method read into
+    # a `let` (reaching `self` is rejected, MYLA-168)
+    "t13_child_of_an_actor_method": ("true\n", 0),
+    # ... and a loop or match over a field of `self` across an `await` holds
+    # its own references (MYLA-198: native code hung on 4 workers)
+    "t13_actor_state_across_an_await": ("true\n", 0),
     # 10. what an actor publishes is seen whole
     "t10_publication_through_an_actor": ("42\n", 0),
     # 12. every worker and every single request make progress

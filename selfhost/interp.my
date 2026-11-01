@@ -176,6 +176,10 @@ pub struct Interp {
     failing: bool,
     fail_err: Option<RtError>,
     fail_code: int32,
+    // MYLA-170: called with a task's runtime error when it fails, before the
+    // other tasks stop; the drivers report it there (true: reported)
+    on_failure: (RtError) -> bool,
+    fail_reported: bool,
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
@@ -265,6 +269,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         defer: false, deferred: None, deferred_place: None,
         parked: false, yielding: false,
         failing: false, fail_err: None, fail_code: 0,
+        on_failure: (r: RtError) => false, fail_reported: false,
     }
     return it
 }
@@ -1307,6 +1312,10 @@ impl Interp {
             self.fail_err = err
             self.fail_code = code
             self.cancel_task(0)
+            match err {
+                Some(r) => { self.fail_reported = self.on_failure(r) },
+                None => {},
+            }
         }
         for w in self.tasks[t].waiters {
             self.tasks[w].state = 0

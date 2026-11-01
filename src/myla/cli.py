@@ -137,9 +137,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
     try:
         checker = _front_end(args.file, args)
         _warn(checker, args.file, source)
-        return Interpreter(checker, argv=argv).run()
+        interp = Interpreter(checker, argv=argv)
+        # a task's failure is reported when it happens, before the program
+        # waits for its other tasks to stop (D97, MYLA-170)
+        interp.on_task_failure = lambda err: _report(err, args.file, source)
+        return interp.run()
     except MylaError as err:
-        _report(err, args.file, source)
+        if not getattr(err, "reported", False):
+            _report(err, args.file, source)
         return 1
 
 

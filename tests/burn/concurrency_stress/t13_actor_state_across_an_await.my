@@ -1,0 +1,85 @@
+// 13. An async actor method walks a field of `self`, or matches on one, with an
+// `await` inside, while other calls change the field (MYLA-198): its loop and
+// match hold references of their own, so nothing dangles
+actor Clock {
+    n: int,
+}
+
+impl Clock {
+    fun tick(var self) -> int {
+        self.n = self.n + 1
+        return self.n
+    }
+}
+
+actor Store {
+    xs: [int],
+    last: Option<[int]>,
+}
+
+impl Store {
+    fun churn(var self) {
+        if len(self.xs) > 50 {
+            self.xs = []
+            self.last = None
+        }
+        push(self.xs, 1)
+        self.last = Some(self.xs)
+    }
+
+    async fun walk(self, c: Clock) -> bool {
+        var n = 0
+        for x in self.xs {
+            let t = await c.tick()
+            n = n + x
+        }
+        return n >= 0
+    }
+
+    async fun look(self, c: Clock) -> bool {
+        match self.last {
+            Some(ys) => {
+                let t = await c.tick()
+                var s = 0
+                for y in ys {
+                    s = s + y
+                }
+                return s == len(ys)
+            },
+            None => { return true },
+        }
+        return true
+    }
+}
+
+async fun churner(s: Store) -> int {
+    for i in 0..3000 {
+        await s.churn()
+    }
+    return 0
+}
+
+async fun reader(s: Store, c: Clock) -> bool {
+    var ok = true
+    for i in 0..200 {
+        if !(await s.walk(c)) {
+            ok = false
+        }
+        if !(await s.look(c)) {
+            ok = false
+        }
+    }
+    return ok
+}
+
+#main
+async fun main() {
+    let s = Store { xs: [], last: None }
+    let c = Clock { n: 0 }
+    async let a = churner(s)
+    async let b = churner(s)
+    async let r1 = reader(s, c)
+    async let r2 = reader(s, c)
+    let d = await a + await b
+    print(await r1 && await r2)
+}

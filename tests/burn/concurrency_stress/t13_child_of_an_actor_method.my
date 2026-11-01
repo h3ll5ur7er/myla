@@ -1,0 +1,61 @@
+// 13. A child task of an actor method (MYLA-168): it can't reach the actor's
+// state through `self` (the error corpus pins it), so the method reads what
+// the children need into a `let` first, on the actor; the children then work
+// on copies while other calls change the actor
+async fun total(xs: [int]) -> int {
+    var t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+actor Store {
+    xs: [int],
+}
+
+impl Store {
+    fun churn(var self) {
+        if len(self.xs) > 200 {
+            self.xs = []
+        }
+        push(self.xs, 1)
+    }
+
+    async fun peek(self) -> bool {
+        let xs = self.xs
+        async let a = total(xs)
+        async let b = total(xs)
+        let ta = await a
+        let tb = await b
+        return ta == tb && ta == len(xs)
+    }
+}
+
+async fun churner(s: Store) -> int {
+    for i in 0..2000 {
+        await s.churn()
+    }
+    return 0
+}
+
+async fun peeker(s: Store) -> bool {
+    var ok = true
+    for i in 0..300 {
+        if !(await s.peek()) {
+            ok = false
+        }
+    }
+    return ok
+}
+
+#main
+async fun main() {
+    let s = Store { xs: [] }
+    async let c1 = churner(s)
+    async let c2 = churner(s)
+    async let p1 = peeker(s)
+    async let p2 = peeker(s)
+    let done = await c1 + await c2
+    print(await p1 && await p2)
+}

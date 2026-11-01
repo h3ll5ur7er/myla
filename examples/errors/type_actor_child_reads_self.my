@@ -1,0 +1,25 @@
+//~ type error: an 'async let' can't reach the actor's state through 'self': its child task runs off the actor
+//~ span: self.xs
+//~ help: read what the child needs into a 'let' before the 'async let'
+// The child task runs on another worker while the actor's other calls change
+// its fields (MYLA-168).
+async fun total(xs: [int]) -> int {
+    var t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+actor Store {
+    xs: [int],
+}
+
+impl Store {
+    async fun peek(self) -> int {
+        async let a = total(self.xs)
+        return await a
+    }
+}
+
+fun main() {}

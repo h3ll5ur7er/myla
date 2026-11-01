@@ -2780,10 +2780,12 @@ impl CodeGen {
         // __task_fail: a panic (%rdi 2, %rsi the message, %rdx the position)
         // or an `exit` (%rdi 3, %rsi the code) in a task ends the program
         // (D97): the first failure claims it, every other worker drops its
-        // frames, and once none runs one this returns (%rax 0) for the caller
-        // to report the failure and end the program. A later failure, or one
-        // in a task stopping, is not reported: its worker goes back to the
-        // executor. With no task running it returns at once.
+        // frames from then on, and this returns (%rax 0) for the caller to
+        // report the failure at once, wait until no other worker runs a frame
+        // (`__failed_wait`) and end the program (MYLA-170: a sibling looping
+        // without a suspension point delays the end, not the report). A later
+        // failure is not reported: its worker goes back to the executor.
+        // With no task running it returns at once.
         self.raw("__task_fail:")
         self.raw(format("\tmovq {}, %rax", self.tv("__exec_cur")))
         self.raw("\ttestq %rax, %rax")
@@ -2792,13 +2794,6 @@ impl CodeGen {
         self.raw("\txorl %eax, %eax")
         self.raw("\tlock cmpxchgq %rcx, __exec_failing(%rip)")
         self.raw("\tjne .Lexec_failed")
-        self.raw("\tpushq %rdi")
-        self.raw("\tpushq %rsi")
-        self.raw("\tpushq %rdx")
-        self.raw("\tcall __wait_stopped")
-        self.raw("\tpopq %rdx")
-        self.raw("\tpopq %rsi")
-        self.raw("\tpopq %rdi")
         self.raw(".Ltf_now:")
         self.raw("\txorl %eax, %eax")
         self.raw("\tret")
@@ -3060,8 +3055,15 @@ impl CodeGen {
         self.raw(format("\tmovq %rdi, {}", self.tv("__actor_held")))
         self.raw("\tret")
         self.raw("")
+        // __failed_wait: once a task has failed (D97), until no other worker
+        // runs a frame; at once otherwise
+        self.raw("__failed_wait:")
+        self.raw("\tcmpq $0, __exec_failing(%rip)")
+        self.raw("\tjne __wait_stopped")
+        self.raw("\tret")
+        self.raw("")
         // __wait_stopped: until no other worker runs a frame (each worker's
-        // current frame), once a task has failed (D97)
+        // current frame)
         self.raw("__wait_stopped:")
         self.raw("\tpushq %rbx")
         self.raw(".Lwk_scan:")
@@ -3139,6 +3141,7 @@ impl CodeGen {
         self.raw("\tmovslq %edi, %rsi")
         self.raw("\tmovq $3, %rdi")
         self.raw("\tcall __task_fail")
+        self.raw("\tcall __failed_wait")
         self.raw("\tpopq %rdi")
         self.raw("\tmovq $231, %rax")
         self.raw("\tsyscall")
@@ -4234,6 +4237,8 @@ impl CodeGen {
         self.raw("\tmovq $1, %rdx")
         self.raw("\tcall __write_all")
         self.raw("\taddq $16, %rsp")
+        // reported; with tasks, the end waits for the other workers (D97)
+        if self.frames { self.raw("\tcall __failed_wait") }
         self.raw("\tmovq $231, %rax")
         self.raw("\tmovq $1, %rdi")
         self.raw("\tsyscall")

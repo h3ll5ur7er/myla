@@ -3823,6 +3823,7 @@ impl Checker {
     fun check_isolation(self, sname: str, target: Expr, field: str, e: Expr) -> Result<int32, CheckErr> {
         if !self.is_actor(sname) { return Ok(0) }
         let own = match target.kind { ExprKind.Name(n) => n == "self" && self.actor_self == sname, _ => false }
+        if own && self.task_init { return Err(child_reaches_self(e)) }
         if own { return Ok(0) }
         return Err(terr_at(e.line, e.col, e.sp, format("'{}' belongs to the actor '{}': only its own methods reach it", field, type_name(Type.TStruct(sname, [])))))
     }
@@ -3902,6 +3903,7 @@ impl Checker {
                 },
                 _ => {},
             }
+            if own && self.task_init && !self.call_async { return Err(child_reaches_self(e)) }
             if self.is_actor(self.call_key) && !own { why = format("a call into the actor '{}' needs 'await'", type_name(Type.TStruct(self.call_key, []))) }
             else if self.call_async { why = format("a call to the async method '{}' needs 'await'", field) }
         } else if self.call_kind == "value" {
@@ -5884,4 +5886,11 @@ impl Reentrancy {
     fun warn(var self, msg: str, at: Expr, aw: Expr, help: str) {
         push(self.out, CheckErr { line: at.line, col: at.col, sp: at.sp, msg: msg, decl: -1, notes: [note_at("other calls to the actor may run at this 'await'", aw.line, aw.col, aw.sp), Note { label: "help", msg: help, line: 0, col: 0, sp: no_span() }] })
     }
+}
+
+// An `async let`'s initializer in an actor's method reads a field of `self`
+// or calls one of its synchronous methods: the child task would do it off the
+// actor (MYLA-168; types.py: _child_reaches_self).
+fun child_reaches_self(e: Expr) -> CheckErr {
+    return with_notes(terr_at(e.line, e.col, e.sp, "an 'async let' can't reach the actor's state through 'self': its child task runs off the actor"), [Note { label: "help", msg: "read what the child needs into a 'let' before the 'async let'", line: 0, col: 0, sp: no_span() }])
 }

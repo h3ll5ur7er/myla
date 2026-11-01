@@ -105,10 +105,16 @@ pub fun cmd_interp(file: str, opts: LoadOptions, tests: bool, prog_args: [str]) 
             if tests {
                 return it.run_tests()
             }
+            // a task's failure is reported when it happens, before the
+            // other tasks stop (D97, MYLA-170)
+            let prog = ch.prog
+            it.on_failure = (r: RtError) => report_runtime_error(r, prog)
             let code = it.run()
-            match it.rt_err {
-                Some(r) => { eprintln(render(Report { kind: "runtime error", msg: r.msg, path: file_of(ch.prog, r.node), line: r.line, col: r.col, sp: r.sp, more: [], notes: [] })) },
-                None => {},
+            if !it.fail_reported {
+                match it.rt_err {
+                    Some(r) => { let shown = report_runtime_error(r, ch.prog) },
+                    None => {},
+                }
             }
             return code
         },
@@ -166,4 +172,11 @@ pub fun cmd_build(file: str, output: str, opts: LoadOptions, debug: bool) -> int
         return 1
     }
     return 0
+}
+
+// A runtime error on stderr, as the Python CLI prints it, in the file of its
+// expression; true.
+fun report_runtime_error(r: RtError, prog: Loaded) -> bool {
+    eprintln(render(Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp, more: [], notes: [] }))
+    return true
 }

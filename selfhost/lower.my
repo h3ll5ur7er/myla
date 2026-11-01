@@ -537,6 +537,9 @@ impl Lower {
     fun fixed_place(self, e: Expr) -> bool {
         return match e.kind {
             ExprKind.Name(n) => {
+                // an async actor method's `self`: the actor's other calls
+                // change its fields at every suspension point
+                if self.shared_self(n) { return false }
                 var i = len(self.scopes) - 1
                 while i >= 0 {
                     var j = len(self.scopes[i]) - 1
@@ -553,6 +556,13 @@ impl Lower {
             ExprKind.Index(t, i) => self.fixed_place(t),
             _ => false,
         }
+    }
+
+    // Whether `name` is the `self` of an async actor method, whose fields
+    // the actor's other calls change while it waits (its `let`s, loops and
+    // matches can't borrow from them).
+    fun shared_self(self, name: str) -> bool {
+        return self.actor_self >= 0 && self.lookup(name) == self.actor_self
     }
 
     // The slot of the innermost `name` in scope, or -1.
@@ -3194,7 +3204,9 @@ impl Lower {
             result = self.value_slot(cg, "__match", rt, true)
         }
         let root_var = place_root(scrut)
-        let owns_copy = root_var != "" && cg.owns_heap(sst) && arms_may_write(arms, root_var)
+        // the copy owns references of its own when an arm may write the
+        // variable, or when other calls of the actor may (MYLA-168's t13)
+        let owns_copy = root_var != "" && cg.owns_heap(sst) && (arms_may_write(arms, root_var) || self.shared_self(root_var))
         let root = self.value_slot(cg, "__scrutinee", sst, owns_copy)
         let base = self.slot_addr(root)
         if is_aggregate(sst) {

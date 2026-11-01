@@ -36,15 +36,16 @@ async fun parent(r: Res) -> int {
     return await f
 }
 
+// The entry keeps calling the actor for ever: only the child's failure ends
+// the program, at the entry's next call (D97), whatever the timing (MYLA-197:
+// a loop of 2,000 calls could finish first under load)
 #main
 async fun main() {
     let r = Res { n: 0 }
     async let x = parent(r)
-    var i = 0
-    while i < 2000 {
+    while true {
         let t = await r.tick()
-        i = i + 1
     }
-    print("main still runs")
+    print("never")
     print(await x)
 }

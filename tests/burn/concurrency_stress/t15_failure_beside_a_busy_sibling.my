@@ -1,0 +1,38 @@
+// 8. A failure while a sibling computes without a suspension point
+// (MYLA-170): the failure is reported when it happens; the program ends once
+// the sibling reaches its next suspension point (D94 (2), D97), here after
+// its loop (whether the sibling has started by then depends on timing, so it
+// prints nothing before it)
+actor Log {
+    n: int,
+}
+
+impl Log {
+    fun note(var self) -> int {
+        self.n = self.n + 1
+        return self.n
+    }
+}
+
+async fun busy(log: Log) -> int {
+    var x = 0
+    for i in 0..300000 {
+        x = (x * 17 + 5) % 1009
+    }
+    let n = await log.note()
+    print("never")
+    return x
+}
+
+async fun fail_soon(log: Log) -> int {
+    panic("failure beside a busy sibling")
+    return 0
+}
+
+#main
+async fun main() {
+    let log = Log { n: 0 }
+    async let a = busy(log)
+    async let b = fail_soon(log)
+    print(await a + await b)
+}

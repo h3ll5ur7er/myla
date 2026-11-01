@@ -387,6 +387,10 @@ class Interpreter:
         # other task stops at its next suspension point, the entry's raising it
         self._failing: BaseException | None = None
         self._failing_lock = threading.Lock()
+        # called with the first task failure that is a runtime error, at
+        # once, by `myla run` to report it before the other tasks stop
+        # (MYLA-170); the error is then marked `reported`
+        self.on_task_failure = None
 
     # -- program entry -------------------------------------------------------
 
@@ -533,8 +537,12 @@ class Interpreter:
         """A task's failure (not its stopping when cancelled) reaches the
         program at once (D97): the first one is the program's."""
         with self._failing_lock:
-            if self._failing is None:
-                self._failing = exc
+            if self._failing is not None:
+                return
+            self._failing = exc
+        if self.on_task_failure is not None and isinstance(exc, MylaError):
+            self.on_task_failure(exc)
+            exc.reported = True
 
     def _released(self, wait):
         """Run `wait`, which may block, without holding the thread's actor, so
