@@ -191,6 +191,16 @@ fun f() -> [float64] { return [0.1 + 0.2] }
 fun f32() -> float32 { return 0.1f32 }
 #test()[P { x: 1, name: "a" }]
 fun p() -> P { return P { x: 2, name: "b'" } }
+impl P {
+    #test(P { x: 1, name: "a" }, 2)[3]
+    #test(P { x: 1, name: "a" }, 2)[4]
+    fun plus(self, k: int) -> int { return self.x + k }
+    #test(P { x: 1, name: "a" })[P { x: 1, name: "a!" }]
+    fun shout(var self) -> P {
+        self.name = self.name + "!"
+        return self
+    }
+}
 #test()[E.B(1, "z")]
 fun e() -> E { return E.A }
 #test()[[1, 2]]

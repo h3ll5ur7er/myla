@@ -139,6 +139,28 @@ class TestTestRunner(unittest.TestCase):
         self.assertTrue(results[0].passed)
         self.assertFalse(results[1].passed)
 
+    def test_method_cases(self):
+        # D116: the receiver is the first argument; a `var self` method's
+        # result is compared, its changed receiver isn't; cases run in source
+        # order
+        src = (
+            "struct C {\n    n: int,\n}\n"
+            "#test(2)[2]\nfun first(x: int) -> int {\n    return x\n}\n"
+            "impl C {\n"
+            "    #test(C { n: 2 }, 3)[5]\n"
+            "    #test(C { n: 2 }, 3)[6]\n"
+            "    fun add(self, k: int) -> int {\n        return self.n + k\n    }\n"
+            "    #test(C { n: 1 })[2]\n"
+            "    fun bump(var self) -> int {\n        self.n = self.n + 1\n        return self.n\n    }\n"
+            "}\n"
+            "#test(1)[1]\nfun last(x: int) -> int {\n    return x\n}\n"
+        )
+        results = self._run_tests(src)
+        self.assertEqual([(r.function, r.index, r.passed) for r in results],
+                         [("first", 1, True), ("C.add", 1, True), ("C.add", 2, False),
+                          ("C.bump", 1, True), ("last", 1, True)])
+        self.assertEqual(results[2].detail, "expected 6, got 5")
+
     def test_no_tests(self):
         self.assertEqual(self._run_tests("fun main() {\n    print(1)\n}\n"), [])
 

@@ -1,13 +1,16 @@
 // methods.my — methods & `impl` blocks: `self` / `var self`, method
 // chaining, value semantics, generic impls, enum methods, and methods on
-// built-in types (no orphan rule, D45–D47).
+// built-in types (no orphan rule, D45–D47). A method's `#test` cases take
+// the receiver as their first argument (D116).
 
 struct Counter {
     n: int,
 }
 
 impl Counter {
+    #test(Counter { n: 4 })[4]
     fun get(self) -> int { return self.n }            // read-only receiver
+    #test(Counter { n: 4 })[Counter { n: 5 }]
     fun bumped(self) -> Counter { return Counter { n: self.n + 1 } }
     fun bump(var self) { self.n = self.n + 1 }         // mutating receiver
     fun add(var self, k: int) { self.n = self.n + k }
@@ -29,6 +32,8 @@ enum Shape {
 }
 
 impl Shape {
+    #test(Shape.Circle(1))[3]
+    #test(Shape.Rect(2, 5))[10]
     fun area(self) -> int {
         return match self {
             Circle(r) => 3 * r * r
@@ -39,7 +44,10 @@ impl Shape {
 
 // Methods on a built-in type — Myla has no orphan rule (D45).
 impl int {
+    #test(4)[true]
+    #test(7)[false]
     fun is_even(self) -> bool { return self % 2 == 0 }
+    #test(-3)[-6]
     fun double(self) -> int { return self * 2 }
 }
 

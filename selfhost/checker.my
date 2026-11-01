@@ -2101,7 +2101,7 @@ impl Checker {
         for p in m.params { push(sparams, p) }
         let fdecl = FunData {
             line: m.line, col: m.col, sp: m.sp, name: mangled, params: sparams,
-            ret_type: m.ret_type, body: m.body, attributes: [],
+            ret_type: m.ret_type, body: m.body, attributes: m.attributes,
             type_params: synth_typarams(combined_names), receiver: m.receiver, is_pub: false, is_async: m.is_async,
         }
         let sig = FuncSig { name: mangled, params: params, ret: rt, type_params: combined_names, bounds: combined_bounds, decl: fdecl, has_decl: true, decl_id: impl_id }
@@ -4496,6 +4496,20 @@ impl Checker {
                 Err(e) => { self.note(e) },
             }
         }
+        // then the methods' `#test` cases (D116), in the order registered
+        var mi = 0
+        while mi < len(self.method_decls) {
+            if self.full() { return }
+            let md = self.method_decls[mi]
+            if len(md.attributes) > 0 && !contains(self.skipped_fns, md.name) {
+                self.reset_state(self.method_decl_ids[mi])
+                match self.check_method_attributes(md, self.method_decl_keys[mi]) {
+                    Ok(x) => {},
+                    Err(e) => { self.note(e) },
+                }
+            }
+            mi = mi + 1
+        }
         if self.full() { return }
         var main_names: [str] = []
         for m in self.mains { push(main_names, m.name) }
@@ -4536,7 +4550,7 @@ impl Checker {
                         if len(attr.args) > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#main' takes no arguments")) }
                         push(self.mains, MainAt { line: fd.line, col: fd.col, sp: fd.sp, name: fd.name, id: decl.id })
                     } else {
-                        self.check_test_attr(decl, fd, attr)?
+                        self.check_test_attr(fd, attr)?
                     }
                 },
                 _ => {},
@@ -4545,7 +4559,19 @@ impl Checker {
         return Ok(0)
     }
 
-    fun check_test_attr(var self, decl: Decl, fd: FunData, attr: Attribute) -> Result<int32, CheckErr> {
+    // A method takes `#test` cases, its receiver as the first argument
+    // (D116); no other attribute (types.py: _check_method_attributes).
+    fun check_method_attributes(var self, fd: FunData, key: str) -> Result<int32, CheckErr> {
+        for attr in fd.attributes {
+            if attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' can't be applied to a method (a method takes only '#test')", attr.name))) }
+            if contains(self.actors, key) { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' can't run an actor method (its receiver is an actor, not a value)")) }
+            if len(fd.type_params) > 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "attribute '#test' cannot be applied to a generic method (it has no single concrete instantiation)")) }
+            self.check_test_attr(fd, attr)?
+        }
+        return Ok(0)
+    }
+
+    fun check_test_attr(var self, fd: FunData, attr: Attribute) -> Result<int32, CheckErr> {
         if fd.is_async { return Err(terr_at(attr.line, attr.col, attr.sp, "'#test' can't run an async function")) }
         let idx = self.func_idx(fd.name)
         let sig = self.functions[idx]

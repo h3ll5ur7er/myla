@@ -339,6 +339,18 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.hover(uri, 11, 52), "v: int")
         self.assertEqual(self.refs(uri, 0, 13), [(uri, 0, 13, 16), (uri, 8, 18, 21), (uri, 11, 14, 17)])
 
+    def test_names_in_a_method_s_test_cases(self):
+        # a method's `#test` cases (D116) resolve in the module's scope
+        uri = self.open("const BASE: int = 2\n"
+                        "struct C {\n    n: int,\n}\n"
+                        "impl C {\n"
+                        "    #test(C { n: BASE }, 1)[3]\n"
+                        "    fun add(self, k: int) -> int {\n        return self.n + k\n    }\n"
+                        "}\n")
+        self.assertEqual(self.defn(uri, 5, 18), {"uri": uri, "range": rng(0, 6, 10)})   # BASE
+        self.assertEqual(self.defn(uri, 5, 10), {"uri": uri, "range": rng(1, 7, 8)})    # C
+        self.assertEqual(self.defn(uri, 5, 14), {"uri": uri, "range": rng(2, 4, 5)})    # C's n
+
     def test_unicode_identifiers(self):
         # XID identifiers (MYLA-84); ranges in UTF-16 units, 😀 counting two
         uri = self.open('fun main() {\n    let größe = 1\n    let 日本 = größe\n    print(f"😀{日本}")\n}\n')

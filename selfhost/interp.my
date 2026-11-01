@@ -454,9 +454,10 @@ impl Interp {
         var i = 0
         while i < len(self.func_decls) {
             let fd = self.func_decls[i]
+            let name = self.func_names[i]    // a method's is `T.m` (D116)
             var idx = 0
             for attr in fd.attributes {
-                if attr.name == "test" && !is_qualified(fd.name) {
+                if attr.name == "test" && !is_qualified(name) {
                     idx = idx + 1
                     total = total + 1
                     self.push_scope()
@@ -468,7 +469,21 @@ impl Interp {
                         None => {},
                     }
                     self.pop_scope()
-                    let actual = self.call_func(i, argv)
+                    var actual = Value.VUnit
+                    match fd.receiver {
+                        // a method's receiver is its first argument (D116)
+                        Some(r) => {
+                            var rest: [Value] = []
+                            var k = 1
+                            while k < len(argv) {
+                                push(rest, argv[k])
+                                k = k + 1
+                            }
+                            let (rv, final_self) = self.call_method(i, argv[0], rest)
+                            actual = rv
+                        },
+                        None => { actual = self.call_func(i, argv) },
+                    }
                     var detail = ""
                     match self.ctrl {
                         Ctrl.CExit => {
@@ -487,9 +502,9 @@ impl Interp {
                     }
                     if detail == "" {
                         passed = passed + 1
-                        push(report, format("PASS  {} #{}\n", fd.name, idx))
+                        push(report, format("PASS  {} #{}\n", name, idx))
                     } else {
-                        push(report, format("FAIL  {} #{}: {}\n", fd.name, idx, detail))
+                        push(report, format("FAIL  {} #{}: {}\n", name, idx, detail))
                     }
                 }
             }

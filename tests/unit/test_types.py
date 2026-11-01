@@ -276,6 +276,46 @@ class TestAttributesAndEntry(unittest.TestCase):
         with self.assertRaises(TypeCheckError):
             check_src("#test(1, 2)[3]\nfun f(a: int) -> int {\n    return a\n}\n")
 
+    # -- `#test` on methods (D116) --
+    def _method_case_error(self, src: str) -> str:
+        with self.assertRaises(TypeCheckError) as cm:
+            check_src(src)
+        return cm.exception.message
+
+    def test_method_cases_count_the_receiver(self):
+        pre = "struct C {\n    n: int,\n}\nimpl C {\n"
+        body = "    fun get(self, k: int) -> int {\n        return self.n + k\n    }\n}\n"
+        check_src(pre + "    #test(C { n: 1 }, 2)[3]\n" + body)
+        self.assertEqual(self._method_case_error(pre + "    #test(2)[3]\n" + body),
+                         "'#test' expects 2 argument(s), got 1")
+        self.assertEqual(self._method_case_error(pre + "    #test(1, 2)[3]\n" + body),
+                         "'#test' argument type mismatch: expected 'C', found 'int32'")
+
+    def test_method_cases_on_trait_impls_and_builtin_receivers(self):
+        check_src("struct P {\n    x: int,\n}\n"
+                  "impl Add for P {\n    #test(P { x: 1 }, P { x: 2 })[P { x: 3 }]\n"
+                  "    fun add(self, o: P) -> P {\n        return P { x: self.x + o.x }\n    }\n}\n"
+                  "impl int32 {\n    #test(4)[8]\n"
+                  "    fun double(self) -> int32 {\n        return self * 2\n    }\n}\n")
+
+    def test_method_cases_rejected_where_there_is_no_value_receiver(self):
+        self.assertEqual(self._method_case_error(
+            "actor A {\n    n: int,\n}\nimpl A {\n    #test(A { n: 1 })[1]\n"
+            "    fun get(self) -> int {\n        return self.n\n    }\n}\n"),
+            "'#test' can't run an actor method (its receiver is an actor, not a value)")
+        self.assertEqual(self._method_case_error(
+            "struct B<T> {\n    v: T,\n}\nimpl<T> B<T> {\n    #test(B { v: 1 })[1]\n"
+            "    fun get(self) -> T {\n        return self.v\n    }\n}\n"),
+            "attribute '#test' cannot be applied to a generic method (it has no single concrete instantiation)")
+        self.assertEqual(self._method_case_error(
+            "struct C {\n    n: int,\n}\nimpl C {\n    #main\n"
+            "    fun run(self) {\n        return\n    }\n}\n"),
+            "attribute '#main' can't be applied to a method (a method takes only '#test')")
+        self.assertEqual(self._method_case_error(
+            "struct C {\n    n: int,\n}\nimpl C {\n    #test(C { n: 1 })[1]\n"
+            "    async fun get(self) -> int {\n        return self.n\n    }\n}\n"),
+            "'#test' can't run an async function")
+
     def test_both_main_attr_and_named_main(self):
         with self.assertRaises(TypeCheckError):
             check_src(

@@ -669,15 +669,16 @@ impl Parser {
         self.skip_separators()
         var methods: [FunData] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
-            if self.leaves_body() { break }
+            if self.leaves_body(true) { break }
             let start = self.pos
+            let attrs = self.attributes()     // `#test` cases of a method (D116)
             if self.at_method() {
-                push(methods, self.method_decl())
+                push(methods, self.method_decl(attrs))
             } else {
                 let tok = self.peek()
                 self.fail_at(tok, format("expected a method ('fun ...') in impl block, found '{}'", tok.lexeme))
             }
-            self.member_recovered(start)
+            self.member_recovered(start, true)
             self.skip_separators()
         }
         self.expect(TokenKind.RBRACE, "'}' to close impl block")
@@ -692,7 +693,7 @@ impl Parser {
         self.skip_separators()
         var methods: [FunData] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
-            if self.leaves_body() { break }
+            if self.leaves_body(false) { break }
             let start = self.pos
             if self.at_method() {
                 push(methods, self.method_sig())
@@ -700,7 +701,7 @@ impl Parser {
                 let tok = self.peek()
                 self.fail_at(tok, format("expected a method signature ('fun ...') in trait body, found '{}'", tok.lexeme))
             }
-            self.member_recovered(start)
+            self.member_recovered(start, false)
             self.skip_separators()
         }
         self.expect(TokenKind.RBRACE, "'}' to close trait body")
@@ -709,10 +710,10 @@ impl Parser {
 
     // Before a member of an impl or trait body (parser.py: _member): after an
     // error, a line starting another declaration, or one at column 1, leaves
-    // the body (unwinding).
-    fun leaves_body(var self) -> bool {
+    // the body (unwinding). In an impl body a member may start with `#`.
+    fun leaves_body(var self, attributes: bool) -> bool {
         let tok = self.peek()
-        if self.resuming_at_declaration() && (tok.kind != TokenKind.FUN || tok.column == 1) {
+        if self.resuming_at_declaration() && (!starts_member(tok.kind, attributes) || tok.column == 1) {
             self.unwind()
             return true
         }
@@ -722,11 +723,11 @@ impl Parser {
     // After a member parsed from `start`: recover from its error; a method
     // whose block unwound to a `fun` (not at column 1) is followed by the next
     // member.
-    fun member_recovered(var self, start: int32) {
+    fun member_recovered(var self, start: int32, attributes: bool) {
         self.recovered(start, SYNC_MEMBER)
         if self.unwinding && !self.stopped {
             let at = self.toks[self.resume]
-            if at.kind == TokenKind.FUN && at.column > 1 {
+            if starts_member(at.kind, attributes) && at.column > 1 {
                 self.unwinding = false
                 self.pos = self.resume
             }
@@ -776,14 +777,14 @@ impl Parser {
         }
     }
 
-    fun method_decl(var self) -> FunData {
+    fun method_decl(var self, attrs: [Attribute]) -> FunData {
         let h = self.method_header()
         let body = self.block()
         // Rebuild rather than mutate `h.body`: the native backend does not yet
         // support assigning a ref-counted aggregate into a struct field.
         return FunData {
             line: h.line, col: h.col, sp: self.span_from(h.line, h.col), name: h.name, params: h.params,
-            ret_type: h.ret_type, body: Some(body), attributes: h.attributes,
+            ret_type: h.ret_type, body: Some(body), attributes: attrs,
             type_params: h.type_params, receiver: h.receiver, is_pub: h.is_pub, is_async: h.is_async,
         }
     }
@@ -1842,4 +1843,13 @@ pub fun parse_source(src: str, first_id: int32) -> Result<Parsed, Diag> {
         Ok(p) => Ok(p),
         Err(ds) => Err(ds[0]),
     }
+}
+
+// Whether a token kind starts a member of an impl body (`fun`, or `#` before
+// a method's `#test` cases, D116) or of a trait body (`fun`).
+#test(TokenKind.HASH, true)[true]
+#test(TokenKind.HASH, false)[false]
+#test(TokenKind.FUN, false)[true]
+fun starts_member(k: TokenKind, attributes: bool) -> bool {
+    return k == TokenKind.FUN || (attributes && k == TokenKind.HASH)
 }

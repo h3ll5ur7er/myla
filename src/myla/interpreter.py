@@ -414,9 +414,7 @@ class Interpreter:
         qualify (`myla test file.my`, MYLA-187)."""
         _deep_stack()
         results: list[TestResult] = []
-        for decl in self.checker.program.decls:
-            if not isinstance(decl, ast.FunDecl):
-                continue
+        for decl in self.checker.declared_functions():   # methods too (D116)
             if own_only and "$" in decl.name:
                 continue
             idx = 0

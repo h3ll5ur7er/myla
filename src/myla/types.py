@@ -1025,6 +1025,9 @@ class Checker:
         self.methods: dict[str, dict[str, FuncSig]] = {}
         self._impl_decls: list[ast.ImplDecl] = []
         self._method_decls: list[ast.FunDecl] = []
+        # an impl's method (by id) -> its checked declaration, named `T.m`
+        # with `self` as its first parameter (`_register_method`)
+        self._method_of: dict[int, ast.FunDecl] = {}
         # traits (v0.4.4): name -> TraitSig (signatures only, `Self`-typed)
         self.traits: dict[str, TraitSig] = {}
         self._trait_decls: list[ast.TraitDecl] = []
@@ -1873,9 +1876,11 @@ class Checker:
         combined_bounds = {**impl.type_param_bounds, **m.type_param_bounds}
         fdecl = ast.FunDecl(
             mangled, [self_param] + list(m.params), m.ret_type, m.body,
+            attributes=m.attributes,
             type_params=combined_tps, type_param_bounds=combined_bounds,
             receiver=m.receiver, is_async=m.is_async,
         ).at(m.line, m.column)
+        self._method_of[id(m)] = fdecl
         fdecl.span = m.span
         fdecl.source_path = getattr(m, "source_path", None)
         fdecl.tag_eq = getattr(m, "tag_eq", False)
@@ -2237,11 +2242,27 @@ class Checker:
             f"unsupported const operator '{op}'", at=expr
         )
 
+    def declared_functions(self) -> list[ast.FunDecl]:
+        """The program's functions and methods in source order: a method as
+        its checked declaration (`T.m`, `self` first), which carries its
+        `#test` cases (D116)."""
+        out: list[ast.FunDecl] = []
+        for decl in self.program.decls:
+            if isinstance(decl, ast.FunDecl):
+                out.append(decl)
+            elif isinstance(decl, ast.ImplDecl):
+                out.extend(self._method_of[id(m)] for m in decl.methods
+                           if id(m) in self._method_of)
+        return out
+
     def _check_attributes_and_entry(self) -> None:
         main_decls: list[ast.FunDecl] = []
         for decl in self.program.decls:
-            if id(decl) not in self._skipped:
+            if id(decl) not in self._skipped and not isinstance(decl, ast.ImplDecl):
                 self._on_its_own(decl, lambda d=decl: self._check_attributes(d, main_decls))
+        for mdecl in self._method_decls:
+            if mdecl.attributes and id(mdecl) not in self._skipped:
+                self._on_its_own(mdecl, lambda d=mdecl: self._check_method_attributes(d))
 
         named_main = self.functions.get("main")
         entry = main_decls[0] if main_decls else (named_main.decl if named_main else None)
@@ -2282,6 +2303,24 @@ class Checker:
                 main_decls.append(decl)
             else:
                 self._check_test_attr(decl, attr)
+
+    def _check_method_attributes(self, decl: ast.FunDecl) -> None:
+        """A method takes `#test` cases, its receiver as the first argument
+        (D116); no other attribute."""
+        for attr in decl.attributes:
+            if attr.name != "test":
+                raise TypeCheckError(
+                    f"attribute '#{attr.name}' can't be applied to a method "
+                    "(a method takes only '#test')", at=attr)
+            if decl.name.rpartition(".")[0] in self.actors:
+                raise TypeCheckError(
+                    "'#test' can't run an actor method (its receiver is an actor, "
+                    "not a value)", at=attr)
+            if decl.type_params:
+                raise TypeCheckError(
+                    "attribute '#test' cannot be applied to a generic method "
+                    "(it has no single concrete instantiation)", at=attr)
+            self._check_test_attr(decl, attr)
 
     def _check_main_attr(self, decl: ast.FunDecl, attr: ast.Attribute) -> None:
         if attr.args or attr.outputs is not None:

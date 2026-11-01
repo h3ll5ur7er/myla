@@ -155,6 +155,7 @@ async fun main() {
 
 - Run: `python3 myla.py run file.my`, test: `python3 myla.py test file.my`, compile: `python3 myla.py build file.my -o out`, type-check: `python3 myla.py check file.my`.
 - The self-hosted CLI, `build/myla` (built by `scripts/bootstrap.sh`), has the same commands plus `repl`, and in a project with a `myla.toml` `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` (D73).
+- `#test` cases go above a function, or above a method inside its `impl` with the receiver as the first argument (`#test(Counter { n: 2 }, 3)[5]`, D116).
 - Every value-returning function in `examples/` needs `#test(args)[expected]` cases (a burn test enforces it); add them to new functions in `selfhost/` too: the target there is at least 80 % of value-returning functions (D109).
 - New examples must be registered in `tests/burn/test_examples_run.py` and `tests/burn/test_examples_compile.py`; programs that must be rejected go to `examples/errors/` with a first line `//~ <lex|parse|module|type|runtime> error: <message substring>` (more directives, such as `//~ span:`, in `tests/burn/test_error_corpus.py`).
 - The interpreter and the native backend must print the same output; check both (`run` and `build` + execute) after changing either.

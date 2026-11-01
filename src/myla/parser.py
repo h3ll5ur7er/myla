@@ -472,8 +472,8 @@ class Parser:
         self._skip_separators()
         methods: list[ast.FunDecl] = []
         while not self._check(T.RBRACE) and not self._at_end():
-            self._member(lambda: methods.append(self._method_decl()),
-                         "a method ('fun ...') in impl block")
+            self._member(lambda attrs: methods.append(self._method_decl(attrs)),
+                         "a method ('fun ...') in impl block", attributes=True)
             # a method always ends in `}`, so the next method's `fun` (or the
             # impl's closing `}`) may follow on the same or a later line.
             self._skip_separators()
@@ -500,22 +500,29 @@ class Parser:
             name.value, methods, type_params=type_params
         ).at(kw.line, kw.column, self._end())
 
-    def _member(self, parse_method, what: str) -> None:
-        """One member of an impl or trait body: `parse_method` at a `fun`.
-        After an error, the next `fun` or the body's `}`; a line starting
-        another declaration (or at column 1) leaves the body (`_Unwind`)."""
+    def _member(self, parse_method, what: str, attributes: bool = False) -> None:
+        """One member of an impl or trait body: `parse_method` at a `fun`,
+        after `#test` attributes in an impl (D116). After an error, the next
+        `fun` or the body's `}`; a line starting another declaration (or at
+        column 1) leaves the body (`_Unwind`)."""
         tok = self._peek()
-        if self._resuming_at_declaration() and (tok.kind is not T.FUN or tok.column == 1):
+        member_start = {T.FUN, T.HASH} if attributes else {T.FUN}
+        if self._resuming_at_declaration() and (tok.kind not in member_start or tok.column == 1):
             raise _Unwind()
         start = self.pos
         try:
+            attrs = self._attributes() if attributes else []
+            tok = self._peek()
             if not (self._check(T.FUN) or (self._check(T.ASYNC) and self._peek(1).kind is T.FUN)):
                 raise ParseError(f"expected {what}, found '{tok.lexeme}'", at=tok)
-            parse_method()
+            if attributes:
+                parse_method(attrs)
+            else:
+                parse_method()
         except ParseError as err:
             self._recover(err, start, _MEMBER)
         except _Unwind:
-            if not (self._check(T.FUN) and self._peek().column > 1):
+            if not (self._peek().kind in member_start and self._peek().column > 1):
                 raise
 
     def _method_header(self):
@@ -554,10 +561,10 @@ class Parser:
             ret_type = self._type()
         return kw, name, type_params, bounds, receiver, params, ret_type
 
-    def _method_decl(self) -> ast.FunDecl:
+    def _method_decl(self, attributes: list[ast.Attribute]) -> ast.FunDecl:
         kw, name, type_params, bounds, receiver, params, ret_type = self._method_header()
         body = self._block()
-        return ast.FunDecl(name.value, params, ret_type, body,
+        return ast.FunDecl(name.value, params, ret_type, body, attributes=attributes,
                            type_params=type_params, type_param_bounds=bounds,
                            receiver=receiver, is_async=kw.kind is T.ASYNC).at(kw.line, kw.column, self._end())
 
