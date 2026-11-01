@@ -14,6 +14,7 @@ from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
 from std.io import write
+from std.fs import read_to_string
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // =========================================================================
@@ -154,7 +155,9 @@ pub struct Interp {
     receivers: [Value],     // `var self` receivers on their way into a call
     tail: TailCall,         // the call a `become` left pending (Ctrl.CBecome)
     // concurrency (D89): the actor types and the actors' states (by handle);
-    // the tasks, those ready to run (`queue` from `qhead`), the one running
+    // the tasks, those ready to run (a ring: `qlen` of them from `qhead`,
+    // the newest last; `sched` the order they run in, `rng` the generator of
+    // `seed:N`, D110), the one running
     // and its calls (`frames`; the innermost's variables are `scopes`); the
     // normalizer, the normalized async bodies and what statements suspend, by
     // node id; whether the next call of an async body is deferred to the
@@ -165,6 +168,9 @@ pub struct Interp {
     tasks: [Task],
     queue: [int32],
     qhead: int32,
+    qlen: int32,
+    sched: int32,
+    rng: uint64,
     cur: int32,
     frames: [AFrame],
     norm: Norm,
@@ -258,6 +264,66 @@ enum PlaceOp {
 // MYLA-183), and the runtime lets the main stack grow to 120 MiB.
 const MAX_CALL_DEPTH: int32 = 2500
 
+// The orders ready tasks run in (D110, MYLA-231; `Interp.ready`): the newest
+// first (the default), the oldest (MYLA_SCHED=fifo), each queued at the end
+// the generator x * SCHED_MUL + SCHED_ADD picks (seed:N; Knuth's MMIX
+// constants, native code's too)
+const SCHED_LIFO: int32 = 0
+const SCHED_FIFO: int32 = 1
+const SCHED_SEED: int32 = 2
+const SCHED_MUL: uint64 = 6364136223846793005
+const SCHED_ADD: uint64 = 1442695040888963407
+
+// The order `spec` (MYLA_SCHED's value) names, and its seed.
+#test("fifo")[(1, 0u64)]
+#test("seed:42")[(2, 42u64)]
+#test("lifo")[(0, 0u64)]
+#test("")[(0, 0u64)]
+#test("seed:")[(2, 0u64)]
+#test("Fifo")[(0, 0u64)]
+pub fun sched_of(spec: str) -> (int32, uint64) {
+    if spec == "fifo" { return (SCHED_FIFO, 0u64) }
+    if len(spec) < 5 || !(spec[0] == 's' && spec[1] == 'e' && spec[2] == 'e' && spec[3] == 'd' && spec[4] == ':') { return (SCHED_LIFO, 0u64) }
+    var seed: uint64 = 0
+    var i = 5
+    while i < len(spec) && spec[i] >= '0' && spec[i] <= '9' {
+        seed = seed * 10u64 + ((spec[i] - '0') as uint64)
+        i = i + 1
+    }
+    return (SCHED_SEED, seed)
+}
+
+// MYLA_SCHED's value in the environment `environ` (/proc/self/environ:
+// NAME=value entries, each ended by a NUL), "" when it has none.
+#test("A=1\0MYLA_SCHED=fifo\0B=2\0")["fifo"]
+#test("MYLA_SCHEDX=1\0")[""]
+#test("")[""]
+pub fun sched_in(environ: str) -> str {
+    let key = "MYLA_SCHED="
+    var i = 0
+    while i < len(environ) {
+        var j = i
+        while j < len(environ) && environ[j] != '\0' { j = j + 1 }
+        var k = 0
+        while k < len(key) && i + k < j && environ[i + k] == key[k] { k = k + 1 }
+        if k == len(key) {
+            var sb = StringBuilder()
+            append(sb, environ, i + k, j)
+            return build(sb)
+        }
+        i = j + 1
+    }
+    return ""
+}
+
+// MYLA_SCHED's value in this process's environment, "" without one.
+pub fun sched_from_env() -> str {
+    return match read_to_string("/proc/self/environ") {
+        Ok(e) => sched_in(e),
+        Err(_) => "",
+    }
+}
+
 pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     var it = Interp {
         decls: c.decls,
@@ -277,7 +343,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         actor_types: c.actors,
         actors: [],
         tasks: [],
-        queue: [], qhead: 0, cur: -1, frames: [],
+        queue: [], qhead: 0, qlen: 0, sched: SCHED_LIFO, rng: 0, cur: -1, frames: [],
         norm: new_norm(2000000000),
         bodies: [:], suspending: [:],
         defer: false, deferred: None, deferred_place: None,
@@ -888,10 +954,8 @@ impl Interp {
             None => { return },
         }
         self.scopes = []
-        while self.qhead < len(self.queue) {
-            let t = self.queue[self.qhead]
-            self.qhead = self.qhead + 1
-            if self.qhead > 4096 && 2 * self.qhead > len(self.queue) { self.compact_queue() }
+        while self.qlen > 0 {
+            let t = self.next_ready()
             self.cur = t
             self.frames = self.tasks[t].frames
             self.tasks[t].frames = []
@@ -940,19 +1004,87 @@ impl Interp {
         let f = AFrame { scopes: sc, conts: [Cont.KScope, Cont.KStmts(body.stmts, 0)], place: None, pend: Ctrl.CNone, pval: Value.VUnit, perr: None, pcode: 0 }
         push(self.tasks, Task { frames: [f], state: 0, value: Value.VUnit, failed: false, err: None, code: 0, awaited: false, waiters: [], cancelled: false, kids: [], requested: false })
         let id = len(self.tasks) - 1
-        push(self.queue, id)
+        self.ready(id)
         return id
     }
 
-    fun compact_queue(var self) {
-        var rest: [int32] = []
-        var i = self.qhead
-        while i < len(self.queue) {
-            push(rest, self.queue[i])
+    // -- the ready tasks (D110, MYLA-231) ----------------------------------
+    //
+    // The order native code runs frames in on one worker (`emit_executor`):
+    // the newest ready task first, depth first; a task yielding a turn goes
+    // to the oldest end, behind the others. MYLA_SCHED=fifo runs the oldest
+    // first (a yield goes to the newest end, behind the others); seed:N
+    // queues each ready task at the end a generator picks.
+
+    // Run the ready tasks in the order `spec` (MYLA_SCHED's value) names.
+    fun schedule(var self, spec: str) {
+        let (order, seed) = sched_of(spec)
+        self.sched = order
+        self.rng = seed
+    }
+
+    // Room for one more ready task: the ring doubled, its tasks in order.
+    fun q_room(var self) {
+        let cap = len(self.queue)
+        if self.qlen < cap { return }
+        var bigger: [int32] = []
+        var i = 0
+        while i < self.qlen {
+            push(bigger, self.queue[(self.qhead + i) % cap])
             i = i + 1
         }
-        self.queue = rest
+        while len(bigger) < 2 * cap + 16 { push(bigger, -1) }
+        self.queue = bigger
         self.qhead = 0
+    }
+
+    // The task `t` is ready: the newest (seed:N: at the end the generator's
+    // next value picks, its bit 33, as `__exec_push`).
+    fun ready(var self, t: int32) {
+        if self.sched == SCHED_SEED {
+            self.rng = self.rng * SCHED_MUL + SCHED_ADD
+            if (self.rng / 8589934592u64) % 2u64 == 1u64 {
+                self.q_front(t)
+                return
+            }
+        }
+        self.q_room()
+        self.queue[(self.qhead + self.qlen) % len(self.queue)] = t
+        self.qlen = self.qlen + 1
+    }
+
+    // The task `t` yields its turn: the oldest (fifo: the newest, behind the
+    // others).
+    fun ready_behind(var self, t: int32) {
+        if self.sched == SCHED_FIFO {
+            self.ready(t)
+            return
+        }
+        self.q_front(t)
+    }
+
+    // The task `t` at the oldest end.
+    fun q_front(var self, t: int32) {
+        self.q_room()
+        let cap = len(self.queue)
+        self.qhead = (self.qhead + cap - 1) % cap
+        self.queue[self.qhead] = t
+        self.qlen = self.qlen + 1
+    }
+
+    // The ready task to run next (there is one): the newest (fifo: the
+    // oldest), as `__exec_find`.
+    fun next_ready(var self) -> int32 {
+        let cap = len(self.queue)
+        if self.sched == SCHED_FIFO {
+            let t = self.queue[self.qhead]
+            self.qhead = (self.qhead + 1) % cap
+            self.qlen = self.qlen - 1
+            return t
+        }
+        let last = (self.qhead + self.qlen - 1) % cap
+        self.qlen = self.qlen - 1
+        return self.queue[last]
     }
 
     // Run the current task until it waits, lets the others run, or ends.
@@ -970,7 +1102,7 @@ impl Interp {
             if self.yielding {
                 self.yielding = false
                 if len(self.frames) > 0 {
-                    push(self.queue, self.cur)
+                    self.ready_behind(self.cur)
                     return
                 }
             }
@@ -1263,8 +1395,8 @@ impl Interp {
 
     // `let name = await op`: the result of an `async let`'s child (waiting
     // for it if it hasn't ended), or of a call. A call whose body can suspend
-    // is entered on this evaluator; any other runs now. After the value is
-    // there the other tasks may run.
+    // is entered on this evaluator; any other runs now, and then the other
+    // tasks may run.
     fun exec_await(var self, name: str, op: Expr) {
         match op.kind {
             ExprKind.Name(n) => {
@@ -1272,9 +1404,11 @@ impl Interp {
                     Some(v) => {
                         match v {
                             Value.VTask(id) => {
+                                // a child that has ended: its result at
+                                // once, no turn for the others (as native
+                                // code's `myla___wait`, D110)
                                 if self.tasks[id].state == 2 {
                                     self.deliver(name, id)
-                                    self.yielding = true
                                 } else {
                                     push(self.frames[len(self.frames) - 1].conts, Cont.KLet(name, id))
                                     self.wait_for(id)
@@ -1383,7 +1517,7 @@ impl Interp {
         }
         for w in self.tasks[t].waiters {
             self.tasks[w].state = 0
-            push(self.queue, w)
+            self.ready(w)
         }
         self.tasks[t].waiters = []
         self.scopes = []

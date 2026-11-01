@@ -38,7 +38,7 @@ Until the Python toolchain was retired (D101, [[MYLA-219]]), the Python interpre
 D89, [[MYLA-139]], [[Language/Concurrency]].
 
 - **Async functions** are ordinary calls, unless their body has an `await` or an `async let`: such a body is normalized (`anf.my`: each `await` in a `let` of its own, the order of evaluation kept) and runs on an async evaluator, its statements continuations of its call in its task. Everything else runs on the tree walker.
-- **Tasks** take turns at each `await`, one at a time, first in, first out: the order the native runtime keeps on one worker (which is why `test_unit_programs.py` runs native code on one worker). An `async let` starts a child task; the scope that started it joins it when it ends. A failure in any task ends the program (D97).
+- **Tasks** take turns at each `await`, one at a time, the newest ready task first (a ring of ready tasks, `Interp.ready`, `ready_behind`, `next_ready`; `MYLA_SCHED`, read from `/proc/self/environ`, picks another order): the order the native runtime keeps on one worker (D110, [[MYLA-231]]; which is why `test_unit_programs.py` runs native code on one worker). An `async let` starts a child task; the scope that started it joins it when it ends. A failure in any task ends the program (D97).
 - **Actors** are handles to states in `Interp.actors`. Since one task runs at a time, they need no lock.
 
 The Python interpreter ran each `async let` child on a Python thread and gave each actor a lock instead.

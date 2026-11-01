@@ -1950,6 +1950,7 @@ impl CodeGen {
         if self.frames {
             push(out, ".Lmsg_stuck:\n\t.quad 48\n\t.ascii \"runtime error: every task waits for another one\\n\"")
             push(out, ".Lmyla_threads:\n\t.ascii \"MYLA_THREADS=\"")
+            push(out, ".Lmyla_sched:\n\t.ascii \"MYLA_SCHED=\"")
         }
         for line in self.posdata { push(out, line) }
         for line in self.rodata { push(out, line) }
@@ -2006,7 +2007,10 @@ impl CodeGen {
             push(out, format("\t.skip {}", TLS_SIZE * MAX_WORKERS))
             push(out, "__heap_base:")
             push(out, "\t.skip 8")
-            for g in ["__exec_seq", "__exec_idle", "__exec_sleepers", "__exec_workers"] {
+            // the order ready frames run in (`__sched_init`, D110): 0 the
+            // newest first, 1 the oldest, 2 one chosen by the generator
+            // `__exec_rng` (MYLA_SCHED=seed:N)
+            for g in ["__exec_seq", "__exec_idle", "__exec_sleepers", "__exec_workers", "__exec_sched", "__exec_rng"] {
                 push(out, g + ":")
                 push(out, "\t.skip 8")
             }
@@ -2548,8 +2552,11 @@ impl CodeGen {
         // first: a task's children before its siblings'), else steals the
         // oldest frame of the next queue that has one (the biggest piece of
         // a tree of tasks); a frame yielding a turn goes to the oldest end,
-        // behind the others. One worker keeps first in, first out: the order
-        // of the self-hosted interpreter.
+        // behind the others (D110: depth-first, with one worker the order of
+        // the self-hosted interpreter). MYLA_SCHED changes it
+        // (`__sched_init`): `fifo` takes the oldest (a yield goes to the
+        // newest end); `seed:N` queues each push at the end a generator
+        // seeded with N picks (a yield still behind the others).
         // `__exec_seq` counts pushes, the word sleeping workers wait on
         // (futex); `__exec_idle` counts the workers with nothing to run
         // (spinning a while, then asleep), `__exec_sleepers` those asleep.
@@ -2578,6 +2585,21 @@ impl CodeGen {
         self.raw("\tshlq $23, %rdx")
         self.raw("\taddq __wq_rings(%rip), %rdx")
         self.raw("\tcall __wq_lock")
+        // seed:N: the generator's next value (x * a + c, the interpreter's
+        // `Interp.ready` too); its bit 33 set queues the frame at the oldest end
+        self.raw("\tcmpq $2, __exec_sched(%rip)")
+        self.raw("\tjne .Lexp_newest")
+        self.raw("\tpushq %r8")
+        self.raw("\tmovq __exec_rng(%rip), %rax")
+        self.raw(format("\tmovabsq ${}, %r8", SCHED_MUL))
+        self.raw("\timulq %r8, %rax")
+        self.raw(format("\tmovabsq ${}, %r8", SCHED_ADD))
+        self.raw("\taddq %r8, %rax")
+        self.raw("\tpopq %r8")
+        self.raw("\tmovq %rax, __exec_rng(%rip)")
+        self.raw("\tbtq $33, %rax")
+        self.raw("\tjc .Lexp_oldest")
+        self.raw(".Lexp_newest:")
         self.raw("\tmovq 16(%rcx), %rax")
         self.raw("\tpushq %rax")
         self.raw("\tsubq 8(%rcx), %rax")
@@ -2617,10 +2639,10 @@ impl CodeGen {
         self.raw("\tret")
         self.raw("")
         // __exec_yield_push: %rdi = a frame yielding a turn, onto the oldest
-        // end of the running worker's queue (one worker: the newest, as any
-        // push). Clobbers %rax and %rcx.
+        // end of the running worker's queue (MYLA_SCHED=fifo: the newest, as
+        // any push). Clobbers %rax and %rcx.
         self.raw("__exec_yield_push:")
-        self.raw("\tcmpl $1, __exec_workers(%rip)")
+        self.raw("\tcmpq $1, __exec_sched(%rip)")
         self.raw("\tje __exec_push")
         self.raw("\tpushq %rdx")
         self.raw(format("\tmovq {}, %rcx", self.tv("__worker_id")))
@@ -2631,6 +2653,8 @@ impl CodeGen {
         self.raw("\tshlq $23, %rdx")
         self.raw("\taddq __wq_rings(%rip), %rdx")
         self.raw("\tcall __wq_lock")
+        // (%rdx pushed, the lock taken: `__exec_push` comes here too)
+        self.raw(".Lexp_oldest:")
         self.raw("\tmovq 16(%rcx), %rax")
         self.raw("\tsubq 8(%rcx), %rax")
         self.raw(format("\tcmpq ${}, %rax", EXEC_CAP))
@@ -2647,12 +2671,12 @@ impl CodeGen {
         self.raw("\tjne .Lexp_wake")
         self.raw("\tret")
         self.raw("")
-        // __exec_find: %rdi = the running worker's newest frame (one worker:
-        // its oldest), else the oldest frame of the next queue that has one;
-        // 0 when none has. Clobbers %rax, %rcx, %rdx, %rsi, %r8.
+        // __exec_find: %rdi = the running worker's newest frame (fifo: its
+        // oldest), else the oldest frame of the next queue that has one; 0
+        // when none has. Clobbers %rax, %rcx, %rdx, %rsi, %r8.
         self.raw("__exec_find:")
         self.raw(format("\tmovq {}, %rsi", self.tv("__worker_id")))
-        self.raw("\tcmpl $1, __exec_workers(%rip)")
+        self.raw("\tcmpq $1, __exec_sched(%rip)")
         self.raw("\tje .Lef_steal")
         self.raw("\tmovq %rsi, %rcx")
         self.raw("\tshlq $6, %rcx")
@@ -2665,11 +2689,11 @@ impl CodeGen {
         self.raw("\tmovq 16(%rcx), %rax")
         self.raw("\tcmpq 8(%rcx), %rax")
         self.raw("\tje .Lef_mine_gone")
-        self.raw("\tdecq %rax")
-        self.raw("\tmovq %rax, 16(%rcx)")
         self.raw("\tmovq %rsi, %rdx")
         self.raw("\tshlq $23, %rdx")
         self.raw("\taddq __wq_rings(%rip), %rdx")
+        self.raw("\tdecq %rax")
+        self.raw("\tmovq %rax, 16(%rcx)")
         self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
         self.raw("\tmovq (%rdx,%rax,8), %rdi")
         self.raw("\tmovl $0, (%rcx)")
@@ -2950,6 +2974,58 @@ impl CodeGen {
         self.raw("\tpopq %r13")
         self.raw("\tpopq %r12")
         self.raw("\tpopq %rbx")
+        self.raw("\tret")
+        self.raw("")
+        // __sched_init: the scheduling order from MYLA_SCHED (D110,
+        // MYLA-231): `fifo` (1), `seed:N` (2, the generator seeded with N);
+        // anything else keeps the default, the newest first (0)
+        self.raw("__sched_init:")
+        self.raw("\tmovq __envp(%rip), %rsi")
+        self.raw(".Lsi_env:")
+        self.raw("\tmovq (%rsi), %rdi")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lsi_done")
+        self.raw("\tleaq .Lmyla_sched(%rip), %rcx")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw(".Lsi_cmp:")
+        self.raw("\tmovb (%rcx,%rdx), %al")
+        self.raw("\tcmpb (%rdi,%rdx), %al")
+        self.raw("\tjne .Lsi_skip")
+        self.raw("\tincq %rdx")
+        self.raw("\tcmpq $11, %rdx")
+        self.raw("\tjb .Lsi_cmp")
+        self.raw("\taddq $11, %rdi")
+        // "fifo" and "seed", little-endian
+        self.raw("\tcmpl $0x6f666966, (%rdi)")
+        self.raw("\tjne .Lsi_seed")
+        self.raw("\tcmpb $0, 4(%rdi)")
+        self.raw("\tjne .Lsi_done")
+        self.raw("\tmovq $1, __exec_sched(%rip)")
+        self.raw("\tret")
+        self.raw(".Lsi_seed:")
+        self.raw("\tcmpl $0x64656573, (%rdi)")
+        self.raw("\tjne .Lsi_done")
+        self.raw("\tcmpb $58, 4(%rdi)")
+        self.raw("\tjne .Lsi_done")
+        self.raw("\taddq $5, %rdi")
+        self.raw("\txorq %rax, %rax")
+        self.raw(".Lsi_digit:")
+        self.raw("\tmovzbq (%rdi), %rcx")
+        self.raw("\tsubq $48, %rcx")
+        self.raw("\tcmpq $9, %rcx")
+        self.raw("\tja .Lsi_seeded")
+        self.raw("\timulq $10, %rax")
+        self.raw("\taddq %rcx, %rax")
+        self.raw("\tincq %rdi")
+        self.raw("\tjmp .Lsi_digit")
+        self.raw(".Lsi_seeded:")
+        self.raw("\tmovq %rax, __exec_rng(%rip)")
+        self.raw("\tmovq $2, __exec_sched(%rip)")
+        self.raw("\tret")
+        self.raw(".Lsi_skip:")
+        self.raw("\taddq $8, %rsi")
+        self.raw("\tjmp .Lsi_env")
+        self.raw(".Lsi_done:")
         self.raw("\tret")
         self.raw("")
         // __workers_count: %eax = MYLA_THREADS when the environment has it,
@@ -4306,6 +4382,7 @@ impl CodeGen {
             // environment), and the heap region: an arena of 4 GiB per
             // worker, reserved (MAP_NORESERVE), not MAX_WORKERS always
             // (MYLA-172, D106)
+            self.raw("\tcall __sched_init")
             self.raw("\tcall __workers_count")
             self.raw("\tmovl %eax, __exec_workers(%rip)")
             self.raw("\tmovl %eax, %esi")
@@ -4935,7 +5012,7 @@ impl CodeGen {
     // Freestanding I/O runtime backing the `std` intrinsics (D29): `__write`
     // (write(2)), `__args` (build a [str] from the argc/argv captured at _start)
     // and `__read_file` (open/fstat/read/close into a fresh str cell, errno ->
-    // __io_errno_val).
+    // __io_errno_val; a file whose size fstat doesn't know read to its end).
     fun emit_io_runtime(var self) {
         self.raw("__write:")
         self.raw("\tmovq (%rsi), %rdx")
@@ -5045,6 +5122,14 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("\tmovq 48(%rsp), %r15")
         self.raw("\taddq $144, %rsp")
+        // a file without a size (/proc, a pipe: 0) is read into a cell that
+        // doubles until the end (%r12 = 1)
+        self.raw("\txorq %r12, %r12")
+        self.raw("\ttestq %r15, %r15")
+        self.raw("\tjnz .Lrf_sized")
+        self.raw("\tmovq $1, %r12")
+        self.raw("\tmovq $4096, %r15")
+        self.raw(".Lrf_sized:")
         self.raw("\tleaq 8(%r15), %rdi")
         self.raw("\tcall __alloc")
         self.raw("\tmovq %rax, %r13")
@@ -5052,7 +5137,25 @@ impl CodeGen {
         self.raw("\txorq %r14, %r14")
         self.raw(".Lrf_read:")
         self.raw("\tcmpq %r15, %r14")
-        self.raw("\tjae .Lrf_read_done")
+        self.raw("\tjb .Lrf_room")
+        self.raw("\ttestq %r12, %r12")
+        self.raw("\tjz .Lrf_read_done")
+        self.raw("\tleaq 8(%r15,%r15), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\txorq %rcx, %rcx")
+        self.raw(".Lrf_grow:")
+        self.raw("\tcmpq %r14, %rcx")
+        self.raw("\tjae .Lrf_grown")
+        self.raw("\tmovb 8(%r13,%rcx), %dl")
+        self.raw("\tmovb %dl, 8(%rax,%rcx)")
+        self.raw("\tincq %rcx")
+        self.raw("\tjmp .Lrf_grow")
+        self.raw(".Lrf_grown:")
+        self.raw("\tmovq %r13, %rdi")
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tcall __free")
+        self.raw("\taddq %r15, %r15")
+        self.raw(".Lrf_room:")
         self.raw("\tmovq $0, %rax")
         self.raw("\tmovq %rbx, %rdi")
         self.raw("\tleaq 8(%r13), %rsi")
@@ -7799,6 +7902,12 @@ fun compiler_norm() -> Norm {
 
 // The ready-frame ring's size (D90): a power of two.
 const EXEC_CAP: int32 = 1048576
+
+// The generator of MYLA_SCHED=seed:N (D110): x * SCHED_MUL + SCHED_ADD,
+// wrapping (Knuth's MMIX constants), the same in the interpreter
+// (`Interp.ready`).
+const SCHED_MUL: int64 = 6364136223846793005
+const SCHED_ADD: int64 = 1442695040888963407
 
 // A thread's block of runtime state in a program with tasks (D92), which
 // `%fs` points at: its own address first (for `tls_addr`), then each

@@ -17,7 +17,7 @@ from .diag import render, Report
 from .checker import build_checker_decls, Checker, CheckErr
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
-from .interp import new_interp, RtError, TestRun
+from .interp import new_interp, RtError, TestRun, sched_from_env
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // Decode a captured `[uint8]` buffer (e.g. a child's stderr) as UTF-8 text.
@@ -114,6 +114,7 @@ pub fun cmd_interp(file: str, opts: LoadOptions, tests: bool, prog_args: [str]) 
             // other tasks stop (D97, MYLA-170)
             let prog = ch.prog
             it.on_failure = (r: RtError) => report_runtime_error(r, prog)
+            it.schedule(sched_from_env())
             let code = it.run()
             if !it.fail_reported {
                 match it.rt_err {

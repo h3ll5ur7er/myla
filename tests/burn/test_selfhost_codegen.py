@@ -1381,7 +1381,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 with open(exe + ".s", "w", encoding="utf-8") as fh:
                     fh.write(self._emit_asm(path, stdlib))
                 subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
-                # one worker: the order the self-hosted interpreter has (D92)
+                # one worker: the order the self-hosted interpreter has (D92,
+                # D110)
                 env = dict(os.environ, MYLA_THREADS="1")
                 proc = subprocess.run([exe], capture_output=True, text=True, timeout=60, env=env)
                 self.assertEqual((proc.stdout, proc.returncode), (want_out, want_code))
@@ -1536,6 +1537,8 @@ CHILD_FAILURES = {
         "    print(await b)\n    print(\"before a\")\n    print(await a)\n    print(\"never\")\n}\n"),
         "1\n", 1, "runtime error: boom\n"),
     # a grandchild's `exit` ends the program before main is done counting
+    # (depth first, D110: main's second count yields to `inner`, which ends,
+    # then to `leave`; oldest first main printed 3 before `leave` went on)
     "held_exit": ("from std.process import exit\n" + _HELD_COUNTER + (
         "async fun leave(c: C) {\n    let x = await c.bump()\n    exit(4)\n}\n"
         "async fun inner(c: C) -> int {\n    async let l = leave(c)\n    let y = await c.bump()\n"
@@ -1543,7 +1546,7 @@ CHILD_FAILURES = {
         "#main\nasync fun main() {\n    let c = C { n: 0 }\n    async let a = inner(c)\n"
         "    for i in 0..4 {\n        print(await c.bump())\n    }\n    print(\"waiting\")\n"
         "    print(await a)\n    print(\"never\")\n}\n"),
-        "1\ninner goes on\n3\n", 4, ""),
+        "1\ninner goes on\n", 4, ""),
     # children of synchronous calls are tasks too: they run when the parent
     # waits, here at its `await`, which their failure stops
     "held_sync_child": (

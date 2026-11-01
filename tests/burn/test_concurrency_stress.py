@@ -4,7 +4,10 @@ language-neutral plan in docs/Development/Concurrency-stress-tests.md.
 Each program in tests/burn/concurrency_stress/ states what Myla guarantees
 for its example; it must print the same on the self-hosted interpreter and
 natively on 1, 4 and 16 workers (several runs each), under a watchdog (and on
-the Python interpreter until it was retired, MYLA-219). The examples Myla
+the Python interpreter until it was retired, MYLA-219), and in other orders
+of its tasks: on one worker, the interpreter and native code alike, oldest
+first and in the orders of a few seeds (MYLA_SCHED, D110, MYLA-231), each
+reproducible. The examples Myla
 rejects at compile time are in the error corpus (examples/errors/), the
 documented limits on the Concurrency page."""
 import os
@@ -82,6 +85,10 @@ EXPECTED = {
 }
 
 
+# the orders other than the default (newest first) each program is run in
+SCHEDULES = ["fifo", "seed:1", "seed:2", "seed:3"]
+
+
 def _run(cmd, env=None):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=_WATCHDOG, env=env)
@@ -120,6 +127,20 @@ class ConcurrencyStress(unittest.TestCase):
                     for _ in range(3):
                         got = _run([exe], dict(os.environ, MYLA_THREADS=workers))
                         self.assertEqual(got, want, f"{workers} workers")
+                for sched in SCHEDULES:
+                    got = _run([exe], dict(os.environ, MYLA_THREADS="1", MYLA_SCHED=sched))
+                    self.assertEqual(got, want, f"MYLA_SCHED={sched}")
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+    def test_the_self_hosted_interpreter_in_other_orders(self):
+        from ._tools import selfhost_tool
+        interp = selfhost_tool("interp_main")
+        for name, want in EXPECTED.items():
+            for sched in SCHEDULES:
+                with self.subTest(program=name, sched=sched):
+                    got = _run([interp, os.path.join(_DIR, name + ".my"), STDLIB_ROOT],
+                               dict(os.environ, MYLA_SCHED=sched))
+                    self.assertEqual(got, want)
 
 
 if __name__ == "__main__":

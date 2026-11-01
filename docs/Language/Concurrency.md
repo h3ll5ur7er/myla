@@ -1,6 +1,6 @@
 # Concurrency
 
-> **D89 to D97, built** ([[MYLA-61]], [[MYLA-135]] to [[MYLA-150]]). The checker checks what this page describes. The interpreter runs it with tasks taking turns at each `await` (the retired Python interpreter ran a thread per task). The compiler builds every concurrent program (D91): its async functions as stackless state machines on heap frames, its tasks in parallel on a pool of OS threads, one per CPU unless the environment variable `MYLA_THREADS` says how many (at most 32; with `MYLA_THREADS=1` in the same order as the self-hosted interpreter's), its actors with executors of their own (D92, [[Architecture/Native-backend]]). Suspension points are child tasks and actor calls: there is no `sleep`, timer or suspending I/O yet, so today's concurrency is parallel computation and actors.
+> **D89 to D97, built** ([[MYLA-61]], [[MYLA-135]] to [[MYLA-150]]). The checker checks what this page describes. The interpreter runs it with tasks taking turns at each `await` (the retired Python interpreter ran a thread per task). The compiler builds every concurrent program (D91): its async functions as stackless state machines on heap frames, its tasks in parallel on a pool of OS threads, one per CPU unless the environment variable `MYLA_THREADS` says how many (at most 32; with `MYLA_THREADS=1` in the same order as the self-hosted interpreter's, see [[#Order of tasks]]), its actors with executors of their own (D92, [[Architecture/Native-backend]]). Suspension points are child tasks and actor calls: there is no `sleep`, timer or suspending I/O yet, so today's concurrency is parallel computation and actors.
 
 Myla's concurrency follows Swift's: `async` functions that may suspend, `await` at every suspension, structured tasks that never outlive the scope that starts them, and `actor`s, whose state only their own methods touch. Tasks run in parallel on several threads. A value crossing into another task or actor is copied, so tasks share nothing but actors (D89).
 
@@ -181,6 +181,15 @@ A copy costs what the value holds: every element of a list, every entry of a map
 ## The entry point
 
 `#main async fun main()` runs as the first task. The program ends when it returns, and by then every task it started has ended too.
+
+## Order of tasks
+
+Which ready task runs next isn't part of the language: a program whose result depends on it is wrong, and on several workers the order is whatever the timing makes it. What the runners do (D110, [[MYLA-231]]):
+
+- A worker runs the newest ready task first, so a tree of tasks unfolds depth first and needs memory for its depth, not its width: `task.all` over 1.1 million functions on one worker took 20.8 s and 3.3 GB first in, first out, and takes 1.9 s and 354 MB depth first. An idle worker takes the oldest task of another worker's queue.
+- An `async let` queues its child and the parent goes on; awaiting a child that has ended gives its result at once. An awaited call and an awaited actor call give the other tasks a turn afterwards: the task goes behind every task ready then.
+- On one worker (`MYLA_THREADS=1`) native code runs tasks in the same order as the interpreter, so a program prints the same in both.
+- `MYLA_SCHED` changes the order, in the interpreter and in native code alike: `fifo` runs the oldest ready task first (breadth first, the order before D110), `seed:N` queues each ready task at the newest or the oldest end as a generator seeded with N decides, a turn still going behind the others. On one worker each order is reproducible and the same in both runners; the stress tests run every program in a few of them ([[Development/Concurrency-stress-tests]]).
 
 ## Output from tasks running at once
 
