@@ -171,7 +171,9 @@ class NativeRuntime(unittest.TestCase):
     def test_a_stack_overflow_on_a_worker_is_reported(self):
         # every worker stack has a guard page and every worker an alternate
         # signal stack, so running out of a worker's 8 MiB is reported as on
-        # the main stack, whichever thread runs the task (MYLA-172, D106)
+        # the main stack, whichever thread runs the task (MYLA-172, D106),
+        # once when several overflow at the same time (it was printed twice in
+        # about one run of 20)
         source = ("import std.task as task\n\n"
                   "fun down(n: int) -> int {\n    if n == 0 {\n        return 0\n    }\n"
                   "    return down(n - 1) + 1\n}\n\n"
@@ -181,7 +183,7 @@ class NativeRuntime(unittest.TestCase):
                   "    let rs = await task.all(fs)\n    print(len(rs))\n}\n")
         for backend, binary in self.binaries("worker_overflow", source):
             with self.subTest(backend=backend):
-                for _ in range(3):
+                for _ in range(20):
                     proc = subprocess.run([binary], capture_output=True, text=True, timeout=60,
                                           env={**os.environ, "MYLA_THREADS": "4"})
                     self.assertEqual((proc.stdout, proc.stderr, proc.returncode),

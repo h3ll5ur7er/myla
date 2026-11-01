@@ -48,7 +48,7 @@ The jobs run on `ubuntu-24.04` (pinned: `ubuntu-latest` moves, and the burn job 
 
 | Suite | Tests | Result |
 | --- | --- | --- |
-| Burn | 836 (plus subtests, 24 skipped) | All pass (but `test_native_runtime.py`'s stack overflow on a worker is flaky: in one of six runs the error was printed twice); about 120 s in one process with the tools cached, the compiler bootstrapped from the seed and every program built by it |
+| Burn | 840 (plus subtests, about 40 skipped: recorded answers about `selfhost/` files changed since, the tree-sitter CLI) | All pass; about 120 s in one process with the tools cached, the compiler bootstrapped from the seed and every program built by it |
 | `#test` cases in `selfhost/` | on 1,030 of 1,286 value-returning functions (80 %) | `myla test` passes every one ([[MYLA-184]]) |
 
 ## What the Python tests covered

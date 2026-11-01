@@ -1996,6 +1996,9 @@ impl CodeGen {
         push(out, "\t.skip 8")
         push(out, "__run_errno_val:")
         push(out, "\t.skip 8")
+        // 1 once a stack overflow is being reported (`__on_segv`)
+        push(out, "__segv_once:")
+        push(out, "\t.skip 8")
         if self.frames {
             // each worker's queue: `[lock][head][tail]`, a cache line each
             push(out, "\t.balign 64")
@@ -4461,7 +4464,9 @@ impl CodeGen {
         // `runtime error: <message>`, then `  --> file:line:col` (MYLA-65).
         // __on_segv(sig, siginfo, ucontext), on the alternate stack: the fault
         // address (siginfo + 16) within 64 KiB below or 1 MiB above the interrupted
-        // %rsp (ucontext + 160) is a stack overflow (MYLA-182)
+        // %rsp (ucontext + 160) is a stack overflow (MYLA-182), reported once:
+        // a worker overflowing after another sleeps until its exit ends the
+        // process (MYLA-172)
         self.raw("__on_segv:")
         self.raw("	movq 16(%rsi), %rax")
         self.raw("	movq 160(%rdx), %rcx")
@@ -4473,6 +4478,15 @@ impl CodeGen {
         self.raw("	addq $1048576, %r8")
         self.raw("	cmpq %r8, %rax")
         self.raw("	ja .Lsegv_other")
+        self.raw("	movl $1, %eax")
+        self.raw("	xchgl %eax, __segv_once(%rip)")
+        self.raw("	testl %eax, %eax")
+        self.raw("	jz .Lsegv_report")
+        self.raw(".Lsegv_sleep:")
+        self.raw("	movq $34, %rax")
+        self.raw("	syscall")
+        self.raw("	jmp .Lsegv_sleep")
+        self.raw(".Lsegv_report:")
         self.raw("	movq $1, %rax")
         self.raw("	movl $2, %edi")
         self.raw("	leaq .Lmsg_sov(%rip), %rsi")
