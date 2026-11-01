@@ -13,3 +13,5 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 - `std.process.run` has no PATH search, working directory, environment or stdin for the child; the project tool works around PATH with `/usr/bin/env git`. `Command` is an immutable builder (`arg` returns a new one), which the page doesn't say.
 
 - [ ] Each decided and done, with the parity tests of `test_stdio.py`, `test_fs.py` and `test_process.py` extended
+
+Waits for the decision in [[MYLA-211]].

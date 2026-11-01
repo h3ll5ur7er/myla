@@ -14,3 +14,5 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 
 - [ ] One shared frame-layout record; named constants; a flag on the call site instead of the suffix
 - [ ] `codegen.my` split by role (runtime text, layout, DWARF, census), or at least its sections named for what they hold
+
+Waits for the decision in [[MYLA-201]] and [[MYLA-217]].

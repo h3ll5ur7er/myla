@@ -10,3 +10,5 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 
 - [ ] Slots of disjoint scopes and match arms share cells (the temporaries already do, `alloc_temps`), measured on the self-compile (time, peak memory, frame sizes of the interpreter's functions)
 - [ ] The interpreter's recursion depth before and after
+
+Waits for the decision in [[MYLA-210]].

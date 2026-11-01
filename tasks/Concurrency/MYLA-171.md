@@ -11,3 +11,5 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 - [ ] A call of a `var self` method on `self` counts as a change of every field it changes (transitively); a call of a `self` method counts as examining every field its body examines
 - [ ] Both checkers agree; the two programs above warn, the two ways out (checking again after the `await`, changing before it) stay quiet
 - [ ] Consider a non-reentrant method kind (no `await` inside), which is what most invariants want (a decision)
+
+Waits for the decision in [[MYLA-212]].

@@ -14,3 +14,5 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 - [ ] Reserve per worker, or lazily
 - [ ] A guard page under every worker stack (and the main stack's own guard reported as `runtime error: stack overflow`, with [[MYLA-182]])
 - [ ] Both documented on [[Architecture/Native-backend]]
+
+Waits for the decision in [[MYLA-206]].
