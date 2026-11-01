@@ -194,6 +194,9 @@ pub struct RtError { msg: str, line: int32, col: int32, sp: SrcSpan, node: int32
 pub struct TestRun { report: [str], passed: int32, total: int32 }
 
 // A partial application's arguments: its filled slots, and `argv` in its holes.
+#test([Value.VInt(2), Value.VUnit], [false, true], [Value.VInt(4)])[[Value.VInt(2), Value.VInt(4)]]
+#test([Value.VInt(5), Value.VUnit], [false, true], [Value.VInt(10)])[[Value.VInt(5), Value.VInt(10)]]
+#test([Value.VUnit, Value.VInt(2)], [true, false], [Value.VInt(40)])[[Value.VInt(40), Value.VInt(2)]]
 fun fill_holes(slots: [Value], holes: [bool], argv: [Value]) -> [Value] {
     var full: [Value] = []
     var hi = 0
@@ -2766,6 +2769,9 @@ impl Interp {
 
 // format_value, with a float32 printed to its 9 significant digits (the
 // static type decides, as in the Python interpreter)
+#test(Value.VChar(97), Some(Type.TChar))["a"]
+#test(Value.VInt(40), Some(Type.TInt(32, true)))["40"]
+#test(Value.VStr("main.my:3:12: there is no error, this is just a test"), Some(Type.TStr))["main.my:3:12: there is no error, this is just a test"]
 fun format_typed(v: Value, t: Option<Type>) -> str {
     match v {
         Value.VFloat(f) => { if is_float32_type(t) { return format("{}", f as float32) } },
@@ -2777,20 +2783,31 @@ fun format_typed(v: Value, t: Option<Type>) -> str {
 
 // A uint64 value is stored as the int64 with the same bits; division,
 // remainder, comparison and printing read it unsigned.
+#test(Some(Type.TChar))[false]
+#test(Some(Type.TFloat(64)))[false]
+#test(Some(Type.TParam("T")))[false]
 fun is_u64(t: Option<Type>) -> bool {
     return match t { Some(Type.TInt(w, sg)) => w == 64 && !sg, _ => false }
 }
 
+#test(Some(Type.TFloat(32)))[true]
+#test(Some(Type.TFloat(64)))[false]
 fun is_float32_type(t: Option<Type>) -> bool {
     return match t { Some(Type.TFloat(w)) => w == 32, _ => false }
 }
 
 // Round to the precision of float type `t` (float32: to nearest single).
+#test(1.0, Some(Type.TFloat(64)))[1.0]
+#test(6.0, Some(Type.TFloat(64)))[6.0]
+#test(0.30000000447034836, Some(Type.TFloat(32)))[0.30000001192092896]
 fun round_float(f: float64, t: Option<Type>) -> float64 {
     if is_float32_type(t) { return (f as float32) as float64 }
     return f
 }
 
+#test(Value.VInt(0))["0"]
+#test(Value.VInt(955))["955"]
+#test(Value.VStr("This is not the error you are looking for. It is the answer to life, the universe, and everything."))["This is not the error you are looking for. It is the answer to life, the universe, and everything."]
 fun format_value(v: Value) -> str {
     return match v {
         Value.VStr(s) => s,
@@ -2802,6 +2819,9 @@ fun format_value(v: Value) -> str {
     }
 }
 
+#test(Value.VInt(0))[0]
+#test(Value.VInt(99))[99]
+#test(Value.VInt(100000))[100000]
 fun as_int(v: Value) -> int64 {
     return match v {
         Value.VInt(n) => n,
@@ -2811,6 +2831,9 @@ fun as_int(v: Value) -> int64 {
     }
 }
 
+#test(Value.VInt(2))[2.0]
+#test(Value.VFloat(1.5))[1.5]
+#test(Value.VFloat(0.20000000298023224))[0.20000000298023224]
 fun as_float(v: Value) -> float64 {
     return match v {
         Value.VFloat(f) => f,
@@ -2819,10 +2842,15 @@ fun as_float(v: Value) -> float64 {
     }
 }
 
+#test(Value.VBool(true))[true]
+#test(Value.VBool(false))[false]
 fun as_bool(v: Value) -> bool {
     return match v { Value.VBool(b) => b, _ => false }
 }
 
+#test(Value.VStr(""))[""]
+#test(Value.VStr("héllo"))["héllo"]
+#test(Value.VStr("This is not the error you are looking for. It is {}"))["This is not the error you are looking for. It is {}"]
 fun as_str(v: Value) -> str {
     return match v { Value.VStr(s) => s, _ => "" }
 }
@@ -2836,10 +2864,16 @@ fun bytes_to_value(bytes: [uint8]) -> Value {
     return Value.VList(items)
 }
 
+#test(Value.VInt(0))[false]
+#test(Value.VInt(1))[false]
+#test(Value.VStr("a"))[true]
 fun is_vstr(v: Value) -> bool {
     return match v { Value.VStr(s) => true, _ => false }
 }
 
+#test(Value.VInt(-32))[false]
+#test(Value.VInt(240))[false]
+#test(Value.VClosure([], ExprOrBlock.EB_Block(Block { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, stmts: [] }), [], [], "inc", true))[true]
 fun is_callable(v: Value) -> bool {
     return match v {
         Value.VClosure(ps, b, cn, cv, fn, isf) => true,
@@ -2864,6 +2898,9 @@ fun append_value(xs: [Value], v: Value) -> [Value] {
     return out
 }
 
+#test(Value.VInt(0))[false]
+#test(Value.VInt(1))[false]
+#test(Value.VEnum("Color", "Green", []))[true]
 fun i_is_struct_or_enum(v: Value) -> bool {
     return match v {
         Value.VStruct(n, fns, fvs) => true,
@@ -2872,6 +2909,9 @@ fun i_is_struct_or_enum(v: Value) -> bool {
     }
 }
 
+#test(Value.VEnum("Color", "Green", []))["Color"]
+#test(Value.VStruct("Glyph", ["c", "width"], [Value.VChar(109), Value.VFloat(0.5)]))["Glyph"]
+#test(Value.VStruct("Pixel", ["at", "color"], [Value.VStruct("Vec2", ["x", "y"], [Value.VInt(0), Value.VInt(0)]), Value.VEnum("Color", "Red", [])]))["Pixel"]
 fun value_key(v: Value) -> str {
     return match v {
         Value.VStruct(n, fns, fvs) => n,
@@ -2885,6 +2925,9 @@ fun value_key(v: Value) -> str {
     }
 }
 
+#test(Type.TInt(32, true))["int32"]
+#test(Type.TActor("Account"))["Account"]
+#test(Type.TStruct("Box", [Type.TInt(32, true)]))["Box"]
 fun type_key_of(t: Type) -> str {
     return match t {
         Type.TStruct(n, a) => n,
@@ -2898,6 +2941,7 @@ fun type_key_of(t: Type) -> str {
     }
 }
 
+#test(32, true)["int32"]
 fun int_type_name_i(w: int32, signed: bool) -> str {
     if signed { return format("int{}", w) }
     return format("uint{}", w)
@@ -2905,6 +2949,9 @@ fun int_type_name_i(w: int32, signed: bool) -> str {
 
 // Map a written type name (incl. aliases) to the canonical key `type_key_of`
 // produces, so `impl int { … }` registers under the same key `int` resolves to.
+#test("Box")["Box"]
+#test("Money")["Money"]
+#test("ErrorCode")["ErrorCode"]
 fun canon_type_name(n: str) -> str {
     if n == "int" { return "int32" }
     if n == "uint" { return "uint32" }
@@ -2913,6 +2960,9 @@ fun canon_type_name(n: str) -> str {
     return n
 }
 
+#test("<", -1)[true]
+#test("<", 2)[false]
+#test("<", -90)[true]
 fun cmp_to_bool(op: str, c: int64) -> bool {
     if op == "<" { return c < 0 }
     if op == "<=" { return c <= 0 }
@@ -2920,6 +2970,7 @@ fun cmp_to_bool(op: str, c: int64) -> bool {
     return c >= 0
 }
 
+#test("+")["add"]
 fun i_arith_method(op: str) -> str {
     if op == "+" { return "add" }
     if op == "-" { return "sub" }
@@ -2928,6 +2979,9 @@ fun i_arith_method(op: str) -> str {
     return "rem"
 }
 
+#test([])[false]
+#test([Expr { id: 11, line: 9, col: 11, sp: SrcSpan { sline: 9, scol: 11, eline: 9, ecol: 14 }, kind: ExprKind.Name("sum") }])[false]
+#test([Expr { id: 7, line: 13, col: 16, sp: SrcSpan { sline: 13, scol: 16, eline: 13, ecol: 17 }, kind: ExprKind.Name("s") }])[false]
 fun i_args_have_hole(args: [Expr]) -> bool {
     for a in args {
         match a.kind { ExprKind.Hole => { return true }, _ => {} }
@@ -2936,6 +2990,9 @@ fun i_args_have_hole(args: [Expr]) -> bool {
 }
 
 
+#test("<")[true]
+#test(">")[true]
+#test("%")[false]
 fun is_cmp_op(op: str) -> bool {
     return op == "<" || op == "<=" || op == ">" || op == ">="
 }
@@ -2949,6 +3006,9 @@ fun ucompare(op: str, a: int64, b: int64) -> bool {
     return x >= y
 }
 
+#test(0, 0)[0]
+#test(1, 0)[1]
+#test(0, 1)[-1]
 fun icmp(a: int64, b: int64) -> int32 {
     if a < b { return -1 }
     if a > b { return 1 }
@@ -2956,6 +3016,7 @@ fun icmp(a: int64, b: int64) -> int32 {
 }
 
 // float comparison with IEEE semantics: anything involving NaN is false
+#test("<", 2.0, 3.0)[true]
 fun fcompare(op: str, a: float64, b: float64) -> bool {
     if op == "<" { return a < b }
     if op == "<=" { return a <= b }
@@ -2990,21 +3051,31 @@ fun idiv(a: int64, b: int64) -> int64 {
     return a / b
 }
 
+#test(1, 2)[1]
+#test(2, 2)[0]
+#test(17, 5)[2]
 fun imod(a: int64, b: int64) -> int64 {
     if b == 0 { return 0 }
     return a - idiv(a, b) * b
 }
 
+#test(Some(Type.TInt(8, false)))[8]
+#test(Some(Type.TInt(32, true)))[32]
 fun width_of(rt: Option<Type>) -> int32 {
     return match rt { Some(t) => match t { Type.TInt(w, s) => w, _ => 0 }, None => 0 }
 }
 
+#test(2, Some(Type.TInt(32, true)))[2]
+#test(4, Some(Type.TInt(32, true)))[4]
+#test(10, Some(Type.TInt(32, true)))[10]
 fun shift_count(b: int64, rt: Option<Type>) -> int64 {
     let w = width_of(rt)
     if w > 0 { return b & ((w as int64) - 1) }
     return b
 }
 
+#test(-32, 2, Some(Type.TInt(32, true)))[-8]
+#test(240, 4, Some(Type.TInt(8, false)))[15]
 fun shr_typed(a: int64, b: int64, rt: Option<Type>) -> int64 {
     let count = shift_count(b, rt)
     let aw = wrap_opt(a, rt)
@@ -3013,6 +3084,9 @@ fun shr_typed(a: int64, b: int64, rt: Option<Type>) -> int64 {
     return wrap_opt(aw >> count, rt)
 }
 
+#test(1, Some(Type.TParam("T")))[1]
+#test(99, Some(Type.TInt(32, true)))[99]
+#test(100000, Some(Type.TInt(32, true)))[100000]
 fun wrap_opt(v: int64, rt: Option<Type>) -> int64 {
     return match rt {
         Some(t) => match t { Type.TInt(w, s) => wrap_int_w(v, w, s), _ => v },
@@ -3020,6 +3094,9 @@ fun wrap_opt(v: int64, rt: Option<Type>) -> int64 {
     }
 }
 
+#test(0, 32, true)[0]
+#test(98, 32, true)[98]
+#test(100000, 32, true)[100000]
 fun wrap_int_w(value: int64, w: int32, signed: bool) -> int64 {
     if w >= 64 { return value }
     var mask: int64 = 1
@@ -3035,6 +3112,9 @@ fun wrap_int_w(value: int64, w: int32, signed: bool) -> int64 {
     return m
 }
 
+#test(Value.VChar(0), Some(Type.TChar), Some(Type.TInt(32, true)))[Value.VInt(0)]
+#test(Value.VInt(9), Some(Type.TInt(32, true)), Some(Type.TFloat(64)))[Value.VFloat(9.0)]
+#test(Value.VInt(200), Some(Type.TInt(8, false)), Some(Type.TInt(8, true)))[Value.VInt(-56)]
 fun cast_value(v: Value, src: Option<Type>, tgt: Option<Type>) -> Value {
     var t = Type.TBool
     var has = false
@@ -3060,6 +3140,7 @@ fun cast_value(v: Value, src: Option<Type>, tgt: Option<Type>) -> Value {
 
 // `f as` an integer of width `w`: truncate toward zero, clamp to the range,
 // NaN gives 0 (D59). A uint64 above 2^63 comes back as its bit pattern.
+#test(3.9, 32, true)[3]
 fun float_to_int(f: float64, w: int32, s: bool) -> int64 {
     if f != f { return 0 }
     var top = w                                  // high + 1 = 2^top
@@ -3082,15 +3163,20 @@ fun empty_values() -> [Value] {
     return x
 }
 
+#test()[[]]
 fun empty_params() -> [Param] {
     let x: [Param] = []
     return x
 }
 
+#test()[ExprOrBlock.EB_Block(Block { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, stmts: [] })]
 fun eb_dummy() -> ExprOrBlock {
     return ExprOrBlock.EB_Block(Block { line: 0, col: 0, sp: no_span(), stmts: [] })
 }
 
+#test(Value.VStr(""))[0]
+#test(Value.VStr("héλ"))[5]
+#test(Value.VStr("banana"))[6]
 fun value_len(v: Value) -> int64 {
     return match v {
         Value.VList(xs) => len(xs) as int64,
@@ -3103,6 +3189,9 @@ fun value_len(v: Value) -> int64 {
 
 // Why `c[k]` can't be read (or, `assigning`, written: a missing map key is
 // then an insert), with the Python interpreter's message; "" if it can.
+#test(Value.VStr("a"), Value.VInt(0), false)[""]
+#test(Value.VStr("b"), Value.VInt(0), false)[""]
+#test(Value.VStr("e"), Value.VInt(0), false)[""]
 fun index_error(c: Value, k: Value, assigning: bool) -> str {
     match c {
         Value.VList(xs) => {
@@ -3129,6 +3218,9 @@ fun index_error(c: Value, k: Value, assigning: bool) -> str {
 
 // The parts of a container value (empty for any other value), for
 // `Interp.update_cell`: the caller releases the container, then changes them.
+#test(Value.VList([]))[[]]
+#test(Value.VList([Value.VInt(4), Value.VInt(6)]))[[Value.VInt(4), Value.VInt(6)]]
+#test(Value.VList([Value.VList([Value.VInt(1), Value.VInt(20)]), Value.VList([Value.VInt(3), Value.VInt(4)])]))[[Value.VList([Value.VInt(1), Value.VInt(20)]), Value.VList([Value.VInt(3), Value.VInt(4)])]]
 fun list_values(v: Value) -> [Value] {
     return match v {
         Value.VList(xs) => xs,
@@ -3136,6 +3228,9 @@ fun list_values(v: Value) -> [Value] {
     }
 }
 
+#test(Value.VMap([], []))[true]
+#test(Value.VList([Value.VInt(1), Value.VInt(2)]))[false]
+#test(Value.VList([Value.VInt(1), Value.VInt(2), Value.VInt(3)]))[false]
 fun is_vmap(v: Value) -> bool {
     return match v {
         Value.VMap(ks, vs) => true,
@@ -3143,6 +3238,9 @@ fun is_vmap(v: Value) -> bool {
     }
 }
 
+#test(Value.VList([Value.VInt(1), Value.VInt(2)]))[true]
+#test(Value.VList([Value.VInt(1), Value.VInt(2), Value.VInt(3)]))[true]
+#test(Value.VList([Value.VInt(10), Value.VInt(20), Value.VInt(30)]))[true]
 fun is_vlist(v: Value) -> bool {
     return match v {
         Value.VList(xs) => true,
@@ -3150,6 +3248,9 @@ fun is_vlist(v: Value) -> bool {
     }
 }
 
+#test(Value.VStruct("Box", ["v"], [Value.VInt(1)]))[true]
+#test(Value.VStruct("Box", ["value"], [Value.VInt(7)]))[true]
+#test(Value.VStruct("Counter", ["n"], [Value.VInt(0)]))[true]
 fun is_vstruct(v: Value) -> bool {
     return match v {
         Value.VStruct(n, names, vals) => true,
@@ -3157,6 +3258,7 @@ fun is_vstruct(v: Value) -> bool {
     }
 }
 
+#test(Value.VMap([], []))[[]]
 fun map_key_values(v: Value) -> [Value] {
     return match v {
         Value.VMap(ks, vs) => ks,
@@ -3164,6 +3266,7 @@ fun map_key_values(v: Value) -> [Value] {
     }
 }
 
+#test(Value.VMap([], []))[[]]
 fun map_val_values(v: Value) -> [Value] {
     return match v {
         Value.VMap(ks, vs) => vs,
@@ -3171,6 +3274,9 @@ fun map_val_values(v: Value) -> [Value] {
     }
 }
 
+#test(Value.VStruct("Box", ["v"], [Value.VInt(1)]))["Box"]
+#test(Value.VStruct("Account", ["balance"], [Value.VInt(0)]))["Account"]
+#test(Value.VStruct("Point", ["x", "y"], [Value.VInt(3), Value.VInt(4)]))["Point"]
 fun struct_name(v: Value) -> str {
     return match v {
         Value.VStruct(n, names, vals) => n,
@@ -3178,6 +3284,9 @@ fun struct_name(v: Value) -> str {
     }
 }
 
+#test(Value.VStruct("Box", ["v"], [Value.VInt(1)]))[["v"]]
+#test(Value.VStruct("Box", ["value"], [Value.VInt(7)]))[["value"]]
+#test(Value.VStruct("Point", ["x", "y"], [Value.VInt(3), Value.VInt(4)]))[["x", "y"]]
 fun struct_field_names(v: Value) -> [str] {
     let none: [str] = []
     return match v {
@@ -3186,6 +3295,9 @@ fun struct_field_names(v: Value) -> [str] {
     }
 }
 
+#test(Value.VStruct("Box", ["v"], [Value.VInt(1)]))[[Value.VInt(1)]]
+#test(Value.VStruct("Account", ["balance"], [Value.VInt(20)]))[[Value.VInt(20)]]
+#test(Value.VStruct("Point", ["x", "y"], [Value.VInt(3), Value.VInt(4)]))[[Value.VInt(3), Value.VInt(4)]]
 fun struct_values(v: Value) -> [Value] {
     return match v {
         Value.VStruct(n, names, vals) => vals,
@@ -3193,6 +3305,9 @@ fun struct_values(v: Value) -> [Value] {
     }
 }
 
+#test(Value.VSB([]))[[]]
+#test(Value.VSB([48, 49, 50, 51]))[[48, 49, 50, 51]]
+#test(Value.VSB([72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100]))[[72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100]]
 fun sb_bytes(v: Value) -> [int64] {
     return match v {
         Value.VSB(b) => b,
@@ -3201,6 +3316,8 @@ fun sb_bytes(v: Value) -> [int64] {
 }
 
 // The index of key `k` in `ks`, or -1.
+#test([], Value.VChar(120))[-1]
+#test([Value.VChar(120)], Value.VChar(120))[0]
 fun key_index(ks: [Value], k: Value) -> int32 {
     var i = 0
     while i < len(ks) {
@@ -3210,6 +3327,7 @@ fun key_index(ks: [Value], k: Value) -> int32 {
     return -1
 }
 
+#test(Value.VMap([Value.VChar(120)], [Value.VInt(2)]), Value.VChar(120))[true]
 fun map_has(c: Value, k: Value) -> bool {
     return match c {
         Value.VMap(ks, vs) => keys_contain(ks, k),
@@ -3217,6 +3335,7 @@ fun map_has(c: Value, k: Value) -> bool {
     }
 }
 
+#test([Value.VChar(120)], Value.VChar(120))[true]
 fun keys_contain(ks: [Value], k: Value) -> bool {
     return key_index(ks, k) >= 0
 }
@@ -3249,6 +3368,9 @@ fun map_keys(c: Value) -> Value {
     }
 }
 
+#test("")[Value.VList([])]
+#test("héλ")[Value.VList([Value.VChar(104), Value.VChar(233), Value.VChar(955)])]
+#test("héllo")[Value.VList([Value.VChar(104), Value.VChar(233), Value.VChar(108), Value.VChar(108), Value.VChar(111)])]
 fun decode_chars(s: str) -> Value {
     var out: [Value] = []
     for ch in chars(s) {
@@ -3257,11 +3379,15 @@ fun decode_chars(s: str) -> Value {
     return Value.VList(out)
 }
 
+#test()[[]]
 fun empty_bytes() -> [int64] {
     let x: [int64] = []
     return x
 }
 
+#test(Value.VSB([]))[""]
+#test(Value.VSB([48, 49, 50, 51, 52]))["01234"]
+#test(Value.VSB([72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33]))["Hello, world!"]
 fun sb_build(c: Value) -> str {
     return match c {
         Value.VSB(b) => bytes_to_str(b),
@@ -3269,6 +3395,9 @@ fun sb_build(c: Value) -> str {
     }
 }
 
+#test([])[""]
+#test([48, 49, 50, 51, 52])["01234"]
+#test([72, 101, 108, 108, 111, 44, 32, 119, 111, 114, 108, 100, 33])["Hello, world!"]
 fun bytes_to_str(b: [int64]) -> str {
     var sb = StringBuilder()
     var i = 0
@@ -3279,6 +3408,9 @@ fun bytes_to_str(b: [int64]) -> str {
     return build(sb)
 }
 
+#test("{}€", ["6"])["6€"]
+#test("{} + {} = {}", ["2", "3", "5"])["2 + 3 = 5"]
+#test("{}:{}:{}: there is no error, this is just a test", ["main.my", "3", "12"])["main.my:3:12: there is no error, this is just a test"]
 fun render_format(fmt: str, parts: [str]) -> str {
     var sb = StringBuilder()
     let n = len(fmt)
@@ -3304,9 +3436,16 @@ fun render_format(fmt: str, parts: [str]) -> str {
     return build(sb)
 }
 
+#test()[MatchRes { ok: true, names: [], vals: [] }]
 fun mr_ok() -> MatchRes { return MatchRes { ok: true, names: [], vals: [] } }
+#test()[MatchRes { ok: false, names: [], vals: [] }]
 fun mr_fail() -> MatchRes { return MatchRes { ok: false, names: [], vals: [] } }
+#test(true)[MatchRes { ok: true, names: [], vals: [] }]
+#test(false)[MatchRes { ok: false, names: [], vals: [] }]
 fun mr_bool(b: bool) -> MatchRes { return MatchRes { ok: b, names: [], vals: [] } }
+#test("a", Value.VInt(4))[MatchRes { ok: true, names: ["a"], vals: [Value.VInt(4)] }]
+#test("w", Value.VInt(3))[MatchRes { ok: true, names: ["w"], vals: [Value.VInt(3)] }]
+#test("t", Value.VEnum("List", "Cons", [Value.VInt(6), Value.VEnum("List", "Nil", [])]))[MatchRes { ok: true, names: ["t"], vals: [Value.VEnum("List", "Cons", [Value.VInt(6), Value.VEnum("List", "Nil", [])])] }]
 fun mr_bind(n: str, v: Value) -> MatchRes {
     var names: [str] = []
     var vals: [Value] = []
@@ -3314,6 +3453,9 @@ fun mr_bind(n: str, v: Value) -> MatchRes {
     push(vals, v)
     return MatchRes { ok: true, names: names, vals: vals }
 }
+#test(MatchRes { ok: true, names: [], vals: [] }, MatchRes { ok: true, names: [], vals: [] })[MatchRes { ok: true, names: [], vals: [] }]
+#test(MatchRes { ok: true, names: [], vals: [] }, MatchRes { ok: true, names: ["v"], vals: [Value.VInt(8)] })[MatchRes { ok: true, names: ["v"], vals: [Value.VInt(8)] }]
+#test(MatchRes { ok: true, names: [], vals: [] }, MatchRes { ok: true, names: ["rest"], vals: [Value.VEnum("List", "Nil", [])] })[MatchRes { ok: true, names: ["rest"], vals: [Value.VEnum("List", "Nil", [])] }]
 fun mr_merge(a: MatchRes, b: MatchRes) -> MatchRes {
     var names = a.names
     var vals = a.vals
@@ -3328,6 +3470,9 @@ fun mr_merge(a: MatchRes, b: MatchRes) -> MatchRes {
 
 struct RtEnumInfo { ok: bool, names: [str], vals: [Value] }
 
+#test(Value.VEnum("List", "Nil", []))[RtEnumInfo { ok: true, names: ["Nil"], vals: [] }]
+#test(Value.VEnum("Option", "Some", [Value.VInt(8)]))[RtEnumInfo { ok: true, names: ["Some"], vals: [Value.VInt(8)] }]
+#test(Value.VEnum("List", "Cons", [Value.VStr("z"), Value.VEnum("List", "Nil", [])]))[RtEnumInfo { ok: true, names: ["Cons"], vals: [Value.VStr("z"), Value.VEnum("List", "Nil", [])] }]
 fun enum_info(v: Value) -> RtEnumInfo {
     return match v {
         Value.VEnum(en, vr, pl) => mk_enum_info(vr, pl),
@@ -3335,6 +3480,9 @@ fun enum_info(v: Value) -> RtEnumInfo {
     }
 }
 
+#test("Nil", [])[RtEnumInfo { ok: true, names: ["Nil"], vals: [] }]
+#test("Some", [Value.VInt(8)])[RtEnumInfo { ok: true, names: ["Some"], vals: [Value.VInt(8)] }]
+#test("Cons", [Value.VStr("z"), Value.VEnum("List", "Nil", [])])[RtEnumInfo { ok: true, names: ["Cons"], vals: [Value.VStr("z"), Value.VEnum("List", "Nil", [])] }]
 fun mk_enum_info(vr: str, pl: [Value]) -> RtEnumInfo {
     var names: [str] = []
     push(names, vr)
@@ -3345,6 +3493,9 @@ fun i_tuple_elems(v: Value) -> [Value] {
     return match v { Value.VTuple(es) => es, _ => empty_values() }
 }
 
+#test(Value.VInt(0), Value.VInt(0))[true]
+#test(Value.VInt(1), Value.VInt(1))[true]
+#test(Value.VInt(0), Value.VInt(1))[false]
 fun value_eq(a: Value, b: Value) -> bool {
     return match a {
         Value.VInt(x) => icmp(x, as_int(b)) == 0,
@@ -3489,6 +3640,9 @@ fun maps_eq(ks: [Value], vs: [Value], ks2: [Value], vs2: [Value]) -> bool {
     return true
 }
 
+#test([], [])[true]
+#test([Value.VInt(5)], [Value.VInt(5)])[true]
+#test([Value.VStruct("Vec2", ["x", "y"], [Value.VInt(1), Value.VInt(1)]), Value.VEnum("Color", "Red", [])], [Value.VStruct("Vec2", ["x", "y"], [Value.VInt(1), Value.VInt(1)]), Value.VEnum("Color", "Blue", [])])[false]
 fun values_eq(a: [Value], b: [Value]) -> bool {
     if len(a) != len(b) { return false }
     var i = 0
@@ -3499,6 +3653,9 @@ fun values_eq(a: [Value], b: [Value]) -> bool {
     return true
 }
 
+#test(Value.VStruct("Box", ["v"], [Value.VInt(1)]), "v")[Value.VInt(1)]
+#test(Value.VStruct("Account", ["balance"], [Value.VInt(18)]), "balance")[Value.VInt(18)]
+#test(Value.VStruct("Point", ["x", "y"], [Value.VInt(-3), Value.VInt(1)]), "x")[Value.VInt(-3)]
 fun get_field(v: Value, field: str) -> Value {
     match v {
         Value.VStruct(n, names, vals) => {
@@ -3513,6 +3670,9 @@ fun get_field(v: Value, field: str) -> Value {
     return Value.VUnit
 }
 
+#test(Value.VStr("a"), Value.VInt(0))[Value.VInt(97)]
+#test(Value.VList([Value.VInt(1), Value.VInt(2)]), Value.VInt(1))[Value.VInt(2)]
+#test(Value.VList([Value.VList([Value.VInt(1), Value.VInt(20)]), Value.VList([Value.VInt(3), Value.VInt(4), Value.VInt(5)])]), Value.VInt(1))[Value.VList([Value.VInt(3), Value.VInt(4), Value.VInt(5)])]
 fun index_get(c: Value, k: Value) -> Value {
     return match c {
         Value.VList(xs) => xs[as_int(k) as int32],
@@ -3522,6 +3682,7 @@ fun index_get(c: Value, k: Value) -> Value {
     }
 }
 
+#test([Value.VChar(120)], [Value.VInt(2)], Value.VChar(120))[Value.VInt(2)]
 fun map_get(ks: [Value], vs: [Value], k: Value) -> Value {
     var i = 0
     while i < len(ks) {
@@ -3531,6 +3692,9 @@ fun map_get(ks: [Value], vs: [Value], k: Value) -> Value {
     return Value.VUnit
 }
 
+#test([RtFrame { names: [], vals: [] }])[[]]
+#test([RtFrame { names: ["s"], vals: [Value.VStr("Hi")] }, RtFrame { names: ["c"], vals: [Value.VInt(72)] }])[[RtFrame { names: ["s"], vals: [Value.VStr("Hi")] }]]
+#test([RtFrame { names: ["s"], vals: [Value.VStr("apple")] }, RtFrame { names: [], vals: [] }, RtFrame { names: [], vals: [] }])[[RtFrame { names: ["s"], vals: [Value.VStr("apple")] }, RtFrame { names: [], vals: [] }]]
 fun drop_last_frame(xs: [RtFrame]) -> [RtFrame] {
     var out: [RtFrame] = []
     var i = 0
@@ -3542,6 +3706,9 @@ fun drop_last_frame(xs: [RtFrame]) -> [RtFrame] {
 }
 
 // `Key.method`: a method's mangled name (plain function names have no dot).
+#test("add")[false]
+#test("inc")[false]
+#test("mul")[false]
 fun is_method_name(name: str) -> bool {
     for c in chars(name) {
         if c == '.' { return true }

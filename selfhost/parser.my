@@ -99,6 +99,9 @@ fun is_after(d: Diag, last: Diag) -> bool {
     return d.line > last.line || (d.line == last.line && d.col > last.col)
 }
 
+#test("")[None]
+#test("u8")[Some("u8")]
+#test("f64")[Some("f64")]
 fun suffix_opt(s: str) -> Option<str> {
     if s == "" { return None }
     return Some(s)
@@ -112,6 +115,9 @@ fun cons_expr(head: Expr, tail: [Expr]) -> [Expr] {
     return out
 }
 
+#test(Expr { id: 2, line: 6, col: 5, sp: SrcSpan { sline: 6, scol: 5, eline: 6, ecol: 6 }, kind: ExprKind.Name("s") })[true]
+#test(Expr { id: 2, line: 9, col: 5, sp: SrcSpan { sline: 9, scol: 5, eline: 9, ecol: 6 }, kind: ExprKind.Name("x") })[true]
+#test(Expr { id: 0, line: 4, col: 5, sp: SrcSpan { sline: 4, scol: 5, eline: 4, ecol: 6 }, kind: ExprKind.IntLit(1, None, false, "") })[false]
 fun is_lvalue(e: Expr) -> bool {
     return match e.kind {
         ExprKind.Name(n) => true,

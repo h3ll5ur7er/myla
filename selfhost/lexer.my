@@ -19,6 +19,9 @@ pub struct Lexer {
     err: Option<Diag>,
 }
 
+#test("a")[Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None }]
+#test("code")[Lexer { cps: ['c', 'o', 'd', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None }]
+#test("tries")[Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None }]
 pub fun new_lexer(src: str) -> Lexer {
     // the code points as `chars` decodes them, not copied (MYLA-133)
     let cps = chars(src)
@@ -56,6 +59,9 @@ impl Lexer {
     // Build a `str` from the codepoints `cps[start..end]`. A method (not a free
     // function) so `self.cps` is borrowed through `self` rather than passed —
     // and cloned — by value on every token (the lexer's dominant allocation).
+    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None }, 0, 1)["a"]
+    #test(Lexer { cps: ['c', 'o', 'd', 'e'], pos: 4, line: 1, col: 5, n: 4, toks: [], err: None }, 0, 4)["code"]
+    #test(Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 5, line: 1, col: 6, n: 5, toks: [], err: None }, 0, 5)["tries"]
     fun slice_str(self, start: int32, end: int32) -> str {
         var sb = StringBuilder()
         var i = start
@@ -68,15 +74,22 @@ impl Lexer {
         return build(sb)
     }
 
+    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None })[true]
+    #test(Lexer { cps: ['b'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None })[true]
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None })[false]
     fun at_end(self) -> bool {
         return self.pos >= self.n
     }
 
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None })[97]
+    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None })[110]
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None })[43]
     fun peek(self) -> int32 {
         if self.pos >= self.n { return 0 }
         return self.cps[self.pos] as int32
     }
 
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None })[32]
     fun peek1(self) -> int32 {
         if self.pos + 1 >= self.n { return 0 }
         return self.cps[self.pos + 1] as int32
@@ -102,6 +115,9 @@ impl Lexer {
         self.pos = self.n
     }
 
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None })[97]
+    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None })[110]
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None })[43]
     fun advance(var self) -> int32 {
         if self.pos >= self.n { return 0 }
         let c = self.cps[self.pos] as int32
@@ -685,6 +701,9 @@ pub fun lex(src: str) -> Result<[Token], Diag> {
 // The decimal text of the literal `digits` in `base` if its value is 2^63 or
 // more, else "" (MYLA-73). Short literals can't be that big, so only long ones
 // pay for the base-10^9 arithmetic.
+#test("0", 10)[""]
+#test("1", 10)[""]
+#test("10", 2)[""]
 fun big_text(digits: str, base: int64) -> str {
     if len(digits) < 16 { return "" }
     var limbs: [int64] = [0]                 // little endian, base 10^9
@@ -733,6 +752,7 @@ fun text_less(a: str, b: str) -> bool {
 }
 
 // `c` lowered if it is an ASCII capital letter.
+#test(120)[120]
 fun lower(c: int32) -> int32 {
     if c >= 65 && c <= 90 { return c + 32 }
     return c

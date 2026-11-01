@@ -7229,11 +7229,17 @@ impl CodeGen {
 
 // -- free helpers ---------------------------------------------------------
 
+#test(".L1:")[true]
+#test(".L2:")[true]
+#test("cld")[false]
 fun ends_colon(s: str) -> bool {
     let n = len(s)
     return n > 0 && s[n - 1] == 58
 }
 
+#test("-")["45"]
+#test("zero")["122, 101, 114, 111"]
+#test("examples/traits_on_builtins.my")["101, 120, 97, 109, 112, 108, 101, 115, 47, 116, 114, 97, 105, 116, 115, 95, 111, 110, 95, 98, 117, 105, 108, 116, 105, 110, 115, 46, 109, 121"]
 fun byte_list(s: str) -> str {
     var sb = StringBuilder()
     var i = 0
@@ -7256,6 +7262,9 @@ fun join_lines(xs: [str]) -> str {
     return build(sb)
 }
 
+#test(Type.TSB)[false]
+#test(Type.TStr)[false]
+#test(Type.TEnum("List", []))[true]
 pub fun is_aggregate(t: Type) -> bool {
     return match t {
         Type.TStruct(n, a) => true,
@@ -7267,20 +7276,30 @@ pub fun is_aggregate(t: Type) -> bool {
     }
 }
 
+#test(Some(Type.TInt(32, true)))[false]
 pub fun is_aggregate_opt(ot: Option<Type>) -> bool {
     return match ot { Some(t) => is_aggregate(t), None => false }
 }
 
+#test(Type.TTuple([Type.TInt(32, true)]))[[Type.TInt(32, true)]]
+#test(Type.TTuple([Type.TStruct("Box", []), Type.TInt(32, true)]))[[Type.TStruct("Box", []), Type.TInt(32, true)]]
+#test(Type.TTuple([Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]), Type.TInt(32, true)]))[[Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]), Type.TInt(32, true)]]
 pub fun tuple_elems(t: Type) -> [Type] {
     return match t { Type.TTuple(es) => es, _ => [] }
 }
 
+#test(Type.TList(Type.TStr))[Type.TStr]
+#test(Type.TList(Type.TStruct("Vec2", [])))[Type.TStruct("Vec2", [])]
+#test(Type.TList(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true)))))[Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true)))]
 pub fun list_elem(t: Type) -> Type {
     return match t { Type.TList(e) => e, _ => Type.TInt(32, true) }
 }
 
 // Split a `format` template into literal segments (one more than the number of
 // `{}` holes). `{{`/`}}` collapse to single literal braces.
+#test("{}€")[["", "€"]]
+#test("{} scored {}")[["", " scored ", ""]]
+#test("This is not the error you are looking for. It is {}")[["This is not the error you are looking for. It is ", ""]]
 pub fun format_segments(s: str) -> [str] {
     var segs: [str] = []
     var cur = ""
@@ -7312,31 +7331,54 @@ pub fun format_segments(s: str) -> [str] {
 }
 
 // The single-byte substring at index `i` (build a 1-char string).
+#test("{}: {}", 2)[":"]
+#test("{}:{}:{}: there is no error, this is just a test", 16)["i"]
+#test("This is not the error you are looking for. It is {}", 38)["f"]
 fun str_byte(s: str, i: int32) -> str {
     var sb = StringBuilder()
     append_byte(sb, s[i])
     return build(sb)
 }
 
+#test(Type.TMap(Type.TChar, Type.TInt(32, true)))[Type.TChar]
 pub fun map_key(t: Type) -> Type {
     return match t { Type.TMap(k, v) => k, _ => Type.TStr }
 }
 
+#test(Type.TMap(Type.TChar, Type.TInt(32, true)))[Type.TInt(32, true)]
 pub fun map_val(t: Type) -> Type {
     return match t { Type.TMap(k, v) => v, _ => Type.TInt(32, true) }
 }
 
+#test(Type.TSB)[false]
+#test(Type.TStr)[false]
+#test(Type.TList(Type.TStr))[true]
 pub fun is_list_t(t: Type) -> bool { return match t { Type.TList(e) => true, _ => false } }
+#test(Type.TSB)[false]
+#test(Type.TStr)[false]
+#test(Type.TMap(Type.TChar, Type.TInt(32, true)))[true]
 pub fun is_map_t(t: Type) -> bool { return match t { Type.TMap(k, v) => true, _ => false } }
+#test(Type.TStr)[true]
+#test(Type.TChar)[false]
+#test(Type.TInt(32, true))[false]
 pub fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => false } }
+#test(Type.TSB)[true]
+#test(Type.TStr)[false]
+#test(Type.TInt(32, true))[false]
 fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
 
 // A heap cell whose pointer is the value: retained and dropped as one pointer.
+#test(Type.TSB)[true]
+#test(Type.TStr)[true]
+#test(Type.TInt(32, true))[false]
 pub fun is_cell_t(t: Type) -> bool { return is_list_t(t) || is_map_t(t) || is_sb_t(t) || is_str_t(t) || is_actor_t(t) }
 
 // A `str` cell in the data section: the heap's `[size][refcount]` header, then
 // `[len][bytes]` at `label`; its count never reaches zero (MYLA-18, the Python
 // backend's `_static_str` and STATIC_RC).
+#test(".Lstr0", "")[["\t.balign 8", "\t.quad 8", "\t.quad 4611686018427387904", ".Lstr0:", "\t.quad 0"]]
+#test(".Lstr4", "cool")[["\t.balign 8", "\t.quad 12", "\t.quad 4611686018427387904", ".Lstr4:", "\t.quad 4", "\t.byte 99, 111, 111, 108"]]
+#test(".Lstr1", "examples/tuples.my")[["\t.balign 8", "\t.quad 26", "\t.quad 4611686018427387904", ".Lstr1:", "\t.quad 18", "\t.byte 101, 120, 97, 109, 112, 108, 101, 115, 47, 116, 117, 112, 108, 101, 115, 46, 109, 121"]]
 fun static_str(label: str, text: str) -> [str] {
     var out = ["\t.balign 8", format("\t.quad {}", 8 + len(text)), "\t.quad 4611686018427387904",
                format("{}:", label), format("\t.quad {}", len(text))]
@@ -7486,6 +7528,9 @@ fun names_in_block(b: Block, acc: [str]) -> [str] {
     return out
 }
 
+#test("sum")[false]
+#test("total")[false]
+#test("length")[false]
 fun is_mutating_builtin(n: str) -> bool {
     return n == "push" || n == "pop" || n == "remove" || n == "append" || n == "append_byte"
 }
@@ -7582,10 +7627,16 @@ fun may_write_expr(e: Expr, name: str) -> bool {
     return false
 }
 
+#test(Type.TStruct("Box", []))["Box"]
+#test(Type.TStruct("Glyph", []))["Glyph"]
+#test(Type.TStruct("Pair", [Type.TInt(32, true), Type.TBool]))["Pair"]
 fun struct_name_of(t: Type) -> str {
     return match t { Type.TStruct(n, a) => n, Type.TActor(n) => n, _ => "" }
 }
 
+#test(Type.TActor("Account"))[[]]
+#test(Type.TEnum("List", [Type.TInt(32, true)]))[[Type.TInt(32, true)]]
+#test(Type.TStruct("Pair", [Type.TInt(32, true), Type.TBool]))[[Type.TInt(32, true), Type.TBool]]
 fun type_args_of(t: Type) -> [Type] {
     return match t {
         Type.TStruct(n, a) => a,
@@ -7594,12 +7645,16 @@ fun type_args_of(t: Type) -> [Type] {
     }
 }
 
+#test(Type.TStr)[false]
+#test(Type.TChar)[false]
+#test(Type.TEnum("Color", []))[true]
 pub fun is_struct_or_enum_t(t: Type) -> bool {
     return match t { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, _ => false }
 }
 
 // The normalizer of async bodies for frame functions (anf.my): a `match` with
 // an `await` in an arm stays a value; an `async let` starts an async lambda.
+#test()[Norm { next: 2000000000, resolved: [:], out: [], temps: 0, value_matches: true, wrap_children: true, children: [:] }]
 fun compiler_norm() -> Norm {
     var n = new_norm(2000000000)
     n.value_matches = true
@@ -7613,6 +7668,9 @@ const EXEC_CAP: int32 = 1048576
 // A thread's block of runtime state in a program with tasks (D92), which
 // `%fs` points at: its own address first (for `tls_addr`), then each
 // variable's word, then the free lists (4616 bytes).
+#test("__exec_sp")[32]
+#test("__remote_free")[96]
+#test("__run_stderr_val")[48]
 fun tls_offset(sym: str) -> int32 {
     if sym == "__heap_ptr" { return 8 }
     if sym == "__heap_end" { return 16 }
@@ -7636,22 +7694,34 @@ const TLS_SIZE: int32 = 4800
 // region, so a cell's address tells whose heap it is.
 const MAX_WORKERS: int32 = 32
 
+#test(Type.TSB)[false]
+#test(Type.TStr)[false]
+#test(Type.TAsync(Type.TFunc([], None)))[true]
 pub fun is_tfunc(t: Type) -> bool {
     return match t { Type.TFunc(p, r) => true, Type.TAsync(f) => true, _ => false }
 }
 
 // An async function type as its function type: with one task, an async
 // function runs as an ordinary one (D91, MYLA-138).
+#test(Type.TAsync(Type.TFunc([], None)))[Type.TFunc([], None)]
+#test(Type.TAsync(Type.TFunc([], Some(Type.TInt(32, true)))))[Type.TFunc([], Some(Type.TInt(32, true)))]
+#test(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true))))[Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true)))]
 pub fun unasync(t: Type) -> Type {
     return match t { Type.TAsync(f) => f, _ => t }
 }
 
 // Whether `t` is an async function's type (D89).
+#test(Type.TAsync(Type.TFunc([], None)))[true]
+#test(Type.TAsync(Type.TFunc([], Some(Type.TInt(32, true)))))[true]
+#test(Type.TAsync(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true)))))[true]
 pub fun is_async_t(t: Type) -> bool {
     return match t { Type.TAsync(f) => true, _ => false }
 }
 
 // Whether `t` is an actor's handle: a cell holding its fields (D89).
+#test(Type.TInt(32, true))[false]
+#test(Type.TActor("Account"))[true]
+#test(Type.TEnum("List", []))[false]
 pub fun is_actor_t(t: Type) -> bool {
     return match t { Type.TActor(n) => true, _ => false }
 }
@@ -7660,6 +7730,7 @@ pub fun is_hole_expr(e: Expr) -> bool {
     return match e.kind { ExprKind.Hole => true, _ => false }
 }
 
+#test([])[false]
 pub fun args_have_hole(args: [Expr]) -> bool {
     for a in args { if is_hole_expr(a) { return true } }
     return false
@@ -7693,18 +7764,27 @@ fun empty_str_list() -> [str] {
     return e
 }
 
+#test(Type.TAsync(Type.TFunc([], None)))[[]]
+#test(Type.TFunc([Type.TStr], Some(Type.TStr)))[[Type.TStr]]
+#test(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true))))[[Type.TInt(32, true)]]
 pub fun tfunc_params(t: Type) -> [Type] {
     match unasync(t) { Type.TFunc(p, r) => { return p }, _ => {} }
     var empty: [Type] = []
     return empty
 }
 
+#test(Type.TAsync(Type.TFunc([], None)))[None]
+#test(Type.TFunc([Type.TStr], Some(Type.TStr)))[Some(Type.TStr)]
+#test(Type.TAsync(Type.TFunc([], Some(Type.TInt(32, true)))))[Some(Type.TInt(32, true))]
 pub fun tfunc_ret(t: Type) -> Option<Type> {
     match unasync(t) { Type.TFunc(p, r) => { return r }, _ => {} }
     return None
 }
 
 // Names that are builtins, not calls of a function or function value.
+#test("id")[false]
+#test("abs")[false]
+#test("add")[false]
 pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "print" || nm == "assert" || nm == "panic" || nm == "unreachable" { return true }
     if nm == "len" || nm == "push" || nm == "pop" || nm == "chars" || nm == "format" { return true }
@@ -7719,6 +7799,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     return false
 }
 
+#test([])[false]
 fun attrs_have_derive_eq(attrs: [Attribute]) -> bool {
     for a in attrs {
         if a.name == "derive" {
@@ -7730,12 +7811,16 @@ fun attrs_have_derive_eq(attrs: [Attribute]) -> bool {
     return false
 }
 
+#test("%")[true]
+#test("*")[true]
+#test("&")[false]
 pub fun is_overloadable_op(op: str) -> bool {
     if op == "==" || op == "!=" { return true }
     if is_cmp(op) { return true }
     return op == "+" || op == "-" || op == "*" || op == "/" || op == "%"
 }
 
+#test("+")["add"]
 pub fun arith_method_cg(op: str) -> str {
     if op == "+" { return "add" }
     if op == "-" { return "sub" }
@@ -7744,6 +7829,9 @@ pub fun arith_method_cg(op: str) -> str {
     return "rem"
 }
 
+#test(Type.TInt(32, true))[""]
+#test(Type.TEnum("Direction", []))["Direction"]
+#test(Type.TEnum("Result", [Type.TInt(32, true), Type.TStr]))["Result"]
 pub fun enum_name_of(t: Type) -> str {
     return match t { Type.TEnum(n, a) => n, _ => "" }
 }
@@ -7753,6 +7841,7 @@ fun expr_name(e: Expr) -> str {
 }
 
 // The list a map lookup found, else none.
+#test(None)[[]]
 fun int_list(o: Option<[int32]>) -> [int32] {
     return match o {
         Some(xs) => xs,
@@ -7789,11 +7878,15 @@ fun getfield_name(callee: Expr) -> str {
     return match callee.kind { ExprKind.GetField(tgt, field) => field, _ => "" }
 }
 
+#test("Result")["Ok"]
+#test("Option")["Some"]
 pub fun success_variant(enum_name: str) -> str {
     if enum_name == "Option" { return "Some" }
     return "Ok"
 }
 
+#test("Result")["Err"]
+#test("Option")["None"]
 pub fun failure_variant(enum_name: str) -> str {
     if enum_name == "Option" { return "None" }
     return "Err"
@@ -7801,11 +7894,15 @@ pub fun failure_variant(enum_name: str) -> str {
 
 // -- monomorphization helpers --------------------------------------------
 
+#test(32, true)["int32"]
 fun int_type_name_cg(w: int32, signed: bool) -> str {
     if signed { return format("int{}", w) }
     return format("uint{}", w)
 }
 
+#test("id", [Type.TStr])["id__4.str"]
+#test("Box.get", [Type.TInt(32, true)])["Box.get__4.i32"]
+#test("swap", [Type.TInt(32, true), Type.TInt(32, true)])["swap__4.i324.i32"]
 pub fun mangle_fn(name: str, args: [Type]) -> str {
     return format("{}__{}", name, join_tokens(args))
 }
@@ -7814,6 +7911,9 @@ pub fun mangle_fn(name: str, args: [Type]) -> str {
 // prefixed with its length, and a built-in token starts with `.`, which no
 // identifier contains, while a user type's token is its name. So
 // `Pair<A_B, C>` is `Pair__3A_B1C` and `Pair<A, B_C>` is `Pair__1A3B_C`.
+#test([Type.TStr])["4.str"]
+#test([Type.TStruct("Vec2", [])])["4Vec2"]
+#test([Type.TInt(32, true), Type.TInt(32, true)])["4.i324.i32"]
 fun join_tokens(xs: [Type]) -> str {
     var s = ""
     for x in xs { s = s + lp(mono_token(x)) }
@@ -7821,26 +7921,37 @@ fun join_tokens(xs: [Type]) -> str {
 }
 
 // `tok` prefixed with its length, so a run of tokens reads back one way.
+#test(".f64")["4.f64"]
+#test(".char")["5.char"]
+#test(".F4.i32R4.i32")["13.F4.i32R4.i32"]
 fun lp(tok: str) -> str {
     return format("{}{}", len(tok), tok)
 }
 
 // The suffix naming a map type's helpers.
+#test(Type.TChar, Type.TInt(32, true))["5.char4.i32"]
 fun map_token(k: Type, v: Type) -> str {
     return lp(mono_token(k)) + lp(mono_token(v))
 }
 
+#test(32, true)[".i32"]
 fun int_token(w: int32, s: bool) -> str {
     if s { return format(".i{}", w) }
     return format(".u{}", w)
 }
 
+#test("List", [])["List"]
+#test("Account", [])["Account"]
+#test("Result", [Type.TInt(32, true), Type.TStr])["Result__4.i324.str"]
 fun agg_token(n: str, args: [Type]) -> str {
     if len(args) == 0 { return n }
     return format("{}__{}", n, join_tokens(args))
 }
 
 // A stable identifier fragment for a concrete type (used in mangled names).
+#test(Type.TStr)[".str"]
+#test(Type.TList(Type.TFloat(64)))[".L4.f64"]
+#test(Type.TList(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true)))))[".L13.F4.i32R4.i32"]
 fun mono_token(t: Type) -> str {
     return match t {
         Type.TInt(w, s) => int_token(w, s),
@@ -7862,12 +7973,16 @@ fun mono_token(t: Type) -> str {
     }
 }
 
+#test(Some(Type.TInt(32, true)))[".i32"]
 fun ret_token(r: Option<Type>) -> str {
     return match r { Some(t) => mono_token(t), None => ".void" }
 }
 
 // The component types of a composite type, in a canonical order, so two types
 // of the same shape line up positionally for unification.
+#test(Type.TInt(32, true))[[]]
+#test(Type.TList(Type.TStruct("Vec2", [])))[[Type.TStruct("Vec2", [])]]
+#test(Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]))[[Type.TInt(32, true), Type.TInt(32, true)]]
 fun parts_of(t: Type) -> [Type] {
     return match t {
         Type.TTuple(es) => es,
@@ -7881,6 +7996,8 @@ fun parts_of(t: Type) -> [Type] {
     }
 }
 
+#test([Type.TParam("T")], Some(Type.TParam("T")))[[Type.TParam("T"), Type.TParam("T")]]
+#test([Type.TInt(32, true)], Some(Type.TInt(32, true)))[[Type.TInt(32, true), Type.TInt(32, true)]]
 fun func_parts(ps: [Type], r: Option<Type>) -> [Type] {
     var out: [Type] = []
     for p in ps { push(out, p) }
@@ -7890,6 +8007,9 @@ fun func_parts(ps: [Type], r: Option<Type>) -> [Type] {
 
 // Solve type-parameter bindings by structurally unifying a declared (possibly
 // type-parametric) type against a concrete type.
+#test(Type.TInt(32, true), Type.TInt(32, true))[[]]
+#test(Type.TParam("T"), Type.TInt(32, true))[[Subst { name: "T", ty: Type.TInt(32, true) }]]
+#test(Type.TTuple([Type.TParam("T"), Type.TParam("T")]), Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]))[[Subst { name: "T", ty: Type.TInt(32, true) }, Subst { name: "T", ty: Type.TInt(32, true) }]]
 fun unify_into(declared: Type, concrete: Type) -> [Subst] {
     var out: [Subst] = []
     match declared {
@@ -7907,6 +8027,9 @@ fun unify_into(declared: Type, concrete: Type) -> [Subst] {
     return out
 }
 
+#test([], "a")[false]
+#test([], "b")[false]
+#test(["a"], "a")[true]
 fun list_has_str(xs: [str], target: str) -> bool {
     for x in xs { if x == target { return true } }
     return false
@@ -7914,6 +8037,9 @@ fun list_has_str(xs: [str], target: str) -> bool {
 
 // Return a fresh list with `s` appended (non-mutating: callers pass it down a
 // recursion as a cycle-breaking "seen" set without disturbing the caller's).
+#test([], "Box")[["Box"]]
+#test([], "Money")[["Money"]]
+#test(["Pixel"], "Vec2")[["Pixel", "Vec2"]]
 fun push_str_copy(xs: [str], s: str) -> [str] {
     var out: [str] = []
     for x in xs { push(out, x) }
@@ -7921,28 +8047,41 @@ fun push_str_copy(xs: [str], s: str) -> [str] {
     return out
 }
 
+#test(Type.TStr)[true]
+#test(Type.TChar)[false]
+#test(Type.TFloat(32))[false]
 pub fun is_tstr(t: Type) -> bool {
     return match t { Type.TStr => true, _ => false }
 }
 
+#test(Type.TChar)[true]
+#test(Type.TFloat(64))[false]
+#test(Type.TInt(8, true))[false]
 fun is_tchar(t: Type) -> bool {
     return match t { Type.TChar => true, _ => false }
 }
 
+#test(Type.TChar)[false]
+#test(Type.TFloat(64))[true]
+#test(Type.TInt(8, true))[false]
 fun is_tfloat(t: Type) -> bool {
     return match t { Type.TFloat(w) => true, _ => false }
 }
 
+#test(Type.TFloat(32))[true]
+#test(Type.TFloat(64))[false]
 fun is_tfloat32(t: Type) -> bool {
     return match t { Type.TFloat(w) => w == 32, _ => false }
 }
 
 // The runtime-error entries and their messages (MYLA-17), as in the Python
 // backend (`_TRAPS`). `__panic` prints them after `runtime error: `.
+#test()[["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char"]]
 fun trap_labels() -> [str] {
     return ["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char"]
 }
 
+#test()[["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char"]]
 fun trap_messages() -> [str] {
     return ["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char"]
 }
@@ -7985,26 +8124,39 @@ fun skip_trap(jump: str) -> str {
 }
 
 // The bits of the double 2^k (-2^k when `neg`), as a signed immediate.
+#test(31, false)[4746794007248502784]
+#test(31, true)[-4476578029606273024]
 fun pow2_bits(k: int32, neg: bool) -> int64 {
     let bits = ((1023 + k) as int64) << 52
     if neg { return bits | (1i64 << 63) }
     return bits
 }
 
+#test(Type.TChar)[false]
+#test(Type.TInt(32, true))[true]
+#test(Type.TInt(64, true))[true]
 pub fun int_signed(t: Type) -> bool {
     return match t { Type.TInt(w, s) => s, _ => false }
 }
 
+#test(Type.TInt(8, false))[8]
+#test(Type.TInt(32, true))[32]
 fun int_width_cg(t: Type) -> int32 {
     return match t { Type.TInt(w, s) => w, _ => 64 }
 }
 
 // Whether the integer operator `op` takes its second operand as an
 // immediate or from memory (`emit_int_op`); the others want it in %rcx.
+#test("&")[true]
+#test("*")[true]
+#test("%")[false]
 pub fun takes_operand(op: str) -> bool {
     return op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^" || op == "==" || op == "!=" || is_cmp(op)
 }
 
+#test("$2")[true]
+#test("$4")[true]
+#test("%r9")[false]
 fun starts_with_dollar(s: str) -> bool { return len(s) > 0 && s[0] == '$' }
 
 // The return of a function called with `words` argument words, which it
@@ -8078,10 +8230,16 @@ fun has_text(s: str, t: str) -> bool {
     return false
 }
 
+#test("<")[true]
+#test(">")[true]
+#test("%")[false]
 pub fun is_cmp(op: str) -> bool {
     return op == "<" || op == "<=" || op == ">" || op == ">="
 }
 
+#test("<", true)["setl"]
+#test("<=", false)["setbe"]
+#test(">=", false)["setae"]
 pub fun cmp_set(op: str, signed: bool) -> str {
     if op == "<" {
         if signed { return "setl" }

@@ -21,6 +21,7 @@ pub enum TokenKind {
 // syntax nodes know theirs, and a diagnostic underlines it.
 pub struct SrcSpan { sline: int32, scol: int32, eline: int32, ecol: int32 }
 
+#test()[SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }]
 pub fun no_span() -> SrcSpan {
     return SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }
 }
@@ -81,6 +82,9 @@ fun upper_ascii(s: str) -> str {
     return build(sb)
 }
 
+#test("as")[TokenKind.AS]
+#test("actor")[TokenKind.ACTOR]
+#test("typealias")[TokenKind.TYPEALIAS]
 pub fun keyword_kind(text: str) -> TokenKind {
     if text == "let" { return TokenKind.LET }
     if text == "var" { return TokenKind.VAR }
@@ -124,10 +128,15 @@ pub fun keyword_kind(text: str) -> TokenKind {
     return TokenKind.IDENT
 }
 
+#test("i8")[true]
+#test("u8")[true]
+#test("i9")[false]
 pub fun is_int_suffix(s: str) -> bool {
     return s == "i8" || s == "i16" || s == "i32" || s == "i64" || s == "u8" || s == "u16" || s == "u32" || s == "u64"
 }
 
+#test("f32")[true]
+#test("f64")[true]
 pub fun is_float_suffix(s: str) -> bool {
     return s == "f32" || s == "f64"
 }

@@ -191,6 +191,9 @@ fun sstr(s: str) -> str {
 }
 
 // An integer literal's value: its decimal text when it is 2^63 or more.
+#test(0, "")["0"]
+#test(128, "")["128"]
+#test(2147483648, "")["2147483648"]
 pub fun int_text(v: int64, big: str) -> str {
     if big != "" { return big }
     return format("{}", v)

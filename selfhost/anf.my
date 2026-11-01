@@ -25,6 +25,7 @@ from .checker import Type
 // those lambdas, whose captures are copied deeply (D92).
 pub struct Norm { next: int32, resolved: [int32: Type], out: [Stmt], temps: int32, value_matches: bool, wrap_children: bool, children: [int32: bool] }
 
+#test(2000000000)[Norm { next: 2000000000, resolved: [:], out: [], temps: 0, value_matches: false, wrap_children: false, children: [:] }]
 pub fun new_norm(next: int32) -> Norm {
     return Norm { next: next, resolved: [:], out: [], temps: 0, value_matches: false, wrap_children: false, children: [:] }
 }
@@ -52,11 +53,13 @@ pub fun has_await(e: Expr) -> bool {
     }
 }
 
+#test([])[false]
 fun any_await(es: [Expr]) -> bool {
     for e in es { if has_await(e) { return true } }
     return false
 }
 
+#test(None)[false]
 fun opt_await(e: Option<Expr>) -> bool {
     return match e { Some(x) => has_await(x), None => false }
 }
@@ -66,6 +69,7 @@ fun fields_await(fs: [FieldInit]) -> bool {
     return false
 }
 
+#test([])[false]
 fun entries_await(ents: [MapEntry]) -> bool {
     for en in ents { if has_await(en.key) || has_await(en.value) { return true } }
     return false
@@ -106,6 +110,7 @@ pub fun stmt_suspends(s: Stmt) -> bool {
     }
 }
 
+#test(None)[false]
 fun else_suspends(el: Option<ElseTail>) -> bool {
     return match el {
         Some(et) => match et {

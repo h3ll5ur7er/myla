@@ -60,6 +60,8 @@ fun compile_asm(file: str, opts: LoadOptions, debug: bool) -> Result<str, str> {
 
 // Inspect a finished child's status; return true on failure (nonzero exit or a
 // terminating signal), echoing its stderr and `label`.
+#test(Output { stdout: [], stderr: [], status: ExitStatus.Exited(0) }, "myla: linker failed")[false]
+#test(Output { stdout: [], stderr: [], status: ExitStatus.Exited(0) }, "myla: assembler failed")[false]
 fun step_failed(out: Output, label: str) -> bool {
     match out.status {
         ExitStatus.Exited(code) => {

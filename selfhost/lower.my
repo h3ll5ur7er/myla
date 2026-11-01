@@ -279,6 +279,9 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
 }
 
 // Whether `t` is a scalar: an integer, float, bool or char.
+#test(Type.TSB)[false]
+#test(Type.TBool)[true]
+#test(Type.TChar)[true]
 fun is_scalar(t: Type) -> bool {
     return match t {
         Type.TInt(w, s) => true
@@ -299,6 +302,9 @@ fun lowerable(cg: CodeGen, t: Type) -> bool {
 // `lowerable` for a type whose structs and enums are lowerable unless named
 // in `blocked`, with their type arguments; a type parameter (in a
 // declaration) is.
+#test(Type.TSB, [])[true]
+#test(Type.TStr, [])[true]
+#test(Type.TBool, [])[true]
 fun member_lowerable(t: Type, blocked: [str]) -> bool {
     if is_scalar(t) { return true }
     return match t {
@@ -320,6 +326,9 @@ fun member_lowerable(t: Type, blocked: [str]) -> bool {
     }
 }
 
+#test([], [])[true]
+#test([Type.TStr], [])[true]
+#test([Type.TParam("E")], [])[true]
 fun all_lowerable(ts: [Type], blocked: [str]) -> bool {
     for t in ts {
         if !member_lowerable(t, blocked) { return false }
@@ -327,6 +336,9 @@ fun all_lowerable(ts: [Type], blocked: [str]) -> bool {
     return true
 }
 
+#test([], "a")[false]
+#test([], "f")[false]
+#test(["double", "inc"], "double")[true]
 fun has_name(names: [str], n: str) -> bool {
     for x in names {
         if x == n { return true }
@@ -401,6 +413,7 @@ fun actor_record_offset(cg: CodeGen, t: Type) -> int32 {
 struct CallTarget { name: str, params: [Type], ret: Option<Type> }
 
 // The name of the actor type `t` (D89).
+#test(Type.TActor("Account"))["Account"]
 fun actor_name(t: Type) -> str {
     return match t { Type.TActor(n) => n, _ => "" }
 }
@@ -3516,6 +3529,9 @@ fun diverges(e: Expr) -> bool {
 
 // Whether `as char` from `src` needs a check (MYLA-177): from any integer but
 // a `uint8`, all of whose values are Unicode scalars.
+#test(Type.TInt(32, true), Type.TChar)[true]
+#test(Type.TChar, Type.TInt(32, true))[false]
+#test(Type.TChar, Type.TInt(32, false))[false]
 fun char_cast_checked(src: Type, t: Type) -> bool {
     match t { Type.TChar => {}, _ => { return false } }
     return match src {

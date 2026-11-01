@@ -283,6 +283,7 @@ fun render_bin(d: int32, op: str, t: Type, rt: Type, a: int32, b: int32, pos: Po
     return text
 }
 
+#test(Type.TEnum("List", []), Type.TEnum("List", []))[true]
 fun type_eq_names(a: Type, b: Type) -> bool {
     return type_name(a) == type_name(b)
 }
@@ -522,6 +523,9 @@ fun step(f: IrFunc, inst: Inst, addr_of: [int32], live: [int32]) -> str {
 
 // Whether the last instruction of a block is a call of a function or a
 // function value (what `become` makes in place of the function).
+#test([Inst.Frame(27), Inst.Load(28, 4), Inst.Call(-1, "__wait", [28, 27])])[true]
+#test([Inst.Frame(37), Inst.Load(38, 7), Inst.Call(-1, "__wait", [38, 37])])[true]
+#test([Inst.Frame(84), Inst.Load(85, 16), Inst.Call(-1, "__wait", [85, 84])])[true]
 pub fun ends_in_call(insts: [Inst]) -> bool {
     if len(insts) == 0 { return false }
     return match insts[len(insts) - 1] {
@@ -533,6 +537,9 @@ pub fun ends_in_call(insts: [Inst]) -> bool {
     }
 }
 
+#test(Term.Become)[[]]
+#test(Term.Br(4, 2, 3))[[2, 3]]
+#test(Term.Br(189, 49, 48))[[49, 48]]
 pub fun successors(t: Term) -> [int32] {
     return match t {
         Term.Jmp(b) => [b]
@@ -601,6 +608,9 @@ pub fun inst_uses(inst: Inst) -> [int32] {
 }
 
 // The temporaries a terminator reads.
+#test(Term.Become)[[]]
+#test(Term.Ret(26))[[26]]
+#test(Term.Br(176, 41, 40))[[176]]
 pub fun term_uses(t: Term) -> [int32] {
     return match t {
         Term.Br(c, a, b) => [c]
@@ -648,6 +658,9 @@ pub fun inst_defs(inst: Inst) -> [int32] {
 }
 
 // Whether `inst` writes the temporary `t` (`inst_defs` without a list).
+#test(Inst.Addr(9, 1), 9)[true]
+#test(Inst.Load(1, 0), 1)[true]
+#test(Inst.Load(6, 0), 2)[false]
 fun writes_temp(inst: Inst, t: int32) -> bool {
     return match inst {
         Inst.Const(d, ty, v) => d == t
@@ -676,6 +689,9 @@ fun writes_temp(inst: Inst, t: int32) -> bool {
     }
 }
 
+#test(-1)[[]]
+#test(38)[[38]]
+#test(156)[[156]]
 fun result_temp(d: int32) -> [int32] {
     if d < 0 { return [] }
     return [d]
@@ -804,6 +820,9 @@ fun borrowed_slots(f: IrFunc) -> [bool] {
     return out
 }
 
+#test([])[false]
+#test([Inst.Load(11, 2)])[false]
+#test([Inst.Loc(Pos { line: 31, col: 5 }), Inst.Load(20, 2), Inst.RetainVal(Type.TList(Type.TInt(32, true)), 20), Inst.DropSlot(Type.TList(Type.TInt(32, true)), 2)])[true]
 fun retains_and_drops(insts: [Inst]) -> bool {
     var retains = false
     var drops = false
@@ -845,6 +864,9 @@ fun retained_slot(f: IrFunc, insts: [Inst], at: int32) -> int32 {
 
 // The slot the temporary `t` was last set to the value of (`load $s`) before
 // `insts[at]`, in this block; -1 when it wasn't, or was set otherwise.
+#test([Inst.Loc(Pos { line: 31, col: 5 }), Inst.Load(20, 2), Inst.RetainVal(Type.TList(Type.TInt(32, true)), 20), Inst.DropSlot(Type.TList(Type.TInt(32, true)), 2)], 2, 20)[2]
+#test([Inst.Loc(Pos { line: 34, col: 5 }), Inst.Load(20, 2), Inst.RetainVal(Type.TList(Type.TInt(32, true)), 20), Inst.DropSlot(Type.TList(Type.TInt(32, true)), 2)], 2, 20)[2]
+#test([Inst.Loc(Pos { line: 45, col: 5 }), Inst.Load(20, 1), Inst.RetainVal(Type.TList(Type.TInt(32, true)), 20), Inst.DropSlot(Type.TList(Type.TInt(32, true)), 1)], 2, 20)[1]
 fun defining_load(insts: [Inst], at: int32, t: int32) -> int32 {
     var j = at - 1
     while j >= 0 {
@@ -860,6 +882,8 @@ fun defining_load(insts: [Inst], at: int32, t: int32) -> int32 {
 }
 
 // Likewise for a slot's address (`addr $s`).
+#test([Inst.Load(6, 0), Inst.Copy(6, 2, 16), Inst.Retain(Type.TEnum("Result", [Type.TInt(32, true), Type.TStr]), 6), Inst.DropSlot(Type.TEnum("Result", [Type.TInt(32, true), Type.TStr]), 5)], 1, 2)[-1]
+#test([Inst.Load(14, 0), Inst.Copy(14, 10, 16), Inst.Retain(Type.TEnum("Result", [Type.TInt(32, true), Type.TStr]), 14), Inst.DropSlot(Type.TEnum("Result", [Type.TInt(32, true), Type.TStr]), 7)], 1, 10)[-1]
 fun defining_addr(insts: [Inst], at: int32, t: int32) -> int32 {
     var j = at - 1
     while j >= 0 {
@@ -1008,6 +1032,9 @@ fun only_reads(inst: Inst) -> bool {
 
 // Whether `inst` names the slot `s` (reads, writes, takes its address,
 // drops it or marks it moved or initialised).
+#test(Inst.Init(3), 1)[false]
+#test(Inst.Moved(3), 1)[false]
+#test(Inst.Addr(9, 1), 1)[true]
 fun touches_slot(inst: Inst, s: int32) -> bool {
     return match inst {
         Inst.Load(d, x) => x == s,
@@ -1080,6 +1107,9 @@ pub fun use_counts(f: IrFunc, tc: Touches) -> [int32] {
     return counts
 }
 
+#test(7, [])[[7]]
+#test(25, [26])[[25, 26]]
+#test(87, [74, 84])[[87, 74, 84]]
 fun prepend(x: int32, xs: [int32]) -> [int32] {
     var out = [x]
     for y in xs { push(out, y) }
