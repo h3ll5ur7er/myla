@@ -168,6 +168,37 @@ class NativeRuntime(unittest.TestCase):
                 self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
                                  ("1000000\n", "runtime error: stack overflow\n", 1))
 
+    def test_a_stack_overflow_on_a_worker_is_reported(self):
+        # every worker stack has a guard page and every worker an alternate
+        # signal stack, so running out of a worker's 8 MiB is reported as on
+        # the main stack, whichever thread runs the task (MYLA-172, D106)
+        source = ("import std.task as task\n\n"
+                  "fun down(n: int) -> int {\n    if n == 0 {\n        return 0\n    }\n"
+                  "    return down(n - 1) + 1\n}\n\n"
+                  "async fun deep(k: int) -> int {\n    return down(100000000 + k)\n}\n\n"
+                  "#main\nasync fun main() {\n    var fs: [async () -> int] = []\n"
+                  "    for k in 0..4 {\n        push(fs, async () => await deep(k))\n    }\n"
+                  "    let rs = await task.all(fs)\n    print(len(rs))\n}\n")
+        for backend, binary in self.binaries("worker_overflow", source):
+            with self.subTest(backend=backend):
+                for _ in range(3):
+                    proc = subprocess.run([binary], capture_output=True, text=True, timeout=60,
+                                          env={**os.environ, "MYLA_THREADS": "4"})
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
+                                     ("", "runtime error: stack overflow\n", 1))
+
+    def test_a_tasked_program_reserves_an_arena_per_worker(self):
+        # one 4 GiB arena per worker, not 32 always: with one worker a tasked
+        # program runs under a 5.7 GB address-space limit (MYLA-172, D106)
+        source = ("async fun one() -> int {\n    return 1\n}\n\n"
+                  "#main\nasync fun main() {\n    async let a = one()\n    print(await a)\n}\n")
+        for backend, binary in self.binaries("arenas", source):
+            with self.subTest(backend=backend):
+                proc = subprocess.run(["bash", "-c", f"ulimit -v 6000000 && exec {binary}"],
+                                      capture_output=True, text=True, timeout=60,
+                                      env={**os.environ, "MYLA_THREADS": "1"})
+                self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("1\n", "", 0))
+
     def test_runtime_errors_in_an_imported_module_name_its_file(self):
         for line, message, position in MODULE_TRAPS:
             with self.subTest(line=line):

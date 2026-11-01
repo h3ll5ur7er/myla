@@ -2869,16 +2869,14 @@ impl CodeGen {
         self.raw("\tret")
         self.raw("")
         // __start_workers: the workers besides the main thread (worker 0),
-        // as many as `__workers_count` says; each a thread (clone: the
-        // address space, files, signal handlers and thread group shared,
-        // CLONE_SETTLS) with its state block and an 8 MiB stack, running
-        // `__exec_run`
+        // as many as `__exec_workers` says (`_start` set it); each a thread
+        // (clone: the address space, files, signal handlers and thread group
+        // shared, CLONE_SETTLS) with its state block and an 8 MiB stack with
+        // a guard page at its bottom (MYLA-172), running `__exec_run`
         self.raw("__start_workers:")
         self.raw("\tpushq %rbx")
         self.raw("\tpushq %r12")
         self.raw("\tpushq %r13")
-        self.raw("\tcall __workers_count")
-        self.raw("\tmovl %eax, __exec_workers(%rip)")
         self.raw("\tmovq $1, %rbx")
         self.raw(".Lsw_next:")
         self.raw("\tcmpl __exec_workers(%rip), %ebx")
@@ -2899,6 +2897,14 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("\tcmpq $-4096, %rax")
         self.raw("\tja .Lsw_short")
+        // the stack's lowest page faults: mprotect(base, 4096, PROT_NONE)
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tmovq $4096, %rsi")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw("\tmovq $10, %rax")
+        self.raw("\tsyscall")
+        self.raw("\tmovq %r13, %rax")
         self.raw("\tleaq 8388608(%rax), %rsi")
         self.raw("\tmovq $855808, %rdi")
         self.raw("\txorq %rdx, %rdx")
@@ -2911,8 +2917,31 @@ impl CodeGen {
         self.raw("\tjs .Lsw_short")
         self.raw("\tincq %rbx")
         self.raw("\tjmp .Lsw_next")
-        // the new thread, on its stack
+        // the new thread, on its stack: an alternate signal stack of its own
+        // (a thread made with CLONE_VM has none), so `__on_segv` reports its
+        // stack's overflow as the main thread's (MYLA-172): mmap(64 KiB),
+        // sigaltstack
         self.raw(".Lsw_child:")
+        self.raw("\tmovq $9, %rax")
+        self.raw("\txorl %edi, %edi")
+        self.raw("\tmovl $65536, %esi")
+        self.raw("\tmovl $3, %edx")
+        self.raw("\tmovl $34, %r10d")
+        self.raw("\tmovq $-1, %r8")
+        self.raw("\txorl %r9d, %r9d")
+        self.raw("\tsyscall")
+        self.raw("\tcmpq $-4096, %rax")
+        self.raw("\tja .Lsw_run")
+        self.raw("\tsubq $32, %rsp")
+        self.raw("\tmovq %rax, (%rsp)")
+        self.raw("\tmovq $0, 8(%rsp)")
+        self.raw("\tmovq $65536, 16(%rsp)")
+        self.raw("\tmovq $131, %rax")
+        self.raw("\tmovq %rsp, %rdi")
+        self.raw("\txorl %esi, %esi")
+        self.raw("\tsyscall")
+        self.raw("\taddq $32, %rsp")
+        self.raw(".Lsw_run:")
         self.raw("\tjmp __exec_run")
         // no more threads to be had: the workers made so far
         self.raw(".Lsw_short:")
@@ -4253,19 +4282,6 @@ impl CodeGen {
             self.raw("\tmovq $4098, %rdi")
             self.raw("\tmovq $158, %rax")
             self.raw("\tsyscall")
-            // the heap region, an arena per worker, reserved (MAP_NORESERVE)
-            self.raw("\tmovq $9, %rax")
-            self.raw("\txorq %rdi, %rdi")
-            // MAX_WORKERS (32) arenas of 4 GiB
-            self.raw("\tmovabsq $137438953472, %rsi")
-            self.raw("\tmovq $3, %rdx")
-            self.raw("\tmovq $16418, %r10")
-            self.raw("\tmovq $-1, %r8")
-            self.raw("\txorq %r9, %r9")
-            self.raw("\tsyscall")
-            self.raw("\tcmpq $-4096, %rax")
-            self.raw("\tja __trap_oom")
-            self.raw("\tmovq %rax, __heap_base(%rip)")
             // the workers' rings of ready frames, EXEC_CAP frames each
             self.raw("\tmovq $9, %rax")
             self.raw("\txorq %rdi, %rdi")
@@ -4285,6 +4301,26 @@ impl CodeGen {
         self.raw("\tmovq %rcx, __argv(%rip)")
         self.raw("\tleaq 16(%rsp,%rax,8), %rcx")
         self.raw("\tmovq %rcx, __envp(%rip)")
+        if self.frames {
+            // as many workers as `__workers_count` says (it reads the
+            // environment), and the heap region: an arena of 4 GiB per
+            // worker, reserved (MAP_NORESERVE), not MAX_WORKERS always
+            // (MYLA-172, D106)
+            self.raw("\tcall __workers_count")
+            self.raw("\tmovl %eax, __exec_workers(%rip)")
+            self.raw("\tmovl %eax, %esi")
+            self.raw("\tshlq $32, %rsi")
+            self.raw("\tmovq $9, %rax")
+            self.raw("\txorq %rdi, %rdi")
+            self.raw("\tmovq $3, %rdx")
+            self.raw("\tmovq $16418, %r10")
+            self.raw("\tmovq $-1, %r8")
+            self.raw("\txorq %r9, %r9")
+            self.raw("\tsyscall")
+            self.raw("\tcmpq $-4096, %rax")
+            self.raw("\tja __trap_oom")
+            self.raw("\tmovq %rax, __heap_base(%rip)")
+        }
         // with tasks, the other workers (D92)
         if self.frames { self.raw("\tcall __start_workers") }
         if self.frames && self.sig_of(entry_name).decl.is_async {
