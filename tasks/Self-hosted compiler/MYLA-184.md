@@ -26,6 +26,22 @@ Also a decision question from the review's §11.10, tracked with the others in `
 **D109 (2026-11-01).** The owner: "soft enforce >80 % coverage". A burn test reports the share of value-returning functions with `#test` cases per module and overall, and warns without failing while the overall share is below 80 %.
 
 - [x] Decided (D109): at least 80 %, softly enforced; it used to read: enforce the convention for `selfhost/` (and start with the pure helpers of `ir.my`, `lower.my`, `util.my`), or restate it as "the examples, and the self-hosted compiler where a function is testable in isolation"
+## Approach
+
+The owner's point: a case is only an input and an output, and the toolchains already compute both, so cases can be generated rather than written. Measured on 2026-11-01 (1,272 value-returning functions in `selfhost/`, 96 with cases):
+
+| Kind | Functions | Generated cases |
+| --- | --- | --- |
+| Free function, simple inputs (numbers, `str`, `char`, `bool`, lists and options of them) | 267 | Directly: argument and result literals |
+| Free function taking compiler data (AST, IR, tokens, types) | 415 | Where the values print as Myla expressions of bounded size (struct literals, enum constructors), or built by a helper call (`#test(parse_expr_text("1 + 2"))[…]`: arguments may be any expression without local variables) |
+| Method (`self` / `var self`) | 590 | **Not possible today**: `#test` on a method is a parse error ("expected a method ('fun ...') in impl block, found '#'") |
+
+So 80 % needs `#test` on methods: the receiver as the first argument (`#test(C { n: 2 }, 3)[5]` above `fun add(self, k: int)`), and for `var self` methods the result only. That is a language change for the owner to decide.
+
+The harvester: the Python interpreter runs the self-hosted compiler (`selfhost/gen_main.my`, the interpreter, the loader) over the examples and the error corpus with a hook on function entry and return. It records each call whose arguments and result print as Myla expressions under a size limit, keeps a few distinct cases per function (small ones first, every enum variant of the result where it can), and writes them as `#test` lines above the function. Generated cases record what the compiler does today (regression tests, not a specification), and a person reads them before they are committed. It needs the Python interpreter, so it runs before [[MYLA-219]] removes it; the self-hosted interpreter could carry the same hook later.
+
 - [ ] The three places that state it agree with the decision
 - [ ] The burn test: coverage per module and overall, a warning below 80 % (in the test output and as a CI annotation)
-- [ ] Cases added, the pure helpers first, until the share passes 80 %
+- [ ] `#test` on methods, if the owner decides for it (both parsers and checkers, both test runners)
+- [ ] The harvester; cases generated, read and committed module by module, before [[MYLA-219]]
+- [ ] The share past 80 %
