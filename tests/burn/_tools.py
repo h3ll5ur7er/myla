@@ -1,14 +1,14 @@
 """The Myla tools the burn tests run (`selfhost/<name>.my`, `tools/…`), and the
 compiler that builds them and the test programs (MYLA-58, MYLA-235).
 
-The self-hosted compiler builds them: the Python backend builds stage 1 of the
-bootstrap (`selfhost/gen_main.my`), stage 1 compiles the compiler again, and
-that stage (at the fixed point the same as `build/stage3`) compiles every tool,
-as `scripts/bootstrap.sh` does. `MYLA_TEST_BACKEND=python` makes the Python
-backend build them all instead: the fallback.
+The self-hosted compiler builds them, bootstrapped as `scripts/bootstrap.sh`
+does: the seed (`bootstrap/seed.s`, MYLA-218) assembled is stage 0, it compiles
+the compiler (stage 1), stage 1 compiles it again, and that stage (at the fixed
+point the same as `build/stage3`) compiles every tool. `MYLA_TEST_BACKEND=python`
+makes the Python backend build them all instead: the fallback.
 
 Each binary is built once per content hash of the Python toolchain, the
-standard library, `selfhost/` and `tools/`, into `build/test-tools/`
+standard library, `selfhost/`, `tools/` and the seed, into `build/test-tools/`
 (gitignored), and reused by every test module and every later run until one
 of those sources changes.
 """
@@ -38,6 +38,7 @@ def _sources_hash() -> str:
         + glob.glob(os.path.join(_REPO, "src", "myla", "std", "*.my"))
         + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
         + glob.glob(os.path.join(_REPO, "tools", "**", "*.my"), recursive=True)
+        + [os.path.join(_REPO, "bootstrap", "seed.s")]
     )
     h = hashlib.sha256()
     for path in files:
@@ -70,22 +71,29 @@ def _python_build(relpath: str, out: str) -> None:
     build(check(link(os.path.join(_REPO, relpath), stdlib_root=default_stdlib_root())), out)
 
 
+def _assemble(asm: str, out: str) -> None:
+    """The assembly file `asm` assembled and linked into `out`."""
+    subprocess.run(["as", "--64", "-o", out + ".o", asm], check=True)
+    subprocess.run(["ld", "-o", out, out + ".o"], check=True)
+
+
 def _compile_with(compiler: str, relpath: str, out: str) -> None:
     """`relpath` compiled by a stage of the self-hosted compiler, assembled and
     linked into `out`."""
     with open(out + ".s", "wb") as fh:
         subprocess.run([compiler, relpath, default_stdlib_root()], cwd=_REPO, stdout=fh, check=True)
-    subprocess.run(["as", "--64", "-o", out + ".o", out + ".s"], check=True)
-    subprocess.run(["ld", "-o", out, out + ".o"], check=True)
+    _assemble(out + ".s", out)
 
 
 @functools.cache
 def native_compiler() -> str | None:
-    """The self-hosted compiler of the current sources, bootstrapped and
-    cached; None with the Python fallback."""
+    """The self-hosted compiler of the current sources, bootstrapped from the
+    seed and cached; None with the Python fallback."""
     if BACKEND == "python":
         return None
-    stage1 = _cached("stage1", lambda out: _python_build("selfhost/gen_main.my", out))
+    seed = os.path.join(_REPO, "bootstrap", "seed.s")
+    stage0 = _cached("stage0", lambda out: _assemble(seed, out))
+    stage1 = _cached("stage1", lambda out: _compile_with(stage0, "selfhost/gen_main.my", out))
     return _cached("stage2", lambda out: _compile_with(stage1, "selfhost/gen_main.my", out))
 
 

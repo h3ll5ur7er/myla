@@ -6,9 +6,12 @@
 
 ## Stages
 
+The bootstrap starts from a seed: `bootstrap/seed.s`, the self-hosted compiler's own assembly, committed (D101, [[MYLA-218]]). It needs only `as` and `ld`; the Python toolchain builds stage 1 only with `--from-python`, until it is retired ([[MYLA-219]]).
+
 ```mermaid
 flowchart LR
-    py["Python toolchain<br/>myla.py build"] -->|stage 1| g["build/gen_tool"]
+    seed["bootstrap/seed.s"] -->|"as + ld"| s0["build/stage0"]
+    s0 -->|"compiles selfhost/gen_main.my"| g["build/gen_tool"]
     g -->|"compiles selfhost/gen_main.my"| s2["build/stage2.s → stage2"]
     s2 -->|"compiles selfhost/gen_main.my"| s3["build/stage3.s → stage3"]
     s2 -.->|"cmp: identical"| s3
@@ -16,12 +19,26 @@ flowchart LR
 
 | Stage | What runs | Time (4 cores) |
 | --- | --- | --- |
-| 1 | `python3 myla.py build selfhost/gen_main.my -o build/gen_tool` | 9.7 s |
-| 2 | `build/gen_tool selfhost/gen_main.my src/myla > build/stage2.s`, then `as` + `ld` | 1.2 s to compile |
+| 0 | `as` + `ld` of `bootstrap/seed.s` into `build/stage0` | 0.7 s |
+| 1 | `build/stage0 selfhost/gen_main.my src/myla > build/gen_tool.s`, then `as` + `ld` | 1.1 s to compile |
+| 2 | `build/gen_tool selfhost/gen_main.my src/myla > build/stage2.s`, then `as` + `ld` | 1.1 s to compile |
 | 3 | `build/stage2 selfhost/gen_main.my src/myla > build/stage3.s`, then `as` + `ld` | 1.1 s to compile |
 | check | `cmp build/stage2.s build/stage3.s` | |
 
-The result is about 6.2 MB of assembly (324,557 lines) and a 1.5 MB static binary (measured on 2026-11-01; the whole script, with `build/myla` and the language server, takes about 15 s). A fourth round produces the same output again.
+A seed older than the sources is an older compiler, which is why the check comes after stage 3: stage 1 is the current compiler as the old one compiled it, stage 2 the first one the current compiler compiled, and `stage2.s` and `stage3.s` are both the current compiler's output. Bootstrapping today's sources from the seed of the commit before [[MYLA-237]] (a code-generation change) reaches the same fixed point, byte for byte.
+
+The result is about 6.2 MB of assembly and a 1.5 MB static binary; the whole script, with `build/myla` and the language server, takes about 7.5 s from the seed and about 16 s with `--from-python` (measured on 2026-11-01). A fourth round produces the same output again.
+
+## The seed
+
+`bootstrap/seed.s` is the `stage3.s` of a fixed point, under a header that names the commit it came from and the SHA-256 of the assembly below it. `scripts/update-seed.sh` makes it: it runs the bootstrap (from the current seed, or with `--from-python`) and writes the new seed. Git shows it collapsed and without diffs (`.gitattributes`); each new seed adds about 0.6 MB to the repository's history, compressed.
+
+- **When to update it:** before the compiler's own source (`selfhost/`, and the standard library it imports) uses a construct the current seed can't compile: change the compiler, commit, update the seed, then use the construct. Otherwise whenever convenient; an old seed still works.
+- **What it doesn't limit:** the seed only has to compile the compiler. What the compiler emits for programs (new system calls, IPC, a C FFI, LLVM output, other platforms) is the compiler's business, not the seed's.
+- **Checking a seed:** run `scripts/update-seed.sh` at the commit its header names and compare; the compiler is deterministic, so the result is the same byte for byte.
+- **Other hosts:** the seed is x86-64 Linux assembly; another host cross-compiles from x86-64 Linux, or gets a seed of its own later.
+
+The burn tests bootstrap from the seed too (`tests/burn/_tools.py`, [[MYLA-235]]), and CI's `bootstrap` job runs without Python, then once more with `--from-python`.
 
 ## Why it used to be slow
 
@@ -37,7 +54,9 @@ Both fixes left `stage2.s` byte-identical. A full bootstrap now takes about 8 se
 ## Running it
 
 ```bash
-scripts/bootstrap.sh [OUT_DIR]       # default ./build; MYLA="uv run myla.py" to change the stage-1 command
+scripts/bootstrap.sh [OUT_DIR]       # default ./build, from bootstrap/seed.s
+scripts/bootstrap.sh --from-python   # stage 1 by the Python toolchain; MYLA="uv run myla.py" to change its command
+scripts/update-seed.sh               # a new seed from the current sources (see "The seed")
 just bootstrap                       # the same
 ```
 

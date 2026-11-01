@@ -106,7 +106,7 @@ python3 myla.py check examples/structs.my      # type-check only
 python3 myla.py build examples/hello.my -o hello && ./hello   # a native binary (-g: for gdb)
 ```
 
-`scripts/bootstrap.sh` builds the self-hosted compiler through its three stages, checks the fixed point, and builds `build/myla`, the self-hosted command-line tool, and `build/myla-lsp`, the language server:
+`scripts/bootstrap.sh` builds the self-hosted compiler from the committed seed (`bootstrap/seed.s`, its own assembly; only `as` and `ld` needed), checks the fixed point, and builds `build/myla`, the self-hosted command-line tool, and `build/myla-lsp`, the language server:
 
 ```bash
 scripts/bootstrap.sh
