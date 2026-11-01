@@ -1,12 +1,12 @@
 # Decisions
 
-The locked design decisions, newest first. They were made while the language was designed (June 2026) and are the "why" behind the rules on the [[Language]] pages. A decision is settled: changing one means adding a new numbered decision that supersedes it, not editing the old row.
+The locked design decisions, newest first: the first ones while the language was designed (June 2026), the later ones as it grew (to D97 in October 2026). They are the "why" behind the rules on the [[Language]] pages. A decision is settled: changing one means adding a new numbered decision that supersedes it, not editing the old row.
 
-Links in the table point at the design documents in [[Archive]], where each decision is discussed in detail.
+Links in the early rows point at the design documents in [[Archive]], where those decisions are discussed in detail; the later rows link their tasks.
 
 ## Adding a decision
 
-Add a row at the top with the next number (D62, …), today's date, the decision and the reason, and update the affected [[Language]] or [[Architecture]] pages. Decisions that tasks need are referenced from the task (for example [[MYLA-6]] asks for one on float-to-integer casts).
+Add a row at the top with the next number (D98, …), today's date, the decision and the reason, and update the affected [[Language]] or [[Architecture]] pages. Decisions that tasks need are referenced from the task (for example [[MYLA-6]] asks for one on float-to-integer casts).
 
 ## Log
 

@@ -24,9 +24,11 @@ examples/errors/        programs that must be rejected, one diagnostic each
 tests/unit/             module-level tests (unittest)
 tests/integration/      every example parses
 tests/burn/             end-to-end: interpreter output, native parity, #test cases, error corpus, self-hosting gates
-scripts/                bootstrap.sh, build.sh, run.sh, samples.sh
+scripts/                bootstrap.sh, build.sh, test.sh (fast|all), the generators (gen_*.py, gen_treesitter.sh)
 justfile                bs, bootstrap, build, run, test, run-all recipes
-editor/                 the tree-sitter grammar
+grammar/                myla.ebnf, the grammar description
+tools/                  tools written in Myla: lsp/ (the language server), grammar/ (the generator)
+editor/                 the tree-sitter grammar, generated from grammar/myla.ebnf
 vscode-extension/myla/  the VS Code extension
 docs/                   this wiki
 tasks/                  the task board (Genbeya)

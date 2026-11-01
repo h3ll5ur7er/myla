@@ -1,9 +1,0 @@
-{
-    // The Myla extension finds the repository (the folder with myla.py) in
-    // the workspace, and the language server and CLI in its build/ folder
-    // (built by scripts/bootstrap.sh). Set these only to override;
-    // ${workspaceFolder} is expanded:
-    // "myla.compilerPath": "${workspaceFolder}/myla.py",
-    // "myla.serverPath": "${workspaceFolder}/build/myla-lsp",
-    // "myla.cliPath": "${workspaceFolder}/build/myla",
-}

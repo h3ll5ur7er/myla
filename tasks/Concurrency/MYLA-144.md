@@ -58,7 +58,9 @@ The table is on the Concurrency page too ([[Language/Concurrency]]).
 
 Reopened on 2026-10-31: the review ([[Project/Review-2026-10]]) found four shapes none of the sixteen programs exercise, and each is where a problem was found. Each becomes a `t13_` to `t16_` program once its task settles the behaviour (an error-corpus file where the program is rejected):
 
-- [ ] `t13_child_of_an_actor_method`: an `async let` in an actor method reading `self` ([[MYLA-168]])
+- [x] `t13_child_of_an_actor_method`: an `async let` in an actor method reading `self` ([[MYLA-168]])
 - [ ] `t14_struct_method_in_actor`: an awaited `var self` struct method on an actor field ([[MYLA-169]])
-- [ ] `t15_failure_beside_a_busy_sibling`: a failure while a sibling loops without a suspension point ([[MYLA-170]])
-- [ ] `t16_long_lines`: lines longer than `PIPE_BUF` from several tasks ([[MYLA-173]])
+- [x] `t15_failure_beside_a_busy_sibling`: a failure while a sibling loops without a suspension point ([[MYLA-170]])
+- [x] `t16_long_lines`: lines longer than `PIPE_BUF` from several tasks ([[MYLA-173]])
+
+The review's programs (2026-11-01): `t13_child_of_an_actor_method` and `t13_actor_state_across_an_await` ([[MYLA-168]], [[MYLA-198]]), `t15_failure_beside_a_busy_sibling` ([[MYLA-170]]), `t16_long_lines` (the idiom for lines longer than a pipe keeps whole, [[MYLA-173]]); `t14` waits for [[MYLA-169]]'s decision.

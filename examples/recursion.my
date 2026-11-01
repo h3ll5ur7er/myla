@@ -1,9 +1,9 @@
-// recursion.my — recursive enums: self-referential algebraic data types (v0.2.3).
+// recursion.my — recursive enums: self-referential algebraic data types.
 //
 // An enum is *recursive* when a variant payload refers back to the enum (a list's
 // tail, a tree's children). The compiler boxes those self-referential edges behind
 // a heap pointer, so values are built on the heap while keeping value semantics;
-// non-recursive enums stay inline. Heap cells are reference counted (v0.2.3b):
+// non-recursive enums stay inline. Heap cells are reference counted:
 // they are retained when shared and freed the moment the last owner is dropped, so
 // programs that build and discard structures in a loop run in bounded memory.
 

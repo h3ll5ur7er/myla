@@ -71,6 +71,9 @@ EXPECTED = {
     # ... and a loop or match over a field of `self` across an `await` holds
     # its own references (MYLA-198: native code hung on 4 workers)
     "t13_actor_state_across_an_await": ("true\n", 0),
+    # 16. lines longer than a pipe keeps whole, printed in the parent's order
+    # from what its children returned (MYLA-173)
+    "t16_long_lines": ("".join(c * 6000 + "\n" for c in "abcd") + "24000\n", 0),
     # 10. what an actor publishes is seen whole
     "t10_publication_through_an_actor": ("42\n", 0),
     # 12. every worker and every single request make progress

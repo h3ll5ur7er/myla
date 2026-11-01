@@ -1,4 +1,4 @@
-// Option / Result and the `?` operator (v0.2.4c, D16).
+// Option / Result and the `?` operator (D16).
 //
 // `Option<T>` and `Result<T, E>` are prelude enums — always in scope, and the
 // only enums whose variants may be built *unqualified*: `Some(x)`, `None`,
@@ -7,7 +7,7 @@
 // `expr?` is postfix early-return propagation. On a `Result`, `Ok(v)` evaluates
 // to `v` while `Err(e)` does `return Err(e)`; on an `Option`, `Some(v)` yields
 // `v` while `None` does `return None`. The enclosing function must return the
-// *same carrier* (D36) — there is no error conversion in v0.2. `?` desugars to a
+// *same carrier* (D36) — there is no error conversion. `?` desugars to a
 // `match`, so it needs nothing the checker doesn't already have.
 //
 // `#test` compares the returned value structurally, so a carrier value like

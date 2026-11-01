@@ -1,6 +1,6 @@
 # Methods and traits
 
-The checker lowers every method to a function named `Type.method` with `self` as its first parameter (`Checker._resolve_impls`, [[src/myla/types.py#L1187-L1316]]).
+The checker lowers every method to a function named `Type.method` with `self` as its first parameter (`Checker._resolve_impls` in [[src/myla/types.py]]).
 
 [TOC]
 
@@ -61,7 +61,7 @@ fun main() {
 }
 ```
 
-- A trait lists method signatures; there are no default bodies. `Self` is the implementing type.
+- A trait lists method signatures; there are no default bodies. `Self` is the implementing type, and it means nothing outside a trait declaration (`'Self' is only valid inside a trait declaration`).
 - `impl Trait for T` must provide exactly the trait's methods, with the same receivers and with parameter and result types equal to the signature after `Self` is replaced by `T`.
 - A type implements a trait at most once.
 - **Generic traits** (D55) take type parameters, `trait Comparable<T> { fun compare(self, other: T) -> int }`, implemented as `impl Comparable<int32> for Version`. Still at most one impl per trait and type, whatever the arguments, so calls never need overload resolution.

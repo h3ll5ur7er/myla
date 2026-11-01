@@ -26,6 +26,8 @@ Measurements in October 2026 showed that the bootstrap's slowness comes from two
 | v0.6–v0.9 | Self-hosting bring-up: lexer, parser, checker, code generator and loader ported to Myla, each tested against the Python oracle | Done |
 | **v1.0** | **Self-hosted: three-stage byte-identical fixed point** (30 June 2026) | **Done** |
 | post-1.0 | Subprocesses (`std.process.run`), the self-hosted CLI with `run`/`test`/`build`, the language server, the VS Code extension, the Rust edition (removed in October 2026) | Done (July 2026), with open issues |
+| October 2026 | The mid-level IR with its verifier, every function through it (D79, D85); guaranteed tail calls (`become`, D87); the project tool with Git dependencies (D73); tools in Myla (language server, REPL, grammar generator, D71) | Done |
+| October 2026 | Concurrency: `async`/`await`, structured child tasks, actors, on a multi-threaded work-stealing native runtime (D89 to D97, [[MYLA-61]]) | Done |
 
 The milestone numbering was locked by D23: self-hosting is the destination (v1.0), reached through the feature milestones. The detailed per-version designs are in [[Archive]].
 
@@ -47,7 +49,7 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
 
 ## Ideas
 
-Bigger directions, collected as tasks in the `Roadmap ideas` epic. None is designed or scheduled yet.
+Bigger directions, collected as tasks in the `Roadmap ideas` epic: three are done ([[MYLA-61]], [[MYLA-67]], [[MYLA-64]]), LLVM is planned in steps, the rest are ideas.
 
 | Idea | Task | Notes |
 | --- | --- | --- |
@@ -71,4 +73,4 @@ Ideas not yet decided or scheduled (from the decision log and the feature catalo
 - by-reference closure capture with `ref` (D15, D48);
 - `#derive(Ord)`, trait objects, user-defined bounds beyond operators;
 - associated functions (`Type.new()`), named-field enum variants (D32), `@` bindings and range patterns (D33);
-- a package manifest and `exec` from the language runtime beyond `std.process` (D29).
+- `exec` from the language runtime beyond `std.process` (D29); the package manifest is built ([[Architecture/Project-tool]]).

@@ -1,0 +1,26 @@
+// 16. Long lines from several tasks (MYLA-173): a `print` is one write, which
+// a pipe keeps whole only up to 4 KiB, so tasks running at once could
+// interleave lines longer than that. The idiom: each task returns its line
+// and the parent prints them in order.
+async fun line_of(c: str, n: int) -> str {
+    var sb = StringBuilder()
+    for i in 0..n {
+        append(sb, c)
+    }
+    return build(sb)
+}
+
+#main
+async fun main() {
+    async let a = line_of("a", 6000)
+    async let b = line_of("b", 6000)
+    async let c = line_of("c", 6000)
+    async let d = line_of("d", 6000)
+    let lines = [await a, await b, await c, await d]
+    var total = 0
+    for l in lines {
+        print(l)
+        total = total + len(l)
+    }
+    print(total)
+}

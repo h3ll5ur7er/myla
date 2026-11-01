@@ -1,5 +1,5 @@
-// pipelines.my — functional pipelines, composition & partial application
-// (v0.4.3). All three are pure desugaring over v0.4.2 lambdas/calls:
+// pipelines.my — functional pipelines, composition & partial application.
+// All three are pure desugaring over lambdas and calls:
 //
 //   x |> f        ≡  f(x)              (pipeline: splice left as the 1st arg)
 //   x |> f(a)     ≡  f(x, a)

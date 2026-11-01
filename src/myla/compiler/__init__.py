@@ -31,7 +31,7 @@ def compile_to_asm(checker: Checker, debug: bool = False,
     positions in files named as `myla run` would name them (MYLA-65).
     """
     if checker.concurrency_at is not None:
-        raise MylaRuntimeError("the compiler doesn't build concurrency yet (D89, MYLA-137)",
+        raise MylaRuntimeError("the Python backend doesn't build concurrency (D91): build it with the self-hosted compiler, build/myla build",
                                at=checker.concurrency_at)
     try:
         concrete = monomorphize(checker)

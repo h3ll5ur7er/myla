@@ -1,4 +1,4 @@
-// enums.my — algebraic data types and `match` (v0.2).
+// enums.my — algebraic data types and `match`.
 // Variants can carry positional payloads; `match` is an expression with
 // exhaustiveness checking, guards, or-patterns, and nested patterns.
 

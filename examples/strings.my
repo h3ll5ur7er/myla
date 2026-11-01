@@ -1,7 +1,7 @@
-// Strings (v0.3.5): `str` is an immutable, length-prefixed, UTF-8 byte sequence.
-// v0.3 is **byte-oriented** — the dedicated Unicode `char` type arrives in v0.5.
+// Strings: `str` is an immutable, length-prefixed, UTF-8 byte sequence.
+// `len` and indexing are **byte-oriented**; Unicode code points are `char` (`chars(s)`).
 //
-// This file covers the v0.3.5a slice: `len(s)` (byte count), byte indexing
+// This file covers `len(s)` (byte count), byte indexing
 // `s[i] -> uint8` (bounds-checked, traps out of range), and **char literals**
 // (`'a'`, `'\n'`, `'\t'`, `'\r'`, `'\\'`, `'\''`, `'\0'`) whose value is the
 // byte — a `uint8` by default, but integer-literal-flexible so `s[i] == 'a'`

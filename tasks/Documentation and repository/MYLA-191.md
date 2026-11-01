@@ -2,7 +2,7 @@
 id: MYLA-191
 title: Docs status sweep after the October 2026 review
 type: chore
-status: todo
+status: review
 priority: medium
 labels: [docs]
 ---
@@ -23,4 +23,14 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 - `examples/maps.my:2` (char keys missing), `examples/strings.my:2` ("arrives in v0.5"); the examples' version-stamped headers; an "examples in reading order" list in Getting started
 - `src/myla/__init__.py` `__version__ = "0.0.1"`; `types.py` messages citing "v0.0", "v0.4.1", "v0.4.4"; the Python backend's refusal of concurrency citing [[MYLA-137]] as future
 
-- [ ] Every line above fixed or deliberately kept, and the line-count column dropped or generated
+- [x] Every line above fixed or deliberately kept, and the line-count column dropped or generated
+
+## Evidence
+
+- Fixed: README (the Archive pointer, D1–D97, a paragraph on what exists today, `myla check`, `build/myla`, the `module` stage, the `#test` convention as it is); Home (three toolchains, the status paragraph); Language, Concurrency, Conventions (D1–D97, the eleven epic folders); Architecture (the line-count column dropped, "Designs not built yet" now "Built since the first design"); IR.md's opening; Self-hosted-compiler.md (line counts dropped, 6.2 MB and 1.1 s / 111 MB measured on 2026-11-01); Bootstrap.md's stage times; Decisions (when they were made, D98 next, where links point); Roadmap (milestone rows for the IR and concurrency, the ideas' state, the manifest); Known-issues (fixed lines marked until `done`); Getting-started (test numbers, an examples reading order); Testing.md (counts and timings, with [[MYLA-153]]); Development.md (`tools/`, `grammar/`, `scripts/test.sh`).
+- The seven `#Lnn-Lmm` links now name the function and link the file (line numbers rot).
+- Structs-enums-and-match (fields need commas), Statements (no bare block statement), Lexical-structure (with [[MYLA-180]]).
+- Stated now: `_` only as a call argument, `Self` only in a trait, `StringBuilder()` without arguments, `>>` with two functions or two integers, `Eq` the only derivable trait, the notes and `did you mean` help lines.
+- The examples' version-stamped headers rewritten (18 files), `maps.my`'s keys, `strings.my`.
+- `__version__` and `pyproject.toml` 1.0.0 (`uv lock` updated the lock file); the six version-stamped checker messages changed in both checkers alike; the Python backend's refusal of concurrency points at `build/myla build` (D91).
+- Kept for the owner: the README's vision bullets ("Focus on simplicity, not safety"), which the review asks to rewrite: a statement of what the project values is the owner's to make.

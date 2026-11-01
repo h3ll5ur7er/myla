@@ -2,14 +2,23 @@
 read: a line table (MYLA-71), and the variables of every function with their
 types (MYLA-66), in both backends. readelf (binutils) is always there when
 native builds work; the gdb tests run only where gdb is installed."""
+import contextlib
+import io
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 
-from myla.cli import main as myla
+from myla.cli import main as _cli_main
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+
+
+def myla(argv: list[str]) -> int:
+    """The Python CLI in-process, its `wrote <binary>` line kept out of the
+    test run's output (MYLA-192)."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        return _cli_main(argv)
 
 PROGRAM = (
     "fun add(a: int, b: int) -> int {\n"   # line 1

@@ -26,7 +26,7 @@ fun main() {
 }
 ```
 
-- Fields are `name: Type`, separated by commas or newlines; a trailing comma is fine. Types may be declared in any order.
+- Fields are `name: Type`, separated by commas (newlines may follow a comma, but don't replace it); a trailing comma is fine. Types may be declared in any order.
 - A literal gives every field exactly once, in any order. A generic struct's type arguments are inferred from the field values (or the expected type); `Pair<int, str> { … }` is not valid syntax.
 - Structs are values: binding, passing and returning copies them (cheaply for heap-backed fields, which are copy-on-write).
 - A struct can't contain itself, directly or through other structs and tuples ("would have infinite size"); put the cycle through an enum, which is boxed.

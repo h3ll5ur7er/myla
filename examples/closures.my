@@ -1,4 +1,4 @@
-// closures.my — function types, lambdas & closures (v0.4.2).
+// closures.my — function types, lambdas & closures.
 //
 // A function value is a 16-byte *fat value*: a code pointer plus a pointer to a
 // refcounted environment of captured variables. Lambdas are written

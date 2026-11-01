@@ -1597,8 +1597,8 @@ class Checker:
             )
         if decl.type_params:
             raise TypeCheckError(
-                "deriving on generic types is not supported yet (v0.4.4 "
-                "derives Eq for concrete structs/enums)",
+                "deriving on generic types is not supported yet (Eq is "
+                "derived for concrete structs and enums)",
                 at=attr,
             )
         self._validate_derive_attr(attr)
@@ -1621,8 +1621,7 @@ class Checker:
                 )
             if a.ident != "Eq":
                 raise TypeCheckError(
-                    f"cannot derive '{a.ident}'; only 'Eq' is derivable in "
-                    "v0.4.4 (Ord is the planned next addition)",
+                    f"cannot derive '{a.ident}': only 'Eq' is derivable",
                     at=a,
                 )
 
@@ -1848,7 +1847,7 @@ class Checker:
             if impl.type_params:
                 raise TypeCheckError(
                     "generic impls on built-in types are not supported yet "
-                    "(v0.4.1 covers concrete built-in receivers)",
+                    "(only concrete built-in receivers)",
                     at=impl,
                 )
             for m in impl.methods:
@@ -1860,7 +1859,7 @@ class Checker:
                     )
         else:
             raise TypeCheckError(
-                f"cannot 'impl' on type '{type_name(target)}'; v0.4.1 supports "
+                f"cannot 'impl' on type '{type_name(target)}': an impl takes "
                 "structs, enums, and concrete scalar / str / StringBuilder "
                 "receivers",
                 at=impl,
@@ -2253,7 +2252,7 @@ class Checker:
         elif len(main_decls) > 1:
             self._fail_at(main_decls[1], "more than one '#main' entry point", main_decls[1])
         elif entry is not None and entry.params:
-            self._fail_at(entry, "entry point must take no parameters in v0.0", entry)
+            self._fail_at(entry, "entry point must take no parameters", entry)
         self.entry = entry
 
     def _check_attributes(self, decl: ast.Decl, main_decls: list[ast.FunDecl]) -> None:
@@ -3035,7 +3034,7 @@ class Checker:
                 raise TypeCheckError(
                     f"'?' propagates an error of type '{type_name(err_t)}', but the "
                     f"{where} returns 'Result<_, {type_name(ret.args[1])}>' "
-                    "(there is no error conversion in v0.2)",
+                    "(there is no error conversion)",
                     at=expr,
                 )
             result_t, succ, fail, fail_payload = ok_t, "Ok", "Err", True

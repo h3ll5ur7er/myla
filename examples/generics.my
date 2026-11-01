@@ -1,4 +1,4 @@
-// Generics (v0.2.4a): parametric functions, monomorphized (D13).
+// Generics: parametric functions, monomorphized (D13).
 //
 // Type parameters are declared in `<...>` after the function name. Type
 // arguments are *inferred* at the call site (D34) — there is no `f<int>(x)`

@@ -56,7 +56,7 @@ Both are reference-counted, copy-on-write values: a copy is cheap, and writing t
 
 ## Option and Result
 
-Every program has this prelude ([[src/myla/types.py#L620-L635]]):
+Every program has this prelude (`_PRELUDE_SRC` in [[src/myla/types.py]]):
 
 ```
 enum Option<T> { Some(T), None }

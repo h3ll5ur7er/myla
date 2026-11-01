@@ -753,7 +753,9 @@ class SemanticTokenScenarios:
 
     def test_the_corpus_is_covered(self) -> None:
         import glob, re
-        keywords = set(open(os.path.join(_REPO, "selfhost", "tokens.my")).read().split("keywords() -> [str] {")[1]
+        with open(os.path.join(_REPO, "selfhost", "tokens.my"), encoding="utf-8") as fh:
+            tokens_src = fh.read()   # closed, not left to the collector (MYLA-192)
+        keywords = set(tokens_src.split("keywords() -> [str] {")[1]
                        .split("]")[0].replace('"', "").replace("return [", "").replace(",", " ").split())
         files = sorted(glob.glob(os.path.join(_REPO, "examples", "*.my")) + glob.glob(os.path.join(_REPO, "selfhost", "*.my")))
         for path in files:

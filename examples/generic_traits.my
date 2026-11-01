@@ -1,4 +1,4 @@
-// generic_traits.my — restricted generic traits (v0.5.5, D55).
+// generic_traits.my — restricted generic traits (D55).
 //
 // A `trait` may take type parameters. A type implements such a trait *at most
 // once* (for a single argument T), so a call like `x.compare(y)` needs no

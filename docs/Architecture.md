@@ -19,20 +19,20 @@ flowchart LR
     interp --> out["run / test"]
 ```
 
-| Module | Lines | Role | Page |
-| --- | --- | --- | --- |
-| `cli.py` | 240 | Commands `run`, `test`, `build`, `check`, `tokenize`, `parse` (and `repl`, which points to the self-hosted one) | [[Getting started]] |
-| `tokens.py`, `lexer.py` | 760 | Source → tokens; f-strings lowered here | [[Architecture/Lexer-and-parser]] |
-| `ast.py`, `parser.py` | 1770 | Tokens → AST; `|>` and `return a, b` lowered here | [[Architecture/Lexer-and-parser]] |
-| `loader.py` | 710 | Import graph → one program with qualified names | [[Architecture/Module-loader]] |
-| `types.py` | 4160 | Type representation, the checker, desugaring, float formatting | [[Architecture/Type-checker]] |
-| `interpreter.py` | 1000 | Tree-walking evaluator and `#test` runner | [[Architecture/Interpreter]] |
-| `compiler/monomorphize.py` | 420 | Generic → concrete copies | [[Architecture/Monomorphization]] |
-| `compiler/codegen_x86.py` | 5210 | AST → GAS/AT&T assembly plus the runtime | [[Architecture/Native-backend]] |
-| `compiler/__init__.py` | 70 | Writes the `.s`, runs `as` and `ld` | [[Architecture/Native-backend]] |
-| `canon.py` | 320 | Canonical token and AST dumps for differential tests | [[Architecture/Self-hosted-compiler]] |
-| `errors.py` | 130 | `MylaError` and its subclasses, rendering with the error's range underlined | below |
-| `std/*.my` | 200 | The standard library, in Myla | [[Language/Standard-library]] |
+| Module | Role | Page |
+| --- | --- | --- |
+| `cli.py` | Commands `run`, `test`, `build`, `check`, `tokenize`, `parse` (and `repl`, which points to the self-hosted one) | [[Getting started]] |
+| `tokens.py`, `lexer.py` | Source → tokens; f-strings lowered here | [[Architecture/Lexer-and-parser]] |
+| `ast.py`, `parser.py` | Tokens → AST; `|>` and `return a, b` lowered here | [[Architecture/Lexer-and-parser]] |
+| `loader.py` | Import graph → one program with qualified names | [[Architecture/Module-loader]] |
+| `types.py` | Type representation, the checker, desugaring, float formatting | [[Architecture/Type-checker]] |
+| `interpreter.py` | Tree-walking evaluator and `#test` runner | [[Architecture/Interpreter]] |
+| `compiler/monomorphize.py` | Generic → concrete copies | [[Architecture/Monomorphization]] |
+| `compiler/codegen_x86.py` | AST → GAS/AT&T assembly plus the runtime | [[Architecture/Native-backend]] |
+| `compiler/__init__.py` | Writes the `.s`, runs `as` and `ld` | [[Architecture/Native-backend]] |
+| `canon.py` | Canonical token and AST dumps for differential tests | [[Architecture/Self-hosted-compiler]] |
+| `errors.py` | `MylaError` and its subclasses, rendering with the error's range underlined | below |
+| `std/*.my` | The standard library, in Myla | [[Language/Standard-library]] |
 
 The whole toolchain uses only the Python standard library. The tools beyond the compiler (the language server, the grammar generator) are written in Myla, in `tools/` (D71).
 
@@ -63,9 +63,11 @@ type error: unknown function 'nope'
 - [[Architecture/Rust-edition]]: a separate dialect and toolchain in Rust, removed in October 2026 (history note).
 - [[Architecture/Editor-tooling]]: language server, VS Code extension and its debugger, the grammar description and the tree-sitter grammar generated from it.
 
-## Designs not built yet
+## Built since the first design
 
 - [[Architecture/Project-tool]]: `myla` as a project tool like cargo, with a manifest (`myla.toml`), path and Git dependencies and the commands `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` (D73, [[MYLA-64]]).
-- [[Architecture/IR]]: the mid-level IR between the checker and the self-hosted backend: three-address code on basic blocks with explicit reference counting, migrated to function by function (D79, [[MYLA-67]]); the self-hosted backend's default since [[MYLA-107]].
+- [[Architecture/IR]]: the mid-level IR between the checker and the self-hosted backend: three-address code on basic blocks with explicit reference counting and a verifier; every function goes through it since [[MYLA-107]] (D79, D85).
+
+Not built yet: an LLVM backend and other platforms ([[MYLA-62]]).
 
 The original v0.0 design sketch of this architecture is [[Archive/architecture]].

@@ -1,6 +1,6 @@
 # IR
 
-The design of the mid-level intermediate representation between the checker and the self-hosted native backend ([[MYLA-67]], D79). Today [[selfhost/codegen.my]] turns the checked, monomorphized AST straight into assembly text and decides frame layout, reference counting, copy-on-write, staged stores and drops while it emits instructions ([[Architecture/Native-backend]]). The IR makes those decisions explicit data, so they can be printed, checked and optimised, and leaves the backend only instruction selection.
+The mid-level intermediate representation between the checker and the self-hosted native backend ([[MYLA-67]], D79). Every function goes through it ([[MYLA-107]]): [[selfhost/lower.my]] turns the checked, monomorphized AST into IR, where frame layout, reference counting, copy-on-write, staged stores and drops are explicit data that can be printed, verified and optimised, and [[selfhost/ir_x86.my]] selects the instructions ([[Architecture/Native-backend]]). Before it, the code generator decided all of that while it emitted assembly.
 
 > [!NOTE]
 > **Status: built, and stable since D85.** The decisions below were approved on 2026-10-27 (D79). The steps were tasks [[MYLA-103]] to [[MYLA-109]] and [[MYLA-120]] to [[MYLA-122]]; see "Stability" for what may change from here.

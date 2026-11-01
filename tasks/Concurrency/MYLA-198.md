@@ -16,3 +16,4 @@ Found while writing the stress program for [[MYLA-168]]. In native code, an asyn
 - Before: `t13_child_of_an_actor_method` printed `false` natively on 1 and 4 workers (the borrowed list's length read back as an address, e.g. `ta 2 tb 2 len 140233093941944`), `true` in both interpreters; `t13_actor_state_across_an_await` hung natively on 4 workers (2 of 2 runs killed after 20 s).
 - After: both print `true` in both interpreters and natively, on 1 and 4 workers (3 runs each), and in the stress suite on 1, 4 and 16 workers.
 - The interpreters copy and were never affected; the Python backend has no concurrency (D91).
+- Unit 622, integration 2, burn 826 (5 skipped) and the extension's 54 tests pass on commit 12f6e94; the bootstrap reaches its byte-identical fixed point (6,153,392 bytes).

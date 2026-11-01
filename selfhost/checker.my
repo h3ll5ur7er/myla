@@ -2074,10 +2074,10 @@ impl Checker {
         }
         match key_opt {
             Some(k) => {
-                if len(tps) > 0 { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are not supported yet (v0.4.1 covers concrete built-in receivers)")) }
+                if len(tps) > 0 { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are not supported yet (only concrete built-in receivers)")) }
                 for m in methods { if match m.receiver { Some(r) => r == "var self", None => false } { return Err(terr_at(m.line, m.col, m.sp, "'var self' methods on built-in types are not supported yet; use a read-only 'self' receiver")) } }
             },
-            None => { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on type '{}'; v0.4.1 supports structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
+            None => { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on type '{}': an impl takes structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
         }
         return Ok(0)
     }
@@ -4179,7 +4179,7 @@ impl Checker {
             DeclKind.EnumDecl(n, v, a, t, p) => len(t) > 0,
             _ => false,
         }
-        if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (v0.4.4 derives Eq for concrete structs/enums)")) }
+        if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (Eq is derived for concrete structs and enums)")) }
         return self.validate_derive_attr(attr)
     }
 
@@ -4195,7 +4195,7 @@ impl Checker {
         if len(attr.args) == 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' needs at least one trait, e.g. #derive(Eq)")) }
         for a in attr.args {
             match a.kind {
-                ExprKind.Name(id) => { if id != "Eq" { return Err(terr_at(a.line, a.col, a.sp, format("cannot derive '{}'; only 'Eq' is derivable in v0.4.4 (Ord is the planned next addition)", id))) } },
+                ExprKind.Name(id) => { if id != "Eq" { return Err(terr_at(a.line, a.col, a.sp, format("cannot derive '{}': only 'Eq' is derivable", id))) } },
                 _ => { return Err(terr_at(a.line, a.col, a.sp, "'#derive' arguments must be trait names")) },
             }
         }
@@ -4514,7 +4514,7 @@ impl Checker {
             if ei >= 0 && len(self.functions[ei].decl.params) > 0 {
                 let d = self.functions[ei].decl
                 self.reset_state(self.functions[ei].decl_id)
-                self.note(terr_at(d.line, d.col, d.sp, "entry point must take no parameters in v0.0"))
+                self.note(terr_at(d.line, d.col, d.sp, "entry point must take no parameters"))
             }
         }
     }
@@ -5279,7 +5279,7 @@ impl Checker {
                     if ret_is != "Result" { return Err(terr_at(e.line, e.col, e.sp, format("'?' on a Result requires the enclosing {} to return a Result", where))) }
                     let ret_err = match self.cur_ret { Some(r) => match r { Type.TEnum(rn, rargs) => rargs[1], _ => err_t }, None => err_t }
                     if !type_eq(ret_err, err_t) {
-                        return Err(terr_at(e.line, e.col, e.sp, format("'?' propagates an error of type '{}', but the {} returns 'Result<_, {}>' (there is no error conversion in v0.2)", type_name(err_t), where, type_name(ret_err))))
+                        return Err(terr_at(e.line, e.col, e.sp, format("'?' propagates an error of type '{}', but the {} returns 'Result<_, {}>' (there is no error conversion)", type_name(err_t), where, type_name(ret_err))))
                     }
                     return Ok(oargs[0])
                 }
