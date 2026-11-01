@@ -1,6 +1,6 @@
 """Burn test enforcing the project's `#test` convention for examples.
 
-Convention (see README): every `.my` example must (a) have all of its embedded
+Convention (docs/Development/Conventions.md): every `.my` example must (a) have all of its embedded
 `#test` cases pass, and (b) attach at least one `#test` to every value-returning
 function. Entry points / void helpers are exempt (they cannot be unit-tested).
 

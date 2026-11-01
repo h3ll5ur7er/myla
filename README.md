@@ -1,169 +1,154 @@
-# Myla Programming Language
+# Myla
 
 [![CI](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml)
 
-Very simple custom language with a compiler and an interpreter.
-Inspired by modern languages like Swift, Rust, and Python.
+Myla is a small, statically typed programming language with value semantics. It compiles to x86-64 Linux binaries without libc, and its compiler is written in Myla and compiles itself. It borrows from Swift, Rust and Python, but is none of them: newlines end statements, functions start with `fun`, collections are values, and everything is checked before anything runs.
 
-## Visions
-### Short Term
-- No dependencies
-- Easy to learn and understand
-- Focus on simplicity, not safety
-- Explicitly sized primitive types (e.g. `int32`/`uint8`), not Python-style dynamic numbers
-- Neat, modern cli tool
-### Long Term
-- Self-hosted
-- Algebraic data types (enums on steroids) and pattern matching
-- Structs and Traits
-- A growing standard library (tuples, lists, maps, ...)
-- First-class functions: lambdas/closures and functional pipelines
-- Operator overloading and custom operators
-- Extensible using metaprogramming (attributes/macros, e.g. `#main`, `#test`)
-- All kinds of syntactic sugar
+```myla
+enum Shape {
+    Square(int),
+    Rect(int, int),
+}
 
-> The language as it is today is described in the wiki: [Language](docs/Language.md).
-> The early proposals for these are kept in [docs/Archive/future-features.md](docs/Archive/future-features.md).
+#test(Shape.Rect(2, 3))[6]
+fun area(s: Shape) -> int {
+    return match s {
+        Square(side) => side * side,
+        Rect(w, h) => w * h,
+    }
+}
 
-## Proposed guidelines
-### Syntax
-Widely inspired by modern languages like swift, rust, python, etc.
+fun parse_digit(c: char) -> Result<int, str> {
+    let d = (c as int) - ('0' as int)
+    if d < 0 || d > 9 {
+        return Err(f"not a digit: {c}")
+    }
+    return Ok(d)
+}
 
-Some highlights of the v0.0 design: function definitions use `fun`; primitives
-are explicitly sized integers (`int8`/`int16`/`int32`/`int64` and their `uint`
-counterparts) with `int` as a built-in alias for `int32`; integer literals take
-optional type suffixes (`255u8`, `123i64`); user-defined `typealias` is
-supported; and declarations may carry built-in attributes (`#main` to mark the
-entry point, `#test(inputs)[expected]` for inline tests run via `myla test`).
+fun sum_digits(text: str) -> Result<int, str> {
+    var total = 0
+    for c in chars(text) {
+        total = total + parse_digit(c)?
+    }
+    return Ok(total)
+}
 
-Documentation lives in the project wiki under [`docs/`](docs/Home.md), and work
-is tracked as tasks under [`tasks/`](tasks/). Both are plain Markdown managed with
-[Genbeya](https://github.com/genbeya/genbeya), so they read fine on GitHub and live
-(with working `[[MYLA-12]]`-style references) in Genbeya:
-
-- [Home](docs/Home.md) — overview and where to start
-- [Getting started](docs/Getting-started.md) — run, build, test, bootstrap
-- [Language](docs/Language.md) — the language reference, including the [grammar](docs/Language/Grammar.md)
-- [Architecture](docs/Architecture.md) — the Python toolchain, the self-hosted compiler, editor tooling
-- [Development](docs/Development.md) — testing, bootstrap, conventions
-- [Project](docs/Project.md) — [roadmap](docs/Project/Roadmap.md), [decision log D1–D97](docs/Project/Decisions.md), [known issues](docs/Project/Known-issues.md)
-
-What is there today: value semantics with sized integers, enums and `match`, traits, generics, closures and pipelines, guaranteed tail calls (`become`), Swift-style concurrency (`async`/`await`, structured child tasks, actors) on a multi-threaded native runtime, a standard library with JSON and TOML, a project tool with Git dependencies (`myla new`, `build`, `run`, `test`, `check`, `fetch`), a language server, a VS Code extension with a debugger, and a compiler written in Myla that compiles itself.
-
-The documents written during development (the v0.0 spec, grammar and architecture,
-the self-hosting plan, the per-version v0.2–v0.5 designs, the feature catalog and
-the open-questions tracker) are kept unchanged in the [Archive](docs/Archive.md).
-
-
-### CLI (the Python toolchain — bootstrap stage0 + oracle)
-```bash
-uv sync
-uv run myla.py <cmd>          # or: python3 myla.py <cmd>  (no third-party deps)
-
-## Example commands:
-# interpreter
-uv run myla.py run myscript.my
-# compiler (native x86-64 ELF via as/ld, no libc)
-uv run myla.py build myscript.my -o myscript
-# run inline #test cases
-uv run myla.py test myscript.my
-# type-check only
-uv run myla.py check myscript.my
-# repl (in the self-hosted CLI, which scripts/bootstrap.sh builds)
-build/myla repl
-```
-
-### Self-hosting (the Myla-written compiler)
-
-The compiler is now self-hosted: the toolchain under `selfhost/` (lexer →
-parser → checker → x86-64 codegen) compiles its own source to a **byte-identical
-fixed point**. Build it and verify the three-stage fixpoint with:
-
-```bash
-scripts/bootstrap.sh            # outputs to ./build (gitignored)
-# build/gen_tool : selfhost compiler, built by the Python backend (stage1)
-# build/stage2   : selfhost compiler, built by gen_tool
-# build/stage3   : selfhost compiler, built by stage2 (stage2.s == stage3.s)
-```
-
-The self-hosted compiler emits assembly to stdout and takes the stdlib root as
-its second argument; a thin host wrapper (the script above) runs `as`/`ld`:
-
-```bash
-build/stage3 examples/hello.my src/myla > hello.s
-as --64 -o hello.o hello.s && ld -o hello hello.o && ./hello
-```
-
-`scripts/bootstrap.sh` also builds `build/myla`, the self-hosted command-line
-tool (`run`, `test`, `build`, `check`, `repl` and the project commands), and the
-language server. See [Known issues](docs/Project/Known-issues.md) for current
-gaps and the [Roadmap](docs/Project/Roadmap.md) for status.
-
-### Testing convention
-
-Every `.my` example attaches `#test(inputs)[expected]` cases to **every
-value-returning function**, turning each file into its own regression suite
-runnable with `myla test`. Entry points and void helpers are exempt since they
-cannot be unit-tested. The self-hosted compiler's sources carry such cases in
-places only ([MYLA-184](tasks/Self-hosted%20compiler/MYLA-184.md)); the parity
-gates against the Python toolchain cover them.
-
-This is deliberately redundant with the Python test suite today, but it is what
-keeps a self-hosted Myla honest: when the toolchain is written in Myla, these
-in-language tests are how we detect that a change broke something. The
-[examples burn test](tests/burn/test_examples_tests.py) enforces both halves of
-the convention (all `#test` cases pass, and no value-returning function is left
-untested).
-
-### Regression corpus
-
-Every language feature must appear in at least one runnable example, and every
-known edge case, past bug, and intentional error must be captured by a program
-the toolchain handles in a pinned way. Concretely:
-
-- **Positive cases** live in `examples/*.my` — runnable programs with `#test`
-  cases. Each is pinned to its stdout in
-  [`test_examples_run.py`](tests/burn/test_examples_run.py) and compiled to
-  native code and diffed against the interpreter in
-  [`test_examples_compile.py`](tests/burn/test_examples_compile.py). A coverage
-  check fails if an example lands without being registered in both.
-- **Negative cases** live in `examples/errors/*.my` — programs that *must* be
-  rejected. Each declares the diagnostic it expects with a directive comment:
-
-```
-//~ type error: cannot assign to an immutable binding
 fun main() {
-    let x = 1
-    x = 2
+    let shapes = [Shape.Square(3), Shape.Rect(2, 5)]
+    var total = 0
+    for s in shapes {
+        total = total + area(s)
+    }
+    print(f"total area {total}")      // total area 19
+    match sum_digits("20x6") {
+        Ok(n) => print(n),
+        Err(e) => print(e),           // not a digit: x
+    }
 }
 ```
 
-The leading `<lex|parse|module|type|runtime> error` selects the pipeline stage that must
-fail and the trailing text is a substring of the expected message.
-[`test_error_corpus.py`](tests/burn/test_error_corpus.py) runs each through the
-toolchain and asserts it fails in the right stage with the right message — so a
-feature can neither silently *stop* rejecting bad input nor start failing for the
-wrong reason. When a bug is fixed, add the program that triggered it: an accepted
-program to `examples/regressions.my`, or a rejected one to `examples/errors/`.
+And concurrency in the style of Swift: an actor's methods run one at a time, child tasks run in parallel, and values cross between them as copies.
 
-## Roadmap
+```myla
+actor Counter {
+    n: int,
+}
 
-For live status (what is implemented, in progress, planned) and the running log
-of design decisions, see the [Roadmap](docs/Project/Roadmap.md) and [Decisions](docs/Project/Decisions.md). High-level
-milestone outline (all milestones below are **done** — the original
-"v0.1 = self-host" framing was superseded by D23, which makes self-hosting the
-v1.0 destination reached through the feature milestones):
+impl Counter {
+    fun add(var self, k: int) -> int {
+        self.n = self.n + k
+        return self.n
+    }
+}
 
-| Milestone | Theme |
-|-----------|-------|
-| v0.0 | Python bootstrap toolchain: front end + tree-walking interpreter + x86-64 compiler (`myla run`/`test`/`build`) |
-| v0.2 | Data modeling: `enum`+`match`, tuples, generics, `Option`/`Result` + `?` |
-| v0.3 | Collections, strings & ops: lists/maps, string toolkit, refcounting, bitwise, casts, `const`, `assert` |
-| v0.4 | Abstraction: methods/`impl`, lambdas/closures, pipelines, traits + operator overloading |
-| v0.5 | Modules & runtime: imports + `std`, floats, `char`/UTF-8, freestanding I/O |
-| v0.6–v0.9 | Self-hosting bring-up: port lexer → parser → checker → codegen to Myla, each differentially tested against the Python oracle |
-| **v1.0** | **Self-hosted: Myla compiles Myla to a byte-identical three-stage fixed point** (`scripts/bootstrap.sh`) |
+async fun work(c: Counter, times: int) -> int {
+    for i in 0..times {
+        await c.add(1)
+    }
+    return times
+}
 
-Post-1.0 ideas (custom operators, user macros, compound-assignment sugar) and the
-known gaps in the self-hosted backend live in the [Roadmap](docs/Project/Roadmap.md)
-and [Known issues](docs/Project/Known-issues.md).
+#main
+async fun main() {
+    let c = Counter { n: 0 }
+    async let a = work(c, 1000)
+    async let b = work(c, 2000)
+    let done = await a + await b
+    print(f"{done} calls, counter at {await c.add(0)}")   // 3000 calls, counter at 3000
+}
+```
+
+## What it values
+
+- **No dependencies.** The toolchain needs Python's standard library and GNU binutils (`as`, `ld`), nothing else; native programs are static binaries without libc.
+- **Predictable code.** Explicitly sized integers (`int8` … `uint64`, `int` is `int32`), no implicit conversions, value semantics with copy-on-write, deep immutability for `let`, no null (`Option`), errors as values (`Result` and `?`).
+- **Safety the checker can give cheaply.** Exhaustive `match`, ranges and spans in every diagnostic, actors whose state only their own methods reach, captures that can't be changed from a lambda, a warning for actor state checked before an `await` and changed after it.
+- **One meaning, several implementations.** The interpreter defines the language; two interpreters and two native backends are tested against each other on every program of the test suites, down to the text of every diagnostic.
+- **Self-hosting.** The compiler in `selfhost/` compiles itself to a byte-identical fixed point, and the tools around it (the language server, the REPL, the project tool, the grammar generator) are written in Myla too.
+
+## The language
+
+Structs, enums with payloads and `match`, tuples, lists and maps, strings and `char` (UTF-8), `float32`/`float64`; generics (monomorphized), traits with operator overloading and `#derive(Eq)`; methods, closures, pipelines (`x |> f(y)`), composition (`f >> g`) and partial application (`f(_, 2)`); guaranteed tail calls (`become`); modules with `pub` and packages; `#test(args)[expected]` cases next to the code they test; `async`/`await`, structured child tasks (`async let`, `std.task`) and actors on a multi-threaded native runtime.
+
+The standard library has I/O and files (`std.io`, `std.fs`), processes (`std.process`), JSON and TOML (`std.json`, `std.toml`), number formatting (`std.num`) and task groups (`std.task`).
+
+The reference is the wiki, starting at [Language](docs/Language.md); the reasons behind each rule are the numbered decisions on [Decisions](docs/Project/Decisions.md).
+
+## Getting started
+
+You need x86-64 Linux, Python 3.12 or later and GNU binutils. gdb is optional, for debugging.
+
+```bash
+python3 myla.py run examples/hello.my          # interpret a program
+python3 myla.py test examples/structs.my       # run its #test cases
+python3 myla.py check examples/structs.my      # type-check only
+python3 myla.py build examples/hello.my -o hello && ./hello   # a native binary (-g: for gdb)
+```
+
+`scripts/bootstrap.sh` builds the self-hosted compiler through its three stages, checks the fixed point, and builds `build/myla`, the self-hosted command-line tool, and `build/myla-lsp`, the language server:
+
+```bash
+scripts/bootstrap.sh
+build/myla run examples/concurrency.my         # the same commands as myla.py, faster
+build/myla repl                                # the interactive interpreter
+build/myla new hello && cd hello && ../build/myla run   # a project with a myla.toml
+```
+
+In a project, `build/myla` also has `build`, `test`, `check`, `fetch` (Git dependencies, with a lock file) and `clean`. Native programs with tasks run on one worker per CPU; `MYLA_THREADS` sets the number.
+
+More in [Getting started](docs/Getting-started.md), including an examples reading order: every file in `examples/` is a runnable program.
+
+## Editor support
+
+The VS Code extension in [`vscode-extension/myla`](vscode-extension/myla/README.md) starts the language server (diagnostics as you type, hover, go to definition, references, completion, semantic highlighting), runs and tests files, and debugs them with gdb through its own debug adapter. A tree-sitter grammar, generated from [`grammar/myla.ebnf`](grammar/myla.ebnf), is in `editor/`. See [Editor tooling](docs/Architecture/Editor-tooling.md).
+
+## How it is built
+
+| Part | Where | Role |
+| --- | --- | --- |
+| Python toolchain | `src/myla/`, `myla.py` | The reference: lexer, parser, checker, tree-walking interpreter, `#test` runner, and a native backend that builds the first stage of the bootstrap |
+| Self-hosted compiler | `selfhost/` | The same pipeline in Myla, with a mid-level IR and its verifier, a native backend with the concurrency runtime, and its own interpreter; `build/myla` |
+| Tools in Myla | `tools/` | The language server (`tools/lsp/`) and the grammar generator (`tools/grammar/`) |
+| Standard library | `src/myla/std/` | Written in Myla |
+| Editor support | `vscode-extension/`, `editor/`, `grammar/` | The VS Code extension, the tree-sitter grammar, the grammar description |
+
+The architecture, from the module loader to the native runtime, is described in [Architecture](docs/Architecture.md); the bootstrap in [Bootstrap](docs/Development/Bootstrap.md).
+
+## Status
+
+Version 1.0, self-hosting, was reached in June 2026. Since then: the mid-level IR, guaranteed tail calls, concurrency with actors and a work-stealing runtime, the project tool, and the tools rewritten in Myla. The review of October 2026 and what came of it are on [Review 2026-10](docs/Project/Review-2026-10.md); open bugs are on [Known issues](docs/Project/Known-issues.md).
+
+Next on the [Roadmap](docs/Project/Roadmap.md): an LLVM backend, and other platforms through it (Linux on aarch64, macOS, Windows, WebAssembly), then a C FFI.
+
+## Working on Myla
+
+```bash
+scripts/test.sh fast        # unit, integration and the quick burn tests, about 20 s
+scripts/test.sh             # everything, the self-hosting gates included (several minutes)
+scripts/bootstrap.sh        # after changing selfhost/ or the native backend: the fixed point
+```
+
+- **Tests.** Unit and integration tests for the Python toolchain; burn tests that run every example through the interpreters and both backends, pin the error corpus (`examples/errors/`, one rejected program per diagnostic), and compare the self-hosted compiler with the Python one stage by stage. See [Testing](docs/Development/Testing.md).
+- **Tasks and wiki.** Work is planned as tasks in [`tasks/`](tasks/) and documented in the wiki in [`docs/`](docs/Home.md), both plain Markdown managed with [Genbeya](https://github.com/genbeya/genbeya). Conventions are in [Conventions](docs/Development/Conventions.md); coding agents start at [`AGENTS.md`](AGENTS.md).
+- **History.** The design documents written while the language was designed, and a Rust edition removed in October 2026, are kept in the [Archive](docs/Archive.md).

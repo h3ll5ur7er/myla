@@ -1,6 +1,6 @@
 """Command-line interface for the Myla toolchain.
 
-Commands (see README "CLI"):
+Commands (see docs/Getting-started.md):
     run <file.my>            interpret a program
     test <file.my>           run #test cases
     build <file.my> -o <bin> compile to a native binary

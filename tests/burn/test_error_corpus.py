@@ -1,6 +1,6 @@
 """Burn test: the negative corpus in ``examples/errors/`` is rejected as expected.
 
-Project convention (see README "Regression corpus"): every language feature is
+Project convention (docs/Development/Testing.md, "The error corpus"): every language feature is
 exercised by a runnable example, and every *known edge case, past bug, and error*
 is pinned by a program the toolchain must reject. The files in
 ``examples/errors/`` are those rejections.

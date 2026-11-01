@@ -2,7 +2,7 @@
 id: MYLA-182
 title: "Deep input segfaults the self-hosted parser and interpreter: a stack depth guard"
 type: bug
-status: review
+status: done
 priority: high
 labels: [selfhost, parser, interpreter, lsp]
 ---

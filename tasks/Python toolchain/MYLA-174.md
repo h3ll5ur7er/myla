@@ -2,7 +2,7 @@
 id: MYLA-174
 title: The Python backend can't compile a map literal whose values involve generics
 type: bug
-status: review
+status: done
 priority: high
 labels: [compiler, monomorphization]
 ---
