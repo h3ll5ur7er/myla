@@ -71,10 +71,17 @@ def _corpus() -> list[str]:
     return sorted(f for f in files if not f.startswith(errors))
 
 
+# Error-corpus files whose program the grammar accepts: they break a limit of
+# the parsers, not a rule of the grammar (MYLA-182: 256 levels of nesting)
+_PARSER_LIMITS = {"parse_nested_too_deeply.my"}
+
+
 def _syntax_errors() -> list[str]:
-    """The error-corpus files that must fail to lex or parse."""
+    """The error-corpus files that must fail to lex or parse by the grammar."""
     out = []
     for path in sorted(glob.glob(os.path.join(_REPO, "examples", "errors", "*.my"))):
+        if os.path.basename(path) in _PARSER_LIMITS:
+            continue
         with open(path, encoding="utf-8") as fh:
             if re.match(r"//~\s*(lex|parse) error", fh.readline()):
                 out.append(path)
