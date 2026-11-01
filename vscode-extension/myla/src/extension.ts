@@ -11,7 +11,7 @@ import { chooseCli, expandPath, findCompilerEntry, type Toolchain, type ToolMiss
 
 let client: LanguageClient | undefined;
 let watcher: vscode.FileSystemWatcher | undefined;
-let output: vscode.OutputChannel;
+let output: vscode.LogOutputChannel;
 let status: vscode.LanguageStatusItem;
 
 /** A path setting, expanded. */
@@ -35,7 +35,8 @@ export function resolveCli(): Toolchain | ToolMissing {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  output = vscode.window.createOutputChannel("Myla");
+  // a log channel: vscode-languageclient 10 writes its own log lines to it
+  output = vscode.window.createOutputChannel("Myla", { log: true });
   status = vscode.languages.createLanguageStatusItem("myla.languageServer", { language: "myla" });
   status.name = "Myla language server";
   context.subscriptions.push(output, status);
