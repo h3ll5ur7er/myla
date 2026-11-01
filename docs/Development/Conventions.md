@@ -7,7 +7,7 @@
 This repository uses [Genbeya](https://github.com/genbeya/genbeya): the board is `tasks/`, the wiki is `docs/`, settings are in `.genbeya.yml`. Both are plain Markdown and can be edited with any editor; Genbeya shows them as a board and a wiki with live references.
 
 - One file per task, named after its ID (`MYLA-12.md`), in the epic folder of its component: `Python toolchain`, `Self-hosted compiler`, `IR`, `Concurrency`, `LLVM and platforms`, `Editor tooling`, `Tooling in Myla`, `Project tool`, `Documentation and repository`, `Rust edition` (history), and `Roadmap ideas` for larger directions.
-- Workflow: `backlog` → `todo` → `in-progress` → `review` → `done`. Confirmed bugs that should be fixed next are in `todo`, everything else waits in `backlog`.
+- Workflow: `backlog` → `todo` → `in-progress` → `review` → `done`. An agent moves a task it has finished to `review`; only the owner moves tasks to `done`, or asks for it explicitly. Confirmed bugs that should be fixed next are in `todo`, everything else waits in `backlog`.
 - A new task takes the next free number across all epics. Abandoned tasks move to `done` with a note; tasks are never deleted.
 - Reference tasks, pages and files with `[[MYLA-12]]`, `[[Language/Types]]` and `[[src/myla/types.py#L10-L20]]`; `![[file#L1-L9]]` on its own line embeds lines.
 - Name the task in commit messages and pull requests: `MYLA-12: Encode interpreter strings with surrogateescape`.

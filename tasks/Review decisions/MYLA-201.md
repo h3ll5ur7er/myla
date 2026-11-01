@@ -2,7 +2,7 @@
 id: MYLA-201
 title: "Decision: the end state of D71 (how many implementations a change needs)"
 type: chore
-status: todo
+status: review
 priority: high
 labels: [decision, architecture, bootstrap]
 ---
@@ -27,7 +27,9 @@ Either way, [[MYLA-181]] (one builtin table in the Python toolchain) and [[MYLA-
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D101 (2026-11-01).** The owner: "we need a way to bootstrap the language, including all future low level integrations. I am perfectly fine freezing or even dropping the Python version if we don't shut a door while doing so. […] as long as the current feature set of Myla can supply everything we might need in the future, I am fine with committing an assembly file that can be compiled into a first compiler stage that is capable of bootstrapping the self-hosted Myla compiler."
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+So option C: a committed assembly seed ([[MYLA-218]]), the Python toolchain frozen now and removed afterwards ([[MYLA-219]]). Why no door closes: the seed only has to compile the compiler's own source; everything the compiler can emit for programs (system calls, IPC, a C FFI, LLVM, other platforms) is added to the compiler, not to the seed. A construct the compiler's own source wants to use first goes into the compiler, then a new seed is committed, then the source may use it. Other hosts cross-compile from x86-64 Linux, or get a seed of their own later. [[MYLA-181]]'s Python half is moot.
+
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

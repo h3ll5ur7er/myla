@@ -18,7 +18,7 @@ From the October 2026 review ([[Project/Review-2026-10]], §13.8). The rules the
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**`done` (2026-11-01):** agents put tasks into `review` when they are done; the owner moves them to `done`, or asks for it explicitly, as until now (written into [[Development/Conventions]]). The other sub-questions (types, epic parents, pull requests, evidence) are open.
 
 - [ ] Decided, and recorded on [[Project/Decisions]]
 - [ ] The implementation tasks created or updated to match

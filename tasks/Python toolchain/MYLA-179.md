@@ -2,7 +2,7 @@
 id: MYLA-179
 title: Map iteration order differs between the interpreter and native code
 type: improvement
-status: backlog
+status: todo
 priority: low
 labels: [maps, parity, design]
 ---
@@ -23,6 +23,7 @@ Part of the language ergonomics round ([[MYLA-215]]).
 
 ## Decision
 
-*Open.*
+**D105 (2026-11-01): insertion order** (option B), in every implementation (after [[MYLA-219]], the self-hosted interpreter and the native map).
 
-- [ ] A decision on [[Project/Decisions]], then the implementation in all four implementations with a parity program
+- [x] A decision on [[Project/Decisions]] (D105)
+- [ ] Then the implementation in all four implementations with a parity program

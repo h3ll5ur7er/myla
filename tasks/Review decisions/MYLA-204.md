@@ -2,7 +2,7 @@
 id: MYLA-204
 title: "Decision: methods on builtin collections, or free functions only"
 type: chore
-status: todo
+status: review
 priority: medium
 labels: [decision, language, builtins]
 ---
@@ -24,7 +24,7 @@ Is there one call style for builtin types, and which?
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D103 (2026-11-01), option C.** The owner: "C. I already fell for that trap as well." Implementation: [[MYLA-221]].
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

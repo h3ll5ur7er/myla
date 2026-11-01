@@ -15,4 +15,6 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 - [ ] One shared frame-layout record; named constants; a flag on the call site instead of the suffix
 - [ ] `codegen.my` split by role (runtime text, layout, DWARF, census), or at least its sections named for what they hold
 
-Waits for the decision in [[MYLA-201]] and [[MYLA-217]].
+Decided by D108 ([[MYLA-217]]): one frame-layout record shared by the code generator's parts and later the LLVM backend, and one visitor for the four AST walks that collect names, now; the runtime leaves `codegen.my` with [[MYLA-162]]; the Python backend is frozen (D101), so only the self-hosted side.
+
+- [ ] One visitor for the name-collecting AST walks (D108)

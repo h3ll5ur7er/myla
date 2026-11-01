@@ -2,7 +2,7 @@
 id: MYLA-171
 title: The reentrancy warning (D95) is bypassed through self methods
 type: improvement
-status: backlog
+status: todo
 priority: medium
 labels: [concurrency, checker, warnings]
 ---
@@ -12,4 +12,4 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 - [ ] Both checkers agree; the two programs above warn, the two ways out (checking again after the `await`, changing before it) stay quiet
 - [ ] Consider a non-reentrant method kind (no `await` inside), which is what most invariants want (a decision)
 
-Waits for the decision in [[MYLA-212]].
+Part of the next concurrency slice (D107, [[MYLA-212]]).

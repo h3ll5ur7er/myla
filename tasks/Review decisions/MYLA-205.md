@@ -2,7 +2,7 @@
 id: MYLA-205
 title: "Decision: how decisions are recorded (numbering, a provisional state, the page format)"
 type: chore
-status: todo
+status: review
 priority: low
 labels: [decision, docs, process]
 ---
@@ -26,7 +26,7 @@ The format question is separate: one `###` heading per decision with number, dat
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**On hold (2026-11-01).** The owner: Genbeya will get a decision-management mechanism soon; until then decisions are recorded as today (a number at once, one table). [[MYLA-193]] waits for it too. No decision number.
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

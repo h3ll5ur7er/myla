@@ -2,7 +2,7 @@
 id: MYLA-206
 title: "Decision: the runtime's address-space reservation and the worker stacks' guard pages"
 type: chore
-status: todo
+status: review
 priority: low
 labels: [decision, concurrency, runtime]
 ---
@@ -28,7 +28,7 @@ Worker stacks: a `PROT_NONE` page under each, plus a per-thread `sigaltstack` so
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D106 (2026-11-01): the recommendation.** One arena per worker and guard pages now ([[MYLA-172]]); lazy arenas with [[MYLA-162]].
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

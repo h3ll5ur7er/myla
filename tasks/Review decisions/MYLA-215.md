@@ -2,7 +2,7 @@
 id: MYLA-215
 title: "Decision: the language ergonomics round"
 type: chore
-status: todo
+status: review
 priority: medium
 labels: [decision, language, ergonomics]
 ---
@@ -22,7 +22,7 @@ From the October 2026 review ([[Project/Review-2026-10]], §13.9): small languag
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D104 (2026-11-01): the recommendations**, and insertion order for maps (D105, [[MYLA-179]]). Implementation: [[MYLA-222]] (`if` expression), [[MYLA-223]] (compound assignment), [[MYLA-224]] (line continuation), [[MYLA-225]] (trailing commas), [[MYLA-226]] (`if let`/`while let`), [[MYLA-227]] (trait bounds, later); floats [[MYLA-220]], methods [[MYLA-221]].
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

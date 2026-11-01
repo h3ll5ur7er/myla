@@ -12,3 +12,6 @@ Third step of [[MYLA-62]]: the runtime (about 3,000 lines of hand-written x86-64
 - [ ] The platform layer behind a small interface: memory (`mmap`), output and files, processes (`__run`), directories, threads, parking and waking, thread-local state, time, exit; Linux first, with system calls as today
 - [ ] Atomics where the runtime needs them (counts of actor handles, queues, the failure flag of D97)
 - [ ] Both backends (assembly and LLVM) on x86-64 Linux use it, or the assembly backend keeps its runtime: decided in the LLVM decision round ([[MYLA-160]]); the gates and the bootstrap still pass, and the cost is measured
+- [ ] Arenas that grow lazily (D106, [[MYLA-206]])
+- [ ] The runtime out of [[selfhost/codegen.my]] (D108, [[MYLA-217]])
+- [ ] Then the reactor: [[MYLA-230]] (D107)

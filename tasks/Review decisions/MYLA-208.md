@@ -2,7 +2,7 @@
 id: MYLA-208
 title: "Decision: the roadmap's scope beside the open backlog"
 type: chore
-status: todo
+status: review
 priority: medium
 labels: [decision, roadmap, process]
 ---
@@ -24,7 +24,7 @@ How much of the roadmap is a plan, and what is only an idea?
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**Option A (2026-11-01).** The owner: keep the roadmap as it is. No decision number.
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

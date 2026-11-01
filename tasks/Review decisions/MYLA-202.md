@@ -2,7 +2,7 @@
 id: MYLA-202
 title: "Decision: keeping two interpreters, and which one retires first"
 type: chore
-status: todo
+status: review
 priority: medium
 labels: [decision, architecture, interpreter]
 ---
@@ -24,7 +24,7 @@ Do both interpreters stay, and if one goes, which one and when?
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**Follows from D101** ([[MYLA-201]]): the Python interpreter goes with the rest of the Python toolchain ([[MYLA-219]]), option C; the self-hosted interpreter stays (the REPL, Myla in the browser) and becomes the reference the gates compare native code with.
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

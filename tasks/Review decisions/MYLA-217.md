@@ -2,7 +2,7 @@
 id: MYLA-217
 title: "Decision: splitting codegen.my, one frame-layout record, one AST visitor"
 type: chore
-status: todo
+status: review
 priority: low
 labels: [decision, selfhost, backend]
 ---
@@ -24,7 +24,7 @@ Is the backend split now, and how far?
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D108 (2026-11-01): the recommendation.** The frame-layout record and one visitor with [[MYLA-185]]; the runtime with [[MYLA-162]]; nothing on the Python side.
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

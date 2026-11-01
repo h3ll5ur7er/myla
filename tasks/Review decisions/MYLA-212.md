@@ -2,7 +2,7 @@
 id: MYLA-212
 title: "Decision: the next concurrency slice, what goes in and in which order"
 type: chore
-status: todo
+status: review
 priority: low
 labels: [decision, concurrency]
 ---
@@ -25,7 +25,7 @@ Which of these form the next slice, and which wait?
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D107 (2026-11-01): the recommendation.** Now: [[MYLA-171]], `yield` ([[MYLA-228]]), `defer` ([[MYLA-229]], semantics first). After [[MYLA-162]]: the reactor ([[MYLA-230]]). Async trait methods and a non-reentrant method kind when a program needs them.
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match

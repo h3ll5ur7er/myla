@@ -2,7 +2,7 @@
 id: MYLA-203
 title: "Decision: `float` is float32 or float64"
 type: chore
-status: todo
+status: review
 priority: medium
 labels: [decision, language, floats]
 ---
@@ -24,7 +24,7 @@ What does `float` (and an unsuffixed literal such as `1.5`) mean?
 
 ## Decision
 
-*Open.* The owner's answer goes here and, once given, onto [[Project/Decisions]] as a numbered decision.
+**D102 (2026-11-01), option B.** The owner: "when I started programming, float → 32, double → 64 was the law. I am completely fine switching this around." Implementation: [[MYLA-220]].
 
-- [ ] Decided, and recorded on [[Project/Decisions]]
-- [ ] The implementation tasks created or updated to match
+- [x] Decided, and recorded on [[Project/Decisions]]
+- [x] The implementation tasks created or updated to match
