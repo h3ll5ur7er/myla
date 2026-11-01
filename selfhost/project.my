@@ -256,9 +256,9 @@ pub fun normalize_path(p: str) -> str {
 }
 
 // The components of `p` between its slashes (empty ones included).
-#test("/home/user/myla/build/harvest/proj/app")[["", "home", "user", "myla", "build", "harvest", "proj", "app"]]
-#test("/home/user/myla/build/harvest/proj/tidy/myla.toml")[["", "home", "user", "myla", "build", "harvest", "proj", "tidy", "myla.toml"]]
-#test("/home/user/myla/build/harvest/proj/gitapp/myla.toml/..")[["", "home", "user", "myla", "build", "harvest", "proj", "gitapp", "myla.toml", ".."]]
+#test("/work/myla/build/harvest/proj/app")[["", "work", "myla", "build", "harvest", "proj", "app"]]
+#test("/work/myla/build/harvest/proj/tidy/myla.toml")[["", "work", "myla", "build", "harvest", "proj", "tidy", "myla.toml"]]
+#test("/work/myla/build/harvest/proj/gitapp/myla.toml/..")[["", "work", "myla", "build", "harvest", "proj", "gitapp", "myla.toml", ".."]]
 fun split_path(p: str) -> [str] {
     var out: [str] = []
     var start = 0
@@ -359,9 +359,9 @@ pub fun relative_path(base: str, p: str) -> str {
 }
 
 // `s` from the byte `start` on.
-#test("/home/user/myla/build/harvest/proj/app/src", 39)["src"]
-#test("/home/user/myla/build/harvest/proj/app/src/main.my", 39)["src/main.my"]
-#test("/home/user/myla/build/harvest/proj/app/src/util/strings.my", 39)["src/util/strings.my"]
+#test("/work/myla/build/harvest/proj/app/src", 34)["src"]
+#test("/work/myla/build/harvest/proj/app/src/main.my", 34)["src/main.my"]
+#test("/work/myla/build/harvest/proj/app/src/util/strings.my", 34)["src/util/strings.my"]
 fun part_from(s: str, start: int32) -> str {
     var sb = StringBuilder()
     append(sb, s, start, len(s))
@@ -370,9 +370,9 @@ fun part_from(s: str, start: int32) -> str {
 
 // `p` as an absolute, normalised path (a relative one is taken from the
 // working directory); None if the working directory can't be found.
-#test("/home/user/myla/build/harvest/proj/app")[Some("/home/user/myla/build/harvest/proj/app")]
-#test("/home/user/myla/build/harvest/proj/gitapp")[Some("/home/user/myla/build/harvest/proj/gitapp")]
-#test("/home/user/myla/build/harvest/proj/gitapp/myla.toml")[Some("/home/user/myla/build/harvest/proj/gitapp/myla.toml")]
+#test("/work/myla/build/harvest/proj/app")[Some("/work/myla/build/harvest/proj/app")]
+#test("/work/myla/build/harvest/proj/gitapp")[Some("/work/myla/build/harvest/proj/gitapp")]
+#test("/work/myla/build/harvest/proj/gitapp/myla.toml")[Some("/work/myla/build/harvest/proj/gitapp/myla.toml")]
 pub fun absolute_path(p: str) -> Option<str> {
     if len(p) > 0 && p[0] == '/' { return Some(normalize_path(p)) }
     return match current_dir() {
@@ -402,7 +402,7 @@ pub fun find_manifest(start: str) -> Option<str> {
 // --- The manifest ---------------------------------------------------------------
 
 // The manifest in `text` (from the file `path`, for errors), checked.
-#test("[package]\nname = \"geo\"\nversion = \"0.1.0\"\n\n[dependencies]\n", "/home/user/myla/build/harvest/proj/geo/myla.toml")[Ok(Manifest { name: "geo", version: "0.1.0", deps: [] })]
+#test("[package]\nname = \"geo\"\nversion = \"0.1.0\"\n\n[dependencies]\n", "/work/myla/build/harvest/proj/geo/myla.toml")[Ok(Manifest { name: "geo", version: "0.1.0", deps: [] })]
 pub fun parse_manifest(text: str, path: str) -> Result<Manifest, ProjectError> {
     let doc = match parse_doc(text) {
         Ok(d) => d
@@ -898,9 +898,9 @@ fun dep_error(parent: Pending, d: Dependency, msg: str) -> ProjectError {
     return error_at(parent.manifest, d.pos, msg)
 }
 
-#test("/home/user/myla/build/harvest/proj/app", "app")["/home/user/myla/build/harvest/proj/app/src/app.my"]
-#test("/home/user/myla/build/harvest/proj/geo", "geo")["/home/user/myla/build/harvest/proj/geo/src/geo.my"]
-#test("/home/user/myla/build/harvest/proj/gitapp", "gitapp")["/home/user/myla/build/harvest/proj/gitapp/src/gitapp.my"]
+#test("/work/myla/build/harvest/proj/app", "app")["/work/myla/build/harvest/proj/app/src/app.my"]
+#test("/work/myla/build/harvest/proj/geo", "geo")["/work/myla/build/harvest/proj/geo/src/geo.my"]
+#test("/work/myla/build/harvest/proj/gitapp", "gitapp")["/work/myla/build/harvest/proj/gitapp/src/gitapp.my"]
 fun library_of(dir: str, name: str) -> str {
     return format("{}/src/{}.my", dir, name)
 }

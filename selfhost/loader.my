@@ -100,7 +100,7 @@ pub struct LoadOptions { stdlib_root: str, packages: [(str, str)], root: str, ov
 
 // The options for a program without packages, rooted at its entry's directory.
 #test("")[LoadOptions { stdlib_root: "", packages: [], root: "", overrides: [:] }]
-#test("/home/user/myla/src/myla")[LoadOptions { stdlib_root: "/home/user/myla/src/myla", packages: [], root: "", overrides: [:] }]
+#test("/work/myla/src/myla")[LoadOptions { stdlib_root: "/work/myla/src/myla", packages: [], root: "", overrides: [:] }]
 pub fun load_options(stdlib_root: str) -> LoadOptions {
     return LoadOptions { stdlib_root: stdlib_root, packages: [], root: "", overrides: [:] }
 }
@@ -185,9 +185,9 @@ pub fun normalize(p: str) -> str {
     return joined
 }
 
-#test("/home/user/myla/src/myla")[["home", "user", "myla", "src", "myla"]]
-#test("/home/user/myla/src/myla/std/task.my")[["home", "user", "myla", "src", "myla", "std", "task.my"]]
-#test("/home/user/myla/src/myla/std/process.my")[["home", "user", "myla", "src", "myla", "std", "process.my"]]
+#test("/work/myla/src/myla")[["work", "myla", "src", "myla"]]
+#test("/work/myla/src/myla/std/task.my")[["work", "myla", "src", "myla", "std", "task.my"]]
+#test("/work/myla/src/myla/std/process.my")[["work", "myla", "src", "myla", "std", "process.my"]]
 fun segments(p: str) -> [str] {
     if p == "." { return [] }
     var out: [str] = []
@@ -199,14 +199,14 @@ fun segments(p: str) -> [str] {
 
 #test("examples/maps.my")["examples"]
 #test("examples/errors/lex_bad_char.my")["examples/errors"]
-#test("/home/user/myla/selfhost/main.my")["/home/user/myla/selfhost"]
+#test("/work/myla/selfhost/main.my")["/work/myla/selfhost"]
 fun dirname(p: str) -> str {
     return normalize(p + "/..")
 }
 
 #test("examples/errors", "nowhere")["examples/errors/nowhere"]
-#test("/home/user/myla/src/myla/std", "task.my")["/home/user/myla/src/myla/std/task.my"]
-#test("/home/user/myla/src/myla/std/process", "process.my")["/home/user/myla/src/myla/std/process/process.my"]
+#test("/work/myla/src/myla/std", "task.my")["/work/myla/src/myla/std/task.my"]
+#test("/work/myla/src/myla/std/process", "process.my")["/work/myla/src/myla/std/process/process.my"]
 fun join_path(a: str, b: str) -> str {
     return normalize(a + "/" + b)
 }
@@ -229,8 +229,8 @@ fun dotted(p: ImportPath) -> str {
 }
 
 // The segments of normalized `path` below normalized `root`, if it is below.
-#test("/home/user/myla/src/myla/std/task.my", "/home/user/myla/src/myla")[Some(["std", "task.my"])]
-#test("/home/user/myla/src/myla/std/process.my", "/home/user/myla/src/myla")[Some(["std", "process.my"])]
+#test("/work/myla/src/myla/std/task.my", "/work/myla/src/myla")[Some(["std", "task.my"])]
+#test("/work/myla/src/myla/std/process.my", "/work/myla/src/myla")[Some(["std", "process.my"])]
 fun rel_under(path: str, root: str) -> Option<[str]> {
     let ps = segments(path)
     let rs = segments(root)
@@ -1213,7 +1213,7 @@ fun module_env(bindings: [str: Binding]) -> [str: str] {
 // The stdlib root for a tool started as `argv0` (MYLA-31): `src/myla` next
 // to the `build/` directory the tools live in, so `build/myla` works from any
 // directory; plain `src/myla` when argv0 has no directory part.
-#test("/home/user/myla/selfhost/main.my")["/home/user/myla/src/myla"]
+#test("/work/myla/selfhost/main.my")["/work/myla/src/myla"]
 pub fun default_stdlib_root(argv0: str) -> str {
     var has_dir = false
     for c in chars(argv0) { if c == '/' { has_dir = true } }

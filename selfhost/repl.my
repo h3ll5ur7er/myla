@@ -78,9 +78,9 @@ pub fun repl(stdlib: str, packages: [(str, str)]) -> int32 {
 impl Session {
     // Check and run one input; the exit status when it ends the session,
     // else -1.
-    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "let xs = [1]")[-1]
-    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "let x = 1 + 2")[-1]
-    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "let q = [1, 2, 3]")[-1]
+    #test(Session { stdlib: "/work/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "let xs = [1]")[-1]
+    #test(Session { stdlib: "/work/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "let x = 1 + 2")[-1]
+    #test(Session { stdlib: "/work/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "let q = [1, 2, 3]")[-1]
     fun enter(var self, input: str) -> int32 {
         let decl = starts_a_declaration(input)
         var t = self.text("", input)
@@ -128,9 +128,9 @@ impl Session {
 
     // The session's text with a new declaration or new statements (the
     // other ""), and the line the new input starts on.
-    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "", "let xs = [1]")[Text { source: "fun __repl() {\nlet xs = [1]\n}\n", start: 2 }]
-    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "", "let x = 1 + 2")[Text { source: "fun __repl() {\nlet x = 1 + 2\n}\n", start: 2 }]
-    #test(Session { stdlib: "/home/user/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "", "let q = [1, 2, 3]")[Text { source: "fun __repl() {\nlet q = [1, 2, 3]\n}\n", start: 2 }]
+    #test(Session { stdlib: "/work/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "", "let xs = [1]")[Text { source: "fun __repl() {\nlet xs = [1]\n}\n", start: 2 }]
+    #test(Session { stdlib: "/work/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "", "let x = 1 + 2")[Text { source: "fun __repl() {\nlet x = 1 + 2\n}\n", start: 2 }]
+    #test(Session { stdlib: "/work/myla/src/myla", packages: [], decls: "", levels: [], names: [], vals: [] }, "", "let q = [1, 2, 3]")[Text { source: "fun __repl() {\nlet q = [1, 2, 3]\n}\n", start: 2 }]
     fun text(self, new_decl: str, new_stmts: str) -> Text {
         var sb = StringBuilder()
         append(sb, self.decls)
