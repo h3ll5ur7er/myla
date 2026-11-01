@@ -38,8 +38,8 @@ _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 )
 
-# Programs the Python unit tests expect to fail type checking, collected by
-# scripts/harvest_type_errors.py, then snippets for the messages they don't
+# Programs the Python toolchain's unit tests expected to fail type checking,
+# collected before it was retired (MYLA-219), then snippets for the messages they don't
 # reach (named after the message).
 _SNIPPETS = os.path.join(os.path.dirname(__file__), "data", "type_error_snippets.json")
 def _main(*lines: str, before: str = "") -> str:

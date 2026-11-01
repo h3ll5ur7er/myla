@@ -1,6 +1,6 @@
 # Concurrency
 
-> **D89 to D97, built** ([[MYLA-61]], [[MYLA-135]] to [[MYLA-150]]). Both checkers check what this page describes. The Python interpreter runs it with a thread per task, the self-hosted interpreter with tasks taking turns at each `await`. The self-hosted compiler builds every concurrent program (D91): its async functions as stackless state machines on heap frames, its tasks in parallel on a pool of OS threads, one per CPU unless the environment variable `MYLA_THREADS` says how many (at most 32; with `MYLA_THREADS=1` in the same order as the self-hosted interpreter's), its actors with executors of their own (D92, [[Architecture/Native-backend]]). The Python backend refuses concurrency. Suspension points are child tasks and actor calls: there is no `sleep`, timer or suspending I/O yet, so today's concurrency is parallel computation and actors.
+> **D89 to D97, built** ([[MYLA-61]], [[MYLA-135]] to [[MYLA-150]]). The checker checks what this page describes. The interpreter runs it with tasks taking turns at each `await` (the retired Python interpreter ran a thread per task). The compiler builds every concurrent program (D91): its async functions as stackless state machines on heap frames, its tasks in parallel on a pool of OS threads, one per CPU unless the environment variable `MYLA_THREADS` says how many (at most 32; with `MYLA_THREADS=1` in the same order as the self-hosted interpreter's), its actors with executors of their own (D92, [[Architecture/Native-backend]]). Suspension points are child tasks and actor calls: there is no `sleep`, timer or suspending I/O yet, so today's concurrency is parallel computation and actors.
 
 Myla's concurrency follows Swift's: `async` functions that may suspend, `await` at every suspension, structured tasks that never outlive the scope that starts them, and `actor`s, whose state only their own methods touch. Tasks run in parallel on several threads. A value crossing into another task or actor is copied, so tasks share nothing but actors (D89).
 
@@ -61,7 +61,7 @@ async fun squares(n: int) -> [int] {
 
 - `task.all(fs)` runs each async function value of `fs` as a child task, all at once, and waits for every one of them.
 - It gives the results in the order of `fs`, so the outcome doesn't depend on which finished first.
-- It is written in Myla with `async let` alone ([[src/myla/std/task.my]]), so every implementation that runs `async let` runs it.
+- It is written in Myla with `async let` alone ([[lib/std/task.my]]), so every implementation that runs `async let` runs it.
 
 ## Asking a child to stop: `task.cancel` and `task.cancelled`
 

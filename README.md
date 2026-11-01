@@ -81,10 +81,10 @@ async fun main() {
 
 ## What it values
 
-- **No dependencies.** The toolchain needs Python's standard library and GNU binutils (`as`, `ld`), nothing else; native programs are static binaries without libc.
+- **No dependencies.** The toolchain needs GNU binutils (`as`, `ld`), nothing else, and the tests only Python's standard library; native programs are static binaries without libc.
 - **Predictable code.** Explicitly sized integers (`int8` … `uint64`, `int` is `int32`), no implicit conversions, value semantics with copy-on-write, deep immutability for `let`, no null (`Option`), errors as values (`Result` and `?`).
 - **Safety the checker can give cheaply.** Exhaustive `match`, ranges and spans in every diagnostic, actors whose state only their own methods reach, captures that can't be changed from a lambda, a warning for actor state checked before an `await` and changed after it.
-- **One meaning, several implementations.** The interpreter defines the language; two interpreters and two native backends are tested against each other on every program of the test suites, down to the text of every diagnostic.
+- **One meaning, two ways to run it.** There is one implementation, and its interpreter and its native code are tested against each other on every program of the test suites, and against the answers the retired Python toolchain gave, recorded, down to the text of every diagnostic.
 - **Self-hosting.** The compiler in `selfhost/` compiles itself to a byte-identical fixed point, and the tools around it (the language server, the REPL, the project tool, the grammar generator) are written in Myla too.
 
 ## The language
@@ -97,20 +97,16 @@ The reference is the wiki, starting at [Language](docs/Language.md); the reasons
 
 ## Getting started
 
-You need x86-64 Linux, Python 3.12 or later and GNU binutils. gdb is optional, for debugging.
+You need x86-64 Linux and GNU binutils (`as`, `ld`). gdb is optional, for debugging; Python 3.12 or later only runs the tests.
 
-```bash
-python3 myla.py run examples/hello.my          # interpret a program
-python3 myla.py test examples/structs.my       # run its #test cases
-python3 myla.py check examples/structs.my      # type-check only
-python3 myla.py build examples/hello.my -o hello && ./hello   # a native binary (-g: for gdb)
-```
-
-`scripts/bootstrap.sh` builds the self-hosted compiler from the committed seed (`bootstrap/seed.s`, its own assembly; only `as` and `ld` needed), checks the fixed point, and builds `build/myla`, the self-hosted command-line tool, and `build/myla-lsp`, the language server:
+`scripts/bootstrap.sh` builds the compiler from the committed seed (`bootstrap/seed.s`, its own assembly; only `as` and `ld` needed), checks the fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server:
 
 ```bash
 scripts/bootstrap.sh
-build/myla run examples/concurrency.my         # the same commands as myla.py, faster
+build/myla run examples/hello.my               # interpret a program
+build/myla test examples/structs.my            # run its #test cases
+build/myla check examples/structs.my           # type-check only
+build/myla build examples/hello.my -o hello && ./hello   # a native binary (-g: for gdb)
 build/myla repl                                # the interactive interpreter
 build/myla new hello && cd hello && ../build/myla run   # a project with a myla.toml
 ```
@@ -121,34 +117,35 @@ More in [Getting started](docs/Getting-started.md), including an examples readin
 
 ## Editor support
 
-The VS Code extension in [`vscode-extension/myla`](vscode-extension/myla/README.md) starts the language server (diagnostics as you type, hover, go to definition, references, completion, semantic highlighting), runs and tests files, and debugs them with gdb through its own debug adapter. A tree-sitter grammar, generated from [`grammar/myla.ebnf`](grammar/myla.ebnf), is in `editor/`. See [Editor tooling](docs/Architecture/Editor-tooling.md).
+The VS Code extension in [`vscode-extension/myla`](vscode-extension/myla/README.md) starts the language server (diagnostics as you type, hover, go to definition, references, completion, semantic highlighting), runs and tests files, and debugs them with gdb through its own debug adapter; it uses the `build/myla` and `build/myla-lsp` of the repository that `scripts/bootstrap.sh` builds. A tree-sitter grammar, generated from [`grammar/myla.ebnf`](grammar/myla.ebnf), is in `editor/`. See [Editor tooling](docs/Architecture/Editor-tooling.md).
 
 ## How it is built
 
 | Part | Where | Role |
 | --- | --- | --- |
-| Python toolchain | `src/myla/`, `myla.py` | The reference: lexer, parser, checker, tree-walking interpreter, `#test` runner, and a native backend that builds the first stage of the bootstrap |
-| Self-hosted compiler | `selfhost/` | The same pipeline in Myla, with a mid-level IR and its verifier, a native backend with the concurrency runtime, and its own interpreter; `build/myla` |
+| Self-hosted compiler | `selfhost/` | Written in Myla: lexer, parser, module loader, checker, a mid-level IR and its verifier, a native backend with the concurrency runtime, a tree-walking interpreter and the `#test` runner, the REPL and the project tool; `build/myla` |
+| Seed | `bootstrap/seed.s` | The compiler's own assembly, from which `scripts/bootstrap.sh` builds it with `as` and `ld` |
 | Tools in Myla | `tools/` | The language server (`tools/lsp/`) and the grammar generator (`tools/grammar/`) |
-| Standard library | `src/myla/std/` | Written in Myla |
+| Standard library | `lib/` | Written in Myla (`lib/std/`), with the gdb pretty-printers (`lib/debug/`) |
 | Editor support | `vscode-extension/`, `editor/`, `grammar/` | The VS Code extension, the tree-sitter grammar, the grammar description |
 
 The architecture, from the module loader to the native runtime, is described in [Architecture](docs/Architecture.md); the bootstrap in [Bootstrap](docs/Development/Bootstrap.md).
 
 ## Status
 
-Version 1.0, self-hosting, was reached in June 2026. Since then: the mid-level IR, guaranteed tail calls, concurrency with actors and a work-stealing runtime, the project tool, and the tools rewritten in Myla. The review of October 2026 and what came of it are on [Review 2026-10](docs/Project/Review-2026-10.md); open bugs are on [Known issues](docs/Project/Known-issues.md).
+Version 1.0, self-hosting, was reached in June 2026. Since then: the mid-level IR, guaranteed tail calls, concurrency with actors and a work-stealing runtime, the project tool, the tools rewritten in Myla, and in November 2026 the bootstrap from a committed seed, which retired the Python toolchain (D101). The review of October 2026 and what came of it are on [Review 2026-10](docs/Project/Review-2026-10.md); open bugs are on [Known issues](docs/Project/Known-issues.md).
 
 Next on the [Roadmap](docs/Project/Roadmap.md): an LLVM backend, and other platforms through it (Linux on aarch64, macOS, Windows, WebAssembly), then a C FFI.
 
 ## Working on Myla
 
 ```bash
-scripts/test.sh fast        # unit, integration and the quick burn tests, about 20 s
-scripts/test.sh             # everything, the self-hosting gates included (several minutes)
-scripts/bootstrap.sh        # after changing selfhost/ or the native backend: the fixed point
+scripts/test.sh fast        # the quick burn tests, about 20 s once the tools are cached
+scripts/test.sh             # every burn test, the self-hosting gates included (about 2 minutes)
+scripts/bootstrap.sh        # after changing selfhost/: the fixed point
+scripts/update-seed.sh      # after changing the compiler: a new seed (CI fails on a stale one)
 ```
 
-- **Tests.** Unit and integration tests for the Python toolchain; burn tests that run every example through the interpreters and both backends, pin the error corpus (`examples/errors/`, one rejected program per diagnostic), and compare the self-hosted compiler with the Python one stage by stage. See [Testing](docs/Development/Testing.md).
+- **Tests.** Burn tests (Python `unittest` modules in `tests/burn/`) run every example in the interpreter and natively, pin the error corpus (`examples/errors/`, one rejected program per diagnostic), and compare the lexer, parser, checker, interpreter and native code with the answers the retired Python toolchain gave, recorded before it was removed. See [Testing](docs/Development/Testing.md).
 - **Tasks and wiki.** Work is planned as tasks in [`tasks/`](tasks/) and documented in the wiki in [`docs/`](docs/Home.md), both plain Markdown managed with [Genbeya](https://github.com/genbeya/genbeya). Conventions are in [Conventions](docs/Development/Conventions.md); coding agents start at [`AGENTS.md`](AGENTS.md).
-- **History.** The design documents written while the language was designed, and a Rust edition removed in October 2026, are kept in the [Archive](docs/Archive.md).
+- **History.** The design documents written while the language was designed, and a Rust edition removed in October 2026, are kept in the [Archive](docs/Archive.md). Until November 2026 a Python toolchain was the bootstrap and the reference; the branch `backup/python-toolchain-final` keeps its last state ([Bootstrap](docs/Development/Bootstrap.md)).

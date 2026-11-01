@@ -1,6 +1,6 @@
 # Methods and traits
 
-The checker lowers every method to a function named `Type.method` with `self` as its first parameter (`Checker._resolve_impls` in [[src/myla/types.py]]).
+The checker lowers every method to a function named `Type.method` with `self` as its first parameter (`Checker.resolve_impls` in [[selfhost/checker.my]]).
 
 [TOC]
 

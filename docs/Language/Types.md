@@ -1,6 +1,6 @@
 # Types
 
-Every expression has a type known before the program runs. Types are resolved by the checker in [[src/myla/types.py]] (`IntType`, `FloatType`, `CharType`, … at the top of the file).
+Every expression has a type known before the program runs. Types are resolved by the checker in [[selfhost/checker.my]] (the enum `Type` at the top of the file).
 
 [TOC]
 
@@ -56,7 +56,7 @@ Both are reference-counted, copy-on-write values: a copy is cheap, and writing t
 
 ## Option and Result
 
-Every program has this prelude (`_PRELUDE_SRC` in [[src/myla/types.py]]):
+Every program has this prelude (`prelude_src` in [[selfhost/checker.my]]):
 
 ```
 enum Option<T> { Some(T), None }

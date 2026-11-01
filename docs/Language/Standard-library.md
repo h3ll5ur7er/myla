@@ -1,6 +1,6 @@
 # Standard library
 
-Myla has built-in functions known to the checker, and a small standard library written in Myla under [[src/myla/std/io.my|src/myla/std/]]. Both work without libc: natively they are raw Linux system calls ([[Architecture/Native-backend]]), in the interpreter Python I/O.
+Myla has built-in functions known to the checker, and a small standard library written in Myla under [[lib/std/io.my|lib/std/]]. Both work without libc: they are raw Linux system calls ([[Architecture/Native-backend]]), natively and in the interpreter, which is a native program itself.
 
 [TOC]
 
@@ -74,7 +74,7 @@ fun main() {
 }
 ```
 
-A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/unit/test_stdio.py` has an example (`FRAMED`).
+A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/burn/test_stdin.py` has an example.
 
 ## std.process
 
@@ -161,7 +161,7 @@ The directory functions rest on seven primitives (D64's pattern: a small system 
 | `__rmdir(path: str)` | rmdir(2) | Nothing |
 | `__rename(from: str, to: str)` | rename(2) | Nothing |
 
-Each sets the errno that `__io_errno()` reads (0 on success). A name can't hold a NUL byte, so NUL separates them. `list_dir` drops `.` and `..` and sorts the names by their bytes, so the Python interpreter (`os.listdir`), the native helpers and every file system give the same list.
+Each sets the errno that `__io_errno()` reads (0 on success). A name can't hold a NUL byte, so NUL separates them. `list_dir` drops `.` and `..` and sorts the names by their bytes, so every file system gives the same list (and the Python interpreter, with `os.listdir`, gave it too).
 
 ## std.num
 

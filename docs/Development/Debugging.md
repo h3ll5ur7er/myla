@@ -52,7 +52,7 @@ and a runtime error (`debuggee.my panic`):
 Build with `-g` to get DWARF debug information: a line table ([[MYLA-71]]), the parameters and variables of every function with their types, the functions' result types, and pretty-printers for gdb ([[MYLA-66]]):
 
 ```bash
-python3 myla.py build examples/structs.my -o structs -g
+build/myla build examples/structs.my -o structs -g
 gdb ./structs
 ```
 
@@ -108,12 +108,12 @@ $4 = Point {x: 3, y: 4}
 
 - Functions are named `myla_<name>` (`myla_main`, `myla_Point.len` for methods, `myla_geometry$area` for a function from module `geometry`, `myla___lambda_3` for lambdas, `myla_first__6.int32` for a generic instantiation, see [[Architecture/Monomorphization]]; the self-hosted backend names lambdas `myla_<function>__lam<n>`). `break myla_main`, `break myla_Point.len` and `break myla_geometry$area` work as written; quote a generic instance: `break 'myla_first__6.int32'`. gdb shows it as `myla_first.6.int32` in frames.
 - Every statement and every expression-bodied match arm starts a line entry. Runtime helpers (`__alloc`, `__print_int`, …) have no source line; `step` into them shows assembly, `finish` gets you out.
-- `-g` changes nothing else: the binary behaves exactly like one built without it, and its code is the same apart from labels (`tests/burn/test_debug_info.py`, `tests/unit/test_compiler.py`).
+- `-g` changes nothing else: the binary behaves exactly like one built without it, and its code is the same apart from labels (`tests/burn/test_debug_info.py`).
 - `finish` prints the value a function returns (`Value returned is $2 = 7`): every function's debug information has its result type. An aggregate comes back through the hidden result pointer the function returns in `%rax`, so gdb shows a pointer to it (`(*mut Bag) 0x7ffe…`, `print *$` shows the value), or with the pretty-printers the value itself. A `float32`/`float64` result is in `%rax` too, where gdb's x86-64 rules expect `%xmm0`, so a float function has no result type and `finish` prints nothing: `print/f $rax` reads the double.
 
 ## Pretty-printers
 
-A `-g` binary carries gdb pretty-printers for Myla values (D82): [[src/myla/debug/myla_gdb.py]], embedded by both compilers as an inline Python script in the binary's `.debug_gdb_scripts` section. They print what the DWARF types alone can't (see Variables below): a `str`, list, builder or map inside a struct, tuple, enum, list or map as its value instead of a pointer to its cell, a map as `{key: value, …}`, a boxed (recursive) enum inside an aggregate as its value, and a `float32` field or element as a float:
+A `-g` binary carries gdb pretty-printers for Myla values (D82): [[lib/debug/myla_gdb.py]], embedded by the compiler as an inline Python script in the binary's `.debug_gdb_scripts` section. They print what the DWARF types alone can't (see Variables below): a `str`, list, builder or map inside a struct, tuple, enum, list or map as its value instead of a pointer to its cell, a map as `{key: value, …}`, a boxed (recursive) enum inside an aggregate as its value, and a `float32` field or element as a float:
 
 ```
 (gdb) info locals
@@ -135,13 +135,13 @@ gdb runs a script embedded in a binary only from a path its `auto-load safe-path
 
 - for one session: `gdb -iex 'add-auto-load-safe-path ./prog' ./prog` (`-iex` runs before the program is loaded; a directory allows everything below it);
 - for good: the line `add-auto-load-safe-path ~/src/myproject` in `~/.config/gdb/gdbinit` (or `~/.gdbinit`); `set auto-load safe-path /` trusts every file, which gdb's warning also offers;
-- or load the printers by hand, for any `-g` binary, without the permission: `source src/myla/debug/myla_gdb.py` (or `gdb -x …/myla_gdb.py ./prog`).
+- or load the printers by hand, for any `-g` binary, without the permission: `source lib/debug/myla_gdb.py` (or `gdb -x …/myla_gdb.py ./prog`).
 
 `info auto-load python-scripts` shows whether `myla-printers` was loaded, `info pretty-printer` lists `myla` among the global printers, `print/r x` prints one value without them, and `disable pretty-printer global myla` turns them off. They need a gdb built with Python (most distributions' is). A map prints in the order of its slots, the order `for k in m` visits them; long lists and maps stop after `print elements` entries (200 by default). The VS Code debugger lets gdb load them for the program it debugs.
 
 ## Variables
 
-`info args`, `info locals`, `print` and the frame line show parameters (`self` included), locals, loop variables, match bindings, destructured names and, in a lambda, its parameters and captured variables. Each local is visible from the statement after its declaration to the end of its block, so a shadowed name shows the innermost binding (`info locals` lists inner blocks first) and a name not declared yet is unknown. The debug information says the program is Rust: gdb's Rust rules print values the way Myla writes them, and expressions (`print xs[1] * 10`, `print p.x + 1`) use a syntax close to Myla's. From `tests/burn/test_debug_info.py` (both backends print this), without the pretty-printers:
+`info args`, `info locals`, `print` and the frame line show parameters (`self` included), locals, loop variables, match bindings, destructured names and, in a lambda, its parameters and captured variables. Each local is visible from the statement after its declaration to the end of its block, so a shadowed name shows the innermost binding (`info locals` lists inner blocks first) and a name not declared yet is unknown. The debug information says the program is Rust: gdb's Rust rules print values the way Myla writes them, and expressions (`print xs[1] * 10`, `print p.x + 1`) use a syntax close to Myla's. From `tests/burn/test_debug_info.py`, without the pretty-printers:
 
 ```
 (gdb) info locals
@@ -177,7 +177,7 @@ and with them `m = {"a": 1}`, `words = ["ab", "c"]`, `print *words[1]` gives `"c
 
 `set var x = …` changes a variable; a signed integer is described as its whole 8-byte slot, so a negative value is stored sign-extended as the program expects.
 
-How it works: the compiler writes `.debug_info` and `.debug_abbrev` itself, as assembler data ([[src/myla/compiler/dwarf.py]], [[selfhost/dwarf.my]] and the `dbg_*` methods of [[selfhost/codegen.my]]), and the assembler adds the line table from the `.loc` directives. Every slot has a fixed `%rbp` offset, so locations are `DW_OP_fbreg` offsets from the frame base `%rbp`; in a program with tasks, an async function's or lambda's variables live in its heap frame (D90), whose address is its argument word, so their locations are `DW_OP_fbreg 16; DW_OP_deref; DW_OP_plus_uconst` the slot's offset ([[MYLA-141]]), and the async normalizer's temporaries (`%aw1`, …) are left out like the compiler's own (`__…`); an aggregate parameter is reached through the address in its slot, a capture through the closure environment. A `str` variable is shown as a Rust `&str` whose two fields are computed from its cell (a composite location), a list variable as an array at its elements whose length is read from the cell's header (`DW_OP_push_object_address`). gdb gives array elements and fields only types of a fixed size (a dynamic one makes it fail an internal assertion), so heap values inside aggregates are pointers to descriptions of their cells, which the pretty-printers follow. See [[Architecture/Native-backend]], D75 and D82.
+How it works: the compiler writes `.debug_info` and `.debug_abbrev` itself, as assembler data ([[selfhost/dwarf.my]] and the `dbg_*` methods of [[selfhost/codegen.my]]), and the assembler adds the line table from the `.loc` directives. Every slot has a fixed `%rbp` offset, so locations are `DW_OP_fbreg` offsets from the frame base `%rbp`; in a program with tasks, an async function's or lambda's variables live in its heap frame (D90), whose address is its argument word, so their locations are `DW_OP_fbreg 16; DW_OP_deref; DW_OP_plus_uconst` the slot's offset ([[MYLA-141]]), and the async normalizer's temporaries (`%aw1`, …) are left out like the compiler's own (`__…`); an aggregate parameter is reached through the address in its slot, a capture through the closure environment. A `str` variable is shown as a Rust `&str` whose two fields are computed from its cell (a composite location), a list variable as an array at its elements whose length is read from the cell's header (`DW_OP_push_object_address`). gdb gives array elements and fields only types of a fixed size (a dynamic one makes it fail an internal assertion), so heap values inside aggregates are pointers to descriptions of their cells, which the pretty-printers follow. See [[Architecture/Native-backend]], D75 and D82.
 
 ## Runtime errors under gdb
 
@@ -201,13 +201,13 @@ b = 0
 
 Before, the trap was a jump: the backtrace stopped at `?? ()` and the frame had no variables.
 
-## The self-hosted compiler
+## Debugging the compiler
 
-The self-hosted compiler emits the same debug information with `-g` (`gen_main <file.my> <stdlib_root> -g`, or `myla build … -g` with the self-hosted CLI). The loader knows which node ids belong to which file (`Loaded.spans`), so each module gets its own `.file` entry. Like the Python backend, it records the working directory as the compilation directory (`std.fs.current_dir`, [[MYLA-98]]), so gdb finds sources given by relative paths from anywhere. That makes the self-hosted compiler debuggable in its own source: build it with `-g` by the stage 3 compiler and break in the checker while it reports a type error:
+The compiler emits this debug information for any program with `-g` (`gen_main <file.my> <stdlib_root> -g`, or `myla build … -g`). The loader knows which node ids belong to which file (`Loaded.spans`), so each module gets its own `.file` entry. It records the working directory as the compilation directory (`std.fs.current_dir`, [[MYLA-98]]), so gdb finds sources given by relative paths from anywhere. That makes the compiler debuggable in its own source: build it with `-g` by the stage 3 compiler and break in the checker while it reports a type error:
 
 ```
-$ build/stage3 selfhost/gen_main.my src/myla -g > gen.s && as --64 -o gen.o gen.s && ld -o gen_g gen.o
-$ gdb -q -batch -ex 'break checker.my:2561' -ex 'run bad.my src/myla' -ex bt ./gen_g
+$ build/stage3 selfhost/gen_main.my lib -g > gen.s && as --64 -o gen.o gen.s && ld -o gen_g gen.o
+$ gdb -q -batch -ex 'break checker.my:2561' -ex 'run bad.my lib' -ex bt ./gen_g
 Breakpoint 1, myla_checker$Checker.check_stmt () at selfhost/checker.my:2561
 2561	                        if !type_eq(value_type, d) { return Err(terr(s.line, s.col, format("cannot assign value of type …
 #0  myla_checker$Checker.check_stmt () at selfhost/checker.my:2561
@@ -242,5 +242,5 @@ $3 = 2
 ## Other tools
 
 - `myla run` reports a runtime error with the values in the message and the source line; a native binary prints the message without the values and the position ([[MYLA-17]], [[MYLA-65]]).
-- `myla build --keep-asm` keeps the generated `.s` next to the binary; `myla parse` and `myla tokenize` dump the front end's view of a file.
+- `build/stage3 file.my lib > file.s` writes the generated assembly (`myla build` removes it), `build/stage3 file.my lib --emit-ir` the IR instead ([[Architecture/IR]]); `build/stage3` is `selfhost/gen_main.my` compiled. The drivers of the self-hosting gates dump the front end's view of a file once built with `build/myla build`: `selfhost/lex_main.my` the canonical tokens, `selfhost/parse_main.my` the canonical AST ([[Architecture/Self-hosted-compiler]]).
 - `readelf --debug-dump=decodedline ./binary` lists the line table that `-g` produced, `readelf --debug-dump=info ./binary` the functions, variables and types.

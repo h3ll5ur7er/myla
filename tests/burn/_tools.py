@@ -7,10 +7,10 @@ the compiler (stage 1), stage 1 compiles it again, and that stage (at the fixed
 point the same as `build/stage3`) compiles every tool. (The Python backend, the
 fallback until MYLA-219, is gone.)
 
-Each binary is built once per content hash of the Python toolchain, the
-standard library, `selfhost/`, `tools/` and the seed, into `build/test-tools/`
-(gitignored), and reused by every test module and every later run until one
-of those sources changes.
+Each binary is built once per content hash of the standard library,
+`selfhost/`, `tools/` and the seed, into `build/test-tools/` (gitignored),
+and reused by every test module and every later run until one of those
+sources changes.
 """
 from __future__ import annotations
 

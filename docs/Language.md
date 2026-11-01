@@ -1,6 +1,6 @@
 # Language
 
-The reference for Myla as the Python toolchain implements it (version 1.0). The Python toolchain is the language's definition: where the self-hosted compiler behaves differently, the difference is a bug ([[Project/Known-issues]]).
+The reference for Myla (version 1.0). These pages and the decisions on [[Project/Decisions]] define the language; the self-hosted toolchain implements it, and where it behaves differently, the difference is a bug ([[Project/Known-issues]]). Until November 2026 the Python toolchain was the language's definition (D71, replaced by D101), and the tests still compare with its recorded answers ([[Development/Testing]]).
 
 [SUBPAGES]
 
@@ -33,4 +33,4 @@ The reference for Myla as the Python toolchain implements it (version 1.0). The 
 | [[Language/Attributes-and-testing]] | `#main`, `#test`, `#derive`, `const`, `assert`/`panic`/`unreachable`, runtime errors |
 | [[Language/Grammar]] | The grammar in EBNF |
 
-The reasons behind each rule are recorded as numbered decisions (D1–D100) on [[Project/Decisions]]. When a rule is broken, the message underlines the place, often with a note (`'x' is declared here`) or a `help: did you mean 'count'?` line for a misspelt name, and both toolchains print the same text.
+The reasons behind each rule are recorded as numbered decisions (D1–D116) on [[Project/Decisions]]. When a rule is broken, the message underlines the place, often with a note (`'x' is declared here`) or a `help: did you mean 'count'?` line for a misspelt name.

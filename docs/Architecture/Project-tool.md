@@ -14,7 +14,7 @@ flowchart LR
     toml["myla.toml"] --> tool["project tool<br/>(build/myla, in Myla)"]
     lock["myla.lock"] --> tool
     tool -->|"git ls-remote / clone<br/>(std.process)"| deps[".myla/deps/&lt;name&gt;-&lt;commit&gt;/"]
-    tool -->|"entry src/main.my<br/>--package name=dir …"| loader["loader<br/>(self-hosted or Python)"]
+    tool -->|"entry src/main.my<br/>--package name=dir …"| loader["loader<br/>(selfhost/loader.my)"]
     deps --> loader
     loader --> rest["checker → interpreter / codegen"]
     rest --> out["build/&lt;name&gt;"]
@@ -213,7 +213,7 @@ pub fun lock_of(p: Project) -> Lock
 
 ## The loaders: `--package name=dir`
 
-Both loaders, the Python one ([[src/myla/loader.py]]) and the self-hosted one ([[selfhost/loader.my]]), take a list of packages, each a name and a directory, on the command line as `--package name=dir` (repeatable) and in their APIs as a parameter. The Python CLI accepts the flag for `run`, `test`, `build` and `check`, the self-hosted CLI and tools (`build/myla`, `interp_main`, `gen_main`) likewise, so the toolchains can be compared on projects with dependencies as on single files. The project tool calls the self-hosted loader in-process.
+The loader ([[selfhost/loader.my]]) takes a list of packages, each a name and a directory, on the command line as `--package name=dir` (repeatable) and in its API as a parameter. `build/myla` accepts the flag for `run`, `test`, `build`, `check` and `repl`, and so do the tools `interp_main` and `gen_main`. The project tool calls the loader in-process. (The Python loader took the same flag, so the toolchains could be compared on projects with dependencies as on single files; the tests still compare with its recorded answers, [[MYLA-219]].)
 
 ### Resolution order
 
@@ -234,7 +234,7 @@ A package's modules get the ids they would have if the package directory were `<
 
 ## Commands
 
-The self-hosted CLI `build/myla` runs a command in **project mode** when it is given no file: the first argument after the command doesn't end in `.my`. Project mode looks for `myla.toml` in the current directory and then in its parents, so commands work from any directory of the project ([question 7](#settled-questions)); every path is relative to the directory holding the manifest. With a file, every command works as today ([[Getting started]]). The Python CLI has no project mode (D71).
+`build/myla` runs a command in **project mode** when it is given no file: the first argument after the command doesn't end in `.my`. Project mode looks for `myla.toml` in the current directory and then in its parents, so commands work from any directory of the project ([question 7](#settled-questions)); every path is relative to the directory holding the manifest. With a file, every command works as today ([[Getting started]]). The Python CLI has no project mode (D71).
 
 | Command | Does | Errors |
 | --- | --- | --- |
@@ -246,7 +246,7 @@ The self-hosted CLI `build/myla` runs a command in **project mode** when it is g
 | `myla fetch [--update]` | Resolves the Git dependencies of the whole build: for each one without a current lock entry (or each one, with `--update`), asks the remote for the commit, checks it out into `.myla/deps/<name>-<commit>/` if that directory doesn't exist, and writes `myla.lock` | Git isn't installed; Git fails (its stderr is shown with the dependency's name and URL); a reference doesn't exist; a dependency error as for `build` |
 | `myla clean` | Removes `build/` (with `--deps` also `.myla/`) | A file can't be removed |
 
-`myla test` and `myla check` load each file as an entry with `src/` as the project root, so a nested file such as `src/geo/round.my` resolves absolute imports from `src/` as `src/main.my` does. The loaders therefore get a project root parameter that defaults to the entry's directory ([[MYLA-92]]). `myla test` runs only the cases declared in the file itself (its functions' names are the ones the loader doesn't qualify with a module id), and so does `myla test file.my` in both CLIs ([[MYLA-187]]: it used to run every linked module's cases, the standard library's too). Paths in messages and the program's `argv[0]` are relative to the working directory (`src/main.my`, or `../main.my` from `src/util/`). A Git dependency whose locked commit isn't checked out yet is checked out first (printing `fetching …` on stderr); one without a current lock entry stops the command with ``run `myla fetch` ``. The commands are [[selfhost/project_cmd.my]], Git is [[selfhost/fetch.my]]; what they share with the file commands is [[selfhost/driver.my]].
+`myla test` and `myla check` load each file as an entry with `src/` as the project root, so a nested file such as `src/geo/round.my` resolves absolute imports from `src/` as `src/main.my` does. The loader therefore gets a project root parameter that defaults to the entry's directory ([[MYLA-92]]). `myla test` runs only the cases declared in the file itself (its functions' names are the ones the loader doesn't qualify with a module id), and so does `myla test file.my` in both CLIs ([[MYLA-187]]: it used to run every linked module's cases, the standard library's too). Paths in messages and the program's `argv[0]` are relative to the working directory (`src/main.my`, or `../main.my` from `src/util/`). A Git dependency whose locked commit isn't checked out yet is checked out first (printing `fetching …` on stderr); one without a current lock entry stops the command with ``run `myla fetch` ``. The commands are [[selfhost/project_cmd.my]], Git is [[selfhost/fetch.my]]; what they share with the file commands is [[selfhost/driver.my]].
 
 ### Messages
 

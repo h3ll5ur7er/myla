@@ -6,9 +6,9 @@
 as `myla run` (the Python interpreter). This test asserts that, for every
 runnable example in the corpus, the self-hosted interpreter's (stdout, exit
 code) is identical to the Python oracle's. That is the v0.8 interpreter-parity
-gate from docs/Development/Testing.md ("the Myla-built binary must produce the same
-stdout/exit code as the Python-built one and the interpreter, for every
-example").
+gate from docs/Development/Testing.md (the Myla-built binary had to produce
+the same stdout/exit code as the Python-built one and the interpreter, for
+every example).
 
 As with the lexer/parser/checker gates, the Myla interpreter runs as a *native
 binary*, built by the self-hosted compiler (which also exercises codegen parity

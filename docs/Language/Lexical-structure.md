@@ -1,6 +1,6 @@
 # Lexical structure
 
-How source text becomes tokens. The lexer is [[src/myla/lexer.py]]; token kinds and keywords are in [[src/myla/tokens.py]].
+How source text becomes tokens. The lexer is [[selfhost/lexer.my]]; token kinds and keywords are in [[selfhost/tokens.my]].
 
 [TOC]
 
@@ -48,7 +48,7 @@ fun add(a: int, b: int) -> int {
 
 ## Identifiers and keywords
 
-An identifier follows Unicode's identifier syntax: it starts with `_` or an XID_Start character (a letter of any script, or a letter number such as `Ⅻ`) and continues with XID_Continue characters (those, digits of any script, combining marks such as the accent in a decomposed `é`, `_` and a few others such as `·`): `größe`, `π`, `日本`. Identifiers aren't normalized, so a precomposed and a decomposed `é` make different names. Keywords and number literals stay ASCII (`١` is no digit of a literal). Both lexers use one generated table (`src/myla/unicode_ident.py`, `selfhost/unicode.my`, D72). They are case-sensitive. By convention types are `PascalCase` and everything else `snake_case`.
+An identifier follows Unicode's identifier syntax: it starts with `_` or an XID_Start character (a letter of any script, or a letter number such as `Ⅻ`) and continues with XID_Continue characters (those, digits of any script, combining marks such as the accent in a decomposed `é`, `_` and a few others such as `·`): `größe`, `π`, `日本`. Identifiers aren't normalized, so a precomposed and a decomposed `é` make different names. Keywords and number literals stay ASCII (`١` is no digit of a literal). The lexer uses a generated table (`selfhost/unicode.my`, written by `scripts/gen_unicode_tables.py`, D72). They are case-sensitive. By convention types are `PascalCase` and everything else `snake_case`.
 
 Reserved keywords:
 

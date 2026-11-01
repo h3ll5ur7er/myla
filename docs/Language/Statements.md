@@ -1,6 +1,6 @@
 # Statements
 
-Statement checking is `Checker._check_stmt` in [[src/myla/types.py]].
+Statement checking is `Checker.check_stmt` in [[selfhost/checker.my]].
 
 Statements are separated by line breaks, or by `;` to put several on one line: `let t = a; let u = b` (D61, [[Language/Lexical-structure]]).
 
@@ -77,7 +77,7 @@ fun main() {
 
 `return` ends the function; `return value` in a function with `-> T`; `return a, b` returns the tuple `(a, b)`.
 
-A function with a result type must return on every path. The check is deliberately simple (`_block_returns` in [[src/myla/types.py]]): a block returns if it contains a `return`, a call to `panic`/`unreachable`/`std.process.exit`, or an `if` whose every branch (including a final `else`) returns. Loops never count, and neither does a `match` statement. End such functions with `unreachable()` or return the `match` as a value:
+A function with a result type must return on every path. The check is deliberately simple (`block_returns` in [[selfhost/checker.my]]): a block returns if it contains a `return`, a call to `panic`/`unreachable`/`std.process.exit`, or an `if` whose every branch (including a final `else`) returns. Loops never count, and neither does a `match` statement. End such functions with `unreachable()` or return the `match` as a value:
 
 ```myla
 fun first_even(xs: [int]) -> int {
@@ -118,7 +118,7 @@ fun main() {
 }
 ```
 
-The checker accepts a `become` that can run without the function's frame (`Checker._check_become` in [[src/myla/types.py]]):
+The checker accepts a `become` that can run without the function's frame (`Checker.check_become` in [[selfhost/checker.my]]):
 
 - It stands where a `return` could, in a function's body; a lambda's body can't use it.
 - It calls a function, a method (`become self.step(n)`) or a function value, not a builtin, an enum variant or a partial application. No `?` follows the call.

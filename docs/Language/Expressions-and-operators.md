@@ -1,6 +1,6 @@
 # Expressions and operators
 
-The parser implements precedence by one function per level (`Parser._pipe` down to `Parser._unary` in [[src/myla/parser.py]]); the operator typing rules are in `Checker._infer_binary` ([[src/myla/types.py]]).
+The parser implements precedence by one function per level (`pipe` down to `unary` in [[selfhost/parser.my]]); the operator typing rules are in `Checker.infer_binary` ([[selfhost/checker.my]]).
 
 [TOC]
 
@@ -32,7 +32,7 @@ From loosest to tightest. Every binary level is left-associative.
 - **Arithmetic** `+ - * / %`: both operands have the same integer or float type, and so does the result. An unsuffixed literal adopts the other operand's type. On a struct or enum, the operator calls the type's operator trait ([[Language/Methods-and-traits]]).
 - **Integer division** truncates toward zero; `%` has the sign of the dividend. Division or remainder by zero is a runtime error.
 - **Float arithmetic** follows IEEE-754: dividing by zero gives ±inf or NaN; `%` is `fmod`. A `float32` result is rounded to single precision after every operation.
-- **Overflow** wraps (two's complement) at the operand width, in both backends.
+- **Overflow** wraps (two's complement) at the operand width, in the interpreter and natively.
 - **Comparison** `< <= > >=`: same numeric type, or two `char`s. On structs and enums: through `Ord` (`a.cmp(b) < 0`).
 - **Equality** `== !=`: same type, one of integer, float, `char`, `bool` or `str`; structs and enums through `Eq`. Tuples, lists and maps can't be compared.
 - **Logic** `&& || !`: `bool` only.
