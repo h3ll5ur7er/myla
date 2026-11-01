@@ -56,6 +56,9 @@ pub enum Type {
 pub struct CheckErr { line: int32, col: int32, sp: SrcSpan, msg: str, decl: int32, notes: [Note] }
 
 // An error at a position without a range (one caret).
+#test(27, 27, "x")[CheckErr { line: 27, col: 27, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "x", decl: -1, notes: [] }]
+#test(50, 50, "d2")[CheckErr { line: 50, col: 50, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "d2", decl: -1, notes: [] }]
+#test(108, 108, "left")[CheckErr { line: 108, col: 108, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "left", decl: -1, notes: [] }]
 fun terr(line: int32, col: int32, msg: str) -> CheckErr { return terr_at(line, col, no_span(), msg) }
 
 #test(3, 13, SrcSpan { sline: 3, scol: 13, eline: 3, ecol: 14 }, "unknown name 'y'")[CheckErr { line: 3, col: 13, sp: SrcSpan { sline: 3, scol: 13, eline: 3, ecol: 14 }, msg: "unknown name 'y'", decl: -1, notes: [] }]
@@ -270,6 +273,7 @@ fun is_poisoned(e: CheckErr) -> bool { return e.line == -1 && e.msg == "" }
 
 // What the declaration phases return when MAX_ERRORS errors are collected:
 // the check ends (types.py: _Stop).
+#test()[CheckErr { line: -2, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, msg: "", decl: -1, notes: [] }]
 fun stopped() -> CheckErr {
     return CheckErr { line: -2, col: 0, sp: no_span(), msg: "", decl: -1, notes: [] }
 }
@@ -322,6 +326,9 @@ fun join_strs(xs: [str], sep: str) -> str {
 }
 
 // Byte-wise `a < b` (Python's order for ASCII names).
+#test("a", "a")[false]
+#test("x", "x")[false]
+#test("y", "y")[false]
 fun str_less(a: str, b: str) -> bool {
     var i = 0
     while i < len(a) && i < len(b) {
@@ -580,6 +587,9 @@ fun lit_fits(value: int64, big: str, w: int32, signed: bool, negated: bool) -> b
 }
 
 // `a > b` for decimal texts of the same length.
+#test("a", "a")[false]
+#test("x", "x")[false]
+#test("y", "y")[false]
 fun text_greater(a: str, b: str) -> bool {
     var i = 0
     while i < len(a) {
@@ -869,6 +879,7 @@ fun pattern_misfit(lit: Expr, t: Type) -> str {
 }
 
 // `-x` for an unsigned scrutinee: fine only for a zero literal.
+#test(expr_of("-n * 2"))[""]
 fun negated_misfit(x: Expr) -> str {
     match x.kind {
         ExprKind.IntLit(v, suf, isc, big) => {
@@ -1278,6 +1289,7 @@ fun is_diverging(e: Expr) -> bool {
     }
 }
 
+#test(stmt_of("return a"))[true]
 fun stmt_returns(s: Stmt) -> bool {
     return match s.kind {
         StmtKind.ReturnS(v, tail) => true,
@@ -1293,6 +1305,7 @@ fun stmt_returns(s: Stmt) -> bool {
     }
 }
 
+#test(block_of("{ }"))[false]
 fun block_returns(b: Block) -> bool {
     for s in b.stmts { if stmt_returns(s) { return true } }
     return false
@@ -1315,10 +1328,12 @@ fun is_flexible_char_lit(e: Expr) -> bool {
     return match e.kind { ExprKind.IntLit(v, suf, isc, big) => isc, _ => false }
 }
 
+#test(expr_of("-n * 2"))[false]
 fun is_flexible_float_lit(e: Expr) -> bool {
     return match e.kind { ExprKind.FloatLit(lex, suf) => match suf { Some(x) => false, None => true }, _ => false }
 }
 
+#test(expr_of("-n * 2"))[0]
 fun int_lit_value(e: Expr) -> int64 {
     return match e.kind { ExprKind.IntLit(v, suf, isc, big) => v, _ => 0 }
 }
@@ -1334,6 +1349,7 @@ fun const_int(e: Expr) -> Option<int64> {
     }
 }
 
+#test("a", expr_of("-n * 2"))[None]
 fun const_int_neg(op: str, x: Expr) -> Option<int64> {
     if op != "-" { return None }
     return match x.kind {
@@ -2358,6 +2374,7 @@ impl Checker {
         return Ok(0)
     }
 
+    #test(checker_on("struct P { x: int, y: int }"), type_expr_of("[str]"), "Name", [], fun_of("fun g() { print(1) }"), 60)[Ok(0)]
     fun register_method(var self, target_te: TypeExpr, key: str, impl_tps: [TypeParam], m: FunData, impl_id: int32) -> Result<int32, CheckErr> {
         let mangled = format("{}.{}", key, m.name)
         var combined_names: [str] = []
@@ -2752,6 +2769,7 @@ impl Checker {
         return Ok(func_type(sig.params, sig.ret, sig.decl.is_async))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "Option", "None", None)[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "enum 'Option' has no variant 'None'", decl: -1, notes: [] })]
     fun infer_bare_variant(var self, e: Expr, enum_name: str, variant: str, expected: Option<Type>) -> Result<Type, CheckErr> {
         let payload = match self.enum_variant_payload(enum_name, [], variant) { Some(p) => p, None => { return Err(terr_at(e.line, e.col, e.sp, format("enum '{}' has no variant '{}'", enum_name, variant))) } }
         if len(payload) > 0 { return Err(terr_at(e.line, e.col, e.sp, format("variant '{}' carries a payload; call it like '{}(...)'", variant, variant))) }
@@ -2764,6 +2782,7 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("cannot infer type argument(s) for '{}'; annotate the binding (e.g. ': {}<...>')", variant, enum_name)))
     }
 
+    #test(checker_on("fun f(n: int) -> int { return n * 2 }"), expr_of("1 + 2 * 3"), "-", expr_of("1 + 2 * 3"), None)[Ok(Type.TInt(32, true))]
     fun infer_unary(var self, e: Expr, op: str, x: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         if op == "-" {
             let hint = num_hint(expected)
@@ -2789,6 +2808,7 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("unknown unary operator '{}'", op)))
     }
 
+    #test(checker_on("fun f(n: int) -> int { return n * 2 }"), expr_of("1 + 2 * 3"), expr_of("1 + 2 * 3"), type_expr_of("int"))[Ok(Type.TInt(32, true))]
     fun infer_cast(var self, e: Expr, x: Expr, ty: TypeExpr) -> Result<Type, CheckErr> {
         let target = self.resolve0(ty)?
         let src = self.expect_value(x, None)?
@@ -2827,6 +2847,7 @@ impl Checker {
         return Err(terr_at(ln.line, ln.col, ln.sp, format("type mismatch: '{}' vs '{}' (no implicit conversion between numeric types)", type_name(lt), type_name(rt))))
     }
 
+    #test(checker_on("fun f(n: int) -> int { return n * 2 }"), expr_of("1 + 2 * 3"), "==", expr_of("1 + 2 * 3"), expr_of("1 + 2 * 3"), None)[Ok(Type.TBool)]
     fun infer_binary(var self, e: Expr, op: str, l: Expr, r: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         if op == "&&" || op == "||" {
             self.expect_type(l, Type.TBool, format("operand of '{}'", op))?
@@ -2909,6 +2930,7 @@ impl Checker {
         return Ok(common)
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "+", expr_of("a.b[0]"), expr_of("a.b[0]"), Type.TStruct("Vec2", []))[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "operator '+' is not defined for 'Vec2': it needs 'impl Add for Vec2'", decl: -1, notes: [] })]
     fun infer_operator_overload(var self, e: Expr, op: str, l: Expr, r: Expr, lt: Type) -> Result<Type, CheckErr> {
         var trnm = ""
         var kind = ""
@@ -2939,6 +2961,7 @@ impl Checker {
         return Ok(Type.TBool)
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "+", expr_of("a.b[0]"), expr_of("a.b[0]"), Type.TParam("T"))[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "operator '+' on a value of type parameter 'T' requires the bound 'T: Add'", decl: -1, notes: [] })]
     fun infer_bounded_op(var self, e: Expr, op: str, l: Expr, r: Expr, lt: Type) -> Result<Type, CheckErr> {
         var trnm = ""
         var result = lt
@@ -2961,6 +2984,7 @@ impl Checker {
         return false
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), Type.TFunc([Type.TInt(32, true)], Some(Type.TStr)), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_compose(var self, e: Expr, lt: Type, r: Expr) -> Result<Type, CheckErr> {
         let lparams = func_params_of(lt)
         let lret: Option<Type> = func_ret_of(lt)
@@ -2978,6 +3002,7 @@ impl Checker {
         return Ok(Type.TFunc([lparams[0]], rret))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), [Expr { id: 47, line: 39, col: 8, sp: SrcSpan { sline: 39, scol: 8, eline: 39, ecol: 9 }, kind: ExprKind.IntLit(7, None, false, "") }], Some(Type.TTuple([Type.TInt(32, true)])))[Ok(Type.TTuple([Type.TInt(32, true)]))]
     fun infer_tuple_lit(var self, e: Expr, elems: [Expr], expected: Option<Type>) -> Result<Type, CheckErr> {
         var exp_elems: [Type] = []
         var have_exp = false
@@ -2999,6 +3024,7 @@ impl Checker {
         return Ok(Type.TTuple(ts))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), 0)[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_tuple_index(var self, e: Expr, t: Expr, idx: int64) -> Result<Type, CheckErr> {
         let base = self.expect_value(t, None)?
         match base {
@@ -3060,6 +3086,7 @@ impl Checker {
         return Ok(Type.TMap(key_t, val_t))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_index(var self, e: Expr, t: Expr, ix: Expr) -> Result<Type, CheckErr> {
         let base = self.expect_value(t, None)?
         match base {
@@ -3080,6 +3107,7 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("type '{}' is not a list and cannot be indexed with `[...]`", type_name(base))))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), "f", None)[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_field(var self, e: Expr, target: Expr, field: str, expected: Option<Type>) -> Result<Type, CheckErr> {
         match self.enum_name_ref(target) {
             Some(enum_name) => {
@@ -3109,6 +3137,7 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, format("type '{}' has no fields", type_name(base))))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "Name", [FieldInit { line: 54, col: 20, sp: SrcSpan { sline: 54, scol: 20, eline: 54, ecol: 27 }, name: "text", value: Expr { id: 96, line: 54, col: 26, sp: SrcSpan { sline: 54, scol: 26, eline: 54, ecol: 27 }, kind: ExprKind.Name("a") } }], None)[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "unknown struct 'Name'", decl: -1, notes: [] })]
     fun infer_struct_lit(var self, e: Expr, sname: str, fields: [FieldInit], expected: Option<Type>) -> Result<Type, CheckErr> {
         if !self.is_struct(sname) { return Err(terr_at(e.line, e.col, e.sp, format("unknown struct '{}'", sname))) }
         let si = self.struct_idx(sname)
@@ -3177,6 +3206,7 @@ fun is_type_param(t: Type) -> bool { return match t { Type.TParam(n) => true, _ 
 
 impl Checker {
     // `label` names the construct in a mismatch message ("struct 'Box'").
+    #test(checker_on("enum E { A, B(int) }"), ["T"], [Type.TParam("T")], [Expr { id: 96, line: 70, col: 26, sp: SrcSpan { sline: 70, scol: 26, eline: 70, ecol: 28 }, kind: ExprKind.IntLit(42, None, false, "") }], None, expr_of("a.b[0]"), "struct 'Box'")[Ok([Type.TInt(32, true)])]
     fun infer_type_args(var self, params: [str], template_types: [Type], nodes: [Expr], expected_args: Option<[Type]>, e: Expr, label: str) -> Result<[Type], CheckErr> {
         var subst: [Subst] = []
         match expected_args {
@@ -3265,6 +3295,7 @@ impl Checker {
 
     // The arms of a statement match (`as_stmt`) need no value, so their last
     // statement is checked as a statement, and a match there is one too (MYLA-59).
+    #test(checker_on("enum E { A, B(int) }"), ExprOrBlock.EB_Expr(Expr { id: 57, line: 29, col: 25, sp: SrcSpan { sline: 29, scol: 25, eline: 29, ecol: 31 }, kind: ExprKind.StrLit("warm") }), Some(Type.TStr), false)[Ok(ArmBody.ABValue(Some(Type.TStr), Some(Expr { id: 57, line: 29, col: 25, sp: SrcSpan { sline: 29, scol: 25, eline: 29, ecol: 31 }, kind: ExprKind.StrLit("warm") })))]
     fun check_arm_body(var self, body: ExprOrBlock, expected: Option<Type>, as_stmt: bool) -> Result<ArmBody, CheckErr> {
         match body {
             ExprOrBlock.EB_Expr(ex) => {
@@ -3283,6 +3314,7 @@ impl Checker {
         return Ok(ArmBody.ABDiverge)
     }
 
+    #test(checker_on("fun main() { print(1 + 2) }"), block_of("{ }"), None, true)[Ok(ArmBody.ABValue(None, None))]
     fun check_arm_block(var self, bl: Block, expected: Option<Type>, as_stmt: bool) -> Result<ArmBody, CheckErr> {
         let n = len(bl.stmts)
         var i = 0
@@ -3396,6 +3428,7 @@ impl Checker {
         }
     }
 
+    #test(checker_on("enum E { A, B(int) }"), pattern_of("(a, _)"), Some("Shape"), "Empty", [], false, Type.TEnum("Shape", []))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "enum 'Shape' has no variant 'Empty'", decl: -1, notes: [] })]
     fun check_enum_pattern(var self, pat: Pattern, en: Option<str>, variant: str, elems: [Pattern], hp: bool, t: Type) -> Result<int32, CheckErr> {
         match t {
             Type.TEnum(tn, args) => {
@@ -3963,6 +3996,7 @@ impl Checker {
         }
     }
 
+    #test(checker_on("fun h(xs: [int]) -> int { var t = 0; for x in xs { t = t + x }; return t }"), stmt_of("for v in xs { print(v) }"), "x", None, None, block_of("{ print(1); print(2) }"), Some(Expr { id: 14, line: 7, col: 14, sp: SrcSpan { sline: 7, scol: 14, eline: 7, ecol: 16 }, kind: ExprKind.Name("xs") }))[Ok(0)]
     fun check_for(var self, s: Stmt, var_name: str, start: Option<Expr>, end: Option<Expr>, body: Block, iter: Option<Expr>) -> Result<int32, CheckErr> {
         var loop_t = t_int()
         match iter {
@@ -3992,6 +4026,7 @@ impl Checker {
         return Ok(0)
     }
 
+    #test(checker_on("fun f(n: int) -> int { return n * 2 }"), stmt_of("let x = 1"), Some(Expr { id: 28, line: 26, col: 12, sp: SrcSpan { sline: 26, scol: 12, eline: 26, ecol: 15 }, kind: ExprKind.Name("acc") }))[Err(CheckErr { line: 26, col: 12, sp: SrcSpan { sline: 26, scol: 12, eline: 26, ecol: 15 }, msg: "unknown name 'acc'", decl: -1, notes: [] })]
     fun check_return(var self, s: Stmt, v: Option<Expr>) -> Result<int32, CheckErr> {
         if !self.has_cur_ret {
             match v {
@@ -4029,6 +4064,7 @@ impl Checker {
     // `become ve` (D87): a call of a function, a method or a function value
     // that returns what the function does, whose arguments can be passed
     // without the function's frame (types.py: _check_become).
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "'become' needs a call", decl: -1, notes: [] })]
     fun check_become(var self, ve: Expr) -> Result<int32, CheckErr> {
         if self.lambda_depth > 0 { return Err(terr_at(ve.line, ve.col, ve.sp, "'become' can't stand in a lambda")) }
         if self.in_async { return Err(terr_at(ve.line, ve.col, ve.sp, "'become' can't stand in an async function")) }
@@ -4169,6 +4205,7 @@ impl Checker {
     }
 
     // An actor's fields are reachable only through `self` in its own methods.
+    #test(checker_on("enum E { A, B(int) }"), "Adder", expr_of("a.b[0]"), "f", expr_of("a.b[0]"))[Ok(0)]
     fun check_isolation(self, sname: str, target: Expr, field: str, e: Expr) -> Result<int32, CheckErr> {
         if !self.is_actor(sname) { return Ok(0) }
         let own = match target.kind { ExprKind.Name(n) => n == "self" && self.actor_self == sname, _ => false }
@@ -4179,6 +4216,7 @@ impl Checker {
 
     // `task.cancel(a)` (D96): `a` names an `async let` in scope, as an `await`
     // of it would; the call has no result (types.py: _infer_task_cancel).
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), [Expr { id: 5, line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 18 }, kind: ExprKind.Name("n") }])[Err(CheckErr { line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 18 }, msg: "task.cancel() takes the name of an 'async let'", decl: -1, notes: [] })]
     fun infer_task_cancel(var self, e: Expr, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         if len(args) == 1 {
             match args[0].kind {
@@ -4206,6 +4244,7 @@ impl Checker {
     }
 
     // `await x`: in async code, a call that may suspend or an `async let`'s name.
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), None)[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "'await' can only stand in an async function", decl: -1, notes: [] })]
     fun infer_await(var self, e: Expr, op: Expr, expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         if !self.in_async { return Err(terr_at(e.line, e.col, e.sp, "'await' can only stand in an async function")) }
         if self.in_guard { return Err(terr_at(e.line, e.col, e.sp, "'await' can't stand in a match guard: bind the awaited value before the 'match'")) }
@@ -4240,6 +4279,7 @@ impl Checker {
     // The call `e` just inferred (marked by `mark_call`) stands under `await`
     // if it may suspend: a call of an async function, method or function
     // value, or of an actor's method from outside it.
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Ok(0)]
     fun check_suspension(var self, e: Expr, callee: Expr) -> Result<int32, CheckErr> {
         var why = ""
         if self.call_kind == "method" {
@@ -4268,6 +4308,7 @@ impl Checker {
 
     // `async let name = init` (s): a child task in async code; a call it makes
     // is awaited by the task.
+    #test(checker_on("enum E { A, B(int) }"), stmt_of("x = x + 1"), "a", None, expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 3, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, msg: "'async let' can only stand in an async function", decl: -1, notes: [] })]
     fun check_async_let(var self, s: Stmt, name: str, ty: Option<TypeExpr>, init: Expr) -> Result<int32, CheckErr> {
         if !self.in_async { return Err(terr_at(s.line, s.col, s.sp, "'async let' can only stand in an async function")) }
         if self.task_line == 0 {
@@ -4380,6 +4421,7 @@ impl Checker {
         }
     }
 
+    #test(checker_on("fun f(n: int) -> int { return n * 2 }"), fun_of("fun f(n: int) -> int { return n * 2 }"))[Ok(0)]
     fun check_function(var self, fd: FunData) -> Result<int32, CheckErr> {
         let idx = self.func_idx(fd.name)
         let sig = self.functions[idx]
@@ -4720,6 +4762,7 @@ impl Checker {
         return match get(self.resolved, e.id) { Some(t) => t, None => t_int() }
     }
 
+    #test(checker_on("fun f(n: int) -> int { return n * 2 }"), expr_of("1 + 2 * 3"), ">", expr_of("1 + 2 * 3"), expr_of("1 + 2 * 3"), Type.TBool)[Ok(CV.CVBool(false))]
     fun fold_const_binary(var self, e: Expr, op: str, l: Expr, r: Expr, t: Type) -> Result<CV, CheckErr> {
         if op == "&&" {
             let lv = self.fold_const_expr(l)?
@@ -4812,6 +4855,9 @@ fun int_less(a: int64, b: int64, t: Type) -> bool {
     return a < b
 }
 
+#test(true, 1)[-1]
+#test(false, 255)[-256]
+#test(true, 128512)[-128512]
 fun if_neg(neg: bool, v: int64) -> int64 {
     if neg { return 0 - v }
     return ~v
@@ -4926,6 +4972,7 @@ impl Checker {
 
     // A method takes `#test` cases, its receiver as the first argument
     // (D116); no other attribute (types.py: _check_method_attributes).
+    #test(checker_on("struct P { x: int, y: int }"), fun_of("fun g() { print(1) }"), "App")[Ok(0)]
     fun check_method_attributes(var self, fd: FunData, key: str) -> Result<int32, CheckErr> {
         for attr in fd.attributes {
             if attr.name != "test" { return Err(terr_at(attr.line, attr.col, attr.sp, format("attribute '#{}' can't be applied to a method (a method takes only '#test')", attr.name))) }
@@ -5219,6 +5266,7 @@ fun count_format_holes(fmt: str, line: int32, col: int32) -> Result<int32, Check
 // =========================================================================
 
 impl Checker {
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), [Expr { id: 40, line: 23, col: 22, sp: SrcSpan { sline: 23, scol: 22, eline: 23, ecol: 23 }, kind: ExprKind.Name("s") }], None)[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_call(var self, e: Expr, callee: Expr, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         for a in args { match a.kind { ExprKind.Hole => { return Ok(Some(self.infer_partial(e, callee, args)?)) }, _ => {} } }
         // local binding shadows a global function: call as a value
@@ -5407,6 +5455,7 @@ impl Checker {
         return Ok(sig.ret)
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "pop", [Expr { id: 5, line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 19 }, kind: ExprKind.Name("xs") }])[Err(CheckErr { line: 7, col: 17, sp: SrcSpan { sline: 7, scol: 17, eline: 7, ecol: 19 }, msg: "unknown name 'xs'", decl: -1, notes: [] })]
     fun infer_list_mutation(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         var nargs = 1
         if name == "push" { nargs = 2 }
@@ -5421,6 +5470,7 @@ impl Checker {
         return Ok(Some(elem))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "contains", [Expr { id: 52, line: 4, col: 17, sp: SrcSpan { sline: 4, scol: 17, eline: 4, ecol: 18 }, kind: ExprKind.Name("m") }, Expr { id: 53, line: 4, col: 20, sp: SrcSpan { sline: 4, scol: 20, eline: 4, ecol: 21 }, kind: ExprKind.Name("k") }])[Err(CheckErr { line: 4, col: 17, sp: SrcSpan { sline: 4, scol: 17, eline: 4, ecol: 18 }, msg: "unknown name 'm'", decl: -1, notes: [] })]
     fun infer_map_builtin(var self, e: Expr, name: str, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         var nargs = 2
         if name == "keys" { nargs = 1 }
@@ -5445,6 +5495,7 @@ impl Checker {
         return Ok(None)
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), [Expr { id: 244, line: 126, col: 19, sp: SrcSpan { sline: 126, scol: 19, eline: 126, ecol: 45 }, kind: ExprKind.StrLit("braces {{}} stay literal") }])[Ok(Type.TStr)]
     fun infer_format(var self, e: Expr, args: [Expr]) -> Result<Type, CheckErr> {
         if len(args) == 0 { return Err(terr_at(e.line, e.col, e.sp, "format() needs a string literal format and its arguments")) }
         let fmt = args[0]
@@ -5509,6 +5560,7 @@ impl Checker {
         return Ok(None)
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), [Expr { id: 46, line: 32, col: 21, sp: SrcSpan { sline: 32, scol: 21, eline: 32, ecol: 22 }, kind: ExprKind.Name("x") }])[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_indirect_call(var self, e: Expr, callee: Expr, args: [Expr]) -> Result<Option<Type>, CheckErr> {
         let ft = self.expect_value(callee, None)?
         let ps = match strip_async(ft) { Type.TFunc(p, r) => p, _ => { return Err(terr_at(e.line, e.col, e.sp, format("cannot call a value of type '{}'", type_name(ft)))) } }
@@ -5524,6 +5576,7 @@ impl Checker {
         return Ok(rr)
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "Maybe", "Just", [Expr { id: 118, line: 82, col: 33, sp: SrcSpan { sline: 82, scol: 33, eline: 82, ecol: 34 }, kind: ExprKind.IntLit(9, None, false, "") }], None)[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "enum 'Maybe' has no variant 'Just'", decl: -1, notes: [] })]
     fun infer_variant_ctor(var self, e: Expr, enum_name: str, variant: str, args: [Expr], expected: Option<Type>) -> Result<Type, CheckErr> {
         if !self.enum_has_variant(enum_name, variant) { return Err(terr_at(e.line, e.col, e.sp, format("enum '{}' has no variant '{}'", enum_name, variant))) }
         let payload = match self.enum_variant_payload(enum_name, [], variant) { Some(p) => p, None => empty_types() }
@@ -5597,6 +5650,7 @@ impl Checker {
 
     // `callee` is the `target.field` node itself (a function-valued field is
     // typed through it, MYLA-33).
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"), "total", [], None)[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_method_call(var self, e: Expr, callee: Expr, target: Expr, field: str, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         let recv_type = self.expect_value(target, None)?
         let key_opt = self.type_key(recv_type)
@@ -5688,6 +5742,7 @@ impl Checker {
         return Ok(opt_subst_type(sig.ret, subst))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun infer_try(var self, e: Expr, operand: Expr) -> Result<Type, CheckErr> {
         let ot = self.expect_value(operand, None)?
         if self.task_init { return Err(terr_at(e.line, e.col, e.sp, "'?' can't stand in an 'async let': its child task has no function to return from")) }
@@ -5832,6 +5887,7 @@ impl Checker {
         self.lambda_infer = inf
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), [Expr { id: 9, line: 6, col: 17, sp: SrcSpan { sline: 6, scol: 17, eline: 6, ecol: 18 }, kind: ExprKind.Hole }])[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "'_' partial application requires a function, method, or function value", decl: -1, notes: [] })]
     fun infer_partial(var self, e: Expr, callee: Expr, args: [Expr]) -> Result<Type, CheckErr> {
         let pt = self.partial_target(e, callee)?
         if sig_has_error(pt.params, pt.ret) { return Err(poisoned()) }
@@ -5859,6 +5915,7 @@ impl Checker {
         return Ok(Type.TFunc(hole_types, pt.ret))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"))[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "'_' partial application requires a function, method, or function value", decl: -1, notes: [] })]
     fun partial_target(var self, e: Expr, callee: Expr) -> Result<PartialTgt, CheckErr> {
         match callee.kind {
             ExprKind.Name(nm) => { return self.partial_name(e, nm) },
@@ -5868,6 +5925,7 @@ impl Checker {
         return Err(terr_at(e.line, e.col, e.sp, "'_' partial application requires a function, method, or function value"))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "add")[Err(CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "cannot partially apply 'add' with '_' (only functions, methods, and function values are supported)", decl: -1, notes: [] })]
     fun partial_name(var self, e: Expr, nm: str) -> Result<PartialTgt, CheckErr> {
         match self.lookup(nm) {
             Some(b) => { return func_to_partial_res(b.ty, e) },
@@ -5881,6 +5939,7 @@ impl Checker {
         return Ok(PartialTgt { params: sig.params, ret: sig.ret, name: nm })
     }
 
+    #test(checker_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"), expr_of("a.b[0]"), "a")[Err(CheckErr { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "unknown name 'a'", decl: -1, notes: [] })]
     fun partial_field(var self, e: Expr, callee: Expr, target: Expr, field: str) -> Result<PartialTgt, CheckErr> {
         let recv = self.expect_value(target, None)?
         match self.method_partial(recv, field, e)? {
@@ -5902,6 +5961,7 @@ impl Checker {
         return Err(with_notes(terr_at(e.line, e.col, e.sp, format("type '{}' has no method '{}'", type_name(recv), field)), did_you_mean(field, self.method_names(self.type_key(recv)))))
     }
 
+    #test(checker_on("enum E { A, B(int) }"), Type.TBool, "a", expr_of("a.b[0]"))[Ok(None)]
     fun method_partial(self, recv: Type, field: str, e: Expr) -> Result<Option<PartialTgt>, CheckErr> {
         match self.type_key(recv) {
             Some(k) => {
@@ -5927,6 +5987,7 @@ impl Checker {
     }
 }
 
+#test(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true))), expr_of("-n * 2"))[Ok(PartialTgt { params: [Type.TInt(32, true)], ret: Some(Type.TInt(32, true)), name: "" })]
 fun func_to_partial_res(t: Type, e: Expr) -> Result<PartialTgt, CheckErr> {
     match t {
         Type.TFunc(p, r) => { return Ok(PartialTgt { params: p, ret: r, name: "" }) },
@@ -6004,12 +6065,16 @@ fun add_name(xs: [str], n: str) -> [str] {
     return out
 }
 
+#test([], "y")[false]
+#test(["x"], "a")[false]
+#test(["d"], "d2")[false]
 fun has_name(xs: [str], n: str) -> bool {
     for x in xs { if x == n { return true } }
     return false
 }
 
 // The field of `self` a place starts from (`stock` of `self.stock[0].n`), or "".
+#test(expr_of("-n * 2"))[""]
 fun self_field(e: Expr) -> str {
     match e.kind {
         ExprKind.GetField(t, f) => {
@@ -6152,6 +6217,7 @@ impl Reads {
 struct Reentrancy { epoch: int32, checked: [str: int32], locals: [str: Taint], awaits: [Expr], out: [CheckErr] }
 
 impl Reentrancy {
+    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [] }, expr_of("-n * 2"))[Reads { fields: [], names: [], awaits: [] }]
     fun scan(self, e: Expr) -> Reads {
         var r = Reads { fields: [], names: [], awaits: [] }
         r.expr(e, self.locals)
@@ -6170,6 +6236,7 @@ impl Reentrancy {
     }
 
     // `e` examined as a condition; its awaits.
+    #test(Reentrancy { epoch: 0, checked: [:], locals: [:], awaits: [], out: [] }, expr_of("-n * 2"))[[]]
     fun check(var self, e: Expr) -> [Expr] {
         let r = self.scan(e)
         for n in r.names {
@@ -6350,6 +6417,7 @@ impl Reentrancy {
 // An `async let`'s initializer in an actor's method reads a field of `self`
 // or calls one of its synchronous methods: the child task would do it off the
 // actor (MYLA-168; types.py: _child_reaches_self).
+#test(expr_of("-n * 2"))[CheckErr { line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, msg: "an 'async let' can't reach the actor's state through 'self': its child task runs off the actor", decl: -1, notes: [Note { label: "help", msg: "read what the child needs into a 'let' before the 'async let'", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 } }] }]
 fun child_reaches_self(e: Expr) -> CheckErr {
     return with_notes(terr_at(e.line, e.col, e.sp, "an 'async let' can't reach the actor's state through 'self': its child task runs off the actor"), [Note { label: "help", msg: "read what the child needs into a 'let' before the 'async let'", line: 0, col: 0, sp: no_span() }])
 }

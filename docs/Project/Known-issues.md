@@ -14,7 +14,9 @@ The reference implementation.
 
 ## Self-hosted compiler
 
-- The convention that every value-returning function in `selfhost/` has `#test` cases is 8 % true ([[MYLA-184]]).
+- The convention that every value-returning function in `selfhost/` has `#test` cases is 8 % true ([[MYLA-184]]). *Fixed, in review: 80 %, mostly generated cases.*
+- Native code takes a read-only method receiver after the arguments, the interpreters before them, as the reference says ([[MYLA-237]]).
+- The self-hosted interpreter lost an argument's change to a `var self` receiver ([[MYLA-238]]). *Fixed, in review.*
 
 Also by design: x86-64 Linux is the only target (D2); the LLVM round ([[MYLA-62]]) is to change that.
 

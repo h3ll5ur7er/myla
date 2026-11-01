@@ -53,6 +53,7 @@ pub struct Token {
 
 // The reserved words, as keyword_kind recognises them (the grammar tool
 // checks that grammar/myla.ebnf uses each of them, MYLA-77).
+#test()[["let", "var", "fun", "return", "become", "actor", "async", "await", "struct", "enum", "impl", "trait", "self", "match", "typealias", "as", "pub", "import", "from", "const", "break", "continue", "if", "else", "while", "for", "in", "true", "false", "bool", "str", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"]]
 pub fun keywords() -> [str] {
     return ["let", "var", "fun", "return", "become", "actor", "async", "await", "struct", "enum", "impl", "trait", "self", "match",
             "typealias", "as", "pub", "import", "from", "const", "break", "continue", "if", "else",
@@ -141,6 +142,9 @@ pub fun is_float_suffix(s: str) -> bool {
     return s == "f32" || s == "f64"
 }
 
+#test(TokenKind.INT)["INT"]
+#test(TokenKind.FLOAT)["FLOAT"]
+#test(TokenKind.STRING)["STRING"]
 pub fun kind_name(k: TokenKind) -> str {
     return match k {
         TokenKind.INT => "INT",

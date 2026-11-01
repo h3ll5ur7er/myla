@@ -33,6 +33,9 @@ pub fun is_xid_continue(c: int32) -> bool {
 }
 
 // Whether `c` is in one of the ranges of `table` (binary search).
+#test("a", 86)[false]
+#test("x", 27)[false]
+#test("y", 60)[false]
 fun in_table(table: str, c: int32) -> bool {
     var lo = 0
     var hi = len(table) / 12

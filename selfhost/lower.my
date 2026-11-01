@@ -77,15 +77,18 @@ struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, f
 
 pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
 
-// A lowering of an empty function `test` without a result, the receiver of
-// `#test` cases of the lowering's methods (MYLA-184), with a code generator
-// from `codegen_on` as their `cg`.
+// A lowering of a function `test` without a result, at the start of its
+// entry block, the receiver of `#test` cases of the lowering's methods
+// (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    return Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
+    lw.start(lw.new_block())
+    return lw
 }
 
 // The IR of the function `fd`, generated as `mangled`; Err: why it can't be
 // lowered yet.
+#test(codegen_on("struct P { x: int }; fun get(p: P) -> int { return p.x }"), fun_of("fun h(xs: [int]) -> int { return len(xs) }"), "add")[Err("the builtin len")]
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
@@ -410,6 +413,7 @@ const FRAME_PARENT: int32 = 56
 const ACTOR_RECORD: int32 = 32
 
 // Whether `fd` is a method (it has a receiver).
+#test(fun_of("fun g() { print(1) }"))[false]
 fun has_receiver(fd: FunData) -> bool {
     return match fd.receiver { Some(r) => true, None => false }
 }
@@ -432,7 +436,7 @@ fun actor_name(t: Type) -> str {
 impl Lower {
     // --- building -------------------------------------------------------------
 
-    #test(lower_on())[0]
+    #test(lower_on())[1]
     fun new_block(var self) -> int32 {
         push(self.f.blocks, IrBlock { insts: [], term: Term.Open })
         return len(self.f.blocks) - 1
@@ -470,7 +474,7 @@ impl Lower {
         self.start(next)
     }
 
-    #test(lower_on(), Type.TStr)[0]
+    #test(lower_on(), Type.TBool)[0]
     fun temp(var self, t: Type) -> int32 {
         push(self.f.temps, t)
         push(self.holder, -1)
@@ -498,7 +502,7 @@ impl Lower {
 
     // Whether the value `v` of type `t`, which owns heap values, is taken
     // from an owned temporary (`take`).
-    #test(lower_on(), codegen_on("[int]"), Type.TChar, 0)[false]
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TBool, 86)[false]
     fun took(var self, cg: CodeGen, t: Type, v: int32) -> bool {
         return cg.owns_heap(t) && self.take(v)
     }
@@ -519,6 +523,7 @@ impl Lower {
     // The argument words of the aggregate of type `t` at `src`, passed by
     // value (D88): with a reference of their own to what it holds (taken from
     // an owned temporary, else retained), read in place.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TBool, 86)[[0]]
     fun value_words(var self, cg: CodeGen, t: Type, src: int32) -> [int32] {
         if !self.took(cg, t, src) { self.retain(cg, t, src) }
         var ws: [int32] = []
@@ -539,7 +544,7 @@ impl Lower {
         self.retain(cg, t, v)
     }
 
-    #test(lower_on(), "s", Type.TStr, 8, -1, true)[0]
+    #test(lower_on(), "a", Type.TBool, 86, 86, true)[0]
     fun new_slot(var self, name: str, t: Type, size: int32, word: int32, owns: bool) -> int32 {
         push(self.f.slots, Slot { name: name, ty: t, size: size, word: word, owns: owns, inline: false })
         return len(self.f.slots) - 1
@@ -547,7 +552,7 @@ impl Lower {
 
     // A slot for a value of type `t` (its size, at least 8 bytes); `owns`: it
     // owns the heap values it will hold.
-    #test(lower_on(), codegen_on("[int]"), "s", Type.TStr, true)[0]
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), "a", Type.TBool, true)[0]
     fun value_slot(var self, cg: CodeGen, name: str, t: Type, owns: bool) -> int32 {
         var size = 8
         if is_aggregate(t) { size = cg.size(t) }
@@ -563,6 +568,7 @@ impl Lower {
 
     // Whether `e` is a part of a fixed variable (`Local`): the variable, a
     // field, a tuple's element or an element of a list or map in it.
+    #test(lower_on(), expr_of("-n * 2"))[false]
     fun fixed_place(self, e: Expr) -> bool {
         return match e.kind {
             ExprKind.Name(n) => {
@@ -612,6 +618,7 @@ impl Lower {
 
     // The type of a place: a variable's from its slot (the checker leaves
     // assignment targets untyped), a field's or element's from its aggregate.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[Type.TInt(32, true)]
     fun place_type(self, cg: CodeGen, e: Expr) -> Type {
         match e.kind {
             ExprKind.Name(n) => {
@@ -644,12 +651,14 @@ impl Lower {
 
     // `p + off` in a temporary of its own, also at offset 0: the address of a
     // member, which the verifier mustn't read as the whole slot's.
+    #test(lower_on(), 0, 0)[0]
     fun offset(var self, p: int32, off: int32) -> int32 {
         let d = self.temp(Type.TInt(64, false))
         self.add(Inst.Offset(d, p, off))
         return d
     }
 
+    #test(lower_on(), Type.TChar, 97)[0]
     fun konst(var self, t: Type, v: int64) -> int32 {
         let d = self.temp(t)
         self.add(Inst.Const(d, t, v))
@@ -657,6 +666,7 @@ impl Lower {
     }
 
     // Record the first construct that can't be lowered; returns a dummy temp.
+    #test(lower_on(), "a")[0]
     fun unsupported(var self, what: str) -> int32 {
         if self.err == "" { self.err = what }
         return self.temp(Type.TInt(64, true))
@@ -750,7 +760,7 @@ impl Lower {
 
     // The cell value `v` of type `t` is a new reference (a call's result, a
     // concatenation): keep it in an owning slot dropped with the statement.
-    #test(lower_on(), codegen_on("[int]"), 7, Type.TBool)[7]
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), 86, Type.TBool)[86]
     fun owned_value(var self, cg: CodeGen, v: int32, t: Type) -> int32 {
         if !cg.owns_heap(t) { return v }
         let slot = self.value_slot(cg, "__temp", t, true)
@@ -769,6 +779,7 @@ impl Lower {
     // A scalar expression evaluated where nothing ends its temporaries (a
     // condition, a guard, an operand of `&&`/`||`): they are dropped as soon
     // as its value is known, which owns nothing.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[0]
     fun cond(var self, cg: CodeGen, e: Expr) -> int32 {
         self.begin_temps()
         let v = self.expr(cg, e)
@@ -1112,6 +1123,7 @@ impl Lower {
     // Whether `e` is a local variable or a field of one, through structs
     // only: a place no other task or call reaches while this function waits
     // (an actor's field could change meanwhile, D89).
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[false]
     fun local_place(var self, cg: CodeGen, e: Expr) -> bool {
         return match e.kind {
             ExprKind.Name(n) => self.lookup(n) >= 0,
@@ -1123,6 +1135,7 @@ impl Lower {
 
     // Whether `e` is a field of this async actor method's `self`, or a field
     // or list element of one, through structs and lists (D99, MYLA-169).
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[false]
     fun actor_place(self, cg: CodeGen, e: Expr) -> bool {
         return match e.kind {
             ExprKind.GetField(recv, f) => match recv.kind {
@@ -1188,6 +1201,7 @@ impl Lower {
     // function still holds its own actor, which it leaves; the call made in
     // the receiver's actor, entered and left around it; then a turn for the
     // others, and its own actor entered again. False when `op` isn't one.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), stmt_of("x = x + 1"), "let", "b", expr_of("a.b[0]"))[false]
     fun actor_call(var self, cg: CodeGen, s: Stmt, k: str, name: str, op: Expr) -> bool {
         match op.kind {
             ExprKind.Call(callee, args) => {
@@ -1230,6 +1244,7 @@ impl Lower {
     }
 
     // `e`'s value in a new owned slot named `nm`, with references of its own.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), "%actor39")[0]
     fun held_value(var self, cg: CodeGen, e: Expr, nm: str) -> int32 {
         let t = cg.type_of(e.id)
         let slot = self.value_slot(cg, nm, t, true)
@@ -1295,6 +1310,7 @@ impl Lower {
     // call `resume(fr)` made in place of it (`suspend` after it), and when it
     // ends its result (`has`, of type `rt`) moved into the variable `name`,
     // the frame freed unless the caller `keep`s it, in the slot returned.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), "let", "%aw1", 1, "fetch", true, Type.TInt(32, true), false)[0]
     fun run_frame(var self, cg: CodeGen, k: str, name: str, fr: int32, resume: str, has: bool, rt: Type, keep: bool) -> int32 {
         let me = self.temp(Type.TInt(64, false))
         self.add(Inst.Frame(me))
@@ -1339,6 +1355,7 @@ impl Lower {
     // The frame a call through an async function value makes (its code, the
     // async function's `__new`, takes the environment and the arguments),
     // or -1 when `op` is no such call.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[-1]
     fun frame_of_value(var self, cg: CodeGen, op: Expr) -> int32 {
         if !cg.frames { return -1 }
         match op.kind {
@@ -1409,7 +1426,7 @@ impl Lower {
 
     // The child task whose frame is in the slot `ts`: its index in `tasks`,
     // or -1.
-    #test(lower_on(), 1)[-1]
+    #test(lower_on(), 24)[-1]
     fun task_of(self, ts: int32) -> int32 {
         var i = 0
         while i < len(self.tasks) {
@@ -1681,6 +1698,7 @@ impl Lower {
 
     // The address of an assignable place: a local, a field, tuple element, list
     // element or map value of one at any depth, made unique on the way.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[0]
     fun place(var self, cg: CodeGen, e: Expr) -> int32 {
         match e.kind {
             ExprKind.Name(n) => {
@@ -1903,6 +1921,7 @@ impl Lower {
 
     // The temporary holding the value of the scalar expression `e` (for a
     // string, the cell pointer: borrowed, or owned by a temporary slot).
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[0]
     fun expr(var self, cg: CodeGen, e: Expr) -> int32 {
         if self.err != "" { return 0 }
         let t = cg.type_of(e.id)
@@ -2009,7 +2028,7 @@ impl Lower {
         return self.unsupported("that kind of expression")
     }
 
-    #test(lower_on(), codegen_on("[int]"), "s", Type.TStr)[0]
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), "a", Type.TBool)[0]
     fun name(var self, cg: CodeGen, n: str, t: Type) -> int32 {
         let slot = self.lookup(n)
         if slot >= 0 {
@@ -2036,6 +2055,7 @@ impl Lower {
         return self.unsupported("a function used as a value")
     }
 
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), "*", expr_of("(a, 'c')"), expr_of("(a, 'c')"))[1]
     fun binary(var self, cg: CodeGen, e: Expr, op: str, l: Expr, r: Expr) -> int32 {
         if op == "&&" || op == "||" { return self.logical(cg, op, l, r) }
         let lt = cg.type_of(l.id)
@@ -2077,6 +2097,7 @@ impl Lower {
 
     // `a == b`, `a != b` and the orderings on a user type: its `eq` or `cmp`
     // method, called with both operands' addresses.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), "<", expr_of("(a, 'c')"), expr_of("(a, 'c')"), Type.TStruct("Vec2", []))[3]
     fun overloaded_scalar(var self, cg: CodeGen, op: str, l: Expr, r: Expr, lt: Type) -> int32 {
         // the derived `eq` of an enum without payloads: equal tags (MYLA-133)
         if (op == "==" || op == "!=") && cg.tag_only_eq(lt) {
@@ -2121,6 +2142,7 @@ impl Lower {
 
     // `l && r` / `l || r`: `r` runs only when it decides the result; each
     // operand drops its own temporaries, since the right one may not run.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), "&&", expr_of("(a, 'c')"), expr_of("(a, 'c')"))[0]
     fun logical(var self, cg: CodeGen, op: str, l: Expr, r: Expr) -> int32 {
         let d = self.temp(Type.TBool)
         let a = self.cond(cg, l)
@@ -2147,6 +2169,7 @@ impl Lower {
     // A temporary holding the address of the aggregate value of `e`: where a
     // variable keeps it (borrowed), or a slot the value is built in (owned
     // by the statement when it holds heap values).
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[0]
     fun addr(var self, cg: CodeGen, e: Expr) -> int32 {
         // the destination offered to this expression only, not to its parts
         let into = self.into
@@ -2221,6 +2244,7 @@ impl Lower {
 
     // The address the fields of `tgt`'s value are at: its own, or an actor's
     // cell, through its handle (D89).
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[0]
     fun field_base(var self, cg: CodeGen, tgt: Expr) -> int32 {
         if is_actor_t(self.place_type(cg, tgt)) { return self.expr(cg, tgt) }
         return self.addr(cg, tgt)
@@ -2245,7 +2269,7 @@ impl Lower {
 
     // The address of the value of type `t` held by the member at `p`: `p`
     // itself, or for a recursive enum (a boxed member) the box's, borrowed.
-    #test(lower_on(), codegen_on("[int]"), Type.TStruct("Box", []), 7)[7]
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TBool, 86)[86]
     fun unbox(var self, cg: CodeGen, t: Type, p: int32) -> int32 {
         if !cg.is_boxed(t) { return p }
         let q = self.temp(Type.TInt(64, false))
@@ -2255,6 +2279,7 @@ impl Lower {
 
     // A new box holding a copy of `value`, a recursive enum's, with references
     // of its own: the pointer a member of type `t` holds.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), Type.TEnum("List", []))[3]
     fun box(var self, cg: CodeGen, value: Expr, t: Type) -> int32 {
         let src = self.addr(cg, value)
         let took = self.took(cg, t, src)
@@ -2267,6 +2292,7 @@ impl Lower {
     }
 
     // An enum value built in a new slot: the variant's tag, then its payload.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TEnum("Color", []), "Color", "Red", [], -1)[0]
     fun enum_ctor(var self, cg: CodeGen, t: Type, enum_name: str, variant: str, args: [Expr], into: int32) -> int32 {
         let slot = self.build_slot(cg, "__enum", t, into)
         let base = self.slot_addr(slot)
@@ -2283,7 +2309,7 @@ impl Lower {
     }
 
     // Whether `v` is the address of a value built in its destination.
-    #test(lower_on(), 0)[false]
+    #test(lower_on(), 24)[false]
     fun is_placed(self, v: int32) -> bool {
         return v >= 0 && v < len(self.placed) && self.placed[v]
     }
@@ -2291,7 +2317,7 @@ impl Lower {
     // The slot an aggregate value is built in: `into`, the destination its
     // statement offers (a new variable's slot, or the function's result), or
     // a temporary of its own (MYLA-108: no copy from one to the other).
-    #test(lower_on(), codegen_on("[int]"), "__struct", Type.TStruct("Adder", []), 1)[1]
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), "a", Type.TBool, 86)[86]
     fun build_slot(var self, cg: CodeGen, name: str, t: Type, into: int32) -> int32 {
         if into >= 0 { return into }
         return self.value_slot(cg, name, t, true)
@@ -2333,6 +2359,7 @@ impl Lower {
     // A call: `print`, `len` of a string, a user function, or a method; the
     // temporary holding its scalar result or its aggregate result's address,
     // -1 without a result. A result that owns heap values is the statement's.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"), [], 1)[0]
     fun call(var self, cg: CodeGen, e: Expr, callee: Expr, args: [Expr], into: int32) -> int32 {
         if self.err != "" { return -1 }
         // the calls in the arguments of one that `become` makes aren't its
@@ -2414,6 +2441,7 @@ impl Lower {
     // `a.eq(b)` of a `#derive(Eq)` type: the code generator's routine, with
     // both operands' addresses (MYLA-132). It calls nothing that comes back,
     // so `become` makes it an ordinary call and returns its result.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), "a", expr_of("(a, 'c')"), expr_of("(a, 'c')"), true)[2]
     fun derived_eq(var self, cg: CodeGen, name: str, a: Expr, b: Expr, tail: bool) -> int32 {
         let pa = self.addr(cg, a)
         let pb = self.addr(cg, b)
@@ -2472,6 +2500,7 @@ impl Lower {
     // A slot for the function value of type `t` made here: (its address, its
     // environment cell of `size` bytes, whose first word is the release
     // function `drop`; -1 for none: a null environment), its code `code`.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true))), "myla_inc__fnval", -1, "")[(0, 0, -1)]
     fun fat_value(var self, cg: CodeGen, t: Type, code: str, size: int32, drop: str) -> (int32, int32, int32) {
         let slot = self.value_slot(cg, "__fn", t, true)
         let base = self.slot_addr(slot)
@@ -2515,6 +2544,7 @@ impl Lower {
 
     // A top-level function `n` as a value: its thunk (taking an environment
     // word it ignores) and a null environment.
+    #test(lower_on(), codegen_on("fun main() { print(1 + 2) }"), expr_of("Some(n)"), "inc")[0]
     fun fn_value(var self, cg: CodeGen, e: Expr, n: str) -> int32 {
         if len(cg.sig_of(n).type_params) > 0 { return self.unsupported("a generic function as a value") }
         if !has_name(self.fnvals, n) { push(self.fnvals, n) }
@@ -2585,6 +2615,7 @@ impl Lower {
 
     // `l >> r`: an environment holding both function values (retained), and
     // the runtime's `__compose_call`.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[0]
     fun compose(var self, cg: CodeGen, e: Expr, l: Expr, r: Expr) -> int32 {
         let made = self.fat_value(cg, cg.type_of(e.id), "__compose_call", 40, "__compose_env_drop")
         self.store_env(cg, made.2, 8, l, cg.type_of(l.id))
@@ -2702,6 +2733,7 @@ impl Lower {
         return CallTarget { name: mangle_fn(sig.name, targs), params: cp, ret: opt_subst_type(sig.ret, sub) }
     }
 
+    #test(lower_on(), codegen_on("fun main() { print(1 + 2) }"), expr_of("Some(n)"), "list_sum", [], -1, false)[-1]
     fun direct_call(var self, cg: CodeGen, e: Expr, name: str, argv: [Expr], into: int32, tail: bool) -> int32 {
         let sig = cg.sig_of(name)
         let ct = self.call_target(cg, sig, argv)
@@ -2791,6 +2823,7 @@ impl Lower {
     // references; the statement owns it from the start, its length counting
     // the elements stored so far, so a `?` failing in an element releases
     // the cell and those (MYLA-157).
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TList(Type.TInt(32, true)), [])[1]
     fun list_lit(var self, cg: CodeGen, lt: Type, elems: [Expr]) -> int32 {
         if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
         let et = list_elem(lt)
@@ -2815,6 +2848,7 @@ impl Lower {
 
     // The address of element `idx` of the list or string `base` (bounds
     // checked at `e`), borrowed from it.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[0]
     fun elem_read(var self, cg: CodeGen, e: Expr, base: Expr, idx: Expr) -> int32 {
         let bt = self.place_type(cg, base)
         if !is_list_t(bt) && !is_tstr(bt) && !is_map_t(bt) { return self.unsupported("indexing that type") }
@@ -2830,6 +2864,7 @@ impl Lower {
 
     // `push(holder, value)`: the value taken first (with its references), then
     // the list made unique, grown when full, and the value moved in.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[-1]
     fun push_elem(var self, cg: CodeGen, holder: Expr, value: Expr) -> int32 {
         let lt = self.place_type(cg, holder)
         if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
@@ -2847,6 +2882,7 @@ impl Lower {
 
     // `pop(holder)`: the last element moved out of the (unique) list, with its
     // references; the statement owns it.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[3]
     fun pop_elem(var self, cg: CodeGen, e: Expr, holder: Expr) -> int32 {
         let lt = self.place_type(cg, holder)
         if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
@@ -2881,11 +2917,13 @@ impl Lower {
 
     // --- maps -------------------------------------------------------------------
 
+    #test(lower_on(), 0)[0]
     fun int_const(var self, v: int32) -> int32 {
         return self.konst(Type.TInt(64, true), v as int64)
     }
 
     // The slot of `key` in the map `cell` of type `mt`, or 0 when it is missing.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 32, 33)[2]
     fun map_lookup(var self, cg: CodeGen, mt: Type, cell: int32, key: int32) -> int32 {
         let size = self.int_const(cg.map_slot_size(mt))
         let is_str = self.int_const(cg.map_is_str(mt))
@@ -2896,6 +2934,7 @@ impl Lower {
 
     // The address of the value of `key` in the map `cell`, borrowed from it;
     // trapping at `e` when the key is missing.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"), Type.TMap(Type.TStr, Type.TInt(32, true)), 9, 10)[3]
     fun map_value(var self, cg: CodeGen, e: Expr, mt: Type, cell: int32, key: int32) -> int32 {
         let slot = self.map_lookup(cg, mt, cell, key)
         self.add(Inst.Check(slot, "key", Pos { line: e.line, col: e.col }))
@@ -2904,6 +2943,7 @@ impl Lower {
 
     // A new list of the keys of the map `cell`, each with its reference; the
     // caller owns it.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 115)[3]
     fun map_keys(var self, cg: CodeGen, mt: Type, cell: int32) -> int32 {
         let size = self.int_const(cg.map_slot_size(mt))
         let stride = self.int_const(cg.stored_size(map_key(mt)))
@@ -2918,6 +2958,7 @@ impl Lower {
     // slot holding it until it is moved in, or -1 when it owns nothing; its
     // temporary, or its staged copy's address for an aggregate). A `?` or
     // `return` in between drops it with the statement's temporaries.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TInt(32, true), expr_of("(a, 'c')"))[(-1, 0)]
     fun stage(var self, cg: CodeGen, vt: Type, value: Expr) -> (int32, int32) {
         let owns = cg.owns_heap(vt)
         if is_aggregate(vt) {
@@ -3005,6 +3046,7 @@ impl Lower {
 
     // `[k: v, …]`: a new map, each key evaluated before its value; the
     // statement owns it.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TChar, Type.TInt(32, true)), [])[5]
     fun map_lit(var self, cg: CodeGen, mt: Type, entries: [MapEntry]) -> int32 {
         if !lowerable(cg, mt) { return self.unsupported("a map of that type") }
         let eight = self.int_const(8)
@@ -3037,6 +3079,7 @@ impl Lower {
         self.map_put(cg, mt, h, k, staged)
     }
 
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[0]
     fun map_contains(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
         let mt = self.place_type(cg, m)
         if !is_map_t(mt) { return self.unsupported("contains on that type") }
@@ -3051,6 +3094,7 @@ impl Lower {
 
     // `remove(m, k)`: the map made unique (copies keep the entry), then the
     // key; see `emit_map_remove`.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"), expr_of("(a, 'c')"))[0]
     fun map_remove(var self, cg: CodeGen, m: Expr, k: Expr) -> int32 {
         let mt = self.place_type(cg, m)
         if !is_map_t(mt) { return self.unsupported("remove on that type") }
@@ -3064,6 +3108,7 @@ impl Lower {
 
     // --- strings ----------------------------------------------------------------
 
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"))[1]
     fun sb_new(var self, cg: CodeGen) -> int32 {
         let size = self.int_const(16)
         let cell = self.temp(Type.TSB)
@@ -3122,6 +3167,7 @@ impl Lower {
 
     // The print form of a printable value as a string: a string itself
     // (borrowed), or a new one the statement owns.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[1]
     fun render(var self, cg: CodeGen, arg: Expr) -> int32 {
         let t = cg.type_of(arg.id)
         var helper = ""
@@ -3153,6 +3199,7 @@ impl Lower {
     // address), borrowed from the operand; otherwise the failure's tag and
     // payload are copied into the function's result with references of their
     // own, and it returns as `return` does.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"), expr_of("a.b[0]"))[0]
     fun try_expr(var self, cg: CodeGen, e: Expr, inner: Expr) -> int32 {
         let carrier = cg.type_of(inner.id)
         if !lowerable(cg, carrier) { return self.unsupported("`?` on a value of that type") }
@@ -3192,6 +3239,7 @@ impl Lower {
     // `panic(msg)`, `unreachable()` and `assert(c)`, `assert(c, msg)`: the
     // runtime error at the call's position; the code after the first two is
     // unreachable.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "unreachable", [])[-1]
     fun intrinsic(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
         let at = Pos { line: e.line, col: e.col }
         if nm == "panic" {
@@ -3224,6 +3272,7 @@ impl Lower {
     // The I/O intrinsics (`__write`, `__read_file`, …): runtime helpers taking
     // their arguments in the calling registers, or the runtime's variables; a
     // result that is a cell is a new reference.
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"), "let", [])[0]
     fun io_call(var self, cg: CodeGen, e: Expr, nm: str, args: [Expr]) -> int32 {
         let t = cg.type_of(e.id)
         if nm == "__io_errno" || nm == "__run_stderr" {
@@ -3266,6 +3315,7 @@ impl Lower {
         return self.owned_value(cg, d, t)
     }
 
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), expr_of("(a, 'c')"))[-1]
     fun print(var self, cg: CodeGen, arg: Expr) -> int32 {
         let t = cg.type_of(arg.id)
         if !is_scalar(t) && !is_tstr(t) { return self.unsupported("print of a value that isn't a scalar or a string") }
@@ -3529,7 +3579,7 @@ impl Lower {
 
     // The slot of the binding `n` in the current arm (made the first time); it
     // borrows from the scrutinee's copy.
-    #test(lower_on(), codegen_on("[int]"), "e", Type.TStr)[0]
+    #test(lower_on(), codegen_on("enum E { A, B(int) }"), "a", Type.TBool)[0]
     fun arm_slot(var self, cg: CodeGen, n: str, t: Type) -> int32 {
         for b in self.arm_binds {
             if b.name == n { return b.slot }
@@ -3542,6 +3592,7 @@ impl Lower {
 
 // Whether `e` is a call that never returns (`panic`, `unreachable`): an
 // arm ending in one has no value to store.
+#test(expr_of("-n * 2"))[false]
 fun diverges(e: Expr) -> bool {
     return match e.kind {
         ExprKind.Call(callee, args) => match callee.kind {

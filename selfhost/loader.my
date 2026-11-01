@@ -672,11 +672,13 @@ struct Renamer {
     err: Option<Report>,
 }
 
+#test(expr_of("-n * 2"), ExprKind.IntLit(0, None, false, ""))[Expr { id: 3, line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.IntLit(0, None, false, "") }]
 fun mk_expr(e: Expr, k: ExprKind) -> Expr {
     return Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: k }
 }
 
 // `e` rebuilt with kind `k`, positioned where `pos` is.
+#test(expr_of("-n * 2"), expr_of("-n * 2"), ExprKind.Name("std$task$cancel"))[Expr { id: 3, line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.Name("std$task$cancel") }]
 fun mk_expr_at(e: Expr, pos: Expr, k: ExprKind) -> Expr {
     return Expr { id: e.id, line: pos.line, col: pos.col, sp: e.sp, kind: k }
 }
@@ -868,6 +870,7 @@ impl Renamer {
 
     // -- types --
 
+    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None }, type_expr_of("int"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, kind: TypeKind.TRef("int", []) }]
     fun ty(self, t: TypeExpr) -> TypeExpr {
         let k = match t.kind {
             TypeKind.TRef(n, args) => TypeKind.TRef(self.type_name(n), self.ty_list(args)),
@@ -897,6 +900,7 @@ impl Renamer {
 
     // -- statements --
 
+    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None }, block_of("{ }"))[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, stmts: [] }]
     fun block(var self, b: Block) -> Block {
         let saved = self.vals
         var out: [Stmt] = []
@@ -905,6 +909,7 @@ impl Renamer {
         return Block { line: b.line, col: b.col, sp: b.sp, stmts: out }
     }
 
+    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None }, stmt_of("return a"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 9 }, kind: StmtKind.ReturnS(Some(Expr { id: 0, line: 1, col: 8, sp: SrcSpan { sline: 1, scol: 8, eline: 1, ecol: 9 }, kind: ExprKind.Name("a") }), false) }]
     fun stmt(var self, s: Stmt) -> Stmt {
         let k = match s.kind {
             StmtKind.VarDecl(kind, n, t, init) => {
@@ -1073,6 +1078,7 @@ impl Renamer {
     // `alias.member[.field…]`: the module prefix (the longest one that names a
     // module) folds into the qualified member; what follows stays field
     // accesses. The new nodes reuse the ids of the ones they replace.
+    #test(Renamer { env: ["Account": "Account", "fetch": "fetch", "deposit_ones": "deposit_ones", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["self"], tys: ["Self"], path: "examples/concurrency.my", err: None }, expr_of("-n * 2"))[None]
     fun module_access(var self, e: Expr) -> Option<Expr> {
         var names: [str] = []       // field names, outermost first
         var nodes: [Expr] = []      // their GetField nodes
@@ -1158,6 +1164,7 @@ impl Renamer {
         return out
     }
 
+    #test(Renamer { env: ["big": "big", "size": "size", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["n"], tys: ["Self"], path: "examples/errors/type_await_in_guard.my", err: None }, pattern_of("_"))[Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: PatternKind.PWild }]
     fun pattern(var self, p: Pattern) -> Pattern {
         let k = match p.kind {
             PatternKind.PLit(x) => PatternKind.PLit(self.expr(x)),
@@ -1215,6 +1222,9 @@ pub fun default_stdlib_root(argv0: str) -> str {
 }
 
 // A module error without a position (the package list's).
+#test("a")[Report { kind: "module error", msg: "a", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] }]
+#test("d2")[Report { kind: "module error", msg: "d2", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] }]
+#test("right")[Report { kind: "module error", msg: "right", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] }]
 fun list_error(msg: str) -> Report {
     return Report { kind: "module error", msg: msg, path: "", line: 0, col: 0, sp: no_span(), more: [], notes: [] }
 }
@@ -1294,6 +1304,9 @@ pub fun load_program_with(entry: str, stdlib_root: str, overrides: [str: str]) -
 // and its directory, and the project root `root` ("" for the entry's
 // directory): what the project tool loads for `src/main.my`, and with root
 // `src` for every file under `src/` (MYLA-92).
+#test("a", "a", [("let", "let"), ("x", "x")], "a")[Err(Report { kind: "module error", msg: "invalid package name 'let'", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] })]
+#test("x", "x", [("let", "let"), ("x", "x")], "x")[Err(Report { kind: "module error", msg: "invalid package name 'let'", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] })]
+#test("d1", "d1", [("let", "let"), ("x", "x")], "d1")[Err(Report { kind: "module error", msg: "invalid package name 'let'", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] })]
 pub fun load_program_packages(entry: str, stdlib_root: str, packages: [(str, str)], root: str) -> Result<Loaded, Report> {
     var opts = load_options(stdlib_root)
     opts.packages = packages

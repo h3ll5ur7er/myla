@@ -35,6 +35,9 @@ pub fun cp_utf8(cp: int32) -> str {
 
 // Escape a string for the canonical dumps (only \ \n \t \r " are special;
 // every other byte, including multi-byte UTF-8, passes through verbatim).
+#test("a")["a"]
+#test("d2")["d2"]
+#test("right")["right"]
 pub fun escape(s: str) -> str {
     var sb = StringBuilder()
     for ch in chars(s) {

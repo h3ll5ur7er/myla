@@ -66,10 +66,10 @@ GENERATED = os.path.join(STATE, "generated.json")   # cases run on factory recei
 MAX_CASE = 220          # characters of one case's arguments and result together
 MAX_DISTINCT = 40       # distinct calls kept per function while recording
 CASES_PER_FUNCTION = 3
-GENERATED_PER_FUNCTION = 1   # a case on factory receivers costs a factory call in each runner
+GENERATED_PER_FUNCTION = 1   # a case with factory-built state costs a factory call in each runner
 WORKLOAD_SECONDS = 240
 MAX_ARGSETS = 8         # recorded argument lists kept per function with state parameters
-MAX_GENERATED = 300     # characters of a generated case's other arguments and result
+MAX_GENERATED = 400     # characters of a generated case's other arguments and result
 CALL_SECONDS = 3
 
 # The compiler's state objects can't be written as literals, and its AST
@@ -99,13 +99,19 @@ SNIPPETS = {
                   "fun f(n: int) -> int { return n * 2 }", "struct P { x: int, y: int }",
                   "enum E { A, B(int) }", "fun main() { print(1 + 2) }",
                   "const N: int = 4; fun g() -> int { return N }",
-                  "fun h(xs: [int]) -> int { var t = 0; for x in xs { t = t + x }; return t }"],
+                  "fun h(xs: [int]) -> int { var t = 0; for x in xs { t = t + x }; return t }",
+                  "match e { A => 0, B(n) => n }", "impl C { fun get(self) -> int { return self.n } }",
+                  "(x: int) => x + 1", "import a.b as c"],
     "programs": ["fun f(n: int) -> int { return n * 2 }", "struct P { x: int, y: int }",
                  "enum E { A, B(int) }", "fun main() { print(1 + 2) }",
                  "const N: int = 4; fun g() -> int { return N }",
                  "fun h(xs: [int]) -> int { var t = 0; for x in xs { t = t + x }; return t }",
                  "struct P { x: int }; fun get(p: P) -> int { return p.x }",
-                 "fun s(a: str) -> str { return a + \"!\" }"],
+                 "fun s(a: str) -> str { return a + \"!\" }",
+                 "enum E { A, B(int) }; fun v(e: E) -> int { return match e { A => 0, B(n) => n } }",
+                 "struct C { n: int }; impl C { fun get(self) -> int { return self.n } }",
+                 "fun m() -> [str: int] { var d: [str: int] = [:]; d[\"a\"] = 1; return d }",
+                 "fun k(f: (int) -> int) -> int { return f(2) }; fun z() -> int { return k((x: int) => x + 1) }"],
     "exprs": ["1 + 2 * 3", "f(x, 2)", "a.b[0]", "Some(n)", "[1, 2, 3]", "x |> f(_, 2)",
               "-n * 2", "\"s\" + t", "p.x == 3 && !done", "E.B(4)", "(a, 'c')", "[\"k\": 1]"],
     "stmts": ["let x = 1", "var y: int = 2", "x = x + 1", "return a", "while i < 3 { i = i + 1 }",
@@ -605,12 +611,71 @@ def _local_names(names_of: dict, path: str) -> dict[str, str]:
     return {local: q for q, local in names_of.get(os.path.realpath(path), {}).items()}
 
 
+POOL_SIZE = 8
+
+
+def build_pools(checker, argsets: dict) -> dict:
+    """Values per type for arguments nobody recorded: the values recorded
+    for other functions' parameters of that type (MYLA-184)."""
+    pools: dict = {}
+    for name, sets in argsets.items():
+        sig = checker.functions.get(name)
+        if sig is None:
+            continue
+        idx = [i for i, t in enumerate(sig.params)
+               if not (isinstance(t, StructType) and t.name.split("$")[-1] in FACTORIES)]
+        for _, blob in sets:
+            values = pickle.loads(base64.b64decode(blob))
+            for i, v in zip(idx, values):
+                pool = pools.setdefault(sig.params[i], [])
+                if len(pool) < POOL_SIZE and v not in pool:
+                    pool.append(v)
+    return pools
+
+
+_INTS = [0, 1, 2, 3, 8, 32, -1]
+_STRS = ["", "a", "x", "main", "int", "Point", "hello world"]
+
+
+def pool_values(t, pools: dict, depth: int = 0) -> list:
+    """Values of type `t` to try as an argument: recorded ones, else small
+    literals for the primitive types and the collections of them."""
+    if t in pools:
+        return pools[t]
+    if isinstance(t, IntType):
+        return [v for v in _INTS if t.signed or v >= 0]
+    if isinstance(t, StrType):
+        return list(_STRS)
+    if isinstance(t, BoolType):
+        return [True, False]
+    if isinstance(t, CharType):
+        return [ord(c) for c in "a0 _"]
+    if isinstance(t, FloatType):
+        return [0.0, 1.5]
+    if depth > 1:
+        return []
+    if isinstance(t, ListType):
+        elems = pool_values(t.elem, pools, depth + 1)
+        return [ListValue([])] + ([ListValue(elems[:2])] if elems else [])
+    if isinstance(t, MapType):
+        return [MapValue({})]
+    if isinstance(t, EnumType) and t.name == "Option":
+        inner = pool_values(t.args[0], pools, depth + 1)
+        return [EnumValue("Option", "None", [])] + ([EnumValue("Option", "Some", [inner[0]])] if inner else [])
+    if isinstance(t, TupleType):
+        parts = [pool_values(e, pools, depth + 1) for e in t.elems]
+        if all(parts):
+            return [TupleValue([p[k % len(p)] for p in parts]) for k in range(max(len(p) for p in parts))]
+    return []
+
+
 def generate_chunk(checker, names_of, decls: list, out_path: str) -> None:
     """In a forked child: run each function of `decls` with its state
     parameters built by the factories, over the snippets and the recorded
     other arguments, and write the cases that come out to `out_path`."""
     with open(ARGS, encoding="utf-8") as fh:
         argsets = json.load(fh)
+    pools = build_pools(checker, argsets)
     devnull = open(os.devnull, "w")
     os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
     sys.setrecursionlimit(100_000)
@@ -662,9 +727,15 @@ def generate_chunk(checker, names_of, decls: list, out_path: str) -> None:
         tnames = {i: sig.params[i].name.split("$")[-1] for i in idx}
         pr = Printer(checker, names_of.get(os.path.realpath(decl.source_path), {}))
         others = [i for i in range(len(sig.params)) if i not in idx]
-        sets = argsets.get(decl.name, []) if others else [[[], None]]
-        if not sets:
-            continue
+        if not others:
+            sets = [[]]
+        elif decl.name in argsets:
+            sets = [pickle.loads(base64.b64decode(b)) for _, b in argsets[decl.name]]
+        else:   # nobody recorded them: values of their types from the pools
+            choices = [pool_values(sig.params[i], pools) for i in others]
+            if not all(choices):
+                continue
+            sets = [[c[k % len(c)] for c in choices] for k in range(min(MAX_ARGSETS, max(map(len, choices))))]
         sets_used = [FACTORIES[t][2] for t in tnames.values() if isinstance(FACTORIES[t][2], str)]
         rounds = max((len(SNIPPETS[n]) for n in sets_used), default=1)
         cases: dict[str, None] = {}
@@ -691,18 +762,23 @@ def generate_chunk(checker, names_of, decls: list, out_path: str) -> None:
                 values[i] = value
             if not ok:
                 continue
-            for other_texts, blob in sets:
-                other_values = pickle.loads(base64.b64decode(blob)) if blob else []
+            for other_values in sets:
                 args, arg_texts = [], []
-                k = 0
-                for i in range(len(sig.params)):
-                    if i in values:
-                        args.append(_copy(values[i]))
-                        arg_texts.append(texts[i])
-                    else:
-                        args.append(_copy(other_values[k]))
-                        arg_texts.append(other_texts[k])
-                        k += 1
+                budget = MAX_GENERATED
+                try:
+                    k = 0
+                    for i in range(len(sig.params)):
+                        if i in values:
+                            args.append(_copy(values[i]))
+                            arg_texts.append(texts[i])
+                        else:   # printed in this module's names
+                            text = pr.show(other_values[k], sig.params[i], budget)
+                            budget -= len(text) + 2
+                            args.append(_copy(other_values[k]))
+                            arg_texts.append(text)
+                            k += 1
+                except (Unprintable, KeyError, AttributeError, TypeError):
+                    continue
                 impure[0] = False
                 try:
                     result = timed(lambda: interp._call(decl, args))
@@ -710,7 +786,6 @@ def generate_chunk(checker, names_of, decls: list, out_path: str) -> None:
                     continue
                 if impure[0]:
                     continue
-                budget = MAX_GENERATED - sum(len(other_texts[j]) + 2 for j in range(len(other_texts)))
                 try:
                     res = pr.show(result, sig.ret, budget)
                 except (Unprintable, KeyError, AttributeError, TypeError):
@@ -726,8 +801,8 @@ def cmd_generate(jobs: int) -> None:
     t0 = time.time()
     checker, names_of = load()
     os.chdir(REPO)
-    decls = [d for d in eligible(checker).values() if state_params(checker, d)]
-    print(f"{len(decls)} functions with state parameters", flush=True)
+    decls = list(eligible(checker).values())
+    print(f"{len(decls)} functions without cases", flush=True)
     gen_dir = os.path.join(STATE, "generated")
     shutil.rmtree(gen_dir, ignore_errors=True)
     os.makedirs(gen_dir)
@@ -789,7 +864,7 @@ def cmd_write() -> None:
         decl = elig.get(name)
         if decl is None:
             continue
-        n = GENERATED_PER_FUNCTION if name in generated else CASES_PER_FUNCTION
+        n = GENERATED_PER_FUNCTION if name in generated and state_params(checker, decl) else CASES_PER_FUNCTION
         lines = [f"#test({', '.join(args)})[{res}]" for args, res in choose(cases, n)]
         inserts.setdefault(os.path.realpath(decl.source_path), []).append((decl.line, lines))
     total = 0

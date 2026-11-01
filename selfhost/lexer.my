@@ -33,6 +33,9 @@ pub fun new_lexer(src: str) -> Lexer {
 }
 
 // One canonical token line (mirror of src/myla/canon.py:canonical_token).
+#test(Token { kind: TokenKind.IDENT, lexeme: "East", line: 64, column: 19, eline: 64, ecol: 23, ival: 0, suffix: "", big: "" })["IDENT 64 19 \"East\" end=64:23"]
+#test(Token { kind: TokenKind.IDENT, lexeme: "Direction", line: 62, column: 9, eline: 62, ecol: 18, ival: 0, suffix: "", big: "" })["IDENT 62 9 \"Direction\" end=62:18"]
+#test(Token { kind: TokenKind.IDENT, lexeme: "Direction", line: 65, column: 9, eline: 65, ecol: 18, ival: 0, suffix: "", big: "" })["IDENT 65 9 \"Direction\" end=65:18"]
 pub fun canonical_line(t: Token) -> str {
     var sb = StringBuilder()
     append(sb, kind_name(t.kind))
@@ -694,6 +697,9 @@ impl Lexer {
 }
 
 // The tokens of `src`, or its first lex error.
+#test("a")[Ok([Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }])]
+#test("d2")[Ok([Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }])]
+#test("right")[Ok([Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }])]
 pub fun lex(src: str) -> Result<[Token], Diag> {
     var lx = new_lexer(src)
     let toks = lx.run()
@@ -767,6 +773,9 @@ fun lower(c: int32) -> int32 {
 }
 
 // `v` in upper-case hexadecimal, without a prefix.
+#test(0)["0"]
+#test(97)["61"]
+#test(128512)["1F600"]
 fun hex_upper(v: int64) -> str {
     if v == 0 { return "0" }
     var digits: [uint8] = []

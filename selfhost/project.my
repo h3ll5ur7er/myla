@@ -96,6 +96,7 @@ pub enum DepSource {
 
 // --- Errors ---------------------------------------------------------------------
 
+#test()[TomlPos { line: 0, col: 0, end_line: 0, end_col: 0 }]
 fun no_pos() -> TomlPos {
     return TomlPos { line: 0, col: 0, end_line: 0, end_col: 0 }
 }
@@ -105,10 +106,16 @@ fun error_at(path: str, pos: TomlPos, msg: str) -> ProjectError {
     return ProjectError { msg: msg, path: path, line: pos.line, col: pos.col, end_line: pos.end_line, end_col: pos.end_col }
 }
 
+#test("a", "a")[ProjectError { msg: "a", path: "a", line: 0, col: 0, end_line: 0, end_col: 0 }]
+#test("d2", "d2")[ProjectError { msg: "d2", path: "d2", line: 0, col: 0, end_line: 0, end_col: 0 }]
+#test("right", "right")[ProjectError { msg: "right", path: "right", line: 0, col: 0, end_line: 0, end_col: 0 }]
 fun error_in(path: str, msg: str) -> ProjectError {
     return error_at(path, no_pos(), msg)
 }
 
+#test("a")[ProjectError { msg: "a", path: "", line: 0, col: 0, end_line: 0, end_col: 0 }]
+#test("d2")[ProjectError { msg: "d2", path: "", line: 0, col: 0, end_line: 0, end_col: 0 }]
+#test("right")[ProjectError { msg: "right", path: "", line: 0, col: 0, end_line: 0, end_col: 0 }]
 fun error_plain(msg: str) -> ProjectError {
     return error_at("", no_pos(), msg)
 }
@@ -538,6 +545,8 @@ fun manifest_summary(text: str) -> str {
     }
 }
 
+#test(Toml.Table([("k", Toml.Int(1)), ("s", Toml.Str("v"))]))[[("k", Toml.Int(1)), ("s", Toml.Str("v"))]]
+#test(Toml.Str("x"))[[]]
 fun table_members(t: Toml) -> [(str, Toml)] {
     var none: [(str, Toml)] = []
     return match t {
@@ -546,6 +555,10 @@ fun table_members(t: Toml) -> [(str, Toml)] {
     }
 }
 
+#test(Toml.Array([Toml.Str("a"), Toml.Str("b")]))[true]
+#test(Toml.Array([Toml.Str("a"), Toml.Int(1)]))[false]
+#test(Toml.Array([]))[true]
+#test(Toml.Bool(true))[false]
 fun is_string_array(v: Toml) -> bool {
     match v {
         Toml.Array(items) => {
@@ -596,6 +609,9 @@ pub fun load_lock(path: str) -> Result<Lock, ProjectError> {
 // The lock file in `text` (from the file `path`, for errors), checked: format
 // version 1, and a table `[git.<name>]` with `url`, at most one of `tag`,
 // `branch` and `rev`, and `commit` for each Git package.
+#test("a", "a")[Err(ProjectError { msg: "expected '=' after a key", path: "a", line: 1, col: 2, end_line: 0, end_col: 0 })]
+#test("d2", "d2")[Err(ProjectError { msg: "expected '=' after a key", path: "d2", line: 1, col: 3, end_line: 0, end_col: 0 })]
+#test("right", "right")[Err(ProjectError { msg: "expected '=' after a key", path: "right", line: 1, col: 6, end_line: 0, end_col: 0 })]
 pub fun parse_lock(text: str, path: str) -> Result<Lock, ProjectError> {
     let doc = match parse_doc(text) {
         Ok(d) => d
@@ -923,6 +939,7 @@ fun before(a: str, b: str) -> bool {
 
 // The lists below are small (one entry per package), so insertion sorts do.
 
+#test([])[[]]
 fun sorted_packages(xs: [Package]) -> [Package] {
     var out: [Package] = []
     for x in xs {
@@ -952,6 +969,7 @@ fun sorted_git(xs: [GitPackage]) -> [GitPackage] {
     return out
 }
 
+#test([])[[]]
 fun sorted_entries(xs: [LockEntry]) -> [LockEntry] {
     var out: [LockEntry] = []
     for x in xs {

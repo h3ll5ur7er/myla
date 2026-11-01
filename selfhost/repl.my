@@ -367,6 +367,9 @@ fun escaped(c: int64, quote: int64) -> str {
     return cp_utf8(c as int32)
 }
 
+#test(0)["0"]
+#test(97)["61"]
+#test(128512)["1f600"]
 fun hex(n: int64) -> str {
     let digits = "0123456789abcdef"
     if n < 16 { return part(digits, n as int32, n as int32 + 1) }

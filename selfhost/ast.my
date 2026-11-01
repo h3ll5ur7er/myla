@@ -166,6 +166,9 @@ pub struct Program { decls: [Decl] }
 // Canonical dump (mirror of src/myla/canon.py) — structural, ignores id/pos.
 // =========================================================================
 
+#test([])["[]"]
+#test(["s"])["[s]"]
+#test(["n", "d"])["[n d]"]
 fun wrap_list(parts: [str]) -> str {
     var sb = StringBuilder()
     append_byte(sb, '[')
@@ -187,6 +190,9 @@ fun join_map<T>(xs: [T], f: (T) -> str) -> str {
     return wrap_list(parts)
 }
 
+#test("a")["\"a\""]
+#test("d2")["\"d2\""]
+#test("right")["\"right\""]
 fun sstr(s: str) -> str {
     return format("\"{}\"", escape(s))
 }
@@ -200,11 +206,15 @@ pub fun int_text(v: int64, big: str) -> str {
     return format("{}", v)
 }
 
+#test(true)["true"]
+#test(false)["false"]
 fun bstr(b: bool) -> str {
     if b { return "true" }
     return "false"
 }
 
+#test(Some("Shape"))["\"Shape\""]
+#test(Some("Direction"))["\"Direction\""]
 fun opt_sstr(o: Option<str>) -> str {
     return match o {
         Some(s) => sstr(s),
@@ -212,6 +222,7 @@ fun opt_sstr(o: Option<str>) -> str {
     }
 }
 
+#test(None)["nil"]
 fun opt_type(o: Option<TypeExpr>) -> str {
     return match o {
         Some(t) => dump_type(t),
@@ -219,6 +230,9 @@ fun opt_type(o: Option<TypeExpr>) -> str {
     }
 }
 
+#test(None)["nil"]
+#test(Some(Expr { id: 55, line: 35, col: 17, sp: SrcSpan { sline: 35, scol: 17, eline: 35, ecol: 18 }, kind: ExprKind.Name("n") }))["(name \"n\")"]
+#test(Some(Expr { id: 54, line: 35, col: 14, sp: SrcSpan { sline: 35, scol: 14, eline: 35, ecol: 15 }, kind: ExprKind.IntLit(0, None, false, "") }))["(int 0 nil false)"]
 fun opt_expr(o: Option<Expr>) -> str {
     return match o {
         Some(e) => dump_expr(e),
@@ -226,17 +240,24 @@ fun opt_expr(o: Option<Expr>) -> str {
     }
 }
 
+#test(true, "a", "a")["a"]
+#test(false, "d2", "d2")["d2"]
+#test(true, "right", "right")["right"]
 fun choose(c: bool, a: str, b: str) -> str {
     if c { return a }
     return b
 }
 
 // `(async X)` for an async function type or lambda (D89).
+#test(false, "y")["y"]
+#test(true, "a")["(async a)"]
+#test(true, "right")["(async right)"]
 fun async_wrap(asy: bool, inner: str) -> str {
     if asy { return format("(async {})", inner) }
     return inner
 }
 
+#test(type_expr_of("int"))["(tref \"int\" [])"]
 pub fun dump_type(t: TypeExpr) -> str {
     return match t.kind {
         TypeKind.TRef(name, args) => format("(tref {} {})", sstr(name), join_map(args, dump_type)),
@@ -259,6 +280,9 @@ fun dump_param(p: Param) -> str {
     return format("(param {} {})", sstr(p.name), opt_type(p.ty))
 }
 
+#test(ExprOrBlock.EB_Expr(Expr { id: 57, line: 29, col: 25, sp: SrcSpan { sline: 29, scol: 25, eline: 29, ecol: 31 }, kind: ExprKind.StrLit("warm") }))["(str \"warm\")"]
+#test(ExprOrBlock.EB_Expr(Expr { id: 39, line: 20, col: 29, sp: SrcSpan { sline: 20, scol: 29, eline: 20, ecol: 30 }, kind: ExprKind.IntLit(0, None, false, "") }))["(int 0 nil false)"]
+#test(ExprOrBlock.EB_Expr(Expr { id: 119, line: 51, col: 28, sp: SrcSpan { sline: 51, scol: 28, eline: 51, ecol: 29 }, kind: ExprKind.IntLit(1, None, false, "") }))["(int 1 nil false)"]
 fun dump_eb(b: ExprOrBlock) -> str {
     return match b {
         ExprOrBlock.EB_Expr(e) => dump_expr(e),
@@ -274,6 +298,7 @@ fun dump_arm(a: MatchArm) -> str {
     return format("(arm {} {} {})", dump_pattern(a.pattern), g, dump_eb(a.body))
 }
 
+#test(expr_of("Some(n)"))["(call (name \"Some\") [(name \"n\")])"]
 pub fun dump_expr(e: Expr) -> str {
     return match e.kind {
         ExprKind.IntLit(v, suf, isc, big) => format("(int {} {} {})", int_text(v, big), opt_sstr(suf), bstr(isc)),
@@ -304,6 +329,7 @@ fun dump_fpat(fp: FieldPat) -> str {
     return format("(fpat {} {})", sstr(fp.name), dump_pattern(fp.pattern))
 }
 
+#test(pattern_of("_"))["(pwild)"]
 pub fun dump_pattern(p: Pattern) -> str {
     return match p.kind {
         PatternKind.PWild => "(pwild)",
@@ -331,16 +357,20 @@ fun dump_else(t: ElseTail) -> str {
     }
 }
 
+#test(block_of("{ }"))["(block [])"]
 pub fun dump_block(b: Block) -> str {
     return format("(block {})", join_map(b.stmts, dump_stmt))
 }
 
 // The keyword of a return statement: `become` for a tail call (D87).
+#test(true)["become"]
+#test(false)["return"]
 fun return_word(tail: bool) -> str {
     if tail { return "become" }
     return "return"
 }
 
+#test(stmt_of("return a"))["(return (name \"a\"))"]
 pub fun dump_stmt(s: Stmt) -> str {
     return match s.kind {
         StmtKind.VarDecl(kind, name, ty, init) => format("(vardecl {} {} {} {})", sstr(kind), sstr(name), opt_type(ty), dump_expr(init)),
@@ -374,6 +404,7 @@ fun dump_variant(v: Variant) -> str {
     return format("(variant {} {})", sstr(v.name), join_map(v.payload, dump_type))
 }
 
+#test(Attribute { line: 36, col: 1, sp: SrcSpan { sline: 36, scol: 1, eline: 36, ecol: 14 }, name: "test", args: [], outputs: Some([Expr { id: 53, line: 36, col: 9, sp: SrcSpan { sline: 36, scol: 9, eline: 36, ecol: 13 }, kind: ExprKind.BoolLit(true) }]) })["(attr \"test\" [] [(bool true)])"]
 fun dump_attr(a: Attribute) -> str {
     let outs = match a.outputs {
         Some(xs) => join_map(xs, dump_expr),
@@ -386,6 +417,7 @@ fun dump_importitem(it: ImportItem) -> str {
     return format("(iitem {} {})", sstr(it.name), opt_sstr(it.alias))
 }
 
+#test(fun_of("fun g() { print(1) }"))["(fun \"g\" [] nil (block [(exprstmt (call (name \"print\") [(int 1 nil false)]))]) [] [] nil false)"]
 fun dump_fun(f: FunData) -> str {
     let body = match f.body {
         Some(b) => dump_block(b),

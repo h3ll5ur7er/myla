@@ -19,6 +19,8 @@ from .project import Project, Lock, LockEntry, GitPackage, GitSource, GitRef
 // What a git command printed, and whether it succeeded.
 struct GitRun { ok: bool, out: str, err: str }
 
+#test([])[""]
+#test([0, 1])["\0\u{1}"]
 fun text_of(bytes: [uint8]) -> str {
     var sb = StringBuilder()
     for b in bytes { append_byte(sb, b) }

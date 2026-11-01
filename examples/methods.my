@@ -14,6 +14,11 @@ impl Counter {
     fun bumped(self) -> Counter { return Counter { n: self.n + 1 } }
     fun bump(var self) { self.n = self.n + 1 }         // mutating receiver
     fun add(var self, k: int) { self.n = self.n + k }
+    #test(Counter { n: 1 })[2]
+    fun bump_get(var self) -> int {                 // changes `self` and returns a value
+        self.n = self.n + 1
+        return self.n
+    }
 }
 
 // A generic impl: one body covers every `Box<T>` instantiation (monomorphized).
@@ -96,4 +101,9 @@ fun main() {
     var b = Box { value: 41 }
     b.set(b.get() + 1)
     print(b.get())                       // 42
+
+    // the arguments run before the method takes its receiver: the change
+    // `bump_get` makes to `c` is kept, then `add` adds its result
+    c.add(c.bump_get())
+    print(c.get())                       // 4
 }

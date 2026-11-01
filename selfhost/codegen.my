@@ -720,6 +720,7 @@ impl CodeGen {
 
     // A map slot of map type `t`, `size` bytes: `[state:8][key:8][value]`
     // (state 1: occupied).
+    #test(codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 24)[["\t.uleb128 9", "\t.string \"slot\"", "\t.uleb128 24", "\t.uleb128 10", "\t.string \"state\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 0", "\t.uleb128 10", "\t.string \"key\"", "\t.long .Ldty2 - .Ldebug_info0", "\t.uleb128 8", "\t.uleb128 10", "\t.string \"value\"", "\t.long .Ldty3 - .Ldebug_info0", "\t.uleb128 16", "\t.byte 0"]]
     fun dbg_slot_lines(var self, t: Type, size: int32) -> [str] {
         match t {
             Type.TMap(k, v) => {
@@ -1244,6 +1245,7 @@ impl CodeGen {
 
     // Whether `myla_<key>.eq` is the routine `emit_derived_eq` writes for a
     // `#derive(Eq)` struct or enum (called with both operands' addresses).
+    #test(codegen_on("enum E { A, B(int) }"), "a")[false]
     fun derived_eq_routine(self, key: str) -> bool {
         for d in self.decls {
             match d.kind {
@@ -1288,6 +1290,7 @@ impl CodeGen {
     }
 
     // The bytes of argument words a value of type `t` takes by value.
+    #test(codegen_on("enum E { A, B(int) }"), Type.TBool)[8]
     fun word_size(self, t: Type) -> int32 {
         let size = (self.size(t) + 7) / 8 * 8
         if size < 8 { return 8 }
@@ -1797,11 +1800,13 @@ impl CodeGen {
     // Whether the checker typed `callee` as a value, which it does only for an
     // indirect call: a local binding shadows a function of the same name
     // (MYLA-102), so `f(x)` with a local `f` calls the local.
+    #test(codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[false]
     fun called_as_value(self, callee: Expr) -> bool {
         return contains(self.resolved, callee.id)
     }
 
     // Classify an expression as an enum constructor (if it is one).
+    #test(codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[CtorInfo { ok: false, enum_name: "", variant: "", args: [] }]
     fun ctor_info(self, e: Expr) -> CtorInfo {
         let enm = enum_name_of(self.type_of(e.id))
         match e.kind {
@@ -2059,6 +2064,7 @@ impl CodeGen {
     // to be emitted. `clone` (MYLA-148): `__dclonew_<T>`, the T at %rdi a
     // word-for-word copy of a value others hold, whose heap values it
     // replaces by deep copies, only reading the originals.
+    #test(codegen_on("enum E { A, B(int) }"), Type.TBool, true)["__dclonew_.bool"]
     fun register_deep(var self, t: Type, clone: bool) -> str {
         var name = "__deepw_" + mono_token(t)
         if clone { name = "__dclonew_" + mono_token(t) }
@@ -2075,6 +2081,7 @@ impl CodeGen {
     // unshared, deeply: %rax = the same cell when it was the only reference,
     // else a copy; either way every heap value in it is a deep copy of its own.
     // `clone`: %rax = a deep copy of the cell at %rdi, which is only read.
+    #test(codegen_on("enum E { A, B(int) }"), Type.TBool, true)["__dcloneb_.bool"]
     fun deep_cell_name(var self, t: Type, clone: bool) -> str {
         var pre = "__deep"
         if clone { pre = "__dclone" }
@@ -2309,6 +2316,7 @@ impl CodeGen {
     }
 
     // The deep walk of a boxed enum's inline value (its cell's contents).
+    #test(codegen_on("enum E { A, B(int) }"), Type.TBool, true)["__dclonei_.bool"]
     fun register_deep_inline(var self, t: Type, clone: bool) -> str {
         var name = "__deepi_" + mono_token(t)
         if clone { name = "__dclonei_" + mono_token(t) }
@@ -3990,6 +3998,7 @@ impl CodeGen {
     // Push the words of the aggregate of type `t` whose address the lines
     // `load` put in %rax, with references of their own to what it holds, for
     // a parameter passed by value (D88): how many words.
+    #test(codegen_on("enum E { A, B(int) }"), Type.TBool, ["x"])[1]
     fun push_value_words(var self, t: Type, load: [str]) -> int32 {
         for line in load { self.emit(line) }
         self.emit("movq %rax, %r8")
@@ -4011,6 +4020,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("fun main() { print(1 + 2) }"), block_of("{ }"), [])[[]]
     fun free_block(self, b: Block, bound: [str]) -> [str] {
         var out: [str] = []
         var bnd = bound
@@ -4053,6 +4063,7 @@ impl CodeGen {
         return out
     }
 
+    #test(codegen_on("enum E { A, B(int) }"), None, [])[[]]
     fun free_opt_else(self, oe: Option<ElseTail>, bound: [str]) -> [str] {
         return match oe {
             Some(et) => self.free_else(et, bound),
@@ -4074,6 +4085,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"), [])[["a"]]
     fun free_expr(self, e: Expr, bound: [str]) -> [str] {
         var out: [str] = []
         match e.kind {
@@ -7321,6 +7333,9 @@ fun byte_list(s: str) -> str {
     return build(sb)
 }
 
+#test([])[""]
+#test(["s"])["s"]
+#test(["n", "d"])["n\nd"]
 fun join_lines(xs: [str]) -> str {
     var sb = StringBuilder()
     var i = 0
@@ -7458,6 +7473,7 @@ fun static_str(label: str, text: str) -> [str] {
 
 // The variable a place (`x`, `x.f`, `x[i].g`) starts from, or "" when `e` is
 // not a place.
+#test(expr_of("-n * 2"))[""]
 pub fun place_root(e: Expr) -> str {
     return match e.kind {
         ExprKind.Name(n) => n,
@@ -7471,6 +7487,7 @@ pub fun place_root(e: Expr) -> str {
 // Whether the expression makes a new value an owned temporary holds (a
 // call's result, a concatenation, a list or map literal), not a variable's
 // or a constant's (MYLA-127).
+#test(expr_of("-n * 2"))[true]
 fun is_new_value(e: Expr) -> bool {
     return match e.kind {
         ExprKind.Call(c, args) => true,
@@ -7487,6 +7504,7 @@ fun is_new_value(e: Expr) -> bool {
 struct ScanArg { callee: str, recv: int32, fresh: [bool] }
 
 // Whether `e` is a variable.
+#test(expr_of("-n * 2"))[false]
 fun is_name_expr(e: Expr) -> bool {
     return match e.kind {
         ExprKind.Name(n) => true,
@@ -7512,6 +7530,7 @@ fun method_part(name: str) -> str {
 }
 
 // `acc` with the name `e` is, when it is a variable's (MYLA-127).
+#test(expr_of("-n * 2"), [])[[]]
 fun with_name(e: Expr, acc: [str]) -> [str] {
     return match e.kind {
         ExprKind.Name(n) => {
@@ -7526,6 +7545,7 @@ fun with_name(e: Expr, acc: [str]) -> [str] {
 
 // `acc` with every name the expression or block reads (a lambda captures
 // them, MYLA-127).
+#test(expr_of("-n * 2"), [])[["n"]]
 fun names_in_expr(e: Expr, acc: [str]) -> [str] {
     var out = with_name(e, acc)
     match e.kind {
@@ -7568,6 +7588,7 @@ fun names_in_expr(e: Expr, acc: [str]) -> [str] {
     return out
 }
 
+#test(block_of("{ }"), [])[[]]
 fun names_in_block(b: Block, acc: [str]) -> [str] {
     var out = acc
     for st in b.stmts {
@@ -7609,6 +7630,9 @@ fun is_mutating_builtin(n: str) -> bool {
 // conservatively: an assignment to or into it, a mutating builtin on it, or a
 // method call on it (the method may take `var self`). Myla has no references
 // and closures capture by value, so nothing else can.
+#test([], "a")[false]
+#test([], "x")[false]
+#test([], "y")[false]
 pub fun arms_may_write(arms: [MatchArm], name: str) -> bool {
     for arm in arms {
         match arm.guard { Some(g) => { if may_write_expr(g, name) { return true } }, None => {} }
@@ -7624,20 +7648,24 @@ fun may_write_body(b: ExprOrBlock, name: str) -> bool {
     }
 }
 
+#test(block_of("{ }"), "a")[false]
 fun may_write_block(b: Block, name: str) -> bool {
     for st in b.stmts { if may_write_stmt(st, name) { return true } }
     return false
 }
 
+#test(None, "let")[false]
 fun may_write_opt(oe: Option<Expr>, name: str) -> bool {
     return match oe { Some(e) => may_write_expr(e, name), None => false }
 }
 
+#test([], "let")[false]
 fun may_write_exprs(es: [Expr], name: str) -> bool {
     for e in es { if may_write_expr(e, name) { return true } }
     return false
 }
 
+#test(stmt_of("print(1)"), "a")[false]
 fun may_write_stmt(st: Stmt, name: str) -> bool {
     match st.kind {
         StmtKind.VarDecl(k, n, ty, init) => { return may_write_expr(init, name) },
@@ -7664,6 +7692,7 @@ fun may_write_stmt(st: Stmt, name: str) -> bool {
     return false
 }
 
+#test(expr_of("-n * 2"), "r")[false]
 fun may_write_expr(e: Expr, name: str) -> bool {
     match e.kind {
         ExprKind.Unary(op, x) => { return may_write_expr(x, name) },
@@ -7796,6 +7825,7 @@ pub fun is_actor_t(t: Type) -> bool {
     return match t { Type.TActor(n) => true, _ => false }
 }
 
+#test(expr_of("-n * 2"))[false]
 pub fun is_hole_expr(e: Expr) -> bool {
     return match e.kind { ExprKind.Hole => true, _ => false }
 }
@@ -7816,6 +7846,7 @@ fun bind_elem_names(be: BindElem) -> [str] {
     return out
 }
 
+#test(pattern_of("3"))[[]]
 fun pattern_names(p: Pattern) -> [str] {
     var out: [str] = []
     match p.kind {
@@ -7829,6 +7860,7 @@ fun pattern_names(p: Pattern) -> [str] {
     return out
 }
 
+#test()[[]]
 fun empty_str_list() -> [str] {
     var e: [str] = []
     return e
@@ -7906,6 +7938,7 @@ pub fun enum_name_of(t: Type) -> str {
     return match t { Type.TEnum(n, a) => n, _ => "" }
 }
 
+#test(expr_of("-n * 2"))[""]
 fun expr_name(e: Expr) -> str {
     return match e.kind { ExprKind.Name(n) => n, _ => "" }
 }
@@ -7944,6 +7977,7 @@ fun callee_target(callee: Expr) -> Expr {
     return match callee.kind { ExprKind.GetField(tgt, field) => tgt, _ => callee }
 }
 
+#test(expr_of("-n * 2"))[""]
 fun getfield_name(callee: Expr) -> str {
     return match callee.kind { ExprKind.GetField(tgt, field) => field, _ => "" }
 }

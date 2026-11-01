@@ -39,12 +39,16 @@ pub struct Parser {
 // Python parser's MAX_NESTING): past it, a parse error, not a stack overflow.
 const MAX_NESTING: int32 = 256
 
+#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
 pub fun new_parser(toks: [Token]) -> Parser {
     return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }
 }
 
 // A parser at the first token of `src`, the receiver of `#test` cases of the
 // parser's methods (MYLA-184): one without tokens when `src` doesn't lex.
+#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
+#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
+#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
 pub fun parser_on(src: str) -> Parser {
     return match lex(src) {
         Ok(toks) => new_parser(toks),
@@ -54,32 +58,50 @@ pub fun parser_on(src: str) -> Parser {
 
 // AST values parsed from `src` alone, the arguments of `#test` cases of
 // functions that take them (MYLA-184).
+#test("let")[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, kind: ExprKind.Hole }]
+#test("d1")[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 3 }, kind: ExprKind.Name("d1") }]
+#test("right")[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: ExprKind.Name("right") }]
 pub fun expr_of(src: str) -> Expr {
     var p = parser_on(src)
     return p.expression()
 }
 
+#test("a")[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: StmtKind.ExprStmt(Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: ExprKind.Name("a") }) }]
+#test("d2")[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 3 }, kind: StmtKind.ExprStmt(Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 3 }, kind: ExprKind.Name("d2") }) }]
+#test("let")[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, kind: StmtKind.VarDecl("let", "", None, Expr { id: 0, line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 4, eline: 1, ecol: 4 }, kind: ExprKind.Hole }) }]
 pub fun stmt_of(src: str) -> Stmt {
     var p = parser_on(src)
     return p.statement()
 }
 
+#test("a")[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: TypeKind.TRef("a", []) }]
+#test("d1")[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 3 }, kind: TypeKind.TRef("d1", []) }]
+#test("right")[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: TypeKind.TRef("right", []) }]
 pub fun type_expr_of(src: str) -> TypeExpr {
     var p = parser_on(src)
     return p.parse_type()
 }
 
+#test("a")[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, stmts: [] }]
+#test("let")[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, stmts: [] }]
+#test("right")[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, stmts: [] }]
 pub fun block_of(src: str) -> Block {
     var p = parser_on(src)
     return p.block()
 }
 
+#test("let")[Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, kind: PatternKind.PWild }]
+#test("d1")[Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 3 }, kind: PatternKind.PBind("d1") }]
+#test("right")[Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PBind("right") }]
 pub fun pattern_of(src: str) -> Pattern {
     var p = parser_on(src)
     return p.pattern()
 }
 
 // The function `src` declares; an empty one when it declares none.
+#test("a")[FunData { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, name: "", params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }]
+#test("x")[FunData { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, name: "", params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }]
+#test("y")[FunData { line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, name: "", params: [], ret_type: None, body: None, attributes: [], type_params: [], receiver: None, is_pub: false, is_async: false }]
 pub fun fun_of(src: str) -> FunData {
     var p = parser_on(src)
     let d = p.declaration()
@@ -153,6 +175,7 @@ fun suffix_opt(s: str) -> Option<str> {
     return Some(s)
 }
 
+#test(expr_of("Some(n)"), [])[[Expr { id: 2, line: 1, col: 5, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 8 }, kind: ExprKind.Call(Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 5 }, kind: ExprKind.Name("Some") }, [Expr { id: 1, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 7 }, kind: ExprKind.Name("n") }]) }]]
 fun cons_expr(head: Expr, tail: [Expr]) -> [Expr] {
     var out: [Expr] = [head]
     for x in tail {
@@ -202,6 +225,7 @@ impl Parser {
         return Expr { id: self.fresh(), line: line, col: col, sp: self.span_from(st.line, st.column), kind: k }
     }
 
+    #test(parser_on("[int]"), 7, 5, StmtKind.ReturnS(Some(Expr { id: 22, line: 7, col: 12, sp: SrcSpan { sline: 7, scol: 12, eline: 7, ecol: 16 }, kind: ExprKind.Name("None") }), false))[Stmt { id: 0, line: 7, col: 5, sp: SrcSpan { sline: 7, scol: 5, eline: 1, ecol: 2 }, kind: StmtKind.ReturnS(Some(Expr { id: 22, line: 7, col: 12, sp: SrcSpan { sline: 7, scol: 12, eline: 7, ecol: 16 }, kind: ExprKind.Name("None") }), false) }]
     fun mk_stmt(var self, line: int32, col: int32, k: StmtKind) -> Stmt {
         return Stmt { id: self.fresh(), line: line, col: col, sp: self.span_from(line, col), kind: k }
     }
@@ -890,6 +914,7 @@ impl Parser {
         return self.mk_decl(kw.line, kw.column, DeclKind.TypeAliasDecl(name, target, attrs, is_pub))
     }
 
+    #test(parser_on("a.b[0]"), [], false)[Decl { id: 2, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: DeclKind.ConstDecl(".", TypeExpr { id: 0, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: TypeKind.TRef("", []) }, Expr { id: 1, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: ExprKind.Hole }, [], false) }]
     fun const_decl(var self, attrs: [Attribute], is_pub: bool) -> Decl {
         let kw = self.advance()
         let name = self.expect(TokenKind.IDENT, "constant name").lexeme
@@ -1195,6 +1220,7 @@ impl Parser {
         return self.mk_stmt(kw.line, kw.column, StmtKind.WhileS(cond, body))
     }
 
+    #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.ForS(".", None, None, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }, Some(Expr { id: 0, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: ExprKind.Hole })) }]
     fun for_stmt(var self) -> Stmt {
         let kw = self.advance()
         let v = self.expect(TokenKind.IDENT, "loop variable name").lexeme
@@ -1646,6 +1672,7 @@ impl Parser {
         return self.mk_expr(kw.line, kw.column, ExprKind.MatchE(scrutinee, arms))
     }
 
+    #test(parser_on("[int]"))[MatchArm { line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, pattern: Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PWild }, guard: None, body: ExprOrBlock.EB_Expr(Expr { id: 2, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 6 }, kind: ExprKind.Hole }) }]
     fun match_arm(var self) -> MatchArm {
         let st = self.peek()
         let pattern = self.pattern()
@@ -1757,6 +1784,7 @@ impl Parser {
         return self.mk_pat_from(st.line, st.column, variant_tok.line, variant_tok.column, PatternKind.PEnum(enum_name, variant_tok.lexeme, elems, has_payload))
     }
 
+    #test(parser_on("[int]"))[Pattern { id: 2, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PTuple([Pattern { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 5 }, kind: PatternKind.PBind("int") }, Pattern { id: 1, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 6 }, kind: PatternKind.PWild }]) }]
     fun tuple_pattern(var self) -> Pattern {
         let lp = self.advance()
         var elems: [Pattern] = [self.pattern()]
@@ -1821,6 +1849,7 @@ impl Parser {
         return false
     }
 
+    #test(parser_on("a.b[0]"))[Expr { id: 2, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.Lambda([Param { line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, name: ".", ty: None }], None, ExprOrBlock.EB_Expr(Expr { id: 1, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: ExprKind.Hole }), false) }]
     fun lambda_expr(var self) -> Expr {
         let lp = self.advance()
         var params: [Param] = []
@@ -1967,6 +1996,9 @@ pub fun parse_ids(toks: [Token], first_id: int32) -> Result<Parsed, [Diag]> {
 
 // Lex and parse `src` (node ids from `first_id`): its lex error, or its parse
 // errors.
+#test("a", 86)[Err([Diag { kind: "parse error", line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "expected a declaration (struct/actor/fun/enum/typealias/const/trait/impl/import), found 'a'" }])]
+#test("d2", 50)[Err([Diag { kind: "parse error", line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 3 }, msg: "expected a declaration (struct/actor/fun/enum/typealias/const/trait/impl/import), found 'd2'" }])]
+#test("right", 24)[Err([Diag { kind: "parse error", line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, msg: "expected a declaration (struct/actor/fun/enum/typealias/const/trait/impl/import), found 'right'" }])]
 pub fun parse_source_all(src: str, first_id: int32) -> Result<Parsed, [Diag]> {
     return match lex(src) {
         Ok(toks) => parse_ids(toks, first_id),
@@ -1975,6 +2007,9 @@ pub fun parse_source_all(src: str, first_id: int32) -> Result<Parsed, [Diag]> {
 }
 
 // Lex and parse `src` (node ids from `first_id`): its first lex or parse error.
+#test("a", 86)[Err(Diag { kind: "parse error", line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, msg: "expected a declaration (struct/actor/fun/enum/typealias/const/trait/impl/import), found 'a'" })]
+#test("d2", 50)[Err(Diag { kind: "parse error", line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 3 }, msg: "expected a declaration (struct/actor/fun/enum/typealias/const/trait/impl/import), found 'd2'" })]
+#test("right", 24)[Err(Diag { kind: "parse error", line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, msg: "expected a declaration (struct/actor/fun/enum/typealias/const/trait/impl/import), found 'right'" })]
 pub fun parse_source(src: str, first_id: int32) -> Result<Parsed, Diag> {
     return match parse_source_all(src, first_id) {
         Ok(p) => Ok(p),
