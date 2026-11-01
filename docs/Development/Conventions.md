@@ -42,7 +42,7 @@ The interpreter defines the semantics. A native backend that prints something el
 
 ## Decisions
 
-Language and design decisions are numbered (D1–D97 so far) and recorded with date, decision and reason on [[Project/Decisions]]. Revisiting one is a new decision, not an edit.
+Language and design decisions are numbered (D1–D100 so far) and recorded with date, decision and reason on [[Project/Decisions]]. Revisiting one is a new decision, not an edit.
 
 ## Style
 

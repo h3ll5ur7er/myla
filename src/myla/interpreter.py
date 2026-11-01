@@ -917,8 +917,15 @@ class Interpreter:
         if isinstance(expr, ast.Match):
             return self._eval_match(expr, env)
         if isinstance(expr, ast.Cast):
-            return _cast_value(self._eval(expr.operand, env),
-                               expr.operand.resolved_type, expr.resolved_type)
+            value = _cast_value(self._eval(expr.operand, env),
+                                expr.operand.resolved_type, expr.resolved_type)
+            if (isinstance(expr.resolved_type, CharType)
+                    and not isinstance(expr.operand.resolved_type, CharType)
+                    and not _is_scalar_value(value)):
+                # a char is a Unicode scalar: anything else traps (MYLA-177)
+                raise MylaRuntimeError(
+                    f"invalid char: {value} is not a Unicode scalar value", at=expr)
+            return value
         if isinstance(expr, ast.Lambda):
             captured = {name: _copy(env.get(name)) for name, _t in expr.captures}
             return ClosureValue(expr.params, expr.body, captured,
@@ -1340,6 +1347,19 @@ class Interpreter:
 
     def _eval_method_call(self, expr: ast.Call, env: _Env, mfunc: str):
         decl = self.functions[mfunc].decl
+        recv_expr = expr.callee.target
+        if (decl.is_async and getattr(expr, "method_is_var_self", False)
+                and _actor_rooted(recv_expr, env)):
+            # an async `var self` method on a place in an actor: it works on
+            # a copy, and its final `self` is written back to the place, its
+            # indices computed once, as for a list element (D99, MYLA-169,
+            # MYLA-142); the actor's other calls run while it waits
+            keys: dict[int, object] = {}
+            self._fix_keys(recv_expr, env, keys)
+            frame = self._method_frame(expr, env, decl, copy_receiver=True)
+            result = self._run(decl.body, frame, getattr(decl, "source_path", None))
+            self._write_place(recv_expr, env, keys, frame.vars["self"])
+            return result
         frame = self._method_frame(expr, env, decl)
         recv = frame.vars["self"]
         if isinstance(recv, ActorRef):   # runs on the actor (D89)
@@ -1347,9 +1367,44 @@ class Interpreter:
                 decl.body, frame, getattr(decl, "source_path", None)))
         return self._run(decl.body, frame, getattr(decl, "source_path", None))
 
-    def _method_frame(self, expr: ast.Call, env: _Env, decl: ast.FunDecl) -> _Env:
+    def _fix_keys(self, expr: ast.Expr, env: _Env, keys: dict) -> None:
+        """The index of each `[…]` in the place `expr`, computed now."""
+        if isinstance(expr, ast.FieldAccess):
+            self._fix_keys(expr.target, env, keys)
+        elif isinstance(expr, ast.Index):
+            self._fix_keys(expr.target, env, keys)
+            keys[id(expr)] = self._eval(expr.index, env)
+
+    def _place_object(self, expr: ast.Expr, env: _Env, keys: dict):
+        """The value object at the place `expr`, with the indices in `keys`."""
+        if isinstance(expr, ast.Name):
+            value = env.get(expr.ident)
+            return value.state if isinstance(value, ActorRef) else value
+        if isinstance(expr, ast.FieldAccess):
+            return self._place_object(expr.target, env, keys).fields[expr.field_name]
+        container = self._place_object(expr.target, env, keys)
+        key = keys[id(expr)]
+        if key < 0 or key >= len(container.elems):
+            raise MylaRuntimeError(
+                f"list index {key} out of bounds (len {len(container.elems)})", at=expr)
+        return container.elems[key]
+
+    def _write_place(self, expr: ast.Expr, env: _Env, keys: dict, value) -> None:
+        """`value` stored at the place `expr` (a field or list element)."""
+        if isinstance(expr, ast.FieldAccess):
+            self._place_object(expr.target, env, keys).fields[expr.field_name] = value
+        elif isinstance(expr, ast.Index):
+            container = self._place_object(expr.target, env, keys)
+            key = keys[id(expr)]
+            if key < 0 or key >= len(container.elems):
+                raise MylaRuntimeError(
+                    f"list index {key} out of bounds (len {len(container.elems)})", at=expr)
+            container.elems[key] = value
+
+    def _method_frame(self, expr: ast.Call, env: _Env, decl: ast.FunDecl,
+                      copy_receiver: bool = False) -> _Env:
         recv_expr = expr.callee.target
-        is_var_self = getattr(expr, "method_is_var_self", False)
+        is_var_self = getattr(expr, "method_is_var_self", False) and not copy_receiver
         # For `var self`, bind `self` to the *actual* receiver object (no copy)
         # so in-place field/element mutations write back to the caller. For a
         # read-only `self`, bind a copy (value semantics).
@@ -1402,12 +1457,31 @@ def _wrap(value, t: Type):
     return m
 
 
+def _is_scalar_value(v: int) -> bool:
+    """Whether the code point `v` is a Unicode scalar value: at most 10FFFF
+    and not a surrogate (D800 to DFFF)."""
+    return 0 <= v <= 0x10FFFF and not 0xD800 <= v <= 0xDFFF
+
+
+def _actor_rooted(expr: ast.Expr, env) -> bool:
+    """Whether the place `expr` (fields and list elements) starts at an actor
+    handle: a place in the actor's state."""
+    while isinstance(expr, (ast.FieldAccess, ast.Index)):
+        expr = expr.target
+    if not isinstance(expr, ast.Name):
+        return False
+    try:
+        return isinstance(env.get(expr.ident), ActorRef)
+    except KeyError:
+        return False
+
+
 def _cast_value(v, src: Type, target: Type):
     """Apply an `as` numeric conversion at runtime (mirrors the native backend
     and const folding): int↔int wrap, int→float round, float→int truncate
     toward zero and saturate (D59), float→float widen/round."""
     if isinstance(target, CharType):
-        return int(v)                  # int -> char: the codepoint (unchecked)
+        return int(v)                  # int -> char: the codepoint (checked by the caller)
     if isinstance(src, CharType):
         return _wrap(int(v), target)   # char -> int: wrap to width
     if isinstance(target, FloatType):

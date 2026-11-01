@@ -4605,6 +4605,15 @@ impl Checker {
         return Ok(0)
     }
 
+    // A call of a `__` primitive outside the standard library: allowed, with
+    // a warning (D100, MYLA-186), once per place (types.py: _warn_primitive).
+    fun warn_primitive(var self, at: Expr, name: str) {
+        if len(self.fun_name) >= 4 && self.fun_name[0] == 's' && self.fun_name[1] == 't' && self.fun_name[2] == 'd' && self.fun_name[3] == '$' { return }
+        let msg = format("'{}' is a primitive of the standard library, not meant to be called from a program", name)
+        for w in self.warnings { if w.msg == msg && w.line == at.line && w.col == at.col { return } }
+        push(self.warnings, CheckErr { line: at.line, col: at.col, sp: at.sp, msg: msg, decl: self.cur_decl, notes: [Note { label: "help", msg: "call the function of `std` that wraps it; a primitive's behaviour may change with the standard library", line: 0, col: 0, sp: no_span() }] })
+    }
+
     fun run_phases(var self) -> Result<int32, CheckErr> {
         self.collect_globals()?
         self.resolve_signatures()?
@@ -4813,6 +4822,7 @@ impl Checker {
         let name = match callee.kind { ExprKind.Name(nm) => nm, _ => "" }
         if name == "" { return self.infer_indirect_call(e, callee, args) }
         if contains(self.redefined, name) { return Err(poisoned()) }   // written against the left-out redefinition (MYLA-110)
+        if starts_with_dunder(name) && is_builtin_func(name) { self.warn_primitive(callee, name) }
 
         if name == "print" {
             if len(args) != 1 { return Err(terr_at(e.line, e.col, e.sp, "print() takes exactly one argument")) }
@@ -5902,4 +5912,9 @@ impl Reentrancy {
 // actor (MYLA-168; types.py: _child_reaches_self).
 fun child_reaches_self(e: Expr) -> CheckErr {
     return with_notes(terr_at(e.line, e.col, e.sp, "an 'async let' can't reach the actor's state through 'self': its child task runs off the actor"), [Note { label: "help", msg: "read what the child needs into a 'let' before the 'async let'", line: 0, col: 0, sp: no_span() }])
+}
+
+// Whether `name` starts with `__`, as the standard library's primitives do.
+fun starts_with_dunder(name: str) -> bool {
+    return len(name) >= 2 && name[0] == '_' && name[1] == '_'
 }

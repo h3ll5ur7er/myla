@@ -10,7 +10,7 @@ WebAssembly as a target of the LLVM backend ([[MYLA-62]], step 4), so Myla progr
 
 ## Notes
 
-- Through LLVM's wasm target (the plan of [[MYLA-62]]). The IR is lowered per target ([[Architecture/IR]], "Lowered per target"): 32-bit wasm has other sizes and offsets, which D98 ([[MYLA-160]]) settles.
+- Through LLVM's wasm target (the plan of [[MYLA-62]]). The IR is lowered per target ([[Architecture/IR]], "Lowered per target"): 32-bit wasm has other sizes and offsets, which the LLVM decision ([[MYLA-160]]) settles.
 - Tail calls (`become`, the suspensions of D90) need wasm's tail-call extension, which current browsers have.
 - The runtime (allocator, strings, maps, float formatting byte-identical to the interpreter) has to exist for wasm too; I/O goes through imports the host provides (a browser page, or WASI).
 - Concurrency: wasm threads need shared memory and workers, and `SharedArrayBuffer` needs cross-origin isolation headers that static hosts such as GitHub Pages can't set; a first version runs one worker (D92's `MYLA_THREADS=1` order).

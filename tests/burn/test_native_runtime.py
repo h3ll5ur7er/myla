@@ -40,6 +40,8 @@ TRAPS = [
     ("pop_empty", "var xs: [int] = []\n    print(pop(xs) + n)", "pop from an empty list", "5:14"),
     ("division", "print(7 / (n - 1))", "division by zero", "4:13"),
     ("modulo", "print(7 % (n - 1))", "modulo by zero", "4:13"),
+    ("char_surrogate", "print((n + 55295) as char)", "invalid char", "4:23"),
+    ("char_above_max", "print((n + 1114111) as char)", "invalid char", "4:25"),
     ("string_range", 'var sb = StringBuilder()\n    append(sb, "abc", n, 9)', "index out of bounds", "5:11"),
     ("panic", 'panic(f"boom {n}")', "boom 1", "4:10"),
     ("assert", "assert(n == 2)", "assertion failed", "4:11"),

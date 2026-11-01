@@ -8,7 +8,7 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 
 The reference implementation.
 
-- `as char` is unchecked: a surrogate crashes the interpreter when printed, native code prints garbage ([[MYLA-177]]).
+- `as char` is unchecked: a surrogate crashes the interpreter when printed, native code prints garbage ([[MYLA-177]]). *Fixed, in review.*
 - Map iteration order differs between the interpreter and native code (allowed by the page; a decision) ([[MYLA-179]]).
 - Map removal keeps no tombstones in the Python backend ([[MYLA-151]]).
 
@@ -20,13 +20,13 @@ Also by design: x86-64 Linux is the only target (D2); the LLVM round ([[MYLA-62]
 
 ## Concurrency
 
-- An awaited `var self` struct method on an actor field is accepted and behaves three ways across the implementations ([[MYLA-169]]).
+- An awaited `var self` struct method on an actor field is accepted and behaves three ways across the implementations ([[MYLA-169]]). *Fixed, in review.*
 - The D95 warning is bypassed through `self` methods ([[MYLA-171]]).
 - Every tasked program reserves 128 GiB of address space; worker stacks have no guard page ([[MYLA-172]]).
 
 ## Tooling in Myla
 
-- The `__` primitives are callable from user code ([[MYLA-186]]).
+- The `__` primitives are callable from user code ([[MYLA-186]]). *Fixed, in review.*
 - The language server's bare completion dumps the workspace, and a long check blocks every request ([[MYLA-188]]).
 
 ## Editor tooling

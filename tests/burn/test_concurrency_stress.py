@@ -65,6 +65,10 @@ EXPECTED = {
     "t09_latest_request_wins": ("ui shows cats\n", 0),
     # ... or by cancelling the old request, which checks before publishing
     "t09_cancel_the_stale_request": ("ui shows cats\n", 0),
+    # 14. an awaited `var self` method of a struct in an actor's field works on
+    # a copy and writes it back when it returns (D99, MYLA-169): changes made
+    # one after the other are kept, a change made while it waits is replaced
+    "t14_struct_method_in_actor": ("101000\n1 1 1\n", 0),
     # 13. a child task of an actor method works on what the method read into
     # a `let` (reaching `self` is rejected, MYLA-168)
     "t13_child_of_an_actor_method": ("true\n", 0),

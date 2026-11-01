@@ -50,7 +50,7 @@ From loosest to tightest. Every binary level is left-associative.
 | integer → float | Rounds to nearest |
 | float → integer | Truncates toward zero and saturates: out-of-range values and ±inf clamp to the target's minimum or maximum, NaN gives `0` (D59) |
 | float → float | Widens, or rounds to `float32` |
-| integer ↔ `char` | The codepoint, unchecked one way and wrapped the other |
+| integer ↔ `char` | Integer to `char`: the codepoint if it is a Unicode scalar (at most `0x10FFFF`, not a surrogate `0xD800`…`0xDFFF`), else a runtime error at the cast (`invalid char: 55296 is not a Unicode scalar value`; D98, [[MYLA-177]]); every `uint8` is one. `char` to integer: the codepoint, wrapped to the width |
 | `char` ↔ float, `bool`, `str` | Not allowed |
 
 The operand is typed without a hint from the target, so `300 as uint8` is `44`, not an error.

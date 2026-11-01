@@ -1906,7 +1906,18 @@ impl Interp {
         let v = self.eval(x)
         let src = self.resolved_of(x.id)
         let tgt = self.resolved_of(e.id)
-        return cast_value(v, src, tgt)
+        let r = cast_value(v, src, tgt)
+        // a char is a Unicode scalar: anything else traps (MYLA-177)
+        let to_char = match tgt { Some(tt) => match tt { Type.TChar => true, _ => false }, None => false }
+        let from_char = match src { Some(st) => match st { Type.TChar => true, _ => false }, None => false }
+        if to_char && !from_char {
+            let cp = as_int(v)
+            if cp < 0 || cp > 1114111 || (cp >= 55296 && cp <= 57343) {
+                self.fail(e, format("invalid char: {} is not a Unicode scalar value", cp))
+                return Value.VUnit
+            }
+        }
+        return r
     }
 
     fun eval_getfield(var self, e: Expr, tgt: Expr, field: str) -> Value {

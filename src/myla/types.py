@@ -4267,6 +4267,21 @@ class Checker:
         expr.resolved_type = ret
         return ret
 
+    def _warn_primitive(self, at: ast.Name, name: str) -> None:
+        """A call of a `__` primitive outside the standard library: allowed,
+        for code that knows what it does (a new std function in the making),
+        with a warning (D100, MYLA-186). Once per place: a call may be typed
+        twice."""
+        if (self._fun_name or "").startswith("std$"):
+            return
+        msg = "'{}' is a primitive of the standard library, not meant to be called from a program".format(name)
+        if any(w.message == msg and w.line == at.line and w.column == at.column
+               for w in self.warnings):
+            return
+        w = CheckWarning(msg, at=at, notes=[Note("help", "call the function of `std` that wraps it; a primitive's behaviour may change with the standard library")])
+        w.path = self._fun_path
+        self.warnings.append(w)
+
     def _infer_call(self, expr: ast.Call, scope: _Scope,
                     expected: Type | None = None) -> Type | None:
         # A call carrying `_` holes is a partial application (X7): it desugars to
@@ -4292,6 +4307,8 @@ class Checker:
         name = callee.ident
         if name in self._redefined_builtins:
             raise _Poisoned()   # written against the left-out redefinition (MYLA-110)
+        if name.startswith("__") and name in _BUILTIN_FUNCS:
+            self._warn_primitive(callee, name)
         if name == "print":
             if len(expr.args) != 1:
                 raise TypeCheckError("print() takes exactly one argument",

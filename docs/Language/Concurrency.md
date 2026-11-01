@@ -135,6 +135,7 @@ async fun main() {
 - Inside its methods, a call on `self` is an ordinary call (`self.get()`), since the actor is already running it, unless the method is `async`.
 - An `async let` in an actor's method can't reach the actor's state through `self` (`an 'async let' can't reach the actor's state through 'self': its child task runs off the actor`): neither a field nor a synchronous method, since the child runs elsewhere while the actor runs other calls ([[MYLA-168]]). Read what the child needs into a `let` before the `async let`: the method reads it on the actor, and the child gets a copy. Passing `self` itself, the handle, or calling an `async` method of it is fine.
 - An actor method may be `async`. While it waits, the actor runs other calls (it is *reentrant*), so two actors calling each other can't deadlock. Its fields may have changed when it resumes:
+- In an async actor method, `await self.tally.bump()` with a `var self` method of a struct in a field works on a copy of the field, and the method's final `self` is written back to it when it returns, as for a list element (D99, [[MYLA-169]]). The actor's other calls run while it waits; a change they make to that field meanwhile is replaced by the write-back.
 
 ```myla
 actor Account {

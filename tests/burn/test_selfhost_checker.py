@@ -311,6 +311,9 @@ TYPE_ERRORS: dict[str, str] = {
 # both checkers give alike, the program still checking (and none where the
 # idioms re-check after the `await` or reserve before it)
 WARNINGS: dict[str, str] = {
+    # a `__` primitive called from a program: a warning, once per place, also
+    # in a lambda (D100, MYLA-186)
+    'warn_primitive_called': 'fun main() {\n    let d = __getcwd()\n    let f = () => __io_errno()\n    print(f() + len(d))\n    __exit(0)\n}\n',
     'warn_reentrancy_stale_check': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun buy(var self, p: Pay) -> bool {\n        if self.stock == 0 {\n            return false\n        }\n        let paid = await p.charge()\n        self.stock = self.stock - 1\n        return true\n    }\n}\n',
     'warn_reentrancy_recheck_is_quiet': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun buy(var self, p: Pay) -> bool {\n        if self.stock == 0 {\n            return false\n        }\n        let paid = await p.charge()\n        if self.stock > 0 {\n            self.stock = self.stock - 1\n            return true\n        }\n        return false\n    }\n}\n',
     'warn_reentrancy_reserve_is_quiet': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun buy(var self, p: Pay) -> bool {\n        if self.stock == 0 {\n            return false\n        }\n        self.stock = self.stock - 1\n        let paid = await p.charge()\n        if !paid {\n            self.stock = self.stock + 1\n        }\n        return paid\n    }\n}\n',

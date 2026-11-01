@@ -46,10 +46,11 @@ _TRAPS = [
     ("__trap_mod", "modulo by zero"),
     ("__trap_match", "no match arm matched"),
     ("__trap_oom", "out of memory"),
+    ("__trap_char", "invalid char"),
 ]
 
 # The conditional jump that skips a trap call, for each jump to a trap.
-_SKIP_TRAP = {"jae": "jb", "jz": "jnz", "jl": "jge", "jg": "jle"}
+_SKIP_TRAP = {"jae": "jb", "jz": "jnz", "jl": "jge", "jg": "jle", "ja": "jbe", "jb": "jae"}
 
 # The refcount of a `str` cell in the binary: retains and drops change it like
 # any other, but it never reaches zero, so it is never freed (MYLA-18).
@@ -3811,7 +3812,15 @@ class CodeGen:
         target = expr.resolved_type
         self._eval(expr.operand)
         if isinstance(target, CharType):
-            # int -> char: keep the codepoint value in %rax unchanged (unchecked).
+            # int -> char: the codepoint unchanged, if it is a Unicode scalar
+            # (at most 10FFFF, not a surrogate), else a trap (MYLA-177); every
+            # uint8 is one
+            if isinstance(src, IntType) and (src.signed or src.width > 8):
+                self._emit("cmpq $1114111, %rax")
+                self._trap("ja", "__trap_char", expr)
+                self._emit("leaq -55296(%rax), %rcx")
+                self._emit("cmpq $2048, %rcx")
+                self._trap("jb", "__trap_char", expr)
             return
         if isinstance(src, CharType):
             # char -> int: the codepoint is already in %rax; wrap to the width.

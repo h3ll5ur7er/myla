@@ -1003,8 +1003,13 @@ impl Lower {
         // receiver, a variable or a field or list element of one, its indices
         // computed once (MYLA-142); nothing else reaches the place meanwhile
         var back = false
+        var in_actor = false
         if sig.has_decl && match sig.decl.receiver { Some(r) => r == "var self", None => false } && is_aggregate(ct.params[0]) {
-            if !self.local_place(cg, argv[0]) {
+            // or a place in this actor's state: the method works on a deep
+            // copy, made while this method holds the actor, and its `self` is
+            // written back once it holds it again (D99, MYLA-169)
+            in_actor = self.actor_place(cg, argv[0])
+            if !in_actor && !self.local_place(cg, argv[0]) {
                 let d = self.unsupported("an awaited 'var self' method on that receiver")
                 return
             }
@@ -1018,7 +1023,18 @@ impl Lower {
                 let d = self.unsupported("a call with an argument of that type")
                 return
             }
-            if is_aggregate(ct.params[i]) { push(vals, self.addr(cg, argv[i])) } else { push(vals, self.expr(cg, argv[i])) }
+            if i == 0 && in_actor {
+                // the method runs off the actor: a copy of its own, deep, so
+                // it shares no counts with the actor's state (D92)
+                let t0 = ct.params[0]
+                let tmp = self.new_slot("__receiver", t0, cg.size(t0), -1, cg.owns_heap(t0))
+                let dst = self.slot_addr(tmp)
+                self.add(Inst.Copy(dst, self.addr(cg, argv[0]), cg.size(t0)))
+                self.retain(cg, t0, dst)
+                if cg.owns_heap(t0) { self.add(Inst.Deep(t0, dst)) }
+                self.own_temp(tmp)
+                push(vals, self.slot_addr(tmp))
+            } else if is_aggregate(ct.params[i]) { push(vals, self.addr(cg, argv[i])) } else { push(vals, self.expr(cg, argv[i])) }
             i = i + 1
         }
         let fr = self.temp(Type.TInt(64, false))
@@ -1069,6 +1085,19 @@ impl Lower {
             ExprKind.Name(n) => self.lookup(n) >= 0,
             ExprKind.GetField(recv, f) => !is_actor_t(cg.type_of(recv.id)) && self.local_place(cg, recv),
             ExprKind.Index(base, idx) => is_list_t(cg.type_of(base.id)) && self.local_place(cg, base),
+            _ => false,
+        }
+    }
+
+    // Whether `e` is a field of this async actor method's `self`, or a field
+    // or list element of one, through structs and lists (D99, MYLA-169).
+    fun actor_place(self, cg: CodeGen, e: Expr) -> bool {
+        return match e.kind {
+            ExprKind.GetField(recv, f) => match recv.kind {
+                ExprKind.Name(n) => self.shared_self(n),
+                _ => !is_actor_t(cg.type_of(recv.id)) && self.actor_place(cg, recv),
+            },
+            ExprKind.Index(base, idx) => is_list_t(cg.type_of(base.id)) && self.actor_place(cg, base),
             _ => false,
         }
     }
@@ -1886,6 +1915,20 @@ impl Lower {
                 let src = cg.type_of(x.id)
                 if !is_scalar(src) || !is_scalar(t) { return self.unsupported("a cast of a value that isn't a scalar") }
                 let a = self.expr(cg, x)
+                if char_cast_checked(src, t) {
+                    // a Unicode scalar or a trap (MYLA-177): at most 10FFFF,
+                    // not a surrogate (D800 to DFFF)
+                    let u = Type.TInt(64, false)
+                    let pos = Pos { line: e.line, col: e.col }
+                    let in_range = self.temp(Type.TBool)
+                    self.add(Inst.Cmp(in_range, "<=", u, a, self.konst(u, 1114111)))
+                    self.add(Inst.Check(in_range, "char", pos))
+                    let off = self.temp(u)
+                    self.add(Inst.Bin(off, "-", u, u, a, self.konst(u, 55296), pos))
+                    let not_surrogate = self.temp(Type.TBool)
+                    self.add(Inst.Cmp(not_surrogate, ">=", u, off, self.konst(u, 2048)))
+                    self.add(Inst.Check(not_surrogate, "char", pos))
+                }
                 let d = self.temp(t)
                 self.add(Inst.Cast(d, src, t, a))
                 return d
@@ -3468,5 +3511,15 @@ fun diverges(e: Expr) -> bool {
             _ => false
         }
         _ => false
+    }
+}
+
+// Whether `as char` from `src` needs a check (MYLA-177): from any integer but
+// a `uint8`, all of whose values are Unicode scalars.
+fun char_cast_checked(src: Type, t: Type) -> bool {
+    match t { Type.TChar => {}, _ => { return false } }
+    return match src {
+        Type.TInt(w, signed) => signed || w > 8,
+        _ => false,
     }
 }
