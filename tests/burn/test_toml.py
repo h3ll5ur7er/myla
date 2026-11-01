@@ -1,6 +1,6 @@
 """Burn tests: `std.toml` (MYLA-89) against Python's `tomllib`.
 
-The driver of `tests/unit/test_toml.py` reads length-framed documents from
+The driver (`DRIVER`) reads length-framed documents from
 stdin and prints, for each, `ok <value as compact JSON>` or `err <line> <col>
 <message>`. Python generates documents of the subset from a seed (tables,
 dotted and quoted headers, bare, quoted and literal keys, strings with
@@ -16,8 +16,9 @@ inserting or duplicating a character or cutting the text short. For each:
   with the same value (a few repeat a key or a table by chance, and both
   reject those).
 
-The big corpus runs on the native builds of both backends, a small one in
-both interpreters.
+The big corpus runs on the self-hosted native build, a small one in the
+self-hosted interpreter. (The Python toolchain's backend and interpreter ran
+them as well until it was retired, MYLA-219.)
 """
 from __future__ import annotations
 
@@ -25,19 +26,88 @@ import json
 import os
 import random
 import subprocess
-import sys
 import tempfile
 import tomllib
 import unittest
 
-from myla.compiler import build
-from myla.loader import default_stdlib_root
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._tools import STDLIB_ROOT, selfhost_tool
 
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, check_file
-from ._tools import selfhost_tool
-from tests.unit.test_toml import DRIVER, canonical, framed
+# The driver was shared with the unit tests of the retired Python toolchain
+# (`tests/unit/test_toml.py`).
+DRIVER = """from std.io import stdin, println, Reader
+from std.toml import parse, Toml, TomlError
+from std.json import Json, to_string
+from std.num import parse_int
 
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+struct Input { r: Reader }
+
+impl Input {
+    // The next document: a line with its length in bytes, then the text.
+    fun next(var self) -> Option<str> {
+        let header = match self.r.read_line() {
+            Ok(Some(line)) => line,
+            _ => "",
+        }
+        let n = match parse_int(header) {
+            Some(v) => v as int32,
+            None => -1,
+        }
+        if n < 0 { return None }
+        return match self.r.read_exact(n) {
+            Ok(Some(t)) => Some(t),
+            _ => None,
+        }
+    }
+}
+
+fun to_json(t: Toml) -> Json {
+    return match t {
+        Toml.Str(s) => Json.Str(s)
+        Toml.Int(n) => Json.Int(n)
+        Toml.Bool(b) => Json.Bool(b)
+        Toml.Array(items) => {
+            var out: [Json] = []
+            for x in items { push(out, to_json(x)) }
+            Json.Array(out)
+        }
+        Toml.Table(members) => {
+            var out: [(str, Json)] = []
+            for m in members { push(out, (m.0, to_json(m.1))) }
+            Json.Object(out)
+        }
+    }
+}
+
+fun main() {
+    var input = Input { r: stdin() }
+    var more = true
+    while more {
+        match input.next() {
+            Some(text) => {
+                match parse(text) {
+                    Ok(v) => { println("ok " + to_string(to_json(v))) },
+                    Err(e) => { println(format("err {} {} {}", e.line, e.col, e.msg)) },
+                }
+            },
+            None => { more = false },
+        }
+    }
+}
+"""
+
+
+def framed(texts: list[str]) -> bytes:
+    out = bytearray()
+    for t in texts:
+        data = t.encode("utf-8")
+        out += str(len(data)).encode() + b"\n" + data
+    return bytes(out)
+
+
+def canonical(value) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
 
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 
@@ -217,19 +287,16 @@ class TomlAgainstPython(unittest.TestCase):
         path = os.path.join(cls.tmp.name, "main.my")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(DRIVER)
-        py_native = os.path.join(cls.tmp.name, "py_native")
-        build(check_file(path), py_native)
         gen = selfhost_tool("gen_main")
-        asm = subprocess.run([gen, path, default_stdlib_root()], capture_output=True, text=True, check=True)
+        asm = subprocess.run([gen, path, STDLIB_ROOT], capture_output=True, text=True, check=True)
         sh_native = os.path.join(cls.tmp.name, "sh_native")
         with open(sh_native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
         subprocess.run(["as", "--64", "-o", sh_native + ".o", sh_native + ".s"], check=True)
         subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
-        cls.native = {"python native": [py_native], "self-hosted native": [sh_native]}
+        cls.native = {"self-hosted native": [sh_native]}
         cls.interpreters = {
-            "python interpreter": [sys.executable, os.path.join(_REPO, "myla.py"), "run", path],
-            "self-hosted interpreter": [selfhost_tool("interp_main"), path, default_stdlib_root()],
+            "self-hosted interpreter": [selfhost_tool("interp_main"), path, STDLIB_ROOT],
         }
 
     @classmethod

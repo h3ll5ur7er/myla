@@ -12,31 +12,39 @@ enforced: `tests/burn/test_selfhost_coverage.py` warns below it.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(REPO, "src"))
-
-from myla import ast                    # noqa: E402
-from myla.lexer import tokenize         # noqa: E402
-from myla.parser import parse           # noqa: E402
 
 TARGET = 0.80
 
+# a function or method with a result and a body on its line (Myla code keeps
+# a signature on one line; a trait's signatures have no body)
+_FUN = re.compile(r"^\s*(pub\s+)?(async\s+)?fun\s+\w+.*\)\s*->.*\{")
+
 
 def module_counts(path: str) -> tuple[int, int]:
-    """(tested, value-returning functions) of one source file."""
+    """(tested, value-returning functions) of one source file: a function
+    counts as tested when a `#test` attribute stands above it (attributes,
+    comments and blank lines may come between)."""
     with open(path, encoding="utf-8") as fh:
-        program = parse(tokenize(fh.read()))
-    funs: list[ast.FunDecl] = []
-    for d in program.decls:
-        if isinstance(d, ast.FunDecl):
-            funs.append(d)
-        elif isinstance(d, ast.ImplDecl):
-            funs.extend(d.methods)
-    returning = [f for f in funs if f.ret_type is not None and f.body is not None]
-    tested = [f for f in returning if any(a.name == "test" for a in f.attributes)]
-    return len(tested), len(returning)
+        lines = fh.read().split("\n")
+    tested = total = 0
+    for i, line in enumerate(lines):
+        if not _FUN.match(line):
+            continue
+        total += 1
+        j = i - 1
+        while j >= 0:
+            above = lines[j].strip()
+            if above.startswith("#test"):
+                tested += 1
+                break
+            if not (above == "" or above.startswith("#") or above.startswith("//")):
+                break
+            j -= 1
+    return tested, total
 
 
 def coverage(directory: str) -> list[tuple[str, int, int]]:

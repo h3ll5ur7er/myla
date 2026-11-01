@@ -1,16 +1,14 @@
 """Burn tests: run each example program and assert its stdout.
 
 These pin down end-to-end behavior (lexer -> parser -> checker -> interpreter)
-and double as living documentation of what each example prints.
+and double as living documentation of what each example prints. The
+self-hosted interpreter (`myla run`) runs them; the table is the expectation
+(it was checked with the Python interpreter until MYLA-219).
 """
-import io
 import os
 import unittest
 
-from myla.interpreter import Interpreter
-from myla.lexer import tokenize
-from myla.parser import parse
-from myla.types import check
+from tests.burn._native import selfhost_run
 
 EXAMPLES_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "examples")
@@ -58,12 +56,10 @@ EXPECTED = {
 }
 
 def run_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as fh:
-        source = fh.read()
-    checker = check(parse(tokenize(source)))
-    out = io.StringIO()
-    Interpreter(checker, out).run()
-    return out.getvalue()
+    """What `myla run path` prints; it must succeed without diagnostics."""
+    out, err, code = selfhost_run(path)
+    assert (err, code) == ("", 0), f"myla run {os.path.basename(path)} failed ({code}):\n{err}"
+    return out
 
 
 def _example_files() -> set[str]:

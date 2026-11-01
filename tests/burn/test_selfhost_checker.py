@@ -7,11 +7,12 @@ each error, MYLA-65, D80). This test asserts that, for every single-file source
 in the shared corpus and for every snippet of TYPE_ERRORS, those lines are
 identical to the Python oracle's: the same verdict, errors in the same order,
 positions, underlined ranges (MYLA-65) and messages (MYLA-28). That is the v0.7
-checker-parity gate from docs/Development/Testing.md.
+checker-parity gate from docs/Development/Testing.md. The oracle's lines are
+the retired Python checker's, recorded (`tests/burn/_golden.py`, MYLA-219).
 
-As with the lexer/parser gates, the Myla checker runs as a *native binary* when
-the host can build one (which also exercises interpreter/compiler parity of the
-toolchain that built it); otherwise it falls back to the interpreter.
+As with the lexer/parser gates, the Myla checker runs as a *native binary*,
+built by the self-hosted compiler (which also exercises the code generation of
+the toolchain that built it); a host that cannot build one skips the gate.
 
 The gate covers single-file programs that lex + parse cleanly and do not import
 other modules (the self-hosted `check_main` has no module loader; it injects only
@@ -22,30 +23,20 @@ lexer/parser gates or the runtime corpus, not the checker-parity gate.
 from __future__ import annotations
 
 import glob
-import io
 import json
 import os
 import subprocess
 import tempfile
 import unittest
 
-from myla.ast import ImportDecl
-from myla.canon import canonical_errors, canonical_warning
-from myla.errors import MylaError
-from myla.interpreter import Interpreter
-from myla.lexer import tokenize
-from myla.loader import default_stdlib_root, link
-from myla.parser import parse
-from myla.types import check
-
+from ._golden import golden
 from ._mutants import mutants
-from ._native import CAN_BUILD_NATIVE
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 )
-CHECK_TOOL = os.path.join(_REPO, "selfhost", "check_main.my")
 
 # Programs the Python unit tests expect to fail type checking, collected by
 # scripts/harvest_type_errors.py, then snippets for the messages they don't
@@ -337,13 +328,6 @@ def _corpus() -> list[str]:
     return sorted(files)
 
 
-def _canonical(err: MylaError) -> str:
-    """`err <line> <col> <span> <kind>: <message>` for `err` and the errors
-    after it (D80): the range a diagnostic underlines must agree too
-    (MYLA-65)."""
-    return canonical_errors(err)
-
-
 def _snippets() -> dict[str, str]:
     with open(_SNIPPETS, encoding="utf-8") as fh:
         harvested = json.load(fh)
@@ -352,23 +336,37 @@ def _snippets() -> dict[str, str]:
     return cases
 
 
-def _ok(checker) -> str:
-    """`ok` after the checker's warnings (D95), as check_main prints them."""
-    return "\n".join([canonical_warning(w) for w in checker.warnings] + ["ok"])
+# The oracle's canonical lines: `err <line> <col> <span> <kind>: <message>`
+# for an error and the errors after it (D80), the range a diagnostic
+# underlines agreeing too (MYLA-65), else `ok` after the checker's warnings
+# (D95), as check_main prints them.
 
-
+@golden("selfhost_checker.verdict_of_source")
 def _oracle_source(source: str) -> str:
+    from myla.canon import canonical_errors, canonical_warning
+    from myla.errors import MylaError
+    from myla.lexer import tokenize
+    from myla.parser import parse
+    from myla.types import check
     try:
         checker = check(parse(tokenize(source)))
     except MylaError as err:
-        return _canonical(err)
-    return _ok(checker)
+        return canonical_errors(err)
+    return "\n".join([canonical_warning(w) for w in checker.warnings] + ["ok"])
 
 
+@golden("selfhost_checker.verdict")
 def _oracle(path: str) -> str | None:
     """Canonical accept/reject line from the Python toolchain, or None if the
     file is not part of the checker-parity gate (does not lex/parse cleanly, uses
     module imports, or rejects with a non-`type` diagnostic class)."""
+    from myla.ast import ImportDecl
+    from myla.canon import canonical_errors, canonical_warning
+    from myla.errors import MylaError
+    from myla.lexer import tokenize
+    from myla.loader import default_stdlib_root, link
+    from myla.parser import parse
+    from myla.types import check
     with open(path, "r", encoding="utf-8") as fh:
         source = fh.read()
     try:
@@ -383,12 +381,8 @@ def _oracle(path: str) -> str | None:
         kind = err.kind.split()[0]
         if kind != "type":
             return None  # only the `type` diagnostic class is in scope
-        return _canonical(err)
-    return _ok(checker)
-
-
-def _check_file(path: str):
-    return link(path, stdlib_root=default_stdlib_root())
+        return canonical_errors(err)
+    return "\n".join([canonical_warning(w) for w in checker.warnings] + ["ok"])
 
 
 class SelfHostedCheckerParity(unittest.TestCase):
@@ -396,25 +390,22 @@ class SelfHostedCheckerParity(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        # (The fallback of running check_main.my in the Python interpreter
+        # went with the Python toolchain, MYLA-219; the self-hosted one needs
+        # the native CLI, so a host without a native toolchain has neither.)
         if not CAN_BUILD_NATIVE:
-            return
-        # The Myla checker, built natively by the Python backend (cached), so
-        # the gate also exercises the codegen parity of the toolchain.
+            raise unittest.SkipTest(SKIP_REASON)
+        # The Myla checker, built natively by the self-hosted compiler
+        # (cached), so the gate also exercises the code generation of the
+        # toolchain.
         cls._binary = selfhost_tool("check_main")
 
     def _myla_check(self, path: str) -> str:
-        if self._binary is not None:
-            proc = subprocess.run(
-                [self._binary, path], capture_output=True, text=True
-            )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            return proc.stdout.rstrip("\n")
-        # Interpreter fallback (no native toolchain on this host).
-        out = io.StringIO()
-        Interpreter(
-            check(_check_file(CHECK_TOOL)), out, argv=["check_tool", path]
-        ).run()
-        return out.getvalue().rstrip("\n")
+        proc = subprocess.run(
+            [self._binary, path], capture_output=True, text=True
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.rstrip("\n")
 
     def test_corpus_check_parity(self) -> None:
         checked = 0

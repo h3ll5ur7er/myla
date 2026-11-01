@@ -2,21 +2,18 @@
 language-neutral plan in docs/Development/Concurrency-stress-tests.md.
 
 Each program in tests/burn/concurrency_stress/ states what Myla guarantees
-for its example; it must print the same on the Python interpreter, the
-self-hosted interpreter and natively on 1, 4 and 16 workers (several runs
-each), under a watchdog. The examples Myla rejects at compile time are in the
-error corpus (examples/errors/), the documented limits on the Concurrency
-page."""
+for its example; it must print the same on the self-hosted interpreter and
+natively on 1, 4 and 16 workers (several runs each), under a watchdog (and on
+the Python interpreter until it was retired, MYLA-219). The examples Myla
+rejects at compile time are in the error corpus (examples/errors/), the
+documented limits on the Concurrency page."""
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 
-from myla.loader import default_stdlib_root
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
-
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+from tests.burn._tools import STDLIB_ROOT
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "concurrency_stress")
 _WATCHDOG = 60
 
@@ -98,20 +95,13 @@ class ConcurrencyStress(unittest.TestCase):
         programs = sorted(f[:-3] for f in os.listdir(_DIR) if f.endswith(".my"))
         self.assertEqual(programs, sorted(EXPECTED))
 
-    def test_the_python_interpreter(self):
-        for name, want in EXPECTED.items():
-            with self.subTest(program=name):
-                got = _run([sys.executable, os.path.join(_REPO, "myla.py"), "run",
-                            os.path.join(_DIR, name + ".my")])
-                self.assertEqual(got, want)
-
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
     def test_the_self_hosted_interpreter(self):
         from ._tools import selfhost_tool
         interp = selfhost_tool("interp_main")
         for name, want in EXPECTED.items():
             with self.subTest(program=name):
-                got = _run([interp, os.path.join(_DIR, name + ".my"), default_stdlib_root()])
+                got = _run([interp, os.path.join(_DIR, name + ".my"), STDLIB_ROOT])
                 self.assertEqual(got, want)
 
     @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -121,7 +111,7 @@ class ConcurrencyStress(unittest.TestCase):
         for name, want in EXPECTED.items():
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
                 exe = os.path.join(tmp, name)
-                asm = subprocess.run([gen, os.path.join(_DIR, name + ".my"), default_stdlib_root()],
+                asm = subprocess.run([gen, os.path.join(_DIR, name + ".my"), STDLIB_ROOT],
                                      capture_output=True, text=True, check=True).stdout
                 with open(exe + ".s", "w", encoding="utf-8") as fh:
                     fh.write(asm)

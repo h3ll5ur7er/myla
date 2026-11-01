@@ -22,8 +22,8 @@ has no values in it (MYLA-17, MYLA-58)::
 
     //~ native: runtime error: index out of bounds
 
-and is built with the Python backend, which must exit with status 1 and print
-exactly that line and the interpreter's position, `  --> <file>:<line>:<col>`
+and is built with the self-hosted compiler, which must exit with status 1 and
+print exactly that line and the interpreter's position, `  --> <file>:<line>:<col>`
 (MYLA-65, MYLA-66), on stderr. Module errors are checked through the loader,
 with the bundled standard library, as are the type errors of a file that
 imports.
@@ -47,21 +47,17 @@ error's; a file without these directives expects no notes::
     //~ note: is declared here
     //~ note span: let n = 1
     //~ help: did you mean 'count'?
+
+The diagnostics are the retired Python toolchain's, recorded
+(`tests/burn/_golden.py`, MYLA-219): the stage that failed, its messages,
+notes and positions, and the text its carets underline.
 """
 import os
 import re
 import unittest
 
-from myla.ast import ImportDecl
-from myla.errors import (LexError, ModuleError, MylaRuntimeError, ParseError, TypeCheckError,
-                         caret_range)
-from myla.interpreter import Interpreter
-from myla.lexer import tokenize
-from myla.loader import default_stdlib_root, link
-from myla.parser import parse
-from myla.types import check
-
-from ._native import CAN_BUILD_NATIVE, build_and_run_full
+from ._golden import golden
+from ._native import CAN_BUILD_NATIVE, build_and_run_full, check_file
 
 ERRORS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "examples", "errors")
@@ -75,34 +71,74 @@ _NEXT = re.compile(r"//~\s*next:\s*(.*?)\s*$")
 _NOTE = re.compile(r"//~\s*(note|help):\s*(.*?)\s*$")
 _NOTE_SPAN = re.compile(r"//~\s*note span:\s?(.*?)$")
 
-# phase -> (exception class, how far to drive the pipeline)
-_PHASES = {
-    "lex": LexError,
-    "parse": ParseError,
-    "module": ModuleError,
-    "type": TypeCheckError,
-    "runtime": MylaRuntimeError,
-}
 
+@golden("error_corpus.diagnostic")
+def _diagnostic(phase: str, path: str) -> dict | None:
+    """The error of stage `phase` the Python toolchain reports for the file
+    `path` (None if it reports none): its message, the text it underlines,
+    its notes, its position and the errors after it."""
+    from myla.ast import ImportDecl
+    from myla.errors import (LexError, ModuleError, MylaRuntimeError, ParseError, TypeCheckError,
+                             caret_range)
+    from myla.interpreter import Interpreter
+    from myla.lexer import tokenize
+    from myla.loader import default_stdlib_root, link
+    from myla.parser import parse
+    from myla.types import check
 
-def _drive(phase: str, source: str, path: str) -> None:
-    """Run the pipeline far enough to reach `phase`; let its error escape."""
-    if phase == "module":
-        link(path, stdlib_root=default_stdlib_root())
-        return
-    tokens = tokenize(source)
-    if phase == "lex":
-        return
-    program = parse(tokens)
-    if phase == "parse":
-        return
-    if any(isinstance(d, ImportDecl) for d in program.decls):
-        # a program that imports is checked as 'myla check' does, linked
-        program = link(path, stdlib_root=default_stdlib_root())
-    checker = check(program)
-    if phase == "type":
-        return
-    Interpreter(checker).run()
+    # phase -> exception class
+    phases = {
+        "lex": LexError,
+        "parse": ParseError,
+        "module": ModuleError,
+        "type": TypeCheckError,
+        "runtime": MylaRuntimeError,
+    }
+
+    def drive() -> None:
+        """Run the pipeline far enough to reach `phase`; let its error escape."""
+        if phase == "module":
+            link(path, stdlib_root=default_stdlib_root())
+            return
+        tokens = tokenize(source)
+        if phase == "lex":
+            return
+        program = parse(tokens)
+        if phase == "parse":
+            return
+        if any(isinstance(d, ImportDecl) for d in program.decls):
+            # a program that imports is checked as 'myla check' does, linked
+            program = link(path, stdlib_root=default_stdlib_root())
+        checker = check(program)
+        if phase == "type":
+            return
+        Interpreter(checker).run()
+
+    def underlined(err) -> str:
+        """The text of the error's (or note's) line under its carets."""
+        text = source.splitlines()[err.line - 1]
+        start, end = caret_range(text, err.line, err.column, err.span)
+        return text[start - 1:end - 1]
+
+    with open(path, encoding="utf-8") as fh:
+        source = fh.read()
+    exc_type = phases[phase]
+    try:
+        drive()
+    except exc_type as exc:
+        notes = exc.notes
+        placed = [n for n in notes if n.line is not None]
+        return {
+            "message": str(exc),
+            "line": exc.line,
+            "column": exc.column,
+            "underlined": underlined(exc) if _span(source) is not None else None,
+            "notes": [(n.label, n.message) for n in notes],
+            "note_underlined": [underlined(n) for _, n in zip(_note_spans(source), placed)],
+            # each later error: (of the same stage?, its text)
+            "more": [(isinstance(e, exc_type), str(e)) for e in exc.more],
+        }
+    return None
 
 
 def _corpus() -> list[str]:
@@ -139,13 +175,6 @@ def _note_spans(source: str) -> list[str]:
     return [m.group(1) for line in source.splitlines() if (m := _NOTE_SPAN.match(line.strip()))]
 
 
-def _underlined(err, source: str) -> str:
-    """The text of the error's (or note's) line under its carets."""
-    text = source.splitlines()[err.line - 1]
-    start, end = caret_range(text, err.line, err.column, err.span)
-    return text[start - 1:end - 1]
-
-
 def _directive(source: str) -> tuple[str, str]:
     matches = [m for line in source.splitlines() if (m := _DIRECTIVE.match(line.strip()))]
     if len(matches) != 1:
@@ -167,43 +196,42 @@ def _make(name: str):
         with open(path, encoding="utf-8") as fh:
             source = fh.read()
         phase, needle = _directive(source)
-        exc_type = _PHASES[phase]
-        with self.assertRaises(exc_type, msg=f"{name}: expected a {phase} error") as ctx:
-            _drive(phase, source, path)
+        diag = _diagnostic(phase, path)
+        if diag is None:
+            self.fail(f"{name}: expected a {phase} error")
+        message = diag["message"]
         if needle:
             self.assertIn(
                 needle.lower(),
-                str(ctx.exception).lower(),
-                f"{name}: diagnostic '{ctx.exception}' should contain '{needle}'",
+                message.lower(),
+                f"{name}: diagnostic '{message}' should contain '{needle}'",
             )
         span = _span(source)
         if span is not None:
-            self.assertEqual(_underlined(ctx.exception, source), span, f"{name}: the underlined text")
-        notes, wanted = ctx.exception.notes, _notes(source)
-        self.assertEqual([n.label for n in notes], [label for label, _ in wanted],
-                         f"{name}: the notes: {[(n.label, n.message) for n in notes]}")
-        for (_, want), n in zip(wanted, notes):
-            self.assertIn(want.lower(), n.message.lower(), f"{name}: a note")
-        placed = [n for n in notes if n.line is not None]
-        for want, n in zip(_note_spans(source), placed):
-            self.assertEqual(_underlined(n, source), want, f"{name}: the text a note underlines")
-        later = ctx.exception.more
+            self.assertEqual(diag["underlined"], span, f"{name}: the underlined text")
+        notes, wanted = diag["notes"], _notes(source)
+        self.assertEqual([label for label, _ in notes], [label for label, _ in wanted],
+                         f"{name}: the notes: {notes}")
+        for (_, want), (_, got) in zip(wanted, notes):
+            self.assertIn(want.lower(), got.lower(), f"{name}: a note")
+        for want, got in zip(_note_spans(source), diag["note_underlined"]):
+            self.assertEqual(got, want, f"{name}: the text a note underlines")
+        later = diag["more"]
         self.assertEqual(1 + len(later), _count(source),
-                         f"{name}: the errors reported: {[str(e) for e in (ctx.exception, *later)]}")
+                         f"{name}: the errors reported: {[message, *(text for _, text in later)]}")
         nexts = _nexts(source)
         if nexts:
             self.assertEqual(len(nexts), len(later), f"{name}: one 'next' directive per later error")
-            for want, err in zip(nexts, later):
-                self.assertIsInstance(err, exc_type, f"{name}: a later error of another stage")
-                self.assertIn(want.lower(), str(err).lower(), f"{name}: a later error")
+            for want, (same_stage, text) in zip(nexts, later):
+                self.assertTrue(same_stage, f"{name}: a later error of another stage")
+                self.assertIn(want.lower(), text.lower(), f"{name}: a later error")
         native = _native(source)
         if phase == "runtime":
             self.assertIsNotNone(native, f"{name}: a runtime error file needs a '//~ native:' line")
             if CAN_BUILD_NATIVE:
-                checker = check(link(path, stdlib_root=default_stdlib_root()))
-                out, err, code = build_and_run_full(checker, entry_path=path)
+                out, err, code = build_and_run_full(check_file(path), entry_path=path)
                 self.assertEqual(code, 1, f"{name}: the native binary should exit 1")
-                where = f"  --> {path}:{ctx.exception.line}:{ctx.exception.column}"
+                where = f"  --> {path}:{diag['line']}:{diag['column']}"
                 self.assertEqual(err, f"{native}\n{where}\n", f"{name}: native stderr")
         else:
             self.assertIsNone(native, f"{name}: '//~ native:' only goes with a runtime error")

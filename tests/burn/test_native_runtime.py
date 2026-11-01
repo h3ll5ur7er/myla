@@ -1,10 +1,11 @@
-"""Burn test: the native runtime's robustness (MYLA-17), for the Python
-backend and the self-hosted compiler.
+"""Burn test: the native runtime's robustness (MYLA-17), for the self-hosted
+compiler (and for the Python backend until it was retired, MYLA-219).
 
 - A runtime error writes `runtime error: <message>` to stderr (the
   interpreter's message, without the values), then the source position as
   `  --> file:line:col`, the interpreter's second line (MYLA-65, MYLA-66), and
-  exits with status 1, instead of exiting silently.
+  exits with status 1, instead of exiting silently. (The interpreter's
+  positions are the retired Python interpreter's, recorded.)
 - Output isn't lost when a `write` is short or can't proceed yet: here stdout
   is a non-blocking pipe whose reader starts late, so the pipe fills and
   `write` returns EAGAIN or writes part of the buffer.
@@ -19,13 +20,21 @@ import tempfile
 import time
 import unittest
 
-from myla.loader import default_stdlib_root
-
+from ._golden import golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._tools import selfhost_tool
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _MYLA = os.path.join(_REPO, "myla.py")
+
+
+@golden("test_native_runtime.interpreter_run")
+def _interpreter_run(path: str) -> tuple[int, str]:
+    """(exit, stderr) of the Python CLI's `myla run <file>`, run in the file's
+    directory with its bare name, so the positions name it that way."""
+    proc = subprocess.run([sys.executable, _MYLA, "run", os.path.basename(path)],
+                          cwd=os.path.dirname(path), capture_output=True, text=True)
+    return proc.returncode, proc.stderr
 
 # (name, statements in main from line 4 on, the message, the position). The
 # position is the interpreter's (checked against it below): the node that
@@ -101,7 +110,7 @@ class NativeRuntime(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._tmp = tempfile.TemporaryDirectory()
         cls.dir = cls._tmp.name
-        cls.stdlib = default_stdlib_root()
+        cls.stdlib = STDLIB_ROOT
         cls.gen = selfhost_tool("gen_main")
 
     @classmethod
@@ -115,28 +124,25 @@ class NativeRuntime(unittest.TestCase):
         return path
 
     def binaries(self, name: str, source: str, cwd: str | None = None) -> list[tuple[str, str]]:
-        """`source` built by both backends as `<name>.my` in `cwd`, compiled
-        from there with that relative path as `myla build` would be (so the
-        positions name `<name>.my`): [(backend, binary)]."""
+        """`source` built by the self-hosted compiler as `<name>.my` in `cwd`,
+        compiled from there with that relative path as `myla build` would be
+        (so the positions name `<name>.my`): [(backend, binary)]."""
         cwd = cwd or self.dir
         self.write(name + ".my", source, cwd)
-        py = os.path.join(cwd, name + "_py")
-        subprocess.run([sys.executable, _MYLA, "build", name + ".my", "-o", py],
-                       cwd=cwd, capture_output=True, check=True)
         asm = subprocess.run([self.gen, name + ".my", self.stdlib], cwd=cwd,
                              capture_output=True, text=True, check=True).stdout
         sh = os.path.join(cwd, name + "_self")
         self.write(name + "_self.s", asm, cwd)
         subprocess.run(["as", "--64", "-o", sh + ".o", sh + ".s"], check=True)
         subprocess.run(["ld", "-o", sh, sh + ".o"], check=True)
-        return [("python", py), ("self-hosted", sh)]
+        return [("self-hosted", sh)]
 
     def interpreter_position(self, name: str, cwd: str | None = None) -> str:
-        """The `  --> file:line:col` line `myla run` prints for `<name>.my`."""
-        proc = subprocess.run([sys.executable, _MYLA, "run", name + ".my"],
-                              cwd=cwd or self.dir, capture_output=True, text=True)
-        self.assertEqual(proc.returncode, 1, proc.stderr)
-        return proc.stderr.splitlines()[1]
+        """The `  --> file:line:col` line `myla run` prints for `<name>.my`
+        (the retired Python interpreter's, recorded)."""
+        code, stderr = _interpreter_run(os.path.join(cwd or self.dir, name + ".my"))
+        self.assertEqual(code, 1, stderr)
+        return stderr.splitlines()[1]
 
     def test_runtime_errors_have_messages_and_positions(self):
         for name, body, message, position in TRAPS:
@@ -151,7 +157,7 @@ class NativeRuntime(unittest.TestCase):
 
     def test_a_stack_overflow_is_reported(self):
         # the main stack grows to 120 MiB, and running out of it is a runtime
-        # error from both backends, as from the interpreters (MYLA-182)
+        # error, as from the interpreters (MYLA-182)
         source = ("fun down(n: int) -> int {\n    if n == 0 {\n        return 0\n    }\n"
                   "    return down(n - 1) + 1\n}\n\n"
                   "fun main() {\n    print(down(1000000))\n    print(down(100000000))\n}\n")

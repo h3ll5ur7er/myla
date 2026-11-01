@@ -1,9 +1,12 @@
 """Burn test: the self-hosted `myla` CLI ([[selfhost/main.my]], MYLA-31, MYLA-35).
 
-The CLI is built by the Python backend into `<tmp>/build/myla`, next to a
-`<tmp>/src/myla` that links to this repository's stdlib, the layout of a
-checkout. It is run from another directory, so the stdlib root must come from
-the binary's own location.
+The CLI is built by the self-hosted compiler and copied to `<tmp>/build/myla`,
+next to a `<tmp>/src/myla` that links to this repository's stdlib, the layout
+of a checkout. It is run from another directory, so the stdlib root must come
+from the binary's own location.
+
+Where it must print what the retired Python CLI printed, the Python CLI's
+output is its recorded answer (`tests/burn/_golden.py`, MYLA-219).
 """
 from __future__ import annotations
 
@@ -15,10 +18,34 @@ import sys
 import tempfile
 import unittest
 
+from ._golden import golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._tools import selfhost_tool
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+
+
+@golden("selfhost_cli.python_cli")
+def _recorded_python_cli(argv: list[str], files: dict[str, str]) -> tuple[str, str, int]:
+    """(stdout, stderr, exit) of the retired Python CLI (`myla.py *argv`) run
+    in a fresh work directory holding `files` (name -> source). `{work}` in
+    `argv` is that directory, and in the answer it is written `{work}`."""
+    with tempfile.TemporaryDirectory() as work:
+        for name, text in files.items():
+            with open(os.path.join(work, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        proc = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"),
+                               *(a.replace("{work}", work) for a in argv)],
+                              cwd=work, capture_output=True, text=True)
+        return proc.stdout.replace(work, "{work}"), proc.stderr.replace(work, "{work}"), proc.returncode
+
+
+def python_cli(argv: list[str], files: dict[str, str], work: str) -> tuple[str, str, int]:
+    """What the Python CLI printed for `argv` (see `_recorded_python_cli`), as
+    if it had run in the directory `work`."""
+    out, err, code = _recorded_python_cli(argv, files)
+    return out.replace("{work}", work), err.replace("{work}", work), code
+
 
 PROGRAM = """\
 from std.process import args
@@ -109,10 +136,8 @@ class SelfHostedCli(_Layout):
         for command in ("run", "check"):
             with self.subTest(command=command):
                 mine = self.myla_cmd(command, "warned.my")
-                python = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), command, "warned.my"],
-                                        cwd=self.work, capture_output=True, text=True)
-                self.assertEqual((mine.stdout, mine.stderr, mine.returncode),
-                                 (python.stdout, python.stderr, python.returncode))
+                python = python_cli([command, "warned.my"], {"warned.my": WARNED}, self.work)
+                self.assertEqual((mine.stdout, mine.stderr, mine.returncode), python)
                 self.assertEqual(mine.returncode, 0)
                 self.assertIn("warning: 'self.stock' was checked before an 'await'", mine.stderr)
                 self.assertIn("note: other calls to the actor may run at this 'await'", mine.stderr)
@@ -135,10 +160,8 @@ class SelfHostedCli(_Layout):
             with self.subTest(program=name):
                 path = os.path.join(_REPO, "examples", "errors", name)
                 mine = self.myla_cmd("check", path)
-                python = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), "check", path],
-                                        cwd=self.work, capture_output=True, text=True)
-                self.assertEqual((mine.stdout, mine.stderr, mine.returncode),
-                                 (python.stdout, python.stderr, python.returncode))
+                python = python_cli(["check", path], {}, self.work)
+                self.assertEqual((mine.stdout, mine.stderr, mine.returncode), python)
                 self.assertEqual(mine.returncode, 1)
                 self.assertIn("type error: ", mine.stderr)
 
@@ -251,20 +274,21 @@ class TestCommandParity(_Layout):
     on failures of every kind (values shown as the Python interpreter's repr,
     runtime errors, `exit`, output from the tests)."""
 
-    def both(self, path: str) -> tuple:
-        py = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), "test", path], cwd=self.work,
-                            capture_output=True, text=True)
+    def both(self, path: str, files: dict[str, str] | None = None) -> tuple:
+        """(stdout, exit) of the Python CLI's (recorded) and the self-hosted
+        CLI's `myla test path`; `files` are the work directory's files the
+        Python CLI saw (`path` among them written `{work}/name`)."""
+        py_out, _, py_code = python_cli(["test", path], files or {}, self.work)
         # the Python CLI's stdlib root, not the layout's symlink to it: module
         # ids come from paths as written, and a stdlib module tested through
         # another root would be named as a project module
-        my = self.myla_cmd("test", path, "--stdlib", os.path.join(_REPO, "src", "myla"))
-        return (py.stdout, py.returncode), (my.stdout, my.returncode)
+        my = self.myla_cmd("test", path.replace("{work}", self.work), "--stdlib", STDLIB_ROOT)
+        return (py_out, py_code), (my.stdout, my.returncode)
 
     def test_failures(self):
-        path = os.path.join(self.work, "failing.my")
-        with open(path, "w", encoding="utf-8") as fh:
+        with open(os.path.join(self.work, "failing.my"), "w", encoding="utf-8") as fh:
             fh.write(FAILING)
-        py, my = self.both(path)
+        py, my = self.both("{work}/failing.my", {"failing.my": FAILING})
         self.assertEqual(py[1], 1, py)
         self.assertIn("FAIL  quits #1: exited with status 3", py[0])
         self.assertEqual(my, py)

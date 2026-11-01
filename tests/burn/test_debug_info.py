@@ -1,30 +1,42 @@
 """Burn tests: `myla build -g` produces DWARF debug information that real tools
 read: a line table (MYLA-71), and the variables of every function with their
-types (MYLA-66), in both backends. readelf (binutils) is always there when
-native builds work; the gdb tests run only where gdb is installed."""
-import contextlib
-import io
+types (MYLA-66), from the self-hosted CLI and compiler. readelf (binutils) is
+always there when native builds work; the gdb tests run only where gdb is
+installed. (The Python backend's debug information was tested too until it was
+retired, MYLA-219; the self-hosted compiler's abbreviation table is still
+compared with the one the Python backend wrote, recorded.)"""
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 
-from myla.cli import main as _cli_main
+from tests.burn._golden import golden
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
+from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 
 
 def myla(argv: list[str]) -> int:
-    """`myla <argv>` of the natively built CLI (MYLA-235); with the fallback
-    (`MYLA_TEST_BACKEND=python`) the Python CLI in-process, its `wrote
-    <binary>` line kept out of the test run's output (MYLA-192)."""
-    from myla.loader import default_stdlib_root
-    from tests.burn._tools import BACKEND, selfhost_tool
-    if BACKEND == "python":
-        with contextlib.redirect_stdout(io.StringIO()):
-            return _cli_main(argv)
-    return subprocess.run([selfhost_tool("main"), *argv, "--stdlib", default_stdlib_root()],
+    """`myla <argv>` of the natively built CLI (MYLA-235)."""
+    return subprocess.run([selfhost_tool("main"), *argv, "--stdlib", STDLIB_ROOT],
                           capture_output=True).returncode
+
+
+def _abbrev_table(asm: str) -> str:
+    """The `.debug_abbrev` section of the assembly `asm`."""
+    start = asm.index("\t.section .debug_abbrev")
+    return asm[start:asm.index("\t.section .debug_info", start)]
+
+
+@golden("test_debug_info.python_abbrev_table")
+def _python_abbrev_table(entry: str, imported: list[str]) -> str:
+    """The abbreviation table the Python backend wrote for the program `entry`
+    built with `-g` (`imported`: the files it imports, named so that their
+    content is part of the question)."""
+    from myla.compiler import compile_to_asm
+    from myla.loader import default_stdlib_root, link
+    from myla.types import check
+    return _abbrev_table(compile_to_asm(check(link(entry, stdlib_root=default_stdlib_root())), debug=True))
 
 PROGRAM = (
     "fun add(a: int, b: int) -> int {\n"   # line 1
@@ -107,12 +119,8 @@ class TestSelfHostedLineTables(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from myla.loader import default_stdlib_root
-
-        from ._tools import selfhost_tool
-
         cls.tmp = tempfile.TemporaryDirectory()
-        cls.stdlib = default_stdlib_root()
+        cls.stdlib = STDLIB_ROOT
         cls.gen = selfhost_tool("gen_main")
 
     @classmethod
@@ -155,27 +163,17 @@ class TestSelfHostedLineTables(unittest.TestCase):
         self.assertEqual((debug.stdout, debug.returncode), (plain.stdout, plain.returncode))
 
     def test_the_abbreviation_tables_agree(self):
-        # selfhost/dwarf.my writes the table src/myla/compiler/dwarf.py writes (MYLA-66)
-        from myla.compiler import compile_to_asm
-        from myla.loader import link
-        from myla.types import check
-
-        def table(asm: str) -> str:
-            start = asm.index("\t.section .debug_abbrev")
-            return asm[start:asm.index("\t.section .debug_info", start)]
-
+        # selfhost/dwarf.my writes the table src/myla/compiler/dwarf.py wrote
+        # (MYLA-66; recorded)
         entry = os.path.join(self.dir, "main.my")
-        python = compile_to_asm(check(link(entry, stdlib_root=self.stdlib)), debug=True)
+        python = _python_abbrev_table(entry, [os.path.join(self.dir, "lib.my")])
         selfhosted = subprocess.run([self.gen, entry, self.stdlib, "-g"],
                                     capture_output=True, text=True, check=True).stdout
-        self.assertEqual(table(selfhosted), table(python))
+        self.assertEqual(_abbrev_table(selfhosted), python)
 
-    def test_both_backends_embed_the_pretty_printers(self):
+    def test_the_pretty_printers_are_embedded(self):
         # an inline Python script (kind 4) in .debug_gdb_scripts: src/myla/debug/myla_gdb.py
-        from myla.compiler import build
-        from myla.loader import link
-        from myla.types import check
-
+        # (the Python backend embedded it too until it was retired, MYLA-219)
         def section(binary: str) -> bytes:
             names = subprocess.run(["readelf", "-S", "-W", binary], capture_output=True,
                                    text=True, check=True).stdout
@@ -187,17 +185,13 @@ class TestSelfHostedLineTables(unittest.TestCase):
             with open(raw, "rb") as fh:
                 return fh.read()
 
-        python = os.path.join(self.dir, "prog_py")
-        build(check(link(os.path.join(self.dir, "main.my"), stdlib_root=self.stdlib)), python,
-              debug=True)
         with open(GDB_SCRIPT, "rb") as fh:
             expected = b"\x04myla-printers\n" + fh.read() + b"\x00"
-        self.assertEqual(section(python), expected)
         self.assertEqual(section(self.build("-g")), expected)
         self.assertEqual(section(self.build()), b"")      # only with -g
 
     def test_the_compile_unit_names_the_working_directory(self):
-        # std.fs.current_dir (MYLA-98), as the Python backend's os.getcwd()
+        # std.fs.current_dir (MYLA-98), as the Python backend's os.getcwd() did
         asm = subprocess.run([self.gen, "main.my", self.stdlib, "-g"], cwd=self.dir,
                              capture_output=True, text=True, check=True).stdout
         binary = os.path.join(self.dir, "prog_cwd")
@@ -241,8 +235,7 @@ def gdb(binary: str, *commands: str, printers: bool = False) -> str:
                           text=True, timeout=60).stdout
 
 
-GDB_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir,
-                          "src", "myla", "debug", "myla_gdb.py")
+GDB_SCRIPT = os.path.join(STDLIB_ROOT, "debug", "myla_gdb.py")
 
 
 # Scalars of every kind, a loop variable, shadowing and a match binding.
@@ -475,7 +468,8 @@ class GdbVariables:
 
 @unittest.skipUnless(CAN_BUILD_NATIVE and shutil.which("gdb"), "needs native builds and gdb")
 class TestGdbVariables(GdbVariables, unittest.TestCase):
-    """The Python backend."""
+    """`myla build -g` of the self-hosted CLI (the Python backend's until
+    MYLA-235)."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -541,11 +535,7 @@ class TestSelfHostedGdbVariables(GdbVariables, unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from myla.loader import default_stdlib_root
-
-        from ._tools import selfhost_tool
-
-        cls.stdlib = default_stdlib_root()
+        cls.stdlib = STDLIB_ROOT
         cls.gen = selfhost_tool("gen_main")
 
     def setUp(self):

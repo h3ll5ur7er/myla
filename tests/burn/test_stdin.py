@@ -1,10 +1,12 @@
-"""Burn tests: reading stdin with `std.io` (MYLA-78) behaves the same in all
-four implementations, given the same bytes through a real pipe:
+"""Burn tests: reading stdin with `std.io` (MYLA-78) behaves the same in both
+implementations, given the same bytes through a real pipe:
 
-- the Python interpreter (`myla.py run`),
-- the Python native backend,
 - the self-hosted interpreter (`selfhost/interp_main.my`),
 - the self-hosted native backend (`selfhost/gen_main.my`).
+
+(The Python interpreter and the Python native backend ran them too until they
+were retired, MYLA-219; where a test has no expectation of its own, the
+Python interpreter's output, recorded, is the expected one.)
 
 The programs read lines, Content-Length framed messages (as the language
 server protocol does), everything at once (binary bytes, echoed back), and
@@ -21,18 +23,97 @@ import sys
 import tempfile
 import unittest
 
-from myla.compiler import build
-from myla.loader import default_stdlib_root
-
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, check_file
-from ._tools import selfhost_tool
-from tests.unit.test_stdio import FRAMED, LINES
+from ._golden import golden
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
 # Python buffers a piped stdout unless PYTHONUNBUFFERED is set (as some CI
-# environments do); the interpreter must not rely on it.
+# environments do); the (retired Python) interpreter must not rely on it.
 _ENV = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
+
+
+@golden("test_stdin.python_interpreter")
+def _python_interpreter(path: str, data: str) -> tuple[str, int]:
+    """(stdout, exit) of the Python interpreter running the program `path`
+    with `data` (UTF-8) on stdin."""
+    proc = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), "run", path],
+                          input=data.encode(), capture_output=True, timeout=60, env=_ENV)
+    return proc.stdout.decode(), proc.returncode
+
+
+# The two programs below were shared with the unit tests of the retired Python
+# toolchain (`tests/unit/test_stdio.py`).
+
+# Prints each line of stdin with its length, then the count.
+LINES = """from std.io import stdin
+fun main() {
+    var r = stdin()
+    var n = 0
+    while true {
+        match r.read_line() {
+            Ok(Some(line)) => {
+                n = n + 1
+                print(format("{}: [{}] {}", n, line, len(line)))
+            },
+            Ok(None) => { break },
+            Err(e) => {
+                print("error")
+                break
+            },
+        }
+    }
+    print(format("{} lines", n))
+}
+"""
+
+# Reads messages framed by a Content-Length header, as the language server
+# protocol does, through a struct that owns the reader.
+FRAMED = """from std.io import stdin, Reader
+from std.fs import IoError
+
+struct Channel { input: Reader }
+
+impl Channel {
+    // The next message's body; None at the end of the input.
+    fun next(var self) -> Result<Option<str>, IoError> {
+        var length = -1
+        while true {
+            match self.input.read_line()? {
+                Some(line) => {
+                    if len(line) <= 1 { break }       // "" or "\\r"
+                    length = digits_of(line)
+                },
+                None => { return Ok(None) },
+            }
+        }
+        return self.input.read_exact(length)
+    }
+}
+
+fun digits_of(s: str) -> int32 {
+    var n = 0
+    for c in chars(s) {
+        if c >= '0' && c <= '9' { n = n * 10 + ((c as int32) - 48) }
+    }
+    return n
+}
+
+fun main() {
+    var ch = Channel { input: stdin() }
+    while true {
+        match ch.next() {
+            Ok(Some(body)) => { print(format("<{}>", body)) },
+            Ok(None) => { break },
+            Err(e) => {
+                print("error")
+                break
+            },
+        }
+    }
+}
+"""
 
 ECHO_ALL = """from std.io import stdin, write
 fun main() {
@@ -111,6 +192,7 @@ class StdinParity(unittest.TestCase):
         cls.gen = selfhost_tool("gen_main")
         cls.tmp = tempfile.TemporaryDirectory()
         cls.programs: dict[str, dict[str, list[str]]] = {}
+        cls.paths: dict[str, str] = {}
         for name, source in [("lines", LINES), ("framed", FRAMED), ("echo", ECHO_ALL),
                              ("bad_fd", BAD_FD), ("ping", PING), ("wait", WAIT)]:
             cls.programs[name] = cls._commands(name, source)
@@ -127,18 +209,15 @@ class StdinParity(unittest.TestCase):
         path = os.path.join(d, "main.my")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(source)
-        py_native = os.path.join(d, "py_native")
-        build(check_file(path), py_native)
-        asm = subprocess.run([cls.gen, path, default_stdlib_root()], capture_output=True, text=True, check=True)
+        asm = subprocess.run([cls.gen, path, STDLIB_ROOT], capture_output=True, text=True, check=True)
         sh_native = os.path.join(d, "sh_native")
         with open(sh_native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
         subprocess.run(["as", "--64", "-o", sh_native + ".o", sh_native + ".s"], check=True)
         subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
+        cls.paths[name] = path
         return {
-            "python interpreter": [sys.executable, os.path.join(_REPO, "myla.py"), "run", path],
-            "python native": [py_native],
-            "self-hosted interpreter": [cls.interp, path, default_stdlib_root()],
+            "self-hosted interpreter": [cls.interp, path, STDLIB_ROOT],
             "self-hosted native": [sh_native],
         }
 
@@ -149,9 +228,16 @@ class StdinParity(unittest.TestCase):
             out[impl] = (proc.stdout, proc.returncode)
         return out
 
+    def python_interpreter(self, name: str, data: bytes) -> bytes:
+        """The retired Python interpreter's output for the program `name`
+        given `data` (recorded)."""
+        out, code = _python_interpreter(self.paths[name], data.decode())
+        self.assertEqual(code, 0)
+        return out.encode()
+
     def assert_all(self, name: str, data: bytes, expected: bytes | None = None) -> None:
         results = self.outputs(name, data)
-        reference = expected if expected is not None else results["python interpreter"][0]
+        reference = expected if expected is not None else self.python_interpreter(name, data)
         for impl, (stdout, code) in results.items():
             with self.subTest(implementation=impl):
                 self.assertEqual(code, 0)
@@ -167,7 +253,7 @@ class StdinParity(unittest.TestCase):
     def test_many_lines_across_chunks(self) -> None:
         data = _big_input()
         results = self.outputs("lines", data)
-        reference = results["python interpreter"][0]
+        reference = self.python_interpreter("lines", data)
         self.assertTrue(reference.endswith(b"1500 lines\n"))
         last = ("1500: [" + "ab λ" * (1499 % 37) + "1499😀]").encode()
         self.assertTrue(last in reference, "the last line is missing or wrong")
