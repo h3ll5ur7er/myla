@@ -118,6 +118,13 @@ SNIPPETS = {
 }
 
 
+# primitives whose result or effect depends on the world outside the call
+IMPURE = {"print", "__write", "__exit", "__args", "__read_file", "__read", "__poll",
+          "__io_errno", "__getcwd", "__write_file", "__list_dir", "__stat", "__mkdir",
+          "__unlink", "__rmdir", "__rename", "__run", "__run_errno", "__run_exit_code",
+          "__run_signal", "__run_stderr", "__task_cancelled"}
+
+
 class Unprintable(Exception):
     pass
 
@@ -509,8 +516,12 @@ def record_one(checker, names_of, elig, work: dict, out_path: str) -> None:
     sys.setrecursionlimit(100_000)
     try:
         Interpreter(checker, out=devnull, err=devnull, argv=[ENTRY, *work["argv"]]).run()
-    except BaseException:   # a timeout, an error of the program: keep what was seen
+    except _Timeout:        # keep what was seen
         pass
+    except BaseException:   # an error of the harvester or the program: keep what was seen, say why
+        import traceback
+        with open(out_path + ".error", "w", encoding="utf-8") as fh:
+            fh.write(traceback.format_exc())
     signal.alarm(0)
     os.unlink(stdin)
     with open(out_path, "w", encoding="utf-8") as fh:
@@ -552,6 +563,9 @@ def cmd_record(jobs: int) -> None:
             if pid == 0:
                 try:
                     record_one(checker, names_of, elig, work, part)
+                except BaseException:
+                    import traceback
+                    traceback.print_exc()
                 finally:
                     os._exit(0)
             running[pid] = (i, work, time.time())
@@ -566,6 +580,8 @@ def merge_parts() -> None:
     calls: dict[str, list] = {}
     args: dict[str, list] = {}
     for part in sorted(os.listdir(os.path.join(STATE, "parts"))):
+        if not part.endswith(".json"):
+            continue
         with open(os.path.join(STATE, "parts", part), encoding="utf-8") as fh:
             data = json.load(fh)
         for name, cases in data["calls"].items():
