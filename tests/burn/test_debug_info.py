@@ -15,10 +15,16 @@ from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON
 
 
 def myla(argv: list[str]) -> int:
-    """The Python CLI in-process, its `wrote <binary>` line kept out of the
-    test run's output (MYLA-192)."""
-    with contextlib.redirect_stdout(io.StringIO()):
-        return _cli_main(argv)
+    """`myla <argv>` of the natively built CLI (MYLA-235); with the fallback
+    (`MYLA_TEST_BACKEND=python`) the Python CLI in-process, its `wrote
+    <binary>` line kept out of the test run's output (MYLA-192)."""
+    from myla.loader import default_stdlib_root
+    from tests.burn._tools import BACKEND, selfhost_tool
+    if BACKEND == "python":
+        with contextlib.redirect_stdout(io.StringIO()):
+            return _cli_main(argv)
+    return subprocess.run([selfhost_tool("main"), *argv, "--stdlib", default_stdlib_root()],
+                          capture_output=True).returncode
 
 PROGRAM = (
     "fun add(a: int, b: int) -> int {\n"   # line 1

@@ -4,6 +4,10 @@ These helpers build a Myla program to a real ELF binary with the system
 `as`/`ld` and run it, plus run the same source through the interpreter, so tests
 can assert the two agree. They are skipped automatically when the host can't
 produce/run the binary (non-x86-64, non-Linux, or no assembler/linker).
+
+The self-hosted compiler builds the programs (`myla build` of the natively
+built CLI, MYLA-235); `MYLA_TEST_BACKEND=python` makes the Python backend do
+it, the fallback, as it does for a program given only as a checked AST.
 """
 from __future__ import annotations
 
@@ -38,13 +42,32 @@ def interpret_checker(checker) -> str:
     return out.getvalue()
 
 
+def native_build(checker, binary: str, entry_path: str | None = None, debug: bool = False) -> None:
+    """Compile a checked program to the native binary `binary`: with the
+    self-hosted CLI from its entry file (`check_file` records it), else with
+    the Python backend. `entry_path` names the entry file in runtime-error
+    positions, as `myla build <entry_path>` would."""
+    from tests.burn._tools import BACKEND, selfhost_tool
+    path = getattr(checker, "entry_file", None)
+    if BACKEND == "python" or path is None:
+        build(checker, binary, entry_path=entry_path, debug=debug)
+        return
+    cmd = [selfhost_tool("main"), "build", entry_path or path, "-o", binary,
+           "--stdlib", default_stdlib_root()]
+    if debug:
+        cmd.append("-g")
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"myla build {path} failed:\n{proc.stderr}")
+
+
 def build_and_run_checker(checker, timeout: float | None = None) -> tuple[str, int]:
     """Compile an already-checked program to a native binary, run it, and return
     (stdout, exit code). With `timeout` (seconds), a run that takes longer raises
     `subprocess.TimeoutExpired`."""
     with tempfile.TemporaryDirectory() as tmp:
         binary = os.path.join(tmp, "prog")
-        build(checker, binary)
+        native_build(checker, binary)
         proc = subprocess.run([binary], capture_output=True, text=True, timeout=timeout)
         return proc.stdout, proc.returncode
 
@@ -55,7 +78,11 @@ def interpret(source: str) -> str:
 
 def build_and_run(source: str, timeout: float | None = None) -> tuple[str, int]:
     """Compile `source` to a native binary, run it, return (stdout, exit code)."""
-    return build_and_run_checker(check(parse(tokenize(source))), timeout)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = write_program(tmp, source)
+        checker = check(parse(tokenize(source)))   # a type error raises, as before
+        checker.entry_file = path
+        return build_and_run_checker(checker, timeout)
 
 
 # -- stdlib-aware helpers (v0.5.4) -----------------------------------------
@@ -67,8 +94,11 @@ def build_and_run(source: str, timeout: float | None = None) -> tuple[str, int]:
 
 def check_file(path: str):
     """Link the module graph rooted at `path` (with the bundled stdlib on the
-    search path) and type-check the merged program."""
-    return check(link(path, stdlib_root=default_stdlib_root()))
+    search path) and type-check the merged program; the checker keeps the
+    entry file, which the self-hosted CLI builds."""
+    checker = check(link(path, stdlib_root=default_stdlib_root()))
+    checker.entry_file = path
+    return checker
 
 
 def write_program(directory: str, source: str, name: str = "main.my") -> str:
@@ -95,7 +125,7 @@ def build_and_run_full(checker, args=None, argv0="prog",
     runtime-error positions, as `myla build <entry_path>` would."""
     with tempfile.TemporaryDirectory() as tmp:
         binary = os.path.join(tmp, "prog")
-        build(checker, binary, entry_path=entry_path)
+        native_build(checker, binary, entry_path=entry_path)
         program_argv = [argv0, *(args or [])]
         proc = subprocess.run(program_argv, executable=binary,
                               capture_output=True, text=True)
