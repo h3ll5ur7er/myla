@@ -35,13 +35,14 @@ The jobs run on `ubuntu-24.04` (pinned: `ubuntu-latest` moves, and the burn job 
 | `bootstrap` | `scripts/bootstrap.sh`, then the stage 3 compiler builds and runs `examples/hello.my` |
 | `vscode-extension` | In `vscode-extension/myla`, with Node 22, gdb and the runner's own Python (`actions/setup-python` would point gdb at its libpython, and the binaries' pretty-printers wouldn't run, D82): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test` (the extension's tests, the debugger against gdb with the Python CLI building), `npx vsce package`; uploads the `.vsix` as the artifact `myla-vscode-extension` ([[MYLA-101]]) |
 
-## Results (October 2026)
+## Results (November 2026)
 
 | Suite | Tests | Result |
 | --- | --- | --- |
-| Unit | 622 | All pass, about 6 s |
+| Unit | 627 | All pass, about 6 s |
 | Integration | 2 | Pass |
-| Burn | 826 (plus subtests, 5 skipped) | All pass, about 350 s with cached tools in one process (green since [[MYLA-4]]) |
+| Burn | 836 (plus subtests, 5 skipped) | All pass, about 460 s in one process from an empty tool cache, the compiler bootstrapped and every program built by it (green since [[MYLA-4]]) |
+| `#test` cases in `selfhost/` | 1,898 on 1,030 of 1,285 value-returning functions (80 %) | Both runners pass every one ([[MYLA-184]]) |
 
 ## Unit tests
 

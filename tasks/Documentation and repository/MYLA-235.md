@@ -23,3 +23,4 @@ The owner, on 2026-11-01: "primarily use the native compiler for tests, python s
 - The burn suite on the native path, from an empty cache: 836 tests pass in 450 s (the same as before, 430–500 s on this machine); `test_compiler_parity.py` alone: 159 tests in 36 s, the bootstrap included.
 - The fallback: `MYLA_TEST_BACKEND=python` runs `test_compiler_parity.py`, `test_debug_info.py` and `test_fs.py` (206 tests) green in 51 s.
 - Stage 1 still comes from the Python backend until the seed ([[MYLA-218]]).
+- Unit 627, integration 2, burn 836 (5 skipped, 463 s from an empty tool cache) and the extension's 54 tests pass on commit eae1be7; the bootstrap reaches its byte-identical fixed point (6,210,821 bytes).

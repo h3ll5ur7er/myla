@@ -15,4 +15,4 @@ Found by the generated `#test` cases of [[MYLA-184]]: cases computed by the Pyth
 ## Evidence
 
 - Before: `examples/methods.my`'s new last line printed `3` from `build/myla run` and `4` from the Python interpreter and both native backends; a reduced program (`l.start(l.add())`) printed `0 0` against `1 0`. After the fix all four print `4` and `1 0`, and the 29 generated `lower.my` cases that failed in the self-hosted runner pass in both.
-- The full verification of the change is recorded on [[MYLA-184]].
+- Unit 626, integration 2, burn 835 (5 skipped) and the extension's 54 tests pass on commit b4100ff, which carries the fix; the bootstrap reaches its byte-identical fixed point (6,194,029 bytes).

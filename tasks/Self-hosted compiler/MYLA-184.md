@@ -56,4 +56,4 @@ The harvester: the Python interpreter runs the self-hosted compiler (`selfhost/g
 - Coverage of value-returning functions in `selfhost/`: 8 % → 34 % → 61 % → 70 % → **80.2 %** (1,030 of 1,285); `#test` lines in `selfhost/` 297 → 1,898, 524 of them with a factory. One case per function that needs factory state, as each costs a factory call in each runner: the burn suite went from 383 s to about 430 s.
 - Validation found a bug: the self-hosted interpreter dropped an argument's change to a `var self` receiver ([[MYLA-238]], fixed), and with it a difference in the read-only receiver's order between the interpreters and native code ([[MYLA-237]]).
 - A first version of `generate` let a function that makes directories run with pooled names: seven `myla new` skeletons appeared in the checkout (removed; no tracked file was touched). Generated calls now stop before any I/O primitive runs and work in `build/harvest/sandbox`.
-
+- Gates: unit 626, integration 2, burn 835 (5 skipped) and the extension's 54 tests pass on commit b4100ff, the last of the third round; the bootstrap reaches its byte-identical fixed point (6,194,029 bytes).
