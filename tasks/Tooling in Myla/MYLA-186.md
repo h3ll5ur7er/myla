@@ -20,3 +20,4 @@ The rejection needs a decision: the self-hosted interpreter ([[selfhost/interp.m
 - The owner's decision: not a rejection but a warning (D100), in both checkers, at the call's name, once per place, with a help line; silent inside the standard library (functions named `std$…`). The task's first item now reads as done in that form.
 - Checker gate: `warn_primitive_called` (a call in `main`, one in a lambda) gives the same warnings from both checkers.
 - In the repository only `selfhost/interp.my` calls primitives from outside the standard library (17 places: it implements them for the programs it runs); `python3 myla.py check selfhost/main.my` shows those 17 warnings, the compiler, the language server and the other tools none.
+- Unit 622, integration 2, burn 828 (5 skipped) and the extension's 54 tests pass on commit 1ddece4; the bootstrap reaches its byte-identical fixed point (6,185,088 bytes).

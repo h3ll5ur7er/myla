@@ -15,3 +15,4 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 
 - The owner's decision: trap at run time (D98). An integer cast to `char` that isn't a Unicode scalar (above 0x10FFFF, a surrogate, negative) is `runtime error: invalid char: <n> is not a Unicode scalar value` in both interpreters and `runtime error: invalid char` from both backends (a new trap, `__trap_char`, two compares; the IR's `check`), at the cast; casts from `uint8` aren't checked.
 - At the boundaries (55295 and 57344 valid; -1, 55296, 57343, 1114112 trap) the four agree. Corpus `runtime_invalid_char.my` (interpreter message, native message, the span); two rows in `test_native_runtime`'s trap table, positions equal to the interpreter's.
+- Unit 622, integration 2, burn 828 (5 skipped) and the extension's 54 tests pass on commit 1ddece4; the bootstrap reaches its byte-identical fixed point (6,185,088 bytes).
