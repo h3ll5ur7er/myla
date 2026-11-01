@@ -16,33 +16,22 @@
 # so stage2.s and stage3.s are both the current compiler's output.
 #
 # Usage:
-#   scripts/bootstrap.sh [--from-python] [OUT_DIR]
+#   scripts/bootstrap.sh [OUT_DIR]
 #
-# OUT_DIR defaults to ./build (gitignored). --from-python builds stage1 with the
-# Python toolchain instead of the seed (until MYLA-219 retires it); override
-# its entry point with the MYLA env var (default: "python3 myla.py").
+# OUT_DIR defaults to ./build (gitignored). Until MYLA-219 the Python toolchain
+# could build stage1 instead (the branch backup/python-toolchain-final).
 #
-# Requires: GNU as + ld (no third-party deps, no libc — decisions D1/D2);
-# python3 only with --from-python.
+# Requires: GNU as + ld (no third-party deps, no libc — decisions D1/D2).
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-FROM_PYTHON=0
-ARGS=()
-for arg in "$@"; do
-    case "$arg" in
-        --from-python) FROM_PYTHON=1 ;;
-        *) ARGS+=("$arg") ;;
-    esac
-done
-OUT_DIR="${ARGS[0]:-build}"
+OUT_DIR="${1:-build}"
 SEED="bootstrap/seed.s"
 ENTRY="selfhost/gen_main.my"   # amalgamating front end + codegen entry point
 STDLIB_ROOT="src/myla"         # where the bundled `std/` package lives
-MYLA="${MYLA:-python3 myla.py}"
 
 mkdir -p "$OUT_DIR"
 
@@ -52,20 +41,15 @@ asm_to_bin() {  # <src.s> <out-bin>
     ld -o "$2" "${2}.o"
 }
 
-if [ "$FROM_PYTHON" = 1 ]; then
-    echo "==> stage1: Python toolchain builds the self-hosted compiler (gen_tool)"
-    $MYLA build "$ENTRY" -o "$OUT_DIR/gen_tool"
-else
-    if [ ! -f "$SEED" ]; then
-        echo "FAIL: no $SEED (scripts/update-seed.sh --from-python makes one)" >&2
-        exit 1
-    fi
-    echo "==> stage0: the seed ($SEED), assembled and linked"
-    asm_to_bin "$SEED" "$OUT_DIR/stage0"
-    echo "==> stage1: stage0 compiles the self-hosted compiler (gen_tool)"
-    "$OUT_DIR/stage0" "$ENTRY" "$STDLIB_ROOT" > "$OUT_DIR/gen_tool.s"
-    asm_to_bin "$OUT_DIR/gen_tool.s" "$OUT_DIR/gen_tool"
+if [ ! -f "$SEED" ]; then
+    echo "FAIL: no $SEED (it is committed; restore it from Git)" >&2
+    exit 1
 fi
+echo "==> stage0: the seed ($SEED), assembled and linked"
+asm_to_bin "$SEED" "$OUT_DIR/stage0"
+echo "==> stage1: stage0 compiles the self-hosted compiler (gen_tool)"
+"$OUT_DIR/stage0" "$ENTRY" "$STDLIB_ROOT" > "$OUT_DIR/gen_tool.s"
+asm_to_bin "$OUT_DIR/gen_tool.s" "$OUT_DIR/gen_tool"
 
 echo "==> stage2: gen_tool compiles the compiler"
 "$OUT_DIR/gen_tool" "$ENTRY" "$STDLIB_ROOT" > "$OUT_DIR/stage2.s"

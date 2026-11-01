@@ -7,9 +7,11 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-py="${PYTHON:-python3}"
-mkdir -p build
-$py myla.py build tools/grammar/main.my -o build/grammar >/dev/null
+if [ ! -x build/myla ]; then
+    echo "build/myla not found: run scripts/bootstrap.sh first" >&2
+    exit 1
+fi
+build/myla build tools/grammar/main.my -o build/grammar >/dev/null
 build/grammar treesitter grammar/myla.ebnf tools/grammar/highlights.scm editor/tree-sitter-myla
 echo "wrote editor/tree-sitter-myla/grammar.js and queries/highlights.scm"
 

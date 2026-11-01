@@ -1,10 +1,6 @@
 default:
     @just --list
 
-# The Python toolchain (no dependencies beyond Python's standard library).
-bs *args:
-    @python3 myla.py {{args}}
-
 # Build the self-hosted compiler (checking the fixed point) and the myla CLI.
 bootstrap:
     scripts/bootstrap.sh

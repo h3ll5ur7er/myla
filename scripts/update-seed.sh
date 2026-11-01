@@ -13,10 +13,11 @@
 # compiler is deterministic, so the assembly is the same byte for byte.
 #
 # Usage:
-#   scripts/update-seed.sh [--from-python]
+#   scripts/update-seed.sh
 #
-# --from-python builds stage 1 with the Python toolchain (bootstrap.sh), for a
-# first seed or a seed that can no longer compile the sources.
+# A seed that can no longer compile the sources is updated in steps: an older
+# compiler builds a newer one (git history), or, as for the first seed, the
+# Python toolchain of the branch backup/python-toolchain-final builds stage 1.
 
 set -euo pipefail
 
@@ -24,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 OUT_DIR="build/seed-update"
-scripts/bootstrap.sh "$@" "$OUT_DIR"
+scripts/bootstrap.sh "$OUT_DIR"
 
 # the compiler is committed with its seed: a seed made from uncommitted
 # sources names the commit it will sit on, not its own (which it can't know)

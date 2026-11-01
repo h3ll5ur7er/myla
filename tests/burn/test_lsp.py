@@ -874,7 +874,7 @@ class TestExtensionStartsTheServer(unittest.TestCase):
         return json.loads(out)
 
     def settings(self, **over) -> dict:
-        s = {"serverPath": "", "compilerEntry": "/r/myla.py"}
+        s = {"serverPath": "", "compilerEntry": "/r/selfhost/main.my"}
         s.update(over)
         return s
 
@@ -897,7 +897,7 @@ class TestExtensionStartsTheServer(unittest.TestCase):
             os.makedirs(os.path.join(tmp, "build"))
             os.symlink(binary, os.path.join(tmp, "build", "myla-lsp"))
             os.symlink(os.path.join(_REPO, "src"), os.path.join(tmp, "src"))
-            entry = os.path.join(tmp, "myla.py")
+            entry = os.path.join(tmp, "selfhost", "main.my")
             c = self.choose(self.settings(compilerEntry=entry),
                             [os.path.join(tmp, "build", "myla-lsp"), os.path.join(tmp, "src", "myla", "std")])
             client = _Client([c["command"], *c["args"]])

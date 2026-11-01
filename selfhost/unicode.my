@@ -3,8 +3,7 @@
 //
 // An identifier is `_` or an XID_Start character, then XID_Continue
 // characters. Each table is a run of 12 hex digits per range (first and last
-// code point, 6 each), sorted, searched in place. src/myla/unicode_ident.py
-// holds the same ranges for the Python lexer.
+// code point, 6 each), sorted, searched in place.
 
 pub const UNICODE_VERSION: str = "15.1.0"
 

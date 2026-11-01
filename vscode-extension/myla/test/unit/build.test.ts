@@ -48,10 +48,10 @@ test("a message without a position is not a diagnostic", () => {
 });
 
 test("the build command line", () => {
-  const cli = { command: "python3", args: ["/r/myla.py"] };
+  const cli = { command: "/opt/myla", args: ["--stdlib", "/r/src/myla"] };
   assert.deepEqual(buildCommand(cli, "/w/a.my", "/tmp/out/a", true), {
-    command: "python3",
-    args: ["/r/myla.py", "build", "/w/a.my", "-o", "/tmp/out/a", "-g"],
+    command: "/opt/myla",
+    args: ["--stdlib", "/r/src/myla", "build", "/w/a.my", "-o", "/tmp/out/a", "-g"],
   });
   assert.deepEqual(buildCommand({ command: "/r/build/myla", args: [] }, "/w/a.my", "/o/a", false).args, [
     "build",
@@ -89,8 +89,6 @@ test("a project is built by the project's `myla build` (MYLA-94)", () => {
     cwd: "/w/app",
     executable: "/w/app/build/app",
   });
-  const python = { command: "python3", args: ["/r/myla.py"] };
-  assert.match((projectBuild(python, "/w/app", '[package]\nname = "app"\n') as { missing: string }).missing, /build\/myla/);
   assert.match((projectBuild(cli, "/w/app", "[dependencies]\n") as { missing: string }).missing, /package\.name/);
 });
 
