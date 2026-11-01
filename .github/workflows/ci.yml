@@ -82,6 +82,8 @@ jobs:
       # from the seed: as and ld only, no Python (MYLA-218)
       - name: Build stage 0–3 from bootstrap/seed.s and compare stage2.s with stage3.s
         run: scripts/bootstrap.sh build
+      - name: The seed is the current compiler (else run scripts/update-seed.sh and commit it)
+        run: scripts/check-seed.sh build
       - name: Self-hosted compiler builds and runs an example
         run: |
           build/stage3 examples/hello.my src/myla > build/hello.s

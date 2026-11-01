@@ -33,12 +33,13 @@ The result is about 6.2 MB of assembly and a 1.5 MB static binary; the whole scr
 
 `bootstrap/seed.s` is the `stage3.s` of a fixed point, under a header that names the commit it came from and the SHA-256 of the assembly below it. `scripts/update-seed.sh` makes it: it runs the bootstrap (from the current seed, or with `--from-python`) and writes the new seed. Git shows it collapsed and without diffs (`.gitattributes`); each new seed adds about 0.6 MB to the repository's history, compressed.
 
-- **When to update it:** before the compiler's own source (`selfhost/`, and the standard library it imports) uses a construct the current seed can't compile: change the compiler, commit, update the seed, then use the construct. Otherwise whenever convenient; an old seed still works.
+- **When to update it:** with every change to the compiler's output, committed in the same pull request: `scripts/update-seed.sh` (about 8 s), then commit `bootstrap/seed.s`. CI's `bootstrap` job fails when the seed isn't the compiler of the sources (`scripts/check-seed.sh`), so a pull request carries one seed version (about 250 KB of history for a sizeable change; a seed per commit would multiply that). A bootstrap still works from an older seed, as long as it can compile the sources.
+- **The optional pre-push hook:** `scripts/install-hooks.sh` sets `core.hooksPath` to `.githooks/`, whose `pre-push` runs `scripts/check-seed.sh` (about 6 s) when the commits pushed change `selfhost/`, `src/myla/std/` or the seed, and stops the push if the seed is stale (`MYLA_SKIP_SEED_CHECK=1 git push` skips it once). It checks the working tree, so commit first.
 - **What it doesn't limit:** the seed only has to compile the compiler. What the compiler emits for programs (new system calls, IPC, a C FFI, LLVM output, other platforms) is the compiler's business, not the seed's.
 - **Checking a seed:** run `scripts/update-seed.sh` at the commit its header names and compare; the compiler is deterministic, so the result is the same byte for byte.
 - **Other hosts:** the seed is x86-64 Linux assembly; another host cross-compiles from x86-64 Linux, or gets a seed of its own later.
 
-The burn tests bootstrap from the seed too (`tests/burn/_tools.py`, [[MYLA-235]]), and CI's `bootstrap` job runs without Python, then once more with `--from-python`.
+The burn tests bootstrap from the seed too (`tests/burn/_tools.py`, [[MYLA-235]]), and CI's `bootstrap` job runs without Python, checks that the seed is current, then bootstraps once more with `--from-python`.
 
 ## Why it used to be slow
 
@@ -57,6 +58,8 @@ Both fixes left `stage2.s` byte-identical. A full bootstrap now takes about 8 se
 scripts/bootstrap.sh [OUT_DIR]       # default ./build, from bootstrap/seed.s
 scripts/bootstrap.sh --from-python   # stage 1 by the Python toolchain; MYLA="uv run myla.py" to change its command
 scripts/update-seed.sh               # a new seed from the current sources (see "The seed")
+scripts/check-seed.sh [build]        # is the seed the current compiler? (CI and the pre-push hook)
+scripts/install-hooks.sh             # the optional pre-push hook for this clone
 just bootstrap                       # the same
 ```
 
