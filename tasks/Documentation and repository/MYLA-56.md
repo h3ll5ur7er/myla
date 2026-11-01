@@ -2,7 +2,7 @@
 id: MYLA-56
 title: Docs inside code point at moved or stale pages
 type: chore
-status: review
+status: done
 priority: low
 labels: [docs]
 ---

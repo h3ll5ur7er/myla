@@ -2,7 +2,7 @@
 id: MYLA-32
 title: Self-hosted interpreter diverges from the Python interpreter
 type: bug
-status: review
+status: done
 priority: medium
 labels: [selfhost, interpreter, parity]
 ---

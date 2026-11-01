@@ -2,7 +2,7 @@
 id: MYLA-144
 title: The concurrency stress tests
 type: test
-status: done
+status: todo
 priority: medium
 labels: [concurrency, tests, design]
 ---
@@ -45,7 +45,7 @@ From the first runs (programs in `tests/burn/test_concurrency_stress.py` to come
 | 5 | Waiting cycles | A cycle doesn't check; a child awaiting a sibling printed garbage natively | Supported everywhere ([[MYLA-148]], `t05_child_awaits_sibling`, `t05_siblings_share_a_result`) |
 | 6 | Reentrancy across an await | The last item sold twice (stock -1) | A warning (D95, [[MYLA-146]]); checking again after the `await`: one sale (`t06_recheck_after_the_await`) |
 | 7 | Cancellation and cleanup | Not expressible | Cooperative cancelling (D96, [[MYLA-149]]): cancelled at each of seven points, the worker gives back the resource, never twice (`t07_cancelled_holder_gives_back`) |
-| 8 | Failure while siblings run | The interpreters hung, native code left the sibling running | The sibling cancelled, the failure ends the program, everywhere (D94, [[MYLA-147]], two `t08_` programs) |
+| 8 | Failure while siblings run | The interpreters hung, native code left the sibling running | The sibling cancelled, the failure ends the program, everywhere (D94, [[MYLA-147]]); at once, wherever the parent waits, also in a `task.all` group (D97, [[MYLA-150]]; four `t08_` programs) |
 | 9 | A stale result | "ca" shown | The program's to decide: a request number (`t09_latest_request_wins`), or cancelling the old request (`t09_cancel_the_stale_request`) |
 | 10 | Memory visibility | 42 | The same (`t10_publication_through_an_actor`) |
 | 11 | Retryable transactions | Not applicable (no transactions) | Not applicable |
@@ -53,3 +53,14 @@ From the first runs (programs in `tests/burn/test_concurrency_stress.py` to come
 
 The table is on the Concurrency page too ([[Language/Concurrency]]).
 - Unit 621, integration 2, burn 808 (5 skipped) and the extension's 54 tests pass; the bootstrap reaches its byte-identical fixed point (6,107,397 bytes).
+
+## Follow-up (October 2026 review)
+
+Reopened on 2026-10-31: the review ([[Project/Review-2026-10]]) found four shapes none of the sixteen programs exercise, and each is where a problem was found. Each becomes a `t13_` to `t16_` program once its task settles the behaviour (an error-corpus file where the program is rejected):
+
+- [x] `t13_child_of_an_actor_method`: an `async let` in an actor method reading `self` ([[MYLA-168]])
+- [ ] `t14_struct_method_in_actor`: an awaited `var self` struct method on an actor field ([[MYLA-169]])
+- [x] `t15_failure_beside_a_busy_sibling`: a failure while a sibling loops without a suspension point ([[MYLA-170]])
+- [x] `t16_long_lines`: lines longer than `PIPE_BUF` from several tasks ([[MYLA-173]])
+
+The review's programs (2026-11-01): `t13_child_of_an_actor_method` and `t13_actor_state_across_an_await` ([[MYLA-168]], [[MYLA-198]]), `t15_failure_beside_a_busy_sibling` ([[MYLA-170]]), `t16_long_lines` (the idiom for lines longer than a pipe keeps whole, [[MYLA-173]]); `t14` waits for [[MYLA-169]]'s decision.

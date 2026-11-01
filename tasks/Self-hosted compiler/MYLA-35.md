@@ -2,7 +2,7 @@
 id: MYLA-35
 title: justfile recipes drop arguments and leave files behind
 type: bug
-status: review
+status: done
 priority: low
 labels: [scripts, selfhost]
 ---

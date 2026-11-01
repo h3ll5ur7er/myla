@@ -2,7 +2,7 @@
 id: MYLA-66
 title: Debugger support
 type: feature
-status: review
+status: done
 priority: low
 labels: [tooling, debugging, backend]
 ---

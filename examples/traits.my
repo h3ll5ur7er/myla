@@ -1,4 +1,4 @@
-// traits.my — traits, operator overloading & derivable Eq (v0.4.4): a user
+// traits.my — traits, operator overloading & derivable Eq: a user
 // `trait` + `impl Trait for T`, the built-in operator traits (Add/Eq/Ord),
 // `#derive(Eq)`, and the limited generic bounds `<T: Trait>` (D52/D53, X8/X9).
 

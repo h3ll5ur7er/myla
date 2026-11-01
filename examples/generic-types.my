@@ -1,4 +1,4 @@
-// Generic structs & enums (v0.2.4b): parametric aggregates, monomorphized (D13).
+// Generic structs & enums: parametric aggregates, monomorphized (D13).
 //
 // A `struct`/`enum` may take type parameters in `<...>` after its name; a use
 // site supplies concrete type arguments (`Box<int>`, `List<str>`). Each distinct

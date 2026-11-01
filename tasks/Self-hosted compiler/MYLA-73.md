@@ -2,7 +2,7 @@
 id: MYLA-73
 title: Self-hosted lexer wraps integer literals of 2^63 and above
 type: bug
-status: review
+status: done
 priority: low
 labels: [selfhost, lexer]
 ---

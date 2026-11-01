@@ -118,10 +118,20 @@ class SelfHostedCli(_Layout):
                 self.assertIn("note: other calls to the actor may run at this 'await'", mine.stderr)
         self.assertEqual(self.myla_cmd("run", "warned.my").stdout, "true\n")
 
+    def test_help(self):
+        # `--help` prints the usage on stdout and succeeds (MYLA-178)
+        for flag in ("--help", "-h", "help"):
+            with self.subTest(flag=flag):
+                proc = self.myla_cmd(flag)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertTrue(proc.stdout.startswith("usage: myla <command>"), proc.stdout)
+        self.assertEqual(self.myla_cmd("--nope").returncode, 2)
+
     def test_errors_of_programs_that_import(self):
         # the corpus's type errors behind an import, which the checker gate
         # leaves out (it checks single files): the same diagnostics as Python's
-        for name in ("type_task_cancel_not_a_task.my", "type_lambda_cancels_child_task.my"):
+        for name in ("type_task_cancel_not_a_task.my", "type_lambda_cancels_child_task.my",
+                     "type_task_cancel_as_value.my"):
             with self.subTest(program=name):
                 path = os.path.join(_REPO, "examples", "errors", name)
                 mine = self.myla_cmd("check", path)

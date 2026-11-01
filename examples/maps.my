@@ -1,6 +1,6 @@
-// Maps `[K: V]` (v0.3.4): a reference-counted, copy-on-write hash table with
-// value semantics (W1/D38/D39). Keys must be a primitive comparable type
-// (`int`, `bool`, `str`); values may be any type.
+// Maps `[K: V]`: a reference-counted, copy-on-write hash table with
+// value semantics (D38, D39). Keys are integers, `char`, `bool` or `str`;
+// values may be any type.
 //
 // Like lists, a map is a *value*: binding, passing, returning, or assigning it
 // produces an independent value, so mutating one binding never affects another.

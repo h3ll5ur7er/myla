@@ -2,7 +2,8 @@
 # Everything here uses only the standard library plus GNU binutils (as/ld), which
 # the Ubuntu runners already have; the burn job also installs Node, for the
 # tree-sitter CLI of the editor-grammar tests and the VS Code extension's
-# server choice. The vscode-extension job typechecks, lints and tests the VS
+# server choice, and gdb for the debug-information tests. The runners are
+# pinned (ubuntu-24.04: its python3 is 3.12, which gdb embeds). The vscode-extension job typechecks, lints and tests the VS
 # Code extension and uploads its .vsix. See docs/Development/Testing.md.
 name: CI
 
@@ -19,14 +20,14 @@ concurrency:
 jobs:
   unit:
     name: Unit and integration tests (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - name: Unit tests
@@ -36,36 +37,49 @@ jobs:
 
   burn:
     name: Burn tests (native builds, error corpus, self-hosting gates)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      # the runner's own python3 (3.12), not actions/setup-python: that sets
+      # LD_LIBRARY_PATH to its libpython, which gdb then embeds instead of its
+      # own, and the pretty-printers the binaries embed (D82) don't run
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: editor/tree-sitter-myla/package-lock.json
+      - name: gdb for the debug-information tests (MYLA-156)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdb
+          gdb --version | head -1
+      # the self-hosted tools the burn tests build, keyed on every source
+      # that can change them (as tests/burn/_tools.py's own hash is)
+      - uses: actions/cache@v6
+        with:
+          path: build/test-tools
+          key: test-tools-${{ hashFiles('src/myla/**/*.py', 'src/myla/std/*.my', 'selfhost/*.my', 'tools/**/*.my') }}
       - name: tree-sitter CLI for the editor-grammar tests (MYLA-77)
         run: |
           npm ci --no-audit --no-fund --ignore-scripts --prefix editor/tree-sitter-myla
           cd editor/tree-sitter-myla/node_modules/tree-sitter-cli && node install.js
       - name: Toolchain versions
         run: |
-          python --version
+          python3 --version
           as --version | head -1
           ld --version | head -1
           editor/tree-sitter-myla/node_modules/.bin/tree-sitter --version
       - name: Burn tests
-        run: python -m unittest discover -s tests/burn -t . -v
+        run: python3 -m unittest discover -s tests/burn -t . -v
 
   bootstrap:
     name: Bootstrap fixed point
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Build stage 1–3 and compare stage2.s with stage3.s
@@ -79,19 +93,19 @@ jobs:
 
   vscode-extension:
     name: VS Code extension (typecheck, lint, tests, .vsix)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
         working-directory: vscode-extension/myla
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # the debugger's integration test builds Myla programs with the Python
       # CLI (python3 myla.py build -g) and debugs them with gdb. It uses the
       # runner's own python3 (3.12): actions/setup-python sets LD_LIBRARY_PATH
       # to its libpython, which gdb then embeds instead of the one it was
       # built with, and the pretty-printers the binaries embed (D82) don't run
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -115,7 +129,7 @@ jobs:
         run: npx vsce package
       - name: List the .vsix
         run: unzip -l *.vsix
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: myla-vscode-extension
           path: vscode-extension/myla/*.vsix

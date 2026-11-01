@@ -2,7 +2,7 @@
 id: MYLA-86
 title: More escapes in string literals (\r, \0, \u{…})
 type: feature
-status: review
+status: done
 priority: low
 labels: [lexer, selfhost, spec, grammar]
 ---

@@ -29,8 +29,8 @@ The reference for Myla as the Python toolchain implements it (version 1.0). The 
 | [[Language/Collections-and-strings]] | Lists, maps, strings, `format`, `StringBuilder`, chars |
 | [[Language/Modules]] | Imports, `pub`, packages, resolution rules |
 | [[Language/Standard-library]] | `print` and the other built-in functions, `std.io`, `std.fs`, `std.process` |
-| [[Language/Concurrency]] | D89, in progress: `async`/`await`, `async let`, `std.task`, actors |
+| [[Language/Concurrency]] | D89 to D97: `async`/`await`, `async let`, `std.task`, actors |
 | [[Language/Attributes-and-testing]] | `#main`, `#test`, `#derive`, `const`, `assert`/`panic`/`unreachable`, runtime errors |
 | [[Language/Grammar]] | The grammar in EBNF |
 
-The reasons behind each rule are recorded as numbered decisions (D1–D58) on [[Project/Decisions]].
+The reasons behind each rule are recorded as numbered decisions (D1–D97) on [[Project/Decisions]]. When a rule is broken, the message underlines the place, often with a note (`'x' is declared here`) or a `help: did you mean 'count'?` line for a misspelt name, and both toolchains print the same text.

@@ -22,8 +22,8 @@ Inspired by modern languages like Swift, Rust, and Python.
 - Extensible using metaprogramming (attributes/macros, e.g. `#main`, `#test`)
 - All kinds of syntactic sugar
 
-> Concrete syntax proposals and a suggested rollout order for these live in
-> [docs/Archive/future-features.md](docs/Archive/future-features.md).
+> The language as it is today is described in the wiki: [Language](docs/Language.md).
+> The early proposals for these are kept in [docs/Archive/future-features.md](docs/Archive/future-features.md).
 
 ## Proposed guidelines
 ### Syntax
@@ -46,7 +46,9 @@ is tracked as tasks under [`tasks/`](tasks/). Both are plain Markdown managed wi
 - [Language](docs/Language.md) — the language reference, including the [grammar](docs/Language/Grammar.md)
 - [Architecture](docs/Architecture.md) — the Python toolchain, the self-hosted compiler, editor tooling
 - [Development](docs/Development.md) — testing, bootstrap, conventions
-- [Project](docs/Project.md) — [roadmap](docs/Project/Roadmap.md), [decision log D1–D58](docs/Project/Decisions.md), [known issues](docs/Project/Known-issues.md)
+- [Project](docs/Project.md) — [roadmap](docs/Project/Roadmap.md), [decision log D1–D97](docs/Project/Decisions.md), [known issues](docs/Project/Known-issues.md)
+
+What is there today: value semantics with sized integers, enums and `match`, traits, generics, closures and pipelines, guaranteed tail calls (`become`), Swift-style concurrency (`async`/`await`, structured child tasks, actors) on a multi-threaded native runtime, a standard library with JSON and TOML, a project tool with Git dependencies (`myla new`, `build`, `run`, `test`, `check`, `fetch`), a language server, a VS Code extension with a debugger, and a compiler written in Myla that compiles itself.
 
 The documents written during development (the v0.0 spec, grammar and architecture,
 the self-hosting plan, the per-version v0.2–v0.5 designs, the feature catalog and
@@ -65,6 +67,8 @@ uv run myla.py run myscript.my
 uv run myla.py build myscript.my -o myscript
 # run inline #test cases
 uv run myla.py test myscript.my
+# type-check only
+uv run myla.py check myscript.my
 # repl (in the self-hosted CLI, which scripts/bootstrap.sh builds)
 build/myla repl
 ```
@@ -90,15 +94,19 @@ build/stage3 examples/hello.my src/myla > hello.s
 as --64 -o hello.o hello.s && ld -o hello hello.o && ./hello
 ```
 
-See [Known issues](docs/Project/Known-issues.md) for current gaps (notably float
-codegen) and the [Roadmap](docs/Project/Roadmap.md) for status.
+`scripts/bootstrap.sh` also builds `build/myla`, the self-hosted command-line
+tool (`run`, `test`, `build`, `check`, `repl` and the project commands), and the
+language server. See [Known issues](docs/Project/Known-issues.md) for current
+gaps and the [Roadmap](docs/Project/Roadmap.md) for status.
 
 ### Testing convention
 
-Every `.my` example (and, once we self-host, the compiler source itself) attaches
-`#test(inputs)[expected]` cases to **every value-returning function**, turning each
-file into its own regression suite runnable with `myla test`. Entry points and
-void helpers are exempt since they cannot be unit-tested.
+Every `.my` example attaches `#test(inputs)[expected]` cases to **every
+value-returning function**, turning each file into its own regression suite
+runnable with `myla test`. Entry points and void helpers are exempt since they
+cannot be unit-tested. The self-hosted compiler's sources carry such cases in
+places only ([MYLA-184](tasks/Self-hosted%20compiler/MYLA-184.md)); the parity
+gates against the Python toolchain cover them.
 
 This is deliberately redundant with the Python test suite today, but it is what
 keeps a self-hosted Myla honest: when the toolchain is written in Myla, these
@@ -130,7 +138,7 @@ fun main() {
 }
 ```
 
-The leading `<lex|parse|type|runtime> error` selects the pipeline stage that must
+The leading `<lex|parse|module|type|runtime> error` selects the pipeline stage that must
 fail and the trailing text is a substring of the expected message.
 [`test_error_corpus.py`](tests/burn/test_error_corpus.py) runs each through the
 toolchain and asserts it fails in the right stage with the right message — so a

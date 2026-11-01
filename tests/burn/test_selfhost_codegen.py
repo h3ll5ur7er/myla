@@ -109,6 +109,7 @@ PARITY_PROGRAMS = (
     "derived_eq_on_plain_enums",
     "const_string_concatenation_in_functions",
     "local_closure_shadows_a_function",
+    "local_closure_shadows_a_builtin",
     "plain_aggregates",
     "strings_through_the_ir",
     "lists_through_the_ir",
@@ -131,6 +132,7 @@ STRESS_PROGRAMS = {
     "STRESS_STR_OWNERSHIP_SRC": "4650000",
     "STRESS_TRY_SRC": "100000",
     "STRESS_TRY_AFTER_STAGED_VALUE_SRC": "7500000",
+    "STRESS_TRY_IN_LITERAL_SRC": "1200000",
     "STRESS_LOOPCTL_SRC": "200001\n133333",
     "STRESS_LIST_SRC": "0",
     "STRESS_MAP_SRC": "0",
@@ -1264,13 +1266,14 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertEqual((out, code), ("8997000\n3000\n100000\n", 0))
             self.assertLess(peak, 64, f"peak {peak:.1f} MB")
 
-    def test_child_failures_are_held_for_the_parent(self) -> None:
-        """A panic or `exit` in a child task waits for its parent's `await`
-        (or scope end) while the other tasks go on, as in the interpreters
-        (D89). On one thread the order is fixed: the self-hosted interpreter
+    def test_child_failures_end_the_program_at_once(self) -> None:
+        """A panic or `exit` in a child task ends the program at once: every
+        other task stops at its next suspension point, then the failure is
+        reported (D97; it used to wait for the parent's `await` or scope end,
+        D89). On one thread the order is fixed: the self-hosted interpreter
         prints the same; the Python interpreter's threads may interleave."""
         stdlib = default_stdlib_root()
-        for name, (src, want_out, want_code, want_err) in HELD_FAILURES.items():
+        for name, (src, want_out, want_code, want_err) in CHILD_FAILURES.items():
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, name + ".my")
                 with open(path, "w", encoding="utf-8") as fh:
@@ -1424,15 +1427,16 @@ ACTOR_PROGRAMS = {
 _HELD_COUNTER = ("actor C { n: int }\nimpl C {\n    fun bump(var self) -> int {\n"
                  "        self.n = self.n + 1\n        return self.n\n    }\n}\n")
 # (program, stdout, exit code, the start of stderr)
-HELD_FAILURES = {
+CHILD_FAILURES = {
+    # main stops at its next call of the actor, before `await b` (D97)
     "held_panic": (_HELD_COUNTER + (
         "async fun boom(c: C) -> int {\n    let x = await c.bump()\n    panic(\"boom\")\n    return 0\n}\n"
         "async fun fine(c: C) -> int {\n    return await c.bump() * 10\n}\n"
         "#main\nasync fun main() {\n    let c = C { n: 0 }\n    async let a = boom(c)\n    async let b = fine(c)\n"
         "    var i = 0\n    while i < 5 {\n        print(await c.bump())\n        i = i + 1\n    }\n"
         "    print(await b)\n    print(\"before a\")\n    print(await a)\n    print(\"never\")\n}\n"),
-        "1\n4\n5\n6\n7\n30\nbefore a\n", 1, "runtime error: boom\n"),
-    # a grandchild's `exit` reaches its parent's scope end, then main's await
+        "1\n", 1, "runtime error: boom\n"),
+    # a grandchild's `exit` ends the program before main is done counting
     "held_exit": ("from std.process import exit\n" + _HELD_COUNTER + (
         "async fun leave(c: C) {\n    let x = await c.bump()\n    exit(4)\n}\n"
         "async fun inner(c: C) -> int {\n    async let l = leave(c)\n    let y = await c.bump()\n"
@@ -1440,9 +1444,9 @@ HELD_FAILURES = {
         "#main\nasync fun main() {\n    let c = C { n: 0 }\n    async let a = inner(c)\n"
         "    for i in 0..4 {\n        print(await c.bump())\n    }\n    print(\"waiting\")\n"
         "    print(await a)\n    print(\"never\")\n}\n"),
-        "1\ninner goes on\n3\n5\n6\nwaiting\n", 4, ""),
+        "1\ninner goes on\n3\n", 4, ""),
     # children of synchronous calls are tasks too: they run when the parent
-    # waits, and their failure waits for the `await`
+    # waits, here at its `await`, which their failure stops
     "held_sync_child": (
         "fun noisy(i: int) -> int {\n    print(f\"noisy {i}\")\n    return i * 2\n}\n"
         "fun pick(xs: [int], i: int) -> int {\n    return xs[i]\n}\n"

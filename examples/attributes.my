@@ -1,4 +1,4 @@
-// attributes.my — built-in v0.0 attributes: #main and #test.
+// attributes.my — built-in attributes: #main and #test.
 
 // #test cases are checked by `myla test`: call the function with the inputs in
 // (...) and assert the result equals the value in [...].

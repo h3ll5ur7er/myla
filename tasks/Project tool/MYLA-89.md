@@ -2,7 +2,7 @@
 id: MYLA-89
 title: std.toml - the TOML subset of D73
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib]
 ---

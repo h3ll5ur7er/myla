@@ -1,5 +1,5 @@
 // tuples.my — fixed-size products: literals, indexing, destructuring,
-// multiple return, and value semantics (v0.2).
+// multiple return, and value semantics.
 
 struct Point {
     x: int,

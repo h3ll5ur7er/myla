@@ -17,4 +17,4 @@ Package layout (see docs/Architecture.md):
     std/            the standard library (Myla sources)
 """
 
-__version__ = "0.0.1"
+__version__ = "1.0.0"

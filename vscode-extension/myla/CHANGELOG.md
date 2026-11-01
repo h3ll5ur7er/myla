@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Requires VS Code 1.91 or later: `vscode-languageclient` 10, which writes its log to the *Myla* output channel, now a log channel (MYLA-199).
+- Development dependencies: `@vscode/vsce` 4.1 and the advisory of `@azure/msal-node` it pulled in fixed (Dependabot's updates, MYLA-199).
+
 ## 0.1.0
 
 - **Projects in the language server** (MYLA-97): a file inside a project (`myla.toml`) is checked with the project's dependencies, so their imports resolve and definition, references, hover and completion reach into them; manifest errors show on `myla.toml`. The file watcher also reports changes to `myla.toml` and `myla.lock`.

@@ -22,7 +22,7 @@
     "syntax highlighting"
   ],
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.91.0"
   },
   "categories": [
     "Programming Languages",
@@ -358,14 +358,14 @@
     "package": "vsce package"
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.1"
+    "vscode-languageclient": "^10.1.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^20.19.43",
-    "@types/vscode": "~1.90.0",
+    "@types/vscode": "~1.91.0",
     "@vscode/debugprotocol": "^1.68.0",
-    "@vscode/vsce": "^4.0.0",
+    "@vscode/vsce": "^4.1.0",
     "esbuild": "^0.28.2",
     "eslint": "^10.13.0",
     "typescript": "~6.0.3",

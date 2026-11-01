@@ -147,6 +147,19 @@ class NativeRuntime(unittest.TestCase):
                                      ("1\n", f"runtime error: {message}\n{where}\n", 1))
                     self.assertEqual(where, self.interpreter_position(name))
 
+    def test_a_stack_overflow_is_reported(self):
+        # the main stack grows to 120 MiB, and running out of it is a runtime
+        # error from both backends, as from the interpreters (MYLA-182)
+        source = ("fun down(n: int) -> int {\n    if n == 0 {\n        return 0\n    }\n"
+                  "    return down(n - 1) + 1\n}\n\n"
+                  "fun main() {\n    print(down(1000000))\n    print(down(100000000))\n}\n")
+        for backend, binary in self.binaries("overflow", source):
+            with self.subTest(backend=backend):
+                proc = subprocess.run([binary], capture_output=True, text=True, timeout=60)
+                # a million calls fit in 120 MiB, where 8 MiB held some 130,000
+                self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
+                                 ("1000000\n", "runtime error: stack overflow\n", 1))
+
     def test_runtime_errors_in_an_imported_module_name_its_file(self):
         for line, message, position in MODULE_TRAPS:
             with self.subTest(line=line):

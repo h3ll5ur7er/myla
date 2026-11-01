@@ -1,4 +1,4 @@
-// methods.my — methods & `impl` blocks (v0.4.1): `self` / `var self`, method
+// methods.my — methods & `impl` blocks: `self` / `var self`, method
 // chaining, value semantics, generic impls, enum methods, and methods on
 // built-in types (no orphan rule, D45–D47).
 

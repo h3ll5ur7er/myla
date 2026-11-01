@@ -1,14 +1,15 @@
 """Command-line interface for the Myla toolchain.
 
 Commands (see README "CLI"):
-    run <file.my>            interpret a program            (implemented)
-    test <file.my>           run #test cases                (implemented)
-    build <file.my> -o <bin> compile to a native binary     (implemented)
-    repl                     interactive interpreter        (planned: v0.0.2)
+    run <file.my>            interpret a program
+    test <file.my>           run #test cases
+    build <file.my> -o <bin> compile to a native binary
+    check <file.my>          type-check without running
+    repl                     points at `build/myla repl`, the self-hosted REPL
 
-Development/debug commands available now:
-    tokenize <file.my>       print the token stream (the lexer is implemented)
-    parse <file.my>          print the parsed AST (the parser is implemented)
+Development/debug commands:
+    tokenize <file.my>       print the token stream
+    parse <file.my>          print the parsed AST
 """
 from __future__ import annotations
 
@@ -136,9 +137,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
     try:
         checker = _front_end(args.file, args)
         _warn(checker, args.file, source)
-        return Interpreter(checker, argv=argv).run()
+        interp = Interpreter(checker, argv=argv)
+        # a task's failure is reported when it happens, before the program
+        # waits for its other tasks to stop (D97, MYLA-170)
+        interp.on_task_failure = lambda err: _report(err, args.file, source)
+        return interp.run()
     except MylaError as err:
-        _report(err, args.file, source)
+        if not getattr(err, "reported", False):
+            _report(err, args.file, source)
         return 1
 
 
@@ -147,7 +153,9 @@ def _cmd_test(args: argparse.Namespace) -> int:
     try:
         checker = _front_end(args.file, args)
         _warn(checker, args.file, source)
-        results = Interpreter(checker).run_tests()
+        # the entry file's own cases, not those of the modules it imports
+        # (MYLA-187)
+        results = Interpreter(checker).run_tests(own_only=True)
     except MylaError as err:
         _report(err, args.file, source)
         return 1
@@ -294,6 +302,13 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(errors="surrogateescape")
     try:
         return args.func(args)
-    except FileNotFoundError as err:
+    except BrokenPipeError:
+        # the reader went away (`myla tokenize f.my | head`): no traceback,
+        # and nothing more written to the closed pipe (MYLA-178)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 1
+    except OSError as err:
+        # a missing file, a directory given for a file, … (MYLA-178)
         print(f"error: {err}", file=sys.stderr)
         return 1

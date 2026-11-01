@@ -1,7 +1,0 @@
-{
-    // The Myla extension finds myla.py and the project's .venv in the
-    // workspace by itself. Set these only to override; ${workspaceFolder} is
-    // expanded:
-    // "myla.compilerPath": "${workspaceFolder}/myla.py",
-    // "myla.pythonPath": "${workspaceFolder}/.venv/bin/python",
-}

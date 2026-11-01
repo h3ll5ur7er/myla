@@ -2,7 +2,7 @@
 id: MYLA-94
 title: Project commands in build/myla (path dependencies)
 type: feature
-status: review
+status: done
 priority: medium
 labels: [tooling, cli, selfhost]
 ---
@@ -42,3 +42,7 @@ Step 5 of the project tool ([[MYLA-64]]): `myla new`, `build`, `run`, `test`, `c
   - errors: no manifest (every command), a manifest error, compile errors with project-relative paths in `run`/`check`/`test`, a Git dependency not checked out, the usage.
 - **Unit tests:** the new `#test` cases of `relative_path`, `is_qualified`, `count` and `ends_with` pass under `myla test`.
 - **The other suites:** the CLI parity test (`myla test file.my` against the Python CLI on the corpus) and the rest still pass; see the full-suite numbers in the commit.
+
+## Evidence (sign-off, 2026-10-31)
+
+The review ([[Project/Review-2026-10]]) found `myla clean` refusing to clean: it located the project through `checked_out_project`, so a dependency that isn't locked (a Git dependency after its tag was edited, or before the first `myla fetch`) stopped it with ``dependency 'geo' is not locked: run `myla fetch` `` and nothing was removed. `project_clean` now reads only the manifest (`find_here`) and removes `build/` (and `.myla/` with `--deps`) from the manifest's directory. Test first: `test_clean_needs_no_resolvable_dependencies` in `tests/burn/test_project_commands.py` (a project with an unlocked Git dependency: `check` reports it, `clean` removes `build/` and leaves `.myla/`, `clean --deps` removes `.myla/`), failing before (`myla: dependency 'greet' is not locked`, exit 1), passing after; the module's 15 tests pass.

@@ -1,6 +1,6 @@
 # Expressions and operators
 
-The parser implements precedence by one function per level ([[src/myla/parser.py#L663-L763]]); the operator typing rules are in `Checker._infer_binary` ([[src/myla/types.py#L2750-L2881]]).
+The parser implements precedence by one function per level (`Parser._pipe` down to `Parser._unary` in [[src/myla/parser.py]]); the operator typing rules are in `Checker._infer_binary` ([[src/myla/types.py]]).
 
 [TOC]
 
@@ -72,7 +72,7 @@ fun main() {
 ```
 
 - `x |> f` is `f(x)`, and `x |> f(a, b)` is `f(x, a, b)`. It is rewritten by the parser (D50).
-- `f >> g` with two one-argument function values is `(x) => g(f(x))`; `f`'s result type must equal `g`'s parameter type. With integer operands `>>` is the shift (D24).
+- `f >> g` with two one-argument function values is `(x) => g(f(x))`; `f`'s result type must equal `g`'s parameter type. With integer operands `>>` is the shift (D24). Both operands are functions or both are integers; anything else is an error (`shift amount for '>>' must be an integer`).
 - A call with `_` arguments is a lambda over the holes, left to right. The other arguments (and a method's receiver) are evaluated once, left to right, when the partial is made, and every call reuses those values (D51, D60): `let p = g(f(1), _)` runs `f(1)` right there, not at each `p(…)`. Every parameter must be listed: there is no automatic currying. It works on functions, methods and function values bound to a name, not on generic functions.
 
 ## The `?` operator
@@ -118,5 +118,5 @@ Subexpressions evaluate left to right, in the interpreter and in native code ali
 - A call evaluates the arguments in order; a method call evaluates the receiver first, and a call through a function value evaluates the callee first. `x |> f(y)` is `f(x, y)`, so `x` comes first.
 - Struct, tuple, list and enum literals evaluate their elements in the order written (a struct literal in the order of its fields as written, not as declared). A map literal evaluates each key, then its value.
 - `format` and `f"…"` evaluate their arguments left to right.
-- A partial application `f(a, _)` evaluates its receiver and filled arguments when it is made (D60).
+- A partial application `f(a, _)` evaluates its receiver and filled arguments when it is made (D60). `_` stands only as a call argument (`'_' placeholder is only valid as a call argument`).
 - An assignment evaluates the value first, then the place: `xs[i] = v` evaluates `v`, then `xs`, then `i`. `push(xs, v)`, `append_byte(sb, b)` and the other writes into a container likewise evaluate the value before they touch the container (MYLA-4).

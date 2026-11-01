@@ -378,8 +378,8 @@ const FRAME_CALLER: int32 = 8
 const FRAME_TASK: int32 = 24
 const FRAME_RESULT: int32 = 72
 
-// A frame's task (its first frame), a task's flags (1: its children are
-// cancelled, D94) and its parent task.
+// A frame's task (its first frame), a task's flags (2: `task.cancel` asked
+// it to stop, D96) and its parent task.
 const FRAME_ROOT: int32 = 40
 const FRAME_PARENT: int32 = 56
 
@@ -403,10 +403,6 @@ struct CallTarget { name: str, params: [Type], ret: Option<Type> }
 // The name of the actor type `t` (D89).
 fun actor_name(t: Type) -> str {
     return match t { Type.TActor(n) => n, _ => "" }
-}
-
-fun is_cell(t: Type) -> bool {
-    return is_cell_t(t)
 }
 
 impl Lower {
@@ -541,6 +537,9 @@ impl Lower {
     fun fixed_place(self, e: Expr) -> bool {
         return match e.kind {
             ExprKind.Name(n) => {
+                // an async actor method's `self`: the actor's other calls
+                // change its fields at every suspension point
+                if self.shared_self(n) { return false }
                 var i = len(self.scopes) - 1
                 while i >= 0 {
                     var j = len(self.scopes[i]) - 1
@@ -557,6 +556,13 @@ impl Lower {
             ExprKind.Index(t, i) => self.fixed_place(t),
             _ => false,
         }
+    }
+
+    // Whether `name` is the `self` of an async actor method, whose fields
+    // the actor's other calls change while it waits (its `let`s, loops and
+    // matches can't borrow from them).
+    fun shared_self(self, name: str) -> bool {
+        return self.actor_self >= 0 && self.lookup(name) == self.actor_self
     }
 
     // The slot of the innermost `name` in scope, or -1.
@@ -660,7 +666,9 @@ impl Lower {
             var i = len(self.owners[s]) - 1
             while i >= 0 {
                 let slot = self.owners[s][i]
-                self.add(Inst.DropSlot(self.f.slots[slot].ty, slot))
+                // an async actor method's handle to its actor is dropped by
+                // `exit_fn`, once the method has left the actor through it
+                if slot != self.actor_self { self.add(Inst.DropSlot(self.f.slots[slot].ty, slot)) }
                 i = i - 1
             }
             s = s - 1
@@ -1319,7 +1327,7 @@ impl Lower {
             let d = self.unsupported("an 'async let' not made a call of an async lambda")
             return
         }
-        // a task of its own, this function's task its parent (D94)
+        // a task of its own, this function's task its parent (D96: a request reaches its children)
         self.add(Inst.StoreAt(fr, FRAME_ROOT, fr))
         let me = self.temp(Type.TInt(64, false))
         self.add(Inst.Frame(me))
@@ -1387,8 +1395,6 @@ impl Lower {
         self.start(done)
         let out = self.temp(Type.TInt(64, false))
         self.add(Inst.Load(out, ts))
-        // a failure in the child is raised here (D89)
-        self.add(Inst.Rt(-1, "__task_check", [out]))
         return out
     }
 
@@ -1442,8 +1448,6 @@ impl Lower {
     }
 
     // The function's end, returning the value in %v (-1: none, or an
-
-    // The function's end, returning the value in %v (-1: none, or an
     // aggregate already in its result's storage); `fall`: the body fell
     // through (`finish`), else a statement ended it (`leave`). A frame
     // function stores a scalar result in its frame and ends with
@@ -1472,7 +1476,11 @@ impl Lower {
         }
         if v >= 0 && self.result >= 0 && self.sret < 0 { self.add(Inst.Store(self.result, v)) }
         if self.deep_res && self.result >= 0 { self.add(Inst.Deep(self.f.slots[self.result].ty, self.slot_addr(self.result))) }
+        // the actor is left through the handle in `self`, so that handle,
+        // possibly the actor's last reference, is dropped only afterwards
+        // (the other owners are dropped before `exit_fn` is called)
         self.leave_self()
+        if self.actor_self >= 0 { self.add(Inst.DropSlot(self.f.slots[self.actor_self].ty, self.actor_self)) }
         let fr = self.temp(Type.TInt(64, false))
         self.add(Inst.Frame(fr))
         self.add(Inst.Call(-1, "__finish", [fr]))
@@ -2253,6 +2261,10 @@ impl Lower {
         if args_have_hole(args) { return self.partial(cg, e, callee, args) }
         match callee.kind {
             ExprKind.Name(nm) => {
+                // a local binding shadows a function or builtin of the same
+                // name: the checker typed the callee as a value (MYLA-102,
+                // MYLA-152)
+                if cg.called_as_value(callee) { return self.indirect_call(cg, e, callee, args, tail) }
                 if nm == "print" && len(args) == 1 { return self.print(cg, args[0]) }
                 if nm == "len" && len(args) == 1 && is_cell_t(cg.type_of(args[0].id)) {
                     let s = self.expr(cg, args[0])
@@ -2696,7 +2708,9 @@ impl Lower {
     // --- lists ------------------------------------------------------------------
 
     // `[a, b, …]`: a new cell holding the elements, each with its own
-    // references; the statement owns it.
+    // references; the statement owns it from the start, its length counting
+    // the elements stored so far, so a `?` failing in an element releases
+    // the cell and those (MYLA-157).
     fun list_lit(var self, cg: CodeGen, lt: Type, elems: [Expr]) -> int32 {
         if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
         let et = list_elem(lt)
@@ -2706,14 +2720,17 @@ impl Lower {
         let cell = self.temp(lt)
         self.add(Inst.Rt(cell, "__alloc", [size]))
         let count = self.konst(Type.TInt(64, true), n as int64)
-        self.add(Inst.StoreAt(cell, 0, count))
+        let owned = cg.owns_heap(et)
+        if owned { self.add(Inst.StoreAt(cell, 0, self.konst(Type.TInt(64, true), 0))) } else { self.add(Inst.StoreAt(cell, 0, count)) }
         self.add(Inst.StoreAt(cell, 8, count))
+        let v = self.owned_value(cg, cell, lt)
         var i = 0
         for el in elems {
             self.store_member(cg, el, cell, 16 + i * stride)
             i = i + 1
+            if owned { self.add(Inst.StoreAt(cell, 0, self.konst(Type.TInt(64, true), i as int64))) }
         }
-        return self.owned_value(cg, cell, lt)
+        return v
     }
 
     // The address of element `idx` of the list or string `base` (bounds
@@ -3196,7 +3213,9 @@ impl Lower {
             result = self.value_slot(cg, "__match", rt, true)
         }
         let root_var = place_root(scrut)
-        let owns_copy = root_var != "" && cg.owns_heap(sst) && arms_may_write(arms, root_var)
+        // the copy owns references of its own when an arm may write the
+        // variable, or when other calls of the actor may (MYLA-168's t13)
+        let owns_copy = root_var != "" && cg.owns_heap(sst) && (arms_may_write(arms, root_var) || self.shared_self(root_var))
         let root = self.value_slot(cg, "__scrutinee", sst, owns_copy)
         let base = self.slot_addr(root)
         if is_aggregate(sst) {
@@ -3451,4 +3470,3 @@ fun diverges(e: Expr) -> bool {
         _ => false
     }
 }
-

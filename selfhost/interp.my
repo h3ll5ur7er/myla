@@ -112,11 +112,11 @@ struct AFrame { scopes: [RtFrame], conts: [Cont], place: Option<Place>, pend: Ct
 
 // A task: its calls, innermost last; `state` 0 ready, 1 waiting, 2 done with
 // its result or failure (a runtime error, or an `exit` with `code`), which
-// reaches the parent at `await` or at the end of the scope that started it;
-// `awaited`: it was asked for; `waiters`: the tasks waiting for it.
-// `cancelled`: a failure in its parent cancelled it (D94), so it stops when
-// it next runs (after a suspension); `kids`: its child tasks, cancelled with
-// it; `requested`: `task.cancel` asked it, or a task above it, to stop (D96).
+// ends the program at once (D97, `failing`); `awaited`: it was asked for;
+// `waiters`: the tasks waiting for it. `cancelled`: a failure cancelled it
+// (D94, D97), so it stops when it next runs (after a suspension); `kids`:
+// its child tasks, cancelled with it; `requested`: `task.cancel` asked it,
+// or a task above it, to stop (D96).
 struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: Option<RtError>, code: int32, awaited: bool, waiters: [int32], cancelled: bool, kids: [int32], requested: bool }
 
 // A call whose async body the async evaluator takes over (Interp.defer).
@@ -171,6 +171,17 @@ pub struct Interp {
     deferred_place: Option<Place>,
     parked: bool,
     yielding: bool,
+    // D97: a task has failed, so the program ends: every other task stops at
+    // its next suspension point, the first task with this failure
+    failing: bool,
+    fail_err: Option<RtError>,
+    fail_code: int32,
+    // MYLA-170: called with a task's runtime error when it fails, before the
+    // other tasks stop; the drivers report it there (true: reported)
+    on_failure: (RtError) -> bool,
+    fail_reported: bool,
+    // calls in progress, up to MAX_CALL_DEPTH (MYLA-182)
+    depth: int32,
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
@@ -235,6 +246,11 @@ enum PlaceOp {
 
 // An interpreter for the checked program `c`, run as `argv` (argv[0] is the
 // program's path, as for `myla run`).
+// The deepest the interpreter's calls go (MYLA-182): an interpreted call takes
+// some 12 to 25 KB of native stack (every IR slot has a cell of its own,
+// MYLA-183), and the runtime lets the main stack grow to 120 MiB.
+const MAX_CALL_DEPTH: int32 = 2500
+
 pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     var it = Interp {
         decls: c.decls,
@@ -259,6 +275,9 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         bodies: [:], suspending: [:],
         defer: false, deferred: None, deferred_place: None,
         parked: false, yielding: false,
+        failing: false, fail_err: None, fail_code: 0,
+        on_failure: (r: RtError) => false, fail_reported: false,
+        depth: 0,
     }
     return it
 }
@@ -408,8 +427,10 @@ impl Interp {
     // PASS/FAIL line for each (after whatever the tests printed) and the
     // summary, as the Python CLI does (`Interpreter.run_tests`, MYLA-81); the
     // exit status: 0 if all pass (or none exist), else 1.
+    // `myla test file.my`: the entry file's own cases, not those of the
+    // modules it imports (MYLA-187)
     fun run_tests(var self) -> int32 {
-        let r = self.run_test_cases(false)
+        let r = self.run_test_cases()
         if r.total == 0 {
             write(1, "no #test cases found.\n")
             return 0
@@ -420,11 +441,11 @@ impl Interp {
         return 1
     }
 
-    // Run the `#test` cases, of the entry module's own functions only when
-    // `own_only` (`myla test` in a project, MYLA-94: the entry's names are the
-    // ones the loader doesn't qualify with a module id), and collect a
+    // Run the `#test` cases of the entry module's own functions (`myla test`
+    // of a file, MYLA-187, and in a project, MYLA-94: the entry's names are
+    // the ones the loader doesn't qualify with a module id), and collect a
     // PASS/FAIL line for each.
-    fun run_test_cases(var self, own_only: bool) -> TestRun {
+    fun run_test_cases(var self) -> TestRun {
         self.collect()
         self.eval_consts()
         var report: [str] = []
@@ -435,7 +456,7 @@ impl Interp {
             let fd = self.func_decls[i]
             var idx = 0
             for attr in fd.attributes {
-                if attr.name == "test" && (!own_only || !is_qualified(fd.name)) {
+                if attr.name == "test" && !is_qualified(fd.name) {
                     idx = idx + 1
                     total = total + 1
                     self.push_scope()
@@ -832,6 +853,12 @@ impl Interp {
                         self.frames[ft].pend = Ctrl.CExit
                         self.frames[ft].perr = None
                         self.frames[ft].pcode = 0
+                        // the first task stops with the failure that ends the
+                        // program (D97)
+                        if t == 0 && self.failing {
+                            self.frames[ft].perr = self.fail_err
+                            self.frames[ft].pcode = self.fail_code
+                        }
                     },
                     _ => {},
                 }
@@ -1288,6 +1315,18 @@ impl Interp {
         self.tasks[t].failed = !ok
         self.tasks[t].err = err
         self.tasks[t].code = code
+        // a failure, not a cancelled task's stop, ends the program at once
+        // (D97): the first one is the program's, every task is cancelled
+        if !ok && t != 0 && !self.tasks[t].cancelled && !self.failing {
+            self.failing = true
+            self.fail_err = err
+            self.fail_code = code
+            self.cancel_task(0)
+            match err {
+                Some(r) => { self.fail_reported = self.on_failure(r) },
+                None => {},
+            }
+        }
         for w in self.tasks[t].waiters {
             self.tasks[w].state = 0
             push(self.queue, w)
@@ -1942,7 +1981,17 @@ impl Interp {
         // partial application: `f(a, _)` builds a closure awaiting the holes
         if i_args_have_hole(args) { return self.eval_partial(callee, args) }
         match callee.kind {
-            ExprKind.Name(nm) => { return self.eval_name_call(e, nm, args) },
+            ExprKind.Name(nm) => {
+                // a local binding shadows a function or builtin of the same
+                // name: the checker typed the callee as a value (MYLA-152)
+                if contains(self.resolved, callee.id) {
+                    match self.lookup(nm) {
+                        Some(v) => { return self.call_value(v, self.eval_args(args)) },
+                        None => {},
+                    }
+                }
+                return self.eval_name_call(e, nm, args)
+            },
             ExprKind.GetField(tgt, field) => { return self.eval_getfield_call(e, tgt, field, args) },
             _ => {},
         }
@@ -2080,6 +2129,7 @@ impl Interp {
     // Call method `fi` on the receiver on top of `self.receivers`, which
     // moves into the method's `self`; yields the result and the final `self`.
     fun call_with_receiver(var self, fi: int32, argv: [Value]) -> (Value, Value) {
+        if !self.enter_call() { return Value.VUnit, pop(self.receivers) }
         let saved = self.scopes
         self.enter_method(fi, argv)
         // `become self.m(…)` with a `var self` method goes on with this `self`
@@ -2100,7 +2150,24 @@ impl Interp {
         let final_self = self.lookup_or_unit("self")
         let rv = self.run_tail()
         self.scopes = saved
+        self.depth = self.depth - 1
         return rv, final_self
+    }
+
+    // One call deeper; past MAX_CALL_DEPTH a runtime error, as the Python
+    // interpreter's `stack overflow`, instead of running out of native stack
+    // (MYLA-182) and false.
+    fun enter_call(var self) -> bool {
+        if self.depth >= MAX_CALL_DEPTH {
+            if !self.stop() {
+                self.rt_err = Some(RtError { msg: "stack overflow", line: 0, col: 0, sp: no_span(), node: -1 })
+                self.ctrl = Ctrl.CExit
+                self.exit_code = 1
+            }
+            return false
+        }
+        self.depth = self.depth + 1
+        return true
     }
 
     fun tail_on_self(self) -> bool {
@@ -2596,6 +2663,7 @@ impl Interp {
             }
             return self.call_func(fi, argv)
         }
+        if !self.enter_call() { return Value.VUnit }
         let saved = self.scopes
         self.scopes = []
         self.push_scope()
@@ -2611,6 +2679,7 @@ impl Interp {
         }
         if self.defer_lambda(body) {
             self.scopes = saved
+            self.depth = self.depth - 1
             return Value.VUnit
         }
         var rv = Value.VUnit
@@ -2626,14 +2695,17 @@ impl Interp {
             },
         }
         self.scopes = saved
+        self.depth = self.depth - 1
         return rv
     }
 
     fun call_func(var self, fi: int32, argv: [Value]) -> Value {
+        if !self.enter_call() { return Value.VUnit }
         let saved = self.scopes
         self.enter_func(fi, argv)
         let rv = self.run_tail()
         self.scopes = saved
+        self.depth = self.depth - 1
         return rv
     }
 

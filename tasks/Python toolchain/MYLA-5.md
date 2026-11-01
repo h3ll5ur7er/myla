@@ -2,7 +2,7 @@
 id: MYLA-5
 title: Native int64 division of the minimum by -1 dies with SIGFPE
 type: bug
-status: review
+status: done
 priority: medium
 labels: [native-backend, parity, arithmetic]
 ---

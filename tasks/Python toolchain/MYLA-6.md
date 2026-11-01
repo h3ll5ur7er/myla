@@ -2,7 +2,7 @@
 id: MYLA-6
 title: Float-to-integer casts crash the interpreter or disagree with native code
 type: bug
-status: review
+status: done
 priority: medium
 labels: [interpreter, native-backend, floats, parity]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-65
 title: Better error messages
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [diagnostics, tooling]
 ---

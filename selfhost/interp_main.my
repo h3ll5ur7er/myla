@@ -17,8 +17,12 @@ fun run_program(prog: Loaded, file: str) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
         Ok(c) => {
             var it = new_interp(c, [file])
+            // a task's failure reported when it happens (MYLA-170)
+            it.on_failure = (r: RtError) => report_now(r, prog)
             let code = it.run()
-            match it.rt_err { Some(r) => { eprintln(render(runtime_report(r, prog))) }, None => {} }
+            if !it.fail_reported {
+                match it.rt_err { Some(r) => { eprintln(render(runtime_report(r, prog))) }, None => {} }
+            }
             code
         },
         Err(errs) => {
@@ -26,6 +30,12 @@ fun run_program(prog: Loaded, file: str) -> int32 {
             1
         },
     }
+}
+
+// A runtime error on stderr now; true.
+fun report_now(r: RtError, prog: Loaded) -> bool {
+    eprintln(render(runtime_report(r, prog)))
+    return true
 }
 
 // A runtime error as the Python CLI prints it, in the file of its expression.

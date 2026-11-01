@@ -1,6 +1,6 @@
 [project]
 name = "myla"
-version = "0.0.1"
+version = "1.0.0"
 description = "Myla: a very simple custom language with an interpreter and a native compiler (bootstrapped in Python)."
 readme = "README.md"
 requires-python = ">=3.12"

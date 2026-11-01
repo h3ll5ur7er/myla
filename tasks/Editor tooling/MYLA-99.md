@@ -2,7 +2,7 @@
 id: MYLA-99
 title: Debug adapter in the VS Code extension
 type: feature
-status: review
+status: done
 priority: medium
 labels: [vscode, debugging]
 ---

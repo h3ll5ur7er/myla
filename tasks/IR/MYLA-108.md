@@ -2,7 +2,7 @@
 id: MYLA-108
 title: IR: optimisations
 type: feature
-status: review
+status: done
 priority: medium
 labels: [ir, codegen, selfhost]
 ---

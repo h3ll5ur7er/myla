@@ -2,7 +2,7 @@
 id: MYLA-7
 title: "Literal patterns outside the scrutinee's range match differently natively"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [checker, native-backend, parity]
 ---

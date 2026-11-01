@@ -52,6 +52,10 @@ A Myla `str` is bytes, kept as a Python `str` in which every byte that isn't par
 
 `run_tests()` goes through every function's `#test` attributes, evaluates arguments and the expected value, calls the function and compares with Python `==` (structural for every value type). A runtime error fails that case only.
 
+## Depth
+
+The Python interpreter raises Python's recursion limit to 100,000 frames (as the parser does, for nesting) and reports a program that still runs out of it as `runtime error: stack overflow`. The self-hosted interpreter counts its calls instead: past 2,500 (`MAX_CALL_DEPTH` in [[selfhost/interp.my]]) it gives the same error ([[MYLA-182]]). An interpreted call takes some 12 to 25 KB of its native stack, because every IR slot has a cell of its own ([[MYLA-183]] would share them), and the native runtime lets the main stack grow to 120 MiB ([[Architecture/Native-backend]]); a program recursing deeper than 2,500 runs in the Python interpreter and natively, but not in `build/myla run`.
+
 ## Known problems
 
 - `s[i]` and `len(s)` encode the whole string each time, so byte loops over long strings are quadratic.

@@ -2,7 +2,7 @@
 id: MYLA-93
 title: Project model - manifest, lock file and path dependencies
 type: feature
-status: review
+status: done
 priority: medium
 labels: [tooling, selfhost]
 ---

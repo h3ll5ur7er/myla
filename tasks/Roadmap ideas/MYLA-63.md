@@ -15,7 +15,7 @@ A SwiftUI-like way to build user interfaces: views as values composed from small
 
 - **Software rendering is fully possible without libc**: draw into memory and hand it to the display through a Wayland `wl_shm` buffer or X11 shared memory (both plain socket protocols plus `mmap`), or directly to the screen through the kernel's DRM/KMS "dumb buffer" ioctls on `/dev/dri/card0` (no display server, driver-independent).
 - **OpenGL and Vulkan are not practical without C libraries.** They are C APIs whose implementation is the GPU vendor's user-space driver (Mesa or NVIDIA's), loaded as shared libraries that depend on libc. The kernel interface underneath (DRM ioctls and command buffers) is different for every GPU family; talking to it directly means writing a GPU driver.
-- So hardware acceleration needs a **C FFI**: the System V calling convention (Myla's internal convention is stack-based), C struct layout, callbacks, and a dynamically linked executable (an interpreter `/lib64/ld-linux-x86-64.so.2` and `-lvulkan`). Myla's own runtime can stay libc-free while the process loads libc indirectly through the driver, which is the approach Go takes. macOS and Windows require system libraries for any graphics anyway.
+- So hardware acceleration needs a **C FFI** ([[MYLA-166]], with LLVM, [[MYLA-62]]): the System V calling convention (Myla's internal convention is stack-based), C struct layout, callbacks, and a dynamically linked executable (an interpreter `/lib64/ld-linux-x86-64.so.2` and `-lvulkan`). Myla's own runtime can stay libc-free while the process loads libc indirectly through the driver, which is the approach Go takes. macOS and Windows require system libraries for any graphics anyway.
 
 ## What it would need first
 

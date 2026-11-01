@@ -1,6 +1,6 @@
 # IR
 
-The design of the mid-level intermediate representation between the checker and the self-hosted native backend ([[MYLA-67]], D79). Today [[selfhost/codegen.my]] turns the checked, monomorphized AST straight into assembly text and decides frame layout, reference counting, copy-on-write, staged stores and drops while it emits instructions ([[Architecture/Native-backend]]). The IR makes those decisions explicit data, so they can be printed, checked and optimised, and leaves the backend only instruction selection.
+The mid-level intermediate representation between the checker and the self-hosted native backend ([[MYLA-67]], D79). Every function goes through it ([[MYLA-107]]): [[selfhost/lower.my]] turns the checked, monomorphized AST into IR, where frame layout, reference counting, copy-on-write, staged stores and drops are explicit data that can be printed, verified and optimised, and [[selfhost/ir_x86.my]] selects the instructions ([[Architecture/Native-backend]]). Before it, the code generator decided all of that while it emitted assembly.
 
 > [!NOTE]
 > **Status: built, and stable since D85.** The decisions below were approved on 2026-10-27 (D79). The steps were tasks [[MYLA-103]] to [[MYLA-109]] and [[MYLA-120]] to [[MYLA-122]]; see "Stability" for what may change from here.
@@ -110,7 +110,7 @@ unreachable
 
 ### Ownership in the IR
 
-The lowering makes every rule of [[Architecture/Native-backend#heap-and-reference-counting]] an instruction: a binding copies and retains; parameters are borrowed; owning slots are dropped at scope exit, before `ret` and on loop exits; staged stores evaluate the value into an owning slot, then `cow` the container and move the value in; match bindings borrow from the match's copy of the scrutinee, retained when an arm may write the variable it came from. The **verifier** follows each owning slot along every path (uninitialised → owned → moved or dropped) and rejects a drop of a slot that isn't owned, an owned slot still live at `ret` or at a block's exit when the successor disagrees, and a read of a moved slot. It runs on every function the gates compile.
+The lowering makes every rule of [[Architecture/Native-backend#heap-and-reference-counting]] an instruction: a binding copies and retains; parameters are borrowed; owning slots are dropped at scope exit, before `ret` and on loop exits; staged stores evaluate the value into an owning slot, then `cow` the container and move the value in; match bindings borrow from the match's copy of the scrutinee, retained when an arm may write the variable it came from. The **verifier** follows each owning slot along every path (holding nothing → holding a value → moved or dropped) and rejects a drop of a slot that holds no value, a read of one that holds no value (never stored, or dropped; a moved slot's bits are still read by whoever took them), an owned slot still live at `ret` or at a block's exit when the successor disagrees. It runs on every function the gates compile.
 
 ### Text form
 
@@ -250,7 +250,7 @@ Altogether the self-compile went from 3.80 s (the old path) to about 1.9 s, the 
 - **The I/O intrinsics.** Runtime helpers (`rt`) or runtime variables (`global`); a cell they return is a new reference (`__run_stderr` hands over the runtime's).
 - **Matches.** A match copies its scrutinee; the copy owns references of its own (retained, dropped after the match or by an arm's early exit) only when an arm may write the variable the scrutinee came from (MYLA-2).
 
-The **verifier** (`verify` in [[selfhost/ir.my]]) follows every owning slot along the reachable paths. It rejects a store into a slot that still holds a value, a drop of one that holds none, a slot holding a value at `ret` or `become`, a `become` after anything but a call, and paths that join disagreeing on a slot. It treats `suspend L` as `jmp L`: a frame function's owning slots stay owned while it is suspended, since they live in its heap frame. A `copy`, `call … sret` or `init` into an owning slot stores into it. A function it rejects falls back to the old path with the reason `IR verifier: …`, which the IR gate treats as a failure.
+The **verifier** (`verify` in [[selfhost/ir.my]]) follows every owning slot along the reachable paths. It rejects a store into a slot that still holds a value, a drop of one that holds none, a read of one that holds none (a `load` of the slot, or a `load`, `copy` or `retain` at its address: a dropped value, or a slot never stored into, is never read; a moved slot is still read by whoever took its value), a slot holding a value at `ret` or `become`, a `become` after anything but a call, and paths that join disagreeing on a slot. It treats `suspend L` as `jmp L`: a frame function's owning slots stay owned while it is suspended, since they live in its heap frame. A `copy`, `call … sret` or `init` into an owning slot stores into it. A function it rejects is a compiler error (`take_ir` panics with the reason `IR verifier: …`): there is no other path since [[MYLA-107]].
 
 ### Lowering aggregates
 

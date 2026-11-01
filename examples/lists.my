@@ -1,5 +1,5 @@
-// Lists `[T]` (v0.3.3): a growable, reference-counted, copy-on-write sequence
-// with value semantics (W1/D38/D39).
+// Lists `[T]`: a growable, reference-counted, copy-on-write sequence
+// with value semantics (D38, D39).
 //
 // A list is a *value*: binding, passing, returning, or assigning it produces an
 // independent value, so mutating one binding never affects another. Under the

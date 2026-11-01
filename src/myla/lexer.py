@@ -96,7 +96,9 @@ def _is_digit(c: str) -> bool:
 class Lexer:
     def __init__(self, source: str):
         self.source = source
-        self.pos = 0
+        # a UTF-8 byte-order mark at the start is skipped, taking no column
+        # (MYLA-178)
+        self.pos = 1 if source.startswith("\ufeff") else 0
         self.line = 1
         self.column = 1
         self.tokens: list[Token] = []

@@ -2,7 +2,7 @@
 id: MYLA-53
 title: VS Code extension settings and packaging
 type: bug
-status: review
+status: done
 priority: low
 labels: [vscode]
 ---

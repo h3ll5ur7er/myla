@@ -2,7 +2,7 @@
 id: MYLA-22
 title: Self-hosted runtime never frees memory
 type: bug
-status: review
+status: done
 priority: high
 labels: [selfhost, runtime, memory]
 ---

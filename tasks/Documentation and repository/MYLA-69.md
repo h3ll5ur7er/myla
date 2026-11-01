@@ -2,7 +2,7 @@
 id: MYLA-69
 title: Continuous integration with GitHub Actions
 type: chore
-status: review
+status: done
 priority: high
 labels: [ci, tests]
 ---

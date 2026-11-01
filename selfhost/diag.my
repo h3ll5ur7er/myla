@@ -99,6 +99,8 @@ fun source_line(src: str, n: int32) -> Option<str> {
     var line = 1
     var sb = StringBuilder()
     var i = 0
+    // a byte-order mark the lexer skipped isn't shown (MYLA-178)
+    if len(src) >= 3 && src[0] == 0xEFu8 && src[1] == 0xBBu8 && src[2] == 0xBFu8 { i = 3 }
     while i < len(src) {
         let c = src[i]
         if c == '\n' {

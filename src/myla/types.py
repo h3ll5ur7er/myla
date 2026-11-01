@@ -321,15 +321,15 @@ def _is_map_key(t: Type) -> bool:
     return isinstance(t, (IntType, CharType, BoolType, StrType))
 
 
-def int_fits(value: int, t: IntType) -> bool:
+def int_fits(value: int, t: IntType, negated: bool = False) -> bool:
     """Whether a non-negative literal magnitude fits `t`.
 
-    For signed types we permit the magnitude up to 2**(width-1) so that a
-    negated literal like `-128i8` is accepted (the unary minus is a separate
-    node). This is intentionally permissive, matching the wrapping semantics.
+    A signed type takes magnitudes up to 2**(width-1) - 1, and 2**(width-1)
+    itself only under a unary minus, so that `-128i8` is accepted but `128i8`
+    isn't (the minus is a separate node, MYLA-175).
     """
     if t.signed:
-        return 0 <= value <= (1 << (t.width - 1))
+        return 0 <= value <= (1 << (t.width - 1)) - (0 if negated else 1)
     return 0 <= value <= (1 << t.width) - 1
 
 
@@ -389,7 +389,12 @@ def round_float(value: float, t: Type) -> float:
     precision (round to nearest) so the interpreter and native backend agree —
     the float analogue of integer `_wrap_int` (D56 parity discipline)."""
     if isinstance(t, FloatType) and t.width == 32:
-        return struct.unpack("f", struct.pack("f", value))[0]
+        try:
+            return struct.unpack("f", struct.pack("f", value))[0]
+        except OverflowError:
+            # past the largest float32 after rounding: infinity, as the
+            # hardware's conversion gives (MYLA-176)
+            return math.copysign(math.inf, value)
     return value
 
 
@@ -1592,8 +1597,8 @@ class Checker:
             )
         if decl.type_params:
             raise TypeCheckError(
-                "deriving on generic types is not supported yet (v0.4.4 "
-                "derives Eq for concrete structs/enums)",
+                "deriving on generic types is not supported yet (Eq is "
+                "derived for concrete structs and enums)",
                 at=attr,
             )
         self._validate_derive_attr(attr)
@@ -1616,8 +1621,7 @@ class Checker:
                 )
             if a.ident != "Eq":
                 raise TypeCheckError(
-                    f"cannot derive '{a.ident}'; only 'Eq' is derivable in "
-                    "v0.4.4 (Ord is the planned next addition)",
+                    f"cannot derive '{a.ident}': only 'Eq' is derivable",
                     at=a,
                 )
 
@@ -1843,7 +1847,7 @@ class Checker:
             if impl.type_params:
                 raise TypeCheckError(
                     "generic impls on built-in types are not supported yet "
-                    "(v0.4.1 covers concrete built-in receivers)",
+                    "(only concrete built-in receivers)",
                     at=impl,
                 )
             for m in impl.methods:
@@ -1855,7 +1859,7 @@ class Checker:
                     )
         else:
             raise TypeCheckError(
-                f"cannot 'impl' on type '{type_name(target)}'; v0.4.1 supports "
+                f"cannot 'impl' on type '{type_name(target)}': an impl takes "
                 "structs, enums, and concrete scalar / str / StringBuilder "
                 "receivers",
                 at=impl,
@@ -2248,7 +2252,7 @@ class Checker:
         elif len(main_decls) > 1:
             self._fail_at(main_decls[1], "more than one '#main' entry point", main_decls[1])
         elif entry is not None and entry.params:
-            self._fail_at(entry, "entry point must take no parameters in v0.0", entry)
+            self._fail_at(entry, "entry point must take no parameters", entry)
         self.entry = entry
 
     def _check_attributes(self, decl: ast.Decl, main_decls: list[ast.FunDecl]) -> None:
@@ -3030,7 +3034,7 @@ class Checker:
                 raise TypeCheckError(
                     f"'?' propagates an error of type '{type_name(err_t)}', but the "
                     f"{where} returns 'Result<_, {type_name(ret.args[1])}>' "
-                    "(there is no error conversion in v0.2)",
+                    "(there is no error conversion)",
                     at=expr,
                 )
             result_t, succ, fail, fail_payload = ok_t, "Ok", "Err", True
@@ -3494,7 +3498,7 @@ class Checker:
         else:
             t = INT
         assert isinstance(t, IntType)
-        if not int_fits(expr.value, t):
+        if not int_fits(expr.value, t, getattr(expr, "negated", False)):
             raise TypeCheckError(
                 f"integer literal {expr.value} does not fit in '{type_name(t)}'",
                 at=expr,
@@ -3530,6 +3534,12 @@ class Checker:
             enum_name = _PRELUDE_VARIANTS.get(expr.ident)
             if enum_name is not None:
                 return self._infer_bare_variant(expr, enum_name, expr.ident, expected)
+            if expr.ident == "std$task$cancel":
+                # D96: the compiler takes its calls; as a value it would do nothing
+                raise TypeCheckError(
+                    "task.cancel can only be called, with the name of an 'async let'",
+                    at=expr,
+                )
             if expr.ident in self.functions and "." not in expr.ident:
                 return self._infer_fun_value(expr, expected)
             if expr.ident in self._redefined_builtins:
@@ -3611,6 +3621,9 @@ class Checker:
 
     def _infer_unary(self, expr: ast.Unary, scope: _Scope, expected: Type | None) -> Type:
         if expr.op == "-":
+            if isinstance(expr.operand, ast.IntLit):
+                # the magnitude one past the signed maximum fits only here
+                expr.operand.negated = True
             t = self._expect_value(
                 expr.operand, scope,
                 expected if isinstance(expected, (IntType, FloatType)) else None)
@@ -4604,11 +4617,23 @@ class Checker:
             return
         target = expr.target
         if isinstance(target, ast.Name) and target.ident == "self" and self._actor_self == base.name:
+            if self._task_init:
+                self._child_reaches_self(expr)
             return
         raise TypeCheckError(
             f"'{expr.field_name}' belongs to the actor '{type_name(base)}': only its "
             "own methods reach it",
             at=expr,
+        )
+
+    def _child_reaches_self(self, at: ast.Node) -> None:
+        """An `async let`'s initializer in an actor's method reads a field of
+        `self` or calls one of its synchronous methods: the child task would
+        do it off the actor (MYLA-168)."""
+        raise TypeCheckError(
+            "an 'async let' can't reach the actor's state through 'self': its child task runs off the actor",
+            at=at,
+            notes=[Note("help", "read what the child needs into a 'let' before the 'async let'")],
         )
 
     def _infer_await(self, expr: ast.Await, scope: _Scope, expected: Type | None) -> Type | None:
@@ -4656,8 +4681,11 @@ class Checker:
         if mfunc is not None:
             key = mfunc.rpartition(".")[0]
             recv = call.callee.target
-            if key in self.actors and not (isinstance(recv, ast.Name) and recv.ident == "self"
-                                           and self._actor_self == key):
+            own = (isinstance(recv, ast.Name) and recv.ident == "self"
+                   and self._actor_self == key)
+            if own and self._task_init and not self.functions[mfunc].decl.is_async:
+                self._child_reaches_self(call)
+            if key in self.actors and not own:
                 why = (f"a call into the actor '{type_name(recv.resolved_type)}' "
                        "needs 'await'")
             elif self.functions[mfunc].decl.is_async:

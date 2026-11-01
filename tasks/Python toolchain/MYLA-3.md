@@ -2,7 +2,7 @@
 id: MYLA-3
 title: Compiler crashes assigning a heap-owning struct to a field
 type: bug
-status: review
+status: done
 priority: high
 labels: [native-backend, crash]
 ---

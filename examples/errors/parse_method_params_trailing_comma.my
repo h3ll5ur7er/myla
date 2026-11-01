@@ -1,0 +1,15 @@
+//~ parse error: expected parameter name, found ')'
+//~ span: )
+// A parameter list takes no trailing comma, a method's as a function's and a
+// lambda's (MYLA-180).
+struct P {
+    x: int,
+}
+
+impl P {
+    fun add(self, d: int,) -> int {
+        return self.x + d
+    }
+}
+
+fun main() {}

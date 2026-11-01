@@ -32,10 +32,15 @@ pub struct Parser {
     resume: int32,              // where it, or the unwinding, left off
     unwinding: bool,            // leaving a declaration without an error (Python's _Unwind)
     stopped: bool,              // MAX_ERRORS were recorded (Python's _Stop)
+    depth: int32,               // nesting, up to MAX_NESTING (MYLA-182)
 }
 
+// How deep expressions, types, blocks and patterns may nest (MYLA-182; the
+// Python parser's MAX_NESTING): past it, a parse error, not a stack overflow.
+const MAX_NESTING: int32 = 256
+
 pub fun new_parser(toks: [Token]) -> Parser {
-    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false }
+    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }
 }
 
 // What `sync` skips to: the next statement of a block, the next member of an
@@ -331,6 +336,14 @@ impl Parser {
     }
 
     // An error about the token `tok`, which it underlines.
+    // One level deeper (the caller leaves it after); past MAX_NESTING a parse
+    // error at the current token, which sends the parse to the end, so the
+    // levels unwind at once (Python: _enter).
+    fun enter(var self, what: str) {
+        self.depth = self.depth + 1
+        if self.depth > MAX_NESTING { self.fail_at(self.peek(), format("{} nested too deeply", what)) }
+    }
+
     fun fail_at(var self, tok: Token, msg: str) {
         self.fail(tok.line, tok.column, SrcSpan { sline: tok.line, scol: tok.column, eline: tok.eline, ecol: tok.ecol }, msg)
     }
@@ -744,10 +757,8 @@ impl Parser {
             self.fail_at(self.peek(), "a method's first parameter must be 'self' or 'var self'")
         }
         var params: [Param] = []
+        // no trailing comma, as in a function's parameter list (MYLA-180)
         while self.match1(TokenKind.COMMA) {
-            if self.check(TokenKind.RPAREN) {
-                break
-            }
             let pname = self.expect(TokenKind.IDENT, "parameter name")
             self.expect(TokenKind.COLON, "':'")
             let ptype = self.parse_type()
@@ -802,6 +813,13 @@ impl Parser {
     // -- types -------------------------------------------------------------
 
     fun parse_type(var self) -> TypeExpr {
+        self.enter("type")
+        let t = self.parse_type_inner()
+        self.depth = self.depth - 1
+        return t
+    }
+
+    fun parse_type_inner(var self) -> TypeExpr {
         let tok = self.peek()
         let k = tok.kind
         if k == TokenKind.ASYNC {
@@ -904,6 +922,13 @@ impl Parser {
     // -- statements --------------------------------------------------------
 
     fun block(var self) -> Block {
+        self.enter("block")
+        let b = self.block_inner()
+        self.depth = self.depth - 1
+        return b
+    }
+
+    fun block_inner(var self) -> Block {
         let lbrace = self.expect(TokenKind.LBRACE, "'{'")
         var stmts: [Stmt] = []
         self.skip_separators()
@@ -1126,7 +1151,9 @@ impl Parser {
     fun expression_with(var self, allow: bool) -> Expr {
         let prev = self.allow_struct_lit
         self.allow_struct_lit = allow
+        self.enter("expression")
         let e = self.pipe()
+        self.depth = self.depth - 1
         self.allow_struct_lit = prev
         return e
     }
@@ -1292,12 +1319,16 @@ impl Parser {
         let k = self.peek_kind()
         if k == TokenKind.AWAIT {
             let kw = self.advance()
+            self.enter("expression")
             let operand = self.unary()
+            self.depth = self.depth - 1
             return self.mk_expr(kw.line, kw.column, ExprKind.Await(operand))
         }
         if k == TokenKind.MINUS || k == TokenKind.BANG || k == TokenKind.TILDE {
             let op = self.advance()
+            self.enter("expression")
             let operand = self.unary()
+            self.depth = self.depth - 1
             return self.mk_expr(op.line, op.column, ExprKind.Unary(op.lexeme, operand))
         }
         return self.postfix()
@@ -1506,6 +1537,13 @@ impl Parser {
     }
 
     fun pattern(var self) -> Pattern {
+        self.enter("pattern")
+        let p = self.pattern_inner()
+        self.depth = self.depth - 1
+        return p
+    }
+
+    fun pattern_inner(var self) -> Pattern {
         let first = self.base_pattern()
         if !self.check(TokenKind.PIPE) {
             return first

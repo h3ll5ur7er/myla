@@ -1,12 +1,9 @@
 default:
     @just --list
 
+# The Python toolchain (no dependencies beyond Python's standard library).
 bs *args:
-    @uv run myla.py {{args}}
-
-asm2bin asm bin:
-    as --64 -o {{bin}}.o {{asm}}
-    ld -o {{bin}} {{bin}}.o
+    @python3 myla.py {{args}}
 
 # Build the self-hosted compiler (checking the fixed point) and the myla CLI.
 bootstrap:

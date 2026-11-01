@@ -1,5 +1,5 @@
 // Module-level `const`s and the abort intrinsics `assert` / `panic` /
-// `unreachable` (v0.3.2).
+// `unreachable`.
 //
 // A `const` is a file-scoped, immutable, compile-time value. Its initializer
 // must be a *constant expression*: literals, references to other consts, and

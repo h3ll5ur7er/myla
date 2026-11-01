@@ -465,10 +465,10 @@ fun float_suffix_type(s: str) -> Option<Type> {
 // Whether a literal fits a type, as types.int_fits: `big` is its decimal text
 // when it is 2^63 or more (`value` then holds only its low bits). A signed
 // type admits the magnitude 2^(w-1), so that `-128i8` is accepted.
-fun lit_fits(value: int64, big: str, w: int32, signed: bool) -> bool {
-    if big == "" { return int_fits(value, w, signed) }
+fun lit_fits(value: int64, big: str, w: int32, signed: bool, negated: bool) -> bool {
+    if big == "" { return int_fits(value, w, signed, negated) }
     if w < 64 { return false }
-    if signed { return big == "9223372036854775808" }
+    if signed { return negated && big == "9223372036854775808" }
     return len(big) < 20 || (len(big) == 20 && !text_greater(big, "18446744073709551615"))
 }
 
@@ -482,12 +482,15 @@ fun text_greater(a: str, b: str) -> bool {
     return false
 }
 
-fun int_fits(value: int64, w: int32, signed: bool) -> bool {
+// A signed type takes magnitudes up to 2^(w-1) - 1, and 2^(w-1) only under a
+// unary minus (MYLA-175; types.py: int_fits).
+fun int_fits(value: int64, w: int32, signed: bool, negated: bool) -> bool {
     if value < 0 { return false }
     if signed {
         if w >= 64 { return true }
         var lim: int64 = 1
         lim = lim << (w - 1)
+        if !negated { lim = lim - 1 }
         return value <= lim
     }
     if w >= 64 { return true }
@@ -1031,6 +1034,7 @@ pub struct Checker {
     suspended: int32,
     task_init: bool,                // checking an `async let`'s initializer, outside its lambdas
     in_guard: bool,                 // checking a match guard, outside its lambdas
+    neg_lit: int32,                 // the integer literal under a unary minus, or -1 (MYLA-175)
     // the first `async let`, which the compiler doesn't build yet (D91,
     // MYLA-138; `task_line` 0: none)
     task_line: int32,
@@ -1055,7 +1059,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", cur_key: "",
-        lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false,
+        lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
     }
 }
@@ -2070,10 +2074,10 @@ impl Checker {
         }
         match key_opt {
             Some(k) => {
-                if len(tps) > 0 { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are not supported yet (v0.4.1 covers concrete built-in receivers)")) }
+                if len(tps) > 0 { return Err(terr_at(ln, cl, sp, "generic impls on built-in types are not supported yet (only concrete built-in receivers)")) }
                 for m in methods { if match m.receiver { Some(r) => r == "var self", None => false } { return Err(terr_at(m.line, m.col, m.sp, "'var self' methods on built-in types are not supported yet; use a read-only 'self' receiver")) } }
             },
-            None => { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on type '{}'; v0.4.1 supports structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
+            None => { return Err(terr_at(ln, cl, sp, format("cannot 'impl' on type '{}': an impl takes structs, enums, and concrete scalar / str / StringBuilder receivers", type_name(target)))) },
         }
         return Ok(0)
     }
@@ -2379,7 +2383,7 @@ impl Checker {
                 }
                 let w = match t { Type.TInt(ww, ss) => ww, _ => 32 }
                 let sg = match t { Type.TInt(ww, ss) => ss, _ => true }
-                if !lit_fits(v, big, w, sg) { return Err(terr_at(e.line, e.col, e.sp, format("integer literal {} does not fit in '{}'", int_text(v, big), type_name(t)))) }
+                if !lit_fits(v, big, w, sg, self.neg_lit == e.id) { return Err(terr_at(e.line, e.col, e.sp, format("integer literal {} does not fit in '{}'", int_text(v, big), type_name(t)))) }
                 Ok(t)
             },
             _ => Err(terr_at(e.line, e.col, e.sp, "expected an integer literal")),   // unreachable
@@ -2434,6 +2438,8 @@ impl Checker {
             Some(en) => { return self.infer_bare_variant(e, en, ident, expected) },
             None => {},
         }
+        // D96: the compiler takes its calls; as a value it would do nothing
+        if ident == "std$task$cancel" { return Err(terr_at(e.line, e.col, e.sp, "task.cancel can only be called, with the name of an 'async let'")) }
         if self.func_idx(ident) >= 0 {
             // a non-method top-level function referenced as a value
             return self.infer_fun_value(e, ident)
@@ -2465,7 +2471,12 @@ impl Checker {
     fun infer_unary(var self, e: Expr, op: str, x: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         if op == "-" {
             let hint = num_hint(expected)
-            let t = self.expect_value(x, hint)?
+            // the magnitude one past the signed maximum fits only here
+            let saved_neg = self.neg_lit
+            match x.kind { ExprKind.IntLit(v, suf, isc, big) => { self.neg_lit = x.id }, _ => {} }
+            let tr = self.expect_value(x, hint)
+            self.neg_lit = saved_neg
+            let t = tr?
             if !(is_int(t) || is_float(t)) { return Err(terr_at(e.line, e.col, e.sp, "unary '-' requires a numeric operand")) }
             return Ok(t)
         }
@@ -3821,6 +3832,7 @@ impl Checker {
     fun check_isolation(self, sname: str, target: Expr, field: str, e: Expr) -> Result<int32, CheckErr> {
         if !self.is_actor(sname) { return Ok(0) }
         let own = match target.kind { ExprKind.Name(n) => n == "self" && self.actor_self == sname, _ => false }
+        if own && self.task_init { return Err(child_reaches_self(e)) }
         if own { return Ok(0) }
         return Err(terr_at(e.line, e.col, e.sp, format("'{}' belongs to the actor '{}': only its own methods reach it", field, type_name(Type.TStruct(sname, [])))))
     }
@@ -3900,6 +3912,7 @@ impl Checker {
                 },
                 _ => {},
             }
+            if own && self.task_init && !self.call_async { return Err(child_reaches_self(e)) }
             if self.is_actor(self.call_key) && !own { why = format("a call into the actor '{}' needs 'await'", type_name(Type.TStruct(self.call_key, []))) }
             else if self.call_async { why = format("a call to the async method '{}' needs 'await'", field) }
         } else if self.call_kind == "value" {
@@ -4166,7 +4179,7 @@ impl Checker {
             DeclKind.EnumDecl(n, v, a, t, p) => len(t) > 0,
             _ => false,
         }
-        if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (v0.4.4 derives Eq for concrete structs/enums)")) }
+        if has_tps { return Err(terr_at(attr.line, attr.col, attr.sp, "deriving on generic types is not supported yet (Eq is derived for concrete structs and enums)")) }
         return self.validate_derive_attr(attr)
     }
 
@@ -4182,7 +4195,7 @@ impl Checker {
         if len(attr.args) == 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' needs at least one trait, e.g. #derive(Eq)")) }
         for a in attr.args {
             match a.kind {
-                ExprKind.Name(id) => { if id != "Eq" { return Err(terr_at(a.line, a.col, a.sp, format("cannot derive '{}'; only 'Eq' is derivable in v0.4.4 (Ord is the planned next addition)", id))) } },
+                ExprKind.Name(id) => { if id != "Eq" { return Err(terr_at(a.line, a.col, a.sp, format("cannot derive '{}': only 'Eq' is derivable", id))) } },
                 _ => { return Err(terr_at(a.line, a.col, a.sp, "'#derive' arguments must be trait names")) },
             }
         }
@@ -4501,7 +4514,7 @@ impl Checker {
             if ei >= 0 && len(self.functions[ei].decl.params) > 0 {
                 let d = self.functions[ei].decl
                 self.reset_state(self.functions[ei].decl_id)
-                self.note(terr_at(d.line, d.col, d.sp, "entry point must take no parameters in v0.0"))
+                self.note(terr_at(d.line, d.col, d.sp, "entry point must take no parameters"))
             }
         }
     }
@@ -5266,7 +5279,7 @@ impl Checker {
                     if ret_is != "Result" { return Err(terr_at(e.line, e.col, e.sp, format("'?' on a Result requires the enclosing {} to return a Result", where))) }
                     let ret_err = match self.cur_ret { Some(r) => match r { Type.TEnum(rn, rargs) => rargs[1], _ => err_t }, None => err_t }
                     if !type_eq(ret_err, err_t) {
-                        return Err(terr_at(e.line, e.col, e.sp, format("'?' propagates an error of type '{}', but the {} returns 'Result<_, {}>' (there is no error conversion in v0.2)", type_name(err_t), where, type_name(ret_err))))
+                        return Err(terr_at(e.line, e.col, e.sp, format("'?' propagates an error of type '{}', but the {} returns 'Result<_, {}>' (there is no error conversion)", type_name(err_t), where, type_name(ret_err))))
                     }
                     return Ok(oargs[0])
                 }
@@ -5882,4 +5895,11 @@ impl Reentrancy {
     fun warn(var self, msg: str, at: Expr, aw: Expr, help: str) {
         push(self.out, CheckErr { line: at.line, col: at.col, sp: at.sp, msg: msg, decl: -1, notes: [note_at("other calls to the actor may run at this 'await'", aw.line, aw.col, aw.sp), Note { label: "help", msg: help, line: 0, col: 0, sp: no_span() }] })
     }
+}
+
+// An `async let`'s initializer in an actor's method reads a field of `self`
+// or calls one of its synchronous methods: the child task would do it off the
+// actor (MYLA-168; types.py: _child_reaches_self).
+fun child_reaches_self(e: Expr) -> CheckErr {
+    return with_notes(terr_at(e.line, e.col, e.sp, "an 'async let' can't reach the actor's state through 'self': its child task runs off the actor"), [Note { label: "help", msg: "read what the child needs into a 'let' before the 'async let'", line: 0, col: 0, sp: no_span() }])
 }

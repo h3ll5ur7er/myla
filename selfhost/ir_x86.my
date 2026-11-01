@@ -1995,8 +1995,9 @@ fun frame_size(f: IrFunc) -> int32 {
 
 // An async function's frame begins `[resume fn][caller frame][state][task]
 // [link][its task's first frame][flags][parent task][actor handed]` (D90;
-// the link chains the frames waiting for an actor or a task, D92; the last
-// four serve cancellation, D94); its first slot, its result when it has one,
+// the link chains the frames waiting for an actor or a task, D92; the next
+// three serve cancelling by asking, D96, the last dropping frames once a
+// task has failed, D94, D97); its first slot, its result when it has one,
 // follows.
 const FRAME_HEADER: int32 = 72
 

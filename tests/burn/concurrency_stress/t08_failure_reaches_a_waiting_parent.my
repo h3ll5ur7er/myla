@@ -1,0 +1,38 @@
+// 8. A child fails while the parent awaits a looping sibling first: the
+// failure ends the program at once (D97), where the parent used to wait for
+// ever
+actor Feed {
+    n: int,
+}
+
+impl Feed {
+    fun next(var self) -> int {
+        self.n = self.n + 1
+        return self.n
+    }
+}
+
+async fun forever(f: Feed) -> int {
+    while true {
+        let x = await f.next()
+    }
+    return 0
+}
+
+async fun fail_soon(f: Feed) -> int {
+    let x = await f.next()
+    panic("failure")
+    return x
+}
+
+async fun operation(f: Feed) -> int {
+    async let a = forever(f)
+    async let b = fail_soon(f)
+    return await a + await b
+}
+
+#main
+async fun main() {
+    let f = Feed { n: 0 }
+    print(await operation(f))
+}

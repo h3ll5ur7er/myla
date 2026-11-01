@@ -16,6 +16,7 @@ ever waits holding an actor.
 """
 from __future__ import annotations
 
+import sys
 import threading
 from dataclasses import dataclass
 
@@ -344,6 +345,18 @@ class TestResult:
     detail: str
 
 
+# Python's default recursion limit (1000) is a few dozen Myla calls deep, since
+# every Myla call takes several evaluator frames. Pure-Python recursion lives on
+# the heap since Python 3.12, so a far higher limit is safe; a program that still
+# exhausts it is reported as a runtime error instead of a traceback.
+_RECURSION_LIMIT = 100_000
+
+
+def _deep_stack() -> None:
+    if sys.getrecursionlimit() < _RECURSION_LIMIT:
+        sys.setrecursionlimit(_RECURSION_LIMIT)
+
+
 class Interpreter:
     def __init__(self, checker: Checker, out=None, err=None, argv=None, stdin=None):
         self.checker = checker
@@ -370,6 +383,14 @@ class Interpreter:
         # that keeps lines written by tasks running at once whole
         self._tls = threading.local()
         self._out_lock = threading.Lock()
+        # D97: the first failure of a task, which ends the program: every
+        # other task stops at its next suspension point, the entry's raising it
+        self._failing: BaseException | None = None
+        self._failing_lock = threading.Lock()
+        # called with the first task failure that is a runtime error, at
+        # once, by `myla run` to report it before the other tasks stop
+        # (MYLA-170); the error is then marked `reported`
+        self.on_task_failure = None
 
     # -- program entry -------------------------------------------------------
 
@@ -378,16 +399,25 @@ class Interpreter:
         completion, or the code passed to `std.process.exit`)."""
         if self.checker.entry is None:
             raise MylaRuntimeError("no entry point: define '#main' or a function named 'main'")
+        _deep_stack()
         try:
             self._call(self.checker.entry, [])
         except _ExitSignal as sig:
             return sig.code
+        except RecursionError:
+            raise MylaRuntimeError("stack overflow") from None
         return 0
 
-    def run_tests(self) -> list[TestResult]:
+    def run_tests(self, own_only: bool = False) -> list[TestResult]:
+        """Run the `#test` cases: of every linked module, or with `own_only`
+        of the entry file's own functions, whose names the loader doesn't
+        qualify (`myla test file.my`, MYLA-187)."""
+        _deep_stack()
         results: list[TestResult] = []
         for decl in self.checker.program.decls:
             if not isinstance(decl, ast.FunDecl):
+                continue
+            if own_only and "$" in decl.name:
                 continue
             idx = 0
             for attr in decl.attributes:
@@ -492,15 +522,32 @@ class Interpreter:
                     and not isinstance(task.error, _Cancelled):
                 failed = task.error
         env.tasks = None
-        if failed is not None and (leaving is None or isinstance(leaving, _LEAVING)):
-            raise failed
+        if leaving is None or isinstance(leaving, _LEAVING):
+            # waiting for the children was a suspension point (D97)
+            self._suspension_point()
+            if failed is not None:
+                raise failed
 
     def _suspension_point(self) -> None:
         """Where a task may give up its worker (waiting for a child, an awaited
-        actor call): a cancelled one stops here (D94)."""
+        actor call): a cancelled one stops here (D94), and once a task has
+        failed every other one does, the entry's raising that failure (D97)."""
         task = getattr(self._tls, "task", None)
-        if task is not None and task.cancelled.is_set():
+        if task is not None and (task.cancelled.is_set() or self._failing is not None):
             raise _Cancelled()
+        if task is None and self._failing is not None:
+            raise self._failing
+
+    def _task_failed(self, exc: BaseException) -> None:
+        """A task's failure (not its stopping when cancelled) reaches the
+        program at once (D97): the first one is the program's."""
+        with self._failing_lock:
+            if self._failing is not None:
+                return
+            self._failing = exc
+        if self.on_task_failure is not None and isinstance(exc, MylaError):
+            self.on_task_failure(exc)
+            exc.reported = True
 
     def _released(self, wait):
         """Run `wait`, which may block, without holding the thread's actor, so
@@ -574,8 +621,10 @@ class Interpreter:
             self._tls.task = task
             try:
                 task.value = _copy(self._eval(stmt.init, child))
-            except BaseException as exc:   # reaches the parent at `await` or the scope's end
+            except BaseException as exc:   # the program's failure, at once (D97)
                 task.error = exc
+                if not isinstance(exc, _Cancelled):
+                    self._task_failed(exc)
 
         task.thread = threading.Thread(target=work, daemon=True)
         task.thread.start()

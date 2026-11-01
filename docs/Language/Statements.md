@@ -1,6 +1,6 @@
 # Statements
 
-Statement checking is `Checker._check_stmt` ([[src/myla/types.py#L1733-L1863]]).
+Statement checking is `Checker._check_stmt` in [[src/myla/types.py]].
 
 Statements are separated by line breaks, or by `;` to put several on one line: `let t = a; let u = b` (D61, [[Language/Lexical-structure]]).
 
@@ -21,7 +21,7 @@ fun main() {
 
 - Every binding is initialised. `let` can't be reassigned, and nothing inside it can be changed (deep immutability, D14): no `p.x = …`, no `push`, no `var self` method calls on a `let`.
 - With an annotation, the value must have exactly that type (literals adopt it).
-- Bindings are block-scoped. An inner block may shadow an outer name; declaring a name twice in the same block is an error.
+- Bindings are block-scoped. A block nested in another (the body of an `if`, a loop, a match arm or a lambda; there is no bare block statement) may shadow an outer name; declaring a name twice in the same block is an error.
 - Destructuring requires a tuple and matching arity; `_` skips an element. A 1-tuple needs the comma: `let (x,) = t`.
 
 ## Assignment
@@ -77,7 +77,7 @@ fun main() {
 
 `return` ends the function; `return value` in a function with `-> T`; `return a, b` returns the tuple `(a, b)`.
 
-A function with a result type must return on every path. The check is deliberately simple ([[src/myla/types.py#L3997-L4027]]): a block returns if it contains a `return`, a call to `panic`/`unreachable`/`std.process.exit`, or an `if` whose every branch (including a final `else`) returns. Loops never count, and neither does a `match` statement. End such functions with `unreachable()` or return the `match` as a value:
+A function with a result type must return on every path. The check is deliberately simple (`_block_returns` in [[src/myla/types.py]]): a block returns if it contains a `return`, a call to `panic`/`unreachable`/`std.process.exit`, or an `if` whose every branch (including a final `else`) returns. Loops never count, and neither does a `match` statement. End such functions with `unreachable()` or return the `match` as a value:
 
 ```myla
 fun first_even(xs: [int]) -> int {
@@ -118,7 +118,7 @@ fun main() {
 }
 ```
 
-The checker accepts a `become` that can run without the function's frame ([[src/myla/types.py#L4267-L4388]]):
+The checker accepts a `become` that can run without the function's frame (`Checker._check_become` in [[src/myla/types.py]]):
 
 - It stands where a `return` could, in a function's body; a lambda's body can't use it.
 - It calls a function, a method (`become self.step(n)`) or a function value, not a builtin, an enum variant or a partial application. No `?` follows the call.

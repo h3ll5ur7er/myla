@@ -2,7 +2,7 @@
 id: MYLA-11
 title: "#test attributes in imported modules can't name module-level declarations"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [loader, testing]
 ---

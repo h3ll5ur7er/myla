@@ -2,7 +2,7 @@
 id: MYLA-106
 title: IR: closures, function values and the rest
 type: feature
-status: review
+status: done
 priority: medium
 labels: [ir, codegen, selfhost]
 ---

@@ -6,7 +6,7 @@
 
 This repository uses [Genbeya](https://github.com/genbeya/genbeya): the board is `tasks/`, the wiki is `docs/`, settings are in `.genbeya.yml`. Both are plain Markdown and can be edited with any editor; Genbeya shows them as a board and a wiki with live references.
 
-- One file per task, named after its ID (`MYLA-12.md`), in the epic folder of its component: `Python toolchain`, `Self-hosted compiler`, `Editor tooling`, `Documentation and repository`, and `Roadmap ideas` for larger directions that aren't designed yet.
+- One file per task, named after its ID (`MYLA-12.md`), in the epic folder of its component: `Python toolchain`, `Self-hosted compiler`, `IR`, `Concurrency`, `LLVM and platforms`, `Editor tooling`, `Tooling in Myla`, `Project tool`, `Documentation and repository`, `Rust edition` (history), and `Roadmap ideas` for larger directions.
 - Workflow: `backlog` → `todo` → `in-progress` → `review` → `done`. Confirmed bugs that should be fixed next are in `todo`, everything else waits in `backlog`.
 - A new task takes the next free number across all epics. Abandoned tasks move to `done` with a note; tasks are never deleted.
 - Reference tasks, pages and files with `[[MYLA-12]]`, `[[Language/Types]]` and `[[src/myla/types.py#L10-L20]]`; `![[file#L1-L9]]` on its own line embeds lines.
@@ -27,7 +27,7 @@ This repository uses [Genbeya](https://github.com/genbeya/genbeya): the board is
 
 ## Every function has tests
 
-Every value-returning function in `examples/` and `selfhost/` carries `#test(args)[expected]` cases, so each file is its own regression suite (`myla test file.my`). Entry points and functions without a result are exempt. `test_examples_tests.py` enforces this for the examples.
+Every value-returning function in `examples/` carries `#test(args)[expected]` cases (the burn tests enforce it; in `selfhost/` some do, [[MYLA-184]]), so each file is its own regression suite (`myla test file.my`). Entry points and functions without a result are exempt. `test_examples_tests.py` enforces this for the examples.
 
 ## Regression corpus
 
@@ -42,7 +42,7 @@ The interpreter defines the semantics. A native backend that prints something el
 
 ## Decisions
 
-Language and design decisions are numbered (D1–D58 so far) and recorded with date, decision and reason on [[Project/Decisions]]. Revisiting one is a new decision, not an edit.
+Language and design decisions are numbered (D1–D97 so far) and recorded with date, decision and reason on [[Project/Decisions]]. Revisiting one is a new decision, not an edit.
 
 ## Style
 

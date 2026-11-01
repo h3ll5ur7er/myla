@@ -1,0 +1,8 @@
+//~ type error: integer literal 2147483648 does not fit in 'int32'
+//~ span: 2147483648
+// One past the signed maximum fits only under a unary minus: `-2147483648`
+// is the minimum, `2147483648` would wrap (MYLA-175).
+fun main() {
+    let c = 2147483648
+    print(c)
+}

@@ -2,7 +2,7 @@
 id: MYLA-119
 title: Lookup tables instead of linear searches in the self-hosted compiler
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [selfhost, performance]
 ---

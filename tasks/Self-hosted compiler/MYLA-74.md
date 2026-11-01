@@ -2,7 +2,7 @@
 id: MYLA-74
 title: Self-hosted interpreter copies containers on every update
 type: improvement
-status: review
+status: done
 priority: low
 labels: [selfhost, interpreter, performance]
 ---

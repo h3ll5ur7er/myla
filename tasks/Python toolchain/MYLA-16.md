@@ -2,7 +2,7 @@
 id: MYLA-16
 title: Native allocator scans one free list linearly
 type: improvement
-status: review
+status: done
 priority: high
 labels: [native-backend, performance, bootstrap]
 ---
@@ -19,4 +19,4 @@ Map `remove` is O(capacity) as well: it rebuilds the table instead of leaving to
 - [x] A 300,000-allocation version of that workload: 137 s → 1.4 s
 - [x] Stage 2: about 4 min → 1.3 s; full bootstrap 5 min → 7.8 s, fixed point holds, `stage2.s` identical to before; recorded on [[Development/Bootstrap]]
 - [x] Arena-reclaim stress tests still pass; the generated assembly differs from before only in `__alloc`, `__free` and `.bss`
-- [ ] Optional: tombstone deletion for maps (state 2 is already reserved)
+- [x] Optional: tombstone deletion for maps (state 2 is already reserved): moved to [[MYLA-151]]

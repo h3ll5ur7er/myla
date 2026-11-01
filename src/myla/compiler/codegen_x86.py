@@ -576,6 +576,72 @@ class CodeGen:
         e = self.text.append
         e("\t.global _start")
         e("_start:")
+        # the main thread's stack may grow to 120 MiB (MYLA-182, as in the
+        # self-hosted runtime): prlimit64(0, RLIMIT_STACK) raised to
+        # min(120 MiB, the hard limit) when lower; Linux keeps 128 MiB free
+        # below the stack for it
+        e("\tsubq $16, %rsp")
+        e("\tmovq $302, %rax")
+        e("\txorl %edi, %edi")
+        e("\tmovl $3, %esi")
+        e("\txorl %edx, %edx")
+        e("\tmovq %rsp, %r10")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjnz .Lstk_done")
+        e("\tmovq $125829120, %rcx")
+        e("\tcmpq %rcx, (%rsp)")
+        e("\tjae .Lstk_done")
+        e("\tcmpq %rcx, 8(%rsp)")
+        e("\tjae .Lstk_set")
+        e("\tmovq 8(%rsp), %rcx")
+        e(".Lstk_set:")
+        e("\tmovq %rcx, (%rsp)")
+        e("\tmovq $302, %rax")
+        e("\txorl %edi, %edi")
+        e("\tmovl $3, %esi")
+        e("\tmovq %rsp, %rdx")
+        e("\txorl %r10d, %r10d")
+        e("\tsyscall")
+        e(".Lstk_done:")
+        e("\taddq $16, %rsp")
+        # SIGSEGV on an alternate stack (MYLA-182): a fault next to the stack
+        # pointer is the main stack running out (past its 120 MiB), reported as
+        # `runtime error: stack overflow`; any other fault gets the default action
+        # back and happens again. mmap(64 KiB), sigaltstack, rt_sigaction(SIGSEGV,
+        # SA_SIGINFO | SA_ONSTACK | SA_RESTORER)
+        e("	movq $9, %rax")
+        e("	xorl %edi, %edi")
+        e("	movl $65536, %esi")
+        e("	movl $3, %edx")
+        e("	movl $34, %r10d")
+        e("	movq $-1, %r8")
+        e("	xorl %r9d, %r9d")
+        e("	syscall")
+        e("	cmpq $-4096, %rax")
+        e("	ja .Lsov_done")
+        e("	subq $32, %rsp")
+        e("	movq %rax, (%rsp)")
+        e("	movq $0, 8(%rsp)")
+        e("	movq $65536, 16(%rsp)")
+        e("	movq $131, %rax")
+        e("	movq %rsp, %rdi")
+        e("	xorl %esi, %esi")
+        e("	syscall")
+        e("	leaq __on_segv(%rip), %rax")
+        e("	movq %rax, (%rsp)")
+        e("	movq $201326596, 8(%rsp)")
+        e("	leaq __sig_restorer(%rip), %rax")
+        e("	movq %rax, 16(%rsp)")
+        e("	movq $0, 24(%rsp)")
+        e("	movq $13, %rax")
+        e("	movl $11, %edi")
+        e("	movq %rsp, %rsi")
+        e("	xorl %edx, %edx")
+        e("	movl $8, %r10d")
+        e("	syscall")
+        e("	addq $32, %rsp")
+        e(".Lsov_done:")
         # capture argc/argv from the entry stack (D29) for `std.process.args`.
         e("\tmovq (%rsp), %rax")        # argc
         e("\tmovq %rax, __argc(%rip)")
@@ -626,6 +692,48 @@ class CodeGen:
         # <message>`, then `  --> file:line:col` on the next line, the first two
         # lines of the interpreter's report (MYLA-65), to stderr and exits with
         # 1. Used by assert/panic/unreachable (§7) and the traps.
+        # __on_segv(sig, siginfo, ucontext), on the alternate stack: the fault
+        # address (siginfo + 16) within 64 KiB below or 1 MiB above the interrupted
+        # %rsp (ucontext + 160) is a stack overflow (MYLA-182)
+        e("__on_segv:")
+        e("	movq 16(%rsi), %rax")
+        e("	movq 160(%rdx), %rcx")
+        e("	movq %rcx, %r8")
+        e("	subq $65536, %r8")
+        e("	cmpq %r8, %rax")
+        e("	jb .Lsegv_other")
+        e("	movq %rcx, %r8")
+        e("	addq $1048576, %r8")
+        e("	cmpq %r8, %rax")
+        e("	ja .Lsegv_other")
+        e("	movq $1, %rax")
+        e("	movl $2, %edi")
+        e("	leaq .Lmsg_sov(%rip), %rsi")
+        e("	movl $30, %edx")
+        e("	syscall")
+        e("	movq $231, %rax")
+        e("	movl $1, %edi")
+        e("	syscall")
+        e(".Lsegv_other:")
+        e("	subq $32, %rsp")
+        e("	movq $0, (%rsp)")
+        e("	movq $0, 8(%rsp)")
+        e("	movq $0, 16(%rsp)")
+        e("	movq $0, 24(%rsp)")
+        e("	movq $13, %rax")
+        e("	movl $11, %edi")
+        e("	movq %rsp, %rsi")
+        e("	xorl %edx, %edx")
+        e("	movl $8, %r10d")
+        e("	syscall")
+        e("	addq $32, %rsp")
+        e("	ret")
+        e("__sig_restorer:")
+        e("	movq $15, %rax")
+        e("	syscall")
+        e(".Lmsg_sov:")
+        e("	.ascii \"runtime error: stack overflow\\n\"")
+        e("")
         e("__panic:")
         e("\tpushq %rsi")
         e("\tpushq %rdi")
@@ -1350,6 +1458,7 @@ class CodeGen:
                     cursor[0] += 8       # saved env_ptr
                     self._locals[f"indenv:{id(expr)}"] = -cursor[0]
                 if (isinstance(expr.callee, ast.Name)
+                        and not getattr(expr, "indirect_call", False)   # a local (MYLA-152)
                         and expr.callee.ident in ("push", "remove",
                                                   "append", "append_byte")):
                     cursor[0] += 8       # scratch to hold the lvalue holder address
@@ -1836,10 +1945,28 @@ class CodeGen:
         self._emit(f"movq ${16 + n * stride}, %rdi")
         self._emit("call __alloc")
         self._emit(f"movq %rax, {slot}(%rbp)")
-        self._emit(f"movq ${n}, (%rax)")     # length
+        # the length counts the elements stored so far, so that a `?` failing
+        # in an element releases the cell and what it holds (MYLA-157)
+        counted = self._owns_heap(et)
+        self._emit(f"movq ${0 if counted else n}, (%rax)")     # length
         self._emit(f"movq ${n}, 8(%rax)")    # capacity
+        drops = [lambda: self._drop_value("rbp", slot, expr.resolved_type)]
+        self._staged_drops.append(drops)
         for i, elem in enumerate(expr.elems):
             self._store_list_elem(elem, slot, 16 + i * stride, et)
+            if counted:
+                self._emit(f"movq {slot}(%rbp), %rcx")
+                self._emit(f"movq ${i + 1}, (%rcx)")
+            self._stage_temps(elem, drops)
+        self._staged_drops.pop()
+
+    def _stage_temps(self, value: ast.Expr, drops: list) -> None:
+        """The temporaries of `value`, an element already stored, released by
+        an early return before the statement's end (MYLA-157)."""
+        temps: list = []
+        self._collect_expr_temps(value, temps)
+        drops.extend(lambda off=off, tt=tt: self._drop_value("rbp", off, tt)
+                     for off, tt in temps)
 
     def _store_list_elem(self, value: ast.Expr, cell_slot: int, off: int,
                          mt: Type) -> None:
@@ -1882,6 +2009,10 @@ class CodeGen:
         self._emit(f"call {self._map_new_name(mt)}")
         self._emit(f"movq %rax, {slot}(%rbp)")
         staged = self._locals[f"staged:{id(expr)}"]
+        # an early return (a `?` in an entry) releases the map and what it
+        # holds so far (MYLA-157)
+        drops = [lambda: self._drop_value("rbp", slot, mt)]
+        self._staged_drops.append(drops)
         for key, value in expr.entries:
             self._eval(key)                      # key, then value (MYLA-8)
             self._emit("pushq %rax")
@@ -1890,6 +2021,9 @@ class CodeGen:
             self._emit(f"movq {slot}(%rbp), %rdi")  # cell
             self._emit(f"call {self._map_put_name(mt)}")  # rax=&value, rdx=found
             self._commit_map_value(vt, staged)
+            self._stage_temps(key, drops)
+            self._stage_temps(value, drops)
+        self._staged_drops.pop()
 
     # -- storing into containers ----------------------------------------------
     # A store into a list element, map value or builder evaluates the value

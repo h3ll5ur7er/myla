@@ -192,7 +192,7 @@ CONCURRENCY_PROGRAMS = {
         "actor A {\n    n: int\n}\nactor B {\n    m: int\n}\n"
         "impl A {\n    async fun ping(self, b: B) -> int {\n        return await b.pong(self)\n    }\n"
         "    fun val(self) -> int {\n        return self.n\n    }\n"
-        "    async fun peek(self) -> int {\n        async let x = self.n + 1\n        return await x\n    }\n}\n"
+        "    async fun peek(self) -> int {\n        let n = self.n\n        async let x = n + 1\n        return await x\n    }\n}\n"
         "impl B {\n    async fun pong(self, a: A) -> int {\n        return await a.val() + self.m\n    }\n}\n"
         "actor P {\n    n: int\n}\n"
         "impl P {\n    async fun poke(self, other: P, depth: int) -> int {\n"

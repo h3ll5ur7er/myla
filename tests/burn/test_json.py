@@ -273,9 +273,9 @@ class JsonAgainstPython(unittest.TestCase):
         self.check(self.interpreters, texts, sys.version_info >= (3, 13))
 
     def test_nesting_limit(self) -> None:
-        deep = "[" * 500 + "]" * 500
-        too_deep = "[" * 501 + "]" * 501
-        expected = ["ok " + deep, "err 1 501 Too deeply nested"]
+        deep = "[" * 200 + "]" * 200
+        too_deep = "[" * 201 + "]" * 201
+        expected = ["ok " + deep, "err 1 201 Too deeply nested"]
         data = _framed([deep, too_deep])
         for impl, argv in self.native.items():
             with self.subTest(implementation=impl):

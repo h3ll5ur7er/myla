@@ -193,6 +193,13 @@ class TestFloatInterpreter(unittest.TestCase):
         self.assertEqual(run("fun main() { print(3.9 as int32) }\n"), "3\n")
         self.assertEqual(run("fun main() { print(5 as float64) }\n"), "5\n")
 
+    def test_float32_overflow_gives_infinity(self):
+        # past the largest float32 the result is infinity, as natively, not
+        # an OverflowError (MYLA-176)
+        src = ("fun main() {\n    print(1e38 * 10.0)\n    print(-1e38 * 10.0)\n"
+               "    let c: float = 3.5e38\n    print(c)\n    print(3.4028235e38)\n}\n")
+        self.assertEqual(run(src), "inf\n-inf\ninf\n340282347000000000000000000000000000000\n")
+
     def test_float_to_int_casts_saturate(self):
         # D59 (MYLA-6): truncate toward zero, clamp to the target's range, NaN -> 0
         src = (

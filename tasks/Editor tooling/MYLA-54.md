@@ -2,7 +2,7 @@
 id: MYLA-54
 title: VS Code grammar and snippets describe a different Myla
 type: bug
-status: review
+status: done
 priority: low
 labels: [vscode]
 ---

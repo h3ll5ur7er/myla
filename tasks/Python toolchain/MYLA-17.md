@@ -2,7 +2,7 @@
 id: MYLA-17
 title: "Native runtime robustness: partial writes and malformed UTF-8"
 type: bug
-status: review
+status: done
 priority: low
 labels: [native-backend, runtime]
 ---

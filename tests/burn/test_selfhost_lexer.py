@@ -103,6 +103,18 @@ class SelfHostedLexerParity(unittest.TestCase):
         finally:
             os.unlink(fh.name)
 
+    def test_a_byte_order_mark_is_skipped(self) -> None:
+        # a UTF-8 BOM at the start takes no column; one elsewhere is an error
+        # in both lexers (MYLA-178)
+        for source in ("\ufefffun main() {\n    print(1)\n}\n", "fun main() {\n    \ufeff\n}\n"):
+            with self.subTest(source=source), tempfile.NamedTemporaryFile(
+                    "w", suffix=".my", encoding="utf-8", delete=False) as fh:
+                fh.write(source)
+            try:
+                self.assertEqual(self._myla_lex(fh.name), _oracle(fh.name))
+            finally:
+                os.unlink(fh.name)
+
     def test_unicode_identifiers_and_escapes(self) -> None:
         # XID identifiers and the escapes strings share with chars (MYLA-84, MYLA-86)
         source = ("fun größe(π: int, x\u0301: int, a\u00b7b: int) -> int {\n"

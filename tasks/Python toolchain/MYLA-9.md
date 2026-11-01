@@ -2,7 +2,7 @@
 id: MYLA-9
 title: Generic instantiations can get the same mangled name
 type: bug
-status: review
+status: done
 priority: low
 labels: [monomorphize, native-backend]
 ---

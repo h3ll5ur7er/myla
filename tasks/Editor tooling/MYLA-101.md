@@ -2,7 +2,7 @@
 id: MYLA-101
 title: Build the VS Code extension's .vsix in CI
 type: feature
-status: review
+status: done
 priority: medium
 labels: [vscode, ci]
 ---
@@ -42,4 +42,4 @@ Run locally from a clean folder (`rm -rf node_modules out *.vsix`), the job's co
    488620  12 files
 ```
 
-No sources, tests, `node_modules`, source maps or configuration files. The job itself hasn't run on GitHub yet.
+No sources, tests, `node_modules`, source maps or configuration files. The job has run on GitHub since: master run 41238095249 is green, 54 tests, a `.vsix` of 12 files (127 KB) uploaded as `myla-vscode-extension` (noted in the review triage of 2026-10-31).

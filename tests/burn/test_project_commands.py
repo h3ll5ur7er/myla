@@ -125,6 +125,27 @@ class TestNewProject(_Layout):
         proc = self.run_in(root, "clean")          # nothing to remove is fine
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
+    def test_clean_needs_no_resolvable_dependencies(self):
+        # `myla clean` reads only the manifest: an unlocked Git dependency
+        # stops `check`, not cleaning (found in the October 2026 review)
+        proc = self.myla_cmd("new", "cleanme")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        root = os.path.join(self.work, "cleanme")
+        _write(os.path.join(root, "myla.toml"),
+               '[package]\nname = "cleanme"\nversion = "0.1.0"\n\n[dependencies]\n'
+               'greet = { git = "https://example.invalid/greet.git", tag = "v1" }\n')
+        _write(os.path.join(root, "build", "hello"), "")
+        _write(os.path.join(root, ".myla", "deps", "stale"), "")
+        proc = self.run_in(root, "check")
+        self.assertIn("dependency 'greet' is not locked", proc.stderr)
+        proc = self.run_in(root, "clean")
+        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("", "", 0))
+        self.assertFalse(os.path.exists(os.path.join(root, "build")))
+        self.assertTrue(os.path.isdir(os.path.join(root, ".myla")))
+        proc = self.run_in(root, "clean", "--deps")
+        self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("", "", 0))
+        self.assertFalse(os.path.exists(os.path.join(root, ".myla")))
+
     def test_new_errors(self):
         proc = self.myla_cmd("new", "1abc")
         self.assertEqual(proc.returncode, 1)

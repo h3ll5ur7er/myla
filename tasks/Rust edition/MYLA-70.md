@@ -2,7 +2,7 @@
 id: MYLA-70
 title: Remove the Rust edition from the repository
 type: chore
-status: review
+status: done
 priority: low
 labels: [rust, cleanup]
 ---

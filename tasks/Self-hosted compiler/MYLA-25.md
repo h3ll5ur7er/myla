@@ -2,7 +2,7 @@
 id: MYLA-25
 title: remove() on a map changes copies of the map too
 type: bug
-status: review
+status: done
 priority: medium
 labels: [selfhost, codegen, collections]
 ---

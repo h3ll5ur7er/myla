@@ -2,7 +2,7 @@
 id: MYLA-23
 title: "#derive(Eq) on recursive enums compares box addresses"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [selfhost, codegen, traits]
 ---

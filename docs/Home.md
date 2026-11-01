@@ -41,7 +41,7 @@ fun main() {
 
 ## The toolchains
 
-The repository holds four implementations of the language and its tools:
+The repository holds three toolchains:
 
 | Toolchain | Where | Role |
 | --- | --- | --- |
@@ -60,7 +60,7 @@ flowchart LR
 
 ## Status in one paragraph
 
-Version 1.0 is reached: every feature milestone (v0.0 to v0.5) is implemented in the Python toolchain with interpreter/native parity, and the self-hosted compiler reaches its three-stage fixed point. A code review in October 2026 found parity bugs between the interpreter and the native backend, a disabled `free` and several miscompiles in the self-hosted runtime, and a Rust reimplementation whose native backend miscompiled common code (since removed, [[Architecture/Rust-edition]]). They are tracked as tasks on the board and summarised on [[Project/Known-issues]]. The Python backend's memory and crash bugs from that review are fixed ([[MYLA-2]], [[MYLA-3]], [[MYLA-4]]); so are the self-hosted destructuring miscompile ([[MYLA-21]]) and its disabled `free` ([[MYLA-22]]).
+Version 1.0 is reached and well past: every feature milestone is implemented in the Python toolchain with interpreter/native parity, and the self-hosted compiler reaches its three-stage fixed point. Since then the self-hosted backend goes through a verified mid-level IR ([[Architecture/IR]]), with guaranteed tail calls (`become`, D87); the language has Swift-style concurrency (D89 to D97: `async`/`await`, structured child tasks, actors) on a multi-threaded work-stealing native runtime ([[Language/Concurrency]]); and the tools are written in Myla: a project tool with Git dependencies ([[Architecture/Project-tool]]), a language server and a REPL, beside a VS Code extension with a debugger ([[Architecture/Editor-tooling]]). The review of October 2026 ([[Project/Review-2026-10]]) found the bugs now on the board and on [[Project/Known-issues]]; next is LLVM and other platforms ([[MYLA-62]]).
 
 ## Working in this repository
 

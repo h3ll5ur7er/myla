@@ -16,12 +16,12 @@ flowchart LR
 
 | Stage | What runs | Time (4 cores) |
 | --- | --- | --- |
-| 1 | `python3 myla.py build selfhost/gen_main.my -o build/gen_tool` | 3.4 s |
-| 2 | `build/gen_tool selfhost/gen_main.my src/myla > build/stage2.s`, then `as` + `ld` | 1.3 s |
-| 3 | `build/stage2 selfhost/gen_main.my src/myla > build/stage3.s`, then `as` + `ld` | 2.9 s |
+| 1 | `python3 myla.py build selfhost/gen_main.my -o build/gen_tool` | 9.7 s |
+| 2 | `build/gen_tool selfhost/gen_main.my src/myla > build/stage2.s`, then `as` + `ld` | 1.2 s to compile |
+| 3 | `build/stage2 selfhost/gen_main.my src/myla > build/stage3.s`, then `as` + `ld` | 1.1 s to compile |
 | check | `cmp build/stage2.s build/stage3.s` | |
 
-The result is about 4.4 MB of assembly (267,709 lines) and a 1 MB static binary. A fourth round produces the same output again.
+The result is about 6.2 MB of assembly (324,557 lines) and a 1.5 MB static binary (measured on 2026-11-01; the whole script, with `build/myla` and the language server, takes about 15 s). A fourth round produces the same output again.
 
 ## Why it used to be slow
 
@@ -58,7 +58,7 @@ build/stage3 program.my src/myla > program.s     # the second argument is the fo
 as --64 -o program.o program.s && ld -o program program.o
 ```
 
-Without the second argument the root is derived from the compiler's location, as for `build/myla`. `scripts/build.sh <file> [out]` and `scripts/run.sh <file> [args]` wrap this and work from any directory.
+Without the second argument the root is derived from the compiler's location, as for `build/myla`. `scripts/build.sh <file> [out]` wraps this and works from any directory; `build/myla run <file> [args]` interprets a program.
 
 ## When the fixed point breaks
 

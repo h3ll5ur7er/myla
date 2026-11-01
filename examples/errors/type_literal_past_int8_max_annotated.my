@@ -1,0 +1,7 @@
+//~ type error: integer literal 128 does not fit in 'int8'
+//~ span: 128
+// The annotation makes the literal an `int8`, whose maximum is 127 (MYLA-175).
+fun main() {
+    let d: int8 = 128
+    print(d)
+}

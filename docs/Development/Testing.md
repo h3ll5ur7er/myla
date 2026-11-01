@@ -7,7 +7,7 @@ All tests use the standard library's `unittest`, so they need nothing beyond Pyt
 ## Running
 
 ```bash
-scripts/test.sh fast                                     # about 20 seconds once the tools are cached
+scripts/test.sh fast                                     # about 20 seconds once the tools are cached (the quick burn modules)
 scripts/test.sh                                          # every suite (all)
 python3 -m unittest discover -s tests/unit -t .
 python3 -m unittest discover -s tests/integration -t .
@@ -18,7 +18,7 @@ uv run pytest tests/unit -q                              # pytest from the dev g
 
 `scripts/test.sh fast` runs the unit and integration tests and the burn tests without the self-hosting gates (`tests/burn/test_selfhost_*`); use it while working and the full run before committing.
 
-The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by the Python backend) through `selfhost_tool(name)` in `tests/burn/_tools.py`, and other Myla programs such as the grammar tool through `myla_tool(path, name)`. A tool is cached as `build/test-tools/<name>-<hash>`, where the hash covers every source that can change it (`src/myla/**/*.py`, `src/myla/std/*.my`, `selfhost/*.my`, `tools/**/*.my`), so an edit to any of them rebuilds it and the stale copy is removed. The full burn run takes about 65 s with an empty cache and about 42 s with a warm one; when every module built its own tools it took 78 s, with fewer tests ([[MYLA-58]]).
+The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by the Python backend) through `selfhost_tool(name)` in `tests/burn/_tools.py`, and other Myla programs such as the grammar tool through `myla_tool(path, name)`. A tool is cached as `build/test-tools/<name>-<hash>`, where the hash covers every source that can change it (`src/myla/**/*.py`, `src/myla/std/*.my`, `selfhost/*.my`, `tools/**/*.my`), so an edit to any of them rebuilds it and the stale copy is removed. Measured on 4 cores with the tools cached (2026-11-01, [[MYLA-153]]): the burn modules take 320 s one after the other, most of it in the self-hosting gates (`test_selfhost_cli` 57 s, `test_selfhost_codegen` 51 s, `test_selfhost_interp` 22 s), the language server scenarios (39 s), the native parity suite (36 s), the concurrency stress tests (22 s) and the JSON corpus (17 s); building the tools adds about a minute to a cold run. `scripts/test.sh fast` leaves out the self-hosting gates and every module of 4 s or more, and takes 18 s with the unit and integration tests. CI's burn job takes 4 to 7 minutes.
 
 ## Continuous integration
 
@@ -26,12 +26,12 @@ The burn tests build the self-hosted tools (`selfhost/<name>.my`, compiled by th
 
 [![CI](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/h3ll5ur7er/myla/actions/workflows/ci.yml)
 
-The jobs:
+The jobs run on `ubuntu-24.04` (pinned: `ubuntu-latest` moves, and the burn job relies on that runner's Python 3.12), with the actions at their Node 24 versions:
 
 | Job | Runs |
 | --- | --- |
 | `unit` | Unit and integration tests on Python 3.12 and 3.13 |
-| `burn` | The burn suite (native builds with the runner's binutils), with Node and the tree-sitter CLI for `test_grammar.py` (Node also runs the VS Code extension's server choice in `test_lsp.py`) |
+| `burn` | The burn suite (native builds with the runner's binutils) on the runner's own Python 3.12, with gdb for the debug-information and debugger tests (on `actions/setup-python` gdb would embed its libpython and the pretty-printers wouldn't run, [[MYLA-156]]), Node and the tree-sitter CLI for `test_grammar.py` (Node also runs the VS Code extension's server choice in `test_lsp.py`); `build/test-tools` and the npm install are cached |
 | `bootstrap` | `scripts/bootstrap.sh`, then the stage 3 compiler builds and runs `examples/hello.my` |
 | `vscode-extension` | In `vscode-extension/myla`, with Node 22, gdb and the runner's own Python (`actions/setup-python` would point gdb at its libpython, and the binaries' pretty-printers wouldn't run, D82): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test` (the extension's tests, the debugger against gdb with the Python CLI building), `npx vsce package`; uploads the `.vsix` as the artifact `myla-vscode-extension` ([[MYLA-101]]) |
 
@@ -39,9 +39,9 @@ The jobs:
 
 | Suite | Tests | Result |
 | --- | --- | --- |
-| Unit | 595 | All pass, about 7 s |
+| Unit | 622 | All pass, about 6 s |
 | Integration | 2 | Pass |
-| Burn | 768 (plus subtests, 5 skipped) | All pass, about 400 s with cached tools (green since [[MYLA-4]]) |
+| Burn | 826 (plus subtests, 5 skipped) | All pass, about 350 s with cached tools in one process (green since [[MYLA-4]]) |
 
 ## Unit tests
 
@@ -137,7 +137,7 @@ The first error's notes and help lines are named in order, each by its label and
 //~ help: did you mean 'count'?
 ```
 
-The corpus has 166 files: 12 lex, 10 parse, 2 module, 130 type, 12 runtime. The `type_recover_*` files have errors in declarations and bodies (D84, [[MYLA-110]]). More module errors (cycles, which file an error is attributed to) are covered by `tests/unit/test_loader.py`.
+The corpus has 210 files: 12 lex, 12 parse, 2 module, 172 type, 12 runtime. The `type_recover_*` files have errors in declarations and bodies (D84, [[MYLA-110]]). More module errors (cycles, which file an error is attributed to) are covered by `tests/unit/test_loader.py`.
 
 ## Adding tests
 

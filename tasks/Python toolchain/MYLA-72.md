@@ -2,7 +2,7 @@
 id: MYLA-72
 title: "`?` in a lambda is checked against the enclosing function's return type"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [checker, closures]
 ---

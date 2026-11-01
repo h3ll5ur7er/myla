@@ -2,7 +2,7 @@
 id: MYLA-88
 title: Directory functions in std.fs
 type: feature
-status: review
+status: done
 priority: medium
 labels: [stdlib, runtime, selfhost]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-64
 title: Project tool like cargo
 type: feature
-status: review
+status: done
 priority: medium
 labels: [tooling, cli, design]
 ---

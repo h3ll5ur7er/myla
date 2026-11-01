@@ -2,7 +2,7 @@
 id: MYLA-92
 title: Packages in both loaders (--package name=dir)
 type: feature
-status: review
+status: done
 priority: medium
 labels: [loader, selfhost, tooling]
 ---

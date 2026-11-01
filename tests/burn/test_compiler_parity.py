@@ -325,6 +325,26 @@ PROGRAMS = {
     # MYLA-84: a const string made with `+` read inside a function: the
     # self-hosted backend evaluated the concatenation at each use, into a
     # temporary its frame had no slot for, and the function's return crashed
+    # MYLA-152: a local closure shadows a builtin of the same name too, with
+    # and without a result, in calls; outside its scope the builtin is back
+    "local_closure_shadows_a_builtin": (
+        "#main\nfun main() {\n"
+        "    if true {\n"
+        "        let build = (n: int32) => n + 1\n"
+        "        print(build(41))\n"
+        "        let len = (s: str) => 7\n"
+        "        print(len(\"abc\"))\n"
+        "        let keys = (n: int32) => [n, n]\n"
+        "        print(keys(3)[1])\n"
+        "        let push = (s: str) => { print(s + \"!\") }\n"
+        "        push(\"pushed\")\n"
+        "    }\n"
+        "    print(len(\"abc\"))\n"
+        "    var xs = [1]\n"
+        "    push(xs, 2)\n"
+        "    print(len(xs))\n"
+        "}\n"
+    ),
     # MYLA-102: a local binding shadows a top-level function of the same name
     # in calls too (a closure, a parameter of function type); outside its
     # scope the function is called again
@@ -2750,6 +2770,36 @@ PROGRAMS = {
         "    print(t1.1.v + t2.0.v)\n"
         "}\n"
     ),
+    # a map literal whose values involve generics: the monomorphizer walks
+    # its (key, value) entries (MYLA-174)
+    "map_literal_with_generic_values": (
+        "struct Box<T> { v: T }\n"
+        "\n"
+        "fun main() {\n"
+        "    let m = [1: Some(2), 3: None]\n"
+        "    print(len(m))\n"
+        "    match m[1] {\n"
+        "        Some(n) => print(n),\n"
+        "        None => print(0),\n"
+        "    }\n"
+        "    let b: [int: Box<str>] = [1: Box { v: \"one\" }]\n"
+        "    print(b[1].v)\n"
+        "    let nested = [\"k\": [Box { v: 4 }]]\n"
+        "    print(nested[\"k\"][0].v)\n"
+        "}\n"
+    ),
+    # float32 overflow gives infinity everywhere (MYLA-176)
+    "float32_overflow_gives_infinity": (
+        "fun main() {\n"
+        "    let a = 1e38 * 10.0\n"
+        "    print(a)\n"
+        "    print(-1e38 * 10.0)\n"
+        "    let c: float = 3.5e38\n"
+        "    print(c)\n"
+        "    print(a - a)\n"
+        "    print(3.4028235e38)\n"
+        "}\n"
+    ),
     # float -> integer casts saturate, NaN gives 0 (D59, MYLA-6)
     "float_to_int_casts_saturate": (
         "const BIG: float64 = 1e19\n"
@@ -3000,6 +3050,28 @@ STRESS_TRY_SRC = (
     "    while k < 100000 {\n"
     "        match chain(60) { Ok(_) => { } Err(_) => { errs = errs + 1 } }\n"
     "        k = k + 1\n    }\n    print(errs)\n}\n"
+)
+
+
+# MYLA-157: a `?` failing in a list or map literal after an element that owns
+# a heap value (a 1 KB string): the half-built literal and that element must
+# be released, or 1.2M iterations leak over a gigabyte (past the Python
+# backend's 1 GiB arena; the self-hosted gate checks its peak).
+STRESS_TRY_IN_LITERAL_SRC = (
+    "fun fails(i: int) -> Result<str, str> {\n    return Err(\"no\")\n}\n"
+    "fun in_list(i: int, pad: str) -> Result<[str], str> {\n"
+    "    let xs = [pad + f\"{i}\", fails(i)?]\n    return Ok(xs)\n}\n"
+    "fun in_map(i: int, pad: str) -> Result<[str: str], str> {\n"
+    "    let m = [\"a\": pad + f\"{i}\", \"b\": fails(i)?]\n    return Ok(m)\n}\n"
+    "#main\nfun main() {\n"
+    "    var sb = StringBuilder()\n"
+    "    for i in 0..1000 {\n        append(sb, \"x\")\n    }\n"
+    "    let pad = build(sb)\n"
+    "    var errs = 0\n"
+    "    for k in 0..600000 {\n"
+    "        match in_list(k, pad) { Ok(_) => { } Err(_) => { errs = errs + 1 } }\n"
+    "        match in_map(k, pad) { Ok(_) => { } Err(_) => { errs = errs + 1 } }\n"
+    "    }\n    print(errs)\n}\n"
 )
 
 
@@ -3645,6 +3717,11 @@ class TestCompilerParity(unittest.TestCase):
         out, code = build_and_run(STRESS_TRY_SRC)
         self.assertEqual(code, 0, "arena exhausted — `?` early return leaked locals")
         self.assertEqual(out.strip(), "100000")
+
+    def test_try_in_a_literal_releases_it(self):
+        out, code = build_and_run(STRESS_TRY_IN_LITERAL_SRC)
+        self.assertEqual(code, 0, "arena exhausted — a half-built literal leaked")
+        self.assertEqual(out.strip(), "1200000")
 
     def test_try_after_a_staged_value_releases_it(self):
         out, code = build_and_run(STRESS_TRY_AFTER_STAGED_VALUE_SRC)

@@ -42,7 +42,7 @@ module.exports = grammar({
     type_params: $ => seq('<', $.identifier, repeat(seq(',', $.identifier)), '>'),
     impl_decl: $ => seq('impl', optional($.generics), choice($._type, seq($.named_type, 'for', $._type)), '{', optional($._sep_rep), repeat(seq($.method, optional($._sep_rep))), '}'),
     method: $ => seq($.method_head, $.block),
-    method_head: $ => seq(optional('async'), 'fun', $.identifier, optional($.generics), '(', $.receiver, repeat(seq(',', $.param)), optional(','), ')', optional(seq('->', $._type))),
+    method_head: $ => seq(optional('async'), 'fun', $.identifier, optional($.generics), '(', $.receiver, repeat(seq(',', $.param)), ')', optional(seq('->', $._type))),
     receiver: $ => choice('self', seq('var', 'self')),
     trait_decl: $ => seq('trait', $.identifier, optional($.type_params), '{', optional($._sep_rep), repeat(seq($.method_head, optional($._sep_rep))), '}'),
     typealias_decl: $ => seq('typealias', $.identifier, '=', $._type),

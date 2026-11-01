@@ -10,7 +10,7 @@ An attribute is written on the lines above a declaration: `#name`, optionally fo
 | --- | --- | --- |
 | `#main` | a non-generic function without parameters | The entry point, instead of the function named `main` |
 | `#test(args)[expected]` | a non-generic function with a result | One test case; several may be stacked |
-| `#derive(Eq)` | a non-generic struct or enum | Structural equality ([[Language/Methods-and-traits]]) |
+| `#derive(Eq)` | a non-generic struct or enum | Structural equality ([[Language/Methods-and-traits]]); `Eq` is the only trait that can be derived (`cannot derive 'Ord': only 'Eq' is derivable`) |
 
 ## #test
 
@@ -30,10 +30,10 @@ fun main() {
 ```
 
 - The arguments must match the parameters and the single expected value the result type; both are checked at compile time. They may use literals, constants, struct literals, enum constructors and other expressions without local variables.
-- `myla test file.my` calls the function for each case in the interpreter and compares the result with the expected value structurally (maps whatever their order). A runtime error (`panic`, a failed `assert` included) fails the case, and so does `exit(n)`; the other cases still run. Once all have run, it prints `PASS  add #1` or `FAIL  add #2: expected 101, got 100` for each (values as the Python interpreter's repr shows them: `True`, `'text'`, chars as code points, `P { x: 1 }`, `E.B(2)`), `FAIL  f #1: runtime error: <message>` or `FAIL  f #1: exited with status 3`, and a summary; the exit status is 1 if anything failed. The Python CLI and the self-hosted `build/myla test` print the same ([[MYLA-81]]); output from the tests themselves comes before the report.
+- `myla test file.my` runs the cases declared in `file.my` itself, not those of the modules it imports, the standard library's included ([[MYLA-187]]); test a module by naming it. It calls the function for each case in the interpreter and compares the result with the expected value structurally (maps whatever their order). A runtime error (`panic`, a failed `assert` included) fails the case, and so does `exit(n)`; the other cases still run. Once all have run, it prints `PASS  add #1` or `FAIL  add #2: expected 101, got 100` for each (values as the Python interpreter's repr shows them: `True`, `'text'`, chars as code points, `P { x: 1 }`, `E.B(2)`), `FAIL  f #1: runtime error: <message>` or `FAIL  f #1: exited with status 3`, and a summary; the exit status is 1 if anything failed. The Python CLI and the self-hosted `build/myla test` print the same ([[MYLA-81]]); output from the tests themselves comes before the report.
 - `#test` never affects `run` or `build`.
 
-Every value-returning function in `examples/` and in `selfhost/` carries tests, and the burn tests enforce that ([[Development/Conventions]]). A `#test` in an imported module can use that module's own declarations ([[MYLA-11]]).
+Every value-returning function in `examples/` carries tests, and the burn tests enforce that ([[Development/Conventions]]); in `selfhost/` some do ([[MYLA-184]]). A `#test` in an imported module can use that module's own declarations ([[MYLA-11]]).
 
 ## const
 

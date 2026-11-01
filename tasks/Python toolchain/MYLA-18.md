@@ -2,7 +2,7 @@
 id: MYLA-18
 title: "Strings from +, format and builders are never freed"
 type: improvement
-status: review
+status: done
 priority: low
 labels: [native-backend, memory]
 ---

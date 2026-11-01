@@ -2,7 +2,7 @@
 id: MYLA-103
 title: IR: data types, flags and scalar functions
 type: feature
-status: review
+status: done
 priority: high
 labels: [ir, codegen, selfhost]
 ---

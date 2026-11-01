@@ -2,7 +2,7 @@
 id: MYLA-76
 title: Optional semicolons as statement separators
 type: feature
-status: review
+status: done
 priority: medium
 labels: [lexer, parser, selfhost, spec]
 ---

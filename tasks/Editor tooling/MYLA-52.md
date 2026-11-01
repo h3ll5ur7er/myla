@@ -2,7 +2,7 @@
 id: MYLA-52
 title: Language server has no tests
 type: chore
-status: review
+status: done
 priority: medium
 labels: [lsp, tests]
 ---
@@ -14,7 +14,7 @@ There are no tests for `src/myla/lsp/`. The pure modules (positions, lookup, sym
 
 ## How and evidence
 
-[[tests/unit/test_lsp_features.py]], 21 tests without pygls:
+`tests/unit/test_lsp_features.py`, 21 tests without pygls:
 
 - positions: UTF-16 columns with astral and BMP characters, clamping, CRLF lines, `identifier_end_column`, and the new `from_lsp_character` (UTF-16 offset to string index);
 - symbols: the ranges of [[MYLA-48]], the outline's structure, a parse error;
@@ -22,3 +22,7 @@ There are no tests for `src/myla/lsp/`. The pure modules (positions, lookup, sym
 - completion: members after `.`, keywords and declarations otherwise.
 
 Two bugs found by the tests, fixed: `completion._is_member_access` sliced the line with a UTF-16 offset as if it were a string index (a cursor after a 😀 looked one character further), and the keyword list lacked `char`, `float`, `float32` and `float64`. With pygls installed, `tests/integration` also runs the diagnostics smoke test (4 tests, none skipped). Unit suite: 442 tests pass.
+
+## Resolution
+
+Superseded (closed in the review triage of 2026-10-31): [[MYLA-83]] removed the Python language server it was to test; the Myla server ([[MYLA-80]]) is tested by `tests/burn/test_lsp.py` over the scenarios in `tests/burn/_lsp_scenarios.py` (140 tests).

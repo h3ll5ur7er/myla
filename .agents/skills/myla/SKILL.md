@@ -7,7 +7,7 @@ description: Write, read, review and debug code in the Myla programming language
 
 Myla is a small, statically typed language with sized integers, value semantics, enums with `match`, traits and closures. It compiles to x86-64 Linux binaries without libc and is self-hosted. **It is not Rust and not Swift**: code that looks right in either usually fails here. The full reference is the wiki: `docs/Language.md` and its subpages; the grammar is `docs/Language/Grammar.md`.
 
-Which implementation defines the language: the Python toolchain in `src/myla/` (the interpreter is the semantics). The self-hosted compiler in `selfhost/` follows it. A Rust prototype with a different dialect (actors, `async`, semicolons, no type checking) existed until October 2026 and was removed; its syntax is not Myla. Don't copy it from git history, and don't trust the tree-sitter grammar in `editor/`, which still follows it in places.
+Which implementation defines the language: the Python toolchain in `src/myla/` (the interpreter is the semantics). The self-hosted compiler in `selfhost/` follows it. A Rust prototype with a different dialect (semicolons, no type checking, its own actors) existed until October 2026 and was removed; its syntax is not Myla, so don't copy it from git history. Myla's own concurrency (`async`, `await`, `async let`, actors) is described below. The grammar is `grammar/myla.ebnf`; the tree-sitter grammar in `editor/` is generated from it.
 
 ## A complete program
 
@@ -100,7 +100,7 @@ fun main() {
 ## Syntax notes
 
 - Struct literal `Point { x: 1, y: 2 }` (every field); in `if`/`while`/`for`/`match` heads wrap it in parentheses.
-- `match`: arms `pattern [if guard] => expr` or `=> { …; last_expression }`, one per line or comma-separated. Patterns: `_`, bindings, literals, `Variant(a, b)`, `E.Variant`, tuples, `Point { x, y: 0 }`, `a | b`. Matches must be exhaustive; nested patterns like `Some(Ok(x))` need a `_` arm.
+- `match`: arms `pattern [if guard] => expr` or `=> { …; last_expression }`, one per line or comma-separated. Patterns: `_`, bindings, literals, `Variant(a, b)`, `E.Variant`, tuples, `Point { x, y: 0 }`, `a | b`. Matches must be exhaustive, nested patterns included: `Some(Ok(v))`, `Some(Err(e))` and `None` cover an `Option<Result<…>>` without a `_` arm.
 - A function that returns a value must end every path with `return`, `panic(…)` or `unreachable()`; loops and `match` statements don't count, so put `unreachable()` after a loop that always returns.
 - `?` works on `Option`/`Result` when the function returns the same kind (same error type). Inside a lambda it returns from the lambda, so the lambda's result type must be known: pass it where a function type is expected or annotate the variable (`let f: (int) -> Option<int> = (x: int) => …`).
 - `x |> f(y)` is `f(x, y)`; `f >> g` composes; `f(_, 2)` is partial application.
@@ -108,15 +108,55 @@ fun main() {
 - Generic bounds: `fun sum<T: Add>(…)`; a bound allows the operator on `T`, not calling trait methods on it.
 - Entry point: `fun main()` without parameters; `std.process.args()` and `std.process.exit(code)`.
 - Input: `var r = stdin()` (from `std.io`), then `r.read_line()` (`Result<Option<str>, IoError>`, no `"\n"`), `r.read_exact(n)`, `r.read_to_end()`. A reader is a value, so a helper function can't read from one it was passed: keep it in a struct field and read in `var self` methods.
-- Files (`std.fs`): `read_to_string(path)`, `write_to_file(path, s)`, `list_dir(path)` (`Result<[str], IoError>`, sorted, without `.`/`..`), `make_dir(path)`, `make_dir_all(path)`, `exists(path)`, `is_dir(path)`, `is_file(path)`.
+- Files (`std.fs`): `read_to_string(path)`, `write_to_file(path, s)`, `list_dir(path)` (`Result<[str], IoError>`, sorted, without `.`/`..`), `make_dir(path)`, `make_dir_all(path)`, `remove_file(path)`, `remove_dir(path)`, `remove_dir_all(path)`, `rename(from, to)`, `exists(path)`, `is_dir(path)`, `is_file(path)`, `current_dir()`.
+- Also in the standard library: `std.json` (`parse`, `to_string`, `field`), `std.toml` (`parse`, `parse_doc`), `std.num` (`parse_int`, `parse_float`, `format_float`), `std.task` (`all`, `cancel`, `cancelled`); the reference is `docs/Language/Standard-library.md`.
 - Part of a string: `var sb = StringBuilder()`, `append(sb, s, start, end)` (byte offsets, must lie within `s`), `build(sb)`; there is no slicing syntax.
 - Constants: `const MAX: int = 10`; no global variables.
+- `become f(args)` is a guaranteed tail call: it ends the function like `return f(args)`, but the stack doesn't grow (D87). The call must be a function, a method or a function value that's a parameter (not a builtin, a variant or a partial application), and must not be followed by `?`.
+
+## Concurrency (D89 to D97, `docs/Language/Concurrency.md`)
+
+```myla
+import std.task as task
+
+actor Counter {
+    n: int,
+}
+
+impl Counter {
+    fun add(var self, k: int) -> int {
+        self.n = self.n + k
+        return self.n
+    }
+}
+
+async fun work(c: Counter, k: int) -> int {
+    return await c.add(k)
+}
+
+#main
+async fun main() {
+    let c = Counter { n: 0 }
+    async let a = work(c, 1)
+    async let b = work(c, 2)
+    print(await a + await b)
+}
+```
+
+- `async fun` can suspend; a call of it, or of an actor's method from outside, must be awaited (`await f(x)`), and only in async code. The entry point is `#main async fun main()`.
+- `async let x = e` starts a child task; read it once with `await x`. A scope waits for its children. Only async functions have them, and a lambda can't `await` or `task.cancel` them.
+- An actor's state is reached only through `self` in its own methods; one method runs at a time, but an `await` inside an async method lets other calls in (a warning flags a field checked before an `await` and changed after it, D95).
+- Values cross between tasks and actors as deep copies; nothing mutable is shared but an actor. Captures can't be changed (D93).
+- `std.task`: `await task.all(fs)` runs a list of `async () -> T` functions as children; `task.cancel(a)` asks the child `a` to stop and `task.cancelled()` is how a task checks (cooperative, D96).
+- A failure (panic, runtime error, `exit`) in any task ends the program at once: the others stop at their next `await` (D97).
+- Native concurrency is the self-hosted compiler's (`build/myla build`, D92: `MYLA_THREADS` workers); `python3 myla.py build` refuses it (D91), the interpreter runs it.
 
 ## Working in this repository
 
 - Run: `python3 myla.py run file.my`, test: `python3 myla.py test file.my`, compile: `python3 myla.py build file.my -o out`, type-check: `python3 myla.py check file.my`.
-- Every value-returning function in `examples/` and `selfhost/` needs `#test(args)[expected]` cases; a burn test enforces it.
-- New examples must be registered in `tests/burn/test_examples_run.py` and `tests/burn/test_examples_compile.py`; programs that must be rejected go to `examples/errors/` with a first line `//~ <lex|parse|type|runtime> error: <message substring>`.
+- The self-hosted CLI, `build/myla` (built by `scripts/bootstrap.sh`), has the same commands plus `repl`, and in a project with a `myla.toml` `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` (D73).
+- Every value-returning function in `examples/` needs `#test(args)[expected]` cases (a burn test enforces it); add them to new functions in `selfhost/` too where they make sense.
+- New examples must be registered in `tests/burn/test_examples_run.py` and `tests/burn/test_examples_compile.py`; programs that must be rejected go to `examples/errors/` with a first line `//~ <lex|parse|module|type|runtime> error: <message substring>` (more directives, such as `//~ span:`, in `tests/burn/test_error_corpus.py`).
 - The interpreter and the native backend must print the same output; check both (`run` and `build` + execute) after changing either.
 - Changes to `selfhost/` must keep the bootstrap fixed point: `scripts/bootstrap.sh`.
 - Before trusting a construct you're unsure of, write a five-line program and run `python3 myla.py check` on it: the checker's messages are precise.

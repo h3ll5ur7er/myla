@@ -1,4 +1,4 @@
-// interpolation.my — string interpolation (v0.5.6, D58).
+// interpolation.my — string interpolation (D58).
 //
 // `f"…{expr}…"` is pure front-end sugar for the existing `format` intrinsic:
 // each `{ … }` hole becomes a trailing argument, so the printable-type rule is

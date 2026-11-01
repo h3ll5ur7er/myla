@@ -22,7 +22,11 @@ pub struct Lexer {
 pub fun new_lexer(src: str) -> Lexer {
     // the code points as `chars` decodes them, not copied (MYLA-133)
     let cps = chars(src)
-    return Lexer { cps: cps, pos: 0, line: 1, col: 1, n: len(cps) as int32, toks: [], err: None }
+    // a UTF-8 byte-order mark at the start is skipped, taking no column
+    // (MYLA-178)
+    var start = 0
+    if len(cps) > 0 && cps[0] == '\u{FEFF}' { start = 1 }
+    return Lexer { cps: cps, pos: start, line: 1, col: 1, n: len(cps) as int32, toks: [], err: None }
 }
 
 // One canonical token line (mirror of src/myla/canon.py:canonical_token).

@@ -1,5 +1,5 @@
 // Bitwise & shift operators, numeric casts, integer-literal bases, and loop
-// control flow (v0.3.1).
+// control flow.
 //
 // Precedence note: the bitwise operators bind *tighter* than the comparisons
 // (and `&` > `^` > `|`), so `a & b == c` parses as `(a & b) == c` — avoiding

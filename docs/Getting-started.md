@@ -126,6 +126,18 @@ python3 myla.py build point.my -o point && ./point
 
 Every value-returning function in the examples carries `#test` cases; see [[Development/Conventions]]. The language itself is described in [[Language]].
 
+## The examples, in reading order
+
+Each file in `examples/` is a runnable program with `#test` cases on its functions (`python3 myla.py run examples/<file>`, `python3 myla.py test examples/<file>`):
+
+1. Basics: `hello.my`, `variables.my`, `types_and_aliases.my`, `functions.my`, `control_flow.my`, `loops.my`, `constants.my`
+2. Data: `structs.my`, `tuples.my`, `enums.my`, `option-result.my`, `recursion.my`
+3. Collections and text: `lists.my`, `maps.my`, `strings.my`, `chars.my`, `unicode.my`, `interpolation.my`, `floats.my`
+4. Abstraction: `methods.my`, `closures.my`, `pipelines.my`, `generics.my`, `generic-types.my`, `traits.my`, `traits_on_builtins.my`, `generic_traits.my`, `operators.my`
+5. Programs: `attributes.my`, `semicolons.my`, the folders `modules/`, `args/`, `readfile/`, `stdio/` and `subprocess/`
+6. Concurrency: `concurrency.my`
+7. What the checker rejects: `examples/errors/`, one program per error, its expected message in its first line; and `regressions.my`, the accepted programs that once broke
+
 ## Build the self-hosted compiler
 
 ```bash
@@ -139,9 +151,10 @@ The second argument of the self-hosted compiler is the folder that contains `std
 ## Run the tests
 
 ```bash
-python3 -m unittest discover -s tests/unit -t .         # ~410 tests, about 1 s
+python3 -m unittest discover -s tests/unit -t .         # about 620 tests, about 6 s
 python3 -m unittest discover -s tests/integration -t .
-python3 -m unittest discover -s tests/burn -t .         # native builds, about 30 seconds
+python3 -m unittest discover -s tests/burn -t .         # native builds and the self-hosting gates, several minutes
+scripts/test.sh fast                                    # unit, integration and the quick burn tests
 ```
 
 What each suite guarantees and the current results: [[Development/Testing]].
