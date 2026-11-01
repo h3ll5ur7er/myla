@@ -41,7 +41,15 @@ So 80 % needs `#test` on methods: the receiver as the first argument (`#test(C {
 The harvester: the Python interpreter runs the self-hosted compiler (`selfhost/gen_main.my`, the interpreter, the loader) over the examples and the error corpus with a hook on function entry and return. It records each call whose arguments and result print as Myla expressions under a size limit, keeps a few distinct cases per function (small ones first, every enum variant of the result where it can), and writes them as `#test` lines above the function. Generated cases record what the compiler does today (regression tests, not a specification), and a person reads them before they are committed. It needs the Python interpreter, so it runs before [[MYLA-219]] removes it; the self-hosted interpreter could carry the same hook later.
 
 - [ ] The three places that state it agree with the decision
-- [ ] The burn test: coverage per module and overall, a warning below 80 % (in the test output and as a CI annotation)
-- [ ] `#test` on methods, if the owner decides for it (both parsers and checkers, both test runners)
-- [ ] The harvester; cases generated, read and committed module by module, before [[MYLA-219]]
+- [x] The burn test: coverage per module and overall, a warning below 80 % (in the test output and as a CI annotation): `tests/burn/test_selfhost_coverage.py`, `scripts/test_coverage.py`
+- [x] `#test` on methods (D116, [[MYLA-236]])
+- [x] The harvester (`scripts/harvest_tests.py`); a first round of cases generated, validated by both runners and committed
 - [ ] The share past 80 %
+- [ ] Receivers for the methods on the compiler's state objects, or a decision on how they count (see Evidence)
+
+## Evidence
+
+- First round (2026-11-01): the harvester ran the self-hosted CLI in the Python interpreter over 342 workloads (`check`, `build`, `test`, `run` of the 32 examples, `check` of the error corpus) in about 40 minutes on 4 cores, recorded calls of 335 functions and wrote 852 cases (at most three per function, spread over the recorded sizes, each at most 220 characters of arguments and result). Both runners pass every case; validation removed none.
+- Coverage of value-returning functions in `selfhost/`: 97 of 1,274 (8 %) before, 432 of 1,274 (34 %) after.
+- What stops it at a third: 540 of the functions without cases are methods on the compiler's state objects (`Checker` 150, `CodeGen` 106, `Parser` 98, `Interp` 93, `Lower` 74, `Norm` 19), whose receiver is the whole state and can't be written as a literal; and most of the 259 free functions without cases are on paths the examples don't reach (the REPL, the project commands, `fetch`, rare diagnostics) or take compiler state. Raising the size limit adds almost nothing (5 functions under 400 characters on a probe).
+
