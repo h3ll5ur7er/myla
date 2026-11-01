@@ -7693,7 +7693,7 @@ fun may_write_stmt(st: Stmt, name: str) -> bool {
 }
 
 #test(expr_of("-n * 2"), "r")[false]
-fun may_write_expr(e: Expr, name: str) -> bool {
+pub fun may_write_expr(e: Expr, name: str) -> bool {
     match e.kind {
         ExprKind.Unary(op, x) => { return may_write_expr(x, name) },
         ExprKind.Await(x) => { return may_write_expr(x, name) },

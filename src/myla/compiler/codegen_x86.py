@@ -4319,10 +4319,21 @@ class CodeGen:
         if struct_ret:
             logical.append(("sret", self._locals[id(expr)]))
         logical.append(("env", env_off))
+        aliased = {id(a) for a, _ in self._aliased_args(expr)}
         for i, arg in enumerate(expr.args):
-            logical.append(("arg", arg, ft.params[i]))
+            logical.append(("staged" if id(arg) in aliased else "arg", arg, ft.params[i]))
         self._store_call_words(logical)
         self._emit(f"call *{code_off}(%rbp)")
+        if aliased:
+            # the copies released after the call, its result kept
+            self._emit("pushq %rax")
+            self._emit("pushq %rax")
+            for item in reversed(logical):
+                if item[0] == "staged":
+                    self._staged_drops.pop()
+                    self._release(self._locals[f"staged:{id(item[1])}"], item[2], True)
+            self._emit("popq %rax")
+            self._emit("popq %rax")
 
     def _gen_call(self, expr: ast.Call) -> None:
         if getattr(expr, "indirect_call", False):
@@ -4642,22 +4653,39 @@ class CodeGen:
             self._emit("movq %r11, %rbp")
 
     def _aliased_args(self, expr: ast.Call) -> list:
-        """The arguments of a call to a method writing its receiver (`var
-        self`) read from the receiver's variable, with their types: each one
-        passed by address or owning heap memory is passed as a copy taken
-        before the call (MYLA-123, MYLA-129), since the method's writes would
-        change or release its place otherwise."""
-        if getattr(expr, "indirect_call", False) or not isinstance(expr.callee, ast.Name):
+        """The arguments of a call passed as a copy taken when they are
+        evaluated, with their types: each one passed by address or owning heap
+        memory that (1) a method writing its receiver (`var self`) reads from
+        the receiver's variable (MYLA-123, MYLA-129), since the method's writes
+        would change or release its place otherwise, or (2) is read from a
+        variable a later argument may write (MYLA-237), since the call must get
+        the value it had when it was evaluated."""
+        if getattr(expr, "indirect_call", False):
+            ft = getattr(expr.callee, "resolved_type", None)
+            params = list(getattr(ft, "params", ()))
+            writes_self = False
+        elif isinstance(expr.callee, ast.Name):
+            sig = self.checker.functions.get(expr.callee.ident)
+            if sig is None:
+                return []
+            params = sig.params
+            writes_self = getattr(sig.decl, "receiver", None) == "var self" and bool(expr.args)
+        else:
             return []
-        sig = self.checker.functions.get(expr.callee.ident)
-        if sig is None or getattr(sig.decl, "receiver", None) != "var self" or not expr.args:
-            return []
-        root = _place_root(expr.args[0])
-        if root is None:
-            return []
-        return [(a, sig.params[i]) for i, a in enumerate(expr.args)
-                if i > 0 and _place_root(a) == root
-                and (_is_aggregate(sig.params[i]) or self._owns_heap(sig.params[i]))]
+        root0 = _place_root(expr.args[0]) if writes_self else None
+        out = []
+        for i, a in enumerate(expr.args):
+            if i >= len(params) or not (_is_aggregate(params[i]) or self._owns_heap(params[i])):
+                continue
+            if i > 0 and root0 is not None and _place_root(a) == root0:
+                out.append((a, params[i]))
+                continue
+            if i == 0 and writes_self:
+                continue   # the place the method writes
+            root = _place_root(a)
+            if root is not None and any(_may_write(b, root) for b in expr.args[i + 1:]):
+                out.append((a, params[i]))
+        return out
 
     def _arg_kind(self, call: ast.Call, i: int, arg: ast.Expr, aliased: set) -> str:
         """How argument `i` of a direct call is passed: "staged" (a copy,
@@ -6658,6 +6686,11 @@ def _may_write(node, name: str) -> bool:
     if isinstance(node, ast.Call):
         callee = node.callee
         if isinstance(callee, ast.FieldAccess) and _place_root(callee.target) == name:
+            return True
+        # a method call as the code generator sees it, `T.m(recv, args)`
+        # (monomorphize.py): the method may take `var self`
+        if (isinstance(callee, ast.Name) and "." in callee.ident and not getattr(node, "indirect_call", False)
+                and node.args and _place_root(node.args[0]) == name):
             return True
         if (isinstance(callee, ast.Name) and callee.ident in _MUTATING_BUILTINS
                 and node.args and _place_root(node.args[0]) == name):

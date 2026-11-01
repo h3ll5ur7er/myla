@@ -116,7 +116,7 @@ Subexpressions evaluate left to right, in the interpreter and in native code ali
 
 - A binary operator evaluates its left operand, then its right. `&&` and `||` skip the right operand when the left one decides.
 - A call evaluates the arguments in order; a method call evaluates the receiver first, and a call through a function value evaluates the callee first. `x |> f(y)` is `f(x, y)`, so `x` comes first.
-- A `var self` method writes into its receiver, so it takes the receiver's place first (its indices, once) and its value only after the arguments, as `push` does: in `c.add(c.bump_get())` the change `bump_get` makes to `c` is kept ([[MYLA-238]]). A read-only receiver's value is taken first; native code still takes it after the arguments ([[MYLA-237]]).
+- A `var self` method writes into its receiver, so it takes the receiver's place first (its indices, once) and its value only after the arguments, as `push` does: in `c.add(c.bump_get())` the change `bump_get` makes to `c` is kept ([[MYLA-238]]). A read-only receiver's value, and every argument's, is taken when it is evaluated: a later argument that writes the same variable (`c.plus(c.bump_get())`, `f(d, d.bump_get())`) doesn't change what was passed ([[MYLA-237]]).
 - Struct, tuple, list and enum literals evaluate their elements in the order written (a struct literal in the order of its fields as written, not as declared). A map literal evaluates each key, then its value.
 - `format` and `f"…"` evaluate their arguments left to right.
 - A partial application `f(a, _)` evaluates its receiver and filled arguments when it is made (D60). `_` stands only as a call argument (`'_' placeholder is only valid as a call argument`).

@@ -17,6 +17,7 @@ ever waits holding an actor.
 from __future__ import annotations
 
 import sys
+import dataclasses
 import threading
 from dataclasses import dataclass
 
@@ -391,6 +392,8 @@ class Interpreter:
         # once, by `myla run` to report it before the other tasks stop
         # (MYLA-170); the error is then marked `reported`
         self.on_task_failure = None
+        # per call (by id): which arguments are copied as they are evaluated
+        self._arg_snapshots: dict[int, list] = {}
 
     # -- program entry -------------------------------------------------------
 
@@ -483,11 +486,11 @@ class Interpreter:
                                  getattr(decl, "source_path", None))
         if getattr(expr, "indirect_call", False):
             clo = self._eval(expr.callee, env)
-            args = [self._eval(a, env) for a in expr.args]
+            args = self._eval_args(expr, env)
             return _BecomeSignal(clo.body, self._closure_frame(clo, args), clo.path,
                                  clo.is_block)
         decl = self.functions[expr.callee.ident].decl
-        args = [self._eval(a, env) for a in expr.args]
+        args = self._eval_args(expr, env)
         return _BecomeSignal(decl.body, self._function_frame(decl, args),
                              getattr(decl, "source_path", None))
 
@@ -1156,7 +1159,7 @@ class Interpreter:
             return self._eval_method_call(expr, env, mfunc)
         if getattr(expr, "indirect_call", False):  # `f(args)` value call (v0.4.2)
             clo = self._eval(expr.callee, env)
-            args = [self._eval(a, env) for a in expr.args]
+            args = self._eval_args(expr, env)
             return self._call_closure(clo, args)
         callee = expr.callee
         assert isinstance(callee, ast.Name)
@@ -1340,8 +1343,26 @@ class Interpreter:
             task = getattr(self._tls, "task", None)
             return task is not None and task.requested.is_set()
         sig = self.functions[callee.ident]
-        args = [self._eval(a, env) for a in expr.args]
+        args = self._eval_args(expr, env)
         return self._call(sig.decl, args)
+
+    def _eval_args(self, expr: ast.Call, env: _Env) -> list:
+        """The arguments of a call, in order. An argument read from a variable
+        that a later argument may write (through a `var self` method) is copied
+        when it is evaluated, so the call gets the value it had then, as the
+        evaluation order says (MYLA-237); the frame copies the others."""
+        snap = self._arg_snapshots.get(id(expr))
+        if snap is None:
+            snap = []
+            for i, a in enumerate(expr.args):
+                root = _place_root(a)
+                snap.append(root is not None and any(_may_write(b, root) for b in expr.args[i + 1:]))
+            self._arg_snapshots[id(expr)] = snap
+        out = []
+        for a, s in zip(expr.args, snap):
+            v = self._eval(a, env)
+            out.append(_copy(v) if s else v)
+        return out
 
     def _eval_method_call(self, expr: ast.Call, env: _Env, mfunc: str):
         decl = self.functions[mfunc].decl
@@ -1605,3 +1626,30 @@ def _render_format(fmt: str, parts: list[str]) -> str:
 
 def run(checker: Checker, out=None) -> None:
     Interpreter(checker, out).run()
+
+
+def _place_root(expr) -> str | None:
+    """The variable a place (`x`, `x.f`, `x[i].g`) starts from, or None."""
+    while isinstance(expr, (ast.FieldAccess, ast.TupleIndex, ast.Index)):
+        expr = expr.target
+    return expr.ident if isinstance(expr, ast.Name) else None
+
+
+def _may_write(node, name: str) -> bool:
+    """Whether evaluating `node` may write variable `name`, conservatively: a
+    method call on it (the method may take `var self`) or a mutating builtin
+    on it. Myla has no references and closures capture by value, so nothing
+    else in an expression can (MYLA-237)."""
+    if isinstance(node, list):
+        return any(_may_write(n, name) for n in node)
+    if not isinstance(node, ast.Node):
+        return False
+    if isinstance(node, ast.Call):
+        callee = node.callee
+        if getattr(node, "method_func", None) is not None and isinstance(callee, ast.FieldAccess) \
+                and _place_root(callee.target) == name:
+            return True
+        if isinstance(callee, ast.Name) and callee.ident in ("push", "pop", "remove", "append", "append_byte") \
+                and node.args and _place_root(node.args[0]) == name:
+            return True
+    return any(_may_write(getattr(node, f.name), name) for f in dataclasses.fields(node))

@@ -30,7 +30,7 @@
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import Type, Subst, FuncSig, opt_subst_type, subst_type
-from .codegen import codegen_on, is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .codegen import codegen_on, may_write_expr, is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -411,6 +411,20 @@ const FRAME_PARENT: int32 = 56
 // An actor's executor (D92), after its fields: `[lock][running][first
 // frame waiting][last]`.
 const ACTOR_RECORD: int32 = 32
+
+// Whether an argument after `argv[i]` may write the variable `argv[i]` is
+// read from (through a method that may take `var self`, or a mutating
+// builtin): then `argv[i]` is copied when it is evaluated (MYLA-237).
+fun later_writes(argv: [Expr], i: int32) -> bool {
+    let root = place_root(argv[i])
+    if root == "" { return false }
+    var j = i + 1
+    while j < len(argv) {
+        if may_write_expr(argv[j], root) { return true }
+        j = j + 1
+    }
+    return false
+}
 
 // Whether `fd` is a method (it has a receiver).
 #test(fun_of("fun g() { print(1) }"))[false]
@@ -2467,7 +2481,10 @@ impl Lower {
         var vals: [int32] = []
         var i = 0
         while i < len(args) && i < len(params) {
-            if is_aggregate(params[i]) { push(vals, self.addr(cg, args[i])) } else { push(vals, self.expr(cg, args[i])) }
+            // a later argument may write the variable this one is read from:
+            // a copy taken now (MYLA-237)
+            if later_writes(args, i) && (is_aggregate(params[i]) || cg.owns_heap(params[i])) { push(vals, self.stage(cg, params[i], args[i]).1) }
+            else if is_aggregate(params[i]) { push(vals, self.addr(cg, args[i])) } else { push(vals, self.expr(cg, args[i])) }
             i = i + 1
         }
         if tail {
@@ -2773,6 +2790,13 @@ impl Lower {
             // a copy of its own, which the method's writes can't reach either
             if byval { for w in self.value_words(cg, params[i], self.addr(cg, argv[i])) { push(vals, w) } }
             else if i > 0 && root != "" && place_root(argv[i]) == root && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
+                let staged = self.stage(cg, params[i], argv[i])
+                if owned { self.moved(staged.0) }
+                push(vals, staged.1)
+            }
+            // a later argument may write the variable this one is read from:
+            // a copy taken now, so the call gets the value it had (MYLA-237)
+            else if !(i == 0 && root != "") && later_writes(argv, i) && (is_aggregate(params[i]) || cg.owns_heap(params[i])) {
                 let staged = self.stage(cg, params[i], argv[i])
                 if owned { self.moved(staged.0) }
                 push(vals, staged.1)

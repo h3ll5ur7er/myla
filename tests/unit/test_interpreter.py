@@ -123,6 +123,17 @@ class TestStructValueSemantics(unittest.TestCase):
         self.assertEqual(run_main(body, pre=self.PRE), "7\n")
 
 
+class TestArgumentOrder(unittest.TestCase):
+    def test_values_are_taken_before_a_later_argument_writes_them(self):
+        # the receiver first, then each argument in order (the reference's
+        # evaluation order): a later `var self` call doesn't change what an
+        # earlier argument passed (MYLA-237)
+        import io as _io
+        out = _io.StringIO()
+        Interpreter(check(parse(tokenize("struct C {\n    n: int,\n}\nimpl C {\n    fun bump_get(var self) -> int {\n        self.n = self.n + 1\n        return self.n\n    }\n    fun plus(self, k: int) -> int {\n        return self.n * 100 + k\n    }\n    fun with(self, o: C, k: int) -> int {\n        return self.n * 10000 + o.n * 100 + k\n    }\n}\nfun outer(c: C, k: int) -> int {\n    return c.n * 100 + k\n}\n#main\nfun main() {\n    var c = C { n: 1 }\n    print(c.plus(c.bump_get()))\n    var d = C { n: 1 }\n    print(outer(d, d.bump_get()))\n    var xs = [C { n: 1 }]\n    print(xs[0].plus(xs[0].bump_get()))\n    var e = C { n: 1 }\n    var f = C { n: 5 }\n    print(e.with(f, f.bump_get()))\n    let g = (x: C, k: int) => x.n * 100 + k\n    var h = C { n: 1 }\n    print(g(h, h.bump_get()))\n    var p = C { n: 1 }\n    print(p.n * 100 + p.bump_get())\n}\n"))), out).run()
+        self.assertEqual(out.getvalue(), "102\n102\n102\n10506\n102\n102\n")
+
+
 class TestTestRunner(unittest.TestCase):
     def _run_tests(self, src: str):
         checker = check(parse(tokenize(src)))
