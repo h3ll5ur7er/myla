@@ -173,11 +173,12 @@ class PackageParity(_Layout):
         self.assertEqual((it.stdout, it.stderr, it.returncode), (EXPECTED_RUN, "", 0))
 
     def test_test(self):
-        # every linked module's cases, the packages' included
+        # the entry file's own cases only, not the packages' (MYLA-187)
         py = _python_cli("test", self.main, *self.flags, cwd=self.ws)
         self.assertEqual(py.returncode, 0, py.stderr)
-        for case in ("PASS  circle_area #1", "PASS  geo$geo$origin #1", "PASS  geo$shapes$area #1"):
-            self.assertIn(case, py.stdout)
+        self.assertIn("PASS  circle_area #1", py.stdout)
+        for case in ("geo$geo$origin", "geo$shapes$area"):
+            self.assertNotIn(case, py.stdout)
         my = self.myla_cmd("test", self.main, "--stdlib", _STDLIB, *self.flags)
         self.assertEqual((my.stdout, my.returncode), (py.stdout, 0))
 

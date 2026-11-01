@@ -465,10 +465,10 @@ fun float_suffix_type(s: str) -> Option<Type> {
 // Whether a literal fits a type, as types.int_fits: `big` is its decimal text
 // when it is 2^63 or more (`value` then holds only its low bits). A signed
 // type admits the magnitude 2^(w-1), so that `-128i8` is accepted.
-fun lit_fits(value: int64, big: str, w: int32, signed: bool) -> bool {
-    if big == "" { return int_fits(value, w, signed) }
+fun lit_fits(value: int64, big: str, w: int32, signed: bool, negated: bool) -> bool {
+    if big == "" { return int_fits(value, w, signed, negated) }
     if w < 64 { return false }
-    if signed { return big == "9223372036854775808" }
+    if signed { return negated && big == "9223372036854775808" }
     return len(big) < 20 || (len(big) == 20 && !text_greater(big, "18446744073709551615"))
 }
 
@@ -482,12 +482,15 @@ fun text_greater(a: str, b: str) -> bool {
     return false
 }
 
-fun int_fits(value: int64, w: int32, signed: bool) -> bool {
+// A signed type takes magnitudes up to 2^(w-1) - 1, and 2^(w-1) only under a
+// unary minus (MYLA-175; types.py: int_fits).
+fun int_fits(value: int64, w: int32, signed: bool, negated: bool) -> bool {
     if value < 0 { return false }
     if signed {
         if w >= 64 { return true }
         var lim: int64 = 1
         lim = lim << (w - 1)
+        if !negated { lim = lim - 1 }
         return value <= lim
     }
     if w >= 64 { return true }
@@ -1031,6 +1034,7 @@ pub struct Checker {
     suspended: int32,
     task_init: bool,                // checking an `async let`'s initializer, outside its lambdas
     in_guard: bool,                 // checking a match guard, outside its lambdas
+    neg_lit: int32,                 // the integer literal under a unary minus, or -1 (MYLA-175)
     // the first `async let`, which the compiler doesn't build yet (D91,
     // MYLA-138; `task_line` 0: none)
     task_line: int32,
@@ -1055,7 +1059,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", cur_key: "",
-        lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false,
+        lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
     }
 }
@@ -2379,7 +2383,7 @@ impl Checker {
                 }
                 let w = match t { Type.TInt(ww, ss) => ww, _ => 32 }
                 let sg = match t { Type.TInt(ww, ss) => ss, _ => true }
-                if !lit_fits(v, big, w, sg) { return Err(terr_at(e.line, e.col, e.sp, format("integer literal {} does not fit in '{}'", int_text(v, big), type_name(t)))) }
+                if !lit_fits(v, big, w, sg, self.neg_lit == e.id) { return Err(terr_at(e.line, e.col, e.sp, format("integer literal {} does not fit in '{}'", int_text(v, big), type_name(t)))) }
                 Ok(t)
             },
             _ => Err(terr_at(e.line, e.col, e.sp, "expected an integer literal")),   // unreachable
@@ -2467,7 +2471,12 @@ impl Checker {
     fun infer_unary(var self, e: Expr, op: str, x: Expr, expected: Option<Type>) -> Result<Type, CheckErr> {
         if op == "-" {
             let hint = num_hint(expected)
-            let t = self.expect_value(x, hint)?
+            // the magnitude one past the signed maximum fits only here
+            let saved_neg = self.neg_lit
+            match x.kind { ExprKind.IntLit(v, suf, isc, big) => { self.neg_lit = x.id }, _ => {} }
+            let tr = self.expect_value(x, hint)
+            self.neg_lit = saved_neg
+            let t = tr?
             if !(is_int(t) || is_float(t)) { return Err(terr_at(e.line, e.col, e.sp, "unary '-' requires a numeric operand")) }
             return Ok(t)
         }

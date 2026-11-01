@@ -44,8 +44,17 @@ class TestIntegerLiterals(unittest.TestCase):
             check_fn("let x: int32 = 5u8")  # uint8 != int32
 
     def test_literal_too_large(self):
-        with self.assertRaises(TypeCheckError):
-            check_fn("let x: uint8 = 999")
+        # the boundaries, not just a far-off value (MYLA-175): one past the
+        # signed maximum fits only under a unary minus
+        for bad in ["let x: uint8 = 256", "let x: int8 = 128", "let x = 2147483648",
+                    "let x = 128i8", "let x: int64 = 9223372036854775808"]:
+            with self.subTest(bad=bad), self.assertRaises(TypeCheckError):
+                check_fn(bad)
+        for good in ["let x: uint8 = 255", "let x: int8 = 127", "let x: int8 = -128",
+                     "let x = -2147483648", "let x = -128i8",
+                     "let x: int64 = -9223372036854775808"]:
+            with self.subTest(good=good):
+                check_fn(good)
 
     def test_literal_adopts_operand_type(self):
         # a is int64; `a + 1` should type 1 as int64 and pass.

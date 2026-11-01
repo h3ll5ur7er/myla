@@ -131,7 +131,7 @@ pub fun cmd_interp(file: str, opts: LoadOptions, tests: bool, prog_args: [str]) 
 pub fun own_tests(file: str, opts: LoadOptions) -> Result<TestRun, str> {
     let ch = load_and_check(file, opts)?
     var it = new_interp(ch.checker, [file])
-    return Ok(it.run_test_cases(true))
+    return Ok(it.run_test_cases())
 }
 
 // `myla build <file> -o <out>`: compile to a native binary at `out`.

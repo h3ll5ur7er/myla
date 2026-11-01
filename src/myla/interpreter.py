@@ -408,11 +408,16 @@ class Interpreter:
             raise MylaRuntimeError("stack overflow") from None
         return 0
 
-    def run_tests(self) -> list[TestResult]:
+    def run_tests(self, own_only: bool = False) -> list[TestResult]:
+        """Run the `#test` cases: of every linked module, or with `own_only`
+        of the entry file's own functions, whose names the loader doesn't
+        qualify (`myla test file.my`, MYLA-187)."""
         _deep_stack()
         results: list[TestResult] = []
         for decl in self.checker.program.decls:
             if not isinstance(decl, ast.FunDecl):
+                continue
+            if own_only and "$" in decl.name:
                 continue
             idx = 0
             for attr in decl.attributes:

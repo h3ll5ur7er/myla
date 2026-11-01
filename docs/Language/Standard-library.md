@@ -14,13 +14,13 @@ These names are reserved: no declaration may reuse them.
 | `len(x)` | list, map, `str` or `StringBuilder` → `int` | Strings and builders: bytes |
 | `push(xs, v)`, `pop(xs)` | list | Need a `var` place |
 | `contains(m, k)`, `keys(m)`, `remove(m, k)` | map | `remove` needs a `var` place |
-| `get(m, k)` | map → `Option<V>` | A prelude function, not a built-in |
+| `get(m, k)` | map → `Option<V>` | The one entry here that is a prelude function, not a built-in: an ordinary generic function every program sees (a declaration of another `get` is a duplicate), so its errors read like any call's |
 | `chars(s)` | `str` → `[char]` | |
 | `format(fmt, args…)` | → `str` | `fmt` is a literal; see [[Language/Collections-and-strings]] |
 | `StringBuilder()`, `append(sb, s)`, `append(sb, s, start, end)`, `append_byte(sb, b)`, `build(sb)` | | The four-argument `append` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
-The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal` and `__run_errno` exist for the standard library; call the `std` functions instead.
+The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled` exist for the standard library; call the `std` functions instead. Both checkers still accept a call of one from a program ([[MYLA-186]]).
 
 ## std.io
 

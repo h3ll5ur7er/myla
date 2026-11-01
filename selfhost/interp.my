@@ -419,8 +419,10 @@ impl Interp {
     // PASS/FAIL line for each (after whatever the tests printed) and the
     // summary, as the Python CLI does (`Interpreter.run_tests`, MYLA-81); the
     // exit status: 0 if all pass (or none exist), else 1.
+    // `myla test file.my`: the entry file's own cases, not those of the
+    // modules it imports (MYLA-187)
     fun run_tests(var self) -> int32 {
-        let r = self.run_test_cases(false)
+        let r = self.run_test_cases()
         if r.total == 0 {
             write(1, "no #test cases found.\n")
             return 0
@@ -431,11 +433,11 @@ impl Interp {
         return 1
     }
 
-    // Run the `#test` cases, of the entry module's own functions only when
-    // `own_only` (`myla test` in a project, MYLA-94: the entry's names are the
-    // ones the loader doesn't qualify with a module id), and collect a
+    // Run the `#test` cases of the entry module's own functions (`myla test`
+    // of a file, MYLA-187, and in a project, MYLA-94: the entry's names are
+    // the ones the loader doesn't qualify with a module id), and collect a
     // PASS/FAIL line for each.
-    fun run_test_cases(var self, own_only: bool) -> TestRun {
+    fun run_test_cases(var self) -> TestRun {
         self.collect()
         self.eval_consts()
         var report: [str] = []
@@ -446,7 +448,7 @@ impl Interp {
             let fd = self.func_decls[i]
             var idx = 0
             for attr in fd.attributes {
-                if attr.name == "test" && (!own_only || !is_qualified(fd.name)) {
+                if attr.name == "test" && !is_qualified(fd.name) {
                     idx = idx + 1
                     total = total + 1
                     self.push_scope()

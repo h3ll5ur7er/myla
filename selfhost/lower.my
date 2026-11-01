@@ -2704,7 +2704,9 @@ impl Lower {
     // --- lists ------------------------------------------------------------------
 
     // `[a, b, …]`: a new cell holding the elements, each with its own
-    // references; the statement owns it.
+    // references; the statement owns it from the start, its length counting
+    // the elements stored so far, so a `?` failing in an element releases
+    // the cell and those (MYLA-157).
     fun list_lit(var self, cg: CodeGen, lt: Type, elems: [Expr]) -> int32 {
         if !lowerable(cg, lt) { return self.unsupported("a list of that element type") }
         let et = list_elem(lt)
@@ -2714,14 +2716,17 @@ impl Lower {
         let cell = self.temp(lt)
         self.add(Inst.Rt(cell, "__alloc", [size]))
         let count = self.konst(Type.TInt(64, true), n as int64)
-        self.add(Inst.StoreAt(cell, 0, count))
+        let owned = cg.owns_heap(et)
+        if owned { self.add(Inst.StoreAt(cell, 0, self.konst(Type.TInt(64, true), 0))) } else { self.add(Inst.StoreAt(cell, 0, count)) }
         self.add(Inst.StoreAt(cell, 8, count))
+        let v = self.owned_value(cg, cell, lt)
         var i = 0
         for el in elems {
             self.store_member(cg, el, cell, 16 + i * stride)
             i = i + 1
+            if owned { self.add(Inst.StoreAt(cell, 0, self.konst(Type.TInt(64, true), i as int64))) }
         }
-        return self.owned_value(cg, cell, lt)
+        return v
     }
 
     // The address of element `idx` of the list or string `base` (bounds
@@ -3461,4 +3466,3 @@ fun diverges(e: Expr) -> bool {
         _ => false
     }
 }
-

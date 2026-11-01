@@ -321,15 +321,15 @@ def _is_map_key(t: Type) -> bool:
     return isinstance(t, (IntType, CharType, BoolType, StrType))
 
 
-def int_fits(value: int, t: IntType) -> bool:
+def int_fits(value: int, t: IntType, negated: bool = False) -> bool:
     """Whether a non-negative literal magnitude fits `t`.
 
-    For signed types we permit the magnitude up to 2**(width-1) so that a
-    negated literal like `-128i8` is accepted (the unary minus is a separate
-    node). This is intentionally permissive, matching the wrapping semantics.
+    A signed type takes magnitudes up to 2**(width-1) - 1, and 2**(width-1)
+    itself only under a unary minus, so that `-128i8` is accepted but `128i8`
+    isn't (the minus is a separate node, MYLA-175).
     """
     if t.signed:
-        return 0 <= value <= (1 << (t.width - 1))
+        return 0 <= value <= (1 << (t.width - 1)) - (0 if negated else 1)
     return 0 <= value <= (1 << t.width) - 1
 
 
@@ -389,7 +389,12 @@ def round_float(value: float, t: Type) -> float:
     precision (round to nearest) so the interpreter and native backend agree —
     the float analogue of integer `_wrap_int` (D56 parity discipline)."""
     if isinstance(t, FloatType) and t.width == 32:
-        return struct.unpack("f", struct.pack("f", value))[0]
+        try:
+            return struct.unpack("f", struct.pack("f", value))[0]
+        except OverflowError:
+            # past the largest float32 after rounding: infinity, as the
+            # hardware's conversion gives (MYLA-176)
+            return math.copysign(math.inf, value)
     return value
 
 
@@ -3494,7 +3499,7 @@ class Checker:
         else:
             t = INT
         assert isinstance(t, IntType)
-        if not int_fits(expr.value, t):
+        if not int_fits(expr.value, t, getattr(expr, "negated", False)):
             raise TypeCheckError(
                 f"integer literal {expr.value} does not fit in '{type_name(t)}'",
                 at=expr,
@@ -3617,6 +3622,9 @@ class Checker:
 
     def _infer_unary(self, expr: ast.Unary, scope: _Scope, expected: Type | None) -> Type:
         if expr.op == "-":
+            if isinstance(expr.operand, ast.IntLit):
+                # the magnitude one past the signed maximum fits only here
+                expr.operand.negated = True
             t = self._expect_value(
                 expr.operand, scope,
                 expected if isinstance(expected, (IntType, FloatType)) else None)

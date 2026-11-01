@@ -153,7 +153,9 @@ def _cmd_test(args: argparse.Namespace) -> int:
     try:
         checker = _front_end(args.file, args)
         _warn(checker, args.file, source)
-        results = Interpreter(checker).run_tests()
+        # the entry file's own cases, not those of the modules it imports
+        # (MYLA-187)
+        results = Interpreter(checker).run_tests(own_only=True)
     except MylaError as err:
         _report(err, args.file, source)
         return 1

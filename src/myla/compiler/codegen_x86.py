@@ -1836,10 +1836,28 @@ class CodeGen:
         self._emit(f"movq ${16 + n * stride}, %rdi")
         self._emit("call __alloc")
         self._emit(f"movq %rax, {slot}(%rbp)")
-        self._emit(f"movq ${n}, (%rax)")     # length
+        # the length counts the elements stored so far, so that a `?` failing
+        # in an element releases the cell and what it holds (MYLA-157)
+        counted = self._owns_heap(et)
+        self._emit(f"movq ${0 if counted else n}, (%rax)")     # length
         self._emit(f"movq ${n}, 8(%rax)")    # capacity
+        drops = [lambda: self._drop_value("rbp", slot, expr.resolved_type)]
+        self._staged_drops.append(drops)
         for i, elem in enumerate(expr.elems):
             self._store_list_elem(elem, slot, 16 + i * stride, et)
+            if counted:
+                self._emit(f"movq {slot}(%rbp), %rcx")
+                self._emit(f"movq ${i + 1}, (%rcx)")
+            self._stage_temps(elem, drops)
+        self._staged_drops.pop()
+
+    def _stage_temps(self, value: ast.Expr, drops: list) -> None:
+        """The temporaries of `value`, an element already stored, released by
+        an early return before the statement's end (MYLA-157)."""
+        temps: list = []
+        self._collect_expr_temps(value, temps)
+        drops.extend(lambda off=off, tt=tt: self._drop_value("rbp", off, tt)
+                     for off, tt in temps)
 
     def _store_list_elem(self, value: ast.Expr, cell_slot: int, off: int,
                          mt: Type) -> None:
@@ -1882,6 +1900,10 @@ class CodeGen:
         self._emit(f"call {self._map_new_name(mt)}")
         self._emit(f"movq %rax, {slot}(%rbp)")
         staged = self._locals[f"staged:{id(expr)}"]
+        # an early return (a `?` in an entry) releases the map and what it
+        # holds so far (MYLA-157)
+        drops = [lambda: self._drop_value("rbp", slot, mt)]
+        self._staged_drops.append(drops)
         for key, value in expr.entries:
             self._eval(key)                      # key, then value (MYLA-8)
             self._emit("pushq %rax")
@@ -1890,6 +1912,9 @@ class CodeGen:
             self._emit(f"movq {slot}(%rbp), %rdi")  # cell
             self._emit(f"call {self._map_put_name(mt)}")  # rax=&value, rdx=found
             self._commit_map_value(vt, staged)
+            self._stage_temps(key, drops)
+            self._stage_temps(value, drops)
+        self._staged_drops.pop()
 
     # -- storing into containers ----------------------------------------------
     # A store into a list element, map value or builder evaluates the value

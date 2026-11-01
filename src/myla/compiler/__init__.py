@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-from ..errors import MylaRuntimeError
+from ..errors import MylaError, MylaRuntimeError
 from ..types import Checker
 from .codegen_x86 import generate as _generate
 from .monomorphize import monomorphize
@@ -33,7 +33,13 @@ def compile_to_asm(checker: Checker, debug: bool = False,
     if checker.concurrency_at is not None:
         raise MylaRuntimeError("the compiler doesn't build concurrency yet (D89, MYLA-137)",
                                at=checker.concurrency_at)
-    return _generate(monomorphize(checker), debug=debug, entry_path=entry_path)
+    try:
+        concrete = monomorphize(checker)
+    except (MylaError, KeyError) as err:
+        # the program was checked already: a failure here is the compiler's,
+        # not the user's (MYLA-174)
+        raise BuildError(f"internal compiler error: monomorphizing the checked program failed: {err}") from err
+    return _generate(concrete, debug=debug, entry_path=entry_path)
 
 
 def build(checker: Checker, output: str, keep_asm: bool = False,

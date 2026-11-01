@@ -1,0 +1,6 @@
+//~ type error: integer literal 128 does not fit in 'int8'
+//~ span: 128i8
+// `-128i8` is the minimum; `128i8` doesn't fit (MYLA-175).
+fun main() {
+    print(128i8)
+}

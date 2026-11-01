@@ -196,6 +196,9 @@ class _Monomorphizer:
             return self._rewrite(val, subst)
         if isinstance(val, list):
             return [self._rewrite_child(v, subst) for v in val]
+        if isinstance(val, tuple):
+            # a map literal's `(key, value)` entries (MYLA-174)
+            return tuple(self._rewrite_child(v, subst) for v in val)
         return val
 
     def _rewrite_fn_call(self, node: ast.Call, subst: dict[str, Type]) -> None:
