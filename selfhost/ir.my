@@ -174,7 +174,11 @@ pub struct IrBlock { insts: [Inst], term: Term }
 // (a local, an owned temporary: the verifier follows it, MYLA-105), and for
 // an aggregate parameter whether its argument words hold the aggregate itself
 // (`inline`: passed by value, D88) instead of its address.
-pub struct Slot { name: str, ty: Type, size: int32, word: int32, owns: bool, inline: bool }
+// `scope`: the lexical scope a local is declared in (an index into its
+// function's `scope_parent`), so locals of scopes that are never open at once
+// can share a frame cell (MYLA-183); -1 for a slot that isn't a local of one
+// scope (a temporary, or declared in two), which keeps a cell of its own.
+pub struct Slot { name: str, ty: Type, size: int32, word: int32, owns: bool, inline: bool, scope: int32 }
 
 // A generic function's instance a function calls: the generic function and
 // its type arguments, which the code generator then stamps out.
@@ -185,7 +189,7 @@ pub struct Instance { orig: str, targs: [Type] }
 // which lowering started the blocks, which is the order they are emitted in,
 // and the generic instances it calls; `frame`: an async function's, whose
 // slots are in its heap frame (D90), its one argument the frame.
-pub struct IrFunc { name: str, ret: Option<Type>, slots: [Slot], temps: [Type], blocks: [IrBlock], order: [int32], instances: [Instance], frame: bool }
+pub struct IrFunc { name: str, ret: Option<Type>, slots: [Slot], temps: [Type], blocks: [IrBlock], order: [int32], instances: [Instance], frame: bool, scope_parent: [int32] }
 
 // --- The text form --------------------------------------------------------------
 
@@ -1184,7 +1188,7 @@ fun verify_join(left: [Inst], right: [Inst], after: [Inst]) -> str {
     ]))
 }
 
-#test([])[IrFunc { name: "f", ret: None, slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true, inline: false }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false, inline: false }], temps: [Type.TStr, Type.TBool], blocks: [], order: [], instances: [], frame: false }]
+#test([])[IrFunc { name: "f", ret: None, slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true, inline: false, scope: -1 }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false, inline: false, scope: -1 }], temps: [Type.TStr, Type.TBool], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }]
 fun test_func(blocks: [IrBlock]) -> IrFunc {
     var order: [int32] = []
     var i = 0
@@ -1194,7 +1198,7 @@ fun test_func(blocks: [IrBlock]) -> IrFunc {
     }
     return IrFunc {
         name: "f", ret: None,
-        slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true, inline: false }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false, inline: false }],
-        temps: [Type.TStr, Type.TBool], blocks: blocks, order: order, instances: [], frame: false,
+        slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true, inline: false, scope: -1 }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false, inline: false, scope: -1 }],
+        temps: [Type.TStr, Type.TBool], blocks: blocks, order: order, instances: [], frame: false, scope_parent: [-1],
     }
 }

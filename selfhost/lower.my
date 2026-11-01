@@ -65,7 +65,8 @@ struct LoopTarget { cont: int32, brk: int32, owners: int32, temps: int32 }
 // `actor_self`: the slot of an actor method's `self`, whose actor its frame
 // function holds between suspensions (D92), or -1; `deep_res`: an actor
 // method's result is copied deeply before it leaves the actor (D92).
-struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool }
+// `scope_ids`: the open scopes' indices in `f.scope_parent` (MYLA-183).
+struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], owners: [[int32]], temps: [[int32]], loops: [LoopTarget], sret: int32, arm_binds: [Local], err: str, lams: [LamJob], partials: [PartialJob], fnvals: [str], holder: [int32], into: int32, placed: [bool], tail: bool, tailed: bool, frame_fn: bool, result: int32, tasks: [TaskSlot], actor_self: int32, actor_off: int32, deep_res: bool }
 
 // A function's IR, with the code it needs generated besides (see `Lower`).
 // A child task of an `async let` (D89): the slot holding its frame, its
@@ -81,7 +82,7 @@ pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: 
 // entry block, the receiver of `#test` cases of the lowering's methods
 // (MYLA-184), with a code generator from `codegen_on` as their `cg`.
 pub fun lower_on() -> Lower {
-    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
+    var lw = Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
     lw.start(lw.new_block())
     return lw
 }
@@ -92,7 +93,7 @@ pub fun lower_on() -> Lower {
 pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered, str> {
     let sig = cg.sig_of(fd.name)
     let ret = opt_subst_type(sig.ret, cg.subst)
-    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
+    var lw = Lower { f: IrFunc { name: mangled, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
     var first_word = 0
     // an async function, when tasks take turns: its frame function, its
     // slots in its heap frame, the result in the first (D90)
@@ -190,7 +191,7 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
-    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
+    var lw = Lower { f: IrFunc { name: job.lifted, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
     // an async lambda, when tasks take turns: a frame function, as an async
     // function's (D90); its frame holds the environment and the arguments
     let frame = cg.frames && is_async_t(job.ftype)
@@ -560,7 +561,7 @@ impl Lower {
 
     #test(lower_on(), "a", Type.TBool, 86, 86, true)[0]
     fun new_slot(var self, name: str, t: Type, size: int32, word: int32, owns: bool) -> int32 {
-        push(self.f.slots, Slot { name: name, ty: t, size: size, word: word, owns: owns, inline: false })
+        push(self.f.slots, Slot { name: name, ty: t, size: size, word: word, owns: owns, inline: false, scope: -1 })
         return len(self.f.slots) - 1
     }
 
@@ -578,6 +579,17 @@ impl Lower {
 
     fun declare_as(var self, name: str, slot: int32, fixed: bool) {
         push(self.scopes[len(self.scopes) - 1], Local { name: name, slot: slot, fixed: fixed })
+        // the scope the local lives in, for the frame layout (MYLA-183): a
+        // slot declared in two scopes keeps a cell of its own (-2)
+        let here = self.scope_ids[len(self.scope_ids) - 1]
+        let was = self.f.slots[slot].scope
+        if was == -1 { self.f.slots[slot].scope = here } else if was != here { self.f.slots[slot].scope = -2 }
+    }
+
+    // A scope opens: its index in `f.scope_parent`, under the innermost open one.
+    fun enter_scope(var self) {
+        push(self.scope_ids, len(self.f.scope_parent))
+        push(self.f.scope_parent, self.scope_ids[len(self.scope_ids) - 2])
     }
 
     // Whether `e` is a part of a fixed variable (`Local`): the variable, a
@@ -694,6 +706,7 @@ impl Lower {
         push(self.scopes, names)
         var slots: [int32] = []
         push(self.owners, slots)
+        self.enter_scope()
         self.add(Inst.Scope(true))
     }
 
@@ -703,6 +716,7 @@ impl Lower {
         while len(self.tasks) > 0 && self.tasks[len(self.tasks) - 1].depth >= depth { let t = pop(self.tasks) }
         pop(self.scopes)
         pop(self.owners)
+        let id = pop(self.scope_ids)
         self.add(Inst.Scope(false))
     }
 
@@ -3395,6 +3409,7 @@ impl Lower {
             push(self.scopes, names)
             var arm_owners: [int32] = []
             push(self.owners, arm_owners)
+            self.enter_scope()
             self.add(Inst.Scope(true))
             for b in self.arm_binds {
                 self.declare(b.name, b.slot)
@@ -3413,6 +3428,7 @@ impl Lower {
             self.leave(Term.Jmp(end))
             pop(self.scopes)
             pop(self.owners)
+            let id = pop(self.scope_ids)
             self.add(Inst.Scope(false))
             self.finish(Term.Jmp(fail))
             self.start(fail)

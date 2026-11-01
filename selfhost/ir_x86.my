@@ -56,8 +56,9 @@ impl CodeGen {
         let slot_off = slots_at(f, 8 * cells)
         self.temp_remat = self.remat_texts(f, slot_off, defs)
         var cursor = 8 * cells
-        for s in f.slots {
-            if s.word < 0 && !f.frame { cursor = cursor + (s.size + 7) / 8 * 8 }
+        if !f.frame {
+            let (pos, extent) = slot_positions(f, true)
+            cursor = cursor + extent
         }
         let saves = cursor
         cursor = cursor + 8 * len(self.saved_regs)
@@ -1999,20 +2000,67 @@ fun writes_no_slot(inst: Inst) -> bool {
 // frame function, else `layout_slots`'.
 fun slots_at(f: IrFunc, below: int32) -> [int32] {
     if !f.frame { return layout_slots(f, below) }
+    let (pos, extent) = slot_positions(f, false)
     var off: [int32] = []
-    var cursor = FRAME_HEADER
-    for s in f.slots {
-        push(off, cursor)
-        cursor = cursor + (s.size + 7) / 8 * 8
-    }
+    for p in pos { push(off, FRAME_HEADER + p) }
     return off
 }
 
 // The size of a frame function's heap frame: the header, then its slots.
 fun frame_size(f: IrFunc) -> int32 {
-    var cursor = FRAME_HEADER
-    for s in f.slots { cursor = cursor + (s.size + 7) / 8 * 8 }
-    return cursor
+    let (pos, extent) = slot_positions(f, false)
+    return FRAME_HEADER + extent
+}
+
+// Where each slot of `f` goes in its area of the frame, from its start, and
+// the area's size (MYLA-183): first the slots that aren't the local of an
+// inner scope, one after the other; then each inner scope's locals, after
+// those of the scopes around it, so the locals of two scopes that are never
+// open at once (two blocks, two match arms) share cells. With `words`, a
+// slot passed in argument words (`word` >= 0) takes no room here (-1).
+fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
+    var pos: [int32] = []
+    var cursor = 0
+    for s in f.slots {
+        if (words && s.word >= 0) || s.scope > 0 { push(pos, -1) } else {
+            push(pos, cursor)
+            cursor = cursor + (s.size + 7) / 8 * 8
+        }
+    }
+    let n = len(f.scope_parent)
+    var own: [int32] = []
+    var i = 0
+    while i < n {
+        push(own, 0)
+        i = i + 1
+    }
+    for s in f.slots {
+        if s.scope > 0 && !(words && s.word >= 0) { own[s.scope] = own[s.scope] + (s.size + 7) / 8 * 8 }
+    }
+    // a scope's area starts where its parent's locals end (a scope's index
+    // is greater than its parent's)
+    var start: [int32] = []
+    var extent = cursor
+    i = 0
+    while i < n {
+        let parent = f.scope_parent[i]
+        var at = cursor
+        if parent > 0 { at = start[parent] + own[parent] }
+        push(start, at)
+        if at + own[i] > extent { extent = at + own[i] }
+        i = i + 1
+    }
+    var fill = start
+    var k = 0
+    while k < len(f.slots) {
+        let s = f.slots[k]
+        if s.scope > 0 && !(words && s.word >= 0) {
+            pos[k] = fill[s.scope]
+            fill[s.scope] = fill[s.scope] + (s.size + 7) / 8 * 8
+        }
+        k = k + 1
+    }
+    return pos, extent
 }
 
 // An async function's frame begins `[resume fn][caller frame][state][task]
@@ -2026,15 +2074,13 @@ const FRAME_HEADER: int32 = 72
 // The frame offset of each slot of `f`: an argument word above %rbp, the
 // others below the first `below` bytes.
 fun layout_slots(f: IrFunc, below: int32) -> [int32] {
+    let (pos, extent) = slot_positions(f, true)
     var off: [int32] = []
-    var cursor = below
-    for s in f.slots {
-        if s.word >= 0 {
-            push(off, 16 + 8 * s.word)
-        } else {
-            cursor = cursor + (s.size + 7) / 8 * 8
-            push(off, -cursor)
-        }
+    var k = 0
+    while k < len(f.slots) {
+        let s = f.slots[k]
+        if s.word >= 0 { push(off, 16 + 8 * s.word) } else { push(off, -(below + pos[k] + (s.size + 7) / 8 * 8)) }
+        k = k + 1
     }
     return off
 }
