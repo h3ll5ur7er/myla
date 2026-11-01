@@ -4095,6 +4095,37 @@ impl CodeGen {
     fun emit_runtime_prelude(var self, entry_name: str) {
         self.raw("\t.global _start")
         self.raw("_start:")
+        // the main thread's stack may grow to 120 MiB (MYLA-182): Linux grows
+        // it up to the soft RLIMIT_STACK, read at each growth, and keeps at
+        // least 128 MiB free below it; deep recursion (the self-hosted
+        // interpreter takes some 9 KB of stack per interpreted call) then
+        // runs where 8 MiB would end in a segfault. prlimit64(0,
+        // RLIMIT_STACK), raised to min(120 MiB, the hard limit) when lower
+        self.raw("\tsubq $16, %rsp")
+        self.raw("\tmovq $302, %rax")
+        self.raw("\txorl %edi, %edi")
+        self.raw("\tmovl $3, %esi")
+        self.raw("\txorl %edx, %edx")
+        self.raw("\tmovq %rsp, %r10")
+        self.raw("\tsyscall")
+        self.raw("\ttestq %rax, %rax")
+        self.raw("\tjnz .Lstk_done")
+        self.raw("\tmovq $125829120, %rcx")
+        self.raw("\tcmpq %rcx, (%rsp)")
+        self.raw("\tjae .Lstk_done")
+        self.raw("\tcmpq %rcx, 8(%rsp)")
+        self.raw("\tjae .Lstk_set")
+        self.raw("\tmovq 8(%rsp), %rcx")
+        self.raw(".Lstk_set:")
+        self.raw("\tmovq %rcx, (%rsp)")
+        self.raw("\tmovq $302, %rax")
+        self.raw("\txorl %edi, %edi")
+        self.raw("\tmovl $3, %esi")
+        self.raw("\tmovq %rsp, %rdx")
+        self.raw("\txorl %r10d, %r10d")
+        self.raw("\tsyscall")
+        self.raw(".Lstk_done:")
+        self.raw("\taddq $16, %rsp")
         if self.frames {
             // the main thread's state block, worker 0's: arch_prctl(
             // ARCH_SET_FS, block), its first word its own address

@@ -42,7 +42,7 @@ fun add(a: int, b: int) -> int {
 }
 ```
 
-- Trailing commas are allowed in struct and enum bodies, struct, list, map and tuple literals, tuple and payload types, and patterns, but **not** in call arguments or function parameter lists (`f(1, 2,)` is a parse error).
+- Trailing commas are allowed in struct and enum bodies, struct, list, map and tuple literals, tuple and payload types, and patterns, but **not** in call arguments or the parameter lists of functions, methods and lambdas (`f(1, 2,)` is a parse error, MYLA-180).
 - `else` may sit on the line after the closing `}` of its `if`.
 - `// …` comments run to the end of the line; `/* … */` comments may span lines and do **not** nest (the first `*/` ends them). An unterminated block comment is a lex error.
 

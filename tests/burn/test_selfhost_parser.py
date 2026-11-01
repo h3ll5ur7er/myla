@@ -58,6 +58,11 @@ def _corpus() -> list[str]:
 # Snippets for every lexer and parser error the corpus lacks (MYLA-28): the
 # self-hosted front end must report Python's message at Python's position.
 SYNTAX_ERRORS = {
+    # nesting past MAX_NESTING (256) in each kind of construct (MYLA-182)
+    "nested_unary_operators": "fun main() {\n    let x = " + "-" * 300 + "1\n}\n",
+    "nested_types": "fun f(x: " + "[" * 300 + "int" + "]" * 300 + ") {\n}\n",
+    "nested_blocks": "fun main() {\n" + "    if true {\n" * 300 + "    }\n" * 300 + "}\n",
+    "nested_patterns": "fun f(x: int) {\n    match x {\n        " + "(" * 300 + "1" + ",)" * 300 + " => {},\n    }\n}\n",
     "block_comment": "fun main() {}\n/* never closed\n",
     "separator_doubled": "fun main() {\n    let x = 1__0\n}\n",
     "separator_leading": "fun main() {\n    let x = 0x_1\n}\n",

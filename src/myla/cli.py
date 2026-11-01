@@ -302,6 +302,13 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(errors="surrogateescape")
     try:
         return args.func(args)
-    except FileNotFoundError as err:
+    except BrokenPipeError:
+        # the reader went away (`myla tokenize f.my | head`): no traceback,
+        # and nothing more written to the closed pipe (MYLA-178)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        return 1
+    except OSError as err:
+        # a missing file, a directory given for a file, … (MYLA-178)
         print(f"error: {err}", file=sys.stderr)
         return 1

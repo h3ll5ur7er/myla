@@ -109,6 +109,7 @@ PARITY_PROGRAMS = (
     "derived_eq_on_plain_enums",
     "const_string_concatenation_in_functions",
     "local_closure_shadows_a_function",
+    "local_closure_shadows_a_builtin",
     "plain_aggregates",
     "strings_through_the_ir",
     "lists_through_the_ir",

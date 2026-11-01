@@ -180,6 +180,8 @@ pub struct Interp {
     // other tasks stop; the drivers report it there (true: reported)
     on_failure: (RtError) -> bool,
     fail_reported: bool,
+    // calls in progress, up to MAX_CALL_DEPTH (MYLA-182)
+    depth: int32,
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
@@ -244,6 +246,11 @@ enum PlaceOp {
 
 // An interpreter for the checked program `c`, run as `argv` (argv[0] is the
 // program's path, as for `myla run`).
+// The deepest the interpreter's calls go (MYLA-182): an interpreted call takes
+// some 12 to 25 KB of native stack (every IR slot has a cell of its own,
+// MYLA-183), and the runtime lets the main stack grow to 120 MiB.
+const MAX_CALL_DEPTH: int32 = 2500
+
 pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     var it = Interp {
         decls: c.decls,
@@ -270,6 +277,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         parked: false, yielding: false,
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
+        depth: 0,
     }
     return it
 }
@@ -1973,7 +1981,17 @@ impl Interp {
         // partial application: `f(a, _)` builds a closure awaiting the holes
         if i_args_have_hole(args) { return self.eval_partial(callee, args) }
         match callee.kind {
-            ExprKind.Name(nm) => { return self.eval_name_call(e, nm, args) },
+            ExprKind.Name(nm) => {
+                // a local binding shadows a function or builtin of the same
+                // name: the checker typed the callee as a value (MYLA-152)
+                if contains(self.resolved, callee.id) {
+                    match self.lookup(nm) {
+                        Some(v) => { return self.call_value(v, self.eval_args(args)) },
+                        None => {},
+                    }
+                }
+                return self.eval_name_call(e, nm, args)
+            },
             ExprKind.GetField(tgt, field) => { return self.eval_getfield_call(e, tgt, field, args) },
             _ => {},
         }
@@ -2111,6 +2129,7 @@ impl Interp {
     // Call method `fi` on the receiver on top of `self.receivers`, which
     // moves into the method's `self`; yields the result and the final `self`.
     fun call_with_receiver(var self, fi: int32, argv: [Value]) -> (Value, Value) {
+        if !self.enter_call() { return Value.VUnit, pop(self.receivers) }
         let saved = self.scopes
         self.enter_method(fi, argv)
         // `become self.m(…)` with a `var self` method goes on with this `self`
@@ -2131,7 +2150,24 @@ impl Interp {
         let final_self = self.lookup_or_unit("self")
         let rv = self.run_tail()
         self.scopes = saved
+        self.depth = self.depth - 1
         return rv, final_self
+    }
+
+    // One call deeper; past MAX_CALL_DEPTH a runtime error, as the Python
+    // interpreter's `stack overflow`, instead of running out of native stack
+    // (MYLA-182) and false.
+    fun enter_call(var self) -> bool {
+        if self.depth >= MAX_CALL_DEPTH {
+            if !self.stop() {
+                self.rt_err = Some(RtError { msg: "stack overflow", line: 0, col: 0, sp: no_span(), node: -1 })
+                self.ctrl = Ctrl.CExit
+                self.exit_code = 1
+            }
+            return false
+        }
+        self.depth = self.depth + 1
+        return true
     }
 
     fun tail_on_self(self) -> bool {
@@ -2627,6 +2663,7 @@ impl Interp {
             }
             return self.call_func(fi, argv)
         }
+        if !self.enter_call() { return Value.VUnit }
         let saved = self.scopes
         self.scopes = []
         self.push_scope()
@@ -2642,6 +2679,7 @@ impl Interp {
         }
         if self.defer_lambda(body) {
             self.scopes = saved
+            self.depth = self.depth - 1
             return Value.VUnit
         }
         var rv = Value.VUnit
@@ -2657,14 +2695,17 @@ impl Interp {
             },
         }
         self.scopes = saved
+        self.depth = self.depth - 1
         return rv
     }
 
     fun call_func(var self, fi: int32, argv: [Value]) -> Value {
+        if !self.enter_call() { return Value.VUnit }
         let saved = self.scopes
         self.enter_func(fi, argv)
         let rv = self.run_tail()
         self.scopes = saved
+        self.depth = self.depth - 1
         return rv
     }
 

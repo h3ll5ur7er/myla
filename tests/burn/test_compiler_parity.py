@@ -325,6 +325,26 @@ PROGRAMS = {
     # MYLA-84: a const string made with `+` read inside a function: the
     # self-hosted backend evaluated the concatenation at each use, into a
     # temporary its frame had no slot for, and the function's return crashed
+    # MYLA-152: a local closure shadows a builtin of the same name too, with
+    # and without a result, in calls; outside its scope the builtin is back
+    "local_closure_shadows_a_builtin": (
+        "#main\nfun main() {\n"
+        "    if true {\n"
+        "        let build = (n: int32) => n + 1\n"
+        "        print(build(41))\n"
+        "        let len = (s: str) => 7\n"
+        "        print(len(\"abc\"))\n"
+        "        let keys = (n: int32) => [n, n]\n"
+        "        print(keys(3)[1])\n"
+        "        let push = (s: str) => { print(s + \"!\") }\n"
+        "        push(\"pushed\")\n"
+        "    }\n"
+        "    print(len(\"abc\"))\n"
+        "    var xs = [1]\n"
+        "    push(xs, 2)\n"
+        "    print(len(xs))\n"
+        "}\n"
+    ),
     # MYLA-102: a local binding shadows a top-level function of the same name
     # in calls too (a closure, a parameter of function type); outside its
     # scope the function is called again

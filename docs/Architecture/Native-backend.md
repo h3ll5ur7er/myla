@@ -14,6 +14,8 @@ The self-hosted code generator ([[Architecture/Self-hosted-compiler]]) began as 
 
 ## Calling convention
 
+The main thread's stack may grow to 120 MiB: `_start` raises the soft `RLIMIT_STACK` to that (or to the hard limit, if lower) with `prlimit64`; Linux reads the limit at each growth of the stack and keeps at least 128 MiB free below it, so deep recursion runs where 8 MiB ended in a segfault (both backends, [[MYLA-182]]). Workers' stacks are 8 MiB.
+
 Internal and stack-based (never called from C):
 
 - Argument *i* is at `16 + 8*i(%rbp)`; the callee pops the arguments (`ret $8n`, `_ret_popping`), so `become` can replace a function by one taking more arguments (D87). To evaluate them left to right, the caller reserves the argument words and stores each argument in source order (`_store_call_words`). When at most one argument isn't a literal, the order can't be observed, and it pushes them last to first instead, which is shorter.

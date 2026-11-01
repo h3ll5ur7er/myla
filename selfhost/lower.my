@@ -2261,6 +2261,10 @@ impl Lower {
         if args_have_hole(args) { return self.partial(cg, e, callee, args) }
         match callee.kind {
             ExprKind.Name(nm) => {
+                // a local binding shadows a function or builtin of the same
+                // name: the checker typed the callee as a value (MYLA-102,
+                // MYLA-152)
+                if cg.called_as_value(callee) { return self.indirect_call(cg, e, callee, args, tail) }
                 if nm == "print" && len(args) == 1 { return self.print(cg, args[0]) }
                 if nm == "len" && len(args) == 1 && is_cell_t(cg.type_of(args[0].id)) {
                     let s = self.expr(cg, args[0])

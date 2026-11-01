@@ -25,32 +25,39 @@
 // (`default_stdlib_root`, MYLA-31).
 
 from std.process import args, exit
-from std.io import eprintln
+from std.io import eprintln, println
 from .repl import repl
 from .loader import load_options, LoadOptions, parse_package_flag, default_stdlib_root
 from .diag import render
 from .driver import cmd_build, cmd_interp, load_and_check
 from .project_cmd import project_build, project_run, project_test, project_check, project_clean, project_new, project_fetch, ends_with
 
+// The usage text, a line each (MYLA-178: `--help` prints it on stdout).
+fun usage_lines() -> [str] {
+    return [
+        "usage: myla <command> [<file.my>] [options]",
+        "commands on a file:",
+        "  run   <file.my> [options] [args...]  interpret a program with these arguments",
+        "  test  <file.my> [options]            run its #test cases",
+        "  build <file.my> [-o <out>] [-g] [options]  compile to a binary (-g: debug information for gdb)",
+        "  check <file.my> [options]            type-check it",
+        "  repl  [options]                      the interactive interpreter",
+        "commands on the project around the working directory (myla.toml):",
+        "  new   <name>                         create a project in the directory <name>",
+        "  build [-g] [options]                 compile src/main.my to build/<name>",
+        "  run   [options] [args...]            interpret src/main.my with these arguments",
+        "  test  [options]                      run the #test cases of every file under src/",
+        "  check [options]                      type-check every file under src/",
+        "  clean [--deps]                       remove build/ (--deps: and the fetched dependencies, .myla/)",
+        "  fetch [--update]                     resolve the Git dependencies, check them out and write myla.lock",
+        "options:",
+        "  --stdlib <dir>        the directory holding std/ (default: src/myla next to this binary's build/ directory)",
+        "  --package <name=dir>  a dependency: imports of <name> resolve in <dir> (repeatable)",
+    ]
+}
+
 fun usage() {
-    eprintln("usage: myla <command> [<file.my>] [options]")
-    eprintln("commands on a file:")
-    eprintln("  run   <file.my> [options] [args...]  interpret a program with these arguments")
-    eprintln("  test  <file.my> [options]            run its #test cases")
-    eprintln("  build <file.my> [-o <out>] [-g] [options]  compile to a binary (-g: debug information for gdb)")
-    eprintln("  check <file.my> [options]            type-check it")
-    eprintln("  repl  [options]                      the interactive interpreter")
-    eprintln("commands on the project around the working directory (myla.toml):")
-    eprintln("  new   <name>                         create a project in the directory <name>")
-    eprintln("  build [-g] [options]                 compile src/main.my to build/<name>")
-    eprintln("  run   [options] [args...]            interpret src/main.my with these arguments")
-    eprintln("  test  [options]                      run the #test cases of every file under src/")
-    eprintln("  check [options]                      type-check every file under src/")
-    eprintln("  clean [--deps]                       remove build/ (--deps: and the fetched dependencies, .myla/)")
-    eprintln("  fetch [--update]                     resolve the Git dependencies, check them out and write myla.lock")
-    eprintln("options:")
-    eprintln("  --stdlib <dir>        the directory holding std/ (default: src/myla next to this binary's build/ directory)")
-    eprintln("  --package <name=dir>  a dependency: imports of <name> resolve in <dir> (repeatable)")
+    for l in usage_lines() { eprintln(l) }
 }
 
 // A command's arguments: its file ("" in project mode), the load options,
@@ -121,6 +128,10 @@ fun main() {
         exit(2)
     }
     let cmd = argv[1]
+    if cmd == "--help" || cmd == "-h" || cmd == "help" {
+        for l in usage_lines() { println(l) }
+        exit(0)
+    }
     let known = ["run", "test", "build", "check", "repl", "new", "clean", "fetch"]
     var ok = false
     for k in known { if k == cmd { ok = true } }

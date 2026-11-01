@@ -576,6 +576,35 @@ class CodeGen:
         e = self.text.append
         e("\t.global _start")
         e("_start:")
+        # the main thread's stack may grow to 120 MiB (MYLA-182, as in the
+        # self-hosted runtime): prlimit64(0, RLIMIT_STACK) raised to
+        # min(120 MiB, the hard limit) when lower; Linux keeps 128 MiB free
+        # below the stack for it
+        e("\tsubq $16, %rsp")
+        e("\tmovq $302, %rax")
+        e("\txorl %edi, %edi")
+        e("\tmovl $3, %esi")
+        e("\txorl %edx, %edx")
+        e("\tmovq %rsp, %r10")
+        e("\tsyscall")
+        e("\ttestq %rax, %rax")
+        e("\tjnz .Lstk_done")
+        e("\tmovq $125829120, %rcx")
+        e("\tcmpq %rcx, (%rsp)")
+        e("\tjae .Lstk_done")
+        e("\tcmpq %rcx, 8(%rsp)")
+        e("\tjae .Lstk_set")
+        e("\tmovq 8(%rsp), %rcx")
+        e(".Lstk_set:")
+        e("\tmovq %rcx, (%rsp)")
+        e("\tmovq $302, %rax")
+        e("\txorl %edi, %edi")
+        e("\tmovl $3, %esi")
+        e("\tmovq %rsp, %rdx")
+        e("\txorl %r10d, %r10d")
+        e("\tsyscall")
+        e(".Lstk_done:")
+        e("\taddq $16, %rsp")
         # capture argc/argv from the entry stack (D29) for `std.process.args`.
         e("\tmovq (%rsp), %rax")        # argc
         e("\tmovq %rax, __argc(%rip)")
@@ -1350,6 +1379,7 @@ class CodeGen:
                     cursor[0] += 8       # saved env_ptr
                     self._locals[f"indenv:{id(expr)}"] = -cursor[0]
                 if (isinstance(expr.callee, ast.Name)
+                        and not getattr(expr, "indirect_call", False)   # a local (MYLA-152)
                         and expr.callee.ident in ("push", "remove",
                                                   "append", "append_byte")):
                     cursor[0] += 8       # scratch to hold the lvalue holder address

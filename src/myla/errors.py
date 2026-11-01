@@ -104,6 +104,9 @@ def _located(header: str, line: int | None, column: int | None, span: Span | Non
     lines = [header, location]
     if source is not None:
         src_lines = source.splitlines()
+        if src_lines and src_lines[0].startswith("\ufeff"):
+            # a byte-order mark the lexer skipped isn't shown (MYLA-178)
+            src_lines[0] = src_lines[0][1:]
         if 1 <= line <= len(src_lines):
             gutter = str(line)
             pad = " " * len(gutter)

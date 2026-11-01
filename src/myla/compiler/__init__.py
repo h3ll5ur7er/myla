@@ -50,6 +50,9 @@ def build(checker: Checker, output: str, keep_asm: bool = False,
     written next to `output`; the object file is always removed and the assembly
     is removed unless `keep_asm` is set.
     """
+    out_dir = os.path.dirname(output)
+    if out_dir and not os.path.isdir(out_dir):
+        raise BuildError(f"the output directory '{out_dir}' doesn't exist")
     asm = compile_to_asm(checker, debug=debug, entry_path=entry_path)
     asm_path = output + ".s"
     obj_path = output + ".o"

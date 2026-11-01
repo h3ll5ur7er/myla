@@ -21,6 +21,8 @@ few notes on the tricky bits:
 """
 from __future__ import annotations
 
+import sys
+
 from . import ast
 from .errors import MAX_ERRORS, ParseError
 from .tokens import Token, TokenKind as T
@@ -54,12 +56,26 @@ _PRIM_TYPE_KINDS = {
 }
 
 
+# How deep expressions, types, blocks and patterns may nest (MYLA-182): past
+# it, a parse error instead of running out of stack (the self-hosted parser,
+# a native program, does the same at the same place).
+MAX_NESTING = 256
+
+
 class Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = list(tokens)       # a copy: `_type_args` may split a `>=`
         self.pos = 0
         self._allow_struct_lit = True
         self.errors: list[ParseError] = []
+        self._depth = 0   # nesting, up to MAX_NESTING (MYLA-182)
+
+    def _enter(self, what: str) -> None:
+        """One level deeper (the caller leaves it in a `finally`); past
+        MAX_NESTING, a parse error at the current token."""
+        self._depth += 1
+        if self._depth > MAX_NESTING:
+            raise ParseError(f"{what} nested too deeply", at=self._peek())
 
     # -- cursor helpers ------------------------------------------------------
 
@@ -526,9 +542,8 @@ class Parser:
                 at=tok,
             )
         params: list[ast.Param] = []
+        # no trailing comma, as in a function's parameter list (MYLA-180)
         while self._match(T.COMMA):
-            if self._check(T.RPAREN):  # trailing comma after self
-                break
             pname = self._expect(T.IDENT, "parameter name")
             self._expect(T.COLON, "':'")
             ptype = self._type()
@@ -569,6 +584,13 @@ class Parser:
         return ast.ConstDecl(name.value, declared_type, value).at(kw.line, kw.column, self._end())
 
     def _type(self):
+        try:
+            self._enter("type")
+            return self._type_inner()
+        finally:
+            self._depth -= 1
+
+    def _type_inner(self):
         tok = self._peek()
         if tok.kind is T.ASYNC:
             # `async (T, …) -> R` (D89)
@@ -660,6 +682,13 @@ class Parser:
     # -- statements ----------------------------------------------------------
 
     def _block(self) -> ast.Block:
+        try:
+            self._enter("block")
+            return self._block_inner()
+        finally:
+            self._depth -= 1
+
+    def _block_inner(self) -> ast.Block:
         lbrace = self._expect(T.LBRACE, "'{'")
         stmts: list[ast.Stmt] = []
         self._skip_separators()
@@ -841,9 +870,11 @@ class Parser:
         prev = self._allow_struct_lit
         self._allow_struct_lit = allow_struct_lit
         try:
+            self._enter("expression")
             return self._pipe()
         finally:
             self._allow_struct_lit = prev
+            self._depth -= 1
 
     def _pipe(self) -> ast.Expr:
         # `|>` is the loosest binary level (below `||`), left-associative, and is
@@ -938,11 +969,19 @@ class Parser:
     def _unary(self) -> ast.Expr:
         if self._check(T.AWAIT):
             kw = self._advance()
-            operand = self._unary()
+            try:
+                self._enter("expression")
+                operand = self._unary()
+            finally:
+                self._depth -= 1
             return ast.Await(operand).at(kw.line, kw.column, self._end())
         if self._peek().kind in (T.MINUS, T.BANG, T.TILDE):
             op = self._advance()
-            operand = self._unary()
+            try:
+                self._enter("expression")
+                operand = self._unary()
+            finally:
+                self._depth -= 1
             return ast.Unary(op.lexeme, operand).at(op.line, op.column, self._end())
         return self._postfix()
 
@@ -1107,6 +1146,13 @@ class Parser:
         return ast.MatchArm(pattern, guard, body).at(arrow.line, arrow.column, self._end(), start)
 
     def _pattern(self) -> ast.Pattern:
+        try:
+            self._enter("pattern")
+            return self._pattern_inner()
+        finally:
+            self._depth -= 1
+
+    def _pattern_inner(self) -> ast.Pattern:
         first = self._base_pattern()
         if not self._check(T.PIPE):
             return first
@@ -1354,4 +1400,8 @@ def _is_lvalue(expr: ast.Expr) -> bool:
 
 def parse(tokens: list[Token]) -> ast.Program:
     """Convenience wrapper: parse a token list into a `Program`."""
+    # a level of nesting takes some fifteen Python frames: room for
+    # MAX_NESTING levels, and for the checker that walks them (MYLA-182)
+    if sys.getrecursionlimit() < 100_000:
+        sys.setrecursionlimit(100_000)
     return Parser(tokens).parse_program()
