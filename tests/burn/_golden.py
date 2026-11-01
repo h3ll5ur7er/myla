@@ -19,7 +19,9 @@ directory in an argument is replaced in the answer by a placeholder and put
 back on replay.
 
 The repository's own path in an answer is stored as a placeholder too, so a
-checkout elsewhere replays with its own.
+checkout elsewhere replays with its own; in an argument (a program that names
+a file of the repository) it is keyed as the checkout that recorded the
+answers, `RECORDED_REPO`, saw it.
 
 `MYLA_GOLDEN=record` (only on a checkout that still has the Python
 toolchain, the branch `backup/python-toolchain-final`) computes and stores the
@@ -38,6 +40,9 @@ import unittest
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _DIR = os.environ.get("MYLA_GOLDEN_DIR") or os.path.join(_REPO, "tests", "burn", "data", "golden")
 RECORD = os.environ.get("MYLA_GOLDEN") == "record"
+# where the answers were recorded: an argument holding the repository's path
+# (a program that names a file of the repository) is keyed as it was there
+RECORDED_REPO = "/home/user/myla"
 
 _stores: dict[str, dict] = {}
 _lock = threading.Lock()
@@ -76,7 +81,10 @@ def _describe(arg, dirs: list[str]):
     if isinstance(arg, str) and len(arg) < 4096 and os.path.isfile(arg):
         path = os.path.abspath(arg)
         with open(path, "rb") as fh:
-            digest = hashlib.sha256(fh.read()).hexdigest()
+            data = fh.read()
+        for r in {_REPO, os.path.realpath(_REPO)}:   # as the recording checkout saw it
+            data = data.replace(r.encode(), RECORDED_REPO.encode())
+        digest = hashlib.sha256(data).hexdigest()
         if path.startswith(_REPO + os.sep) and "/build/" not in path:
             where = os.path.relpath(path, _REPO)
         else:
@@ -85,6 +93,10 @@ def _describe(arg, dirs: list[str]):
                 if d not in dirs:
                     dirs.append(d)
         return {"file": where, "sha256": digest}
+    if isinstance(arg, str):
+        for r in {_REPO, os.path.realpath(_REPO)}:
+            arg = arg.replace(r, RECORDED_REPO)
+        return arg
     if isinstance(arg, (list, tuple)):
         return [_describe(a, dirs) for a in arg]
     if isinstance(arg, dict):
