@@ -1349,6 +1349,8 @@ class Interpreter:
         decl = self.functions[mfunc].decl
         recv_expr = expr.callee.target
         if (decl.is_async and getattr(expr, "method_is_var_self", False)
+                and isinstance(recv_expr, (ast.FieldAccess, ast.Index))
+                and mfunc.rpartition(".")[0] not in self.checker.actors
                 and _actor_rooted(recv_expr, env)):
             # an async `var self` method on a place in an actor: it works on
             # a copy, and its final `self` is written back to the place, its
@@ -1465,7 +1467,8 @@ def _is_scalar_value(v: int) -> bool:
 
 def _actor_rooted(expr: ast.Expr, env) -> bool:
     """Whether the place `expr` (fields and list elements) starts at an actor
-    handle: a place in the actor's state."""
+    handle: a place in the actor's state (the caller passes a field or an
+    element, never the handle itself, whose methods run on the actor)."""
     while isinstance(expr, (ast.FieldAccess, ast.Index)):
         expr = expr.target
     if not isinstance(expr, ast.Name):
