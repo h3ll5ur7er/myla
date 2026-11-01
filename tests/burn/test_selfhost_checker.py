@@ -314,6 +314,42 @@ WARNINGS: dict[str, str] = {
 }
 
 
+# MYLA-171: the D95 walk through `self` methods. A call of a `var self`
+# method counts as a change of every field it changes, transitively; a call
+# of a method as an examination of every field its body examines. (The
+# Python checker never saw these, so the expectation is written here: the
+# warnings' first lines, then `ok`.)
+_PAY = "actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\n"
+_INV_METHODS = ("    fun take(var self) {\n        self.stock = self.stock - 1\n    }\n"
+                "    fun has_stock(self) -> bool {\n        return self.stock > 0\n    }\n"
+                "    fun sell(var self) -> int {\n        self.take()\n        self.sold = self.sold + 1\n        return self.sold\n    }\n")
+SELF_METHOD_WARNINGS: dict[str, tuple[str, list[str]]] = {
+    # the change in a `var self` method
+    "change_in_a_method": (_PAY + "actor Inv {\n    stock: int,\n    sold: int,\n}\nimpl Inv {\n" + _INV_METHODS +
+        "    async fun buy(var self, p: Pay) -> bool {\n        if self.stock == 0 {\n            return false\n        }\n"
+        "        let paid = await p.charge()\n        self.take()\n        return true\n    }\n}\n",
+        ["warn 31 18 31:9-31:20 warning: 'self.stock' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]),
+    # ... two calls deep
+    "change_two_methods_deep": (_PAY + "actor Inv {\n    stock: int,\n    sold: int,\n}\nimpl Inv {\n" + _INV_METHODS +
+        "    async fun buy(var self, p: Pay) -> int {\n        if self.stock == 0 {\n            return 0\n        }\n"
+        "        let paid = await p.charge()\n        return self.sell()\n    }\n}\n",
+        ["warn 31 25 31:16-31:27 warning: 'self.stock' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]),
+    # the check in a method
+    "check_in_a_method": (_PAY + "actor Inv {\n    stock: int,\n    sold: int,\n}\nimpl Inv {\n" + _INV_METHODS +
+        "    async fun buy(var self, p: Pay) -> bool {\n        if !self.has_stock() {\n            return false\n        }\n"
+        "        let paid = await p.charge()\n        self.stock = self.stock - 1\n        return true\n    }\n}\n",
+        ["warn 31 13 31:9-31:19 warning: 'self.stock' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile"]),
+    # the ways out: checking again after the `await`, changing before it
+    "quiet_check_again": (_PAY + "actor Inv {\n    stock: int,\n    sold: int,\n}\nimpl Inv {\n" + _INV_METHODS +
+        "    async fun buy(var self, p: Pay) -> bool {\n        if !self.has_stock() {\n            return false\n        }\n"
+        "        let paid = await p.charge()\n        if self.has_stock() {\n            self.take()\n            return true\n        }\n        return false\n    }\n}\n",
+        []),
+    "quiet_change_before": (_PAY + "actor Inv {\n    stock: int,\n    sold: int,\n}\nimpl Inv {\n" + _INV_METHODS +
+        "    async fun buy(var self, p: Pay) -> bool {\n        if !self.has_stock() {\n            return false\n        }\n"
+        "        self.take()\n        let paid = await p.charge()\n        return paid\n    }\n}\n",
+        []),
+}
+
 def _corpus() -> list[str]:
     """Every single-file .my source the checker gate covers: the top-level
     examples and the error corpus. (Multi-file example packages and the stdlib
@@ -442,6 +478,18 @@ class SelfHostedCheckerParity(unittest.TestCase):
                     with open(path, "w", encoding="utf-8") as fh:
                         fh.write(source)
                     self.assertEqual(self._myla_check(path), expected)
+
+    def test_warnings_through_self_methods(self) -> None:
+        # MYLA-171: the two shapes of the review warn, the ways out stay quiet
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, (source, warns) in SELF_METHOD_WARNINGS.items():
+                with self.subTest(case=name):
+                    path = os.path.join(tmp, name + ".my")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(source)
+                    lines = self._myla_check(path).split("\n")
+                    self.assertEqual([l for l in lines if l.startswith("warn ")], warns)
+                    self.assertEqual(lines[-1], "ok")
 
     def test_declaration_mutants_match_the_oracle(self) -> None:
         # every example with one declaration broken (MYLA-110): the same error,

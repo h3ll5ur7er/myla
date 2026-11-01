@@ -14,6 +14,7 @@ are recorded (`tests/burn/_golden.py`, MYLA-219).
 from __future__ import annotations
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -527,18 +528,21 @@ def _corpus() -> list[str]:
                   + glob.glob(os.path.join(_REPO, "lib", "std", "*.my")))
 
 
-@golden("lsp.identifiers")
 def _identifiers(path: str) -> list[tuple[str, int, int, bool]]:
-    """Each identifier token of the file `path` by the Python lexer: (lexeme,
-    1-based line and column, whether it follows `.` or `#`, i.e. is a member
-    or an attribute's name)."""
-    from myla.lexer import tokenize
-    from myla.tokens import TokenKind
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
-    toks = tokenize(text)
-    return [(t.lexeme, t.line, t.column, k > 0 and toks[k - 1].kind in (TokenKind.DOT, TokenKind.HASH))
-            for k, t in enumerate(toks) if t.kind == TokenKind.IDENT]
+    """Each identifier token of the file `path` by the self-hosted lexer
+    (`lex_main`'s canonical dump, which matched the Python lexer's byte for
+    byte): (lexeme, 1-based line and column, whether it follows `.` or `#`,
+    i.e. is a member or an attribute's name). (The Python lexer's answers were
+    recorded, which left out every file changed since, MYLA-219.)"""
+    out = subprocess.run([selfhost_tool("lex_main"), path], capture_output=True, text=True,
+                         check=True).stdout
+    toks = []
+    for line in out.splitlines():
+        m = re.match(r'(\w+) (\d+) (\d+) "(.*)" end=', line)
+        if m:
+            toks.append((m.group(1), m.group(4), int(m.group(2)), int(m.group(3))))
+    return [(lexeme, ln, col, k > 0 and toks[k - 1][0] in ("DOT", "HASH"))
+            for k, (kind, lexeme, ln, col) in enumerate(toks) if kind == "IDENT"]
 
 
 @golden("lsp.members")
