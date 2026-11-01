@@ -5074,6 +5074,21 @@ pub fun build_checker_decls(decls: [Decl], next_id: int32) -> Result<Checker, [C
     return Ok(c)
 }
 
+// A checker that has checked `src` alone, the receiver of `#test` cases of
+// the checker's methods (MYLA-184): without the prelude, which would take a
+// third of a second per case in the Python interpreter. Its errors stay in
+// `errs`; a `src` that doesn't parse gives an empty checker.
+pub fun checker_on(src: str) -> Checker {
+    var decls: [Decl] = []
+    match parse_source(src, 0) {
+        Ok(p) => { decls = p.program.decls },
+        Err(d) => {},
+    }
+    var c = new_checker(decls)
+    let r = c.run_all()
+    return c
+}
+
 #test(Type.TStr)[true]
 #test(Type.TBool)[true]
 #test(Type.TParam("T"))[false]

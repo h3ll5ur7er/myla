@@ -15,7 +15,7 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
+from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered
@@ -210,6 +210,12 @@ pub struct CodeGen {
     handed: [str: [int32]],
     passed_on: [str: [int32]],
     tag_enums: [str: bool],         // MYLA-133: the enums whose `==` compares tags only
+}
+
+// A code generator for `src` (checked alone, `checker_on`), the receiver of
+// `#test` cases of the code generator's methods (MYLA-184).
+pub fun codegen_on(src: str) -> CodeGen {
+    return new_codegen(checker_on(src))
 }
 
 pub fun new_codegen(c: Checker) -> CodeGen {

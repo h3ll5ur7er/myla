@@ -30,7 +30,7 @@
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import Type, Subst, FuncSig, opt_subst_type, subst_type
-from .codegen import is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
+from .codegen import codegen_on, is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 
 // A name in scope: the slot holding it.
@@ -75,6 +75,13 @@ struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], owners: [[int32]], temp
 struct TaskSlot { slot: int32, ty: Type, void: bool, owns: bool, depth: int32, foreign: bool }
 
 pub struct Lowered { f: IrFunc, lams: [LamJob], partials: [PartialJob], fnvals: [str] }
+
+// A lowering of an empty function `test` without a result, the receiver of
+// `#test` cases of the lowering's methods (MYLA-184), with a code generator
+// from `codegen_on` as their `cg`.
+pub fun lower_on() -> Lower {
+    return Lower { f: IrFunc { name: "test", ret: None, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false }, cur: 0, scopes: [[]], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false }
+}
 
 // The IR of the function `fd`, generated as `mangled`; Err: why it can't be
 // lowered yet.

@@ -10,6 +10,7 @@ expected result, and recording calls gives regression tests for free.
     scripts/harvest_tests.py record   # run the workloads, keep the calls (resumes;
                                       # FRESH=1 starts over, ONLY=regex selects)
     scripts/harvest_tests.py merge    # merge the parts of a stopped `record`
+    scripts/harvest_tests.py generate # run functions with state on factory receivers
     scripts/harvest_tests.py write    # write the chosen cases into selfhost/
     scripts/harvest_tests.py validate # drop every case a runner rejects
 
@@ -31,10 +32,13 @@ The cases record what the compiler does today: read them before committing.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
+import pickle
 import os
 import re
+import shutil
 import signal
 import struct
 import subprocess
@@ -46,7 +50,7 @@ sys.path.insert(0, os.path.join(REPO, "src"))
 
 from myla import ast, loader                              # noqa: E402
 from myla.interpreter import (EnumValue, Interpreter, ListValue, MapValue,  # noqa: E402
-                              StructValue, TupleValue, _Env)
+                              StructValue, TupleValue, _copy)
 from myla.types import (BoolType, CharType, EnumType, FloatType, IntType,  # noqa: E402
                         ListType, MapType, StrType, StructType, TupleType,
                         TypeParam, check)
@@ -56,11 +60,48 @@ ENTRY = os.path.join(SELFHOST, "main.my")
 STDLIB = os.path.join(REPO, "src", "myla")
 STATE = os.path.join(REPO, "build", "harvest")
 RECORDS = os.path.join(STATE, "records.json")
+ARGS = os.path.join(STATE, "args.json")             # arguments beside state, as values
+GENERATED = os.path.join(STATE, "generated.json")   # cases run on factory receivers
 
 MAX_CASE = 220          # characters of one case's arguments and result together
 MAX_DISTINCT = 40       # distinct calls kept per function while recording
 CASES_PER_FUNCTION = 3
+GENERATED_PER_FUNCTION = 1   # a case on factory receivers costs a factory call in each runner
 WORKLOAD_SECONDS = 240
+MAX_ARGSETS = 8         # recorded argument lists kept per function with state parameters
+MAX_GENERATED = 300     # characters of a generated case's other arguments and result
+CALL_SECONDS = 3
+
+# The compiler's state objects can't be written as literals; a factory in the
+# type's own module builds one (MYLA-184): from each snippet, without
+# arguments, or from fixed arguments. A parameter of such a type (a method's
+# receiver, or any other) takes the factory's call in a generated case.
+FACTORIES = {
+    "Parser": ("parser.my", "parser_on", "snippets"),
+    "Checker": ("checker.my", "checker_on", "snippets"),
+    "Interp": ("interp.my", "interp_on", "snippets"),
+    "CodeGen": ("codegen.my", "codegen_on", "snippets"),
+    "Lower": ("lower.my", "lower_on", []),
+    "Norm": ("anf.my", "new_norm", [0]),
+}
+
+# Sources the factories build state from: fragments for the parser's
+# methods, small programs for the checker, the interpreter and the code
+# generator (one line each, so a case stays one line).
+SNIPPETS = [
+    "1 + 2 * 3",
+    "f(x, 2)",
+    "a.b[0]",
+    "let x = 1",
+    "[int]",
+    "Some(n)",
+    "fun f(n: int) -> int { return n * 2 }",
+    "struct P { x: int, y: int }",
+    "enum E { A, B(int) }",
+    "fun main() { print(1 + 2) }",
+    "const N: int = 4; fun g() -> int { return N }",
+    "fun h(xs: [int]) -> int { var t = 0; for x in xs { t = t + x }; return t }",
+]
 
 # primitives whose result or effect depends on the world outside the call
 IMPURE = {"print", "__write", "__exit", "__args", "__read_file", "__read", "__poll",
@@ -267,31 +308,108 @@ def eligible(checker):
     return out
 
 
-def workloads() -> list[list[str]]:
+def workloads() -> list[dict]:
+    """Each workload: the CLI's arguments, and optionally its stdin and its
+    working directory."""
     examples = sorted(os.path.join("examples", f) for f in os.listdir(os.path.join(REPO, "examples"))
                       if f.endswith(".my"))
     errors = sorted(os.path.join("examples", "errors", f)
                     for f in os.listdir(os.path.join(REPO, "examples", "errors")) if f.endswith(".my"))
     out = []
     for ex in examples:
-        out.append(["check", ex])
-        out.append(["build", ex, "-o", os.path.join(STATE, "bin", os.path.basename(ex)[:-3])])
-        out.append(["test", ex])
+        out.append({"argv": ["check", ex]})
+        out.append({"argv": ["build", ex, "-o", os.path.join(STATE, "bin", os.path.basename(ex)[:-3])]})
+        out.append({"argv": ["test", ex]})
     for ex in examples:
-        out.append(["run", ex])
+        out.append({"argv": ["run", ex]})
     for err in errors:
-        out.append(["check", err])
+        out.append({"argv": ["check", err]})
+    out.extend(extra_workloads())
+    return out
+
+
+REPL_SESSIONS = [
+    "let x = 1 + 2\nx\nfun twice(n: int) -> int {\n    return n * 2\n}\ntwice(x)\n",
+    "struct P { x: int, name: str }\nvar p = P { x: 5, name: \"a\" }\np\np.x = 7\np.x\n[1, 2]\n[\"a\": [1]]\n(1, 'c', true)\nSome(1.5)\n",
+    "let xs = [1]\nxs[3]\nxs\nfor i in 0..3 {\n    print(i)\n}\ny + 1\nlet x = \"now a string\"\nx\n",
+    "from std.num import format_float\nformat_float(0.5)\nenum E { A, B(int) }\nE.B(2)\nmatch E.A {\n    A => 1,\n    B(n) => n,\n}\n",
+    "fun bad() -> int {\n    return \"no\"\n}\nlet q = [1, 2, 3]\nq |> len()\n1 / 0\n",
+]
+
+
+def _write(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def extra_workloads() -> list[dict]:
+    """The REPL, the project commands (`new`, `build`, `run`, `test`,
+    `check`, `clean`, `fetch` from a local Git repository) and debug
+    information (`build -g`), in projects set up under build/harvest/proj."""
+    root = os.path.join(STATE, "proj")
+    geo, app = os.path.join(root, "geo"), os.path.join(root, "app")
+    _write(os.path.join(geo, "myla.toml"), '[package]\nname = "geo"\nversion = "0.1.0"\n\n[dependencies]\n')
+    _write(os.path.join(geo, "src", "geo.my"),
+           "pub struct Square {\n    side: int,\n}\n\npub fun area(s: Square) -> int {\n    return s.side * s.side\n}\n")
+    _write(os.path.join(app, "myla.toml"),
+           '[package]\nname = "app"\nversion = "0.1.0"\n\n[dependencies]\ngeo = { path = "../geo" }\n')
+    _write(os.path.join(app, "src", "main.my"),
+           "from geo import Square, area\nimport util.strings as strings\n\n#test(2)[4]\nfun sq(n: int) -> int {\n"
+           "    return area(Square { side: n })\n}\n\nfun main() {\n    print(strings.shout(\"hi\"))\n"
+           "    print(sq(3))\n}\n")
+    _write(os.path.join(app, "src", "util", "strings.my"),
+           'pub fun shout(s: str) -> str {\n    return s + "!"\n}\n')
+    tidy = os.path.join(root, "tidy")
+    _write(os.path.join(tidy, "myla.toml"), '[package]\nname = "tidy"\nversion = "0.1.0"\n\n[dependencies]\n')
+    _write(os.path.join(tidy, "src", "main.my"), "fun main() {\n    print(1)\n}\n")
+    os.makedirs(os.path.join(tidy, "build"), exist_ok=True)
+    for made in ("fresh", "freshlib"):      # what `new` makes, made again each round
+        shutil.rmtree(os.path.join(root, made), ignore_errors=True)
+    out = [{"argv": ["build"], "cwd": app}, {"argv": ["run"], "cwd": app},
+           {"argv": ["test"], "cwd": app}, {"argv": ["check"], "cwd": app},
+           {"argv": ["clean"], "cwd": tidy}, {"argv": ["new", "fresh"], "cwd": root},
+           {"argv": ["new", "--lib", "freshlib"], "cwd": root}]
+    lib = os.path.join(root, "greetlib")
+    if not os.path.isdir(os.path.join(lib, ".git")):
+        _write(os.path.join(lib, "myla.toml"), '[package]\nname = "greet"\nversion = "1.0.0"\n\n[dependencies]\n')
+        _write(os.path.join(lib, "src", "greet.my"), 'pub fun hello(n: str) -> str {\n    return "hello " + n\n}\n')
+        git = ["git", "-c", "user.name=harvest", "-c", "user.email=harvest@example.invalid"]
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "greet"], ["tag", "v1"]):
+            subprocess.run(git + cmd, cwd=lib, check=True, capture_output=True)
+    gitapp = os.path.join(root, "gitapp")
+    _write(os.path.join(gitapp, "myla.toml"),
+           '[package]\nname = "gitapp"\nversion = "0.1.0"\n\n[dependencies]\n'
+           f'greet = {{ git = "file://{lib}", tag = "v1" }}\n')
+    _write(os.path.join(gitapp, "src", "main.my"),
+           'import greet\n\nfun main() {\n    print(greet.hello("you"))\n}\n')
+    out += [{"argv": ["fetch"], "cwd": gitapp}]
+    out += [{"argv": ["repl"], "stdin": text} for text in REPL_SESSIONS]
+    for ex in ("structs", "enums", "maps", "floats", "closures"):
+        if os.path.exists(os.path.join(REPO, "examples", ex + ".my")):
+            out.append({"argv": ["build", "-g", os.path.join("examples", ex + ".my"),
+                                 "-o", os.path.join(STATE, "bin", ex + "-g")]})
     return out
 
 
 # -- recording ----------------------------------------------------------------
 
-def record_one(checker, names_of, elig, argv: list[str], out_path: str) -> None:
-    """Run the CLI on `argv` with the hooks (in a forked child) and write the
-    calls kept to `out_path`."""
+def state_params(checker, decl) -> list[int]:
+    """The indices of `decl`'s parameters whose type has a factory."""
+    sig = checker.functions[decl.name]
+    return [i for i, t in enumerate(sig.params)
+            if isinstance(t, StructType) and t.name.split("$")[-1] in FACTORIES]
+
+
+def record_one(checker, names_of, elig, work: dict, out_path: str) -> None:
+    """Run the CLI on a workload with the hooks (in a forked child) and write
+    the calls kept to `out_path`: whole calls that print, and for a function
+    with state parameters the other arguments, as text and as values."""
     printers = {}
     calls: dict[str, dict[str, None]] = {}
+    argsets: dict[str, dict[str, str]] = {}
     stack: list[list] = []
+    stateful = {d.name: state_params(checker, d) for d in elig.values()}
 
     def printer(decl):
         path = os.path.realpath(decl.source_path)
@@ -302,12 +420,39 @@ def record_one(checker, names_of, elig, argv: list[str], out_path: str) -> None:
     orig_run = Interpreter._run
     orig_call = Interpreter._eval_call
 
+    def keep_args(decl, sig, frame, pr, state):
+        kept = argsets.setdefault(decl.name, {})
+        if len(kept) >= MAX_ARGSETS:
+            return
+        try:
+            budget = MAX_GENERATED
+            texts, values = [], []
+            for i, (param, ptype) in enumerate(zip(decl.params, sig.params)):
+                if i in state:
+                    continue
+                v = frame.lookup(param.name, _MISSING)
+                text = pr.show(v, ptype, budget)
+                budget -= len(text) + 2
+                texts.append(text)
+                values.append(_copy(v))
+            key = json.dumps(texts)
+            if key not in kept:
+                kept[key] = base64.b64encode(pickle.dumps(values)).decode()
+        except Exception:   # unprintable, or a value that doesn't pickle
+            return
+
     def run_hook(self, body, frame, path, is_block=True):
         decl = elig.get(id(body))
-        if decl is None or len(calls.get(decl.name, ())) >= MAX_DISTINCT:
+        if decl is None:
             return orig_run(self, body, frame, path, is_block)
+        state = stateful[decl.name]
         sig = checker.functions[decl.name]
         pr = printer(decl)
+        if state:
+            keep_args(decl, sig, frame, pr, state)
+            return orig_run(self, body, frame, path, is_block)
+        if len(calls.get(decl.name, ())) >= MAX_DISTINCT:
+            return orig_run(self, body, frame, path, is_block)
         try:
             budget = MAX_CASE
             args = []
@@ -342,20 +487,32 @@ def record_one(checker, names_of, elig, argv: list[str], out_path: str) -> None:
     Interpreter._eval_call = call_hook
 
     def stop(signum, frame_):
-        raise TimeoutError()
+        raise _Timeout()
 
     signal.signal(signal.SIGALRM, stop)
     signal.alarm(WORKLOAD_SECONDS)
     devnull = open(os.devnull, "w")
-    os.dup2(os.open(os.devnull, os.O_RDONLY), 0)   # a program that reads stdin reads nothing
+    stdin = os.path.join(STATE, f"stdin-{os.getpid()}")
+    with open(stdin, "w", encoding="utf-8") as fh:
+        fh.write(work.get("stdin", ""))
+    os.dup2(os.open(stdin, os.O_RDONLY), 0)
+    if work.get("cwd"):
+        os.chdir(work["cwd"])
     sys.setrecursionlimit(100_000)
     try:
-        Interpreter(checker, out=devnull, err=devnull, argv=[ENTRY, *argv]).run()
+        Interpreter(checker, out=devnull, err=devnull, argv=[ENTRY, *work["argv"]]).run()
     except BaseException:   # a timeout, an error of the program: keep what was seen
         pass
     signal.alarm(0)
+    os.unlink(stdin)
     with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump({k: list(v) for k, v in calls.items()}, fh)
+        json.dump({"calls": {k: list(v) for k, v in calls.items()},
+                   "args": {k: [[json.loads(t), b] for t, b in v.items()] for k, v in argsets.items()}}, fh)
+
+
+class _Timeout(BaseException):
+    """Raised by the alarm; a BaseException so the interpreter's handlers of
+    runtime errors don't catch it."""
 
 
 _MISSING = object()
@@ -375,45 +532,201 @@ def cmd_record(jobs: int) -> None:
     if os.environ.get("FRESH"):
         for f in os.listdir(parts):
             os.unlink(os.path.join(parts, f))
-    todo = [(i, w) for i, w in enumerate(workloads()) if only.search(" ".join(w))
+    todo = [(i, w) for i, w in enumerate(workloads()) if only.search(" ".join(w["argv"]))
             and not os.path.exists(os.path.join(parts, f"{i:04d}.json"))]
     print(f"{len(todo)} workloads to run", flush=True)
     running: dict[int, tuple] = {}
     while todo or running:
         while todo and len(running) < jobs:
-            i, argv = todo.pop(0)
+            i, work = todo.pop(0)
             part = os.path.join(STATE, "parts", f"{i:04d}.json")
             pid = os.fork()
             if pid == 0:
                 try:
-                    record_one(checker, names_of, elig, argv, part)
+                    record_one(checker, names_of, elig, work, part)
                 finally:
                     os._exit(0)
-            running[pid] = (i, argv, time.time())
+            running[pid] = (i, work, time.time())
         pid, _ = os.wait()
-        i, argv, started = running.pop(pid)
-        print(f"  [{i}] {' '.join(argv[:2])}: {time.time() - started:.0f} s", flush=True)
+        i, work, started = running.pop(pid)
+        print(f"  [{i}] {' '.join(work['argv'][:2])}: {time.time() - started:.0f} s", flush=True)
     merge_parts()
     print(f"done in {time.time() - t0:.0f} s")
 
 
 def merge_parts() -> None:
-    merged: dict[str, list] = {}
+    calls: dict[str, list] = {}
+    args: dict[str, list] = {}
     for part in sorted(os.listdir(os.path.join(STATE, "parts"))):
         with open(os.path.join(STATE, "parts", part), encoding="utf-8") as fh:
-            for name, cases in json.load(fh).items():
-                seen = merged.setdefault(name, [])
-                for c in cases:
-                    if c not in seen:
-                        seen.append(c)
+            data = json.load(fh)
+        for name, cases in data["calls"].items():
+            seen = calls.setdefault(name, [])
+            seen.extend(c for c in cases if c not in seen)
+        for name, sets in data["args"].items():
+            seen = args.setdefault(name, [])
+            texts = [t for t, _ in seen]
+            seen.extend(a for a in sets if a[0] not in texts and len(seen) < MAX_ARGSETS)
     with open(RECORDS, "w", encoding="utf-8") as fh:
+        json.dump(calls, fh, indent=0, sort_keys=True)
+    with open(ARGS, "w", encoding="utf-8") as fh:
+        json.dump(args, fh, sort_keys=True)
+    print(f"{len(calls)} functions with recorded calls, {len(args)} with recorded arguments beside state")
+
+
+# -- generating on factory receivers ----------------------------------------------
+
+def _local_names(names_of: dict, path: str) -> dict[str, str]:
+    """A module's own name -> qualified name (the inverse of `names_of`)."""
+    return {local: q for q, local in names_of.get(os.path.realpath(path), {}).items()}
+
+
+def generate_chunk(checker, names_of, decls: list, out_path: str) -> None:
+    """In a forked child: run each function of `decls` with its state
+    parameters built by the factories, over the snippets and the recorded
+    other arguments, and write the cases that come out to `out_path`."""
+    with open(ARGS, encoding="utf-8") as fh:
+        argsets = json.load(fh)
+    devnull = open(os.devnull, "w")
+    os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+    sys.setrecursionlimit(100_000)
+    interp = Interpreter(checker, out=devnull, err=devnull, argv=[ENTRY])
+    impure = [False]
+    orig_call = Interpreter._eval_call
+
+    def call_hook(self, expr, env):
+        callee = expr.callee
+        if isinstance(callee, ast.Name) and callee.ident in IMPURE:
+            impure[0] = True
+        return orig_call(self, expr, env)
+
+    Interpreter._eval_call = call_hook
+
+    def stop(signum, frame_):
+        raise _Timeout()
+
+    signal.signal(signal.SIGALRM, stop)
+
+    def timed(fn):
+        signal.setitimer(signal.ITIMER_REAL, CALL_SECONDS)
+        try:
+            return fn()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+    built: dict[tuple, object] = {}
+
+    def state(tname: str, choice):
+        """(the factory's call as text in no module yet, the value) or None."""
+        key = (tname, choice)
+        if key not in built:
+            mod, fname, how = FACTORIES[tname]
+            q = _local_names(names_of, os.path.join(SELFHOST, mod)).get(fname)
+            sig = checker.functions.get(q) if q else None
+            args = [] if choice is None else [choice]
+            try:
+                value = timed(lambda: interp._call(sig.decl, list(args))) if sig else None
+            except BaseException:
+                value = None
+            built[key] = (q, value)
+        return built[key]
+
+    out: dict[str, list] = {}
+    for decl in decls:
+        sig = checker.functions[decl.name]
+        idx = state_params(checker, decl)
+        tnames = {i: sig.params[i].name.split("$")[-1] for i in idx}
+        pr = Printer(checker, names_of.get(os.path.realpath(decl.source_path), {}))
+        others = [i for i in range(len(sig.params)) if i not in idx]
+        sets = argsets.get(decl.name, []) if others else [[[], None]]
+        if not sets:
+            continue
+        uses_snippets = any(FACTORIES[t][2] == "snippets" for t in tnames.values())
+        choices = SNIPPETS if uses_snippets else [None]
+        cases: dict[str, None] = {}
+        for snippet in choices:
+            texts, values, ok = {}, {}, True
+            for i, t in tnames.items():
+                how = FACTORIES[t][2]
+                choice = snippet if how == "snippets" else (how[0] if how else None)
+                q, value = state(t, choice)
+                local = pr.names.get(q) if q else None
+                if value is None or local is None:
+                    ok = False
+                    break
+                if how == "snippets":
+                    texts[i] = f'{local}("' + "".join(_escape_char(ord(c), '"') for c in snippet) + '")'
+                elif how:
+                    texts[i] = f"{local}({how[0]})"
+                else:
+                    texts[i] = f"{local}()"
+                values[i] = value
+            if not ok:
+                continue
+            for other_texts, blob in sets:
+                other_values = pickle.loads(base64.b64decode(blob)) if blob else []
+                args, arg_texts = [], []
+                k = 0
+                for i in range(len(sig.params)):
+                    if i in values:
+                        args.append(_copy(values[i]))
+                        arg_texts.append(texts[i])
+                    else:
+                        args.append(_copy(other_values[k]))
+                        arg_texts.append(other_texts[k])
+                        k += 1
+                impure[0] = False
+                try:
+                    result = timed(lambda: interp._call(decl, args))
+                except BaseException:
+                    continue
+                if impure[0]:
+                    continue
+                budget = MAX_GENERATED - sum(len(other_texts[j]) + 2 for j in range(len(other_texts)))
+                try:
+                    res = pr.show(result, sig.ret, budget)
+                except (Unprintable, KeyError, AttributeError, TypeError):
+                    continue
+                cases[json.dumps([arg_texts, res])] = None
+        if cases:
+            out[decl.name] = list(cases)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(out, fh)
+
+
+def cmd_generate(jobs: int) -> None:
+    t0 = time.time()
+    checker, names_of = load()
+    os.chdir(REPO)
+    decls = [d for d in eligible(checker).values() if state_params(checker, d)]
+    print(f"{len(decls)} functions with state parameters", flush=True)
+    gen_dir = os.path.join(STATE, "generated")
+    shutil.rmtree(gen_dir, ignore_errors=True)
+    os.makedirs(gen_dir)
+    chunks = [decls[i::jobs] for i in range(jobs)]
+    pids = []
+    for n, chunk in enumerate(chunks):
+        pid = os.fork()
+        if pid == 0:
+            try:
+                generate_chunk(checker, names_of, chunk, os.path.join(gen_dir, f"{n}.json"))
+            finally:
+                os._exit(0)
+        pids.append(pid)
+    for pid in pids:
+        os.waitpid(pid, 0)
+    merged: dict[str, list] = {}
+    for f in sorted(os.listdir(gen_dir)):
+        with open(os.path.join(gen_dir, f), encoding="utf-8") as fh:
+            merged.update(json.load(fh))
+    with open(GENERATED, "w", encoding="utf-8") as fh:
         json.dump(merged, fh, indent=0, sort_keys=True)
-    print(f"{len(merged)} functions with recorded calls")
+    print(f"{len(merged)} functions with generated cases, in {time.time() - t0:.0f} s")
 
 
 # -- writing ------------------------------------------------------------------
 
-def choose(cases: list[str]) -> list[tuple[list[str], str]]:
+def choose(cases: list[str], n: int = CASES_PER_FUNCTION) -> list[tuple[list[str], str]]:
     """Up to CASES_PER_FUNCTION cases spread over the sizes recorded (the
     smallest, the largest, then the middle), each with a result of its own
     where the calls allow."""
@@ -422,12 +735,12 @@ def choose(cases: list[str]) -> list[tuple[list[str], str]]:
     for c in parsed:
         by_result.setdefault(c[1], c)          # the smallest call per result
     pool = sorted(by_result.values(), key=lambda c: (len(", ".join(c[0])) + len(c[1]), c))
-    if len(pool) < CASES_PER_FUNCTION:        # too few results: other calls too
-        pool += [c for c in parsed if c not in pool][:CASES_PER_FUNCTION - len(pool)]
+    if len(pool) < n:                         # too few results: other calls too
+        pool += [c for c in parsed if c not in pool][:n - len(pool)]
         pool.sort(key=lambda c: (len(", ".join(c[0])) + len(c[1]), c))
     picks = []
     for i in (0, len(pool) - 1, len(pool) // 2):
-        if pool and pool[i] not in picks and len(picks) < CASES_PER_FUNCTION:
+        if pool and pool[i] not in picks and len(picks) < n:
             picks.append(pool[i])
     return [(a, r) for a, r in sorted(picks, key=lambda c: (len(", ".join(c[0])) + len(c[1]), c))]
 
@@ -437,12 +750,19 @@ def cmd_write() -> None:
     elig = {d.name: d for d in eligible(checker).values()}
     with open(RECORDS, encoding="utf-8") as fh:
         records = json.load(fh)
+    generated = set()
+    if os.path.exists(GENERATED):
+        with open(GENERATED, encoding="utf-8") as fh:
+            for name, cases in json.load(fh).items():
+                records.setdefault(name, []).extend(cases)
+                generated.add(name)
     inserts: dict[str, list[tuple[int, list[str]]]] = {}
     for name, cases in records.items():
         decl = elig.get(name)
         if decl is None:
             continue
-        lines = [f"#test({', '.join(args)})[{res}]" for args, res in choose(cases)]
+        n = GENERATED_PER_FUNCTION if name in generated else CASES_PER_FUNCTION
+        lines = [f"#test({', '.join(args)})[{res}]" for args, res in choose(cases, n)]
         inserts.setdefault(os.path.realpath(decl.source_path), []).append((decl.line, lines))
     total = 0
     for path, items in sorted(inserts.items()):
@@ -548,6 +868,8 @@ def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "record":
         cmd_record(int(os.environ.get("JOBS", os.cpu_count() or 2)))
+    elif cmd == "generate":
+        cmd_generate(int(os.environ.get("JOBS", os.cpu_count() or 2)))
     elif cmd == "merge":
         merge_parts()
     elif cmd == "write":

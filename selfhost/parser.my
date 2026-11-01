@@ -43,6 +43,15 @@ pub fun new_parser(toks: [Token]) -> Parser {
     return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }
 }
 
+// A parser at the first token of `src`, the receiver of `#test` cases of the
+// parser's methods (MYLA-184): one without tokens when `src` doesn't lex.
+pub fun parser_on(src: str) -> Parser {
+    return match lex(src) {
+        Ok(toks) => new_parser(toks),
+        Err(d) => new_parser([]),
+    }
+}
+
 // What `sync` skips to: the next statement of a block, the next member of an
 // impl or trait body, the next top-level declaration.
 const SYNC_STMT: int32 = 0

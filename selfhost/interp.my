@@ -9,7 +9,7 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
 from .tokens import SrcSpan, no_span
-from .checker import Checker, Type
+from .checker import Checker, Type, checker_on
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
@@ -282,6 +282,16 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
     }
+    return it
+}
+
+// An interpreter of `src` with its functions collected and its constants
+// evaluated, the receiver of `#test` cases of the interpreter's methods
+// (MYLA-184).
+pub fun interp_on(src: str) -> Interp {
+    var it = new_interp(checker_on(src), [])
+    it.collect()
+    it.eval_consts()
     return it
 }
 
