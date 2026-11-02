@@ -93,7 +93,13 @@ sequenceDiagram
 
 ## tree-sitter grammar
 
-`editor/tree-sitter-myla/` is a tree-sitter grammar (with bindings for C, Go, Node, Python, Rust and Swift, and highlight, fold, indent and injection queries), **generated** from [[grammar/myla.ebnf]] since [[MYLA-77]].
+`editor/tree-sitter-myla/` is a tree-sitter grammar with highlight, fold, indent and injection queries, **generated** from [[grammar/myla.ebnf]] since [[MYLA-77]]. The repository keeps what editors and the tests use (D111, [[MYLA-232]]):
+- `grammar.js` and `src/` (`parser.c`, `grammar.json`, `node-types.json`, `tree_sitter/`): the grammar and the parser generated from it;
+- `queries/`;
+- `tree-sitter.json`, which the CLI needs to generate;
+- a `package.json` and its lock that install only the tree-sitter CLI (for `scripts/gen_treesitter.sh`, the grammar tests and CI).
+
+The bindings `tree-sitter init` generates for C, Go, Node, Python, Rust and Swift, with their packaging (`Cargo.toml`, `Package.swift`, `binding.gyp`, `setup.py`, `pyproject.toml`, `Makefile`), are not kept; `.gitignore` leaves them out. To publish a package, run `tree-sitter init` in the directory (it adds the bindings and packaging around the existing `grammar.js` and `tree-sitter.json`; answer its questions with the metadata in `tree-sitter.json`). Then `tree-sitter build` builds and `npm publish`, `cargo publish` or the like publishes, from that working copy.
 
 ### The grammar description
 
