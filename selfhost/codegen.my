@@ -708,7 +708,7 @@ impl CodeGen {
             },
             Type.TMap(k, v) => {
                 // the slots, as many as the capacity
-                let stride = 16 + self.stored_size(v)
+                let stride = self.map_slot_size(t)
                 let slot = self.dbg_type(format("slot:{}", type_name(t)), "slot", t, "", stride, 0)
                 let slots = self.dbg_array(slot, stride, 8)
                 return self.dbg_struct_lines(type_name(t), 16, ["len", "cap", "slots"], [len_t, len_t, slots], [0, 8, 16])
@@ -718,16 +718,16 @@ impl CodeGen {
         return self.dbg_struct_lines(type_name(t), 16, ["len", "cap"], [len_t, len_t], [0, 8])
     }
 
-    // A map slot of map type `t`, `size` bytes: `[state:8][key:8][value]`
-    // (state 1: occupied).
-    #test(codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 24)[["\t.uleb128 9", "\t.string \"slot\"", "\t.uleb128 24", "\t.uleb128 10", "\t.string \"state\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 0", "\t.uleb128 10", "\t.string \"key\"", "\t.long .Ldty2 - .Ldebug_info0", "\t.uleb128 8", "\t.uleb128 10", "\t.string \"value\"", "\t.long .Ldty3 - .Ldebug_info0", "\t.uleb128 16", "\t.byte 0"]]
+    // A map slot of map type `t`, `size` bytes: `[state:8][key:8][value][order:8]`
+    // (state 1: occupied; order: the place in the order of insertion, D105).
+    #test(codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 32)[["\t.uleb128 9", "\t.string \"slot\"", "\t.uleb128 32", "\t.uleb128 10", "\t.string \"state\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 0", "\t.uleb128 10", "\t.string \"key\"", "\t.long .Ldty2 - .Ldebug_info0", "\t.uleb128 8", "\t.uleb128 10", "\t.string \"value\"", "\t.long .Ldty3 - .Ldebug_info0", "\t.uleb128 16", "\t.uleb128 10", "\t.string \"order\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 24", "\t.byte 0"]]
     fun dbg_slot_lines(var self, t: Type, size: int32) -> [str] {
         match t {
             Type.TMap(k, v) => {
                 let state = self.dbg_base(Type.TInt(64, false), 8)
                 let key = self.dbg_element(k)
                 let value = self.dbg_element(v)
-                return self.dbg_struct_lines("slot", size, ["state", "key", "value"], [state, key, value], [0, 8, 16])
+                return self.dbg_struct_lines("slot", size, ["state", "key", "value", "order"], [state, key, value, state], [0, 8, 16, size - 8])
             },
             _ => {},
         }
@@ -3802,7 +3802,9 @@ impl CodeGen {
     // -- maps / strings / chars -------------------------------------------
 
     #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[24]
-    fun map_slot_size(self, mt: Type) -> int32 { return 16 + self.stored_size(map_val(mt)) }
+    // `[state:8][key:8][value][rank:8]`: the rank is the key's place in the
+    // order of insertion, 0 … count - 1 (D105, MYLA-179)
+    fun map_slot_size(self, mt: Type) -> int32 { return 24 + self.stored_size(map_val(mt)) }
     #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[1]
     fun map_is_str(self, mt: Type) -> int32 {
         if is_str_t(map_key(mt)) { return 1 }
@@ -3824,6 +3826,8 @@ impl CodeGen {
         self.emit(format("jz {}", done))
         self.emit("movq $2, (%rax)")         // tombstone
         self.emit("decq (%rdx)")             // len -= 1
+        // its rank, for the rebuild to close the gap (D105, MYLA-179)
+        self.emit(format("pushq {}(%rax)", self.map_slot_size(mt) - 8))
         if is_str_t(map_key(mt)) {           // the key's reference (MYLA-18)
             self.emit("pushq %rax")
             self.emit("movq 8(%rax), %rdi")
@@ -3832,10 +3836,11 @@ impl CodeGen {
         }
         self.emit("leaq 16(%rax), %rcx")     // &value
         self.drop_stored(map_val(mt), false)
-        self.emit("movq (%rsp), %rax")       // &holder
+        self.emit("movq 8(%rsp), %rax")      // &holder
         self.emit("movq (%rax), %rdi")
         self.emit(format("movq ${}, %rsi", self.map_slot_size(mt)))
         self.emit(format("movq ${}, %rcx", self.map_is_str(mt)))
+        self.emit("popq %rdx")               // the removed key's rank
         self.emit("call __map_rebuild")
         self.emit("movq (%rsp), %rcx")
         self.emit("movq %rax, (%rcx)")       // publish the rebuilt cell
@@ -6580,8 +6585,11 @@ impl CodeGen {
         self.raw("")
     }
 
-    // Map cell: [count:8][cap:8][slot0..]; slot = [state:8][key:8][value…] where
-    // state 0=empty, 1=occupied, 2=tombstone. Open addressing, linear probing,
+    // Map cell: [count:8][cap:8][slot0..]; slot = [state:8][key:8][value…][rank:8]
+    // where state 0=empty, 1=occupied, 2=tombstone, and rank is the key's place
+    // in the order of insertion: the occupied slots' ranks are 0 … count - 1
+    // (D105, MYLA-179; a new key takes the count, `__map_rebuild` closes the gap
+    // a removed one leaves, and a grow copies them). Open addressing, linear probing,
     // multiplicative hashing (`__map_hash`). cap is a power of two. Copy-on-write clones are per type
     // (`__clone_map_*`, emit_map_clone_helper) and retain the values they share.
     fun emit_map_runtime(var self) {
@@ -6794,6 +6802,8 @@ impl CodeGen {
         self.raw("\txorq %rdx, %rdx")           // a new key
         self.raw("\tmovq $1, (%rax)")
         self.raw("\tmovq %r12, 8(%rax)")
+        self.raw("\tmovq (%rbx), %rcx")         // its rank: the last (a grow copies the old one over it)
+        self.raw("\tmovq %rcx, -8(%rax,%r13)")
         self.raw("\tincq (%rbx)")
         self.raw("\ttestq %r14, %r14")
         self.raw("\tjz .Lss_done")
@@ -6820,6 +6830,7 @@ impl CodeGen {
         self.raw("\tmovq %rdi, %rbx")
         self.raw("\tmovq %rsi, %r13")
         self.raw("\tmovq %rcx, %r14")
+        self.raw("\tmovq $-1, -64(%rbp)")      // no rank to close (`__map_rebuild`)
         self.raw("\tmovq 8(%rbx), %rax")
         self.raw("\ttestq %rax, %rax")
         self.raw("\tjnz .Lmg_dbl")
@@ -6862,6 +6873,11 @@ impl CodeGen {
         self.raw("\tsubq $16, %rcx")
         self.raw("\tcld")
         self.raw("\trep movsb")
+        // ranked after a key just removed: one up (D105)
+        self.raw("\tmovq -8(%rax,%r13), %rcx")
+        self.raw("\tcmpq -64(%rbp), %rcx")
+        self.raw("\tjbe .Lmg_skip")
+        self.raw("\tdecq -8(%rax,%r13)")
         self.raw(".Lmg_skip:")
         self.raw("\tmovq -48(%rbp), %rax")
         self.raw("\tincq %rax")
@@ -6881,10 +6897,12 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
-        // __map_rebuild: rdi=cell, rsi=slot_size, rcx=is_str -> rax = a cell of
-        // the same capacity without tombstones, so a probe always ends at an
-        // empty slot (`remove` rebuilds, like the Python backend's, MYLA-18).
-        // Same frame as __map_grow, whose body it shares.
+        // __map_rebuild: rdi=cell, rsi=slot_size, rdx=the rank of the key just
+        // removed, rcx=is_str -> rax = a cell of the same capacity without
+        // tombstones, so a probe always ends at an empty slot (`remove`
+        // rebuilds, like the Python backend's, MYLA-18), the keys ranked after
+        // the removed one moved up (D105). Same frame as __map_grow, whose
+        // body it shares.
         self.raw("__map_rebuild:")
         self.raw("\tpushq %rbp")
         self.raw("\tmovq %rsp, %rbp")
@@ -6897,6 +6915,7 @@ impl CodeGen {
         self.raw("\tmovq %rdi, %rbx")
         self.raw("\tmovq %rsi, %r13")
         self.raw("\tmovq %rcx, %r14")
+        self.raw("\tmovq %rdx, -64(%rbp)")
         self.raw("\tmovq 8(%rbx), %r12")
         self.raw("\tjmp .Lmg_new")
         self.raw("")
@@ -6936,7 +6955,8 @@ impl CodeGen {
         self.raw("\tret")
         self.raw("")
         // __map_keys: rdi=cell, rsi=slot_size, rdx=key_stride, rcx=is_str -> rax=[K]
-        // list cell, which holds a reference to each str key (MYLA-18).
+        // list cell, which holds a reference to each str key (MYLA-18), in the
+        // order the keys were inserted (D105).
         self.raw("__map_keys:")
         self.raw("\tpushq %rbp")
         self.raw("\tmovq %rsp, %rbp")
@@ -6976,13 +6996,11 @@ impl CodeGen {
         self.raw("\tje .Lmk_noinc")
         self.raw("\tincq -8(%rcx)")
         self.raw(".Lmk_noinc:")
-        self.raw("\tmovq -56(%rbp), %rax")
-        self.raw("\tmovq %rax, %r9")
+        // at its rank: the keys in the order of insertion (D105)
+        self.raw("\tmovq -8(%r8,%r13), %r9")
         self.raw("\timulq %r14, %r9")
         self.raw("\tleaq 16(%r15,%r9), %r10")
         self.raw("\tmovq %rcx, (%r10)")
-        self.raw("\tincq %rax")
-        self.raw("\tmovq %rax, -56(%rbp)")
         self.raw(".Lmk_skip:")
         self.raw("\tmovq -48(%rbp), %rax")
         self.raw("\tincq %rax")

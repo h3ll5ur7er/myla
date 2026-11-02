@@ -81,7 +81,7 @@ fun main() {
 ```
 
 - A range's bounds are integers of one type (literals adopt), and the loop variable has that type.
-- Iterating a list visits its elements; iterating a map visits its keys, in no defined order (the interpreter uses insertion order, native code hash order).
+- Iterating a list visits its elements; iterating a map visits its keys in the order they were first inserted (D105).
 - The loop variable is immutable. The loop works on a snapshot: changing the list inside the loop doesn't change what is visited.
 - `break` and `continue` apply to the innermost loop; outside a loop they are a type error.
 

@@ -13,7 +13,6 @@ Retired by D101 ([[MYLA-219]]); its tasks stay in the `Python toolchain` epic.
 
 ## Self-hosted compiler
 
-- Map iteration order differs between the interpreter and native code (allowed by the page; D105 makes it insertion order everywhere, not built yet) ([[MYLA-179]]).
 
 - The convention that every value-returning function in `selfhost/` has `#test` cases is 8 % true ([[MYLA-184]]). *Fixed, in review: 80 %, mostly generated cases.*
 - Native code took a read-only method receiver, and the Python interpreter a function's argument, after a later argument that writes the same variable ([[MYLA-237]]). *Fixed, in review.*

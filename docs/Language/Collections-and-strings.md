@@ -63,9 +63,9 @@ fun main() {
 | `[k: v, …]`, `[:]` | Keys must be an integer type, `char`, `bool` or `str`; `[:]` needs an expected type |
 | `m[k]` | A missing key is a runtime error; use `get(m, k) -> Option<V>` (a prelude function) to ask safely |
 | `m[k] = v` | Inserts or replaces; needs a `var` place |
-| `contains(m, k)`, `keys(m) -> [K]`, `len(m)` | |
+| `contains(m, k)`, `keys(m) -> [K]`, `len(m)` | `keys` gives the keys in the order `for` visits them |
 | `remove(m, k)` | Needs a `var` place; removing a missing key does nothing |
-| `for k in m` | Visits the keys in no defined order |
+| `for k in m` | Visits the keys in the order they were first inserted: replacing a value keeps its key's place, removing a key and inserting it again moves it to the end (D105, [[MYLA-179]]) |
 
 ## Value semantics and copy-on-write
 

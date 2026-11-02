@@ -101,11 +101,15 @@ class MapPrinter:
         slots = self.cell["slots"]
         cap = int(self.cell["cap"])
         limit = _limit()
-        parts = []
+        occupied = []
         for i in range(cap):
             slot = slots[i]
-            if int(slot["state"]) != 1:
-                continue
+            if int(slot["state"]) == 1:
+                occupied.append((int(slot["order"]), slot))
+        # in the order of insertion, each slot's `order` (D105, MYLA-179)
+        occupied.sort(key=lambda entry: entry[0])
+        parts = []
+        for _, slot in occupied:
             if limit is not None and len(parts) == limit:
                 parts.append("...")
                 break
