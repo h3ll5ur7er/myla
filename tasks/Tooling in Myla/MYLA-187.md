@@ -2,7 +2,7 @@
 id: MYLA-187
 title: "myla test file.my runs the #test cases of imported std modules"
 type: bug
-status: review
+status: done
 priority: medium
 labels: [cli, tests, stdlib]
 ---

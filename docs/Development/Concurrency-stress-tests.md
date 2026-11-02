@@ -311,6 +311,8 @@ Use a controlled scheduler where possible. Introduce scheduling points around sh
 
 Record the seed and scheduling decisions so failures are reproducible. A failing trace should include task identities, relevant state changes, synchronization events, and cancellation or exception delivery.
 
+In Myla, `MYLA_SCHED` is that controlled scheduler on one worker ([[Language/Concurrency#Order of tasks]], [[MYLA-231]]): `fifo` and `seed:N` give other orders of the ready tasks, reproducible and the same in the interpreter and in native code. `tests/burn/test_concurrency_stress.py` runs every program oldest first and with three seeds in both, besides the default order on 1, 4 and 16 workers; the first seeded run showed that `t15_failure_beside_a_busy_sibling` relies on a task that yields going behind the others, a promise (the Starvation row of [[Language/Concurrency]]) the seeded order now keeps too.
+
 Controlled scheduling alone may not expose weak-memory behavior. Use memory-model litmus testing or appropriate native-runtime stress tests for those guarantees.
 
 ### Check three dimensions separately

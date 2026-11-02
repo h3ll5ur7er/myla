@@ -1,12 +1,12 @@
 ---
 id: MYLA-160
-title: "LLVM: the decision round (D98)"
+title: "LLVM: the decision round"
 type: design
 status: todo
 priority: medium
 labels: [llvm, backend, design]
 ---
-First step of [[MYLA-62]]: the questions the LLVM backend has to settle before any code, put to the owner and recorded as D98 on [[Project/Decisions]] (and on [[Architecture/IR]] where they change "Stability").
+First step of [[MYLA-62]]: the questions the LLVM backend has to settle before any code, put to the owner and recorded as a decision on [[Project/Decisions]] (and on [[Architecture/IR]] where they change "Stability").
 
 - [ ] **How LLVM is reached:** textual `.ll` run through `llc` or `clang` (the compiler stays free of dependencies; LLVM is a build tool like `as` and `ld`), as an optional backend (`myla build --backend llvm`), the assembly backend staying the default and the bootstrap's
 - [ ] **Calling convention of user code:** Myla's own stack-based convention (arguments in the argument words above `%rbp`, the callee popping them, [[MYLA-126]]) can't be expressed in LLVM; System V or `fastcc` for user functions, `musttail` for `become` (D87) and for the suspensions of frame functions (D90), and what that means for the hand-written runtime's entry points that call user code (the executor, `__fnval` adapters, thunks)

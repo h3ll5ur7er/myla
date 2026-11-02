@@ -1,6 +1,6 @@
 # Concurrency
 
-> **D89 to D97, built** ([[MYLA-61]], [[MYLA-135]] to [[MYLA-150]]). Both checkers check what this page describes. The Python interpreter runs it with a thread per task, the self-hosted interpreter with tasks taking turns at each `await`. The self-hosted compiler builds every concurrent program (D91): its async functions as stackless state machines on heap frames, its tasks in parallel on a pool of OS threads, one per CPU unless the environment variable `MYLA_THREADS` says how many (at most 32; with `MYLA_THREADS=1` in the same order as the self-hosted interpreter's), its actors with executors of their own (D92, [[Architecture/Native-backend]]). The Python backend refuses concurrency. Suspension points are child tasks and actor calls: there is no `sleep`, timer or suspending I/O yet, so today's concurrency is parallel computation and actors.
+> **D89 to D97, built** ([[MYLA-61]], [[MYLA-135]] to [[MYLA-150]]). The checker checks what this page describes. The interpreter runs it with tasks taking turns at each `await` (the retired Python interpreter ran a thread per task). The compiler builds every concurrent program (D91): its async functions as stackless state machines on heap frames, its tasks in parallel on a pool of OS threads, one per CPU unless the environment variable `MYLA_THREADS` says how many (at most 32; with `MYLA_THREADS=1` in the same order as the self-hosted interpreter's, see [[#Order of tasks]]), its actors with executors of their own (D92, [[Architecture/Native-backend]]). Suspension points are child tasks and actor calls: there is no `sleep`, timer or suspending I/O yet, so today's concurrency is parallel computation and actors.
 
 Myla's concurrency follows Swift's: `async` functions that may suspend, `await` at every suspension, structured tasks that never outlive the scope that starts them, and `actor`s, whose state only their own methods touch. Tasks run in parallel on several threads. A value crossing into another task or actor is copied, so tasks share nothing but actors (D89).
 
@@ -28,7 +28,7 @@ async fun twice(n: int) -> int {
 
 ## Child tasks: `async let`
 
-```myla
+```myla fragment
 async fun total() -> int {
     async let a = fetch(1)
     async let b = fetch(2)
@@ -61,13 +61,13 @@ async fun squares(n: int) -> [int] {
 
 - `task.all(fs)` runs each async function value of `fs` as a child task, all at once, and waits for every one of them.
 - It gives the results in the order of `fs`, so the outcome doesn't depend on which finished first.
-- It is written in Myla with `async let` alone ([[src/myla/std/task.my]]), so every implementation that runs `async let` runs it.
+- It is written in Myla with `async let` alone ([[lib/std/task.my]]), so every implementation that runs `async let` runs it.
 
 ## Asking a child to stop: `task.cancel` and `task.cancelled`
 
 Cancelling is cooperative (D96): `task.cancel(a)` asks the child task of `async let a` to stop, and the child decides where it can stop safely, by checking `task.cancelled()`:
 
-```myla
+```myla fragment
 import std.task as task
 
 async fun worker(pool: Pool) -> str {
@@ -126,6 +126,8 @@ async fun main() {
     await b
     print(await c.get())        // 2000: one increment at a time
 }
+// output:
+// 2000
 ```
 
 - `actor` declares a type like a struct, and `impl` gives it methods. Making one (`Counter { count: 0 }`) starts the actor and gives a **handle**. Copying the handle copies the reference: `let d = c` reaches the same actor. It is the only reference type in Myla.
@@ -135,8 +137,9 @@ async fun main() {
 - Inside its methods, a call on `self` is an ordinary call (`self.get()`), since the actor is already running it, unless the method is `async`.
 - An `async let` in an actor's method can't reach the actor's state through `self` (`an 'async let' can't reach the actor's state through 'self': its child task runs off the actor`): neither a field nor a synchronous method, since the child runs elsewhere while the actor runs other calls ([[MYLA-168]]). Read what the child needs into a `let` before the `async let`: the method reads it on the actor, and the child gets a copy. Passing `self` itself, the handle, or calling an `async` method of it is fine.
 - An actor method may be `async`. While it waits, the actor runs other calls (it is *reentrant*), so two actors calling each other can't deadlock. Its fields may have changed when it resumes:
+- In an async actor method, `await self.tally.bump()` with a `var self` method of a struct in a field works on a copy of the field, and the method's final `self` is written back to it when it returns, as for a list element (D99, [[MYLA-169]]). The actor's other calls run while it waits; a change they make to that field meanwhile is replaced by the write-back.
 
-```myla
+```myla fragment
 actor Account {
     balance: int
 }
@@ -152,7 +155,7 @@ impl Account {
 }
 ```
 
-- The compiler warns when an actor's async method changes a field after an `await` on the strength of what it read before (D95): a field examined by a condition (`if`, `while`, a `match`'s scrutinee or guard, directly or through a local read from it) before an `await` and changed after it without being examined again, or set from a local read before an `await`. Without the second check above, `self.balance = self.balance - amount` gets `warning: 'self.balance' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile`, with a note at the `await`. Checking again after the `await`, or changing the field before it (reserving, and giving it back if need be), are the two ways out. The program is still built and run.
+- The compiler warns when an actor's async method changes a field after an `await` on the strength of what it read before (D95): a field examined by a condition (`if`, `while`, a `match`'s scrutinee or guard, directly or through a local read from it) before an `await` and changed after it without being examined again, or set from a local read before an `await`. Without the second check above, `self.balance = self.balance - amount` gets `warning: 'self.balance' was checked before an 'await' and is changed after it: another call to this actor may have changed it meanwhile`, with a note at the `await`. The actor's own synchronous methods count ([[MYLA-171]]): a call `self.take()` changes every field `take` changes, through the methods it calls in turn, and a call `self.has_stock()` examines every field its body examines, so `if !self.has_stock() { … }` before the `await` and `self.take()` after it get the same warning. Checking again after the `await`, or changing the field before it (reserving, and giving it back if need be), are the two ways out. The program is still built and run. (The walk sees `self` and its methods only: a change made through another actor, or by an async method of the same actor, isn't followed.)
 
 ## What Myla guarantees, and what it doesn't
 
@@ -181,13 +184,22 @@ A copy costs what the value holds: every element of a list, every entry of a map
 
 `#main async fun main()` runs as the first task. The program ends when it returns, and by then every task it started has ended too.
 
+## Order of tasks
+
+Which ready task runs next isn't part of the language: a program whose result depends on it is wrong, and on several workers the order is whatever the timing makes it. What the runners do (D110, [[MYLA-231]]):
+
+- A worker runs the newest ready task first, so a tree of tasks unfolds depth first and needs memory for its depth, not its width: `task.all` over 1.1 million functions on one worker took 20.8 s and 3.3 GB first in, first out, and takes 1.9 s and 354 MB depth first. An idle worker takes the oldest task of another worker's queue.
+- An `async let` queues its child and the parent goes on; awaiting a child that has ended gives its result at once. An awaited call and an awaited actor call give the other tasks a turn afterwards: the task goes behind every task ready then.
+- On one worker (`MYLA_THREADS=1`) native code runs tasks in the same order as the interpreter, so a program prints the same in both.
+- `MYLA_SCHED` changes the order, in the interpreter and in native code alike: `fifo` runs the oldest ready task first (breadth first, the order before D110), `seed:N` queues each ready task at the newest or the oldest end as a generator seeded with N decides, a turn still going behind the others. On one worker each order is reproducible and the same in both runners; the stress tests run every program in a few of them ([[Development/Concurrency-stress-tests]]).
+
 ## Output from tasks running at once
 
 The order between lines printed by tasks running at once isn't defined. Each `print` writes its line whole with one write, which a pipe keeps whole up to 4 KiB (`PIPE_BUF`): longer lines printed by tasks at the same moment can interleave ([[MYLA-173]]). A task that has long lines to print can return them for its parent to print in order. A program prints the same everywhere when its order comes from `await`: results joined in order, an actor's state read after its callers have finished.
 
 ## Errors
 
-```myla
+```myla error
 fun peek(c: Counter) -> int {
     return c.count              // 'count' belongs to the actor 'Counter': only its own methods reach it
 }

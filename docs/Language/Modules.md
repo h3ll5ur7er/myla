@@ -1,6 +1,6 @@
 # Modules
 
-Modules are resolved by the loader before type checking ([[Architecture/Module-loader]]). These are the rules of both toolchains (D17, D22, D54, D57, D73, D76); the self-hosted loader differs only in edge cases ([[Architecture/Module-loader]]).
+Modules are resolved by the loader before type checking ([[Architecture/Module-loader]]). These are its rules (D17, D22, D54, D57, D73, D76); it differs from the retired Python loader only in edge cases ([[Architecture/Module-loader]]).
 
 [TOC]
 
@@ -31,7 +31,7 @@ pub import .geometry.vector as vector  // re-export a module (needs `as`)
 
 ## Packages (dependencies)
 
-A build can have packages: libraries, each with a name and a directory, given as `--package name=dir` to the commands that compile (`run`, `test`, `build` and `check` of the Python CLI; `run`, `test`, `build`, `check` and `repl` of `build/myla`; D73 (6), D76, [[MYLA-92]]); the project commands of `build/myla` compute them from `myla.toml` ([[Architecture/Project-tool]], [[MYLA-94]]). A package `geo` with directory `G` behaves as if `G` were a directory `geo/` in the project root:
+A build can have packages: libraries, each with a name and a directory, given as `--package name=dir` to the commands that compile (`run`, `test`, `build`, `check` and `repl` of `build/myla`; D73 (6), D76, [[MYLA-92]]); the project commands of `build/myla` compute them from `myla.toml` ([[Architecture/Project-tool]], [[MYLA-94]]). A package `geo` with directory `G` behaves as if `G` were a directory `geo/` in the project root:
 
 | Import | File |
 | --- | --- |
@@ -46,7 +46,7 @@ A build can have packages: libraries, each with a name and a directory, given as
 - A package's modules are named as if the directory were `geo/` in the project root (`geo$shapes$Circle`), whatever the directory's path ([[Architecture/Module-loader]]).
 
 ```bash
-python3 myla.py run app/main.my --package geo=geo/src --package fmt=fmt/src
+build/myla run app/main.my --package geo=geo/src --package fmt=fmt/src
 build/myla build app/main.my --package geo=geo/src --package fmt=fmt/src -o app/app
 ```
 
@@ -70,5 +70,5 @@ examples/modules/
 ```
 
 ```bash
-python3 myla.py run examples/modules/main.my    # 7, done!, 7
+build/myla run examples/modules/main.my    # 7, done!, 7
 ```

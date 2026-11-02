@@ -13,7 +13,7 @@ import { DapClient, FIXTURES, markerLine, testCli } from "./dapClient.ts";
 
 const hasGdb = spawnSync("gdb", ["--version"]).status === 0;
 const cli = testCli();
-const hasCli = fs.existsSync(cli) && (cli.endsWith(".py") ? spawnSync("python3", ["--version"]).status === 0 : true);
+const hasCli = fs.existsSync(cli);
 const hasBinutils = spawnSync("as", ["--version"]).status === 0 && spawnSync("ld", ["--version"]).status === 0;
 const skip = !hasGdb ? "gdb isn't installed" : !hasCli ? `no myla CLI (${cli})` : !hasBinutils ? "needs as and ld" : false;
 

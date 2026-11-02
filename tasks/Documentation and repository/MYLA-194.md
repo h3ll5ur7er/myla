@@ -16,3 +16,5 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 - [ ] `scripts/check_tasks.py` (front matter, statuses, types, id vs file name, unticked items in `done`, missing evidence) run by the `unit` CI job
 - [ ] `## Evidence` as the one heading, named in Conventions; the three other shapes retitled
 - [ ] The types, the gaps and the epic parents settled
+
+Decided ([[MYLA-214]]): no new types (Genbeya gets its own decision convention), so `design` and `test` become `chore`; epic parents into their folders with `## Children`; `## Evidence` as the one heading; one pull request per theme.

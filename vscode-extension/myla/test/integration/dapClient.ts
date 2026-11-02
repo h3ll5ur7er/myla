@@ -20,12 +20,11 @@ export function markerLine(file: string, name: string): number {
   return i + 1;
 }
 
-/** The myla CLI the tests build with: $MYLA_CLI, the repository's build/myla,
- * else the Python CLI. */
+/** The myla CLI the tests build with: $MYLA_CLI, else the repository's
+ * build/myla (scripts/bootstrap.sh builds it). */
 export function testCli(): string {
   if (process.env.MYLA_CLI) return process.env.MYLA_CLI;
-  const built = path.join(REPO, "build", "myla");
-  return fs.existsSync(built) ? built : path.join(REPO, "myla.py");
+  return path.join(REPO, "build", "myla");
 }
 
 type Message = DebugProtocol.ProtocolMessage & Record<string, unknown>;

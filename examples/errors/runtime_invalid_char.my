@@ -1,0 +1,13 @@
+//~ runtime error: invalid char: 55296 is not a Unicode scalar value
+//~ native: runtime error: invalid char
+//~ span: n as char
+// A char is a Unicode scalar value: a surrogate (D800 to DFFF) or anything
+// above 10FFFF traps at the cast (MYLA-177).
+fun to_char(n: int) -> char {
+    return n as char
+}
+
+fun main() {
+    print(to_char(65))
+    print(to_char(55296))
+}

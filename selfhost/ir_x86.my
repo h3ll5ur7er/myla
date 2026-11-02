@@ -13,6 +13,7 @@ from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, ret_popping, is_aggregate, is_actor_t
 from .ir import IrFunc, Inst, Term, Touches, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
+from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 impl CodeGen {
     // Emit `f`, the IR of the function `fd`, as `myla_<mangled>`.
@@ -55,8 +56,9 @@ impl CodeGen {
         let slot_off = slots_at(f, 8 * cells)
         self.temp_remat = self.remat_texts(f, slot_off, defs)
         var cursor = 8 * cells
-        for s in f.slots {
-            if s.word < 0 && !f.frame { cursor = cursor + (s.size + 7) / 8 * 8 }
+        if !f.frame {
+            let (pos, extent) = slot_positions(f, true)
+            cursor = cursor + extent
         }
         let saves = cursor
         cursor = cursor + 8 * len(self.saved_regs)
@@ -1619,6 +1621,9 @@ fun jump_cond(op: str, signed: bool) -> str {
 // the drops go before the jump, so no argument may depend on what they drop
 // (`drops_after_free`). No argument may be an address in this frame either,
 // which the jump leaves (`passes_frame_address`).
+#test([], Term.Jmp(6))[-1]
+#test([], Term.Ret(0))[-1]
+#test([], Term.Br(5, 5, 7))[-1]
 fun tail_call_at(insts: [Inst], term: Term) -> int32 {
     let v = match term {
         Term.Ret(x) => x,
@@ -1759,6 +1764,9 @@ fun filled_from(insts: [Inst], at: int32, s: int32) -> [int32] {
 // Whether the code of `inst` calls something (a function, a runtime helper,
 // a retain or drop walk) or uses %r8-%r11 itself: a value in one of those
 // registers can't live across it (MYLA-134). A trap never returns.
+#test(Inst.Frame(2))[true]
+#test(Inst.Init(0))[false]
+#test(Inst.Init(1))[false]
 fun clobbers(inst: Inst) -> bool {
     return match inst {
         Inst.Const(d, t, v) => false,
@@ -1789,6 +1797,9 @@ fun clobbers(inst: Inst) -> bool {
 }
 
 // Whether a binary operation is a float `%`, which calls `__fmod`.
+#test("%", Type.TFloat(64))[true]
+#test("+", Type.TFloat(32))[false]
+#test("+", Type.TFloat(64))[false]
 fun float_rem(op: str, t: Type) -> bool {
     if op != "%" { return false }
     return match t {
@@ -1808,6 +1819,9 @@ fun contains_int(xs: [int32], x: int32) -> bool {
 
 // Whether the call `c` passes an argument that may be an address in the
 // caller's frame (`frame_addresses`).
+#test(Inst.Call(1, "Shape.area", [0]), [false, false])[false]
+#test(Inst.Call(2, "inc", [1]), [false, false, false])[false]
+#test(Inst.Call(4, "Money.compare", [2, 3]), [true, false, true, false, false])[true]
 fun passes_frame_address(c: Inst, in_frame: [bool]) -> bool {
     return match c {
         Inst.Call(d, name, args) => {
@@ -1916,6 +1930,9 @@ fun int_const_text(v: int64) -> str {
 
 // The constant `v` as a `w`-bit integer (signed or not) holds it in 64 bits,
 // as `wrap` leaves it in %rax.
+#test(0, 32, true)[0]
+#test(41, 32, true)[41]
+#test(1114111, 64, false)[1114111]
 fun wrapped(v: int64, w: int32, signed: bool) -> int64 {
     if w == 64 { return v }
     if signed {
@@ -1929,6 +1946,9 @@ fun wrapped(v: int64, w: int32, signed: bool) -> int64 {
 // Whether all `n` reads of the temporary `t`, written by `insts[at]`, come
 // later in the same block (its terminator included) with only instructions
 // in between that write no slot, so the slot still holds what was read.
+#test([Inst.Load(11, 2)], Term.Ret(11), 0, 11, 1)[true]
+#test([Inst.Load(16, 1)], Term.Ret(16), 0, 16, 1)[true]
+#test([Inst.Load(12, 1), Inst.Moved(1)], Term.Ret(12), 0, 12, 1)[false]
 fun reads_before_writes(insts: [Inst], term: Term, at: int32, t: int32, n: int32) -> bool {
     var seen = 0
     var j = at + 1
@@ -1948,6 +1968,9 @@ fun reads_before_writes(insts: [Inst], term: Term, at: int32, t: int32, n: int32
 }
 
 // Whether `inst` writes no frame slot, directly or through an address.
+#test(Inst.Moved(1))[false]
+#test(Inst.Moved(2))[false]
+#test(Inst.Addr(1, 2))[true]
 fun writes_no_slot(inst: Inst) -> bool {
     return match inst {
         Inst.Const(d, t, v) => true
@@ -1977,20 +2000,67 @@ fun writes_no_slot(inst: Inst) -> bool {
 // frame function, else `layout_slots`'.
 fun slots_at(f: IrFunc, below: int32) -> [int32] {
     if !f.frame { return layout_slots(f, below) }
+    let (pos, extent) = slot_positions(f, false)
     var off: [int32] = []
-    var cursor = FRAME_HEADER
-    for s in f.slots {
-        push(off, cursor)
-        cursor = cursor + (s.size + 7) / 8 * 8
-    }
+    for p in pos { push(off, FRAME_HEADER + p) }
     return off
 }
 
 // The size of a frame function's heap frame: the header, then its slots.
 fun frame_size(f: IrFunc) -> int32 {
-    var cursor = FRAME_HEADER
-    for s in f.slots { cursor = cursor + (s.size + 7) / 8 * 8 }
-    return cursor
+    let (pos, extent) = slot_positions(f, false)
+    return FRAME_HEADER + extent
+}
+
+// Where each slot of `f` goes in its area of the frame, from its start, and
+// the area's size (MYLA-183): first the slots that aren't the local of an
+// inner scope, one after the other; then each inner scope's locals, after
+// those of the scopes around it, so the locals of two scopes that are never
+// open at once (two blocks, two match arms) share cells. With `words`, a
+// slot passed in argument words (`word` >= 0) takes no room here (-1).
+fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
+    var pos: [int32] = []
+    var cursor = 0
+    for s in f.slots {
+        if (words && s.word >= 0) || s.scope > 0 { push(pos, -1) } else {
+            push(pos, cursor)
+            cursor = cursor + (s.size + 7) / 8 * 8
+        }
+    }
+    let n = len(f.scope_parent)
+    var own: [int32] = []
+    var i = 0
+    while i < n {
+        push(own, 0)
+        i = i + 1
+    }
+    for s in f.slots {
+        if s.scope > 0 && !(words && s.word >= 0) { own[s.scope] = own[s.scope] + (s.size + 7) / 8 * 8 }
+    }
+    // a scope's area starts where its parent's locals end (a scope's index
+    // is greater than its parent's)
+    var start: [int32] = []
+    var extent = cursor
+    i = 0
+    while i < n {
+        let parent = f.scope_parent[i]
+        var at = cursor
+        if parent > 0 { at = start[parent] + own[parent] }
+        push(start, at)
+        if at + own[i] > extent { extent = at + own[i] }
+        i = i + 1
+    }
+    var fill = start
+    var k = 0
+    while k < len(f.slots) {
+        let s = f.slots[k]
+        if s.scope > 0 && !(words && s.word >= 0) {
+            pos[k] = fill[s.scope]
+            fill[s.scope] = fill[s.scope] + (s.size + 7) / 8 * 8
+        }
+        k = k + 1
+    }
+    return pos, extent
 }
 
 // An async function's frame begins `[resume fn][caller frame][state][task]
@@ -2004,15 +2074,13 @@ const FRAME_HEADER: int32 = 72
 // The frame offset of each slot of `f`: an argument word above %rbp, the
 // others below the first `below` bytes.
 fun layout_slots(f: IrFunc, below: int32) -> [int32] {
+    let (pos, extent) = slot_positions(f, true)
     var off: [int32] = []
-    var cursor = below
-    for s in f.slots {
-        if s.word >= 0 {
-            push(off, 16 + 8 * s.word)
-        } else {
-            cursor = cursor + (s.size + 7) / 8 * 8
-            push(off, -cursor)
-        }
+    var k = 0
+    while k < len(f.slots) {
+        let s = f.slots[k]
+        if s.word >= 0 { push(off, 16 + 8 * s.word) } else { push(off, -(below + pos[k] + (s.size + 7) / 8 * 8)) }
+        k = k + 1
     }
     return off
 }

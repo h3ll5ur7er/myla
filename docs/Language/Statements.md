@@ -1,6 +1,6 @@
 # Statements
 
-Statement checking is `Checker._check_stmt` in [[src/myla/types.py]].
+Statement checking is `Checker.check_stmt` in [[selfhost/checker.my]].
 
 Statements are separated by line breaks, or by `;` to put several on one line: `let t = a; let u = b` (D61, [[Language/Lexical-structure]]).
 
@@ -17,6 +17,9 @@ fun main() {
     print(x + a + b)
     print(y)
 }
+// output:
+// 13
+// 1
 ```
 
 - Every binding is initialised. `let` can't be reassigned, and nothing inside it can be changed (deep immutability, D14): no `p.x = …`, no `push`, no `var self` method calls on a `let`.
@@ -45,6 +48,8 @@ fun sign(n: int) -> str {
 fun main() {
     print(sign(-3))
 }
+// output:
+// negative
 ```
 
 The condition must be `bool`. `if` is a statement: it has no value (use `match` on a `bool` for a value). In the condition of `if`, `while`, `for` and `match`, a struct literal must be parenthesised, because its `{` would otherwise start the body.
@@ -66,6 +71,13 @@ fun main() {
     let ages = ["ann": 31]
     for key in ages { print(key) }      // keys of a map
 }
+// output:
+// 0
+// 2
+// 3
+// a
+// b
+// ann
 ```
 
 - A range's bounds are integers of one type (literals adopt), and the loop variable has that type.
@@ -77,7 +89,7 @@ fun main() {
 
 `return` ends the function; `return value` in a function with `-> T`; `return a, b` returns the tuple `(a, b)`.
 
-A function with a result type must return on every path. The check is deliberately simple (`_block_returns` in [[src/myla/types.py]]): a block returns if it contains a `return`, a call to `panic`/`unreachable`/`std.process.exit`, or an `if` whose every branch (including a final `else`) returns. Loops never count, and neither does a `match` statement. End such functions with `unreachable()` or return the `match` as a value:
+A function with a result type must return on every path. The check is deliberately simple (`block_returns` in [[selfhost/checker.my]]): a block returns if it contains a `return`, a call to `panic`/`unreachable`/`std.process.exit`, or an `if` whose every branch (including a final `else`) returns. Loops never count, and neither does a `match` statement. End such functions with `unreachable()` or return the `match` as a value:
 
 ```myla
 fun first_even(xs: [int]) -> int {
@@ -90,6 +102,8 @@ fun first_even(xs: [int]) -> int {
 fun main() {
     print(first_even([1, 4]))
 }
+// output:
+// 4
 ```
 
 ## become
@@ -116,9 +130,12 @@ fun main() {
     print(gcd(1071, 462))      // 21
     print(is_even(1000000))    // true, without a million frames
 }
+// output:
+// 21
+// true
 ```
 
-The checker accepts a `become` that can run without the function's frame (`Checker._check_become` in [[src/myla/types.py]]):
+The checker accepts a `become` that can run without the function's frame (`Checker.check_become` in [[selfhost/checker.my]]):
 
 - It stands where a `return` could, in a function's body; a lambda's body can't use it.
 - It calls a function, a method (`become self.step(n)`) or a function value, not a builtin, an enum variant or a partial application. No `?` follows the call.

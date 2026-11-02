@@ -1,13 +1,13 @@
 ---
 name: myla
-description: Write, read, review and debug code in the Myla programming language (.my files) and work on its compilers. Myla looks like Rust and Swift but differs from both in many details, so use this before writing or changing any .my file (examples/, selfhost/, src/myla/std/, tests), before answering questions about Myla syntax or semantics, and when changing the Myla toolchains in src/myla/ or selfhost/.
+description: Write, read, review and debug code in the Myla programming language (.my files) and work on its compilers. Myla looks like Rust and Swift but differs from both in many details, so use this before writing or changing any .my file (examples/, selfhost/, tools/, lib/std/, tests), before answering questions about Myla syntax or semantics, and when changing the Myla toolchain in selfhost/ or tools/.
 ---
 
 # Myla
 
 Myla is a small, statically typed language with sized integers, value semantics, enums with `match`, traits and closures. It compiles to x86-64 Linux binaries without libc and is self-hosted. **It is not Rust and not Swift**: code that looks right in either usually fails here. The full reference is the wiki: `docs/Language.md` and its subpages; the grammar is `docs/Language/Grammar.md`.
 
-Which implementation defines the language: the Python toolchain in `src/myla/` (the interpreter is the semantics). The self-hosted compiler in `selfhost/` follows it. A Rust prototype with a different dialect (semicolons, no type checking, its own actors) existed until October 2026 and was removed; its syntax is not Myla, so don't copy it from git history. Myla's own concurrency (`async`, `await`, `async let`, actors) is described below. The grammar is `grammar/myla.ebnf`; the tree-sitter grammar in `editor/` is generated from it.
+What defines the language: the reference documentation, `docs/Language.md` and its subpages, and the decisions on `docs/Project/Decisions.md`. The implementation is the self-hosted toolchain in `selfhost/` (compiler, interpreter, CLI), bootstrapped from `bootstrap/seed.s`; its interpreter and its native code must agree. The Python toolchain that used to be the reference (`src/myla/`, `myla.py`) was removed in November 2026 (D101), so ignore old instructions that use `python3 myla.py`. A Rust prototype with a different dialect (semicolons, no type checking, its own actors) existed until October 2026 and was removed; its syntax is not Myla, so don't copy it from git history. Myla's own concurrency (`async`, `await`, `async let`, actors) is described below. The grammar is `grammar/myla.ebnf`; the tree-sitter grammar in `editor/` is generated from it.
 
 ## A complete program
 
@@ -149,14 +149,16 @@ async fun main() {
 - Values cross between tasks and actors as deep copies; nothing mutable is shared but an actor. Captures can't be changed (D93).
 - `std.task`: `await task.all(fs)` runs a list of `async () -> T` functions as children; `task.cancel(a)` asks the child `a` to stop and `task.cancelled()` is how a task checks (cooperative, D96).
 - A failure (panic, runtime error, `exit`) in any task ends the program at once: the others stop at their next `await` (D97).
-- Native concurrency is the self-hosted compiler's (`build/myla build`, D92: `MYLA_THREADS` workers); `python3 myla.py build` refuses it (D91), the interpreter runs it.
+- Native code runs tasks in parallel on `MYLA_THREADS` workers, one per CPU by default (`build/myla build`, D92); the interpreter (`build/myla run`) runs them one at a time, taking turns at each `await`.
 
 ## Working in this repository
 
-- Run: `python3 myla.py run file.my`, test: `python3 myla.py test file.my`, compile: `python3 myla.py build file.my -o out`, type-check: `python3 myla.py check file.my`.
-- The self-hosted CLI, `build/myla` (built by `scripts/bootstrap.sh`), has the same commands plus `repl`, and in a project with a `myla.toml` `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` (D73).
-- Every value-returning function in `examples/` needs `#test(args)[expected]` cases (a burn test enforces it); add them to new functions in `selfhost/` too where they make sense.
+- The CLI is `build/myla`; if it is missing, run `scripts/bootstrap.sh` first (it needs only `as` and `ld`, about 8 seconds). Run: `build/myla run file.my`, test: `build/myla test file.my`, compile: `build/myla build file.my -o out` (`-g` for gdb), type-check: `build/myla check file.my`, interactive: `build/myla repl`; in a project with a `myla.toml` also `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` (D73).
+- The standard library is in `lib/std/`; the tests are in `tests/burn/` (`scripts/test.sh fast`, or `scripts/test.sh` for all).
+- `#test` cases go above a function, or above a method inside its `impl` with the receiver as the first argument (`#test(Counter { n: 2 }, 3)[5]`, D116).
+- Every value-returning function in `examples/` needs `#test(args)[expected]` cases (a burn test enforces it); add them to new functions in `selfhost/` too: the target there is at least 80 % of value-returning functions (D109).
 - New examples must be registered in `tests/burn/test_examples_run.py` and `tests/burn/test_examples_compile.py`; programs that must be rejected go to `examples/errors/` with a first line `//~ <lex|parse|module|type|runtime> error: <message substring>` (more directives, such as `//~ span:`, in `tests/burn/test_error_corpus.py`).
+- A ```` ```myla ```` block in `docs/` or the README is a tested program (`tests/burn/test_doc_blocks.py`): it must check and, with a `main`, run; it may end with `// output:` and one `// ` line per printed line. Mark pieces ```` ```myla fragment ```` and deliberately wrong code ```` ```myla error ```` (D114).
 - The interpreter and the native backend must print the same output; check both (`run` and `build` + execute) after changing either.
-- Changes to `selfhost/` must keep the bootstrap fixed point: `scripts/bootstrap.sh`.
-- Before trusting a construct you're unsure of, write a five-line program and run `python3 myla.py check` on it: the checker's messages are precise.
+- Changes to `selfhost/` must keep the bootstrap fixed point: `scripts/bootstrap.sh`. A change to the compiler's output also needs a new seed: `scripts/update-seed.sh`, then commit `bootstrap/seed.s` (CI fails on a stale one).
+- Before trusting a construct you're unsure of, write a five-line program and run `build/myla check` on it: the checker's messages are precise.

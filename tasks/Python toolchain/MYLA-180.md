@@ -2,7 +2,7 @@
 id: MYLA-180
 title: A method's parameter list takes a trailing comma, a function's and a lambda's don't
 type: bug
-status: review
+status: done
 priority: low
 labels: [parser, grammar]
 ---

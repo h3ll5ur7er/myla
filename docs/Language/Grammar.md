@@ -1,6 +1,6 @@
 # Grammar
 
-The syntax of Myla 1.0 in EBNF, as [[src/myla/parser.py]] and [[selfhost/parser.my]] accept it. The original v0.0 grammar is in [[Archive/grammar]].
+The syntax of Myla 1.0 in EBNF, as [[selfhost/parser.my]] accepts it. The original v0.0 grammar is in [[Archive/grammar]].
 
 This page shows the rules of [[grammar/myla.ebnf]], the machine-readable grammar: the same rules plus annotations for the editor grammars it generates (MYLA-77, [[Architecture/Editor-tooling]]). A test compares the two, so change both together.
 
@@ -69,7 +69,7 @@ generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
 type_params  = "<" IDENT ( "," IDENT )* ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;
-method       = method_head block ;
+method       = attribute* method_head block ;
 method_head  = "async"? "fun" IDENT generics? "(" receiver ( "," param )* ")" ( "->" type )? ;
 receiver     = "self" | "var" "self" ;
 
@@ -190,7 +190,7 @@ field_pattern = IDENT ( ":" pattern )? ;
 - **Parenthesis.** `( … ) =>` is a lambda (decided by scanning to the matching `)`), `(e)` is grouping, `(e,)` and `(a, b)` are tuples. In types, `(…) -> R` is a function type and `(T,)` a tuple.
 - **`<`.** In types it opens type arguments; in expressions it is a comparison. Generic arguments never appear in expressions (D34), but after a cast's type a `<` opens type arguments: `a as T < b` is a parse error.
 - **`>>`.** Two touching `>` are a shift in expressions and two closers in types.
-- **Nesting.** Expressions, types, blocks and patterns nest at most 256 levels deep (`MAX_NESTING`, both parsers count the same places): deeper is a parse error, `expression nested too deeply` (or `type`, `block`, `pattern`), at the token where it goes past, not a crash of the parser or the language server ([[MYLA-182]]).
+- **Nesting.** Expressions, types, blocks and patterns nest at most 256 levels deep (`MAX_NESTING` in the parser): deeper is a parse error, `expression nested too deeply` (or `type`, `block`, `pattern`), at the token where it goes past, not a crash of the parser or the language server ([[MYLA-182]]).
 - **`|`.** Bitwise or in expressions, alternative in patterns.
 - **`.`.** `t.0` is a tuple index (a `.` followed by an integer token), `x.f` a field, `E.V` a variant, `m.f` a module member (resolved by the loader).
 - **Greedy bodies.** A lambda's expression body, like every operand, extends as far as it can: `(x) => x + 1 |> f` is a lambda whose body is `x + 1 |> f`.

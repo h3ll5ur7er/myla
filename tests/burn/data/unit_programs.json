@@ -1,0 +1,584 @@
+[
+ {
+  "source": "#derive(Eq)\nstruct Pt { x: int, y: int }\n#derive(Eq)\nenum E { A, B(int) }\nfun main() {\n    print(Pt{x:1,y:2} == Pt{x:1,y:2})\n    print(Pt{x:1,y:2} != Pt{x:9,y:2})\n    print(E.B(3) == E.B(3))\n    print(E.B(3) == E.A)\n}\n",
+  "argv": null,
+  "stdout": "true\ntrue\ntrue\nfalse\n",
+  "exit": 0
+ },
+ {
+  "source": "actor A {\n    n: int\n}\nactor B {\n    m: int\n}\nimpl A {\n    async fun ping(self, b: B) -> int {\n        return await b.pong(self)\n    }\n    fun val(self) -> int {\n        return self.n\n    }\n}\nimpl B {\n    async fun pong(self, a: A) -> int {\n        return await a.val() + self.m\n    }\n}\n#main\nasync fun main() {\n    let a = A { n: 1 }\n    let b = B { m: 2 }\n    async let x = a.ping(b)\n    async let y = a.ping(b)\n    print(await x + await y)\n}\n",
+  "argv": null,
+  "stdout": "6\n",
+  "exit": 0
+ },
+ {
+  "source": "actor A {\n    n: int\n}\nimpl A {\n    async fun peek(self) -> int {\n        let n = self.n\n        async let x = n + 1\n        return await x\n    }\n}\n#main\nasync fun main() {\n    let a = A { n: 4 }\n    print(await a.peek())\n}\n",
+  "argv": null,
+  "stdout": "5\n",
+  "exit": 0
+ },
+ {
+  "source": "actor Box {\n    items: [int]\n}\nimpl Box {\n    fun all(self) -> [int] {\n        return self.items\n    }\n    fun first(self) -> int {\n        return self.items[0]\n    }\n}\n#main\nasync fun main() {\n    let b = Box { items: [1, 2] }\n    var xs = await b.all()\n    xs[0] = 9\n    print(await b.first())\n}\n",
+  "argv": null,
+  "stdout": "1\n",
+  "exit": 0
+ },
+ {
+  "source": "actor Box {\n    items: [int]\n}\nimpl Box {\n    fun put(var self, xs: [int]) {\n        self.items = xs\n    }\n    fun first(self) -> int {\n        return self.items[0]\n    }\n}\n#main\nasync fun main() {\n    let b = Box { items: [] }\n    var xs = [1, 2]\n    await b.put(xs)\n    xs[0] = 9\n    print(await b.first())\n}\n",
+  "argv": null,
+  "stdout": "1\n",
+  "exit": 0
+ },
+ {
+  "source": "actor Counter {\n    count: int\n}\nimpl Counter {\n    fun increment(var self) -> int {\n        self.count = self.count + 1\n        return self.count\n    }\n    fun get(self) -> int {\n        return self.count\n    }\n}\n#main\nasync fun main() {\n    let c = Counter { count: 0 }\n    let d = c\n    let x = await d.increment()\n    print(await c.get())\n}\n",
+  "argv": null,
+  "stdout": "1\n",
+  "exit": 0
+ },
+ {
+  "source": "actor Counter {\n    count: int\n}\nimpl Counter {\n    fun increment(var self) -> int {\n        self.count = self.count + 1\n        return self.count\n    }\n    fun get(self) -> int {\n        return self.count\n    }\n}\nasync fun count_up(c: Counter, n: int) {\n    for i in 0..n {\n        let x = await c.increment()\n    }\n}\n#main\nasync fun main() {\n    let c = Counter { count: 0 }\n    async let a = count_up(c, 500)\n    async let b = count_up(c, 500)\n    async let d = count_up(c, 500)\n    await a\n    await b\n    await d\n    print(await c.get())\n}\n",
+  "argv": null,
+  "stdout": "1500\n",
+  "exit": 0
+ },
+ {
+  "source": "actor Counter {\n    count: int\n}\nimpl Counter {\n    fun increment(var self) -> int {\n        self.count = self.count + 1\n        return self.count\n    }\n    fun twice(var self) -> int {\n        let a = self.increment()\n        return self.increment()\n    }\n    fun get(self) -> int {\n        return self.count\n    }\n}\n#main\nasync fun main() {\n    let c = Counter { count: 0 }\n    print(await c.twice())\n}\n",
+  "argv": null,
+  "stdout": "2\n",
+  "exit": 0
+ },
+ {
+  "source": "actor Counter {\n    count: int\n}\nimpl Counter {\n    fun increment(var self) {\n        let v = self.count\n        var spin = 0\n        while spin < 20 {\n            spin = spin + 1\n        }\n        self.count = v + 1\n    }\n    fun get(self) -> int {\n        return self.count\n    }\n}\nasync fun count_up(c: Counter, n: int) {\n    for i in 0..n {\n        await c.increment()\n    }\n}\n#main\nasync fun main() {\n    let c = Counter { count: 0 }\n    async let a = count_up(c, 300)\n    async let b = count_up(c, 300)\n    async let d = count_up(c, 300)\n    await a\n    await b\n    await d\n    print(await c.get())\n}\n",
+  "argv": null,
+  "stdout": "900\n",
+  "exit": 0
+ },
+ {
+  "source": "actor P {\n    n: int\n}\nimpl P {\n    async fun poke(self, other: P, depth: int) -> int {\n        if depth == 0 {\n            return self.n\n        }\n        return await other.poke(self, depth - 1) + self.n\n    }\n}\n#main\nasync fun main() {\n    let p = P { n: 1 }\n    let q = P { n: 10 }\n    async let x = p.poke(q, 50)\n    async let y = q.poke(p, 50)\n    print(await x)\n    print(await y)\n}\n",
+  "argv": null,
+  "stdout": "276\n285\n",
+  "exit": 0
+ },
+ {
+  "source": "async fun boom() -> int {\n    panic(\"boom\")\n    return 0\n}\n#main\nasync fun main() {\n    async let a = boom()\n    print(await a)\n}\n",
+  "argv": null,
+  "stdout": "",
+  "runtime_error": "boom"
+ },
+ {
+  "source": "async fun boom() {\n    panic(\"boom\")\n}\n#main\nasync fun main() {\n    if true {\n        async let a = boom()\n    }\n    print(\"after\")\n}\n",
+  "argv": null,
+  "stdout": "",
+  "runtime_error": "boom"
+ },
+ {
+  "source": "async fun fetch(n: int) -> int {\n    return n * 10\n}\n#main\nasync fun main() {\n    async let a = fetch(1)\n    async let b: int = fetch(2)\n    print(await a + await b)\n}\n",
+  "argv": null,
+  "stdout": "30\n",
+  "exit": 0
+ },
+ {
+  "source": "async fun fetch(n: int) -> int {\n    return n * 10\n}\n#main\nasync fun main() {\n    async let a = fetch(1)\n    print(await a)\n    print(await a)\n}\n",
+  "argv": null,
+  "stdout": "10\n10\n",
+  "exit": 0
+ },
+ {
+  "source": "async fun fetch(n: int) -> int {\n    return n * 10\n}\n#main\nasync fun main() {\n    print(await fetch(1) + await fetch(2))\n}\n",
+  "argv": null,
+  "stdout": "30\n",
+  "exit": 0
+ },
+ {
+  "source": "async fun fetch(n: int) -> int {\n    return n * 10\n}\n#main\nasync fun main() {\n    print(await fetch(4))\n}\n",
+  "argv": null,
+  "stdout": "40\n",
+  "exit": 0
+ },
+ {
+  "source": "async fun fetch(n: int) -> int {\n    return n * 10\n}\nasync fun apply(f: async (int) -> int, x: int) -> int {\n    return await f(x)\n}\n#main\nasync fun main() {\n    let f = async (n: int) => await fetch(n) + 1\n    print(await apply(f, 2))\n    print(await apply(fetch, 3))\n}\n",
+  "argv": null,
+  "stdout": "21\n30\n",
+  "exit": 0
+ },
+ {
+  "source": "async fun noisy() {\n    print(\"child\")\n}\n#main\nasync fun main() {\n    async let a = noisy()\n    await a\n    print(\"after\")\n}\n",
+  "argv": null,
+  "stdout": "child\nafter\n",
+  "exit": 0
+ },
+ {
+  "source": "async fun noisy() {\n    print(\"child\")\n}\n#main\nasync fun main() {\n    if true {\n        async let a = noisy()\n    }\n    print(\"after\")\n}\n",
+  "argv": null,
+  "stdout": "child\nafter\n",
+  "exit": 0
+ },
+ {
+  "source": "async fun noisy(i: int) {\n    print(i)\n}\n#main\nasync fun main() {\n    for i in 0..3 {\n        async let a = noisy(i)\n    }\n    print(\"after\")\n}\n",
+  "argv": null,
+  "stdout": "0\n1\n2\nafter\n",
+  "exit": 0
+ },
+ {
+  "source": "async fun total(xs: [int]) -> int {\n    var t = 0\n    for x in xs {\n        t = t + x\n    }\n    return t\n}\n#main\nasync fun main() {\n    var xs = [1, 2, 3]\n    async let t = total(xs)\n    xs[0] = 100\n    print(await t)\n    print(xs[0])\n}\n",
+  "argv": null,
+  "stdout": "6\n100\n",
+  "exit": 0
+ },
+ {
+  "source": "const A: int = 1; const B: int = 2\nstruct P { x: int, y: int }\ntrait Area { fun area(self) -> int; fun twice(self) -> int }\nimpl Area for P {\n    fun area(self) -> int { return self.x * self.y }; fun twice(self) -> int { return 2 * self.area() }\n}\nfun f(n: int) -> int { if n < 0 { return 0 }; var t = 0; for i in 0..n { t = t + i }; return t }\nfun main() { let p = P { x: A + 2, y: B }; print(p.area()); print(p.twice()); print(f(4)); return; }\n",
+  "argv": null,
+  "stdout": "6\n12\n6\n",
+  "exit": 0
+ },
+ {
+  "source": "const BIG: float64 = 1e19\nconst A: uint64 = BIG as uint64\nconst B: int64 = BIG as int64\nconst C: uint8 = 300.0 as uint8\nconst D: int32 = (0.0f64 / 0.0f64) as int32\nfun main() {\n    print(A)\n    print(B)\n    print(C)\n    print(D)\n}\n",
+  "argv": null,
+  "stdout": "10000000000000000000\n9223372036854775807\n255\n0\n",
+  "exit": 0
+ },
+ {
+  "source": "enum Color { Red, Green, Blue }\nfun f(c: Color) -> str { return match c { Red => \"r\", Green | Blue => \"gb\" } }\nfun main() {\n    print(f(Color.Red))\n    print(f(Color.Blue))\n}\n",
+  "argv": null,
+  "stdout": "r\ngb\n",
+  "exit": 0
+ },
+ {
+  "source": "enum List { Cons(int, List), Nil }\nfun sum(xs: List) -> int {\n    return match xs { List.Cons(h, t) => h + sum(t), List.Nil => 0 }\n}\nfun main() {\n    print(sum(List.Cons(1, List.Cons(2, List.Cons(3, List.Nil)))))\n}\n",
+  "argv": null,
+  "stdout": "6\n",
+  "exit": 0
+ },
+ {
+  "source": "enum Opt { Some(int), None }\nfun bump(o: Opt) -> Opt { return match o { Opt.Some(n) => Opt.Some(n + 1), Opt.None => Opt.None } }\nfun peel(o: Opt) -> int { return match o { Opt.Some(n) => n, Opt.None => -1 } }\nfun main() {\n    print(peel(bump(Opt.Some(41))))\n    print(peel(bump(Opt.None)))\n}\n",
+  "argv": null,
+  "stdout": "42\n-1\n",
+  "exit": 0
+ },
+ {
+  "source": "enum Shape { Circle(int), Rect(int, int), Empty }\nfun classify(s: Shape) -> str {\n    return match s {\n        Shape.Circle(r) if r > 10 => \"big\",\n        Shape.Circle(_) => \"small\",\n        _ => \"other\",\n    }\n}\nfun main() {\n    print(classify(Shape.Circle(20)))\n    print(classify(Shape.Circle(1)))\n    print(classify(Shape.Empty))\n}\n",
+  "argv": null,
+  "stdout": "big\nsmall\nother\n",
+  "exit": 0
+ },
+ {
+  "source": "enum Tree { Leaf(int), Node(Tree, Tree) }\nfun total(t: Tree) -> int {\n    return match t { Tree.Leaf(n) => n, Tree.Node(l, r) => total(l) + total(r) }\n}\nfun main() {\n    print(total(Tree.Node(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)), Tree.Leaf(7))))\n}\n",
+  "argv": null,
+  "stdout": "10\n",
+  "exit": 0
+ },
+ {
+  "source": "fun double(x: int32) -> int32 { return x * 2 }\nfun main() {\n    print(f\"{double(3)} and {1 + 2}\")\n}\n",
+  "argv": null,
+  "stdout": "6 and 3\n",
+  "exit": 0
+ },
+ {
+  "source": "fun fact(n: int) -> int {\n    if n <= 1 {\n        return 1\n    }\n    return n * fact(n - 1)\n}\nfun main() {\n    print(fact(5))\n}\n",
+  "argv": null,
+  "stdout": "120\n",
+  "exit": 0
+ },
+ {
+  "source": "fun half(x: int) -> Option<int> {\n    if x % 2 == 1 { return None }\n    return Some(x / 2)\n}\nfun apply(f: (int) -> Option<int>, x: int) -> int {\n    return match f(x) { Some(v) => v, None => 0 }\n}\nfun main() {\n    print(apply((x) => Some(half(x)? * 10), 8))\n}\n",
+  "argv": null,
+  "stdout": "40\n",
+  "exit": 0
+ },
+ {
+  "source": "fun half(x: int) -> Option<int> {\n    if x % 2 == 1 { return None }\n    return Some(x / 2)\n}\nfun main() {\n    let g: (int) -> Option<int> = (x: int) => Some(half(x)? + 100)\n    print(match g(4) { Some(v) => v, None => -1 })\n    print(match g(3) { Some(v) => v, None => -1 })\n}\n",
+  "argv": null,
+  "stdout": "102\n-1\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    for i in 0..3 {\n        print(i)\n    }\n}\n",
+  "argv": null,
+  "stdout": "0\n1\n2\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    if 1 < 2 {\n        print(\"a\")\n    } else {\n        print(\"b\")\n    }\n}\n",
+  "argv": null,
+  "stdout": "a\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    let ((a, b), c) = ((10, 20), 30)\n    print(a + b + c)\n}\n",
+  "argv": null,
+  "stdout": "60\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    let f = (x: int) => { let y = x * 2; return y + 1 }\n    let v = match f(1) { 3 => { print(1); 10 }, _ => 0 }; print(v)\n}\n",
+  "argv": null,
+  "stdout": "1\n10\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    let name = \"myla\"\n    let n = 42\n    print(f\"{name} = {n}\")\n}\n",
+  "argv": null,
+  "stdout": "myla = 42\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    let p = (1, 2)\n    print(p.0)\n    let (a, b) = p\n    print(a + b)\n}\n",
+  "argv": null,
+  "stdout": "1\n3\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    let r: Result<int, str> = Ok(1)\n    match r {\n        Ok(n) => {\n            print(n)\n            match n {\n                1 => print(\"one\")\n                _ => print(\"other\")\n            }\n        }\n        Err(e) => print(e)\n    }\n}\n",
+  "argv": null,
+  "stdout": "1\none\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    let x = 1\n    print(f\"{{ {x} }}\")\n}\n",
+  "argv": null,
+  "stdout": "{ 1 }\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    let x = 5\n    var y = x + 1\n    y = y * 2\n    print(y)\n}\n",
+  "argv": null,
+  "stdout": "12\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    let x: int8 = -128i8\n    print(x)\n}\n",
+  "argv": null,
+  "stdout": "-128\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    let z: float64 = 0.0\n    let big: float64 = 1e19\n    let huge: float64 = 3e19\n    print((z / z) as int32)\n    print((1.0f64 / z) as int32)\n    print((-1.0f64 / z) as int64)\n    print(big as uint64)\n    print(big as int64)\n    print(huge as uint64)\n    print(300.0 as uint8)\n    print(-300.0 as int8)\n    print(-1.5 as uint8)\n    print(-2.9 as int8)\n}\n",
+  "argv": null,
+  "stdout": "0\n2147483647\n-9223372036854775808\n10000000000000000000\n9223372036854775807\n18446744073709551615\n255\n-128\n0\n-2\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    print(-7 % 2)\n}\n",
+  "argv": null,
+  "stdout": "-1\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    print(-7 / 2)\n}\n",
+  "argv": null,
+  "stdout": "-3\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    print(1e38 * 10.0)\n    print(-1e38 * 10.0)\n    let c: float = 3.5e38\n    print(c)\n    print(3.4028235e38)\n}\n",
+  "argv": null,
+  "stdout": "inf\n-inf\ninf\n340282347000000000000000000000000000000\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    print(2 + 3 * 4)\n}\n",
+  "argv": null,
+  "stdout": "14\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    print(42)\n    print(true)\n    print(\"hi\")\n}\n",
+  "argv": null,
+  "stdout": "42\ntrue\nhi\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    print(7 / 2)\n}\n",
+  "argv": null,
+  "stdout": "3\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    var b: int8 = 127i8\n    b = b + 1i8\n    print(b)\n}\n",
+  "argv": null,
+  "stdout": "-128\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    var b: uint8 = 255u8\n    b = b + 1u8\n    print(b)\n}\n",
+  "argv": null,
+  "stdout": "0\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    var i = 0\n    while i < 3 {\n        print(i)\n        i = i + 1\n    }\n}\n",
+  "argv": null,
+  "stdout": "0\n1\n2\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"aö\", 0, 2)\n    append(sb, \"aö\", 2, 3)\n    let s = build(sb)\n    print(s == \"aö\")\n    print(s)\n}\n",
+  "argv": null,
+  "stdout": "true\naö\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"hello world\", 6, 11)\n    append(sb, \"hello world\", 0, 0)\n    append(sb, \"-\", 0, 1)\n    append(sb, \"hello world\", 0, 5)\n    print(build(sb))\n}\n",
+  "argv": null,
+  "stdout": "world-hello\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"hello\", -1, 2)\n}\n",
+  "argv": null,
+  "stdout": "",
+  "runtime_error": "string range -1..2 out of bounds (len 5)"
+ },
+ {
+  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"hello\", 0, 6)\n}\n",
+  "argv": null,
+  "stdout": "",
+  "runtime_error": "string range 0..6 out of bounds (len 5)"
+ },
+ {
+  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"hello\", 2, 1)\n}\n",
+  "argv": null,
+  "stdout": "",
+  "runtime_error": "string range 2..1 out of bounds (len 5)"
+ },
+ {
+  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"hello\", 6, 6)\n}\n",
+  "argv": null,
+  "stdout": "",
+  "runtime_error": "string range 6..6 out of bounds (len 5)"
+ },
+ {
+  "source": "fun main() {\n    var z = 0\n    print(1 / z)\n}\n",
+  "argv": null,
+  "stdout": "",
+  "runtime_error": "division by zero"
+ },
+ {
+  "source": "fun main() {\n  for c in chars(\"abc\") { print(c as uint32) } }\n",
+  "argv": null,
+  "stdout": "97\n98\n99\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() {\n  let s = \"héλ😀\"\n  print(len(s))\n  print(len(chars(s)))\n  for c in chars(s) { print(c as uint32) } }\n",
+  "argv": null,
+  "stdout": "9\n4\n104\n233\n955\n128512\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { let c: char = 'b'\n  match c { 'a' => print(1), 'b' => print(2), _ => print(0) } }\n",
+  "argv": null,
+  "stdout": "2\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print('\\u{1F600}') }\n",
+  "argv": null,
+  "stdout": "😀\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print('\\u{3BB}') }\n",
+  "argv": null,
+  "stdout": "λ\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print('a' < 'b') }\n",
+  "argv": null,
+  "stdout": "true\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print('a' == 'a') }\n",
+  "argv": null,
+  "stdout": "true\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print('a' as uint32) }\n",
+  "argv": null,
+  "stdout": "97\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print('a') }\n",
+  "argv": null,
+  "stdout": "a\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print('b' < 'a') }\n",
+  "argv": null,
+  "stdout": "false\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(0.0 / 0.0) }\n",
+  "argv": null,
+  "stdout": "nan\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(0.1f32 + 0.2f32) }\n",
+  "argv": null,
+  "stdout": "0.300000012\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(0.1f64 + 0.2f64) }\n",
+  "argv": null,
+  "stdout": "0.30000000000000004\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(1 + 2)\n print(3 == 3) }\n",
+  "argv": null,
+  "stdout": "3\ntrue\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(1.0 / 0.0) }\n",
+  "argv": null,
+  "stdout": "inf\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(1.5 + 2.25) }\n",
+  "argv": null,
+  "stdout": "3.75\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(3.9 as int32) }\n",
+  "argv": null,
+  "stdout": "3\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(5 as float64) }\n",
+  "argv": null,
+  "stdout": "5\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(5.5 % 2.0) }\n",
+  "argv": null,
+  "stdout": "1.5\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(7.0 / 2.0) }\n",
+  "argv": null,
+  "stdout": "3.5\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(955 as char) }\n",
+  "argv": null,
+  "stdout": "λ\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(format(\"[{}]\", '\\u{3BB}')) }\n",
+  "argv": null,
+  "stdout": "[λ]\n",
+  "exit": 0
+ },
+ {
+  "source": "fun main() { print(len(chars(\"\"))) }\n",
+  "argv": null,
+  "stdout": "0\n",
+  "exit": 0
+ },
+ {
+  "source": "impl int { fun double(self) -> int { return self * 2 } }\nfun main() {\n    let n = 21\n    print(n.double())\n}\n",
+  "argv": null,
+  "stdout": "42\n",
+  "exit": 0
+ },
+ {
+  "source": "struct Box<T> { v: T }\nimpl<T> Box<T> { fun get(self) -> T { return self.v }\n                 fun set(var self, x: T) { self.v = x } }\nfun main() {\n    var b = Box { v: 7 }\n    b.set(42)\n    print(b.get())\n}\n",
+  "argv": null,
+  "stdout": "42\n",
+  "exit": 0
+ },
+ {
+  "source": "struct C {\n    n: int,\n}\nimpl C {\n    fun bump_get(var self) -> int {\n        self.n = self.n + 1\n        return self.n\n    }\n    fun plus(self, k: int) -> int {\n        return self.n * 100 + k\n    }\n    fun with(self, o: C, k: int) -> int {\n        return self.n * 10000 + o.n * 100 + k\n    }\n}\nfun outer(c: C, k: int) -> int {\n    return c.n * 100 + k\n}\n#main\nfun main() {\n    var c = C { n: 1 }\n    print(c.plus(c.bump_get()))\n    var d = C { n: 1 }\n    print(outer(d, d.bump_get()))\n    var xs = [C { n: 1 }]\n    print(xs[0].plus(xs[0].bump_get()))\n    var e = C { n: 1 }\n    var f = C { n: 5 }\n    print(e.with(f, f.bump_get()))\n    let g = (x: C, k: int) => x.n * 100 + k\n    var h = C { n: 1 }\n    print(g(h, h.bump_get()))\n    var p = C { n: 1 }\n    print(p.n * 100 + p.bump_get())\n}\n",
+  "argv": null,
+  "stdout": "102\n102\n102\n10506\n102\n102\n",
+  "exit": 0
+ },
+ {
+  "source": "struct C { n: int }\nimpl C {\n    fun add(self, a: int, b: int) -> int {\n        return self.n + a + b\n    }\n}\nfun f(x: int) -> int {\n    print(x)\n    return x\n}\nfun c(n: int) -> C {\n    print(n)\n    return C { n: n }\n}\nfun g(a: int, b: int, c: int) -> int {\n    return a * 100 + b * 10 + c\n}\nfun main() {\n    let p = g(f(1), _, f(2))\n    print(0)\n    print(p(f(3)))\n    print(p(4))\n    let m = c(5).add(f(6), _)\n    print(0)\n    print(m(7))\n    print(m(8))\n    var x = 1\n    let r = g(x, _, 3)\n    x = 2\n    print(r(0))\n}\n",
+  "argv": null,
+  "stdout": "1\n2\n0\n3\n132\n142\n5\n6\n0\n18\n19\n103\n",
+  "exit": 0
+ },
+ {
+  "source": "struct P {\n    x: int,\n    y: int,\n}\nfun main() {\n    var a = P { x: 1, y: 2 }\n    var b = a\n    b.x = 99\n    print(a.x)\n    print(b.x)\n}\n",
+  "argv": null,
+  "stdout": "1\n99\n",
+  "exit": 0
+ },
+ {
+  "source": "struct P {\n    x: int,\n    y: int,\n}\nfun main() {\n    var p = P { x: 0, y: 0 }\n    p.x = 7\n    print(p.x)\n}\n",
+  "argv": null,
+  "stdout": "7\n",
+  "exit": 0
+ },
+ {
+  "source": "struct P {\n    x: int,\n}\nfun main() {\n    let orig = P { x: 1 }\n    let t = (orig, 2)\n    var c = t.0\n    c.x = 99\n    print(orig.x)\n    print(c.x)\n}\n",
+  "argv": null,
+  "stdout": "1\n99\n",
+  "exit": 0
+ },
+ {
+  "source": "struct P { x: int }\nimpl P {\n    async fun twice(self) -> int {\n        return self.x * 2\n    }\n}\n#main\nasync fun main() {\n    let p = P { x: 21 }\n    print(await p.twice())\n}\n",
+  "argv": null,
+  "stdout": "42\n",
+  "exit": 0
+ },
+ {
+  "source": "struct P { x: int }\nimpl P { fun with(self, v: int) -> P { return P { x: v } }\n         fun x_of(self) -> int { return self.x } }\nfun main() {\n    let a = P { x: 1 }\n    let b = a.with(9)\n    print(a.x_of())\n    print(b.x_of())\n}\n",
+  "argv": null,
+  "stdout": "1\n9\n",
+  "exit": 0
+ },
+ {
+  "source": "struct Point { x: int, y: int }\nimpl Point {\n    fun sum(self) -> int { return self.x + self.y }\n    fun shift(var self, d: int) { self.x = self.x + d }\n}\nfun main() {\n    var p = Point { x: 1, y: 2 }\n    p.shift(5)\n    print(p.sum())\n}\n",
+  "argv": null,
+  "stdout": "8\n",
+  "exit": 0
+ },
+ {
+  "source": "struct Vec2 { x: int, y: int }\nimpl Add for Vec2 {\n    fun add(self, other: Vec2) -> Vec2 {\n        return Vec2 { x: self.x + other.x, y: self.y + other.y }\n    }\n}\nfun main() {\n    let v = Vec2{x:1,y:2} + Vec2{x:3,y:4}\n    print(v.x)\n print(v.y)\n}\n",
+  "argv": null,
+  "stdout": "4\n6\n",
+  "exit": 0
+ },
+ {
+  "source": "struct Vec2 { x: int, y: int }\nimpl Add for Vec2 {\n    fun add(self, other: Vec2) -> Vec2 {\n        return Vec2 { x: self.x + other.x, y: self.y + other.y }\n    }\n}\nfun sum<T: Add>(xs: [T], zero: T) -> T {\n    var acc = zero\n for x in xs { acc = acc + x }\n return acc\n}\nfun main() {\n    print(sum([1, 2, 3], 0))\n    let v = sum([Vec2{x:1,y:1}, Vec2{x:2,y:2}], Vec2{x:0,y:0})\n    print(v.x)\n}\n",
+  "argv": null,
+  "stdout": "6\n3\n",
+  "exit": 0
+ },
+ {
+  "source": "struct W { n: int }\nimpl Ord for W { fun cmp(self, o: W) -> int { return self.n - o.n } }\nfun main() { print(W{n:1} < W{n:2})\n print(W{n:5} >= W{n:2}) }\n",
+  "argv": null,
+  "stdout": "true\ntrue\n",
+  "exit": 0
+ },
+ {
+  "source": "trait Comparable<T> {\n    fun compare(self, other: T) -> int32\n}\nstruct Money { cents: int32 }\nimpl Comparable<int32> for Money {\n    fun compare(self, other: int32) -> int32 {\n        if self.cents < other { return -1 }\n        if self.cents > other { return 1 }\n        return 0\n    }\n}\nfun main() {\n    let m = Money { cents: 100 }\n    print(m.compare(100))\n    print(m.compare(50))\n    print(m.compare(200))\n}\n",
+  "argv": null,
+  "stdout": "0\n1\n-1\n",
+  "exit": 0
+ },
+ {
+  "source": "trait Show { fun show(self) -> str }\nstruct P { x: int }\nimpl Show for P { fun show(self) -> str { return \"p\" } }\nfun main() { print(P{x:1}.show()) }\n",
+  "argv": null,
+  "stdout": "p\n",
+  "exit": 0
+ }
+]

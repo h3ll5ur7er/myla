@@ -96,6 +96,7 @@ pub enum DepSource {
 
 // --- Errors ---------------------------------------------------------------------
 
+#test()[TomlPos { line: 0, col: 0, end_line: 0, end_col: 0 }]
 fun no_pos() -> TomlPos {
     return TomlPos { line: 0, col: 0, end_line: 0, end_col: 0 }
 }
@@ -105,10 +106,16 @@ fun error_at(path: str, pos: TomlPos, msg: str) -> ProjectError {
     return ProjectError { msg: msg, path: path, line: pos.line, col: pos.col, end_line: pos.end_line, end_col: pos.end_col }
 }
 
+#test("a", "a")[ProjectError { msg: "a", path: "a", line: 0, col: 0, end_line: 0, end_col: 0 }]
+#test("d2", "d2")[ProjectError { msg: "d2", path: "d2", line: 0, col: 0, end_line: 0, end_col: 0 }]
+#test("right", "right")[ProjectError { msg: "right", path: "right", line: 0, col: 0, end_line: 0, end_col: 0 }]
 fun error_in(path: str, msg: str) -> ProjectError {
     return error_at(path, no_pos(), msg)
 }
 
+#test("a")[ProjectError { msg: "a", path: "", line: 0, col: 0, end_line: 0, end_col: 0 }]
+#test("d2")[ProjectError { msg: "d2", path: "", line: 0, col: 0, end_line: 0, end_col: 0 }]
+#test("right")[ProjectError { msg: "right", path: "", line: 0, col: 0, end_line: 0, end_col: 0 }]
 fun error_plain(msg: str) -> ProjectError {
     return error_at("", no_pos(), msg)
 }
@@ -249,6 +256,9 @@ pub fun normalize_path(p: str) -> str {
 }
 
 // The components of `p` between its slashes (empty ones included).
+#test("/work/myla/build/harvest/proj/app")[["", "work", "myla", "build", "harvest", "proj", "app"]]
+#test("/work/myla/build/harvest/proj/tidy/myla.toml")[["", "work", "myla", "build", "harvest", "proj", "tidy", "myla.toml"]]
+#test("/work/myla/build/harvest/proj/gitapp/myla.toml/..")[["", "work", "myla", "build", "harvest", "proj", "gitapp", "myla.toml", ".."]]
 fun split_path(p: str) -> [str] {
     var out: [str] = []
     var start = 0
@@ -349,6 +359,9 @@ pub fun relative_path(base: str, p: str) -> str {
 }
 
 // `s` from the byte `start` on.
+#test("/work/myla/build/harvest/proj/app/src", 34)["src"]
+#test("/work/myla/build/harvest/proj/app/src/main.my", 34)["src/main.my"]
+#test("/work/myla/build/harvest/proj/app/src/util/strings.my", 34)["src/util/strings.my"]
 fun part_from(s: str, start: int32) -> str {
     var sb = StringBuilder()
     append(sb, s, start, len(s))
@@ -357,6 +370,9 @@ fun part_from(s: str, start: int32) -> str {
 
 // `p` as an absolute, normalised path (a relative one is taken from the
 // working directory); None if the working directory can't be found.
+#test("/work/myla/build/harvest/proj/app")[Some("/work/myla/build/harvest/proj/app")]
+#test("/work/myla/build/harvest/proj/gitapp")[Some("/work/myla/build/harvest/proj/gitapp")]
+#test("/work/myla/build/harvest/proj/gitapp/myla.toml")[Some("/work/myla/build/harvest/proj/gitapp/myla.toml")]
 pub fun absolute_path(p: str) -> Option<str> {
     if len(p) > 0 && p[0] == '/' { return Some(normalize_path(p)) }
     return match current_dir() {
@@ -386,6 +402,7 @@ pub fun find_manifest(start: str) -> Option<str> {
 // --- The manifest ---------------------------------------------------------------
 
 // The manifest in `text` (from the file `path`, for errors), checked.
+#test("[package]\nname = \"geo\"\nversion = \"0.1.0\"\n\n[dependencies]\n", "/work/myla/build/harvest/proj/geo/myla.toml")[Ok(Manifest { name: "geo", version: "0.1.0", deps: [] })]
 pub fun parse_manifest(text: str, path: str) -> Result<Manifest, ProjectError> {
     let doc = match parse_doc(text) {
         Ok(d) => d
@@ -528,6 +545,8 @@ fun manifest_summary(text: str) -> str {
     }
 }
 
+#test(Toml.Table([("k", Toml.Int(1)), ("s", Toml.Str("v"))]))[[("k", Toml.Int(1)), ("s", Toml.Str("v"))]]
+#test(Toml.Str("x"))[[]]
 fun table_members(t: Toml) -> [(str, Toml)] {
     var none: [(str, Toml)] = []
     return match t {
@@ -536,6 +555,10 @@ fun table_members(t: Toml) -> [(str, Toml)] {
     }
 }
 
+#test(Toml.Array([Toml.Str("a"), Toml.Str("b")]))[true]
+#test(Toml.Array([Toml.Str("a"), Toml.Int(1)]))[false]
+#test(Toml.Array([]))[true]
+#test(Toml.Bool(true))[false]
 fun is_string_array(v: Toml) -> bool {
     match v {
         Toml.Array(items) => {
@@ -586,6 +609,9 @@ pub fun load_lock(path: str) -> Result<Lock, ProjectError> {
 // The lock file in `text` (from the file `path`, for errors), checked: format
 // version 1, and a table `[git.<name>]` with `url`, at most one of `tag`,
 // `branch` and `rev`, and `commit` for each Git package.
+#test("a", "a")[Err(ProjectError { msg: "expected '=' after a key", path: "a", line: 1, col: 2, end_line: 0, end_col: 0 })]
+#test("d2", "d2")[Err(ProjectError { msg: "expected '=' after a key", path: "d2", line: 1, col: 3, end_line: 0, end_col: 0 })]
+#test("right", "right")[Err(ProjectError { msg: "expected '=' after a key", path: "right", line: 1, col: 6, end_line: 0, end_col: 0 })]
 pub fun parse_lock(text: str, path: str) -> Result<Lock, ProjectError> {
     let doc = match parse_doc(text) {
         Ok(d) => d
@@ -872,6 +898,9 @@ fun dep_error(parent: Pending, d: Dependency, msg: str) -> ProjectError {
     return error_at(parent.manifest, d.pos, msg)
 }
 
+#test("/work/myla/build/harvest/proj/app", "app")["/work/myla/build/harvest/proj/app/src/app.my"]
+#test("/work/myla/build/harvest/proj/geo", "geo")["/work/myla/build/harvest/proj/geo/src/geo.my"]
+#test("/work/myla/build/harvest/proj/gitapp", "gitapp")["/work/myla/build/harvest/proj/gitapp/src/gitapp.my"]
 fun library_of(dir: str, name: str) -> str {
     return format("{}/src/{}.my", dir, name)
 }
@@ -910,6 +939,7 @@ fun before(a: str, b: str) -> bool {
 
 // The lists below are small (one entry per package), so insertion sorts do.
 
+#test([])[[]]
 fun sorted_packages(xs: [Package]) -> [Package] {
     var out: [Package] = []
     for x in xs {
@@ -924,6 +954,7 @@ fun sorted_packages(xs: [Package]) -> [Package] {
     return out
 }
 
+#test([])[[]]
 fun sorted_git(xs: [GitPackage]) -> [GitPackage] {
     var out: [GitPackage] = []
     for x in xs {
@@ -938,6 +969,7 @@ fun sorted_git(xs: [GitPackage]) -> [GitPackage] {
     return out
 }
 
+#test([])[[]]
 fun sorted_entries(xs: [LockEntry]) -> [LockEntry] {
     var out: [LockEntry] = []
     for x in xs {

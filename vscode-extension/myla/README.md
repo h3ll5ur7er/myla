@@ -17,16 +17,16 @@ Support for the [Myla](https://github.com/h3ll5ur7er/myla) programming language 
 ## Requirements
 
 - x86-64 Linux: Myla compiles to native Linux binaries.
-- The Myla toolchain: a checkout of the repository with `scripts/bootstrap.sh` run, which builds `build/myla` and `build/myla-lsp`. Without `build/myla`, the commands fall back to `python3 myla.py`.
+- The Myla toolchain: a checkout of the repository with `scripts/bootstrap.sh` run, which builds `build/myla` and `build/myla-lsp` from the committed seed with GNU `as` and `ld` alone. Open the repository as a workspace folder, or point `myla.compilerPath` at it. Without `build/myla` the commands say how to build it.
 - For debugging: gdb (`sudo apt install gdb`), and GNU `as`/`ld` for the build.
 
 ## Settings
 
 | Setting | Meaning |
 | --- | --- |
-| `myla.compilerPath` | The repository root or its `myla.py`. Empty: the workspace folder that has a `myla.py`. |
+| `myla.compilerPath` | The repository root, the folder with `selfhost/main.my` (a file directly in it works too). Empty: the workspace folder that has a `selfhost/main.my`. The language server gets the standard library from its `lib` folder. |
 | `myla.serverPath` | The language server. Empty: `build/myla-lsp` in the repository. |
-| `myla.cliPath` | The `myla` CLI for run, test, build and debugging. Empty: `build/myla` in the repository, else `python3 myla.py`. |
+| `myla.cliPath` | The `myla` CLI for run, test, build and debugging. Empty: `build/myla` in the repository. |
 | `myla.debug.gdbPath` | The gdb to debug with (default `gdb`). |
 | `myla.diagnostics.enable` | Show the compiler's diagnostics (the server keeps running when off). |
 | `myla.trace.server` | Trace the language server protocol in the Myla output channel. |
@@ -67,7 +67,7 @@ npm ci
 npm run build        # bundle src/ into out/ with esbuild (npm run watch to rebuild on change)
 npm run typecheck    # tsc, no output
 npm run lint         # eslint
-npm test             # unit tests and the debugger against real gdb
+npm test             # unit tests and the debugger against real gdb (with the repository's build/myla)
 npx vsce package     # myla-language-support-<version>.vsix
 ```
 

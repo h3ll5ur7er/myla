@@ -1,10 +1,11 @@
 import * as path from "path";
+import { repoRootOf } from "./toolchain.ts";
 
 /** What the extension knows when it starts the language server. */
 export interface ServerSettings {
   /** `myla.serverPath`, expanded: the server's binary, or "". */
   serverPath: string;
-  /** The repository's `myla.py`, when found (it marks the repository root). */
+  /** The repository's marker `selfhost/main.my`, when found (`findCompilerEntry`). */
   compilerEntry: string | null | undefined;
 }
 
@@ -31,7 +32,7 @@ export function chooseServer(
   exists: (p: string) => boolean
 ): ServerChoice | ServerMissing {
   const entry = settings.compilerEntry ?? undefined;
-  const repoRoot = entry ? path.dirname(entry) : undefined;
+  const repoRoot = entry ? repoRootOf(entry) : undefined;
   const binary =
     settings.serverPath ||
     (repoRoot ? path.join(repoRoot, "build", "myla-lsp") : "");
@@ -48,7 +49,7 @@ export function chooseServer(
   }
   // the binary finds the standard library next to its build/ directory;
   // name the repository's when it is known
-  const stdlib = repoRoot ? path.join(repoRoot, "src", "myla") : "";
+  const stdlib = repoRoot ? path.join(repoRoot, "lib") : "";
   const args =
     stdlib && exists(path.join(stdlib, "std")) ? ["--stdlib", stdlib] : [];
   return { command: binary, args, cwd: repoRoot };

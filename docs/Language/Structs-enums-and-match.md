@@ -24,6 +24,9 @@ fun main() {
     let pr = Pair { first: "one", second: 1 }
     print(pr.first)
 }
+// output:
+// 2
+// one
 ```
 
 - Fields are `name: Type`, separated by commas (newlines may follow a comma, but don't replace it); a trailing comma is fine. Types may be declared in any order.
@@ -52,6 +55,8 @@ fun main() {
     let e = Expr.Add(Expr.Num(2), Expr.Neg(Expr.Num(5)))
     print(eval(e))
 }
+// output:
+// -3
 ```
 
 - Variants have no payload or a positional payload (D32); named-field variants don't exist.
@@ -79,6 +84,8 @@ fun describe(t: (int, bool)) -> str {
 fun main() {
     print(describe((2, false)))
 }
+// output:
+// small
 ```
 
 - Arms are `pattern [if guard] => body`, separated by newlines or commas. A body is an expression, or a block whose final expression statement is its value. An arm that always returns (or calls `panic`/`unreachable`) doesn't need a value.

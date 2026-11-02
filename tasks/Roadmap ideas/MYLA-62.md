@@ -21,7 +21,7 @@ An optional LLVM backend, to reduce the amount of hand-written assembly to maint
 
 User code through LLVM is mostly mechanical now. What LLVM doesn't give for free is the runtime (hand-written x86-64 assembly) and the platform layer (D2, no libc), so the steps are:
 
-1. [[MYLA-160]] The decision round (D98): how LLVM is reached, the calling convention of user code, a pointer kind, sizes per target, the runtime's future, D2 per target, debug information, the gates
+1. [[MYLA-160]] The decision round: how LLVM is reached, the calling convention of user code, a pointer kind, sizes per target, the runtime's future, D2 per target, debug information, the gates
 2. [[MYLA-161]] User code on x86-64 Linux through LLVM, linked with the existing assembly runtime: the IR-to-LLVM mapping checked against the parity tests first; debug information with it ([[MYLA-167]])
 3. [[MYLA-162]] The runtime off assembly: a portable runtime and a thin platform layer, the step that makes other platforms affordable
 4. Targets: [[MYLA-163]] Linux on aarch64, [[MYLA-164]] macOS, [[MYLA-158]] WebAssembly, [[MYLA-165]] Windows

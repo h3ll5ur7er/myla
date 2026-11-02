@@ -25,6 +25,14 @@ cd editor/tree-sitter-myla && npm install   # the tree-sitter CLI, once
 cd ../.. && scripts/gen_treesitter.sh       # grammar.js, highlights.scm, src/
 ```
 
+## Bindings
+
+The repository keeps the grammar, the generated parser (`src/`) and the queries,
+not language bindings (D111). To publish a package, generate them with
+`npx tree-sitter init` here (it writes `bindings/` and the packaging files
+around `grammar.js` and `tree-sitter.json`; `.gitignore` keeps them out of the
+repository) and publish from that working copy.
+
 ## Tests
 
 `tests/burn/test_grammar.py` (run with the burn suite, or `npm test` here)

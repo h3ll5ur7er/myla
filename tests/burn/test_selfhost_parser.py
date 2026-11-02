@@ -6,36 +6,29 @@ test asserts that, for every source file in the shared corpus, that dump is
 byte-for-byte identical to the Python oracle's (`myla parse --canonical`). That
 is the v0.6b structural-AST gate from docs/Development/Testing.md. For a source
 with syntax errors, both report every error the parser recovers from, in order
-(MYLA-65, D80).
+(MYLA-65, D80). The oracle's dumps are the retired Python parser's, recorded
+(`tests/burn/_golden.py`, MYLA-219).
 
-As with the lexer gate, the Myla parser runs as a *native binary* when the host
-can build one (which also checks interpreter/compiler parity of the toolchain
-that built it); otherwise it falls back to the interpreter.
+As with the lexer gate, the Myla parser runs as a *native binary* built by the
+self-hosted compiler, so the test needs a host that can build one (the
+interpreter fallback went with the Python toolchain).
 """
 from __future__ import annotations
 
 import glob
-import io
 import os
 import random
 import subprocess
 import tempfile
 import unittest
 
-from myla.canon import canonical_ast, canonical_errors
-from myla.errors import MylaError
-from myla.interpreter import Interpreter
-from myla.lexer import tokenize
-from myla.loader import default_stdlib_root, link
-from myla.parser import parse
-
-from ._native import CAN_BUILD_NATIVE
+from ._golden import answer_for_file, golden
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 )
-PARSE_TOOL = os.path.join(_REPO, "selfhost", "parse_main.my")
 
 
 def _corpus() -> list[str]:
@@ -46,7 +39,7 @@ def _corpus() -> list[str]:
         os.path.join(_REPO, "examples", "*.my"),
         os.path.join(_REPO, "examples", "**", "*.my"),
         os.path.join(_REPO, "examples", "errors", "*.my"),
-        os.path.join(_REPO, "src", "myla", "std", "*.my"),
+        os.path.join(_REPO, "lib", "std", "*.my"),
         os.path.join(_REPO, "selfhost", "*.my"),
     ]
     files: set[str] = set()
@@ -241,10 +234,15 @@ def _garbled(source: str, rng: random.Random, n: int) -> str:
     return "\n".join(lines)
 
 
+@golden("selfhost_parser.ast")
 def _canonical(source: str) -> str:
     """Canonical AST dump from the Python parser, or its errors as
     `err <line> <col> <span> <kind>: <message>` lines (what `parse_main`
     prints): the range a diagnostic underlines must agree too (MYLA-65)."""
+    from myla.canon import canonical_ast, canonical_errors
+    from myla.errors import MylaError
+    from myla.lexer import tokenize
+    from myla.parser import parse
     try:
         return canonical_ast(parse(tokenize(source)))
     except MylaError as err:
@@ -253,20 +251,17 @@ def _canonical(source: str) -> str:
 
 def _oracle(path: str) -> str:
     with open(path, "r", encoding="utf-8") as fh:
-        return _canonical(fh.read())
+        source = fh.read()
+    # skipped when the file changed after the retirement (selfhost/, tools/, std)
+    return answer_for_file(path, lambda: _canonical(source))
 
 
-def _check_file(path: str):
-    return link(path, stdlib_root=default_stdlib_root())
-
-
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedParserParity(unittest.TestCase):
     _binary: str | None = None
 
     @classmethod
     def setUpClass(cls) -> None:
-        if not CAN_BUILD_NATIVE:
-            return
         cls._binary = selfhost_tool("parse_main")
 
     def _myla_parse_source(self, source: str) -> str:
@@ -278,20 +273,11 @@ class SelfHostedParserParity(unittest.TestCase):
             os.unlink(fh.name)
 
     def _myla_parse(self, path: str) -> str:
-        if self._binary is not None:
-            proc = subprocess.run(
-                [self._binary, path], capture_output=True, text=True
-            )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            return proc.stdout.rstrip("\n")
-        # Interpreter fallback (no native toolchain on this host).
-        from myla.types import check
-
-        out = io.StringIO()
-        Interpreter(
-            check(_check_file(PARSE_TOOL)), out, argv=["parse_tool", path]
-        ).run()
-        return out.getvalue().rstrip("\n")
+        proc = subprocess.run(
+            [self._binary, path], capture_output=True, text=True
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.rstrip("\n")
 
     def test_corpus_ast_parity(self) -> None:
         checked = errors = 0

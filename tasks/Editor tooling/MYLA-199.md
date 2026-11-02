@@ -2,7 +2,7 @@
 id: MYLA-199
 title: Dependency updates of the VS Code extension (Dependabot)
 type: chore
-status: review
+status: done
 priority: medium
 labels: [vscode, dependencies, security]
 ---

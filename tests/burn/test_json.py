@@ -12,8 +12,10 @@ texts (characters deleted, inserted or duplicated, or the text cut short)
 must fail where Python fails, with Python's message and position (3.13's
 wording; older Pythons only have to fail too).
 
-The big corpus runs on the native builds of both backends, a small one on
-both interpreters. The modules' own `#test` cases run too.
+The big corpus runs on the self-hosted native build, a small one on the
+self-hosted interpreter. The modules' own `#test` cases run too. (The Python
+toolchain's backend and interpreter ran them as well until it was retired,
+MYLA-219.)
 """
 from __future__ import annotations
 
@@ -27,13 +29,8 @@ import sys
 import tempfile
 import unittest
 
-from myla.compiler import build
-from myla.loader import default_stdlib_root
-
-from ._native import CAN_BUILD_NATIVE, SKIP_REASON, check_file
-from ._tools import selfhost_tool
-
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 DRIVER = """from std.io import stdin, println, Reader
 from std.json import parse, to_string, JsonError
@@ -215,19 +212,16 @@ class JsonAgainstPython(unittest.TestCase):
         path = os.path.join(cls.tmp.name, "main.my")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(DRIVER)
-        py_native = os.path.join(cls.tmp.name, "py_native")
-        build(check_file(path), py_native)
         gen = selfhost_tool("gen_main")
-        asm = subprocess.run([gen, path, default_stdlib_root()], capture_output=True, text=True, check=True)
+        asm = subprocess.run([gen, path, STDLIB_ROOT], capture_output=True, text=True, check=True)
         sh_native = os.path.join(cls.tmp.name, "sh_native")
         with open(sh_native + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
         subprocess.run(["as", "--64", "-o", sh_native + ".o", sh_native + ".s"], check=True)
         subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
-        cls.native = {"python native": [py_native], "self-hosted native": [sh_native]}
+        cls.native = {"self-hosted native": [sh_native]}
         cls.interpreters = {
-            "python interpreter": [sys.executable, os.path.join(_REPO, "myla.py"), "run", path],
-            "self-hosted interpreter": [selfhost_tool("interp_main"), path, default_stdlib_root()],
+            "self-hosted interpreter": [selfhost_tool("interp_main"), path, STDLIB_ROOT],
         }
 
     @classmethod
@@ -287,8 +281,8 @@ class StdTests(unittest.TestCase):
     def test_the_modules_own_tests_pass(self) -> None:
         for name in ("num", "json"):
             with self.subTest(module=name):
-                path = os.path.join(_REPO, "src", "myla", "std", name + ".my")
-                proc = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), "test", path],
+                path = os.path.join(STDLIB_ROOT, "std", name + ".my")
+                proc = subprocess.run([selfhost_tool("main"), "test", path, "--stdlib", STDLIB_ROOT],
                                       capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 

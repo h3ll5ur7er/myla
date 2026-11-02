@@ -2,7 +2,7 @@
 id: MYLA-170
 title: A failure isn't reported while a sibling runs without a suspension point
 type: bug
-status: review
+status: done
 priority: medium
 labels: [concurrency, runtime]
 ---

@@ -23,7 +23,7 @@ function pathSetting(name: string): string {
   });
 }
 
-/** The repository's myla.py, which marks its root. */
+/** The repository's marker `selfhost/main.my` (its root two folders up). */
 function compilerEntry(): string | undefined {
   const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
   return findCompilerEntry(pathSetting("compilerPath"), folders, fs.existsSync);

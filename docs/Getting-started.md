@@ -4,14 +4,22 @@
 
 ## Requirements
 
-- **Python 3.12 or newer.** The Python toolchain has no third-party dependencies; `uv` is optional.
-- **GNU `as` and `ld`** (binutils) on x86-64 Linux, for native builds and the bootstrap.
+- **GNU `as` and `ld`** (binutils) on x86-64 Linux: they build the toolchain from its seed, and native programs.
+- **Python 3.12 or newer**, only to run the tests (standard library only; `uv` is optional).
+
+## Build the toolchain
+
+```bash
+scripts/bootstrap.sh            # output in ./build (gitignored); about 8 seconds
+```
+
+This builds the compiler from the committed seed `bootstrap/seed.s` (its own assembly, so only `as` and `ld` are needed), checks that it compiles itself to a byte-identical fixed point, and builds `build/myla`, the command-line tool, and `build/myla-lsp`, the language server. Details, stages and timings: [[Development/Bootstrap]].
 
 ## Run a program
 
 ```bash
-python3 myla.py run examples/hello.my          # or: uv run myla.py run …
-python3 myla.py run examples/args/main.my a b  # arguments after the file go to the program
+build/myla run examples/hello.my
+build/myla run examples/args/main.my a b       # arguments after the file go to the program
 ```
 
 `run` interprets the program and exits with its exit status (0, or the code passed to `std.process.exit`). A compile error or runtime error prints a diagnostic and exits 1; the carets underline what the error is about:
@@ -32,15 +40,13 @@ A run reports up to 20 errors: after a syntax error the parser goes on at the ne
 | --- | --- |
 | `myla run <file> [args…]` | Load modules, type-check, interpret |
 | `myla test <file>` | Run every `#test(args)[expected]` case; prints `PASS`/`FAIL` per case and exits 1 on a failure |
-| `myla build <file> [-o out] [--keep-asm] [-g]` | Compile to a static x86-64 ELF (`a.out` by default) through `as` and `ld`; `-g` adds DWARF debug information for gdb: line table, variables and types ([[Development/Debugging]]) |
-| `myla check <file> [--canonical]` | Type-check only, printing any warnings (D95); `--canonical` prints `ok` or `err <line> <col> <kind>` for differential tests, a warning as a `warn` line before `ok` |
-| `myla tokenize <file> [--canonical]` | Dump the token stream |
-| `myla parse <file> [--canonical]` | Dump the AST (`--canonical`: one S-expression per declaration) |
-| `myla repl` | Points to the REPL written in Myla: `build/myla repl` (built by `scripts/bootstrap.sh`, [[MYLA-82]]) |
+| `myla build <file> [-o out] [-g]` | Compile to a static x86-64 ELF (`a.out` by default) through `as` and `ld`; `-g` adds DWARF debug information for gdb: line table, variables and types ([[Development/Debugging]]) |
+| `myla check <file>` | Type-check only, printing any warnings (D95), then `ok` |
+| `myla repl` | The interactive interpreter ([[MYLA-82]]) |
 
-`run`, `test`, `build` and `check` take `--package name=dir` (repeatable), before or after the file: a dependency whose modules `import name` and `from name.shapes import …` find in `dir`, as if it were a directory `name/` next to the entry file ([[Language/Modules]]). The project commands below pass these flags themselves.
+`run`, `test`, `build`, `check` and `repl` take `--package name=dir` (repeatable), before or after the file: a dependency whose modules `import name` and `from name.shapes import …` find in `dir`, as if it were a directory `name/` next to the entry file ([[Language/Modules]]). The project commands below pass these flags themselves. `--stdlib <dir>` names the folder holding `std/`; by default it is `lib` next to the `build/` directory the binary is in, so `build/myla` works from any directory.
 
-All commands live in [[src/myla/cli.py]]; `myla.py` only puts `src/` on the import path. The self-hosted CLI, `build/myla` ([[selfhost/main.my]]), has `run`, `test` and `build` (printing what the Python ones print, [[MYLA-81]], and taking `--stdlib <dir>` and `--package name=dir` like the REPL) and the REPL:
+The commands live in [[selfhost/main.my]] and [[selfhost/driver.my]]. The REPL:
 
 ```text
 $ build/myla repl
@@ -56,7 +62,7 @@ Declarations accumulate, a final expression's value is shown as Myla source writ
 
 ## Projects
 
-The self-hosted CLI also works on projects: a directory with a manifest `myla.toml`, the program in `src/main.my`, and dependencies on other projects ([[Architecture/Project-tool]], D73). Without a file argument, its commands work on the project around the working directory:
+`build/myla` also works on projects: a directory with a manifest `myla.toml`, the program in `src/main.my`, and dependencies on other projects ([[Architecture/Project-tool]], D73). Without a file argument, its commands work on the project around the working directory:
 
 ```text
 $ build/myla new hello
@@ -116,19 +122,22 @@ fun main() {
     print(manhattan(p))
     print(f"({p.x}, {p.y})")
 }
+// output:
+// 7
+// (3, -4)
 ```
 
 ```bash
-python3 myla.py run point.my      # 7, then (3, -4)
-python3 myla.py test point.my     # PASS  manhattan #1
-python3 myla.py build point.my -o point && ./point
+build/myla run point.my      # 7, then (3, -4)
+build/myla test point.my     # PASS  manhattan #1
+build/myla build point.my -o point && ./point
 ```
 
 Every value-returning function in the examples carries `#test` cases; see [[Development/Conventions]]. The language itself is described in [[Language]].
 
 ## The examples, in reading order
 
-Each file in `examples/` is a runnable program with `#test` cases on its functions (`python3 myla.py run examples/<file>`, `python3 myla.py test examples/<file>`):
+Each file in `examples/` is a runnable program with `#test` cases on its functions (`build/myla run examples/<file>`, `build/myla test examples/<file>`):
 
 1. Basics: `hello.my`, `variables.my`, `types_and_aliases.my`, `functions.my`, `control_flow.my`, `loops.my`, `constants.my`
 2. Data: `structs.my`, `tuples.my`, `enums.my`, `option-result.my`, `recursion.my`
@@ -138,23 +147,20 @@ Each file in `examples/` is a runnable program with `#test` cases on its functio
 6. Concurrency: `concurrency.my`
 7. What the checker rejects: `examples/errors/`, one program per error, its expected message in its first line; and `regressions.my`, the accepted programs that once broke
 
-## Build the self-hosted compiler
+## Use the compiler directly
 
 ```bash
-scripts/bootstrap.sh            # output in ./build (gitignored); about 8 seconds
-build/stage3 examples/hello.my src/myla > hello.s
+build/stage3 examples/hello.my lib > hello.s
 as --64 -o hello.o hello.s && ld -o hello hello.o && ./hello
 ```
 
-The second argument of the self-hosted compiler is the folder that contains `std/` (by default `src/myla` next to its `build/` directory). The script also builds `build/myla`, the self-hosted command-line tool: `build/myla run|test|build <file.my>`. Details, stages and timings: [[Development/Bootstrap]].
+The second argument of the compiler is the folder that contains `std/` (by default `lib` next to its `build/` directory); `build/myla build` does the same in one step. Details: [[Development/Bootstrap]].
 
 ## Run the tests
 
 ```bash
-python3 -m unittest discover -s tests/unit -t .         # about 620 tests, about 6 s
-python3 -m unittest discover -s tests/integration -t .
-python3 -m unittest discover -s tests/burn -t .         # native builds and the self-hosting gates, several minutes
-scripts/test.sh fast                                    # unit, integration and the quick burn tests
+scripts/test.sh fast        # the quick burn tests, about 20 s once the tools are cached
+scripts/test.sh             # all of them (python3 -m unittest discover -s tests/burn -t .), about 2 minutes
 ```
 
 What each suite guarantees and the current results: [[Development/Testing]].

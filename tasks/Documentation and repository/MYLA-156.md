@@ -2,7 +2,7 @@
 id: MYLA-156
 title: CI maintenance - gdb in the burn job, actions off Node 20
 type: chore
-status: review
+status: done
 priority: medium
 labels: [ci]
 ---

@@ -1,6 +1,6 @@
 # Expressions and operators
 
-The parser implements precedence by one function per level (`Parser._pipe` down to `Parser._unary` in [[src/myla/parser.py]]); the operator typing rules are in `Checker._infer_binary` ([[src/myla/types.py]]).
+The parser implements precedence by one function per level (`pipe` down to `unary` in [[selfhost/parser.my]]); the operator typing rules are in `Checker.infer_binary` ([[selfhost/checker.my]]).
 
 [TOC]
 
@@ -32,7 +32,7 @@ From loosest to tightest. Every binary level is left-associative.
 - **Arithmetic** `+ - * / %`: both operands have the same integer or float type, and so does the result. An unsuffixed literal adopts the other operand's type. On a struct or enum, the operator calls the type's operator trait ([[Language/Methods-and-traits]]).
 - **Integer division** truncates toward zero; `%` has the sign of the dividend. Division or remainder by zero is a runtime error.
 - **Float arithmetic** follows IEEE-754: dividing by zero gives ±inf or NaN; `%` is `fmod`. A `float32` result is rounded to single precision after every operation.
-- **Overflow** wraps (two's complement) at the operand width, in both backends.
+- **Overflow** wraps (two's complement) at the operand width, in the interpreter and natively.
 - **Comparison** `< <= > >=`: same numeric type, or two `char`s. On structs and enums: through `Ord` (`a.cmp(b) < 0`).
 - **Equality** `== !=`: same type, one of integer, float, `char`, `bool` or `str`; structs and enums through `Eq`. Tuples, lists and maps can't be compared.
 - **Logic** `&& || !`: `bool` only.
@@ -50,7 +50,7 @@ From loosest to tightest. Every binary level is left-associative.
 | integer → float | Rounds to nearest |
 | float → integer | Truncates toward zero and saturates: out-of-range values and ±inf clamp to the target's minimum or maximum, NaN gives `0` (D59) |
 | float → float | Widens, or rounds to `float32` |
-| integer ↔ `char` | The codepoint, unchecked one way and wrapped the other |
+| integer ↔ `char` | Integer to `char`: the codepoint if it is a Unicode scalar (at most `0x10FFFF`, not a surrogate `0xD800`…`0xDFFF`), else a runtime error at the cast (`invalid char: 55296 is not a Unicode scalar value`; D98, [[MYLA-177]]); every `uint8` is one. `char` to integer: the codepoint, wrapped to the width |
 | `char` ↔ float, `bool`, `str` | Not allowed |
 
 The operand is typed without a hint from the target, so `300 as uint8` is `44`, not an error.
@@ -69,6 +69,10 @@ fun main() {
     print(f(1))
     print(triple(4))
 }
+// output:
+// 18
+// 3
+// 12
 ```
 
 - `x |> f` is `f(x)`, and `x |> f(a, b)` is `f(x, a, b)`. It is rewritten by the parser (D50).
@@ -99,11 +103,13 @@ fun main() {
         Err(e) => print(e)
     }
 }
+// output:
+// 11
 ```
 
 Inside a lambda, `?` returns from the lambda, so it needs the **lambda's** result type, not the enclosing function's: pass the lambda where a function type is expected, or annotate the variable it is bound to.
 
-```myla
+```myla fragment
 let next: (int) -> Option<int> = (x: int) => Some(half(x)? + 1)   // fine in any function
 let bad = (x: int) => Some(half(x)? + 1)     // error: the lambda's result type isn't known
 ```
@@ -116,6 +122,7 @@ Subexpressions evaluate left to right, in the interpreter and in native code ali
 
 - A binary operator evaluates its left operand, then its right. `&&` and `||` skip the right operand when the left one decides.
 - A call evaluates the arguments in order; a method call evaluates the receiver first, and a call through a function value evaluates the callee first. `x |> f(y)` is `f(x, y)`, so `x` comes first.
+- A `var self` method writes into its receiver, so it takes the receiver's place first (its indices, once) and its value only after the arguments, as `push` does: in `c.add(c.bump_get())` the change `bump_get` makes to `c` is kept ([[MYLA-238]]). A read-only receiver's value, and every argument's, is taken when it is evaluated: a later argument that writes the same variable (`c.plus(c.bump_get())`, `f(d, d.bump_get())`) doesn't change what was passed ([[MYLA-237]]).
 - Struct, tuple, list and enum literals evaluate their elements in the order written (a struct literal in the order of its fields as written, not as declared). A map literal evaluates each key, then its value.
 - `format` and `f"…"` evaluate their arguments left to right.
 - A partial application `f(a, _)` evaluates its receiver and filled arguments when it is made (D60). `_` stands only as a call argument (`'_' placeholder is only valid as a call argument`).

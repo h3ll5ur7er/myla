@@ -1,0 +1,89 @@
+// 14. An awaited `var self` method of a struct held in an actor's field
+// (MYLA-169, D99): it works on a copy and its final `self` is written back to
+// the field when it returns, as for a list element (MYLA-142). The actor's
+// other calls run while it waits, so a change they make to the same field in
+// that time is replaced by the write-back: here once, at a moment a gate fixes.
+actor Gate {
+    reached: bool,
+    open: bool,
+}
+
+impl Gate {
+    fun arrive(var self) {
+        self.reached = true
+    }
+    fun has_arrived(self) -> bool {
+        return self.reached
+    }
+    fun let_through(var self) {
+        self.open = true
+    }
+    fun is_open(self) -> bool {
+        return self.open
+    }
+}
+
+struct Tally {
+    n: int,
+    log: [int],
+}
+
+impl Tally {
+    async fun bump(var self, g: Gate, wait: bool) -> int {
+        if wait {
+            await g.arrive()
+            while !(await g.is_open()) {
+            }
+        }
+        self.n = self.n + 1
+        push(self.log, self.n)
+        return self.n
+    }
+}
+
+actor Shop {
+    t: Tally,
+}
+
+impl Shop {
+    async fun sell(var self, g: Gate, wait: bool) -> int {
+        return await self.t.bump(g, wait)
+    }
+    fun poke(var self) {
+        self.t.n = self.t.n + 100
+    }
+    fun count(self) -> int {
+        return self.t.n
+    }
+    fun entries(self) -> int {
+        return len(self.t.log)
+    }
+}
+
+async fun poke_while_it_waits(s: Shop, g: Gate) -> int {
+    while !(await g.has_arrived()) {
+    }
+    await s.poke()
+    await g.let_through()
+    return 0
+}
+
+#main
+async fun main() {
+    // one after the other: every call's change is kept
+    let s = Shop { t: Tally { n: 0, log: [] } }
+    let g0 = Gate { reached: false, open: true }
+    for i in 0..1000 {
+        let r = await s.sell(g0, false)
+        await s.poke()
+    }
+    print(await s.count())
+    // a poke while a call waits: the call's write-back replaces it
+    let shop = Shop { t: Tally { n: 0, log: [] } }
+    let g = Gate { reached: false, open: false }
+    async let seller = shop.sell(g, true)
+    async let poker = poke_while_it_waits(shop, g)
+    let sold = await seller
+    let p = await poker
+    print(f"{sold} {await shop.count()} {await shop.entries()}")
+}

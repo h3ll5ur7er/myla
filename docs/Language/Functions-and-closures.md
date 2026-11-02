@@ -14,6 +14,8 @@ fun clamp(x: int, lo: int, hi: int) -> int {
 fun main() {
     print(clamp(15, 0, 10))
 }
+// output:
+// 10
 ```
 
 - Parameter and result types are always written; a function without `-> T` returns nothing.
@@ -45,6 +47,11 @@ fun main() {
     print(twice((x) => x * 3, 1))          // parameter type from the expected type
     print(add(2, 3) + square(4))
 }
+// output:
+// 3
+// 21
+// 9
+// 21
 ```
 
 - A **lambda** is `(params) => expression` or `(params) => { block }`. Parameter types may be left out when the lambda is passed where a function type is expected; otherwise they're required. The result type is inferred from the body (for a block, from its `return`s).

@@ -4,21 +4,19 @@
 program (which also uses argv, the I/O streams, and exit) plus focused parity
 programs are linked against the bundled stdlib and run through both the
 interpreter and the native compiler, which must agree on stdout, stderr, and the
-process exit status — including the errno-keyed `IoError` paths.
+process exit status — including the errno-keyed `IoError` paths. (The
+interpreter's answers are the retired Python interpreter's, recorded; MYLA-219.)
 
 The directory functions (`list_dir`, `make_dir`, `make_dir_all`, `exists`,
-`is_dir`, `is_file`; MYLA-88) are run in all four implementations: the Python
-interpreter, the Python native backend, the self-hosted interpreter and the
+`is_dir`, `is_file`; MYLA-88) are run in the self-hosted interpreter and the
 self-hosted native backend, each in a fresh working directory; so is
-`current_dir` (MYLA-98), also in a working directory that was removed."""
+`current_dir` (MYLA-98), also in a working directory that was removed. (They
+ran in the Python interpreter and the Python native backend too until those
+were retired, MYLA-219.)"""
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
-
-from myla.compiler import build
-from myla.loader import default_stdlib_root
 
 from ._native import (
     CAN_BUILD_NATIVE,
@@ -28,10 +26,7 @@ from ._native import (
     interpret_full,
     write_program,
 )
-from ._tools import selfhost_tool
-from tests.unit.test_fs import CWD_PROGRAM, FS_TOUR, FS_TOUR_OUTPUT
-
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 EXAMPLE = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir,
@@ -200,6 +195,140 @@ class TestWriteToFileParity(unittest.TestCase):
         self.assertEqual(out, "21\n")   # EISDIR on Linux
 
 
+# Every directory function of `std.fs` on relative paths, so it can run in a
+# fresh working directory (MYLA-88). It was shared with the unit tests of the
+# retired Python toolchain; `DirectoryParity` runs it in both implementations.
+FS_TOUR = """from std.io import println
+from std.fs import list_dir, make_dir, make_dir_all, exists, is_dir, is_file, write_to_file, IoError
+
+fun describe(e: IoError) -> str {
+    return match e {
+        IoError.NotFound => "not found"
+        IoError.PermissionDenied => "permission denied"
+        IoError.Other(code) => format("errno {}", code)
+    }
+}
+
+fun joined(names: [str]) -> str {
+    var sb = StringBuilder()
+    for n in names {
+        if len(sb) > 0 { append(sb, ",") }
+        append(sb, n)
+    }
+    return build(sb)
+}
+
+fun show(label: str, r: Result<[str], IoError>) {
+    match r {
+        Ok(names) => { println(format("{}: {} [{}]", label, len(names), joined(names))) },
+        Err(e) => { println(format("{}: {}", label, describe(e))) },
+    }
+}
+
+fun made(label: str, r: Result<int32, IoError>) {
+    match r {
+        Ok(n) => { println(format("{}: ok {}", label, n)) },
+        Err(e) => { println(format("{}: {}", label, describe(e))) },
+    }
+}
+
+fun kind(path: str) {
+    println(format("'{}': exists {} dir {} file {}", path, exists(path), is_dir(path), is_file(path)))
+}
+
+fun touch(path: str) {
+    match write_to_file(path, path) {
+        Ok(n) => {},
+        Err(e) => { println(format("write {}: {}", path, describe(e))) },
+    }
+}
+
+fun main() {
+    show("empty", list_dir("."))
+    made("make a", make_dir("a"))
+    made("make a again", make_dir("a"))
+    made("make in missing", make_dir("missing/b"))
+    made("make all", make_dir_all("deep/er/est"))
+    made("make all again", make_dir_all("deep/er/est"))
+    made("make all trailing", make_dir_all("deep/er/est2/"))
+    for name in ["zeta.txt", "Alpha", "beta", "λ.my", "_under", "10", "9", ".hidden", "a b"] {
+        touch("a/" + name)
+    }
+    made("make sub", make_dir("a/sub"))
+    show("a", list_dir("a"))
+    show("a/", list_dir("a/"))
+    show("deep", list_dir("deep/er"))
+    show("file", list_dir("a/beta"))
+    show("missing", list_dir("missing"))
+    made("make all through a file", make_dir_all("a/beta/c"))
+    made("make all over a file", make_dir_all("a/beta"))
+    kind(".")
+    kind("a")
+    kind("a/beta")
+    kind("a/sub/")
+    kind("missing")
+    kind("a/beta/x")
+    kind("")
+    made("make many", make_dir("many"))
+    var i = 0
+    while i < 300 {
+        touch(format("many/entry-number-{}-with-a-longer-name.txt", i))
+        i = i + 1
+    }
+    match list_dir("many") {
+        Ok(names) => { println(format("many: {} first {} last {}", len(names), names[0], names[len(names) - 1])) },
+        Err(e) => { println(format("many: {}", describe(e))) },
+    }
+}
+"""
+
+FS_TOUR_OUTPUT = """empty: 0 []
+make a: ok 0
+make a again: errno 17
+make in missing: not found
+make all: ok 0
+make all again: ok 0
+make all trailing: ok 0
+make sub: ok 0
+a: 10 [.hidden,10,9,Alpha,_under,a b,beta,sub,zeta.txt,λ.my]
+a/: 10 [.hidden,10,9,Alpha,_under,a b,beta,sub,zeta.txt,λ.my]
+deep: 2 [est,est2]
+file: errno 20
+missing: not found
+make all through a file: errno 20
+make all over a file: errno 17
+'.': exists true dir true file false
+'a': exists true dir true file false
+'a/beta': exists true dir false file true
+'a/sub/': exists true dir true file false
+'missing': exists false dir false file false
+'a/beta/x': exists false dir false file false
+'': exists false dir false file false
+make many: ok 0
+many: 300 first entry-number-0-with-a-longer-name.txt last entry-number-99-with-a-longer-name.txt
+"""
+
+# Prints the working directory twice: `current_dir`'s result, and whether it
+# names a directory (MYLA-98). `DirectoryParity` runs it in both
+# implementations, in a directory that exists and in one that was removed.
+CWD_PROGRAM = """from std.io import println
+from std.fs import current_dir, is_dir, IoError
+
+fun main() {
+    match current_dir() {
+        Ok(d) => { println(format("{} {}", d, is_dir(d))) },
+        Err(e) => {
+            match e {
+                IoError.NotFound => { println("not found") },
+                IoError.PermissionDenied => { println("permission denied") },
+                IoError.Other(code) => { println(format("errno {}", code)) },
+            }
+        },
+    }
+}
+"""
+
+
 # A directory with many entries of every length from 1 to 255 bytes (the
 # longest name Linux allows), so getdents64 fills its buffer many times and
 # the native result grows several times over.
@@ -274,8 +403,7 @@ def prepare_tree(work: str) -> None:
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class DirectoryParity(unittest.TestCase):
     """The same program, in a fresh working directory, prints the same in the
-    Python interpreter, the Python native backend, the self-hosted interpreter
-    and the self-hosted native backend (MYLA-88)."""
+    self-hosted interpreter and the self-hosted native backend (MYLA-88)."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -294,9 +422,7 @@ class DirectoryParity(unittest.TestCase):
         path = os.path.join(d, "main.my")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(source)
-        py_native = os.path.join(d, "py_native")
-        build(check_file(path), py_native)
-        asm = subprocess.run([self.gen, path, default_stdlib_root()],
+        asm = subprocess.run([self.gen, path, STDLIB_ROOT],
                              capture_output=True, text=True, check=True)
         sh_native = os.path.join(d, "sh_native")
         with open(sh_native + ".s", "w", encoding="utf-8") as fh:
@@ -304,9 +430,7 @@ class DirectoryParity(unittest.TestCase):
         subprocess.run(["as", "--64", "-o", sh_native + ".o", sh_native + ".s"], check=True)
         subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
         return {
-            "python interpreter": [sys.executable, os.path.join(_REPO, "myla.py"), "run", path],
-            "python native": [py_native],
-            "self-hosted interpreter": [self.interp, path, default_stdlib_root()],
+            "self-hosted interpreter": [self.interp, path, STDLIB_ROOT],
             "self-hosted native": [sh_native],
         }
 

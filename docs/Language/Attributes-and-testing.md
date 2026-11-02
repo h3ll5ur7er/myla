@@ -9,7 +9,7 @@ An attribute is written on the lines above a declaration: `#name`, optionally fo
 | Attribute | On | Meaning |
 | --- | --- | --- |
 | `#main` | a non-generic function without parameters | The entry point, instead of the function named `main` |
-| `#test(args)[expected]` | a non-generic function with a result | One test case; several may be stacked |
+| `#test(args)[expected]` | a non-generic function or method with a result | One test case; several may be stacked. On a method the receiver is the first argument (D116) |
 | `#derive(Eq)` | a non-generic struct or enum | Structural equality ([[Language/Methods-and-traits]]); `Eq` is the only trait that can be derived (`cannot derive 'Ord': only 'Eq' is derivable`) |
 
 ## #test
@@ -27,11 +27,29 @@ fun add(a: int, b: int) -> int {
 fun main() {
     print(add(1, 2))
 }
+// output:
+// 3
 ```
 
 - The arguments must match the parameters and the single expected value the result type; both are checked at compile time. They may use literals, constants, struct literals, enum constructors and other expressions without local variables.
-- `myla test file.my` runs the cases declared in `file.my` itself, not those of the modules it imports, the standard library's included ([[MYLA-187]]); test a module by naming it. It calls the function for each case in the interpreter and compares the result with the expected value structurally (maps whatever their order). A runtime error (`panic`, a failed `assert` included) fails the case, and so does `exit(n)`; the other cases still run. Once all have run, it prints `PASS  add #1` or `FAIL  add #2: expected 101, got 100` for each (values as the Python interpreter's repr shows them: `True`, `'text'`, chars as code points, `P { x: 1 }`, `E.B(2)`), `FAIL  f #1: runtime error: <message>` or `FAIL  f #1: exited with status 3`, and a summary; the exit status is 1 if anything failed. The Python CLI and the self-hosted `build/myla test` print the same ([[MYLA-81]]); output from the tests themselves comes before the report.
+- `myla test file.my` runs the cases declared in `file.my` itself, not those of the modules it imports, the standard library's included ([[MYLA-187]]); test a module by naming it. It calls the function for each case in the interpreter and compares the result with the expected value structurally (maps whatever their order). A runtime error (`panic`, a failed `assert` included) fails the case, and so does `exit(n)`; the other cases still run. Once all have run, it prints `PASS  add #1` or `FAIL  add #2: expected 101, got 100` for each (values as the Python interpreter's repr shows them: `True`, `'text'`, chars as code points, `P { x: 1 }`, `E.B(2)`), `FAIL  f #1: runtime error: <message>` or `FAIL  f #1: exited with status 3`, and a summary; the exit status is 1 if anything failed. This is what the Python CLI printed, and `build/myla test` prints the same ([[MYLA-81]]); output from the tests themselves comes before the report.
 - `#test` never affects `run` or `build`.
+- **Methods** (D116) take cases too, written above the method inside its `impl`; the receiver is the first argument, and the report names the case `Type.method` (`PASS  Counter.get #1`, `int32.double #1` for a method on `int`):
+
+  ```myla
+  struct Counter {
+      n: int,
+  }
+
+  impl Counter {
+      #test(Counter { n: 2 }, 3)[5]
+      fun plus(self, k: int) -> int {
+          return self.n + k
+      }
+  }
+  ```
+
+  For a `var self` method only the result is compared, not the changed receiver. A method of a generic `impl` or with type parameters of its own, an actor's method (its receiver is a running actor, not a value) and an `async` method can't have cases; `#test` is the only attribute a method takes.
 
 Every value-returning function in `examples/` carries tests, and the burn tests enforce that ([[Development/Conventions]]); in `selfhost/` some do ([[MYLA-184]]). A `#test` in an imported module can use that module's own declarations ([[MYLA-11]]).
 

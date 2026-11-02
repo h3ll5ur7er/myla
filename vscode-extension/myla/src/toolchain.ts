@@ -24,9 +24,19 @@ export function expandPath(value: string, env: { home: string; folder: string })
   return out.replace(/\$\{workspaceFolder\}/g, env.folder).replace(/\$\{userHome\}/g, env.home);
 }
 
+/** The file that marks the repository's root: the CLI's source. */
+export const ROOT_MARKER = path.join("selfhost", "main.my");
+
+/** The repository's root, from the marker `findCompilerEntry` found. */
+export function repoRootOf(entry: string): string {
+  return path.dirname(path.dirname(entry));
+}
+
 /**
- * The repository's `myla.py`, which marks its root: `myla.compilerPath` (the
- * root or `myla.py` itself), else the first workspace folder that has one.
+ * The repository's marker file `selfhost/main.my` (MYLA-219: `myla.py` marked
+ * it until the Python toolchain was retired): `myla.compilerPath` (the root,
+ * or a file directly in it, such as an old `myla.py` setting), else the first
+ * workspace folder that has one.
  */
 export function findCompilerEntry(
   configured: string,
@@ -34,26 +44,21 @@ export function findCompilerEntry(
   exists: (p: string) => boolean,
 ): string | undefined {
   if (configured) {
-    if (configured.endsWith(".py")) return exists(configured) ? configured : undefined;
-    const candidate = path.join(configured, "myla.py");
+    const root = /\.[a-z]+$/.test(configured) ? path.dirname(configured) : configured;
+    const candidate = path.join(root, ROOT_MARKER);
     return exists(candidate) ? candidate : undefined;
   }
   for (const folder of workspaceFolders) {
-    const candidate = path.join(folder, "myla.py");
+    const candidate = path.join(folder, ROOT_MARKER);
     if (exists(candidate)) return candidate;
   }
   return undefined;
 }
 
-/** A `.py` path runs with python3, anything else is the program itself. */
-function asCommand(cli: string): Toolchain {
-  return cli.endsWith(".py") ? { command: "python3", args: [cli] } : { command: cli, args: [] };
-}
-
 /**
  * The `myla` CLI for run, test, build and debug builds: `myla.cliPath`, else
  * the self-hosted `build/myla` of the repository (built by
- * `scripts/bootstrap.sh`), else the Python CLI `python3 myla.py`.
+ * `scripts/bootstrap.sh`).
  */
 export function chooseCli(
   settings: { cliPath: string; compilerEntry: string | null | undefined },
@@ -62,18 +67,17 @@ export function chooseCli(
   const configured = settings.cliPath;
   if (configured) {
     // a bare name such as `myla` is looked up on PATH when it runs
-    if (!configured.includes("/") || exists(configured)) return asCommand(configured);
+    if (!configured.includes("/") || exists(configured)) return { command: configured, args: [] };
     return { missing: `The myla CLI set in 'myla.cliPath' doesn't exist: ${configured}` };
   }
   const entry = settings.compilerEntry ?? undefined;
   if (entry) {
-    const built = path.join(path.dirname(entry), "build", "myla");
-    if (exists(built)) return asCommand(built);
-    if (exists(entry)) return asCommand(entry);
+    const built = path.join(repoRootOf(entry), "build", "myla");
+    if (exists(built)) return { command: built, args: [] };
   }
   return {
     missing:
-      "The myla CLI wasn't found: open the Myla repository (build it with scripts/bootstrap.sh), or set 'myla.cliPath' or 'myla.compilerPath'.",
+      "The myla CLI wasn't found: open the Myla repository and build it with scripts/bootstrap.sh, or set 'myla.cliPath'.",
   };
 }
 

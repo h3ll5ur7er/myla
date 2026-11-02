@@ -13,9 +13,14 @@ the corpus, the binary produced by the self-hosted backend must have the same
 interpreter).
 
 How the assembly is produced. The self-hosted compiler is itself a Myla
-program: `gen_main.my` is compiled once by the Python backend (cached by
+program: `gen_main.my` is compiled once natively (cached by
 `_tools.selfhost_tool`) and that binary is invoked per example, so the
 *assembly under test* is emitted by the Myla-written backend.
+
+The Python oracle's answers (its interpreter's output, its CLI's diagnostics)
+are recorded (`tests/burn/_golden.py`, MYLA-219): the oracle functions below
+run the retired Python toolchain only when recording. The comparisons with the
+Python backend's binaries went with it.
 
 Scope. The corpus gate covers the single-file top-level examples (`floats.my`
 included since MYLA-29). Multi-module programs (`examples/modules` and the
@@ -34,14 +39,9 @@ import sys
 import tempfile
 import unittest
 
-from myla.interpreter import Interpreter
-from myla.lexer import tokenize
-from myla.loader import default_stdlib_root, link
-from myla.parser import parse
-from myla.types import check
-
+from ._golden import golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._tools import selfhost_tool
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
@@ -479,13 +479,133 @@ def _corpus() -> list[str]:
     return sorted(f for f in files if os.path.basename(f) not in EXCLUDED)
 
 
+def _modules(entry: str) -> list[str]:
+    """The files of the project whose entry is `entry` besides the entry, so
+    that a recorded answer is keyed by every module of the program."""
+    root = os.path.dirname(entry)
+    files = glob.glob(os.path.join(root, "**", "*.my"), recursive=True)
+    return sorted(f for f in files if f != entry)
+
+
+@golden("selfhost_codegen.run")
 def _oracle(path: str) -> tuple[str, int]:
     """(stdout, exit code) from the Python interpreter for `path`."""
+    from myla.interpreter import Interpreter
+    from myla.lexer import tokenize
+    from myla.parser import parse
+    from myla.types import check
+
     with open(path, "r", encoding="utf-8") as fh:
         source = fh.read()
     out = io.StringIO()
     code = Interpreter(check(parse(tokenize(source))), out).run()
     return out.getvalue(), code
+
+
+@golden("selfhost_codegen.linked_run")
+def _linked_oracle(path: str, modules: list[str]) -> tuple[str, int]:
+    """(stdout, exit code) of the Python `link` + interpreter for the program
+    whose entry is `path`; `modules` (its other files) only key the recorded
+    answer."""
+    from myla.interpreter import Interpreter
+    from myla.loader import default_stdlib_root, link
+    from myla.types import check
+
+    out = io.StringIO()
+    checker = check(link(path, stdlib_root=default_stdlib_root()))
+    code = Interpreter(checker, out, argv=[path]).run()
+    return out.getvalue(), code
+
+
+@golden("selfhost_codegen.cli_run")
+def _cli_oracle(entry: str) -> tuple[str, str, int]:
+    """(stdout, stderr, exit code) of the Python `myla run` for `entry` (a
+    single module): its output, then a runtime error rendered as the CLI
+    prints it (as `test_selfhost_interp._cli_oracle`)."""
+    from myla.errors import MylaError
+    from myla.interpreter import Interpreter
+    from myla.loader import default_stdlib_root, link
+    from myla.types import check
+
+    out = io.StringIO()
+    try:
+        code = Interpreter(check(link(entry, stdlib_root=default_stdlib_root())), out,
+                           argv=[entry]).run()
+        return out.getvalue(), "", code
+    except MylaError as err:
+        path = err.path or entry
+        source = None
+        if err.line is not None:
+            with open(path, encoding="utf-8") as fh:
+                source = fh.read()
+        return out.getvalue(), err.render(source, path) + "\n", 1
+
+
+@golden("selfhost_codegen.runtime_error")
+def _runtime_error_oracle(path: str) -> tuple[str, int, int] | None:
+    """The Python interpreter's stdout and the line and column of the runtime
+    error it stops `path` with (None if it doesn't)."""
+    from myla.errors import MylaRuntimeError
+    from myla.interpreter import Interpreter
+    from myla.loader import default_stdlib_root, link
+    from myla.types import check
+
+    out = io.StringIO()
+    try:
+        Interpreter(check(link(path, stdlib_root=default_stdlib_root())), out).run()
+    except MylaRuntimeError as err:
+        return out.getvalue(), err.line, err.column
+    return None
+
+
+@golden("selfhost_codegen.diagnostic")
+def _diagnostic_oracle(entry: str, modules: list[str]) -> str | None:
+    """The Python CLI's diagnostic for `entry` (None if it accepts the
+    program); `modules` (the program's other files) only key the recorded
+    answer."""
+    from myla.errors import MylaError
+    from myla.loader import default_stdlib_root, link
+    from myla.types import check
+
+    try:
+        check(link(entry, stdlib_root=default_stdlib_root()))
+    except MylaError as err:
+        # every error in its file, then a summary line (MYLA-65, D80)
+        shown = []
+        for e in (err, *err.more):
+            path = e.path or entry
+            with open(path, encoding="utf-8") as fh:
+                shown.append(e.render(fh.read(), path))
+        if err.more:
+            shown.append(f"error: aborting due to {len(shown)} previous errors")
+        return "\n\n".join(shown)
+    return None
+
+
+# A plain enum's derived `eq` (MYLA-87) and the reader of a function's
+# instructions, as the Python backend's tests have them (tests/unit/
+# test_compiler.py, which needs the retired toolchain).
+PLAIN_ENUM_EQ = (
+    "#derive(Eq)\nenum K { " + ", ".join(f"V{i}" for i in range(40)) + " }\n"
+    "#derive(Eq)\nenum P { A(int), B }\n"
+    "fun main() {\n    print(K.V3 == K.V39)\n    print(P.A(1) == P.B)\n}\n"
+)
+
+
+def function_body(asm: str, label: str) -> list[str]:
+    """The instruction lines of the function at `label`, up to its `ret`
+    (`ret $n` where the callee pops its arguments, MYLA-126)."""
+    lines = asm.splitlines()
+    start = lines.index(label + ":")
+    body = []
+    for line in lines[start + 1:]:
+        line = line.strip()
+        if not line or line.startswith("."):
+            continue
+        body.append(line)
+        if line == "ret" or line.startswith("ret $"):
+            return body
+    raise AssertionError(f"no ret after {label}")
 
 
 # MYLA-121: a loop, recursion keeping a value across a call, and a method
@@ -530,8 +650,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        # The Myla compiler, built natively by the Python backend (cached), so
-        # emitting the assembly under test is a fast subprocess call.
+        # The Myla compiler, built natively by the self-hosted compiler
+        # (cached), so emitting the assembly under test is a fast subprocess
+        # call.
         cls._binary = selfhost_tool("gen_main")
 
     def _emit_asm(self, path: str, stdlib_root: str | None = None, flags: tuple = ()) -> str:
@@ -577,7 +698,6 @@ class SelfHostedCodegenParity(unittest.TestCase):
 
     def test_derived_eq_on_a_plain_enum_compares_tags(self) -> None:
         # MYLA-87: a few instructions, however many variants
-        from tests.unit.test_compiler import PLAIN_ENUM_EQ, function_body
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "eq.my")
             with open(path, "w", encoding="utf-8") as fh:
@@ -599,44 +719,31 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertGreater(checked, 20)
 
     def test_runtime_errors_match_the_python_backend(self) -> None:
-        # Every runtime error of the error corpus: the same stdout, stderr
-        # (`runtime error: <message>` and `  --> file:line:col`) and exit
-        # status as the Python backend's binary, at the interpreter's position
-        # (MYLA-65, MYLA-66).
-        from myla.compiler import build
-        from myla.errors import MylaRuntimeError
-
+        # Every runtime error of the error corpus: stderr `runtime error:
+        # <message>` and `  --> file:line:col`, at the interpreter's position,
+        # exit status 1 (MYLA-65, MYLA-66), after what the interpreter printed.
+        # (It also compared stdout and stderr with the Python backend's
+        # binary, retired with it, MYLA-219.)
         runtime = sorted(glob.glob(os.path.join(_REPO, "examples", "errors", "runtime_*.my")))
         self.assertGreater(len(runtime), 8)
         for path in runtime:
             with self.subTest(file=os.path.basename(path)), tempfile.TemporaryDirectory() as tmp:
-                with self.assertRaises(MylaRuntimeError) as ctx:
-                    Interpreter(check(link(path, stdlib_root=default_stdlib_root())),
-                                io.StringIO()).run()
-                err = ctx.exception
-                binary = os.path.join(tmp, "py")
-                build(check(link(path, stdlib_root=default_stdlib_root())), binary, entry_path=path)
-                py = subprocess.run([binary], capture_output=True, text=True)
+                interp = _runtime_error_oracle(path)
+                self.assertIsNotNone(interp, "the interpreter ran it without a runtime error")
+                want_out, line, column = interp
                 asm = os.path.join(tmp, "self.s")
                 with open(asm, "w", encoding="utf-8") as fh:
                     fh.write(self._emit_asm(path))
                 subprocess.run(["as", "--64", "-o", asm + ".o", asm], check=True)
                 subprocess.run(["ld", "-o", asm + ".bin", asm + ".o"], check=True)
                 sh = subprocess.run([asm + ".bin"], capture_output=True, text=True)
-                self.assertEqual((sh.stdout, sh.stderr, sh.returncode),
-                                 (py.stdout, py.stderr, py.returncode))
-                self.assertEqual(sh.returncode, 1)
-                self.assertTrue(sh.stderr.endswith(f"\n  --> {path}:{err.line}:{err.column}\n"),
+                self.assertEqual((sh.stdout, sh.returncode), (want_out, 1))
+                self.assertTrue(sh.stderr.startswith("runtime error: "), sh.stderr)
+                self.assertTrue(sh.stderr.endswith(f"\n  --> {path}:{line}:{column}\n"),
                                 sh.stderr)
 
-    def _linked_oracle(self, path: str) -> tuple[str, int]:
-        out = io.StringIO()
-        checker = check(link(path, stdlib_root=default_stdlib_root()))
-        code = Interpreter(checker, out, argv=[path]).run()
-        return out.getvalue(), code
-
     def test_module_programs_match_the_oracle(self) -> None:
-        stdlib = default_stdlib_root()
+        stdlib = STDLIB_ROOT
         entries = {"examples/modules": os.path.join(_REPO, "examples", "modules", "main.my")}
         with tempfile.TemporaryDirectory() as tmp:
             for name, files in MODULE_PROJECTS.items():
@@ -644,44 +751,33 @@ class SelfHostedCodegenParity(unittest.TestCase):
             for name, entry in entries.items():
                 with self.subTest(program=name):
                     out, code = self._build_and_run(self._emit_asm(entry, stdlib))
-                    expected, _ = self._linked_oracle(entry)
+                    expected, _ = _linked_oracle(entry, _modules(entry))
                     self.assertEqual((out, code), (expected, 0))
 
-    def _assert_diagnostic_matches(self, entry: str, stdlib: str) -> None:
+    def _assert_diagnostic_matches(self, entry: str, stdlib: str, modules: list[str]) -> None:
         """The self-hosted compiler rejects `entry` with exactly the Python
-        CLI's diagnostic, carets included."""
-        from myla.errors import MylaError
-
-        with self.assertRaises(MylaError) as ctx:
-            check(link(entry, stdlib_root=stdlib))
-        err = ctx.exception
-        # every error in its file, then a summary line (MYLA-65, D80)
-        shown = []
-        for e in (err, *err.more):
-            path = e.path or entry
-            with open(path, encoding="utf-8") as fh:
-                shown.append(e.render(fh.read(), path))
-        if err.more:
-            shown.append(f"error: aborting due to {len(shown)} previous errors")
-        expected = "\n\n".join(shown)
+        CLI's diagnostic, carets included; `modules` are the program's other
+        files."""
+        expected = _diagnostic_oracle(entry, modules)
+        self.assertIsNotNone(expected, "the Python toolchain accepted the program")
         proc = subprocess.run(
             [self._binary, entry, stdlib], capture_output=True, text=True
         )
         self.assertEqual((proc.returncode, proc.stderr), (1, expected + "\n"))
 
     def test_module_errors_match_the_python_loader(self) -> None:
-        stdlib = default_stdlib_root()
+        stdlib = STDLIB_ROOT
         with tempfile.TemporaryDirectory() as tmp:
             for name, files in MODULE_ERRORS.items():
                 with self.subTest(program=name):
                     entry = _write_project(os.path.join(tmp, name), files)
-                    self._assert_diagnostic_matches(entry, stdlib)
+                    self._assert_diagnostic_matches(entry, stdlib, _modules(entry))
 
     def test_diagnostics_match_the_python_cli(self) -> None:
         # every lex, parse, module and type error of the corpus, and ranges
         # that run past their line, hold other characters or sit in an
         # f-string: the same text, the same carets (MYLA-65)
-        stdlib = default_stdlib_root()
+        stdlib = STDLIB_ROOT
         cases = {os.path.basename(p): p for p in glob.glob(os.path.join(_REPO, "examples", "errors", "*.my"))
                  if not os.path.basename(p).startswith("runtime_")}
         self.assertGreater(len(cases), 100)
@@ -691,7 +787,10 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 cases[name] = _write_project(os.path.join(tmp, name), files)
             for name, entry in sorted(cases.items()):
                 with self.subTest(case=name):
-                    self._assert_diagnostic_matches(entry, stdlib)
+                    # the examples are single files; each case of DIAGNOSTICS
+                    # has a directory of its own
+                    modules = _modules(entry) if name in DIAGNOSTICS else []
+                    self._assert_diagnostic_matches(entry, stdlib, modules)
 
     def test_stress_programs_reclaim_memory(self) -> None:
         from . import test_compiler_parity
@@ -1236,11 +1335,11 @@ class SelfHostedCodegenParity(unittest.TestCase):
         natively (D90, D91: tasks taking turns on one thread), print and exit
         as the Python interpreter does; a program without `async let` also
         with its async functions on frames (`--async-frames`)."""
-        from .test_selfhost_interp import CONCURRENCY_PROGRAMS, _cli_oracle
+        from .test_selfhost_interp import CONCURRENCY_PROGRAMS
 
         cases = dict(ACTOR_PROGRAMS)
         cases.update(CONCURRENCY_PROGRAMS)
-        stdlib = default_stdlib_root()
+        stdlib = STDLIB_ROOT
         for name, src in cases.items():
             modes = [()] if "async let" in src or "task." in src else [(), ("--async-frames",)]
             for flags in modes:
@@ -1262,7 +1361,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             path = os.path.join(tmp, "deep.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(DEEP_TASKS)
-            out, code, peak = self._build_and_measure(self._emit_asm(path, default_stdlib_root()))
+            out, code, peak = self._build_and_measure(self._emit_asm(path, STDLIB_ROOT))
             self.assertEqual((out, code), ("8997000\n3000\n100000\n", 0))
             self.assertLess(peak, 64, f"peak {peak:.1f} MB")
 
@@ -1272,7 +1371,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
         reported (D97; it used to wait for the parent's `await` or scope end,
         D89). On one thread the order is fixed: the self-hosted interpreter
         prints the same; the Python interpreter's threads may interleave."""
-        stdlib = default_stdlib_root()
+        stdlib = STDLIB_ROOT
         for name, (src, want_out, want_code, want_err) in CHILD_FAILURES.items():
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, name + ".my")
@@ -1282,7 +1381,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 with open(exe + ".s", "w", encoding="utf-8") as fh:
                     fh.write(self._emit_asm(path, stdlib))
                 subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
-                # one worker: the order the self-hosted interpreter has (D92)
+                # one worker: the order the self-hosted interpreter has (D92,
+                # D110)
                 env = dict(os.environ, MYLA_THREADS="1")
                 proc = subprocess.run([exe], capture_output=True, text=True, timeout=60, env=env)
                 self.assertEqual((proc.stdout, proc.returncode), (want_out, want_code))
@@ -1293,13 +1393,13 @@ class SelfHostedCodegenParity(unittest.TestCase):
         1 to 16 workers (D92), run several times each: tasks on other threads,
         actors entered from several at once, cells freed on another worker's
         heap, values copied deeply as they cross."""
-        from .test_selfhost_interp import CONCURRENCY_PROGRAMS, _cli_oracle
+        from .test_selfhost_interp import CONCURRENCY_PROGRAMS
 
         cases = {n: s for n, s in CONCURRENCY_PROGRAMS.items() if "async let" in s or "task." in s}
         cases["values_cross_deeply"] = ACTOR_PROGRAMS["values_cross_deeply"]
         cases["deep_task_trees"] = DEEP_TASKS
         cases["task_tree"] = TASK_TREE
-        stdlib = default_stdlib_root()
+        stdlib = STDLIB_ROOT
         for name, src in cases.items():
             with self.subTest(program=name), tempfile.TemporaryDirectory() as tmp:
                 path = os.path.join(tmp, name + ".my")
@@ -1330,7 +1430,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 fh.write(PARALLEL_WORK)
             exe = os.path.join(tmp, "par")
             with open(exe + ".s", "w", encoding="utf-8") as fh:
-                fh.write(self._emit_asm(path, default_stdlib_root()))
+                fh.write(self._emit_asm(path, STDLIB_ROOT))
             subprocess.run(["gcc", "-nostdlib", "-static", "-o", exe, exe + ".s"], check=True)
             env = dict(os.environ)
             env.pop("MYLA_THREADS", None)
@@ -1437,6 +1537,8 @@ CHILD_FAILURES = {
         "    print(await b)\n    print(\"before a\")\n    print(await a)\n    print(\"never\")\n}\n"),
         "1\n", 1, "runtime error: boom\n"),
     # a grandchild's `exit` ends the program before main is done counting
+    # (depth first, D110: main's second count yields to `inner`, which ends,
+    # then to `leave`; oldest first main printed 3 before `leave` went on)
     "held_exit": ("from std.process import exit\n" + _HELD_COUNTER + (
         "async fun leave(c: C) {\n    let x = await c.bump()\n    exit(4)\n}\n"
         "async fun inner(c: C) -> int {\n    async let l = leave(c)\n    let y = await c.bump()\n"
@@ -1444,7 +1546,7 @@ CHILD_FAILURES = {
         "#main\nasync fun main() {\n    let c = C { n: 0 }\n    async let a = inner(c)\n"
         "    for i in 0..4 {\n        print(await c.bump())\n    }\n    print(\"waiting\")\n"
         "    print(await a)\n    print(\"never\")\n}\n"),
-        "1\ninner goes on\n3\n", 4, ""),
+        "1\ninner goes on\n", 4, ""),
     # children of synchronous calls are tasks too: they run when the parent
     # waits, here at its `await`, which their failure stops
     "held_sync_child": (

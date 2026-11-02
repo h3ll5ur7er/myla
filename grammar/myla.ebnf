@@ -88,7 +88,7 @@ generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
 type_params  = "<" IDENT ( "," IDENT )* ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;
-method       = method_head block ;
+method       = attribute* method_head block ;
 method_head  = "async"? "fun" IDENT generics? "(" receiver ( "," param )* ")" ( "->" type )? ;
 receiver     = "self" | "var" "self" ;
 

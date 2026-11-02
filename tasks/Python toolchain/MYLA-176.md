@@ -2,7 +2,7 @@
 id: MYLA-176
 title: float32 overflow crashes the interpreter where native code prints inf
 type: bug
-status: review
+status: done
 priority: medium
 labels: [interpreter, floats]
 ---

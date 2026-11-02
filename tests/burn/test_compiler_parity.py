@@ -5,6 +5,11 @@ import unittest
 from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret
 
 PROGRAMS = {
+    # a receiver and every argument are taken in order, before a later
+    # argument writes their variable through a `var self` method (MYLA-237)
+    "argument_values_before_later_writes": (
+        "struct C {\n    n: int,\n}\nimpl C {\n    fun bump_get(var self) -> int {\n        self.n = self.n + 1\n        return self.n\n    }\n    fun plus(self, k: int) -> int {\n        return self.n * 100 + k\n    }\n    fun with(self, o: C, k: int) -> int {\n        return self.n * 10000 + o.n * 100 + k\n    }\n}\nfun outer(c: C, k: int) -> int {\n    return c.n * 100 + k\n}\n#main\nfun main() {\n    var c = C { n: 1 }\n    print(c.plus(c.bump_get()))\n    var d = C { n: 1 }\n    print(outer(d, d.bump_get()))\n    var xs = [C { n: 1 }]\n    print(xs[0].plus(xs[0].bump_get()))\n    var e = C { n: 1 }\n    var f = C { n: 5 }\n    print(e.with(f, f.bump_get()))\n    let g = (x: C, k: int) => x.n * 100 + k\n    var h = C { n: 1 }\n    print(g(h, h.bump_get()))\n    var p = C { n: 1 }\n    print(p.n * 100 + p.bump_get())\n}\n"
+    ),
     "unsigned_wrap": (
         "#main\nfun main() {\n"
         "    var b: uint8 = 255u8\n    b = b + 1u8\n    print(b)\n"

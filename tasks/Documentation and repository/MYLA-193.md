@@ -11,3 +11,5 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 - [ ] One `###` heading per decision (number, date, title, decision, rationale, superseded by / supersedes), grouped by area or by date, with a short index table at the top
 - [ ] A convention for decisions made and superseded on the same day (D94 → D96 → D97): a "provisional" marker, or waiting a day before numbering
 - [ ] The references `D1–D58` across the wiki replaced by a link to the page
+
+On hold ([[MYLA-205]]): Genbeya gets a decision-management mechanism soon, which may replace this page's format.

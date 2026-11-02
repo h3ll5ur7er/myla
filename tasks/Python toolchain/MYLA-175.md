@@ -2,7 +2,7 @@
 id: MYLA-175
 title: A positive literal one past the signed maximum is accepted and wraps
 type: bug
-status: review
+status: done
 priority: medium
 labels: [checker, literals]
 ---

@@ -2,7 +2,7 @@
 id: MYLA-157
 title: A ? failing inside a list or map literal leaks the half-built literal (both backends)
 type: bug
-status: review
+status: done
 priority: medium
 labels: [python-backend, selfhost, memory]
 ---

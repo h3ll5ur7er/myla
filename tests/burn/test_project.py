@@ -9,22 +9,19 @@ Git dependencies that are locked and checked out (the checkout made by hand),
 unlocked, or locked but not checked out yet. Lock files round-trip through
 `render_lock`.
 
-The driver is built by the Python backend; a few scenarios also run in the
-Python interpreter and in the driver built by the self-hosted backend, which
-must print the same.
+The driver is built by the self-hosted compiler; a few scenarios also run in
+the self-hosted interpreter (`myla run`) and in the driver compiled by
+`gen_main`, which must print the same.
 """
 from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 
-from myla.loader import default_stdlib_root
-
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._tools import selfhost_tool
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
@@ -457,22 +454,23 @@ class ProjectModel(unittest.TestCase):
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class ProjectModelParity(unittest.TestCase):
     """A project with every kind of package, an error, and a lock file print
-    the same in the Python interpreter and the drivers built by both
-    backends."""
+    the same in the self-hosted interpreter and the drivers built natively
+    (the cached tool, and `gen_main`'s output assembled here). The Python
+    interpreter, a third runner until MYLA-219, is gone."""
 
     def test_parity(self) -> None:
         gen = selfhost_tool("gen_main")
         source = os.path.join(_REPO, "selfhost", "project_main.my")
         with tempfile.TemporaryDirectory() as tmp:
             sh_native = os.path.join(tmp, "sh_native")
-            asm = subprocess.run([gen, source, default_stdlib_root()], capture_output=True, text=True, check=True)
+            asm = subprocess.run([gen, source, STDLIB_ROOT], capture_output=True, text=True, check=True)
             with open(sh_native + ".s", "w", encoding="utf-8") as fh:
                 fh.write(asm.stdout)
             subprocess.run(["as", "--64", "-o", sh_native + ".o", sh_native + ".s"], check=True)
             subprocess.run(["ld", "-o", sh_native, sh_native + ".o"], check=True)
             drivers = {
-                "python native": [selfhost_tool("project_main")],
-                "python interpreter": [sys.executable, os.path.join(_REPO, "myla.py"), "run", source],
+                "native": [selfhost_tool("project_main")],
+                "self-hosted interpreter": [selfhost_tool("main"), "run", "--stdlib", STDLIB_ROOT, source],
                 "self-hosted native": [sh_native],
             }
             root = os.path.realpath(os.path.join(tmp, "p"))
@@ -497,7 +495,7 @@ class ProjectModelParity(unittest.TestCase):
                     proc = subprocess.run([*argv, *args], cwd=os.path.join(root, cwd), capture_output=True, timeout=300)
                     outs.append((proc.stdout.decode(), proc.stderr.decode(), proc.returncode))
                 results[name] = outs
-        expected = results["python native"]
+        expected = results["native"]
         self.assertIn("unlocked color git https://example.org/c.git\n", expected[0][0])
         self.assertIn("dependency 'color' is not locked", expected[1][1])
         self.assertIn("'größe' is not a valid package name", expected[2][1])

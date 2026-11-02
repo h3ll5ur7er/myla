@@ -3,8 +3,7 @@
 //
 // An identifier is `_` or an XID_Start character, then XID_Continue
 // characters. Each table is a run of 12 hex digits per range (first and last
-// code point, 6 each), sorted, searched in place. src/myla/unicode_ident.py
-// holds the same ranges for the Python lexer.
+// code point, 6 each), sorted, searched in place.
 
 pub const UNICODE_VERSION: str = "15.1.0"
 
@@ -33,6 +32,9 @@ pub fun is_xid_continue(c: int32) -> bool {
 }
 
 // Whether `c` is in one of the ranges of `table` (binary search).
+#test("a", 86)[false]
+#test("x", 27)[false]
+#test("y", 60)[false]
 fun in_table(table: str, c: int32) -> bool {
     var lo = 0
     var hi = len(table) / 12

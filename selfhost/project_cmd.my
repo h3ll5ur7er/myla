@@ -257,6 +257,7 @@ pub fun project_new(name: str) -> int32 {
 }
 
 // The `src/main.my` that `myla new` writes.
+#test("fresh")["// The greeting `main` prints.\n#test(\"fresh\")[\"Hello from fresh!\"]\nfun greeting(name: str) -> str {\n    return f\"Hello from {name}!\"\n}\n\nfun main() {\n    print(greeting(\"fresh\"))\n}\n"]
 fun main_template(name: str) -> str {
     var sb = StringBuilder()
     append(sb, "// The greeting `main` prints.\n")

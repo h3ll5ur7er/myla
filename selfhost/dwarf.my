@@ -146,6 +146,9 @@ pub fun dw_ref(label: str) -> str {
 
 // One abbreviation: its code, tag, whether it has children, and its
 // (attribute, form) pairs.
+#test(8, 15, false, [11, 11])[["\t.uleb128 8, 15, 0", "\t.uleb128 11, 11, 0, 0"]]
+#test(4, 5, false, [3, 8, 73, 19, 2, 24])[["\t.uleb128 4, 5, 0", "\t.uleb128 3, 8, 73, 19, 2, 24, 0, 0"]]
+#test(1, 17, true, [37, 8, 19, 5, 3, 8, 27, 8, 17, 1, 18, 7, 16, 23])[["\t.uleb128 1, 17, 1", "\t.uleb128 37, 8, 19, 5, 3, 8, 27, 8, 17, 1, 18, 7, 16, 23, 0, 0"]]
 fun abbrev(code: int32, tag: int32, children: bool, attrs: [int32]) -> [str] {
     var line = StringBuilder()
     append(line, "\t.uleb128 ")

@@ -1,0 +1,15 @@
+//~ type error: attribute '#test' cannot be applied to a generic method (it has no single concrete instantiation)
+//~ span: #test(Holder { v: 1 })[1]
+// A method of a generic impl has no single instantiation to test (D116).
+struct Holder<T> {
+    v: T,
+}
+
+impl<T> Holder<T> {
+    #test(Holder { v: 1 })[1]
+    fun value(self) -> T {
+        return self.v
+    }
+}
+
+fun main() {}

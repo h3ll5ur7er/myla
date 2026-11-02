@@ -2,7 +2,7 @@
 id: MYLA-152
 title: A local closure named like a builtin
 type: bug
-status: review
+status: done
 priority: medium
 labels: [selfhost, interpreter, lowering]
 ---

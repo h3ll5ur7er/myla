@@ -1,21 +1,16 @@
 """The self-hosted compiler's float literal conversion (std.num, which moved from selfhost/floatlit.my in MYLA-79;
 MYLA-29) against Python: the correctly rounded double of each literal, and that
 double rounded to float32, must be bit-identical to what the Python toolchain
-uses (`float(text)`, then `struct` single-precision rounding)."""
-import os
+used (`float(text)`, then `struct` single-precision rounding), which is plain
+Python and so still computed here. `selfhost/floatlit_main.my` is built by the
+self-hosted compiler (it was the Python backend until MYLA-219)."""
 import random
 import struct
 import subprocess
-import tempfile
 import unittest
 
-from myla.compiler import build
-from myla.loader import default_stdlib_root, link
-from myla.types import check
-
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
+from ._tools import selfhost_tool
 
 TRICKY = [
     "0.0", "00.0", "0.5", "0.1", "0.2", "0.3", "1.0", "2f32", "2f64", "1_000.5", "1_0e1_0",
@@ -59,13 +54,9 @@ def _python_bits(lexeme: str) -> tuple[int, int]:
 class TestFloatLiteralBits(unittest.TestCase):
     def test_matches_python_bit_for_bit(self):
         literals = TRICKY + _random_literals(400)
-        with tempfile.TemporaryDirectory() as tmp:
-            tool = os.path.join(tmp, "floatlit")
-            checker = check(link(os.path.join(_REPO, "selfhost", "floatlit_main.my"),
-                                 stdlib_root=default_stdlib_root()))
-            build(checker, tool)
-            out = subprocess.run([tool, *literals], capture_output=True, text=True,
-                                 check=True).stdout.split("\n")
+        tool = selfhost_tool("floatlit_main")
+        out = subprocess.run([tool, *literals], capture_output=True, text=True,
+                             check=True).stdout.split("\n")
         for lexeme, line in zip(literals, out):
             with self.subTest(literal=lexeme):
                 got = tuple(int(x) for x in line.split())

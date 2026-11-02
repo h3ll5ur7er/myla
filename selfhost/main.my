@@ -21,7 +21,7 @@
 // `dir` (MYLA-92). `run` passes the other arguments after the file to the
 // program (its argv is the file, then those), as the Python `myla run` does.
 // What the commands do with a file is in driver.my. The stdlib root defaults
-// to `src/myla` next to the `build/` directory this binary is in
+// to `lib` next to the `build/` directory this binary is in
 // (`default_stdlib_root`, MYLA-31).
 
 from std.process import args, exit
@@ -51,7 +51,7 @@ fun usage_lines() -> [str] {
         "  clean [--deps]                       remove build/ (--deps: and the fetched dependencies, .myla/)",
         "  fetch [--update]                     resolve the Git dependencies, check them out and write myla.lock",
         "options:",
-        "  --stdlib <dir>        the directory holding std/ (default: src/myla next to this binary's build/ directory)",
+        "  --stdlib <dir>        the directory holding std/ (default: lib next to this binary's build/ directory)",
         "  --package <name=dir>  a dependency: imports of <name> resolve in <dir> (repeatable)",
     ]
 }
@@ -74,6 +74,7 @@ struct CliError { msg: str, usage: bool }
 // file if it ends in `.my` (else there is none: project mode); then `run`
 // passes the rest to the program, `test` too with a file, `new` takes one
 // name, and other commands reject them.
+#test(["/work/myla/selfhost/main.my", "new", "--lib", "freshlib"])[Err(CliError { msg: "myla: unknown option 'freshlib'", usage: true })]
 fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
     let cmd = argv[1]
     var cl = CommandLine { file: "", opts: load_options(default_stdlib_root(argv[0])), output: "a.out", debug: false, deps: false, update: false, name: "", rest: [] }

@@ -2993,6 +2993,10 @@
       "required": true,
       "types": [
         {
+          "type": "attribute",
+          "named": true
+        },
+        {
           "type": "block",
           "named": true
         },

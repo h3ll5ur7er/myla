@@ -6,14 +6,19 @@
 as `myla run` (the Python interpreter). This test asserts that, for every
 runnable example in the corpus, the self-hosted interpreter's (stdout, exit
 code) is identical to the Python oracle's. That is the v0.8 interpreter-parity
-gate from docs/Development/Testing.md ("the Myla-built binary must produce the same
-stdout/exit code as the Python-built one and the interpreter, for every
-example").
+gate from docs/Development/Testing.md (the Myla-built binary had to produce
+the same stdout/exit code as the Python-built one and the interpreter, for
+every example).
 
 As with the lexer/parser/checker gates, the Myla interpreter runs as a *native
-binary* when the host can build one (which also exercises codegen parity of the
-toolchain); otherwise it falls back to running the interpreter source through
-the Python interpreter.
+binary*, built by the self-hosted compiler (which also exercises codegen parity
+of the toolchain); a host that can't build one skips the gate. (It used to fall
+back to running the interpreter source through the Python interpreter; the
+self-hosted interpreter can't stand in, as it needs a native build too.)
+
+The Python oracle's answers are recorded (`tests/burn/_golden.py`, MYLA-219):
+the oracle functions below run the retired Python toolchain only when
+recording.
 
 Scope. The corpus gate covers the single-file top-level examples (`floats.my`
 included since MYLA-29). `interp_main` links its input with the self-hosted
@@ -31,20 +36,13 @@ import tempfile
 import time
 import unittest
 
-from myla.errors import MylaError
-from myla.interpreter import Interpreter
-from myla.lexer import tokenize
-from myla.loader import default_stdlib_root, link
-from myla.parser import parse
-from myla.types import check
-
+from ._golden import golden
 from ._native import CAN_BUILD_NATIVE
-from ._tools import selfhost_tool
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 )
-INTERP_TOOL = os.path.join(_REPO, "selfhost", "interp_main.my")
 
 # Examples outside the v0.8 interpreter gate's scope (see module docstring).
 EXCLUDED: set[str] = set()
@@ -57,8 +55,14 @@ def _corpus() -> list[str]:
     return sorted(f for f in files if os.path.basename(f) not in EXCLUDED)
 
 
+@golden("selfhost_interp.run")
 def _oracle(path: str) -> tuple[str, int]:
     """(stdout, exit code) from the Python interpreter for `path`."""
+    from myla.interpreter import Interpreter
+    from myla.lexer import tokenize
+    from myla.parser import parse
+    from myla.types import check
+
     with open(path, "r", encoding="utf-8") as fh:
         source = fh.read()
     out = io.StringIO()
@@ -66,9 +70,24 @@ def _oracle(path: str) -> tuple[str, int]:
     return out.getvalue(), code
 
 
-def _cli_oracle(entry: str) -> tuple[str, str, int]:
+def _modules(entry: str) -> list[str]:
+    """The files of the project whose entry is `entry` besides the entry, so
+    that a recorded answer is keyed by every module of the program."""
+    root = os.path.dirname(entry)
+    files = glob.glob(os.path.join(root, "**", "*.my"), recursive=True)
+    return sorted(f for f in files if f != entry)
+
+
+@golden("selfhost_interp.cli_run")
+def _cli_oracle(entry: str, modules: list[str]) -> tuple[str, str, int]:
     """(stdout, stderr, exit code) of the Python `myla run` for `entry`: its
-    output, then a runtime error rendered as the CLI prints it."""
+    output, then a runtime error rendered as the CLI prints it. `modules`
+    (the program's other files) only key the recorded answer."""
+    from myla.errors import MylaError
+    from myla.interpreter import Interpreter
+    from myla.loader import default_stdlib_root, link
+    from myla.types import check
+
     out = io.StringIO()
     try:
         code = Interpreter(check(link(entry, stdlib_root=default_stdlib_root())), out,
@@ -232,8 +251,19 @@ CONCURRENCY_PROGRAMS = {
 }
 
 
-def _check_tool():
-    return check(link(INTERP_TOOL, stdlib_root=default_stdlib_root()))
+@golden("selfhost_interp.linked_run")
+def _linked_oracle(entry: str, modules: list[str]) -> tuple[str, int]:
+    """(stdout, exit code) of the Python `link` + interpreter for the program
+    whose entry is `entry`; `modules` (its other files) only key the recorded
+    answer."""
+    from myla.interpreter import Interpreter
+    from myla.loader import default_stdlib_root, link
+    from myla.types import check
+
+    out = io.StringIO()
+    checker = check(link(entry, stdlib_root=default_stdlib_root()))
+    code = Interpreter(checker, out, argv=[entry]).run()
+    return out.getvalue(), code
 
 
 class SelfHostedInterpParity(unittest.TestCase):
@@ -243,13 +273,14 @@ class SelfHostedInterpParity(unittest.TestCase):
     def setUpClass(cls) -> None:
         if not CAN_BUILD_NATIVE:
             return
-        # The Myla interpreter, built natively by the Python backend (cached),
-        # so the gate also exercises the codegen parity of the toolchain.
+        # The Myla interpreter, built natively by the self-hosted compiler
+        # (cached), so the gate also exercises the codegen parity of the
+        # toolchain.
         cls._binary = selfhost_tool("interp_main")
 
     def _myla_run_full(self, path: str) -> tuple[str, str, int]:
         proc = subprocess.run(
-            [self._binary, path, default_stdlib_root()], capture_output=True, text=True
+            [self._binary, path, STDLIB_ROOT], capture_output=True, text=True
         )
         return proc.stdout, proc.stderr, proc.returncode
 
@@ -272,7 +303,8 @@ class SelfHostedInterpParity(unittest.TestCase):
                 fh.write("from .lib import third\nfun main() {\n    print(third([1, 2]))\n}\n")
             for name, path in sorted(cases.items()):
                 with self.subTest(case=name):
-                    self.assertEqual(self._myla_run_full(path), _cli_oracle(path))
+                    modules = _modules(path) if name == "error_in_module" else []
+                    self.assertEqual(self._myla_run_full(path), _cli_oracle(path, modules))
 
     def test_concurrency_matches_the_python_cli(self) -> None:
         if self._binary is None:
@@ -283,23 +315,16 @@ class SelfHostedInterpParity(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(source)
                 with self.subTest(program=name):
-                    self.assertEqual(self._myla_run_full(path), _cli_oracle(path))
+                    self.assertEqual(self._myla_run_full(path), _cli_oracle(path, []))
 
     def _myla_run(self, path: str) -> tuple[str, int]:
-        argv = [path, default_stdlib_root()]
-        if self._binary is not None:
-            proc = subprocess.run(
-                [self._binary, *argv], capture_output=True, text=True
-            )
-            return proc.stdout, proc.returncode
-        # Interpreter fallback (no native toolchain on this host): run the
-        # interpreter source through the Python interpreter, with the example
-        # path as argv[1] (what `interp_main` reads).
-        out = io.StringIO()
-        code = Interpreter(
-            _check_tool(), out, argv=["interp_tool", *argv]
-        ).run()
-        return out.getvalue(), code
+        if self._binary is None:
+            # the fallback through the Python interpreter is retired (MYLA-219)
+            self.skipTest("the self-hosted interpreter could not be built natively")
+        proc = subprocess.run(
+            [self._binary, path, STDLIB_ROOT], capture_output=True, text=True
+        )
+        return proc.stdout, proc.returncode
 
     def test_corpus_run_parity(self) -> None:
         checked = 0
@@ -326,17 +351,13 @@ class SelfHostedInterpParity(unittest.TestCase):
     def test_module_programs_match_the_oracle(self) -> None:
         from .test_selfhost_codegen import MODULE_PROJECTS, _write_project
 
-        stdlib = default_stdlib_root()
         entries = {"examples/modules": os.path.join(_REPO, "examples", "modules", "main.my")}
         with tempfile.TemporaryDirectory() as tmp:
             for name, files in MODULE_PROJECTS.items():
                 entries[name] = _write_project(os.path.join(tmp, name), files)
             for name, entry in entries.items():
                 with self.subTest(program=name):
-                    out = io.StringIO()
-                    checker = check(link(entry, stdlib_root=stdlib))
-                    code = Interpreter(checker, out, argv=[entry]).run()
-                    self.assertEqual(self._myla_run(entry), (out.getvalue(), code))
+                    self.assertEqual(self._myla_run(entry), _linked_oracle(entry, _modules(entry)))
 
     def test_updates_are_amortised_constant(self) -> None:
         """`push`, element assignment, a `push` inside a `var self` method and
@@ -351,7 +372,7 @@ class SelfHostedInterpParity(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as fh:
                     fh.write(UPDATES.replace("N_ITER", str(n)))
                 start = time.perf_counter()
-                proc = subprocess.run([self._binary, path, default_stdlib_root()],
+                proc = subprocess.run([self._binary, path, STDLIB_ROOT],
                                       capture_output=True, text=True, timeout=120)
                 times[n] = time.perf_counter() - start
                 self.assertEqual((proc.stdout, proc.stderr, proc.returncode),

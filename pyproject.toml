@@ -1,16 +1,17 @@
 [project]
 name = "myla"
 version = "1.0.0"
-description = "Myla: a very simple custom language with an interpreter and a native compiler (bootstrapped in Python)."
+description = "Myla: a small statically typed language with a self-hosted compiler. This file only configures the Python test harness (tests/burn)."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
-# No third-party runtime dependencies, by design (see README "Visions / Short
-# Term"). The tests are standard-library `unittest`s: `python3 -m unittest
-# discover -s tests/unit -t .` (or `scripts/test.sh`) needs nothing else. pytest
-# is an optional development tool that runs the same tests: `uv run pytest`
-# installs it from the `dev` group below (MYLA-58).
+# No third-party dependencies, by design. The toolchain is written in Myla
+# (selfhost/, tools/) and bootstraps from bootstrap/seed.s; Python only runs the
+# tests, standard-library `unittest`s: `python3 -m unittest discover -s
+# tests/burn -t .` (or `scripts/test.sh`) needs nothing else. pytest is an
+# optional development tool that runs the same tests: `uv run pytest` installs
+# it from the `dev` group below (MYLA-58).
 
 [dependency-groups]
 dev = [

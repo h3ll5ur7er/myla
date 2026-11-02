@@ -1,0 +1,15 @@
+//~ type error: attribute '#main' can't be applied to a method (a method takes only '#test')
+//~ span: #main
+// Only `#test` may stand before a method (D116).
+struct App {
+    name: str,
+}
+
+impl App {
+    #main
+    fun start(self) {
+        print(self.name)
+    }
+}
+
+fun main() {}

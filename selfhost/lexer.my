@@ -19,6 +19,9 @@ pub struct Lexer {
     err: Option<Diag>,
 }
 
+#test("a")[Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None }]
+#test("code")[Lexer { cps: ['c', 'o', 'd', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None }]
+#test("tries")[Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None }]
 pub fun new_lexer(src: str) -> Lexer {
     // the code points as `chars` decodes them, not copied (MYLA-133)
     let cps = chars(src)
@@ -30,6 +33,9 @@ pub fun new_lexer(src: str) -> Lexer {
 }
 
 // One canonical token line (mirror of src/myla/canon.py:canonical_token).
+#test(Token { kind: TokenKind.IDENT, lexeme: "East", line: 64, column: 19, eline: 64, ecol: 23, ival: 0, suffix: "", big: "" })["IDENT 64 19 \"East\" end=64:23"]
+#test(Token { kind: TokenKind.IDENT, lexeme: "Direction", line: 62, column: 9, eline: 62, ecol: 18, ival: 0, suffix: "", big: "" })["IDENT 62 9 \"Direction\" end=62:18"]
+#test(Token { kind: TokenKind.IDENT, lexeme: "Direction", line: 65, column: 9, eline: 65, ecol: 18, ival: 0, suffix: "", big: "" })["IDENT 65 9 \"Direction\" end=65:18"]
 pub fun canonical_line(t: Token) -> str {
     var sb = StringBuilder()
     append(sb, kind_name(t.kind))
@@ -56,6 +62,9 @@ impl Lexer {
     // Build a `str` from the codepoints `cps[start..end]`. A method (not a free
     // function) so `self.cps` is borrowed through `self` rather than passed —
     // and cloned — by value on every token (the lexer's dominant allocation).
+    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None }, 0, 1)["a"]
+    #test(Lexer { cps: ['c', 'o', 'd', 'e'], pos: 4, line: 1, col: 5, n: 4, toks: [], err: None }, 0, 4)["code"]
+    #test(Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 5, line: 1, col: 6, n: 5, toks: [], err: None }, 0, 5)["tries"]
     fun slice_str(self, start: int32, end: int32) -> str {
         var sb = StringBuilder()
         var i = start
@@ -68,15 +77,22 @@ impl Lexer {
         return build(sb)
     }
 
+    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None })[true]
+    #test(Lexer { cps: ['b'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None })[true]
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None })[false]
     fun at_end(self) -> bool {
         return self.pos >= self.n
     }
 
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None })[97]
+    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None })[110]
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None })[43]
     fun peek(self) -> int32 {
         if self.pos >= self.n { return 0 }
         return self.cps[self.pos] as int32
     }
 
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None })[32]
     fun peek1(self) -> int32 {
         if self.pos + 1 >= self.n { return 0 }
         return self.cps[self.pos + 1] as int32
@@ -102,6 +118,9 @@ impl Lexer {
         self.pos = self.n
     }
 
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None })[97]
+    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None })[110]
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None })[43]
     fun advance(var self) -> int32 {
         if self.pos >= self.n { return 0 }
         let c = self.cps[self.pos] as int32
@@ -152,6 +171,7 @@ impl Lexer {
         self.fail(sl, sc, "unterminated block comment")
     }
 
+    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None }, 10)["1"]
     fun scan_digits(var self, base: int32) -> str {
         var sb = StringBuilder()
         var prev_us = false
@@ -183,6 +203,7 @@ impl Lexer {
         return build(sb)
     }
 
+    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 1, line: 1, col: 2, n: 5, toks: [], err: None }, 1, 1)[""]
     fun scan_int_suffix(var self, sl: int32, sc: int32) -> str {
         if self.peek() == 105 || self.peek() == 117 {
             let sp = self.pos
@@ -463,6 +484,9 @@ impl Lexer {
         }
     }
 
+    #test(Lexer { cps: ['[', '1', ',', ' ', '2', ']'], pos: 0, line: 1, col: 1, n: 6, toks: [], err: None }, 91)[TokenKind.LBRACKET]
+    #test(Lexer { cps: ['(', '1', ',', ' ', '\'', 'c', '\'', ',', ' ', 't', 'r', 'u', 'e', ')'], pos: 0, line: 1, col: 1, n: 14, toks: [], err: None }, 40)[TokenKind.LPAREN]
+    #test(Lexer { cps: ['p', '.', 'x'], pos: 1, line: 1, col: 2, n: 3, toks: [Token { kind: TokenKind.IDENT, lexeme: "p", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None }, 46)[TokenKind.DOT]
     fun one_char_kind(self, c: int32) -> TokenKind {
         if c == 43 { return TokenKind.PLUS }
         if c == 45 { return TokenKind.MINUS }
@@ -673,6 +697,9 @@ impl Lexer {
 }
 
 // The tokens of `src`, or its first lex error.
+#test("a")[Ok([Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }])]
+#test("d2")[Ok([Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }])]
+#test("right")[Ok([Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }])]
 pub fun lex(src: str) -> Result<[Token], Diag> {
     var lx = new_lexer(src)
     let toks = lx.run()
@@ -685,6 +712,9 @@ pub fun lex(src: str) -> Result<[Token], Diag> {
 // The decimal text of the literal `digits` in `base` if its value is 2^63 or
 // more, else "" (MYLA-73). Short literals can't be that big, so only long ones
 // pay for the base-10^9 arithmetic.
+#test("0", 10)[""]
+#test("1", 10)[""]
+#test("10", 2)[""]
 fun big_text(digits: str, base: int64) -> str {
     if len(digits) < 16 { return "" }
     var limbs: [int64] = [0]                 // little endian, base 10^9
@@ -723,6 +753,9 @@ fun big_text(digits: str, base: int64) -> str {
 }
 
 // `a < b` for decimal texts of the same length.
+#test("4591870180066957722", "9223372036854775808")[true]
+#test("4591870180174331904", "9223372036854775808")[true]
+#test("9223372036854775808", "9223372036854775808")[false]
 fun text_less(a: str, b: str) -> bool {
     var i = 0
     while i < len(a) {
@@ -733,12 +766,16 @@ fun text_less(a: str, b: str) -> bool {
 }
 
 // `c` lowered if it is an ASCII capital letter.
+#test(120)[120]
 fun lower(c: int32) -> int32 {
     if c >= 65 && c <= 90 { return c + 32 }
     return c
 }
 
 // `v` in upper-case hexadecimal, without a prefix.
+#test(0)["0"]
+#test(97)["61"]
+#test(128512)["1F600"]
 fun hex_upper(v: int64) -> str {
     if v == 0 { return "0" }
     var digits: [uint8] = []
