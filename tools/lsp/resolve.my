@@ -121,10 +121,10 @@ pub fun local_ranges(path: str, source: str, toks: [Token], program: Program) ->
     var out: [Range] = []
     let r = resolve_parsed(path, source, toks, program, load_options(""), [:], false, Pos { line: -1, character: 0 })
     for u in r.uses {
-        if !is_global(u.def) { push(out, u.range) }
+        if !is_global(u.def) { out.push(u.range) }
     }
     for d in r.defs {
-        if !is_global(d) { push(out, d.range) }
+        if !is_global(d) { out.push(d.range) }
     }
     return out
 }
@@ -135,12 +135,12 @@ fun resolve_parsed(path: str, source: str, toks: [Token], program: Program, opts
     // at the string's start, out of order
     var idents: [Token] = []
     for t in toks {
-        if t.kind == TokenKind.IDENT { push(idents, t) }
+        if t.kind == TokenKind.IDENT { idents.push(t) }
     }
     // the file's declarations (and the methods of its impls)
     var defs: [Def] = []
     for sym in symbols {
-        if !kind_is_impl(sym.kind) { push(defs, sym_def(path, sym)) }
+        if !kind_is_impl(sym.kind) { defs.push(sym_def(path, sym)) }
     }
     var r = Resolver { path: path, opts: opts, toks: idents, lines: line_index(source), scopes: [], globals: globals_of(path, symbols), modules: [:], known: known, methods: [:], with_methods: [:], self_type: "", want: want, completion: no_completion(), uses: [], defs: defs }
     r.add_methods(path, symbols)
@@ -167,18 +167,18 @@ fun globals_of(path: str, symbols: [Symbol]) -> [str: Global] {
     var members: [int32: [Def]] = [:]
     for m in symbols {
         if m.parent >= 0 {
-            if !contains(members, m.parent) {
+            if !members.contains(m.parent) {
                 var empty: [Def] = []
                 members[m.parent] = empty
             }
-            push(members[m.parent], sym_def(path, m))
+            members[m.parent].push(sym_def(path, m))
         }
     }
     var out: [str: Global] = [:]
     var i = 0
-    while i < len(symbols) {
+    while i < symbols.len() {
         let s = symbols[i]
-        if s.parent == -1 && !kind_is_impl(s.kind) && !contains(out, s.name) {
+        if s.parent == -1 && !kind_is_impl(s.kind) && !out.contains(s.name) {
             var ms: [Def] = []
             match get(members, i) { Some(x) => { ms = x }, None => {} }
             out[s.name] = Global { def: sym_def(path, s), members: ms }
@@ -190,13 +190,13 @@ fun globals_of(path: str, symbols: [Symbol]) -> [str: Global] {
 
 fun dirname(p: str) -> str {
     var last = -1
-    for i in 0..len(p) {
+    for i in 0..p.len() {
         if p[i] == '/' { last = i }
     }
     if last <= 0 { return "/" }
     var sb = StringBuilder()
-    append(sb, p, 0, last)
-    return build(sb)
+    sb.append(p, 0, last)
+    return sb.build()
 }
 
 impl Resolver {
@@ -225,16 +225,16 @@ impl Resolver {
         if p.dots == 0 {
             for pkg in self.opts.packages {
                 if pkg.0 == p.segments[0] {
-                    if len(p.segments) == 1 { return self.readable(normalize(pkg.1 + "/" + pkg.0 + ".my")) }
-                    push(bases, pkg.1)
+                    if p.segments.len() == 1 { return self.readable(normalize(pkg.1 + "/" + pkg.0 + ".my")) }
+                    bases.push(pkg.1)
                     first = 1
                 }
             }
             if first == 0 {
                 var root = here
                 if self.opts.root != "" { root = self.opts.root }
-                if p.segments[0] != "std" { push(bases, root) }
-                if self.opts.stdlib_root != "" { push(bases, self.opts.stdlib_root) }
+                if p.segments[0] != "std" { bases.push(root) }
+                if self.opts.stdlib_root != "" { bases.push(self.opts.stdlib_root) }
             }
         } else {
             var base = here
@@ -243,16 +243,16 @@ impl Resolver {
                 base = dirname(base)
                 k = k + 1
             }
-            push(bases, base)
+            bases.push(base)
         }
         for base in bases {
             var dir = base
             var i = first
-            while i < len(p.segments) - 1 {
+            while i < p.segments.len() - 1 {
                 dir = dir + "/" + p.segments[i]
                 i = i + 1
             }
-            let last = p.segments[len(p.segments) - 1]
+            let last = p.segments[p.segments.len() - 1]
             let file = normalize(dir + "/" + last + ".my")
             let pkg = normalize(dir + "/" + last + "/" + last + ".my")
             match self.readable(file) {
@@ -304,7 +304,7 @@ impl Resolver {
                         }
                     },
                     None => {
-                        var name = p.segments[len(p.segments) - 1]
+                        var name = p.segments[p.segments.len() - 1]
                         match alias { Some(a) => { name = a }, None => {} }
                         self.modules[name] = file
                     },
@@ -320,14 +320,14 @@ impl Resolver {
     // on the next few tokens.
     fun ident_after(self, line: int32, col: int32, name: str) -> int32 {
         var lo = 0
-        var hi = len(self.toks)
+        var hi = self.toks.len()
         while lo < hi {
             let mid = (lo + hi) / 2
             let t = self.toks[mid]
             if t.line < line || (t.line == line && t.column < col) { lo = mid + 1 } else { hi = mid }
         }
         var k = lo
-        while k < len(self.toks) && k < lo + 64 {
+        while k < self.toks.len() && k < lo + 64 {
             if self.toks[k].lexeme == name { return k }
             k = k + 1
         }
@@ -342,7 +342,7 @@ impl Resolver {
     // Record that the identifier `name` at or after (line, col) refers to `d`.
     fun use_at(var self, line: int32, col: int32, name: str, d: Def) {
         let k = self.ident_after(line, col, name)
-        if k >= 0 { push(self.uses, Use { range: self.range_of(k), def: d }) }
+        if k >= 0 { self.uses.push(Use { range: self.range_of(k), def: d }) }
     }
 
     // Declare `name` (of type `ty`) at or after (line, col) in the innermost
@@ -351,20 +351,20 @@ impl Resolver {
         let k = self.ident_after(line, col, name)
         if k < 0 { return }
         let d = Def { name: name, path: self.path, range: self.range_of(k), kind: kind, detail: "", ty: ty }
-        push(self.defs, d)
-        if len(self.scopes) > 0 { push(self.scopes[len(self.scopes) - 1], d) }
+        self.defs.push(d)
+        if self.scopes.len() > 0 { self.scopes[self.scopes.len() - 1].push(d) }
     }
 
     fun push_scope(var self) {
         var empty: [Def] = []
-        push(self.scopes, empty)
+        self.scopes.push(empty)
     }
 
     fun pop_scope(var self) {
         var out: [[Def]] = []
         var i = 0
-        while i < len(self.scopes) - 1 {
-            push(out, self.scopes[i])
+        while i < self.scopes.len() - 1 {
+            out.push(self.scopes[i])
             i = i + 1
         }
         self.scopes = out
@@ -372,9 +372,9 @@ impl Resolver {
 
     // The innermost declaration of `name` in scope, then the file's.
     fun lookup(self, name: str) -> Option<Def> {
-        var i = len(self.scopes) - 1
+        var i = self.scopes.len() - 1
         while i >= 0 {
-            var j = len(self.scopes[i]) - 1
+            var j = self.scopes[i].len() - 1
             while j >= 0 {
                 if self.scopes[i][j].name == name { return Some(self.scopes[i][j]) }
                 j = j - 1
@@ -391,7 +391,7 @@ impl Resolver {
         match self.lookup(name) {
             Some(d) => { self.use_at(line, col, name, d) },
             None => {
-                if contains(self.modules, name) {
+                if self.modules.contains(name) {
                     let file = self.modules[name]
                     self.use_at(line, col, name, Def { name: name, path: file, range: Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }, kind: DefKind.Module, detail: "", ty: "" })
                 }
@@ -414,7 +414,7 @@ impl Resolver {
 
     // A variant named `name` of any enum of the file or its imports.
     fun variant(self, name: str) -> Option<Def> {
-        for k in keys(self.globals) {
+        for k in self.globals.keys() {
             match self.globals[k].def.kind {
                 DefKind.Global(SymKind.Enum) => {
                     for m in self.globals[k].members {
@@ -631,7 +631,7 @@ impl Resolver {
                 var i = 0
                 for e in es {
                     var part = ""
-                    if i < len(parts) { part = parts[i] }
+                    if i < parts.len() { part = parts[i] }
                     self.bind_elem(e, k, part)
                     i = i + 1
                 }
@@ -753,11 +753,11 @@ impl Resolver {
                         }
                     },
                     None => {
-                        if contains(self.modules, n) {
+                        if self.modules.contains(n) {
                             named = true
                             let file = self.modules[n]
                             for s in self.module_symbols(file) {
-                                if s.parent == -1 && !kind_is_impl(s.kind) { push(members, sym_def(file, s)) }
+                                if s.parent == -1 && !kind_is_impl(s.kind) { members.push(sym_def(file, s)) }
                             }
                         }
                     },
@@ -781,7 +781,7 @@ impl Resolver {
         }
         for m in members {
             if m.name == field {
-                push(self.uses, Use { range: self.range_of(k), def: m })
+                self.uses.push(Use { range: self.range_of(k), def: m })
                 return
             }
         }
@@ -800,14 +800,14 @@ impl Resolver {
     fun visible(self) -> [Def] {
         var out: [Def] = []
         var seen: [str: bool] = [:]
-        var i = len(self.scopes) - 1
+        var i = self.scopes.len() - 1
         while i >= 0 {
-            var j = len(self.scopes[i]) - 1
+            var j = self.scopes[i].len() - 1
             while j >= 0 {
                 let d = self.scopes[i][j]
-                if !contains(seen, d.name) {
+                if !seen.contains(d.name) {
                     seen[d.name] = true
-                    push(out, d)
+                    out.push(d)
                 }
                 j = j - 1
             }
@@ -819,16 +819,16 @@ impl Resolver {
     // Record the methods of the impls among `symbols` (of the file `path`),
     // by the name of their target type.
     fun add_methods(var self, path: str, symbols: [Symbol]) {
-        if contains(self.with_methods, path) { return }
+        if self.with_methods.contains(path) { return }
         self.with_methods[path] = true
         for s in symbols {
             if s.parent >= 0 && kind_is_impl(symbols[s.parent].kind) {
                 let target = base_of(symbols[s.parent].name)
-                if !contains(self.methods, target) {
+                if !self.methods.contains(target) {
                     var empty: [Def] = []
                     self.methods[target] = empty
                 }
-                push(self.methods[target], sym_def(path, s))
+                self.methods[target].push(sym_def(path, s))
             }
         }
     }
@@ -859,14 +859,14 @@ impl Resolver {
         match get(self.globals, name) {
             Some(g) => {
                 match g.def.kind {
-                    DefKind.Global(SymKind.Enum) => { for m in g.members { push(out, m) } },
+                    DefKind.Global(SymKind.Enum) => { for m in g.members { out.push(m) } },
                     _ => {},
                 }
             },
             None => {},
         }
         match get(self.methods, name) {
-            Some(ms) => { for m in ms { push(out, m) } },
+            Some(ms) => { for m in ms { out.push(m) } },
             None => {},
         }
         return out
@@ -890,18 +890,18 @@ impl Resolver {
                         for m in g.members {
                             var f = m
                             f.ty = subst(m.ty, names, args)
-                            push(out, f)
+                            out.push(f)
                         }
                     },
                     _ => {},
                 }
             },
             None => {
-                if !is_builtin_type(b) && !contains(self.methods, b) { return None }
+                if !is_builtin_type(b) && !self.methods.contains(b) { return None }
             },
         }
         match get(self.methods, b) {
-            Some(ms) => { for m in ms { push(out, m) } },
+            Some(ms) => { for m in ms { out.push(m) } },
             None => {},
         }
         return Some(out)
@@ -929,7 +929,7 @@ impl Resolver {
             },
             ExprKind.Cast(x, t) => { return type_str(t) },
             ExprKind.ListLit(es) => {
-                if len(es) == 0 { return "" }
+                if es.len() == 0 { return "" }
                 let t = self.type_of(es[0])
                 if t == "" { return "" }
                 return "[" + t + "]"
@@ -937,7 +937,7 @@ impl Resolver {
             ExprKind.Index(a, i) => { return index_of(self.unalias(self.type_of(a))) },
             ExprKind.TupleIndex(x, i) => {
                 let elems = tuple_elems(self.unalias(self.type_of(x)))
-                if i < 0 || i >= (len(elems) as int64) { return "" }
+                if i < 0 || i >= (elems.len() as int64) { return "" }
                 return elems[i as int32]
             },
             ExprKind.Unary(op, x) => {
@@ -983,19 +983,19 @@ impl Resolver {
     fun call_result(self, sig: str, args: [Expr]) -> str {
         let ret = result_of(sig)
         let tps = sig_type_params(sig)
-        if len(tps) == 0 { return ret }
+        if tps.len() == 0 { return ret }
         let params = sig_param_types(sig)
         var bound: [str: str] = [:]
         var i = 0
-        while i < len(params) && i < len(args) {
+        while i < params.len() && i < args.len() {
             bound = unify(params[i], self.type_of(args[i]), tps, bound)
             i = i + 1
         }
         var names: [str] = []
         var types: [str] = []
-        for n in keys(bound) {
-            push(names, n)
-            push(types, bound[n])
+        for n in bound.keys() {
+            names.push(n)
+            types.push(bound[n])
         }
         return subst(ret, names, types)
     }
@@ -1123,7 +1123,7 @@ impl Resolver {
                             var variants: [Def] = []
                             for m in self.members_named(name) {
                                 match m.kind {
-                                    DefKind.Global(SymKind.EnumMember) => { push(variants, m) },
+                                    DefKind.Global(SymKind.EnumMember) => { variants.push(m) },
                                     _ => {},
                                 }
                             }
@@ -1214,14 +1214,14 @@ fun kind_name(k: DefKind) -> str {
 pub fun describe(r: Resolution) -> [str] {
     var out: [str] = []
     if !r.ok {
-        push(out, "unparsed")
+        out.push("unparsed")
         return out
     }
     for d in r.defs {
-        push(out, f"def {d.range.start.line}:{d.range.start.character}-{d.range.end.character} {kind_name(d.kind)} {d.name}")
+        out.push(f"def {d.range.start.line}:{d.range.start.character}-{d.range.end.character} {kind_name(d.kind)} {d.name}")
     }
     for u in r.uses {
-        push(out, f"use {u.range.start.line}:{u.range.start.character}-{u.range.end.character} {u.def.name} -> {u.def.path} {u.def.range.start.line}:{u.def.range.start.character} {kind_name(u.def.kind)}")
+        out.push(f"use {u.range.start.line}:{u.range.start.character}-{u.range.end.character} {u.def.name} -> {u.def.path} {u.def.range.start.line}:{u.def.range.start.character} {kind_name(u.def.kind)}")
     }
     return out
 }

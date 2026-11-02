@@ -62,7 +62,7 @@ struct Names {
 // Whether `line` is all ASCII (its bytes, code points and UTF-16 units then
 // coincide).
 fun is_ascii(line: str) -> bool {
-    for i in 0..len(line) {
+    for i in 0..line.len() {
         if line[i] >= 128u8 { return false }
     }
     return true
@@ -72,7 +72,7 @@ fun is_ascii(line: str) -> bool {
 fun byte_of(line: str, cp: int32) -> int32 {
     var seen = 0
     var i = 0
-    while i < len(line) {
+    while i < line.len() {
         let c = line[i]
         if c < 128u8 || c >= 192u8 {
             if seen == cp { return i }
@@ -80,14 +80,14 @@ fun byte_of(line: str, cp: int32) -> int32 {
         }
         i = i + 1
     }
-    return len(line)
+    return line.len()
 }
 
 // The UTF-16 length of the first `bytes` bytes of `line`.
 fun utf16_of(line: str, bytes: int32) -> int32 {
     var units = 0
     var i = 0
-    while i < bytes && i < len(line) {
+    while i < bytes && i < line.len() {
         let c = line[i]
         if c >= 240u8 { units = units + 2 } else if c < 128u8 || c >= 192u8 { units = units + 1 }
         i = i + 1
@@ -96,9 +96,9 @@ fun utf16_of(line: str, bytes: int32) -> int32 {
 }
 
 fun at(line: str, i: int32, text: str) -> bool {
-    if i < 0 || i + len(text) > len(line) { return false }
+    if i < 0 || i + text.len() > line.len() { return false }
     var k = 0
-    while k < len(text) {
+    while k < text.len() {
         if line[i + k] != text[k] { return false }
         k = k + 1
     }
@@ -109,10 +109,10 @@ fun at(line: str, i: int32, text: str) -> bool {
 // its closing quote.
 fun quoted_end(line: str, i: int32, q: uint8) -> int32 {
     var j = i + 1
-    while j < len(line) {
+    while j < line.len() {
         if line[j] == '\\' { j = j + 2 } else if line[j] == q { return j + 1 } else { j = j + 1 }
     }
-    return len(line)
+    return line.len()
 }
 
 fun type_of_symbol(k: SymKind) -> int32 {
@@ -175,7 +175,7 @@ fun simple_type(k: TokenKind) -> int32 {
 }
 
 fun is_upper(s: str) -> bool {
-    return len(s) > 0 && s[0] >= 'A' && s[0] <= 'Z'
+    return s.len() > 0 && s[0] >= 'A' && s[0] <= 'Z'
 }
 
 fun is_builtin_type(s: str) -> bool {
@@ -191,30 +191,30 @@ pub fun semantic_tokens(source: str) -> [int64] {
     }
     let lines = lines_of(source)
     var ascii: [bool] = []
-    for l in lines { push(ascii, is_ascii(l)) }
+    for l in lines { ascii.push(is_ascii(l)) }
     let names = names_of(source)
     var spans: [Span] = []
     var covered: [[Span]] = []          // per line: what tokens and literals cover
     for l in lines {
         var empty: [Span] = []
-        push(covered, empty)
+        covered.push(empty)
     }
     // the tokens that are in the source, with their byte ranges
     var real: [Placed] = []
     for t in toks {
         let ln = t.line - 1
-        if ln >= 0 && ln < len(lines) && t.kind != TokenKind.EOF && t.kind != TokenKind.NEWLINE {
+        if ln >= 0 && ln < lines.len() && t.kind != TokenKind.EOF && t.kind != TokenKind.NEWLINE {
             let line = lines[ln]
             var b = t.column - 1
             if !ascii[ln] { b = byte_of(line, t.column - 1) }
             if t.kind == TokenKind.STRING {
                 if at(line, b, "\"") {
-                    push(real, Placed { tok: t, line: ln, start: b, end: quoted_end(line, b, '"') })
+                    real.push(Placed { tok: t, line: ln, start: b, end: quoted_end(line, b, '"') })
                 } else if at(line, b, "f\"") {
-                    push(real, Placed { tok: t, line: ln, start: b, end: b })      // the f-string, split below
+                    real.push(Placed { tok: t, line: ln, start: b, end: b })      // the f-string, split below
                 }
             } else if at(line, b, t.lexeme) {
-                push(real, Placed { tok: t, line: ln, start: b, end: b + len(t.lexeme) })
+                real.push(Placed { tok: t, line: ln, start: b, end: b + t.lexeme.len() })
             }
         }
     }
@@ -222,7 +222,7 @@ pub fun semantic_tokens(source: str) -> [int64] {
     var item_mode = false               // in the names a `from` import lists
     var mode_line = -1
     var i = 0
-    while i < len(real) {
+    while i < real.len() {
         let p = real[i]
         let k = p.tok.kind
         if p.line != mode_line {
@@ -244,10 +244,10 @@ pub fun semantic_tokens(source: str) -> [int64] {
             path_mode = false
         }
         if k == TokenKind.STRING && p.start == p.end {
-            for sp in fstring_spans(lines[p.line], p.line, p.start) { push(spans, sp) }
-            push(covered[p.line], Span { line: p.line, start: p.start, end: fstring_end(lines[p.line], p.start), ty: -1, mods: 0 })
+            for sp in fstring_spans(lines[p.line], p.line, p.start) { spans.push(sp) }
+            covered[p.line].push(Span { line: p.line, start: p.start, end: fstring_end(lines[p.line], p.start), ty: -1, mods: 0 })
         } else {
-            push(covered[p.line], Span { line: p.line, start: p.start, end: p.end, ty: -1, mods: 0 })
+            covered[p.line].push(Span { line: p.line, start: p.start, end: p.end, ty: -1, mods: 0 })
             var ty = simple_type(k)
             var mods = 0
             if k == TokenKind.STRING { ty = T_STRING }
@@ -255,35 +255,35 @@ pub fun semantic_tokens(source: str) -> [int64] {
                 var prev = TokenKind.EOF
                 var next = TokenKind.EOF
                 if i > 0 { prev = real[i - 1].tok.kind }
-                if i + 1 < len(real) { next = real[i + 1].tok.kind }
+                if i + 1 < real.len() { next = real[i + 1].tok.kind }
                 let name = p.tok.lexeme
                 var u = p.start
                 if !ascii[p.line] { u = utf16_of(lines[p.line], p.start) }
                 let key = format("{}:{}", p.line, u)
                 if name == "_" {
                     ty = T_KEYWORD
-                } else if contains(names.decls, key) {
+                } else if names.decls.contains(key) {
                     ty = names.decls[key]
                     mods = M_DECLARATION
-                    if contains(names.consts, name) { mods = mods + M_READONLY }
+                    if names.consts.contains(name) { mods = mods + M_READONLY }
                 } else if path_mode {
                     ty = T_NAMESPACE
                 } else if prev == TokenKind.HASH {
                     ty = T_DECORATOR
                 } else if is_builtin_type(name) {
                     ty = T_TYPE
-                } else if contains(names.types, name) {
+                } else if names.types.contains(name) {
                     ty = names.types[name]
-                } else if contains(names.variants, name) {
+                } else if names.variants.contains(name) {
                     ty = T_ENUM_MEMBER
-                } else if contains(names.consts, name) {
+                } else if names.consts.contains(name) {
                     ty = T_VARIABLE
                     mods = M_READONLY
                 } else if next == TokenKind.LPAREN {
                     if prev == TokenKind.DOT { ty = T_METHOD } else { ty = T_FUNCTION }
                 } else if prev == TokenKind.DOT {
                     ty = T_PROPERTY
-                } else if next == TokenKind.COLON && contains(names.fields, name) {
+                } else if next == TokenKind.COLON && names.fields.contains(name) {
                     ty = T_PROPERTY
                 } else if item_mode {
                     if is_upper(name) { ty = T_TYPE } else { ty = T_FUNCTION }
@@ -293,23 +293,23 @@ pub fun semantic_tokens(source: str) -> [int64] {
                     ty = T_VARIABLE
                 }
             }
-            if ty >= 0 { push(spans, Span { line: p.line, start: p.start, end: p.end, ty: ty, mods: mods }) }
+            if ty >= 0 { spans.push(Span { line: p.line, start: p.start, end: p.end, ty: ty, mods: mods }) }
         }
         i = i + 1
     }
-    for c in comment_spans(lines, covered) { push(spans, c) }
+    for c in comment_spans(lines, covered) { spans.push(c) }
     return encode(lines, ascii, sorted_spans(spans))
 }
 
 // The end of the f-string at line[i] (`f"`), just past its closing quote.
 fun fstring_end(line: str, i: int32) -> int32 {
     var j = i + 2
-    while j < len(line) {
+    while j < line.len() {
         let c = line[j]
         if c == '"' { return j + 1 }
         if c == '\\' {
             j = escape_end(line, j)
-        } else if c == '{' && j + 1 < len(line) && line[j + 1] == '{' {
+        } else if c == '{' && j + 1 < line.len() && line[j + 1] == '{' {
             j = j + 2
         } else if c == '{' {
             j = hole_end(line, j)
@@ -317,7 +317,7 @@ fun fstring_end(line: str, i: int32) -> int32 {
             j = j + 1
         }
     }
-    return len(line)
+    return line.len()
 }
 
 // Just past the escape whose backslash is at line[j]: two bytes, or the whole
@@ -325,10 +325,10 @@ fun fstring_end(line: str, i: int32) -> int32 {
 #test("a\\u{20AC}b", 1)[9]
 #test("a\\nb", 1)[3]
 fun escape_end(line: str, j: int32) -> int32 {
-    if j + 2 < len(line) && line[j + 1] == 'u' && line[j + 2] == '{' {
+    if j + 2 < line.len() && line[j + 1] == 'u' && line[j + 2] == '{' {
         var k = j + 3
-        while k < len(line) && line[k] != '}' { k = k + 1 }
-        if k < len(line) { return k + 1 }
+        while k < line.len() && line[k] != '}' { k = k + 1 }
+        if k < line.len() { return k + 1 }
         return k
     }
     return j + 2
@@ -338,7 +338,7 @@ fun escape_end(line: str, j: int32) -> int32 {
 fun hole_end(line: str, j0: int32) -> int32 {
     var depth = 1
     var j = j0 + 1
-    while j < len(line) && depth > 0 {
+    while j < line.len() && depth > 0 {
         let c = line[j]
         if c == '{' {
             depth = depth + 1
@@ -361,25 +361,25 @@ fun fstring_spans(line: str, ln: int32, i: int32) -> [Span] {
     var out: [Span] = []
     var seg = i
     var j = i + 2
-    while j < len(line) {
+    while j < line.len() {
         let c = line[j]
         if c == '"' {
-            push(out, Span { line: ln, start: seg, end: j + 1, ty: T_STRING, mods: 0 })
+            out.push(Span { line: ln, start: seg, end: j + 1, ty: T_STRING, mods: 0 })
             return out
         }
         if c == '\\' {
             j = escape_end(line, j)
-        } else if c == '{' && j + 1 < len(line) && line[j + 1] == '{' {
+        } else if c == '{' && j + 1 < line.len() && line[j + 1] == '{' {
             j = j + 2
         } else if c == '{' {
-            if j > seg { push(out, Span { line: ln, start: seg, end: j, ty: T_STRING, mods: 0 }) }
+            if j > seg { out.push(Span { line: ln, start: seg, end: j, ty: T_STRING, mods: 0 }) }
             j = hole_end(line, j)
             seg = j
         } else {
             j = j + 1
         }
     }
-    if len(line) > seg { push(out, Span { line: ln, start: seg, end: len(line), ty: T_STRING, mods: 0 }) }
+    if line.len() > seg { out.push(Span { line: ln, start: seg, end: line.len(), ty: T_STRING, mods: 0 }) }
     return out
 }
 
@@ -389,14 +389,14 @@ fun comment_spans(lines: [str], covered: [[Span]]) -> [Span] {
     var out: [Span] = []
     var in_block = false
     var ln = 0
-    while ln < len(lines) {
+    while ln < lines.len() {
         let line = lines[ln]
         var j = 0
         var start = 0
-        while j < len(line) {
+        while j < line.len() {
             if in_block {
                 if at(line, j, "*/") {
-                    push(out, Span { line: ln, start: start, end: j + 2, ty: T_COMMENT, mods: 0 })
+                    out.push(Span { line: ln, start: start, end: j + 2, ty: T_COMMENT, mods: 0 })
                     in_block = false
                     j = j + 2
                 } else {
@@ -410,8 +410,8 @@ fun comment_spans(lines: [str], covered: [[Span]]) -> [Span] {
                 if skip >= 0 {
                     j = skip
                 } else if at(line, j, "//") {
-                    push(out, Span { line: ln, start: j, end: len(line), ty: T_COMMENT, mods: 0 })
-                    j = len(line)
+                    out.push(Span { line: ln, start: j, end: line.len(), ty: T_COMMENT, mods: 0 })
+                    j = line.len()
                 } else if at(line, j, "/*") {
                     in_block = true
                     start = j
@@ -421,7 +421,7 @@ fun comment_spans(lines: [str], covered: [[Span]]) -> [Span] {
                 }
             }
         }
-        if in_block && len(line) > start { push(out, Span { line: ln, start: start, end: len(line), ty: T_COMMENT, mods: 0 }) }
+        if in_block && line.len() > start { out.push(Span { line: ln, start: start, end: line.len(), ty: T_COMMENT, mods: 0 }) }
         ln = ln + 1
     }
     return out
@@ -433,12 +433,12 @@ fun span_before(a: Span, b: Span) -> bool {
 
 // `spans` by position (merge sort).
 fun sorted_spans(spans: [Span]) -> [Span] {
-    if len(spans) <= 1 { return spans }
+    if spans.len() <= 1 { return spans }
     var left: [Span] = []
     var right: [Span] = []
     var i = 0
-    while i < len(spans) {
-        if i < len(spans) / 2 { push(left, spans[i]) } else { push(right, spans[i]) }
+    while i < spans.len() {
+        if i < spans.len() / 2 { left.push(spans[i]) } else { right.push(spans[i]) }
         i = i + 1
     }
     let l = sorted_spans(left)
@@ -446,12 +446,12 @@ fun sorted_spans(spans: [Span]) -> [Span] {
     var out: [Span] = []
     var a = 0
     var b = 0
-    while a < len(l) || b < len(r) {
-        if b >= len(r) || (a < len(l) && !span_before(r[b], l[a])) {
-            push(out, l[a])
+    while a < l.len() || b < r.len() {
+        if b >= r.len() || (a < l.len() && !span_before(r[b], l[a])) {
+            out.push(l[a])
             a = a + 1
         } else {
-            push(out, r[b])
+            out.push(r[b])
             b = b + 1
         }
     }
@@ -476,11 +476,11 @@ fun encode(lines: [str], ascii: [bool], spans: [Span]) -> [int64] {
         if length > 0 {
             var ds = start
             if s.line == prev_line { ds = start - prev_start }
-            push(out, (s.line - prev_line) as int64)
-            push(out, ds as int64)
-            push(out, length as int64)
-            push(out, s.ty as int64)
-            push(out, s.mods as int64)
+            out.push((s.line - prev_line) as int64)
+            out.push(ds as int64)
+            out.push(length as int64)
+            out.push(s.ty as int64)
+            out.push(s.mods as int64)
             prev_line = s.line
             prev_start = start
         }

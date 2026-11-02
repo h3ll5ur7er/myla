@@ -202,24 +202,24 @@ pub fun render_func(f: IrFunc) -> str {
     }
     var kind = ""
     if f.frame { kind = " frame" }
-    append(sb, format("fun myla_{}{}{} {{\n", f.name, ret, kind))
+    sb.append(format("fun myla_{}{}{} {{\n", f.name, ret, kind))
     var i = 0
-    while i < len(f.slots) {
+    while i < f.slots.len() {
         let s = f.slots[i]
         var where = ""
         if s.inline { where = format(" (argument {}, {} bytes by value)", s.word, s.size) }
         else if s.word >= 0 { where = format(" (argument {})", s.word) } else if s.size != 8 { where = format(" ({} bytes)", s.size) }
         if s.owns { where = where + " owns" }
-        append(sb, format("  ${} {}: {}{}\n", i, s.name, type_name(s.ty), where))
+        sb.append(format("  ${} {}: {}{}\n", i, s.name, type_name(s.ty), where))
         i = i + 1
     }
     for b in f.order {
-        append(sb, format("L{}:\n", b))
-        for inst in f.blocks[b].insts { append(sb, "  " + render_inst(inst) + "\n") }
-        append(sb, "  " + render_term(f.blocks[b].term) + "\n")
+        sb.append(format("L{}:\n", b))
+        for inst in f.blocks[b].insts { sb.append("  " + render_inst(inst) + "\n") }
+        sb.append("  " + render_term(f.blocks[b].term) + "\n")
     }
-    append(sb, "}\n")
-    return build(sb)
+    sb.append("}\n")
+    return sb.build()
 }
 
 #test(Inst.Const(0, Type.TInt(32, true), 42))["%t0 = const int32 42"]
@@ -297,16 +297,16 @@ fun type_eq_names(a: Type, b: Type) -> bool {
 #test(86, "a", [-8, -16, -24, -32, -40, -48, -56, -64, -72, -80, -88, -96, -104])["%t86 = call myla_a(%t-8, %t-16, %t-24, %t-32, %t-40, %t-48, %t-56, %t-64, %t-72, %t-80, %t-88, %t-96, %t-104)"]
 fun render_call(d: int32, name: str, args: [int32]) -> str {
     var sb = StringBuilder()
-    if d >= 0 { append(sb, format("%t{} = ", d)) }
-    append(sb, format("call myla_{}(", name))
+    if d >= 0 { sb.append(format("%t{} = ", d)) }
+    sb.append(format("call myla_{}(", name))
     var first = true
     for a in args {
-        if !first { append(sb, ", ") }
-        append(sb, format("%t{}", a))
+        if !first { sb.append(", ") }
+        sb.append(format("%t{}", a))
         first = false
     }
-    append(sb, ")")
-    return build(sb)
+    sb.append(")")
+    return sb.build()
 }
 
 #test(false)[""]
@@ -321,16 +321,16 @@ fun str_suffix(is_str: bool) -> str {
 #test(86, "a", [-8, -16, -24, -32, -40, -48, -56, -64, -72, -80, -88, -96, -104])["%t86 = rt a(%t-8, %t-16, %t-24, %t-32, %t-40, %t-48, %t-56, %t-64, %t-72, %t-80, %t-88, %t-96, %t-104)"]
 fun render_rt(d: int32, name: str, args: [int32]) -> str {
     var sb = StringBuilder()
-    if d >= 0 { append(sb, format("%t{} = ", d)) }
-    append(sb, format("rt {}(", name))
+    if d >= 0 { sb.append(format("%t{} = ", d)) }
+    sb.append(format("rt {}(", name))
     var first = true
     for a in args {
-        if !first { append(sb, ", ") }
-        append(sb, format("%t{}", a))
+        if !first { sb.append(", ") }
+        sb.append(format("%t{}", a))
         first = false
     }
-    append(sb, ")")
-    return build(sb)
+    sb.append(")")
+    return sb.build()
 }
 
 #test(Term.Br(1, 2, 3))["br %t1, L2, L3"]
@@ -358,16 +358,16 @@ pub fun render_term(t: Term) -> str {
 #test("a\"b\n")["\"a\\\"b\\n\""]
 fun quoted(s: str) -> str {
     var sb = StringBuilder()
-    append(sb, "\"")
-    for c in chars(s) {
-        if c == '"' { append(sb, "\\\"") }
-        else if c == '\\' { append(sb, "\\\\") }
-        else if c == '\n' { append(sb, "\\n") }
-        else if c == '\t' { append(sb, "\\t") }
-        else { append(sb, format("{}", c)) }
+    sb.append("\"")
+    for c in s.chars() {
+        if c == '"' { sb.append("\\\"") }
+        else if c == '\\' { sb.append("\\\\") }
+        else if c == '\n' { sb.append("\\n") }
+        else if c == '\t' { sb.append("\\t") }
+        else { sb.append(format("{}", c)) }
     }
-    append(sb, "\"")
-    return build(sb)
+    sb.append("\"")
+    return sb.build()
 }
 
 // --- The verifier (MYLA-105) ------------------------------------------------------
@@ -389,11 +389,11 @@ const HOLDS: int32 = 1
 const MOVED: int32 = 2
 
 pub fun verify(f: IrFunc) -> str {
-    let n = len(f.blocks)
+    let n = f.blocks.len()
     if n == 0 { return "" }
     // the slot each temporary is the address of (`addr`), or -1
     var addr_of: [int32] = []
-    for t in f.temps { push(addr_of, -1) }
+    for t in f.temps { addr_of.push(-1) }
     for b in f.blocks {
         for inst in b.insts {
             match inst {
@@ -406,24 +406,24 @@ pub fun verify(f: IrFunc) -> str {
     var known: [bool] = []
     var entry: [[int32]] = []
     var none: [int32] = []
-    for s in f.slots { push(none, NONE) }
+    for s in f.slots { none.push(NONE) }
     for b in f.blocks {
-        push(known, false)
-        push(entry, none)
+        known.push(false)
+        entry.push(none)
     }
     // a parameter passed owned holds a value on entry (MYLA-127)
     var first = none
     var s = 0
-    while s < len(f.slots) {
+    while s < f.slots.len() {
         if f.slots[s].word >= 0 && f.slots[s].owns { first[s] = HOLDS }
         s = s + 1
     }
     entry[0] = first
     known[0] = true
     var work = [0]
-    while len(work) > 0 {
-        let b = work[len(work) - 1]
-        pop(work)
+    while work.len() > 0 {
+        let b = work[work.len() - 1]
+        work.pop()
         var live = entry[b]
         for inst in f.blocks[b].insts {
             let problem = step(f, inst, addr_of, live)
@@ -441,7 +441,7 @@ pub fun verify(f: IrFunc) -> str {
         match f.blocks[b].term {
             Term.Ret(v) => {
                 var i = 0
-                while i < len(live) {
+                while i < live.len() {
                     if live[i] == HOLDS { return format("L{}: ${} ({}) still holds a value at ret", b, i, f.slots[i].name) }
                     i = i + 1
                 }
@@ -449,7 +449,7 @@ pub fun verify(f: IrFunc) -> str {
             Term.Become => {
                 if !ends_in_call(f.blocks[b].insts) { return format("L{}: become after no call", b) }
                 var i = 0
-                while i < len(live) {
+                while i < live.len() {
                     if live[i] == HOLDS { return format("L{}: ${} ({}) still holds a value at become", b, i, f.slots[i].name) }
                     i = i + 1
                 }
@@ -460,7 +460,7 @@ pub fun verify(f: IrFunc) -> str {
             if !known[s] {
                 known[s] = true
                 entry[s] = live
-                push(work, s)
+                work.push(s)
             } else {
                 // MOVED on one path and NONE on another (a staged value moved
                 // inside a branch, nothing on the path around it) agree that
@@ -468,7 +468,7 @@ pub fun verify(f: IrFunc) -> str {
                 // is checked again with NONE when it was first seen with MOVED
                 var again = false
                 var i = 0
-                while i < len(live) {
+                while i < live.len() {
                     if live[i] != entry[s][i] {
                         if live[i] == HOLDS || entry[s][i] == HOLDS { return format("L{}: paths into L{} disagree on whether ${} ({}) holds a value", b, s, i, f.slots[i].name) }
                         if entry[s][i] != NONE {
@@ -478,7 +478,7 @@ pub fun verify(f: IrFunc) -> str {
                     }
                     i = i + 1
                 }
-                if again { push(work, s) }
+                if again { work.push(s) }
             }
         }
     }
@@ -539,8 +539,8 @@ fun step(f: IrFunc, inst: Inst, addr_of: [int32], live: [int32]) -> str {
 #test([Inst.Frame(37), Inst.Load(38, 7), Inst.Call(-1, "__wait", [38, 37])])[true]
 #test([Inst.Frame(84), Inst.Load(85, 16), Inst.Call(-1, "__wait", [85, 84])])[true]
 pub fun ends_in_call(insts: [Inst]) -> bool {
-    if len(insts) == 0 { return false }
-    return match insts[len(insts) - 1] {
+    if insts.len() == 0 { return false }
+    return match insts[insts.len() - 1] {
         Inst.Call(d, name, args) => true
         Inst.CallSret(name, r, args) => true
         Inst.CallInd(d, fv, args) => true
@@ -721,38 +721,38 @@ pub fun moves(f: IrFunc) -> IrFunc {
     var out = f
     var borrowed: [bool] = []           // worked out for the first candidate
     var b = 0
-    while b < len(f.blocks) {
+    while b < f.blocks.len() {
         // only a block with a retain and a drop of a slot has anything to move
         if retains_and_drops(f.blocks[b].insts) {
             let insts = f.blocks[b].insts
             var cut: [int32] = []           // the retains that go
             var drops: [int32] = []         // the drops that become `moved`
             var i = 0
-            while i < len(insts) {
+            while i < insts.len() {
                 let s = retained_slot(f, insts, i)
                 if s >= 0 {
-                    if len(borrowed) == 0 { borrowed = borrowed_slots(f) }
+                    if borrowed.len() == 0 { borrowed = borrowed_slots(f) }
                     if !borrowed[s] {
                         let d = move_drop(f, insts, f.blocks[b].term, i, s)
                         if d >= 0 && !has_int(drops, d) {
-                            push(cut, i)
-                            push(drops, d)
+                            cut.push(i)
+                            drops.push(d)
                         }
                     }
                 }
                 i = i + 1
             }
-            if len(cut) > 0 {
+            if cut.len() > 0 {
                 var kept: [Inst] = []
                 i = 0
-                while i < len(insts) {
+                while i < insts.len() {
                     if !has_int(cut, i) {
                         if has_int(drops, i) {
                             match insts[i] {
-                                Inst.DropSlot(t, x) => { push(kept, Inst.Moved(x)) },
+                                Inst.DropSlot(t, x) => { kept.push(Inst.Moved(x)) },
                                 _ => {},
                             }
-                        } else { push(kept, insts[i]) }
+                        } else { kept.push(insts[i]) }
                     }
                     i = i + 1
                 }
@@ -772,42 +772,42 @@ pub fun moves(f: IrFunc) -> IrFunc {
 // loads, offsets and elements computed from it in the block.
 fun borrowed_slots(f: IrFunc) -> [bool] {
     var out: [bool] = []
-    for sl in f.slots { push(out, false) }
+    for sl in f.slots { out.push(false) }
     var root: [int32] = []
-    for t in f.temps { push(root, -1) }
+    for t in f.temps { root.push(-1) }
     for b in f.blocks {
         var set: [int32] = []
         var k = 0
-        while k < len(b.insts) {
+        while k < b.insts.len() {
             match b.insts[k] {
                 Inst.Load(d, x) => {
                     if f.slots[x].owns {
                         root[d] = x
-                        push(set, d)
+                        set.push(d)
                     }
                 },
                 Inst.Addr(d, x) => {
                     if f.slots[x].owns {
                         root[d] = x
-                        push(set, d)
+                        set.push(d)
                     }
                 },
                 Inst.LoadAt(d, p, off) => {
                     if root[p] >= 0 {
                         root[d] = root[p]
-                        push(set, d)
+                        set.push(d)
                     }
                 },
                 Inst.Offset(d, p, off) => {
                     if root[p] >= 0 {
                         root[d] = root[p]
-                        push(set, d)
+                        set.push(d)
                     }
                 },
                 Inst.Elem(d, c, i, stride, is_str, pos) => {
                     if root[c] >= 0 {
                         root[d] = root[c]
-                        push(set, d)
+                        set.push(d)
                     }
                 },
                 Inst.Store(x, v) => {
@@ -815,7 +815,7 @@ fun borrowed_slots(f: IrFunc) -> [bool] {
                 },
                 Inst.Copy(d, src, size) => {
                     // a copy retained right away has references of its own
-                    let retained = k + 1 < len(b.insts) && match b.insts[k + 1] {
+                    let retained = k + 1 < b.insts.len() && match b.insts[k + 1] {
                         Inst.Retain(t, p) => p == d,
                         _ => false,
                     }
@@ -920,7 +920,7 @@ fun move_drop(f: IrFunc, insts: [Inst], term: Term, at: int32, s: int32) -> int3
     // a drop of s later in the block, first (cheap)
     var later = false
     var j = at + 1
-    while j < len(insts) && !later {
+    while j < insts.len() && !later {
         match insts[j] {
             Inst.DropSlot(t, x) => { later = x == s },
             _ => {},
@@ -940,14 +940,14 @@ fun move_drop(f: IrFunc, insts: [Inst], term: Term, at: int32, s: int32) -> int3
             _ => false,
         }
         var reads_family = from_s
-        if !reads_family && len(family) > 0 {
+        if !reads_family && family.len() > 0 {
             for u in inst_uses(insts[j]) {
                 if has_int(family, u) { reads_family = true }
             }
         }
-        if reads_family || len(family) > 0 {
+        if reads_family || family.len() > 0 {
             for d in inst_defs(insts[j]) {
-                if reads_family { if !has_int(family, d) { push(family, d) } }
+                if reads_family { if !has_int(family, d) { family.push(d) } }
                 else { family = without_int(family, d) }
             }
         }
@@ -968,7 +968,7 @@ fun move_drop(f: IrFunc, insts: [Inst], term: Term, at: int32, s: int32) -> int3
     var reads = 0
     var drop = -1
     j = at + 1
-    while j < len(insts) {
+    while j < insts.len() {
         // until the drop the slot still holds the value: what only reads it
         // (a load of the slot, or of what is computed from one) may go on
         // reading it there, but nothing taken from it is read after the drop,
@@ -995,7 +995,7 @@ fun move_drop(f: IrFunc, insts: [Inst], term: Term, at: int32, s: int32) -> int3
         }
         if from_family {
             // a plain scalar read out of the value is a copy of its own
-            for d in inst_defs(insts[j]) { if !plain_scalar(f.temps[d]) && !has_int(family, d) { push(family, d) } }
+            for d in inst_defs(insts[j]) { if !plain_scalar(f.temps[d]) && !has_int(family, d) { family.push(d) } }
         }
         j = j + 1
     }
@@ -1072,7 +1072,7 @@ fun has_int(xs: [int32], x: int32) -> bool {
 fun without_int(xs: [int32], x: int32) -> [int32] {
     var out: [int32] = []
     for y in xs {
-        if y != x { push(out, y) }
+        if y != x { out.push(y) }
     }
     return out
 }
@@ -1087,23 +1087,23 @@ pub struct Touches { at: [int32], rat: [int32], reads: [int32], wat: [int32], wr
 pub fun touches(f: IrFunc) -> Touches {
     var tc = Touches { at: [], rat: [], reads: [], wat: [], writes: [] }
     for b in f.blocks {
-        push(tc.at, len(tc.rat))
+        tc.at.push(tc.rat.len())
         for inst in b.insts {
-            push(tc.rat, len(tc.reads))
-            push(tc.wat, len(tc.writes))
-            for u in inst_uses(inst) { push(tc.reads, u) }
-            for d in inst_defs(inst) { push(tc.writes, d) }
+            tc.rat.push(tc.reads.len())
+            tc.wat.push(tc.writes.len())
+            for u in inst_uses(inst) { tc.reads.push(u) }
+            for d in inst_defs(inst) { tc.writes.push(d) }
         }
     }
-    push(tc.rat, len(tc.reads))
-    push(tc.wat, len(tc.writes))
+    tc.rat.push(tc.reads.len())
+    tc.wat.push(tc.writes.len())
     return tc
 }
 
 // How many times each temporary of `f` is written.
 pub fun def_counts(f: IrFunc, tc: Touches) -> [int32] {
     var counts: [int32] = []
-    for t in f.temps { push(counts, 0) }
+    for t in f.temps { counts.push(0) }
     for d in tc.writes { counts[d] = counts[d] + 1 }
     return counts
 }
@@ -1111,7 +1111,7 @@ pub fun def_counts(f: IrFunc, tc: Touches) -> [int32] {
 // How many times each temporary of `f` is read.
 pub fun use_counts(f: IrFunc, tc: Touches) -> [int32] {
     var counts: [int32] = []
-    for t in f.temps { push(counts, 0) }
+    for t in f.temps { counts.push(0) }
     for u in tc.reads { counts[u] = counts[u] + 1 }
     for b in f.blocks {
         for u in term_uses(b.term) { counts[u] = counts[u] + 1 }
@@ -1124,7 +1124,7 @@ pub fun use_counts(f: IrFunc, tc: Touches) -> [int32] {
 #test(87, [74, 84])[[87, 74, 84]]
 fun prepend(x: int32, xs: [int32]) -> [int32] {
     var out = [x]
-    for y in xs { push(out, y) }
+    for y in xs { out.push(y) }
     return out
 }
 
@@ -1192,8 +1192,8 @@ fun verify_join(left: [Inst], right: [Inst], after: [Inst]) -> str {
 fun test_func(blocks: [IrBlock]) -> IrFunc {
     var order: [int32] = []
     var i = 0
-    while i < len(blocks) {
-        push(order, i)
+    while i < blocks.len() {
+        order.push(i)
         i = i + 1
     }
     return IrFunc {

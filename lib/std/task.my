@@ -11,7 +11,7 @@
 
 // The results of `fs`, run as child tasks at once, in the order of `fs`.
 pub async fun all<T>(fs: [async () -> T]) -> [T] {
-    if len(fs) == 0 {
+    if fs.len() == 0 {
         return []
     }
     return await run_halves(fs)
@@ -19,25 +19,25 @@ pub async fun all<T>(fs: [async () -> T]) -> [T] {
 
 // The results of `fs` (not empty), run as child tasks.
 async fun run_halves<T>(fs: [async () -> T]) -> [T] {
-    if len(fs) == 1 {
+    if fs.len() == 1 {
         let f = fs[0]
         return [await f()]
     }
-    let mid = len(fs) / 2
+    let mid = fs.len() / 2
     var low: [async () -> T] = []
     var high: [async () -> T] = []
-    for i in 0..len(fs) {
+    for i in 0..fs.len() {
         if i < mid {
-            push(low, fs[i])
+            low.push(fs[i])
         } else {
-            push(high, fs[i])
+            high.push(fs[i])
         }
     }
     async let left = run_halves(low)
     async let right = run_halves(high)
     var out = await left
     for x in await right {
-        push(out, x)
+        out.push(x)
     }
     return out
 }

@@ -119,19 +119,19 @@ impl Sampler {
     }
 
     fun minimal(self) -> bool {
-        return self.depth > MAX_DEPTH || len(self.toks) > MAX_TOKENS
+        return self.depth > MAX_DEPTH || self.toks.len() > MAX_TOKENS
     }
 
     // Whether a choice goes the cheap way: likelier the deeper it is and the
     // more of the size budget the program has used.
     fun cheap(var self) -> bool {
-        return self.minimal() || self.rng.below(CHEAP_DEPTH) < self.depth || self.rng.below(MAX_TOKENS) < len(self.toks)
+        return self.minimal() || self.rng.below(CHEAP_DEPTH) < self.depth || self.rng.below(MAX_TOKENS) < self.toks.len()
     }
 
     // Whether an under-covered choice may still be forced: in the first half
     // of the size budget, so that one expression doesn't use it all.
     fun roomy(self) -> bool {
-        return !self.minimal() && len(self.toks) < MAX_TOKENS / 2
+        return !self.minimal() && self.toks.len() < MAX_TOKENS / 2
     }
 
     fun times_seen(self, key: str) -> int32 {
@@ -178,7 +178,7 @@ impl Sampler {
 
     fun gen(var self, e: GExpr) {
         match e {
-            GExpr.GTerm(t) => { push(self.toks, t) },
+            GExpr.GTerm(t) => { self.toks.push(t) },
             GExpr.GClass(c) => {},
             GExpr.GRef(n) => { self.gen_ref(n) },
             GExpr.GSeq(xs) => {
@@ -191,7 +191,7 @@ impl Sampler {
             GExpr.GStar(x) => { self.gen_times(x, self.repeats(0, x)) },
             GExpr.GPlus(x) => { self.gen_times(x, self.repeats(1, x)) },
             GExpr.GLabel(x, l) => {
-                let saved = len(self.excluded)
+                let saved = self.excluded.len()
                 self.restrict(l)
                 self.gen(x)
                 self.unrestrict(saved)
@@ -214,9 +214,9 @@ impl Sampler {
     fun pick(var self, xs: [GExpr]) -> GExpr {
         var ok: [GExpr] = []
         for x in xs {
-            if self.allowed(x) { push(ok, x) }
+            if self.allowed(x) { ok.push(x) }
         }
-        if len(ok) == 0 { ok = xs }
+        if ok.len() == 0 { ok = xs }
         var least = ok[0]
         var fewest = INFINITE
         var most = 0
@@ -236,7 +236,7 @@ impl Sampler {
                     if self.cost(x) < self.cost(choice) { choice = x }
                 }
             } else if self.rng.below(4) == 0 {
-                choice = ok[self.rng.below(len(ok))]
+                choice = ok[self.rng.below(ok.len())]
             }
         }
         self.count(canon(choice, 0))
@@ -248,14 +248,14 @@ impl Sampler {
         let r = self.g.rules[k]
         if self.kinds[k] == "token" {
             if is_newline_token(r) {
-                push(self.toks, "\n")
+                self.toks.push("\n")
             } else {
                 let lexemes = samples_of(self.g, n)
-                push(self.toks, lexemes[self.rng.below(len(lexemes))])
+                self.toks.push(lexemes[self.rng.below(lexemes.len())])
             }
             return
         }
-        let saved = len(self.excluded)
+        let saved = self.excluded.len()
         self.restrict(n)
         self.depth = self.depth + 1
         self.gen(r.body)
@@ -268,8 +268,8 @@ impl Sampler {
         for args in directive_args(self.g, "restrict") {
             if arg_text(args[0]) == name {
                 var i = 1
-                while i < len(args) {
-                    push(self.excluded, arg_text(args[i]))
+                while i < args.len() {
+                    self.excluded.push(arg_text(args[i]))
                     i = i + 1
                 }
             }
@@ -277,7 +277,7 @@ impl Sampler {
     }
 
     fun unrestrict(var self, saved: int32) {
-        while len(self.excluded) > saved { pop(self.excluded) }
+        while self.excluded.len() > saved { self.excluded.pop() }
     }
 }
 
@@ -287,8 +287,8 @@ fun samples_of(g: Grammar, name: str) -> [str] {
     for args in directive_args(g, "sample") {
         if arg_text(args[0]) == name {
             var i = 1
-            while i < len(args) {
-                push(out, arg_text(args[i]))
+            while i < args.len() {
+                out.push(arg_text(args[i]))
                 i = i + 1
             }
         }
@@ -299,13 +299,13 @@ fun samples_of(g: Grammar, name: str) -> [str] {
 // The fewest tokens each rule can produce.
 fun rule_costs(g: Grammar, kinds: [str]) -> [int32] {
     var costs: [int32] = []
-    for r in g.rules { push(costs, INFINITE) }
+    for r in g.rules { costs.push(INFINITE) }
     var s = Sampler { g: g, kinds: kinds, costs: costs, rng: Rng { state: 0u64 }, toks: [], excluded: [], depth: 0, seen: [:] }
     var changed = true
     while changed {
         changed = false
         var k = 0
-        while k < len(g.rules) {
+        while k < g.rules.len() {
             if kinds[k] == "syntax" {
                 let c = s.cost(g.rules[k].body)
                 if c < s.costs[k] {
@@ -326,15 +326,15 @@ fun render(toks: [str]) -> str {
     var line_start = true
     for t in toks {
         if t == "\n" {
-            append(sb, "\n")
+            sb.append("\n")
             line_start = true
         } else {
-            if !line_start { append(sb, " ") }
-            append(sb, t)
+            if !line_start { sb.append(" ") }
+            sb.append(t)
             line_start = false
         }
     }
-    return build(sb)
+    return sb.build()
 }
 
 // `n` random programs; one run of choices, so later programs cover what
@@ -350,7 +350,7 @@ pub fun samples(g: Grammar, seed: int32, n: int32) -> [str] {
     while i < n {
         s.toks = []
         s.gen_ref(start)
-        push(out, render(s.toks))
+        out.push(render(s.toks))
         i = i + 1
     }
     return out

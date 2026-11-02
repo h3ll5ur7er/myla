@@ -171,21 +171,21 @@ pub struct Program { decls: [Decl] }
 #test(["n", "d"])["[n d]"]
 fun wrap_list(parts: [str]) -> str {
     var sb = StringBuilder()
-    append_byte(sb, '[')
+    sb.append_byte('[')
     var i = 0
-    while i < len(parts) {
-        if i > 0 { append_byte(sb, ' ') }
-        append(sb, parts[i])
+    while i < parts.len() {
+        if i > 0 { sb.append_byte(' ') }
+        sb.append(parts[i])
         i = i + 1
     }
-    append_byte(sb, ']')
-    return build(sb)
+    sb.append_byte(']')
+    return sb.build()
 }
 
 fun join_map<T>(xs: [T], f: (T) -> str) -> str {
     var parts: [str] = []
     for x in xs {
-        push(parts, f(x))
+        parts.push(f(x))
     }
     return wrap_list(parts)
 }
@@ -449,10 +449,10 @@ pub fun dump_decl(d: Decl) -> str {
 pub fun dump_program(p: Program) -> str {
     var sb = StringBuilder()
     var i = 0
-    while i < len(p.decls) {
-        if i > 0 { append_byte(sb, 10) }
-        append(sb, dump_decl(p.decls[i]))
+    while i < p.decls.len() {
+        if i > 0 { sb.append_byte(10) }
+        sb.append(dump_decl(p.decls[i]))
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }

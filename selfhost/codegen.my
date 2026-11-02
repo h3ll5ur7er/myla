@@ -221,14 +221,14 @@ pub fun codegen_on(src: str) -> CodeGen {
 
 pub fun new_codegen(c: Checker) -> CodeGen {
     var handed: [str: [int32]] = [:]
-    for k in keys(c.handovers) {
+    for k in c.handovers.keys() {
         let h = c.handovers[k]
         handed[h.func] = with_int(int_list(get(handed, h.func)), h.index)
     }
     var passed_on: [str: [int32]] = [:]
     for p in c.passed_on { passed_on[p.func] = with_int(int_list(get(passed_on, p.func)), p.index) }
     var const_strs: [str: str] = [:]
-    for n in keys(c.const_values) {
+    for n in c.const_values.keys() {
         match c.const_values[n] {
             CV.CVStr(t) => { const_strs[n] = t },
             _ => {},
@@ -236,25 +236,25 @@ pub fun new_codegen(c: Checker) -> CodeGen {
     }
     var func_ix: [str: int32] = [:]
     var i = 0
-    while i < len(c.functions) {
-        if !contains(func_ix, c.functions[i].name) { func_ix[c.functions[i].name] = i }
+    while i < c.functions.len() {
+        if !func_ix.contains(c.functions[i].name) { func_ix[c.functions[i].name] = i }
         i = i + 1
     }
     var struct_ix: [str: int32] = [:]
     i = 0
-    while i < len(c.structs) {
-        if !contains(struct_ix, c.structs[i].name) { struct_ix[c.structs[i].name] = i }
+    while i < c.structs.len() {
+        if !struct_ix.contains(c.structs[i].name) { struct_ix[c.structs[i].name] = i }
         i = i + 1
     }
     var enum_ix: [str: int32] = [:]
     var variant_names: [str: bool] = [:]
     var nullary_names: [str: bool] = [:]
     i = 0
-    while i < len(c.enums) {
-        if !contains(enum_ix, c.enums[i].name) { enum_ix[c.enums[i].name] = i }
+    while i < c.enums.len() {
+        if !enum_ix.contains(c.enums[i].name) { enum_ix[c.enums[i].name] = i }
         for v in c.enums[i].variants {
             variant_names[v.name] = true
-            if len(v.payload) == 0 { nullary_names[v.name] = true }
+            if v.payload.len() == 0 { nullary_names[v.name] = true }
         }
         i = i + 1
     }
@@ -321,8 +321,8 @@ impl CodeGen {
     #test(codegen_on("[int]"))[""]
     fun ir_text(self) -> str {
         var sb = StringBuilder()
-        for t in self.ir_texts { append(sb, t) }
-        return build(sb)
+        for t in self.ir_texts { sb.append(t) }
+        return sb.build()
     }
 
     // The path of the file node `id` is in, as the loader names it (the entry
@@ -330,7 +330,7 @@ impl CodeGen {
     // `<input>` without one.
     #test(codegen_on("[int]"), 16)["<input>"]
     fun path_of(self, id: int32) -> str {
-        if len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return "<input>" }
+        if self.line_spans.len() == 0 || id < 0 || id >= self.prelude_id { return "<input>" }
         var path = self.line_spans[0].path
         for sp in self.line_spans { if sp.first_id <= id { path = sp.path } }
         return path
@@ -352,13 +352,13 @@ impl CodeGen {
         match get(self.pos_labels, key) {
             Some(l) => { lab = l },
             None => {
-                lab = format(".Lpos{}", len(self.pos_labels))
+                lab = format(".Lpos{}", self.pos_labels.len())
                 self.pos_labels[key] = lab
                 let file = self.string_label(self.cur_path)
-                push(self.posdata, "\t.balign 8")
-                push(self.posdata, format("{}:", lab))
-                push(self.posdata, format("\t.quad {}", file))
-                push(self.posdata, format("\t.long {}, {}", line, col))
+                self.posdata.push("\t.balign 8")
+                self.posdata.push(format("{}:", lab))
+                self.posdata.push(format("\t.quad {}", file))
+                self.posdata.push(format("\t.long {}, {}", line, col))
             },
         }
         self.emit(format("leaq {}(%rip), %{}", lab, reg))
@@ -390,7 +390,7 @@ impl CodeGen {
         return format(".Ld{}{}", kind, self.dbg_n)
     }
 
-    fun dbg_line(var self, line: str) { push(self.dbg_lines, line) }
+    fun dbg_line(var self, line: str) { self.dbg_lines.push(line) }
 
     // Open the subprogram of the function at label `symbol`, if the function
     // has a line table; it returns `self.ret_type`.
@@ -439,12 +439,12 @@ impl CodeGen {
     }
 
     fun dbg_push_scope(var self) {
-        if self.dbg_fn { push(self.dbg_scopes, DbgScope { end: self.dbg_label("e"), blocks: 0 }) }
+        if self.dbg_fn { self.dbg_scopes.push(DbgScope { end: self.dbg_label("e"), blocks: 0 }) }
     }
 
     fun dbg_pop_scope(var self) {
         if !self.dbg_fn { return }
-        let top = pop(self.dbg_scopes)
+        let top = self.dbg_scopes.pop()
         if top.blocks > 0 {
             self.emit(format("{}:", top.end))
             var i = 0
@@ -461,16 +461,16 @@ impl CodeGen {
     fun dbg_variable(var self, b: CgBinding, whole: bool, param: bool) {
         if !self.dbg_fn || is_internal_name(b.name) { return }
         if !whole {
-            let si = len(self.dbg_scopes) - 1
+            let si = self.dbg_scopes.len() - 1
             let end = self.dbg_scopes[si].end
-            if format("{}:{}", end, len(self.text)) != self.dbg_mark {
+            if format("{}:{}", end, self.text.len()) != self.dbg_mark {
                 let start = self.dbg_label("b")
                 self.emit(format("{}:", start))
                 self.dbg_line(format("\t.uleb128 {}", AB_BLOCK))
                 self.dbg_line(format("\t.quad {}", start))
                 self.dbg_line(format("\t.quad {} - {}", end, start))
                 self.dbg_scopes[si].blocks = self.dbg_scopes[si].blocks + 1
-                self.dbg_mark = format("{}:{}", end, len(self.text))
+                self.dbg_mark = format("{}:{}", end, self.text.len())
             }
         }
         // the address of the value
@@ -478,21 +478,21 @@ impl CodeGen {
         if b.kind == "frame" {
             // in a frame function's heap frame, whose address is the
             // function's argument word (D90, MYLA-141)
-            push(addr, 16)
-            push(addr, OP_DEREF)
-            push(addr, OP_PLUS_UCONST)
-            for x in uleb(b.offset) { push(addr, x) }
+            addr.push(16)
+            addr.push(OP_DEREF)
+            addr.push(OP_PLUS_UCONST)
+            for x in uleb(b.offset) { addr.push(x) }
         } else {
-            for x in sleb(b.offset) { push(addr, x) }
+            for x in sleb(b.offset) { addr.push(x) }
         }
         if b.kind == "capture" {
-            push(addr, OP_DEREF)
+            addr.push(OP_DEREF)
             if b.capoff != 0 {
-                push(addr, OP_PLUS_UCONST)
-                for x in uleb(b.capoff) { push(addr, x) }
+                addr.push(OP_PLUS_UCONST)
+                for x in uleb(b.capoff) { addr.push(x) }
             }
         } else if b.kind == "param" && is_aggregate(b.ty) {
-            push(addr, OP_DEREF)               // passed (or borrowed) by address
+            addr.push(OP_DEREF)               // passed (or borrowed) by address
         }
         var ty = ""
         var loc: [str] = []
@@ -507,9 +507,9 @@ impl CodeGen {
             },
             Type.TList(e) => {
                 ty = self.dbg_items(e)
-                push(addr, OP_DEREF)
-                push(addr, OP_PLUS_UCONST)
-                push(addr, 16)
+                addr.push(OP_DEREF)
+                addr.push(OP_PLUS_UCONST)
+                addr.push(16)
                 loc = exprloc(addr)
             },
             Type.TFloat(w) => {
@@ -546,12 +546,12 @@ impl CodeGen {
         let start = self.dbg_label("x")
         let end = self.dbg_label("x")
         var out = [format("\t.uleb128 {} - {}", end, start), format("{}:", start), bytes_line(addr)]
-        push(out, format("\t.byte {}, 8", OP_GNU_DEREF_TYPE))
-        push(out, format("\t.uleb128 {} - .Ldebug_info0", f64))
-        push(out, format("\t.byte {}", OP_GNU_CONVERT))
-        push(out, format("\t.uleb128 {} - .Ldebug_info0", f32))
-        push(out, format("\t.byte {}", OP_STACK_VALUE))
-        push(out, format("{}:", end))
+        out.push(format("\t.byte {}, 8", OP_GNU_DEREF_TYPE))
+        out.push(format("\t.uleb128 {} - .Ldebug_info0", f64))
+        out.push(format("\t.byte {}", OP_GNU_CONVERT))
+        out.push(format("\t.uleb128 {} - .Ldebug_info0", f32))
+        out.push(format("\t.byte {}", OP_STACK_VALUE))
+        out.push(format("{}:", end))
         return out
     }
 
@@ -562,9 +562,9 @@ impl CodeGen {
             Some(l) => { return l },
             None => {},
         }
-        let label = format(".Ldty{}", len(self.dbg_types))
+        let label = format(".Ldty{}", self.dbg_types.len())
         self.dbg_types[key] = label
-        push(self.dbg_pending, DbgType { label: label, kind: kind, ty: ty, target: target, n: n, m: m })
+        self.dbg_pending.push(DbgType { label: label, kind: kind, ty: ty, target: target, n: n, m: m })
         return label
     }
 
@@ -648,14 +648,14 @@ impl CodeGen {
     fun dbg_struct_lines(self, name: str, size: int32, members: [str], types: [str], offs: [int32]) -> [str] {
         var out = [format("\t.uleb128 {}", AB_STRUCT), dw_string(name), format("\t.uleb128 {}", size)]
         var i = 0
-        while i < len(members) {
-            push(out, format("\t.uleb128 {}", AB_MEMBER))
-            push(out, dw_string(members[i]))
-            push(out, dw_ref(types[i]))
-            push(out, format("\t.uleb128 {}", offs[i]))
+        while i < members.len() {
+            out.push(format("\t.uleb128 {}", AB_MEMBER))
+            out.push(dw_string(members[i]))
+            out.push(dw_ref(types[i]))
+            out.push(format("\t.uleb128 {}", offs[i]))
             i = i + 1
         }
-        push(out, "\t.byte 0")
+        out.push("\t.byte 0")
         return out
     }
 
@@ -679,8 +679,8 @@ impl CodeGen {
         }
         if p.kind == "array" {
             var out = [format("\t.uleb128 {}", AB_ARRAY), dw_ref(p.target), format("\t.uleb128 {}", p.n), format("\t.uleb128 {}", AB_SUBRANGE)]
-            for l in exprloc([OP_PUSH_OBJECT_ADDRESS, OP_LIT0 + p.m, OP_MINUS, OP_DEREF]) { push(out, l) }
-            push(out, "\t.byte 0")
+            for l in exprloc([OP_PUSH_OBJECT_ADDRESS, OP_LIT0 + p.m, OP_MINUS, OP_DEREF]) { out.push(l) }
+            out.push("\t.byte 0")
             return out
         }
         if p.kind == "cell" { return self.dbg_cell_lines(p.ty) }
@@ -748,18 +748,18 @@ impl CodeGen {
                 let sub = self.type_subst(info.type_params, a)
                 for f in info.fields {
                     let ft = subst_type(f.ty, sub)
-                    push(members, f.name)
-                    push(types, self.dbg_element(ft))
-                    push(offs, off)
+                    members.push(f.name)
+                    types.push(self.dbg_element(ft))
+                    offs.push(off)
                     off = off + self.stored_size(ft)
                 }
             },
             Type.TTuple(es) => {
                 var i = 0
                 for et in es {
-                    push(members, format("__{}", i))
-                    push(types, self.dbg_element(et))
-                    push(offs, off)
+                    members.push(format("__{}", i))
+                    types.push(self.dbg_element(et))
+                    offs.push(off)
                     off = off + self.stored_size(et)
                     i = i + 1
                 }
@@ -784,48 +784,48 @@ impl CodeGen {
         let tag = self.dbg_label("g")
         let tag_t = self.dbg_base(Type.TInt(64, false), 8)
         var out = [format("\t.uleb128 {}", AB_STRUCT), dw_string(name), format("\t.uleb128 {}", size)]
-        push(out, format("\t.uleb128 {}", AB_VARIANT_PART))
-        push(out, dw_ref(tag))
-        push(out, format("{}:", tag))
-        push(out, format("\t.uleb128 {}", AB_TAG))
-        push(out, dw_string("<tag>"))
-        push(out, dw_ref(tag_t))
-        push(out, "\t.uleb128 0")
+        out.push(format("\t.uleb128 {}", AB_VARIANT_PART))
+        out.push(dw_ref(tag))
+        out.push(format("{}:", tag))
+        out.push(format("\t.uleb128 {}", AB_TAG))
+        out.push(dw_string("<tag>"))
+        out.push(dw_ref(tag_t))
+        out.push("\t.uleb128 0")
         var labels: [str] = []
-        for v in variants { push(labels, self.dbg_label("v")) }
+        for v in variants { labels.push(self.dbg_label("v")) }
         var i = 0
         for v in variants {
-            push(out, format("\t.uleb128 {}", AB_VARIANT))
-            push(out, format("\t.uleb128 {}", i))
-            push(out, format("\t.uleb128 {}", AB_MEMBER))
-            push(out, dw_string(v.name))
-            push(out, dw_ref(labels[i]))
-            push(out, "\t.uleb128 0")
-            push(out, "\t.byte 0")
+            out.push(format("\t.uleb128 {}", AB_VARIANT))
+            out.push(format("\t.uleb128 {}", i))
+            out.push(format("\t.uleb128 {}", AB_MEMBER))
+            out.push(dw_string(v.name))
+            out.push(dw_ref(labels[i]))
+            out.push("\t.uleb128 0")
+            out.push("\t.byte 0")
             i = i + 1
         }
-        push(out, "\t.byte 0")                  // end of the variant part
+        out.push("\t.byte 0")                  // end of the variant part
         i = 0
         for v in variants {
-            push(out, format("{}:", labels[i]))
-            push(out, format("\t.uleb128 {}", AB_STRUCT))
-            push(out, dw_string(v.name))
-            push(out, format("\t.uleb128 {}", size))
+            out.push(format("{}:", labels[i]))
+            out.push(format("\t.uleb128 {}", AB_STRUCT))
+            out.push(dw_string(v.name))
+            out.push(format("\t.uleb128 {}", size))
             var off = 8
             var j = 0
             for ft in self.variant_payload(t, v.name) {
                 let ty = self.dbg_element(ft)
-                push(out, format("\t.uleb128 {}", AB_MEMBER))
-                push(out, dw_string(format("__{}", j)))
-                push(out, dw_ref(ty))
-                push(out, format("\t.uleb128 {}", off))
+                out.push(format("\t.uleb128 {}", AB_MEMBER))
+                out.push(dw_string(format("__{}", j)))
+                out.push(dw_ref(ty))
+                out.push(format("\t.uleb128 {}", off))
                 off = off + self.stored_size(ft)
                 j = j + 1
             }
-            push(out, "\t.byte 0")
+            out.push("\t.byte 0")
             i = i + 1
         }
-        push(out, "\t.byte 0")
+        out.push("\t.byte 0")
         return out
     }
 
@@ -836,29 +836,29 @@ impl CodeGen {
     fun dbg_sections(var self) -> [str] {
         var types: [str] = []
         var i = 0
-        while i < len(self.dbg_pending) {
+        while i < self.dbg_pending.len() {
             let p = self.dbg_pending[i]
-            push(types, format("{}:", p.label))
-            for l in self.dbg_build(p) { push(types, l) }
+            types.push(format("{}:", p.label))
+            for l in self.dbg_build(p) { types.push(l) }
             i = i + 1
         }
         var out = abbrev_section()
-        for l in ["\t.section .debug_info,\"\",@progbits", ".Ldebug_info0:", "\t.long .Ldebug_info_end - .Ldebug_info_start", ".Ldebug_info_start:", "\t.value 4", "\t.long .Ldebug_abbrev0", "\t.byte 8"] { push(out, l) }
-        push(out, format("\t.uleb128 {}", AB_CU))
-        push(out, dw_string("myla (self-hosted)"))
-        push(out, format("\t.value {}", LANG_RUST))
-        push(out, dw_string(self.line_files[0]))
+        for l in ["\t.section .debug_info,\"\",@progbits", ".Ldebug_info0:", "\t.long .Ldebug_info_end - .Ldebug_info_start", ".Ldebug_info_start:", "\t.value 4", "\t.long .Ldebug_abbrev0", "\t.byte 8"] { out.push(l) }
+        out.push(format("\t.uleb128 {}", AB_CU))
+        out.push(dw_string("myla (self-hosted)"))
+        out.push(format("\t.value {}", LANG_RUST))
+        out.push(dw_string(self.line_files[0]))
         let comp_dir = match current_dir() {
             Ok(d) => d
             Err(e) => "."
         }
-        push(out, dw_string(comp_dir))
-        for l in ["\t.quad .Ltext0", "\t.quad .Letext0 - .Ltext0", "\t.long .Ldebug_line0"] { push(out, l) }
-        for l in self.dbg_lines { push(out, l) }
-        for l in types { push(out, l) }
-        for l in ["\t.byte 0", ".Ldebug_info_end:"] { push(out, l) }
-        if self.dbg_script != "" { for l in gdb_scripts_section(self.dbg_script) { push(out, l) } }
-        for l in ["\t.section .debug_line,\"\",@progbits", ".Ldebug_line0:"] { push(out, l) }
+        out.push(dw_string(comp_dir))
+        for l in ["\t.quad .Ltext0", "\t.quad .Letext0 - .Ltext0", "\t.long .Ldebug_line0"] { out.push(l) }
+        for l in self.dbg_lines { out.push(l) }
+        for l in types { out.push(l) }
+        for l in ["\t.byte 0", ".Ldebug_info_end:"] { out.push(l) }
+        if self.dbg_script != "" { for l in gdb_scripts_section(self.dbg_script) { out.push(l) } }
+        for l in ["\t.section .debug_line,\"\",@progbits", ".Ldebug_line0:"] { out.push(l) }
         return out
     }
 
@@ -868,15 +868,15 @@ impl CodeGen {
     // use; 0 when line tables are off or the node is the prelude's.
     #test(codegen_on("[int]"), 16)[0]
     fun file_number(var self, id: int32) -> int32 {
-        if !self.debug || len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return 0 }
+        if !self.debug || self.line_spans.len() == 0 || id < 0 || id >= self.prelude_id { return 0 }
         let path = self.path_of(id)
         var i = 0
-        while i < len(self.line_files) {
+        while i < self.line_files.len() {
             if self.line_files[i] == path { return i + 1 }
             i = i + 1
         }
-        push(self.line_files, path)
-        return len(self.line_files)
+        self.line_files.push(path)
+        return self.line_files.len()
     }
 
     // Attribute the code that follows to source position `line:col`.
@@ -903,18 +903,18 @@ impl CodeGen {
     fun emit(var self, line: str) {
         if self.pend_store != "" { self.flush_temp() }
         if line == "" {
-            push(self.text, "")
+            self.text.push("")
         } else if ends_colon(line) {
-            push(self.text, line)
+            self.text.push(line)
         } else {
-            push(self.text, "\t" + line)
+            self.text.push("\t" + line)
         }
     }
 
     // Append a pre-formatted runtime-prelude line verbatim.
     fun raw(var self, line: str) {
         if self.pend_store != "" { self.flush_temp() }
-        push(self.text, line)
+        self.text.push(line)
     }
 
     // Emit the held-back store of a temporary (see `store_temp`). A value
@@ -922,7 +922,7 @@ impl CodeGen {
     // straight into it instead (MYLA-125); `flush_temp_in_rax` keeps it in
     // %rax as well, for a reader that takes it from there.
     fun flush_temp(var self) {
-        let n = len(self.text)
+        let n = self.text.len()
         if n > 0 && is_reg_move(self.pend_store) {
             let folded = fold_load(self.text[n - 1], reg_of_move(self.pend_store))
             if folded != "" {
@@ -936,7 +936,7 @@ impl CodeGen {
     }
 
     fun flush_temp_in_rax(var self) {
-        push(self.text, "\t" + self.pend_store)
+        self.text.push("\t" + self.pend_store)
         self.pend_store = ""
         self.pend_temp = -1
     }
@@ -962,10 +962,10 @@ impl CodeGen {
         if existing >= 0 { return self.str_labels[existing] }
         let lab = format(".Lstr{}", self.str_n)
         self.str_n = self.str_n + 1
-        self.str_ix[text] = len(self.str_texts)
-        push(self.str_texts, text)
-        push(self.str_labels, lab)
-        for line in static_str(lab, text) { push(self.strdata, line) }
+        self.str_ix[text] = self.str_texts.len()
+        self.str_texts.push(text)
+        self.str_labels.push(lab)
+        for line in static_str(lab, text) { self.strdata.push(line) }
         return lab
     }
 
@@ -980,7 +980,7 @@ impl CodeGen {
 
     #test(codegen_on("[int]"), "add")[false]
     fun has_func(self, name: str) -> bool {
-        return contains(self.func_ix, name)
+        return self.func_ix.contains(name)
     }
 
     // -- owned parameters (MYLA-127, D86) ----------------------------------
@@ -1008,7 +1008,7 @@ impl CodeGen {
             var any = false
             for p in sig.decl.params {
                 let k = p.name != "self" && list_has_str(self.scan_kept, p.name)
-                push(flags, k)
+                flags.push(k)
                 if k { any = true }
             }
             self.kept_params[sig.name] = flags
@@ -1019,7 +1019,7 @@ impl CodeGen {
         // together: no receiver's type to look up)
         var score: [str: [int32]] = [:]
         for u in self.scan_args {
-            if !contains(self.keeping, u.callee) { continue }
+            if !self.keeping.contains(u.callee) { continue }
             var first = 0
             if u.recv >= 0 { first = 1 }
             var ss = match get(score, u.callee) {
@@ -1029,9 +1029,9 @@ impl CodeGen {
                     zeros
                 },
             }
-            while len(ss) < first + len(u.fresh) { push(ss, 0) }
+            while ss.len() < first + u.fresh.len() { ss.push(0) }
             var i = 0
-            while i < len(u.fresh) {
+            while i < u.fresh.len() {
                 if u.fresh[i] { ss[first + i] = ss[first + i] + 1 } else { ss[first + i] = ss[first + i] - 1 }
                 i = i + 1
             }
@@ -1059,9 +1059,9 @@ impl CodeGen {
             var flags: [bool] = []
             var any = false
             var i = 0
-            while i < len(kept) {
-                let k = ((kept[i] && i < len(ss) && ss[i] > 0) || contains_int(handed, i)) && !contains_int(passed, i)
-                push(flags, k)
+            while i < kept.len() {
+                let k = ((kept[i] && i < ss.len() && ss[i] > 0) || contains_int(handed, i)) && !contains_int(passed, i)
+                flags.push(k)
                 if k { any = true }
                 i = i + 1
             }
@@ -1122,7 +1122,7 @@ impl CodeGen {
     // `scan_kept` gets the name `e` is, when it is a variable.
     fun keep_name(var self, e: Expr) {
         match e.kind {
-            ExprKind.Name(n) => { push(self.scan_kept, n) },
+            ExprKind.Name(n) => { self.scan_kept.push(n) },
             _ => {},
         }
     }
@@ -1157,10 +1157,10 @@ impl CodeGen {
                 var fresh: [bool] = []
                 for a in args {
                     if stores { self.keep_name(a) }
-                    if callee_name != "" { push(fresh, is_new_value(a) || (in_return && is_name_expr(a))) }
+                    if callee_name != "" { fresh.push(is_new_value(a) || (in_return && is_name_expr(a))) }
                     self.scan_expr(a, false)
                 }
-                if callee_name != "" { push(self.scan_args, ScanArg { callee: callee_name, recv: recv, fresh: fresh }) }
+                if callee_name != "" { self.scan_args.push(ScanArg { callee: callee_name, recv: recv, fresh: fresh }) }
                 self.scan_expr(callee, false)
             },
             ExprKind.Unary(op, x) => { self.scan_expr(x, false) },
@@ -1219,7 +1219,7 @@ impl CodeGen {
                     ExprOrBlock.EB_Expr(x) => names_in_expr(x, []),
                     ExprOrBlock.EB_Block(blk) => names_in_block(blk, []),
                 }
-                for n in names { push(self.scan_kept, n) }
+                for n in names { self.scan_kept.push(n) }
             },
             _ => {},
         }
@@ -1231,7 +1231,7 @@ impl CodeGen {
     fun owned_param(self, sig: FuncSig, i: int32, t: Type) -> bool {
         if is_aggregate(t) || !self.owns_heap(t) { return false }
         return match get(self.kept_params, sig.name) {
-            Some(flags) => i < len(flags) && flags[i],
+            Some(flags) => i < flags.len() && flags[i],
             None => false,
         }
     }
@@ -1240,7 +1240,7 @@ impl CodeGen {
     // value: a struct, tuple or enum a `become` hands over to it (D88), its
     // words in the argument words.
     fun byval_param(self, sig: FuncSig, i: int32, t: Type) -> bool {
-        return len(self.handed) > 0 && is_aggregate(t) && contains_int(int_list(get(self.handed, sig.name)), i)
+        return self.handed.len() > 0 && is_aggregate(t) && contains_int(int_list(get(self.handed, sig.name)), i)
     }
 
     // Whether `myla_<key>.eq` is the routine `emit_derived_eq` writes for a
@@ -1249,8 +1249,8 @@ impl CodeGen {
     fun derived_eq_routine(self, key: str) -> bool {
         for d in self.decls {
             match d.kind {
-                DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => { if name == key { return len(tps) == 0 && attrs_have_derive_eq(attrs) } },
-                DeclKind.EnumDecl(name, variants, attrs, tps, isp) => { if name == key { return len(tps) == 0 && attrs_have_derive_eq(attrs) } },
+                DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => { if name == key { return tps.len() == 0 && attrs_have_derive_eq(attrs) } },
+                DeclKind.EnumDecl(name, variants, attrs, tps, isp) => { if name == key { return tps.len() == 0 && attrs_have_derive_eq(attrs) } },
                 _ => {},
             }
         }
@@ -1262,7 +1262,7 @@ impl CodeGen {
     #test(codegen_on("[int]"), Type.TEnum("Color", []))[false]
     fun tag_only_eq(self, t: Type) -> bool {
         return match t {
-            Type.TEnum(n, a) => contains(self.tag_enums, n),
+            Type.TEnum(n, a) => self.tag_enums.contains(n),
             _ => false,
         }
     }
@@ -1271,10 +1271,10 @@ impl CodeGen {
         for d in self.decls {
             match d.kind {
                 DeclKind.EnumDecl(name, variants, attrs, tps, isp) => {
-                    if len(tps) == 0 && attrs_have_derive_eq(attrs) {
+                    if tps.len() == 0 && attrs_have_derive_eq(attrs) {
                         var payloads = false
                         for v in self.enum_info(name).variants {
-                            if len(v.payload) > 0 { payloads = true }
+                            if v.payload.len() > 0 { payloads = true }
                         }
                         if !payloads { self.tag_enums[name] = true }
                     }
@@ -1286,7 +1286,7 @@ impl CodeGen {
 
     // Whether some parameter of `sig` is passed by value (most have none).
     fun has_byval(self, sig: FuncSig) -> bool {
-        return len(self.handed) > 0 && contains(self.handed, sig.name)
+        return self.handed.len() > 0 && self.handed.contains(sig.name)
     }
 
     // The bytes of argument words a value of type `t` takes by value.
@@ -1300,7 +1300,7 @@ impl CodeGen {
     // `owned_param` for each of the parameters `params` of `sig`; none for a
     // function without owned parameters (most).
     fun owned_params(self, sig: FuncSig, params: [Type]) -> [bool] {
-        if !contains(self.owning, sig.name) { return self.no_owned }
+        if !self.owning.contains(sig.name) { return self.no_owned }
         var out: [bool] = []
         let flags = match get(self.kept_params, sig.name) {
             Some(fl) => fl,
@@ -1310,8 +1310,8 @@ impl CodeGen {
             },
         }
         var i = 0
-        while i < len(params) {
-            push(out, i < len(flags) && flags[i] && !is_aggregate(params[i]) && self.owns_heap(params[i]))
+        while i < params.len() {
+            out.push(i < flags.len() && flags[i] && !is_aggregate(params[i]) && self.owns_heap(params[i]))
             i = i + 1
         }
         return out
@@ -1470,9 +1470,9 @@ impl CodeGen {
         }
         if is_str_t(t) { return }                // `__str_drop` is always there
         let key = "drop" + mono_token(t)
-        if contains(self.helper_seen, key) { return }
+        if self.helper_seen.contains(key) { return }
         self.helper_seen[key] = true
-        push(self.need_drop, t)
+        self.need_drop.push(t)
     }
 
     // Record that `t`'s copy-on-write clone routine must be emitted.
@@ -1482,9 +1482,9 @@ impl CodeGen {
             return
         }
         let key = "clone" + mono_token(t)
-        if contains(self.helper_seen, key) { return }
+        if self.helper_seen.contains(key) { return }
         self.helper_seen[key] = true
-        push(self.need_clone, t)
+        self.need_clone.push(t)
     }
 
     // The clone routine for a list/map/builder cow site.
@@ -1534,7 +1534,7 @@ impl CodeGen {
             Type.TStruct(n, a) => {
                 let info = self.struct_info(n)
                 let sub = self.type_subst(info.type_params, a)
-                for f in info.fields { push(members, subst_type(f.ty, sub)) }
+                for f in info.fields { members.push(subst_type(f.ty, sub)) }
             },
             Type.TTuple(es) => { members = es },
             _ => {},
@@ -1552,10 +1552,10 @@ impl CodeGen {
         let tok = mono_token(t)
         var name = "__walkd_" + tok
         if retain { name = "__walkr_" + tok }
-        if contains(self.helper_seen, name) { return name }
+        if self.helper_seen.contains(name) { return name }
         self.helper_seen[name] = true
-        push(self.need_walk, t)
-        push(self.walk_retain, retain)
+        self.need_walk.push(t)
+        self.walk_retain.push(retain)
         return name
     }
 
@@ -1658,8 +1658,8 @@ impl CodeGen {
     fun type_subst(self, type_params: [str], args: [Type]) -> [Subst] {
         var sub: [Subst] = []
         var i = 0
-        while i < len(type_params) && i < len(args) {
-            push(sub, Subst { name: type_params[i], ty: args[i] })
+        while i < type_params.len() && i < args.len() {
+            sub.push(Subst { name: type_params[i], ty: args[i] })
             i = i + 1
         }
         return sub
@@ -1761,7 +1761,7 @@ impl CodeGen {
         let info = self.enum_info(name)
         let sub = self.type_subst(info.type_params, type_args_of(et))
         var out: [Type] = []
-        for ft in self.variant_payload_decl(name, variant) { push(out, subst_type(ft, sub)) }
+        for ft in self.variant_payload_decl(name, variant) { out.push(subst_type(ft, sub)) }
         return out
     }
 
@@ -1779,22 +1779,22 @@ impl CodeGen {
 
     #test(codegen_on("[int]"), "a")[false]
     fun is_enum_name(self, n: str) -> bool {
-        return contains(self.enum_names, n)
+        return self.enum_names.contains(n)
     }
 
     #test(codegen_on("[int]"), "a")[false]
     fun is_nullary_variant(self, n: str) -> bool {
-        return contains(self.nullary_names, n)
+        return self.nullary_names.contains(n)
     }
 
     #test(codegen_on("[int]"), "Ok")[false]
     fun is_variant_name(self, n: str) -> bool {
-        return contains(self.variant_names, n)
+        return self.variant_names.contains(n)
     }
 
     #test(codegen_on("[int]"), "push")[false]
     fun has_function(self, n: str) -> bool {
-        return contains(self.func_ix, n)
+        return self.func_ix.contains(n)
     }
 
     // Whether the checker typed `callee` as a value, which it does only for an
@@ -1802,7 +1802,7 @@ impl CodeGen {
     // (MYLA-102), so `f(x)` with a local `f` calls the local.
     #test(codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[false]
     fun called_as_value(self, callee: Expr) -> bool {
-        return contains(self.resolved, callee.id)
+        return self.resolved.contains(callee.id)
     }
 
     // Classify an expression as an enum constructor (if it is one).
@@ -1848,15 +1848,15 @@ impl CodeGen {
         self.find_kept_params()
         self.find_tag_enums()
         let m = self.request_fn(en, [])
-        while len(self.fn_worklist) > 0 || len(self.lam_jobs) > 0 {
-            if len(self.fn_worklist) > 0 {
-                let job = pop(self.fn_worklist)
+        while self.fn_worklist.len() > 0 || self.lam_jobs.len() > 0 {
+            if self.fn_worklist.len() > 0 {
+                let job = self.fn_worklist.pop()
                 self.subst = job.subst
                 self.gen_any_function(self.sig_of(job.orig).decl, job.mangled)
                 self.subst = []
             } else {
-                let lj = pop(self.lam_jobs)
-                if contains(self.lam_seen, lj.lifted) { continue }
+                let lj = self.lam_jobs.pop()
+                if self.lam_seen.contains(lj.lifted) { continue }
                 self.lam_seen[lj.lifted] = true
                 self.gen_any_lambda(lj)
             }
@@ -1873,23 +1873,23 @@ impl CodeGen {
     #test(codegen_on("fun main() { print(1 + 2) }"), "add", [])["add"]
     fun request_fn(var self, orig: str, targs: [Type]) -> str {
         let sig = self.sig_of(orig)
-        if len(sig.type_params) == 0 {
-            if !contains(self.fn_seen, orig) {
+        if sig.type_params.len() == 0 {
+            if !self.fn_seen.contains(orig) {
                 self.fn_seen[orig] = true
-                push(self.fn_worklist, MonoFn { orig: orig, mangled: orig, subst: [] })
+                self.fn_worklist.push(MonoFn { orig: orig, mangled: orig, subst: [] })
             }
             return orig
         }
         let mangled = mangle_fn(orig, targs)
-        if !contains(self.fn_seen, mangled) {
+        if !self.fn_seen.contains(mangled) {
             self.fn_seen[mangled] = true
             var sub: [Subst] = []
             var i = 0
-            while i < len(sig.type_params) {
-                push(sub, Subst { name: sig.type_params[i], ty: targs[i] })
+            while i < sig.type_params.len() {
+                sub.push(Subst { name: sig.type_params[i], ty: targs[i] })
                 i = i + 1
             }
-            push(self.fn_worklist, MonoFn { orig: orig, mangled: mangled, subst: sub })
+            self.fn_worklist.push(MonoFn { orig: orig, mangled: mangled, subst: sub })
         }
         return mangled
     }
@@ -1899,13 +1899,13 @@ impl CodeGen {
     fun solve_targs(self, sig: FuncSig, args: [Expr]) -> [Type] {
         var sub: [Subst] = []
         var i = 0
-        while i < len(sig.params) && i < len(args) {
-            for b in unify_into(sig.params[i], self.type_of(args[i].id)) { push(sub, b) }
+        while i < sig.params.len() && i < args.len() {
+            for b in unify_into(sig.params[i], self.type_of(args[i].id)) { sub.push(b) }
             i = i + 1
         }
         var out: [Type] = []
         for tp in sig.type_params {
-            match subst_get(sub, tp) { Some(t) => { push(out, t) }, None => { push(out, Type.TInt(32, true)) } }
+            match subst_get(sub, tp) { Some(t) => { out.push(t) }, None => { out.push(Type.TInt(32, true)) } }
         }
         return out
     }
@@ -1925,108 +1925,108 @@ impl CodeGen {
 
     fun assemble_source(var self) -> str {
         var out: [str] = []
-        push(out, "\t.text")
+        out.push("\t.text")
         var fi = 0
-        while fi < len(self.line_files) {
-            push(out, format("\t.file {} \"{}\"", fi + 1, asm_string(self.line_files[fi])))
+        while fi < self.line_files.len() {
+            out.push(format("\t.file {} \"{}\"", fi + 1, asm_string(self.line_files[fi])))
             fi = fi + 1
         }
-        if len(self.line_files) > 0 { push(out, ".Ltext0:") }     // the compile unit's code (MYLA-66)
-        for line in self.text { push(out, line) }
-        if len(self.line_files) > 0 { push(out, ".Letext0:") }
-        push(out, "")
-        push(out, "\t.section .rodata")
-        push(out, ".Lbool_true:\n\t.ascii \"true\"")
-        push(out, ".Lbool_false:\n\t.ascii \"false\"")
+        if self.line_files.len() > 0 { out.push(".Ltext0:") }     // the compile unit's code (MYLA-66)
+        for line in self.text { out.push(line) }
+        if self.line_files.len() > 0 { out.push(".Letext0:") }
+        out.push("")
+        out.push("\t.section .rodata")
+        out.push(".Lbool_true:\n\t.ascii \"true\"")
+        out.push(".Lbool_false:\n\t.ascii \"false\"")
         let messages = trap_messages()
         var ti = 0
         for label in trap_labels() {
             let text = messages[ti]
-            push(out, format(".Lmsg{}:\n\t.quad {}\n\t.ascii \"{}\"", label, len(text), text))
+            out.push(format(".Lmsg{}:\n\t.quad {}\n\t.ascii \"{}\"", label, text.len(), text))
             ti = ti + 1
         }
-        push(out, ".Lmsg_rterr:\n\t.quad 15\n\t.ascii \"runtime error: \"")
-        push(out, ".Lmsg_at:\n\t.quad 7\n\t.ascii \"\\n  --> \"")
+        out.push(".Lmsg_rterr:\n\t.quad 15\n\t.ascii \"runtime error: \"")
+        out.push(".Lmsg_at:\n\t.quad 7\n\t.ascii \"\\n  --> \"")
         if self.frames {
-            push(out, ".Lmsg_stuck:\n\t.quad 48\n\t.ascii \"runtime error: every task waits for another one\\n\"")
-            push(out, ".Lmyla_threads:\n\t.ascii \"MYLA_THREADS=\"")
-            push(out, ".Lmyla_sched:\n\t.ascii \"MYLA_SCHED=\"")
+            out.push(".Lmsg_stuck:\n\t.quad 48\n\t.ascii \"runtime error: every task waits for another one\\n\"")
+            out.push(".Lmyla_threads:\n\t.ascii \"MYLA_THREADS=\"")
+            out.push(".Lmyla_sched:\n\t.ascii \"MYLA_SCHED=\"")
         }
-        for line in self.posdata { push(out, line) }
-        for line in self.rodata { push(out, line) }
-        if self.uses_float { for chunk in self.float_rodata_text() { push(out, chunk) } }
-        push(out, "")
+        for line in self.posdata { out.push(line) }
+        for line in self.rodata { out.push(line) }
+        if self.uses_float { for chunk in self.float_rodata_text() { out.push(chunk) } }
+        out.push("")
         // `str` values that live in the binary (literals, the renderers'
         // constants): cells with a count that never reaches zero (MYLA-18)
-        push(out, "\t.data")
+        out.push("\t.data")
         var statics = ["true", "false", "-"]
         var slabels = [".Lstr_true", ".Lstr_false", ".Lstr_minus"]
         if self.uses_float {
-            for t in ["nan", "inf", "-inf", "0", "-0"] { push(statics, t) }
-            for l in [".Lstr_nan", ".Lstr_inf", ".Lstr_ninf", ".Lstr_fzero", ".Lstr_fnzero"] { push(slabels, l) }
+            for t in ["nan", "inf", "-inf", "0", "-0"] { statics.push(t) }
+            for l in [".Lstr_nan", ".Lstr_inf", ".Lstr_ninf", ".Lstr_fzero", ".Lstr_fnzero"] { slabels.push(l) }
         }
         var si = 0
-        while si < len(statics) {
-            for line in static_str(slabels[si], statics[si]) { push(out, line) }
+        while si < statics.len() {
+            for line in static_str(slabels[si], statics[si]) { out.push(line) }
             si = si + 1
         }
-        for line in self.strdata { push(out, line) }
-        push(out, "")
-        push(out, "\t.bss")
-        push(out, "\t.align 8")
-        push(out, "__heap_ptr:")
-        push(out, "\t.skip 8")
-        push(out, "__heap_end:")
-        push(out, "\t.skip 8")
-        push(out, "__free_buckets:")
-        push(out, "\t.skip 4616")
-        push(out, "__argc:")
-        push(out, "\t.skip 8")
-        push(out, "__argv:")
-        push(out, "\t.skip 8")
-        push(out, "__envp:")
-        push(out, "\t.skip 8")
-        push(out, "__io_errno_val:")
-        push(out, "\t.skip 8")
-        push(out, "__run_stderr_val:")
-        push(out, "\t.skip 8")
-        push(out, "__run_exit_val:")
-        push(out, "\t.skip 8")
-        push(out, "__run_signal_val:")
-        push(out, "\t.skip 8")
-        push(out, "__run_errno_val:")
-        push(out, "\t.skip 8")
+        for line in self.strdata { out.push(line) }
+        out.push("")
+        out.push("\t.bss")
+        out.push("\t.align 8")
+        out.push("__heap_ptr:")
+        out.push("\t.skip 8")
+        out.push("__heap_end:")
+        out.push("\t.skip 8")
+        out.push("__free_buckets:")
+        out.push("\t.skip 4616")
+        out.push("__argc:")
+        out.push("\t.skip 8")
+        out.push("__argv:")
+        out.push("\t.skip 8")
+        out.push("__envp:")
+        out.push("\t.skip 8")
+        out.push("__io_errno_val:")
+        out.push("\t.skip 8")
+        out.push("__run_stderr_val:")
+        out.push("\t.skip 8")
+        out.push("__run_exit_val:")
+        out.push("\t.skip 8")
+        out.push("__run_signal_val:")
+        out.push("\t.skip 8")
+        out.push("__run_errno_val:")
+        out.push("\t.skip 8")
         // 1 once a stack overflow is being reported (`__on_segv`)
-        push(out, "__segv_once:")
-        push(out, "\t.skip 8")
+        out.push("__segv_once:")
+        out.push("\t.skip 8")
         if self.frames {
             // each worker's queue: `[lock][head][tail]`, a cache line each
-            push(out, "\t.balign 64")
-            push(out, "__wq:")
-            push(out, format("\t.skip {}", 64 * MAX_WORKERS))
-            push(out, "__wq_rings:")
-            push(out, "\t.skip 8")
-            push(out, "__tls_blocks:")
-            push(out, format("\t.skip {}", TLS_SIZE * MAX_WORKERS))
-            push(out, "__heap_base:")
-            push(out, "\t.skip 8")
+            out.push("\t.balign 64")
+            out.push("__wq:")
+            out.push(format("\t.skip {}", 64 * MAX_WORKERS))
+            out.push("__wq_rings:")
+            out.push("\t.skip 8")
+            out.push("__tls_blocks:")
+            out.push(format("\t.skip {}", TLS_SIZE * MAX_WORKERS))
+            out.push("__heap_base:")
+            out.push("\t.skip 8")
             // the order ready frames run in (`__sched_init`, D110): 0 the
             // newest first, 1 the oldest, 2 one chosen by the generator
             // `__exec_rng` (MYLA_SCHED=seed:N)
             for g in ["__exec_seq", "__exec_idle", "__exec_sleepers", "__exec_workers", "__exec_sched", "__exec_rng"] {
-                push(out, g + ":")
-                push(out, "\t.skip 8")
+                out.push(g + ":")
+                out.push("\t.skip 8")
             }
-            push(out, "__exec_main:")
-            push(out, "\t.skip 8")
+            out.push("__exec_main:")
+            out.push("\t.skip 8")
             // 1 once a task has failed: the program ends (D97)
-            push(out, "__exec_failing:")
-            push(out, "\t.skip 8")
+            out.push("__exec_failing:")
+            out.push("\t.skip 8")
         }
-        push(out, "")
-        if len(self.line_files) > 0 { for l in self.dbg_sections() { push(out, l) } }
-        push(out, "\t.section .note.GNU-stack,\"\",@progbits")
-        push(out, "")
+        out.push("")
+        if self.line_files.len() > 0 { for l in self.dbg_sections() { out.push(l) } }
+        out.push("\t.section .note.GNU-stack,\"\",@progbits")
+        out.push("")
         return join_lines(out)
     }
 
@@ -2075,11 +2075,11 @@ impl CodeGen {
     fun register_deep(var self, t: Type, clone: bool) -> str {
         var name = "__deepw_" + mono_token(t)
         if clone { name = "__dclonew_" + mono_token(t) }
-        if !contains(self.helper_seen, name) {
+        if !self.helper_seen.contains(name) {
             self.helper_seen[name] = true
-            push(self.need_deep, t)
-            push(self.deep_inline, false)
-            push(self.deep_clone, clone)
+            self.need_deep.push(t)
+            self.deep_inline.push(false)
+            self.deep_clone.push(clone)
         }
         return name
     }
@@ -2101,10 +2101,10 @@ impl CodeGen {
                 if is_sb_t(t) { name = pre + "_sb" } else { name = pre + "b_" + mono_token(t) }
             },
         }
-        if !contains(self.helper_seen, name) {
+        if !self.helper_seen.contains(name) {
             self.helper_seen[name] = true
-            push(self.need_deepc, t)
-            push(self.deepc_clone, clone)
+            self.need_deepc.push(t)
+            self.deepc_clone.push(clone)
         }
         return name
     }
@@ -2327,11 +2327,11 @@ impl CodeGen {
     fun register_deep_inline(var self, t: Type, clone: bool) -> str {
         var name = "__deepi_" + mono_token(t)
         if clone { name = "__dclonei_" + mono_token(t) }
-        if !contains(self.helper_seen, name) {
+        if !self.helper_seen.contains(name) {
             self.helper_seen[name] = true
-            push(self.need_deep, t)
-            push(self.deep_inline, true)
-            push(self.deep_clone, clone)
+            self.need_deep.push(t)
+            self.deep_inline.push(true)
+            self.deep_clone.push(clone)
         }
         return name
     }
@@ -3367,7 +3367,7 @@ impl CodeGen {
     // Whether node `id` has a type: an expression with a value.
     #test(codegen_on("[int]"), 112)[false]
     fun has_type(self, id: int32) -> bool {
-        return contains(self.resolved, id)
+        return self.resolved.contains(id)
     }
 
     // A lambda's body (MYLA-106), under the substitution of the function
@@ -3389,8 +3389,8 @@ impl CodeGen {
         let f = self.take_ir(lower_lambda(self, job), job.lifted)
         self.emit_ir_at(f, job.id, job.line, job.col, job.lifted)
         var owned: [DropEntry] = []
-        for c in job.caps { if self.owns_heap(c.ty) { push(owned, DropEntry { off: c.off, ty: c.ty }) } }
-        if len(owned) > 0 { self.emit_env_drop(job.lifted, owned) }
+        for c in job.caps { if self.owns_heap(c.ty) { owned.push(DropEntry { off: c.off, ty: c.ty }) } }
+        if owned.len() > 0 { self.emit_env_drop(job.lifted, owned) }
         self.subst = []
     }
 
@@ -3406,7 +3406,7 @@ impl CodeGen {
         // a last use moves (MYLA-127), checked by the verifier with the rest
         let f = moves(l.f)
         let problem = verify(f)
-        if self.keep_ir { push(self.ir_texts, render_func(f)) }
+        if self.keep_ir { self.ir_texts.push(render_func(f)) }
         if problem != "" { panic(format("internal error: {}: IR verifier: {}", mangled, problem)) }
         for inst in l.f.instances { let m = self.request_fn(inst.orig, inst.targs) }
         for b in l.f.blocks {
@@ -3418,13 +3418,13 @@ impl CodeGen {
                 }
             }
         }
-        for lj in l.lams { push(self.lam_jobs, lj) }
+        for lj in l.lams { self.lam_jobs.push(lj) }
         for pj in l.partials {
-            push(self.partial_jobs, pj)
+            self.partial_jobs.push(pj)
             if pj.target != "" { self.request_plain(pj.target) }
         }
         for n in l.fnvals {
-            if !list_has_str(self.fnval_set, n) { push(self.fnval_set, n) }
+            if !list_has_str(self.fnval_set, n) { self.fnval_set.push(n) }
             self.request_plain(n)
         }
         return f
@@ -3433,15 +3433,15 @@ impl CodeGen {
     // Queue the non-generic function `name` (a generic instance is named by
     // its mangled name, and queued from `IrFunc.instances`).
     fun request_plain(var self, name: str) {
-        if self.has_func(name) && len(self.sig_of(name).type_params) == 0 { let m = self.request_fn(name, []) }
+        if self.has_func(name) && self.sig_of(name).type_params.len() == 0 { let m = self.request_fn(name, []) }
         // an async function's `__new` (D90): the function itself, whose
         // frame function emits it
-        let n = len(name)
+        let n = name.len()
         if n > 5 && name[n - 5] == '_' && name[n - 4] == '_' && name[n - 3] == 'n' && name[n - 2] == 'e' && name[n - 1] == 'w' {
             var sb = StringBuilder()
-            append(sb, name, 0, n - 5)
-            let base = build(sb)
-            if self.has_func(base) && len(self.sig_of(base).type_params) == 0 { let m = self.request_fn(base, []) }
+            sb.append(name, 0, n - 5)
+            let base = sb.build()
+            if self.has_func(base) && self.sig_of(base).type_params.len() == 0 { let m = self.request_fn(base, []) }
         }
     }
 
@@ -3924,7 +3924,7 @@ impl CodeGen {
     // caller holds the env, which what the target borrows lives in, until the
     // target returns to it.
     fun gen_partial_function(var self, job: PartialJob) {
-        let n = len(job.slots)
+        let n = job.slots.len()
         var env_off = 16
         if job.sret { env_off = 24 }
         self.emit(format("myla_{}:", job.lifted))
@@ -3945,17 +3945,17 @@ impl CodeGen {
                     if job.slots[j] < 0 { hidx = hidx + 1 }
                     j = j + 1
                 }
-                push(load, format("movq {}(%rbp), %rax", env_off + 8 + 8 * hidx))
+                load.push(format("movq {}(%rbp), %rax", env_off + 8 + 8 * hidx))
             } else {
-                push(load, format("movq {}(%rbp), %rcx", env_off))
-                if job.aggs[pos] { push(load, format("leaq {}(%rcx), %rax", job.slots[pos])) }
-                else { push(load, format("movq {}(%rcx), %rax", job.slots[pos])) }
+                load.push(format("movq {}(%rbp), %rcx", env_off))
+                if job.aggs[pos] { load.push(format("leaq {}(%rcx), %rax", job.slots[pos])) }
+                else { load.push(format("movq {}(%rcx), %rax", job.slots[pos])) }
             }
             // a parameter passed by value gets a copy of its own (D88)
-            if job.fn_off < 0 && pos < len(tsig.params) && self.byval_param(tsig, pos, tsig.params[pos]) { pushed = pushed + self.push_value_words(tsig.params[pos], load) }
+            if job.fn_off < 0 && pos < tsig.params.len() && self.byval_param(tsig, pos, tsig.params[pos]) { pushed = pushed + self.push_value_words(tsig.params[pos], load) }
             else {
                 for line in load { self.emit(line) }
-                if job.fn_off < 0 && pos < len(tsig.params) && self.owned_param(tsig, pos, tsig.params[pos]) { self.emit("incq -8(%rax)") }
+                if job.fn_off < 0 && pos < tsig.params.len() && self.owned_param(tsig, pos, tsig.params[pos]) { self.emit("incq -8(%rax)") }
                 self.emit("pushq %rax")
                 pushed = pushed + 1
             }
@@ -3991,12 +3991,12 @@ impl CodeGen {
         var in_place: [bool] = []
         var k = 0
         while k < pushed {
-            push(in_place, false)
+            in_place.push(false)
             k = k + 1
         }
         self.emit_frame_handover(pushed, in_place, target)
         self.emit("")
-        if len(job.owned) > 0 { self.emit_env_drop(job.lifted, job.owned) }
+        if job.owned.len() > 0 { self.emit_env_drop(job.lifted, job.owned) }
     }
 
     // `myla_<lifted>_env_drop(%rdi = env)`: release the env's owned values, then
@@ -4038,7 +4038,7 @@ impl CodeGen {
         let struct_ret = is_aggregate_opt(sig.ret)
         var byval = false
         var k = 0
-        while k < len(sig.params) {
+        while k < sig.params.len() {
             if self.byval_param(sig, k, sig.params[k]) { byval = true }
             k = k + 1
         }
@@ -4053,7 +4053,7 @@ impl CodeGen {
         var first = 16
         if struct_ret { first = 24 }
         var i = 0
-        while i < len(sig.params) {
+        while i < sig.params.len() {
             if self.owned_param(sig, i, sig.params[i]) {
                 self.emit(format("movq {}(%rsp), %rax", first + 8 * i))
                 self.emit("incq -8(%rax)")
@@ -4082,7 +4082,7 @@ impl CodeGen {
         var first = 24
         if struct_ret { first = 32 }
         var pushed = 0
-        var i = len(sig.params) - 1
+        var i = sig.params.len() - 1
         while i >= 0 {
             let load = format("movq {}(%rbp), %rax", first + 8 * i)
             if self.byval_param(sig, i, sig.params[i]) { pushed = pushed + self.push_value_words(sig.params[i], [load]) }
@@ -4098,12 +4098,12 @@ impl CodeGen {
             self.emit("pushq 16(%rbp)")
             pushed = pushed + 1
         }
-        var words = len(sig.params) + 1
+        var words = sig.params.len() + 1
         if struct_ret { words = words + 1 }
         self.arg_words = words
         self.saved_regs = []
         var in_place: [bool] = []
-        while len(in_place) < pushed { push(in_place, false) }
+        while in_place.len() < pushed { in_place.push(false) }
         self.emit_frame_handover(pushed, in_place, format("myla_{}", n))
         self.emit("")
     }
@@ -4140,36 +4140,36 @@ impl CodeGen {
         for s in b.stmts {
             match s.kind {
                 StmtKind.VarDecl(k, name, ty, init) => {
-                    for v in self.free_expr(init, bnd) { push(out, v) }
-                    push(bnd, name)
+                    for v in self.free_expr(init, bnd) { out.push(v) }
+                    bnd.push(name)
                 },
                 StmtKind.DestructDecl(k, binding, ty, init) => {
-                    for v in self.free_expr(init, bnd) { push(out, v) }
-                    for nm in bind_elem_names(binding) { push(bnd, nm) }
+                    for v in self.free_expr(init, bnd) { out.push(v) }
+                    for nm in bind_elem_names(binding) { bnd.push(nm) }
                 },
                 StmtKind.Assign(target, value) => {
-                    for v in self.free_expr(target, bnd) { push(out, v) }
-                    for v in self.free_expr(value, bnd) { push(out, v) }
+                    for v in self.free_expr(target, bnd) { out.push(v) }
+                    for v in self.free_expr(value, bnd) { out.push(v) }
                 },
                 StmtKind.IfS(cond, then, otherwise) => {
-                    for v in self.free_expr(cond, bnd) { push(out, v) }
-                    for v in self.free_block(then, bnd) { push(out, v) }
-                    for v in self.free_opt_else(otherwise, bnd) { push(out, v) }
+                    for v in self.free_expr(cond, bnd) { out.push(v) }
+                    for v in self.free_block(then, bnd) { out.push(v) }
+                    for v in self.free_opt_else(otherwise, bnd) { out.push(v) }
                 },
                 StmtKind.WhileS(cond, body) => {
-                    for v in self.free_expr(cond, bnd) { push(out, v) }
-                    for v in self.free_block(body, bnd) { push(out, v) }
+                    for v in self.free_expr(cond, bnd) { out.push(v) }
+                    for v in self.free_block(body, bnd) { out.push(v) }
                 },
                 StmtKind.ForS(vn, start, end, body, iter) => {
-                    for v in self.free_opt(start, bnd) { push(out, v) }
-                    for v in self.free_opt(end, bnd) { push(out, v) }
-                    for v in self.free_opt(iter, bnd) { push(out, v) }
+                    for v in self.free_opt(start, bnd) { out.push(v) }
+                    for v in self.free_opt(end, bnd) { out.push(v) }
+                    for v in self.free_opt(iter, bnd) { out.push(v) }
                     var b2 = bnd
-                    push(b2, vn)
-                    for v in self.free_block(body, b2) { push(out, v) }
+                    b2.push(vn)
+                    for v in self.free_block(body, b2) { out.push(v) }
                 },
-                StmtKind.ReturnS(ov, tail) => { for v in self.free_opt(ov, bnd) { push(out, v) } },
-                StmtKind.ExprStmt(e) => { for v in self.free_expr(e, bnd) { push(out, v) } },
+                StmtKind.ReturnS(ov, tail) => { for v in self.free_opt(ov, bnd) { out.push(v) } },
+                StmtKind.ExprStmt(e) => { for v in self.free_expr(e, bnd) { out.push(v) } },
                 _ => {},
             }
         }
@@ -4202,52 +4202,52 @@ impl CodeGen {
     fun free_expr(self, e: Expr, bound: [str]) -> [str] {
         var out: [str] = []
         match e.kind {
-            ExprKind.Name(n) => { if !list_has_str(bound, n) { push(out, n) } },
-            ExprKind.Unary(op, x) => { for v in self.free_expr(x, bound) { push(out, v) } },
-            ExprKind.Await(x) => { for v in self.free_expr(x, bound) { push(out, v) } },
+            ExprKind.Name(n) => { if !list_has_str(bound, n) { out.push(n) } },
+            ExprKind.Unary(op, x) => { for v in self.free_expr(x, bound) { out.push(v) } },
+            ExprKind.Await(x) => { for v in self.free_expr(x, bound) { out.push(v) } },
             ExprKind.Binary(op, l, r) => {
-                for v in self.free_expr(l, bound) { push(out, v) }
-                for v in self.free_expr(r, bound) { push(out, v) }
+                for v in self.free_expr(l, bound) { out.push(v) }
+                for v in self.free_expr(r, bound) { out.push(v) }
             },
             ExprKind.Call(c, args) => {
-                for v in self.free_expr(c, bound) { push(out, v) }
-                for a in args { for v in self.free_expr(a, bound) { push(out, v) } }
+                for v in self.free_expr(c, bound) { out.push(v) }
+                for a in args { for v in self.free_expr(a, bound) { out.push(v) } }
             },
-            ExprKind.GetField(t, f) => { for v in self.free_expr(t, bound) { push(out, v) } },
-            ExprKind.TupleIndex(t, i) => { for v in self.free_expr(t, bound) { push(out, v) } },
+            ExprKind.GetField(t, f) => { for v in self.free_expr(t, bound) { out.push(v) } },
+            ExprKind.TupleIndex(t, i) => { for v in self.free_expr(t, bound) { out.push(v) } },
             ExprKind.Index(b, i) => {
-                for v in self.free_expr(b, bound) { push(out, v) }
-                for v in self.free_expr(i, bound) { push(out, v) }
+                for v in self.free_expr(b, bound) { out.push(v) }
+                for v in self.free_expr(i, bound) { out.push(v) }
             },
-            ExprKind.Cast(x, ty) => { for v in self.free_expr(x, bound) { push(out, v) } },
-            ExprKind.Try(x) => { for v in self.free_expr(x, bound) { push(out, v) } },
+            ExprKind.Cast(x, ty) => { for v in self.free_expr(x, bound) { out.push(v) } },
+            ExprKind.Try(x) => { for v in self.free_expr(x, bound) { out.push(v) } },
             ExprKind.StructLit(n, fields) => {
-                for fi in fields { for v in self.free_expr(fi.value, bound) { push(out, v) } }
+                for fi in fields { for v in self.free_expr(fi.value, bound) { out.push(v) } }
             },
             ExprKind.TupleLit(elems) => {
-                for el in elems { for v in self.free_expr(el, bound) { push(out, v) } }
+                for el in elems { for v in self.free_expr(el, bound) { out.push(v) } }
             },
             ExprKind.ListLit(elems) => {
-                for el in elems { for v in self.free_expr(el, bound) { push(out, v) } }
+                for el in elems { for v in self.free_expr(el, bound) { out.push(v) } }
             },
             ExprKind.MapLit(entries) => {
                 for en in entries {
-                    for v in self.free_expr(en.key, bound) { push(out, v) }
-                    for v in self.free_expr(en.value, bound) { push(out, v) }
+                    for v in self.free_expr(en.key, bound) { out.push(v) }
+                    for v in self.free_expr(en.value, bound) { out.push(v) }
                 }
             },
             ExprKind.Lambda(params, ret, body, asy) => {
                 var b2 = bound
-                for p in params { push(b2, p.name) }
-                for v in self.free_eb(body, b2) { push(out, v) }
+                for p in params { b2.push(p.name) }
+                for v in self.free_eb(body, b2) { out.push(v) }
             },
             ExprKind.MatchE(scrut, arms) => {
-                for v in self.free_expr(scrut, bound) { push(out, v) }
+                for v in self.free_expr(scrut, bound) { out.push(v) }
                 for arm in arms {
                     var b2 = bound
-                    for nm in pattern_names(arm.pattern) { push(b2, nm) }
-                    for v in self.free_opt(arm.guard, b2) { push(out, v) }
-                    for v in self.free_eb(arm.body, b2) { push(out, v) }
+                    for nm in pattern_names(arm.pattern) { b2.push(nm) }
+                    for v in self.free_opt(arm.guard, b2) { out.push(v) }
+                    for v in self.free_eb(arm.body, b2) { out.push(v) }
                 }
             },
             _ => {},
@@ -6288,10 +6288,10 @@ impl CodeGen {
         for d in self.decls {
             match d.kind {
                 DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => {
-                    if len(tps) == 0 && attrs_have_derive_eq(attrs) { self.emit_struct_eq(name) }
+                    if tps.len() == 0 && attrs_have_derive_eq(attrs) { self.emit_struct_eq(name) }
                 },
                 DeclKind.EnumDecl(name, variants, attrs, tps, isp) => {
-                    if len(tps) == 0 && attrs_have_derive_eq(attrs) { self.emit_enum_eq(name) }
+                    if tps.len() == 0 && attrs_have_derive_eq(attrs) { self.emit_enum_eq(name) }
                 },
                 _ => {},
             }
@@ -6332,7 +6332,7 @@ impl CodeGen {
         self.emit(format("jne {}", lne))
         var i = 0
         for v in self.enum_info(name).variants {
-            if len(v.payload) > 0 {
+            if v.payload.len() > 0 {
                 let lskip = self.label()
                 self.emit("movq 16(%rbp), %rax")
                 self.emit("movq 0(%rax), %rax")
@@ -7104,13 +7104,13 @@ impl CodeGen {
         var k = 0
         var dk = 0
         var dc = 0
-        while i < len(self.need_drop) || j < len(self.need_clone) || k < len(self.need_walk) || dk < len(self.need_deep) || dc < len(self.need_deepc) {
-            while i < len(self.need_drop) {
+        while i < self.need_drop.len() || j < self.need_clone.len() || k < self.need_walk.len() || dk < self.need_deep.len() || dc < self.need_deepc.len() {
+            while i < self.need_drop.len() {
                 let t = self.need_drop[i]
                 i = i + 1
                 let tok = mono_token(t)
                 if list_has_str(self.drop_emitted, tok) { continue }
-                push(self.drop_emitted, tok)
+                self.drop_emitted.push(tok)
                 match t {
                     Type.TList(e) => { self.emit_list_drop_helper(t) },
                     Type.TMap(k2, v) => { self.emit_map_drop_helper(t) },
@@ -7120,39 +7120,39 @@ impl CodeGen {
                     _ => {},
                 }
             }
-            while j < len(self.need_clone) {
+            while j < self.need_clone.len() {
                 let t = self.need_clone[j]
                 j = j + 1
                 let tok = mono_token(t)
                 if list_has_str(self.clone_emitted, tok) { continue }
-                push(self.clone_emitted, tok)
+                self.clone_emitted.push(tok)
                 match t {
                     Type.TList(e) => { self.emit_list_clone_helper(t) },
                     Type.TMap(k2, v) => { self.emit_map_clone_helper(t) },
                     _ => {},
                 }
             }
-            while dk < len(self.need_deep) {
+            while dk < self.need_deep.len() {
                 let t = self.need_deep[dk]
                 let inl = self.deep_inline[dk]
                 let cl = self.deep_clone[dk]
                 dk = dk + 1
                 self.emit_deep_walk(t, inl, cl)
             }
-            while dc < len(self.need_deepc) {
+            while dc < self.need_deepc.len() {
                 let t = self.need_deepc[dc]
                 let cl = self.deepc_clone[dc]
                 dc = dc + 1
                 self.emit_deep_cell(t, cl)
             }
-            while k < len(self.need_walk) {
+            while k < self.need_walk.len() {
                 let t = self.need_walk[k]
                 let retain = self.walk_retain[k]
                 k = k + 1
                 var name = "__walkd_" + mono_token(t)
                 if retain { name = "__walkr_" + mono_token(t) }
                 if list_has_str(self.walk_emitted, name) { continue }
-                push(self.walk_emitted, name)
+                self.walk_emitted.push(name)
                 self.emit_walk_helper(t, retain, name)
             }
         }
@@ -7486,7 +7486,7 @@ impl CodeGen {
 #test(".L2:")[true]
 #test("cld")[false]
 fun ends_colon(s: str) -> bool {
-    let n = len(s)
+    let n = s.len()
     return n > 0 && s[n - 1] == 58
 }
 
@@ -7496,12 +7496,12 @@ fun ends_colon(s: str) -> bool {
 fun byte_list(s: str) -> str {
     var sb = StringBuilder()
     var i = 0
-    while i < len(s) {
-        if i > 0 { append(sb, ", ") }
-        append(sb, format("{}", s[i]))
+    while i < s.len() {
+        if i > 0 { sb.append(", ") }
+        sb.append(format("{}", s[i]))
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }
 
 #test([])[""]
@@ -7510,12 +7510,12 @@ fun byte_list(s: str) -> str {
 fun join_lines(xs: [str]) -> str {
     var sb = StringBuilder()
     var i = 0
-    while i < len(xs) {
-        if i > 0 { append(sb, "\n") }
-        append(sb, xs[i])
+    while i < xs.len() {
+        if i > 0 { sb.append("\n") }
+        sb.append(xs[i])
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }
 
 #test(Type.TSB)[false]
@@ -7559,7 +7559,7 @@ pub fun list_elem(t: Type) -> Type {
 pub fun format_segments(s: str) -> [str] {
     var segs: [str] = []
     var cur = ""
-    let n = len(s)
+    let n = s.len()
     var i = 0
     while i < n {
         let c = s[i]
@@ -7567,7 +7567,7 @@ pub fun format_segments(s: str) -> [str] {
             if i + 1 < n && s[i + 1] == '{' { cur = cur + "{"
             i = i + 2
             continue }
-            push(segs, cur)
+            segs.push(cur)
             cur = ""
             i = i + 2
             continue
@@ -7582,7 +7582,7 @@ pub fun format_segments(s: str) -> [str] {
         cur = cur + str_byte(s, i)
         i = i + 1
     }
-    push(segs, cur)
+    segs.push(cur)
     return segs
 }
 
@@ -7592,8 +7592,8 @@ pub fun format_segments(s: str) -> [str] {
 #test("This is not the error you are looking for. It is {}", 38)["f"]
 fun str_byte(s: str, i: int32) -> str {
     var sb = StringBuilder()
-    append_byte(sb, s[i])
-    return build(sb)
+    sb.append_byte(s[i])
+    return sb.build()
 }
 
 #test(Type.TMap(Type.TChar, Type.TInt(32, true)))[Type.TChar]
@@ -7636,9 +7636,9 @@ pub fun is_cell_t(t: Type) -> bool { return is_list_t(t) || is_map_t(t) || is_sb
 #test(".Lstr4", "cool")[["\t.balign 8", "\t.quad 12", "\t.quad 4611686018427387904", ".Lstr4:", "\t.quad 4", "\t.byte 99, 111, 111, 108"]]
 #test(".Lstr1", "examples/tuples.my")[["\t.balign 8", "\t.quad 26", "\t.quad 4611686018427387904", ".Lstr1:", "\t.quad 18", "\t.byte 101, 120, 97, 109, 112, 108, 101, 115, 47, 116, 117, 112, 108, 101, 115, 46, 109, 121"]]
 fun static_str(label: str, text: str) -> [str] {
-    var out = ["\t.balign 8", format("\t.quad {}", 8 + len(text)), "\t.quad 4611686018427387904",
-               format("{}:", label), format("\t.quad {}", len(text))]
-    if len(text) > 0 { push(out, "\t.byte " + byte_list(text)) }
+    var out = ["\t.balign 8", format("\t.quad {}", 8 + text.len()), "\t.quad 4611686018427387904",
+               format("{}:", label), format("\t.quad {}", text.len())]
+    if text.len() > 0 { out.push("\t.byte " + byte_list(text)) }
     return out
 }
 
@@ -7688,12 +7688,12 @@ fun is_name_expr(e: Expr) -> bool {
 #test("Lexer.peek")["peek"]
 #test("main")["main"]
 fun method_part(name: str) -> str {
-    var i = len(name) - 1
+    var i = name.len() - 1
     while i >= 0 {
         if name[i] == '.' {
             var sb = StringBuilder()
-            append(sb, name, i + 1, len(name))
-            return build(sb)
+            sb.append(name, i + 1, name.len())
+            return sb.build()
         }
         i = i - 1
     }
@@ -7707,7 +7707,7 @@ fun with_name(e: Expr, acc: [str]) -> [str] {
         ExprKind.Name(n) => {
             if list_has_str(acc, n) { return acc }
             var out = acc
-            push(out, n)
+            out.push(n)
             out
         },
         _ => acc,
@@ -7872,7 +7872,7 @@ pub fun may_write_expr(e: Expr, name: str) -> bool {
         ExprKind.Call(c, args) => {
             let writes = match c.kind {
                 ExprKind.GetField(recv, m) => place_root(recv) == name,
-                ExprKind.Name(f) => is_mutating_builtin(f) && len(args) > 0 && place_root(args[0]) == name,
+                ExprKind.Name(f) => is_mutating_builtin(f) && args.len() > 0 && place_root(args[0]) == name,
                 _ => false,
             }
             return writes || may_write_expr(c, name) || may_write_exprs(args, name)
@@ -8016,9 +8016,9 @@ pub fun args_have_hole(args: [Expr]) -> bool {
 fun bind_elem_names(be: BindElem) -> [str] {
     var out: [str] = []
     match be {
-        BindElem.BName(n, l, c, sp) => { push(out, n) },
+        BindElem.BName(n, l, c, sp) => { out.push(n) },
         BindElem.BWild => {},
-        BindElem.BTuple(es, l, c, sp) => { for e in es { for n in bind_elem_names(e) { push(out, n) } } },
+        BindElem.BTuple(es, l, c, sp) => { for e in es { for n in bind_elem_names(e) { out.push(n) } } },
     }
     return out
 }
@@ -8027,11 +8027,11 @@ fun bind_elem_names(be: BindElem) -> [str] {
 fun pattern_names(p: Pattern) -> [str] {
     var out: [str] = []
     match p.kind {
-        PatternKind.PBind(n) => { push(out, n) },
-        PatternKind.PEnum(en, v, elems, hp) => { for el in elems { for n in pattern_names(el) { push(out, n) } } },
-        PatternKind.PTuple(elems) => { for el in elems { for n in pattern_names(el) { push(out, n) } } },
-        PatternKind.PStruct(nm, fields) => { for f in fields { for n in pattern_names(f.pattern) { push(out, n) } } },
-        PatternKind.POr(elems) => { for el in elems { for n in pattern_names(el) { push(out, n) } } },
+        PatternKind.PBind(n) => { out.push(n) },
+        PatternKind.PEnum(en, v, elems, hp) => { for el in elems { for n in pattern_names(el) { out.push(n) } } },
+        PatternKind.PTuple(elems) => { for el in elems { for n in pattern_names(el) { out.push(n) } } },
+        PatternKind.PStruct(nm, fields) => { for f in fields { for n in pattern_names(f.pattern) { out.push(n) } } },
+        PatternKind.POr(elems) => { for el in elems { for n in pattern_names(el) { out.push(n) } } },
         _ => {},
     }
     return out
@@ -8136,7 +8136,7 @@ fun int_list(o: Option<[int32]>) -> [int32] {
 #test([1, 2], 2)[[1, 2]]
 fun with_int(xs: [int32], x: int32) -> [int32] {
     var out = xs
-    if !contains_int(out, x) { push(out, x) }
+    if !contains_int(out, x) { out.push(x) }
     return out
 }
 
@@ -8206,7 +8206,7 @@ fun join_tokens(xs: [Type]) -> str {
 #test(".char")["5.char"]
 #test(".F4.i32R4.i32")["13.F4.i32R4.i32"]
 fun lp(tok: str) -> str {
-    return format("{}{}", len(tok), tok)
+    return format("{}{}", tok.len(), tok)
 }
 
 // The suffix naming a map type's helpers.
@@ -8225,7 +8225,7 @@ fun int_token(w: int32, s: bool) -> str {
 #test("Account", [])["Account"]
 #test("Result", [Type.TInt(32, true), Type.TStr])["Result__4.i324.str"]
 fun agg_token(n: str, args: [Type]) -> str {
-    if len(args) == 0 { return n }
+    if args.len() == 0 { return n }
     return format("{}__{}", n, join_tokens(args))
 }
 
@@ -8281,8 +8281,8 @@ fun parts_of(t: Type) -> [Type] {
 #test([Type.TInt(32, true)], Some(Type.TInt(32, true)))[[Type.TInt(32, true), Type.TInt(32, true)]]
 fun func_parts(ps: [Type], r: Option<Type>) -> [Type] {
     var out: [Type] = []
-    for p in ps { push(out, p) }
-    match r { Some(rt) => { push(out, rt) }, None => {} }
+    for p in ps { out.push(p) }
+    match r { Some(rt) => { out.push(rt) }, None => {} }
     return out
 }
 
@@ -8294,13 +8294,13 @@ fun func_parts(ps: [Type], r: Option<Type>) -> [Type] {
 fun unify_into(declared: Type, concrete: Type) -> [Subst] {
     var out: [Subst] = []
     match declared {
-        Type.TParam(n) => { push(out, Subst { name: n, ty: concrete }) },
+        Type.TParam(n) => { out.push(Subst { name: n, ty: concrete }) },
         _ => {
             let ds = parts_of(declared)
             let cs = parts_of(concrete)
             var i = 0
-            while i < len(ds) && i < len(cs) {
-                for b in unify_into(ds[i], cs[i]) { push(out, b) }
+            while i < ds.len() && i < cs.len() {
+                for b in unify_into(ds[i], cs[i]) { out.push(b) }
                 i = i + 1
             }
         },
@@ -8323,8 +8323,8 @@ fun list_has_str(xs: [str], target: str) -> bool {
 #test(["Pixel"], "Vec2")[["Pixel", "Vec2"]]
 fun push_str_copy(xs: [str], s: str) -> [str] {
     var out: [str] = []
-    for x in xs { push(out, x) }
-    push(out, s)
+    for x in xs { out.push(x) }
+    out.push(s)
     return out
 }
 
@@ -8388,8 +8388,8 @@ fun ate_of(t: Type) -> int32 {
 #test("_")[false]
 pub fun is_internal_name(name: str) -> bool {
     // the compiler's names (`__…`) and the async normalizer's (`%aw1`, …)
-    if len(name) >= 1 && name[0] == '%' { return true }
-    return len(name) >= 2 && name[0] == '_' && name[1] == '_'
+    if name.len() >= 1 && name[0] == '%' { return true }
+    return name.len() >= 2 && name[0] == '_' && name[1] == '_'
 }
 
 // The conditional jump that skips a trap call, for each jump to a trap.
@@ -8438,7 +8438,7 @@ pub fun takes_operand(op: str) -> bool {
 #test("$2")[true]
 #test("$4")[true]
 #test("%r9")[false]
-fun starts_with_dollar(s: str) -> bool { return len(s) > 0 && s[0] == '$' }
+fun starts_with_dollar(s: str) -> bool { return s.len() > 0 && s[0] == '$' }
 
 // The return of a function called with `words` argument words, which it
 // pops (MYLA-126).
@@ -8454,15 +8454,15 @@ pub fun ret_popping(words: int32) -> str {
 #test("movq %rax, %r12")[true]
 #test("movq %rax, -8(%rbp)")[false]
 fun is_reg_move(s: str) -> bool {
-    return len(s) > 12 && text_at(s, 0, "movq %rax, %") && !has_text(s, "(")
+    return s.len() > 12 && text_at(s, 0, "movq %rax, %") && !has_text(s, "(")
 }
 
 // The destination register of such a move.
 #test("movq %rax, %rbx")["%rbx"]
 fun reg_of_move(s: str) -> str {
     var sb = StringBuilder()
-    append(sb, s, 11, len(s))
-    return build(sb)
+    sb.append(s, 11, s.len())
+    return sb.build()
 }
 
 // The load `line` (`movq X, %rax` or `leaq X, %rax`, X not reading %rax)
@@ -8475,24 +8475,24 @@ fun reg_of_move(s: str) -> str {
 #test("\tmovq %rax, %rcx", "%r12")[""]
 pub fun fold_load(line: str, reg: str) -> str {
     if !(text_at(line, 0, "\tmovq ") || text_at(line, 0, "\tleaq ")) { return "" }
-    if len(line) < 12 || !text_at(line, len(line) - 6, ", %rax") { return "" }
+    if line.len() < 12 || !text_at(line, line.len() - 6, ", %rax") { return "" }
     var src = StringBuilder()
-    append(src, line, 6, len(line) - 6)
-    let x = build(src)
+    src.append(line, 6, line.len() - 6)
+    let x = src.build()
     if has_text(x, "%rax") || has_text(x, "%eax") || has_text(x, "%ax") || has_text(x, "%al") { return "" }
     var out = StringBuilder()
-    append(out, line, 0, len(line) - 4)
-    append(out, reg)
-    return build(out)
+    out.append(line, 0, line.len() - 4)
+    out.append(reg)
+    return out.build()
 }
 
 // Whether `s` holds `t` at byte `at`.
 #test("abcd", 1, "bc")[true]
 #test("abcd", 3, "de")[false]
 fun text_at(s: str, at: int32, t: str) -> bool {
-    if at < 0 || at + len(t) > len(s) { return false }
+    if at < 0 || at + t.len() > s.len() { return false }
     var i = 0
-    while i < len(t) {
+    while i < t.len() {
         if s[at + i] != t[i] { return false }
         i = i + 1
     }
@@ -8504,7 +8504,7 @@ fun text_at(s: str, at: int32, t: str) -> bool {
 #test("8(%rbx)", "%rax")[false]
 fun has_text(s: str, t: str) -> bool {
     var i = 0
-    while i + len(t) <= len(s) {
+    while i + t.len() <= s.len() {
         if text_at(s, i, t) { return true }
         i = i + 1
     }
@@ -8545,11 +8545,11 @@ pub fun cmp_set(op: str, signed: bool) -> str {
 fun asm_string(s: str) -> str {
     var sb = StringBuilder()
     var i = 0
-    while i < len(s) {
+    while i < s.len() {
         let c = s[i]
-        if c == '\\' || c == '"' { append_byte(sb, '\\') }
-        append_byte(sb, c)
+        if c == '\\' || c == '"' { sb.append_byte('\\') }
+        sb.append_byte(c)
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }

@@ -21,7 +21,7 @@ fun lex_and_dump(src: str) {
 
 fun main() {
     let argv = args()
-    if len(argv) < 2 {
+    if argv.len() < 2 {
         eprintln("usage: lex_main <file.my>")
         exit(2)
     }

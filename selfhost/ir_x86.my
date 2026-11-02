@@ -41,9 +41,9 @@ impl CodeGen {
         if f.frame {
             // the points reachable code resumes at
             var bi = 0
-            while bi < len(f.blocks) {
+            while bi < f.blocks.len() {
                 if reach[bi] {
-                    match f.blocks[bi].term { Term.Suspend(rb) => { if !contains_int(self.resume_blocks, rb) { push(self.resume_blocks, rb) } }, _ => {} }
+                    match f.blocks[bi].term { Term.Suspend(rb) => { if !contains_int(self.resume_blocks, rb) { self.resume_blocks.push(rb) } }, _ => {} }
                 }
                 bi = bi + 1
             }
@@ -51,7 +51,7 @@ impl CodeGen {
         let defs = def_counts(f, tc)
         self.temp_remat = self.remat_texts(f, slots_at(f, 0), defs)
         self.alloc_regs(f, reach, tc)
-        if f.frame { push(self.saved_regs, "r15") }
+        if f.frame { self.saved_regs.push("r15") }
         let cells = self.alloc_temps(f, tc)
         let slot_off = slots_at(f, 8 * cells)
         self.temp_remat = self.remat_texts(f, slot_off, defs)
@@ -61,7 +61,7 @@ impl CodeGen {
             cursor = cursor + extent
         }
         let saves = cursor
-        cursor = cursor + 8 * len(self.saved_regs)
+        cursor = cursor + 8 * self.saved_regs.len()
         // what a tail call needs (MYLA-126): the argument words the caller
         // pushed, where the saved registers are, and (worked out for the
         // first candidate) the temporaries holding an address in this frame
@@ -79,7 +79,7 @@ impl CodeGen {
         let frame = (cursor + 15) / 16 * 16
         self.epilogue = format(".Lret_{}", mangled)
         var labels: [str] = []
-        for b in f.blocks { push(labels, self.label()) }
+        for b in f.blocks { labels.push(self.label()) }
 
         self.cur_file = self.file_number(decl_id)
         self.cur_path = self.path_of(decl_id)
@@ -92,22 +92,22 @@ impl CodeGen {
         // the callee-saved registers it uses, and the parameters living in
         // registers (MYLA-121)
         var r = 0
-        while r < len(self.saved_regs) {
+        while r < self.saved_regs.len() {
             self.emit(format("movq %{}, {}(%rbp)", self.saved_regs[r], -saves - 8 * (r + 1)))
             r = r + 1
         }
         var si = 0
-        while si < len(f.slots) {
+        while si < f.slots.len() {
             if f.slots[si].word >= 0 && self.slot_reg[si] != "" { self.emit(format("movq {}(%rbp), %{}", slot_off[si], self.slot_reg[si])) }
             si = si + 1
         }
         if f.frame {
             // the frame, and the point it resumes at (state 0: the start)
             self.emit("movq 16(%rbp), %r15")
-            if len(self.resume_blocks) > 0 {
+            if self.resume_blocks.len() > 0 {
                 self.emit("movq 16(%r15), %rax")
                 var ri = 0
-                while ri < len(self.resume_blocks) {
+                while ri < self.resume_blocks.len() {
                     self.emit(format("cmpq ${}, %rax", ri + 1))
                     self.emit(format("je {}", labels[self.resume_blocks[ri]]))
                     ri = ri + 1
@@ -119,7 +119,7 @@ impl CodeGen {
         // a block nothing reaches (after a `return`, MYLA-120) has no code; its
         // debug scopes and variables stay, so the scopes stay nested
         var k = 0
-        while k < len(f.order) {
+        while k < f.order.len() {
             let b = f.order[k]
             if !reach[b] {
                 for inst in f.blocks[b].insts {
@@ -140,16 +140,16 @@ impl CodeGen {
             // `suspend` after a call: the call replaces the function (D90)
             let suspend_call = match f.blocks[b].term { Term.Suspend(sb) => ends_in_call(insts), _ => false }
             // `become`'s call always replaces the function (D87), under -g too
-            if becomes || suspend_call { tail = len(insts) - 1 }
+            if becomes || suspend_call { tail = insts.len() - 1 }
             else {
                 if !self.debug && !f.frame { tail = tail_call_at(insts, f.blocks[b].term) }
                 if tail >= 0 && !drops_after_free(f, insts, tail) { tail = -1 }
                 if tail >= 0 {
-                    if len(in_frame) == 0 { in_frame = frame_addresses(f) }
+                    if in_frame.len() == 0 { in_frame = frame_addresses(f) }
                     if passes_frame_address(insts[tail], in_frame) { tail = -1 }
                 }
             }
-            var stop = len(insts)
+            var stop = insts.len()
             if tail >= 0 { stop = tail }
             var i = 0
             while i < stop {
@@ -162,14 +162,14 @@ impl CodeGen {
             // the next block with code, which a jump to it falls through to
             var next = -1
             var nk = k + 1
-            while nk < len(f.order) && next < 0 {
+            while nk < f.order.len() && next < 0 {
                 if reach[f.order[nk]] { next = f.order[nk] }
                 nk = nk + 1
             }
             if tail >= 0 {
                 // the owners dropped after the call go before the jump
                 var j = tail + 1
-                while j < len(insts) {
+                while j < insts.len() {
                     match insts[j] {
                         Inst.DropSlot(t, s) => { self.emit_inst(f, insts[j], slot_off, temp_base) },
                         _ => {},
@@ -202,7 +202,7 @@ impl CodeGen {
     // `suspend L`: the state that resumes at L, into the frame.
     fun emit_state(var self, b: int32) {
         var k = 0
-        while k < len(self.resume_blocks) && self.resume_blocks[k] != b { k = k + 1 }
+        while k < self.resume_blocks.len() && self.resume_blocks[k] != b { k = k + 1 }
         self.emit(format("movq ${}, 16(%r15)", k + 1))
     }
 
@@ -235,7 +235,7 @@ impl CodeGen {
         self.emit(format("leaq myla_{}(%rip), %rax", mangled))
         self.emit("movq %rax, 0(%rbx)")
         var i = 0
-        while i < len(f.slots) {
+        while i < f.slots.len() {
             let s = f.slots[i]
             if s.word >= 0 {
                 if is_aggregate(s.ty) {
@@ -393,7 +393,7 @@ impl CodeGen {
             },
             Inst.Call(d, name, args) => {
                 // the first argument at the lowest address: push the last first
-                var i = len(args) - 1
+                var i = args.len() - 1
                 while i >= 0 {
                     self.push_temp(args[i], temp_base)
                     i = i - 1
@@ -403,7 +403,7 @@ impl CodeGen {
             },
             Inst.CallSret(name, r, args) => {
                 // the result's address is the first word, below the arguments
-                var i = len(args) - 1
+                var i = args.len() - 1
                 while i >= 0 {
                     self.push_temp(args[i], temp_base)
                     i = i - 1
@@ -414,7 +414,7 @@ impl CodeGen {
             Inst.Label(d, sym) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.CallInd(d, fv, args) => {
                 // the arguments, then the environment, then the call
-                var i = len(args) - 1
+                var i = args.len() - 1
                 while i >= 0 {
                     self.push_temp(args[i], temp_base)
                     i = i - 1
@@ -425,7 +425,7 @@ impl CodeGen {
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
             Inst.CallIndSret(fv, r, args) => {
-                var i = len(args) - 1
+                var i = args.len() - 1
                 while i >= 0 {
                     self.push_temp(args[i], temp_base)
                     i = i - 1
@@ -637,8 +637,8 @@ impl CodeGen {
     // with (MYLA-120): an integer comparison ending the block whose result
     // only the branch reads; -1 when there is none.
     fun fused_compare(self, insts: [Inst], term: Term) -> int32 {
-        if len(insts) == 0 { return -1 }
-        let last = len(insts) - 1
+        if insts.len() == 0 { return -1 }
+        let last = insts.len() - 1
         return match term {
             Term.Br(c, a, b) => match insts[last] {
                 Inst.Cmp(d, op, t, x, y) => {
@@ -688,15 +688,15 @@ impl CodeGen {
         // the words, the lowest first (-1: the environment); one already
         // where it goes, a parameter passed on in its place, stays there
         var temps: [int32] = []
-        if r >= 0 { push(temps, r) }
-        if fv >= 0 { push(temps, -1) }
-        for a in words { push(temps, a) }
-        let m = len(temps)
+        if r >= 0 { temps.push(r) }
+        if fv >= 0 { temps.push(-1) }
+        for a in words { temps.push(a) }
+        let m = temps.len()
         let first = 16 + 8 * (self.arg_words - m)
         var in_place: [bool] = []
         var k = 0
         while k < m {
-            push(in_place, m <= self.arg_words && temps[k] >= 0 && self.temp_src[temps[k]] == format("{}(%rbp)", first + 8 * k))
+            in_place.push(m <= self.arg_words && temps[k] >= 0 && self.temp_src[temps[k]] == format("{}(%rbp)", first + 8 * k))
             k = k + 1
         }
         var i = m - 1
@@ -762,7 +762,7 @@ impl CodeGen {
     // The callee-saved registers the function saved, restored (MYLA-121).
     fun restore_regs(var self) {
         var r = 0
-        while r < len(self.saved_regs) {
+        while r < self.saved_regs.len() {
             self.emit(format("movq {}(%rbp), %{}", -self.save_base - 8 * (r + 1), self.saved_regs[r]))
             r = r + 1
         }
@@ -892,7 +892,7 @@ impl CodeGen {
     fun load_args(var self, args: [int32], temp_base: int32) {
         let regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
         var i = 0
-        while i < len(args) {
+        while i < args.len() {
             self.load_temp(args[i], regs[i], temp_base)
             i = i + 1
         }
@@ -908,14 +908,14 @@ impl CodeGen {
         var imm: [str] = []
         var frame: [int32] = []
         for t in f.temps {
-            push(out, "")
-            push(src, "")
-            push(imm, "")
-            push(frame, 0)
+            out.push("")
+            src.push("")
+            imm.push("")
+            frame.push(0)
         }
         for b in f.blocks {
             var i = 0
-            while i < len(b.insts) {
+            while i < b.insts.len() {
                 let inst = b.insts[i]
                 match inst {
                     Inst.Const(d, t, v) => { if defs[d] == 1 { out[d] = self.def_text(inst, slot_off) } },
@@ -1007,24 +1007,24 @@ impl CodeGen {
     // order; one living in several blocks keeps a cell of its own. Returns
     // the number of cells.
     fun alloc_temps(var self, f: IrFunc, tc: Touches) -> int32 {
-        let n = len(f.temps)
+        let n = f.temps.len()
         var home: [int32] = []
         var cross: [bool] = []
         var last: [int32] = []
         var cell: [int32] = []
         var i = 0
         while i < n {
-            push(home, -1)
-            push(cross, false)
-            push(last, -1)
-            push(cell, -1)
+            home.push(-1)
+            cross.push(false)
+            last.push(-1)
+            cell.push(-1)
             i = i + 1
         }
         // where each temporary lives and is last read
         var pos = 0
         for b in f.order {
             var i = tc.at[b]
-            while i < tc.at[b] + len(f.blocks[b].insts) {
+            while i < tc.at[b] + f.blocks[b].insts.len() {
                 var k = tc.wat[i]
                 while k < tc.wat[i + 1] {
                     let t = tc.writes[k]
@@ -1062,7 +1062,7 @@ impl CodeGen {
         pos = 0
         for b in f.order {
             var i = tc.at[b]
-            while i < tc.at[b] + len(f.blocks[b].insts) {
+            while i < tc.at[b] + f.blocks[b].insts.len() {
                 // the cells of the temporaries read for the last time freed,
                 // the list rebuilt only then (MYLA-124)
                 var ended = false
@@ -1072,7 +1072,7 @@ impl CodeGen {
                 if ended {
                     var still: [int32] = []
                     for t in active {
-                        if last[t] < pos { push(free, cell[t]) } else { push(still, t) }
+                        if last[t] < pos { free.push(cell[t]) } else { still.push(t) }
                     }
                     active = still
                 }
@@ -1080,11 +1080,11 @@ impl CodeGen {
                 while k < tc.wat[i + 1] {
                     let t = tc.writes[k]
                     if !cross[t] && cell[t] < 0 && self.temp_remat[t] == "" && self.temp_uses[t] > 0 && self.temp_reg[t] == "" {
-                        if len(free) > 0 { cell[t] = pop(free) } else {
+                        if free.len() > 0 { cell[t] = free.pop() } else {
                             cell[t] = cells
                             cells = cells + 1
                         }
-                        push(active, t)
+                        active.push(t)
                     }
                     k = k + 1
                 }
@@ -1094,7 +1094,7 @@ impl CodeGen {
             pos = pos + 1
         }
         var off: [int32] = []
-        for c in cell { push(off, -8 * (c + 1)) }
+        for c in cell { off.push(-8 * (c + 1)) }
         self.temp_off = off
         return cells
     }
@@ -1102,9 +1102,9 @@ impl CodeGen {
     // No temporary or slot in a register (yet).
     fun clear_regs(var self, f: IrFunc) {
         var treg: [str] = []
-        for t in f.temps { push(treg, "") }
+        for t in f.temps { treg.push("") }
         var sreg: [str] = []
-        for s in f.slots { push(sreg, "") }
+        for s in f.slots { sreg.push("") }
         self.temp_reg = treg
         self.slot_reg = sreg
         self.saved_regs = []
@@ -1122,17 +1122,17 @@ impl CodeGen {
     // live in the frame. `clear_regs` has emptied the tables.
     fun alloc_regs(var self, f: IrFunc, reach: [bool], tc: Touches) {
         if self.debug { return }
-        let nt = len(f.temps)
-        let nv = nt + len(f.slots)
+        let nt = f.temps.len()
+        let nv = nt + f.slots.len()
         // value v: the temporary v below nt, else the slot v - nt
         var cand: [bool] = []
         var i = 0
         while i < nt {
-            push(cand, self.temp_remat[i] == "" && self.temp_uses[i] > 0)
+            cand.push(self.temp_remat[i] == "" && self.temp_uses[i] > 0)
             i = i + 1
         }
         // a frame function's slots are in its frame, never in a register
-        for sl in f.slots { push(cand, sl.size == 8 && !sl.owns && !f.frame) }
+        for sl in f.slots { cand.push(sl.size == 8 && !sl.owns && !f.frame) }
         for b in f.blocks {
             for inst in b.insts {
                 match inst {
@@ -1161,19 +1161,19 @@ impl CodeGen {
         var src_slot: [int32] = []
         i = 0
         while i < nv {
-            push(first, -1)
-            push(last, -1)
-            push(weight, 0)
-            push(home, -1)
-            push(global, false)
-            if i < nt { push(src_slot, -1) }
+            first.push(-1)
+            last.push(-1)
+            weight.push(0)
+            home.push(-1)
+            global.push(false)
+            if i < nt { src_slot.push(-1) }
             i = i + 1
         }
         var bstart: [int32] = []
         var bend: [int32] = []
         for b in f.blocks {
-            push(bstart, -1)
-            push(bend, -1)
+            bstart.push(-1)
+            bend.push(-1)
         }
         // per position, how many before it call something or use %r8-%r11
         // (`clobbers`), which values in those registers can't live across
@@ -1190,39 +1190,39 @@ impl CodeGen {
             }
             var ii = tc.at[b]
             for inst in f.blocks[b].insts {
-                push(tat, len(tv))
-                var c = cpre[len(cpre) - 1]
+                tat.push(tv.len())
+                var c = cpre[cpre.len() - 1]
                 if clobbers(inst) { c = c + 1 }
-                push(cpre, c)
+                cpre.push(c)
                 // a variable read where it is used is read there (`temp_src`)
                 var k = tc.rat[ii]
                 while k < tc.rat[ii + 1] {
                     let u = tc.reads[k]
-                    if cand[u] { push(tv, u) }
-                    if src_slot[u] >= 0 && cand[nt + src_slot[u]] { push(tv, nt + src_slot[u]) }
+                    if cand[u] { tv.push(u) }
+                    if src_slot[u] >= 0 && cand[nt + src_slot[u]] { tv.push(nt + src_slot[u]) }
                     k = k + 1
                 }
                 match inst {
                     Inst.Load(t, sl) => {
-                        if cand[nt + sl] { push(tv, nt + sl) }
+                        if cand[nt + sl] { tv.push(nt + sl) }
                         if self.temp_src[t] != "" { src_slot[t] = sl }
                     },
-                    Inst.Store(sl, v) => { if cand[nt + sl] { push(tv, -1 - (nt + sl)) } },
+                    Inst.Store(sl, v) => { if cand[nt + sl] { tv.push(-1 - (nt + sl)) } },
                     _ => {},
                 }
                 k = tc.wat[ii]
                 while k < tc.wat[ii + 1] {
-                    if cand[tc.writes[k]] { push(tv, -1 - tc.writes[k]) }
+                    if cand[tc.writes[k]] { tv.push(-1 - tc.writes[k]) }
                     k = k + 1
                 }
                 pos = pos + 1
                 ii = ii + 1
             }
-            push(tat, len(tv))
-            push(cpre, cpre[len(cpre) - 1])
+            tat.push(tv.len())
+            cpre.push(cpre[cpre.len() - 1])
             for u in term_uses(f.blocks[b].term) {
-                if cand[u] { push(tv, u) }
-                if src_slot[u] >= 0 && cand[nt + src_slot[u]] { push(tv, nt + src_slot[u]) }
+                if cand[u] { tv.push(u) }
+                if src_slot[u] >= 0 && cand[nt + src_slot[u]] { tv.push(nt + src_slot[u]) }
             }
             bend[b] = pos
             pos = pos + 1
@@ -1230,7 +1230,7 @@ impl CodeGen {
             var p = bstart[b]
             while p < pos {
                 var k = tat[p]
-                let end = match p + 1 < pos { true => tat[p + 1], false => len(tv) }
+                let end = match p + 1 < pos { true => tat[p + 1], false => tv.len() }
                 while k < end {
                     var v = tv[k]
                     let read = v >= 0
@@ -1247,7 +1247,7 @@ impl CodeGen {
                 p = p + 1
             }
         }
-        push(tat, len(tv))
+        tat.push(tv.len())
         let spans = self.live_spans(f, reach, cand, global, tv, tat, bstart, bend, first, last)
         first = spans.0
         last = spans.1
@@ -1256,15 +1256,15 @@ impl CodeGen {
         var head: [int32] = []
         i = 0
         while i < pos {
-            push(head, -1)
+            head.push(-1)
             i = i + 1
         }
         var link: [int32] = []
         var reg: [int32] = []
         i = 0
         while i < nv {
-            push(link, -1)
-            push(reg, -1)
+            link.push(-1)
+            reg.push(-1)
             if cand[i] && first[i] >= 0 {
                 link[i] = head[first[i]]
                 head[first[i]] = i
@@ -1281,9 +1281,9 @@ impl CodeGen {
             names = ["rbx", "r12", "r13", "r14", "r8", "r9", "r10", "r11"]
             ncallee = 4
         }
-        let nr = len(names)
+        let nr = names.len()
         var owner: [int32] = []
-        while len(owner) < nr { push(owner, -1) }
+        while owner.len() < nr { owner.push(-1) }
         var p = 0
         while p < pos {
             var v = head[p]
@@ -1329,7 +1329,7 @@ impl CodeGen {
         // a callee-saved register is worth its save and restore only with
         // enough use
         var used: [int64] = []
-        while len(used) < nr { push(used, 0) }
+        while used.len() < nr { used.push(0) }
         i = 0
         while i < nv {
             if reg[i] >= 0 { used[reg[i]] = used[reg[i]] + weight[i] }
@@ -1344,7 +1344,7 @@ impl CodeGen {
         }
         var r = 0
         while r < ncallee {
-            if used[r] >= REG_MIN_USE { push(self.saved_regs, names[r]) }
+            if used[r] >= REG_MIN_USE { self.saved_regs.push(names[r]) }
             r = r + 1
         }
     }
@@ -1359,17 +1359,17 @@ impl CodeGen {
         var gid: [int32] = []
         var gval: [int32] = []
         var i = 0
-        while i < len(cand) {
+        while i < cand.len() {
             if cand[i] && global[i] {
-                push(gid, len(gval))
-                push(gval, i)
-            } else { push(gid, -1) }
+                gid.push(gval.len())
+                gval.push(i)
+            } else { gid.push(-1) }
             i = i + 1
         }
-        let ng = len(gval)
+        let ng = gval.len()
         if ng == 0 { return (lo, hi) }
         let nw = (ng + 63) / 64
-        let nb = len(f.blocks)
+        let nb = f.blocks.len()
         // what each block reads before writing it (use) and writes (def)
         var use_bits: [int64] = []
         var def_bits: [int64] = []
@@ -1377,10 +1377,10 @@ impl CodeGen {
         var live_out: [int64] = []
         i = 0
         while i < nb * nw {
-            push(use_bits, 0)
-            push(def_bits, 0)
-            push(live_in, 0)
-            push(live_out, 0)
+            use_bits.push(0)
+            def_bits.push(0)
+            live_in.push(0)
+            live_out.push(0)
             i = i + 1
         }
         // and its successors (-1: none)
@@ -1388,8 +1388,8 @@ impl CodeGen {
         var succ2: [int32] = []
         for b in f.blocks {
             let ss = successors(b.term)
-            push(succ1, match len(ss) > 0 { true => ss[0], false => -1 })
-            push(succ2, match len(ss) > 1 { true => ss[1], false => -1 })
+            succ1.push(match ss.len() > 0 { true => ss[0], false => -1 })
+            succ2.push(match ss.len() > 1 { true => ss[1], false => -1 })
         }
         let one: int64 = 1
         for b in f.order {
@@ -1415,7 +1415,7 @@ impl CodeGen {
         var changed = true
         while changed {
             changed = false
-            var k = len(f.order) - 1
+            var k = f.order.len() - 1
             while k >= 0 {
                 let b = f.order[k]
                 if reach[b] {
@@ -1491,7 +1491,7 @@ impl CodeGen {
                 self.pend_temp = -1
                 // read once, by this: loaded straight into `reg` (MYLA-125)
                 if reg != "rax" {
-                    let n = len(self.text)
+                    let n = self.text.len()
                     let folded = fold_load(self.text[n - 1], "%" + reg)
                     if folded != "" {
                         self.text[n - 1] = folded
@@ -1534,7 +1534,7 @@ impl CodeGen {
         if self.pend_store != "" && self.pend_temp == t { return "" }
         if self.temp_reg[t] != "" { return "%" + self.temp_reg[t] }
         let src = self.temp_src[t]
-        if len(src) > 0 && src[0] == '%' { return src }
+        if src.len() > 0 && src[0] == '%' { return src }
         return ""
     }
 
@@ -1571,16 +1571,16 @@ fun loop_depths(f: IrFunc, reach: [bool]) -> [int32] {
     var at: [int32] = []
     var depth: [int32] = []
     for b in f.blocks {
-        push(at, -1)
-        push(depth, 0)
+        at.push(-1)
+        depth.push(0)
     }
     var k = 0
-    while k < len(f.order) {
+    while k < f.order.len() {
         at[f.order[k]] = k
         k = k + 1
     }
     k = 0
-    while k < len(f.order) {
+    while k < f.order.len() {
         let b = f.order[k]
         if reach[b] {
             for s in successors(f.blocks[b].term) {
@@ -1630,7 +1630,7 @@ fun tail_call_at(insts: [Inst], term: Term) -> int32 {
         _ => -2,
     }
     if v == -2 { return -1 }
-    var i = len(insts) - 1
+    var i = insts.len() - 1
     var moved = -1
     while i >= 0 {
         match insts[i] {
@@ -1666,14 +1666,14 @@ fun tail_call_at(insts: [Inst], term: Term) -> int32 {
 fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
     var dropped: [int32] = []
     var j = at + 1
-    while j < len(insts) {
+    while j < insts.len() {
         match insts[j] {
-            Inst.DropSlot(t, s) => { push(dropped, s) },
+            Inst.DropSlot(t, s) => { dropped.push(s) },
             _ => {},
         }
         j = j + 1
     }
-    if len(dropped) == 0 { return true }
+    if dropped.len() == 0 { return true }
     var none: [int32] = []
     let args = match insts[at] {
         Inst.Call(d, name, a) => a,
@@ -1682,10 +1682,10 @@ fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
     for a in args {
         var work = [a]
         var seen: [int32] = []
-        while len(work) > 0 {
-            let t = pop(work)
+        while work.len() > 0 {
+            let t = work.pop()
             if contains_int(seen, t) { continue }
-            push(seen, t)
+            seen.push(t)
             // kept in a dropped slot
             var k = 0
             while k < at {
@@ -1706,8 +1706,8 @@ fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
                             if contains_int(dropped, s) { return false }
                             if !f.slots[s].owns && f.slots[s].word < 0 {
                                 let src = filled_from(insts, k, s)
-                                if len(src) == 0 { return false }
-                                for u in src { push(work, u) }
+                                if src.len() == 0 { return false }
+                                for u in src { work.push(u) }
                             }
                         }
                     },
@@ -1717,14 +1717,14 @@ fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
                             if contains_int(dropped, s) { return false }
                             if !f.slots[s].owns && f.slots[s].word < 0 {
                                 let src = filled_from(insts, k, s)
-                                if len(src) == 0 { return false }
-                                for u in src { push(work, u) }
+                                if src.len() == 0 { return false }
+                                for u in src { work.push(u) }
                             }
                         }
                     },
-                    Inst.LoadAt(d, p, off) => { if d == t { found = true; push(work, p) } },
-                    Inst.Offset(d, p, off) => { if d == t { found = true; push(work, p) } },
-                    Inst.Elem(d, c, i, stride, is_str, pos) => { if d == t { found = true; push(work, c) } },
+                    Inst.LoadAt(d, p, off) => { if d == t { found = true; work.push(p) } },
+                    Inst.Offset(d, p, off) => { if d == t { found = true; work.push(p) } },
+                    Inst.Elem(d, c, i, stride, is_str, pos) => { if d == t { found = true; work.push(c) } },
                     Inst.Const(d, ty, v) => { if d == t { found = true } },
                     Inst.Str(d, text) => { if d == t { found = true } },
                     Inst.Bin(d, op, lt, rt, x, y, pos) => { if d == t { found = true } },
@@ -1751,9 +1751,9 @@ fun filled_from(insts: [Inst], at: int32, s: int32) -> [int32] {
     var k = 0
     while k < at {
         match insts[k] {
-            Inst.Store(x, v) => { if x == s { push(out, v) } },
-            Inst.Addr(d, x) => { if x == s { push(addrs, d) } },
-            Inst.Copy(d, src, size) => { if contains_int(addrs, d) { push(out, src) } },
+            Inst.Store(x, v) => { if x == s { out.push(v) } },
+            Inst.Addr(d, x) => { if x == s { addrs.push(d) } },
+            Inst.Copy(d, src, size) => { if contains_int(addrs, d) { out.push(src) } },
             _ => {},
         }
         k = k + 1
@@ -1838,7 +1838,7 @@ fun passes_frame_address(c: Inst, in_frame: [bool]) -> bool {
 // address, or one computed from such an address.
 fun frame_addresses(f: IrFunc) -> [bool] {
     var out: [bool] = []
-    for t in f.temps { push(out, false) }
+    for t in f.temps { out.push(false) }
     var changed = true
     while changed {
         changed = false
@@ -1901,17 +1901,17 @@ fun negated_cond(cond: str) -> str {
 // Which blocks of `f` the entry block reaches.
 fun reachable_blocks(f: IrFunc) -> [bool] {
     var reach: [bool] = []
-    for b in f.blocks { push(reach, false) }
-    if len(f.blocks) == 0 { return reach }
+    for b in f.blocks { reach.push(false) }
+    if f.blocks.len() == 0 { return reach }
     var work: [int32] = [0]
     reach[0] = true
-    while len(work) > 0 {
-        let b = work[len(work) - 1]
-        pop(work)
+    while work.len() > 0 {
+        let b = work[work.len() - 1]
+        work.pop()
         for s in successors(f.blocks[b].term) {
             if !reach[s] {
                 reach[s] = true
-                push(work, s)
+                work.push(s)
             }
         }
     }
@@ -1952,7 +1952,7 @@ fun wrapped(v: int64, w: int32, signed: bool) -> int64 {
 fun reads_before_writes(insts: [Inst], term: Term, at: int32, t: int32, n: int32) -> bool {
     var seen = 0
     var j = at + 1
-    while j < len(insts) && seen < n {
+    while j < insts.len() && seen < n {
         for u in inst_uses(insts[j]) {
             if u == t { seen = seen + 1 }
         }
@@ -2002,7 +2002,7 @@ fun slots_at(f: IrFunc, below: int32) -> [int32] {
     if !f.frame { return layout_slots(f, below) }
     let (pos, extent) = slot_positions(f, false)
     var off: [int32] = []
-    for p in pos { push(off, FRAME_HEADER + p) }
+    for p in pos { off.push(FRAME_HEADER + p) }
     return off
 }
 
@@ -2022,16 +2022,16 @@ fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
     var pos: [int32] = []
     var cursor = 0
     for s in f.slots {
-        if (words && s.word >= 0) || s.scope > 0 { push(pos, -1) } else {
-            push(pos, cursor)
+        if (words && s.word >= 0) || s.scope > 0 { pos.push(-1) } else {
+            pos.push(cursor)
             cursor = cursor + (s.size + 7) / 8 * 8
         }
     }
-    let n = len(f.scope_parent)
+    let n = f.scope_parent.len()
     var own: [int32] = []
     var i = 0
     while i < n {
-        push(own, 0)
+        own.push(0)
         i = i + 1
     }
     for s in f.slots {
@@ -2046,13 +2046,13 @@ fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
         let parent = f.scope_parent[i]
         var at = cursor
         if parent > 0 { at = start[parent] + own[parent] }
-        push(start, at)
+        start.push(at)
         if at + own[i] > extent { extent = at + own[i] }
         i = i + 1
     }
     var fill = start
     var k = 0
-    while k < len(f.slots) {
+    while k < f.slots.len() {
         let s = f.slots[k]
         if s.scope > 0 && !(words && s.word >= 0) {
             pos[k] = fill[s.scope]
@@ -2077,9 +2077,9 @@ fun layout_slots(f: IrFunc, below: int32) -> [int32] {
     let (pos, extent) = slot_positions(f, true)
     var off: [int32] = []
     var k = 0
-    while k < len(f.slots) {
+    while k < f.slots.len() {
         let s = f.slots[k]
-        if s.word >= 0 { push(off, 16 + 8 * s.word) } else { push(off, -(below + pos[k] + (s.size + 7) / 8 * 8)) }
+        if s.word >= 0 { off.push(16 + 8 * s.word) } else { off.push(-(below + pos[k] + (s.size + 7) / 8 * 8)) }
         k = k + 1
     }
     return off

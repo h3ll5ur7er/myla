@@ -73,7 +73,7 @@ pub fun type_errors(prog: Loaded, errs: [CheckErr]) -> Report {
     for e in errs {
         var r = type_report(e.line, e.col, e.sp, e.msg, file_of(prog, e.decl))
         r.notes = e.notes
-        push(rs, r)
+        rs.push(r)
     }
     return chain(rs)
 }
@@ -86,7 +86,7 @@ pub fun warning_reports(prog: Loaded, ws: [CheckErr]) -> [Report] {
         var r = type_report(w.line, w.col, w.sp, w.msg, file_of(prog, w.decl))
         r.kind = "warning"
         r.notes = w.notes
-        push(rs, r)
+        rs.push(r)
     }
     return rs
 }
@@ -135,16 +135,16 @@ fun split_on(s: str, sep: uint8) -> [str] {
     var parts: [str] = []
     var sb = StringBuilder()
     var i = 0
-    while i < len(s) {
+    while i < s.len() {
         if s[i] == sep {
-            push(parts, build(sb))
+            parts.push(sb.build())
             sb = StringBuilder()
         } else {
-            append_byte(sb, s[i])
+            sb.append_byte(s[i])
         }
         i = i + 1
     }
-    push(parts, build(sb))
+    parts.push(sb.build())
     return parts
 }
 
@@ -154,12 +154,12 @@ fun split_on(s: str, sep: uint8) -> [str] {
 fun join(parts: [str], sep: str) -> str {
     var sb = StringBuilder()
     var i = 0
-    while i < len(parts) {
-        if i > 0 { append(sb, sep) }
-        append(sb, parts[i])
+    while i < parts.len() {
+        if i > 0 { sb.append(sep) }
+        sb.append(parts[i])
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }
 
 // `p` with `.` segments, empty segments and `x/..` pairs removed.
@@ -167,16 +167,16 @@ fun join(parts: [str], sep: str) -> str {
 #test("examples/errors/runtime_map_key_absent.my")["examples/errors/runtime_map_key_absent.my"]
 #test("examples/errors/type_literal_past_int8_max_annotated.my")["examples/errors/type_literal_past_int8_max_annotated.my"]
 pub fun normalize(p: str) -> str {
-    let absolute = len(p) > 0 && p[0] == '/'
+    let absolute = p.len() > 0 && p[0] == '/'
     var out: [str] = []
     for seg in split_on(p, '/') {
         if seg == "" || seg == "." {
             continue
         }
-        if seg == ".." && len(out) > 0 && out[len(out) - 1] != ".." {
-            pop(out)
+        if seg == ".." && out.len() > 0 && out[out.len() - 1] != ".." {
+            out.pop()
         } else if seg != ".." || !absolute {
-            push(out, seg)
+            out.push(seg)
         }
     }
     let joined = join(out, "/")
@@ -192,7 +192,7 @@ fun segments(p: str) -> [str] {
     if p == "." { return [] }
     var out: [str] = []
     for seg in split_on(p, '/') {
-        if seg != "" { push(out, seg) }
+        if seg != "" { out.push(seg) }
     }
     return out
 }
@@ -221,11 +221,11 @@ fun dotted(p: ImportPath) -> str {
     var sb = StringBuilder()
     var i = 0
     while i < p.dots {
-        append(sb, ".")
+        sb.append(".")
         i = i + 1
     }
-    append(sb, join(p.segments, "."))
-    return build(sb)
+    sb.append(join(p.segments, "."))
+    return sb.build()
 }
 
 // The segments of normalized `path` below normalized `root`, if it is below.
@@ -234,15 +234,15 @@ fun dotted(p: ImportPath) -> str {
 fun rel_under(path: str, root: str) -> Option<[str]> {
     let ps = segments(path)
     let rs = segments(root)
-    if len(rs) > len(ps) { return None }
+    if rs.len() > ps.len() { return None }
     var i = 0
-    while i < len(rs) {
+    while i < rs.len() {
         if ps[i] != rs[i] { return None }
         i = i + 1
     }
     var rest: [str] = []
-    while i < len(ps) {
-        push(rest, ps[i])
+    while i < ps.len() {
+        rest.push(ps[i])
         i = i + 1
     }
     return Some(rest)
@@ -256,31 +256,31 @@ fun rel_under(path: str, root: str) -> Option<[str]> {
 fun module_tag(parts: [str]) -> str {
     var sb = StringBuilder()
     var pending = false
-    for c in chars(strip_ext(join(parts, "/"))) {
+    for c in strip_ext(join(parts, "/")).chars() {
         let ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
         if ok {
-            if pending && len(build(sb)) > 0 { append_byte(sb, '$') }
+            if pending && sb.build().len() > 0 { sb.append_byte('$') }
             pending = false
-            append_byte(sb, c as uint8)
+            sb.append_byte(c as uint8)
         } else {
             pending = true
         }
     }
-    return build(sb)
+    return sb.build()
 }
 
 #test("std/task.my")["std/task"]
 #test("std/process.my")["std/process"]
 fun strip_ext(s: str) -> str {
-    let n = len(s)
+    let n = s.len()
     if n > 3 && s[n - 3] == '.' && s[n - 2] == 'm' && s[n - 1] == 'y' {
         var sb = StringBuilder()
         var i = 0
         while i < n - 3 {
-            append_byte(sb, s[i])
+            sb.append_byte(s[i])
             i = i + 1
         }
-        return build(sb)
+        return sb.build()
     }
     return s
 }
@@ -319,7 +319,7 @@ fun at(path: str, line: int32, col: int32, sp: SrcSpan, msg: str) -> Report {
 
 impl Loader {
     fun readable(self, path: str) -> bool {
-        return contains(self.overrides, path) || readable(path)
+        return self.overrides.contains(path) || readable(path)
     }
 
     fun module_id(self, path: str) -> str {
@@ -336,15 +336,15 @@ impl Loader {
         for pkg in self.packages {
             match rel_under(path, pkg.1) {
                 Some(rest) => {
-                    if len(best) == 0 || len(rest) + 1 < len(best) {
+                    if best.len() == 0 || rest.len() + 1 < best.len() {
                         best = [pkg.0]
-                        for r in rest { push(best, r) }
+                        for r in rest { best.push(r) }
                     }
                 },
                 None => {},
             }
         }
-        if len(best) > 0 { return module_tag(best) }
+        if best.len() > 0 { return module_tag(best) }
         match rel_under(path, self.project_root) {
             Some(rest) => { return module_tag(rest) },
             None => {},
@@ -353,18 +353,18 @@ impl Loader {
         let ps = segments(path)
         let rs = segments(self.project_root)
         var common = 0
-        while common < len(ps) && common < len(rs) && ps[common] == rs[common] {
+        while common < ps.len() && common < rs.len() && ps[common] == rs[common] {
             common = common + 1
         }
         var parts: [str] = []
         var i = common
-        while i < len(rs) {
-            push(parts, "up")
+        while i < rs.len() {
+            parts.push("up")
             i = i + 1
         }
         i = common
-        while i < len(ps) {
-            push(parts, ps[i])
+        while i < ps.len() {
+            parts.push(ps[i])
             i = i + 1
         }
         return module_tag(parts)
@@ -379,7 +379,7 @@ impl Loader {
     }
 
     fun exists(self, path: str) -> bool {
-        return contains(self.overrides, path) || exists(path)
+        return self.overrides.contains(path) || exists(path)
     }
 
     // The module file for `p` imported from `importer`: `x.my`, or the package
@@ -394,8 +394,8 @@ impl Loader {
                 Some(dir) => { return self.resolve_in_package(importer, p, dir) },
                 None => {},
             }
-            if first != "std" { push(bases, self.project_root) }
-            if self.stdlib_root != "" { push(bases, self.stdlib_root) }
+            if first != "std" { bases.push(self.project_root) }
+            if self.stdlib_root != "" { bases.push(self.stdlib_root) }
         } else {
             var base = dirname(importer)
             var k = 1
@@ -403,7 +403,7 @@ impl Loader {
                 base = dirname(base)
                 k = k + 1
             }
-            push(bases, base)
+            bases.push(base)
         }
         for base in bases {
             match self.descend(importer, p, base, 0)? {
@@ -426,7 +426,7 @@ impl Loader {
         if self.exists(join_path(self.project_root, name)) || self.exists(join_path(self.project_root, name + ".my")) {
             return Err(at(importer, p.line, p.col, p.sp, format("'{}' is a dependency and cannot be shadowed by a project file or directory", name)))
         }
-        if len(p.segments) == 1 {
+        if p.segments.len() == 1 {
             let root = join_path(dir, name + ".my")
             if self.readable(root) { return Ok(root) }
             return Err(at(importer, p.line, p.col, p.sp, format("package '{}' has no root module '{}.my' in {}", name, name, dir)))
@@ -443,11 +443,11 @@ impl Loader {
     fun descend(self, importer: str, p: ImportPath, base: str, first: int32) -> Result<Option<str>, Report> {
         var dir = base
         var i = first
-        while i < len(p.segments) - 1 {
+        while i < p.segments.len() - 1 {
             dir = join_path(dir, p.segments[i])
             i = i + 1
         }
-        let last = p.segments[len(p.segments) - 1]
+        let last = p.segments[p.segments.len() - 1]
         let file = join_path(dir, last + ".my")
         let pkg = join_path(join_path(dir, last), last + ".my")
         let has_file = self.readable(file)
@@ -463,7 +463,7 @@ impl Loader {
     // Load `path` and its imports (depth first) once each; its module index.
     fun load(var self, path: str) -> Result<int32, Report> {
         var k = 0
-        while k < len(self.modules) {
+        while k < self.modules.len() {
             if self.modules[k].path == path { return Ok(k) }
             k = k + 1
         }
@@ -477,7 +477,7 @@ impl Loader {
                 }
             },
         }
-        push(self.spans, Span { first_id: self.next_id, path: path })
+        self.spans.push(Span { first_id: self.next_id, path: path })
         var parsed = match parse_source_all(src, self.next_id) {
             Ok(x) => x,
             Err(ds) => { return Err(reports(ds, path)) },
@@ -487,18 +487,18 @@ impl Loader {
         var decls: [Decl] = []
         for d in parsed.program.decls {
             match d.kind {
-                DeclKind.ImportDecl(p, items, alias, isp) => { push(imports, d) },
-                _ => { push(decls, d) },
+                DeclKind.ImportDecl(p, items, alias, isp) => { imports.push(d) },
+                _ => { decls.push(d) },
             }
         }
-        let idx = len(self.modules) as int32
-        push(self.modules, Module { id: self.module_id(path), path: path, imports: imports, targets: [], decls: decls, exports: [:], bindings: [:] })
+        let idx = self.modules.len() as int32
+        self.modules.push(Module { id: self.module_id(path), path: path, imports: imports, targets: [], decls: decls, exports: [:], bindings: [:] })
         var targets: [int32] = []
         for imp in imports {
             match imp.kind {
                 DeclKind.ImportDecl(p, items, alias, isp) => {
                     let target = self.resolve(path, p)?
-                    push(targets, self.load(target)?)
+                    targets.push(self.load(target)?)
                 },
                 _ => {},
             }
@@ -524,7 +524,7 @@ impl Loader {
 
     fun build_exports(var self) {
         var i = 0
-        while i < len(self.modules) {
+        while i < self.modules.len() {
             var m = self.modules[i]
             for d in m.decls {
                 match named(d) {
@@ -542,10 +542,10 @@ impl Loader {
         while changed {
             changed = false
             i = 0
-            while i < len(self.modules) {
+            while i < self.modules.len() {
                 var m = self.modules[i]
                 var k = 0
-                while k < len(m.imports) {
+                while k < m.imports.len() {
                     let src = self.modules[m.targets[k]]
                     match m.imports[k].kind {
                         DeclKind.ImportDecl(p, items, alias, isp) => {
@@ -572,7 +572,7 @@ impl Loader {
 
     fun build_bindings(var self) -> Result<int32, Report> {
         var i = 0
-        while i < len(self.modules) {
+        while i < self.modules.len() {
             var m = self.modules[i]
             var bindings: [str: Binding] = [:]
             for d in m.decls {
@@ -582,7 +582,7 @@ impl Loader {
                 }
             }
             var k = 0
-            while k < len(m.imports) {
+            while k < m.imports.len() {
                 let imp = m.imports[k]
                 let src = self.modules[m.targets[k]]
                 match imp.kind {
@@ -620,12 +620,12 @@ fun reexports(src: Module, items: Option<[ImportItem]>, alias: Option<str>) -> [
     match items {
         None => {
             let a = alias_or(alias, "")
-            if a != "" { push(out, NameBinding { name: a, binding: Binding { is_module: true, value: src.id }, missing: false }) }
+            if a != "" { out.push(NameBinding { name: a, binding: Binding { is_module: true, value: src.id }, missing: false }) }
         },
         Some(its) => {
             for it in its {
                 match get(src.exports, it.name) {
-                    Some(b) => { push(out, NameBinding { name: alias_or(it.alias, it.name), binding: b, missing: false }) },
+                    Some(b) => { out.push(NameBinding { name: alias_or(it.alias, it.name), binding: b, missing: false }) },
                     None => {},
                 }
             }
@@ -641,13 +641,13 @@ fun import_bindings(src: Module, p: ImportPath, items: Option<[ImportItem]>, ali
         None => {
             // `import a.b.c [as x]`: the module, for member access
             let key = alias_or(alias, join(p.segments, "."))
-            push(out, NameBinding { name: key, binding: Binding { is_module: true, value: src.id }, missing: false })
+            out.push(NameBinding { name: key, binding: Binding { is_module: true, value: src.id }, missing: false })
         },
         Some(its) => {
             for it in its {
                 match get(src.exports, it.name) {
-                    Some(b) => { push(out, NameBinding { name: alias_or(it.alias, it.name), binding: b, missing: false }) },
-                    None => { push(out, NameBinding { name: it.name, binding: Binding { is_module: false, value: "" }, missing: true }) },
+                    Some(b) => { out.push(NameBinding { name: alias_or(it.alias, it.name), binding: b, missing: false }) },
+                    None => { out.push(NameBinding { name: it.name, binding: Binding { is_module: false, value: "" }, missing: true }) },
                 }
             }
         },
@@ -688,7 +688,7 @@ fun mk_expr_at(e: Expr, pos: Expr, k: ExprKind) -> Expr {
 #test([TypeParam { line: 8, col: 6, sp: SrcSpan { sline: 8, scol: 6, eline: 8, ecol: 7 }, name: "T", bounds: [] }])[["T"]]
 fun tp_names(tps: [TypeParam]) -> [str] {
     var out: [str] = []
-    for tp in tps { push(out, tp.name) }
+    for tp in tps { out.push(tp.name) }
     return out
 }
 
@@ -699,8 +699,8 @@ fun bind_names(bs: [BindElem]) -> [str] {
     var out: [str] = []
     for b in bs {
         match b {
-            BindElem.BName(n, l, c, sp) => { push(out, n) },
-            BindElem.BTuple(sub, l, c, sp) => { for n in bind_names(sub) { push(out, n) } },
+            BindElem.BName(n, l, c, sp) => { out.push(n) },
+            BindElem.BTuple(sub, l, c, sp) => { for n in bind_names(sub) { out.push(n) } },
             _ => {},
         }
     }
@@ -713,11 +713,11 @@ fun bind_names(bs: [BindElem]) -> [str] {
 fun pattern_binds(p: Pattern) -> [str] {
     var out: [str] = []
     match p.kind {
-        PatternKind.PBind(n) => { push(out, n) },
-        PatternKind.PEnum(en, v, elems, hp) => { for q in elems { for n in pattern_binds(q) { push(out, n) } } },
-        PatternKind.PTuple(elems) => { for q in elems { for n in pattern_binds(q) { push(out, n) } } },
-        PatternKind.PStruct(t, fps) => { for fp in fps { for n in pattern_binds(fp.pattern) { push(out, n) } } },
-        PatternKind.POr(alts) => { if len(alts) > 0 { out = pattern_binds(alts[0]) } },
+        PatternKind.PBind(n) => { out.push(n) },
+        PatternKind.PEnum(en, v, elems, hp) => { for q in elems { for n in pattern_binds(q) { out.push(n) } } },
+        PatternKind.PTuple(elems) => { for q in elems { for n in pattern_binds(q) { out.push(n) } } },
+        PatternKind.PStruct(t, fps) => { for fp in fps { for n in pattern_binds(fp.pattern) { out.push(n) } } },
+        PatternKind.POr(alts) => { if alts.len() > 0 { out = pattern_binds(alts[0]) } },
         _ => {},
     }
     return out
@@ -748,14 +748,14 @@ impl Renamer {
             DeclKind.StructDecl(n, fields, attrs, tps, isp, act) => {
                 self.tys = tp_names(tps)
                 var fs: [Field] = []
-                for f in fields { push(fs, Field { line: f.line, col: f.col, sp: f.sp, name: f.name, ty: self.ty(f.ty) }) }
+                for f in fields { fs.push(Field { line: f.line, col: f.col, sp: f.sp, name: f.name, ty: self.ty(f.ty) }) }
                 self.tys = []
                 DeclKind.StructDecl(qualify(mid, n), fs, attrs, tps, isp, act)
             },
             DeclKind.EnumDecl(n, variants, attrs, tps, isp) => {
                 self.tys = tp_names(tps)
                 var vs: [Variant] = []
-                for v in variants { push(vs, Variant { line: v.line, col: v.col, sp: v.sp, name: v.name, payload: self.ty_list(v.payload) }) }
+                for v in variants { vs.push(Variant { line: v.line, col: v.col, sp: v.sp, name: v.name, payload: self.ty_list(v.payload) }) }
                 self.tys = []
                 DeclKind.EnumDecl(qualify(mid, n), vs, attrs, tps, isp)
             },
@@ -767,12 +767,12 @@ impl Renamer {
             DeclKind.FunDecl(fd) => DeclKind.FunDecl(self.function(fd, qualify(mid, fd.name), false, [])),
             DeclKind.TraitDecl(n, methods, tps, isp) => {
                 var ms: [FunData] = []
-                for m in methods { push(ms, self.signature(m)) }
+                for m in methods { ms.push(self.signature(m)) }
                 DeclKind.TraitDecl(qualify(mid, n), ms, tps, isp)
             },
             DeclKind.ImplDecl(target, methods, tps, itrait, targs) => {
                 self.tys = tp_names(tps)
-                push(self.tys, "Self")
+                self.tys.push("Self")
                 let target2 = self.ty(target)
                 let targs2 = self.ty_list(targs)
                 var trait2 = itrait
@@ -780,7 +780,7 @@ impl Renamer {
                 let tps2 = self.bounds(tps)
                 self.tys = []
                 var ms: [FunData] = []
-                for m in methods { push(ms, self.function(m, m.name, true, tp_names(tps))) }
+                for m in methods { ms.push(self.function(m, m.name, true, tp_names(tps))) }
                 DeclKind.ImplDecl(target2, ms, tps2, trait2, targs2)
             },
             _ => d.kind,
@@ -796,8 +796,8 @@ impl Renamer {
         var out: [TypeParam] = []
         for tp in tps {
             var bs: [str] = []
-            for b in tp.bounds { push(bs, self.type_name(b)) }
-            push(out, TypeParam { line: tp.line, col: tp.col, sp: tp.sp, name: tp.name, bounds: bs })
+            for b in tp.bounds { bs.push(self.type_name(b)) }
+            out.push(TypeParam { line: tp.line, col: tp.col, sp: tp.sp, name: tp.name, bounds: bs })
         }
         return out
     }
@@ -807,7 +807,7 @@ impl Renamer {
     #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None }, [])[[]]
     fun params(self, ps: [Param]) -> [Param] {
         var out: [Param] = []
-        for p in ps { push(out, Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty) }) }
+        for p in ps { out.push(Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty) }) }
         return out
     }
 
@@ -815,7 +815,7 @@ impl Renamer {
     fun signature(var self, m: FunData) -> FunData {
         let saved = self.tys
         self.tys = tp_names(m.type_params)
-        push(self.tys, "Self")
+        self.tys.push("Self")
         let ps = self.params(m.params)
         let rt = self.opt_ty(m.ret_type)
         self.tys = saved
@@ -825,15 +825,15 @@ impl Renamer {
     fun function(var self, fd: FunData, name: str, receiver: bool, impl_params: [str]) -> FunData {
         let saved = self.tys
         self.tys = tp_names(fd.type_params)
-        for t in impl_params { push(self.tys, t) }
-        push(self.tys, "Self")
+        for t in impl_params { self.tys.push(t) }
+        self.tys.push("Self")
         let ps = self.params(fd.params)
         let rt = self.opt_ty(fd.ret_type)
         let tps = self.bounds(fd.type_params)
         self.vals = []
         let attrs = self.attributes(fd.attributes)
-        for p in fd.params { push(self.vals, p.name) }
-        if receiver { push(self.vals, "self") }
+        for p in fd.params { self.vals.push(p.name) }
+        if receiver { self.vals.push("self") }
         var body = fd.body
         match fd.body { Some(b) => { body = Some(self.block(b)) }, None => {} }
         self.vals = []
@@ -849,21 +849,21 @@ impl Renamer {
         var out: [Attribute] = []
         for a in attrs {
             if a.name != "test" {
-                push(out, a)
+                out.push(a)
                 continue
             }
             var args: [Expr] = []
-            for x in a.args { push(args, self.expr(x)) }
+            for x in a.args { args.push(self.expr(x)) }
             var outputs: Option<[Expr]> = None
             match a.outputs {
                 Some(os) => {
                     var renamed: [Expr] = []
-                    for o in os { push(renamed, self.expr(o)) }
+                    for o in os { renamed.push(self.expr(o)) }
                     outputs = Some(renamed)
                 },
                 None => {},
             }
-            push(out, Attribute { line: a.line, col: a.col, sp: a.sp, name: a.name, args: args, outputs: outputs })
+            out.push(Attribute { line: a.line, col: a.col, sp: a.sp, name: a.name, args: args, outputs: outputs })
         }
         return out
     }
@@ -887,7 +887,7 @@ impl Renamer {
     #test(Renamer { env: ["P": "P"], aliases: [:], exports: ["": [:]], vals: [], tys: [], path: "examples/errors/type_method_duplicate.my", err: None }, [])[[]]
     fun ty_list(self, ts: [TypeExpr]) -> [TypeExpr] {
         var out: [TypeExpr] = []
-        for t in ts { push(out, self.ty(t)) }
+        for t in ts { out.push(self.ty(t)) }
         return out
     }
 
@@ -904,7 +904,7 @@ impl Renamer {
     fun block(var self, b: Block) -> Block {
         let saved = self.vals
         var out: [Stmt] = []
-        for s in b.stmts { push(out, self.stmt(s)) }
+        for s in b.stmts { out.push(self.stmt(s)) }
         self.vals = saved
         return Block { line: b.line, col: b.col, sp: b.sp, stmts: out }
     }
@@ -915,13 +915,13 @@ impl Renamer {
             StmtKind.VarDecl(kind, n, t, init) => {
                 let init2 = self.expr(init)
                 let t2 = self.opt_ty(t)
-                push(self.vals, n)
+                self.vals.push(n)
                 StmtKind.VarDecl(kind, n, t2, init2)
             },
             StmtKind.DestructDecl(kind, bs, t, init) => {
                 let init2 = self.expr(init)
                 let t2 = self.opt_ty(t)
-                for n in bind_names([bs]) { push(self.vals, n) }
+                for n in bind_names([bs]) { self.vals.push(n) }
                 StmtKind.DestructDecl(kind, bs, t2, init2)
             },
             StmtKind.Assign(target, value) => {
@@ -942,7 +942,7 @@ impl Renamer {
                 let end2 = self.opt_expr(end)
                 let iter2 = self.opt_expr(iter)
                 let saved = self.vals
-                push(self.vals, v)
+                self.vals.push(v)
                 let body2 = self.block(body)
                 self.vals = saved
                 StmtKind.ForS(v, start2, end2, body2, iter2)
@@ -979,7 +979,7 @@ impl Renamer {
     #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_list_empty_no_type.my", err: None }, [])[[]]
     fun exprs(var self, es: [Expr]) -> [Expr] {
         var out: [Expr] = []
-        for e in es { push(out, self.expr(e)) }
+        for e in es { out.push(self.expr(e)) }
         return out
     }
 
@@ -1012,11 +1012,11 @@ impl Renamer {
                 for a in arms {
                     let saved = self.vals
                     let pat = self.pattern(a.pattern)
-                    for n in pattern_binds(a.pattern) { push(self.vals, n) }
+                    for n in pattern_binds(a.pattern) { self.vals.push(n) }
                     let guard = self.opt_expr(a.guard)
                     let body = self.body(a.body)
                     self.vals = saved
-                    push(arms2, MatchArm { line: a.line, col: a.col, sp: a.sp, pattern: pat, guard: guard, body: body })
+                    arms2.push(MatchArm { line: a.line, col: a.col, sp: a.sp, pattern: pat, guard: guard, body: body })
                 }
                 return mk_expr(e, ExprKind.MatchE(scrut2, arms2))
             },
@@ -1024,8 +1024,8 @@ impl Renamer {
                 let saved = self.vals
                 var ps2: [Param] = []
                 for p in ps {
-                    push(ps2, Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty) })
-                    push(self.vals, p.name)
+                    ps2.push(Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty) })
+                    self.vals.push(p.name)
                 }
                 let rt2 = self.opt_ty(rt)
                 let body2 = self.body(body)
@@ -1047,7 +1047,7 @@ impl Renamer {
             },
             ExprKind.StructLit(n, fields) => {
                 var fs: [FieldInit] = []
-                for f in fields { push(fs, FieldInit { line: f.line, col: f.col, sp: f.sp, name: f.name, value: self.expr(f.value) }) }
+                for f in fields { fs.push(FieldInit { line: f.line, col: f.col, sp: f.sp, name: f.name, value: self.expr(f.value) }) }
                 ExprKind.StructLit(self.type_name(n), fs)
             },
             ExprKind.TupleLit(es) => ExprKind.TupleLit(self.exprs(es)),
@@ -1057,7 +1057,7 @@ impl Renamer {
                 var es: [MapEntry] = []
                 for en in entries {
                     let key = self.expr(en.key)
-                    push(es, MapEntry { key: key, value: self.expr(en.value) })
+                    es.push(MapEntry { key: key, value: self.expr(en.value) })
                 }
                 ExprKind.MapLit(es)
             },
@@ -1087,8 +1087,8 @@ impl Renamer {
         while walking {
             match cur.kind {
                 ExprKind.GetField(t, f) => {
-                    push(names, f)
-                    push(nodes, cur)
+                    names.push(f)
+                    nodes.push(cur)
                     cur = t
                 },
                 _ => { walking = false },
@@ -1097,7 +1097,7 @@ impl Renamer {
         var root = ""
         match cur.kind { ExprKind.Name(n) => { root = n }, _ => { return None } }
         if has(self.vals, root) { return None }
-        let cnt = len(names) as int32
+        let cnt = names.len() as int32
         // segment s (innermost first) is names[cnt - 1 - s]
         var k = cnt
         var key = ""
@@ -1160,7 +1160,7 @@ impl Renamer {
     #test(Renamer { env: ["Shape": "Shape", "f": "f", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["s"], tys: ["Self"], path: "examples/errors/type_match_nonexhaustive.my", err: None }, [])[[]]
     fun patterns(var self, ps: [Pattern]) -> [Pattern] {
         var out: [Pattern] = []
-        for p in ps { push(out, self.pattern(p)) }
+        for p in ps { out.push(self.pattern(p)) }
         return out
     }
 
@@ -1176,7 +1176,7 @@ impl Renamer {
             PatternKind.PTuple(elems) => PatternKind.PTuple(self.patterns(elems)),
             PatternKind.PStruct(n, fps) => {
                 var fps2: [FieldPat] = []
-                for fp in fps { push(fps2, FieldPat { line: fp.line, col: fp.col, sp: fp.sp, name: fp.name, pattern: self.pattern(fp.pattern) }) }
+                for fp in fps { fps2.push(FieldPat { line: fp.line, col: fp.col, sp: fp.sp, name: fp.name, pattern: self.pattern(fp.pattern) }) }
                 PatternKind.PStruct(self.type_name(n), fps2)
             },
             PatternKind.POr(alts) => PatternKind.POr(self.patterns(alts)),
@@ -1191,7 +1191,7 @@ impl Renamer {
 #test(["twice": Binding { is_module: false, value: "twice" }, "wrong": Binding { is_module: false, value: "wrong" }, "main": Binding { is_module: false, value: "main" }])[["twice": "twice", "wrong": "wrong", "main": "main"]]
 fun decl_env(bindings: [str: Binding]) -> [str: str] {
     var out: [str: str] = [:]
-    for k in keys(bindings) {
+    for k in bindings.keys() {
         let b = bindings[k]
         if !b.is_module { out[k] = b.value }
     }
@@ -1203,7 +1203,7 @@ fun decl_env(bindings: [str: Binding]) -> [str: str] {
 #test(["outer": Binding { is_module: false, value: "outer" }, "main": Binding { is_module: false, value: "main" }, "task": Binding { is_module: true, value: "std$task" }])[["task": "std$task"]]
 fun module_env(bindings: [str: Binding]) -> [str: str] {
     var out: [str: str] = [:]
-    for k in keys(bindings) {
+    for k in bindings.keys() {
         let b = bindings[k]
         if b.is_module { out[k] = b.value }
     }
@@ -1216,7 +1216,7 @@ fun module_env(bindings: [str: Binding]) -> [str: str] {
 #test("/work/myla/selfhost/main.my")["/work/myla/lib"]
 pub fun default_stdlib_root(argv0: str) -> str {
     var has_dir = false
-    for c in chars(argv0) { if c == '/' { has_dir = true } }
+    for c in argv0.chars() { if c == '/' { has_dir = true } }
     if !has_dir { return "lib" }
     return normalize(join_path(dirname(argv0), "../lib"))
 }
@@ -1235,13 +1235,13 @@ fun list_error(msg: str) -> Report {
 #test("geo=a=b")[Ok(("geo", "a=b"))]
 pub fun parse_package_flag(text: str) -> Result<(str, str), Report> {
     var i = 0
-    while i < len(text) {
+    while i < text.len() {
         if text[i] == '=' {
             var name = StringBuilder()
-            append(name, text, 0, i)
+            name.append(text, 0, i)
             var dir = StringBuilder()
-            append(dir, text, i + 1, len(text))
-            return Ok((build(name), build(dir)))
+            dir.append(text, i + 1, text.len())
+            return Ok((name.build(), dir.build()))
         }
         i = i + 1
     }
@@ -1255,9 +1255,9 @@ pub fun parse_package_flag(text: str) -> Result<(str, str), Report> {
 #test("")[false]
 #test("match")[false]
 fun valid_package_name(name: str) -> bool {
-    if len(name) == 0 || has(keywords(), name) { return false }
+    if name.len() == 0 || has(keywords(), name) { return false }
     var i = 0
-    while i < len(name) {
+    while i < name.len() {
         let c = name[i]
         let letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
         if !letter && (i == 0 || !((c >= '0' && c <= '9') || c == '_')) { return false }
@@ -1280,8 +1280,8 @@ fun check_packages(packages: [(str, str)]) -> Result<[(str, str)], Report> {
         if has(names, name) { return Err(list_error(format("package '{}' is given twice", name))) }
         if dir == "" { return Err(list_error(format("package '{}' has no directory", name))) }
         if !is_dir(dir) { return Err(list_error(format("package '{}': '{}' is not a directory", name, dir))) }
-        push(names, name)
-        push(out, (name, normalize(dir)))
+        names.push(name)
+        out.push((name, normalize(dir)))
     }
     return Ok(out)
 }
@@ -1323,7 +1323,7 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     if opts.root != "" { project_root = normalize(opts.root) }
     let packages = check_packages(opts.packages)?
     var normalized: [str: str] = [:]
-    for p in keys(opts.overrides) { normalized[normalize(p)] = opts.overrides[p] }
+    for p in opts.overrides.keys() { normalized[normalize(p)] = opts.overrides[p] }
     var ld = Loader { stdlib_root: stdlib, project_root: project_root, packages: packages, entry: e, modules: [], next_id: 0, spans: [], overrides: normalized }
     ld.load(e)?
     ld.check_ids()?
@@ -1334,7 +1334,7 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     var decls: [Decl] = []
     for m in ld.modules {
         var r = Renamer { env: decl_env(m.bindings), aliases: module_env(m.bindings), exports: exports, vals: [], tys: [], path: m.path, err: None }
-        for d in m.decls { push(decls, r.decl(d, m.id)) }
+        for d in m.decls { decls.push(r.decl(d, m.id)) }
         match r.err { Some(e) => { return Err(e) }, None => {} }
     }
     return Ok(Loaded { decls: decls, next_id: ld.next_id, spans: ld.spans })

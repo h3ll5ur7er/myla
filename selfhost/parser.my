@@ -148,7 +148,7 @@ fun has_kind(ks: [TokenKind], k: TokenKind) -> bool {
 fun nest(opens: [TokenKind], k: TokenKind) -> [TokenKind] {
     var out = opens
     if k == TokenKind.LPAREN || k == TokenKind.LBRACKET || k == TokenKind.LBRACE {
-        push(out, k)
+        out.push(k)
         return out
     }
     var partner = TokenKind.EOF
@@ -156,7 +156,7 @@ fun nest(opens: [TokenKind], k: TokenKind) -> [TokenKind] {
     if k == TokenKind.RBRACKET { partner = TokenKind.LBRACKET }
     if k == TokenKind.RBRACE { partner = TokenKind.LBRACE }
     if partner != TokenKind.EOF && has_kind(out, partner) {
-        while pop(out) != partner {}
+        while out.pop() != partner {}
     }
     return out
 }
@@ -180,7 +180,7 @@ fun suffix_opt(s: str) -> Option<str> {
 fun cons_expr(head: Expr, tail: [Expr]) -> [Expr] {
     var out: [Expr] = [head]
     for x in tail {
-        push(out, x)
+        out.push(x)
     }
     return out
 }
@@ -273,8 +273,8 @@ impl Parser {
 
     #test(parser_on("a.b[0]"))[Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }]
     fun peek(self) -> Token {
-        if self.pos >= len(self.toks) {
-            return self.toks[len(self.toks) - 1]
+        if self.pos >= self.toks.len() {
+            return self.toks[self.toks.len() - 1]
         }
         return self.toks[self.pos]
     }
@@ -282,8 +282,8 @@ impl Parser {
     #test(parser_on("a.b[0]"), 1)[Token { kind: TokenKind.DOT, lexeme: ".", line: 1, column: 2, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }]
     fun peek_at(self, offset: int32) -> Token {
         let idx = self.pos + offset
-        if idx >= len(self.toks) {
-            return self.toks[len(self.toks) - 1]
+        if idx >= self.toks.len() {
+            return self.toks[self.toks.len() - 1]
         }
         return self.toks[idx]
     }
@@ -292,14 +292,14 @@ impl Parser {
     // place: `peek` copies the token and its strings (MYLA-124).
     #test(parser_on("a.b[0]"))[TokenKind.IDENT]
     fun peek_kind(self) -> TokenKind {
-        if self.pos >= len(self.toks) { return self.toks[len(self.toks) - 1].kind }
+        if self.pos >= self.toks.len() { return self.toks[self.toks.len() - 1].kind }
         return self.toks[self.pos].kind
     }
 
     #test(parser_on("a.b[0]"), 1)[TokenKind.DOT]
     fun peek_kind_at(self, offset: int32) -> TokenKind {
         let idx = self.pos + offset
-        if idx >= len(self.toks) { return self.toks[len(self.toks) - 1].kind }
+        if idx >= self.toks.len() { return self.toks[self.toks.len() - 1].kind }
         return self.toks[idx].kind
     }
 
@@ -351,7 +351,7 @@ impl Parser {
                 Some(e) => {},
             }
         }
-        self.pos = len(self.toks) - 1
+        self.pos = self.toks.len() - 1
     }
 
     // Python's _Unwind: leave the declaration without an error, to go on at
@@ -359,7 +359,7 @@ impl Parser {
     fun unwind(var self) {
         self.unwinding = true
         self.resume = self.pos
-        self.pos = len(self.toks) - 1
+        self.pos = self.toks.len() - 1
     }
 
     // A recovery point after parsing from token `start` (parser.py: the
@@ -374,12 +374,12 @@ impl Parser {
             Some(d) => {
                 self.pending = None
                 self.pos = self.resume
-                let n = len(self.errs)
+                let n = self.errs.len()
                 if n == 0 || is_after(d, self.errs[n - 1]) {
-                    push(self.errs, d)
-                    if len(self.errs) >= MAX_ERRORS {
+                    self.errs.push(d)
+                    if self.errs.len() >= MAX_ERRORS {
                         self.stopped = true
-                        self.pos = len(self.toks) - 1
+                        self.pos = self.toks.len() - 1
                         return true
                     }
                 }
@@ -426,7 +426,7 @@ impl Parser {
             if k == TokenKind.RBRACE && !brace && mode != SYNC_DECL { return }
             if mode == SYNC_STMT && (k == TokenKind.NEWLINE || k == TokenKind.SEMI) && !brace {
                 let nxt = self.peek_kind_at(1)
-                if len(opens) == 0 || is_stmt_start(nxt) || is_decl_start(nxt) || nxt == TokenKind.RBRACE { return }
+                if opens.len() == 0 || is_stmt_start(nxt) || is_decl_start(nxt) || nxt == TokenKind.RBRACE { return }
             }
             opens = nest(opens, k)
             self.skip()
@@ -439,7 +439,7 @@ impl Parser {
     #test(parser_on("[int]"))[false]
     fun resuming_at_declaration(self) -> bool {
         let tok = self.peek()
-        let n = len(self.errs)
+        let n = self.errs.len()
         if n == 0 || !is_decl_start(tok.kind) || !self.at_line_start() { return false }
         return self.errs[n - 1].line == tok.line && self.errs[n - 1].col == tok.column
     }
@@ -495,7 +495,7 @@ impl Parser {
             let start = self.pos
             let d = self.declaration()
             if !self.recovered(start, SYNC_DECL) {
-                push(decls, d)
+                decls.push(d)
                 self.terminate("declaration")
                 self.recovered(start, SYNC_DECL)
             }
@@ -540,7 +540,7 @@ impl Parser {
             return self.enum_decl(attrs, is_pub)
         } else if k == TokenKind.IMPL {
             let d = self.impl_decl()
-            if len(attrs) > 0 {
+            if attrs.len() > 0 {
                 self.fail_at(tok, "attributes are not allowed on an 'impl' block")
             } else if is_pub {
                 self.fail_at(pub_tok, "'pub' is not allowed on an 'impl' block (visibility follows the implemented type)")
@@ -554,7 +554,7 @@ impl Parser {
             return self.const_decl(attrs, is_pub)
         } else if k == TokenKind.IMPORT || k == TokenKind.FROM {
             let d = self.import_decl(is_pub)
-            if len(attrs) > 0 {
+            if attrs.len() > 0 {
                 self.fail_at(tok, "attributes are not allowed on an import statement")
             }
             return d
@@ -572,7 +572,7 @@ impl Parser {
             var items: [ImportItem] = [self.import_item()]
             // a trailing comma (D104 (4), MYLA-225)
             while self.match1(TokenKind.COMMA) && !self.at_separator() && !self.at_end() {
-                push(items, self.import_item())
+                items.push(self.import_item())
             }
             return self.mk_decl(start.line, start.column, DeclKind.ImportDecl(path, Some(items), None, is_pub))
         }
@@ -603,7 +603,7 @@ impl Parser {
         }
         var segments: [str] = [self.expect(TokenKind.IDENT, "a module path segment").lexeme]
         while self.match1(TokenKind.DOT) {
-            push(segments, self.expect(TokenKind.IDENT, "a path segment after '.'").lexeme)
+            segments.push(self.expect(TokenKind.IDENT, "a path segment after '.'").lexeme)
         }
         return ImportPath { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), dots: dots, segments: segments }
     }
@@ -634,7 +634,7 @@ impl Parser {
                 outputs = Some(self.expr_list(TokenKind.RBRACKET))
                 self.expect(TokenKind.RBRACKET, "']'")
             }
-            push(attrs, Attribute { line: hash_tok.line, col: hash_tok.column, sp: self.span_from(hash_tok.line, hash_tok.column), name: name, args: args, outputs: outputs })
+            attrs.push(Attribute { line: hash_tok.line, col: hash_tok.column, sp: self.span_from(hash_tok.line, hash_tok.column), name: name, args: args, outputs: outputs })
             self.skip_newlines()
         }
         return attrs
@@ -651,18 +651,18 @@ impl Parser {
             let tok = self.expect(TokenKind.IDENT, "type parameter name")
             var bounds: [str] = []
             if self.match1(TokenKind.COLON) {
-                push(bounds, self.expect(TokenKind.IDENT, "trait name in type-parameter bound").lexeme)
+                bounds.push(self.expect(TokenKind.IDENT, "trait name in type-parameter bound").lexeme)
                 while self.match1(TokenKind.PLUS) {
-                    push(bounds, self.expect(TokenKind.IDENT, "trait name after '+'").lexeme)
+                    bounds.push(self.expect(TokenKind.IDENT, "trait name after '+'").lexeme)
                 }
             }
-            push(params, TypeParam { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), name: tok.lexeme, bounds: bounds })
+            params.push(TypeParam { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), name: tok.lexeme, bounds: bounds })
             if !self.match1(TokenKind.COMMA) || self.check(TokenKind.GT) {
                 break
             }
         }
         self.expect(TokenKind.GT, "'>' to close type parameters")
-        if len(params) == 0 {
+        if params.len() == 0 {
             self.fail_at(self.peek(), "empty type-parameter list")    // unreachable: a name is expected first
         }
         return params
@@ -672,7 +672,7 @@ impl Parser {
     fun generics_no_bounds(var self, where: str) -> [TypeParam] {
         let ps = self.generics()
         for p in ps {
-            if len(p.bounds) > 0 {
+            if p.bounds.len() > 0 {
                 self.fail_at(self.peek(), format("type-parameter bounds are not supported on {}", where))
             }
         }
@@ -694,7 +694,7 @@ impl Parser {
             let fname = self.expect(TokenKind.IDENT, "field name")
             self.expect(TokenKind.COLON, "':'")
             let ftype = self.parse_type()
-            push(fields, Field { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, ty: ftype })
+            fields.push(Field { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, ty: ftype })
             if !self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
                 break
@@ -717,16 +717,16 @@ impl Parser {
             let vname = self.expect(TokenKind.IDENT, "variant name")
             var payload: [TypeExpr] = []
             if self.match1(TokenKind.LPAREN) {
-                push(payload, self.parse_type())
+                payload.push(self.parse_type())
                 while self.match1(TokenKind.COMMA) {
                     if self.check(TokenKind.RPAREN) {
                         break
                     }
-                    push(payload, self.parse_type())
+                    payload.push(self.parse_type())
                 }
                 self.expect(TokenKind.RPAREN, "')'")
             }
-            push(variants, Variant { line: vname.line, col: vname.column, sp: self.span_from(vname.line, vname.column), name: vname.lexeme, payload: payload })
+            variants.push(Variant { line: vname.line, col: vname.column, sp: self.span_from(vname.line, vname.column), name: vname.lexeme, payload: payload })
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
             } else {
@@ -750,7 +750,7 @@ impl Parser {
                 let pname = self.expect(TokenKind.IDENT, "parameter name")
                 self.expect(TokenKind.COLON, "':'")
                 let ptype = self.parse_type()
-                push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
+                params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
                 if !self.match1(TokenKind.COMMA) || self.check(TokenKind.RPAREN) {
                     break
                 }
@@ -796,7 +796,7 @@ impl Parser {
             let start = self.pos
             let attrs = self.attributes()     // `#test` cases of a method (D116)
             if self.at_method() {
-                push(methods, self.method_decl(attrs))
+                methods.push(self.method_decl(attrs))
             } else {
                 let tok = self.peek()
                 self.fail_at(tok, format("expected a method ('fun ...') in impl block, found '{}'", tok.lexeme))
@@ -820,7 +820,7 @@ impl Parser {
             if self.leaves_body(false) { break }
             let start = self.pos
             if self.at_method() {
-                push(methods, self.method_sig())
+                methods.push(self.method_sig())
             } else {
                 let tok = self.peek()
                 self.fail_at(tok, format("expected a method signature ('fun ...') in trait body, found '{}'", tok.lexeme))
@@ -890,7 +890,7 @@ impl Parser {
             let pname = self.expect(TokenKind.IDENT, "parameter name")
             self.expect(TokenKind.COLON, "':'")
             let ptype = self.parse_type()
-            push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
+            params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
         }
         self.expect(TokenKind.RPAREN, "')'")
         var ret: Option<TypeExpr> = None
@@ -1012,9 +1012,9 @@ impl Parser {
             return args
         }
         self.skip()
-        push(args, self.parse_type())
+        args.push(self.parse_type())
         while self.match1(TokenKind.COMMA) && !self.check(TokenKind.GT) && !self.check(TokenKind.GE) {
-            push(args, self.parse_type())
+            args.push(self.parse_type())
         }
         if self.check(TokenKind.GE) {
             // `Option<int>= x`: the `>=` token closes the list and leaves its
@@ -1033,13 +1033,13 @@ impl Parser {
         var params: [TypeExpr] = []
         var saw_comma = false
         if !self.check(TokenKind.RPAREN) {
-            push(params, self.parse_type())
+            params.push(self.parse_type())
             while self.match1(TokenKind.COMMA) {
                 saw_comma = true
                 if self.check(TokenKind.RPAREN) {
                     break
                 }
-                push(params, self.parse_type())
+                params.push(self.parse_type())
             }
         }
         self.expect(TokenKind.RPAREN, "')'")
@@ -1047,7 +1047,7 @@ impl Parser {
             let ret = self.parse_type()
             return self.mk_type(lp.line, lp.column, TypeKind.TFn(params, ret, false))
         }
-        if len(params) == 0 {
+        if params.len() == 0 {
             self.fail_at(lp, "'()' is only valid as a function type '() -> R'")
         }
         if !saw_comma {
@@ -1079,7 +1079,7 @@ impl Parser {
             let start = self.pos
             let st = self.statement()
             if !self.recovered(start, SYNC_STMT) {
-                push(stmts, st)
+                stmts.push(st)
                 if self.at_separator() {
                     self.skip_separators()
                 } else if self.check(TokenKind.RBRACE) {
@@ -1182,7 +1182,7 @@ impl Parser {
             self.fail_at(self.peek(), "expected ',' in destructuring binding (use '(x,)' for a 1-tuple)")
         }
         while !self.check(TokenKind.RPAREN) {
-            push(elems, self.binding_elem())
+            elems.push(self.binding_elem())
             if !self.match1(TokenKind.COMMA) {
                 break
             }
@@ -1259,7 +1259,7 @@ impl Parser {
         var el_sp = then.sp
         match otherwise {
             ExprOrBlock.EB_Block(b) => {
-                if len(b.stmts) > 0 {
+                if b.stmts.len() > 0 {
                     el_line = b.line
                     el_col = b.col
                     el_sp = b.sp
@@ -1341,7 +1341,7 @@ impl Parser {
             let vc = value.col
             var elems: [Expr] = [value]
             while self.match1(TokenKind.COMMA) {
-                push(elems, self.expression())
+                elems.push(self.expression())
             }
             value = self.mk_expr_from(st, vl, vc, ExprKind.TupleLit(elems))
         }
@@ -1405,9 +1405,9 @@ impl Parser {
         let (place, lets) = self.hoisted(target)
         let value = Expr { id: self.fresh(), line: opt.line, col: opt.column, sp: self.span_from(st.line, st.column), kind: ExprKind.Binary(op, place, rhs) }
         let assign = self.mk_stmt_from(st, opt.line, opt.column, StmtKind.Assign(place, value))
-        if len(lets) == 0 { return assign }
+        if lets.len() == 0 { return assign }
         var stmts = lets
-        push(stmts, assign)
+        stmts.push(assign)
         let cond = Expr { id: self.fresh(), line: st.line, col: st.column, sp: self.span_from(st.line, st.column), kind: ExprKind.BoolLit(true) }
         let blk = Block { line: st.line, col: st.column, sp: self.span_from(st.line, st.column), stmts: stmts }
         return self.mk_stmt_from(st, st.line, st.column, StmtKind.IfS(cond, blk, None))
@@ -1423,7 +1423,7 @@ impl Parser {
                 var idx = i
                 if !simple_index(i) {
                     let name = format("%index{}", i.id)
-                    push(lets, Stmt { id: self.fresh(), line: i.line, col: i.col, sp: i.sp, kind: StmtKind.VarDecl("let", name, None, i) })
+                    lets.push(Stmt { id: self.fresh(), line: i.line, col: i.col, sp: i.sp, kind: StmtKind.VarDecl("let", name, None, i) })
                     idx = Expr { id: self.fresh(), line: i.line, col: i.col, sp: i.sp, kind: ExprKind.Name(name) }
                 }
                 return (Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(nt, idx) }, lets)
@@ -1757,7 +1757,7 @@ impl Parser {
     // trailing `if` statement whose every level has an `else` is the `if`
     // expression it reads as, its value the block's (MYLA-222).
     fun valued(var self, b: Block) -> Block {
-        let n = len(b.stmts)
+        let n = b.stmts.len()
         if n == 0 { return b }
         let last = b.stmts[n - 1]
         match self.if_as_match(last) {
@@ -1888,7 +1888,7 @@ impl Parser {
             if self.check(TokenKind.RBRACKET) {
                 break
             }
-            push(elems, self.expression())
+            elems.push(self.expression())
             self.skip_newlines()
         }
         self.expect(TokenKind.RBRACKET, "']' to close list literal")
@@ -1907,7 +1907,7 @@ impl Parser {
             let key = self.expression()
             self.expect(TokenKind.COLON, "':' between map key and value")
             let val = self.expression()
-            push(entries, MapEntry { key: key, value: val })
+            entries.push(MapEntry { key: key, value: val })
             self.skip_newlines()
         }
         self.expect(TokenKind.RBRACKET, "']' to close map literal")
@@ -1925,7 +1925,7 @@ impl Parser {
         var arms: [MatchArm] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
             let arm = self.match_arm(!as_stmt)
-            push(arms, arm)
+            arms.push(arm)
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
             } else if self.check(TokenKind.NEWLINE) {
@@ -1941,7 +1941,7 @@ impl Parser {
             }
         }
         self.expect(TokenKind.RBRACE, "'}' to end match")
-        if len(arms) == 0 {
+        if arms.len() == 0 {
             self.fail_at(kw, "match expression needs at least one arm")
         }
         return self.mk_expr(kw.line, kw.column, ExprKind.MatchE(scrutinee, arms))
@@ -1987,7 +1987,7 @@ impl Parser {
         let pc = first.col
         var alts: [Pattern] = [first]
         while self.match1(TokenKind.PIPE) {
-            push(alts, self.base_pattern())
+            alts.push(self.base_pattern())
         }
         return self.mk_pat_from(first.sp.sline, first.sp.scol, pl, pc, PatternKind.POr(alts))
     }
@@ -2050,12 +2050,12 @@ impl Parser {
         if self.match1(TokenKind.LPAREN) {
             has_payload = true
             if !self.check(TokenKind.RPAREN) {
-                push(elems, self.pattern())
+                elems.push(self.pattern())
                 while self.match1(TokenKind.COMMA) {
                     if self.check(TokenKind.RPAREN) {
                         break
                     }
-                    push(elems, self.pattern())
+                    elems.push(self.pattern())
                 }
             }
             self.expect(TokenKind.RPAREN, "')'")
@@ -2071,7 +2071,7 @@ impl Parser {
             self.fail_at(self.peek(), "expected ',' in tuple pattern (use '(p,)' for a 1-tuple)")
         }
         while !self.check(TokenKind.RPAREN) {
-            push(elems, self.pattern())
+            elems.push(self.pattern())
             if !self.match1(TokenKind.COMMA) {
                 break
             }
@@ -2093,7 +2093,7 @@ impl Parser {
             } else {
                 pat = self.mk_pat(fname.line, fname.column, PatternKind.PBind(fname.lexeme))
             }
-            push(fields, FieldPat { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, pattern: pat })
+            fields.push(FieldPat { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, pattern: pat })
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
             } else {
@@ -2109,7 +2109,7 @@ impl Parser {
     fun lambda_ahead(self) -> bool {
         var depth = 0
         var i = self.pos
-        let n = len(self.toks)
+        let n = self.toks.len()
         while i < n {
             let k = self.toks[i].kind
             if k == TokenKind.LPAREN || k == TokenKind.LBRACKET || k == TokenKind.LBRACE {
@@ -2139,7 +2139,7 @@ impl Parser {
                 if self.match1(TokenKind.COLON) {
                     pty = Some(self.parse_type())
                 }
-                push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: pty })
+                params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: pty })
                 if !self.match1(TokenKind.COMMA) || self.check(TokenKind.RPAREN) {
                     break
                 }
@@ -2167,7 +2167,7 @@ impl Parser {
         var elems: [Expr] = [first]
         self.skip()
         while !self.check(TokenKind.RPAREN) {
-            push(elems, self.expression())
+            elems.push(self.expression())
             if !self.match1(TokenKind.COMMA) {
                 break
             }
@@ -2185,7 +2185,7 @@ impl Parser {
             let fname = self.expect(TokenKind.IDENT, "field name")
             self.expect(TokenKind.COLON, "':'")
             let value = self.expression()
-            push(fields, FieldInit { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, value: value })
+            fields.push(FieldInit { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, value: value })
             if !self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
                 break
@@ -2204,7 +2204,7 @@ impl Parser {
             return args
         }
         while true {
-            push(args, self.expression())
+            args.push(self.expression())
             self.skip_newlines()
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
@@ -2226,9 +2226,9 @@ impl Parser {
         while true {
             if self.hole_ahead() {
                 let tok = self.advance()
-                push(args, self.mk_expr(tok.line, tok.column, ExprKind.Hole))
+                args.push(self.mk_expr(tok.line, tok.column, ExprKind.Hole))
             } else {
-                push(args, self.expression())
+                args.push(self.expression())
             }
             self.skip_newlines()
             if self.match1(TokenKind.COMMA) {
@@ -2271,7 +2271,7 @@ pub fun parse_ids(toks: [Token], first_id: int32) -> Result<Parsed, [Diag]> {
     var p = new_parser(toks)
     p.next_id = first_id
     let prog = p.parse_program()
-    if len(p.errs) > 0 { return Err(p.errs) }
+    if p.errs.len() > 0 { return Err(p.errs) }
     return Ok(Parsed { program: prog, next_id: p.next_id })
 }
 

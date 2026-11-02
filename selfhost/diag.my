@@ -27,8 +27,8 @@ pub struct Report { kind: str, msg: str, path: str, line: int32, col: int32, sp:
 pub fun chain(rs: [Report]) -> Report {
     var first = rs[0]
     var i = 1
-    while i < len(rs) {
-        push(first.more, rs[i])
+    while i < rs.len() {
+        first.more.push(rs[i])
         i = i + 1
     }
     return first
@@ -37,7 +37,7 @@ pub fun chain(rs: [Report]) -> Report {
 // `r` and its `more`, in order.
 pub fun all_reports(r: Report) -> [Report] {
     var out = [r]
-    for m in r.more { push(out, m) }
+    for m in r.more { out.push(m) }
     return out
 }
 
@@ -72,11 +72,11 @@ pub fun canonical_note(n: Note) -> str {
 #test("parse error")["parse"]
 fun split_kind(kind: str) -> str {
     var sb = StringBuilder()
-    for c in chars(kind) {
-        if c == ' ' { return build(sb) }
-        append_byte(sb, c as uint8)
+    for c in kind.chars() {
+        if c == ' ' { return sb.build() }
+        sb.append_byte(c as uint8)
     }
-    return build(sb)
+    return sb.build()
 }
 
 pub fun type_report(line: int32, col: int32, sp: SrcSpan, msg: str, path: str) -> Report {
@@ -90,7 +90,7 @@ pub fun report(d: Diag, path: str) -> Report {
 // Lex or parse errors `ds` (not empty) in the file `path`, as one report.
 pub fun reports(ds: [Diag], path: str) -> Report {
     var rs: [Report] = []
-    for d in ds { push(rs, report(d, path)) }
+    for d in ds { rs.push(report(d, path)) }
     return chain(rs)
 }
 
@@ -103,18 +103,18 @@ fun source_line(src: str, n: int32) -> Option<str> {
     var sb = StringBuilder()
     var i = 0
     // a byte-order mark the lexer skipped isn't shown (MYLA-178)
-    if len(src) >= 3 && src[0] == 0xEFu8 && src[1] == 0xBBu8 && src[2] == 0xBFu8 { i = 3 }
-    while i < len(src) {
+    if src.len() >= 3 && src[0] == 0xEFu8 && src[1] == 0xBBu8 && src[2] == 0xBFu8 { i = 3 }
+    while i < src.len() {
         let c = src[i]
         if c == '\n' {
-            if line == n { return Some(build(sb)) }
+            if line == n { return Some(sb.build()) }
             line = line + 1
         } else if line == n {
-            append_byte(sb, c)
+            sb.append_byte(c)
         }
         i = i + 1
     }
-    if line == n && len(build(sb)) > 0 { return Some(build(sb)) }
+    if line == n && sb.build().len() > 0 { return Some(sb.build()) }
     return None
 }
 
@@ -131,7 +131,7 @@ pub fun caret_range(text: str, line: int32, col: int32, sp: SrcSpan) -> (int32, 
     var end = col + 1
     if sp.eline > 0 {
         if sp.sline == line { first = sp.scol }
-        if sp.eline == line { end = sp.ecol } else { end = len(chars(text)) as int32 + 1 }
+        if sp.eline == line { end = sp.ecol } else { end = text.chars().len() as int32 + 1 }
     }
     if first > col { first = col }
     if end < col + 1 { end = col + 1 }
@@ -148,10 +148,10 @@ pub fun carets(text: str, line: int32, col: int32, sp: SrcSpan) -> str {
     var sb = StringBuilder()
     var k = 1
     while k < end {
-        if k < first { append_byte(sb, ' ') } else { append_byte(sb, '^') }
+        if k < first { sb.append_byte(' ') } else { sb.append_byte('^') }
         k = k + 1
     }
-    return build(sb)
+    return sb.build()
 }
 
 // What the CLI prints for `r`: it and its `more`, a blank line apart, then a
@@ -159,12 +159,12 @@ pub fun carets(text: str, line: int32, col: int32, sp: SrcSpan) -> str {
 #test(Report { kind: "type error", msg: "a", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] })["type error: a"]
 #test(Report { kind: "parse error", msg: "a", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [Report { kind: "parse error", msg: "b", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] }], notes: [] })["parse error: a\n\nparse error: b\n\nerror: aborting due to 2 previous errors"]
 pub fun render(r: Report) -> str {
-    if len(r.more) == 0 { return render_one(r) }
+    if r.more.len() == 0 { return render_one(r) }
     var sb = StringBuilder()
-    append(sb, render_one(r))
-    for m in r.more { append(sb, "\n\n" + render_one(m)) }
-    append(sb, format("\n\nerror: aborting due to {} previous errors", len(r.more) + 1))
-    return build(sb)
+    sb.append(render_one(r))
+    for m in r.more { sb.append("\n\n" + render_one(m)) }
+    sb.append(format("\n\nerror: aborting due to {} previous errors", r.more.len() + 1))
+    return sb.build()
 }
 
 // One error, with the line it points at, then its notes.
@@ -177,20 +177,20 @@ pub fun render_one(r: Report) -> str {
         }
     }
     var sb = StringBuilder()
-    append(sb, located(format("{}: {}", r.kind, r.msg), r.path, r.line, r.col, r.sp, src))
+    sb.append(located(format("{}: {}", r.kind, r.msg), r.path, r.line, r.col, r.sp, src))
     for n in r.notes {
-        append(sb, "\n" + located(format("{}: {}", n.label, n.msg), r.path, n.line, n.col, n.sp, src))
+        sb.append("\n" + located(format("{}: {}", n.label, n.msg), r.path, n.line, n.col, n.sp, src))
     }
-    return build(sb)
+    return sb.build()
 }
 
 // `header`, then the place in `path` (`line` 0: none) and the line of `src`
 // it points at with its carets.
 fun located(header: str, path: str, line: int32, col: int32, sp: SrcSpan, src: Option<str>) -> str {
     var sb = StringBuilder()
-    append(sb, header)
-    if line == 0 { return build(sb) }
-    append(sb, format("\n  --> {}:{}:{}", path, line, col))
+    sb.append(header)
+    if line == 0 { return sb.build() }
+    sb.append(format("\n  --> {}:{}:{}", path, line, col))
     var src_line: Option<str> = None
     match src {
         Some(s) => { src_line = source_line(s, line) },
@@ -200,11 +200,11 @@ fun located(header: str, path: str, line: int32, col: int32, sp: SrcSpan, src: O
         Some(l) => {
             let gutter = format("{}", line)
             var pad = StringBuilder()
-            for c in chars(gutter) { append_byte(pad, ' ') }
-            let p = build(pad)
-            append(sb, format("\n{} |\n{} | {}\n{} | {}", p, gutter, l, p, carets(l, line, col, sp)))
+            for c in gutter.chars() { pad.append_byte(' ') }
+            let p = pad.build()
+            sb.append(format("\n{} |\n{} | {}\n{} | {}", p, gutter, l, p, carets(l, line, col, sp)))
         },
         None => {},
     }
-    return build(sb)
+    return sb.build()
 }

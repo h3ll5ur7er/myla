@@ -107,7 +107,7 @@ impl Session {
             return -1
         }
         var it = new_interp(c, ["<repl>"])
-        let step = it.session_step(self.names, self.vals, input_stmts(c, len(self.levels)), true)
+        let step = it.session_step(self.names, self.vals, input_stmts(c, self.levels.len()), true)
         match step.err {
             Some(r) => {
                 report(Report { kind: "runtime error", msg: r.msg, path: file_of(prog, r.node), line: r.line, col: r.col, sp: r.sp, more: [], notes: [] }, t, input)
@@ -120,7 +120,7 @@ impl Session {
             Some(v) => { write(1, show(v) + "\n") },
             None => {},
         }
-        push(self.levels, input)
+        self.levels.push(input)
         self.names = step.names
         self.vals = step.vals
         return -1
@@ -133,29 +133,29 @@ impl Session {
     #test(Session { stdlib: "/work/myla/lib", packages: [], decls: "", levels: [], names: [], vals: [] }, "", "let q = [1, 2, 3]")[Text { source: "fun __repl() {\nlet q = [1, 2, 3]\n}\n", start: 2 }]
     fun text(self, new_decl: str, new_stmts: str) -> Text {
         var sb = StringBuilder()
-        append(sb, self.decls)
+        sb.append(self.decls)
         var start = 0
         if new_decl != "" {
             start = count_lines(self.decls) + 1
-            append(sb, new_decl + "\n")
+            sb.append(new_decl + "\n")
         }
-        append(sb, "fun __repl() {\n")
+        sb.append("fun __repl() {\n")
         var all = self.levels
-        if new_stmts != "" { push(all, new_stmts) }
+        if new_stmts != "" { all.push(new_stmts) }
         var i = 0
-        while i < len(all) {
-            if i > 0 { append(sb, "if true {\n") }
-            if i == len(all) - 1 && new_stmts != "" { start = count_lines(build(sb)) + 1 }
-            append(sb, all[i] + "\n")
+        while i < all.len() {
+            if i > 0 { sb.append("if true {\n") }
+            if i == all.len() - 1 && new_stmts != "" { start = count_lines(sb.build()) + 1 }
+            sb.append(all[i] + "\n")
             i = i + 1
         }
         i = 1
-        while i < len(all) {
-            append(sb, "}\n")
+        while i < all.len() {
+            sb.append("}\n")
             i = i + 1
         }
-        append(sb, "}\n")
-        return Text { source: build(sb), start: start }
+        sb.append("}\n")
+        return Text { source: sb.build(), start: start }
     }
 }
 
@@ -179,7 +179,7 @@ fun input_stmts(c: Checker, depth: int32) -> [Stmt] {
     }
     var k = 0
     while k < depth {
-        let last = stmts[len(stmts) - 1]
+        let last = stmts[stmts.len() - 1]
         match last.kind {
             StmtKind.IfS(cond, then, tail) => { stmts = then.stmts },
             _ => {},
@@ -197,7 +197,7 @@ fun report_all(r: Report, t: Text, input: str) {
         eprintln("")
         report(m, t, input)
     }
-    if len(r.more) > 0 { eprintln(format("\nerror: aborting due to {} previous errors", len(r.more) + 1)) }
+    if r.more.len() > 0 { eprintln(format("\nerror: aborting due to {} previous errors", r.more.len() + 1)) }
 }
 
 // Print `r` (not its `more`) and its notes; one in the session's text and in
@@ -209,9 +209,9 @@ fun report(r: Report, t: Text, input: str) {
         return
     }
     var sb = StringBuilder()
-    append(sb, in_input(format("{}: {}", r.kind, r.msg), r.line, r.col, r.sp, t, input))
-    for n in r.notes { append(sb, "\n" + in_input(format("{}: {}", n.label, n.msg), n.line, n.col, n.sp, t, input)) }
-    eprintln(build(sb))
+    sb.append(in_input(format("{}: {}", r.kind, r.msg), r.line, r.col, r.sp, t, input))
+    for n in r.notes { sb.append("\n" + in_input(format("{}: {}", n.label, n.msg), n.line, n.col, n.sp, t, input)) }
+    eprintln(sb.build())
 }
 
 // `header`, then, for a place in the input, the input's line with its carets.
@@ -222,10 +222,10 @@ fun in_input(header: str, at_line: int32, col: int32, at_sp: SrcSpan, t: Text, i
     let src = input_line(input, line)
     let gutter = format("{}", line)
     var pad = StringBuilder()
-    for c in chars(gutter) { append_byte(pad, ' ') }
+    for c in gutter.chars() { pad.append_byte(' ') }
     var sp = at_sp
     if sp.eline > 0 { sp = SrcSpan { sline: sp.sline - shift, scol: sp.scol, eline: sp.eline - shift, ecol: sp.ecol } }
-    return format("{}\n  --> <input>:{}:{}\n{} |\n{} | {}\n{} | {}", header, line, col, build(pad), gutter, src, build(pad), carets(src, line, col, sp))
+    return format("{}\n  --> <input>:{}:{}\n{} |\n{} | {}\n{} | {}", header, line, col, pad.build(), gutter, src, pad.build(), carets(src, line, col, sp))
 }
 
 // Whether `text` leaves a bracket open (so the input goes on); a text that
@@ -298,27 +298,27 @@ pub fun show(v: Value) -> str {
 fun shows(vs: [Value]) -> str {
     var sb = StringBuilder()
     var i = 0
-    while i < len(vs) {
-        if i > 0 { append(sb, ", ") }
-        append(sb, show(vs[i]))
+    while i < vs.len() {
+        if i > 0 { sb.append(", ") }
+        sb.append(show(vs[i]))
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }
 
 #test("P", ["x", "name"], [Value.VInt(5), Value.VStr("a")])["P { x: 5, name: \"a\" }"]
 fun show_struct(n: str, names: [str], vals: [Value]) -> str {
-    if len(names) == 0 { return n + " {}" }
+    if names.len() == 0 { return n + " {}" }
     var sb = StringBuilder()
-    append(sb, n + " { ")
+    sb.append(n + " { ")
     var i = 0
-    while i < len(names) {
-        if i > 0 { append(sb, ", ") }
-        append(sb, names[i] + ": " + show(vals[i]))
+    while i < names.len() {
+        if i > 0 { sb.append(", ") }
+        sb.append(names[i] + ": " + show(vals[i]))
         i = i + 1
     }
-    append(sb, " }")
-    return build(sb)
+    sb.append(" }")
+    return sb.build()
 }
 
 // Option and Result variants are written bare, others with their enum.
@@ -326,33 +326,33 @@ fun show_struct(n: str, names: [str], vals: [Value]) -> str {
 fun show_enum(en: str, vr: str, pl: [Value]) -> str {
     var head = unqualified(en) + "." + vr
     if en == "Option" || en == "Result" { head = vr }
-    if len(pl) == 0 { return head }
+    if pl.len() == 0 { return head }
     return head + "(" + shows(pl) + ")"
 }
 
 #test([Value.VStr("a")], [Value.VList([Value.VInt(1)])])["[\"a\": [1]]"]
 fun show_map(ks: [Value], vs: [Value]) -> str {
-    if len(ks) == 0 { return "[:]" }
+    if ks.len() == 0 { return "[:]" }
     var sb = StringBuilder()
-    append(sb, "[")
+    sb.append("[")
     var i = 0
-    while i < len(ks) {
-        if i > 0 { append(sb, ", ") }
-        append(sb, show(ks[i]) + ": " + show(vs[i]))
+    while i < ks.len() {
+        if i > 0 { sb.append(", ") }
+        sb.append(show(ks[i]) + ": " + show(vs[i]))
         i = i + 1
     }
-    append(sb, "]")
-    return build(sb)
+    sb.append("]")
+    return sb.build()
 }
 
 #test("a")["\"a\""]
 #test("now a string")["\"now a string\""]
 fun show_str(t: str) -> str {
     var sb = StringBuilder()
-    append(sb, "\"")
-    for c in chars(t) { append(sb, escaped(c as int64, 34)) }
-    append(sb, "\"")
-    return build(sb)
+    sb.append("\"")
+    for c in t.chars() { sb.append(escaped(c as int64, 34)) }
+    sb.append("\"")
+    return sb.build()
 }
 
 // The code point `c` inside quotes `quote` (39 or 34), escaped as needed.
@@ -381,10 +381,10 @@ fun hex(n: int64) -> str {
 #test("P")["P"]
 fun unqualified(n: str) -> str {
     var start = 0
-    for i in 0..len(n) {
+    for i in 0..n.len() {
         if n[i] == '$' { start = i + 1 }
     }
-    return part(n, start, len(n))
+    return part(n, start, n.len())
 }
 
 #test("P", 0, 1)["P"]
@@ -392,8 +392,8 @@ fun unqualified(n: str) -> str {
 #test("fun bad() -> int {\n    return \"no\"\n}", 19, 34)["    return \"no\""]
 fun part(s: str, a: int32, b: int32) -> str {
     var sb = StringBuilder()
-    append(sb, s, a, b)
-    return build(sb)
+    sb.append(s, a, b)
+    return sb.build()
 }
 
 // The number of lines of `s` (a last line without "\n" counts).
@@ -402,10 +402,10 @@ fun part(s: str, a: int32, b: int32) -> str {
 #test("")[0]
 fun count_lines(s: str) -> int32 {
     var n = 0
-    for i in 0..len(s) {
+    for i in 0..s.len() {
         if s[i] == '\n' { n = n + 1 }
     }
-    if len(s) > 0 && s[len(s) - 1] != '\n' { n = n + 1 }
+    if s.len() > 0 && s[s.len() - 1] != '\n' { n = n + 1 }
     return n
 }
 
@@ -415,21 +415,21 @@ fun count_lines(s: str) -> int32 {
 fun input_line(input: str, n: int32) -> str {
     var line = 1
     var start = 0
-    for i in 0..len(input) {
+    for i in 0..input.len() {
         if input[i] == '\n' {
             if line == n { return part(input, start, i) }
             line = line + 1
             start = i + 1
         }
     }
-    return part(input, start, len(input))
+    return part(input, start, input.len())
 }
 
 #test("p")[false]
 #test("x")[false]
 #test("xs")[false]
 fun is_blank(s: str) -> bool {
-    for i in 0..len(s) {
+    for i in 0..s.len() {
         if s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && s[i] != 13u8 { return false }
     }
     return true

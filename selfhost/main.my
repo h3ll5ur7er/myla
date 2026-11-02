@@ -80,15 +80,15 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
     var cl = CommandLine { file: "", opts: load_options(default_stdlib_root(argv[0])), output: "a.out", debug: false, deps: false, update: false, name: "", rest: [] }
     var positional = 0
     var j = 2
-    while j < len(argv) {
+    while j < argv.len() {
         let a = argv[j]
-        let has_value = j + 1 < len(argv)
+        let has_value = j + 1 < argv.len()
         if a == "--stdlib" && has_value {
             cl.opts.stdlib_root = argv[j + 1]
             j = j + 2
         } else if a == "--package" && has_value {
             match parse_package_flag(argv[j + 1]) {
-                Ok(pkg) => { push(cl.opts.packages, pkg) },
+                Ok(pkg) => { cl.opts.packages.push(pkg) },
                 Err(r) => { return Err(CliError { msg: render(r), usage: false }) },
             }
             j = j + 2
@@ -112,7 +112,7 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
             positional = 1
             j = j + 1
         } else if cmd == "run" || (cmd == "test" && cl.file != "") {
-            push(cl.rest, a)
+            cl.rest.push(a)
             positional = positional + 1
             j = j + 1
         } else {
@@ -124,7 +124,7 @@ fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
 
 fun main() {
     let argv = args()
-    if len(argv) < 2 {
+    if argv.len() < 2 {
         usage()
         exit(2)
     }

@@ -78,7 +78,7 @@ fun collect(program: str, argv: [str]) -> Result<Output, SpawnError> {
 pub fun run(program: str, args: [str]) -> Result<Output, SpawnError> {
     var argv = [program]
     for a in args {
-        push(argv, a)
+        argv.push(a)
     }
     return collect(program, argv)
 }
@@ -99,7 +99,7 @@ impl Command {
     // Append a single argument, returning the extended command.
     fun arg(self, a: str) -> Command {
         var argv = self.argv
-        push(argv, a)
+        argv.push(a)
         return Command { program: self.program, argv: argv }
     }
 
@@ -107,7 +107,7 @@ impl Command {
     fun args(self, extra: [str]) -> Command {
         var argv = self.argv
         for a in extra {
-            push(argv, a)
+            argv.push(a)
         }
         return Command { program: self.program, argv: argv }
     }

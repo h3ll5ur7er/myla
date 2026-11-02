@@ -104,7 +104,7 @@ fun line_col(s: str, at: int32) -> (int32, int32) {
     var line = 1
     var col = 1
     var k = 0
-    while k < at && k < len(s) {
+    while k < at && k < s.len() {
         let c = s[k]
         if c == '\n' {
             line = line + 1
@@ -143,15 +143,15 @@ struct Parser {
 fun path_key(path: [str]) -> str {
     var sb = StringBuilder()
     for k in path {
-        append(sb, format("{}:", len(k)))
-        append(sb, k)
+        sb.append(format("{}:", k.len()))
+        sb.append(k)
     }
-    return build(sb)
+    return sb.build()
 }
 
 fun with_key(path: [str], key: str) -> [str] {
     var out = path
-    push(out, key)
+    out.push(key)
     return out
 }
 
@@ -160,28 +160,28 @@ fun with_key(path: [str], key: str) -> [str] {
 fun dotted(path: [str]) -> str {
     var sb = StringBuilder()
     for k in path {
-        if len(sb) > 0 { append_byte(sb, '.') }
+        if sb.len() > 0 { sb.append_byte('.') }
         if is_bare_key(k) {
-            append(sb, k)
+            sb.append(k)
         } else {
-            append_byte(sb, '"')
+            sb.append_byte('"')
             var i = 0
-            while i < len(k) {
+            while i < k.len() {
                 let c = k[i]
                 if c == '"' || c == '\\' {
-                    append_byte(sb, '\\')
-                    append_byte(sb, c)
+                    sb.append_byte('\\')
+                    sb.append_byte(c)
                 } else if is_control(c) || c == '\t' {
-                    append(sb, format("\\u{}", hex4(c as int32)))
+                    sb.append(format("\\u{}", hex4(c as int32)))
                 } else {
-                    append_byte(sb, c)
+                    sb.append_byte(c)
                 }
                 i = i + 1
             }
-            append_byte(sb, '"')
+            sb.append_byte('"')
         }
     }
-    return build(sb)
+    return sb.build()
 }
 
 // `n` (below 65536) as four hex digits.
@@ -190,10 +190,10 @@ fun hex4(n: int32) -> str {
     var sb = StringBuilder()
     var shift = 12
     while shift >= 0 {
-        append_byte(sb, digits[(n >> shift) & 15])
+        sb.append_byte(digits[(n >> shift) & 15])
         shift = shift - 4
     }
-    return build(sb)
+    return sb.build()
 }
 
 fun is_bare_char(c: uint8) -> bool {
@@ -201,9 +201,9 @@ fun is_bare_char(c: uint8) -> bool {
 }
 
 fun is_bare_key(k: str) -> bool {
-    if len(k) == 0 { return false }
+    if k.len() == 0 { return false }
     var i = 0
-    while i < len(k) {
+    while i < k.len() {
         if !is_bare_char(k[i]) { return false }
         i = i + 1
     }
@@ -225,12 +225,12 @@ fun insert(t: Toml, path: [str], at: int32, key: str, v: Toml) -> Toml {
     match t {
         Toml.Table(members) => {
             var ms = members
-            if at == len(path) {
-                push(ms, (key, v))
+            if at == path.len() {
+                ms.push((key, v))
                 return Toml.Table(ms)
             }
             var k = 0
-            while k < len(ms) {
+            while k < ms.len() {
                 if ms[k].0 == path[at] {
                     ms[k] = (path[at], insert(ms[k].1, path, at + 1, key, v))
                     return Toml.Table(ms)
@@ -251,7 +251,7 @@ impl Parser {
     }
 
     fun at_end(self) -> bool {
-        return self.i >= len(self.s)
+        return self.i >= self.s.len()
     }
 
     // The byte at the current position, or 0 at the end.
@@ -262,7 +262,7 @@ impl Parser {
 
     // The byte `k` places ahead, or 0 past the end.
     fun ahead(self, k: int32) -> uint8 {
-        if self.i + k >= len(self.s) { return 0u8 }
+        if self.i + k >= self.s.len() { return 0u8 }
         return self.s[self.i + k]
     }
 
@@ -341,7 +341,7 @@ impl Parser {
         var path: [str] = []
         while true {
             self.skip_ws()
-            push(path, self.key()?)
+            path.push(self.key()?)
             self.skip_ws()
             if self.peek() == ']' {
                 self.i = self.i + 1
@@ -358,10 +358,10 @@ impl Parser {
     fun open_table(var self, path: [str], at: int32, end: int32) -> Result<int32, TomlError> {
         var prefix: [str] = []
         var k = 0
-        while k < len(path) {
+        while k < path.len() {
             let parent = prefix
             prefix = with_key(prefix, path[k])
-            let last = k == len(path) - 1
+            let last = k == path.len() - 1
             let pk = path_key(prefix)
             match get(self.kinds, pk) {
                 Some(kind) => {
@@ -390,7 +390,7 @@ impl Parser {
         let (key, v) = self.pair(self.table)?
         let path = with_key(self.table, key)
         let pk = path_key(path)
-        if contains(self.kinds, pk) { return Err(self.error(format("'{}' is defined twice", dotted(path)), at)) }
+        if self.kinds.contains(pk) { return Err(self.error(format("'{}' is defined twice", dotted(path)), at)) }
         self.kinds[pk] = CLOSED
         self.root = insert(self.root, self.table, 0, key, v)
         return Ok(0)
@@ -424,8 +424,8 @@ impl Parser {
         while is_bare_char(self.peek()) { self.i = self.i + 1 }
         if self.i == start { return Err(self.error("expected a key", self.i)) }
         var sb = StringBuilder()
-        append(sb, self.s, start, self.i)
-        return Ok(build(sb))
+        sb.append(self.s, start, self.i)
+        return Ok(sb.build())
     }
 
     // A value, of the key path `path` (for the spans of an inline table's
@@ -451,14 +451,14 @@ impl Parser {
     // Whether the text continues with `w`, not followed by a key character;
     // moves past it if so (only for true and false).
     fun word(var self, w: str) -> bool {
-        if self.i + len(w) > len(self.s) { return false }
+        if self.i + w.len() > self.s.len() { return false }
         var k = 0
-        while k < len(w) {
+        while k < w.len() {
             if self.s[self.i + k] != w[k] { return false }
             k = k + 1
         }
-        if is_bare_char(self.ahead(len(w))) { return false }
-        if w == "true" || w == "false" { self.i = self.i + len(w) }
+        if is_bare_char(self.ahead(w.len())) { return false }
+        if w == "true" || w == "false" { self.i = self.i + w.len() }
         return true
     }
 
@@ -482,7 +482,7 @@ impl Parser {
                 if !last_digit || !is_digit(self.ahead(1)) { return Err(self.error("'_' must stand between digits", self.i)) }
                 last_digit = false
             } else {
-                append_byte(digits, self.peek())
+                digits.append_byte(self.peek())
                 last_digit = true
             }
             self.i = self.i + 1
@@ -490,13 +490,13 @@ impl Parser {
         let c = self.peek()
         if c == '.' || c == 'e' || c == 'E' { return Err(self.error("floats are not supported", start)) }
         if (c == '-' || c == ':') && self.i > first && start == first { return Err(self.error("dates and times are not supported", start)) }
-        let text = build(digits)
-        if len(text) == 0 { return Err(self.error("expected a value", start)) }
-        if len(text) > 1 && text[0] == '0' { return Err(self.error("leading zeros are not allowed", first)) }
+        let text = digits.build()
+        if text.len() == 0 { return Err(self.error("expected a value", start)) }
+        if text.len() > 1 && text[0] == '0' { return Err(self.error("leading zeros are not allowed", first)) }
         // accumulate negatively, so the int64 minimum fits
         var n: int64 = 0
         var k = 0
-        while k < len(text) {
+        while k < text.len() {
             let d = (text[k] - '0') as int64
             if n < (-9223372036854775807i64 - 1i64 + d) / 10i64 { return Err(self.error("integer out of range", start)) }
             n = n * 10i64 - d
@@ -509,7 +509,7 @@ impl Parser {
 
     // The value of the `count` hex digits at the current position, or -1.
     fun hex(self, count: int32) -> int64 {
-        if self.i + count > len(self.s) { return -1i64 }
+        if self.i + count > self.s.len() { return -1i64 }
         var v: int64 = 0
         var k = 0
         while k < count {
@@ -535,15 +535,15 @@ impl Parser {
             if self.at_end() || self.peek() == '\n' { return Err(self.error("unterminated string", quote)) }
             let c = self.peek()
             if c == '"' {
-                append(sb, self.s, run, self.i)
+                sb.append(self.s, run, self.i)
                 self.i = self.i + 1
-                return Ok(build(sb))
+                return Ok(sb.build())
             }
             if is_control(c) { return Err(self.error("control character in a string", self.i)) }
             if c != '\\' {
                 self.i = self.i + 1
             } else {
-                append(sb, self.s, run, self.i)
+                sb.append(self.s, run, self.i)
                 let esc = self.i
                 let e = self.ahead(1)
                 self.i = self.i + 2
@@ -553,15 +553,15 @@ impl Parser {
                     if cp < 0i64 || (cp >= 55296i64 && cp < 57344i64) || cp > 1114111i64 {
                         return Err(self.error("invalid unicode escape", esc))
                     }
-                    append(sb, format("{}", cp as uint32 as char))
+                    sb.append(format("{}", cp as uint32 as char))
                     self.i = self.i + count
-                } else if e == '"' { append_byte(sb, '"') }
-                else if e == '\\' { append_byte(sb, '\\') }
-                else if e == 'b' { append_byte(sb, 8u8) }
-                else if e == 'f' { append_byte(sb, 12u8) }
-                else if e == 'n' { append_byte(sb, '\n') }
-                else if e == 'r' { append_byte(sb, 13u8) }
-                else if e == 't' { append_byte(sb, '\t') }
+                } else if e == '"' { sb.append_byte('"') }
+                else if e == '\\' { sb.append_byte('\\') }
+                else if e == 'b' { sb.append_byte(8u8) }
+                else if e == 'f' { sb.append_byte(12u8) }
+                else if e == 'n' { sb.append_byte('\n') }
+                else if e == 'r' { sb.append_byte(13u8) }
+                else if e == 't' { sb.append_byte('\t') }
                 else { return Err(self.error("invalid escape in a string", esc)) }
                 run = self.i
             }
@@ -579,9 +579,9 @@ impl Parser {
             let c = self.peek()
             if c == '\'' {
                 var sb = StringBuilder()
-                append(sb, self.s, start, self.i)
+                sb.append(self.s, start, self.i)
                 self.i = self.i + 1
-                return Ok(build(sb))
+                return Ok(sb.build())
             }
             if is_control(c) { return Err(self.error("control character in a string", self.i)) }
             self.i = self.i + 1
@@ -604,7 +604,7 @@ impl Parser {
                 if c == ',' || self.at_end() { return Err(self.error("expected a value", self.i)) }
                 return Err(self.error("arrays may only hold strings", self.i))
             }
-            push(items, self.value([])?)
+            items.push(self.value([])?)
             self.skip_blank()?
             if self.peek() == ',' {
                 self.i = self.i + 1
@@ -632,7 +632,7 @@ impl Parser {
             for m in members {
                 if m.0 == key { return Err(self.error(format("'{}' is defined twice", dotted([key])), at)) }
             }
-            push(members, (key, v))
+            members.push((key, v))
             self.skip_ws()
             if self.peek() == '}' {
                 self.i = self.i + 1

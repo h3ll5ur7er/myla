@@ -22,19 +22,19 @@ pub struct Channel {
 #test("Content-Length")["content-length"]
 fun lower(s: str) -> str {
     var sb = StringBuilder()
-    for i in 0..len(s) {
+    for i in 0..s.len() {
         var c = s[i]
         if c >= 'A' && c <= 'Z' { c = c + 32u8 }
-        append_byte(sb, c)
+        sb.append_byte(c)
     }
-    return build(sb)
+    return sb.build()
 }
 
 // `s` without spaces, tabs and carriage returns around it.
 #test(" 12 ")["12"]
 fun trim(s: str) -> str {
     var a = 0
-    var b = len(s)
+    var b = s.len()
     while a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == 13u8) { a = a + 1 }
     while b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == 13u8) { b = b - 1 }
     return part(s, a, b)
@@ -48,10 +48,10 @@ fun trim(s: str) -> str {
 #test("")[-2]
 fun header_length(line: str) -> int32 {
     let t = trim(line)
-    if len(t) == 0 { return -2 }
+    if t.len() == 0 { return -2 }
     let name = "content-length:"
-    if len(t) <= len(name) || lower(part(t, 0, len(name))) != name { return -1 }
-    return match parse_int(trim(part(t, len(name), len(t)))) {
+    if t.len() <= name.len() || lower(part(t, 0, name.len())) != name { return -1 }
+    return match parse_int(trim(part(t, name.len(), t.len()))) {
         Some(n) => n as int32,
         None => -1,
     }
@@ -96,9 +96,9 @@ impl Channel {
 pub fun send(msg: Json) {
     let body = to_string(msg)
     var sb = StringBuilder()
-    append(sb, format("Content-Length: {}\r\n\r\n", len(body)))
-    append(sb, body)
-    write(1, build(sb))
+    sb.append(format("Content-Length: {}\r\n\r\n", body.len()))
+    sb.append(body)
+    write(1, sb.build())
 }
 
 pub fun response(id: Json, result: Json) -> Json {

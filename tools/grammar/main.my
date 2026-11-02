@@ -63,16 +63,16 @@ fun load_checked(path: str) -> Grammar {
     let g = load(path)
     let errors = check_grammar(g)
     for msg in errors { eprintln(format("{}: {}", path, msg)) }
-    if len(errors) > 0 { exit(1) }
+    if errors.len() > 0 { exit(1) }
     return g
 }
 
 #test("12")[12]
 #test("x")[-1]
 fun parse_count(s: str) -> int32 {
-    if len(s) == 0 { return -1 }
+    if s.len() == 0 { return -1 }
     var n = 0
-    for c in chars(s) {
+    for c in s.chars() {
         if c < '0' || c > '9' { return -1 }
         n = n * 10 + ((c as int32) - 48)
     }
@@ -88,22 +88,22 @@ fun usage() {
 
 fun main() {
     let argv = args()
-    if len(argv) < 3 { usage() }
+    if argv.len() < 3 { usage() }
     let cmd = argv[1]
     if cmd == "canon" {
         let g = load(argv[2])
         for r in g.rules { println(canon_rule(r)) }
-    } else if cmd == "treesitter" && len(argv) == 5 {
+    } else if cmd == "treesitter" && argv.len() == 5 {
         let g = load_checked(argv[2])
         let template = read_or_exit(argv[3])
         write_or_exit(argv[4] + "/grammar.js", grammar_js(g))
         write_or_exit(argv[4] + "/queries/highlights.scm", highlights(g, template))
-    } else if cmd == "sample" && len(argv) >= 5 {
+    } else if cmd == "sample" && argv.len() >= 5 {
         let g = load_checked(argv[2])
         let seed = parse_count(argv[3])
         let n = parse_count(argv[4])
         if seed < 0 || n < 0 { usage() }
-        if len(argv) == 6 && argv[5] == "parse" {
+        if argv.len() == 6 && argv[5] == "parse" {
             if !check_samples(g, seed, n) { exit(1) }
         } else {
             var i = 0

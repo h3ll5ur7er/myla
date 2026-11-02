@@ -59,8 +59,8 @@ pub fun reader(fd: int32) -> Reader {
 // The bytes of `s` from `start` up to `end`.
 fun slice(s: str, start: int32, end: int32) -> str {
     var sb = StringBuilder()
-    append(sb, s, start, end)
-    return build(sb)
+    sb.append(s, start, end)
+    return sb.build()
 }
 
 impl Reader {
@@ -74,12 +74,12 @@ impl Reader {
         let chunk = __read(self.fd, n)
         let err = __io_errno()
         if err != 0 { return Err(from_errno(err)) }
-        if len(chunk) == 0 {
+        if chunk.len() == 0 {
             self.eof = true
             return Ok(false)
         }
         if self.pos > 0 {
-            self.buf = slice(self.buf, self.pos, len(self.buf))
+            self.buf = slice(self.buf, self.pos, self.buf.len())
             self.pos = 0
         }
         self.buf = self.buf + chunk
@@ -93,7 +93,7 @@ impl Reader {
         var found = -1
         while found < 0 {
             let buf = self.buf
-            let n = len(buf)
+            let n = buf.len()
             var i = self.pos + scanned
             while i < n {
                 if buf[i] == '\n' {
@@ -104,15 +104,15 @@ impl Reader {
                 }
             }
             if found < 0 {
-                scanned = len(self.buf) - self.pos
+                scanned = self.buf.len() - self.pos
                 if !self.fill(1)? {
                     if scanned == 0 { return Ok(None) }
-                    found = len(self.buf)
+                    found = self.buf.len()
                 }
             }
         }
         let line = slice(self.buf, self.pos, found)
-        if found < len(self.buf) { self.pos = found + 1 } else { self.pos = found }     // past the "\n"
+        if found < self.buf.len() { self.pos = found + 1 } else { self.pos = found }     // past the "\n"
         return Ok(Some(line))
     }
 
@@ -120,8 +120,8 @@ impl Reader {
     // first (the bytes that were there stay unread).
     fun read_exact(var self, n: int32) -> Result<Option<str>, IoError> {
         if n <= 0 { return Ok(Some("")) }
-        while len(self.buf) - self.pos < n {
-            if !self.fill(n - (len(self.buf) - self.pos))? { return Ok(None) }
+        while self.buf.len() - self.pos < n {
+            if !self.fill(n - (self.buf.len() - self.pos))? { return Ok(None) }
         }
         let out = slice(self.buf, self.pos, self.pos + n)
         self.pos = self.pos + n
@@ -132,22 +132,22 @@ impl Reader {
     // milliseconds (0: don't wait; negative: wait as long as it takes) input
     // arrives, the input ends or reading fails (MYLA-80).
     fun ready(self, timeout_ms: int32) -> bool {
-        if self.pos < len(self.buf) || self.eof { return true }
+        if self.pos < self.buf.len() || self.eof { return true }
         return __poll(self.fd, timeout_ms) != 0
     }
 
     // Everything up to the end of the input ("" if it has ended).
     fun read_to_end(var self) -> Result<str, IoError> {
         var sb = StringBuilder()
-        append(sb, slice(self.buf, self.pos, len(self.buf)))
+        sb.append(slice(self.buf, self.pos, self.buf.len()))
         while !self.eof {
             let chunk = __read(self.fd, CHUNK)
             let err = __io_errno()
             if err != 0 { return Err(from_errno(err)) }      // the buffer stays as it was
-            if len(chunk) == 0 { self.eof = true } else { append(sb, chunk) }
+            if chunk.len() == 0 { self.eof = true } else { sb.append(chunk) }
         }
         self.buf = ""
         self.pos = 0
-        return Ok(build(sb))
+        return Ok(sb.build())
     }
 }

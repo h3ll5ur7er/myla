@@ -15,24 +15,24 @@ pub fun lines_of(text: str) -> [str] {
     var out: [str] = []
     var start = 0
     var i = 0
-    while i < len(text) {
+    while i < text.len() {
         let c = text[i]
         if c == '\n' || c == 13u8 {
-            push(out, part(text, start, i))
-            if c == 13u8 && i + 1 < len(text) && text[i + 1] == '\n' { i = i + 1 }
+            out.push(part(text, start, i))
+            if c == 13u8 && i + 1 < text.len() && text[i + 1] == '\n' { i = i + 1 }
             start = i + 1
         }
         i = i + 1
     }
-    if start < len(text) { push(out, part(text, start, len(text))) }
+    if start < text.len() { out.push(part(text, start, text.len())) }
     return out
 }
 
 // The bytes of `s` from `start` up to `end`.
 pub fun part(s: str, start: int32, end: int32) -> str {
     var sb = StringBuilder()
-    append(sb, s, start, end)
-    return build(sb)
+    sb.append(s, start, end)
+    return sb.build()
 }
 
 // The UTF-16 length of the first `n` code points of `line`.
@@ -42,7 +42,7 @@ pub fun utf16_units(line: str, n: int32) -> int32 {
     var units = 0
     var seen = 0
     var i = 0
-    while i < len(line) && seen < n {
+    while i < line.len() && seen < n {
         let c = line[i]
         if c < 128u8 || c >= 192u8 {           // the first byte of a code point
             seen = seen + 1
@@ -57,7 +57,7 @@ pub fun utf16_units(line: str, n: int32) -> int32 {
 // The number of code points of `line`.
 pub fun code_points(line: str) -> int32 {
     var n = 0
-    for b in 0..len(line) {
+    for b in 0..line.len() {
         let c = line[b]
         if c < 128u8 || c >= 192u8 { n = n + 1 }
     }
@@ -69,10 +69,10 @@ pub fun code_points(line: str) -> int32 {
 pub struct Pos { line: int32, character: int32 }
 
 pub fun to_lsp(lines: [str], line: int32, col: int32) -> Pos {
-    if len(lines) == 0 { return Pos { line: 0, character: 0 } }
+    if lines.len() == 0 { return Pos { line: 0, character: 0 } }
     var l = line - 1
     if l < 0 { l = 0 }
-    if l > len(lines) - 1 { l = len(lines) - 1 }
+    if l > lines.len() - 1 { l = lines.len() - 1 }
     let text = lines[l]
     var c = col - 1
     if c < 0 { c = 0 }
@@ -90,10 +90,10 @@ pub fun line_index(text: str) -> LineIndex {
     var ascii: [bool] = []
     for l in lines {
         var plain = true
-        for b in 0..len(l) {
+        for b in 0..l.len() {
             if l[b] >= 128u8 { plain = false }
         }
-        push(ascii, plain)
+        ascii.push(plain)
     }
     return LineIndex { lines: lines, ascii: ascii }
 }
@@ -102,7 +102,7 @@ impl LineIndex {
     // to_lsp(self.lines, line, col)
     fun pos(self, line: int32, col: int32) -> Pos {
         let l = line - 1
-        if l >= 0 && l < len(self.lines) && self.ascii[l] && col >= 1 && col - 1 <= len(self.lines[l]) {
+        if l >= 0 && l < self.lines.len() && self.ascii[l] && col >= 1 && col - 1 <= self.lines[l].len() {
             return Pos { line: l, character: col - 1 }
         }
         return to_lsp(self.lines, line, col)
@@ -132,11 +132,11 @@ fun line_index_agrees() -> bool {
 #test("ab", 5)[6]
 #test("let größe = 1", 5)[10]
 pub fun word_end(line: str, col: int32) -> int32 {
-    let cps = chars(line)
+    let cps = line.chars()
     var i = col - 1
     if i < 0 { i = 0 }
-    if i >= len(cps) || !is_word(cps[i]) { return col + 1 }
-    while i < len(cps) && is_word(cps[i]) { i = i + 1 }
+    if i >= cps.len() || !is_word(cps[i]) { return col + 1 }
+    while i < cps.len() && is_word(cps[i]) { i = i + 1 }
     return i + 1
 }
 
@@ -152,20 +152,20 @@ pub fun is_word(c: char) -> bool {
 #test("untitled:1")[""]
 pub fun uri_path(uri: str) -> str {
     let prefix = "file://"
-    if len(uri) < len(prefix) || part(uri, 0, len(prefix)) != prefix { return "" }
+    if uri.len() < prefix.len() || part(uri, 0, prefix.len()) != prefix { return "" }
     var sb = StringBuilder()
-    var i = len(prefix)
-    while i < len(uri) {
+    var i = prefix.len()
+    while i < uri.len() {
         let c = uri[i]
-        if c == '%' && i + 2 < len(uri) && hex(uri[i + 1]) >= 0 && hex(uri[i + 2]) >= 0 {
-            append_byte(sb, (hex(uri[i + 1]) * 16 + hex(uri[i + 2])) as uint8)
+        if c == '%' && i + 2 < uri.len() && hex(uri[i + 1]) >= 0 && hex(uri[i + 2]) >= 0 {
+            sb.append_byte((hex(uri[i + 1]) * 16 + hex(uri[i + 2])) as uint8)
             i = i + 3
         } else {
-            append_byte(sb, c)
+            sb.append_byte(c)
             i = i + 1
         }
     }
-    return build(sb)
+    return sb.build()
 }
 
 fun hex(c: uint8) -> int32 {
@@ -182,17 +182,17 @@ const HEX_DIGITS: str = "0123456789ABCDEF"
 #test("/tmp/a b/é.my")["file:///tmp/a%20b/%C3%A9.my"]
 pub fun path_uri(path: str) -> str {
     var sb = StringBuilder()
-    append(sb, "file://")
-    for i in 0..len(path) {
+    sb.append("file://")
+    for i in 0..path.len() {
         let c = path[i]
         let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
         if alnum || c == '-' || c == '.' || c == '_' || c == '~' || c == '/' {
-            append_byte(sb, c)
+            sb.append_byte(c)
         } else {
-            append_byte(sb, '%')
-            append_byte(sb, HEX_DIGITS[(c >> 4u8) as int32])
-            append_byte(sb, HEX_DIGITS[(c & 15u8) as int32])
+            sb.append_byte('%')
+            sb.append_byte(HEX_DIGITS[(c >> 4u8) as int32])
+            sb.append_byte(HEX_DIGITS[(c & 15u8) as int32])
         }
     }
-    return build(sb)
+    return sb.build()
 }

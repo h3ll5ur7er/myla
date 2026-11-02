@@ -61,12 +61,12 @@ impl Server {
     // Serve until `exit` or the end of the input; the exit status.
     fun run(var self) -> int32 {
         while true {
-            if len(self.dirty) > 0 {
+            if self.dirty.len() > 0 {
                 var wait = DEBOUNCE_MS
                 if self.urgent { wait = 0 }
                 if !self.ch.ready(wait) { self.check_dirty() }
             }
-            if len(self.dirty) == 0 || self.ch.ready(0) {
+            if self.dirty.len() == 0 || self.ch.ready(0) {
                 match self.ch.next() {
                     Incoming.Message(msg) => {
                         if !self.handle(msg) {
@@ -108,8 +108,8 @@ impl Server {
             let uri = str_field(field_or_null(params, "textDocument"), "uri")
             match field(params, "contentChanges") {
                 Some(Json.Array(changes)) => {
-                    if len(changes) > 0 {
-                        self.docs[uri] = str_field(changes[len(changes) - 1], "text")
+                    if changes.len() > 0 {
+                        self.docs[uri] = str_field(changes[changes.len() - 1], "text")
                         self.mark(uri, false)
                     }
                 },
@@ -124,16 +124,16 @@ impl Server {
             // changed), their declarations kept only while their text is the
             // same; a changed manifest or lock file can change every check
             if project_changed(params) {
-                for u in keys(self.docs) { self.mark(u, false) }
+                for u in self.docs.keys() { self.mark(u, false) }
             }
         } else if method == "textDocument/didClose" {
             let uri = str_field(field_or_null(params, "textDocument"), "uri")
-            remove(self.docs, uri)
-            if contains(self.good, uri) { remove(self.good, uri) }
-            if contains(self.resolved, uri) { remove(self.resolved, uri) }
+            self.docs.remove(uri)
+            if self.good.contains(uri) { self.good.remove(uri) }
+            if self.resolved.contains(uri) { self.resolved.remove(uri) }
             var still: [str] = []
             for u in self.dirty {
-                if u != uri { push(still, u) }
+                if u != uri { still.push(u) }
             }
             self.dirty = still
             publish(uri, [])
@@ -171,7 +171,7 @@ impl Server {
         for u in self.dirty {
             if u == uri { queued = true }
         }
-        if !queued { push(self.dirty, uri) }
+        if !queued { self.dirty.push(uri) }
         if urgent { self.urgent = true }
     }
 
@@ -180,7 +180,7 @@ impl Server {
         self.dirty = []
         self.urgent = false
         for uri in uris {
-            if contains(self.docs, uri) { self.check(uri) }
+            if self.docs.contains(uri) { self.check(uri) }
         }
     }
 
@@ -224,7 +224,7 @@ impl Server {
                         Some(g) => { group = g },
                         None => {},
                     }
-                    push(group, diagnostic(r, file_text(r.path, overrides), target))
+                    group.push(diagnostic(r, file_text(r.path, overrides), target))
                     groups[target] = group
                 }
             },
@@ -237,7 +237,7 @@ impl Server {
                 Some(g) => { group = g },
                 None => {},
             }
-            push(group, diagnostic(r, file_text(r.path, overrides), target))
+            group.push(diagnostic(r, file_text(r.path, overrides), target))
             groups[target] = group
         }
         // a problem of the project (MYLA-97): a manifest that doesn't load
@@ -255,16 +255,16 @@ impl Server {
             None => {},
         }
         for u in stale {
-            if !contains(groups, u) { groups[u] = [] }
+            if !groups.contains(u) { groups[u] = [] }
         }
         var shown: [str] = []
-        for u in keys(groups) {
-            if u != uri && len(groups[u]) > 0 { push(shown, u) }
+        for u in groups.keys() {
+            if u != uri && groups[u].len() > 0 { shown.push(u) }
         }
         self.elsewhere[uri] = shown
         // the checked document first, then the others
         publish(uri, groups[uri])
-        for u in keys(groups) {
+        for u in groups.keys() {
             if u != uri { publish(u, groups[u]) }
         }
     }
@@ -280,7 +280,7 @@ impl Server {
     // The text of every open document, by path.
     fun overrides(self) -> [str: str] {
         var out: [str: str] = [:]
-        for u in keys(self.docs) {
+        for u in self.docs.keys() {
             let p = uri_path(u)
             if p != "" { out[normalize(p)] = self.docs[u] }
         }
@@ -344,7 +344,7 @@ impl Server {
         var removed: [str] = []
         match field(event, "removed") {
             Some(Json.Array(fs)) => {
-                for f in fs { push(removed, normalize(uri_path(str_field(f, "uri")))) }
+                for f in fs { removed.push(normalize(uri_path(str_field(f, "uri")))) }
             },
             _ => {},
         }
@@ -354,13 +354,13 @@ impl Server {
             for x in removed {
                 if x == r { gone = true }
             }
-            if !gone { push(roots, r) }
+            if !gone { roots.push(r) }
         }
         match field(event, "added") {
             Some(Json.Array(fs)) => {
                 for f in fs {
                     let p = uri_path(str_field(f, "uri"))
-                    if p != "" { push(roots, normalize(p)) }
+                    if p != "" { roots.push(normalize(p)) }
                 }
             },
             _ => {},
@@ -417,7 +417,7 @@ impl Server {
             None => {},
         }
         let matches = self.ws.lookup(ident, self.overrides(), self.context(d.path).package_dirs)
-        if len(matches) == 0 { return Json.Null }
+        if matches.len() == 0 { return Json.Null }
         return location(matches[0].path, matches[0].range)
     }
 
@@ -444,7 +444,7 @@ impl Server {
                     Some(s) => { text = render(s.name, s.kind, s.detail) },
                     None => {
                         let matches = self.ws.lookup(ident, self.overrides(), self.context(d.path).package_dirs)
-                        if len(matches) == 0 { return Json.Null }
+                        if matches.len() == 0 { return Json.Null }
                         text = render(matches[0].name, matches[0].kind, matches[0].detail)
                     },
                 }
@@ -486,27 +486,27 @@ impl Server {
                 for x in res.defs {
                     if !same_def(x, def) { other[start_key(x.range)] = true }
                 }
-                if !include_decl { push(decls, Location { path: def.path, range: def.range }) }
+                if !include_decl { decls.push(Location { path: def.path, range: def.range }) }
                 if !is_global(def) {
-                    push(found, Location { path: def.path, range: def.range })
+                    found.push(Location { path: def.path, range: def.range })
                     for u in res.uses {
-                        if same_def(u.def, def) { push(found, Location { path: d.path, range: u.range }) }
+                        if same_def(u.def, def) { found.push(Location { path: d.path, range: u.range }) }
                     }
                 } else {
                     for r in identifier_ranges(d.text, ident) {
-                        if !contains(other, start_key(r)) { push(found, Location { path: d.path, range: r }) }
+                        if !other.contains(start_key(r)) { found.push(Location { path: d.path, range: r }) }
                     }
                     for l in self.ws.references(ident, self.overrides(), self.context(d.path).package_dirs) {
-                        if l.path != d.path { push(found, l) }
+                        if l.path != d.path { found.push(l) }
                     }
                 }
             },
             None => {
-                for r in identifier_ranges(d.text, ident) { push(found, Location { path: d.path, range: r }) }
-                for l in self.ws.references(ident, self.overrides(), self.context(d.path).package_dirs) { push(found, l) }
+                for r in identifier_ranges(d.text, ident) { found.push(Location { path: d.path, range: r }) }
+                for l in self.ws.references(ident, self.overrides(), self.context(d.path).package_dirs) { found.push(l) }
                 if !include_decl {
                     for s in d.symbols {
-                        if s.name == ident { push(decls, Location { path: d.path, range: s.selection }) }
+                        if s.name == ident { decls.push(Location { path: d.path, range: s.selection }) }
                     }
                 }
             },
@@ -516,9 +516,9 @@ impl Server {
         var out: [Json] = []
         for l in found {
             let key = f"{l.path}:{start_key(l.range)}"
-            if !contains(seen, key) {
+            if !seen.contains(key) {
                 seen[key] = true
-                push(out, location(l.path, l.range))
+                out.push(location(l.path, l.range))
             }
         }
         return Json.Array(out)
@@ -530,7 +530,7 @@ impl Server {
         // good text's tokens would be in the wrong places
         match get(self.docs, str_field(field_or_null(params, "textDocument"), "uri")) {
             Some(text) => {
-                for n in semantic_tokens(text) { push(data, Json.Int(n)) }
+                for n in semantic_tokens(text) { data.push(Json.Int(n)) }
             },
             None => {},
         }
@@ -549,9 +549,9 @@ impl Server {
         if ctx.found && (ctx.known || !ctx.member) {
             // the receiver's members; or the locals in scope, then the rest
             for m in ctx.items {
-                if !contains(seen, m.name) {
+                if !seen.contains(m.name) {
                     seen[m.name] = true
-                    push(items, def_item(m))
+                    items.push(def_item(m))
                 }
             }
             if ctx.member { return completion_list(items) }
@@ -559,22 +559,22 @@ impl Server {
         let member = is_member_access(d.text, pos.line, pos.character)
         var pool: [Entry] = []
         for s in d.symbols {
-            push(pool, Entry { name: s.name, kind: s.kind, detail: s.detail, path: d.path, range: s.selection })
+            pool.push(Entry { name: s.name, kind: s.kind, detail: s.detail, path: d.path, range: s.selection })
         }
-        for e in self.ws.all_entries(self.overrides(), self.context(d.path).package_dirs) { push(pool, e) }
+        for e in self.ws.all_entries(self.overrides(), self.context(d.path).package_dirs) { pool.push(e) }
         if !member {
             for kw in completion_keywords() {
-                if !contains(seen, "kw:" + kw) {
+                if !seen.contains("kw:" + kw) {
                     seen["kw:" + kw] = true
-                    push(items, Json.Object([("label", Json.Str(kw)), ("kind", Json.Int(14))]))
+                    items.push(Json.Object([("label", Json.Str(kw)), ("kind", Json.Int(14))]))
                 }
             }
         }
         for e in pool {
             let key = format("{}:{}", lsp_kind(e.kind), e.name)
-            if is_member_kind(e.kind) == member && !kind_eq(e.kind, SymKind.Impl) && !contains(seen, key) {
+            if is_member_kind(e.kind) == member && !kind_eq(e.kind, SymKind.Impl) && !seen.contains(key) {
                 seen[key] = true
-                push(items, completion_item(e))
+                items.push(completion_item(e))
             }
         }
         return completion_list(items)
@@ -603,7 +603,7 @@ impl Server {
     fun uri_of(self, file: str, checked_path: str, checked_uri: str) -> str {
         let f = normalize(file)
         if f == normalize(checked_path) { return checked_uri }
-        for u in keys(self.docs) {
+        for u in self.docs.keys() {
             let p = uri_path(u)
             if p != "" && normalize(p) == f { return u }
         }
@@ -642,12 +642,12 @@ fun project_changed(params: Json) -> bool {
 #test("x")["x"]
 fun base_name(p: str) -> str {
     var start = 0
-    for i in 0..len(p) {
+    for i in 0..p.len() {
         if p[i] == '/' { start = i + 1 }
     }
     var sb = StringBuilder()
-    append(sb, p, start, len(p))
-    return build(sb)
+    sb.append(p, start, p.len())
+    return sb.build()
 }
 
 fun publish(uri: str, diagnostics: [Json]) {
@@ -670,7 +670,7 @@ fun diagnostic(r: Report, text: str, uri: str) -> Json {
     for n in r.notes {
         if n.line > 0 {
             let loc = Json.Object([("uri", Json.Str(uri)), ("range", text_range(lines, n.line, n.col, n.sp))])
-            push(related, Json.Object([("location", loc), ("message", Json.Str(n.msg))]))
+            related.push(Json.Object([("location", loc), ("message", Json.Str(n.msg))]))
         } else {
             msg = msg + "\n" + n.label + ": " + n.msg
         }
@@ -680,7 +680,7 @@ fun diagnostic(r: Report, text: str, uri: str) -> Json {
     if r.kind == "warning" { severity = 2 }
     var fields = [("range", text_range(lines, r.line, r.col, r.sp)), ("message", Json.Str(msg)), ("severity", Json.Int(severity)),
                   ("source", Json.Str("myla")), ("code", Json.Str(kind_code(r.kind)))]
-    if len(related) > 0 { push(fields, ("relatedInformation", Json.Array(related))) }
+    if related.len() > 0 { fields.push(("relatedInformation", Json.Array(related))) }
     return Json.Object(fields)
 }
 
@@ -692,7 +692,7 @@ fun text_range(lines: [str], line: int32, at_col: int32, sp: SrcSpan) -> Json {
         var col = at_col
         if col < 1 { col = 1 }
         var line_text = ""
-        if line - 1 < len(lines) { line_text = lines[line - 1] }
+        if line - 1 < lines.len() { line_text = lines[line - 1] }
         var first = col
         var last = word_end(line_text, col)
         if sp.eline > 0 {
@@ -711,11 +711,11 @@ fun text_range(lines: [str], line: int32, at_col: int32, sp: SrcSpan) -> Json {
 #test("module error")["module"]
 fun kind_code(kind: str) -> str {
     var sb = StringBuilder()
-    for i in 0..len(kind) {
-        if kind[i] == ' ' { return build(sb) }
-        append_byte(sb, kind[i])
+    for i in 0..kind.len() {
+        if kind[i] == ' ' { return sb.build() }
+        sb.append_byte(kind[i])
     }
-    return build(sb)
+    return sb.build()
 }
 
 fun initialize_result() -> Json {
@@ -742,16 +742,16 @@ fun workspace_roots(params: Json) -> [str] {
         Some(Json.Array(folders)) => {
             for f in folders {
                 let p = uri_path(str_field(f, "uri"))
-                if p != "" { push(roots, normalize(p)) }
+                if p != "" { roots.push(normalize(p)) }
             }
         },
         _ => {},
     }
-    if len(roots) == 0 {
+    if roots.len() == 0 {
         let p = uri_path(str_field(params, "rootUri"))
-        if p != "" { push(roots, normalize(p)) }
+        if p != "" { roots.push(normalize(p)) }
     }
-    if len(roots) == 0 && str_field(params, "rootPath") != "" { push(roots, normalize(str_field(params, "rootPath"))) }
+    if roots.len() == 0 && str_field(params, "rootPath") != "" { roots.push(normalize(str_field(params, "rootPath"))) }
     return roots
 }
 
@@ -776,14 +776,14 @@ fun location(path: str, r: Range) -> Json {
 fun symbol_tree(symbols: [Symbol], parent: int32) -> Json {
     var out: [Json] = []
     var i = 0
-    while i < len(symbols) {
+    while i < symbols.len() {
         let s = symbols[i]
         if s.parent == parent {
             var members: [(str, Json)] = [("name", Json.Str(s.name)), ("kind", Json.Int(lsp_kind(s.kind))),
                                          ("range", range_json(s.range)), ("selectionRange", range_json(s.selection))]
-            if s.detail != "" { push(members, ("detail", Json.Str(s.detail))) }
-            push(members, ("children", symbol_tree(symbols, i)))
-            push(out, Json.Object(members))
+            if s.detail != "" { members.push(("detail", Json.Str(s.detail))) }
+            members.push(("children", symbol_tree(symbols, i)))
+            out.push(Json.Object(members))
         }
         i = i + 1
     }
@@ -808,7 +808,7 @@ fun completion_kind(k: SymKind) -> int64 {
 
 fun completion_item(e: Entry) -> Json {
     var members: [(str, Json)] = [("label", Json.Str(e.name)), ("kind", Json.Int(completion_kind(e.kind)))]
-    if e.detail != "" { push(members, ("detail", Json.Str(e.detail))) }
+    if e.detail != "" { members.push(("detail", Json.Str(e.detail))) }
     return Json.Object(members)
 }
 
@@ -826,7 +826,7 @@ fun def_item(d: Def) -> Json {
         _ => {},
     }
     var members: [(str, Json)] = [("label", Json.Str(d.name)), ("kind", Json.Int(kind))]
-    if detail != "" { push(members, ("detail", Json.Str(detail))) }
+    if detail != "" { members.push(("detail", Json.Str(detail))) }
     return Json.Object(members)
 }
 
@@ -836,7 +836,7 @@ fun completion_list(items: [Json]) -> Json {
 
 fun strings(xs: [str]) -> Json {
     var out: [Json] = []
-    for x in xs { push(out, Json.Str(x)) }
+    for x in xs { out.push(Json.Str(x)) }
     return Json.Array(out)
 }
 

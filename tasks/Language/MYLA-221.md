@@ -36,4 +36,9 @@ Before the standard library round ([[MYLA-211]]), which builds on it. Order: aft
 
     Before the change `xs.push(3)` was "type '[int32]' has no method 'push'"; now the output is the same in the interpreter and natively.
   - **Docs.** [[Language/Collections-and-strings]] (a section), `AGENTS.md` and the myla skill.
+- **Step 2: the compiler, the tools and the standard library use the methods.**
+  - A rewriting script, working from the self-hosted lexer's tokens, turned 3,201 calls in `selfhost/`, `tools/` and `lib/std/` (51 files) into method calls: `f(a, rest)` becomes `a.f(rest)`, with `a` in parentheses unless it is a postfix chain.
+  - Everything checks, the bootstrap reaches its byte-identical fixed point from the new seed, and the burn suite passes.
+  - Skips rise from 19 to 41: the command-parity corpus of `test_selfhost_cli` compares the CLI on every file of `tools/` and `selfhost/` with the recorded Python CLI, and those files changed. They are the compiler's own code, covered by the bootstrap and the tools' tests.
+  - The examples, the error corpus, the docs and the test programs in `tests/burn/` still use the function forms, which work. Their recordings are keyed by their text, so moving them needs the recordings to survive it (step 3).
 
