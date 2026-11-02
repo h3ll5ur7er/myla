@@ -67,7 +67,30 @@ fun main() {
 // negative
 ```
 
-The condition must be `bool`. `if` is a statement: it has no value (use `match` on a `bool` for a value). In the condition of `if`, `while`, `for` and `match`, a struct literal must be parenthesised, because its `{` would otherwise start the body.
+The condition must be `bool`. Used as a value (D104 (1), [[MYLA-222]]), `if c { a } else { b }` is an expression: each branch block ends in an expression, its value; the `else` is required, an `else if` chains, and the branches have one type, as a `match`'s arms do. There is no `?:` operator.
+
+```myla
+fun sign(n: int) -> str {
+    return if n < 0 { "negative" } else if n == 0 { "zero" } else { "positive" }
+}
+
+fun main() {
+    let n = 7
+    let half = if n % 2 == 0 {
+        n / 2
+    } else {
+        let up = n + 1
+        up / 2
+    }
+    print(sign(n))
+    print(half)
+}
+// output:
+// positive
+// 4
+```
+
+A block that gives a value (an `if` branch, a `match` arm) may end with an `if` statement whose every level has an `else`: it reads as the `if` expression. In the condition of `if`, `while`, `for` and `match`, a struct literal must be parenthesised, because its `{` would otherwise start the body.
 
 ## Loops
 

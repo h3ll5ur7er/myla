@@ -33,22 +33,23 @@ pub struct Parser {
     unwinding: bool,            // leaving a declaration without an error (Python's _Unwind)
     stopped: bool,              // MAX_ERRORS were recorded (Python's _Stop)
     depth: int32,               // nesting, up to MAX_NESTING (MYLA-182)
+    stmt_match: bool,           // the next `match` starts a statement: its arms give no value (MYLA-222)
 }
 
 // How deep expressions, types, blocks and patterns may nest (MYLA-182; the
 // Python parser's MAX_NESTING): past it, a parse error, not a stack overflow.
 const MAX_NESTING: int32 = 256
 
-#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
+#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
 pub fun new_parser(toks: [Token]) -> Parser {
-    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }
+    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }
 }
 
 // A parser at the first token of `src`, the receiver of `#test` cases of the
 // parser's methods (MYLA-184): one without tokens when `src` doesn't lex.
-#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
-#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
-#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
+#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
+#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
+#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
 pub fun parser_on(src: str) -> Parser {
     return match lex(src) {
         Ok(toks) => new_parser(toks),
@@ -1274,6 +1275,7 @@ impl Parser {
     #test(parser_on("let x = 1"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: StmtKind.ExprStmt(Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }) }]
     fun assign_or_expr(var self) -> Stmt {
         let st = self.peek()
+        self.stmt_match = self.check(TokenKind.MATCH)
         let expr = self.expression()
         if self.check(TokenKind.ASSIGN) {
             let eq = self.advance()
@@ -1609,10 +1611,97 @@ impl Parser {
         return expr
     }
 
+    // `if c { a } else { b }` as a value (D104 (1), MYLA-222): a `match` on
+    // the condition (`if_match`); `else if` nests another.
+    fun if_expr(var self) -> Expr {
+        let kw = self.advance()
+        let cond = self.expression_ns()
+        let then = self.valued(self.block())
+        self.skip_newlines()
+        if !self.check(TokenKind.ELSE) {
+            self.fail_at(self.peek(), "an 'if' used as a value needs an 'else'")
+        }
+        let el = self.advance()
+        var otherwise = ExprOrBlock.EB_Block(then)
+        if self.check(TokenKind.IF) {
+            otherwise = ExprOrBlock.EB_Expr(self.if_expr())
+        } else {
+            otherwise = ExprOrBlock.EB_Block(self.valued(self.block()))
+        }
+        return self.if_match(kw.line, kw.column, self.span_from(kw.line, kw.column), cond, then, otherwise)
+    }
+
+    // The `match` an `if` used as a value is: `true => { then }` and an arm
+    // that binds `%else` (no source spells it), which tells the checker to
+    // speak of an `if` (`if_worded`).
+    fun if_match(var self, line: int32, col: int32, sp: SrcSpan, cond: Expr, then: Block, otherwise: ExprOrBlock) -> Expr {
+        let yes = Expr { id: self.fresh(), line: line, col: col, sp: cond.sp, kind: ExprKind.BoolLit(true) }
+        var el_line = then.line
+        var el_col = then.col
+        var el_sp = then.sp
+        match otherwise {
+            ExprOrBlock.EB_Block(b) => {
+                el_line = b.line
+                el_col = b.col
+                el_sp = b.sp
+            },
+            ExprOrBlock.EB_Expr(x) => {
+                el_line = x.line
+                el_col = x.col
+                el_sp = x.sp
+            },
+        }
+        let arms = [
+            MatchArm { line: then.line, col: then.col, sp: then.sp, pattern: Pattern { id: self.fresh(), line: line, col: col, sp: cond.sp, kind: PatternKind.PLit(yes) }, guard: None, body: ExprOrBlock.EB_Block(then) },
+            MatchArm { line: el_line, col: el_col, sp: el_sp, pattern: Pattern { id: self.fresh(), line: el_line, col: el_col, sp: el_sp, kind: PatternKind.PBind("%else") }, guard: None, body: otherwise },
+        ]
+        return Expr { id: self.fresh(), line: line, col: col, sp: sp, kind: ExprKind.MatchE(cond, arms) }
+    }
+
+    // A block that gives a value (an `if` used as a value, a match arm): a
+    // trailing `if` statement whose every level has an `else` is the `if`
+    // expression it reads as, its value the block's (MYLA-222).
+    fun valued(var self, b: Block) -> Block {
+        let n = len(b.stmts)
+        if n == 0 { return b }
+        let last = b.stmts[n - 1]
+        match self.if_as_match(last) {
+            Some(e) => {
+                var stmts = b.stmts
+                stmts[n - 1] = Stmt { id: last.id, line: last.line, col: last.col, sp: last.sp, kind: StmtKind.ExprStmt(e) }
+                return Block { line: b.line, col: b.col, sp: b.sp, stmts: stmts }
+            },
+            None => {},
+        }
+        return b
+    }
+
+    // The `if` statement `s` as the `if` expression it reads as, when every
+    // level has an `else`.
+    fun if_as_match(var self, s: Stmt) -> Option<Expr> {
+        match s.kind {
+            StmtKind.IfS(cond, then, el) => {
+                match el {
+                    Some(ElseTail.ElseBlock(b)) => { return Some(self.if_match(s.line, s.col, s.sp, cond, self.valued(then), ExprOrBlock.EB_Block(self.valued(b)))) },
+                    Some(ElseTail.ElseIf(x)) => {
+                        match self.if_as_match(x) {
+                            Some(e) => { return Some(self.if_match(s.line, s.col, s.sp, cond, self.valued(then), ExprOrBlock.EB_Expr(e))) },
+                            None => {},
+                        }
+                    },
+                    None => {},
+                }
+            },
+            _ => {},
+        }
+        return None
+    }
+
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun primary(var self) -> Expr {
         let tok = self.peek()
         let k = tok.kind
+        if k == TokenKind.IF { return self.if_expr() }
         if k == TokenKind.INT {
             self.skip()
             return self.mk_expr(tok.line, tok.column, ExprKind.IntLit(tok.ival, suffix_opt(tok.suffix), false, tok.big))
@@ -1732,13 +1821,15 @@ impl Parser {
 
     #test(parser_on("a.b[0]"))[Expr { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.MatchE(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }, []) }]
     fun match_expr(var self) -> Expr {
+        let as_stmt = self.stmt_match
+        self.stmt_match = false
         let kw = self.advance()
         let scrutinee = self.expression_ns()
         self.expect(TokenKind.LBRACE, "'{' to begin match arms")
         self.skip_newlines()
         var arms: [MatchArm] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
-            let arm = self.match_arm()
+            let arm = self.match_arm(!as_stmt)
             push(arms, arm)
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
@@ -1761,8 +1852,8 @@ impl Parser {
         return self.mk_expr(kw.line, kw.column, ExprKind.MatchE(scrutinee, arms))
     }
 
-    #test(parser_on("[int]"))[MatchArm { line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, pattern: Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PWild }, guard: None, body: ExprOrBlock.EB_Expr(Expr { id: 2, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 6 }, kind: ExprKind.Hole }) }]
-    fun match_arm(var self) -> MatchArm {
+    #test(parser_on("[int]"), true)[MatchArm { line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, pattern: Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PWild }, guard: None, body: ExprOrBlock.EB_Expr(Expr { id: 2, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 6 }, kind: ExprKind.Hole }) }]
+    fun match_arm(var self, valued: bool) -> MatchArm {
         let st = self.peek()
         let pattern = self.pattern()
         var guard: Option<Expr> = None
@@ -1771,7 +1862,11 @@ impl Parser {
         }
         let arrow = self.expect(TokenKind.FATARROW, "'=>' after match pattern")
         var body: ExprOrBlock = ExprOrBlock.EB_Expr(self.mk_expr(0, 0, ExprKind.Hole))
-        if self.check(TokenKind.LBRACE) {
+        // a match that gives a value: an arm's trailing `if` … `else` is its
+        // value (MYLA-222)
+        if self.check(TokenKind.LBRACE) && valued {
+            body = ExprOrBlock.EB_Block(self.valued(self.block()))
+        } else if self.check(TokenKind.LBRACE) {
             body = ExprOrBlock.EB_Block(self.block())
         } else {
             body = ExprOrBlock.EB_Expr(self.expression())

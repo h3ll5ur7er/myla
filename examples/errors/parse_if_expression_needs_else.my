@@ -1,0 +1,8 @@
+//~ parse error: an 'if' used as a value needs an 'else'
+// An `if` that gives a value has an `else`, or there would be no value when
+// the condition is false (D104 (1), MYLA-222).
+fun main() {
+    let n = 3
+    let sign = if n > 0 { 1 }
+    print(sign)
+}

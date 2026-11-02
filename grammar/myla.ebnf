@@ -168,10 +168,11 @@ call_arg    = "_" @hole | expression ;            (* "_" alone: a partial-applic
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" @boolean | "false" @boolean
             | "self" @self | IDENT | struct_literal | "(" NL* expression NL* ")" @paren_expression
-            | tuple | list | map | match_expr ;
+            | tuple | list | map | match_expr | if_expr ;
 fstring     = 'f"' ( FSTRING_TEXT | "{{" @escape_sequence | "}}" @escape_sequence
                    | "{" expression "}" @interpolation )* '"' ;
               (* lowered by the lexer to: format(STRING, expression, …) *)
+if_expr     = "if" cond block NL* "else" ( if_expr | block ) ;   (* an if used as a value, D104 (1) *)
 struct_literal = IDENT "{" NL* ( field_init ( "," NL* field_init )* ","? NL* )? "}" ;
 field_init  = IDENT ":" expression ;
 tuple       = "(" NL* expression NL* "," NL* ( expression NL* ( "," NL* expression NL* )* ( "," NL* )? )? ")" ;
@@ -214,7 +215,7 @@ field_pattern = IDENT ( ":" pattern )? ;
 @conflict place primary lambda_param ;
 @conflict tuple_type ;
 @conflict named_type ;
-@conflict if_stmt ;
+@conflict if_stmt if_expr ;
 
 @restrict cond struct_literal lambda ;            (* a lambda's body would take the "{" *)
 @restrict guard struct_literal paren_expression tuple lambda ;   (* "(…) =>" would read as a lambda *)

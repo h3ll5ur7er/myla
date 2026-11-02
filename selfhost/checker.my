@@ -3285,13 +3285,16 @@ impl Checker {
             match ab {
                 ArmBody.ABDiverge => {},
                 ArmBody.ABValue(ot, node) => {
-                    let t = match ot { Some(x) => x, None => { return Err(terr_at(e.line, e.col, e.sp, "this match is used as a value, so every arm must produce one")) } }
+                    let t = match ot { Some(x) => x, None => { return Err(if_worded(terr_at(e.line, e.col, e.sp, "this match is used as a value, so every arm must produce one"), arms)) } }
                     push(vals, MatchVal { ty: t, node: node })
                 },
             }
         }
-        if len(vals) == 0 { return Err(terr_at(e.line, e.col, e.sp, "this match is used as a value, but every arm diverges")) }
-        let result = self.unify_match_result(vals)?
+        if len(vals) == 0 { return Err(if_worded(terr_at(e.line, e.col, e.sp, "this match is used as a value, but every arm diverges"), arms)) }
+        let result = match self.unify_match_result(vals) {
+            Ok(t) => t,
+            Err(err) => { return Err(if_worded(err, arms)) },
+        }
         return Ok(Some(result))
     }
 
@@ -6468,6 +6471,41 @@ impl Reads {
             _ => {},
         }
     }
+}
+
+// `err`, about a match, in the words of the `if` it came from (D104 (1),
+// MYLA-222: the parser makes an `if` used as a value a match whose second
+// arm binds `%else`).
+#test(CheckErr { line: 1, col: 1, sp: no_span(), msg: "match arms have incompatible types 'a' and 'b'", decl: -1, notes: [] }, [])[CheckErr { line: 1, col: 1, sp: no_span(), msg: "match arms have incompatible types 'a' and 'b'", decl: -1, notes: [] }]
+fun if_worded(err: CheckErr, arms: [MatchArm]) -> CheckErr {
+    if len(arms) != 2 { return err }
+    let from_if = match arms[1].pattern.kind { PatternKind.PBind(n) => n == "%else", _ => false }
+    if !from_if { return err }
+    var msg = err.msg
+    let types = "match arms have incompatible types "
+    if len(msg) > len(types) && starts(msg, types) {
+        var sb = StringBuilder()
+        append(sb, msg, len(types), len(msg))
+        msg = "the branches of an 'if' have incompatible types " + build(sb)
+    } else if msg == "this match is used as a value, so every arm must produce one" {
+        msg = "this 'if' is used as a value, so every branch must produce one"
+    } else if msg == "this match is used as a value, but every arm diverges" {
+        msg = "this 'if' is used as a value, but every branch diverges"
+    }
+    return CheckErr { line: err.line, col: err.col, sp: err.sp, msg: msg, decl: err.decl, notes: err.notes }
+}
+
+// Whether `s` begins with `prefix`.
+#test("abc", "ab")[true]
+#test("abc", "b")[false]
+fun starts(s: str, prefix: str) -> bool {
+    if len(prefix) > len(s) { return false }
+    var i = 0
+    while i < len(prefix) {
+        if s[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    return true
 }
 
 // The walk of an actor's async method (types.py: _Reentrancy): `epoch`

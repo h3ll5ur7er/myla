@@ -3039,6 +3039,10 @@
         {
           "type": "SYMBOL",
           "name": "match_expr"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "if_expr"
         }
       ]
     },
@@ -3086,6 +3090,52 @@
         {
           "type": "STRING",
           "value": "\""
+        }
+      ]
+    },
+    "if_expr": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "if"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_cond"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "block"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_nl_rep"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": "else"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "if_expr"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "block"
+            }
+          ]
         }
       ]
     },
@@ -5385,7 +5435,8 @@
       "named_type"
     ],
     [
-      "if_stmt"
+      "if_stmt",
+      "if_expr"
     ]
   ],
   "precedences": [],

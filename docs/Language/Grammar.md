@@ -150,10 +150,11 @@ call_arg    = "_" | expression ;            (* "_" alone: a partial-application 
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" | "false"
             | "self" | IDENT | struct_literal | "(" NL* expression NL* ")"
-            | tuple | list | map | match_expr ;
+            | tuple | list | map | match_expr | if_expr ;
 fstring     = 'f"' ( FSTRING_TEXT | "{{" | "}}"
                    | "{" expression "}" )* '"' ;
               (* lowered by the lexer to: format(STRING, expression, …) *)
+if_expr     = "if" cond block NL* "else" ( if_expr | block ) ;   (* an if used as a value, D104 (1) *)
 struct_literal = IDENT "{" NL* ( field_init ( "," NL* field_init )* ","? NL* )? "}" ;
 field_init  = IDENT ":" expression ;
 tuple       = "(" NL* expression NL* "," NL* ( expression NL* ( "," NL* expression NL* )* ( "," NL* )? )? ")" ;
