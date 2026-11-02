@@ -634,7 +634,11 @@ impl Parser {
                 outputs = Some(self.expr_list(TokenKind.RBRACKET))
                 self.expect(TokenKind.RBRACKET, "']'")
             }
-            attrs.push(Attribute { line: hash_tok.line, col: hash_tok.column, sp: self.span_from(hash_tok.line, hash_tok.column), name: name, args: args, outputs: outputs })
+            // a comment after it on its line names a `#test` case (MYLA-239):
+            // the lexer hands it over on the line's NEWLINE token
+            var label = ""
+            if self.check(TokenKind.NEWLINE) && name == "test" { label = self.peek().suffix }
+            attrs.push(Attribute { line: hash_tok.line, col: hash_tok.column, sp: self.span_from(hash_tok.line, hash_tok.column), name: name, args: args, outputs: outputs, label: label })
             self.skip_newlines()
         }
         return attrs

@@ -617,11 +617,14 @@ impl Interp {
                             if !value_eq(actual, expected) { detail = "expected " + py_repr(expected) + ", got " + py_repr(actual) }
                         },
                     }
+                    // a named case (a comment after its attribute, MYLA-239)
+                    var case_name = format("{} #{}", name, idx)
+                    if attr.label != "" { case_name = format("{} ({})", case_name, attr.label) }
                     if detail == "" {
                         passed = passed + 1
-                        report.push(format("PASS  {} #{}\n", name, idx))
+                        report.push(format("PASS  {}\n", case_name))
                     } else {
-                        report.push(format("FAIL  {} #{}: {}\n", name, idx, detail))
+                        report.push(format("FAIL  {}: {}\n", case_name, detail))
                     }
                 }
             }

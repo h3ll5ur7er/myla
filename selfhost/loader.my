@@ -863,7 +863,7 @@ impl Renamer {
                 },
                 None => {},
             }
-            out.push(Attribute { line: a.line, col: a.col, sp: a.sp, name: a.name, args: args, outputs: outputs })
+            out.push(Attribute { line: a.line, col: a.col, sp: a.sp, name: a.name, args: args, outputs: outputs, label: a.label })
         }
         return out
     }

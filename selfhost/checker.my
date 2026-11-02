@@ -4591,7 +4591,7 @@ impl Checker {
         return name == "int" || name == "float"
     }
 
-    #test(checker_on("[int]"), Attribute { line: 5, col: 1, sp: SrcSpan { sline: 5, scol: 1, eline: 5, ecol: 12 }, name: "derive", args: [Expr { id: 2, line: 5, col: 9, sp: SrcSpan { sline: 5, scol: 9, eline: 5, ecol: 11 }, kind: ExprKind.Name("Eq") }], outputs: None })[Ok(0)]
+    #test(checker_on("[int]"), Attribute { line: 5, col: 1, sp: SrcSpan { sline: 5, scol: 1, eline: 5, ecol: 12 }, name: "derive", args: [Expr { id: 2, line: 5, col: 9, sp: SrcSpan { sline: 5, scol: 9, eline: 5, ecol: 11 }, kind: ExprKind.Name("Eq") }], outputs: None , label: ""})[Ok(0)]
     fun validate_derive_attr(self, attr: Attribute) -> Result<int32, CheckErr> {
         match attr.outputs { Some(x) => { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' takes trait names in parentheses, e.g. #derive(Eq)")) }, None => {} }
         if attr.args.len() == 0 { return Err(terr_at(attr.line, attr.col, attr.sp, "'#derive' needs at least one trait, e.g. #derive(Eq)")) }

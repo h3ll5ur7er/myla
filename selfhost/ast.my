@@ -130,7 +130,9 @@ pub struct Field { line: int32, col: int32, sp: SrcSpan, name: str, ty: TypeExpr
 pub struct Variant { line: int32, col: int32, sp: SrcSpan, name: str, payload: [TypeExpr] }
 pub struct ImportPath { line: int32, col: int32, sp: SrcSpan, dots: int32, segments: [str] }
 pub struct ImportItem { line: int32, col: int32, sp: SrcSpan, name: str, alias: Option<str> }
-pub struct Attribute { line: int32, col: int32, sp: SrcSpan, name: str, args: [Expr], outputs: Option<[Expr]> }
+// `label`: the name a comment after it on its line gives a `#test` case
+// (MYLA-239), "" for none.
+pub struct Attribute { line: int32, col: int32, sp: SrcSpan, name: str, args: [Expr], outputs: Option<[Expr]>, label: str }
 
 pub struct FunData {
     line: int32,
@@ -404,7 +406,7 @@ fun dump_variant(v: Variant) -> str {
     return format("(variant {} {})", sstr(v.name), join_map(v.payload, dump_type))
 }
 
-#test(Attribute { line: 36, col: 1, sp: SrcSpan { sline: 36, scol: 1, eline: 36, ecol: 14 }, name: "test", args: [], outputs: Some([Expr { id: 53, line: 36, col: 9, sp: SrcSpan { sline: 36, scol: 9, eline: 36, ecol: 13 }, kind: ExprKind.BoolLit(true) }]) })["(attr \"test\" [] [(bool true)])"]
+#test(Attribute { line: 36, col: 1, sp: SrcSpan { sline: 36, scol: 1, eline: 36, ecol: 14 }, name: "test", args: [], outputs: Some([Expr { id: 53, line: 36, col: 9, sp: SrcSpan { sline: 36, scol: 9, eline: 36, ecol: 13 }, kind: ExprKind.BoolLit(true) }]) , label: ""})["(attr \"test\" [] [(bool true)])"]
 fun dump_attr(a: Attribute) -> str {
     let outs = match a.outputs {
         Some(xs) => join_map(xs, dump_expr),

@@ -25,11 +25,14 @@ pub struct Lexer {
     held: bool,
     held_line: int32,
     held_col: int32,
+    // the text of a `//` comment after code on the current line, which its
+    // NEWLINE token carries as its suffix (a `#test` case's name, MYLA-239)
+    comment: str,
 }
 
-#test("a")[Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }]
-#test("code")[Lexer { cps: ['c', 'o', 'd', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }]
-#test("tries")[Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }]
+#test("a")[Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }]
+#test("code")[Lexer { cps: ['c', 'o', 'd', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }]
+#test("tries")[Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }]
 pub fun new_lexer(src: str) -> Lexer {
     // the code points as `chars` decodes them, not copied (MYLA-133)
     let cps = src.chars()
@@ -37,7 +40,7 @@ pub fun new_lexer(src: str) -> Lexer {
     // (MYLA-178)
     var start = 0
     if cps.len() > 0 && cps[0] == '\u{FEFF}' { start = 1 }
-    return Lexer { cps: cps, pos: start, line: 1, col: 1, n: cps.len() as int32, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }
+    return Lexer { cps: cps, pos: start, line: 1, col: 1, n: cps.len() as int32, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }
 }
 
 // One canonical token line (mirror of src/myla/canon.py:canonical_token).
@@ -63,6 +66,19 @@ pub fun canonical_line(t: Token) -> str {
         sb.append(format(" cp={}", t.ival))
     }
     sb.append(format(" end={}:{}", t.eline, t.ecol))
+    return sb.build()
+}
+
+// `s` without the spaces and tabs at its ends.
+#test("  my case \t")["my case"]
+#test("")[""]
+pub fun trim_spaces(s: str) -> str {
+    var a = 0
+    var b = s.len()
+    while a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r') { a = a + 1 }
+    while b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r') { b = b - 1 }
+    var sb = StringBuilder()
+    sb.append(s, a, b)
     return sb.build()
 }
 
@@ -93,9 +109,9 @@ impl Lexer {
     // Build a `str` from the codepoints `cps[start..end]`. A method (not a free
     // function) so `self.cps` is borrowed through `self` rather than passed —
     // and cloned — by value on every token (the lexer's dominant allocation).
-    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 0, 1)["a"]
-    #test(Lexer { cps: ['c', 'o', 'd', 'e'], pos: 4, line: 1, col: 5, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 0, 4)["code"]
-    #test(Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 5, line: 1, col: 6, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 0, 5)["tries"]
+    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }, 0, 1)["a"]
+    #test(Lexer { cps: ['c', 'o', 'd', 'e'], pos: 4, line: 1, col: 5, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }, 0, 4)["code"]
+    #test(Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 5, line: 1, col: 6, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }, 0, 5)["tries"]
     fun slice_str(self, start: int32, end: int32) -> str {
         var sb = StringBuilder()
         var i = start
@@ -108,22 +124,22 @@ impl Lexer {
         return sb.build()
     }
 
-    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[true]
-    #test(Lexer { cps: ['b'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[true]
-    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[false]
+    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" })[true]
+    #test(Lexer { cps: ['b'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" })[true]
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" })[false]
     fun at_end(self) -> bool {
         return self.pos >= self.n
     }
 
-    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[97]
-    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[110]
-    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[43]
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" })[97]
+    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" })[110]
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" })[43]
     fun peek(self) -> int32 {
         if self.pos >= self.n { return 0 }
         return self.cps[self.pos] as int32
     }
 
-    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[32]
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" })[32]
     fun peek1(self) -> int32 {
         if self.pos + 1 >= self.n { return 0 }
         return self.cps[self.pos + 1] as int32
@@ -149,9 +165,9 @@ impl Lexer {
         self.pos = self.n
     }
 
-    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[97]
-    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[110]
-    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[43]
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" })[97]
+    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" })[110]
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" })[43]
     fun advance(var self) -> int32 {
         if self.pos >= self.n { return 0 }
         let c = self.cps[self.pos] as int32
@@ -197,6 +213,8 @@ impl Lexer {
     fun emit_newline(var self) {
         if self.toks.len() == 0 { return }
         let last = self.toks[self.toks.len() - 1].kind
+        let comment = self.comment
+        self.comment = ""
         if last == TokenKind.NEWLINE { return }
         if (self.opens.len() > 0 && self.opens[self.opens.len() - 1]) || continues_line(last) {
             if !self.held {
@@ -206,12 +224,17 @@ impl Lexer {
             }
             return
         }
-        self.emit0(TokenKind.NEWLINE, "\\n", self.line, self.col)
+        self.emit(TokenKind.NEWLINE, "\\n", self.line, self.col, 0, comment)
     }
 
     fun line_comment(var self) {
+        let start = self.pos + 2
         while !self.at_end() && self.peek() != 10 {
             self.advance()
+        }
+        // after code on its line: kept for the line's NEWLINE token
+        if self.toks.len() > 0 && self.toks[self.toks.len() - 1].kind != TokenKind.NEWLINE && self.toks[self.toks.len() - 1].eline == self.line {
+            self.comment = trim_spaces(self.slice_str(start, self.pos))
         }
     }
 
@@ -231,7 +254,7 @@ impl Lexer {
         self.fail(sl, sc, "unterminated block comment")
     }
 
-    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 10)["1"]
+    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }, 10)["1"]
     fun scan_digits(var self, base: int32) -> str {
         var sb = StringBuilder()
         var prev_us = false
@@ -263,7 +286,7 @@ impl Lexer {
         return sb.build()
     }
 
-    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 1, line: 1, col: 2, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 1, 1)[""]
+    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 1, line: 1, col: 2, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }, 1, 1)[""]
     fun scan_int_suffix(var self, sl: int32, sc: int32) -> str {
         if self.peek() == 105 || self.peek() == 117 {
             let sp = self.pos
@@ -544,9 +567,9 @@ impl Lexer {
         }
     }
 
-    #test(Lexer { cps: ['[', '1', ',', ' ', '2', ']'], pos: 0, line: 1, col: 1, n: 6, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 91)[TokenKind.LBRACKET]
-    #test(Lexer { cps: ['(', '1', ',', ' ', '\'', 'c', '\'', ',', ' ', 't', 'r', 'u', 'e', ')'], pos: 0, line: 1, col: 1, n: 14, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 40)[TokenKind.LPAREN]
-    #test(Lexer { cps: ['p', '.', 'x'], pos: 1, line: 1, col: 2, n: 3, toks: [Token { kind: TokenKind.IDENT, lexeme: "p", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 46)[TokenKind.DOT]
+    #test(Lexer { cps: ['[', '1', ',', ' ', '2', ']'], pos: 0, line: 1, col: 1, n: 6, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }, 91)[TokenKind.LBRACKET]
+    #test(Lexer { cps: ['(', '1', ',', ' ', '\'', 'c', '\'', ',', ' ', 't', 'r', 'u', 'e', ')'], pos: 0, line: 1, col: 1, n: 14, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }, 40)[TokenKind.LPAREN]
+    #test(Lexer { cps: ['p', '.', 'x'], pos: 1, line: 1, col: 2, n: 3, toks: [Token { kind: TokenKind.IDENT, lexeme: "p", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0, comment: "" }, 46)[TokenKind.DOT]
     fun one_char_kind(self, c: int32) -> TokenKind {
         if c == 43 { return TokenKind.PLUS }
         if c == 45 { return TokenKind.MINUS }
