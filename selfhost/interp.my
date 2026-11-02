@@ -3230,7 +3230,7 @@ fun canon_type_name(n: str) -> str {
     if n == "int" { return "int32" }
     if n == "uint" { return "uint32" }
     if n == "byte" { return "uint8" }
-    if n == "float" { return "float32" }
+    if n == "float" { return "float64" }
     return n
 }
 

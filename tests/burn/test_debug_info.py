@@ -245,7 +245,7 @@ fun main() {
     let wide: uint16 = 65535
     let big: int64 = -1234567890123
     let huge: uint64 = 18446744073709551615
-    let f: float = 0.1
+    let f: float32 = 0.1
     let d: float64 = 2.5f64
     let yes = true
     let ch = '\\u{e9}'
@@ -320,7 +320,7 @@ HEAP = """\
 struct Bag {
     items: [int],
     label: str,
-    ratio: float,
+    ratio: float32,
     tags: [str: int],
 }
 
@@ -347,7 +347,7 @@ fun main() {
     let m = ["x": 1]
     let names = [1: "one"]
     let pair = (1.5, "p")
-    let fs = [0.1, 0.25]
+    let fs: [float32] = [0.1, 0.25]
     let tree = Tree.Node(Tree.Leaf(1), Tree.Leaf(2))
     let nested = [[1, 2], [3]]
     print(total(bag))

@@ -1,8 +1,10 @@
 """Burn tests: hand-written programs exercising codegen corners, each asserting
 the native binary's output matches the interpreter (and exit codes for traps)."""
+import os
+import tempfile
 import unittest
 
-from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret
+from tests.burn._native import CAN_BUILD_NATIVE, SKIP_REASON, build_and_run, interpret, selfhost_run
 
 PROGRAMS = {
     # a receiver and every argument are taken in order, before a later
@@ -2793,16 +2795,29 @@ PROGRAMS = {
         "    print(nested[\"k\"][0].v)\n"
         "}\n"
     ),
-    # float32 overflow gives infinity everywhere (MYLA-176)
+    # float32 overflow gives infinity everywhere (MYLA-176); float32 named,
+    # since `float` is float64 (D102)
     "float32_overflow_gives_infinity": (
         "fun main() {\n"
-        "    let a = 1e38 * 10.0\n"
+        "    let a = 1e38f32 * 10.0f32\n"
         "    print(a)\n"
-        "    print(-1e38 * 10.0)\n"
+        "    print(-1e38f32 * 10.0f32)\n"
+        "    let c: float32 = 3.5e38\n"
+        "    print(c)\n"
+        "    print(a - a)\n"
+        "    print(3.4028235e38f32)\n"
+        "}\n"
+    ),
+    # ... and float64's, the default (D102)
+    "float64_overflow_gives_infinity": (
+        "fun main() {\n"
+        "    let a = 1e308 * 10.0\n"
+        "    print(a)\n"
+        "    print(-1e308 * 10.0)\n"
         "    let c: float = 3.5e38\n"
         "    print(c)\n"
         "    print(a - a)\n"
-        "    print(3.4028235e38)\n"
+        "    print(1.7976931348623157e308)\n"
         "}\n"
     ),
     # float -> integer casts saturate, NaN gives 0 (D59, MYLA-6)
@@ -3782,16 +3797,45 @@ class TestCompilerParity(unittest.TestCase):
         self.assertNotEqual(code, 0)
 
 
-def _make(src: str):
+# What a program prints where the retired Python interpreter's recording no
+# longer holds (a later decision changed its meaning) or there is none (a
+# program added or changed since): its output, pinned here.
+PINNED = {
+    # D102: the unsuffixed 123.456 is a float64 now (the recording's
+    # float32 printed 123.456001)
+    "float_arithmetic": "3.75\n-0.75\n3.375\n3.5\n1.5\n-3.5\n0.30000000000000004\n0.300000012\n2\n100000\n"
+                        "123.456\n0.0009765625\n",
+    # the program says float32 since D102; the output is the recording's
+    "float32_overflow_gives_infinity": "inf\n-inf\ninf\nnan\n340282347000000000000000000000000000000\n",
+    # (a float prints in plain digits: the largest double has 309)
+    "float64_overflow_gives_infinity": "inf\n-inf\n350000000000000000000000000000000000000\nnan\n"
+                                       + "17976931348623157" + "0" * 292 + "\n",
+}
+
+
+def _self_hosted(src: str) -> str:
+    """What the self-hosted interpreter prints for `src`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "main.my")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(src)
+        out, err, code = selfhost_run(path)
+    return out
+
+
+def _make(name: str, src: str):
     def test(self):
+        # native code against the self-hosted interpreter, the reference
+        # (D101), and against the recording or the pinned output
         native_out, code = build_and_run(src)
         self.assertEqual(code, 0)
-        self.assertEqual(native_out, interpret(src))
+        self.assertEqual(native_out, _self_hosted(src))
+        self.assertEqual(native_out, PINNED[name] if name in PINNED else interpret(src))
     return test
 
 
 for _name, _src in PROGRAMS.items():
-    setattr(TestCompilerParity, f"test_{_name}", _make(_src))
+    setattr(TestCompilerParity, f"test_{_name}", _make(_name, _src))
 
 
 if __name__ == "__main__":

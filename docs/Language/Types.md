@@ -11,7 +11,7 @@ Every expression has a type known before the program runs. Types are resolved by
 | `int8` `int16` `int32` `int64` | two's-complement signed | Arithmetic wraps at the width |
 | `uint8` `uint16` `uint32` `uint64` | unsigned | Arithmetic wraps modulo 2^width; printed without sign |
 | `int` | alias of `int32` | The default for integer literals |
-| `float32` `float64` | IEEE-754 | `float` is an alias of **`float32`**, the default for float literals |
+| `float32` `float64` | IEEE-754 | `float` is an alias of `float64`, the default for float literals (D102) |
 | `char` | a Unicode scalar (0…0x10FFFF, no surrogates) | Compares with `<`; no arithmetic (cast to an integer) |
 | `bool` | `true`, `false` | Conditions must be `bool`; there is no truthiness |
 | `str` | immutable UTF-8 bytes | `len` counts bytes; `s[i]` is a `uint8` |

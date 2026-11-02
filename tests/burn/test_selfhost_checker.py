@@ -350,6 +350,13 @@ SELF_METHOD_WARNINGS: dict[str, tuple[str, list[str]]] = {
         []),
 }
 
+# Verdicts a later decision changed from the retired Python checker's
+# recording, pinned here.
+SUPERSEDED: dict[str, str] = {
+    # D102: the unsuffixed 2.0 is a float64
+    "unit_test_79": "err 3 8 3:8-3:9 type: type mismatch: 'int32' vs 'float64' (no implicit conversion between numeric types)",
+}
+
 def _corpus() -> list[str]:
     """Every single-file .my source the checker gate covers: the top-level
     examples and the error corpus. (Multi-file example packages and the stdlib
@@ -460,7 +467,7 @@ class SelfHostedCheckerParity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for name, source in _snippets().items():
                 with self.subTest(case=name):
-                    expected = _oracle_source(source)
+                    expected = SUPERSEDED.get(name) or _oracle_source(source)
                     self.assertIn(" type: ", expected, "not a type error in Python")
                     path = os.path.join(tmp, name + ".my")
                     with open(path, "w", encoding="utf-8") as fh:

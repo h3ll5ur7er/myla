@@ -367,7 +367,9 @@ fun t_int() -> Type { return Type.TInt(32, true) }
 #test()[Type.TInt(8, false)]
 fun t_byte() -> Type { return Type.TInt(8, false) }
 #test()[Type.TFloat(32)]
-fun t_float() -> Type { return Type.TFloat(32) }
+// `float`, and a float literal without a suffix: a double (D102, MYLA-220;
+// D19 made it `float32`)
+fun t_float() -> Type { return Type.TFloat(64) }
 
 // --- equality ------------------------------------------------------------
 

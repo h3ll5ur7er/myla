@@ -97,7 +97,7 @@ fun main() {
 
 A decimal number with a fraction (`1.5`), an exponent (`2e10`, `1.5e-3`) or a float suffix (`2f32`, `0.1f64`) is a float. Hex, binary and octal literals are always integers. `2..10` stays a range and `t.0` a tuple index, because a fraction needs a digit after the dot.
 
-An unsuffixed float literal takes the float type its context expects, defaulting to `float32` (the `float` alias, D19).
+An unsuffixed float literal takes the float type its context expects, defaulting to `float64` (the `float` alias, D102; it was `float32` until November 2026, D19).
 
 ## Character literals
 

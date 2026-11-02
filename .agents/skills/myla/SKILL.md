@@ -78,7 +78,7 @@ fun main() {
 | `println!("{}", x)`, `print("\(x)")` | `print(x)`, `print(f"x = {x}")`, `format("x = {}", x)` | `print` takes exactly one int/float/char/bool/str |
 | `0..=n`, `loop { }`, labelled breaks | `0..n + 1`, `while true { }` | Ranges are half-open and only exist in `for` heads; no `loop`, no labels |
 | `255_u8` | `255u8` | `_` only between digits |
-| `i32`, `u8`, `f64`, `Int`, `Double` as types | `int32`, `uint8`, `float64`, `int` | Type names are spelled out; suffixes are short (`5i64`, `2f64`) |
+| `i32`, `u8`, `f64`, `Int`, `Double` as types | `int32`, `uint8`, `float64` (or `float`), `int` | Type names are spelled out; suffixes are short (`5i64`, `2f64`) |
 | `#[derive(PartialEq)]`, `#[test]` | `#derive(Eq)`, `#test(args)[expected]` | Attributes |
 | `mod x;`, `use a::b;`, `import Foundation` | `from .x import f`, `import a.b as b`, `from std.io import println` | Python-like imports, `pub` exports |
 | `impl Add for P { type Output … fn add(self, o: P) -> P }` | `impl Add for P { fun add(self, other: P) -> P { … } }` | Operator traits have no associated types; `Ord` is `cmp(self, other: Self) -> int` |
@@ -90,7 +90,7 @@ fun main() {
 
 ## Types and conversions
 
-- `int` = `int32`, **`float` = `float32`**, and unsuffixed float literals default to `float32`: write `0.1f64` or annotate `let x: float64 = 0.1`.
+- `int` = `int32`, `float` = `float64`, and unsuffixed float literals default to `float64` (D102); for single precision write `0.1f32` or annotate `let x: float32 = 0.1`.
 - Integers: `int8`…`int64`, `uint8`…`uint64`, wrapping arithmetic. Also `bool`, `char` (Unicode scalar), `str` (immutable UTF-8 bytes), `StringBuilder`, tuples `(int, str)` (1-tuple `(int,)`), lists `[T]`, maps `[K: V]` (keys: integers, `char`, `bool`, `str`), function types, structs, enums, generics.
 - **No implicit conversion at all.** A literal adapts to its context (`let b: uint8 = 200`, `x + 1` with `x: int64`), but a *variable* has a fixed type: `let n = 2` is an `int32`, so `big + n` with `big: int64` fails. Annotate (`let n: int64 = 2`) or cast (`n as int64`).
 - `s[i]` is a byte (`uint8`); `len(s)` counts bytes; `chars(s)` gives `[char]`; `'a'` is a `char` but fits a `uint8` when one is expected (`s[i] == 'a'` works). `+` concatenates strings; no slicing.
