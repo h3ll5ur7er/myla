@@ -11,7 +11,7 @@ D103 ([[MYLA-204]]): `impl` blocks on builtin types are allowed, the builtin col
 - [x] The list: every builtin function on lists, maps, strings and chars with its method name and whether it takes `var self` (`push`, `insert`, `remove`, `set`, …)
 - [ ] `impl [T]`, `impl Map<K, V>`, `impl str`, `impl char` and the numeric types in the checker; method lookup on builtin receivers; mutating methods need a `var` place, with the same diagnostics as `var self` methods today
 - [ ] The free forms give a deprecation warning that names the method
-- [ ] The repository's code moved (examples, `tools/`, the standard library; `selfhost/` after a seed update, [[MYLA-218]])
+- [x] The repository's code moved (examples, `tools/`, the standard library; `selfhost/` after a seed update, [[MYLA-218]])
 - [ ] The free forms removed; [[Language]] pages, the skill, `AGENTS.md` ("`push(xs, v)`") and the grammar updated
 
 Before the standard library round ([[MYLA-211]]), which builds on it. Order: after [[MYLA-219]] this touches only the self-hosted toolchain (checker, interpreter, lowering) and the grammar; done before it, the Python checker and interpreter need it too. Using it in `selfhost/` itself needs a seed that knows it ([[MYLA-218]]).
@@ -41,4 +41,5 @@ Before the standard library round ([[MYLA-211]]), which builds on it. Order: aft
   - Everything checks, the bootstrap reaches its byte-identical fixed point from the new seed, and the burn suite passes.
   - Skips rise from 19 to 41: the command-parity corpus of `test_selfhost_cli` compares the CLI on every file of `tools/` and `selfhost/` with the recorded Python CLI, and those files changed. They are the compiler's own code, covered by the bootstrap and the tools' tests.
   - The examples, the error corpus, the docs and the test programs in `tests/burn/` still use the function forms, which work. Their recordings are keyed by their text, so moving them needs the recordings to survive it (step 3).
+- **Step 3: the examples, the docs and the test programs use the methods.** [[MYLA-240]] made the recordings survive the rewrite, then moved them with the same script (`scripts/to_methods.py`): 59 files. Programs about the function form (its errors, a local shadowing it, "the function forms still work") keep it until step 4 decides what becomes of them.
 

@@ -29,10 +29,10 @@ struct Name { text: str }
 // comparing by length for the sake of a small example.
 impl Comparable<str> for Name {
     fun compare(self, other: str) -> int32 {
-        if len(self.text) < len(other) {
+        if self.text.len() < other.len() {
             return -1
         }
-        if len(self.text) > len(other) {
+        if self.text.len() > other.len() {
             return 1
         }
         return 0

@@ -4,6 +4,6 @@
 #main
 fun main() {
     var xs: [int] = []
-    let x = pop(xs)
+    let x = xs.pop()
     print(x)
 }

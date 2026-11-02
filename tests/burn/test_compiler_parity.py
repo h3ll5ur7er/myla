@@ -92,7 +92,7 @@ PROGRAMS = {
         "impl Counter {\n"
         "    fun get(self) -> int { return self.n }\n"
         "    fun bump(var self) {\n"
-        "        self.n = self.n + 1\n        push(self.log, self.n)\n    }\n"
+        "        self.n = self.n + 1\n        self.log.push(self.n)\n    }\n"
         "    fun total(self) -> int {\n"
         "        var s = 0\n        for v in self.log { s = s + v }\n        return s\n    }\n"
         "    fun bump_n(var self, k: int) {\n"
@@ -173,24 +173,24 @@ PROGRAMS = {
         "    var t = 0\n    for x in xs {\n        t = t + x\n    }\n    return t\n}\n"
         "#main\nfun main() {\n"
         "    let xs = [10, 20, 30]\n"
-        "    print(len(xs))\n    print(xs[0])\n    print(xs[2])\n    print(total(xs))\n"
-        "    let empty: [int] = []\n    print(len(empty))\n}\n"
+        "    print(xs.len())\n    print(xs[0])\n    print(xs[2])\n    print(total(xs))\n"
+        "    let empty: [int] = []\n    print(empty.len())\n}\n"
     ),
     "list_value_semantics_cow": (
         # mutating a copy (and a shared nested cell) must not affect the original.
         "#main\nfun main() {\n"
-        "    var a = [1, 2, 3]\n    var b = a\n    b[0] = 99\n    push(b, 4)\n"
-        "    print(a[0])\n    print(len(a))\n    print(b[0])\n    print(len(b))\n"
+        "    var a = [1, 2, 3]\n    var b = a\n    b[0] = 99\n    b.push(4)\n"
+        "    print(a[0])\n    print(a.len())\n    print(b[0])\n    print(b.len())\n"
         "    var g = [[1, 2], [3, 4]]\n    var h = g\n    h[0][0] = 7\n"
         "    print(g[0][0])\n    print(h[0][0])\n}\n"
     ),
     "list_push_pop_build": (
         "fun make(n: int) -> [int] {\n"
         "    var out: [int] = []\n"
-        "    for i in 0..n {\n        push(out, i * i)\n    }\n    return out\n}\n"
+        "    for i in 0..n {\n        out.push(i * i)\n    }\n    return out\n}\n"
         "#main\nfun main() {\n"
-        "    var xs = make(6)\n    print(len(xs))\n    print(xs[5])\n"
-        "    print(pop(xs))\n    print(len(xs))\n}\n"
+        "    var xs = make(6)\n    print(xs.len())\n    print(xs[5])\n"
+        "    print(xs.pop())\n    print(xs.len())\n}\n"
     ),
     "list_of_structs": (
         "struct P { x: int, y: int }\n"
@@ -205,17 +205,17 @@ PROGRAMS = {
     "map_basics_and_index": (
         "#main\nfun main() {\n"
         '    var m: [str: int] = ["a": 1, "b": 2, "c": 3]\n'
-        '    print(len(m))\n    print(m["a"])\n    print(m["c"])\n'
+        '    print(m.len())\n    print(m["a"])\n    print(m["c"])\n'
         '    m["a"] = 10\n    m["d"] = 4\n'
-        '    print(m["a"])\n    print(len(m))\n'
-        "    let e: [int: int] = [:]\n    print(len(e))\n}\n"
+        '    print(m["a"])\n    print(m.len())\n'
+        "    let e: [int: int] = [:]\n    print(e.len())\n}\n"
     ),
     "map_value_semantics_cow": (
         # mutating a copy (write, remove, insert) must not affect the original.
         "#main\nfun main() {\n"
         "    var a = [1: 10, 2: 20]\n    var b = a\n"
-        "    b[1] = 99\n    remove(b, 2)\n    b[3] = 30\n"
-        "    print(a[1])\n    print(len(a))\n    print(b[1])\n    print(len(b))\n}\n"
+        "    b[1] = 99\n    b.remove(2)\n    b[3] = 30\n"
+        "    print(a[1])\n    print(a.len())\n    print(b[1])\n    print(b.len())\n}\n"
     ),
     "map_get_contains": (
         "fun probe(m: [int: int], k: int) -> int {\n"
@@ -225,7 +225,7 @@ PROGRAMS = {
         "#main\nfun main() {\n"
         "    let m = [1: 100, 2: 200]\n"
         "    print(probe(m, 1))\n    print(probe(m, 9))\n"
-        "    print(contains(m, 2))\n    print(contains(m, 7))\n}\n"
+        "    print(m.contains(2))\n    print(m.contains(7))\n}\n"
     ),
     "map_build_keys_and_for": (
         # grow past the load factor, then sum keys and values (order-independent).
@@ -234,24 +234,24 @@ PROGRAMS = {
         "    var i = 0\n    while i < n {\n        m[i] = i * i\n        i = i + 1\n    }\n"
         "    return m\n}\n"
         "#main\nfun main() {\n"
-        "    let m = make(50)\n    print(len(m))\n"
-        "    var ks = 0\n    for k in keys(m) {\n        ks = ks + k\n    }\n    print(ks)\n"
+        "    let m = make(50)\n    print(m.len())\n"
+        "    var ks = 0\n    for k in m.keys() {\n        ks = ks + k\n    }\n    print(ks)\n"
         "    var vs = 0\n    for k in m {\n        vs = vs + m[k]\n    }\n    print(vs)\n}\n"
     ),
     "map_remove_reinsert": (
         "#main\nfun main() {\n"
         "    var m = [1: 10, 2: 20, 3: 30]\n"
-        "    remove(m, 2)\n    remove(m, 999)\n"
-        "    print(len(m))\n    print(contains(m, 2))\n"
-        "    m[2] = 42\n    print(m[2])\n    print(len(m))\n}\n"
+        "    m.remove(2)\n    m.remove(999)\n"
+        "    print(m.len())\n    print(m.contains(2))\n"
+        "    m[2] = 42\n    print(m[2])\n    print(m.len())\n}\n"
     ),
     "map_of_lists_cow": (
         # heap-owning values retained/dropped correctly across copy and remove.
         "#main\nfun main() {\n"
         "    var m: [int: [int]] = [:]\n"
-        "    m[1] = [2, 3]\n    push(m[1], 4)\n"
-        "    var c = m\n    remove(c, 1)\n"
-        "    print(m[1][0])\n    print(m[1][2])\n    print(len(c))\n}\n"
+        "    m[1] = [2, 3]\n    m[1].push(4)\n"
+        "    var c = m\n    c.remove(1)\n"
+        "    print(m[1][0])\n    print(m[1][2])\n    print(c.len())\n}\n"
     ),
     "string_equality": (
         "#main\nfun main() {\n"
@@ -260,10 +260,10 @@ PROGRAMS = {
     ),
     # --- v0.3.5a strings: len, byte indexing, char literals ---
     "string_len_and_index": (
-        "fun blen(s: str) -> int {\n    return len(s)\n}\n"
+        "fun blen(s: str) -> int {\n    return s.len()\n}\n"
         "#main\nfun main() {\n"
         '    let s = "Myla"\n'
-        "    print(len(s))\n    print(s[0] as int)\n    print(s[3] as int)\n"
+        "    print(s.len())\n    print(s[0] as int)\n    print(s[3] as int)\n"
         '    print(blen(""))\n    print(blen("hello"))\n}\n'
     ),
     # --- v0.3.5b strings: concat + format ---
@@ -273,7 +273,7 @@ PROGRAMS = {
         "#main\nfun main() {\n"
         '    print(greet("Myla"))\n'
         '    print("a" + "b" + "c")\n'
-        '    let s = "foo" + "bar"\n    print(len(s))\n    print(s[3] as int)\n}\n'
+        '    let s = "foo" + "bar"\n    print(s.len())\n    print(s[3] as int)\n}\n'
     ),
     "string_format": (
         "#main\nfun main() {\n"
@@ -290,29 +290,29 @@ PROGRAMS = {
         "fun digits(n: int) -> str {\n"
         "    var sb = StringBuilder()\n"
         "    for i in 0..n {\n"
-        "        append_byte(sb, ('0' as int + i) as uint8)\n    }\n"
-        "    return build(sb)\n}\n"
+        "        sb.append_byte(('0' as int + i) as uint8)\n    }\n"
+        "    return sb.build()\n}\n"
         "#main\nfun main() {\n"
         "    var sb = StringBuilder()\n"
-        '    append(sb, "Hello")\n    append_byte(sb, \',\')\n'
-        '    append_byte(sb, \' \')\n    append(sb, "world")\n    append_byte(sb, \'!\')\n'
-        "    print(len(sb))\n    print(build(sb))\n"
+        '    sb.append("Hello")\n    sb.append_byte(\',\')\n'
+        '    sb.append_byte(\' \')\n    sb.append("world")\n    sb.append_byte(\'!\')\n'
+        "    print(sb.len())\n    print(sb.build())\n"
         "    print(digits(10))\n"
         # value semantics: a copy keeps building independently
-        "    var a = StringBuilder()\n    append(a, \"seed\")\n"
-        "    var b = a\n    append(b, \" more\")\n"
-        "    print(build(a))\n    print(build(b))\n}\n"
+        "    var a = StringBuilder()\n    a.append(\"seed\")\n"
+        "    var b = a\n    b.append(\" more\")\n"
+        "    print(a.build())\n    print(b.build())\n}\n"
     ),
     # MYLA-85: append(sb, s, start, end) appends a byte range
     "string_builder_append_range": (
         "fun field(line: str, n: int) -> str {\n"
         "    var start = 0\n    var k = 0\n    var i = 0\n"
-        "    while i <= len(line) {\n"
-        "        if i == len(line) || line[i] == ',' {\n"
+        "    while i <= line.len() {\n"
+        "        if i == line.len() || line[i] == ',' {\n"
         "            if k == n {\n"
         "                var sb = StringBuilder()\n"
-        "                append(sb, line, start, i)\n"
-        "                return build(sb)\n            }\n"
+        "                sb.append(line, start, i)\n"
+        "                return sb.build()\n            }\n"
         "            k = k + 1\n            start = i + 1\n        }\n"
         "        i = i + 1\n    }\n"
         "    return \"\"\n}\n"
@@ -320,14 +320,14 @@ PROGRAMS = {
         "    let line = \"alpha,,λ ö,omega\"\n"
         "    for n in 0..5 { print(format(\"[{}]\", field(line, n))) }\n"
         "    var sb = StringBuilder()\n"
-        "    append(sb, line, 0, 0)\n"
-        "    append(sb, line, len(line) - 5, len(line))\n"
-        "    append(sb, \"aö\", 0, 2)\n"
-        "    append(sb, \"aö\", 2, 3)\n"
-        "    let s = build(sb)\n"
-        "    print(s)\n    print(len(s))\n"
-        "    var copy = sb\n    append(copy, line, 0, 5)\n"
-        "    print(build(sb))\n    print(build(copy))\n}\n"
+        "    sb.append(line, 0, 0)\n"
+        "    sb.append(line, line.len() - 5, line.len())\n"
+        "    sb.append(\"aö\", 0, 2)\n"
+        "    sb.append(\"aö\", 2, 3)\n"
+        "    let s = sb.build()\n"
+        "    print(s)\n    print(s.len())\n"
+        "    var copy = sb\n    copy.append(line, 0, 5)\n"
+        "    print(sb.build())\n    print(copy.build())\n}\n"
     ),
     # MYLA-84: a const string made with `+` read inside a function: the
     # self-hosted backend evaluated the concatenation at each use, into a
@@ -361,7 +361,7 @@ PROGRAMS = {
         "fun apply(twice: (int32) -> int32, x: int32) -> int32 {\n    return twice(x)\n}\n"
         "#main\nfun main() {\n"
         "    if true {\n"
-        "        let fail = (m: str) => len(m)\n"
+        "        let fail = (m: str) => m.len()\n"
         "        print(fail(\"the closure\"))\n"
         "        let twice = (n: int32) => n + 100\n"
         "        print(twice(1))\n"
@@ -506,8 +506,8 @@ PROGRAMS = {
         "\n"
         "fun first_long(a: str, b: str, c: str) -> str {\n"
         "    for i in 0..3 {\n"
-        "        if i == 0 && len(a) > 3 { return a }\n"
-        "        if i == 1 && len(b) > 3 { return b }\n"
+        "        if i == 0 && a.len() > 3 { return a }\n"
+        "        if i == 1 && b.len() > 3 { return b }\n"
         "    }\n"
         "    return c\n"
         "}\n"
@@ -517,7 +517,7 @@ PROGRAMS = {
         "    var s = GREETING\n"
         '    s = s + ", " + "world"\n'
         "    print(s)\n"
-        "    print(len(s))\n"
+        "    print(s.len())\n"
         '    print(s == "hello, world")\n'
         "    print(s != GREETING)\n"
         '    let n = Named { name: "a", n: 1 }\n'
@@ -540,7 +540,7 @@ PROGRAMS = {
         "    var i = 0\n"
         "    while i < 4 {\n"
         "        let piece = describe(Token.Word(words))\n"
-        "        if len(piece) > 9 {\n"
+        "        if piece.len() > 9 {\n"
         "            break\n"
         "        }\n"
         '        words = words + "y"\n'
@@ -568,7 +568,7 @@ PROGRAMS = {
         "fun names(bag: Bag) -> [str] {\n"
         "    var out: [str] = []\n"
         "    for it in bag.items {\n"
-        '        push(out, it.name + "!")\n'
+        '        out.push(it.name + "!")\n'
         "    }\n"
         "    return out\n"
         "}\n"
@@ -582,17 +582,17 @@ PROGRAMS = {
         "\n"
         "impl Bag {\n"
         "    fun add(var self, name: str, qty: int) {\n"
-        "        push(self.items, Item { name: name, qty: qty })\n"
-        "        push(self.tags, name)\n"
+        "        self.items.push(Item { name: name, qty: qty })\n"
+        "        self.tags.push(name)\n"
         "    }\n"
         "}\n"
         "\n"
         "#main\n"
         "fun main() {\n"
         "    var xs = [3, 1, 4]\n"
-        "    push(xs, 1)\n"
-        "    push(xs, 5)\n"
-        "    print(len(xs))\n"
+        "    xs.push(1)\n"
+        "    xs.push(5)\n"
+        "    print(xs.len())\n"
         "    print(total(xs))\n"
         "    print(xs[2])\n"
         "    xs[2] = 40\n"
@@ -601,14 +601,14 @@ PROGRAMS = {
         "    xs[0] = 0\n"
         "    print(ys[0])\n"
         "    print(xs[0])\n"
-        "    print(pop(xs))\n"
-        "    print(len(xs))\n"
+        "    print(xs.pop())\n"
+        "    print(xs.len())\n"
         '    var bag = Bag { items: [], tags: ["start"] }\n'
         '    bag.add("apple", 2)\n'
         '    bag.add("pear", 5)\n'
         "    let ns = names(bag)\n"
         "    print(ns[0] + ns[1])\n"
-        "    print(len(bag.tags))\n"
+        "    print(bag.tags.len())\n"
         "    bag.items[1].qty = 9\n"
         "    print(bag.items[1].qty)\n"
         "    let copy = bag\n"
@@ -617,19 +617,19 @@ PROGRAMS = {
         "    print(bag.items[1].qty)\n"
         "    var grid = [[1, 2], [3]]\n"
         "    grid[1][0] = 30\n"
-        "    push(grid[0], 7)\n"
-        "    print(len(grid[0]) + grid[1][0])\n"
+        "    grid[0].push(7)\n"
+        "    print(grid[0].len() + grid[1][0])\n"
         '    let s = "hello"\n'
         "    print(s[1])\n"
         "    var words: [str] = []\n"
         "    var i = 0\n"
         "    while i < 5 {\n"
-        '        push(words, "w")\n'
+        '        words.push("w")\n'
         "        i = i + 1\n"
         "    }\n"
-        "    let last = pop(words)\n"
+        "    let last = words.pop()\n"
         "    print(last + words[0])\n"
-        "    print(len(words))\n"
+        "    print(words.len())\n"
         "}\n"
     ),
     # MYLA-105: maps, builders, chars and format through the IR: literals,
@@ -657,10 +657,10 @@ PROGRAMS = {
         "fun joined(parts: [str]) -> str {\n"
         "    var sb = StringBuilder()\n"
         "    for p in parts {\n"
-        "        if len(sb) > 0 { append_byte(sb, 44) }\n"
-        "        append(sb, p)\n"
+        "        if sb.len() > 0 { sb.append_byte(44) }\n"
+        "        sb.append(p)\n"
         "    }\n"
-        "    return build(sb)\n"
+        "    return sb.build()\n"
         "}\n"
         "\n"
         "#main\n"
@@ -668,18 +668,18 @@ PROGRAMS = {
         '    var m = ["a": 1, "b": 2]\n'
         '    m["c"] = 3\n'
         '    m["a"] = 10\n'
-        "    print(len(m))\n"
+        "    print(m.len())\n"
         '    print(m["a"] + m["c"])\n'
-        '    print(contains(m, "b"))\n'
+        '    print(m.contains("b"))\n'
         "    let saved = m\n"
-        '    remove(m, "b")\n'
-        '    print(contains(m, "b"))\n'
-        '    print(contains(saved, "b"))\n'
+        '    m.remove("b")\n'
+        '    print(m.contains("b"))\n'
+        '    print(saved.contains("b"))\n'
         "    print(count(m))\n"
         "    print(count(saved))\n"
         '    print(describe(m, "c"))\n'
         '    print(describe(m, "z"))\n'
-        "    print(len(keys(saved)))\n"
+        "    print(saved.keys().len())\n"
         '    var names: [int: str] = [1: "one"]\n'
         '    names[2] = "two"\n'
         '    names[1] = "uno" + "!"\n'
@@ -692,18 +692,18 @@ PROGRAMS = {
         '    print(pts["p"].x + old["p"].x)\n'
         '    print(pts["p"].label + old["p"].label)\n'
         '    var lists: [str: [int]] = ["xs": [1, 2]]\n'
-        '    push(lists["xs"], 3)\n'
+        '    lists["xs"].push(3)\n'
         '    lists["xs"][0] = 100\n'
-        '    print(lists["xs"][0] + len(lists["xs"]))\n'
+        '    print(lists["xs"][0] + lists["xs"].len())\n'
         '    print(joined(["x", "yy", "zzz"]))\n'
         "    var sb = StringBuilder()\n"
-        '    append(sb, "hello world", 6, 11)\n'
-        "    append_byte(sb, 33)\n"
-        "    let built = build(sb)\n"
+        '    sb.append("hello world", 6, 11)\n'
+        "    sb.append_byte(33)\n"
+        "    let built = sb.build()\n"
         "    print(built)\n"
-        "    print(len(sb))\n"
+        "    print(sb.len())\n"
         "    var vowels = 0\n"
-        '    for c in chars("héllo wörld") {\n'
+        '    for c in "héllo wörld".chars() {\n'
         "        if c == 'o' || c == 'ö' || c == 'é' { vowels = vowels + 1 }\n"
         "    }\n"
         "    print(vowels)\n"
@@ -711,7 +711,7 @@ PROGRAMS = {
         "    let ok = true\n"
         "    let ch = 'q'\n"
         '    print(f"{vowels} {f} {ok} {ch} {built}!")\n'
-        '    print(format("[{}|{}]", len(m), "s"))\n'
+        '    print(format("[{}|{}]", m.len(), "s"))\n'
         "}\n"
     ),
     # MYLA-105: recursive enums through the IR: boxed payloads, fields, list
@@ -730,7 +730,7 @@ PROGRAMS = {
         "    return match t {\n"
         "        Leaf(n) => n\n"
         "        Node(l, r) => sum(l) + sum(r)\n"
-        "        Named(s, inner) => len(s) + sum(inner)\n"
+        "        Named(s, inner) => s.len() + sum(inner)\n"
         "    }\n"
         "}\n"
         "\n"
@@ -766,15 +766,15 @@ PROGRAMS = {
         "    let before = h\n"
         "    h.tree = Tree.Node(h.tree, Tree.Leaf(6))\n"
         "    print(sum(h.tree) + sum(before.tree))\n"
-        "    push(h.spare, t)\n"
-        "    push(h.spare, Tree.Named(\"xyz\", Tree.Leaf(1)))\n"
+        "    h.spare.push(t)\n"
+        "    h.spare.push(Tree.Named(\"xyz\", Tree.Leaf(1)))\n"
         "    var total = 0\n"
         "    for s in h.spare {\n"
         "        total = total + sum(s)\n"
         "    }\n"
         "    print(total)\n"
-        "    let last = pop(h.spare)\n"
-        "    print(sum(last) + len(h.spare))\n"
+        "    let last = h.spare.pop()\n"
+        "    print(sum(last) + h.spare.len())\n"
         "    h.spare[0] = Tree.Leaf(42)\n"
         "    print(sum(h.spare[0]))\n"
         "    var forest = [\"a\": Tree.Leaf(2)]\n"
@@ -805,9 +805,9 @@ PROGRAMS = {
         "}\n"
         "\n"
         "fun parse_num(s: str) -> Result<int, str> {\n"
-        "    if len(s) == 0 { return Err(\"empty\") }\n"
+        "    if s.len() == 0 { return Err(\"empty\") }\n"
         "    var n = 0\n"
-        "    for c in chars(s) {\n"
+        "    for c in s.chars() {\n"
         "        if c < '0' || c > '9' { return Err(\"bad \" + s) }\n"
         "        n = n * 10 + ((c as int32) - 48)\n"
         "    }\n"
@@ -823,10 +823,10 @@ PROGRAMS = {
         "    var seen: [str] = []\n"
         "    var sum = 0\n"
         "    for p in parts {\n"
-        "        push(seen, p + \"!\")\n"
+        "        seen.push(p + \"!\")\n"
         "        sum = sum + pair(p)?.n\n"
         "    }\n"
-        "    return Ok(sum + len(seen))\n"
+        "    return Ok(sum + seen.len())\n"
         "}\n"
         "\n"
         "fun names(parts: [str]) -> Result<str, str> {\n"
@@ -953,7 +953,7 @@ PROGRAMS = {
         "    let h = make_adder(1) >> make_adder(10)\n"
         "    print(h(100))\n"
         "    var fs: [(int) -> int] = [inc, make_adder(5), (x: int) => x * 2]\n"
-        "    push(fs, h)\n"
+        "    fs.push(h)\n"
         "    print(apply_all(fs, 1))\n"
         "    print(fs[1](0))\n"
         "    let c = Counter { step: 2, apply: make_adder(7) }\n"
@@ -969,11 +969,11 @@ PROGRAMS = {
         "    var words: [str] = []\n"
         "    for i in 0..3 {\n"
         "        let w = make_greeter(f\"{i}:\")\n"
-        "        push(words, w(\"x\"))\n"
+        "        words.push(w(\"x\"))\n"
         "    }\n"
         "    print(words[2])\n"
         "    let big = [1, 2, 3]\n"
-        "    let s = (k: int) => big[k] + len(big)\n"
+        "    let s = (k: int) => big[k] + big.len()\n"
         "    print(s(2))\n"
         "    print(make_adder(20)(22))\n"
         "}\n"
@@ -1006,7 +1006,7 @@ PROGRAMS = {
         "    print(show(a > 1 && b == 0) + show(b > 1 || a == 0))\n"
         "    var flags: [bool] = []\n"
         "    for i in 0..4 {\n"
-        "        push(flags, i % 2 == 0 && i > 0)\n"
+        "        flags.push(i % 2 == 0 && i > 0)\n"
         "    }\n"
         "    print(flags[2])\n"
         "    print(flags[1] || flags[3])\n"
@@ -1083,7 +1083,7 @@ PROGRAMS = {
         "const TABLE: str = \"ab\" + \"cd\" + \"ef\"\n"
         "const N: int32 = 2 + 3\n"
         "fun at(i: int32) -> uint8 {\n    return TABLE[i]\n}\n"
-        "fun size() -> int32 {\n    return len(TABLE) + N\n}\n"
+        "fun size() -> int32 {\n    return TABLE.len() + N\n}\n"
         "#main\nfun main() {\n"
         "    var total = 0\n"
         "    for i in 0..100000 {\n"
@@ -1130,7 +1130,7 @@ PROGRAMS = {
         "    let c = load(ok)?\n"
         "    return Ok(c.a + c.e)\n}\n"
         "fun first(xs: [int]) -> Option<(int, int, int, int)> {\n"
-        "    if len(xs) == 0 { return None }\n"
+        "    if xs.len() == 0 { return None }\n"
         "    return Some((xs[0], 0, 0, 0))\n}\n"
         "fun head(xs: [int]) -> Option<int> {\n"
         "    let t = first(xs)?\n"
@@ -1149,7 +1149,7 @@ PROGRAMS = {
     "string_char_literals_and_match": (
         "fun count_byte(s: str, b: uint8) -> int {\n"
         "    var n = 0\n    var i = 0\n"
-        "    while i < len(s) {\n        if s[i] == b {\n            n = n + 1\n        }\n"
+        "    while i < s.len() {\n        if s[i] == b {\n            n = n + 1\n        }\n"
         "        i = i + 1\n    }\n    return n\n}\n"
         "fun vowel(c: uint8) -> int {\n"
         "    return match c {\n        'a' => 1,\n        'e' => 1,\n        _ => 0,\n    }\n}\n"
@@ -1488,12 +1488,12 @@ PROGRAMS = {
         # invisible to the captured snapshot.
         "#main\nfun main() {\n"
         "    var xs: [int] = []\n"
-        "    push(xs, 1)\n    push(xs, 2)\n"
+        "    xs.push(1)\n    xs.push(2)\n"
         "    let snapshot = (i: int) => xs[i]\n"
-        "    push(xs, 3)\n    xs[0] = 99\n"
+        "    xs.push(3)\n    xs[0] = 99\n"
         "    print(snapshot(0))\n"                      # 1
         "    print(snapshot(1))\n"                      # 2
-        "    print(len(xs))\n"                          # 3
+        "    print(xs.len())\n"                          # 3
         "    print(xs[0])\n}\n"                         # 99
     ),
     # --- v0.4.3 pipelines, composition & partial application ---
@@ -1644,16 +1644,16 @@ PROGRAMS = {
     "char_chars_iteration": (
         "fun vowels(s: str) -> int {\n"
         "    var n = 0\n"
-        "    for c in chars(s) {\n"
+        "    for c in s.chars() {\n"
         "        if c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u' {\n"
         "            n = n + 1\n        }\n    }\n    return n\n}\n"
         "#main\nfun main() {\n"
         "    let s = \"h\u00e9\u03bb\U0001f600w\u00f6\"\n"  # raw multibyte UTF-8
-        "    print(len(s))\n"                  # 1+2+2+4+1+2 = 12 bytes
-        "    print(len(chars(s)))\n"           # 6 scalars
-        "    for c in chars(s) { print(c as uint32) }\n"
+        "    print(s.len())\n"                  # 1+2+2+4+1+2 = 12 bytes
+        "    print(s.chars().len())\n"           # 6 scalars
+        "    for c in s.chars() { print(c as uint32) }\n"
         "    print(vowels(\"education\"))\n"   # 5
-        "    print(len(chars(\"\")))\n}\n"     # 0
+        "    print(\"\".chars().len())\n}\n"     # 0
     ),
     # MYLA-4: a mutating builtin evaluates its value argument before it touches
     # the container. A `?` that returns early from inside the argument must
@@ -1669,27 +1669,27 @@ PROGRAMS = {
         "    fun fill(var self, n: int) -> Result<int, str> {\n"
         "        var i = 0\n"
         "        while i < n {\n"
-        "            push(self.items, [upto(i, 2)?])\n"
+        "            self.items.push([upto(i, 2)?])\n"
         "            i = i + 1\n        }\n"
-        "        return Ok(len(self.items))\n    }\n}\n"
+        "        return Ok(self.items.len())\n    }\n}\n"
         "fun lists(n: int) -> Result<int, str> {\n"
         "    var xs: [[int]] = []\n"
-        "    for i in 0..n { push(xs, [upto(i, 2)?]) }\n"
-        "    return Ok(len(xs))\n}\n"
+        "    for i in 0..n { xs.push([upto(i, 2)?]) }\n"
+        "    return Ok(xs.len())\n}\n"
         "fun structs(n: int) -> Result<int, str> {\n"
         "    var ps: [P] = []\n"
-        "    for i in 0..n { push(ps, P { name: \"p\", tags: [upto(i, 2)?] }) }\n"
-        "    return Ok(len(ps))\n}\n"
+        "    for i in 0..n { ps.push(P { name: \"p\", tags: [upto(i, 2)?] }) }\n"
+        "    return Ok(ps.len())\n}\n"
         "fun trees(n: int) -> Result<int, str> {\n"
         "    var ts: [Tree] = []\n"
-        "    for i in 0..n { push(ts, Tree.Leaf(upto(i, 2)?)) }\n"
-        "    return Ok(len(ts))\n}\n"
+        "    for i in 0..n { ts.push(Tree.Leaf(upto(i, 2)?)) }\n"
+        "    return Ok(ts.len())\n}\n"
         "fun show(r: Result<int, str>) {\n"
         "    match r { Ok(k) => print(k), Err(e) => print(e) }\n}\n"
         "#main\nfun main() {\n"
         "    var b = Bag { items: [] }\n"
         "    show(b.fill(5))\n"
-        "    print(len(b.items))\n"            # 2: no half-pushed third item
+        "    print(b.items.len())\n"            # 2: no half-pushed third item
         "    show(lists(2))\n    show(lists(5))\n"
         "    show(structs(2))\n    show(structs(5))\n"
         "    show(trees(2))\n    show(trees(5))\n}\n"
@@ -1701,12 +1701,12 @@ PROGRAMS = {
         "impl Index {\n"
         "    fun fill(var self, n: int) -> Result<int, str> {\n"
         "        for i in 0..n { self.m[i] = [upto(i, 2)?] }\n"
-        "        return Ok(len(self.m))\n    }\n}\n"
+        "        return Ok(self.m.len())\n    }\n}\n"
         "#main\nfun main() {\n"
         "    var ix = Index { m: [:] }\n"
         "    match ix.fill(5) { Ok(k) => print(k), Err(e) => print(e) }\n"
-        "    print(len(ix.m))\n"
-        "    for k in keys(ix.m) { print(len(ix.m[k])) }\n}\n"
+        "    print(ix.m.len())\n"
+        "    for k in ix.m.keys() { print(ix.m[k].len()) }\n}\n"
     ),
     "try_inside_append_byte_leaves_the_builder_intact": (
         "struct Out { sb: StringBuilder }\n"
@@ -1714,22 +1714,22 @@ PROGRAMS = {
         "    if n >= limit { return Err(\"stop\") }\n    return Ok(n)\n}\n"
         "impl Out {\n"
         "    fun fill(var self, n: int) -> Result<int, str> {\n"
-        "        for i in 0..n { append_byte(self.sb, (65 + upto(i, 2)?) as uint8) }\n"
+        "        for i in 0..n { self.sb.append_byte((65 + upto(i, 2)?) as uint8) }\n"
         "        return Ok(n)\n    }\n}\n"
         "#main\nfun main() {\n"
         "    var o = Out { sb: StringBuilder() }\n"
         "    match o.fill(5) { Ok(k) => print(k), Err(e) => print(e) }\n"
-        "    print(build(o.sb))\n}\n"
+        "    print(o.sb.build())\n}\n"
     ),
     "push_evaluates_its_value_before_the_list": (
         "#main\nfun main() {\n"
         "    var xs = [1, 2, 3]\n"
-        "    push(xs, pop(xs) * 10)\n"         # [1, 2, 30]
-        "    print(len(xs))\n"
+        "    xs.push(xs.pop() * 10)\n"         # [1, 2, 30]
+        "    print(xs.len())\n"
         "    for x in xs { print(x) }\n"
         "    var m: [int: int] = [:]\n"
         "    m[1] = 5\n"
-        "    m[2] = len(m) * 100\n"            # the size before the insert
+        "    m[2] = m.len() * 100\n"            # the size before the insert
         "    print(m[2])\n}\n"
     ),
     # MYLA-72: `?` in a lambda is checked against the lambda's result type,
@@ -1738,7 +1738,7 @@ PROGRAMS = {
         "fun half(x: int) -> Option<int> {\n"
         "    if x % 2 == 1 { return None }\n    return Some(x / 2)\n}\n"
         "fun parse(s: str) -> Result<int, str> {\n"
-        "    if s == \"\" { return Err(\"empty\") }\n    return Ok(len(s))\n}\n"
+        "    if s == \"\" { return Err(\"empty\") }\n    return Ok(s.len())\n}\n"
         "fun apply(f: (int) -> Option<int>, x: int) -> int {\n"
         "    return match f(x) { Some(v) => v, None => -1 }\n}\n"
         "#main\nfun main() {\n"
@@ -1779,7 +1779,7 @@ PROGRAMS = {
         "    let p = P { x: 3.0f64, y: 4.0f32 }\n"
         "    print(hyp(p))\n"
         "    var xs: [float64] = [0.5f64, 1.25f64]\n"
-        "    push(xs, -2.0f64)\n"
+        "    xs.push(-2.0f64)\n"
         "    var total = 0.0f64\n"
         "    for x in xs { total = total + x }\n"
         "    print(total)\n"
@@ -1799,13 +1799,13 @@ PROGRAMS = {
         "    return match t {\n"
         "        Leaf(n) => n\n        Node(a, b) => count(a) + count(b)\n    }\n}\n"
         "fun make_adder(xs: [int]) -> (int) -> int {\n"
-        "    let k = len(xs)\n"
+        "    let k = xs.len()\n"
         "    return (i: int) => xs[i] + k\n}\n"
         "fun pick(xs: [int], i: int) -> int {\n    return xs[i]\n}\n"
         "fun double(x: int) -> int {\n    return x * 2\n}\n"
         "fun churn() {\n"                       # reuses freed cells, if any
         "    var big: [[int]] = []\n"
-        "    for i in 0..50 { push(big, [i, i, i, i, i, i]) }\n}\n"
+        "    for i in 0..50 { big.push([i, i, i, i, i, i]) }\n}\n"
         "#main\nfun main() {\n"
         "    var f = make_adder([10, 20, 30])\n"
         "    churn()\n"
@@ -1816,7 +1816,7 @@ PROGRAMS = {
         "    churn()\n"
         "    print(g(2))\n"
         "    var fs: [(int) -> int] = []\n"
-        "    push(fs, make_adder([4, 5]))\n"
+        "    fs.push(make_adder([4, 5]))\n"
         "    churn()\n"
         "    print(fs[0](0))\n"
         "    let h = make_adder([1, 1]) >> double\n"
@@ -1850,13 +1850,13 @@ PROGRAMS = {
         "    let (a, b) = pair()\n"
         "    print(show(a))\n    print(b)\n"
         "    let ((c, xs), s) = nested()\n"
-        "    print(show(c))\n    print(len(xs))\n    print(s)\n"
+        "    print(show(c))\n    print(xs.len())\n    print(s)\n"
         "    var keep: [[int]] = []\n"
         "    for i in 0..3 {\n"
         "        let (v, n) = (V.VI(i), [i, i])\n"
-        "        push(keep, n)\n"
+        "        keep.push(n)\n"
         "        print(show(v))\n    }\n"
-        "    print(len(keep[2]))\n}\n"
+        "    print(keep[2].len())\n}\n"
     ),
     "try_in_an_expression_lambda_returns_from_the_lambda": (
         # the interpreter let the `?` escape the lambda and return from its
@@ -1879,22 +1879,22 @@ PROGRAMS = {
         "enum Box { Full([int]), Empty }\n"
         "fun churn() {\n"                       # reuses freed cells, if any
         "    var big: [[int]] = []\n"
-        "    for i in 0..50 { push(big, [i, i, i, i]) }\n}\n"
+        "    for i in 0..50 { big.push([i, i, i, i]) }\n}\n"
         "#main\nfun main() {\n"
         "    var xs = [1]\n"
         "    match xs {\n"
         "        ys => {\n"
-        "            push(xs, 2)\n            push(xs, 3)\n"
-        "            push(xs, 4)\n            push(xs, 5)\n"
+        "            xs.push(2)\n            xs.push(3)\n"
+        "            xs.push(4)\n            xs.push(5)\n"
         "            churn()\n"
-        "            print(len(ys))\n"
+        "            print(ys.len())\n"
         "            print(ys[0])\n        }\n    }\n"
         "    var b = Bag { items: [1, 2], name: \"b\" }\n"
         "    match b {\n"
         "        Bag { items, name } => {\n"
         "            b.items = [9]\n"
         "            churn()\n"
-        "            print(len(items))\n"
+        "            print(items.len())\n"
         "            print(items[1])\n        }\n    }\n"
         "    var m: [int: int] = [1: 10]\n"
         "    match m {\n"
@@ -1902,15 +1902,15 @@ PROGRAMS = {
         "            m[2] = 20\n            m[3] = 30\n"
         "            m[4] = 40\n            m[5] = 50\n            m[6] = 60\n"
         "            churn()\n"
-        "            print(len(mm))\n        }\n    }\n"
+        "            print(mm.len())\n        }\n    }\n"
         "    var bx = Box.Full([7, 7, 7])\n"
         "    match bx {\n"
         "        Full(vs) => {\n"
         "            bx = Box.Empty\n"
         "            churn()\n"
-        "            print(len(vs))\n        },\n"
+        "            print(vs.len())\n        },\n"
         "        Empty => print(0),\n    }\n"
-        "    print(len(xs))\n}\n"
+        "    print(xs.len())\n}\n"
     ),
     # MYLA-3: a heap-owning aggregate can be assigned to any place; the new
     # value is taken before the old one is released.
@@ -1921,19 +1921,19 @@ PROGRAMS = {
         "#main\nfun main() {\n"
         "    var o = Outer { inner: Inner { xs: [1] }, tag: 1 }\n"
         "    o.inner = Inner { xs: [2, 3] }\n"
-        "    print(len(o.inner.xs))\n"
+        "    print(o.inner.xs.len())\n"
         "    var d = Deep { outer: o }\n"
         "    d.outer.inner = Inner { xs: [4, 5, 6] }\n"
-        "    print(len(d.outer.inner.xs))\n"
-        "    print(len(o.inner.xs))\n"          # value semantics: still 2
+        "    print(d.outer.inner.xs.len())\n"
+        "    print(o.inner.xs.len())\n"          # value semantics: still 2
         "    var os = [o, o]\n"
         "    os[1].inner = Inner { xs: [7, 7, 7, 7] }\n"
-        "    print(len(os[0].inner.xs))\n"
-        "    print(len(os[1].inner.xs))\n"
+        "    print(os[0].inner.xs.len())\n"
+        "    print(os[1].inner.xs.len())\n"
         "    var m: [int: Outer] = [1: o]\n"
         "    m[1].inner = Inner { xs: [8] }\n"
-        "    print(len(m[1].inner.xs))\n"
-        "    print(len(o.inner.xs))\n}\n"
+        "    print(m[1].inner.xs.len())\n"
+        "    print(o.inner.xs.len())\n}\n"
     ),
     "assign_to_a_field_of_a_shared_element_copies_it": (
         # value semantics: writing a field through a list element or map value
@@ -1948,7 +1948,7 @@ PROGRAMS = {
         "    print(a[0].x)\n"
         "    print(b[0].x)\n"
         "    b[0].ys = [4, 4]\n"
-        "    print(len(a[0].ys))\n"
+        "    print(a[0].ys.len())\n"
         "    var m: [int: P] = [1: P { x: 1, ys: [] }]\n"
         "    var m2 = m\n"
         "    m2[1].x = 7\n"
@@ -1965,7 +1965,7 @@ PROGRAMS = {
         # borrower may still read it after the new owner lets it go
         "fun churn() {\n"                       # reuses freed cells, if any
         "    var big: [str] = []\n"
-        "    for i in 0..50 { push(big, f\"cell {i}\") }\n}\n"
+        "    for i in 0..50 { big.push(f\"cell {i}\") }\n}\n"
         "fun lets() {\n"
         "    let s = \"a\" + \"b\"\n"
         "    let n = s\n"
@@ -2048,7 +2048,7 @@ PROGRAMS = {
         "}\n"
         "\n"
         "fun total(xs: [int], i: int, acc: int) -> int {\n"
-        "    if i == len(xs) { return acc }\n"
+        "    if i == xs.len() { return acc }\n"
         "    become total(xs, i + 1, acc + xs[i])\n"
         "}\n"
         "\n"
@@ -2062,7 +2062,7 @@ PROGRAMS = {
         "}\n"
         "\n"
         "fun last<T>(xs: [T], i: int) -> T {\n"
-        "    if i + 1 == len(xs) { return xs[i] }\n"
+        "    if i + 1 == xs.len() { return xs[i] }\n"
         "    become last(xs, i + 1)\n"
         "}\n"
         "\n"
@@ -2110,10 +2110,10 @@ PROGRAMS = {
         "    print(p.b)\n"
         "    print(spread(deep, 0))\n"
         "    var xs: [int] = []\n"
-        "    for i in 0..1000 { push(xs, i % 7) }\n"
+        "    for i in 0..1000 { xs.push(i % 7) }\n"
         "    print(total(xs, 0, 0))\n"
         "    print(via(total, xs))\n"
-        "    print(len(label(1000, \"\")))\n"
+        "    print(label(1000, \"\").len())\n"
         "    print(last([\"a\", \"b\", \"c\"], 0))\n"
         "    print(relay(\"ab\" + \"c\", deep))\n"
         "    print(pick(Pair { a: 4, b: 2 }, deep))\n"
@@ -2163,7 +2163,7 @@ PROGRAMS = {
         "fun grow(t: Named, n: int) -> Named {\n"
         "    if n == 0 { return t }\n"
         "    var steps = t.steps\n"
-        "    push(steps, n)\n"
+        "    steps.push(n)\n"
         "    become grow(Named { name: t.name + \".\", steps: steps }, n - 1)\n"
         "}\n"
         "\n"
@@ -2203,10 +2203,10 @@ PROGRAMS = {
         "    print(p.x + p.y)\n"
         "    let r = rename(Named { name: \"r\" + \"s\", steps: [1, 2] }, deep)\n"
         "    print(r.name)\n"
-        "    print(len(r.steps))\n"
+        "    print(r.steps.len())\n"
         "    let g = grow(Named { name: \"n\", steps: [] }, 1000)\n"
-        "    print(len(g.name))\n"
-        "    print(len(g.steps))\n"
+        "    print(g.name.len())\n"
+        "    print(g.steps.len())\n"
         "    print(pair_sum((0, Pos { x: 0, y: 0 }), deep))\n"
         "    print(echo(Pos { x: 4, y: 5 }, deep).y)\n"
         "    print(echo(\"text\" + \"!\", deep))\n"
@@ -2274,7 +2274,7 @@ PROGRAMS = {
         "    for n in 0..40 { m[word(n, \"x\")] = n }\n"
         "    var total = 0\n"
         "    for n in 0..40 { total = total + m[word(n, \"x\")] }\n"
-        "    print(len(m))\n"
+        "    print(m.len())\n"
         "    print(total)\n"
         "    var ids: [int64: int] = [:]\n"
         "    var big: int64 = 1\n"
@@ -2283,7 +2283,7 @@ PROGRAMS = {
         "        ids[0 - big] = i\n"
         "        big = big * 2\n"
         "    }\n"
-        "    print(len(ids))\n"
+        "    print(ids.len())\n"
         "    print(ids[1i64 << 40] + ids[0 - (1i64 << 59)])\n"
         "    let l = Light.Green\n"
         "    print(l == Light.Green)\n"
@@ -2298,7 +2298,7 @@ PROGRAMS = {
         "impl C {\n"
         "    fun bump(var self, by: int) -> int {\n"
         "        self.n = self.n + by\n"
-        "        push(self.tags, \"t\")\n"
+        "        self.tags.push(\"t\")\n"
         "        return self.n\n"
         "    }\n"
         "}\n"
@@ -2308,7 +2308,7 @@ PROGRAMS = {
         "    let copy = cs\n"
         "    print(cs[1].bump(10))\n"
         "    print(copy[1].n)\n"
-        "    print(len(copy[1].tags))\n"
+        "    print(copy[1].tags.len())\n"
         "    var b = Board { rows: [C { n: 5, tags: [] }], name: \"b\" }\n"
         "    let b2 = b\n"
         "    print(b.rows[0].bump(1))\n"
@@ -2336,23 +2336,23 @@ PROGRAMS = {
         "        self.xs = [9]\n"
         "        churn()\n"
         "        print(other.name)\n"
-        "        print(len(other.xs))\n"
+        "        print(other.xs.len())\n"
         "    }\n"
         "    fun keep(var self, xs: [int]) {\n"
-        "        push(self.xs, 5)\n"
-        "        print(len(xs))\n"
+        "        self.xs.push(5)\n"
+        "        print(xs.len())\n"
         "    }\n"
         "}\n"
         "fun churn() {\n"                       # reuses freed cells, if any
         "    var big: [str] = []\n"
-        "    for i in 0..50 { push(big, f\"cell {i}\") }\n}\n"
+        "    for i in 0..50 { big.push(f\"cell {i}\") }\n}\n"
         "#main\nfun main() {\n"
         "    var b = B { name: \"a\" + \"b\", xs: [1, 2] }\n"
         "    b.rename(b.name)\n"
         "    b.swap(b)\n"
         "    b.keep(b.xs)\n"
         "    print(b.name)\n"
-        "    print(len(b.xs))\n"
+        "    print(b.xs.len())\n"
         "    var bs = [B { name: \"c\" + \"d\", xs: [] }]\n"
         "    bs[0].rename(bs[0].name)\n}\n"
     ),
@@ -2397,16 +2397,16 @@ PROGRAMS = {
         "struct Outer { inner: Inner }\n"
         "fun churn() {\n"                       # reuses freed cells, if any
         "    var big: [[int]] = []\n"
-        "    for i in 0..50 { push(big, [i, i, i, i]) }\n}\n"
+        "    for i in 0..50 { big.push([i, i, i, i]) }\n}\n"
         "#main\nfun main() {\n"
         "    var p = Inner { xs: [9, 9, 9] }\n"
         "    p = p\n"
         "    churn()\n"
-        "    print(len(p.xs))\n"
+        "    print(p.xs.len())\n"
         "    var o = Outer { inner: Inner { xs: [1, 2] } }\n"
         "    o.inner = o.inner\n"
         "    churn()\n"
-        "    print(len(o.inner.xs))\n}\n"
+        "    print(o.inner.xs.len())\n}\n"
     ),
     "assign_replaces_map_and_builder_elements": (
         # replacing an element releases the old one with its own type's drop
@@ -2415,18 +2415,18 @@ PROGRAMS = {
         "#main\nfun main() {\n"
         "    var ms: [[int: int]] = [[1: 2]]\n"
         "    ms[0] = [3: 4, 5: 6]\n"
-        "    print(len(ms[0]))\n"
+        "    print(ms[0].len())\n"
         "    var bs = [StringBuilder()]\n"
         "    bs[0] = StringBuilder()\n"
-        "    append(bs[0], \"hi\")\n"
-        "    print(build(bs[0]))\n"
+        "    bs[0].append(\"hi\")\n"
+        "    print(bs[0].build())\n"
         # the new value is taken before the old one is released, so a struct
         # assigned to its own slot keeps its list alive
         "    var ps = [P { tags: [7, 8] }]\n"
         "    ps[0] = ps[0]\n"
         "    var big: [int] = []\n"
-        "    for i in 0..64 { push(big, i) }\n"   # reuses a freed cell, if any
-        "    print(len(ps[0].tags))\n"
+        "    for i in 0..64 { big.push(i) }\n"   # reuses a freed cell, if any
+        "    print(ps[0].tags.len())\n"
         "    print(ps[0].tags[1])\n}\n"
     ),
     # const references fold to the referenced value; unary operators fold (MYLA-27)
@@ -2582,10 +2582,10 @@ PROGRAMS = {
         "    var pp = P { x: 0, y: 0 }\n"
         "    pp.x = f(61)\n"
         "    print(\"-- builtins\")\n"
-        "    push(xs, f(62))\n"
-        "    let z = contains(ms, s(\"s9\"))\n"
+        "    xs.push(f(62))\n"
+        "    let z = ms.contains(s(\"s9\"))\n"
         "    var sb = StringBuilder()\n"
-        "    append(sb, s(\"s10\"))\n"
+        "    sb.append(s(\"s10\"))\n"
         "    for ii in f(63)..f(65) {\n"
         "        print(ii)\n"
         "    }\n"
@@ -2593,7 +2593,7 @@ PROGRAMS = {
         "    print(a + b + l + o + o2 + n + w + w2 + y + y2 + y3 + y4 + k + k2)\n"
         "    print(m.x + n2.x + j.x + q.x + q2.y + r[0] + t.0 + u[\"k1\"] + pp.x)\n"
         "    print(c && d && e2 && h2 && i && z)\n"
-        "    print(e + x + x2 + build(sb))\n"
+        "    print(e + x + x2 + sb.build())\n"
         "    print(h)\n"
         "    print(w3)\n"
         "    match v {\n"
@@ -2767,7 +2767,7 @@ PROGRAMS = {
         "    let p2 = Pair { x: A { s: \"three\", v: 3 }, y: B_C { v: 4 } }\n"
         "    print(first(p1).v + first(p2).v)\n"
         "    let inc = ident((a: int) => a + 1)\n"
-        "    let size = ident((s: str) => len(s))\n"
+        "    let size = ident((s: str) => s.len())\n"
         "    print(inc(41))\n"
         "    print(size(\"four\"))\n"
         "    print(call((a: int) => a, \"int to int\"))\n"
@@ -2784,7 +2784,7 @@ PROGRAMS = {
         "\n"
         "fun main() {\n"
         "    let m = [1: Some(2), 3: None]\n"
-        "    print(len(m))\n"
+        "    print(m.len())\n"
         "    match m[1] {\n"
         "        Some(n) => print(n),\n"
         "        None => print(0),\n"
@@ -2906,16 +2906,16 @@ PROGRAMS = {
         'fun main() {\n'
         '    var a = ["x": [1, 2], "y": [3]]\n'
         '    var b = a\n'
-        '    remove(b, "x")\n'
-        '    print(len(a))\n'
-        '    print(contains(a, "x"))\n'
-        '    print(len(b))\n'
-        '    print(len(a["x"]))\n'
+        '    b.remove("x")\n'
+        '    print(a.len())\n'
+        '    print(a.contains("x"))\n'
+        '    print(b.len())\n'
+        '    print(a["x"].len())\n'
         '    var c = a\n'
-        '    remove(c, "y")\n'
-        '    remove(c, "nope")\n'
-        '    print(len(c))\n'
-        '    print(len(a))\n'
+        '    c.remove("y")\n'
+        '    c.remove("nope")\n'
+        '    print(c.len())\n'
+        '    print(a.len())\n'
         '}\n'
     ),
     # partial application of functions, methods and function values with
@@ -3012,9 +3012,9 @@ PROGRAMS = {
         "#main\nfun main() {\n"
         "    var m: [int: int] = [:]\n    var r = 0\n"
         "    while r < 1000 {\n        m[r] = r\n"
-        "        if len(m) > 5 {\n            for k in keys(m) {\n                remove(m, k)\n            }\n        }\n"
+        "        if m.len() > 5 {\n            for k in m.keys() {\n                m.remove(k)\n            }\n        }\n"
         "        r = r + 1\n    }\n"
-        "    print(len(m))\n    print(contains(m, 3))\n    print(m[999])\n}\n"
+        "    print(m.len())\n    print(m.contains(3))\n    print(m[999])\n}\n"
     ),
     "pop_a_boxed_enum": (
         # a list of a recursive enum holds boxes; `pop` copies the value out of
@@ -3023,15 +3023,15 @@ PROGRAMS = {
         "enum T {\n    Leaf(int),\n    Node(T, [T]),\n}\n"
         "fun show(t: T) -> str {\n"
         "    return match t {\n        T.Leaf(n) => f\"leaf {n}\",\n"
-        "        T.Node(l, kids) => f\"node({show(l)}, {len(kids)} kids)\",\n    }\n}\n"
+        "        T.Node(l, kids) => f\"node({show(l)}, {kids.len()} kids)\",\n    }\n}\n"
         "struct Stack { items: [T] }\n"
-        "impl Stack {\n    fun take(var self) -> T {\n        return pop(self.items)\n    }\n}\n"
+        "impl Stack {\n    fun take(var self) -> T {\n        return self.items.pop()\n    }\n}\n"
         "#main\nfun main() {\n"
         "    var xs: [T] = [T.Leaf(1), T.Node(T.Leaf(2), [T.Leaf(3)]), T.Leaf(4)]\n"
-        "    let a = pop(xs)\n    print(show(a))\n"
-        "    print(show(pop(xs)))\n"
+        "    let a = xs.pop()\n    print(show(a))\n"
+        "    print(show(xs.pop()))\n"
         "    var s = Stack { items: xs }\n    print(show(s.take()))\n"
-        "    print(len(s.items))\n    print(len(xs))\n}\n"
+        "    print(s.items.len())\n    print(xs.len())\n}\n"
     ),
 }
 
@@ -3085,8 +3085,8 @@ STRESS_TRY_IN_LITERAL_SRC = (
     "    let m = [\"a\": pad + f\"{i}\", \"b\": fails(i)?]\n    return Ok(m)\n}\n"
     "#main\nfun main() {\n"
     "    var sb = StringBuilder()\n"
-    "    for i in 0..1000 {\n        append(sb, \"x\")\n    }\n"
-    "    let pad = build(sb)\n"
+    "    for i in 0..1000 {\n        sb.append(\"x\")\n    }\n"
+    "    let pad = sb.build()\n"
     "    var errs = 0\n"
     "    for k in 0..600000 {\n"
     "        match in_list(k, pad) { Ok(_) => { } Err(_) => { errs = errs + 1 } }\n"
@@ -3161,8 +3161,8 @@ STRESS_BOXED_MEMBERS_SRC = (
         "        h.tree = grow(5)\n"
         "        h.spare[0] = grow(5)\n"
         "        forest[\"k\"] = grow(5)\n"
-        "        push(h.spare, grow(5))\n"
-        "        let t = pop(h.spare)\n"
+        "        h.spare.push(grow(5))\n"
+        "        let t = h.spare.pop()\n"
         "        total = total + sum(h.tree) + sum(h.spare[0]) + sum(forest[\"k\"]) + sum(t)\n"
         "        i = i + 1\n"
         "    }\n"
@@ -3194,7 +3194,7 @@ STRESS_STR_OWNERSHIP_SRC = (
         "    return match s {\n"
         '        "a" => 1,\n'
         '        "xyy" => 2,\n'
-        "        _ => len(s),\n"
+        "        _ => s.len(),\n"
         "    }\n"
         "}\n"
         "\n"
@@ -3205,10 +3205,10 @@ STRESS_STR_OWNERSHIP_SRC = (
         "    while k < 300000 {\n"
         '        let p = Person { name: "n" + "m", tag: pick(k % 10) }\n'
         "        let g = greet(p)\n"
-        "        total = total + len(g) + len(p.tag) + label(p.tag)\n"
+        "        total = total + g.len() + p.tag.len() + label(p.tag)\n"
         "        var w = p.name\n"
         "        w = w + w\n"
-        "        if len(w) > 100 {\n"
+        "        if w.len() > 100 {\n"
         "            break\n"
         "        }\n"
         "        k = k + 1\n"
@@ -3228,15 +3228,15 @@ STRESS_LIST_SRC = (
     "    var t = 0\n    for x in xs {\n        t = t + x\n    }\n    return t\n}\n"
     "fun make(n: int) -> [int] {\n"
     "    var out: [int] = []\n"
-    "    for i in 0..n {\n        push(out, i)\n    }\n    return out\n}\n"
+    "    for i in 0..n {\n        out.push(i)\n    }\n    return out\n}\n"
     "#main\nfun main() {\n"
     "    var acc = 0\n"
     "    for r in 0..200000 {\n"
     "        let xs = make(20)\n"          # fresh list each iteration (grows, drops)
     "        var ys = xs\n"                 # share -> CoW on next write
     "        ys[0] = 5\n"                   # forces a clone of the shared buffer
-    "        push(ys, 99)\n"
-    "        let dropped = pop(ys)\n"
+    "        ys.push(99)\n"
+    "        let dropped = ys.pop()\n"
     "        acc = acc + sum(xs) - sum(xs)\n"  # net 0, but keeps xs live
     "    }\n"
     "    print(acc)\n}\n"
@@ -3261,8 +3261,8 @@ STRESS_MAP_SRC = (
     "        var m = make(20)\n"          # fresh map each iteration (grows, drops)
     "        var c = m\n"                  # share -> CoW on next write
     "        c[0] = [7]\n"                 # forces a clone of the shared table
-    "        remove(c, 1)\n"               # rebuild deletion (alloc + value move)
-    "        acc = acc + len(m) - len(m)\n"  # net 0, but keeps m live
+    "        c.remove(1)\n"               # rebuild deletion (alloc + value move)
+    "        acc = acc + m.len() - m.len()\n"  # net 0, but keeps m live
     "    }\n"
     "    print(acc)\n}\n"
 )
@@ -3276,8 +3276,8 @@ STRESS_MAP_REMOVE_SRC = (
     "    var total = 0\n"
     "    for r in 0..600000 {\n"
     "        m[r % 7] = [r, r, r, r, r, r, r, r]\n"
-    "        remove(m, (r + 3) % 7)\n"
-    "        total = total + len(m)\n"
+    "        m.remove((r + 3) % 7)\n"
+    "        total = total + m.len()\n"
     "    }\n"
     "    print(total)\n}\n"
 )
@@ -3291,15 +3291,15 @@ STRESS_MAP_REMOVE_SRC = (
 STRESS_SB_SRC = (
     "fun make(n: int) -> StringBuilder {\n"
     "    var sb = StringBuilder()\n"
-    "    var i = 0\n    while i < n {\n        append(sb, \"abcde\")\n"
+    "    var i = 0\n    while i < n {\n        sb.append(\"abcde\")\n"
     "        i = i + 1\n    }\n    return sb\n}\n"
     "#main\nfun main() {\n"
     "    var acc = 0\n"
     "    for r in 0..200000 {\n"
     "        var sb = make(8)\n"            # fresh builder each iteration (grows)
     "        var c = sb\n"                   # share -> CoW on next write
-    "        append(c, \"Z\")\n"             # clones the shared buffer, may grow
-    "        acc = acc + len(sb) - len(sb)\n"  # net 0, but keeps sb live
+    "        c.append(\"Z\")\n"             # clones the shared buffer, may grow
+    "        acc = acc + sb.len() - sb.len()\n"  # net 0, but keeps sb live
     "    }\n"
     "    print(acc)\n}\n"
 )
@@ -3316,8 +3316,8 @@ STRESS_CLOSURE_SRC = (
     "    for r in 0..300000 {\n"
     "        var fns: [(int) -> int] = []\n"
     "        let cap = r\n"
-    "        push(fns, (n: int) => n + cap)\n"
-    "        push(fns, (n: int) => n + cap + 1)\n"
+    "        fns.push((n: int) => n + cap)\n"
+    "        fns.push((n: int) => n + cap + 1)\n"
     "        acc = acc + fns[0](0) + fns[1](0) - (2 * r + 1)\n"
     "    }\n"
     "    print(acc)\n}\n"
@@ -3352,7 +3352,7 @@ STRESS_TRAIT_DISPATCH_SRC = (
     "struct Bag { items: [int] }\n"
     "impl Add for Bag {\n"
     "    fun add(self, other: Bag) -> Bag {\n"
-    "        var r = self.items\n        for x in other.items { push(r, x) }\n"
+    "        var r = self.items\n        for x in other.items { r.push(x) }\n"
     "        return Bag { items: r }\n    }\n}\n"
     "fun total<T: Add>(xs: [T], zero: T) -> T {\n"
     "    var acc = zero\n    for x in xs { acc = acc + x }\n    return acc\n}\n"
@@ -3362,7 +3362,7 @@ STRESS_TRAIT_DISPATCH_SRC = (
     "        let a = Bag { items: [r, r] }\n"
     "        let b = Bag { items: [r] }\n"
     "        let c = total([a, b], Bag { items: [] })\n"
-    "        checksum = checksum + len(c.items)\n"
+    "        checksum = checksum + c.items.len()\n"
     "    }\n    print(checksum)\n}\n"
 )
 
@@ -3378,15 +3378,15 @@ STRESS_TRY_AFTER_STAGED_VALUE_SRC = (
     "fun by_key(i: int) -> Result<int, str> {\n"
     "    var m: [int: [int]] = [:]\n"
     f"    m[fail(i)?] = {_BIG_LIST}\n"
-    "    return Ok(len(m))\n}\n"
+    "    return Ok(m.len())\n}\n"
     "fun by_index(i: int) -> Result<int, str> {\n"
     "    var xs: [[int]] = [[]]\n"
     f"    xs[fail(i)?] = {_BIG_LIST}\n"
-    "    return Ok(len(xs))\n}\n"
+    "    return Ok(xs.len())\n}\n"
     "fun by_holder(i: int) -> Result<int, str> {\n"
     "    var xss: [[[int]]] = [[]]\n"
     f"    push(xss[fail(i)?], {_BIG_LIST})\n"
-    "    return Ok(len(xss))\n}\n"
+    "    return Ok(xss.len())\n}\n"
     "#main\nfun main() {\n"
     "    var fails = 0\n"
     "    for i in 0..2500000 {\n"
@@ -3413,17 +3413,17 @@ STRESS_STR_SRC = (
     "        let b = a + \"-\" + a\n"
     "        let c = Named { name: b, n: r }\n"
     "        var xs = [c.name, a]\n"
-    "        push(xs, f\"{r}:{c.n}\")\n"
+    "        xs.push(f\"{r}:{c.n}\")\n"
     "        let key = f\"k{r}\"\n"
-    "        m[key] = len(b)\n"
+    "        m[key] = b.len()\n"
     "        let v = m[key]\n"
-    "        if len(m) > 50 {\n"
-    "            for k in keys(m) {\n                remove(m, k)\n            }\n"
+    "        if m.len() > 50 {\n"
+    "            for k in m.keys() {\n                m.remove(k)\n            }\n"
     "        }\n"
     "        var sb = StringBuilder()\n"
-    "        append(sb, b)\n"
-    "        let built = build(sb)\n"
-    "        total = total + len(xs) + len(built) - v\n"
+    "        sb.append(b)\n"
+    "        let built = sb.build()\n"
+    "        total = total + xs.len() + built.len() - v\n"
     "    }\n"
     "    print(total)\n}\n"
 )
@@ -3435,18 +3435,18 @@ STRESS_STR_SRC = (
 # dropped list) (MYLA-74).
 STRESS_CONDITION_TEMPS_SRC = (
     "fun make(n: int) -> [int] {\n"
-    "    var out: [int] = []\n    for i in 0..n {\n        push(out, i)\n    }\n    return out\n}\n"
-    "fun nonempty(xs: [int]) -> bool {\n    return len(xs) > 0\n}\n"
+    "    var out: [int] = []\n    for i in 0..n {\n        out.push(i)\n    }\n    return out\n}\n"
+    "fun nonempty(xs: [int]) -> bool {\n    return xs.len() > 0\n}\n"
     "#main\nfun main() {\n"
     "    var acc = 0\n"
     "    for r in 0..600000 {\n"
     "        if nonempty(make(200)) {\n            acc = acc + 1\n        }\n"
     "        var k = 0\n"
-    "        while k < len(make(30)) {\n            k = k + 10\n        }\n"
-    "        for i in 0..len(make(100)) - 99 {\n            acc = acc + k\n        }\n"
+    "        while k < make(30).len() {\n            k = k + 10\n        }\n"
+    "        for i in 0..make(100).len() - 99 {\n            acc = acc + k\n        }\n"
     "        match r {\n            x if nonempty(make(50)) => {\n                acc = acc + 1\n            },\n            _ => {},\n        }\n"
     "        if r % 2 == 0 && nonempty(make(20)) {\n            acc = acc + 1\n        }\n"
-    "        let b = r % 3 == 0 || len(make(10)) > 5\n"
+    "        let b = r % 3 == 0 || make(10).len() > 5\n"
     "        if b {\n            acc = acc + 1\n        }\n"
     "    }\n"
     "    print(acc)\n}\n"
@@ -3458,9 +3458,9 @@ STRESS_CONDITION_TEMPS_SRC = (
 # alive and exhausts the arena (MYLA-74).
 STRESS_MATCH_EARLY_EXIT_SRC = (
     "fun make(n: int) -> [int] {\n"
-    "    var out: [int] = []\n    for i in 0..n {\n        push(out, i)\n    }\n    return out\n}\n"
+    "    var out: [int] = []\n    for i in 0..n {\n        out.push(i)\n    }\n    return out\n}\n"
     "fun find(xs: [[int]], i: int) -> Option<[int]> {\n"
-    "    if i < len(xs) {\n        return Some(xs[i])\n    }\n    return None\n}\n"
+    "    if i < xs.len() {\n        return Some(xs[i])\n    }\n    return None\n}\n"
     "fun first(xs: [[int]]) -> [int] {\n"
     "    match find(xs, 0) {\n        Some(v) => {\n            return v\n        },\n        None => {},\n    }\n"
     "    return []\n}\n"
@@ -3470,8 +3470,8 @@ STRESS_MATCH_EARLY_EXIT_SRC = (
     "        match find(xs, i) {\n"
     "            Some(v) => {\n"
     "                i = i + 1\n"
-    "                if len(v) == 100 {\n                    continue\n                }\n"
-    "                n = n + len(v)\n"
+    "                if v.len() == 100 {\n                    continue\n                }\n"
+    "                n = n + v.len()\n"
     "            },\n"
     "            None => {\n                break\n            },\n"
     "        }\n"
@@ -3481,7 +3481,7 @@ STRESS_MATCH_EARLY_EXIT_SRC = (
     "    var acc = 0\n"
     "    for r in 0..600000 {\n"
     "        let xs = [make(200), make(100), make(50)]\n"
-    "        acc = acc + len(first(xs)) + total(xs)\n"
+    "        acc = acc + first(xs).len() + total(xs)\n"
     "    }\n"
     "    print(acc)\n}\n"
 )
@@ -3496,14 +3496,14 @@ STRESS_MATCH_RESULT_SRC = (
     "fun items(b: Box) -> [int] {\n"
     "    return match b {\n        Box.Full(xs) => xs,\n        Box.Empty => [],\n    }\n}\n"
     "fun make(n: int) -> [int] {\n"
-    "    var out: [int] = []\n    for i in 0..n {\n        push(out, i)\n    }\n    return out\n}\n"
+    "    var out: [int] = []\n    for i in 0..n {\n        out.push(i)\n    }\n    return out\n}\n"
     "#main\nfun main() {\n"
     "    var acc = 0\n"
     "    for r in 0..600000 {\n"
     "        let b = Box.Full(make(200))\n"
     "        let xs = items(b)\n"
     "        let ys = match b {\n            Box.Full(zs) => zs,\n            Box.Empty => xs,\n        }\n"
-    "        acc = acc + len(xs) + len(ys) - len(match b {\n            Box.Full(ws) => ws,\n            Box.Empty => xs,\n        })\n"
+    "        acc = acc + xs.len() + ys.len() - (match b {\n            Box.Full(ws) => ws,\n            Box.Empty => xs,\n        }).len()\n"
     "    }\n"
     "    print(acc)\n}\n"
 )
@@ -3520,16 +3520,16 @@ STRESS_FRAGMENTED_FREE_SRC = (
     "    var i = 0\n"
     "    while i < 8000 {\n"
     "        m[i] = i\n"
-    "        let ks = keys(m)\n"
+    "        let ks = m.keys()\n"
     "        i = i + 1\n"
     "    }\n"
     "    var keep: [[int]] = []\n"
     "    var j = 0\n"
     "    while j < 30000 {\n"
-    "        push(keep, [j, j])\n"
+    "        keep.push([j, j])\n"
     "        j = j + 1\n"
     "    }\n"
-    "    print(len(keep) + len(m))\n}\n"
+    "    print(keep.len() + m.len())\n}\n"
 )
 
 STRESS_LARGE_SIZES_SRC = (
@@ -3540,14 +3540,14 @@ STRESS_LARGE_SIZES_SRC = (
     # growing with every check).
     "#main\nfun main() {\n"
     "    var sb = StringBuilder()\n"
-    "    for k in 0..170000 { append_byte(sb, 'x') }\n"
-    "    let big = build(sb)\n"
+    "    for k in 0..170000 { sb.append_byte('x') }\n"
+    "    let big = sb.build()\n"
     "    var total = 0\n"
     "    for i in 0..20000 {\n"
     "        var part = StringBuilder()\n"
-    "        append(part, big, 0, 4100 + 8 * i)\n"
-    "        let s = build(part)\n"
-    "        total = total + len(s) % 7\n"
+    "        part.append(big, 0, 4100 + 8 * i)\n"
+    "        let s = part.build()\n"
+    "        total = total + s.len() % 7\n"
     "    }\n"
     "    print(total)\n}\n"
 )
@@ -3570,7 +3570,7 @@ STRESS_FOR_EARLY_RETURN_SRC = (
     "    var total = 0\n"
     "    for i in 0..1000000 {\n"
     "        var xs = [1, i, 5]\n"
-    "        for k in 0..250 { push(xs, k) }\n"       # 1 KB a list: a leak exhausts the arena
+    "        for k in 0..250 { xs.push(k) }\n"       # 1 KB a list: a leak exhausts the arena
     "        var m: [int: int] = [:]\n"
     "        m[i % 7] = 1\n"
     "        total = total + first_big(xs) % 3 + any_key(m) + nested([[1, 2], [3, i]])\n"
@@ -3594,7 +3594,7 @@ STRESS_MAP_OVERWRITE_SRC = (
     "        var inner: [str: int] = [:]\n"
     "        inner[\"k\"] = i\n"
     "        nested[\"x\"] = inner\n"
-    "        total = total + len(docs[\"a\"]) % 2 + lists[i % 3][0] % 2 + nested[\"x\"][\"k\"] % 2\n"
+    "        total = total + docs[\"a\"].len() % 2 + lists[i % 3][0] % 2 + nested[\"x\"][\"k\"] % 2\n"
     "    }\n"
     "    print(total)\n}\n"
 )
@@ -3630,7 +3630,7 @@ class TestCompilerParity(unittest.TestCase):
             "    become rename(Named { name: t.name + \"x\", steps: t.steps }, n - 1)\n"
             "}\n"
             "fun main() {\n"
-            "    print(len(rename(Named { name: \"\", steps: [1] }, 50000).name))\n"
+            "    print(rename(Named { name: \"\", steps: [1] }, 50000).name.len())\n"
             "}\n")
         self.assertEqual(build_and_run(source, timeout=60), ("50000\n", 0))
 

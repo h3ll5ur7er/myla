@@ -98,7 +98,7 @@ A block that gives a value (an `if` branch, a `match` arm) may end with an `if` 
 
 ```myla
 fun find(xs: [int], want: int) -> Option<int> {
-    for i in 0..len(xs) {
+    for i in 0..xs.len() {
         if xs[i] == want {
             return Some(i)
         }

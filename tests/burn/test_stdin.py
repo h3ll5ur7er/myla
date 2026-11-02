@@ -55,7 +55,7 @@ fun main() {
         match r.read_line() {
             Ok(Some(line)) => {
                 n = n + 1
-                print(format("{}: [{}] {}", n, line, len(line)))
+                print(format("{}: [{}] {}", n, line, line.len()))
             },
             Ok(None) => { break },
             Err(e) => {
@@ -82,7 +82,7 @@ impl Channel {
         while true {
             match self.input.read_line()? {
                 Some(line) => {
-                    if len(line) <= 1 { break }       // "" or "\\r"
+                    if line.len() <= 1 { break }       // "" or "\\r"
                     length = digits_of(line)
                 },
                 None => { return Ok(None) },
@@ -94,7 +94,7 @@ impl Channel {
 
 fun digits_of(s: str) -> int32 {
     var n = 0
-    for c in chars(s) {
+    for c in s.chars() {
         if c >= '0' && c <= '9' { n = n * 10 + ((c as int32) - 48) }
     }
     return n
@@ -120,7 +120,7 @@ fun main() {
     var r = stdin()
     match r.read_to_end() {
         Ok(s) => {
-            print(len(s))
+            print(s.len())
             write(1, s)
         },
         Err(e) => { print("error") },

@@ -7,7 +7,7 @@ typealias A = B
 typealias B = [A]
 
 fun count(a: A) -> int {
-    return len(a)
+    return a.len()
 }
 
 fun main() {

@@ -20,7 +20,7 @@ fun codepoint(c: char) -> int {
 #test("abc")[3]
 #test("héllo")[5]
 fun scalar_count(s: str) -> int {
-    return len(chars(s))
+    return s.chars().len()
 }
 
 fun main() {
@@ -52,9 +52,9 @@ fun main() {
 
     // chars(s) iterates Unicode scalars (not bytes)
     let text = "héλ"            // 1 + 2 + 2 = 5 UTF-8 bytes
-    print(len(text))            // 5  (byte length)
+    print(text.len())            // 5  (byte length)
     print(scalar_count(text))   // 3  (scalar count)
-    for c in chars(text) {
+    for c in text.chars() {
         print(c as uint32)      // 104, 233, 955
     }
 }

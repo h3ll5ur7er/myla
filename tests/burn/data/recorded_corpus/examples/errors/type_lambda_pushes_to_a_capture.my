@@ -1,0 +1,12 @@
+//~ type error: a lambda can't change 'xs', a variable it captures: it holds a copy of its own
+//~ span: xs
+//~ help: return the new value, or keep shared state in an actor
+// `push` through a captured list would change only the lambda's copy (D93).
+fun main() {
+    var xs = [1]
+    let add = (n: int) => {
+        push(xs, n)
+        return len(xs)
+    }
+    print(add(2))
+}

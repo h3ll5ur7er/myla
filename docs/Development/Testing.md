@@ -30,6 +30,21 @@ Until [[MYLA-219]] the burn tests compared the self-hosted toolchain with the Py
 
 So the self-hosted interpreter and native code built by the self-hosted compiler are tested against each other and against the retired toolchain's answers: the interpreter gate compares `interp_main` with the Python interpreter's recorded output, and the native suites (`test_examples_compile.py`, `test_compiler_parity.py`, the runtime and I/O tests) compare binaries with it too. The 97 single-module programs the Python unit tests ran through the interpreter are kept, with what they printed and their exit status or runtime error, in `tests/burn/data/unit_programs.json`, and run in the self-hosted interpreter and natively (`test_unit_programs.py`). The comparisons with the Python backend's binaries went with it, as did the tests that only exercised the Python toolchain.
 
+### Rewriting the recorded programs
+
+A program the answers were recorded for can still be rewritten into a form that means the same, as [[MYLA-221]] moved the examples, docs and test programs from `push(xs, v)` to `xs.push(v)` (`scripts/to_methods.py`, token-based; it keeps every line where it was). The recordings survive it ([[MYLA-240]]):
+
+- `tests/burn/data/golden/aliases/<name>.json.gz` (828 aliases, 135 KB) maps the key of a question about the rewritten texts to the recorded question's key, with the lines that changed and, for each, where every old column went. `_golden.py` answers the old question and moves the columns in the answer (rendered `--> file:L:C` and source lines with their carets, canonical diagnostics, the language server's positions, runtime-error tuples) to the new line. Lines don't move.
+- The answers that are a program's structure (the lexer's tokens, the parser's tree) have no aliases: a rewritten program has other tokens. Their gates ask about copies of the files as they were recorded, `tests/burn/data/recorded_corpus/<path>` (30 examples), keyed by the original path.
+
+To rewrite again: trace the questions on the old texts, rewrite, then build the aliases from the trace with the lexer the rewrite used (`LEX_MAIN`, kept from before any lexer change):
+
+    MYLA_GOLDEN_TRACE=trace.jsonl python3 -m unittest discover -s tests/burn -t .
+    git ls-files '*.my' '*.md' 'tests/burn/*.py' 'tests/burn/data/*.json' | grep -v recorded_corpus | xargs python3 scripts/to_methods.py
+    python3 -m tests.burn.golden_aliases trace.jsonl
+
+Restore the files that keep the old texts on purpose: the lexer and parser gates (`test_selfhost_lexer.py`, `test_selfhost_parser.py`), `_golden.py`, `golden_aliases.py` and `_continuation.py`. The builder checks that every traced key reproduces before it uses it. Compare a trace taken after the rewrite with the first: every oracle should get the same answers. A program that is about the old form (a test that the free function still works, a type error only the function form gives) stays as it was.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on pull requests and pushes to `master` ([[MYLA-69]]); the README shows the state of `master` as a badge:
@@ -48,7 +63,7 @@ The jobs run on `ubuntu-24.04` (pinned: `ubuntu-latest` moves, and the burn job 
 
 | Suite | Tests | Result |
 | --- | --- | --- |
-| Burn | 840 (plus subtests, about 40 skipped: recorded answers about `selfhost/` files changed since, the tree-sitter CLI) | All pass; about 120 s in one process with the tools cached, the compiler bootstrapped from the seed and every program built by it |
+| Burn | 870 (plus subtests, about 110 skipped: recorded answers about `selfhost/`, `tools/` and `lib/std/` files changed since, each such file one subtest of the lexer and parser corpus gates; the tree-sitter CLI) | All pass; about 120 s in one process with the tools cached, the compiler bootstrapped from the seed and every program built by it |
 | `#test` cases in `selfhost/` | on 1,030 of 1,286 value-returning functions (80 %) | `myla test` passes every one ([[MYLA-184]]) |
 
 ## What the Python tests covered

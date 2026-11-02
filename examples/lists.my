@@ -25,7 +25,7 @@ fun total(xs: [int]) -> int {
 #test([1, 2, 3, 4])[4]
 #test([])[0]
 fun count(xs: [int]) -> int {
-    return len(xs)
+    return xs.len()
 }
 
 #test([10, 20, 30], 1)[20]
@@ -40,7 +40,7 @@ fun nth(xs: [int], i: int) -> int {
 fun doubled(xs: [int]) -> [int] {
     var out: [int] = []
     for x in xs {
-        push(out, x * 2)
+        out.push(x * 2)
     }
     return out
 }
@@ -50,7 +50,7 @@ fun doubled(xs: [int]) -> [int] {
 #test([5, 6, 7])[7]
 fun last(xs: [int]) -> int {
     var ys = xs
-    return pop(ys)
+    return ys.pop()
 }
 
 // Indexed assignment is copy-on-write: `ys` is a copy of `xs`, so writing
@@ -69,7 +69,7 @@ fun copy_is_independent() -> int {
     var a = [1, 2, 3]
     var b = a
     b[0] = 99
-    push(b, 4)
+    b.push(4)
     return a[0]            // still 1
 }
 
@@ -102,7 +102,7 @@ fun ysum(ps: [Point]) -> int {
 #main
 fun main() {
     let xs = [1, 2, 3]
-    print(len(xs))                 // 3
+    print(xs.len())                 // 3
     print(xs[0])                   // 1
     print(total(xs))               // 6
 
@@ -112,15 +112,15 @@ fun main() {
     var a = [10, 20, 30]
     var b = a                      // value copy
     b[0] = 99
-    push(b, 40)
+    b.push(40)
     print(a[0])                    // 10  (a untouched)
-    print(len(a))                  // 3
+    print(a.len())                  // 3
     print(b[0])                    // 99
-    print(len(b))                  // 4
+    print(b.len())                  // 4
 
     var grid = [[1, 2], [3, 4]]
     grid[0][1] = 20
-    push(grid[1], 5)
+    grid[1].push(5)
     print(grid[0][1])              // 20
     print(grid[1][2])              // 5
 
@@ -129,9 +129,9 @@ fun main() {
 
     var acc: [int] = []
     for i in 0..5 {
-        push(acc, i * i)
+        acc.push(i * i)
     }
     print(acc[4])                  // 16
-    print(pop(acc))                // 16
-    print(len(acc))                // 4
+    print(acc.pop())                // 16
+    print(acc.len())                // 4
 }

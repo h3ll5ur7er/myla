@@ -3,5 +3,5 @@
 #main
 fun main() {
     let m = [:]
-    print(len(m))
+    print(m.len())
 }

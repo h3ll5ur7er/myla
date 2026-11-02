@@ -28,7 +28,7 @@ fun parse_digit(c: char) -> Result<int, str> {
 
 fun sum_digits(text: str) -> Result<int, str> {
     var total = 0
-    for c in chars(text) {
+    for c in text.chars() {
         total = total + parse_digit(c)?
     }
     return Ok(total)

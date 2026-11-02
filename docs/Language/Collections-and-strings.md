@@ -8,12 +8,12 @@
 fun main() {
     var xs = [3, 1, 2]
     let empty: [str] = []
-    push(xs, 4)
+    xs.push(4)
     xs[0] = 10
-    let last = pop(xs)          // 4
-    print(len(xs))              // 3
+    let last = xs.pop()          // 4
+    print(xs.len())              // 3
     print(xs[0] + last)
-    print(len(empty))
+    print(empty.len())
     for x in xs { print(x) }
 }
 // output:
@@ -43,13 +43,13 @@ fun main() {
     ages["ann"] = 31
     ages["bob"] = 27
     print(ages["ann"])
-    print(contains(ages, "cy"))
+    print(ages.contains("cy"))
     match get(ages, "bob") {
         Some(a) => print(a)
         None => print("unknown")
     }
-    remove(ages, "bob")
-    print(len(keys(ages)))
+    ages.remove("bob")
+    print(ages.keys().len())
 }
 // output:
 // 31
@@ -119,11 +119,11 @@ fun join(parts: [str], sep: str) -> str {
     var sb = StringBuilder()
     var first = true
     for p in parts {
-        if !first { append(sb, sep) }
-        append(sb, p)
+        if !first { sb.append(sep) }
+        sb.append(p)
         first = false
     }
-    return build(sb)
+    return sb.build()
 }
 
 fun main() {
@@ -140,7 +140,7 @@ fun main() {
 ```myla
 fun substring(s: str, start: int, end: int) -> str {
     var sb = StringBuilder()
-    append(sb, s, start, end)
-    return build(sb)
+    sb.append(s, start, end)
+    return sb.build()
 }
 ```

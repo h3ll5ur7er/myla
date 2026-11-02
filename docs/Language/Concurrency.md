@@ -53,7 +53,7 @@ import std.task as task
 async fun squares(n: int) -> [int] {
     var fs: [async () -> int] = []
     for i in 0..n {
-        push(fs, async () => i * i)
+        fs.push(async () => i * i)
     }
     return await task.all(fs)
 }

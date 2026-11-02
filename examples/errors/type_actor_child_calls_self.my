@@ -13,7 +13,7 @@ actor Store {
 
 impl Store {
     fun size(self) -> int {
-        return len(self.xs)
+        return self.xs.len()
     }
 
     async fun peek(self) -> int {

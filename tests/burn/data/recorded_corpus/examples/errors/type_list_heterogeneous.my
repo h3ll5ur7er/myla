@@ -1,0 +1,7 @@
+//~ type error: type mismatch
+// All elements of a list literal must share one element type.
+#main
+fun main() {
+    let xs = [1, true, 3]
+    print(len(xs))
+}

@@ -41,15 +41,15 @@ fun main() {
     print(total)  // bp:after
     print(name)
     let argv = args()
-    if len(argv) > 1 {
+    if argv.len() > 1 {
         if argv[1] == "panic" {
-            print(ratio(7, len(argv) - 2))
+            print(ratio(7, argv.len() - 2))
         }
         if argv[1] == "exit" {
             exit(3)
         }
     }
-    print(len(xs) + len(bag.items))
+    print(xs.len() + bag.items.len())
     match s {
         Circle(_, r) => print(r)
         Rect(_, _) => print(t.0)

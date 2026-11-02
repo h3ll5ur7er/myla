@@ -26,7 +26,7 @@ fun mul(a: int, b: int) -> int { return a * b }
 fun map_list<T>(xs: [T], f: (T) -> T) -> [T] {
     var out: [T] = []
     for x in xs {
-        push(out, f(x))
+        out.push(f(x))
     }
     return out
 }
@@ -69,8 +69,8 @@ fun partial_second(n: int) -> int {
 #test(4)[18]
 fun sum_pipeline(n: int) -> int {
     var xs: [int] = []
-    push(xs, n)
-    push(xs, n + 1)
+    xs.push(n)
+    xs.push(n + 1)
     let doubled = map_list(xs, mul(2, _))   // (x) => mul(2, x)
     var total = 0
     for v in doubled {

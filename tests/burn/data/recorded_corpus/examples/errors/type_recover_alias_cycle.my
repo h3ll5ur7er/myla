@@ -1,0 +1,16 @@
+//~ type error: type alias cycle involving 'A'
+//~ errors: 2
+//~ next: cannot assign value of type 'str' to binding of type 'int32'
+// Both aliases of the cycle take the error type; one error is reported, and an
+// annotation naming them checks its value on its own (MYLA-110).
+typealias A = B
+typealias B = [A]
+
+fun count(a: A) -> int {
+    return len(a)
+}
+
+fun main() {
+    let x: B = []
+    let y: int = "s"
+}

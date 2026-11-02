@@ -12,7 +12,7 @@ fun start(s: str, g: (str) -> int) -> int {
     become relay(Named { name: "a" + s, n: 1 }, g)
 }
 fun size(s: str) -> int {
-    return len(s)
+    return s.len()
 }
 fun main() {
     print(start("b", size))

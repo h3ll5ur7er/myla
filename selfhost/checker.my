@@ -6320,6 +6320,13 @@ impl Effects {
                 let m = self_method(c)
                 if m != "" { self.calls = add_name(self.calls, m) } else { self.expr(c) }
                 match c.kind {
+                    ExprKind.GetField(recv, bm) => {
+                        let root = self_field(recv)
+                        if root != "" && mutating_builtin(bm) { self.changes = add_name(self.changes, root) }
+                    },
+                    _ => {},
+                }
+                match c.kind {
                     ExprKind.Name(f) => {
                         if (f == "push" || f == "pop" || f == "remove" || f == "append") && args.len() > 0 {
                             let root = self_field(args[0])
@@ -6492,6 +6499,14 @@ impl Reads {
             _ => {},
         }
     }
+}
+
+// Whether the builtin method `m` changes its receiver (`push`, `pop`,
+// `remove`, `append`, `append_byte`).
+#test("push")[true]
+#test("len")[false]
+pub fun mutating_builtin(m: str) -> bool {
+    return m == "push" || m == "pop" || m == "remove" || m == "append" || m == "append_byte"
 }
 
 // Whether `m` names a builtin function that is also a method (D103,
@@ -6714,6 +6729,25 @@ impl Reentrancy {
             StmtKind.ExprStmt(e) => {
                 match e.kind {
                     ExprKind.Call(c, args) => {
+                        // `self.f.push(x)`: the builtin as a method (D103)
+                        match c.kind {
+                            ExprKind.GetField(recv, m) => {
+                                let root = self_field(recv)
+                                if root != "" && mutating_builtin(m) {
+                                    var names: [str] = []
+                                    var awaits: [Expr] = []
+                                    for a in args {
+                                        let r = self.scan(a)
+                                        for n in r.names { names = add_name(names, n) }
+                                        for aw in r.awaits { awaits.push(aw) }
+                                    }
+                                    self.suspend(awaits)
+                                    self.write(root, names, e)
+                                    return
+                                }
+                            },
+                            _ => {},
+                        }
                         match c.kind {
                             ExprKind.Name(f) => {
                                 if (f == "push" || f == "pop" || f == "remove" || f == "append") && args.len() > 0 {

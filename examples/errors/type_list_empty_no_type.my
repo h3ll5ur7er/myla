@@ -4,5 +4,5 @@
 #main
 fun main() {
     let xs = []
-    print(len(xs))
+    print(xs.len())
 }

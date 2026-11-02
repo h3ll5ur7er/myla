@@ -16,9 +16,9 @@ from tests.burn._tools import STDLIB_ROOT, selfhost_tool
 _PROGRAM = """fun show(m: [int: int]) -> str {
     var sb = StringBuilder()
     for k in m {
-        append(sb, f"{k}={m[k]} ")
+        sb.append(f"{k}={m[k]} ")
     }
-    return build(sb)
+    return sb.build()
 }
 
 fun main() {
@@ -31,33 +31,33 @@ fun main() {
     }
     // replacing keeps the place; removing and inserting again moves to the end
     m[x] = -1
-    let ks = keys(m)
-    remove(m, ks[0])
-    remove(m, ks[5])
-    remove(m, ks[100])
+    let ks = m.keys()
+    m.remove(ks[0])
+    m.remove(ks[5])
+    m.remove(ks[100])
     m[ks[5]] = 5000
     var line = ""
-    for k in keys(m) {
+    for k in m.keys() {
         line = line + f"{k} "
     }
     print(line)
     print(show(m))
-    print(len(m))
+    print(m.len())
     // string keys, a value that owns heap cells
     var w: [str: [str]] = ["pear": ["p"], "apple": ["a"], "fig": []]
     w["banana"] = ["b", "bb"]
-    remove(w, "apple")
+    w.remove("apple")
     w["apple"] = ["again"]
     w["pear"] = ["pp"]
     for k in w {
-        print(f"{k} {len(w[k])}")
+        print(f"{k} {w[k].len()}")
     }
     // a copy keeps the order and goes its own way
     var c = w
-    remove(c, "fig")
+    c.remove("fig")
     c["fig"] = ["last"]
-    print(join_keys(keys(w)))
-    print(join_keys(keys(c)))
+    print(join_keys(w.keys()))
+    print(join_keys(c.keys()))
 }
 
 fun join_keys(ks: [str]) -> str {

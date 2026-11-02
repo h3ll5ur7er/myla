@@ -78,15 +78,15 @@ fun main() {
 }
 
 fun pop_opt(xs: [int]) -> Option<int> {
-    if len(xs) == 0 {
+    if xs.len() == 0 {
         return None
     }
-    return Some(xs[len(xs) - 1])
+    return Some(xs[xs.len() - 1])
 }
 
 fun shrink(xs: [int]) -> [int] {
     var out = xs
-    let gone = pop(out)
+    let gone = out.pop()
     return out
 }
 """

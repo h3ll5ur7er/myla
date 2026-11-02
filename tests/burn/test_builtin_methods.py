@@ -115,6 +115,26 @@ class BuiltinMethods(unittest.TestCase):
                 self.assertEqual(proc.returncode, 1, proc.stderr)
                 self.assertIn(want, proc.stderr)
 
+    def test_a_mutating_method_changes_an_actor_field(self):
+        # D95: a field checked before an `await` and changed after it, by the
+        # method form as by the function form, directly or in a synchronous
+        # method of the actor (MYLA-171)
+        actor = ("actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n"
+                 "        self.n = self.n + 1\n        return true\n    }\n}\n"
+                 "actor Inv {\n    sold: [str],\n}\nimpl Inv {\n    fun note(var self, who: str) {\n        {note}\n"
+                 "    }\n    async fun record(var self, p: Pay, who: str) {\n        if self.sold.len() < 10 {\n"
+                 "            let paid = await p.charge()\n            {change}\n        }\n    }\n}\n"
+                 "fun main() {}\n")
+        for name, note, change in [("direct", "print(who)", "self.sold.push(who)"),
+                                   ("in_a_method", "self.sold.push(who)", "self.note(who)"),
+                                   ("pop", "print(who)", "self.sold.pop()")]:
+            with self.subTest(case=name):
+                path = self.write(name + ".my", actor.replace("{note}", note).replace("{change}", change))
+                proc = subprocess.run([self.myla, "check", path, "--stdlib", STDLIB_ROOT], capture_output=True,
+                                      text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("'self.sold' was checked before an 'await' and is changed after it", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

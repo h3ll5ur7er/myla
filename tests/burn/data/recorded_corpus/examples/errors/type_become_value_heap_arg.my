@@ -1,0 +1,14 @@
+//~ type error: 'become' can only pass a 'str' to a function value when it is (a part of) a parameter
+//~ span: s
+// A function value only borrows its arguments, and the function that made
+// this string is gone when the call runs (D87).
+fun shout(g: (str) -> int, n: int) -> int {
+    let s = "n = {n}"
+    become g(s)
+}
+fun size(s: str) -> int {
+    return len(s)
+}
+fun main() {
+    print(shout(size, 1))
+}

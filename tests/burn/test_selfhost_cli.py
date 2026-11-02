@@ -58,7 +58,7 @@ fun double(x: int) -> int {
 
 fun main() {
     let argv = args()
-    print(len(argv))
+    print(argv.len())
     for a in argv {
         print(a)
     }

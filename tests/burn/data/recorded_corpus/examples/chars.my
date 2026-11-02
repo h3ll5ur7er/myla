@@ -1,0 +1,60 @@
+// chars.my — the `char` type: Unicode scalar literals, comparisons, and casts.
+
+#test('a')[true]
+#test('q')[true]
+#test('Z')[false]
+#test('5')[false]
+fun is_lower(c: char) -> bool {
+    return c >= 'a' && c <= 'z'
+}
+
+#test('a')[97]
+#test('\u{3BB}')[955]
+fun codepoint(c: char) -> int {
+    return c as int
+}
+
+// chars(s) decodes a UTF-8 string into its Unicode scalars (D25). `len(s)` is
+// still the *byte* length, so a multi-byte string has fewer scalars than bytes.
+#test("")[0]
+#test("abc")[3]
+#test("héllo")[5]
+fun scalar_count(s: str) -> int {
+    return len(chars(s))
+}
+
+fun main() {
+    let a: char = 'a'
+    let lambda = '\u{3BB}'      // a multi-byte scalar — only valid as `char`
+    let emoji = '\u{1F600}'
+
+    print(a)                    // a
+    print(lambda)               // λ
+    print(emoji)                // 😀
+
+    // comparisons order chars by codepoint
+    print(is_lower('q'))        // true
+    print(is_lower('Q'))        // false
+
+    // explicit conversions with `as` (no implicit int<->char mixing)
+    print(codepoint('A'))       // 65
+    print(0x3BB as char)        // λ
+
+    // an ASCII char literal still stands in for a byte (D42 byte compat)
+    let s = "hello"
+    print(s[0] == 'h')          // true
+
+    // chars work as map keys and as match scrutinees
+    var freq: [char: int] = [:]
+    freq['x'] = 2
+    print(freq['x'])            // 2
+    print(match a { 'a' => 1, _ => 0 })   // 1
+
+    // chars(s) iterates Unicode scalars (not bytes)
+    let text = "héλ"            // 1 + 2 + 2 = 5 UTF-8 bytes
+    print(len(text))            // 5  (byte length)
+    print(scalar_count(text))   // 3  (scalar count)
+    for c in chars(text) {
+        print(c as uint32)      // 104, 233, 955
+    }
+}

@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._golden import NoGolden, answer_for_file, golden
+from ._golden import NoGolden, answer_for_file, golden, recorded
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._continuation import continues_a_line
 from ._tools import selfhost_tool
@@ -46,7 +46,8 @@ def _corpus() -> list[str]:
     files: set[str] = set()
     for p in pats:
         files.update(glob.glob(p, recursive=True))
-    return sorted(files)
+    # the files as the recordings saw them (rewritten since: MYLA-240)
+    return sorted(recorded(f) for f in files)
 
 
 # Snippets for every lexer and parser error the corpus lacks (MYLA-28): the
@@ -295,11 +296,13 @@ class SelfHostedParserParity(unittest.TestCase):
     def test_corpus_ast_parity(self) -> None:
         checked = errors = 0
         for path in _corpus():
-            try:
-                expected = _oracle(path)
-            except NoGolden:
-                continue    # a file added to the corpus since has no recording: test_error_corpus holds it to the self-hosted CLI
+            # in the file's subtest: a file changed since the retirement skips
+            # only itself (the recorded copies sort after lib/ and selfhost/)
             with self.subTest(file=os.path.relpath(path, _REPO)):
+                try:
+                    expected = _oracle(path)
+                except NoGolden:
+                    continue    # a file added to the corpus since has no recording: test_error_corpus holds it to the self-hosted CLI
                 actual = self._myla_parse(path)
                 self.assertEqual(actual, expected)
                 checked += 1
@@ -343,7 +346,7 @@ class SelfHostedParserParity(unittest.TestCase):
     def test_garbled_sources_match_the_oracle(self) -> None:
         several = 0
         for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
-            with open(path, encoding="utf-8") as fh:
+            with open(recorded(path), encoding="utf-8") as fh:
                 source = fh.read()
             for seed in range(4):
                 garbled = _garbled(source, random.Random(f"{os.path.basename(path)}/{seed}"), 1 + 2 * seed)
@@ -362,7 +365,7 @@ class SelfHostedParserParity(unittest.TestCase):
 
     def test_truncated_sources_match_the_oracle(self) -> None:
         for name in TRUNCATED:
-            with open(os.path.join(_REPO, "examples", name), encoding="utf-8") as fh:
+            with open(recorded(os.path.join(_REPO, "examples", name)), encoding="utf-8") as fh:
                 source = fh.read()
             cuts = set()
             pos = 0

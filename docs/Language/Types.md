@@ -29,7 +29,7 @@ typealias Grid = [[Byte]]
 
 fun main() {
     let g: Grid = [[1, 2], [3]]
-    print(len(g))
+    print(g.len())
 }
 // output:
 // 2

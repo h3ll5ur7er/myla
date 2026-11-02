@@ -60,7 +60,7 @@ fun main() {
     print(one.0)
     let xs = [1, 2, 3,]
     let m = ["a": 1, "b": 2,]
-    print(len(xs) + len(m))
+    print(xs.len() + m.len())
     let (u, w,) = (4, 6,)
     print(u + w)
     match Shape.Line(3, 8,) {

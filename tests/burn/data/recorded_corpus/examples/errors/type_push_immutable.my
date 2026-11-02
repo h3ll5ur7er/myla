@@ -1,0 +1,7 @@
+//~ type error: needs a mutable list
+// Mutating operations require a `var` binding (W3/D40); `xs` is a `let`.
+#main
+fun main() {
+    let xs = [1, 2, 3]
+    push(xs, 4)
+}

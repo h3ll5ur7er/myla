@@ -46,12 +46,12 @@ TRAPS = [
     ("assign_list_index", "var xs = [1, 2]\n    xs[n + 5] = 3", "index out of bounds", "5:7"),
     ("assign_inner_index", "var g = [[1]]\n    g[n][0] = 3", "index out of bounds", "5:6"),
     ("assign_outer_index", "var g = [[1]]\n    g[0][n] = 3", "index out of bounds", "5:9"),
-    ("pop_empty", "var xs: [int] = []\n    print(pop(xs) + n)", "pop from an empty list", "5:14"),
+    ("pop_empty", "var xs: [int] = []\n    print(xs.pop() + n)", "pop from an empty list", "5:17"),
     ("division", "print(7 / (n - 1))", "division by zero", "4:13"),
     ("modulo", "print(7 % (n - 1))", "modulo by zero", "4:13"),
     ("char_surrogate", "print((n + 55295) as char)", "invalid char", "4:23"),
     ("char_above_max", "print((n + 1114111) as char)", "invalid char", "4:25"),
-    ("string_range", 'var sb = StringBuilder()\n    append(sb, "abc", n, 9)', "index out of bounds", "5:11"),
+    ("string_range", 'var sb = StringBuilder()\n    sb.append("abc", n, 9)', "index out of bounds", "5:14"),
     ("panic", 'panic(f"boom {n}")', "boom 1", "4:10"),
     ("assert", "assert(n == 2)", "assertion failed", "4:11"),
     ("assert_message", 'assert(n == 2, "n is not 2")', "n is not 2", "4:11"),
@@ -64,7 +64,7 @@ MODULE_MAIN = """\
 from .lib import Box, at, apply
 fun main() {
     let b = Box { xs: [1, 2] }
-    let which = len(b.xs)
+    let which = b.xs.len()
     print(which)
     if which == WHICH { print(at(b.xs, 7)) }
     if which == WHICH { print(b.get(9)) }
@@ -179,8 +179,8 @@ class NativeRuntime(unittest.TestCase):
                   "    return down(n - 1) + 1\n}\n\n"
                   "async fun deep(k: int) -> int {\n    return down(100000000 + k)\n}\n\n"
                   "#main\nasync fun main() {\n    var fs: [async () -> int] = []\n"
-                  "    for k in 0..4 {\n        push(fs, async () => await deep(k))\n    }\n"
-                  "    let rs = await task.all(fs)\n    print(len(rs))\n}\n")
+                  "    for k in 0..4 {\n        fs.push(async () => await deep(k))\n    }\n"
+                  "    let rs = await task.all(fs)\n    print(rs.len())\n}\n")
         for backend, binary in self.binaries("worker_overflow", source):
             with self.subTest(backend=backend):
                 for _ in range(20):

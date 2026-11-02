@@ -1,0 +1,7 @@
+//~ type error: append() needs a mutable StringBuilder (declare it with 'var')
+// append()/append_byte() mutate the builder, so it must be a `var` lvalue.
+#main
+fun main() {
+    let sb = StringBuilder()
+    append(sb, "x")
+}

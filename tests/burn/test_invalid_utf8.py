@@ -32,26 +32,26 @@ PROGRAM = """\
 from std.fs import read_to_string
 
 fun show(s: str) {
-    print(len(s))
+    print(s.len())
     var line = StringBuilder()
     var i = 0
-    while i < len(s) {
-        append(line, format("{} ", s[i]))
+    while i < s.len() {
+        line.append(format("{} ", s[i]))
         i = i + 1
     }
-    print(build(line))
+    print(line.build())
     var cps = StringBuilder()
-    for c in chars(s) {
-        append(cps, format("{} ", c as uint32))
+    for c in s.chars() {
+        cps.append(format("{} ", c as uint32))
     }
-    print(build(cps))
+    print(cps.build())
     print(s)
 }
 
 fun byte(b: uint8) -> str {
     var sb = StringBuilder()
-    append_byte(sb, b)
-    return build(sb)
+    sb.append_byte(b)
+    return sb.build()
 }
 
 fun main() {
@@ -64,7 +64,7 @@ fun main() {
             print(joined == "é")
             print(format("{}{}", byte(0xC3u8), byte(0xA9u8)) == "é")
             let m = [joined: 1]
-            print(contains(m, "é"))
+            print(m.contains("é"))
             show(joined)
             print(byte(0xFFu8) == byte(0xFEu8))
         },

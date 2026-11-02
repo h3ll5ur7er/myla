@@ -101,7 +101,7 @@ fun main() {
                 Exited(c) => c
                 Signaled(sig) => 128 + sig
             }
-            print(len(out.stdout))
+            print(out.stdout.len())
             print(code)
         }
         Err(e) => print("could not start")
