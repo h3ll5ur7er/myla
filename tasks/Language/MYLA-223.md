@@ -6,7 +6,7 @@ status: todo
 priority: medium
 labels: [language, ergonomics]
 ---
-D104 (2) ([[MYLA-215]]): `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=` mean `x = x op y`, with the place (`a[i()].f`) evaluated once; operator overloading applies through the operator's trait.
+D104 (2) ([[MYLA-215]]): `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=` mean `x = x op y`, with the place (`a[i()].f`) evaluated once; operator overloading applies through the operator's trait. Shifts exist (D44) and `>>` already means a shift on integers and composition on functions (D24), so `<<=` and `>>=` follow (`f >>= g` composes); the owner kept them on 2026-11-02.
 
 - [ ] Lexer, parser, grammar; checker (the target must be a `var` place, the operator defined for its type); lowering with the place's indices computed once
 - [ ] A test that an index expression with a side effect runs once; error-corpus files

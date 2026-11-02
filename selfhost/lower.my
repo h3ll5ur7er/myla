@@ -1013,6 +1013,23 @@ impl Lower {
     // result moved out of its frame, which is freed. Any other call is made
     // here, and then the other tasks take a turn.
     fun await_let(var self, cg: CodeGen, s: Stmt, k: str, name: str, op: Expr) {
+        // `await __yield()`: a turn for the others, nothing else (MYLA-228)
+        match op.kind {
+            ExprKind.Call(c, a) => {
+                match c.kind {
+                    ExprKind.Name(n) => {
+                        if n == "__yield" {
+                            self.leave_self()
+                            self.yield_turn()
+                            self.enter_self()
+                            return
+                        }
+                    },
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
         // an `async let`'s name: its child's result
         match op.kind {
             ExprKind.Name(n) => {

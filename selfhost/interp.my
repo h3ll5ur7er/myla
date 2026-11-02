@@ -181,6 +181,9 @@ pub struct Interp {
     deferred_place: Option<Place>,
     parked: bool,
     yielding: bool,
+    // the call an `await` makes entered an async function or method that ran
+    // at once: no turn for the others after it, as native code (MYLA-228)
+    entered_async: bool,
     // D97: a task has failed, so the program ends: every other task stops at
     // its next suspension point, the first task with this failure
     failing: bool,
@@ -324,6 +327,29 @@ pub fun sched_from_env() -> str {
     }
 }
 
+// Whether the awaited `op` calls a function value (a local, or any callee
+// but a name or a method), which goes on at once natively (MYLA-228).
+#test(expr_of("f(1)"), [RtFrame { names: ["f"], vals: [Value.VUnit] }])[true]
+#test(expr_of("f(1)"), [])[false]
+#test(expr_of("a.m()"), [])[false]
+#test(expr_of("fs[0]()"), [])[true]
+fun calls_a_value(op: Expr, scopes: [RtFrame]) -> bool {
+    match op.kind {
+        ExprKind.Call(c, args) => {
+            match c.kind {
+                ExprKind.Name(n) => {
+                    for fr in scopes { for k in fr.names { if k == n { return true } } }
+                    return false
+                },
+                ExprKind.GetField(t, f) => { return false },
+                _ => { return true },
+            }
+        },
+        _ => {},
+    }
+    return false
+}
+
 pub fun new_interp(c: Checker, argv: [str]) -> Interp {
     var it = Interp {
         decls: c.decls,
@@ -347,7 +373,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         norm: new_norm(2000000000),
         bodies: [:], suspending: [:],
         defer: false, deferred: None, deferred_place: None,
-        parked: false, yielding: false,
+        parked: false, yielding: false, entered_async: false,
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
@@ -1426,6 +1452,8 @@ impl Interp {
         self.deferred = None
         self.deferred_place = None
         self.defer = true
+        self.entered_async = false
+        let by_value = calls_a_value(op, self.scopes)
         let v = self.eval(op)
         self.defer = false
         if self.stop() {
@@ -1446,7 +1474,11 @@ impl Interp {
             },
             None => {
                 self.define(name, v)
-                self.yielding = true
+                // after a synchronous or actor call, not after an async function,
+                // method or function value that ran at once: native code's turns
+                // (MYLA-228)
+                if !self.entered_async && !by_value { self.yielding = true }
+                self.entered_async = false
             },
         }
     }
@@ -2516,6 +2548,7 @@ impl Interp {
             self.define(fd.params[i].name, argv[i])
             i = i + 1
         }
+        if self.defer && fd.is_async { self.entered_async = true }
         if self.defer_block(fd.body) { return }
         self.exec_block_body(fd.body)
     }
@@ -2532,6 +2565,7 @@ impl Interp {
             self.define(fd.params[i].name, argv[i])
             i = i + 1
         }
+        if self.defer && fd.is_async { self.entered_async = true }
         if self.defer_block(fd.body) { return }
         self.exec_block_body(fd.body)
     }
@@ -2672,6 +2706,8 @@ impl Interp {
         if nm == "__task_cancelled" {
             return Value.VBool(self.cur < len(self.tasks) && self.tasks[self.cur].requested)
         }
+        // nothing but the turn its `await` gives (MYLA-228)
+        if nm == "__yield" { return Value.VUnit }
         if nm == "print" {
             let v = self.eval(args[0])
             if self.stop() { return Value.VUnit }

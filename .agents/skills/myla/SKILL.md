@@ -147,7 +147,7 @@ async fun main() {
 - `async let x = e` starts a child task; read it once with `await x`. A scope waits for its children. Only async functions have them, and a lambda can't `await` or `task.cancel` them.
 - An actor's state is reached only through `self` in its own methods; one method runs at a time, but an `await` inside an async method lets other calls in (a warning flags a field checked before an `await` and changed after it, D95).
 - Values cross between tasks and actors as deep copies; nothing mutable is shared but an actor. Captures can't be changed (D93).
-- `std.task`: `await task.all(fs)` runs a list of `async () -> T` functions as children; `task.cancel(a)` asks the child `a` to stop and `task.cancelled()` is how a task checks (cooperative, D96).
+- `std.task`: `await task.all(fs)` runs a list of `async () -> T` functions as children; `task.cancel(a)` asks the child `a` to stop and `task.cancelled()` is how a task checks (cooperative, D96); `await task.yield()` gives the other tasks a turn (a long loop's way to let a failure elsewhere end the program).
 - A failure (panic, runtime error, `exit`) in any task ends the program at once: the others stop at their next `await` (D97).
 - Native code runs tasks in parallel on `MYLA_THREADS` workers, one per CPU by default (`build/myla build`, D92); the interpreter (`build/myla run`) runs them one at a time, taking turns at each `await`.
 
