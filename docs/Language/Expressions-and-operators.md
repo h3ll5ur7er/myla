@@ -69,6 +69,10 @@ fun main() {
     print(f(1))
     print(triple(4))
 }
+// output:
+// 18
+// 3
+// 12
 ```
 
 - `x |> f` is `f(x)`, and `x |> f(a, b)` is `f(x, a, b)`. It is rewritten by the parser (D50).
@@ -99,11 +103,13 @@ fun main() {
         Err(e) => print(e)
     }
 }
+// output:
+// 11
 ```
 
 Inside a lambda, `?` returns from the lambda, so it needs the **lambda's** result type, not the enclosing function's: pass the lambda where a function type is expected, or annotate the variable it is bound to.
 
-```myla
+```myla fragment
 let next: (int) -> Option<int> = (x: int) => Some(half(x)? + 1)   // fine in any function
 let bad = (x: int) => Some(half(x)? + 1)     // error: the lambda's result type isn't known
 ```

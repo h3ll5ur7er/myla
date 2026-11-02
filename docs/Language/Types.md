@@ -31,6 +31,8 @@ fun main() {
     let g: Grid = [[1, 2], [3]]
     print(len(g))
 }
+// output:
+// 2
 ```
 
 An alias is another name for the same type, not a new type (D5). Aliases may be declared in any order; cycles are an error.

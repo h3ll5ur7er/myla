@@ -24,6 +24,8 @@ fun abs(x: int) -> int { if x < 0 { return -x }; return x }
 fun main() {
     let a = abs(W - H); print(a)
 }
+// output:
+// 1
 ```
 
 - Newlines are skipped in these places only: inside call argument lists, attribute argument lists, list and map literals, struct literals, struct and enum bodies, `impl`/`trait` bodies and between match arms. A binary expression can **not** continue on the next line, and neither can a parenthesised expression or a tuple:
@@ -40,6 +42,8 @@ fun main() {
 fun add(a: int, b: int) -> int {
     return a + b
 }
+// output:
+// 3
 ```
 
 - Trailing commas are allowed in struct and enum bodies, struct, list, map and tuple literals, tuple and payload types, and patterns, but **not** in call arguments or the parameter lists of functions, methods and lambdas (`f(1, 2,)` is a parse error, MYLA-180).
@@ -76,6 +80,12 @@ fun main() {
     print(e)
     print(f)
 }
+// output:
+// 65577
+// 255
+// 165
+// 493
+// 1000000
 ```
 
 - `_` may only stand between two digits.
@@ -109,6 +119,8 @@ fun main() {
     let n = 3
     print(f"{name} has {n * 2} {"braces"}: {{}}")
 }
+// output:
+// Myla has 6 braces: {}
 ```
 
 The lexer rewrites an f-string into a call `format("… {} …", expr, …)`: each hole is cut out by counting braces (skipping nested string and char literals) and lexed again as an expression. So holes accept any expression, and the checker treats the result exactly like `format` ([[Language/Collections-and-strings]]). F-strings are single-line, an empty hole `{}` is an error, and there are no format specifiers. Their text takes the escapes of strings; an escaped brace such as `\u{7B}` is text, not a hole.

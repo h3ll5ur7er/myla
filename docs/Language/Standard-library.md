@@ -32,6 +32,9 @@ fun main() {
     eprintln("to stderr")
     write(1, "no newline\n")
 }
+// output:
+// to stdout
+// no newline
 ```
 
 | Function | Effect |
@@ -104,6 +107,9 @@ fun main() {
         Err(e) => print("could not start")
     }
 }
+// output:
+// 6
+// 0
 ```
 
 ## std.fs
@@ -145,6 +151,8 @@ fun main() {
         Err(e) => { print("no src directory") },
     }
 }
+// output:
+// no src directory
 ```
 
 ### Directory primitives
@@ -208,6 +216,9 @@ fun main() {
         Err(e) => { print(format("{}:{}: {}", e.line, e.col, e.msg)) },
     }
 }
+// output:
+// initialize
+// [1,null]
 ```
 
 | Item | Meaning |
@@ -243,6 +254,8 @@ fun main() {
         Err(e) => { print(format("{}:{}: {}", e.line, e.col, e.msg)) },
     }
 }
+// output:
+// geo
 ```
 
 | Item | Meaning |

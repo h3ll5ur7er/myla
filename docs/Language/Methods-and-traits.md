@@ -31,6 +31,9 @@ fun main() {
     print(c.get())
     print(c.get().double())
 }
+// output:
+// 5
+// 10
 ```
 
 - A method's first parameter is `self` (read-only copy) or `var self` (changes the caller's value, D47).
@@ -59,6 +62,8 @@ fun main() {
     let a = Sq { side: 3 }
     print(a.bigger(Sq { side: 2 }))
 }
+// output:
+// true
 ```
 
 - A trait lists method signatures; there are no default bodies. `Self` is the implementing type, and it means nothing outside a trait declaration (`'Self' is only valid inside a trait declaration`).
@@ -88,6 +93,8 @@ enum Color { Red, Green, Custom(int, int, int) }
 fun main() {
     print(Color.Custom(1, 2, 3) == Color.Custom(1, 2, 3))
 }
+// output:
+// true
 ```
 
 `#derive(Eq)` on a non-generic struct or enum synthesises a structural `impl Eq`. Every field or payload must be an integer, `bool`, `str` or a named type that is `Eq` itself (`char` and float fields are rejected for now: [[MYLA-13]]). A type can't both derive `Eq` and implement it. `Eq` is the only derivable trait so far; `Ord` is the planned next one.
@@ -106,6 +113,8 @@ fun sum<T: Add>(xs: [T], zero: T) -> T {
 fun main() {
     print(sum([1, 2, 3], 0))
 }
+// output:
+// 6
 ```
 
 A type parameter may carry bounds `T: Add + Eq` (built-in or user traits, D53). The bound is checked where the function is called, against the concrete type (primitives count as implementing their built-in operator traits). Inside the body, a bound permits that trait's **operators** on `T`; methods of a user trait can't be called on a `T` yet, because method lookup needs a concrete type.

@@ -16,6 +16,13 @@ fun main() {
     print(len(empty))
     for x in xs { print(x) }
 }
+// output:
+// 3
+// 14
+// 0
+// 10
+// 1
+// 2
 ```
 
 | Operation | Notes |
@@ -44,6 +51,11 @@ fun main() {
     remove(ages, "bob")
     print(len(keys(ages)))
 }
+// output:
+// 31
+// false
+// 27
+// 1
 ```
 
 | Operation | Notes |
@@ -103,6 +115,8 @@ fun join(parts: [str], sep: str) -> str {
 fun main() {
     print(join(["a", "b", "c"], ", "))
 }
+// output:
+// a, b, c
 ```
 
 `StringBuilder()` creates an empty builder (it takes no arguments); `append(sb, s)` and `append_byte(sb, b: uint8)` add to it (a `var` place is needed); `len(sb)` is its byte length; `build(sb)` returns a new `str`. Use it instead of `+` in loops, which copies the whole string each time.

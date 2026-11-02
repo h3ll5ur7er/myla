@@ -46,6 +46,9 @@ fun main() {
         Err(e) => print(e),           // not a digit: x
     }
 }
+// output:
+// total area 19
+// not a digit: x
 ```
 
 And concurrency in the style of Swift: an actor's methods run one at a time, child tasks run in parallel, and values cross between them as copies.
@@ -77,6 +80,8 @@ async fun main() {
     let done = await a + await b
     print(f"{done} calls, counter at {await c.add(0)}")   // 3000 calls, counter at 3000
 }
+// output:
+// 3000 calls, counter at 3000
 ```
 
 ## What it values

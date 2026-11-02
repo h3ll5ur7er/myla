@@ -33,6 +33,9 @@ fun main() {
     print(first((b.value, 3)))
     print(len_of(l))
 }
+// output:
+// x
+// 2
 ```
 
 - Parameter names may not shadow built-in type names (`int`, `str`, …) and may not repeat.

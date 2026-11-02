@@ -27,6 +27,8 @@ fun add(a: int, b: int) -> int {
 fun main() {
     print(add(1, 2))
 }
+// output:
+// 3
 ```
 
 - The arguments must match the parameters and the single expected value the result type; both are checked at compile time. They may use literals, constants, struct literals, enum constructors and other expressions without local variables.

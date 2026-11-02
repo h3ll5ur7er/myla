@@ -172,7 +172,7 @@ Cycles between packages are allowed, as import cycles are. A dependency on the r
 
 [[selfhost/project.my]] implements this ([[MYLA-93]], D77). It depends on `std.fs`, `std.toml`, `diag` and `tokens`, not on the loader or the CLI:
 
-```myla
+```myla fragment
 pub struct Package { name: str, version: str, dir: str, has_program: bool, has_library: bool, source: Source }
 pub enum Source { Root, Path(str), Git(GitSource) }          // Path: the directory as resolved
 pub struct GitSource { url: str, reference: GitRef, commit: str }

@@ -158,6 +158,7 @@ async fun main() {
 - `#test` cases go above a function, or above a method inside its `impl` with the receiver as the first argument (`#test(Counter { n: 2 }, 3)[5]`, D116).
 - Every value-returning function in `examples/` needs `#test(args)[expected]` cases (a burn test enforces it); add them to new functions in `selfhost/` too: the target there is at least 80 % of value-returning functions (D109).
 - New examples must be registered in `tests/burn/test_examples_run.py` and `tests/burn/test_examples_compile.py`; programs that must be rejected go to `examples/errors/` with a first line `//~ <lex|parse|module|type|runtime> error: <message substring>` (more directives, such as `//~ span:`, in `tests/burn/test_error_corpus.py`).
+- A ```` ```myla ```` block in `docs/` or the README is a tested program (`tests/burn/test_doc_blocks.py`): it must check and, with a `main`, run; it may end with `// output:` and one `// ` line per printed line. Mark pieces ```` ```myla fragment ```` and deliberately wrong code ```` ```myla error ```` (D114).
 - The interpreter and the native backend must print the same output; check both (`run` and `build` + execute) after changing either.
 - Changes to `selfhost/` must keep the bootstrap fixed point: `scripts/bootstrap.sh`. A change to the compiler's output also needs a new seed: `scripts/update-seed.sh`, then commit `bootstrap/seed.s` (CI fails on a stale one).
 - Before trusting a construct you're unsure of, write a five-line program and run `build/myla check` on it: the checker's messages are precise.

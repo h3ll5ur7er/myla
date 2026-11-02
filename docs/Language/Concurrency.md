@@ -28,7 +28,7 @@ async fun twice(n: int) -> int {
 
 ## Child tasks: `async let`
 
-```myla
+```myla fragment
 async fun total() -> int {
     async let a = fetch(1)
     async let b = fetch(2)
@@ -67,7 +67,7 @@ async fun squares(n: int) -> [int] {
 
 Cancelling is cooperative (D96): `task.cancel(a)` asks the child task of `async let a` to stop, and the child decides where it can stop safely, by checking `task.cancelled()`:
 
-```myla
+```myla fragment
 import std.task as task
 
 async fun worker(pool: Pool) -> str {
@@ -126,6 +126,8 @@ async fun main() {
     await b
     print(await c.get())        // 2000: one increment at a time
 }
+// output:
+// 2000
 ```
 
 - `actor` declares a type like a struct, and `impl` gives it methods. Making one (`Counter { count: 0 }`) starts the actor and gives a **handle**. Copying the handle copies the reference: `let d = c` reaches the same actor. It is the only reference type in Myla.
@@ -137,7 +139,7 @@ async fun main() {
 - An actor method may be `async`. While it waits, the actor runs other calls (it is *reentrant*), so two actors calling each other can't deadlock. Its fields may have changed when it resumes:
 - In an async actor method, `await self.tally.bump()` with a `var self` method of a struct in a field works on a copy of the field, and the method's final `self` is written back to it when it returns, as for a list element (D99, [[MYLA-169]]). The actor's other calls run while it waits; a change they make to that field meanwhile is replaced by the write-back.
 
-```myla
+```myla fragment
 actor Account {
     balance: int
 }
@@ -197,7 +199,7 @@ The order between lines printed by tasks running at once isn't defined. Each `pr
 
 ## Errors
 
-```myla
+```myla error
 fun peek(c: Counter) -> int {
     return c.count              // 'count' belongs to the actor 'Counter': only its own methods reach it
 }

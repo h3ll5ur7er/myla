@@ -22,6 +22,9 @@ fun main() {
         print(f"area: {area(s)}")
     }
 }
+// output:
+// area: 3.5
+// area: 6
 ```
 
 `myla run` prints `area: 3.5` and `area: 6`; `myla test` runs the `#test` case; `myla build` produces a native binary that prints the same.

@@ -122,6 +122,9 @@ fun main() {
     print(manhattan(p))
     print(f"({p.x}, {p.y})")
 }
+// output:
+// 7
+// (3, -4)
 ```
 
 ```bash
