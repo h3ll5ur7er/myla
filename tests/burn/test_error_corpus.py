@@ -50,14 +50,19 @@ error's; a file without these directives expects no notes::
 
 The diagnostics are the retired Python toolchain's, recorded
 (`tests/burn/_golden.py`, MYLA-219): the stage that failed, its messages,
-notes and positions, and the text its carets underline.
+notes and positions, and the text its carets underline. A file without a
+recording (new or changed since) is held to the self-hosted CLI's
+diagnostics instead, read from what `myla check` (`myla run` for a runtime
+error) prints; on the recorded files the two agree (checked below).
 """
 import os
 import re
+import subprocess
 import unittest
 
-from ._golden import golden
+from ._golden import NoGolden, golden
 from ._native import CAN_BUILD_NATIVE, build_and_run_full, check_file
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 ERRORS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "examples", "errors")
@@ -141,6 +146,71 @@ def _diagnostic(phase: str, path: str) -> dict | None:
     return None
 
 
+_HEADER = re.compile(r"^(lex|parse|module|type|runtime) error: (.*)$")
+_NOTE_HEADER = re.compile(r"^(note|help): (.*)$")
+_WHERE = re.compile(r"^\s*--> (.*):(\d+):(\d+)$")
+_GUTTER = re.compile(r"^\s*(\d+) \| (.*)$")
+_CARETS = re.compile(r"^\s*\| ( *)(\^+)")
+
+
+def _rendered(text: str) -> list[dict]:
+    """The diagnostics the self-hosted CLI rendered in `text`, each with its
+    stage ("note" or "help" for a note), message, position and the text its
+    carets underline."""
+    out: list[dict] = []
+    source = ""
+    for line in text.split("\n"):
+        m = _HEADER.match(line) or _NOTE_HEADER.match(line)
+        if m:
+            out.append({"stage": m.group(1), "message": m.group(2), "line": None, "column": None,
+                        "underlined": None})
+            continue
+        if not out:
+            continue
+        if (w := _WHERE.match(line)) and out[-1]["line"] is None:
+            out[-1]["line"], out[-1]["column"] = int(w.group(2)), int(w.group(3))
+        elif g := _GUTTER.match(line):
+            source = g.group(2)
+        elif (c := _CARETS.match(line)) and out[-1]["underlined"] is None:
+            start = len(c.group(1))
+            out[-1]["underlined"] = source[start:start + len(c.group(2))]
+    return out
+
+
+def _selfhost_diagnostic(phase: str, path: str) -> dict | None:
+    """`_diagnostic`'s answer from the self-hosted CLI: the first error of
+    `myla check` (`myla run` for a runtime error), None when it is of another
+    stage or there is none."""
+    command = "run" if phase == "runtime" else "check"
+    proc = subprocess.run([selfhost_tool("main"), command, path, "--stdlib", STDLIB_ROOT],
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+    found = _rendered(proc.stderr)
+    errors = [i for i, d in enumerate(found) if d["stage"] not in ("note", "help")]
+    if not errors or found[errors[0]]["stage"] != phase:
+        return None
+    first = found[errors[0]]
+    end = errors[1] if len(errors) > 1 else len(found)
+    notes = found[errors[0] + 1:end]
+    return {
+        "message": first["message"],
+        "line": first["line"],
+        "column": first["column"],
+        "underlined": first["underlined"],
+        "notes": [(n["stage"], n["message"]) for n in notes],
+        "note_underlined": [n["underlined"] for n in notes if n["line"] is not None],
+        "more": [(found[i]["stage"] == phase, found[i]["message"]) for i in errors[1:]],
+    }
+
+
+def _expected_diagnostic(phase: str, path: str) -> dict | None:
+    """The recorded diagnostic, or the self-hosted one for a file without a
+    recording."""
+    try:
+        return _diagnostic(phase, path)
+    except (NoGolden, unittest.SkipTest):
+        return _selfhost_diagnostic(phase, path)
+
+
 def _corpus() -> list[str]:
     if not os.path.isdir(ERRORS_DIR):
         return []
@@ -189,6 +259,47 @@ class TestErrorCorpus(unittest.TestCase):
     def test_corpus_is_not_empty(self):
         self.assertTrue(_corpus(), "no negative cases found in examples/errors/")
 
+    @unittest.skipUnless(CAN_BUILD_NATIVE, "the self-hosted CLI needs a native build")
+    def test_the_self_hosted_diagnostics_are_the_recorded_ones(self):
+        # what stands in for a missing recording gives the recorded answer
+        # wherever there is one (the parts the directives look at)
+        compared = 0
+        for name in _corpus():
+            path = os.path.join(ERRORS_DIR, name)
+            with open(path, encoding="utf-8") as fh:
+                source = fh.read()
+            phase, _ = _directive(source)
+            try:
+                recorded = _diagnostic(phase, path)
+            except (NoGolden, unittest.SkipTest):
+                continue
+            with self.subTest(file=name):
+                mine = _selfhost_diagnostic(phase, path)
+                self.assertIsNotNone(mine)
+                keys = ["message", "notes", "more"]
+                if phase == "runtime":
+                    keys += ["line", "column"]
+                if _span(source) is not None:
+                    keys.append("underlined")
+                if _note_spans(source):
+                    keys.append("note_underlined")
+                self.assertEqual({k: mine[k] for k in keys}, {k: recorded[k] for k in keys})
+                compared += 1
+        self.assertGreater(compared, 150)
+
+    @unittest.skipUnless(CAN_BUILD_NATIVE, "the self-hosted CLI needs a native build")
+    def test_a_file_without_a_recording_gets_the_self_hosted_diagnostic(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "type_new_case.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("//~ type error: cannot assign\nfun main() {\n    let x = 1\n    x = 2\n}\n")
+            diag = _expected_diagnostic("type", path)
+            self.assertEqual((diag["message"], diag["line"], diag["underlined"]),
+                             ("cannot assign to an immutable binding (declare it with 'var')", 4, "x = 2"))
+            self.assertEqual(diag["notes"], [("note", "'x' is declared here")])
+            self.assertIsNone(_expected_diagnostic("parse", path))
+
 
 def _make(name: str):
     def test(self):
@@ -196,7 +307,7 @@ def _make(name: str):
         with open(path, encoding="utf-8") as fh:
             source = fh.read()
         phase, needle = _directive(source)
-        diag = _diagnostic(phase, path)
+        diag = _expected_diagnostic(phase, path)
         if diag is None:
             self.fail(f"{name}: expected a {phase} error")
         message = diag["message"]
