@@ -22,6 +22,7 @@ import unittest
 
 from ._golden import answer_for_file, golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._continuation import without_continued_newlines
 from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
@@ -133,7 +134,8 @@ class SelfHostedLexerParity(unittest.TestCase):
     def test_corpus_token_parity(self) -> None:
         checked = 0
         for path in _corpus():
-            expected = _oracle(path)
+            # the recording without the line breaks D104 (3) continues
+            expected = without_continued_newlines(_oracle(path))
             with self.subTest(file=os.path.relpath(path, _REPO)):
                 actual = self._myla_lex(path)
                 self.assertEqual(actual, expected)

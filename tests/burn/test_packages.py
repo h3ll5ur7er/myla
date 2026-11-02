@@ -175,6 +175,15 @@ def _python_diagnostic(files: dict[str, str], flags, ws: str) -> str:
     return _recorded_python_diagnostic(files, list(flags)).replace("{ws}", ws)
 
 
+# Diagnostics that line continuation (D104 (3), MYLA-224) changed from the
+# retired Python CLI's recording: `1 +` at the end of a line goes on to the
+# `}` of the next. `{ws}` is the workspace.
+SUPERSEDED = {
+    "parse_error_in_a_package_module": "parse error: expected an expression, found '}'\n  --> {ws}/geo/src/geo.my:4:1\n"
+                                       "  |\n4 | }\n  | ^",
+}
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class PackageParity(_Layout):
     @classmethod
@@ -249,7 +258,10 @@ class PackageParity(_Layout):
                 _write(ws, PACKAGES)
                 _write(ws, files)
                 entry = os.path.join(ws, "app", "main.my")
-                expected = _python_diagnostic({**PACKAGES, **files}, flags, ws)
+                if name in SUPERSEDED:
+                    expected = SUPERSEDED[name].replace("{ws}", ws)
+                else:
+                    expected = _python_diagnostic({**PACKAGES, **files}, flags, ws)
                 args = _package_args(flags, ws)
                 gen = subprocess.run([self.gen, entry, STDLIB_ROOT, *args], capture_output=True, text=True)
                 self.assertEqual((gen.stderr, gen.returncode), (expected + "\n", 1))

@@ -4,7 +4,7 @@ The syntax of Myla 1.0 in EBNF, as [[selfhost/parser.my]] accepts it. The origin
 
 This page shows the rules of [[grammar/myla.ebnf]], the machine-readable grammar: the same rules plus annotations for the editor grammars it generates (MYLA-77, [[Architecture/Editor-tooling]]). A test compares the two, so change both together.
 
-Notation: `"x"` or `'x'` is a terminal (no escapes: `"\"` is a backslash), `/…/` a character class in regex syntax, `A B` a sequence, `A | B` an alternative, `( … )` a group, `?` optional, `*` zero or more, `+` one or more. Names in capitals whose rules use only terminals, classes and lowercase helper rules are tokens; their helpers are token fragments. `NL` is a newline token; where a rule doesn't mention `NL`, a line break isn't allowed (see [[Language/Lexical-structure]]). `SEP` is a separator, a newline or a `;` (D61).
+Notation: `"x"` or `'x'` is a terminal (no escapes: `"\"` is a backslash), `/…/` a character class in regex syntax, `A B` a sequence, `A | B` an alternative, `( … )` a group, `?` optional, `*` zero or more, `+` one or more. Names in capitals whose rules use only terminals, classes and lowercase helper rules are tokens; their helpers are token fragments. `NL` is a newline token; where a rule doesn't mention `NL`, a line break isn't allowed (see [[Language/Lexical-structure]]). The lexer makes no `NL` inside `( )` or `[ ]` (unless within a `{ }` in them) nor after a binary operator that ends a line, except `>` (D104 (3), [[MYLA-224]]); the rules show `NL` where that matters most, at the edges of bracketed lists and after operators, which is what the editor grammar follows (it doesn't see a line break before an operator inside brackets). `SEP` is a separator, a newline or a `;` (D61).
 
 [TOC]
 
@@ -62,7 +62,7 @@ field        = IDENT ":" type ;
 enum_decl    = "enum" IDENT type_params? "{" NL* ( variant ","? NL* )* "}" ;
 variant      = IDENT ( "(" type ( "," type )* ","? ")" )? ;
 
-fun_decl     = "async"? "fun" IDENT generics? "(" ( param ( "," param )* )? ")" ( "->" type )? block ;
+fun_decl     = "async"? "fun" IDENT generics? "(" NL* ( param NL* ( "," NL* param NL* )* )? ")" ( "->" type )? block ;
 param        = IDENT ":" type ;
 generics     = "<" generic ( "," generic )* ">" ;
 generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
@@ -70,7 +70,7 @@ type_params  = "<" IDENT ( "," IDENT )* ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;
 method       = attribute* method_head block ;
-method_head  = "async"? "fun" IDENT generics? "(" receiver ( "," param )* ")" ( "->" type )? ;
+method_head  = "async"? "fun" IDENT generics? "(" NL* receiver NL* ( "," NL* param NL* )* ")" ( "->" type )? ;
 receiver     = "self" | "var" "self" ;
 
 trait_decl   = "trait" IDENT type_params? "{" SEP* ( method_head SEP* )* "}" ;
@@ -126,37 +126,37 @@ place       = ( IDENT | "self" | "(" place ")" )
 
 ```ebnf
 expression  = pipe ;
-pipe        = logic_or ( "|>" logic_or )* ;
-logic_or    = logic_and ( "||" logic_and )* ;
-logic_and   = equality ( "&&" equality )* ;
-equality    = comparison ( ( "==" | "!=" ) comparison )* ;
-comparison  = bit_or ( ( "<" | "<=" | ">" | ">=" ) bit_or )* ;
-bit_or      = bit_xor ( "|" bit_xor )* ;
-bit_xor     = bit_and ( "^" bit_and )* ;
-bit_and     = shift ( "&" shift )* ;
-shift       = term ( ( "<<" | ">>" ) term )* ;   (* two touching "<" or ">" *)
-term        = factor ( ( "+" | "-" ) factor )* ;
-factor      = cast ( ( "*" | "/" | "%" ) cast )* ;
+pipe        = logic_or ( "|>" NL* logic_or )* ;
+logic_or    = logic_and ( "||" NL* logic_and )* ;
+logic_and   = equality ( "&&" NL* equality )* ;
+equality    = comparison ( ( "==" | "!=" ) NL* comparison )* ;
+comparison  = bit_or ( ( ( "<" | "<=" | ">=" ) NL* | ">" ) bit_or )* ;
+bit_or      = bit_xor ( "|" NL* bit_xor )* ;
+bit_xor     = bit_and ( "^" NL* bit_and )* ;
+bit_and     = shift ( "&" NL* shift )* ;
+shift       = term ( ( "<<" NL* | ">>" ) term )* ;   (* two touching "<" or ">" *)
+term        = factor ( ( "+" | "-" ) NL* factor )* ;
+factor      = cast ( ( "*" | "/" | "%" ) NL* cast )* ;
 cast        = unary ( "as" type )* ;
 unary       = ( "-" | "!" | "~" ) unary | "await" unary
             | postfix | lambda ;
               (* the parser also lets a suffix follow a lambda whose body
                  can't take it, as in (x) => x as T [0]; write ((x) => …)[0] *)
-postfix     = primary ( "(" call_args? ")" | "[" expression "]"
+postfix     = primary ( "(" call_args? ")" | "[" NL* expression NL* "]"
                       | "." ( IDENT | TUPLE_INDEX ) | "?" )* ;
 call_args   = NL+ | NL* call_arg NL* ( "," NL* call_arg NL* )* ;
 call_arg    = "_" | expression ;            (* "_" alone: a partial-application hole *)
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" | "false"
-            | "self" | IDENT | struct_literal | "(" expression ")"
+            | "self" | IDENT | struct_literal | "(" NL* expression NL* ")"
             | tuple | list | map | match_expr ;
 fstring     = 'f"' ( FSTRING_TEXT | "{{" | "}}"
                    | "{" expression "}" )* '"' ;
               (* lowered by the lexer to: format(STRING, expression, …) *)
 struct_literal = IDENT "{" NL* ( field_init ( "," NL* field_init )* ","? NL* )? "}" ;
 field_init  = IDENT ":" expression ;
-tuple       = "(" expression "," ( expression ( "," expression )* ","? )? ")" ;
-lambda      = "async"? "(" ( lambda_param ( "," lambda_param )* )? ")" "=>" ( block | expression ) ;
+tuple       = "(" NL* expression NL* "," NL* ( expression NL* ( "," NL* expression NL* )* ( "," NL* )? )? ")" ;
+lambda      = "async"? "(" NL* ( lambda_param NL* ( "," NL* lambda_param NL* )* )? ")" "=>" ( block | expression ) ;
 lambda_param = IDENT ( ":" type )? ;
 list        = "[" NL* ( expression NL* ( "," NL* expression NL* )* ( "," NL* )? )? "]" ;
 map         = "[" NL* ":" "]"

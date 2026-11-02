@@ -17,11 +17,19 @@ pub struct Lexer {
     n: int32,
     toks: [Token],
     err: Option<Diag>,
+    // the brackets open at the cursor, innermost last: true for `(` and `[`,
+    // inside which a line break doesn't end a statement, false for `{`
+    // (D104 (3), MYLA-224)
+    opens: [bool],
+    // a line break left out since the last token, and where it was
+    held: bool,
+    held_line: int32,
+    held_col: int32,
 }
 
-#test("a")[Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None }]
-#test("code")[Lexer { cps: ['c', 'o', 'd', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None }]
-#test("tries")[Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None }]
+#test("a")[Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }]
+#test("code")[Lexer { cps: ['c', 'o', 'd', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }]
+#test("tries")[Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }]
 pub fun new_lexer(src: str) -> Lexer {
     // the code points as `chars` decodes them, not copied (MYLA-133)
     let cps = chars(src)
@@ -29,7 +37,7 @@ pub fun new_lexer(src: str) -> Lexer {
     // (MYLA-178)
     var start = 0
     if len(cps) > 0 && cps[0] == '\u{FEFF}' { start = 1 }
-    return Lexer { cps: cps, pos: start, line: 1, col: 1, n: len(cps) as int32, toks: [], err: None }
+    return Lexer { cps: cps, pos: start, line: 1, col: 1, n: len(cps) as int32, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }
 }
 
 // One canonical token line (mirror of src/myla/canon.py:canonical_token).
@@ -58,13 +66,36 @@ pub fun canonical_line(t: Token) -> str {
     return build(sb)
 }
 
+// Whether a token of kind `k` can only start a statement or a declaration,
+// never stand inside brackets (`if`, `match` and `async` can, and `var` in a
+// method's `(var self`).
+#test(TokenKind.LET)[true]
+#test(TokenKind.IF)[false]
+#test(TokenKind.ASYNC)[false]
+#test(TokenKind.IDENT)[false]
+#test(TokenKind.VAR)[false]
+pub fun starts_statement(k: TokenKind) -> bool {
+    return k == TokenKind.LET || k == TokenKind.RETURN || k == TokenKind.BECOME || k == TokenKind.FUN || k == TokenKind.STRUCT || k == TokenKind.ACTOR || k == TokenKind.ENUM || k == TokenKind.IMPL || k == TokenKind.TRAIT || k == TokenKind.CONST || k == TokenKind.TYPEALIAS || k == TokenKind.IMPORT || k == TokenKind.FROM || k == TokenKind.PUB || k == TokenKind.WHILE || k == TokenKind.FOR || k == TokenKind.BREAK || k == TokenKind.CONTINUE
+}
+
+// Whether a line that ends in a token of kind `k` goes on: a binary operator
+// (D104 (3), MYLA-224), but not `>`, which also closes a generic type.
+#test(TokenKind.PLUS)[true]
+#test(TokenKind.PIPEGT)[true]
+#test(TokenKind.GT)[false]
+#test(TokenKind.IDENT)[false]
+#test(TokenKind.MINUS)[true]
+pub fun continues_line(k: TokenKind) -> bool {
+    return k == TokenKind.PLUS || k == TokenKind.MINUS || k == TokenKind.STAR || k == TokenKind.SLASH || k == TokenKind.PERCENT || k == TokenKind.EQ || k == TokenKind.NE || k == TokenKind.LT || k == TokenKind.LE || k == TokenKind.GE || k == TokenKind.AND || k == TokenKind.OR || k == TokenKind.AMP || k == TokenKind.PIPE || k == TokenKind.CARET || k == TokenKind.PIPEGT
+}
+
 impl Lexer {
     // Build a `str` from the codepoints `cps[start..end]`. A method (not a free
     // function) so `self.cps` is borrowed through `self` rather than passed —
     // and cloned — by value on every token (the lexer's dominant allocation).
-    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None }, 0, 1)["a"]
-    #test(Lexer { cps: ['c', 'o', 'd', 'e'], pos: 4, line: 1, col: 5, n: 4, toks: [], err: None }, 0, 4)["code"]
-    #test(Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 5, line: 1, col: 6, n: 5, toks: [], err: None }, 0, 5)["tries"]
+    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 0, 1)["a"]
+    #test(Lexer { cps: ['c', 'o', 'd', 'e'], pos: 4, line: 1, col: 5, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 0, 4)["code"]
+    #test(Lexer { cps: ['t', 'r', 'i', 'e', 's'], pos: 5, line: 1, col: 6, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 0, 5)["tries"]
     fun slice_str(self, start: int32, end: int32) -> str {
         var sb = StringBuilder()
         var i = start
@@ -77,22 +108,22 @@ impl Lexer {
         return build(sb)
     }
 
-    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None })[true]
-    #test(Lexer { cps: ['b'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None })[true]
-    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None })[false]
+    #test(Lexer { cps: ['a'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[true]
+    #test(Lexer { cps: ['b'], pos: 1, line: 1, col: 2, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[true]
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[false]
     fun at_end(self) -> bool {
         return self.pos >= self.n
     }
 
-    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None })[97]
-    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None })[110]
-    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None })[43]
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[97]
+    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[110]
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[43]
     fun peek(self) -> int32 {
         if self.pos >= self.n { return 0 }
         return self.cps[self.pos] as int32
     }
 
-    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None })[32]
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[32]
     fun peek1(self) -> int32 {
         if self.pos + 1 >= self.n { return 0 }
         return self.cps[self.pos + 1] as int32
@@ -118,9 +149,9 @@ impl Lexer {
         self.pos = self.n
     }
 
-    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None })[97]
-    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None })[110]
-    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None })[43]
+    #test(Lexer { cps: ['a'], pos: 0, line: 1, col: 1, n: 1, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[97]
+    #test(Lexer { cps: ['n', 'a', 'm', 'e'], pos: 0, line: 1, col: 1, n: 4, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[110]
+    #test(Lexer { cps: ['a', ' ', '+', ' ', 'b'], pos: 2, line: 1, col: 3, n: 5, toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0 })[43]
     fun advance(var self) -> int32 {
         if self.pos >= self.n { return 0 }
         let c = self.cps[self.pos] as int32
@@ -136,16 +167,45 @@ impl Lexer {
 
     // A scanner emits a token once it has consumed it: it ends at the cursor.
     fun emit(var self, kind: TokenKind, lexeme: str, line: int32, col: int32, ival: int64, suffix: str) {
+        // a line inside brackets that starts a statement or declaration: the
+        // brackets were never closed, the line break ends the statement
+        // after all (the parser goes on from there)
+        if self.held && starts_statement(kind) {
+            while len(self.opens) > 0 && self.opens[len(self.opens) - 1] { let o = pop(self.opens) }
+            push(self.toks, Token { kind: TokenKind.NEWLINE, lexeme: "\\n", line: self.held_line, column: self.held_col, eline: self.held_line, ecol: self.held_col, ival: 0, suffix: "", big: "" })
+        }
+        self.held = false
         push(self.toks, Token { kind: kind, lexeme: lexeme, line: line, column: col, eline: self.line, ecol: self.col, ival: ival, suffix: suffix, big: "" })
+        if kind == TokenKind.LPAREN || kind == TokenKind.LBRACKET { push(self.opens, true) }
+        else if kind == TokenKind.LBRACE { push(self.opens, false) }
+        else if (kind == TokenKind.RPAREN || kind == TokenKind.RBRACKET) && len(self.opens) > 0 && self.opens[len(self.opens) - 1] { let o = pop(self.opens) }
+        else if kind == TokenKind.RBRACE {
+            // the brackets left open inside the block end with it
+            while len(self.opens) > 0 && self.opens[len(self.opens) - 1] { let o = pop(self.opens) }
+            if len(self.opens) > 0 { let b = pop(self.opens) }
+        }
     }
 
     fun emit0(var self, kind: TokenKind, lexeme: str, line: int32, col: int32) {
         self.emit(kind, lexeme, line, col, 0, "")
     }
 
+    // A line break: a NEWLINE token, unless the statement goes on (D104 (3),
+    // MYLA-224): inside `( )` or `[ ]` (not in a `{ }` within them), or after
+    // a binary operator that ends the line (not `>`, which also closes a
+    // generic type).
     fun emit_newline(var self) {
         if len(self.toks) == 0 { return }
-        if self.toks[len(self.toks) - 1].kind == TokenKind.NEWLINE { return }
+        let last = self.toks[len(self.toks) - 1].kind
+        if last == TokenKind.NEWLINE { return }
+        if (len(self.opens) > 0 && self.opens[len(self.opens) - 1]) || continues_line(last) {
+            if !self.held {
+                self.held = true
+                self.held_line = self.line
+                self.held_col = self.col
+            }
+            return
+        }
         self.emit0(TokenKind.NEWLINE, "\\n", self.line, self.col)
     }
 
@@ -171,7 +231,7 @@ impl Lexer {
         self.fail(sl, sc, "unterminated block comment")
     }
 
-    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None }, 10)["1"]
+    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 0, line: 1, col: 1, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 10)["1"]
     fun scan_digits(var self, base: int32) -> str {
         var sb = StringBuilder()
         var prev_us = false
@@ -203,7 +263,7 @@ impl Lexer {
         return build(sb)
     }
 
-    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 1, line: 1, col: 2, n: 5, toks: [], err: None }, 1, 1)[""]
+    #test(Lexer { cps: ['1', ' ', '/', ' ', '0'], pos: 1, line: 1, col: 2, n: 5, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 1, 1)[""]
     fun scan_int_suffix(var self, sl: int32, sc: int32) -> str {
         if self.peek() == 105 || self.peek() == 117 {
             let sp = self.pos
@@ -484,9 +544,9 @@ impl Lexer {
         }
     }
 
-    #test(Lexer { cps: ['[', '1', ',', ' ', '2', ']'], pos: 0, line: 1, col: 1, n: 6, toks: [], err: None }, 91)[TokenKind.LBRACKET]
-    #test(Lexer { cps: ['(', '1', ',', ' ', '\'', 'c', '\'', ',', ' ', 't', 'r', 'u', 'e', ')'], pos: 0, line: 1, col: 1, n: 14, toks: [], err: None }, 40)[TokenKind.LPAREN]
-    #test(Lexer { cps: ['p', '.', 'x'], pos: 1, line: 1, col: 2, n: 3, toks: [Token { kind: TokenKind.IDENT, lexeme: "p", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None }, 46)[TokenKind.DOT]
+    #test(Lexer { cps: ['[', '1', ',', ' ', '2', ']'], pos: 0, line: 1, col: 1, n: 6, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 91)[TokenKind.LBRACKET]
+    #test(Lexer { cps: ['(', '1', ',', ' ', '\'', 'c', '\'', ',', ' ', 't', 'r', 'u', 'e', ')'], pos: 0, line: 1, col: 1, n: 14, toks: [], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 40)[TokenKind.LPAREN]
+    #test(Lexer { cps: ['p', '.', 'x'], pos: 1, line: 1, col: 2, n: 3, toks: [Token { kind: TokenKind.IDENT, lexeme: "p", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], err: None, opens: [], held: false, held_line: 0, held_col: 0 }, 46)[TokenKind.DOT]
     fun one_char_kind(self, c: int32) -> TokenKind {
         if c == 43 { return TokenKind.PLUS }
         if c == 45 { return TokenKind.MINUS }

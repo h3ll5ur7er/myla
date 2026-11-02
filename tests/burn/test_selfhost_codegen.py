@@ -644,6 +644,20 @@ REGISTER_SAMPLE = (
     "}\n")
 
 
+# Diagnostics that line continuation (D104 (3), MYLA-224) changed from the
+# retired Python CLI's recording: `1 +` at the end of a line goes on to the
+# next one, so the error names the `}` there (or, in `newline_token`, the
+# statement reads `1 + print(x)`). `{dir}` is the program's directory.
+SUPERSEDED: dict[str, str] = {
+    "parse_error_in_module": "parse error: expected an expression, found '}'\n  --> {dir}/lib.my:3:1\n  |\n3 | }\n  | ^",
+    "parse_errors_in_module": (
+        "parse error: expected an expression, found '}'\n  --> {dir}/lib.my:3:1\n  |\n3 | }\n  | ^\n\n"
+        "parse error: expected parameter name, found '{'\n  --> {dir}/lib.my:4:12\n  |\n4 | pub fun g( {\n  |            ^\n\n"
+        "parse error: expected variable name, found '='\n  --> {dir}/lib.my:7:9\n  |\n7 |     let = 2\n  |         ^\n\n"
+        "error: aborting due to 3 previous errors"),
+    "newline_token": "type error: unknown name 'x'\n  --> {dir}/main.my:3:11\n  |\n3 |     print(x)\n  |           ^",
+}
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedCodegenParity(unittest.TestCase):
     _binary: str
@@ -754,11 +768,14 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     expected, _ = _linked_oracle(entry, _modules(entry))
                     self.assertEqual((out, code), (expected, 0))
 
-    def _assert_diagnostic_matches(self, entry: str, stdlib: str, modules: list[str]) -> None:
+    def _assert_diagnostic_matches(self, entry: str, stdlib: str, modules: list[str], name: str = "") -> None:
         """The self-hosted compiler rejects `entry` with exactly the Python
-        CLI's diagnostic, carets included; `modules` are the program's other
-        files."""
-        expected = _diagnostic_oracle(entry, modules)
+        CLI's diagnostic, carets included (or the one pinned in SUPERSEDED);
+        `modules` are the program's other files."""
+        if name in SUPERSEDED:
+            expected = SUPERSEDED[name].replace("{dir}", os.path.dirname(entry))
+        else:
+            expected = _diagnostic_oracle(entry, modules)
         self.assertIsNotNone(expected, "the Python toolchain accepted the program")
         proc = subprocess.run(
             [self._binary, entry, stdlib], capture_output=True, text=True
@@ -771,7 +788,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             for name, files in MODULE_ERRORS.items():
                 with self.subTest(program=name):
                     entry = _write_project(os.path.join(tmp, name), files)
-                    self._assert_diagnostic_matches(entry, stdlib, _modules(entry))
+                    self._assert_diagnostic_matches(entry, stdlib, _modules(entry), name)
 
     def test_diagnostics_match_the_python_cli(self) -> None:
         # every lex, parse, module and type error of the corpus, and ranges
@@ -790,7 +807,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     # the examples are single files; each case of DIAGNOSTICS
                     # has a directory of its own
                     modules = _modules(entry) if name in DIAGNOSTICS else []
-                    self._assert_diagnostic_matches(entry, stdlib, modules)
+                    self._assert_diagnostic_matches(entry, stdlib, modules, name)
 
     def test_stress_programs_reclaim_memory(self) -> None:
         from . import test_compiler_parity
