@@ -1,0 +1,10 @@
+//~ type error: the pattern of this 'if let' always matches: use 'let' instead
+//~ span: (a, b)
+// An `if let` is for a pattern that can fail; one that always matches is a
+// plain `let` (D104 (5), MYLA-226).
+fun main() {
+    let pair = (1, 2)
+    if let (a, b) = pair {
+        print(a + b)
+    }
+}

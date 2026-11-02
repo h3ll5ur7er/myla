@@ -3277,7 +3277,10 @@ impl Checker {
             push(bodies, ab)
         }
         self.check_exhaustive(e, st, arms)?
-        self.check_redundant(arms, st)?
+        match self.check_redundant(arms, st) {
+            Ok(x) => {},
+            Err(err) => { return Err(if_worded(err, arms)) },
+        }
         if as_stmt { return Ok(None) }
         // collect non-diverging arm values
         var vals: [MatchVal] = []
@@ -6479,8 +6482,20 @@ impl Reads {
 #test(CheckErr { line: 1, col: 1, sp: no_span(), msg: "match arms have incompatible types 'a' and 'b'", decl: -1, notes: [] }, [])[CheckErr { line: 1, col: 1, sp: no_span(), msg: "match arms have incompatible types 'a' and 'b'", decl: -1, notes: [] }]
 fun if_worded(err: CheckErr, arms: [MatchArm]) -> CheckErr {
     if len(arms) != 2 { return err }
-    let from_if = match arms[1].pattern.kind { PatternKind.PBind(n) => n == "%else", _ => false }
-    if !from_if { return err }
+    // `%else`: an `if` used as a value; `%iflet`, `%whilelet`: an `if let`, a
+    // `while let` (MYLA-226), whose pattern must be able to fail
+    let marker = match arms[1].pattern.kind { PatternKind.PBind(n) => n, _ => "" }
+    if marker != "%else" && marker != "%iflet" && marker != "%whilelet" { return err }
+    if err.msg == "unreachable match arm (a previous arm already matches everything)" && marker != "%else" {
+        let pat = arms[0].pattern
+        var advice = "use 'let' instead"
+        var what = "if let"
+        if marker == "%whilelet" {
+            advice = "use 'while true' and 'let'"
+            what = "while let"
+        }
+        return CheckErr { line: pat.line, col: pat.col, sp: pat.sp, msg: format("the pattern of this '{}' always matches: {}", what, advice), decl: err.decl, notes: err.notes }
+    }
     var msg = err.msg
     let types = "match arms have incompatible types "
     if len(msg) > len(types) && starts(msg, types) {

@@ -2260,8 +2260,17 @@
           "value": "if"
         },
         {
-          "type": "SYMBOL",
-          "name": "_cond"
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_cond"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "let_cond"
+            }
+          ]
         },
         {
           "type": "SYMBOL",
@@ -2311,6 +2320,27 @@
         }
       ]
     },
+    "let_cond": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "let"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_pattern"
+        },
+        {
+          "type": "STRING",
+          "value": "="
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_cond"
+        }
+      ]
+    },
     "while_stmt": {
       "type": "SEQ",
       "members": [
@@ -2319,8 +2349,17 @@
           "value": "while"
         },
         {
-          "type": "SYMBOL",
-          "name": "_cond"
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_cond"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "let_cond"
+            }
+          ]
         },
         {
           "type": "SYMBOL",
@@ -3101,8 +3140,17 @@
           "value": "if"
         },
         {
-          "type": "SYMBOL",
-          "name": "_cond"
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_cond"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "let_cond"
+            }
+          ]
         },
         {
           "type": "SYMBOL",

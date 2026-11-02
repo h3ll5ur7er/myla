@@ -92,6 +92,38 @@ fun main() {
 
 A block that gives a value (an `if` branch, a `match` arm) may end with an `if` statement whose every level has an `else`: it reads as the `if` expression. In the condition of `if`, `while`, `for` and `match`, a struct literal must be parenthesised, because its `{` would otherwise start the body.
 
+## if let / while let
+
+`if let P = e { … } else { … }` runs its block when `e` matches the pattern `P`, with `P`'s bindings in scope there only; `while let P = e { … }` runs its body while `e` (evaluated before each round) matches (D104 (5), [[MYLA-226]]). They are sugar over `match`: `match e { P => { … }, _ => { … } }`, and `while true { match e { P => { … }, _ => { break } } }`. An `if let` chains with `else if`, and gives a value as an `if` does. A pattern that always matches (a name, a tuple of names) is an error: write `let`.
+
+```myla
+fun find(xs: [int], want: int) -> Option<int> {
+    for i in 0..len(xs) {
+        if xs[i] == want {
+            return Some(i)
+        }
+    }
+    return None
+}
+
+fun main() {
+    if let Some(i) = find([4, 7, 9], 7) {
+        print(i)
+    }
+    let at = if let Some(i) = find([4, 7, 9], 5) { i } else { -1 }
+    print(at)
+    var n = 3
+    while let Some(_) = find([1, 2, 3], n) {
+        n -= 1
+    }
+    print(n)
+}
+// output:
+// 1
+// -1
+// 0
+```
+
 ## Loops
 
 ```myla

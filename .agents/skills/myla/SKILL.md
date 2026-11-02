@@ -72,7 +72,7 @@ fun main() {
 | `Point::new()`, `static func` | a free function `fun new_point() -> Point` | No associated/static functions: every method takes `self` |
 | `&self`, `&mut self`, `&x`, lifetimes | `self`, `var self`, plain values | No references or borrowing; everything is a value (copy-on-write under the hood) |
 | `xs.push(v)`, `xs.len()`, `s.len()` | `push(xs, v)`, `len(xs)`, `len(s)` | Collection operations are built-in functions; `push`/`pop`/`remove`/`append` need a `var` place |
-| `opt.unwrap()`, `.map(…)`, `.unwrap_or(…)` | `match opt { Some(v) => v, None => 0 }` or `?` | `Option`/`Result` have no methods |
+| `opt.unwrap()`, `.map(…)`, `.unwrap_or(…)` | `match opt { Some(v) => v, None => 0 }`, `if let Some(v) = opt { … }` or `?` | `Option`/`Result` have no methods; `if let`/`while let` (D104) are sugar over `match` |
 | `\|x\| x + 1`, `{ x in x + 1 }` | `(x: int) => x + 1`, `(x) => { return x }` | Lambda syntax; parameter types can be omitted only when a function type is expected |
 | `Fn(i32) -> i32`, `(Int) -> Int` | `(int) -> int` | Function types |
 | `println!("{}", x)`, `print("\(x)")` | `print(x)`, `print(f"x = {x}")`, `format("x = {}", x)` | `print` takes exactly one int/float/char/bool/str |

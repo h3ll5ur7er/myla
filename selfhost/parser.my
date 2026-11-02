@@ -1212,6 +1212,7 @@ impl Parser {
     #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.IfS(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }, None) }]
     fun if_stmt(var self) -> Stmt {
         let kw = self.advance()
+        if self.check(TokenKind.LET) { return self.if_let_stmt(kw) }
         let cond = self.expression_ns()
         let then = self.block()
         var otherwise: Option<ElseTail> = None
@@ -1232,9 +1233,84 @@ impl Parser {
     #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.WhileS(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }) }]
     fun while_stmt(var self) -> Stmt {
         let kw = self.advance()
+        if self.check(TokenKind.LET) { return self.while_let_stmt(kw) }
         let cond = self.expression_ns()
         let body = self.block()
         return self.mk_stmt(kw.line, kw.column, StmtKind.WhileS(cond, body))
+    }
+
+    // -- `if let` and `while let` (D104 (5), MYLA-226): sugar over `match` --
+
+    // At `let`: the pattern and, after `=`, the value it is matched against.
+    fun let_pattern(var self, what: str) -> (Pattern, Expr) {
+        self.skip()
+        let pat = self.pattern()
+        self.expect(TokenKind.ASSIGN, format("'=' after the pattern of an '{}'", what))
+        let value = self.expression_ns()
+        return (pat, value)
+    }
+
+    // `match value { pat => { then }, <marker> => otherwise }`: the second arm
+    // binds `marker` (`%iflet`, `%whilelet`; no source spells them), which
+    // tells the checker the words to use (`if_worded`).
+    fun let_match(var self, line: int32, col: int32, sp: SrcSpan, value: Expr, pat: Pattern, then: Block, marker: str, otherwise: ExprOrBlock) -> Expr {
+        var el_line = then.line
+        var el_col = then.col
+        var el_sp = then.sp
+        match otherwise {
+            ExprOrBlock.EB_Block(b) => {
+                if len(b.stmts) > 0 {
+                    el_line = b.line
+                    el_col = b.col
+                    el_sp = b.sp
+                }
+            },
+            ExprOrBlock.EB_Expr(x) => {
+                el_line = x.line
+                el_col = x.col
+                el_sp = x.sp
+            },
+        }
+        let arms = [
+            MatchArm { line: then.line, col: then.col, sp: then.sp, pattern: pat, guard: None, body: ExprOrBlock.EB_Block(then) },
+            MatchArm { line: el_line, col: el_col, sp: el_sp, pattern: Pattern { id: self.fresh(), line: el_line, col: el_col, sp: el_sp, kind: PatternKind.PBind(marker) }, guard: None, body: otherwise },
+        ]
+        return Expr { id: self.fresh(), line: line, col: col, sp: sp, kind: ExprKind.MatchE(value, arms) }
+    }
+
+    // `if let P = e { … } else …` as a statement: the match, its arms giving
+    // their blocks' values when it is one (MYLA-226).
+    fun if_let_stmt(var self, kw: Token) -> Stmt {
+        let (pat, value) = self.let_pattern("if let")
+        let then = self.valued(self.block())
+        var otherwise = ExprOrBlock.EB_Block(Block { line: then.line, col: then.col, sp: then.sp, stmts: [] })
+        let saved = self.pos
+        self.skip_newlines()
+        if self.match1(TokenKind.ELSE) {
+            if self.check(TokenKind.IF) {
+                let chained = self.if_stmt()
+                otherwise = ExprOrBlock.EB_Block(self.valued(Block { line: chained.line, col: chained.col, sp: chained.sp, stmts: [chained] }))
+            } else {
+                otherwise = ExprOrBlock.EB_Block(self.valued(self.block()))
+            }
+        } else {
+            self.pos = saved
+        }
+        let e = self.let_match(kw.line, kw.column, self.span_from(kw.line, kw.column), value, pat, then, "%iflet", otherwise)
+        return self.mk_stmt(kw.line, kw.column, StmtKind.ExprStmt(e))
+    }
+
+    // `while let P = e { body }`: `while true { match e { P => { body }, _ => { break } } }`.
+    fun while_let_stmt(var self, kw: Token) -> Stmt {
+        let (pat, value) = self.let_pattern("while let")
+        let body = self.block()
+        let stop = Stmt { id: self.fresh(), line: kw.line, col: kw.column, sp: value.sp, kind: StmtKind.BreakS }
+        let otherwise = ExprOrBlock.EB_Block(Block { line: kw.line, col: kw.column, sp: value.sp, stmts: [stop] })
+        let e = self.let_match(kw.line, kw.column, self.span_from(kw.line, kw.column), value, pat, body, "%whilelet", otherwise)
+        let step = Stmt { id: self.fresh(), line: kw.line, col: kw.column, sp: e.sp, kind: StmtKind.ExprStmt(e) }
+        let always = Expr { id: self.fresh(), line: kw.line, col: kw.column, sp: value.sp, kind: ExprKind.BoolLit(true) }
+        let loop_body = Block { line: body.line, col: body.col, sp: body.sp, stmts: [step] }
+        return self.mk_stmt(kw.line, kw.column, StmtKind.WhileS(always, loop_body))
     }
 
     #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.ForS(".", None, None, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }, Some(Expr { id: 0, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: ExprKind.Hole })) }]
@@ -1615,6 +1691,7 @@ impl Parser {
     // the condition (`if_match`); `else if` nests another.
     fun if_expr(var self) -> Expr {
         let kw = self.advance()
+        if self.check(TokenKind.LET) { return self.if_let_expr(kw) }
         let cond = self.expression_ns()
         let then = self.valued(self.block())
         self.skip_newlines()
@@ -1629,6 +1706,24 @@ impl Parser {
             otherwise = ExprOrBlock.EB_Block(self.valued(self.block()))
         }
         return self.if_match(kw.line, kw.column, self.span_from(kw.line, kw.column), cond, then, otherwise)
+    }
+
+    // `if let P = e { a } else { b }` as a value (MYLA-226).
+    fun if_let_expr(var self, kw: Token) -> Expr {
+        let (pat, value) = self.let_pattern("if let")
+        let then = self.valued(self.block())
+        self.skip_newlines()
+        if !self.check(TokenKind.ELSE) {
+            self.fail_at(self.peek(), "an 'if' used as a value needs an 'else'")
+        }
+        self.skip()
+        var otherwise = ExprOrBlock.EB_Block(then)
+        if self.check(TokenKind.IF) {
+            otherwise = ExprOrBlock.EB_Expr(self.if_expr())
+        } else {
+            otherwise = ExprOrBlock.EB_Block(self.valued(self.block()))
+        }
+        return self.let_match(kw.line, kw.column, self.span_from(kw.line, kw.column), value, pat, then, "%iflet", otherwise)
     }
 
     // The `match` an `if` used as a value is: `true => { then }` and an arm

@@ -1,0 +1,8 @@
+//~ parse error: expected '=' after the pattern of an 'if let'
+// `if let` takes a pattern, `=` and the value to match (D104 (5), MYLA-226).
+fun main() {
+    let o = Some(1)
+    if let Some(v) o {
+        print(v)
+    }
+}
