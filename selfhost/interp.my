@@ -9,7 +9,7 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
 from .tokens import SrcSpan, no_span
-from .checker import Checker, Type, checker_on
+from .checker import Checker, Type, checker_on, builtin_method, builtin_method_name
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
@@ -2259,7 +2259,19 @@ impl Interp {
                 }
                 return self.eval_name_call(e, nm, args)
             },
-            ExprKind.GetField(tgt, field) => { return self.eval_getfield_call(e, tgt, field, args) },
+            ExprKind.GetField(tgt, field) => {
+                // a builtin function called as a method of its first argument
+                // (`xs.push(v)` is `push(xs, v)`, D103, MYLA-221)
+                if builtin_method_name(field) && self.func_idx(format("{}.{}", self.recv_key(tgt), field)) < 0 {
+                    let is_builtin = match self.resolved_of(tgt.id) { Some(t) => builtin_method(t, field), None => false }
+                    if is_builtin {
+                        var all: [Expr] = [tgt]
+                        for a in args { push(all, a) }
+                        return self.eval_name_call(e, field, all)
+                    }
+                }
+                return self.eval_getfield_call(e, tgt, field, args)
+            },
             _ => {},
         }
         // indirect call on an arbitrary closure-valued expression

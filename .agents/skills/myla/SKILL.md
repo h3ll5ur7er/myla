@@ -71,7 +71,6 @@ fun main() {
 | `E::A`, `.a` (Swift) to construct | `E.A`, `E.B(1)` | Variants are built with a dot; only `Some`/`None`/`Ok`/`Err` work bare |
 | `Point::new()`, `static func` | a free function `fun new_point() -> Point` | No associated/static functions: every method takes `self` |
 | `&self`, `&mut self`, `&x`, lifetimes | `self`, `var self`, plain values | No references or borrowing; everything is a value (copy-on-write under the hood) |
-| `xs.push(v)`, `xs.len()`, `s.len()` | `push(xs, v)`, `len(xs)`, `len(s)` | Collection operations are built-in functions; `push`/`pop`/`remove`/`append` need a `var` place |
 | `opt.unwrap()`, `.map(…)`, `.unwrap_or(…)` | `match opt { Some(v) => v, None => 0 }`, `if let Some(v) = opt { … }` or `?` | `Option`/`Result` have no methods; `if let`/`while let` (D104) are sugar over `match` |
 | `\|x\| x + 1`, `{ x in x + 1 }` | `(x: int) => x + 1`, `(x) => { return x }` | Lambda syntax; parameter types can be omitted only when a function type is expected |
 | `Fn(i32) -> i32`, `(Int) -> Int` | `(int) -> int` | Function types |
@@ -154,6 +153,7 @@ async fun main() {
 
 - The CLI is `build/myla`; if it is missing, run `scripts/bootstrap.sh` first (it needs only `as` and `ld`, about 8 seconds). Run: `build/myla run file.my`, test: `build/myla test file.my`, compile: `build/myla build file.my -o out` (`-g` for gdb), type-check: `build/myla check file.my`, interactive: `build/myla repl`; in a project with a `myla.toml` also `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` (D73).
 - The standard library is in `lib/std/`; the tests are in `tests/burn/` (`scripts/test.sh fast`, or `scripts/test.sh` for all).
+- The builtin collection and string functions are methods too (D103): `xs.push(v)`, `xs.pop()`, `xs.len()`, `m.contains(k)`, `m.remove(k)`, `m.keys()`, `s.len()`, `s.chars()`, `sb.append(s)`, `sb.append_byte(b)`, `sb.build()`; the function forms (`push(xs, v)`, `len(xs)`) still work. A mutating one needs a `var` place.
 - `#test` cases go above a function, or above a method inside its `impl` with the receiver as the first argument (`#test(Counter { n: 2 }, 3)[5]`, D116).
 - Every value-returning function in `examples/` needs `#test(args)[expected]` cases (a burn test enforces it); add them to new functions in `selfhost/` too: the target there is at least 80 % of value-returning functions (D109).
 - New examples must be registered in `tests/burn/test_examples_run.py` and `tests/burn/test_examples_compile.py`; programs that must be rejected go to `examples/errors/` with a first line `//~ <lex|parse|module|type|runtime> error: <message substring>` (more directives, such as `//~ span:`, in `tests/burn/test_error_corpus.py`).

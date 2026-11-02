@@ -29,7 +29,7 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
-from .checker import Type, Subst, FuncSig, opt_subst_type, subst_type
+from .checker import Type, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
 from .codegen import codegen_on, may_write_expr, is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -2470,6 +2470,13 @@ impl Lower {
             ExprKind.GetField(recv, field) => {
                 let key = cg.type_key(cg.type_of(recv.id))
                 let mname = format("{}.{}", key, field)
+                // a builtin function called as a method of its first argument
+                // (`xs.push(v)` is `push(xs, v)`, D103, MYLA-221)
+                if !cg.has_func(mname) && builtin_method(cg.type_of(recv.id), field) {
+                    var all: [Expr] = [recv]
+                    for a in args { push(all, a) }
+                    return self.call(cg, e, Expr { id: callee.id, line: callee.line, col: callee.col, sp: callee.sp, kind: ExprKind.Name(field) }, all, into)
+                }
                 if !cg.has_func(mname) {
                     if field == "eq" && len(args) == 1 && cg.derived_eq_routine(key) { return self.derived_eq(cg, mname, recv, args[0], tail) }
                     return self.indirect_call(cg, e, callee, args, tail)

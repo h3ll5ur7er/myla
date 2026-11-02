@@ -1241,6 +1241,9 @@ pub struct Checker {
     conc_node: int32,
     in_async: bool,
     actor_self: str,
+    // the call being checked is a builtin function called as a method
+    // (`xs.push(v)`, D103, MYLA-221): a local of the same name doesn't shadow it
+    builtin_as_method: bool,
     cur_key: str,
     lams: [LamAt],
     awaited: [int32: bool],
@@ -1273,7 +1276,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
         call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], passed_on: [],
-        actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", cur_key: "",
+        actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
     }
@@ -5331,9 +5334,11 @@ impl Checker {
     fun infer_call(var self, e: Expr, callee: Expr, args: [Expr], expected: Option<Type>) -> Result<Option<Type>, CheckErr> {
         for a in args { match a.kind { ExprKind.Hole => { return Ok(Some(self.infer_partial(e, callee, args)?)) }, _ => {} } }
         // local binding shadows a global function: call as a value
+        let as_method = self.builtin_as_method
+        self.builtin_as_method = false
         match callee.kind {
             ExprKind.Name(nm) => {
-                let shadowed = match self.lookup(nm) { Some(b) => true, None => false }
+                let shadowed = match self.lookup(nm) { Some(b) => !as_method, None => false }
                 if shadowed { return self.infer_indirect_call(e, callee, args) }
             },
             _ => {},
@@ -5343,6 +5348,19 @@ impl Checker {
                 match self.enum_name_ref(target) {
                     Some(en) => { return Ok(Some(self.infer_variant_ctor(e, en, field, args, expected)?)) },
                     None => {},
+                }
+                // a builtin function called as a method of its first argument
+                // (`xs.push(v)` is `push(xs, v)`, D103, MYLA-221), unless the
+                // type has a method of that name of its own
+                if builtin_method_name(field) {
+                    let rt = self.expect_value(target, None)?
+                    let own = match self.type_key(rt) { Some(k) => match self.method_sig(k, field) { Some(sg) => true, None => false }, None => false }
+                    if builtin_method(rt, field) && !own {
+                        var all = [target]
+                        for a in args { push(all, a) }
+                        self.builtin_as_method = true
+                        return self.infer_call(e, Expr { id: callee.id, line: callee.line, col: callee.col, sp: callee.sp, kind: ExprKind.Name(field) }, all, expected)
+                    }
                 }
                 return self.infer_method_call(e, callee, target, field, args, expected)
             },
@@ -6473,6 +6491,31 @@ impl Reads {
             StmtKind.ExprStmt(x) => { self.expr(x, locals) },
             _ => {},
         }
+    }
+}
+
+// Whether `m` names a builtin function that is also a method (D103,
+// MYLA-221).
+#test("push")[true]
+#test("print")[false]
+pub fun builtin_method_name(m: str) -> bool {
+    return m == "len" || m == "push" || m == "pop" || m == "contains" || m == "remove" || m == "keys" || m == "chars" || m == "append" || m == "append_byte" || m == "build"
+}
+
+// Whether the builtin function `m` is a method of a receiver of type `t`:
+// `len` of lists, maps, strings and builders, `push` and `pop` of lists,
+// `contains`, `remove` and `keys` of maps, `chars` of strings, `append`,
+// `append_byte` and `build` of builders (D103, MYLA-221).
+#test(Type.TList(Type.TStr), "push")[true]
+#test(Type.TStr, "push")[false]
+#test(Type.TSB, "len")[true]
+pub fun builtin_method(t: Type, m: str) -> bool {
+    return match t {
+        Type.TList(el) => m == "len" || m == "push" || m == "pop",
+        Type.TMap(k, v) => m == "len" || m == "contains" || m == "remove" || m == "keys",
+        Type.TStr => m == "len" || m == "chars",
+        Type.TSB => m == "len" || m == "append" || m == "append_byte" || m == "build",
+        _ => false,
     }
 }
 

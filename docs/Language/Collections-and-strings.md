@@ -63,9 +63,23 @@ fun main() {
 | `[k: v, …]`, `[:]` | Keys must be an integer type, `char`, `bool` or `str`; `[:]` needs an expected type |
 | `m[k]` | A missing key is a runtime error; use `get(m, k) -> Option<V>` (a prelude function) to ask safely |
 | `m[k] = v` | Inserts or replaces; needs a `var` place |
-| `contains(m, k)`, `keys(m) -> [K]`, `len(m)` | `keys` gives the keys in the order `for` visits them |
-| `remove(m, k)` | Needs a `var` place; removing a missing key does nothing |
+| `m.contains(k)`, `m.keys() -> [K]`, `m.len()` | `keys` gives the keys in the order `for` visits them |
+| `m.remove(k)` | Needs a `var` place; removing a missing key does nothing |
 | `for k in m` | Visits the keys in the order they were first inserted: replacing a value keeps its key's place, removing a key and inserting it again moves it to the end (D105, [[MYLA-179]]) |
+
+## Methods of the builtin types
+
+The builtin collection and string functions are methods of their first argument (D103, [[MYLA-221]]): `xs.push(v)` is `push(xs, v)`.
+
+| Method | Of |
+| --- | --- |
+| `len()` | lists, maps, strings, `StringBuilder` |
+| `push(v)`, `pop()` | lists (a `var` place) |
+| `contains(k)`, `keys()`, `remove(k)` | maps (`remove`: a `var` place) |
+| `chars()` | strings |
+| `append(s)`, `append(s, start, end)`, `append_byte(b)`, `build()` | `StringBuilder` (`append`, `append_byte`: a `var` place) |
+
+A type's own method of the same name (`impl str { fun len(self) … }`) comes first, and a local named `chars` doesn't hide `s.chars()`. The function forms still work while the repository moves to the methods; then they go (D103).
 
 ## Value semantics and copy-on-write
 
