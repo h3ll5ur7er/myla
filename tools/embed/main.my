@@ -1,0 +1,160 @@
+// main.my: the embedding tool (MYLA-243). The toolchain carries its standard
+// library (and the gdb script `build -g` puts into a binary) as a generated
+// module, so an installed `myla` needs no `lib/` directory on any platform:
+//
+//   embed <lib dir> <module file>          writes the module, only if it changed
+//   embed <lib dir> <module file> --check  exits 1 when the module isn't what
+//                                          the directory gives
+//
+// scripts/bootstrap.sh runs it with stage 0 before compiling the compiler, so
+// every stage carries the same library.
+
+from std.fs import read_to_string, write_to_file, list_dir, is_dir
+from std.io import println, eprintln
+from std.process import args, exit
+
+// The regular files under `root`/`rel`, as paths relative to `root`, sorted;
+// names starting with "." are left out.
+fun files(root: str, rel: str) -> [str] {
+    var out: [str] = []
+    var dir = root
+    if rel != "" { dir = root + "/" + rel }
+    let names = match list_dir(dir) {
+        Ok(ns) => ns,
+        Err(e) => {
+            eprintln(f"embed: cannot list {dir}")
+            exit(1)
+            return out
+        },
+    }
+    for name in names {
+        if name.len() > 0 && name[0] == '.' { continue }
+        var path = name
+        if rel != "" { path = rel + "/" + name }
+        if is_dir(root + "/" + path) {
+            for f in files(root, path) { out.push(f) }
+        } else {
+            out.push(path)
+        }
+    }
+    return out
+}
+
+// `s` as the text of a Myla string literal (without its quotes).
+#test("a\"b\\c\td")["a\\\"b\\\\c\\td"]
+#test("é{x}")["é{x}"]
+#test("\u{1}")["\\u{1}"]
+#test("a\nb")["a\\nb"]
+fun escaped(s: str) -> str {
+    var sb = StringBuilder()
+    for c in s.chars() {
+        if c == '\\' {
+            sb.append("\\\\")
+        } else if c == '"' {
+            sb.append("\\\"")
+        } else if c == '\n' {
+            sb.append("\\n")
+        } else if c == '\t' {
+            sb.append("\\t")
+        } else if c == '\r' {
+            sb.append("\\r")
+        } else if c == '\0' {
+            sb.append("\\0")
+        } else if (c as int32) < 32 || (c as int32) == 127 {
+            sb.append(f"\\u{{{hex(c as int32)}}}")
+        } else {
+            sb.append(f"{c}")
+        }
+    }
+    return sb.build()
+}
+
+#test(1)["1"]
+#test(127)["7f"]
+fun hex(n: int32) -> str {
+    let digits = "0123456789abcdef"
+    if n < 16 {
+        var sb = StringBuilder()
+        sb.append(digits, n, n + 1)
+        return sb.build()
+    }
+    return hex(n / 16) + hex(n % 16)
+}
+
+// The function holding a file's lines: `file_` and the path with every
+// character but letters and digits as `_`.
+#test("std/io.my")["file_std_io_my"]
+#test("debug/myla_gdb.py")["file_debug_myla_gdb_py"]
+fun fun_name(path: str) -> str {
+    var sb = StringBuilder()
+    sb.append("file_")
+    for c in path.chars() {
+        if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+            sb.append(f"{c}")
+        } else {
+            sb.append("_")
+        }
+    }
+    return sb.build()
+}
+
+// The module for the files `paths` of `root`: each file's text as one string
+// literal (a list of lines would cost several instructions per line).
+fun module(root: str, paths: [str]) -> str {
+    var sb = StringBuilder()
+    sb.append("// embedded_std.my: the standard library and the gdb script, as the toolchain\n")
+    sb.append("// carries them (MYLA-243). Generated from lib/ by tools/embed/main.my, which\n")
+    sb.append("// scripts/bootstrap.sh runs: change lib/, not this file.\n\n")
+    sb.append("// The embedded files, by path under the standard library root.\n")
+    sb.append("pub fun embedded_paths() -> [str] {\n    return [\n")
+    for p in paths { sb.append(f"        \"{escaped(p)}\",\n") }
+    sb.append("    ]\n}\n\n")
+    sb.append("// The text of the embedded file `path`, or \"\" for a path `embedded_paths`\n")
+    sb.append("// doesn't list.\n")
+    sb.append("pub fun embedded_file(path: str) -> str {\n")
+    for p in paths { sb.append(f"    if path == \"{escaped(p)}\" {{ return {fun_name(p)}() }}\n") }
+    sb.append("    return \"\"\n}\n")
+    for p in paths {
+        let text = match read_to_string(root + "/" + p) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln(f"embed: cannot read {root}/{p}")
+                exit(1)
+                ""
+            },
+        }
+        sb.append(f"\nfun {fun_name(p)}() -> str {{\n    return \"{escaped(text)}\"\n}}\n")
+    }
+    return sb.build()
+}
+
+fun main() {
+    let argv = args()
+    if argv.len() < 3 || argv.len() > 4 || (argv.len() == 4 && argv[3] != "--check") {
+        eprintln("usage: embed <lib dir> <module file> [--check]")
+        exit(2)
+    }
+    let root = argv[1]
+    let out = argv[2]
+    let text = module(root, files(root, ""))
+    let current = match read_to_string(out) {
+        Ok(t) => t,
+        Err(e) => "",
+    }
+    if argv.len() == 4 {
+        if current != text {
+            eprintln(f"embed: {out} isn't what {root} gives: run scripts/bootstrap.sh")
+            exit(1)
+        }
+        return
+    }
+    if current != text {
+        match write_to_file(out, text) {
+            Ok(n) => println(f"embed: wrote {out}"),
+            Err(e) => {
+                eprintln(f"embed: cannot write {out}")
+                exit(1)
+            },
+        }
+    }
+}

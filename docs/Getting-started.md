@@ -44,7 +44,7 @@ A run reports up to 20 errors: after a syntax error the parser goes on at the ne
 | `myla check <file>` | Type-check only, printing any warnings (D95), then `ok` |
 | `myla repl` | The interactive interpreter ([[MYLA-82]]) |
 
-`run`, `test`, `build`, `check` and `repl` take `--package name=dir` (repeatable), before or after the file: a dependency whose modules `import name` and `from name.shapes import …` find in `dir`, as if it were a directory `name/` next to the entry file ([[Language/Modules]]). The project commands below pass these flags themselves. `--stdlib <dir>` names the folder holding `std/`; by default it is `lib` next to the `build/` directory the binary is in, so `build/myla` works from any directory.
+`run`, `test`, `build`, `check` and `repl` take `--package name=dir` (repeatable), before or after the file: a dependency whose modules `import name` and `from name.shapes import …` find in `dir`, as if it were a directory `name/` next to the entry file ([[Language/Modules]]). The project commands below pass these flags themselves. The standard library is built into `myla` ([[MYLA-243]]): an installed binary needs nothing else, on any platform, and errors in it name its files as `<myla>/std/io.my`. `--stdlib <dir>` or the environment variable `MYLA_STDLIB` name a folder holding `std/` to use instead, such as the repository's `lib` while changing the standard library (`scripts/bootstrap.sh` builds the current `lib` into the tools).
 
 The commands live in [[selfhost/main.my]] and [[selfhost/driver.my]]. The REPL:
 

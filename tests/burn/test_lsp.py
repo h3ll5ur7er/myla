@@ -878,7 +878,7 @@ class TestExtensionStartsTheServer(unittest.TestCase):
         return json.loads(out)
 
     def settings(self, **over) -> dict:
-        s = {"serverPath": "", "compilerEntry": "/r/selfhost/main.my"}
+        s = {"serverPath": "", "compilerEntry": "/r/selfhost/main.my", "searchPath": []}
         s.update(over)
         return s
 
@@ -889,6 +889,12 @@ class TestExtensionStartsTheServer(unittest.TestCase):
     def test_a_configured_binary(self):
         c = self.choose(self.settings(serverPath="/opt/myla-lsp", compilerEntry=None), ["/opt/myla-lsp"])
         self.assertEqual((c["command"], c["args"]), ("/opt/myla-lsp", []))
+
+    def test_the_server_on_the_path(self):
+        # an installed myla-lsp carries its standard library (MYLA-243)
+        c = self.choose(self.settings(compilerEntry=None, searchPath=["/nope", "/usr/local/bin"]),
+                        ["/usr/local/bin/myla-lsp"])
+        self.assertEqual((c["command"], c["args"]), ("/usr/local/bin/myla-lsp", []))
 
     def test_no_server_says_what_to_do(self):
         # the Python server it fell back to is gone (MYLA-83)

@@ -5,6 +5,7 @@
 // is two).
 
 from ...selfhost.util import is_ident_continue
+from ...selfhost.stdroot import EMBEDDED_ROOT
 
 // The lines of `text`, split at "\n", "\r\n" and "\r" (without them).
 #test("a\nb\nc")[["a", "b", "c"]]
@@ -147,13 +148,20 @@ pub fun is_word(c: char) -> bool {
 
 // --- URIs -----------------------------------------------------------------------
 
-// The path of a `file://` URI, percent-decoded; "" for another scheme.
+// The path of a `file://` URI, percent-decoded; for a `myla-std:` URI, the
+// path of an embedded standard library file (`<myla>/std/io.my`, MYLA-243);
+// "" for another scheme.
 #test("file:///tmp/a%20b/c.my")["/tmp/a b/c.my"]
+#test("myla-std:/std/io.my")["<myla>/std/io.my"]
 #test("untitled:1")[""]
 pub fun uri_path(uri: str) -> str {
-    let prefix = "file://"
-    if uri.len() < prefix.len() || part(uri, 0, prefix.len()) != prefix { return "" }
+    var prefix = "file://"
     var sb = StringBuilder()
+    if uri.len() > STD_SCHEME.len() && part(uri, 0, STD_SCHEME.len()) == STD_SCHEME {
+        prefix = STD_SCHEME
+        sb.append(EMBEDDED_ROOT)
+    }
+    if uri.len() < prefix.len() || part(uri, 0, prefix.len()) != prefix { return "" }
     var i = prefix.len()
     while i < uri.len() {
         let c = uri[i]
@@ -177,13 +185,27 @@ fun hex(c: uint8) -> int32 {
 
 const HEX_DIGITS: str = "0123456789ABCDEF"
 
+// The scheme of the embedded standard library's documents: `myla-std:/std/io.my`
+// is `<myla>/std/io.my` (MYLA-243), whose text an editor asks the server for
+// (`myla/stdSource`).
+pub const STD_SCHEME: str = "myla-std:"
+
 // The `file://` URI of an absolute path, percent-encoding all but letters,
-// digits, "-._~" and "/" (as Python's urllib.parse.quote does).
+// digits, "-._~" and "/" (as Python's urllib.parse.quote does); a `myla-std:`
+// one for a file of the embedded standard library.
 #test("/tmp/a b/é.my")["file:///tmp/a%20b/%C3%A9.my"]
+#test("<myla>/std/io.my")["myla-std:/std/io.my"]
 pub fun path_uri(path: str) -> str {
     var sb = StringBuilder()
-    sb.append("file://")
-    for i in 0..path.len() {
+    var start = 0
+    let root = EMBEDDED_ROOT + "/"
+    if path.len() > root.len() && part(path, 0, root.len()) == root {
+        sb.append(STD_SCHEME)
+        start = EMBEDDED_ROOT.len()
+    } else {
+        sb.append("file://")
+    }
+    for i in start..path.len() {
         let c = path[i]
         let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
         if alnum || c == '-' || c == '.' || c == '_' || c == '~' || c == '/' {

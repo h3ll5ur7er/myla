@@ -12,7 +12,7 @@
 from std.io import stdin
 from std.json import Json, field
 from std.fs import read_to_string
-from ...selfhost.loader import load_program_opts, normalize, type_errors, warning_reports
+from ...selfhost.loader import load_program_opts, normalize, type_errors, warning_reports, source_text
 from ...selfhost.diag import Report, all_reports, caret_range
 from ...selfhost.checker import build_checker_decls
 from ...selfhost.tokens import SrcSpan
@@ -149,6 +149,8 @@ impl Server {
             self.reply(id, self.completion(params))
         } else if method == "textDocument/semanticTokens/full" {
             self.reply(id, self.semantic(params))
+        } else if method == "myla/stdSource" {
+            self.reply(id, std_source(params))
         } else {
             match id {
                 Some(i) => { send(error_response(i, METHOD_NOT_FOUND, format("unhandled method {}", method))) },
@@ -611,14 +613,26 @@ impl Server {
     }
 }
 
-// The text of `path`: an open document's, else the file's ("" if unreadable).
+// The text of `path`: an open document's, the embedded standard library's
+// (MYLA-243), else the file's ("" if unreadable).
 fun file_text(path: str, overrides: [str: str]) -> str {
-    return match get(overrides, normalize(path)) {
+    return match source_text(normalize(path), overrides) {
         Some(t) => t,
         None => match read_to_string(path) {
             Ok(t) => t,
             Err(e) => "",
         },
+    }
+}
+
+// The answer to `myla/stdSource` (MYLA-243): `{"text": …}` for the
+// `myla-std:` URI of a file of the embedded standard library, which an editor
+// shows as a read-only document; null for any other URI.
+fun std_source(params: Json) -> Json {
+    // only the embedded library: no overrides, so no file is read
+    return match source_text(uri_path(str_field(params, "uri")), [:]) {
+        Some(text) => Json.Object([("text", Json.Str(text))]),
+        None => Json.Null,
     }
 }
 

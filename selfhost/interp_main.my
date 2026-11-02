@@ -11,6 +11,7 @@ from std.io import eprintln
 from .checker import build_checker_decls
 from .interp import new_interp, RtError, sched_from_env
 from .loader import load_program_opts, load_options, parse_package_flag, Loaded, file_of, type_errors
+from .stdroot import default_stdlib_root
 from .diag import render, Report
 
 fun run_program(prog: Loaded, file: str) -> int32 {
@@ -50,7 +51,7 @@ fun main() {
         eprintln("usage: interp_main <file.my> [stdlib_root] [--package name=dir]... [--root dir]")
         exit(2)
     }
-    var opts = load_options("")
+    var opts = load_options(default_stdlib_root())
     var j = 2
     while j < argv.len() {
         if argv[j] == "--package" && j + 1 < argv.len() {

@@ -20,14 +20,15 @@
 // name=dir` (repeatable), a dependency whose modules `import name…` finds in
 // `dir` (MYLA-92). `run` passes the other arguments after the file to the
 // program (its argv is the file, then those), as the Python `myla run` does.
-// What the commands do with a file is in driver.my. The stdlib root defaults
-// to `lib` next to the `build/` directory this binary is in
-// (`default_stdlib_root`, MYLA-31).
+// What the commands do with a file is in driver.my. The standard library is
+// the one this binary carries, unless `--stdlib` or MYLA_STDLIB name a
+// directory (`default_stdlib_root`, MYLA-243).
 
 from std.process import args, exit
 from std.io import eprintln, println
 from .repl import repl
-from .loader import load_options, LoadOptions, parse_package_flag, default_stdlib_root
+from .loader import load_options, LoadOptions, parse_package_flag
+from .stdroot import default_stdlib_root
 from .diag import render
 from .driver import cmd_build, cmd_interp, load_and_check
 from .project_cmd import project_build, project_run, project_test, project_check, project_clean, project_new, project_fetch, ends_with
@@ -51,7 +52,7 @@ fun usage_lines() -> [str] {
         "  clean [--deps]                       remove build/ (--deps: and the fetched dependencies, .myla/)",
         "  fetch [--update]                     resolve the Git dependencies, check them out and write myla.lock",
         "options:",
-        "  --stdlib <dir>        the directory holding std/ (default: lib next to this binary's build/ directory)",
+        "  --stdlib <dir>        the directory holding std/ (default: $MYLA_STDLIB, else the standard library built into myla)",
         "  --package <name=dir>  a dependency: imports of <name> resolve in <dir> (repeatable)",
     ]
 }
@@ -77,7 +78,7 @@ struct CliError { msg: str, usage: bool }
 #test(["/work/myla/selfhost/main.my", "new", "--lib", "freshlib"])[Err(CliError { msg: "myla: unknown option 'freshlib'", usage: true })]
 fun parse_command_line(argv: [str]) -> Result<CommandLine, CliError> {
     let cmd = argv[1]
-    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root(argv[0])), output: "a.out", debug: false, deps: false, update: false, name: "", rest: [] }
+    var cl = CommandLine { file: "", opts: load_options(default_stdlib_root()), output: "a.out", debug: false, deps: false, update: false, name: "", rest: [] }
     var positional = 0
     var j = 2
     while j < argv.len() {
