@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._golden import answer_for_file, golden
+from ._golden import NoGolden, answer_for_file, golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._continuation import without_continued_newlines
 from ._tools import selfhost_tool
@@ -135,7 +135,10 @@ class SelfHostedLexerParity(unittest.TestCase):
         checked = 0
         for path in _corpus():
             # the recording without the line breaks D104 (3) continues
-            expected = without_continued_newlines(_oracle(path))
+            try:
+                expected = without_continued_newlines(_oracle(path))
+            except NoGolden:
+                continue    # a file added to the corpus since has no recording: test_error_corpus holds it to the self-hosted CLI
             with self.subTest(file=os.path.relpath(path, _REPO)):
                 actual = self._myla_lex(path)
                 self.assertEqual(actual, expected)

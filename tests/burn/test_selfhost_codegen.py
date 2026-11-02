@@ -39,7 +39,7 @@ import sys
 import tempfile
 import unittest
 
-from ._golden import golden
+from ._golden import NoGolden, golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
 
@@ -768,12 +768,20 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     expected, _ = _linked_oracle(entry, _modules(entry))
                     self.assertEqual((out, code), (expected, 0))
 
-    def _assert_diagnostic_matches(self, entry: str, stdlib: str, modules: list[str], name: str = "") -> None:
+    def _assert_diagnostic_matches(self, entry: str, stdlib: str, modules: list[str], name: str = "",
+                                   recorded_only: bool = False) -> None:
         """The self-hosted compiler rejects `entry` with exactly the Python
         CLI's diagnostic, carets included (or the one pinned in SUPERSEDED);
         `modules` are the program's other files."""
         if name in SUPERSEDED:
             expected = SUPERSEDED[name].replace("{dir}", os.path.dirname(entry))
+        elif recorded_only:
+            # a corpus file added since has no recording: test_error_corpus
+            # holds it to the self-hosted CLI
+            try:
+                expected = _diagnostic_oracle(entry, modules)
+            except NoGolden:
+                return
         else:
             expected = _diagnostic_oracle(entry, modules)
         self.assertIsNotNone(expected, "the Python toolchain accepted the program")
@@ -807,7 +815,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     # the examples are single files; each case of DIAGNOSTICS
                     # has a directory of its own
                     modules = _modules(entry) if name in DIAGNOSTICS else []
-                    self._assert_diagnostic_matches(entry, stdlib, modules, name)
+                    self._assert_diagnostic_matches(entry, stdlib, modules, name, recorded_only=name not in DIAGNOSTICS)
 
     def test_stress_programs_reclaim_memory(self) -> None:
         from . import test_compiler_parity

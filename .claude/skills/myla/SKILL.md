@@ -67,7 +67,7 @@ fun main() {
 | `let mut x`, `var x` (Swift ok) | `var x = 1` | `let` is immutable (deeply), `var` mutable |
 | `fun f() -> int { x + 1 }` | `{ return x + 1 }` | Function bodies need `return`; there is no implicit tail value |
 | `let v = if c { 1 } else { 2 }` | `let v = match c { true => 1, false => 2 }` | `if` is a statement, `match` is an expression |
-| `x += 1`, `x++` | `x = x + 1` | No compound assignment, no `++` |
+| `x++`, `x--` | `x += 1`, `x -= 1` | Compound assignment exists (`+=` … `>>=`, D104), `++` doesn't |
 | `E::A`, `.a` (Swift) to construct | `E.A`, `E.B(1)` | Variants are built with a dot; only `Some`/`None`/`Ok`/`Err` work bare |
 | `Point::new()`, `static func` | a free function `fun new_point() -> Point` | No associated/static functions: every method takes `self` |
 | `&self`, `&mut self`, `&x`, lifetimes | `self`, `var self`, plain values | No references or borrowing; everything is a value (copy-on-write under the hood) |

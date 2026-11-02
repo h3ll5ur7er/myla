@@ -1,0 +1,11 @@
+//~ type error: cannot assign to an immutable binding
+//~ span: x += 1
+//~ note: 'x' is declared here
+//~ note span: let x = 1
+// A compound assignment is an assignment: its target is a `var` (D104 (2),
+// MYLA-223).
+fun main() {
+    let x = 1
+    x += 1
+    print(x)
+}

@@ -117,7 +117,8 @@ cond        = expression ;                          (* without struct literals *
 return_stmt = "return" ( expression ( "," expression )* )? ;   (* a, b is a tuple *)
 become_stmt = "become" expression ;                (* a call, D87 *)
 
-assignment  = place "=" expression ;
+assignment  = place ( "=" | compound_op ) expression ;
+compound_op = "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;   (* D104 (2): place = place op expression *)
 place       = ( IDENT | "self" | "(" place ")" )
               ( "." IDENT | "[" expression "]" )* ;
 ```

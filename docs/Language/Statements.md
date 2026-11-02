@@ -31,7 +31,22 @@ fun main() {
 
 `target = value`, where the target is a variable, a field chain or an index chain rooted at a `var`: `p.x = 1`, `grid[i][j] = 0`, `m["k"] = v`, `self.items[0].name = n`. A tuple element (`t.0 = …`) can't be assigned. Assignment is a statement, so `a = b = c` doesn't parse. `self` itself can't be reassigned.
 
-There is no compound assignment (`+=`) yet.
+Compound assignment (D104 (2), [[MYLA-223]]): `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=` and `>>=` mean `place = place op value`. The place is a `var`, a field or an element of one, as for `=`, and it is evaluated once: in `xs[next()] += 1` `next()` runs once. The operator is the binary one, so a struct's `+=` uses its `Add` impl and `f >>= g` composes two functions.
+
+```myla
+fun main() {
+    var total = 10
+    total += 5
+    total *= 2
+    var words = ["a", "b"]
+    words[1] += "c"
+    print(total)
+    print(words[1])
+}
+// output:
+// 30
+// bc
+```
 
 ## if / else
 

@@ -1,0 +1,11 @@
+//~ parse error: invalid assignment target
+//~ span: count()
+// The target of a compound assignment is a place, as for `=` (D104 (2),
+// MYLA-223).
+fun count() -> int {
+    return 1
+}
+
+fun main() {
+    count() += 1
+}

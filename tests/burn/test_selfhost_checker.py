@@ -29,7 +29,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._golden import golden
+from ._golden import NoGolden, golden
 from ._mutants import mutants
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import selfhost_tool
@@ -453,7 +453,10 @@ class SelfHostedCheckerParity(unittest.TestCase):
     def test_corpus_check_parity(self) -> None:
         checked = 0
         for path in _corpus():
-            expected = _oracle(path)
+            try:
+                expected = _oracle(path)
+            except NoGolden:
+                continue    # a file added to the corpus since has no recording: test_error_corpus holds it to the self-hosted CLI
             if expected is None:
                 continue  # not part of the checker-parity gate
             with self.subTest(file=os.path.relpath(path, _REPO)):

@@ -137,7 +137,8 @@ cond        = expression ;                          (* without struct literals *
 return_stmt = "return" ( expression ( "," expression )* )? ;   (* a, b is a tuple *)
 become_stmt = "become" expression ;                (* a call, D87 *)
 
-assignment  = place "=" expression ;
+assignment  = place ( "=" | compound_op ) expression ;
+compound_op = "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;   (* D104 (2): place = place op expression *)
 place       = ( IDENT | "self" @self | "(" place ")" )
               ( "." IDENT @field_expression | "[" expression "]" @index_expression )* ;
 
@@ -201,7 +202,7 @@ field_pattern = IDENT ( ":" pattern )? ;
 
 (* ----- For the generators ----- *)
 
-@adjacent "<<" ">>" ;           (* D44: the parser joins two touching tokens *)
+@adjacent "<<" ">>" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<=" ">>=" ;   (* D44, D104 (2): the parser joins touching tokens *)
 @soft "_" ;                     (* an identifier the parser treats specially *)
 @lexical fstring ;
 

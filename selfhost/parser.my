@@ -196,6 +196,21 @@ fun is_lvalue(e: Expr) -> bool {
     }
 }
 
+// Whether an index needn't be computed ahead in a compound assignment: a
+// name or a literal reads the same twice (MYLA-223).
+#test(expr_of("i"))[true]
+#test(expr_of("f(1)"))[false]
+#test(expr_of("\"k\""))[true]
+fun simple_index(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Name(n) => true,
+        ExprKind.IntLit(v, suf, ch, big) => true,
+        ExprKind.StrLit(t) => true,
+        ExprKind.BoolLit(b) => true,
+        _ => false,
+    }
+}
+
 impl Parser {
     // -- node constructors (assign a NodeId + position) --------------------
 
@@ -1268,7 +1283,80 @@ impl Parser {
             let value = self.expression()
             return self.mk_stmt_from(st, eq.line, eq.column, StmtKind.Assign(expr, value))
         }
+        // `place op= value` (D104 (2), MYLA-223)
+        let op = self.compound_ahead()
+        if op != "" {
+            let opt = self.advance()
+            self.skip()
+            if !is_lvalue(expr) {
+                self.fail(expr.line, expr.col, expr.sp, "invalid assignment target")
+            }
+            let rhs = self.expression()
+            return self.compound_assign(st, opt, op, expr, rhs)
+        }
         return self.mk_stmt_from(st, expr.line, expr.col, StmtKind.ExprStmt(expr))
+    }
+
+    // The compound assignment operator the next two tokens spell, touching
+    // (`+` `=`, … and `<` `<=` for `<<=`, `>` `>=` for `>>=`), without its
+    // `=`; "" for none. The binary operators' loops stop before one.
+    #test(parser_on("x += 1"))[""]
+    fun compound_ahead(self) -> str {
+        let a = self.peek()
+        let b = self.peek_at(1)
+        if a.line != b.line || b.column != a.column + 1 { return "" }
+        if b.kind == TokenKind.ASSIGN {
+            if a.kind == TokenKind.PLUS { return "+" }
+            if a.kind == TokenKind.MINUS { return "-" }
+            if a.kind == TokenKind.STAR { return "*" }
+            if a.kind == TokenKind.SLASH { return "/" }
+            if a.kind == TokenKind.PERCENT { return "%" }
+            if a.kind == TokenKind.AMP { return "&" }
+            if a.kind == TokenKind.PIPE { return "|" }
+            if a.kind == TokenKind.CARET { return "^" }
+        }
+        if a.kind == TokenKind.LT && b.kind == TokenKind.LE { return "<<" }
+        if a.kind == TokenKind.GT && b.kind == TokenKind.GE { return ">>" }
+        return ""
+    }
+
+    // `target op= rhs` as `target = target op rhs`, the place evaluated once:
+    // an index that isn't a name or a literal is computed into a `let` first,
+    // the two inside an `if true { … }` (D104 (2), MYLA-223).
+    fun compound_assign(var self, st: Token, opt: Token, op: str, target: Expr, rhs: Expr) -> Stmt {
+        let (place, lets) = self.hoisted(target)
+        let value = Expr { id: self.fresh(), line: opt.line, col: opt.column, sp: self.span_from(st.line, st.column), kind: ExprKind.Binary(op, place, rhs) }
+        let assign = self.mk_stmt_from(st, opt.line, opt.column, StmtKind.Assign(place, value))
+        if len(lets) == 0 { return assign }
+        var stmts = lets
+        push(stmts, assign)
+        let cond = Expr { id: self.fresh(), line: st.line, col: st.column, sp: self.span_from(st.line, st.column), kind: ExprKind.BoolLit(true) }
+        let blk = Block { line: st.line, col: st.column, sp: self.span_from(st.line, st.column), stmts: stmts }
+        return self.mk_stmt_from(st, st.line, st.column, StmtKind.IfS(cond, blk, None))
+    }
+
+    // The place `e` with each index that isn't a name or a literal replaced
+    // by a name, and the `let`s that compute them, in order.
+    fun hoisted(var self, e: Expr) -> (Expr, [Stmt]) {
+        match e.kind {
+            ExprKind.Index(t, i) => {
+                let (nt, ls) = self.hoisted(t)
+                var lets = ls
+                var idx = i
+                if !simple_index(i) {
+                    let name = format("%index{}", i.id)
+                    push(lets, Stmt { id: self.fresh(), line: i.line, col: i.col, sp: i.sp, kind: StmtKind.VarDecl("let", name, None, i) })
+                    idx = Expr { id: self.fresh(), line: i.line, col: i.col, sp: i.sp, kind: ExprKind.Name(name) }
+                }
+                return (Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(nt, idx) }, lets)
+            },
+            ExprKind.GetField(t, f) => {
+                let (nt, ls) = self.hoisted(t)
+                return (Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.GetField(nt, f) }, ls)
+            },
+            _ => {},
+        }
+        return (e, [])
     }
 
     // -- expressions (precedence climbing) ---------------------------------
@@ -1350,7 +1438,7 @@ impl Parser {
     fun comparison(var self) -> Expr {
         let st = self.peek()
         var expr = self.bit_or()
-        while self.check(TokenKind.LT) || self.check(TokenKind.LE) || self.check(TokenKind.GT) || self.check(TokenKind.GE) {
+        while (self.check(TokenKind.LT) || self.check(TokenKind.LE) || self.check(TokenKind.GT) || self.check(TokenKind.GE)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_or()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1362,7 +1450,7 @@ impl Parser {
     fun bit_or(var self) -> Expr {
         let st = self.peek()
         var expr = self.bit_xor()
-        while self.check(TokenKind.PIPE) {
+        while self.check(TokenKind.PIPE) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_xor()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1374,7 +1462,7 @@ impl Parser {
     fun bit_xor(var self) -> Expr {
         let st = self.peek()
         var expr = self.bit_and()
-        while self.check(TokenKind.CARET) {
+        while self.check(TokenKind.CARET) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_and()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1386,7 +1474,7 @@ impl Parser {
     fun bit_and(var self) -> Expr {
         let st = self.peek()
         var expr = self.shift()
-        while self.check(TokenKind.AMP) {
+        while self.check(TokenKind.AMP) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.shift()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1432,7 +1520,7 @@ impl Parser {
     fun term(var self) -> Expr {
         let st = self.peek()
         var expr = self.factor()
-        while self.check(TokenKind.PLUS) || self.check(TokenKind.MINUS) {
+        while (self.check(TokenKind.PLUS) || self.check(TokenKind.MINUS)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.factor()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1444,7 +1532,7 @@ impl Parser {
     fun factor(var self) -> Expr {
         let st = self.peek()
         var expr = self.cast()
-        while self.check(TokenKind.STAR) || self.check(TokenKind.SLASH) || self.check(TokenKind.PERCENT) {
+        while (self.check(TokenKind.STAR) || self.check(TokenKind.SLASH) || self.check(TokenKind.PERCENT)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.cast()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))

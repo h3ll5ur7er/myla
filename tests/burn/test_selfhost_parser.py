@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._golden import answer_for_file, golden
+from ._golden import NoGolden, answer_for_file, golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._continuation import continues_a_line
 from ._tools import selfhost_tool
@@ -295,7 +295,10 @@ class SelfHostedParserParity(unittest.TestCase):
     def test_corpus_ast_parity(self) -> None:
         checked = errors = 0
         for path in _corpus():
-            expected = _oracle(path)
+            try:
+                expected = _oracle(path)
+            except NoGolden:
+                continue    # a file added to the corpus since has no recording: test_error_corpus holds it to the self-hosted CLI
             with self.subTest(file=os.path.relpath(path, _REPO)):
                 actual = self._myla_parse(path)
                 self.assertEqual(actual, expected)
