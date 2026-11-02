@@ -18,6 +18,7 @@ interface Recorded {
   taskProviders: string[];
   configProviders: [string, unknown][];
   adapterFactories: string[];
+  contentProviders: string[];
   warnings: string[];
 }
 
@@ -53,6 +54,10 @@ function fakeVscode(rec: Recorded): unknown {
       getConfiguration: () => ({ get: (_k: string, d: unknown) => d }),
       onDidChangeConfiguration: () => disposable,
       createFileSystemWatcher: () => disposable,
+      registerTextDocumentContentProvider: (scheme: string) => {
+        rec.contentProviders.push(scheme);
+        return disposable;
+      },
       textDocuments: [],
     },
     tasks: {
@@ -77,7 +82,7 @@ function fakeVscode(rec: Recorded): unknown {
 }
 
 test("the bundle activates and registers what package.json contributes", { skip: !fs.existsSync(BUNDLE) && "run npm run build first" }, async () => {
-  const rec: Recorded = { commands: [], taskProviders: [], configProviders: [], adapterFactories: [], warnings: [] };
+  const rec: Recorded = { commands: [], taskProviders: [], configProviders: [], adapterFactories: [], contentProviders: [], warnings: [] };
   const vscode = fakeVscode(rec);
   // hand the bundle our `vscode` when it requires it
   const original = (Module as unknown as { _load: (...a: unknown[]) => unknown })._load;
@@ -100,6 +105,8 @@ test("the bundle activates and registers what package.json contributes", { skip:
       ["myla", "myla"],
     );
     assert.deepEqual(rec.adapterFactories, ["myla"]);
+    // the standard library's documents, which the language server serves (MYLA-243)
+    assert.deepEqual(rec.contentProviders, ["myla-std"]);
     // the debug type and task type match the manifest
     assert.equal(manifest.contributes.debuggers[0].type, "myla");
     assert.equal(manifest.contributes.taskDefinitions[0].type, "myla");

@@ -48,7 +48,8 @@ The owner installed `myla` by symlinking `build/myla` into `/usr/bin` and ran `m
   - `myla/stdSource` serves only embedded files: no overrides, so no file on disk is read.
   - The extension shows `myla-std:` documents through a content provider, serves them to the server too, and finds `myla` and `myla-lsp` on PATH when there is no setting and no repository (a unit test, and `TestExtensionStartsTheServer.test_the_server_on_the_path`). In the repository it still names `lib/`, so std changes are seen before a bootstrap.
 - **Verification.**
-  - The burn suite passes: 878 tests, 119 skipped. The 8 new skips are recordings about the compiler and std files this change touched.
+  - The burn suite passes in a clean checkout: 880 tests, 124 skipped. Compared with before, the 8 new skips are recordings about the compiler and std files this change touched; 5 more are the tree-sitter CLI, which the clean checkout lacks.
+  - `check-seed.sh` fails, as it should, when `lib/` changes and a bootstrap rewrites the committed module.
   - The bootstrap reaches its fixed point; the seed is current.
-  - The extension's typecheck, lint and 48 unit tests pass.
+  - The extension's typecheck, lint and tests pass (55; its activation test checks that the `myla-std` provider is registered).
 - **Docs and decision.** D118; [[Getting-started]], [[Architecture/Module-loader]], [[Architecture/Editor-tooling]], [[Architecture/Self-hosted-compiler]], [[Development/Bootstrap]], [[Language/Standard-library]] (`env`), `AGENTS.md` and the myla skill.
