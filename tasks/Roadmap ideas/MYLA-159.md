@@ -6,7 +6,7 @@ status: backlog
 priority: low
 labels: [website, docs, tutorial, wasm]
 ---
-A modern Angular webapp as the home of the Myla programming language. It comes after the LLVM ([[MYLA-62]]) and WebAssembly ([[MYLA-158]]) work: its editor and tutorial run the real toolchain in the browser.
+A modern Angular webapp as the home of the Myla programming language. It comes after the platform work ([[MYLA-62]]) and WebAssembly ([[MYLA-158]]): its editor and tutorial run the real toolchain in the browser.
 
 ## Goals
 

@@ -35,7 +35,7 @@ The result is about 6.2 MB of assembly and a 1.5 MB static binary; the whole scr
 
 - **When to update it:** with every change to the compiler's output, committed in the same pull request: `scripts/update-seed.sh` (about 8 s), then commit `bootstrap/seed.s`. CI's `bootstrap` job fails when the seed isn't the compiler of the sources (`scripts/check-seed.sh`), so a pull request carries one seed version (about 250 KB of history for a sizeable change; a seed per commit would multiply that). A bootstrap still works from an older seed, as long as it can compile the sources.
 - **The optional pre-push hook:** `scripts/install-hooks.sh` sets `core.hooksPath` to `.githooks/`, whose `pre-push` runs `scripts/check-seed.sh` (about 6 s) when the commits pushed change `selfhost/`, `lib/std/` or the seed, and stops the push if the seed is stale (`MYLA_SKIP_SEED_CHECK=1 git push` skips it once). It checks the working tree, so commit first.
-- **What it doesn't limit:** the seed only has to compile the compiler. What the compiler emits for programs (new system calls, IPC, a C FFI, LLVM output, other platforms) is the compiler's business, not the seed's.
+- **What it doesn't limit:** the seed only has to compile the compiler. What the compiler emits for programs (new system calls, IPC, a C FFI, other backends and platforms) is the compiler's business, not the seed's.
 - **Checking a seed:** run `scripts/update-seed.sh` at the commit its header names and compare; the compiler is deterministic, so the result is the same byte for byte.
 - **Other hosts:** the seed is x86-64 Linux assembly; another host cross-compiles from x86-64 Linux, or gets a seed of its own later.
 
