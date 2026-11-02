@@ -47,7 +47,7 @@ pub fun write_to_file(path: str, contents: str) -> Result<int32, IoError> {
     __write_file(path, contents)
     let err = __io_errno()
     if err == 0 {
-        return Ok(len(contents))
+        return Ok(contents.len())
     }
     return Err(from_errno(err))
 }
@@ -113,11 +113,11 @@ pub fun make_dir(path: str) -> Result<int32, IoError> {
 // `Ok` holds 0.
 pub fun make_dir_all(path: str) -> Result<int32, IoError> {
     var i = 1
-    while i <= len(path) {
-        if i == len(path) || path[i] == '/' {
+    while i <= path.len() {
+        if i == path.len() || path[i] == '/' {
             var sb = StringBuilder()
-            append(sb, path, 0, i)
-            let prefix = build(sb)
+            sb.append(path, 0, i)
+            let prefix = sb.build()
             if !exists(prefix) {
                 make_dir(prefix)?
             }
@@ -202,13 +202,13 @@ fun split_names(raw: str) -> [str] {
     var names: [str] = []
     var start = 0
     var i = 0
-    while i < len(raw) {
+    while i < raw.len() {
         if raw[i] == 0 {
             var sb = StringBuilder()
-            append(sb, raw, start, i)
-            let name = build(sb)
+            sb.append(raw, start, i)
+            let name = sb.build()
             if name != "." && name != ".." {
-                push(names, name)
+                names.push(name)
             }
             start = i + 1
         }
@@ -220,25 +220,25 @@ fun split_names(raw: str) -> [str] {
 // Whether `a` sorts before `b`, byte by byte (a prefix first).
 fun before(a: str, b: str) -> bool {
     var i = 0
-    while i < len(a) && i < len(b) {
+    while i < a.len() && i < b.len() {
         if a[i] != b[i] {
             return a[i] < b[i]
         }
         i = i + 1
     }
-    return len(a) < len(b)
+    return a.len() < b.len()
 }
 
 // `names` sorted by their bytes (a stable merge sort).
 fun sorted_names(names: [str]) -> [str] {
-    if len(names) <= 1 {
+    if names.len() <= 1 {
         return names
     }
     var left: [str] = []
     var right: [str] = []
     var i = 0
-    while i < len(names) {
-        if i < len(names) / 2 { push(left, names[i]) } else { push(right, names[i]) }
+    while i < names.len() {
+        if i < names.len() / 2 { left.push(names[i]) } else { right.push(names[i]) }
         i = i + 1
     }
     let l = sorted_names(left)
@@ -246,12 +246,12 @@ fun sorted_names(names: [str]) -> [str] {
     var out: [str] = []
     var a = 0
     var b = 0
-    while a < len(l) || b < len(r) {
-        if b >= len(r) || (a < len(l) && !before(r[b], l[a])) {
-            push(out, l[a])
+    while a < l.len() || b < r.len() {
+        if b >= r.len() || (a < l.len() && !before(r[b], l[a])) {
+            out.push(l[a])
             a = a + 1
         } else {
-            push(out, r[b])
+            out.push(r[b])
             b = b + 1
         }
     }

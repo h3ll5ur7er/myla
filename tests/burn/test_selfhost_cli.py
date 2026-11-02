@@ -11,6 +11,7 @@ output is its recorded answer (`tests/burn/_golden.py`, MYLA-219).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import glob
 import subprocess
@@ -57,7 +58,7 @@ fun double(x: int) -> int {
 
 fun main() {
     let argv = args()
-    print(len(argv))
+    print(argv.len())
     for a in argv {
         print(a)
     }
@@ -299,7 +300,10 @@ class TestCommandParity(_Layout):
             with self.subTest(file=os.path.relpath(path, _REPO)):
                 py, my = self.both(path)
                 self.assertEqual(py[1], 0, py[0][-300:])
-                self.assertEqual(my, py)
+                # the recordings predate named cases (MYLA-239): a case's
+                # name after its number is left out of the comparison
+                unnamed = re.sub(r"^((?:PASS|FAIL)  \S+ #\d+) \(.*?\)(?=:|$)", r"\1", my[0], flags=re.M)
+                self.assertEqual((unnamed, *my[1:]), py)
 
 
 SESSION = """\

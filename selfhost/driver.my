@@ -25,8 +25,8 @@ from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 #test([0, 1])["\0\u{1}"]
 fun decode(bytes: [uint8]) -> str {
     var sb = StringBuilder()
-    for b in bytes { append_byte(sb, b) }
-    return build(sb)
+    for b in bytes { sb.append_byte(b) }
+    return sb.build()
 }
 
 // A checked program, and the linked one (for the files of its node ids).
@@ -105,7 +105,7 @@ pub fun cmd_interp(file: str, opts: LoadOptions, tests: bool, prog_args: [str]) 
     match load_and_check(file, opts) {
         Ok(ch) => {
             var argv = [file]
-            for a in prog_args { push(argv, a) }
+            for a in prog_args { argv.push(a) }
             var it = new_interp(ch.checker, argv)
             if tests {
                 return it.run_tests()

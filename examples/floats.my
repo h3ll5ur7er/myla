@@ -7,7 +7,7 @@ fun average(xs: [float64]) -> float64 {
     for x in xs {
         sum = sum + x
     }
-    return sum / (len(xs) as float64)
+    return sum / (xs.len() as float64)
 }
 
 fun main() {

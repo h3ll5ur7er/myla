@@ -11,9 +11,9 @@
 #test("[P]")[""]
 #test("")[""]
 pub fun base_of(t: str) -> str {
-    if len(t) == 0 || !is_name_start(t[0]) { return "" }
+    if t.len() == 0 || !is_name_start(t[0]) { return "" }
     var i = 0
-    while i < len(t) && t[i] != '<' { i = i + 1 }
+    while i < t.len() && t[i] != '<' { i = i + 1 }
     return part(t, 0, i)
 }
 
@@ -22,9 +22,9 @@ pub fun base_of(t: str) -> str {
 #test("P")[[]]
 pub fun type_args(t: str) -> [str] {
     var i = 0
-    while i < len(t) && t[i] != '<' { i = i + 1 }
-    if i >= len(t) || t[len(t) - 1] != '>' { return [] }
-    return split_top(part(t, i + 1, len(t) - 1), ',')
+    while i < t.len() && t[i] != '<' { i = i + 1 }
+    if i >= t.len() || t[t.len() - 1] != '>' { return [] }
+    return split_top(part(t, i + 1, t.len() - 1), ',')
 }
 
 // The element of a list type, the value of a map type: what indexing gives.
@@ -32,17 +32,17 @@ pub fun type_args(t: str) -> [str] {
 #test("[str: [int]]")["[int]"]
 #test("P")[""]
 pub fun index_of(t: str) -> str {
-    if len(t) < 2 || t[0] != '[' || t[len(t) - 1] != ']' { return "" }
-    let parts = split_top(part(t, 1, len(t) - 1), ':')
-    return parts[len(parts) - 1]
+    if t.len() < 2 || t[0] != '[' || t[t.len() - 1] != ']' { return "" }
+    let parts = split_top(part(t, 1, t.len() - 1), ':')
+    return parts[parts.len() - 1]
 }
 
 // What `for x in` a value of type `t` binds: a list's element, a map's key.
 #test("[P]")["P"]
 #test("[str: int]")["str"]
 pub fun iter_of(t: str) -> str {
-    if len(t) < 2 || t[0] != '[' || t[len(t) - 1] != ']' { return "" }
-    return split_top(part(t, 1, len(t) - 1), ':')[0]
+    if t.len() < 2 || t[0] != '[' || t[t.len() - 1] != ']' { return "" }
+    return split_top(part(t, 1, t.len() - 1), ':')[0]
 }
 
 // The success type of an Option or Result: what `?` gives.
@@ -53,7 +53,7 @@ pub fun success_of(t: str) -> str {
     let b = base_of(t)
     if b != "Option" && b != "Result" { return "" }
     let args = type_args(t)
-    if len(args) == 0 { return "" }
+    if args.len() == 0 { return "" }
     return args[0]
 }
 
@@ -65,9 +65,9 @@ pub fun success_of(t: str) -> str {
 #test("(int) -> [str]")["[str]"]
 pub fun result_of(sig: str) -> str {
     var i = 0
-    while i < len(sig) && sig[i] != '(' { i = i + 1 }
+    while i < sig.len() && sig[i] != '(' { i = i + 1 }
     var depth = 0
-    while i < len(sig) {
+    while i < sig.len() {
         let c = sig[i]
         if c == '(' || c == '[' || c == '<' {
             depth = depth + 1
@@ -75,8 +75,8 @@ pub fun result_of(sig: str) -> str {
             // the `>` of an arrow isn't a bracket
             if !(c == '>' && i > 0 && sig[i - 1] == '-') { depth = depth - 1 }
             if depth == 0 {
-                let rest = part(sig, i + 1, len(sig))
-                if starts_with(rest, " -> ") { return part(rest, 4, len(rest)) }
+                let rest = part(sig, i + 1, sig.len())
+                if starts_with(rest, " -> ") { return part(rest, 4, rest.len()) }
                 return ""
             }
         }
@@ -93,8 +93,8 @@ pub fun header_params(header: str) -> [str] {
     var out: [str] = []
     for p in type_args(header) {
         var i = 0
-        while i < len(p) && p[i] != ':' { i = i + 1 }
-        push(out, trim(part(p, 0, i)))
+        while i < p.len() && p[i] != ':' { i = i + 1 }
+        out.push(trim(part(p, 0, i)))
     }
     return out
 }
@@ -105,31 +105,31 @@ pub fun header_params(header: str) -> [str] {
 #test("T", ["T"], [])["T"]
 #test("[Tü]", ["Tü", "T"], ["P", "Q"])["[P]"]
 pub fun subst(t: str, names: [str], args: [str]) -> str {
-    if len(names) == 0 || len(names) != len(args) { return t }
+    if names.len() == 0 || names.len() != args.len() { return t }
     var sb = StringBuilder()
     var i = 0
-    while i < len(t) {
+    while i < t.len() {
         if is_name_start(t[i]) {
             var j = i
-            while j < len(t) && is_name_char(t[j]) { j = j + 1 }
+            while j < t.len() && is_name_char(t[j]) { j = j + 1 }
             let word = part(t, i, j)
             var replaced = false
             var k = 0
-            while k < len(names) {
+            while k < names.len() {
                 if names[k] == word && !replaced {
-                    append(sb, args[k])
+                    sb.append(args[k])
                     replaced = true
                 }
                 k = k + 1
             }
-            if !replaced { append(sb, word) }
+            if !replaced { sb.append(word) }
             i = j
         } else {
-            append_byte(sb, t[i])
+            sb.append_byte(t[i])
             i = i + 1
         }
     }
-    return build(sb)
+    return sb.build()
 }
 
 // The element types of a tuple type, [] for another type.
@@ -137,8 +137,8 @@ pub fun subst(t: str, names: [str], args: [str]) -> str {
 #test("(int) -> str")[[]]
 #test("P")[[]]
 pub fun tuple_elems(t: str) -> [str] {
-    if len(t) < 2 || t[0] != '(' || t[len(t) - 1] != ')' { return [] }
-    return split_top(part(t, 1, len(t) - 1), ',')
+    if t.len() < 2 || t[0] != '(' || t[t.len() - 1] != ')' { return [] }
+    return split_top(part(t, 1, t.len() - 1), ',')
 }
 
 // The type parameters of a function signature, without bounds.
@@ -146,16 +146,16 @@ pub fun tuple_elems(t: str) -> [str] {
 #test("fun f(x: int)")[[]]
 pub fun sig_type_params(sig: str) -> [str] {
     var i = 0
-    while i < len(sig) && sig[i] != '(' && sig[i] != '<' { i = i + 1 }
-    if i >= len(sig) || sig[i] != '<' { return [] }
+    while i < sig.len() && sig[i] != '(' && sig[i] != '<' { i = i + 1 }
+    if i >= sig.len() || sig[i] != '<' { return [] }
     var j = i
-    while j < len(sig) && sig[j] != '(' { j = j + 1 }
+    while j < sig.len() && sig[j] != '(' { j = j + 1 }
     while j > i && sig[j - 1] != '>' { j = j - 1 }
     var out: [str] = []
     for p in split_top(part(sig, i + 1, j - 1), ',') {
         var k = 0
-        while k < len(p) && p[k] != ':' { k = k + 1 }
-        push(out, trim(part(p, 0, k)))
+        while k < p.len() && p[k] != ':' { k = k + 1 }
+        out.push(trim(part(p, 0, k)))
     }
     return out
 }
@@ -166,10 +166,10 @@ pub fun sig_type_params(sig: str) -> [str] {
 #test("fun none()")[[]]
 pub fun sig_param_types(sig: str) -> [str] {
     var i = 0
-    while i < len(sig) && sig[i] != '(' { i = i + 1 }
+    while i < sig.len() && sig[i] != '(' { i = i + 1 }
     var depth = 0
     var j = i
-    while j < len(sig) {
+    while j < sig.len() {
         let c = sig[j]
         if c == '(' || c == '[' || c == '<' {
             depth = depth + 1
@@ -183,8 +183,8 @@ pub fun sig_param_types(sig: str) -> [str] {
     if j <= i + 1 { return out }
     for p in split_top(part(sig, i + 1, j), ',') {
         var k = 0
-        while k < len(p) && p[k] != ':' { k = k + 1 }
-        if k < len(p) { push(out, trim(part(p, k + 1, len(p)))) }
+        while k < p.len() && p[k] != ':' { k = k + 1 }
+        if k < p.len() { out.push(trim(part(p, k + 1, p.len()))) }
     }
     return out
 }
@@ -199,15 +199,15 @@ pub fun unify(pattern: str, actual: str, names: [str], bound: [str: str]) -> [st
     if actual == "" { return out }
     for n in names {
         if n == pattern {
-            if !contains(out, n) { out[n] = actual }
+            if !out.contains(n) { out[n] = actual }
             return out
         }
     }
     let ps = list_or_args(pattern)
     let xs = list_or_args(actual)
-    if len(ps) == 0 || len(ps) != len(xs) || base_of(pattern) != base_of(actual) { return out }
+    if ps.len() == 0 || ps.len() != xs.len() || base_of(pattern) != base_of(actual) { return out }
     var i = 0
-    while i < len(ps) {
+    while i < ps.len() {
         out = unify(ps[i], xs[i], names, out)
         i = i + 1
     }
@@ -216,9 +216,9 @@ pub fun unify(pattern: str, actual: str, names: [str], bound: [str: str]) -> [st
 
 // The parts of a list, map, tuple or generic type, for unify.
 fun list_or_args(t: str) -> [str] {
-    if len(t) >= 2 && t[0] == '[' && t[len(t) - 1] == ']' { return split_top(part(t, 1, len(t) - 1), ':') }
+    if t.len() >= 2 && t[0] == '[' && t[t.len() - 1] == ']' { return split_top(part(t, 1, t.len() - 1), ':') }
     let elems = tuple_elems(t)
-    if len(elems) > 0 { return elems }
+    if elems.len() > 0 { return elems }
     return type_args(t)
 }
 
@@ -237,19 +237,19 @@ fun split_top(s: str, sep: uint8) -> [str] {
     var depth = 0
     var start = 0
     var i = 0
-    while i < len(s) {
+    while i < s.len() {
         let c = s[i]
         if c == '(' || c == '[' || c == '<' {
             depth = depth + 1
         } else if c == ')' || c == ']' || (c == '>' && !(i > 0 && s[i - 1] == '-')) {
             depth = depth - 1
         } else if c == sep && depth == 0 {
-            push(out, trim(part(s, start, i)))
+            out.push(trim(part(s, start, i)))
             start = i + 1
         }
         i = i + 1
     }
-    push(out, trim(part(s, start, len(s))))
+    out.push(trim(part(s, start, s.len())))
     return out
 }
 
@@ -264,8 +264,8 @@ fun is_name_char(c: uint8) -> bool {
 }
 
 fun starts_with(s: str, prefix: str) -> bool {
-    if len(prefix) > len(s) { return false }
-    for i in 0..len(prefix) {
+    if prefix.len() > s.len() { return false }
+    for i in 0..prefix.len() {
         if s[i] != prefix[i] { return false }
     }
     return true
@@ -274,7 +274,7 @@ fun starts_with(s: str, prefix: str) -> bool {
 #test("  a b ")["a b"]
 fun trim(s: str) -> str {
     var a = 0
-    var b = len(s)
+    var b = s.len()
     while a < b && s[a] == ' ' { a = a + 1 }
     while b > a && s[b - 1] == ' ' { b = b - 1 }
     return part(s, a, b)
@@ -282,6 +282,6 @@ fun trim(s: str) -> str {
 
 fun part(s: str, start: int32, end: int32) -> str {
     var sb = StringBuilder()
-    append(sb, s, start, end)
-    return build(sb)
+    sb.append(s, start, end)
+    return sb.build()
 }

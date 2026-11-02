@@ -188,7 +188,7 @@ impl Norm {
 
     fun stmt(var self, s: Stmt) {
         if !stmt_suspends(s) {
-            push(self.out, s)
+            self.out.push(s)
             return
         }
         match s.kind {
@@ -222,42 +222,42 @@ impl Norm {
                         self.children[lam.id] = true
                         let call = self.fresh(init, ExprKind.Call(lam, []))
                         self.copy_type(init.id, call.id)
-                        push(self.out, self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, call)))
+                        self.out.push(self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, call)))
                         return
                     }
-                    push(self.out, s)
+                    self.out.push(s)
                     return
                 }
                 match init.kind {
                     ExprKind.Await(x) => {
                         let op = self.await_operand(x)
-                        push(self.out, self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, with_kind(init, ExprKind.Await(op)))))
+                        self.out.push(self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, with_kind(init, ExprKind.Await(op)))))
                     },
                     _ => {
                         let v = self.expr(init)
-                        push(self.out, self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, v)))
+                        self.out.push(self.with_stmt(s, StmtKind.VarDecl(kind, name, ty, v)))
                     },
                 }
             },
             StmtKind.DestructDecl(kind, b, ty, init) => {
                 let v = self.expr(init)
-                push(self.out, self.with_stmt(s, StmtKind.DestructDecl(kind, b, ty, v)))
+                self.out.push(self.with_stmt(s, StmtKind.DestructDecl(kind, b, ty, v)))
             },
             StmtKind.Assign(t, v) => {
                 // the value first, then the target's indices, as evaluated
                 let v2 = self.expr(v)
                 let t2 = self.place(t)
-                push(self.out, self.with_stmt(s, StmtKind.Assign(t2, v2)))
+                self.out.push(self.with_stmt(s, StmtKind.Assign(t2, v2)))
             },
             StmtKind.IfS(c, th, el) => {
                 let c2 = self.expr(c)
                 let th2 = self.block(th)
                 let el2 = self.else_tail(el)
-                push(self.out, self.with_stmt(s, StmtKind.IfS(c2, th2, el2)))
+                self.out.push(self.with_stmt(s, StmtKind.IfS(c2, th2, el2)))
             },
             StmtKind.WhileS(c, b) => {
                 if !has_await(c) {
-                    push(self.out, self.with_stmt(s, StmtKind.WhileS(c, self.block(b))))
+                    self.out.push(self.with_stmt(s, StmtKind.WhileS(c, self.block(b))))
                     return
                 }
                 // `while true { <c>; if !c { break }; body }`
@@ -268,12 +268,12 @@ impl Norm {
                 self.copy_type(c.id, not_c.id)
                 let brk = Stmt { id: self.id(), line: c.line, col: c.col, sp: c.sp, kind: StmtKind.BreakS }
                 let stop = Block { line: c.line, col: c.col, sp: c.sp, stmts: [brk] }
-                push(self.out, Stmt { id: self.id(), line: c.line, col: c.col, sp: c.sp, kind: StmtKind.IfS(not_c, stop, None) })
+                self.out.push(Stmt { id: self.id(), line: c.line, col: c.col, sp: c.sp, kind: StmtKind.IfS(not_c, stop, None) })
                 for st in b.stmts { self.stmt(st) }
                 let body = self.out
                 self.out = saved
                 let yes = self.fresh(c, ExprKind.BoolLit(true))
-                push(self.out, self.with_stmt(s, StmtKind.WhileS(yes, Block { line: b.line, col: b.col, sp: b.sp, stmts: body })))
+                self.out.push(self.with_stmt(s, StmtKind.WhileS(yes, Block { line: b.line, col: b.col, sp: b.sp, stmts: body })))
             },
             StmtKind.ForS(v, st, en, body, it) => {
                 let later_end = opt_await(en) || opt_await(it)
@@ -283,33 +283,33 @@ impl Norm {
                 if opt_await(it) { en2 = self.opt_hoist(en2) }
                 let it2 = self.opt_expr(it)
                 let body2 = self.block(body)
-                push(self.out, self.with_stmt(s, StmtKind.ForS(v, st2, en2, body2, it2)))
+                self.out.push(self.with_stmt(s, StmtKind.ForS(v, st2, en2, body2, it2)))
             },
             StmtKind.ReturnS(v, tail) => {
                 let v2 = self.opt_expr(v)
-                push(self.out, self.with_stmt(s, StmtKind.ReturnS(v2, tail)))
+                self.out.push(self.with_stmt(s, StmtKind.ReturnS(v2, tail)))
             },
             StmtKind.ExprStmt(x) => {
                 match x.kind {
                     ExprKind.Await(op) => {
                         let op2 = self.await_operand(op)
                         let name = self.temp_name()
-                        push(self.out, self.with_stmt(s, StmtKind.VarDecl("let", name, None, with_kind(x, ExprKind.Await(op2)))))
+                        self.out.push(self.with_stmt(s, StmtKind.VarDecl("let", name, None, with_kind(x, ExprKind.Await(op2)))))
                     },
                     ExprKind.MatchE(sc, arms) => {
                         if arms_await(arms) {
                             self.match_stmt(x, sc, arms, false)
                         } else {
-                            push(self.out, self.with_stmt(s, StmtKind.ExprStmt(self.expr(x))))
+                            self.out.push(self.with_stmt(s, StmtKind.ExprStmt(self.expr(x))))
                         }
                     },
                     _ => {
                         let x2 = self.expr(x)
-                        if !is_simple(x2) { push(self.out, self.with_stmt(s, StmtKind.ExprStmt(x2))) }
+                        if !is_simple(x2) { self.out.push(self.with_stmt(s, StmtKind.ExprStmt(x2))) }
                     },
                 }
             },
-            _ => { push(self.out, s) },
+            _ => { self.out.push(s) },
         }
     }
 
@@ -368,12 +368,12 @@ impl Norm {
             ExprKind.GetField(t, f) => with_kind(e, ExprKind.GetField(self.expr(t), f)),
             ExprKind.StructLit(n, fs) => {
                 var vals: [Expr] = []
-                for f in fs { push(vals, f.value) }
+                for f in fs { vals.push(f.value) }
                 let vs = self.seq(vals)
                 var fs2: [FieldInit] = []
                 var i = 0
-                while i < len(fs) {
-                    push(fs2, FieldInit { line: fs[i].line, col: fs[i].col, sp: fs[i].sp, name: fs[i].name, value: vs[i] })
+                while i < fs.len() {
+                    fs2.push(FieldInit { line: fs[i].line, col: fs[i].col, sp: fs[i].sp, name: fs[i].name, value: vs[i] })
                     i = i + 1
                 }
                 with_kind(e, ExprKind.StructLit(n, fs2))
@@ -383,14 +383,14 @@ impl Norm {
             ExprKind.MapLit(ents) => {
                 var flat: [Expr] = []
                 for en in ents {
-                    push(flat, en.key)
-                    push(flat, en.value)
+                    flat.push(en.key)
+                    flat.push(en.value)
                 }
                 let fl = self.seq(flat)
                 var ents2: [MapEntry] = []
                 var i = 0
-                while i < len(ents) {
-                    push(ents2, MapEntry { key: fl[2 * i], value: fl[2 * i + 1] })
+                while i < ents.len() {
+                    ents2.push(MapEntry { key: fl[2 * i], value: fl[2 * i + 1] })
                     i = i + 1
                 }
                 with_kind(e, ExprKind.MapLit(ents2))
@@ -456,16 +456,16 @@ impl Norm {
     fun seq(var self, es: [Expr]) -> [Expr] {
         var last = -1
         var i = 0
-        while i < len(es) {
+        while i < es.len() {
             if has_await(es[i]) { last = i }
             i = i + 1
         }
         var out: [Expr] = []
         var j = 0
-        while j < len(es) {
-            if j < last { push(out, self.hoist(self.expr(es[j]))) }
-            else if j == last { push(out, self.expr(es[j])) }
-            else { push(out, es[j]) }
+        while j < es.len() {
+            if j < last { out.push(self.hoist(self.expr(es[j]))) }
+            else if j == last { out.push(self.expr(es[j])) }
+            else { out.push(es[j]) }
             j = j + 1
         }
         return out
@@ -478,7 +478,7 @@ impl Norm {
         let saved = self.out
         self.out = []
         let r2 = self.expr(r)
-        push(self.out, Stmt { id: self.id(), line: r.line, col: r.col, sp: r.sp, kind: StmtKind.Assign(t, r2) })
+        self.out.push(Stmt { id: self.id(), line: r.line, col: r.col, sp: r.sp, kind: StmtKind.Assign(t, r2) })
         let inner = self.out
         self.out = saved
         var cond = t
@@ -487,7 +487,7 @@ impl Norm {
             self.copy_type(t.id, cond.id)
         }
         let then = Block { line: r.line, col: r.col, sp: r.sp, stmts: inner }
-        push(self.out, Stmt { id: self.id(), line: e.line, col: e.col, sp: e.sp, kind: StmtKind.IfS(cond, then, None) })
+        self.out.push(Stmt { id: self.id(), line: e.line, col: e.col, sp: e.sp, kind: StmtKind.IfS(cond, then, None) })
         return t
     }
 
@@ -500,7 +500,7 @@ impl Norm {
             let none = self.fresh(e, ExprKind.Hole)
             for arm in arms {
                 let body = self.arm_block(arm.body, none, true)
-                push(varms, MatchArm { line: arm.line, col: arm.col, sp: arm.sp, pattern: arm.pattern, guard: arm.guard, body: ExprOrBlock.EB_Block(body) })
+                varms.push(MatchArm { line: arm.line, col: arm.col, sp: arm.sp, pattern: arm.pattern, guard: arm.guard, body: ExprOrBlock.EB_Block(body) })
             }
             return self.bind(with_kind(e, ExprKind.MatchE(s2, varms)), "let")
         }
@@ -512,10 +512,10 @@ impl Norm {
         var arms2: [MatchArm] = []
         for arm in arms {
             let body = self.arm_block(arm.body, result, value)
-            push(arms2, MatchArm { line: arm.line, col: arm.col, sp: arm.sp, pattern: arm.pattern, guard: arm.guard, body: ExprOrBlock.EB_Block(body) })
+            arms2.push(MatchArm { line: arm.line, col: arm.col, sp: arm.sp, pattern: arm.pattern, guard: arm.guard, body: ExprOrBlock.EB_Block(body) })
         }
         let m = with_kind(e, ExprKind.MatchE(s2, arms2))
-        push(self.out, Stmt { id: self.id(), line: e.line, col: e.col, sp: e.sp, kind: StmtKind.ExprStmt(m) })
+        self.out.push(Stmt { id: self.id(), line: e.line, col: e.col, sp: e.sp, kind: StmtKind.ExprStmt(m) })
         return result
     }
 
@@ -537,7 +537,7 @@ impl Norm {
                 line = b.line
                 col = b.col
                 sp = b.sp
-                let n = len(b.stmts)
+                let n = b.stmts.len()
                 var i = 0
                 while i < n {
                     let st = b.stmts[i]
@@ -565,11 +565,11 @@ impl Norm {
     fun arm_value(var self, x: Expr, result: Expr, value: bool) {
         let x2 = self.expr(x)
         if value && self.value_matches {
-            push(self.out, Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.ExprStmt(x2) })
+            self.out.push(Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.ExprStmt(x2) })
         } else if value {
-            push(self.out, Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.Assign(result, x2) })
+            self.out.push(Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.Assign(result, x2) })
         } else if !is_simple(x2) {
-            push(self.out, Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.ExprStmt(x2) })
+            self.out.push(Stmt { id: self.id(), line: x.line, col: x.col, sp: x.sp, kind: StmtKind.ExprStmt(x2) })
         }
     }
 
@@ -608,7 +608,7 @@ impl Norm {
     // `let t = e` (or `var`), and the name `t`, with `e`'s type, in its place.
     fun bind(var self, e: Expr, kind: str) -> Expr {
         let name = self.temp_name()
-        push(self.out, Stmt { id: self.id(), line: e.line, col: e.col, sp: e.sp, kind: StmtKind.VarDecl(kind, name, None, e) })
+        self.out.push(Stmt { id: self.id(), line: e.line, col: e.col, sp: e.sp, kind: StmtKind.VarDecl(kind, name, None, e) })
         let r = self.fresh(e, ExprKind.Name(name))
         self.copy_type(e.id, r.id)
         return r

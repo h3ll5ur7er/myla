@@ -245,7 +245,7 @@ fun main() {
     let wide: uint16 = 65535
     let big: int64 = -1234567890123
     let huge: uint64 = 18446744073709551615
-    let f: float = 0.1
+    let f: float32 = 0.1
     let d: float64 = 2.5f64
     let yes = true
     let ch = '\\u{e9}'
@@ -287,7 +287,7 @@ impl Point {
 fun area(s: Shape, label: str) -> int {
     return match s {
         Circle(c, r) => r * r + c.x
-        Dot => len(label)
+        Dot => label.len()
     }
 }
 
@@ -301,14 +301,14 @@ fun main() {
     let s = Shape.Circle(p, 2)
     let o: Option<int> = Some(4)
     var sb = StringBuilder()
-    append(sb, "built")
+    sb.append("built")
     let k = 10
     let add_k = (n: int) => n + k
     let m = ["a": 1]
     print(area(s, "disk"))
     print(p.moved(4).x)
     print(add_k(1))
-    print(len(m) + len(name) + len(xs) + len(cs) + len(words) + t.0 + len(build(sb)))
+    print(m.len() + name.len() + xs.len() + cs.len() + words.len() + t.0 + sb.build().len())
     match o { Some(v) => print(v), None => print(0) }
 }
 """
@@ -320,7 +320,7 @@ HEAP = """\
 struct Bag {
     items: [int],
     label: str,
-    ratio: float,
+    ratio: float32,
     tags: [str: int],
 }
 
@@ -347,12 +347,12 @@ fun main() {
     let m = ["x": 1]
     let names = [1: "one"]
     let pair = (1.5, "p")
-    let fs = [0.1, 0.25]
+    let fs: [float32] = [0.1, 0.25]
     let tree = Tree.Node(Tree.Leaf(1), Tree.Leaf(2))
     let nested = [[1, 2], [3]]
     print(total(bag))
     print(greet("bo"))
-    print(len(words) + len(m) + len(names) + len(pair.1) + len(fs) + len(nested))
+    print(words.len() + m.len() + names.len() + pair.1.len() + fs.len() + nested.len())
     match tree { Node(_, _) => print(1), Leaf(v) => print(v) }
 }
 """
@@ -494,10 +494,10 @@ async fun greet(name: str, times: int) -> int {
     var count = 0
     let words = ["hi", name]
     for i in 0..times {
-        count = count + len(words[1])
+        count = count + words[1].len()
     }
     let label = f"{name}!"
-    return count + len(label)
+    return count + label.len()
 }
 
 #main
@@ -506,7 +506,7 @@ async fun main() {
     let r = await a
     let base = 40
     var fs: [async () -> int] = []
-    push(fs, async () => base + r)
+    fs.push(async () => base + r)
     let rs = await task.all(fs)
     print(r)
     print(rs[0])

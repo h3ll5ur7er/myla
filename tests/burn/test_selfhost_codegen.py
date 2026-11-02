@@ -39,7 +39,7 @@ import sys
 import tempfile
 import unittest
 
-from ._golden import golden
+from ._golden import NoGolden, golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import STDLIB_ROOT, selfhost_tool
 
@@ -172,7 +172,7 @@ MODULE_PROJECTS = {
         "main.my": (
             "from std.process import args\n"
             "fun collect(n: int) -> int {\n    return n * 2\n}\n"
-            "fun main() {\n    print(collect(len(args()) as int))\n}\n"),
+            "fun main() {\n    print(collect(args().len() as int))\n}\n"),
     },
     # MYLA-105: the I/O intrinsics behind std.fs, std.process and std.io,
     # with results that don't depend on the machine
@@ -184,9 +184,9 @@ MODULE_PROJECTS = {
             "fun main() {\n"
             '    println("start")\n'
             '    eprintln("to stderr")\n'
-            "    print(len(args()) > 0)\n"
+            "    print(args().len() > 0)\n"
             "    match current_dir() {\n"
-            "        Ok(d) => { print(len(d) > 0) },\n"
+            "        Ok(d) => { print(d.len() > 0) },\n"
             "        Err(e) => { print(false) },\n"
             "    }\n"
             '    match read_to_string("/nonexistent/file") {\n'
@@ -198,7 +198,7 @@ MODULE_PROJECTS = {
             '        Err(e) => { print("not written") },\n'
             "    }\n"
             '    match list_dir("/nonexistent") {\n'
-            "        Ok(names) => { print(len(names)) },\n"
+            "        Ok(names) => { print(names.len()) },\n"
             '        Err(e) => { print("no dir") },\n'
             "    }\n"
             '    match make_dir("/nonexistent/a/b") {\n'
@@ -209,7 +209,7 @@ MODULE_PROJECTS = {
             '    print(is_dir("/"))\n'
             '    print(is_file("/"))\n'
             '    match run("/bin/echo", ["hi"]) {\n'
-            "        Ok(o) => { print(len(o.stdout)) },\n"
+            "        Ok(o) => { print(o.stdout.len()) },\n"
             '        Err(e) => { print("not run") },\n'
             "    }\n"
             "}\n"),
@@ -644,6 +644,20 @@ REGISTER_SAMPLE = (
     "}\n")
 
 
+# Diagnostics that line continuation (D104 (3), MYLA-224) changed from the
+# retired Python CLI's recording: `1 +` at the end of a line goes on to the
+# next one, so the error names the `}` there (or, in `newline_token`, the
+# statement reads `1 + print(x)`). `{dir}` is the program's directory.
+SUPERSEDED: dict[str, str] = {
+    "parse_error_in_module": "parse error: expected an expression, found '}'\n  --> {dir}/lib.my:3:1\n  |\n3 | }\n  | ^",
+    "parse_errors_in_module": (
+        "parse error: expected an expression, found '}'\n  --> {dir}/lib.my:3:1\n  |\n3 | }\n  | ^\n\n"
+        "parse error: expected parameter name, found '{'\n  --> {dir}/lib.my:4:12\n  |\n4 | pub fun g( {\n  |            ^\n\n"
+        "parse error: expected variable name, found '='\n  --> {dir}/lib.my:7:9\n  |\n7 |     let = 2\n  |         ^\n\n"
+        "error: aborting due to 3 previous errors"),
+    "newline_token": "type error: unknown name 'x'\n  --> {dir}/main.my:3:11\n  |\n3 |     print(x)\n  |           ^",
+}
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedCodegenParity(unittest.TestCase):
     _binary: str
@@ -754,11 +768,22 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     expected, _ = _linked_oracle(entry, _modules(entry))
                     self.assertEqual((out, code), (expected, 0))
 
-    def _assert_diagnostic_matches(self, entry: str, stdlib: str, modules: list[str]) -> None:
+    def _assert_diagnostic_matches(self, entry: str, stdlib: str, modules: list[str], name: str = "",
+                                   recorded_only: bool = False) -> None:
         """The self-hosted compiler rejects `entry` with exactly the Python
-        CLI's diagnostic, carets included; `modules` are the program's other
-        files."""
-        expected = _diagnostic_oracle(entry, modules)
+        CLI's diagnostic, carets included (or the one pinned in SUPERSEDED);
+        `modules` are the program's other files."""
+        if name in SUPERSEDED:
+            expected = SUPERSEDED[name].replace("{dir}", os.path.dirname(entry))
+        elif recorded_only:
+            # a corpus file added since has no recording: test_error_corpus
+            # holds it to the self-hosted CLI
+            try:
+                expected = _diagnostic_oracle(entry, modules)
+            except NoGolden:
+                return
+        else:
+            expected = _diagnostic_oracle(entry, modules)
         self.assertIsNotNone(expected, "the Python toolchain accepted the program")
         proc = subprocess.run(
             [self._binary, entry, stdlib], capture_output=True, text=True
@@ -771,7 +796,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             for name, files in MODULE_ERRORS.items():
                 with self.subTest(program=name):
                     entry = _write_project(os.path.join(tmp, name), files)
-                    self._assert_diagnostic_matches(entry, stdlib, _modules(entry))
+                    self._assert_diagnostic_matches(entry, stdlib, _modules(entry), name)
 
     def test_diagnostics_match_the_python_cli(self) -> None:
         # every lex, parse, module and type error of the corpus, and ranges
@@ -790,7 +815,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                     # the examples are single files; each case of DIAGNOSTICS
                     # has a directory of its own
                     modules = _modules(entry) if name in DIAGNOSTICS else []
-                    self._assert_diagnostic_matches(entry, stdlib, modules)
+                    self._assert_diagnostic_matches(entry, stdlib, modules, name, recorded_only=name not in DIAGNOSTICS)
 
     def test_stress_programs_reclaim_memory(self) -> None:
         from . import test_compiler_parity
@@ -827,10 +852,10 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "    let n = p.name\n"
             "    let t = p.tags\n"
             "    let first = t[0]\n"
-            "    var total = len(n) + len(first)\n"
+            "    var total = n.len() + first.len()\n"
             "    for x in t {\n"
             "        let y = x\n"
-            "        total = total + len(y)\n"
+            "        total = total + y.len()\n"
             "    }\n"
             "    return total\n"
             "}\n"
@@ -838,7 +863,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "    var q = p\n"
             "    let n = q.name\n"
             "    q.name = \"z\"\n"
-            "    return len(n)\n"
+            "    return n.len()\n"
             "}\n"
             "fun main() {\n"
             "    let p = P { name: \"ab\", tags: [\"x\", \"yz\"] }\n"
@@ -872,27 +897,27 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "struct Box2 { name: str, tags: [str] }\n"
             "fun make_list(n: int) -> [int] {\n"
             "    var out: [int] = []\n"
-            "    for i in 0..n { push(out, i) }\n"
+            "    for i in 0..n { out.push(i) }\n"
             "    return out\n"
             "}\n"
             "fun boxed(s: str) -> Box2 {\n"
             "    var b = Box2 { name: s + \"!\", tags: [] }\n"
-            "    push(b.tags, s)\n"
+            "    b.tags.push(s)\n"
             "    return b\n"
             "}\n"
             "fun again(s: str) -> [str] {\n"
             "    var t = s + \"?\"\n"
             "    var xs: [str] = []\n"
-            "    push(xs, t)\n"
+            "    xs.push(t)\n"
             "    print(t)\n"
             "    return xs\n"
             "}\n"
             "fun main() {\n"
-            "    print(len(make_list(5)))\n"
+            "    print(make_list(5).len())\n"
             "    let b = boxed(\"x\")\n"
             "    print(b.name)\n"
-            "    print(len(b.tags))\n"
-            "    print(len(again(\"y\")))\n"
+            "    print(b.tags.len())\n"
+            "    print(again(\"y\").len())\n"
             "}\n")
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "prog.my")
@@ -1131,7 +1156,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "fun collect(n: int, acc: [int]) -> [int] {\n"
             "    if n == 0 { return acc }\n"
             "    var next = acc\n"
-            "    push(next, n)\n"
+            "    next.push(n)\n"
             "    return collect(n - 1, next)\n"
             "}\n"
             "fun label(n: int, s: str) -> str {\n"
@@ -1157,7 +1182,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "}\n"
             "fun main() {\n"
             "    let xs = collect(1000000, [])\n"
-            "    print(len(xs))\n"
+            "    print(xs.len())\n"
             "    print(xs[999999])\n"
             "    print(label(3, \"q\" + \"r\"))\n"
             "    print(borrowed(1))\n"
@@ -1228,7 +1253,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "    become rename(Named { name: t.name + \"x\", steps: t.steps }, n - 1)\n"
             "}\n"
             "fun main() {\n"
-            "    print(len(rename(Named { name: \"\", steps: [1] }, 50000).name))\n"
+            "    print(rename(Named { name: \"\", steps: [1] }, 50000).name.len())\n"
             "}\n")
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "prog.my")
@@ -1281,7 +1306,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             "    become m.next(m, n - 1, acc + k)\n"
             "}\n"
             "fun weigh(big: Big, s: str, x: int) -> Big {\n"
-            "    return Big { a: big.a + x, b: len(s), c: big.c }\n"
+            "    return Big { a: big.a + x, b: s.len(), c: big.c }\n"
             "}\n"
             "fun main() {\n"
             "    let m = Machine { step: 0, next: hop(3, _, _, _) }\n"
@@ -1461,7 +1486,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
 _ACTOR_COUNTER = ("actor Counter {\n    count: int,\n    log: [str],\n}\n"
                   "impl Counter {\n"
                   "    fun bump(var self, by: int) -> int {\n        self.count = self.count + by\n"
-                  "        push(self.log, f\"+{by}\")\n        return self.count\n    }\n"
+                  "        self.log.push(f\"+{by}\")\n        return self.count\n    }\n"
                   "    fun get(self) -> int {\n        return self.count\n    }\n"
                   "    fun entries(self) -> [str] {\n        return self.log\n    }\n}\n")
 ACTOR_PROGRAMS = {
@@ -1471,8 +1496,8 @@ ACTOR_PROGRAMS = {
         "#main\nasync fun main() {\n    let c = Counter { count: 0, log: [] }\n    let d = c\n"
         "    let h = Holder { c: d, tag: \"h\" }\n    let x = await h.c.bump(1)\n"
         "    await bump_all([c, d, h.c])\n    print(await c.get())\n"
-        "    var es = await c.entries()\n    push(es, \"local\")\n    print(len(es))\n"
-        "    print(len(await d.entries()))\n}\n"),
+        "    var es = await c.entries()\n    es.push(\"local\")\n    print(es.len())\n"
+        "    print((await d.entries()).len())\n}\n"),
     "actors_are_released": _ACTOR_COUNTER + (
         "async fun churn(n: int) -> int {\n    var total = 0\n    var i = 0\n    while i < n {\n"
         "        let c = Counter { count: i, log: [\"start\"] }\n        let k = c\n"
@@ -1497,20 +1522,20 @@ ACTOR_PROGRAMS = {
     # awaited `var self` methods on list elements and on a field's element
     # (MYLA-142): the element's index computed once, the method's final
     # `self` written back there; a copy of the list keeps its own (MYLA-143)
-    "var_self_on_elements": 'struct Counter {\n    n: int,\n    log: [str],\n}\n\nimpl Counter {\n    async fun bump(var self, by: int) -> int {\n        self.n = self.n + by\n        push(self.log, f"+{by}")\n        return self.n\n    }\n}\n\nstruct Board {\n    rows: [Counter],\n}\n\n\nfun pick(i: int) -> int {\n    print(f"pick {i}")\n    return i\n}\n\n#main\nasync fun main() {\n    var cs = [Counter { n: 0, log: [] }, Counter { n: 10, log: [] }]\n    let a = await cs[1].bump(5)\n    let b = await cs[pick(0)].bump(2)\n    var i = 0\n    while i < 3 {\n        let c = await cs[i % 2].bump(1)\n        i = i + 1\n    }\n    var board = Board { rows: [Counter { n: 100, log: [] }] }\n    let d = await board.rows[0].bump(7)\n    let copy = cs\n    let e = await cs[0].bump(1000)\n    print(f"{a} {b} {d} {e}")\n    print(f"{cs[0].n} {cs[1].n} {len(cs[0].log)} {len(cs[1].log)} {board.rows[0].n} {copy[0].n}")\n}\n',
+    "var_self_on_elements": 'struct Counter {\n    n: int,\n    log: [str],\n}\n\nimpl Counter {\n    async fun bump(var self, by: int) -> int {\n        self.n = self.n + by\n        self.log.push(f"+{by}")\n        return self.n\n    }\n}\n\nstruct Board {\n    rows: [Counter],\n}\n\n\nfun pick(i: int) -> int {\n    print(f"pick {i}")\n    return i\n}\n\n#main\nasync fun main() {\n    var cs = [Counter { n: 0, log: [] }, Counter { n: 10, log: [] }]\n    let a = await cs[1].bump(5)\n    let b = await cs[pick(0)].bump(2)\n    var i = 0\n    while i < 3 {\n        let c = await cs[i % 2].bump(1)\n        i = i + 1\n    }\n    var board = Board { rows: [Counter { n: 100, log: [] }] }\n    let d = await board.rows[0].bump(7)\n    let copy = cs\n    let e = await cs[0].bump(1000)\n    print(f"{a} {b} {d} {e}")\n    print(f"{cs[0].n} {cs[1].n} {cs[0].log.len()} {cs[1].log.len()} {board.rows[0].n} {copy[0].n}")\n}\n',
     # every kind of value crossing into children and actors and back (D92):
     # copied deeply where it crosses (lists, maps, strings, builders, a
     # boxed and a list-recursive enum, tuples, closures with captures), an
     # actor handle shared; what the children and the actor change never shows
     # in the parent
-    "values_cross_deeply": 'import std.task as task\n\nenum Tree {\n    Leaf(str),\n    Node([Tree]),\n}\n\nenum Ex {\n    Num(int),\n    Neg(Ex),\n    Add(Ex, Ex),\n}\n\nfun eval(e: Ex) -> int {\n    return match e {\n        Ex.Num(n) => n,\n        Ex.Neg(x) => 0 - eval(x),\n        Ex.Add(a, b) => eval(a) + eval(b),\n    }\n}\n\nstruct Rec {\n    ex: Ex,\n    sb: StringBuilder,\n    name: str,\n    tags: [str],\n    scores: [str: int],\n    tree: Tree,\n    pair: (str, [int]),\n}\n\nactor Store {\n    items: [Rec],\n    names: [str: int],\n}\n\nimpl Store {\n    fun put(var self, r: Rec, extra: [str]) -> int {\n        push(self.items, r)\n        for e in extra {\n            self.names[e] = len(self.items)\n        }\n        return len(r.tags) + len(extra)\n    }\n    fun find(self, name: str) -> Rec {\n        var i = len(self.items) - 1\n        while i >= 0 {\n            if self.items[i].name == name {\n                return self.items[i]\n            }\n            i = i - 1\n        }\n        return self.items[0]\n    }\n    async fun summary(self, prefix: str) -> [str] {\n        var out: [str] = []\n        for r in self.items {\n            push(out, prefix + r.name)\n        }\n        return out\n    }\n    fun clear(var self) {\n        self.items = []\n    }\n}\n\nfun count(t: Tree) -> int {\n    return match t {\n        Tree.Leaf(s) => len(s),\n        Tree.Node(ts) => {\n            var n = 0\n            for c in ts {\n                n = n + count(c)\n            }\n            n\n        },\n    }\n}\n\nfun make(i: int) -> Rec {\n    var scores: [str: int] = [:]\n    scores[f"s{i}"] = i\n    let tree = Tree.Node([Tree.Leaf(f"leaf{i}"), Tree.Node([Tree.Leaf("x"), Tree.Leaf(f"{i}")])])\n    var sb = StringBuilder()\n    append(sb, f"sb{i}")\n    return Rec { ex: Ex.Add(Ex.Num(i), Ex.Neg(Ex.Num(2))), sb: sb, name: f"rec{i}", tags: [f"t{i}", "u"], scores: scores, tree: tree, pair: (f"p{i}", [i, i + 1]) }\n}\n\nasync fun work(r: Rec, s: Store, f: (int) -> int) -> int {\n    let k = await s.put(r, r.tags)\n    let back = await s.find(r.name)\n    var sb = StringBuilder()\n    append(sb, back.name)\n    var bsb = back.sb\n    append(bsb, "!")\n    let text = build(sb) + build(bsb)\n    return k + eval(back.ex) + count(back.tree) + len(text) + f(len(back.pair.1))\n}\n\n#main\nasync fun main() {\n    let s = Store { items: [], names: [:] }\n    var total = 0\n    var round = 0\n    while round < 300 {\n        let base = round * 3\n        let add = (x: int) => x + base\n        var r = make(round)\n        async let a = work(r, s, add)\n        r.name = "changed"\n        push(r.tags, "parent")\n        async let b = work(make(round + 1), s, add)\n        var fs: [async () -> int] = []\n        for j in 0..3 {\n            let rj = make(j)\n            push(fs, async () => count(rj.tree) + len(rj.name))\n        }\n        let rs = await task.all(fs)\n        for x in rs {\n            total = total + x\n        }\n        total = total + await a + await b + len(r.tags)\n        let sm = await s.summary("> ")\n        var chars = 0\n        for line in sm {\n            chars = chars + len(line)\n        }\n        total = total + len(sm) * 1000 + chars\n        if round % 50 == 49 {\n            await s.clear()\n        }\n        round = round + 1\n    }\n    print(total)\n}\n',
+    "values_cross_deeply": 'import std.task as task\n\nenum Tree {\n    Leaf(str),\n    Node([Tree]),\n}\n\nenum Ex {\n    Num(int),\n    Neg(Ex),\n    Add(Ex, Ex),\n}\n\nfun eval(e: Ex) -> int {\n    return match e {\n        Ex.Num(n) => n,\n        Ex.Neg(x) => 0 - eval(x),\n        Ex.Add(a, b) => eval(a) + eval(b),\n    }\n}\n\nstruct Rec {\n    ex: Ex,\n    sb: StringBuilder,\n    name: str,\n    tags: [str],\n    scores: [str: int],\n    tree: Tree,\n    pair: (str, [int]),\n}\n\nactor Store {\n    items: [Rec],\n    names: [str: int],\n}\n\nimpl Store {\n    fun put(var self, r: Rec, extra: [str]) -> int {\n        self.items.push(r)\n        for e in extra {\n            self.names[e] = self.items.len()\n        }\n        return r.tags.len() + extra.len()\n    }\n    fun find(self, name: str) -> Rec {\n        var i = self.items.len() - 1\n        while i >= 0 {\n            if self.items[i].name == name {\n                return self.items[i]\n            }\n            i = i - 1\n        }\n        return self.items[0]\n    }\n    async fun summary(self, prefix: str) -> [str] {\n        var out: [str] = []\n        for r in self.items {\n            out.push(prefix + r.name)\n        }\n        return out\n    }\n    fun clear(var self) {\n        self.items = []\n    }\n}\n\nfun count(t: Tree) -> int {\n    return match t {\n        Tree.Leaf(s) => s.len(),\n        Tree.Node(ts) => {\n            var n = 0\n            for c in ts {\n                n = n + count(c)\n            }\n            n\n        },\n    }\n}\n\nfun make(i: int) -> Rec {\n    var scores: [str: int] = [:]\n    scores[f"s{i}"] = i\n    let tree = Tree.Node([Tree.Leaf(f"leaf{i}"), Tree.Node([Tree.Leaf("x"), Tree.Leaf(f"{i}")])])\n    var sb = StringBuilder()\n    sb.append(f"sb{i}")\n    return Rec { ex: Ex.Add(Ex.Num(i), Ex.Neg(Ex.Num(2))), sb: sb, name: f"rec{i}", tags: [f"t{i}", "u"], scores: scores, tree: tree, pair: (f"p{i}", [i, i + 1]) }\n}\n\nasync fun work(r: Rec, s: Store, f: (int) -> int) -> int {\n    let k = await s.put(r, r.tags)\n    let back = await s.find(r.name)\n    var sb = StringBuilder()\n    sb.append(back.name)\n    var bsb = back.sb\n    bsb.append("!")\n    let text = sb.build() + bsb.build()\n    return k + eval(back.ex) + count(back.tree) + text.len() + f(back.pair.1.len())\n}\n\n#main\nasync fun main() {\n    let s = Store { items: [], names: [:] }\n    var total = 0\n    var round = 0\n    while round < 300 {\n        let base = round * 3\n        let add = (x: int) => x + base\n        var r = make(round)\n        async let a = work(r, s, add)\n        r.name = "changed"\n        r.tags.push("parent")\n        async let b = work(make(round + 1), s, add)\n        var fs: [async () -> int] = []\n        for j in 0..3 {\n            let rj = make(j)\n            fs.push(async () => count(rj.tree) + rj.name.len())\n        }\n        let rs = await task.all(fs)\n        for x in rs {\n            total = total + x\n        }\n        total = total + await a + await b + r.tags.len()\n        let sm = await s.summary("> ")\n        var chars = 0\n        for line in sm {\n            chars = chars + line.len()\n        }\n        total = total + sm.len() * 1000 + chars\n        if round % 50 == 49 {\n            await s.clear()\n        }\n        round = round + 1\n    }\n    print(total)\n}\n',
     # an awaited `var self` method of a struct on a frame: its final `self`
     # goes back to the receiver, a variable or a field of one, releasing the
     # old value
     "var_self_write_back": (
         "struct Log { lines: [str], name: str }\n"
-        "impl Log {\n    async fun add(var self, s: str) -> int {\n        push(self.lines, s)\n"
-        "        self.name = self.name + \".\"\n        return len(self.lines)\n    }\n"
+        "impl Log {\n    async fun add(var self, s: str) -> int {\n        self.lines.push(s)\n"
+        "        self.name = self.name + \".\"\n        return self.lines.len()\n    }\n"
         "    async fun reset(var self) {\n        self.lines = []\n    }\n}\n"
         "struct Box { log: Log, n: int }\n"
         "async fun run() -> int {\n    var b = Box { log: Log { lines: [], name: \"x\" }, n: 0 }\n"
@@ -1518,7 +1543,7 @@ ACTOR_PROGRAMS = {
         "        let k = await b.log.add(f\"line {i}\")\n        total = total + k\n"
         "        if k == 50 { await b.log.reset() }\n        i = i + 1\n    }\n"
         "    var l = Log { lines: [\"a\"], name: \"y\" }\n    let m = await l.add(\"b\")\n"
-        "    print(f\"{m} {len(l.lines)} {len(l.name)} {len(b.log.lines)} {len(b.log.name)}\")\n"
+        "    print(f\"{m} {l.lines.len()} {l.name.len()} {b.log.lines.len()} {b.log.name.len()}\")\n"
         "    return total\n}\n"
         "#main\nasync fun main() {\n    print(await run())\n}\n"),
 }
@@ -1614,7 +1639,7 @@ async fun main() {
     var fs: [async () -> int64] = []
     for k in 0..8 {
         let seed: int64 = (k + 1) as int64
-        push(fs, async () => crunch(seed))
+        fs.push(async () => crunch(seed))
     }
     var ones: int64 = 0
     for r in await task.all(fs) {
@@ -1670,7 +1695,7 @@ async fun main() {
     let c = Counter { count: 0 }
     var fs: [async () -> int] = []
     for i in 0..3000 {
-        push(fs, async () => await work(c, i))
+        fs.push(async () => await work(c, i))
     }
     let rs = await task.all(fs)
     var sum = 0

@@ -3,5 +3,5 @@
 // A failed `assert` without a message.
 fun main() {
     let xs = [1, 2]
-    assert(len(xs) == 3)
+    assert(xs.len() == 3)
 }

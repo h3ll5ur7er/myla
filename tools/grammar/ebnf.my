@@ -32,16 +32,16 @@ struct GTok { kind: str, text: str, line: int32, col: int32 }
 #test("ab", 1, 1)[""]
 pub fun substr(s: str, start: int32, end: int32) -> str {
     var sb = StringBuilder()
-    append(sb, s, start, end)
-    return build(sb)
+    sb.append(s, start, end)
+    return sb.build()
 }
 
 #test("```ebnf", "```")[true]
 #test("``", "```")[false]
 pub fun starts_with(s: str, prefix: str) -> bool {
-    if len(prefix) > len(s) { return false }
+    if prefix.len() > s.len() { return false }
     var i = 0
-    while i < len(prefix) {
+    while i < prefix.len() {
         if s[i] != prefix[i] { return false }
         i = i + 1
     }
@@ -51,18 +51,18 @@ pub fun starts_with(s: str, prefix: str) -> bool {
 #test("x.md", ".md")[true]
 #test("md", ".md")[false]
 pub fun ends_with(s: str, suffix: str) -> bool {
-    if len(suffix) > len(s) { return false }
-    return substr(s, len(s) - len(suffix), len(s)) == suffix
+    if suffix.len() > s.len() { return false }
+    return substr(s, s.len() - suffix.len(), s.len()) == suffix
 }
 
 #test("a \"b\" c", "\"b\"")[true]
 #test("abc", "abd")[false]
 pub fun contains_str(s: str, part: str) -> bool {
     var i = 0
-    while i + len(part) <= len(s) {
+    while i + part.len() <= s.len() {
         var j = 0
-        while j < len(part) && s[i + j] == part[j] { j = j + 1 }
-        if j == len(part) { return true }
+        while j < part.len() && s[i + j] == part[j] { j = j + 1 }
+        if j == part.len() { return true }
         i = i + 1
     }
     return false
@@ -72,7 +72,7 @@ pub fun contains_str(s: str, part: str) -> bool {
 #test("")[""]
 pub fun trim(s: str) -> str {
     var a = 0
-    var b = len(s)
+    var b = s.len()
     while a < b && is_space(s[a]) { a = a + 1 }
     while b > a && is_space(s[b - 1]) { b = b - 1 }
     return substr(s, a, b)
@@ -106,7 +106,7 @@ fun is_punct(c: uint8) -> bool {
 #test("ab", 1)[98]
 #test("ab", 2)[-1]
 fun byte_at(s: str, i: int32) -> int32 {
-    if i < 0 || i >= len(s) { return -1 }
+    if i < 0 || i >= s.len() { return -1 }
     return s[i] as int32
 }
 
@@ -117,7 +117,7 @@ fun lex_grammar(src: str) -> Result<[GTok], str> {
     var i = 0
     var line = 1
     var col = 1
-    let n = len(src)
+    let n = src.len()
     while i < n {
         let c = src[i]
         if c == '\n' {
@@ -147,21 +147,21 @@ fun lex_grammar(src: str) -> Result<[GTok], str> {
         } else if is_name_start(c) {
             let start = i
             while i < n && is_name_char(src[i]) { i = i + 1 }
-            push(toks, GTok { kind: "name", text: substr(src, start, i), line: line, col: col })
+            toks.push(GTok { kind: "name", text: substr(src, start, i), line: line, col: col })
             col = col + (i - start)
         } else if c == '@' {
             let start = i + 1
             i = i + 1
             while i < n && is_name_char(src[i]) { i = i + 1 }
             if i == start { return Err(format("{}:{}: expected a name after '@'", line, col)) }
-            push(toks, GTok { kind: "at", text: substr(src, start, i), line: line, col: col })
+            toks.push(GTok { kind: "at", text: substr(src, start, i), line: line, col: col })
             col = col + (i - start) + 1
         } else if c == '"' || c == '\'' {
             let start = i + 1
             i = i + 1
             while i < n && src[i] != c && src[i] != '\n' { i = i + 1 }
             if i >= n || src[i] != c { return Err(format("{}:{}: unterminated terminal", line, col)) }
-            push(toks, GTok { kind: "term", text: substr(src, start, i), line: line, col: col })
+            toks.push(GTok { kind: "term", text: substr(src, start, i), line: line, col: col })
             col = col + (i - start) + 2
             i = i + 1
         } else if c == '/' {
@@ -172,18 +172,18 @@ fun lex_grammar(src: str) -> Result<[GTok], str> {
                 i = i + 1
             }
             if i >= n || src[i] != '/' { return Err(format("{}:{}: unterminated class", line, col)) }
-            push(toks, GTok { kind: "class", text: substr(src, start, i), line: line, col: col })
+            toks.push(GTok { kind: "class", text: substr(src, start, i), line: line, col: col })
             col = col + (i - start) + 2
             i = i + 1
         } else if is_punct(c) {
-            push(toks, GTok { kind: "punct", text: substr(src, i, i + 1), line: line, col: col })
+            toks.push(GTok { kind: "punct", text: substr(src, i, i + 1), line: line, col: col })
             i = i + 1
             col = col + 1
         } else {
             return Err(format("{}:{}: unexpected character", line, col))
         }
     }
-    push(toks, GTok { kind: "eof", text: "", line: line, col: col })
+    toks.push(GTok { kind: "eof", text: "", line: line, col: col })
     return Ok(toks)
 }
 
@@ -225,12 +225,12 @@ impl GParser {
     // alternatives = sequence ( "|" sequence )*
     fun alternatives(var self) -> Result<GExpr, str> {
         var alts: [GExpr] = []
-        push(alts, self.sequence()?)
+        alts.push(self.sequence()?)
         while self.at("punct", "|") {
             self.next()
-            push(alts, self.sequence()?)
+            alts.push(self.sequence()?)
         }
-        if len(alts) == 1 { return Ok(alts[0]) }
+        if alts.len() == 1 { return Ok(alts[0]) }
         return Ok(GExpr.GAlt(alts))
     }
 
@@ -238,11 +238,11 @@ impl GParser {
     fun sequence(var self) -> Result<GExpr, str> {
         var items: [GExpr] = []
         while self.starts_atom() {
-            push(items, self.item()?)
+            items.push(self.item()?)
         }
-        if len(items) == 0 { return Err(self.fail("a terminal, a class, a rule name or '('")) }
+        if items.len() == 0 { return Err(self.fail("a terminal, a class, a rule name or '('")) }
         var e = items[0]
-        if len(items) > 1 { e = GExpr.GSeq(items) }
+        if items.len() > 1 { e = GExpr.GSeq(items) }
         if self.peek().kind == "at" {
             let label = self.next()
             e = GExpr.GLabel(e, label.text)
@@ -304,18 +304,18 @@ pub fun parse_grammar(src: str) -> Result<Grammar, str> {
             while !p.at("punct", ";") {
                 let a = p.peek()
                 if a.kind == "name" {
-                    push(args, GExpr.GRef(a.text))
+                    args.push(GExpr.GRef(a.text))
                 } else if a.kind == "term" {
-                    push(args, GExpr.GTerm(a.text))
+                    args.push(GExpr.GTerm(a.text))
                 } else if a.kind == "class" {
-                    push(args, GExpr.GClass(a.text))
+                    args.push(GExpr.GClass(a.text))
                 } else {
                     return Err(p.fail("a directive argument or ';'"))
                 }
                 p.next()
             }
             p.next()
-            push(directives, Directive { name: t.text, args: args, line: t.line })
+            directives.push(Directive { name: t.text, args: args, line: t.line })
         } else if t.kind == "name" {
             var label = ""
             var immediate = false
@@ -326,7 +326,7 @@ pub fun parse_grammar(src: str) -> Result<Grammar, str> {
             p.expect("=")?
             let body = p.alternatives()?
             p.expect(";")?
-            push(rules, GRule { name: t.text, label: label, immediate: immediate, body: body, line: t.line })
+            rules.push(GRule { name: t.text, label: label, immediate: immediate, body: body, line: t.line })
         } else {
             return Err(format("{}:{}: expected a rule or a directive, found '{}'", t.line, t.col, t.text))
         }
@@ -340,20 +340,20 @@ pub fun ebnf_blocks(md: str) -> str {
     var out = StringBuilder()
     var inside = false
     var i = 0
-    let n = len(md)
+    let n = md.len()
     while i < n {
         var j = i
         while j < n && md[j] != '\n' { j = j + 1 }
         let line = substr(md, i, j)
         if starts_with(line, "```") {
-            inside = !inside && trim(substr(line, 3, len(line))) == "ebnf"
+            inside = !inside && trim(substr(line, 3, line.len())) == "ebnf"
         } else if inside {
-            append(out, line)
-            append(out, "\n")
+            out.append(line)
+            out.append("\n")
         }
         i = j + 1
     }
-    return build(out)
+    return out.build()
 }
 
 // -- lookups ---------------------------------------------------------------
@@ -361,7 +361,7 @@ pub fun ebnf_blocks(md: str) -> str {
 // The index of rule `name`, or -1.
 pub fun rule_index(g: Grammar, name: str) -> int32 {
     var i = 0
-    while i < len(g.rules) {
+    while i < g.rules.len() {
         if g.rules[i].name == name { return i }
         i = i + 1
     }
@@ -372,7 +372,7 @@ pub fun rule_index(g: Grammar, name: str) -> int32 {
 pub fun directive_args(g: Grammar, name: str) -> [[GExpr]] {
     var out: [[GExpr]] = []
     for d in g.directives {
-        if d.name == name { push(out, d.args) }
+        if d.name == name { out.push(d.args) }
     }
     return out
 }
@@ -390,17 +390,17 @@ pub fun arg_text(e: GExpr) -> str {
 #test("SEP")[true]
 #test("sep")[false]
 pub fun is_upper_name(n: str) -> bool {
-    return len(n) > 0 && n[0] >= 'A' && n[0] <= 'Z'
+    return n.len() > 0 && n[0] >= 'A' && n[0] <= 'Z'
 }
 
 // Every rule name `e` refers to, in order, with repeats.
 pub fun refs_of(e: GExpr) -> [str] {
     var out: [str] = []
     for x in children(e) {
-        for r in refs_of(x) { push(out, r) }
+        for r in refs_of(x) { out.push(r) }
     }
     match e {
-        GExpr.GRef(n) => { push(out, n) },
+        GExpr.GRef(n) => { out.push(n) },
         _ => {},
     }
     return out
@@ -412,10 +412,10 @@ pub fun children(e: GExpr) -> [GExpr] {
     match e {
         GExpr.GSeq(xs) => { out = xs },
         GExpr.GAlt(xs) => { out = xs },
-        GExpr.GOpt(x) => { push(out, x) },
-        GExpr.GStar(x) => { push(out, x) },
-        GExpr.GPlus(x) => { push(out, x) },
-        GExpr.GLabel(x, l) => { push(out, x) },
+        GExpr.GOpt(x) => { out.push(x) },
+        GExpr.GStar(x) => { out.push(x) },
+        GExpr.GPlus(x) => { out.push(x) },
+        GExpr.GLabel(x, l) => { out.push(x) },
         _ => {},
     }
     return out
@@ -464,11 +464,11 @@ fun join_canon(xs: [GExpr], sep: str, level: int32) -> str {
     var sb = StringBuilder()
     var first = true
     for x in xs {
-        if !first { append(sb, sep) }
-        append(sb, canon(x, level))
+        if !first { sb.append(sep) }
+        sb.append(canon(x, level))
         first = false
     }
-    return build(sb)
+    return sb.build()
 }
 
 // The items of a sequence, with nested groups that are sequences spliced in.
@@ -476,8 +476,8 @@ fun flat_seq(xs: [GExpr]) -> [GExpr] {
     var out: [GExpr] = []
     for x in xs {
         match unlabel(x) {
-            GExpr.GSeq(ys) => { for y in flat_seq(ys) { push(out, y) } },
-            _ => { push(out, x) },
+            GExpr.GSeq(ys) => { for y in flat_seq(ys) { out.push(y) } },
+            _ => { out.push(x) },
         }
     }
     return out
@@ -488,8 +488,8 @@ fun flat_alt(xs: [GExpr]) -> [GExpr] {
     var out: [GExpr] = []
     for x in xs {
         match unlabel(x) {
-            GExpr.GAlt(ys) => { for y in flat_alt(ys) { push(out, y) } },
-            _ => { push(out, x) },
+            GExpr.GAlt(ys) => { for y in flat_alt(ys) { out.push(y) } },
+            _ => { out.push(x) },
         }
     }
     return out

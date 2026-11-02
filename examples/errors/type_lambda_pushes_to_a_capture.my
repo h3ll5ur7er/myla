@@ -5,8 +5,8 @@
 fun main() {
     var xs = [1]
     let add = (n: int) => {
-        push(xs, n)
-        return len(xs)
+        xs.push(n)
+        return xs.len()
     }
     print(add(2))
 }

@@ -130,7 +130,9 @@ pub struct Field { line: int32, col: int32, sp: SrcSpan, name: str, ty: TypeExpr
 pub struct Variant { line: int32, col: int32, sp: SrcSpan, name: str, payload: [TypeExpr] }
 pub struct ImportPath { line: int32, col: int32, sp: SrcSpan, dots: int32, segments: [str] }
 pub struct ImportItem { line: int32, col: int32, sp: SrcSpan, name: str, alias: Option<str> }
-pub struct Attribute { line: int32, col: int32, sp: SrcSpan, name: str, args: [Expr], outputs: Option<[Expr]> }
+// `label`: the name a comment after it on its line gives a `#test` case
+// (MYLA-239), "" for none.
+pub struct Attribute { line: int32, col: int32, sp: SrcSpan, name: str, args: [Expr], outputs: Option<[Expr]>, label: str }
 
 pub struct FunData {
     line: int32,
@@ -171,21 +173,21 @@ pub struct Program { decls: [Decl] }
 #test(["n", "d"])["[n d]"]
 fun wrap_list(parts: [str]) -> str {
     var sb = StringBuilder()
-    append_byte(sb, '[')
+    sb.append_byte('[')
     var i = 0
-    while i < len(parts) {
-        if i > 0 { append_byte(sb, ' ') }
-        append(sb, parts[i])
+    while i < parts.len() {
+        if i > 0 { sb.append_byte(' ') }
+        sb.append(parts[i])
         i = i + 1
     }
-    append_byte(sb, ']')
-    return build(sb)
+    sb.append_byte(']')
+    return sb.build()
 }
 
 fun join_map<T>(xs: [T], f: (T) -> str) -> str {
     var parts: [str] = []
     for x in xs {
-        push(parts, f(x))
+        parts.push(f(x))
     }
     return wrap_list(parts)
 }
@@ -404,7 +406,7 @@ fun dump_variant(v: Variant) -> str {
     return format("(variant {} {})", sstr(v.name), join_map(v.payload, dump_type))
 }
 
-#test(Attribute { line: 36, col: 1, sp: SrcSpan { sline: 36, scol: 1, eline: 36, ecol: 14 }, name: "test", args: [], outputs: Some([Expr { id: 53, line: 36, col: 9, sp: SrcSpan { sline: 36, scol: 9, eline: 36, ecol: 13 }, kind: ExprKind.BoolLit(true) }]) })["(attr \"test\" [] [(bool true)])"]
+#test(Attribute { line: 36, col: 1, sp: SrcSpan { sline: 36, scol: 1, eline: 36, ecol: 14 }, name: "test", args: [], outputs: Some([Expr { id: 53, line: 36, col: 9, sp: SrcSpan { sline: 36, scol: 9, eline: 36, ecol: 13 }, kind: ExprKind.BoolLit(true) }]) , label: ""})["(attr \"test\" [] [(bool true)])"]
 fun dump_attr(a: Attribute) -> str {
     let outs = match a.outputs {
         Some(xs) => join_map(xs, dump_expr),
@@ -449,10 +451,10 @@ pub fun dump_decl(d: Decl) -> str {
 pub fun dump_program(p: Program) -> str {
     var sb = StringBuilder()
     var i = 0
-    while i < len(p.decls) {
-        if i > 0 { append_byte(sb, 10) }
-        append(sb, dump_decl(p.decls[i]))
+    while i < p.decls.len() {
+        if i > 0 { sb.append_byte(10) }
+        sb.append(dump_decl(p.decls[i]))
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }

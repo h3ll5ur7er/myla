@@ -70,7 +70,7 @@ fun shown(h: Here, path: str) -> str {
 fun options(h: Here, base: LoadOptions) -> LoadOptions {
     var opts = base
     var packages = loader_packages(h.project)
-    for pkg in base.packages { push(packages, pkg) }
+    for pkg in base.packages { packages.push(pkg) }
     opts.packages = packages
     opts.root = shown(h, h.project.root.dir + "/src")
     return opts
@@ -203,7 +203,7 @@ pub fun project_clean(deps: bool) -> int32 {
     let (cwd, manifest) = found
     let root = parent_dir(manifest)
     var dirs = [root + "/build"]
-    if deps { push(dirs, root + "/.myla") }
+    if deps { dirs.push(root + "/.myla") }
     for d in dirs {
         if exists(d) {
             match remove_dir_all(d) {
@@ -260,15 +260,15 @@ pub fun project_new(name: str) -> int32 {
 #test("fresh")["// The greeting `main` prints.\n#test(\"fresh\")[\"Hello from fresh!\"]\nfun greeting(name: str) -> str {\n    return f\"Hello from {name}!\"\n}\n\nfun main() {\n    print(greeting(\"fresh\"))\n}\n"]
 fun main_template(name: str) -> str {
     var sb = StringBuilder()
-    append(sb, "// The greeting `main` prints.\n")
-    append(sb, format("#test(\"{}\")[\"Hello from {}!\"]\n", name, name))
-    append(sb, "fun greeting(name: str) -> str {\n")
-    append(sb, "    return f\"Hello from {name}!\"\n")
-    append(sb, "}\n\n")
-    append(sb, "fun main() {\n")
-    append(sb, format("    print(greeting(\"{}\"))\n", name))
-    append(sb, "}\n")
-    return build(sb)
+    sb.append("// The greeting `main` prints.\n")
+    sb.append(format("#test(\"{}\")[\"Hello from {}!\"]\n", name, name))
+    sb.append("fun greeting(name: str) -> str {\n")
+    sb.append("    return f\"Hello from {name}!\"\n")
+    sb.append("}\n\n")
+    sb.append("fun main() {\n")
+    sb.append(format("    print(greeting(\"{}\"))\n", name))
+    sb.append("}\n")
+    return sb.build()
 }
 
 // The `.my` files under the directory `dir` and its subdirectories, sorted
@@ -283,9 +283,9 @@ fun source_files(dir: str) -> [str] {
         if n[0] != '.' {
             let path = dir + "/" + n
             if is_dir(path) {
-                for p in source_files(path) { push(out, p) }
+                for p in source_files(path) { out.push(p) }
             } else if ends_with(n, ".my") {
-                push(out, path)
+                out.push(path)
             }
         }
     }
@@ -302,10 +302,10 @@ fun count(n: int32, noun: str) -> str {
 #test("a.my", ".my")[true]
 #test("my", ".my")[false]
 pub fun ends_with(s: str, suffix: str) -> bool {
-    if len(suffix) > len(s) { return false }
+    if suffix.len() > s.len() { return false }
     var i = 0
-    while i < len(suffix) {
-        if s[len(s) - len(suffix) + i] != suffix[i] { return false }
+    while i < suffix.len() {
+        if s[s.len() - suffix.len() + i] != suffix[i] { return false }
         i = i + 1
     }
     return true

@@ -1,0 +1,25 @@
+//~ type error: an 'async let' can't reach the actor's state through 'self': its child task runs off the actor
+//~ span: self.size()
+//~ help: read what the child needs into a 'let' before the 'async let'
+// A synchronous method of the actor runs without entering it: in a child task
+// it would read the actor's state off the actor (MYLA-168).
+async fun twice(n: int) -> int {
+    return n * 2
+}
+
+actor Store {
+    xs: [int],
+}
+
+impl Store {
+    fun size(self) -> int {
+        return len(self.xs)
+    }
+
+    async fun peek(self) -> int {
+        async let a = twice(self.size())
+        return await a
+    }
+}
+
+fun main() {}

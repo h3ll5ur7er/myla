@@ -4,7 +4,7 @@ The syntax of Myla 1.0 in EBNF, as [[selfhost/parser.my]] accepts it. The origin
 
 This page shows the rules of [[grammar/myla.ebnf]], the machine-readable grammar: the same rules plus annotations for the editor grammars it generates (MYLA-77, [[Architecture/Editor-tooling]]). A test compares the two, so change both together.
 
-Notation: `"x"` or `'x'` is a terminal (no escapes: `"\"` is a backslash), `/…/` a character class in regex syntax, `A B` a sequence, `A | B` an alternative, `( … )` a group, `?` optional, `*` zero or more, `+` one or more. Names in capitals whose rules use only terminals, classes and lowercase helper rules are tokens; their helpers are token fragments. `NL` is a newline token; where a rule doesn't mention `NL`, a line break isn't allowed (see [[Language/Lexical-structure]]). `SEP` is a separator, a newline or a `;` (D61).
+Notation: `"x"` or `'x'` is a terminal (no escapes: `"\"` is a backslash), `/…/` a character class in regex syntax, `A B` a sequence, `A | B` an alternative, `( … )` a group, `?` optional, `*` zero or more, `+` one or more. Names in capitals whose rules use only terminals, classes and lowercase helper rules are tokens; their helpers are token fragments. `NL` is a newline token; where a rule doesn't mention `NL`, a line break isn't allowed (see [[Language/Lexical-structure]]). The lexer makes no `NL` inside `( )` or `[ ]` (unless within a `{ }` in them) nor after a binary operator that ends a line, except `>` (D104 (3), [[MYLA-224]]); the rules show `NL` where that matters most, at the edges of bracketed lists and after operators, which is what the editor grammar follows (it doesn't see a line break before an operator inside brackets). `SEP` is a separator, a newline or a `;` (D61).
 
 [TOC]
 
@@ -54,7 +54,7 @@ declaration  = attribute* "pub"? item_decl | impl_decl | import_decl | "pub" pub
 item_decl    = struct_decl | enum_decl | fun_decl | trait_decl | typealias_decl | const_decl ;
 
 attribute    = "#" IDENT ( "(" expr_list? ")" )? ( "[" expr_list? "]" )? NL* ;
-expr_list    = NL+ | NL* expression NL* ( "," NL* expression NL* )* ;
+expr_list    = NL+ | NL* expression NL* ( "," NL* expression NL* )* ( "," NL* )? ;
 
 struct_decl  = ( "struct" | "actor" ) IDENT type_params? "{" NL* ( field ( "," NL* field )* ","? NL* )? "}" ;
 field        = IDENT ":" type ;
@@ -62,15 +62,15 @@ field        = IDENT ":" type ;
 enum_decl    = "enum" IDENT type_params? "{" NL* ( variant ","? NL* )* "}" ;
 variant      = IDENT ( "(" type ( "," type )* ","? ")" )? ;
 
-fun_decl     = "async"? "fun" IDENT generics? "(" ( param ( "," param )* )? ")" ( "->" type )? block ;
+fun_decl     = "async"? "fun" IDENT generics? "(" NL* ( param NL* ( "," NL* param NL* )* ( "," NL* )? )? ")" ( "->" type )? block ;
 param        = IDENT ":" type ;
-generics     = "<" generic ( "," generic )* ">" ;
+generics     = "<" generic ( "," generic )* ","? ">" ;
 generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
-type_params  = "<" IDENT ( "," IDENT )* ">" ;
+type_params  = "<" IDENT ( "," IDENT )* ","? ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;
 method       = attribute* method_head block ;
-method_head  = "async"? "fun" IDENT generics? "(" receiver ( "," param )* ")" ( "->" type )? ;
+method_head  = "async"? "fun" IDENT generics? "(" NL* receiver NL* ( "," NL* param NL* )* ( "," NL* )? ")" ( "->" type )? ;
 receiver     = "self" | "var" "self" ;
 
 trait_decl   = "trait" IDENT type_params? "{" SEP* ( method_head SEP* )* "}" ;
@@ -80,7 +80,7 @@ const_decl   = "const" IDENT ":" type "=" expression ;
 
 import_decl  = "import" import_path ( "as" IDENT )? | from_import ;
 pub_import   = "import" import_path "as" IDENT | from_import ;
-from_import  = "from" import_path "import" import_item ( "," import_item )* ;
+from_import  = "from" import_path "import" import_item ( "," import_item )* ","? ;
 import_path  = ( "." | ".." )* IDENT ( "." IDENT )* ;
 import_item  = IDENT ( "as" IDENT )? ;
 ```
@@ -91,7 +91,7 @@ import_item  = IDENT ( "as" IDENT )? ;
 type          = prim_type | named_type | "[" type "]" | "[" type ":" type "]"
               | tuple_type | function_type ;
 named_type    = IDENT type_args? ;
-type_args     = "<" type ( "," type )* ">" ;
+type_args     = "<" type ( "," type )* ","? ">" ;
 prim_type     = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
               | "uint8" | "uint16" | "uint32" | "uint64" ;
 tuple_type    = "(" type "," ( type ( "," type )* ","? )? ")" ;
@@ -110,14 +110,16 @@ async_let   = "async" "let" IDENT ( ":" type )? "=" expression ;   (* a child ta
 bind_tuple  = "(" bind_elem "," ( bind_elem ( "," bind_elem )* ","? )? ")" ;
 bind_elem   = IDENT | bind_tuple ;                  (* the name "_" discards *)
 
-if_stmt     = "if" cond block ( NL* "else" ( if_stmt | block ) )? ;
-while_stmt  = "while" cond block ;
+if_stmt     = "if" ( cond | let_cond ) block ( NL* "else" ( if_stmt | block ) )? ;
+let_cond    = "let" pattern "=" cond ;   (* if let, while let: D104 (5) *)
+while_stmt  = "while" ( cond | let_cond ) block ;
 for_stmt    = "for" IDENT "in" cond ( ".." cond )? block ;
 cond        = expression ;                          (* without struct literals *)
 return_stmt = "return" ( expression ( "," expression )* )? ;   (* a, b is a tuple *)
 become_stmt = "become" expression ;                (* a call, D87 *)
 
-assignment  = place "=" expression ;
+assignment  = place ( "=" | compound_op ) expression ;
+compound_op = "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;   (* D104 (2): place = place op expression *)
 place       = ( IDENT | "self" | "(" place ")" )
               ( "." IDENT | "[" expression "]" )* ;
 ```
@@ -126,37 +128,38 @@ place       = ( IDENT | "self" | "(" place ")" )
 
 ```ebnf
 expression  = pipe ;
-pipe        = logic_or ( "|>" logic_or )* ;
-logic_or    = logic_and ( "||" logic_and )* ;
-logic_and   = equality ( "&&" equality )* ;
-equality    = comparison ( ( "==" | "!=" ) comparison )* ;
-comparison  = bit_or ( ( "<" | "<=" | ">" | ">=" ) bit_or )* ;
-bit_or      = bit_xor ( "|" bit_xor )* ;
-bit_xor     = bit_and ( "^" bit_and )* ;
-bit_and     = shift ( "&" shift )* ;
-shift       = term ( ( "<<" | ">>" ) term )* ;   (* two touching "<" or ">" *)
-term        = factor ( ( "+" | "-" ) factor )* ;
-factor      = cast ( ( "*" | "/" | "%" ) cast )* ;
+pipe        = logic_or ( "|>" NL* logic_or )* ;
+logic_or    = logic_and ( "||" NL* logic_and )* ;
+logic_and   = equality ( "&&" NL* equality )* ;
+equality    = comparison ( ( "==" | "!=" ) NL* comparison )* ;
+comparison  = bit_or ( ( ( "<" | "<=" | ">=" ) NL* | ">" ) bit_or )* ;
+bit_or      = bit_xor ( "|" NL* bit_xor )* ;
+bit_xor     = bit_and ( "^" NL* bit_and )* ;
+bit_and     = shift ( "&" NL* shift )* ;
+shift       = term ( ( "<<" NL* | ">>" ) term )* ;   (* two touching "<" or ">" *)
+term        = factor ( ( "+" | "-" ) NL* factor )* ;
+factor      = cast ( ( "*" | "/" | "%" ) NL* cast )* ;
 cast        = unary ( "as" type )* ;
 unary       = ( "-" | "!" | "~" ) unary | "await" unary
             | postfix | lambda ;
               (* the parser also lets a suffix follow a lambda whose body
                  can't take it, as in (x) => x as T [0]; write ((x) => …)[0] *)
-postfix     = primary ( "(" call_args? ")" | "[" expression "]"
+postfix     = primary ( "(" call_args? ")" | "[" NL* expression NL* "]"
                       | "." ( IDENT | TUPLE_INDEX ) | "?" )* ;
-call_args   = NL+ | NL* call_arg NL* ( "," NL* call_arg NL* )* ;
+call_args   = NL+ | NL* call_arg NL* ( "," NL* call_arg NL* )* ( "," NL* )? ;
 call_arg    = "_" | expression ;            (* "_" alone: a partial-application hole *)
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" | "false"
-            | "self" | IDENT | struct_literal | "(" expression ")"
-            | tuple | list | map | match_expr ;
+            | "self" | IDENT | struct_literal | "(" NL* expression NL* ")"
+            | tuple | list | map | match_expr | if_expr ;
 fstring     = 'f"' ( FSTRING_TEXT | "{{" | "}}"
                    | "{" expression "}" )* '"' ;
               (* lowered by the lexer to: format(STRING, expression, …) *)
+if_expr     = "if" ( cond | let_cond ) block NL* "else" ( if_expr | block ) ;   (* an if used as a value, D104 (1) *)
 struct_literal = IDENT "{" NL* ( field_init ( "," NL* field_init )* ","? NL* )? "}" ;
 field_init  = IDENT ":" expression ;
-tuple       = "(" expression "," ( expression ( "," expression )* ","? )? ")" ;
-lambda      = "async"? "(" ( lambda_param ( "," lambda_param )* )? ")" "=>" ( block | expression ) ;
+tuple       = "(" NL* expression NL* "," NL* ( expression NL* ( "," NL* expression NL* )* ( "," NL* )? )? ")" ;
+lambda      = "async"? "(" NL* ( lambda_param NL* ( "," NL* lambda_param NL* )* ( "," NL* )? )? ")" "=>" ( block | expression ) ;
 lambda_param = IDENT ( ":" type )? ;
 list        = "[" NL* ( expression NL* ( "," NL* expression NL* )* ( "," NL* )? )? "]" ;
 map         = "[" NL* ":" "]"

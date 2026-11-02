@@ -212,15 +212,15 @@ fun describe(e: IoError) -> str {
 fun joined(names: [str]) -> str {
     var sb = StringBuilder()
     for n in names {
-        if len(sb) > 0 { append(sb, ",") }
-        append(sb, n)
+        if sb.len() > 0 { sb.append(",") }
+        sb.append(n)
     }
-    return build(sb)
+    return sb.build()
 }
 
 fun show(label: str, r: Result<[str], IoError>) {
     match r {
-        Ok(names) => { println(format("{}: {} [{}]", label, len(names), joined(names))) },
+        Ok(names) => { println(format("{}: {} [{}]", label, names.len(), joined(names))) },
         Err(e) => { println(format("{}: {}", label, describe(e))) },
     }
 }
@@ -276,7 +276,7 @@ fun main() {
         i = i + 1
     }
     match list_dir("many") {
-        Ok(names) => { println(format("many: {} first {} last {}", len(names), names[0], names[len(names) - 1])) },
+        Ok(names) => { println(format("many: {} first {} last {}", names.len(), names[0], names[names.len() - 1])) },
         Err(e) => { println(format("many: {}", describe(e))) },
     }
 }
@@ -338,8 +338,8 @@ fun main() {
     match list_dir("big") {
         Ok(names) => {
             var total = 0
-            for n in names { total = total + len(n) }
-            println(format("{} names, {} bytes", len(names), total))
+            for n in names { total = total + n.len() }
+            println(format("{} names, {} bytes", names.len(), total))
             for n in names { println(n) }
         },
         Err(e) => { println("error") },

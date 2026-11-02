@@ -28,7 +28,11 @@ fun main() {
 // 1
 ```
 
-- Newlines are skipped in these places only: inside call argument lists, attribute argument lists, list and map literals, struct literals, struct and enum bodies, `impl`/`trait` bodies and between match arms. A binary expression can **not** continue on the next line, and neither can a parenthesised expression or a tuple:
+- A statement goes on across a line break (D104 (3), [[MYLA-224]]):
+  - inside `( )` and `[ ]`: call arguments, parameters, parenthesised expressions, tuples, indexes, list and map literals (but a `{ }` block inside them has statements again, so a lambda's body or a `match` inside an argument list works as everywhere else);
+  - after a binary operator that ends the line (`+`, `&&`, `|>`, …), except `>`, which also closes a generic type (`let x: Option<int>` ends its line);
+  - inside struct literals, struct and enum bodies, `impl`/`trait` bodies and between match arms, as before.
+- A line that starts with an operator still starts a new statement, so a chain puts the operator at the end of the line. A line inside brackets that starts with a word only a statement or declaration starts (`let`, `return`, `fun`, `while`, `for`, …) ends the bracket that was never closed, so a missing `)` gives one error and the parser goes on.
 
 ```myla
 fun main() {
@@ -36,17 +40,27 @@ fun main() {
         1,
         2
     )
-    print(total)
+    let ok = total > 2 &&
+        total < 10
+    let scaled = (total
+        * 10
+        + 1)
+    print(scaled)
+    print(ok)
 }
 
-fun add(a: int, b: int) -> int {
+fun add(
+    a: int,
+    b: int
+) -> int {
     return a + b
 }
 // output:
-// 3
+// 31
+// true
 ```
 
-- Trailing commas are allowed in struct and enum bodies, struct, list, map and tuple literals, tuple and payload types, and patterns, but **not** in call arguments or the parameter lists of functions, methods and lambdas (`f(1, 2,)` is a parse error, MYLA-180).
+- A trailing comma may follow the last element of every comma-separated list (D104 (4), [[MYLA-225]]): call and attribute arguments, the parameters of functions, methods and lambdas, list, map and tuple literals, struct fields and literals, enum variants and their payloads, generic arguments and parameters, tuple and function types, patterns and import lists. A one-element tuple needs its comma: `(1,)` is a tuple, `(1)` the number in parentheses.
 - `else` may sit on the line after the closing `}` of its `if`.
 - `// …` comments run to the end of the line; `/* … */` comments may span lines and do **not** nest (the first `*/` ends them). An unterminated block comment is a lex error.
 
@@ -97,7 +111,7 @@ fun main() {
 
 A decimal number with a fraction (`1.5`), an exponent (`2e10`, `1.5e-3`) or a float suffix (`2f32`, `0.1f64`) is a float. Hex, binary and octal literals are always integers. `2..10` stays a range and `t.0` a tuple index, because a fraction needs a digit after the dot.
 
-An unsuffixed float literal takes the float type its context expects, defaulting to `float32` (the `float` alias, D19).
+An unsuffixed float literal takes the float type its context expects, defaulting to `float64` (the `float` alias, D102; it was `float32` until November 2026, D19).
 
 ## Character literals
 

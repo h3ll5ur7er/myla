@@ -34,13 +34,13 @@ pub fun context_of(path: str, stdlib: str, overrides: [str: str]) -> Context {
         Err(e) => { return Context { opts: opts, package_dirs: dirs, problem: Some(project_report(e, manifest)) } },
     }
     opts.packages = loader_packages(p)
-    for pkg in opts.packages { push(dirs, pkg.1) }
+    for pkg in opts.packages { dirs.push(pkg.1) }
     let src = p.root.dir + "/src"
     if is_inside(src, path) { opts.root = src }
     // a locked Git dependency that isn't checked out: its imports fail, and
     // the manifest says why
     var problem: Option<Report> = None
-    if len(p.missing) > 0 {
+    if p.missing.len() > 0 {
         let name = p.missing[0].name
         let pos = dependency_pos(manifest, name)
         let e = ProjectError { msg: format("dependency '{}' is not checked out: run `myla fetch`", name), path: manifest, line: pos.line, col: pos.col, end_line: pos.end_line, end_col: pos.end_col }
@@ -83,10 +83,10 @@ fun project_report(e: ProjectError, manifest: str) -> Report {
 #test("/a/myla.lock", "/myla.lock")[true]
 #test("lock", "/myla.lock")[false]
 fun ends_with(s: str, suffix: str) -> bool {
-    if len(suffix) > len(s) { return false }
+    if suffix.len() > s.len() { return false }
     var i = 0
-    while i < len(suffix) {
-        if s[len(s) - len(suffix) + i] != suffix[i] { return false }
+    while i < suffix.len() {
+        if s[s.len() - suffix.len() + i] != suffix[i] { return false }
         i = i + 1
     }
     return true

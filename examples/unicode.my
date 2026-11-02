@@ -11,7 +11,7 @@ fun fläche(breite: int, höhe: int) -> int {
 // The line ending a protocol such as HTTP or the language server's uses.
 #test()[2]
 fun crlf_len() -> int {
-    return len("\r\n")
+    return "\r\n".len()
 }
 
 #test()["é"]
@@ -23,7 +23,7 @@ fun accent() -> str {
 #test("π")[2]
 #test("a\0b")[3]
 fun bytes_of(s: str) -> int {
-    return len(s)
+    return s.len()
 }
 
 fun main() {

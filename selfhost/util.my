@@ -16,21 +16,21 @@ from .unicode import is_xid_start, is_xid_continue
 pub fun cp_utf8(cp: int32) -> str {
     var sb = StringBuilder()
     if cp < 128 {
-        append_byte(sb, cp as uint8)
+        sb.append_byte(cp as uint8)
     } else if cp < 2048 {
-        append_byte(sb, (192 | (cp >> 6)) as uint8)
-        append_byte(sb, (128 | (cp & 63)) as uint8)
+        sb.append_byte((192 | (cp >> 6)) as uint8)
+        sb.append_byte((128 | (cp & 63)) as uint8)
     } else if cp < 65536 {
-        append_byte(sb, (224 | (cp >> 12)) as uint8)
-        append_byte(sb, (128 | ((cp >> 6) & 63)) as uint8)
-        append_byte(sb, (128 | (cp & 63)) as uint8)
+        sb.append_byte((224 | (cp >> 12)) as uint8)
+        sb.append_byte((128 | ((cp >> 6) & 63)) as uint8)
+        sb.append_byte((128 | (cp & 63)) as uint8)
     } else {
-        append_byte(sb, (240 | (cp >> 18)) as uint8)
-        append_byte(sb, (128 | ((cp >> 12) & 63)) as uint8)
-        append_byte(sb, (128 | ((cp >> 6) & 63)) as uint8)
-        append_byte(sb, (128 | (cp & 63)) as uint8)
+        sb.append_byte((240 | (cp >> 18)) as uint8)
+        sb.append_byte((128 | ((cp >> 12) & 63)) as uint8)
+        sb.append_byte((128 | ((cp >> 6) & 63)) as uint8)
+        sb.append_byte((128 | (cp & 63)) as uint8)
     }
-    return build(sb)
+    return sb.build()
 }
 
 // Escape a string for the canonical dumps (only \ \n \t \r " are special;
@@ -40,23 +40,23 @@ pub fun cp_utf8(cp: int32) -> str {
 #test("right")["right"]
 pub fun escape(s: str) -> str {
     var sb = StringBuilder()
-    for ch in chars(s) {
+    for ch in s.chars() {
         let c = ch as int32
         if c == 92 {
-            append(sb, "\\\\")
+            sb.append("\\\\")
         } else if c == 10 {
-            append(sb, "\\n")
+            sb.append("\\n")
         } else if c == 9 {
-            append(sb, "\\t")
+            sb.append("\\t")
         } else if c == 13 {
-            append(sb, "\\r")
+            sb.append("\\r")
         } else if c == 34 {
-            append(sb, "\\\"")
+            sb.append("\\\"")
         } else {
-            append(sb, cp_utf8(c))
+            sb.append(cp_utf8(c))
         }
     }
-    return build(sb)
+    return sb.build()
 }
 
 #test(48)[true]
@@ -103,7 +103,7 @@ pub fun digit_value(c: int32) -> int32 {
 #test("2147483648", 10)[2147483648]
 pub fun parse_value(digits: str, base: int64) -> int64 {
     var v: int64 = 0
-    for ch in chars(digits) {
+    for ch in digits.chars() {
         let dv = digit_value(ch as int32)
         v = v * base + (dv as int64)
     }
@@ -114,7 +114,7 @@ pub fun parse_value(digits: str, base: int64) -> int64 {
 #test("a")[false]
 #test("b")[false]
 pub fun is_blank(s: str) -> bool {
-    for ch in chars(s) {
+    for ch in s.chars() {
         let c = ch as int32
         if c != 32 && c != 9 && c != 13 && c != 10 {
             return false

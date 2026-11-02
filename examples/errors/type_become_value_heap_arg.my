@@ -7,7 +7,7 @@ fun shout(g: (str) -> int, n: int) -> int {
     become g(s)
 }
 fun size(s: str) -> int {
-    return len(s)
+    return s.len()
 }
 fun main() {
     print(shout(size, 1))

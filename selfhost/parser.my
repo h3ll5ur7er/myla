@@ -33,22 +33,23 @@ pub struct Parser {
     unwinding: bool,            // leaving a declaration without an error (Python's _Unwind)
     stopped: bool,              // MAX_ERRORS were recorded (Python's _Stop)
     depth: int32,               // nesting, up to MAX_NESTING (MYLA-182)
+    stmt_match: bool,           // the next `match` starts a statement: its arms give no value (MYLA-222)
 }
 
 // How deep expressions, types, blocks and patterns may nest (MYLA-182; the
 // Python parser's MAX_NESTING): past it, a parse error, not a stack overflow.
 const MAX_NESTING: int32 = 256
 
-#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
+#test([])[Parser { toks: [], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
 pub fun new_parser(toks: [Token]) -> Parser {
-    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }
+    return Parser { toks: toks, pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }
 }
 
 // A parser at the first token of `src`, the receiver of `#test` cases of the
 // parser's methods (MYLA-184): one without tokens when `src` doesn't lex.
-#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
-#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
-#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0 }]
+#test("a")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 2, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
+#test("d2")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "d2", line: 1, column: 1, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 3, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
+#test("right")[Parser { toks: [Token { kind: TokenKind.IDENT, lexeme: "right", line: 1, column: 1, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }, Token { kind: TokenKind.EOF, lexeme: "", line: 1, column: 6, eline: 1, ecol: 6, ival: 0, suffix: "", big: "" }], pos: 0, allow_struct_lit: true, next_id: 0, errs: [], pending: None, resume: 0, unwinding: false, stopped: false, depth: 0, stmt_match: false }]
 pub fun parser_on(src: str) -> Parser {
     return match lex(src) {
         Ok(toks) => new_parser(toks),
@@ -147,7 +148,7 @@ fun has_kind(ks: [TokenKind], k: TokenKind) -> bool {
 fun nest(opens: [TokenKind], k: TokenKind) -> [TokenKind] {
     var out = opens
     if k == TokenKind.LPAREN || k == TokenKind.LBRACKET || k == TokenKind.LBRACE {
-        push(out, k)
+        out.push(k)
         return out
     }
     var partner = TokenKind.EOF
@@ -155,7 +156,7 @@ fun nest(opens: [TokenKind], k: TokenKind) -> [TokenKind] {
     if k == TokenKind.RBRACKET { partner = TokenKind.LBRACKET }
     if k == TokenKind.RBRACE { partner = TokenKind.LBRACE }
     if partner != TokenKind.EOF && has_kind(out, partner) {
-        while pop(out) != partner {}
+        while out.pop() != partner {}
     }
     return out
 }
@@ -179,7 +180,7 @@ fun suffix_opt(s: str) -> Option<str> {
 fun cons_expr(head: Expr, tail: [Expr]) -> [Expr] {
     var out: [Expr] = [head]
     for x in tail {
-        push(out, x)
+        out.push(x)
     }
     return out
 }
@@ -192,6 +193,21 @@ fun is_lvalue(e: Expr) -> bool {
         ExprKind.Name(n) => true,
         ExprKind.GetField(t, f) => is_lvalue(t),
         ExprKind.Index(t, i) => is_lvalue(t),
+        _ => false,
+    }
+}
+
+// Whether an index needn't be computed ahead in a compound assignment: a
+// name or a literal reads the same twice (MYLA-223).
+#test(expr_of("i"))[true]
+#test(expr_of("f(1)"))[false]
+#test(expr_of("\"k\""))[true]
+fun simple_index(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.Name(n) => true,
+        ExprKind.IntLit(v, suf, ch, big) => true,
+        ExprKind.StrLit(t) => true,
+        ExprKind.BoolLit(b) => true,
         _ => false,
     }
 }
@@ -257,8 +273,8 @@ impl Parser {
 
     #test(parser_on("a.b[0]"))[Token { kind: TokenKind.IDENT, lexeme: "a", line: 1, column: 1, eline: 1, ecol: 2, ival: 0, suffix: "", big: "" }]
     fun peek(self) -> Token {
-        if self.pos >= len(self.toks) {
-            return self.toks[len(self.toks) - 1]
+        if self.pos >= self.toks.len() {
+            return self.toks[self.toks.len() - 1]
         }
         return self.toks[self.pos]
     }
@@ -266,8 +282,8 @@ impl Parser {
     #test(parser_on("a.b[0]"), 1)[Token { kind: TokenKind.DOT, lexeme: ".", line: 1, column: 2, eline: 1, ecol: 3, ival: 0, suffix: "", big: "" }]
     fun peek_at(self, offset: int32) -> Token {
         let idx = self.pos + offset
-        if idx >= len(self.toks) {
-            return self.toks[len(self.toks) - 1]
+        if idx >= self.toks.len() {
+            return self.toks[self.toks.len() - 1]
         }
         return self.toks[idx]
     }
@@ -276,14 +292,14 @@ impl Parser {
     // place: `peek` copies the token and its strings (MYLA-124).
     #test(parser_on("a.b[0]"))[TokenKind.IDENT]
     fun peek_kind(self) -> TokenKind {
-        if self.pos >= len(self.toks) { return self.toks[len(self.toks) - 1].kind }
+        if self.pos >= self.toks.len() { return self.toks[self.toks.len() - 1].kind }
         return self.toks[self.pos].kind
     }
 
     #test(parser_on("a.b[0]"), 1)[TokenKind.DOT]
     fun peek_kind_at(self, offset: int32) -> TokenKind {
         let idx = self.pos + offset
-        if idx >= len(self.toks) { return self.toks[len(self.toks) - 1].kind }
+        if idx >= self.toks.len() { return self.toks[self.toks.len() - 1].kind }
         return self.toks[idx].kind
     }
 
@@ -335,7 +351,7 @@ impl Parser {
                 Some(e) => {},
             }
         }
-        self.pos = len(self.toks) - 1
+        self.pos = self.toks.len() - 1
     }
 
     // Python's _Unwind: leave the declaration without an error, to go on at
@@ -343,7 +359,7 @@ impl Parser {
     fun unwind(var self) {
         self.unwinding = true
         self.resume = self.pos
-        self.pos = len(self.toks) - 1
+        self.pos = self.toks.len() - 1
     }
 
     // A recovery point after parsing from token `start` (parser.py: the
@@ -358,12 +374,12 @@ impl Parser {
             Some(d) => {
                 self.pending = None
                 self.pos = self.resume
-                let n = len(self.errs)
+                let n = self.errs.len()
                 if n == 0 || is_after(d, self.errs[n - 1]) {
-                    push(self.errs, d)
-                    if len(self.errs) >= MAX_ERRORS {
+                    self.errs.push(d)
+                    if self.errs.len() >= MAX_ERRORS {
                         self.stopped = true
-                        self.pos = len(self.toks) - 1
+                        self.pos = self.toks.len() - 1
                         return true
                     }
                 }
@@ -410,7 +426,7 @@ impl Parser {
             if k == TokenKind.RBRACE && !brace && mode != SYNC_DECL { return }
             if mode == SYNC_STMT && (k == TokenKind.NEWLINE || k == TokenKind.SEMI) && !brace {
                 let nxt = self.peek_kind_at(1)
-                if len(opens) == 0 || is_stmt_start(nxt) || is_decl_start(nxt) || nxt == TokenKind.RBRACE { return }
+                if opens.len() == 0 || is_stmt_start(nxt) || is_decl_start(nxt) || nxt == TokenKind.RBRACE { return }
             }
             opens = nest(opens, k)
             self.skip()
@@ -423,7 +439,7 @@ impl Parser {
     #test(parser_on("[int]"))[false]
     fun resuming_at_declaration(self) -> bool {
         let tok = self.peek()
-        let n = len(self.errs)
+        let n = self.errs.len()
         if n == 0 || !is_decl_start(tok.kind) || !self.at_line_start() { return false }
         return self.errs[n - 1].line == tok.line && self.errs[n - 1].col == tok.column
     }
@@ -479,7 +495,7 @@ impl Parser {
             let start = self.pos
             let d = self.declaration()
             if !self.recovered(start, SYNC_DECL) {
-                push(decls, d)
+                decls.push(d)
                 self.terminate("declaration")
                 self.recovered(start, SYNC_DECL)
             }
@@ -524,7 +540,7 @@ impl Parser {
             return self.enum_decl(attrs, is_pub)
         } else if k == TokenKind.IMPL {
             let d = self.impl_decl()
-            if len(attrs) > 0 {
+            if attrs.len() > 0 {
                 self.fail_at(tok, "attributes are not allowed on an 'impl' block")
             } else if is_pub {
                 self.fail_at(pub_tok, "'pub' is not allowed on an 'impl' block (visibility follows the implemented type)")
@@ -538,7 +554,7 @@ impl Parser {
             return self.const_decl(attrs, is_pub)
         } else if k == TokenKind.IMPORT || k == TokenKind.FROM {
             let d = self.import_decl(is_pub)
-            if len(attrs) > 0 {
+            if attrs.len() > 0 {
                 self.fail_at(tok, "attributes are not allowed on an import statement")
             }
             return d
@@ -554,8 +570,9 @@ impl Parser {
             let path = self.import_path()
             self.expect(TokenKind.IMPORT, "'import' after the path in a 'from' import")
             var items: [ImportItem] = [self.import_item()]
-            while self.match1(TokenKind.COMMA) {
-                push(items, self.import_item())
+            // a trailing comma (D104 (4), MYLA-225)
+            while self.match1(TokenKind.COMMA) && !self.at_separator() && !self.at_end() {
+                items.push(self.import_item())
             }
             return self.mk_decl(start.line, start.column, DeclKind.ImportDecl(path, Some(items), None, is_pub))
         }
@@ -586,7 +603,7 @@ impl Parser {
         }
         var segments: [str] = [self.expect(TokenKind.IDENT, "a module path segment").lexeme]
         while self.match1(TokenKind.DOT) {
-            push(segments, self.expect(TokenKind.IDENT, "a path segment after '.'").lexeme)
+            segments.push(self.expect(TokenKind.IDENT, "a path segment after '.'").lexeme)
         }
         return ImportPath { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), dots: dots, segments: segments }
     }
@@ -617,7 +634,11 @@ impl Parser {
                 outputs = Some(self.expr_list(TokenKind.RBRACKET))
                 self.expect(TokenKind.RBRACKET, "']'")
             }
-            push(attrs, Attribute { line: hash_tok.line, col: hash_tok.column, sp: self.span_from(hash_tok.line, hash_tok.column), name: name, args: args, outputs: outputs })
+            // a comment after it on its line names a `#test` case (MYLA-239):
+            // the lexer hands it over on the line's NEWLINE token
+            var label = ""
+            if self.check(TokenKind.NEWLINE) && name == "test" { label = self.peek().suffix }
+            attrs.push(Attribute { line: hash_tok.line, col: hash_tok.column, sp: self.span_from(hash_tok.line, hash_tok.column), name: name, args: args, outputs: outputs, label: label })
             self.skip_newlines()
         }
         return attrs
@@ -634,18 +655,18 @@ impl Parser {
             let tok = self.expect(TokenKind.IDENT, "type parameter name")
             var bounds: [str] = []
             if self.match1(TokenKind.COLON) {
-                push(bounds, self.expect(TokenKind.IDENT, "trait name in type-parameter bound").lexeme)
+                bounds.push(self.expect(TokenKind.IDENT, "trait name in type-parameter bound").lexeme)
                 while self.match1(TokenKind.PLUS) {
-                    push(bounds, self.expect(TokenKind.IDENT, "trait name after '+'").lexeme)
+                    bounds.push(self.expect(TokenKind.IDENT, "trait name after '+'").lexeme)
                 }
             }
-            push(params, TypeParam { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), name: tok.lexeme, bounds: bounds })
-            if !self.match1(TokenKind.COMMA) {
+            params.push(TypeParam { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), name: tok.lexeme, bounds: bounds })
+            if !self.match1(TokenKind.COMMA) || self.check(TokenKind.GT) {
                 break
             }
         }
         self.expect(TokenKind.GT, "'>' to close type parameters")
-        if len(params) == 0 {
+        if params.len() == 0 {
             self.fail_at(self.peek(), "empty type-parameter list")    // unreachable: a name is expected first
         }
         return params
@@ -655,7 +676,7 @@ impl Parser {
     fun generics_no_bounds(var self, where: str) -> [TypeParam] {
         let ps = self.generics()
         for p in ps {
-            if len(p.bounds) > 0 {
+            if p.bounds.len() > 0 {
                 self.fail_at(self.peek(), format("type-parameter bounds are not supported on {}", where))
             }
         }
@@ -677,7 +698,7 @@ impl Parser {
             let fname = self.expect(TokenKind.IDENT, "field name")
             self.expect(TokenKind.COLON, "':'")
             let ftype = self.parse_type()
-            push(fields, Field { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, ty: ftype })
+            fields.push(Field { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, ty: ftype })
             if !self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
                 break
@@ -700,16 +721,16 @@ impl Parser {
             let vname = self.expect(TokenKind.IDENT, "variant name")
             var payload: [TypeExpr] = []
             if self.match1(TokenKind.LPAREN) {
-                push(payload, self.parse_type())
+                payload.push(self.parse_type())
                 while self.match1(TokenKind.COMMA) {
                     if self.check(TokenKind.RPAREN) {
                         break
                     }
-                    push(payload, self.parse_type())
+                    payload.push(self.parse_type())
                 }
                 self.expect(TokenKind.RPAREN, "')'")
             }
-            push(variants, Variant { line: vname.line, col: vname.column, sp: self.span_from(vname.line, vname.column), name: vname.lexeme, payload: payload })
+            variants.push(Variant { line: vname.line, col: vname.column, sp: self.span_from(vname.line, vname.column), name: vname.lexeme, payload: payload })
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
             } else {
@@ -733,8 +754,8 @@ impl Parser {
                 let pname = self.expect(TokenKind.IDENT, "parameter name")
                 self.expect(TokenKind.COLON, "':'")
                 let ptype = self.parse_type()
-                push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
-                if !self.match1(TokenKind.COMMA) {
+                params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
+                if !self.match1(TokenKind.COMMA) || self.check(TokenKind.RPAREN) {
                     break
                 }
             }
@@ -779,7 +800,7 @@ impl Parser {
             let start = self.pos
             let attrs = self.attributes()     // `#test` cases of a method (D116)
             if self.at_method() {
-                push(methods, self.method_decl(attrs))
+                methods.push(self.method_decl(attrs))
             } else {
                 let tok = self.peek()
                 self.fail_at(tok, format("expected a method ('fun ...') in impl block, found '{}'", tok.lexeme))
@@ -803,7 +824,7 @@ impl Parser {
             if self.leaves_body(false) { break }
             let start = self.pos
             if self.at_method() {
-                push(methods, self.method_sig())
+                methods.push(self.method_sig())
             } else {
                 let tok = self.peek()
                 self.fail_at(tok, format("expected a method signature ('fun ...') in trait body, found '{}'", tok.lexeme))
@@ -868,12 +889,12 @@ impl Parser {
             self.fail_at(self.peek(), "a method's first parameter must be 'self' or 'var self'")
         }
         var params: [Param] = []
-        // no trailing comma, as in a function's parameter list (MYLA-180)
-        while self.match1(TokenKind.COMMA) {
+        // a trailing comma, as in a function's parameter list (D104 (4), MYLA-225)
+        while self.match1(TokenKind.COMMA) && !self.check(TokenKind.RPAREN) {
             let pname = self.expect(TokenKind.IDENT, "parameter name")
             self.expect(TokenKind.COLON, "':'")
             let ptype = self.parse_type()
-            push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
+            params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
         }
         self.expect(TokenKind.RPAREN, "')'")
         var ret: Option<TypeExpr> = None
@@ -995,9 +1016,9 @@ impl Parser {
             return args
         }
         self.skip()
-        push(args, self.parse_type())
-        while self.match1(TokenKind.COMMA) {
-            push(args, self.parse_type())
+        args.push(self.parse_type())
+        while self.match1(TokenKind.COMMA) && !self.check(TokenKind.GT) && !self.check(TokenKind.GE) {
+            args.push(self.parse_type())
         }
         if self.check(TokenKind.GE) {
             // `Option<int>= x`: the `>=` token closes the list and leaves its
@@ -1016,13 +1037,13 @@ impl Parser {
         var params: [TypeExpr] = []
         var saw_comma = false
         if !self.check(TokenKind.RPAREN) {
-            push(params, self.parse_type())
+            params.push(self.parse_type())
             while self.match1(TokenKind.COMMA) {
                 saw_comma = true
                 if self.check(TokenKind.RPAREN) {
                     break
                 }
-                push(params, self.parse_type())
+                params.push(self.parse_type())
             }
         }
         self.expect(TokenKind.RPAREN, "')'")
@@ -1030,7 +1051,7 @@ impl Parser {
             let ret = self.parse_type()
             return self.mk_type(lp.line, lp.column, TypeKind.TFn(params, ret, false))
         }
-        if len(params) == 0 {
+        if params.len() == 0 {
             self.fail_at(lp, "'()' is only valid as a function type '() -> R'")
         }
         if !saw_comma {
@@ -1062,7 +1083,7 @@ impl Parser {
             let start = self.pos
             let st = self.statement()
             if !self.recovered(start, SYNC_STMT) {
-                push(stmts, st)
+                stmts.push(st)
                 if self.at_separator() {
                     self.skip_separators()
                 } else if self.check(TokenKind.RBRACE) {
@@ -1165,7 +1186,7 @@ impl Parser {
             self.fail_at(self.peek(), "expected ',' in destructuring binding (use '(x,)' for a 1-tuple)")
         }
         while !self.check(TokenKind.RPAREN) {
-            push(elems, self.binding_elem())
+            elems.push(self.binding_elem())
             if !self.match1(TokenKind.COMMA) {
                 break
             }
@@ -1195,6 +1216,7 @@ impl Parser {
     #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.IfS(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }, None) }]
     fun if_stmt(var self) -> Stmt {
         let kw = self.advance()
+        if self.check(TokenKind.LET) { return self.if_let_stmt(kw) }
         let cond = self.expression_ns()
         let then = self.block()
         var otherwise: Option<ElseTail> = None
@@ -1215,9 +1237,84 @@ impl Parser {
     #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.WhileS(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }) }]
     fun while_stmt(var self) -> Stmt {
         let kw = self.advance()
+        if self.check(TokenKind.LET) { return self.while_let_stmt(kw) }
         let cond = self.expression_ns()
         let body = self.block()
         return self.mk_stmt(kw.line, kw.column, StmtKind.WhileS(cond, body))
+    }
+
+    // -- `if let` and `while let` (D104 (5), MYLA-226): sugar over `match` --
+
+    // At `let`: the pattern and, after `=`, the value it is matched against.
+    fun let_pattern(var self, what: str) -> (Pattern, Expr) {
+        self.skip()
+        let pat = self.pattern()
+        self.expect(TokenKind.ASSIGN, format("'=' after the pattern of an '{}'", what))
+        let value = self.expression_ns()
+        return (pat, value)
+    }
+
+    // `match value { pat => { then }, <marker> => otherwise }`: the second arm
+    // binds `marker` (`%iflet`, `%whilelet`; no source spells them), which
+    // tells the checker the words to use (`if_worded`).
+    fun let_match(var self, line: int32, col: int32, sp: SrcSpan, value: Expr, pat: Pattern, then: Block, marker: str, otherwise: ExprOrBlock) -> Expr {
+        var el_line = then.line
+        var el_col = then.col
+        var el_sp = then.sp
+        match otherwise {
+            ExprOrBlock.EB_Block(b) => {
+                if b.stmts.len() > 0 {
+                    el_line = b.line
+                    el_col = b.col
+                    el_sp = b.sp
+                }
+            },
+            ExprOrBlock.EB_Expr(x) => {
+                el_line = x.line
+                el_col = x.col
+                el_sp = x.sp
+            },
+        }
+        let arms = [
+            MatchArm { line: then.line, col: then.col, sp: then.sp, pattern: pat, guard: None, body: ExprOrBlock.EB_Block(then) },
+            MatchArm { line: el_line, col: el_col, sp: el_sp, pattern: Pattern { id: self.fresh(), line: el_line, col: el_col, sp: el_sp, kind: PatternKind.PBind(marker) }, guard: None, body: otherwise },
+        ]
+        return Expr { id: self.fresh(), line: line, col: col, sp: sp, kind: ExprKind.MatchE(value, arms) }
+    }
+
+    // `if let P = e { … } else …` as a statement: the match, its arms giving
+    // their blocks' values when it is one (MYLA-226).
+    fun if_let_stmt(var self, kw: Token) -> Stmt {
+        let (pat, value) = self.let_pattern("if let")
+        let then = self.valued(self.block())
+        var otherwise = ExprOrBlock.EB_Block(Block { line: then.line, col: then.col, sp: then.sp, stmts: [] })
+        let saved = self.pos
+        self.skip_newlines()
+        if self.match1(TokenKind.ELSE) {
+            if self.check(TokenKind.IF) {
+                let chained = self.if_stmt()
+                otherwise = ExprOrBlock.EB_Block(self.valued(Block { line: chained.line, col: chained.col, sp: chained.sp, stmts: [chained] }))
+            } else {
+                otherwise = ExprOrBlock.EB_Block(self.valued(self.block()))
+            }
+        } else {
+            self.pos = saved
+        }
+        let e = self.let_match(kw.line, kw.column, self.span_from(kw.line, kw.column), value, pat, then, "%iflet", otherwise)
+        return self.mk_stmt(kw.line, kw.column, StmtKind.ExprStmt(e))
+    }
+
+    // `while let P = e { body }`: `while true { match e { P => { body }, _ => { break } } }`.
+    fun while_let_stmt(var self, kw: Token) -> Stmt {
+        let (pat, value) = self.let_pattern("while let")
+        let body = self.block()
+        let stop = Stmt { id: self.fresh(), line: kw.line, col: kw.column, sp: value.sp, kind: StmtKind.BreakS }
+        let otherwise = ExprOrBlock.EB_Block(Block { line: kw.line, col: kw.column, sp: value.sp, stmts: [stop] })
+        let e = self.let_match(kw.line, kw.column, self.span_from(kw.line, kw.column), value, pat, body, "%whilelet", otherwise)
+        let step = Stmt { id: self.fresh(), line: kw.line, col: kw.column, sp: e.sp, kind: StmtKind.ExprStmt(e) }
+        let always = Expr { id: self.fresh(), line: kw.line, col: kw.column, sp: value.sp, kind: ExprKind.BoolLit(true) }
+        let loop_body = Block { line: body.line, col: body.col, sp: body.sp, stmts: [step] }
+        return self.mk_stmt(kw.line, kw.column, StmtKind.WhileS(always, loop_body))
     }
 
     #test(parser_on("a.b[0]"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: StmtKind.ForS(".", None, None, Block { line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, stmts: [] }, Some(Expr { id: 0, line: 1, col: 7, sp: SrcSpan { sline: 1, scol: 7, eline: 1, ecol: 7 }, kind: ExprKind.Hole })) }]
@@ -1248,7 +1345,7 @@ impl Parser {
             let vc = value.col
             var elems: [Expr] = [value]
             while self.match1(TokenKind.COMMA) {
-                push(elems, self.expression())
+                elems.push(self.expression())
             }
             value = self.mk_expr_from(st, vl, vc, ExprKind.TupleLit(elems))
         }
@@ -1258,6 +1355,7 @@ impl Parser {
     #test(parser_on("let x = 1"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: StmtKind.ExprStmt(Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }) }]
     fun assign_or_expr(var self) -> Stmt {
         let st = self.peek()
+        self.stmt_match = self.check(TokenKind.MATCH)
         let expr = self.expression()
         if self.check(TokenKind.ASSIGN) {
             let eq = self.advance()
@@ -1267,7 +1365,80 @@ impl Parser {
             let value = self.expression()
             return self.mk_stmt_from(st, eq.line, eq.column, StmtKind.Assign(expr, value))
         }
+        // `place op= value` (D104 (2), MYLA-223)
+        let op = self.compound_ahead()
+        if op != "" {
+            let opt = self.advance()
+            self.skip()
+            if !is_lvalue(expr) {
+                self.fail(expr.line, expr.col, expr.sp, "invalid assignment target")
+            }
+            let rhs = self.expression()
+            return self.compound_assign(st, opt, op, expr, rhs)
+        }
         return self.mk_stmt_from(st, expr.line, expr.col, StmtKind.ExprStmt(expr))
+    }
+
+    // The compound assignment operator the next two tokens spell, touching
+    // (`+` `=`, … and `<` `<=` for `<<=`, `>` `>=` for `>>=`), without its
+    // `=`; "" for none. The binary operators' loops stop before one.
+    #test(parser_on("x += 1"))[""]
+    fun compound_ahead(self) -> str {
+        let a = self.peek()
+        let b = self.peek_at(1)
+        if a.line != b.line || b.column != a.column + 1 { return "" }
+        if b.kind == TokenKind.ASSIGN {
+            if a.kind == TokenKind.PLUS { return "+" }
+            if a.kind == TokenKind.MINUS { return "-" }
+            if a.kind == TokenKind.STAR { return "*" }
+            if a.kind == TokenKind.SLASH { return "/" }
+            if a.kind == TokenKind.PERCENT { return "%" }
+            if a.kind == TokenKind.AMP { return "&" }
+            if a.kind == TokenKind.PIPE { return "|" }
+            if a.kind == TokenKind.CARET { return "^" }
+        }
+        if a.kind == TokenKind.LT && b.kind == TokenKind.LE { return "<<" }
+        if a.kind == TokenKind.GT && b.kind == TokenKind.GE { return ">>" }
+        return ""
+    }
+
+    // `target op= rhs` as `target = target op rhs`, the place evaluated once:
+    // an index that isn't a name or a literal is computed into a `let` first,
+    // the two inside an `if true { … }` (D104 (2), MYLA-223).
+    fun compound_assign(var self, st: Token, opt: Token, op: str, target: Expr, rhs: Expr) -> Stmt {
+        let (place, lets) = self.hoisted(target)
+        let value = Expr { id: self.fresh(), line: opt.line, col: opt.column, sp: self.span_from(st.line, st.column), kind: ExprKind.Binary(op, place, rhs) }
+        let assign = self.mk_stmt_from(st, opt.line, opt.column, StmtKind.Assign(place, value))
+        if lets.len() == 0 { return assign }
+        var stmts = lets
+        stmts.push(assign)
+        let cond = Expr { id: self.fresh(), line: st.line, col: st.column, sp: self.span_from(st.line, st.column), kind: ExprKind.BoolLit(true) }
+        let blk = Block { line: st.line, col: st.column, sp: self.span_from(st.line, st.column), stmts: stmts }
+        return self.mk_stmt_from(st, st.line, st.column, StmtKind.IfS(cond, blk, None))
+    }
+
+    // The place `e` with each index that isn't a name or a literal replaced
+    // by a name, and the `let`s that compute them, in order.
+    fun hoisted(var self, e: Expr) -> (Expr, [Stmt]) {
+        match e.kind {
+            ExprKind.Index(t, i) => {
+                let (nt, ls) = self.hoisted(t)
+                var lets = ls
+                var idx = i
+                if !simple_index(i) {
+                    let name = format("%index{}", i.id)
+                    lets.push(Stmt { id: self.fresh(), line: i.line, col: i.col, sp: i.sp, kind: StmtKind.VarDecl("let", name, None, i) })
+                    idx = Expr { id: self.fresh(), line: i.line, col: i.col, sp: i.sp, kind: ExprKind.Name(name) }
+                }
+                return (Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.Index(nt, idx) }, lets)
+            },
+            ExprKind.GetField(t, f) => {
+                let (nt, ls) = self.hoisted(t)
+                return (Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: ExprKind.GetField(nt, f) }, ls)
+            },
+            _ => {},
+        }
+        return (e, [])
     }
 
     // -- expressions (precedence climbing) ---------------------------------
@@ -1349,7 +1520,7 @@ impl Parser {
     fun comparison(var self) -> Expr {
         let st = self.peek()
         var expr = self.bit_or()
-        while self.check(TokenKind.LT) || self.check(TokenKind.LE) || self.check(TokenKind.GT) || self.check(TokenKind.GE) {
+        while (self.check(TokenKind.LT) || self.check(TokenKind.LE) || self.check(TokenKind.GT) || self.check(TokenKind.GE)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_or()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1361,7 +1532,7 @@ impl Parser {
     fun bit_or(var self) -> Expr {
         let st = self.peek()
         var expr = self.bit_xor()
-        while self.check(TokenKind.PIPE) {
+        while self.check(TokenKind.PIPE) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_xor()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1373,7 +1544,7 @@ impl Parser {
     fun bit_xor(var self) -> Expr {
         let st = self.peek()
         var expr = self.bit_and()
-        while self.check(TokenKind.CARET) {
+        while self.check(TokenKind.CARET) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.bit_and()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1385,7 +1556,7 @@ impl Parser {
     fun bit_and(var self) -> Expr {
         let st = self.peek()
         var expr = self.shift()
-        while self.check(TokenKind.AMP) {
+        while self.check(TokenKind.AMP) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.shift()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1431,7 +1602,7 @@ impl Parser {
     fun term(var self) -> Expr {
         let st = self.peek()
         var expr = self.factor()
-        while self.check(TokenKind.PLUS) || self.check(TokenKind.MINUS) {
+        while (self.check(TokenKind.PLUS) || self.check(TokenKind.MINUS)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.factor()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1443,7 +1614,7 @@ impl Parser {
     fun factor(var self) -> Expr {
         let st = self.peek()
         var expr = self.cast()
-        while self.check(TokenKind.STAR) || self.check(TokenKind.SLASH) || self.check(TokenKind.PERCENT) {
+        while (self.check(TokenKind.STAR) || self.check(TokenKind.SLASH) || self.check(TokenKind.PERCENT)) && self.compound_ahead() == "" {
             let op = self.advance()
             let right = self.cast()
             expr = self.mk_expr_from(st, op.line, op.column, ExprKind.Binary(op.lexeme, expr, right))
@@ -1520,10 +1691,116 @@ impl Parser {
         return expr
     }
 
+    // `if c { a } else { b }` as a value (D104 (1), MYLA-222): a `match` on
+    // the condition (`if_match`); `else if` nests another.
+    fun if_expr(var self) -> Expr {
+        let kw = self.advance()
+        if self.check(TokenKind.LET) { return self.if_let_expr(kw) }
+        let cond = self.expression_ns()
+        let then = self.valued(self.block())
+        self.skip_newlines()
+        if !self.check(TokenKind.ELSE) {
+            self.fail_at(self.peek(), "an 'if' used as a value needs an 'else'")
+        }
+        let el = self.advance()
+        var otherwise = ExprOrBlock.EB_Block(then)
+        if self.check(TokenKind.IF) {
+            otherwise = ExprOrBlock.EB_Expr(self.if_expr())
+        } else {
+            otherwise = ExprOrBlock.EB_Block(self.valued(self.block()))
+        }
+        return self.if_match(kw.line, kw.column, self.span_from(kw.line, kw.column), cond, then, otherwise)
+    }
+
+    // `if let P = e { a } else { b }` as a value (MYLA-226).
+    fun if_let_expr(var self, kw: Token) -> Expr {
+        let (pat, value) = self.let_pattern("if let")
+        let then = self.valued(self.block())
+        self.skip_newlines()
+        if !self.check(TokenKind.ELSE) {
+            self.fail_at(self.peek(), "an 'if' used as a value needs an 'else'")
+        }
+        self.skip()
+        var otherwise = ExprOrBlock.EB_Block(then)
+        if self.check(TokenKind.IF) {
+            otherwise = ExprOrBlock.EB_Expr(self.if_expr())
+        } else {
+            otherwise = ExprOrBlock.EB_Block(self.valued(self.block()))
+        }
+        return self.let_match(kw.line, kw.column, self.span_from(kw.line, kw.column), value, pat, then, "%iflet", otherwise)
+    }
+
+    // The `match` an `if` used as a value is: `true => { then }` and an arm
+    // that binds `%else` (no source spells it), which tells the checker to
+    // speak of an `if` (`if_worded`).
+    fun if_match(var self, line: int32, col: int32, sp: SrcSpan, cond: Expr, then: Block, otherwise: ExprOrBlock) -> Expr {
+        let yes = Expr { id: self.fresh(), line: line, col: col, sp: cond.sp, kind: ExprKind.BoolLit(true) }
+        var el_line = then.line
+        var el_col = then.col
+        var el_sp = then.sp
+        match otherwise {
+            ExprOrBlock.EB_Block(b) => {
+                el_line = b.line
+                el_col = b.col
+                el_sp = b.sp
+            },
+            ExprOrBlock.EB_Expr(x) => {
+                el_line = x.line
+                el_col = x.col
+                el_sp = x.sp
+            },
+        }
+        let arms = [
+            MatchArm { line: then.line, col: then.col, sp: then.sp, pattern: Pattern { id: self.fresh(), line: line, col: col, sp: cond.sp, kind: PatternKind.PLit(yes) }, guard: None, body: ExprOrBlock.EB_Block(then) },
+            MatchArm { line: el_line, col: el_col, sp: el_sp, pattern: Pattern { id: self.fresh(), line: el_line, col: el_col, sp: el_sp, kind: PatternKind.PBind("%else") }, guard: None, body: otherwise },
+        ]
+        return Expr { id: self.fresh(), line: line, col: col, sp: sp, kind: ExprKind.MatchE(cond, arms) }
+    }
+
+    // A block that gives a value (an `if` used as a value, a match arm): a
+    // trailing `if` statement whose every level has an `else` is the `if`
+    // expression it reads as, its value the block's (MYLA-222).
+    fun valued(var self, b: Block) -> Block {
+        let n = b.stmts.len()
+        if n == 0 { return b }
+        let last = b.stmts[n - 1]
+        match self.if_as_match(last) {
+            Some(e) => {
+                var stmts = b.stmts
+                stmts[n - 1] = Stmt { id: last.id, line: last.line, col: last.col, sp: last.sp, kind: StmtKind.ExprStmt(e) }
+                return Block { line: b.line, col: b.col, sp: b.sp, stmts: stmts }
+            },
+            None => {},
+        }
+        return b
+    }
+
+    // The `if` statement `s` as the `if` expression it reads as, when every
+    // level has an `else`.
+    fun if_as_match(var self, s: Stmt) -> Option<Expr> {
+        match s.kind {
+            StmtKind.IfS(cond, then, el) => {
+                match el {
+                    Some(ElseTail.ElseBlock(b)) => { return Some(self.if_match(s.line, s.col, s.sp, cond, self.valued(then), ExprOrBlock.EB_Block(self.valued(b)))) },
+                    Some(ElseTail.ElseIf(x)) => {
+                        match self.if_as_match(x) {
+                            Some(e) => { return Some(self.if_match(s.line, s.col, s.sp, cond, self.valued(then), ExprOrBlock.EB_Expr(e))) },
+                            None => {},
+                        }
+                    },
+                    None => {},
+                }
+            },
+            _ => {},
+        }
+        return None
+    }
+
     #test(parser_on("let x = 1"))[Expr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 10 }, kind: ExprKind.Hole }]
     fun primary(var self) -> Expr {
         let tok = self.peek()
         let k = tok.kind
+        if k == TokenKind.IF { return self.if_expr() }
         if k == TokenKind.INT {
             self.skip()
             return self.mk_expr(tok.line, tok.column, ExprKind.IntLit(tok.ival, suffix_opt(tok.suffix), false, tok.big))
@@ -1615,7 +1892,7 @@ impl Parser {
             if self.check(TokenKind.RBRACKET) {
                 break
             }
-            push(elems, self.expression())
+            elems.push(self.expression())
             self.skip_newlines()
         }
         self.expect(TokenKind.RBRACKET, "']' to close list literal")
@@ -1634,7 +1911,7 @@ impl Parser {
             let key = self.expression()
             self.expect(TokenKind.COLON, "':' between map key and value")
             let val = self.expression()
-            push(entries, MapEntry { key: key, value: val })
+            entries.push(MapEntry { key: key, value: val })
             self.skip_newlines()
         }
         self.expect(TokenKind.RBRACKET, "']' to close map literal")
@@ -1643,14 +1920,16 @@ impl Parser {
 
     #test(parser_on("a.b[0]"))[Expr { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.MatchE(Expr { id: 0, line: 1, col: 2, sp: SrcSpan { sline: 1, scol: 2, eline: 1, ecol: 7 }, kind: ExprKind.Hole }, []) }]
     fun match_expr(var self) -> Expr {
+        let as_stmt = self.stmt_match
+        self.stmt_match = false
         let kw = self.advance()
         let scrutinee = self.expression_ns()
         self.expect(TokenKind.LBRACE, "'{' to begin match arms")
         self.skip_newlines()
         var arms: [MatchArm] = []
         while !self.check(TokenKind.RBRACE) && !self.at_end() {
-            let arm = self.match_arm()
-            push(arms, arm)
+            let arm = self.match_arm(!as_stmt)
+            arms.push(arm)
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
             } else if self.check(TokenKind.NEWLINE) {
@@ -1666,14 +1945,14 @@ impl Parser {
             }
         }
         self.expect(TokenKind.RBRACE, "'}' to end match")
-        if len(arms) == 0 {
+        if arms.len() == 0 {
             self.fail_at(kw, "match expression needs at least one arm")
         }
         return self.mk_expr(kw.line, kw.column, ExprKind.MatchE(scrutinee, arms))
     }
 
-    #test(parser_on("[int]"))[MatchArm { line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, pattern: Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PWild }, guard: None, body: ExprOrBlock.EB_Expr(Expr { id: 2, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 6 }, kind: ExprKind.Hole }) }]
-    fun match_arm(var self) -> MatchArm {
+    #test(parser_on("[int]"), true)[MatchArm { line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, pattern: Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 6 }, kind: PatternKind.PWild }, guard: None, body: ExprOrBlock.EB_Expr(Expr { id: 2, line: 1, col: 6, sp: SrcSpan { sline: 1, scol: 6, eline: 1, ecol: 6 }, kind: ExprKind.Hole }) }]
+    fun match_arm(var self, valued: bool) -> MatchArm {
         let st = self.peek()
         let pattern = self.pattern()
         var guard: Option<Expr> = None
@@ -1682,7 +1961,11 @@ impl Parser {
         }
         let arrow = self.expect(TokenKind.FATARROW, "'=>' after match pattern")
         var body: ExprOrBlock = ExprOrBlock.EB_Expr(self.mk_expr(0, 0, ExprKind.Hole))
-        if self.check(TokenKind.LBRACE) {
+        // a match that gives a value: an arm's trailing `if` … `else` is its
+        // value (MYLA-222)
+        if self.check(TokenKind.LBRACE) && valued {
+            body = ExprOrBlock.EB_Block(self.valued(self.block()))
+        } else if self.check(TokenKind.LBRACE) {
             body = ExprOrBlock.EB_Block(self.block())
         } else {
             body = ExprOrBlock.EB_Expr(self.expression())
@@ -1708,7 +1991,7 @@ impl Parser {
         let pc = first.col
         var alts: [Pattern] = [first]
         while self.match1(TokenKind.PIPE) {
-            push(alts, self.base_pattern())
+            alts.push(self.base_pattern())
         }
         return self.mk_pat_from(first.sp.sline, first.sp.scol, pl, pc, PatternKind.POr(alts))
     }
@@ -1771,12 +2054,12 @@ impl Parser {
         if self.match1(TokenKind.LPAREN) {
             has_payload = true
             if !self.check(TokenKind.RPAREN) {
-                push(elems, self.pattern())
+                elems.push(self.pattern())
                 while self.match1(TokenKind.COMMA) {
                     if self.check(TokenKind.RPAREN) {
                         break
                     }
-                    push(elems, self.pattern())
+                    elems.push(self.pattern())
                 }
             }
             self.expect(TokenKind.RPAREN, "')'")
@@ -1792,7 +2075,7 @@ impl Parser {
             self.fail_at(self.peek(), "expected ',' in tuple pattern (use '(p,)' for a 1-tuple)")
         }
         while !self.check(TokenKind.RPAREN) {
-            push(elems, self.pattern())
+            elems.push(self.pattern())
             if !self.match1(TokenKind.COMMA) {
                 break
             }
@@ -1814,7 +2097,7 @@ impl Parser {
             } else {
                 pat = self.mk_pat(fname.line, fname.column, PatternKind.PBind(fname.lexeme))
             }
-            push(fields, FieldPat { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, pattern: pat })
+            fields.push(FieldPat { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, pattern: pat })
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
             } else {
@@ -1830,7 +2113,7 @@ impl Parser {
     fun lambda_ahead(self) -> bool {
         var depth = 0
         var i = self.pos
-        let n = len(self.toks)
+        let n = self.toks.len()
         while i < n {
             let k = self.toks[i].kind
             if k == TokenKind.LPAREN || k == TokenKind.LBRACKET || k == TokenKind.LBRACE {
@@ -1860,8 +2143,8 @@ impl Parser {
                 if self.match1(TokenKind.COLON) {
                     pty = Some(self.parse_type())
                 }
-                push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: pty })
-                if !self.match1(TokenKind.COMMA) {
+                params.push(Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: pty })
+                if !self.match1(TokenKind.COMMA) || self.check(TokenKind.RPAREN) {
                     break
                 }
             }
@@ -1888,7 +2171,7 @@ impl Parser {
         var elems: [Expr] = [first]
         self.skip()
         while !self.check(TokenKind.RPAREN) {
-            push(elems, self.expression())
+            elems.push(self.expression())
             if !self.match1(TokenKind.COMMA) {
                 break
             }
@@ -1906,7 +2189,7 @@ impl Parser {
             let fname = self.expect(TokenKind.IDENT, "field name")
             self.expect(TokenKind.COLON, "':'")
             let value = self.expression()
-            push(fields, FieldInit { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, value: value })
+            fields.push(FieldInit { line: fname.line, col: fname.column, sp: self.span_from(fname.line, fname.column), name: fname.lexeme, value: value })
             if !self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
                 break
@@ -1925,10 +2208,11 @@ impl Parser {
             return args
         }
         while true {
-            push(args, self.expression())
+            args.push(self.expression())
             self.skip_newlines()
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
+                if self.check(closing) { break }    // a trailing comma (D104 (4))
             } else {
                 break
             }
@@ -1946,13 +2230,14 @@ impl Parser {
         while true {
             if self.hole_ahead() {
                 let tok = self.advance()
-                push(args, self.mk_expr(tok.line, tok.column, ExprKind.Hole))
+                args.push(self.mk_expr(tok.line, tok.column, ExprKind.Hole))
             } else {
-                push(args, self.expression())
+                args.push(self.expression())
             }
             self.skip_newlines()
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
+                if self.check(TokenKind.RPAREN) { break }    // a trailing comma (D104 (4), MYLA-225)
             } else {
                 break
             }
@@ -1990,7 +2275,7 @@ pub fun parse_ids(toks: [Token], first_id: int32) -> Result<Parsed, [Diag]> {
     var p = new_parser(toks)
     p.next_id = first_id
     let prog = p.parse_program()
-    if len(p.errs) > 0 { return Err(p.errs) }
+    if p.errs.len() > 0 { return Err(p.errs) }
     return Ok(Parsed { program: prog, next_id: p.next_id })
 }
 

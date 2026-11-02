@@ -270,10 +270,11 @@
   "exit": 0
  },
  {
-  "source": "fun main() {\n    print(1e38 * 10.0)\n    print(-1e38 * 10.0)\n    let c: float = 3.5e38\n    print(c)\n    print(3.4028235e38)\n}\n",
+  "source": "fun main() {\n    print(1e38f32 * 10.0f32)\n    print(-1e38f32 * 10.0f32)\n    let c: float32 = 3.5e38\n    print(c)\n    print(3.4028235e38f32)\n}\n",
   "argv": null,
   "stdout": "inf\n-inf\ninf\n340282347000000000000000000000000000000\n",
-  "exit": 0
+  "exit": 0,
+  "note": "float32 named since D102 made `float` float64 (MYLA-220)"
  },
  {
   "source": "fun main() {\n    print(2 + 3 * 4)\n}\n",
@@ -312,37 +313,37 @@
   "exit": 0
  },
  {
-  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"aö\", 0, 2)\n    append(sb, \"aö\", 2, 3)\n    let s = build(sb)\n    print(s == \"aö\")\n    print(s)\n}\n",
+  "source": "fun main() {\n    var sb = StringBuilder()\n    sb.append(\"aö\", 0, 2)\n    sb.append(\"aö\", 2, 3)\n    let s = sb.build()\n    print(s == \"aö\")\n    print(s)\n}\n",
   "argv": null,
   "stdout": "true\naö\n",
   "exit": 0
  },
  {
-  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"hello world\", 6, 11)\n    append(sb, \"hello world\", 0, 0)\n    append(sb, \"-\", 0, 1)\n    append(sb, \"hello world\", 0, 5)\n    print(build(sb))\n}\n",
+  "source": "fun main() {\n    var sb = StringBuilder()\n    sb.append(\"hello world\", 6, 11)\n    sb.append(\"hello world\", 0, 0)\n    sb.append(\"-\", 0, 1)\n    sb.append(\"hello world\", 0, 5)\n    print(sb.build())\n}\n",
   "argv": null,
   "stdout": "world-hello\n",
   "exit": 0
  },
  {
-  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"hello\", -1, 2)\n}\n",
+  "source": "fun main() {\n    var sb = StringBuilder()\n    sb.append(\"hello\", -1, 2)\n}\n",
   "argv": null,
   "stdout": "",
   "runtime_error": "string range -1..2 out of bounds (len 5)"
  },
  {
-  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"hello\", 0, 6)\n}\n",
+  "source": "fun main() {\n    var sb = StringBuilder()\n    sb.append(\"hello\", 0, 6)\n}\n",
   "argv": null,
   "stdout": "",
   "runtime_error": "string range 0..6 out of bounds (len 5)"
  },
  {
-  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"hello\", 2, 1)\n}\n",
+  "source": "fun main() {\n    var sb = StringBuilder()\n    sb.append(\"hello\", 2, 1)\n}\n",
   "argv": null,
   "stdout": "",
   "runtime_error": "string range 2..1 out of bounds (len 5)"
  },
  {
-  "source": "fun main() {\n    var sb = StringBuilder()\n    append(sb, \"hello\", 6, 6)\n}\n",
+  "source": "fun main() {\n    var sb = StringBuilder()\n    sb.append(\"hello\", 6, 6)\n}\n",
   "argv": null,
   "stdout": "",
   "runtime_error": "string range 6..6 out of bounds (len 5)"
@@ -354,13 +355,13 @@
   "runtime_error": "division by zero"
  },
  {
-  "source": "fun main() {\n  for c in chars(\"abc\") { print(c as uint32) } }\n",
+  "source": "fun main() {\n  for c in \"abc\".chars() { print(c as uint32) } }\n",
   "argv": null,
   "stdout": "97\n98\n99\n",
   "exit": 0
  },
  {
-  "source": "fun main() {\n  let s = \"héλ😀\"\n  print(len(s))\n  print(len(chars(s)))\n  for c in chars(s) { print(c as uint32) } }\n",
+  "source": "fun main() {\n  let s = \"héλ😀\"\n  print(s.len())\n  print(s.chars().len())\n  for c in s.chars() { print(c as uint32) } }\n",
   "argv": null,
   "stdout": "9\n4\n104\n233\n955\n128512\n",
   "exit": 0
@@ -486,7 +487,7 @@
   "exit": 0
  },
  {
-  "source": "fun main() { print(len(chars(\"\"))) }\n",
+  "source": "fun main() { print(\"\".chars().len()) }\n",
   "argv": null,
   "stdout": "0\n",
   "exit": 0

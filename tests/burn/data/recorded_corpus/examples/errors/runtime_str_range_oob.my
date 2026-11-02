@@ -1,0 +1,9 @@
+//~ runtime error: string range 2..9 out of bounds (len 5)
+//~ native: runtime error: index out of bounds
+// A byte range of `append` must lie within the string (MYLA-85).
+#main
+fun main() {
+    var sb = StringBuilder()
+    append(sb, "hello", 2, 9)
+    print(build(sb))
+}

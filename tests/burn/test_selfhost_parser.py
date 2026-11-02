@@ -22,8 +22,9 @@ import subprocess
 import tempfile
 import unittest
 
-from ._golden import answer_for_file, golden
+from ._golden import NoGolden, answer_for_file, golden, recorded
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._continuation import continues_a_line
 from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
@@ -45,7 +46,8 @@ def _corpus() -> list[str]:
     files: set[str] = set()
     for p in pats:
         files.update(glob.glob(p, recursive=True))
-    return sorted(files)
+    # the files as the recordings saw them (rewritten since: MYLA-240)
+    return sorted(recorded(f) for f in files)
 
 
 # Snippets for every lexer and parser error the corpus lacks (MYLA-28): the
@@ -256,6 +258,18 @@ def _oracle(path: str) -> str:
     return answer_for_file(path, lambda: _canonical(source))
 
 
+# Parses that line continuation (D104 (3), MYLA-224) changed from the retired
+# Python parser's recording: the line break the error used to point at no
+# longer makes a token, so the error names the next one.
+SUPERSEDED: dict[str, str] = {
+    "split_ge_then_missing_value": "err 3 1 3:1-3:2 parse: expected an expression, found '}'",
+    "impl_members": "err 4 16 4:16-4:17 parse: expected an expression, found '='\n"
+                    "err 6 5 6:5-6:8 parse: expected a method ('fun ...') in impl block, found 'let'\n"
+                    "err 9 5 9:5-9:6 parse: expected an expression, found '}'\n"
+                    "err 12 9 12:9-12:10 parse: expected variable name, found '='",
+}
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedParserParity(unittest.TestCase):
     _binary: str | None = None
@@ -282,8 +296,13 @@ class SelfHostedParserParity(unittest.TestCase):
     def test_corpus_ast_parity(self) -> None:
         checked = errors = 0
         for path in _corpus():
-            expected = _oracle(path)
+            # in the file's subtest: a file changed since the retirement skips
+            # only itself (the recorded copies sort after lib/ and selfhost/)
             with self.subTest(file=os.path.relpath(path, _REPO)):
+                try:
+                    expected = _oracle(path)
+                except NoGolden:
+                    continue    # a file added to the corpus since has no recording: test_error_corpus holds it to the self-hosted CLI
                 actual = self._myla_parse(path)
                 self.assertEqual(actual, expected)
                 checked += 1
@@ -292,10 +311,17 @@ class SelfHostedParserParity(unittest.TestCase):
         self.assertGreater(checked, 25)
         self.assertGreater(errors, 15)
 
+    def _continued(self, source: str) -> bool:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "garbled.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            return continues_a_line(path)
+
     def test_syntax_errors_match_the_oracle(self) -> None:
         for name, source in SYNTAX_ERRORS.items():
             with self.subTest(case=name):
-                expected = _canonical(source)
+                expected = SUPERSEDED.get(name) or _canonical(source)
                 self.assertTrue(expected.startswith("err "), "not an error in Python")
                 self.assertEqual(self._myla_parse_source(source), expected)
 
@@ -320,20 +346,26 @@ class SelfHostedParserParity(unittest.TestCase):
     def test_garbled_sources_match_the_oracle(self) -> None:
         several = 0
         for path in sorted(glob.glob(os.path.join(_REPO, "examples", "*.my"))):
-            with open(path, encoding="utf-8") as fh:
+            with open(recorded(path), encoding="utf-8") as fh:
                 source = fh.read()
             for seed in range(4):
                 garbled = _garbled(source, random.Random(f"{os.path.basename(path)}/{seed}"), 1 + 2 * seed)
                 with self.subTest(file=os.path.basename(path), seed=seed):
                     expected = _canonical(garbled)
-                    self.assertEqual(self._myla_parse_source(garbled), expected)
+                    mine = self._myla_parse_source(garbled)
+                    if self._continued(garbled):
+                        # a line break the lexer leaves out since D104 (3): the
+                        # recording parsed other tokens; errors still, no crash
+                        self.assertEqual(mine.startswith("err "), expected.startswith("err "), mine)
+                        continue
+                    self.assertEqual(mine, expected)
                     several += expected.count("\nerr ") > 0
         # most garbled sources have several errors
         self.assertGreater(several, 50)
 
     def test_truncated_sources_match_the_oracle(self) -> None:
         for name in TRUNCATED:
-            with open(os.path.join(_REPO, "examples", name), encoding="utf-8") as fh:
+            with open(recorded(os.path.join(_REPO, "examples", name)), encoding="utf-8") as fh:
                 source = fh.read()
             cuts = set()
             pos = 0

@@ -125,7 +125,7 @@ INTERP_PROGRAMS = {
     "missing_bool_key": _main("let m = [true: 1]", "print(m[false])"),
     "list_store_out_of_bounds": _main("var xs = [1, 2]", "xs[2] = 3"),
     "nested_store_out_of_bounds": _main("var xs = [[1], [2]]", "xs[3][0] = 3"),
-    "pop_empty": _main("var xs: [int] = []", "let x = pop(xs)"),
+    "pop_empty": _main("var xs: [int] = []", "let x = xs.pop()"),
     "no_entry_point": "fun helper() -> int {\n    return 1\n}\n",
     "error_inside_print_stops_it": _main("let xs = [1]", "print(xs[1] + 1)", "print(9)"),
     "unsigned_shift": _main("let x: uint64 = 18446744073709551615", "print(x >> 60)", "let y: int64 = -16", "print(y >> 2)"),
@@ -388,7 +388,7 @@ struct Bag { items: [int] }
 
 impl Bag {
     fun add(var self, x: int) {
-        push(self.items, x)
+        self.items.push(x)
     }
 }
 
@@ -398,17 +398,17 @@ fun main() {
     var grid: [[int]] = [[]]
     var i = 0
     while i < N_ITER {
-        push(xs, i)
+        xs.push(i)
         xs[i] = xs[i] + 1
         bag.add(i)
-        push(grid[0], i)
+        grid[0].push(i)
         i = i + 1
     }
     var total: int64 = 0
     for x in xs {
         total = total + (x as int64)
     }
-    print(len(xs) + len(bag.items) + len(grid[0]) + len(xs))
+    print(xs.len() + bag.items.len() + grid[0].len() + xs.len())
     print(total)
 }
 """

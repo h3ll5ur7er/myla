@@ -1,0 +1,9 @@
+//~ type error: the branches of an 'if' have incompatible types 'int32' and 'str'
+//~ span: "none"
+// The branches of an `if` used as a value have one type, as a match's arms do
+// (D104 (1), MYLA-222).
+fun main() {
+    let n = 3
+    let label = if n > 0 { n } else { "none" }
+    print(label)
+}

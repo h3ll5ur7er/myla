@@ -75,12 +75,12 @@ pub fun keywords_agree() -> bool {
 #test("int8")["INT8"]
 fun upper_ascii(s: str) -> str {
     var sb = StringBuilder()
-    for c in chars(s) {
+    for c in s.chars() {
         var b = c as uint8
         if b >= 'a' && b <= 'z' { b = b - 32 }
-        append_byte(sb, b)
+        sb.append_byte(b)
     }
-    return build(sb)
+    return sb.build()
 }
 
 #test("as")[TokenKind.AS]

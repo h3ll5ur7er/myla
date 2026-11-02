@@ -10,7 +10,7 @@
 #test("hello")[5]
 #test("")[0]
 fun blen(s: str) -> int {
-    return len(s)
+    return s.len()
 }
 
 #test("abc", 0)[97]
@@ -26,7 +26,7 @@ fun byte_at(s: str, i: int) -> int {
 fun count_byte(s: str, b: uint8) -> int {
     var n = 0
     var i = 0
-    while i < len(s) {
+    while i < s.len() {
         if s[i] == b {
             n = n + 1
         }
@@ -39,7 +39,7 @@ fun count_byte(s: str, b: uint8) -> int {
 #test("ABC")[198]
 fun byte_sum(s: str) -> int {
     var total = 0
-    for i in 0..len(s) {
+    for i in 0..s.len() {
         total = total + (s[i] as int)
     }
     return total
@@ -99,7 +99,7 @@ fun joined() -> str {
 
 #test[6]
 fun joined_len() -> int {
-    return len("foo" + "bar")
+    return ("foo" + "bar").len()
 }
 
 // `format(fmt, args…)` fills `{}` placeholders (`{{`/`}}` are literal braces);
@@ -138,19 +138,19 @@ fun first_byte_of_format() -> int {
 #test[5]
 fun sb_len() -> int {
     var sb = StringBuilder()
-    append(sb, "Hello")
-    return len(sb)
+    sb.append("Hello")
+    return sb.len()
 }
 
 #test["Hello, world!"]
 fun sb_build() -> str {
     var sb = StringBuilder()
-    append(sb, "Hello")
-    append_byte(sb, ',')
-    append_byte(sb, ' ')
-    append(sb, "world")
-    append_byte(sb, '!')
-    return build(sb)
+    sb.append("Hello")
+    sb.append_byte(',')
+    sb.append_byte(' ')
+    sb.append("world")
+    sb.append_byte('!')
+    return sb.build()
 }
 
 // The digits 0..n-1, assembled byte by byte.
@@ -159,19 +159,19 @@ fun sb_build() -> str {
 fun digits(n: int) -> str {
     var sb = StringBuilder()
     for i in 0..n {
-        append_byte(sb, ('0' as int + i) as uint8)
+        sb.append_byte(('0' as int + i) as uint8)
     }
-    return build(sb)
+    return sb.build()
 }
 
 // Value semantics: a copy keeps building independently of the original.
 #test["seed"]
 fun sb_cow_original() -> str {
     var a = StringBuilder()
-    append(a, "seed")
+    a.append("seed")
     var b = a
-    append(b, " and more")
-    return build(a)
+    b.append(" and more")
+    return a.build()
 }
 
 // `join` a small list of words with a separator using a builder.
@@ -180,20 +180,20 @@ fun joined_words() -> str {
     let words = ["a", "b", "c"]
     var sb = StringBuilder()
     var i = 0
-    while i < len(words) {
+    while i < words.len() {
         if i > 0 {
-            append_byte(sb, '-')
+            sb.append_byte('-')
         }
-        append(sb, words[i])
+        sb.append(words[i])
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }
 
 #main
 fun main() {
     let s = "Myla"
-    print(len(s))                 // 4
+    print(s.len())                 // 4
     print(s[0] as uint8)            // 77 ('M')
     print(s[3] as uint8)            // 97 ('a')
 
@@ -209,7 +209,7 @@ fun main() {
     print(greet("world"))         // Hello, world!
     print(joined())               // abc
     print(sum_msg(2, 3))          // 2 + 3 = 5
-    print(format("{}: {}", "len", len("hello")))   // len: 5
+    print(format("{}: {}", "len", "hello".len()))   // len: 5
     print(format("{} and {}", true, false))        // true and false
 
     print(sb_build())             // Hello, world!

@@ -52,7 +52,7 @@ fun analyse(path: str, text: str) -> Cached {
     match parse_source(text, 0) {
         Ok(parsed) => {
             for s in outline_parsed(text, toks, parsed.program) {
-                if indexable(s.kind) { push(entries, Entry { name: s.name, kind: s.kind, detail: s.detail, path: path, range: s.selection }) }
+                if indexable(s.kind) { entries.push(Entry { name: s.name, kind: s.kind, detail: s.detail, path: path, range: s.selection }) }
             }
             for r in local_ranges(path, text, toks, parsed.program) { locals[start_key(r)] = true }
         },
@@ -67,22 +67,22 @@ fun analyse(path: str, text: str) -> Cached {
 #test("a", "a")[false]
 fun before(a: str, b: str) -> bool {
     var i = 0
-    while i < len(a) && i < len(b) {
+    while i < a.len() && i < b.len() {
         if a[i] != b[i] { return a[i] < b[i] }
         i = i + 1
     }
-    return len(a) < len(b)
+    return a.len() < b.len()
 }
 
 // `xs` sorted (merge sort).
 #test(["b", "c", "a"])[["a", "b", "c"]]
 fun sorted(xs: [str]) -> [str] {
-    if len(xs) <= 1 { return xs }
+    if xs.len() <= 1 { return xs }
     var left: [str] = []
     var right: [str] = []
     var i = 0
-    while i < len(xs) {
-        if i < len(xs) / 2 { push(left, xs[i]) } else { push(right, xs[i]) }
+    while i < xs.len() {
+        if i < xs.len() / 2 { left.push(xs[i]) } else { right.push(xs[i]) }
         i = i + 1
     }
     let l = sorted(left)
@@ -90,12 +90,12 @@ fun sorted(xs: [str]) -> [str] {
     var out: [str] = []
     var a = 0
     var b = 0
-    while a < len(l) || b < len(r) {
-        if b >= len(r) || (a < len(l) && !before(r[b], l[a])) {
-            push(out, l[a])
+    while a < l.len() || b < r.len() {
+        if b >= r.len() || (a < l.len() && !before(r[b], l[a])) {
+            out.push(l[a])
             a = a + 1
         } else {
-            push(out, r[b])
+            out.push(r[b])
             b = b + 1
         }
     }
@@ -114,7 +114,7 @@ fun skipped(name: str) -> bool {
 #test(".my")[false]
 #test("a.myx")[false]
 fun is_source(name: str) -> bool {
-    let n = len(name)
+    let n = name.len()
     return n > 3 && name[n - 3] == '.' && name[n - 2] == 'm' && name[n - 1] == 'y'
 }
 
@@ -132,9 +132,9 @@ fun walk(dir: str, depth: int32) -> [str] {
     for n in names {
         let path = dir + "/" + n
         if is_source(n) && !is_dir(path) {
-            push(out, path)
+            out.push(path)
         } else if !skipped(n) && depth < MAX_DEPTH && is_dir(path) {
-            for p in walk(path, depth + 1) { push(out, p) }
+            for p in walk(path, depth + 1) { out.push(p) }
         }
     }
     return out
@@ -147,12 +147,12 @@ impl Workspace {
         var seen: [str: bool] = [:]
         var out: [str] = []
         var dirs = self.roots
-        for d in extra { push(dirs, d) }
+        for d in extra { dirs.push(d) }
         for d in dirs {
             for p in walk(normalize(d), 0) {
-                if !contains(seen, p) {
+                if !seen.contains(p) {
                     seen[p] = true
-                    push(out, p)
+                    out.push(p)
                 }
             }
         }
@@ -193,7 +193,7 @@ impl Workspace {
     fun all_entries(var self, overrides: [str: str], extra: [str]) -> [Entry] {
         var out: [Entry] = []
         for path in self.files(extra) {
-            for e in self.entries_for(path, overrides) { push(out, e) }
+            for e in self.entries_for(path, overrides) { out.push(e) }
         }
         return out
     }
@@ -202,12 +202,12 @@ impl Workspace {
     fun lookup(var self, name: str, overrides: [str: str], extra: [str]) -> [Entry] {
         var matches: [Entry] = []
         for e in self.all_entries(overrides, extra) {
-            if e.name == name { push(matches, e) }
+            if e.name == name { matches.push(e) }
         }
         var out: [Entry] = []
         for p in 0..4 {
             for e in matches {
-                if priority(e.kind) == p { push(out, e) }
+                if priority(e.kind) == p { out.push(e) }
             }
         }
         return out
@@ -222,7 +222,7 @@ impl Workspace {
             match get(c.idents, name) {
                 Some(ranges) => {
                     for r in ranges {
-                        if !contains(c.locals, start_key(r)) { push(out, Location { path: path, range: r }) }
+                        if !c.locals.contains(start_key(r)) { out.push(Location { path: path, range: r }) }
                     }
                 },
                 None => {},

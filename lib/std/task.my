@@ -11,7 +11,7 @@
 
 // The results of `fs`, run as child tasks at once, in the order of `fs`.
 pub async fun all<T>(fs: [async () -> T]) -> [T] {
-    if len(fs) == 0 {
+    if fs.len() == 0 {
         return []
     }
     return await run_halves(fs)
@@ -19,25 +19,25 @@ pub async fun all<T>(fs: [async () -> T]) -> [T] {
 
 // The results of `fs` (not empty), run as child tasks.
 async fun run_halves<T>(fs: [async () -> T]) -> [T] {
-    if len(fs) == 1 {
+    if fs.len() == 1 {
         let f = fs[0]
         return [await f()]
     }
-    let mid = len(fs) / 2
+    let mid = fs.len() / 2
     var low: [async () -> T] = []
     var high: [async () -> T] = []
-    for i in 0..len(fs) {
+    for i in 0..fs.len() {
         if i < mid {
-            push(low, fs[i])
+            low.push(fs[i])
         } else {
-            push(high, fs[i])
+            high.push(fs[i])
         }
     }
     async let left = run_halves(low)
     async let right = run_halves(high)
     var out = await left
     for x in await right {
-        push(out, x)
+        out.push(x)
     }
     return out
 }
@@ -56,4 +56,13 @@ pub fun cancel(child: int) {
 // in the program's first task and outside any task.
 pub fun cancelled() -> bool {
     return __task_cancelled()
+}
+
+// `await task.yield()`: a turn for the other tasks, and nothing else (D107,
+// MYLA-228). The running task goes behind the ready ones (D110) and goes on
+// when its turn comes; a task the end of the program stopped stops here (D97),
+// so a loop that would never wait otherwise (a sibling spinning while another
+// fails) gives the others a turn with it.
+pub async fun yield() {
+    await __yield()
 }

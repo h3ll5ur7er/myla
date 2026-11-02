@@ -37,7 +37,7 @@ pub fun is_xid_continue(c: int32) -> bool {
 #test("y", 60)[false]
 fun in_table(table: str, c: int32) -> bool {
     var lo = 0
-    var hi = len(table) / 12
+    var hi = table.len() / 12
     while lo < hi {
         let mid = (lo + hi) / 2
         if hex6(table, mid * 12 + 6) < c {
@@ -46,7 +46,7 @@ fun in_table(table: str, c: int32) -> bool {
             hi = mid
         }
     }
-    return lo < len(table) / 12 && hex6(table, lo * 12) <= c
+    return lo < table.len() / 12 && hex6(table, lo * 12) <= c
 }
 
 // The 6 hex digits of `table` from `at`.

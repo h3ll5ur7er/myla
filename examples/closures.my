@@ -29,7 +29,7 @@ fun apply_n<T>(f: (T) -> T, x: T, n: int) -> T {
 fun map_list<T>(xs: [T], f: (T) -> T) -> [T] {
     var out: [T] = []
     for x in xs {
-        push(out, f(x))
+        out.push(f(x))
     }
     return out
 }
@@ -83,9 +83,9 @@ fun inc_then_square(n: int) -> int {
 #test(2)[18]
 fun sum_doubled(n: int) -> int {
     var xs: [int] = []
-    push(xs, n)
-    push(xs, n + 1)
-    push(xs, n + 2)
+    xs.push(n)
+    xs.push(n + 1)
+    xs.push(n + 2)
     let doubled = map_list(xs, (x: int) => x * 2)
     var total = 0
     for v in doubled {
@@ -107,7 +107,7 @@ fun list_of_closures(base: int) -> int {
     var k = 1
     while k <= 3 {
         let cap = base + k * 10                 // a distinct value per iteration
-        push(fns, (n: int) => n + cap)          // each closure keeps its own `cap`
+        fns.push((n: int) => n + cap)          // each closure keeps its own `cap`
         k = k + 1
     }
     return fns[0](0) + fns[1](0) + fns[2](0)

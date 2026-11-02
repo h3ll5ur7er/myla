@@ -3,5 +3,5 @@
 #main
 fun main() {
     var xs = [1, 2, 3]
-    push(xs, "four")
+    xs.push("four")
 }

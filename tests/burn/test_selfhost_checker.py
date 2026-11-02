@@ -29,7 +29,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ._golden import golden
+from ._golden import NoGolden, golden
 from ._mutants import mutants
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import selfhost_tool
@@ -304,12 +304,12 @@ TYPE_ERRORS: dict[str, str] = {
 WARNINGS: dict[str, str] = {
     # a `__` primitive called from a program: a warning, once per place, also
     # in a lambda (D100, MYLA-186)
-    'warn_primitive_called': 'fun main() {\n    let d = __getcwd()\n    let f = () => __io_errno()\n    print(f() + len(d))\n    __exit(0)\n}\n',
+    'warn_primitive_called': 'fun main() {\n    let d = __getcwd()\n    let f = () => __io_errno()\n    print(f() + d.len())\n    __exit(0)\n}\n',
     'warn_reentrancy_stale_check': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun buy(var self, p: Pay) -> bool {\n        if self.stock == 0 {\n            return false\n        }\n        let paid = await p.charge()\n        self.stock = self.stock - 1\n        return true\n    }\n}\n',
     'warn_reentrancy_recheck_is_quiet': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun buy(var self, p: Pay) -> bool {\n        if self.stock == 0 {\n            return false\n        }\n        let paid = await p.charge()\n        if self.stock > 0 {\n            self.stock = self.stock - 1\n            return true\n        }\n        return false\n    }\n}\n',
     'warn_reentrancy_reserve_is_quiet': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun buy(var self, p: Pay) -> bool {\n        if self.stock == 0 {\n            return false\n        }\n        self.stock = self.stock - 1\n        let paid = await p.charge()\n        if !paid {\n            self.stock = self.stock + 1\n        }\n        return paid\n    }\n}\n',
     'warn_reentrancy_stale_value': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n}\nimpl Inv {\n    async fun restock(var self, p: Pay) {\n        let s = self.stock\n        let paid = await p.charge()\n        self.stock = s + 10\n    }\n}\n',
-    'warn_reentrancy_push_and_loop': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n    sold: [str],\n    m: [str: int],\n}\nimpl Inv {\n    async fun record(var self, p: Pay, who: str) {\n        if len(self.sold) < 10 {\n            let paid = await p.charge()\n            push(self.sold, who)\n        }\n        let n = ["k": self.stock]\n        let again = await p.charge()\n        self.m = n\n    }\n    async fun drain(var self, p: Pay) {\n        while self.stock > 0 {\n            let paid = await p.charge()\n            self.stock = self.stock - 1\n        }\n    }\n}\n',
+    'warn_reentrancy_push_and_loop': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: int,\n    sold: [str],\n    m: [str: int],\n}\nimpl Inv {\n    async fun record(var self, p: Pay, who: str) {\n        if self.sold.len() < 10 {\n            let paid = await p.charge()\n            self.sold.push(who)\n        }\n        let n = ["k": self.stock]\n        let again = await p.charge()\n        self.m = n\n    }\n    async fun drain(var self, p: Pay) {\n        while self.stock > 0 {\n            let paid = await p.charge()\n            self.stock = self.stock - 1\n        }\n    }\n}\n',
     'warn_reentrancy_match_and_lambda': 'actor Pay {\n    n: int,\n}\nimpl Pay {\n    fun charge(var self) -> bool {\n        self.n = self.n + 1\n        return true\n    }\n}\nactor Inv {\n    stock: Option<int>,\n    hits: int,\n}\nimpl Inv {\n    async fun take(var self, p: Pay) -> int {\n        let f = () => { return 1 }\n        match self.stock {\n            Some(n) => {\n                let paid = await p.charge()\n                self.stock = Some(n - f())\n            },\n            None => {},\n        }\n        let x = await p.charge()\n        self.hits = self.hits + 1\n        return self.hits\n    }\n}\n',
 }
 
@@ -348,6 +348,13 @@ SELF_METHOD_WARNINGS: dict[str, tuple[str, list[str]]] = {
         "    async fun buy(var self, p: Pay) -> bool {\n        if !self.has_stock() {\n            return false\n        }\n"
         "        self.take()\n        let paid = await p.charge()\n        return paid\n    }\n}\n",
         []),
+}
+
+# Verdicts a later decision changed from the retired Python checker's
+# recording, pinned here.
+SUPERSEDED: dict[str, str] = {
+    # D102: the unsuffixed 2.0 is a float64
+    "unit_test_79": "err 3 8 3:8-3:9 type: type mismatch: 'int32' vs 'float64' (no implicit conversion between numeric types)",
 }
 
 def _corpus() -> list[str]:
@@ -446,7 +453,10 @@ class SelfHostedCheckerParity(unittest.TestCase):
     def test_corpus_check_parity(self) -> None:
         checked = 0
         for path in _corpus():
-            expected = _oracle(path)
+            try:
+                expected = _oracle(path)
+            except NoGolden:
+                continue    # a file added to the corpus since has no recording: test_error_corpus holds it to the self-hosted CLI
             if expected is None:
                 continue  # not part of the checker-parity gate
             with self.subTest(file=os.path.relpath(path, _REPO)):
@@ -460,7 +470,7 @@ class SelfHostedCheckerParity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for name, source in _snippets().items():
                 with self.subTest(case=name):
-                    expected = _oracle_source(source)
+                    expected = SUPERSEDED.get(name) or _oracle_source(source)
                     self.assertIn(" type: ", expected, "not a type error in Python")
                     path = os.path.join(tmp, name + ".my")
                     with open(path, "w", encoding="utf-8") as fh:

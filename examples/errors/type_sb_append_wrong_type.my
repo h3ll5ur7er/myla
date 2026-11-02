@@ -3,5 +3,5 @@
 #main
 fun main() {
     var sb = StringBuilder()
-    append(sb, 65)
+    sb.append(65)
 }

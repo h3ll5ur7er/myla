@@ -66,31 +66,29 @@ fun main() {
 | `let x = 1;` at the end of every line | `let x = 1` | A newline ends a statement. `;` is optional and only separates statements or declarations on one line (`let a = 1; let b = 2`); never inside `( )`, `[ ]`, struct fields or match arms |
 | `let mut x`, `var x` (Swift ok) | `var x = 1` | `let` is immutable (deeply), `var` mutable |
 | `fun f() -> int { x + 1 }` | `{ return x + 1 }` | Function bodies need `return`; there is no implicit tail value |
-| `let v = if c { 1 } else { 2 }` | `let v = match c { true => 1, false => 2 }` | `if` is a statement, `match` is an expression |
-| `x += 1`, `x++` | `x = x + 1` | No compound assignment, no `++` |
+| `c ? 1 : 2`, `let v = if c { 1 }` | `let v = if c { 1 } else { 2 }` | `if` is an expression when used as a value, with a required `else` (D104); no `?:` |
+| `x++`, `x--` | `x += 1`, `x -= 1` | Compound assignment exists (`+=` … `>>=`, D104), `++` doesn't |
 | `E::A`, `.a` (Swift) to construct | `E.A`, `E.B(1)` | Variants are built with a dot; only `Some`/`None`/`Ok`/`Err` work bare |
 | `Point::new()`, `static func` | a free function `fun new_point() -> Point` | No associated/static functions: every method takes `self` |
 | `&self`, `&mut self`, `&x`, lifetimes | `self`, `var self`, plain values | No references or borrowing; everything is a value (copy-on-write under the hood) |
-| `xs.push(v)`, `xs.len()`, `s.len()` | `push(xs, v)`, `len(xs)`, `len(s)` | Collection operations are built-in functions; `push`/`pop`/`remove`/`append` need a `var` place |
-| `opt.unwrap()`, `.map(…)`, `.unwrap_or(…)` | `match opt { Some(v) => v, None => 0 }` or `?` | `Option`/`Result` have no methods |
+| `opt.unwrap()`, `.map(…)`, `.unwrap_or(…)` | `match opt { Some(v) => v, None => 0 }`, `if let Some(v) = opt { … }` or `?` | `Option`/`Result` have no methods; `if let`/`while let` (D104) are sugar over `match` |
 | `\|x\| x + 1`, `{ x in x + 1 }` | `(x: int) => x + 1`, `(x) => { return x }` | Lambda syntax; parameter types can be omitted only when a function type is expected |
 | `Fn(i32) -> i32`, `(Int) -> Int` | `(int) -> int` | Function types |
 | `println!("{}", x)`, `print("\(x)")` | `print(x)`, `print(f"x = {x}")`, `format("x = {}", x)` | `print` takes exactly one int/float/char/bool/str |
 | `0..=n`, `loop { }`, labelled breaks | `0..n + 1`, `while true { }` | Ranges are half-open and only exist in `for` heads; no `loop`, no labels |
 | `255_u8` | `255u8` | `_` only between digits |
-| `i32`, `u8`, `f64`, `Int`, `Double` as types | `int32`, `uint8`, `float64`, `int` | Type names are spelled out; suffixes are short (`5i64`, `2f64`) |
+| `i32`, `u8`, `f64`, `Int`, `Double` as types | `int32`, `uint8`, `float64` (or `float`), `int` | Type names are spelled out; suffixes are short (`5i64`, `2f64`) |
 | `#[derive(PartialEq)]`, `#[test]` | `#derive(Eq)`, `#test(args)[expected]` | Attributes |
 | `mod x;`, `use a::b;`, `import Foundation` | `from .x import f`, `import a.b as b`, `from std.io import println` | Python-like imports, `pub` exports |
 | `impl Add for P { type Output … fn add(self, o: P) -> P }` | `impl Add for P { fun add(self, other: P) -> P { … } }` | Operator traits have no associated types; `Ord` is `cmp(self, other: Self) -> int` |
 | trait default method bodies | signatures only | `trait T { fun m(self) -> int }` |
 | `f::<int>(x)` | annotate: `let y: Box<int> = …` | No turbofish; type arguments only in type positions |
 | `x as f64` from `bool`/`str` | only numeric ↔ numeric and `char` ↔ integer | `as` |
-| a binary expression continued on the next line | keep it on one line, or split into `let`s | Newlines inside parentheses and after operators end the statement; only call arguments and literals may span lines |
-| `f(a, b,)` | `f(a, b)` | No trailing comma in calls or parameter lists (fine in struct/enum bodies and literals) |
+| a line that starts with an operator (`\n    + b`) | end the line with the operator (`a +`), or wrap the expression in `( )` | A statement goes on after a binary operator that ends a line and inside `( )`/`[ ]` (D104); a line that starts with an operator is a new statement |
 
 ## Types and conversions
 
-- `int` = `int32`, **`float` = `float32`**, and unsuffixed float literals default to `float32`: write `0.1f64` or annotate `let x: float64 = 0.1`.
+- `int` = `int32`, `float` = `float64`, and unsuffixed float literals default to `float64` (D102); for single precision write `0.1f32` or annotate `let x: float32 = 0.1`.
 - Integers: `int8`…`int64`, `uint8`…`uint64`, wrapping arithmetic. Also `bool`, `char` (Unicode scalar), `str` (immutable UTF-8 bytes), `StringBuilder`, tuples `(int, str)` (1-tuple `(int,)`), lists `[T]`, maps `[K: V]` (keys: integers, `char`, `bool`, `str`), function types, structs, enums, generics.
 - **No implicit conversion at all.** A literal adapts to its context (`let b: uint8 = 200`, `x + 1` with `x: int64`), but a *variable* has a fixed type: `let n = 2` is an `int32`, so `big + n` with `big: int64` fails. Annotate (`let n: int64 = 2`) or cast (`n as int64`).
 - `s[i]` is a byte (`uint8`); `len(s)` counts bytes; `chars(s)` gives `[char]`; `'a'` is a `char` but fits a `uint8` when one is expected (`s[i] == 'a'` works). `+` concatenates strings; no slicing.
@@ -147,7 +145,7 @@ async fun main() {
 - `async let x = e` starts a child task; read it once with `await x`. A scope waits for its children. Only async functions have them, and a lambda can't `await` or `task.cancel` them.
 - An actor's state is reached only through `self` in its own methods; one method runs at a time, but an `await` inside an async method lets other calls in (a warning flags a field checked before an `await` and changed after it, D95).
 - Values cross between tasks and actors as deep copies; nothing mutable is shared but an actor. Captures can't be changed (D93).
-- `std.task`: `await task.all(fs)` runs a list of `async () -> T` functions as children; `task.cancel(a)` asks the child `a` to stop and `task.cancelled()` is how a task checks (cooperative, D96).
+- `std.task`: `await task.all(fs)` runs a list of `async () -> T` functions as children; `task.cancel(a)` asks the child `a` to stop and `task.cancelled()` is how a task checks (cooperative, D96); `await task.yield()` gives the other tasks a turn (a long loop's way to let a failure elsewhere end the program).
 - A failure (panic, runtime error, `exit`) in any task ends the program at once: the others stop at their next `await` (D97).
 - Native code runs tasks in parallel on `MYLA_THREADS` workers, one per CPU by default (`build/myla build`, D92); the interpreter (`build/myla run`) runs them one at a time, taking turns at each `await`.
 
@@ -155,7 +153,8 @@ async fun main() {
 
 - The CLI is `build/myla`; if it is missing, run `scripts/bootstrap.sh` first (it needs only `as` and `ld`, about 8 seconds). Run: `build/myla run file.my`, test: `build/myla test file.my`, compile: `build/myla build file.my -o out` (`-g` for gdb), type-check: `build/myla check file.my`, interactive: `build/myla repl`; in a project with a `myla.toml` also `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` (D73).
 - The standard library is in `lib/std/`; the tests are in `tests/burn/` (`scripts/test.sh fast`, or `scripts/test.sh` for all).
-- `#test` cases go above a function, or above a method inside its `impl` with the receiver as the first argument (`#test(Counter { n: 2 }, 3)[5]`, D116).
+- The builtin collection and string functions are methods too (D103): `xs.push(v)`, `xs.pop()`, `xs.len()`, `m.contains(k)`, `m.remove(k)`, `m.keys()`, `s.len()`, `s.chars()`, `sb.append(s)`, `sb.append_byte(b)`, `sb.build()`; the function forms (`push(xs, v)`, `len(xs)`) still work. A mutating one needs a `var` place.
+- `#test` cases go above a function, or above a method inside its `impl` with the receiver as the first argument (`#test(Counter { n: 2 }, 3)[5]`, D116). A trailing comment names a case: `#test(1, 2)[3] // small numbers` reports `PASS  add #1 (small numbers)` (MYLA-239).
 - Every value-returning function in `examples/` needs `#test(args)[expected]` cases (a burn test enforces it); add them to new functions in `selfhost/` too: the target there is at least 80 % of value-returning functions (D109).
 - New examples must be registered in `tests/burn/test_examples_run.py` and `tests/burn/test_examples_compile.py`; programs that must be rejected go to `examples/errors/` with a first line `//~ <lex|parse|module|type|runtime> error: <message substring>` (more directives, such as `//~ span:`, in `tests/burn/test_error_corpus.py`).
 - A ```` ```myla ```` block in `docs/` or the README is a tested program (`tests/burn/test_doc_blocks.py`): it must check and, with a `main`, run; it may end with `// output:` and one `// ` line per printed line. Mark pieces ```` ```myla fragment ```` and deliberately wrong code ```` ```myla error ```` (D114).

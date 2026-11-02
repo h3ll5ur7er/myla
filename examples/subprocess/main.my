@@ -10,9 +10,9 @@ from std.process import run, command, Output, ExitStatus, SpawnError, exit
 fun decode(bytes: [uint8]) -> str {
     var sb = StringBuilder()
     for b in bytes {
-        append_byte(sb, b)
+        sb.append_byte(b)
     }
-    return build(sb)
+    return sb.build()
 }
 
 fun describe_status(s: ExitStatus) -> str {

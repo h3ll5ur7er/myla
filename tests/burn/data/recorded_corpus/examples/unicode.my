@@ -1,0 +1,40 @@
+// Unicode in identifiers and string escapes (MYLA-84, MYLA-86, D72):
+// identifiers follow Unicode's identifier syntax (a letter of any script or
+// `_`, then letters, digits, combining marks, ...), and strings and f-strings
+// take the escapes chars take: \n \t \r \0 \\ \" \' and \u{…}.
+
+#test(2, 3)[6]
+fun fläche(breite: int, höhe: int) -> int {
+    return breite * höhe
+}
+
+// The line ending a protocol such as HTTP or the language server's uses.
+#test()[2]
+fun crlf_len() -> int {
+    return len("\r\n")
+}
+
+#test()["é"]
+fun accent() -> str {
+    return "\u{e9}"
+}
+
+// A string's length counts bytes: π is two in UTF-8.
+#test("π")[2]
+#test("a\0b")[3]
+fun bytes_of(s: str) -> int {
+    return len(s)
+}
+
+fun main() {
+    let π = 3
+    let größe = fläche(π, 2)
+    print(größe)
+    print(f"{größe}\u{20AC}")
+    print(f"\u{7B}{größe}\u{7D}")
+    print(bytes_of("a\0b"))
+    print(accent() == "é")
+    let quote = '\"'
+    print(quote)
+    print("it\'s \u{1F600}")
+}

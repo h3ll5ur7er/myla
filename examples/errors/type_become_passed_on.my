@@ -11,7 +11,7 @@ fun start(s0: str, g: (str) -> int) -> int {
     become relay("a" + s0, g)
 }
 fun size(s: str) -> int {
-    return len(s)
+    return s.len()
 }
 fun main() {
     print(start("b", size))

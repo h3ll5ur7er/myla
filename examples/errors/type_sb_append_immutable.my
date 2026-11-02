@@ -3,5 +3,5 @@
 #main
 fun main() {
     let sb = StringBuilder()
-    append(sb, "x")
+    sb.append("x")
 }

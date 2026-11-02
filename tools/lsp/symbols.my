@@ -145,20 +145,20 @@ impl Builder {
             DeclKind.StructDecl(name, fields, attrs, tps, is_pub, act) => {
                 var kw = "struct"
                 if act { kw = "actor" }
-                let k = self.add(d.line, d.col, name, SymKind.Struct, header(is_pub, kw, name, tps), name, false, -1, len(fields) > 0)
+                let k = self.add(d.line, d.col, name, SymKind.Struct, header(is_pub, kw, name, tps), name, false, -1, fields.len() > 0)
                 for f in fields { self.add(f.line, f.col, f.name, SymKind.Field, type_str(f.ty), f.name, false, k, false) }
             },
             DeclKind.EnumDecl(name, variants, attrs, tps, is_pub) => {
-                let k = self.add(d.line, d.col, name, SymKind.Enum, header(is_pub, "enum", name, tps), name, false, -1, len(variants) > 0)
+                let k = self.add(d.line, d.col, name, SymKind.Enum, header(is_pub, "enum", name, tps), name, false, -1, variants.len() > 0)
                 for v in variants { self.add(v.line, v.col, v.name, SymKind.EnumMember, variant_detail(v), v.name, false, k, false) }
             },
             DeclKind.TraitDecl(name, methods, tps, is_pub) => {
-                let k = self.add(d.line, d.col, name, SymKind.Interface, header(is_pub, "trait", name, tps), name, false, -1, len(methods) > 0)
+                let k = self.add(d.line, d.col, name, SymKind.Interface, header(is_pub, "trait", name, tps), name, false, -1, methods.len() > 0)
                 for m in methods { self.fun_symbol(m, k) }
             },
             DeclKind.ImplDecl(target, methods, tps, tr, targs) => {
                 let t = type_str(target)
-                let k = self.add(d.line, d.col, t, SymKind.Impl, impl_header(target, tps, tr, targs), type_head(target), true, -1, len(methods) > 0)
+                let k = self.add(d.line, d.col, t, SymKind.Impl, impl_header(target, tps, tr, targs), type_head(target), true, -1, methods.len() > 0)
                 for m in methods { self.fun_symbol(m, k) }
             },
             DeclKind.FunDecl(fd) => { self.fun_symbol(fd, -1) },
@@ -204,8 +204,8 @@ impl Builder {
         }
         var shown = name
         if shown == "" { shown = "?" }
-        push(self.out, Symbol { name: shown, kind: kind, detail: detail, range: full, selection: sel, parent: parent })
-        return len(self.out) - 1
+        self.out.push(Symbol { name: shown, kind: kind, detail: detail, range: full, selection: sel, parent: parent })
+        return self.out.len() - 1
     }
 
     fun token_end(self, i: int32) -> Pos {
@@ -216,7 +216,7 @@ impl Builder {
     // The first token at or after (line, col) (binary search).
     fun token_index(self, line: int32, col: int32) -> int32 {
         var lo = 0
-        var hi = len(self.toks)
+        var hi = self.toks.len()
         while lo < hi {
             let mid = (lo + hi) / 2
             let t = self.toks[mid]
@@ -231,7 +231,7 @@ impl Builder {
     fun name_token(self, i: int32, line: int32, name: str, last: bool) -> int32 {
         var found = -1
         var k = i
-        while k < len(self.toks) {
+        while k < self.toks.len() {
             let t = self.toks[k]
             let nl = t.kind == TokenKind.NEWLINE
             if !(nl && t.line == line) {
@@ -253,7 +253,7 @@ impl Builder {
         var depth = 0
         var last = -1
         var k = i
-        while k < len(self.toks) {
+        while k < self.toks.len() {
             let t = self.toks[k].kind
             if t == TokenKind.LPAREN || t == TokenKind.LBRACKET || t == TokenKind.LBRACE {
                 depth = depth + 1
@@ -277,7 +277,7 @@ impl Builder {
 pub fun type_str(t: TypeExpr) -> str {
     match t.kind {
         TypeKind.TRef(name, args) => {
-            if len(args) == 0 { return name }
+            if args.len() == 0 { return name }
             return name + "<" + type_list(args) + ">"
         },
         _ => {},
@@ -300,11 +300,11 @@ fun type_list(ts: [TypeExpr]) -> str {
     var sb = StringBuilder()
     var first = true
     for t in ts {
-        if !first { append(sb, ", ") }
-        append(sb, type_str(t))
+        if !first { sb.append(", ") }
+        sb.append(type_str(t))
         first = false
     }
-    return build(sb)
+    return sb.build()
 }
 
 // The bare name of an impl's target.
@@ -318,23 +318,23 @@ fun type_head(t: TypeExpr) -> str {
 // `<T: Eq + Ord, U>`, or "" for none.
 #test([])[""]
 fun type_params_str(tps: [TypeParam]) -> str {
-    if len(tps) == 0 { return "" }
+    if tps.len() == 0 { return "" }
     var sb = StringBuilder()
-    append(sb, "<")
+    sb.append("<")
     var i = 0
     for tp in tps {
-        if i > 0 { append(sb, ", ") }
-        append(sb, tp.name)
+        if i > 0 { sb.append(", ") }
+        sb.append(tp.name)
         var j = 0
         for b in tp.bounds {
-            if j == 0 { append(sb, ": ") } else { append(sb, " + ") }
-            append(sb, b)
+            if j == 0 { sb.append(": ") } else { sb.append(" + ") }
+            sb.append(b)
             j = j + 1
         }
         i = i + 1
     }
-    append(sb, ">")
-    return build(sb)
+    sb.append(">")
+    return sb.build()
 }
 
 // `pub struct Box<T>`: a type declaration's header.
@@ -350,7 +350,7 @@ fun impl_header(target: TypeExpr, tps: [TypeParam], tr: Option<str>, targs: [Typ
     match tr {
         Some(t) => {
             out = out + t
-            if len(targs) > 0 { out = out + "<" + type_list(targs) + ">" }
+            if targs.len() > 0 { out = out + "<" + type_list(targs) + ">" }
             out = out + " for "
         },
         None => {},
@@ -359,37 +359,37 @@ fun impl_header(target: TypeExpr, tps: [TypeParam], tr: Option<str>, targs: [Typ
 }
 
 fun variant_detail(v: Variant) -> str {
-    if len(v.payload) == 0 { return "" }
+    if v.payload.len() == 0 { return "" }
     return "(" + type_list(v.payload) + ")"
 }
 
 // `fun name(self, a: T) -> R`
 pub fun signature(fd: FunData) -> str {
     var sb = StringBuilder()
-    if fd.is_pub { append(sb, "pub ") }
-    append(sb, async_str(fd.is_async))
-    append(sb, "fun " + fd.name + type_params_str(fd.type_params) + "(")
+    if fd.is_pub { sb.append("pub ") }
+    sb.append(async_str(fd.is_async))
+    sb.append("fun " + fd.name + type_params_str(fd.type_params) + "(")
     var first = true
     match fd.receiver {
         Some(r) => {
-            append(sb, r)
+            sb.append(r)
             first = false
         },
         None => {},
     }
     for p in fd.params {
-        if !first { append(sb, ", ") }
-        append(sb, p.name + ": ")
+        if !first { sb.append(", ") }
+        sb.append(p.name + ": ")
         match p.ty {
-            Some(t) => { append(sb, type_str(t)) },
-            None => { append(sb, "?") },
+            Some(t) => { sb.append(type_str(t)) },
+            None => { sb.append("?") },
         }
         first = false
     }
-    append(sb, ")")
+    sb.append(")")
     match fd.ret_type {
-        Some(t) => { append(sb, " -> " + type_str(t)) },
+        Some(t) => { sb.append(" -> " + type_str(t)) },
         None => {},
     }
-    return build(sb)
+    return sb.build()
 }

@@ -68,12 +68,12 @@ fun to_json(t: Toml) -> Json {
         Toml.Bool(b) => Json.Bool(b)
         Toml.Array(items) => {
             var out: [Json] = []
-            for x in items { push(out, to_json(x)) }
+            for x in items { out.push(to_json(x)) }
             Json.Array(out)
         }
         Toml.Table(members) => {
             var out: [(str, Json)] = []
-            for m in members { push(out, (m.0, to_json(m.1))) }
+            for m in members { out.push((m.0, to_json(m.1))) }
             Json.Object(out)
         }
     }

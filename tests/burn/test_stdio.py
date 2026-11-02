@@ -105,7 +105,7 @@ class TestStdioParity(unittest.TestCase):
     def test_argc_via_len(self):
         out, _, _ = run_source_both(
             "from std.process import args\n"
-            "fun main() { print(len(args())) }\n",
+            "fun main() { print(args().len()) }\n",
             args=["x", "y"],
         )
         self.assertEqual(out, "3\n")   # program name + 2 arguments
@@ -113,7 +113,7 @@ class TestStdioParity(unittest.TestCase):
     def test_args_only_program_name(self):
         out, _, _ = run_source_both(
             "from std.process import args\n"
-            "fun main() { print(len(args())) }\n",
+            "fun main() { print(args().len()) }\n",
         )
         self.assertEqual(out, "1\n")
 

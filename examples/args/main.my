@@ -7,7 +7,7 @@ from std.process import args
 
 fun main() {
     let argv = args()
-    print(len(argv))             // argc, including the program name
+    print(argv.len())             // argc, including the program name
     for arg in argv {
         println(arg)
     }

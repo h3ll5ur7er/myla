@@ -23,14 +23,14 @@ struct GitRun { ok: bool, out: str, err: str }
 #test([0, 1])["\0\u{1}"]
 fun text_of(bytes: [uint8]) -> str {
     var sb = StringBuilder()
-    for b in bytes { append_byte(sb, b) }
-    return build(sb)
+    for b in bytes { sb.append_byte(b) }
+    return sb.build()
 }
 
 // Run `git args…`.
 fun git(argv: [str]) -> GitRun {
     var full = ["GIT_TERMINAL_PROMPT=0", "git"]
-    for a in argv { push(full, a) }
+    for a in argv { full.push(a) }
     return match run("/usr/bin/env", full) {
         Ok(out) => finished(out)
         Err(e) => GitRun { ok: false, out: "", err: "cannot run /usr/bin/env\n" }
@@ -72,13 +72,13 @@ pub fun remote_commit(name: str, g: GitSource) -> Result<str, str> {
         },
     }
     var argv = ["ls-remote", g.url]
-    for r in refs { push(argv, r) }
+    for r in refs { argv.push(r) }
     let r = git(argv)
     if !r.ok { return Err(format("myla: dependency '{}': git ls-remote {} failed\n{}", name, g.url, trim_end(r.err))) }
     var found = ""
     for line in lines(r.out) {
         let (sha, name_of_ref) = split_tab(line)
-        if len(refs) == 2 && name_of_ref == refs[1] { return Ok(sha) }        // the peeled tag
+        if refs.len() == 2 && name_of_ref == refs[1] { return Ok(sha) }        // the peeled tag
         if name_of_ref == refs[0] { found = sha }
     }
     if found == "" { return Err(format("myla: dependency '{}': there is no {} in {}", name, what, g.url)) }
@@ -122,7 +122,7 @@ pub fun checked_out_project(manifest: str) -> Result<Project, str> {
             Ok(p) => p
             Err(e) => { return Err(render_project_error(e)) }
         }
-        if len(p.missing) == 0 { return Ok(p) }
+        if p.missing.len() == 0 { return Ok(p) }
         for g in p.missing { check_out(g)? }
         rounds = rounds + 1
     }
@@ -147,7 +147,7 @@ pub fun fetch(manifest: str, update: bool) -> Result<int32, str> {
             Ok(p) => p
             Err(e) => { return Err(render_project_error(e)) }
         }
-        if len(p.unlocked) == 0 && len(p.missing) == 0 { return write_lock(p) }
+        if p.unlocked.len() == 0 && p.missing.len() == 0 { return write_lock(p) }
         for g in p.unlocked {
             let commit = remote_commit(g.name, g.git)?
             lock = with_entry(lock, LockEntry { name: g.name, git: GitSource { url: g.git.url, reference: g.git.reference, commit: commit } })
@@ -162,7 +162,7 @@ pub fun fetch(manifest: str, update: bool) -> Result<int32, str> {
 fun write_lock(p: Project) -> Result<int32, str> {
     let lock = lock_of(p)
     let path = parent_dir(p.manifest) + "/myla.lock"
-    if len(lock.entries) == 0 && !is_file(path) { return Ok(0) }
+    if lock.entries.len() == 0 && !is_file(path) { return Ok(0) }
     return match write_to_file(path, render_lock(lock)) {
         Ok(n) => Ok(0)
         Err(e) => Err("myla: cannot write " + path)
@@ -173,9 +173,9 @@ fun write_lock(p: Project) -> Result<int32, str> {
 fun with_entry(lock: Lock, e: LockEntry) -> Lock {
     var entries: [LockEntry] = []
     for old in lock.entries {
-        if old.name != e.name { push(entries, old) }
+        if old.name != e.name { entries.push(old) }
     }
-    push(entries, e)
+    entries.push(e)
     return Lock { entries: entries }
 }
 
@@ -190,10 +190,10 @@ fun remove_tree(path: str) -> bool {
 #test("4f3c2a1e9b0d5c6a7e8f9a0b1c2d3e4f5a6b7c8d")["4f3c2a1"]
 #test("abc")["abc"]
 fun short(commit: str) -> str {
-    if len(commit) <= 7 { return commit }
+    if commit.len() <= 7 { return commit }
     var sb = StringBuilder()
-    append(sb, commit, 0, 7)
-    return build(sb)
+    sb.append(commit, 0, 7)
+    return sb.build()
 }
 
 // The lines of `s`, without their line breaks (and without a last empty one).
@@ -203,19 +203,19 @@ fun lines(s: str) -> [str] {
     var out: [str] = []
     var start = 0
     var i = 0
-    while i < len(s) {
+    while i < s.len() {
         if s[i] == '\n' {
             var sb = StringBuilder()
-            append(sb, s, start, i)
-            push(out, build(sb))
+            sb.append(s, start, i)
+            out.push(sb.build())
             start = i + 1
         }
         i = i + 1
     }
-    if start < len(s) {
+    if start < s.len() {
         var sb = StringBuilder()
-        append(sb, s, start, len(s))
-        push(out, build(sb))
+        sb.append(s, start, s.len())
+        out.push(sb.build())
     }
     return out
 }
@@ -225,21 +225,21 @@ fun lines(s: str) -> [str] {
 #test("abc")[("abc", "")]
 fun split_tab(line: str) -> (str, str) {
     var i = 0
-    while i < len(line) && line[i] != '\t' { i = i + 1 }
+    while i < line.len() && line[i] != '\t' { i = i + 1 }
     var a = StringBuilder()
-    append(a, line, 0, i)
+    a.append(line, 0, i)
     var b = StringBuilder()
-    if i < len(line) { append(b, line, i + 1, len(line)) }
-    return (build(a), build(b))
+    if i < line.len() { b.append(line, i + 1, line.len()) }
+    return (a.build(), b.build())
 }
 
 // `s` without trailing line breaks and spaces.
 #test("x\n\n")["x"]
 #test("")[""]
 fun trim_end(s: str) -> str {
-    var end = len(s)
+    var end = s.len()
     while end > 0 && (s[end - 1] == '\n' || s[end - 1] == ' ' || s[end - 1] == '\r') { end = end - 1 }
     var sb = StringBuilder()
-    append(sb, s, 0, end)
-    return build(sb)
+    sb.append(s, 0, end)
+    return sb.build()
 }

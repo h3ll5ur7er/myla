@@ -3,5 +3,5 @@
 #main
 fun main() {
     let xs = [1, true, 3]
-    print(len(xs))
+    print(xs.len())
 }

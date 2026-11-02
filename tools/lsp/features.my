@@ -48,7 +48,7 @@ pub fun identifier_ranges(source: str, name: str) -> [Range] {
     }
     let lines = lines_of(source)
     for t in toks {
-        if t.kind == TokenKind.IDENT && t.lexeme == name { push(out, token_range(lines, t)) }
+        if t.kind == TokenKind.IDENT && t.lexeme == name { out.push(token_range(lines, t)) }
     }
     return out
 }
@@ -58,11 +58,11 @@ pub fun index_identifiers(lines: [str], toks: [Token]) -> [str: [Range]] {
     var out: [str: [Range]] = [:]
     for t in toks {
         if t.kind == TokenKind.IDENT {
-            if !contains(out, t.lexeme) {
+            if !out.contains(t.lexeme) {
                 var empty: [Range] = []
                 out[t.lexeme] = empty
             }
-            push(out[t.lexeme], token_range(lines, t))
+            out[t.lexeme].push(token_range(lines, t))
         }
     }
     return out
@@ -94,15 +94,15 @@ pub fun render(name: str, kind: SymKind, detail: str) -> str {
 #test("a😀b", 3)[2]
 #test("ab", 9)[2]
 pub fun from_lsp_character(text: str, character: int32) -> int32 {
-    let cps = chars(text)
+    let cps = text.chars()
     var units = 0
     var i = 0
-    while i < len(cps) {
+    while i < cps.len() {
         if (cps[i] as uint32) > 65535u32 { units = units + 2 } else { units = units + 1 }
         if units > character { return i }
         i = i + 1
     }
-    return len(cps)
+    return cps.len()
 }
 
 
@@ -112,8 +112,8 @@ pub fun from_lsp_character(text: str, character: int32) -> int32 {
 #test("p x", 0, 3)[false]
 pub fun is_member_access(source: str, line: int32, character: int32) -> bool {
     let lines = lines_of(source)
-    if line < 0 || line >= len(lines) { return false }
-    let cps = chars(lines[line])
+    if line < 0 || line >= lines.len() { return false }
+    let cps = lines[line].chars()
     var i = from_lsp_character(lines[line], character)
     while i > 0 && is_word(cps[i - 1]) { i = i - 1 }
     return i > 0 && cps[i - 1] == '.'
@@ -133,25 +133,25 @@ const PLACEHOLDER: str = "__complete"
 pub fun completion_attempts(source: str, line: int32, character: int32) -> [Attempt] {
     var out: [Attempt] = []
     let lines = lines_of(source)
-    if line < 0 || line >= len(lines) { return out }
-    let cps = chars(lines[line])
+    if line < 0 || line >= lines.len() { return out }
+    let cps = lines[line].chars()
     let cursor = from_lsp_character(lines[line], character)
     // the identifier the cursor is in or touches
     var start = cursor
     while start > 0 && is_word(cps[start - 1]) { start = start - 1 }
     var end = cursor
-    while end < len(cps) && is_word(cps[end]) { end = end + 1 }
+    while end < cps.len() && is_word(cps[end]) { end = end + 1 }
     var word = PLACEHOLDER
     if start < end { word = cps_text(cps, start, end) }
     let member = start > 0 && cps[start - 1] == '.'
     let prefix = cps_text(cps, 0, start)
-    let rest = cps_text(cps, end, len(cps))
+    let rest = cps_text(cps, end, cps.len())
     var first = source
     if start == end { first = with_line(lines, line, prefix + word + rest) }
-    push(out, Attempt { text: first, want: Pos { line: line, character: utf16_units(prefix, start) } })
+    out.push(Attempt { text: first, want: Pos { line: line, character: utf16_units(prefix, start) } })
     var chain = ""
     if member { chain = receiver_chain(cps_text(cps, 0, start - 1)) + "." }
-    push(out, Attempt { text: with_line(lines, line, chain + word), want: Pos { line: line, character: utf16_units(chain, code_points(chain)) } })
+    out.push(Attempt { text: with_line(lines, line, chain + word), want: Pos { line: line, character: utf16_units(chain, code_points(chain)) } })
     return out
 }
 
@@ -163,8 +163,8 @@ pub fun completion_attempts(source: str, line: int32, character: int32) -> [Atte
 #test("1 + ")[""]
 #test("print(größe")["größe"]
 pub fun receiver_chain(s: str) -> str {
-    let cps = chars(s)
-    var i = len(cps)
+    let cps = s.chars()
+    var i = cps.len()
     while true {
         // calls and indexing
         while i > 0 && (cps[i - 1] == ')' || cps[i - 1] == ']') {
@@ -177,16 +177,16 @@ pub fun receiver_chain(s: str) -> str {
                 if depth == 0 { break }
                 j = j - 1
             }
-            if j < 0 { return cps_text(cps, i, len(cps)) }
+            if j < 0 { return cps_text(cps, i, cps.len()) }
             i = j
         }
         let end = i
         while i > 0 && is_word(cps[i - 1]) { i = i - 1 }
-        if i == end { return cps_text(cps, i, len(cps)) }
+        if i == end { return cps_text(cps, i, cps.len()) }
         if i > 0 && cps[i - 1] == '.' {
             i = i - 1
         } else {
-            return cps_text(cps, i, len(cps))
+            return cps_text(cps, i, cps.len())
         }
     }
     return ""
@@ -196,22 +196,22 @@ fun cps_text(cps: [char], start: int32, end: int32) -> str {
     var sb = StringBuilder()
     var i = start
     while i < end {
-        append(sb, format("{}", cps[i]))
+        sb.append(format("{}", cps[i]))
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }
 
 // `lines` joined by line breaks, line `n` replaced by `text`.
 fun with_line(lines: [str], n: int32, text: str) -> str {
     var sb = StringBuilder()
     var i = 0
-    while i < len(lines) {
-        if i == n { append(sb, text) } else { append(sb, lines[i]) }
-        append(sb, "\n")
+    while i < lines.len() {
+        if i == n { sb.append(text) } else { sb.append(lines[i]) }
+        sb.append("\n")
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }
 
 // The reserved words and built-in type names completion offers.

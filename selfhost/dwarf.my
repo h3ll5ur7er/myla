@@ -59,10 +59,10 @@ pub fun uleb(n: int32) -> [int32] {
         let b = v & 0x7f
         v = v >> 7
         if v == 0 {
-            push(out, b)
+            out.push(b)
             return out
         }
-        push(out, b | 0x80)
+        out.push(b | 0x80)
     }
     unreachable()
 }
@@ -81,10 +81,10 @@ pub fun sleb(n: int32) -> [int32] {
         let b = v & 0x7f
         v = v >> 7
         if (v == 0 && (b & 0x40) == 0) || (v == -1 && (b & 0x40) != 0) {
-            push(out, b)
+            out.push(b)
             return out
         }
-        push(out, b | 0x80)
+        out.push(b | 0x80)
     }
     unreachable()
 }
@@ -93,20 +93,20 @@ pub fun sleb(n: int32) -> [int32] {
 #test([145, 120])["\t.byte 145, 120"]
 pub fun bytes_line(ops: [int32]) -> str {
     var sb = StringBuilder()
-    append(sb, "\t.byte ")
+    sb.append("\t.byte ")
     var i = 0
-    while i < len(ops) {
-        if i > 0 { append(sb, ", ") }
-        append(sb, format("{}", ops[i]))
+    while i < ops.len() {
+        if i > 0 { sb.append(", ") }
+        sb.append(format("{}", ops[i]))
         i = i + 1
     }
-    return build(sb)
+    return sb.build()
 }
 
 // An exprloc of plain bytes: its length, then the bytes.
 #test([145, 120])[["\t.uleb128 2", "\t.byte 145, 120"]]
 pub fun exprloc(ops: [int32]) -> [str] {
-    return [format("\t.uleb128 {}", len(ops)), bytes_line(ops)]
+    return [format("\t.uleb128 {}", ops.len()), bytes_line(ops)]
 }
 
 // The location of a `str` (data `data` bytes into its cell) or builder
@@ -115,10 +115,10 @@ pub fun exprloc(ops: [int32]) -> [str] {
 #test([145, 120], 8)[[145, 120, 6, 35, 8, 159, 147, 8, 145, 120, 6, 6, 159, 147, 8]]
 pub fun str_pieces(addr: [int32], data: int32) -> [int32] {
     var out: [int32] = []
-    for x in addr { push(out, x) }
-    for x in [OP_DEREF, OP_PLUS_UCONST, data, OP_STACK_VALUE, OP_PIECE, 8] { push(out, x) }
-    for x in addr { push(out, x) }
-    for x in [OP_DEREF, OP_DEREF, OP_STACK_VALUE, OP_PIECE, 8] { push(out, x) }
+    for x in addr { out.push(x) }
+    for x in [OP_DEREF, OP_PLUS_UCONST, data, OP_STACK_VALUE, OP_PIECE, 8] { out.push(x) }
+    for x in addr { out.push(x) }
+    for x in [OP_DEREF, OP_DEREF, OP_STACK_VALUE, OP_PIECE, 8] { out.push(x) }
     return out
 }
 
@@ -126,16 +126,16 @@ pub fun str_pieces(addr: [int32], data: int32) -> [int32] {
 #test("a\"b")["\t.string \"a\\\"b\""]
 pub fun dw_string(s: str) -> str {
     var sb = StringBuilder()
-    append(sb, "\t.string \"")
+    sb.append("\t.string \"")
     var i = 0
-    while i < len(s) {
+    while i < s.len() {
         let c = s[i]
-        if c == '\\' || c == '"' { append_byte(sb, '\\') }
-        append_byte(sb, c)
+        if c == '\\' || c == '"' { sb.append_byte('\\') }
+        sb.append_byte(c)
         i = i + 1
     }
-    append(sb, "\"")
-    return build(sb)
+    sb.append("\"")
+    return sb.build()
 }
 
 // A DW_FORM_ref4 to the DIE at `label`.
@@ -151,18 +151,18 @@ pub fun dw_ref(label: str) -> str {
 #test(1, 17, true, [37, 8, 19, 5, 3, 8, 27, 8, 17, 1, 18, 7, 16, 23])[["\t.uleb128 1, 17, 1", "\t.uleb128 37, 8, 19, 5, 3, 8, 27, 8, 17, 1, 18, 7, 16, 23, 0, 0"]]
 fun abbrev(code: int32, tag: int32, children: bool, attrs: [int32]) -> [str] {
     var line = StringBuilder()
-    append(line, "\t.uleb128 ")
-    for a in attrs { append(line, format("{}, ", a)) }
-    append(line, "0, 0")
+    line.append("\t.uleb128 ")
+    for a in attrs { line.append(format("{}, ", a)) }
+    line.append("0, 0")
     var ch = 0
     if children { ch = 1 }
-    return [format("\t.uleb128 {}, {}, {}", code, tag, ch), build(line)]
+    return [format("\t.uleb128 {}, {}, {}", code, tag, ch), line.build()]
 }
 
 // The `.debug_abbrev` section: the same table as the Python backend's.
 #test()[35]
 pub fun abbrev_count() -> int32 {
-    return len(abbrev_section()) as int32
+    return abbrev_section().len() as int32
 }
 
 pub fun abbrev_section() -> [str] {
@@ -190,8 +190,8 @@ pub fun abbrev_section() -> [str] {
         abbrev(AB_TAG, 0x0d, false, [0x03, str_, 0x49, ref4, 0x38, udata, 0x34, 0x19]),
         abbrev(AB_TYPED_SUBPROGRAM, 0x2e, true, [0x03, str_, 0x11, 0x01, 0x12, 0x07, 0x40, exprl, 0x49, ref4]),
     ]
-    for t in tables { for l in t { push(out, l) } }
-    push(out, "\t.byte 0")
+    for t in tables { for l in t { out.push(l) } }
+    out.push("\t.byte 0")
     return out
 }
 
@@ -200,17 +200,17 @@ pub fun abbrev_section() -> [str] {
 #test("ab\\\"c", 1, 4, "\\n")["\t.ascii \"b\\\\\\\"\\n\""]
 fun ascii_line(text: str, start: int32, stop: int32, end: str) -> str {
     var sb = StringBuilder()
-    append(sb, "\t.ascii \"")
+    sb.append("\t.ascii \"")
     var i = start
     while i < stop {
         let c = text[i]
-        if c == '\\' || c == '"' { append_byte(sb, '\\') }
-        append_byte(sb, c)
+        if c == '\\' || c == '"' { sb.append_byte('\\') }
+        sb.append_byte(c)
         i = i + 1
     }
-    append(sb, end)
-    append(sb, "\"")
-    return build(sb)
+    sb.append(end)
+    sb.append("\"")
+    return sb.build()
 }
 
 // `.debug_gdb_scripts` holding the Python `script` inline (D82): kind 4, the
@@ -220,18 +220,18 @@ fun ascii_line(text: str, start: int32, stop: int32, end: str) -> str {
 #test("a\nb")[["\t.section .debug_gdb_scripts,\"MS\",@progbits,1", "\t.byte 4", "\t.ascii \"myla-printers\\n\"", "\t.ascii \"a\\n\"", "\t.ascii \"b\"", "\t.byte 0"]]
 pub fun gdb_scripts_section(script: str) -> [str] {
     let name = "myla-printers"
-    var out = ["\t.section .debug_gdb_scripts,\"MS\",@progbits,1", "\t.byte 4", ascii_line(name, 0, len(name), "\\n")]
+    var out = ["\t.section .debug_gdb_scripts,\"MS\",@progbits,1", "\t.byte 4", ascii_line(name, 0, name.len(), "\\n")]
     var start = 0
     var i = 0
-    while i < len(script) {
+    while i < script.len() {
         if script[i] == '\n' {
-            push(out, ascii_line(script, start, i, "\\n"))
+            out.push(ascii_line(script, start, i, "\\n"))
             start = i + 1
         }
         i = i + 1
     }
-    if start < len(script) { push(out, ascii_line(script, start, len(script), "")) }
-    push(out, "\t.byte 0")
+    if start < script.len() { out.push(ascii_line(script, start, script.len(), "")) }
+    out.push("\t.byte 0")
     return out
 }
 

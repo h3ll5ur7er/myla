@@ -20,8 +20,9 @@ import subprocess
 import tempfile
 import unittest
 
-from ._golden import answer_for_file, golden
+from ._golden import NoGolden, answer_for_file, golden, recorded
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
+from ._continuation import without_continued_newlines
 from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
@@ -41,7 +42,8 @@ def _corpus() -> list[str]:
     files: list[str] = []
     for p in pats:
         files.extend(sorted(glob.glob(p)))
-    return files
+    # the files as the recordings saw them (rewritten since: MYLA-240)
+    return [recorded(f) for f in files]
 
 
 @golden("selfhost_lexer.tokens")
@@ -133,8 +135,14 @@ class SelfHostedLexerParity(unittest.TestCase):
     def test_corpus_token_parity(self) -> None:
         checked = 0
         for path in _corpus():
-            expected = _oracle(path)
+            # in the file's subtest: a file changed since the retirement skips
+            # only itself (the recorded copies sort after lib/ and selfhost/)
             with self.subTest(file=os.path.relpath(path, _REPO)):
+                try:
+                    # the recording without the line breaks D104 (3) continues
+                    expected = without_continued_newlines(_oracle(path))
+                except NoGolden:
+                    continue    # a file added to the corpus since has no recording: test_error_corpus holds it to the self-hosted CLI
                 actual = self._myla_lex(path)
                 self.assertEqual(actual, expected)
                 checked += 1

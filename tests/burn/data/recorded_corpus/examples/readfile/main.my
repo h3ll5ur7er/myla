@@ -1,0 +1,30 @@
+// Reading a file (v0.5.4c): std.fs.read_to_string returns the contents as a
+// `str` or an `IoError`, composed with the I/O streams, argv, and exit status.
+//
+// Run with:  myla run examples/readfile/main.my examples/readfile/poem.txt
+from std.io import write, eprintln
+from std.fs import read_to_string, IoError
+from std.process import args, exit
+
+fun describe(e: IoError) -> str {
+    return match e {
+        IoError.NotFound => "no such file",
+        IoError.PermissionDenied => "permission denied",
+        IoError.Other(code) => "I/O error",
+    }
+}
+
+fun main() {
+    let argv = args()
+    if len(argv) < 2 {
+        eprintln("usage: readfile <path>")
+        exit(2)
+    }
+    match read_to_string(argv[1]) {
+        Ok(contents) => write(1, contents),   // echo the file verbatim to stdout
+        Err(e) => {
+            eprintln(describe(e))
+            exit(1)
+        }
+    }
+}

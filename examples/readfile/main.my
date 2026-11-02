@@ -16,7 +16,7 @@ fun describe(e: IoError) -> str {
 
 fun main() {
     let argv = args()
-    if len(argv) < 2 {
+    if argv.len() < 2 {
         eprintln("usage: readfile <path>")
         exit(2)
     }

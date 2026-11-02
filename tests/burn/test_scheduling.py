@@ -24,10 +24,10 @@ async fun main() {
     var fs: [async () -> int] = []
     for i in 0..300000 {
         let k = i
-        push(fs, async () => k)
+        fs.push(async () => k)
     }
     let r = await task.all(fs)
-    print(len(r))
+    print(r.len())
 }
 """
 

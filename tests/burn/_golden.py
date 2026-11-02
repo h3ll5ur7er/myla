@@ -44,6 +44,19 @@ RECORD = os.environ.get("MYLA_GOLDEN") == "record"
 # (a program that names a file of the repository) is keyed as it was there
 RECORDED_REPO = "/home/user/myla"
 
+# the corpus files (examples/) as the recordings saw them, kept for the gates
+# that compare tokens and syntax trees, where an answer can't be moved to a
+# rewritten text (MYLA-240); keyed by their paths under examples/
+RECORDED_CORPUS = os.path.join(_REPO, "tests", "burn", "data", "recorded_corpus")
+
+
+def recorded(path: str) -> str:
+    """The file at `path` (under the repository) as the recordings saw it:
+    its copy in RECORDED_CORPUS when it was rewritten since, else itself."""
+    copy = os.path.join(RECORDED_CORPUS, os.path.relpath(os.path.abspath(path), _REPO))
+    return copy if os.path.exists(copy) else path
+
+
 _stores: dict[str, dict] = {}
 _lock = threading.Lock()
 
@@ -85,7 +98,10 @@ def _describe(arg, dirs: list[str]):
         for r in {_REPO, os.path.realpath(_REPO)}:   # as the recording checkout saw it
             data = data.replace(r.encode(), RECORDED_REPO.encode())
         digest = hashlib.sha256(data).hexdigest()
-        if path.startswith(_REPO + os.sep) and "/build/" not in path:
+        if path.startswith(RECORDED_CORPUS + os.sep):
+            # a corpus file as it was recorded, before a rewrite (MYLA-240)
+            where = os.path.relpath(path, RECORDED_CORPUS)
+        elif path.startswith(_REPO + os.sep) and "/build/" not in path:
             where = os.path.relpath(path, _REPO)
         else:
             where = os.path.basename(path)
@@ -134,6 +150,180 @@ def _decode(value):
     if isinstance(value, dict):
         return {k: _decode(v) for k, v in value.items()}
     return value
+
+
+# MYLA_GOLDEN_TRACE=<file>: every question asked is appended to the file, its
+# key and its arguments with the texts of the files they name (MYLA-240)
+TRACE = os.environ.get("MYLA_GOLDEN_TRACE")
+
+
+def _texts(arg):
+    """An argument with each file it names replaced by its path and text."""
+    if isinstance(arg, str) and len(arg) < 4096 and os.path.isfile(arg):
+        with open(arg, encoding="utf-8", errors="surrogateescape") as fh:
+            return {"path": os.path.abspath(arg), "text": fh.read()}
+    if isinstance(arg, (list, tuple)):
+        return [_texts(a) for a in arg]
+    if isinstance(arg, dict):
+        return {k: _texts(v) for k, v in sorted(arg.items())}
+    return arg
+
+
+def _trace(name: str, key: str, args: list, kwargs: dict, known: bool) -> None:
+    with _lock:
+        with open(TRACE, "a", encoding="utf-8", errors="surrogateescape") as fh:
+            fh.write(json.dumps({"oracle": name, "key": key, "known": known, "args": _texts(args),
+                                 "kwargs": _texts(kwargs)}, ensure_ascii=False) + "\n")
+
+
+# -- aliases: answers for programs rewritten since the recording (MYLA-240) --
+#
+# When programs moved from `push(xs, v)` to `xs.push(v)` (MYLA-221, D103), a
+# question about a rewritten program found no answer: keys hold the text.
+# `tests/burn/golden_aliases.py` traced every question before the rewrite
+# (`MYLA_GOLDEN_TRACE`), rewrote each text with `scripts/to_methods.py`, and
+# stored for each changed key the original's key and the lines that changed
+# (`aliases/<name>.json.gz`). The rewrite moves no line, so an answer's
+# positions move only in columns on those lines: `translate` moves them, and
+# puts the rewritten line where an answer shows source.
+
+_ALIAS_DIR = os.path.join(_DIR, "aliases")
+_alias_stores: dict[str, dict] = {}
+
+
+def _aliases(name: str) -> dict:
+    with _lock:
+        if name not in _alias_stores:
+            path = os.path.join(_ALIAS_DIR, f"{name}.json.gz")
+            _alias_stores[name] = {}
+            if os.path.exists(path):
+                with gzip.open(path, "rt", encoding="utf-8") as fh:
+                    _alias_stores[name] = json.load(fh)
+        return _alias_stores[name]
+
+
+def _column_map(cols: list):
+    """1-based column on the old line -> on the new one: `cols` holds each
+    old column's place, the column after the line's end too; an end (the
+    column after the last character) goes to the place after its last one."""
+    def move(col: int, end: bool = False) -> int:
+        if end and 2 <= col <= len(cols) + 1:
+            return cols[col - 2] + 1
+        return cols[col - 1] if 1 <= col <= len(cols) else col
+    return move
+
+
+def translate(value, lines: list, oracle: str = ""):
+    """`value`, an answer about original programs, for the rewritten ones:
+    `lines` holds each changed line, `[label, number, old, new, cols]`
+    (`label` the file's name, "" for a program given as text; `cols` each
+    old column's place on the new line, from the rewrite itself)."""
+    import re
+    if not lines:
+        return value
+    by = {}
+    for label, number, old, new, cols in lines:
+        by[(label, number)] = (old, new, _column_map(cols))
+    labels = {entry[0] for entry in lines}
+    only = next(iter(labels)) if len(labels) == 1 else None
+
+    def find(label, number):
+        """The changed line `number` of the file `label` (None: the
+        answer's one program, when it names none)."""
+        if label is not None:
+            return by.get((label, number))
+        if only is not None:
+            return by.get((only, number))
+        return None
+
+    def move(label, number, col, end=False):
+        hit = find(label, number)
+        return hit[2](col, end) if hit else col
+
+    def text(s: str) -> str:
+        out = s.split("\n")
+        current = None    # (label, line) of the last "-->"
+        for i, ln in enumerate(out):
+            m = re.match(r"^(\s*--> )(.*?):(\d+):(\d+)$", ln)
+            if m:
+                label = os.path.basename(m.group(2))
+                number = int(m.group(3))
+                current = (label, number)
+                out[i] = f"{m.group(1)}{m.group(2)}:{number}:{move(label, number, int(m.group(4)))}"
+                continue
+            m = re.match(r"^(\s*)(\d+) \| (.*)$", ln)
+            if m and current and int(m.group(2)) == current[1]:
+                hit = find(*current)
+                if hit:
+                    out[i] = f"{m.group(1)}{m.group(2)} | {hit[1]}"
+                    # the caret line under it
+                    if i + 1 < len(out):
+                        c = re.match(r"^(\s*\| )( *)(\^+)$", out[i + 1])
+                        if c:
+                            a = len(c.group(2)) + 1
+                            b = a + len(c.group(3))
+                            na, nb = hit[2](a), hit[2](b, True)
+                            out[i + 1] = c.group(1) + " " * (na - 1) + "^" * max(1, nb - na)
+                continue
+            m = re.match(r"^(err|warn|note) (\d+) (\d+) (\d+):(\d+)-(\d+):(\d+)(.*)$", ln)
+            if m:
+                l0, c0, sl, sc, el, ec = (int(x) for x in m.groups()[1:7])
+                out[i] = (f"{m.group(1)} {l0} {move(None, l0, c0)} {sl}:{move(None, sl, sc)}-"
+                          f"{el}:{move(None, el, ec, True)}{m.group(8)}")
+                continue
+            out[i] = re.sub(r"([^\s:'\"]+\.my):(\d+):(\d+)",
+                            lambda r: f"{r.group(1)}:{r.group(2)}:{move(os.path.basename(r.group(1)), int(r.group(2)), int(r.group(3)))}",
+                            ln)
+        return "\n".join(out)
+
+    def under(old_text: str, number=None) -> str:
+        """An underlined piece of an old line, as the rewritten line has it."""
+        for (label, n), (old, new, mv) in by.items():
+            if number is not None and n != number:
+                continue
+            at = old.find(old_text)
+            if at >= 0 and old.find(old_text, at + 1) < 0:
+                a, b = mv(at + 1), mv(at + 1 + len(old_text), True)
+                return new[a - 1:b - 1]
+        return old_text
+
+    def walk(v):
+        if isinstance(v, str):
+            return text(v)
+        if isinstance(v, dict):
+            d = {k: walk(x) for k, x in v.items()}
+            if isinstance(v.get("line"), int) and isinstance(v.get("column"), int):
+                hit = find(None, v["line"])
+                if hit:
+                    d["column"] = hit[2](v["column"])
+                    if isinstance(v.get("underlined"), str):
+                        d["underlined"] = under(v["underlined"], v["line"])
+            if isinstance(v.get("note_underlined"), list):
+                d["note_underlined"] = [under(u) if isinstance(u, str) else u for u in v["note_underlined"]]
+            return d
+        if isinstance(v, list):
+            if oracle == "lsp.members":
+                return [_member(x, move) for x in v]
+            return [walk(x) for x in v]
+        if isinstance(v, tuple):
+            # (stdout, line, column) of a runtime error
+            if oracle == "selfhost_codegen.runtime_error" and len(v) == 3 and isinstance(v[1], int):
+                return (v[0], v[1], move(None, v[1], v[2]))
+            return tuple(walk(x) for x in v)
+        return v
+    return walk(value)
+
+
+def _member(entry, move):
+    """An `lsp.members` entry: (line, col, name, kind, decl line 0-based,
+    decl col 0-based or None)."""
+    if not isinstance(entry, (list, tuple)) or len(entry) != 6:
+        return entry
+    line, col, name, kind, dl, dc = entry
+    col = move(None, line, col)
+    if dc is not None:
+        dc = move(None, dl + 1, dc + 1) - 1
+    return type(entry)((line, col, name, kind, dl, dc))
 
 
 class NoGolden(AssertionError):
@@ -185,6 +375,14 @@ def golden(name: str):
                 value = fn(*args, **kwargs)
                 store[key] = _swap(_encode(value), marks)
                 return value
+            if TRACE:
+                _trace(name, key, list(args), kwargs, key in store or key in _aliases(name))
+            if key not in store and key in _aliases(name):
+                # a question about a program rewritten since the recording
+                # (MYLA-240): the original's answer, its positions moved
+                alias = _aliases(name)[key]
+                value = _decode(_swap(store[alias["to"]], [(m, d) for d, m in marks]))
+                return translate(value, alias["lines"], name)
             if key not in store:
                 if _changing_file(list(args) + list(kwargs.values())):
                     raise unittest.SkipTest(f"{name}: {key_obj[0]!r:.120} changed after the Python toolchain was retired")

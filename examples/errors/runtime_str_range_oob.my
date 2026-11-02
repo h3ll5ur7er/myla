@@ -4,6 +4,6 @@
 #main
 fun main() {
     var sb = StringBuilder()
-    append(sb, "hello", 2, 9)
-    print(build(sb))
+    sb.append("hello", 2, 9)
+    print(sb.build())
 }

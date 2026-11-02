@@ -31,7 +31,22 @@ fun main() {
 
 `target = value`, where the target is a variable, a field chain or an index chain rooted at a `var`: `p.x = 1`, `grid[i][j] = 0`, `m["k"] = v`, `self.items[0].name = n`. A tuple element (`t.0 = …`) can't be assigned. Assignment is a statement, so `a = b = c` doesn't parse. `self` itself can't be reassigned.
 
-There is no compound assignment (`+=`) yet.
+Compound assignment (D104 (2), [[MYLA-223]]): `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=` and `>>=` mean `place = place op value`. The place is a `var`, a field or an element of one, as for `=`, and it is evaluated once: in `xs[next()] += 1` `next()` runs once. The operator is the binary one, so a struct's `+=` uses its `Add` impl and `f >>= g` composes two functions.
+
+```myla
+fun main() {
+    var total = 10
+    total += 5
+    total *= 2
+    var words = ["a", "b"]
+    words[1] += "c"
+    print(total)
+    print(words[1])
+}
+// output:
+// 30
+// bc
+```
 
 ## if / else
 
@@ -52,7 +67,62 @@ fun main() {
 // negative
 ```
 
-The condition must be `bool`. `if` is a statement: it has no value (use `match` on a `bool` for a value). In the condition of `if`, `while`, `for` and `match`, a struct literal must be parenthesised, because its `{` would otherwise start the body.
+The condition must be `bool`. Used as a value (D104 (1), [[MYLA-222]]), `if c { a } else { b }` is an expression: each branch block ends in an expression, its value; the `else` is required, an `else if` chains, and the branches have one type, as a `match`'s arms do. There is no `?:` operator.
+
+```myla
+fun sign(n: int) -> str {
+    return if n < 0 { "negative" } else if n == 0 { "zero" } else { "positive" }
+}
+
+fun main() {
+    let n = 7
+    let half = if n % 2 == 0 {
+        n / 2
+    } else {
+        let up = n + 1
+        up / 2
+    }
+    print(sign(n))
+    print(half)
+}
+// output:
+// positive
+// 4
+```
+
+A block that gives a value (an `if` branch, a `match` arm) may end with an `if` statement whose every level has an `else`: it reads as the `if` expression. In the condition of `if`, `while`, `for` and `match`, a struct literal must be parenthesised, because its `{` would otherwise start the body.
+
+## if let / while let
+
+`if let P = e { … } else { … }` runs its block when `e` matches the pattern `P`, with `P`'s bindings in scope there only; `while let P = e { … }` runs its body while `e` (evaluated before each round) matches (D104 (5), [[MYLA-226]]). They are sugar over `match`: `match e { P => { … }, _ => { … } }`, and `while true { match e { P => { … }, _ => { break } } }`. An `if let` chains with `else if`, and gives a value as an `if` does. A pattern that always matches (a name, a tuple of names) is an error: write `let`.
+
+```myla
+fun find(xs: [int], want: int) -> Option<int> {
+    for i in 0..xs.len() {
+        if xs[i] == want {
+            return Some(i)
+        }
+    }
+    return None
+}
+
+fun main() {
+    if let Some(i) = find([4, 7, 9], 7) {
+        print(i)
+    }
+    let at = if let Some(i) = find([4, 7, 9], 5) { i } else { -1 }
+    print(at)
+    var n = 3
+    while let Some(_) = find([1, 2, 3], n) {
+        n -= 1
+    }
+    print(n)
+}
+// output:
+// 1
+// -1
+// 0
+```
 
 ## Loops
 
@@ -81,7 +151,7 @@ fun main() {
 ```
 
 - A range's bounds are integers of one type (literals adopt), and the loop variable has that type.
-- Iterating a list visits its elements; iterating a map visits its keys, in no defined order (the interpreter uses insertion order, native code hash order).
+- Iterating a list visits its elements; iterating a map visits its keys in the order they were first inserted (D105).
 - The loop variable is immutable. The loop works on a snapshot: changing the list inside the loop doesn't change what is visited.
 - `break` and `continue` apply to the innermost loop; outside a loop they are a type error.
 
