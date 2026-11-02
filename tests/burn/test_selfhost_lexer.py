@@ -4,34 +4,29 @@
 every source file in the shared corpus, its canonical token dump is byte-for-byte
 identical to the Python oracle's (`myla tokenize --canonical`, i.e.
 `canon.canonical_tokens`). That is the v0.6a differential gate from
-docs/Development/Testing.md
+docs/Development/Testing.md. The oracle's dumps are the retired Python lexer's,
+recorded (`tests/burn/_golden.py`, MYLA-219).
 
-The Myla lexer is exercised as a *native binary* when the host can build one
-(x86-64 Linux with `as`/`ld`), which also checks interpreter/compiler parity of
-the toolchain that built it; otherwise it falls back to the interpreter.
+The Myla lexer runs as a *native binary* built by the self-hosted compiler, so
+the test needs a host that can build one (x86-64 Linux with `as`/`ld`). (It
+fell back to the Python interpreter elsewhere; the self-hosted interpreter is
+itself a native binary, so there is no fallback any more.)
 """
 from __future__ import annotations
 
 import glob
-import io
 import os
 import subprocess
 import tempfile
 import unittest
 
-from myla.canon import canonical_error, canonical_tokens
-from myla.errors import MylaError
-from myla.interpreter import Interpreter
-from myla.lexer import tokenize
-from myla.loader import default_stdlib_root, link
-
-from ._native import CAN_BUILD_NATIVE
+from ._golden import answer_for_file, golden
+from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 from ._tools import selfhost_tool
 
 _REPO = os.path.abspath(
     os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
 )
-LEXER_TOOL = os.path.join(_REPO, "selfhost", "lex_main.my")
 
 
 def _corpus() -> list[str]:
@@ -40,7 +35,7 @@ def _corpus() -> list[str]:
     pats = [
         os.path.join(_REPO, "examples", "*.my"),
         os.path.join(_REPO, "examples", "errors", "*.my"),
-        os.path.join(_REPO, "src", "myla", "std", "*.my"),
+        os.path.join(_REPO, "lib", "std", "*.my"),
         os.path.join(_REPO, "selfhost", "*.my"),
     ]
     files: list[str] = []
@@ -49,46 +44,49 @@ def _corpus() -> list[str]:
     return files
 
 
-def _oracle(path: str) -> str:
+@golden("selfhost_lexer.tokens")
+def _oracle_source(source: str) -> str:
     """Canonical token dump from the Python lexer (token ends included), or
     its error as `err <line> <col> <span> lex: <message>` (what `lex_main`
     prints): the same tokens and errors, ranges included (MYLA-65)."""
-    with open(path, "r", encoding="utf-8") as fh:
-        source = fh.read()
+    from myla.canon import canonical_error, canonical_tokens
+    from myla.errors import MylaError
+    from myla.lexer import tokenize
     try:
         return canonical_tokens(tokenize(source))
     except MylaError as err:
         return canonical_error(err)
 
 
-def _check_file(path: str):
-    return link(path, stdlib_root=default_stdlib_root())
+@golden("selfhost_lexer.tokens_strict")
+def _tokens(source: str) -> str:
+    """Canonical token dump from the Python lexer of a source it lexes."""
+    from myla.canon import canonical_tokens
+    from myla.lexer import tokenize
+    return canonical_tokens(tokenize(source))
 
 
+def _oracle(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as fh:
+        source = fh.read()
+    # skipped when the file changed after the retirement (selfhost/, tools/, std)
+    return answer_for_file(path, lambda: _oracle_source(source))
+
+
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class SelfHostedLexerParity(unittest.TestCase):
     _binary: str | None = None
 
     @classmethod
     def setUpClass(cls) -> None:
-        if not CAN_BUILD_NATIVE:
-            return
         cls._binary = selfhost_tool("lex_main")
 
     def _myla_lex(self, path: str) -> str:
-        if self._binary is not None:
-            proc = subprocess.run(
-                [self._binary, path], capture_output=True, text=True
-            )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            return proc.stdout.rstrip("\n")
-        # Interpreter fallback (no native toolchain on this host).
-        from myla.types import check
-
-        out = io.StringIO()
-        Interpreter(
-            check(_check_file(LEXER_TOOL)), out, argv=["lexer_tool", path]
-        ).run()
-        return out.getvalue().rstrip("\n")
+        proc = subprocess.run(
+            [self._binary, path], capture_output=True, text=True
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.rstrip("\n")
 
     def test_big_integer_literals(self) -> None:
         # the token dump shows the value of literals of 2^63 and above (MYLA-73)
@@ -98,7 +96,7 @@ class SelfHostedLexerParity(unittest.TestCase):
             fh.write(BIG_LITERALS)
         try:
             with open(fh.name, encoding="utf-8") as src:
-                expected = canonical_tokens(tokenize(src.read()))
+                expected = _tokens(src.read())
             self.assertEqual(self._myla_lex(fh.name), expected)
         finally:
             os.unlink(fh.name)
@@ -126,7 +124,7 @@ class SelfHostedLexerParity(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".my", encoding="utf-8", delete=False) as fh:
             fh.write(source)
         try:
-            expected = canonical_tokens(tokenize(source))
+            expected = _tokens(source)
             self.assertIn("größe", expected)
             self.assertEqual(self._myla_lex(fh.name), expected)
         finally:

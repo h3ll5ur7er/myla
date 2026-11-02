@@ -9,8 +9,8 @@ from it (MYLA-77).
 - The self-hosted parser accepts thousands of random programs sampled from
   the grammar, so the grammar allows nothing the compiler rejects.
 - `keywords()` in `selfhost/tokens.my`, which the grammar must use in full, is
-  the Python lexer's keyword table.
-- The grammar tool's own `#test` cases pass.
+  the Python lexer's keyword table (recorded, `tests/burn/_golden.py`, MYLA-219).
+- The grammar tool's own `#test` cases pass (`myla test` of the self-hosted CLI).
 
 With the tree-sitter CLI (`TREE_SITTER`, the package's `node_modules`, or
 `PATH`) and a C compiler:
@@ -30,12 +30,12 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 
+from ._golden import golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._tools import myla_tool
+from ._tools import STDLIB_ROOT, myla_tool, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _GRAMMAR = os.path.join(_REPO, "grammar", "myla.ebnf")
@@ -66,7 +66,7 @@ def _corpus() -> list[str]:
     files = (glob.glob(os.path.join(_REPO, "examples", "**", "*.my"), recursive=True)
              + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
              + glob.glob(os.path.join(_REPO, "tools", "**", "*.my"), recursive=True)
-             + glob.glob(os.path.join(_REPO, "src", "myla", "std", "*.my")))
+             + glob.glob(os.path.join(_REPO, "lib", "std", "*.my")))
     errors = os.path.join(_REPO, "examples", "errors") + os.sep
     return sorted(f for f in files if not f.startswith(errors))
 
@@ -86,6 +86,13 @@ def _syntax_errors() -> list[str]:
             if re.match(r"//~\s*(lex|parse) error", fh.readline()):
                 out.append(path)
     return out
+
+
+@golden("grammar.keywords")
+def _python_keywords() -> list[str]:
+    """The Python lexer's keyword table, sorted."""
+    from myla.tokens import KEYWORDS
+    return sorted(KEYWORDS)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -131,18 +138,17 @@ class GrammarDescription(unittest.TestCase):
         # The grammar check asks for every word of keywords() in
         # selfhost/tokens.my, so that list must be complete: the Python
         # lexer's table is the reference.
-        from myla.tokens import KEYWORDS
         with open(os.path.join(_REPO, "selfhost", "tokens.my"), encoding="utf-8") as fh:
             body = re.search(r"pub fun keywords\(\) -> \[str\] \{\s*return \[(.*?)\]", fh.read(), re.S)
         self.assertIsNotNone(body, "keywords() not found in selfhost/tokens.my")
-        self.assertEqual(sorted(re.findall(r'"(\w+)"', body.group(1))), sorted(KEYWORDS))
+        self.assertEqual(sorted(re.findall(r'"(\w+)"', body.group(1))), _python_keywords())
 
     def test_the_tool_s_own_tests_pass(self) -> None:
         sources = sorted(glob.glob(os.path.join(_REPO, "tools", "grammar", "*.my")))
         sources.append(os.path.join(_REPO, "selfhost", "tokens.my"))
         for path in sources:
             with self.subTest(file=os.path.relpath(path, _REPO)):
-                proc = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), "test", path],
+                proc = subprocess.run([selfhost_tool("main"), "test", path, "--stdlib", STDLIB_ROOT],
                                       capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 

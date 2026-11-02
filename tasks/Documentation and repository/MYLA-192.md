@@ -2,7 +2,7 @@
 id: MYLA-192
 title: "Repository hygiene: timer.py, duplicate scripts, stray test output"
 type: chore
-status: review
+status: done
 priority: low
 labels: [repository, tests]
 ---

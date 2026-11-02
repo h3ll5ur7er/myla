@@ -14,8 +14,10 @@ This project plans its work as Genbeya tasks and documents itself in a Genbeya w
 
 ## Writing Myla
 
-Myla resembles Rust and Swift but differs from both in many details (newlines end statements and `;` is only an optional separator, `fun`, `return` required, `E.Variant`, `push(xs, v)`, no `+=`, no references, `float` is `float32`). Before writing or changing any `.my` file, read the `myla` skill (`.agents/skills/myla/SKILL.md`, also in `.claude/skills/myla/`); the full language reference is `docs/Language.md`. Check unfamiliar constructs with `python3 myla.py check file.my`.
+Myla resembles Rust and Swift but differs from both in many details (newlines end statements and `;` is only an optional separator, `fun`, `return` required, `E.Variant`, `push(xs, v)`, no `+=`, no references, `float` is `float32`). Before writing or changing any `.my` file, read the `myla` skill (`.agents/skills/myla/SKILL.md`, also in `.claude/skills/myla/`); the full language reference is `docs/Language.md`. Check unfamiliar constructs with `build/myla check file.my` (run `scripts/bootstrap.sh` first if `build/myla` is missing); `build/myla run`, `test` and `build` run, test and compile a file. There is no `python3 myla.py` any more: the Python toolchain was retired (D101).
 
 ## Working agreement
+
+After changing `selfhost/` or `lib/std/`, run `scripts/update-seed.sh` and commit `bootstrap/seed.s` with the change; CI fails a pull request whose seed isn't the current compiler.
 
 For every programming task: write the test first where it makes sense (soft TDD) and see it fail; before reporting that you are done, self-review the whole diff and improve or clean up what you find; then report with concrete evidence (test results before/after, measurements, program output, the bootstrap fixed point). Details: `docs/Development/Conventions.md`.

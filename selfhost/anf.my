@@ -13,6 +13,7 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, ElseTail, ExprOrBlock, MatchArm, FieldInit, MapEntry
 from .checker import Type
+from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // `value_matches`: a `match` with an `await` in an arm, as a value, stays a
 // `match` whose arms are blocks ending in their value, bound by a `let` of its
@@ -25,6 +26,7 @@ from .checker import Type
 // those lambdas, whose captures are copied deeply (D92).
 pub struct Norm { next: int32, resolved: [int32: Type], out: [Stmt], temps: int32, value_matches: bool, wrap_children: bool, children: [int32: bool] }
 
+#test(2000000000)[Norm { next: 2000000000, resolved: [:], out: [], temps: 0, value_matches: false, wrap_children: false, children: [:] }]
 pub fun new_norm(next: int32) -> Norm {
     return Norm { next: next, resolved: [:], out: [], temps: 0, value_matches: false, wrap_children: false, children: [:] }
 }
@@ -32,6 +34,7 @@ pub fun new_norm(next: int32) -> Norm {
 // -- what can suspend -------------------------------------------------------
 
 // Whether `e` has an `await` outside the lambdas in it.
+#test(expr_of("-n * 2"))[false]
 pub fun has_await(e: Expr) -> bool {
     return match e.kind {
         ExprKind.Await(x) => true,
@@ -52,11 +55,13 @@ pub fun has_await(e: Expr) -> bool {
     }
 }
 
+#test([])[false]
 fun any_await(es: [Expr]) -> bool {
     for e in es { if has_await(e) { return true } }
     return false
 }
 
+#test(None)[false]
 fun opt_await(e: Option<Expr>) -> bool {
     return match e { Some(x) => has_await(x), None => false }
 }
@@ -66,11 +71,13 @@ fun fields_await(fs: [FieldInit]) -> bool {
     return false
 }
 
+#test([])[false]
 fun entries_await(ents: [MapEntry]) -> bool {
     for en in ents { if has_await(en.key) || has_await(en.value) { return true } }
     return false
 }
 
+#test([])[false]
 fun arms_await(arms: [MatchArm]) -> bool {
     for arm in arms {
         if opt_await(arm.guard) || body_suspends(arm.body) { return true }
@@ -87,11 +94,13 @@ pub fun body_suspends(b: ExprOrBlock) -> bool {
 
 // Whether a block, or a statement, has an `await` or an `async let` outside
 // its lambdas: what the async evaluator runs.
+#test(block_of("{ }"))[false]
 pub fun block_suspends(b: Block) -> bool {
     for s in b.stmts { if stmt_suspends(s) { return true } }
     return false
 }
 
+#test(stmt_of("print(1)"))[false]
 pub fun stmt_suspends(s: Stmt) -> bool {
     return match s.kind {
         StmtKind.VarDecl(kind, n, t, init) => kind == "async" || has_await(init),
@@ -106,6 +115,7 @@ pub fun stmt_suspends(s: Stmt) -> bool {
     }
 }
 
+#test(None)[false]
 fun else_suspends(el: Option<ElseTail>) -> bool {
     return match el {
         Some(et) => match et {
@@ -117,6 +127,7 @@ fun else_suspends(el: Option<ElseTail>) -> bool {
 }
 
 // A literal or a name: reading it later gives what reading it now would.
+#test(expr_of("-n * 2"))[false]
 fun is_simple(e: Expr) -> bool {
     return match e.kind {
         ExprKind.IntLit(v, s, c, b) => true,
@@ -130,6 +141,7 @@ fun is_simple(e: Expr) -> bool {
 }
 
 // A variable or a part of one: what a `var self` method changes in place.
+#test(expr_of("a.b[0]"))[true]
 fun is_place(e: Expr) -> bool {
     return match e.kind {
         ExprKind.Name(n) => true,
@@ -301,6 +313,7 @@ impl Norm {
         }
     }
 
+    #test(new_norm(0), None)[None]
     fun else_tail(var self, el: Option<ElseTail>) -> Option<ElseTail> {
         return match el {
             Some(et) => match et {
@@ -397,10 +410,12 @@ impl Norm {
         }
     }
 
+    #test(new_norm(0), None)[None]
     fun opt_expr(var self, e: Option<Expr>) -> Option<Expr> {
         return match e { Some(x) => Some(self.expr(x)), None => None }
     }
 
+    #test(new_norm(0), None)[None]
     fun opt_hoist(var self, e: Option<Expr>) -> Option<Expr> {
         return match e { Some(x) => Some(self.hoist(x)), None => None }
     }
@@ -437,6 +452,7 @@ impl Norm {
 
     // `es` evaluated left to right: those before the last with an `await`
     // are put into temporaries.
+    #test(new_norm(0), [])[[]]
     fun seq(var self, es: [Expr]) -> [Expr] {
         var last = -1
         var i = 0
@@ -559,6 +575,7 @@ impl Norm {
 
     // -- new nodes --------------------------------------------------------
 
+    #test(new_norm(0))[0]
     fun id(var self) -> int32 {
         let i = self.next
         self.next = self.next + 1
@@ -582,6 +599,7 @@ impl Norm {
         }
     }
 
+    #test(new_norm(0))["%aw1"]
     fun temp_name(var self) -> str {
         self.temps = self.temps + 1
         return format("%aw{}", self.temps)

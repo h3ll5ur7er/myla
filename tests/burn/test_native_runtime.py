@@ -1,10 +1,11 @@
-"""Burn test: the native runtime's robustness (MYLA-17), for the Python
-backend and the self-hosted compiler.
+"""Burn test: the native runtime's robustness (MYLA-17), for the self-hosted
+compiler (and for the Python backend until it was retired, MYLA-219).
 
 - A runtime error writes `runtime error: <message>` to stderr (the
   interpreter's message, without the values), then the source position as
   `  --> file:line:col`, the interpreter's second line (MYLA-65, MYLA-66), and
-  exits with status 1, instead of exiting silently.
+  exits with status 1, instead of exiting silently. (The interpreter's
+  positions are the retired Python interpreter's, recorded.)
 - Output isn't lost when a `write` is short or can't proceed yet: here stdout
   is a non-blocking pipe whose reader starts late, so the pipe fills and
   `write` returns EAGAIN or writes part of the buffer.
@@ -19,13 +20,21 @@ import tempfile
 import time
 import unittest
 
-from myla.loader import default_stdlib_root
-
+from ._golden import golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._tools import selfhost_tool
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _MYLA = os.path.join(_REPO, "myla.py")
+
+
+@golden("test_native_runtime.interpreter_run")
+def _interpreter_run(path: str) -> tuple[int, str]:
+    """(exit, stderr) of the Python CLI's `myla run <file>`, run in the file's
+    directory with its bare name, so the positions name it that way."""
+    proc = subprocess.run([sys.executable, _MYLA, "run", os.path.basename(path)],
+                          cwd=os.path.dirname(path), capture_output=True, text=True)
+    return proc.returncode, proc.stderr
 
 # (name, statements in main from line 4 on, the message, the position). The
 # position is the interpreter's (checked against it below): the node that
@@ -40,6 +49,8 @@ TRAPS = [
     ("pop_empty", "var xs: [int] = []\n    print(pop(xs) + n)", "pop from an empty list", "5:14"),
     ("division", "print(7 / (n - 1))", "division by zero", "4:13"),
     ("modulo", "print(7 % (n - 1))", "modulo by zero", "4:13"),
+    ("char_surrogate", "print((n + 55295) as char)", "invalid char", "4:23"),
+    ("char_above_max", "print((n + 1114111) as char)", "invalid char", "4:25"),
     ("string_range", 'var sb = StringBuilder()\n    append(sb, "abc", n, 9)', "index out of bounds", "5:11"),
     ("panic", 'panic(f"boom {n}")', "boom 1", "4:10"),
     ("assert", "assert(n == 2)", "assertion failed", "4:11"),
@@ -99,7 +110,7 @@ class NativeRuntime(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._tmp = tempfile.TemporaryDirectory()
         cls.dir = cls._tmp.name
-        cls.stdlib = default_stdlib_root()
+        cls.stdlib = STDLIB_ROOT
         cls.gen = selfhost_tool("gen_main")
 
     @classmethod
@@ -113,28 +124,25 @@ class NativeRuntime(unittest.TestCase):
         return path
 
     def binaries(self, name: str, source: str, cwd: str | None = None) -> list[tuple[str, str]]:
-        """`source` built by both backends as `<name>.my` in `cwd`, compiled
-        from there with that relative path as `myla build` would be (so the
-        positions name `<name>.my`): [(backend, binary)]."""
+        """`source` built by the self-hosted compiler as `<name>.my` in `cwd`,
+        compiled from there with that relative path as `myla build` would be
+        (so the positions name `<name>.my`): [(backend, binary)]."""
         cwd = cwd or self.dir
         self.write(name + ".my", source, cwd)
-        py = os.path.join(cwd, name + "_py")
-        subprocess.run([sys.executable, _MYLA, "build", name + ".my", "-o", py],
-                       cwd=cwd, capture_output=True, check=True)
         asm = subprocess.run([self.gen, name + ".my", self.stdlib], cwd=cwd,
                              capture_output=True, text=True, check=True).stdout
         sh = os.path.join(cwd, name + "_self")
         self.write(name + "_self.s", asm, cwd)
         subprocess.run(["as", "--64", "-o", sh + ".o", sh + ".s"], check=True)
         subprocess.run(["ld", "-o", sh, sh + ".o"], check=True)
-        return [("python", py), ("self-hosted", sh)]
+        return [("self-hosted", sh)]
 
     def interpreter_position(self, name: str, cwd: str | None = None) -> str:
-        """The `  --> file:line:col` line `myla run` prints for `<name>.my`."""
-        proc = subprocess.run([sys.executable, _MYLA, "run", name + ".my"],
-                              cwd=cwd or self.dir, capture_output=True, text=True)
-        self.assertEqual(proc.returncode, 1, proc.stderr)
-        return proc.stderr.splitlines()[1]
+        """The `  --> file:line:col` line `myla run` prints for `<name>.my`
+        (the retired Python interpreter's, recorded)."""
+        code, stderr = _interpreter_run(os.path.join(cwd or self.dir, name + ".my"))
+        self.assertEqual(code, 1, stderr)
+        return stderr.splitlines()[1]
 
     def test_runtime_errors_have_messages_and_positions(self):
         for name, body, message, position in TRAPS:
@@ -149,7 +157,7 @@ class NativeRuntime(unittest.TestCase):
 
     def test_a_stack_overflow_is_reported(self):
         # the main stack grows to 120 MiB, and running out of it is a runtime
-        # error from both backends, as from the interpreters (MYLA-182)
+        # error, as from the interpreters (MYLA-182)
         source = ("fun down(n: int) -> int {\n    if n == 0 {\n        return 0\n    }\n"
                   "    return down(n - 1) + 1\n}\n\n"
                   "fun main() {\n    print(down(1000000))\n    print(down(100000000))\n}\n")
@@ -159,6 +167,39 @@ class NativeRuntime(unittest.TestCase):
                 # a million calls fit in 120 MiB, where 8 MiB held some 130,000
                 self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
                                  ("1000000\n", "runtime error: stack overflow\n", 1))
+
+    def test_a_stack_overflow_on_a_worker_is_reported(self):
+        # every worker stack has a guard page and every worker an alternate
+        # signal stack, so running out of a worker's 8 MiB is reported as on
+        # the main stack, whichever thread runs the task (MYLA-172, D106),
+        # once when several overflow at the same time (it was printed twice in
+        # about one run of 20)
+        source = ("import std.task as task\n\n"
+                  "fun down(n: int) -> int {\n    if n == 0 {\n        return 0\n    }\n"
+                  "    return down(n - 1) + 1\n}\n\n"
+                  "async fun deep(k: int) -> int {\n    return down(100000000 + k)\n}\n\n"
+                  "#main\nasync fun main() {\n    var fs: [async () -> int] = []\n"
+                  "    for k in 0..4 {\n        push(fs, async () => await deep(k))\n    }\n"
+                  "    let rs = await task.all(fs)\n    print(len(rs))\n}\n")
+        for backend, binary in self.binaries("worker_overflow", source):
+            with self.subTest(backend=backend):
+                for _ in range(20):
+                    proc = subprocess.run([binary], capture_output=True, text=True, timeout=60,
+                                          env={**os.environ, "MYLA_THREADS": "4"})
+                    self.assertEqual((proc.stdout, proc.stderr, proc.returncode),
+                                     ("", "runtime error: stack overflow\n", 1))
+
+    def test_a_tasked_program_reserves_an_arena_per_worker(self):
+        # one 4 GiB arena per worker, not 32 always: with one worker a tasked
+        # program runs under a 5.7 GB address-space limit (MYLA-172, D106)
+        source = ("async fun one() -> int {\n    return 1\n}\n\n"
+                  "#main\nasync fun main() {\n    async let a = one()\n    print(await a)\n}\n")
+        for backend, binary in self.binaries("arenas", source):
+            with self.subTest(backend=backend):
+                proc = subprocess.run(["bash", "-c", f"ulimit -v 6000000 && exec {binary}"],
+                                      capture_output=True, text=True, timeout=60,
+                                      env={**os.environ, "MYLA_THREADS": "1"})
+                self.assertEqual((proc.stdout, proc.stderr, proc.returncode), ("1\n", "", 0))
 
     def test_runtime_errors_in_an_imported_module_name_its_file(self):
         for line, message, position in MODULE_TRAPS:

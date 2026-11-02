@@ -11,3 +11,5 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 - [ ] A table `name → (signature check, interpreter, code generator)` or a `Builtin` enum, used by all three
 - [ ] Every checker annotation declared on its dataclass with a default, the `getattr` idiom gone
 - [ ] The same shape considered for [[selfhost/checker.my]], [[selfhost/interp.my]] and [[selfhost/lower.my]] (`eval_name_call` is an if-chain on names)
+
+D101 ([[MYLA-201]]) freezes the Python toolchain and removes it ([[MYLA-219]]), so the first two items are moot; what is left is the third, for the self-hosted checker, interpreter and lowering, before LLVM ([[MYLA-160]]).

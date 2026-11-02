@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # test.sh [fast|all] — run the test suites (MYLA-58).
 #
-#   fast  unit and integration tests, and the burn tests that take less than
-#         about 4 seconds each (about 20 seconds once the tools are cached)
-#   all   every suite (the default; the burn suite takes some 5 minutes)
+#   fast  the burn tests that take less than about 4 seconds each (about 20
+#         seconds once the tools are cached)
+#   all   the whole burn suite (the default; about 2 minutes with the tools
+#         cached)
 #
-# Uses only the standard library's unittest (pytest works too: uv run pytest). The self-hosted tools the burn
-# tests need are built once and cached in build/test-tools/.
+# Uses only the standard library's unittest (pytest works too: uv run pytest).
+# The compiler (bootstrapped from bootstrap/seed.s) and the tools the tests
+# need are built once and cached in build/test-tools/.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 mode="${1:-all}"
 py="${PYTHON:-python3}"
 
-$py -m unittest discover -s tests/unit -t .
-$py -m unittest discover -s tests/integration -t .
 case "$mode" in
     all)
         $py -m unittest discover -s tests/burn -t .

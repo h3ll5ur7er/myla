@@ -3,25 +3,29 @@
 It runs the shared scenarios (tests/burn/_lsp_scenarios.py, once also run
 against the retired Python server, MYLA-83), plus what only it promises: a
 malformed message gets a parse error, a burst of changes is checked once (the
-debounce), and its memory stays flat over hundreds of checks. Both builds run them: by the
-Python backend and by the self-hosted one (as scripts/bootstrap.sh builds
-build/myla-lsp), which leaked where the other didn't.
+debounce), and its memory stays flat over hundreds of checks. Two builds run
+them: the cached tool build and one by the self-hosted `gen_main` (as
+scripts/bootstrap.sh builds build/myla-lsp). The first was built by the Python
+backend until MYLA-219, and that build leaked where the self-hosted one didn't.
+
+Where a test compares the server with the Python lexer or checker, their answers
+are recorded (`tests/burn/_golden.py`, MYLA-219).
 """
 from __future__ import annotations
 
 import json
+import re
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from myla.loader import default_stdlib_root
-
+from ._golden import golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-from ._tools import myla_tool, selfhost_tool
+from ._tools import STDLIB_ROOT, myla_tool, selfhost_tool
 from ._lsp_scenarios import (LspScenarios, LspRequestHelpers, LspRequestScenarios, ProjectScenarios,
                              WorkspaceScanScenarios, _Client, _uri, rng)
 
@@ -34,7 +38,7 @@ def _self_hosted_build() -> str:
     binary = os.path.join(_TMP.name, "myla-lsp")
     if not os.path.exists(binary):
         asm = subprocess.run([selfhost_tool("gen_main"), os.path.join(_REPO, "tools", "lsp", "main.my"),
-                              default_stdlib_root()], capture_output=True, text=True, check=True)
+                              STDLIB_ROOT], capture_output=True, text=True, check=True)
         with open(binary + ".s", "w", encoding="utf-8") as fh:
             fh.write(asm.stdout)
         subprocess.run(["as", "--64", "-o", binary + ".o", binary + ".s"], check=True)
@@ -49,7 +53,7 @@ class TestMylaLsp(LspScenarios, unittest.TestCase):
         cls.binary = myla_tool("tools/lsp/main.my", "lsp")
 
     def server_command(self) -> list[str]:
-        return [self.binary, "--stdlib", default_stdlib_root()]
+        return [self.binary, "--stdlib", STDLIB_ROOT]
 
     def test_a_malformed_message_is_a_parse_error(self):
         self.client.send_raw(b"{not json")
@@ -82,7 +86,7 @@ class TestMylaLsp(LspScenarios, unittest.TestCase):
         # std/json.my matches on Option and Result throughout: checking it
         # leaked about 7 kB a time before loops released what they iterate on
         # an early return, and the Python backend reused large cells (MYLA-80)
-        path = os.path.join(_REPO, "src", "myla", "std", "json.my")
+        path = os.path.join(_REPO, "lib", "std", "json.my")
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         uri = _uri(path)
@@ -130,7 +134,7 @@ class TestMylaLspRequests(LspRequestScenarios, unittest.TestCase):
         cls.binary = myla_tool("tools/lsp/main.my", "lsp")
 
     def server_command(self) -> list[str]:
-        return [self.binary, "--stdlib", default_stdlib_root()]
+        return [self.binary, "--stdlib", STDLIB_ROOT]
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -202,7 +206,7 @@ class TestMylaLspRobustness(RobustnessScenarios, unittest.TestCase):
         cls.binary = myla_tool("tools/lsp/main.my", "lsp")
 
     def server_command(self) -> list[str]:
-        return [self.binary, "--stdlib", default_stdlib_root()]
+        return [self.binary, "--stdlib", STDLIB_ROOT]
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -221,7 +225,7 @@ class TestMylaLspProjects(ProjectScenarios, unittest.TestCase):
         cls.binary = myla_tool("tools/lsp/main.my", "lsp")
 
     def server_command(self) -> list[str]:
-        return [self.binary, "--stdlib", default_stdlib_root()]
+        return [self.binary, "--stdlib", STDLIB_ROOT]
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -240,7 +244,7 @@ class TestMylaLspWorkspaceScan(WorkspaceScanScenarios, unittest.TestCase):
         cls.binary = myla_tool("tools/lsp/main.my", "lsp")
 
     def server_command(self) -> list[str]:
-        return [self.binary, "--stdlib", default_stdlib_root()]
+        return [self.binary, "--stdlib", STDLIB_ROOT]
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -339,6 +343,18 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.hover(uri, 11, 52), "v: int")
         self.assertEqual(self.refs(uri, 0, 13), [(uri, 0, 13, 16), (uri, 8, 18, 21), (uri, 11, 14, 17)])
 
+    def test_names_in_a_method_s_test_cases(self):
+        # a method's `#test` cases (D116) resolve in the module's scope
+        uri = self.open("const BASE: int = 2\n"
+                        "struct C {\n    n: int,\n}\n"
+                        "impl C {\n"
+                        "    #test(C { n: BASE }, 1)[3]\n"
+                        "    fun add(self, k: int) -> int {\n        return self.n + k\n    }\n"
+                        "}\n")
+        self.assertEqual(self.defn(uri, 5, 18), {"uri": uri, "range": rng(0, 6, 10)})   # BASE
+        self.assertEqual(self.defn(uri, 5, 10), {"uri": uri, "range": rng(1, 7, 8)})    # C
+        self.assertEqual(self.defn(uri, 5, 14), {"uri": uri, "range": rng(2, 4, 5)})    # C's n
+
     def test_unicode_identifiers(self):
         # XID identifiers (MYLA-84); ranges in UTF-16 units, 😀 counting two
         uri = self.open('fun main() {\n    let größe = 1\n    let 日本 = größe\n    print(f"😀{日本}")\n}\n')
@@ -358,7 +374,7 @@ class ScopeScenarios(LspRequestHelpers):
         self.assertEqual(self.defn(uri, 5, 21), at_util)          # through an alias
         self.assertEqual(self.defn(uri, 5, 33), at_util)          # through the module
         self.assertEqual(self.defn(uri, 5, 28), {"uri": _uri(util), "range": rng(0, 0, 0)})
-        fs = os.path.join(default_stdlib_root(), "std", "fs.my")
+        fs = os.path.join(STDLIB_ROOT, "std", "fs.my")
         found = self.defn(uri, 3, 22)
         self.assertEqual(found["uri"], _uri(fs))
         with open(fs, encoding="utf-8") as fh:
@@ -374,7 +390,7 @@ class TestMylaLspScopes(ScopeScenarios, unittest.TestCase):
         cls.binary = myla_tool("tools/lsp/main.my", "lsp")
 
     def server_command(self) -> list[str]:
-        return [self.binary, "--stdlib", default_stdlib_root()]
+        return [self.binary, "--stdlib", STDLIB_ROOT]
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -495,7 +511,7 @@ class TestMylaLspTypes(TypeScenarios, unittest.TestCase):
         cls.binary = myla_tool("tools/lsp/main.my", "lsp")
 
     def server_command(self) -> list[str]:
-        return [self.binary, "--stdlib", default_stdlib_root()]
+        return [self.binary, "--stdlib", STDLIB_ROOT]
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -509,7 +525,84 @@ def _corpus() -> list[str]:
     import glob
     return sorted(glob.glob(os.path.join(_REPO, "examples", "*.my")) + glob.glob(os.path.join(_REPO, "selfhost", "*.my"))
                   + glob.glob(os.path.join(_REPO, "tools", "*", "*.my"))
-                  + glob.glob(os.path.join(_REPO, "src", "myla", "std", "*.my")))
+                  + glob.glob(os.path.join(_REPO, "lib", "std", "*.my")))
+
+
+def _identifiers(path: str) -> list[tuple[str, int, int, bool]]:
+    """Each identifier token of the file `path` by the self-hosted lexer
+    (`lex_main`'s canonical dump, which matched the Python lexer's byte for
+    byte): (lexeme, 1-based line and column, whether it follows `.` or `#`,
+    i.e. is a member or an attribute's name). (The Python lexer's answers were
+    recorded, which left out every file changed since, MYLA-219.)"""
+    out = subprocess.run([selfhost_tool("lex_main"), path], capture_output=True, text=True,
+                         check=True).stdout
+    toks = []
+    for line in out.splitlines():
+        m = re.match(r'(\w+) (\d+) (\d+) "(.*)" end=', line)
+        if m:
+            toks.append((m.group(1), m.group(4), int(m.group(2)), int(m.group(3))))
+    return [(lexeme, ln, col, k > 0 and toks[k - 1][0] in ("DOT", "HASH"))
+            for k, (kind, lexeme, ln, col) in enumerate(toks) if kind == "IDENT"]
+
+
+@golden("lsp.members")
+def _checked_members(path: str) -> list[tuple[int, int, str, str, int, int | None]]:
+    """The member accesses `x.f` and `x.m(…)` of the file `path` where the
+    Python checker gives `x` a struct or enum type that declares the member:
+    (1-based line and column of the member's token, its name, "field" or
+    "method", and the 0-based line and column of its declaration, the column
+    None for a method)."""
+    import dataclasses
+    from myla.lexer import tokenize
+    from myla.parser import parse
+    from myla.tokens import TokenKind
+    from myla.types import EnumType, StructType, check
+    from myla import ast
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    program = parse(tokenize(text))
+    check(program)
+    toks = tokenize(text)
+    # where each struct's fields and each type's methods are declared (1-based)
+    fields, methods = {}, {}
+    for d in program.decls:
+        if isinstance(d, ast.StructDecl):
+            for f in d.fields:
+                fields[(d.name, f.name)] = (f.line, f.column)
+        if isinstance(d, ast.ImplDecl) and isinstance(d.target, ast.TypeRef):
+            for m in d.methods:
+                methods[(d.target.name, m.name)] = m.line
+    accesses = []
+
+    def walk(node):
+        if isinstance(node, ast.FieldAccess):
+            accesses.append(node)
+        if dataclasses.is_dataclass(node):
+            for f in dataclasses.fields(node):
+                walk(getattr(node, f.name))
+        elif isinstance(node, list):
+            for x in node:
+                walk(x)
+    walk(program.decls)
+    lines = text.splitlines()
+    out = []
+    for node in accesses:
+        t = getattr(node.target, "resolved_type", None)
+        if not isinstance(t, (StructType, EnumType)) or not lines[node.line - 1].isascii():
+            continue
+        # the member's token: the first `.name` from the access on
+        k = next((i for i, tk in enumerate(toks) if (tk.line, tk.column) >= (node.line, node.column)
+                  and tk.kind == TokenKind.IDENT and tk.lexeme == node.field_name
+                  and toks[i - 1].kind == TokenKind.DOT), None)
+        if k is None:
+            continue
+        key = (t.name, node.field_name)
+        if key in fields:
+            out.append((toks[k].line, toks[k].column, node.field_name, "field",
+                        fields[key][0] - 1, fields[key][1] - 1))
+        elif key in methods:
+            out.append((toks[k].line, toks[k].column, node.field_name, "method", methods[key] - 1, None))
+    return out
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -520,11 +613,9 @@ class TestResolutionCorpus(unittest.TestCase):
     declaration, and no position twice; both builds print the same."""
 
     def test_the_corpus_resolves(self) -> None:
-        from myla.lexer import tokenize
-        from myla.tokens import TokenKind
         files = _corpus()
         self.assertGreater(len(files), 50)
-        out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", default_stdlib_root(), "--resolve",
+        out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", STDLIB_ROOT, "--resolve",
                               *files], capture_output=True, text=True, check=True).stdout
         sections = {}
         for line in out.splitlines():
@@ -556,30 +647,24 @@ class TestResolutionCorpus(unittest.TestCase):
                 with open(path, encoding="utf-8") as fh:
                     text = fh.read()
                 source_lines = text.splitlines()
-                toks = tokenize(text)
                 known = defs | uses
-                for k, t in enumerate(toks):
-                    if t.kind != TokenKind.IDENT or t.lexeme not in declared:
+                for lexeme, line, column, member in _identifiers(path):
+                    if lexeme not in declared:
                         continue
-                    if k > 0 and toks[k - 1].kind in (TokenKind.DOT, TokenKind.HASH):
+                    if member:
                         continue    # a member, or an attribute's name
-                    prefix = source_lines[t.line - 1][:t.column - 1]
-                    pos = (t.line - 1, len(prefix.encode("utf-16-le")) // 2)
-                    self.assertIn(pos, known, f"{t.lexeme} at {t.line}:{t.column} is not resolved")
+                    prefix = source_lines[line - 1][:column - 1]
+                    pos = (line - 1, len(prefix.encode("utf-16-le")) // 2)
+                    self.assertIn(pos, known, f"{lexeme} at {line}:{column} is not resolved")
                     resolved_total += 1
         self.assertGreater(resolved_total, 30000)
 
     def test_members_agree_with_the_checker(self) -> None:
         """Where the server resolves `x.f` or `x.m(…)` in an example, it is the
         field or method of the type the Python checker gives `x` (step 6)."""
-        import dataclasses, glob
-        from myla.lexer import tokenize
-        from myla.parser import parse
-        from myla.tokens import TokenKind
-        from myla.types import EnumType, StructType, check
-        from myla import ast
+        import glob
         files = sorted(glob.glob(os.path.join(_REPO, "examples", "*.my")))
-        out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", default_stdlib_root(), "--resolve",
+        out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", STDLIB_ROOT, "--resolve",
                               *files], capture_output=True, text=True, check=True).stdout
         uses = {}
         for line in out.splitlines():
@@ -592,68 +677,29 @@ class TestResolutionCorpus(unittest.TestCase):
                 uses[(current, int(l), int(rest.split("-")[0]))] = (parts[4], int(dl), int(dc))
         checked = resolved = 0
         for path in files:
-            with open(path, encoding="utf-8") as fh:
-                text = fh.read()
-            program = parse(tokenize(text))
-            check(program)
-            toks = tokenize(text)
-            # where each struct's fields and each type's methods are declared (1-based)
-            fields, methods = {}, {}
-            for d in program.decls:
-                if isinstance(d, ast.StructDecl):
-                    for f in d.fields:
-                        fields[(d.name, f.name)] = (f.line, f.column)
-                if isinstance(d, ast.ImplDecl) and isinstance(d.target, ast.TypeRef):
-                    for m in d.methods:
-                        methods[(d.target.name, m.name)] = m.line
-            accesses = []
-
-            def walk(node):
-                if isinstance(node, ast.FieldAccess):
-                    accesses.append(node)
-                if dataclasses.is_dataclass(node):
-                    for f in dataclasses.fields(node):
-                        walk(getattr(node, f.name))
-                elif isinstance(node, list):
-                    for x in node:
-                        walk(x)
-            walk(program.decls)
-            lines = text.splitlines()
-            for node in accesses:
-                t = getattr(node.target, "resolved_type", None)
-                if not isinstance(t, (StructType, EnumType)) or not lines[node.line - 1].isascii():
-                    continue
-                # the member's token: the first `.name` from the access on
-                k = next((i for i, tk in enumerate(toks) if (tk.line, tk.column) >= (node.line, node.column)
-                          and tk.kind == TokenKind.IDENT and tk.lexeme == node.field_name
-                          and toks[i - 1].kind == TokenKind.DOT), None)
-                if k is None:
-                    continue
-                key = (t.name, node.field_name)
-                if key not in fields and key not in methods:
-                    continue
+            for line, column, member, kind, decl_line, decl_column in _checked_members(path):
                 checked += 1
-                found = uses.get((path, toks[k].line - 1, toks[k].column - 1))
+                found = uses.get((path, line - 1, column - 1))
                 if found is None:
                     continue
                 resolved += 1
-                with self.subTest(file=os.path.basename(path), line=toks[k].line, member=node.field_name):
+                with self.subTest(file=os.path.basename(path), line=line, member=member):
                     self.assertEqual(found[0], path)
-                    if key in fields:
-                        self.assertEqual((found[1], found[2]), (fields[key][0] - 1, fields[key][1] - 1))
+                    if kind == "field":
+                        self.assertEqual((found[1], found[2]), (decl_line, decl_column))
                     else:
-                        self.assertEqual(found[1], methods[key] - 1)
+                        self.assertEqual(found[1], decl_line)
         self.assertGreater(checked, 60)
         self.assertGreater(resolved, checked * 0.9, f"{resolved} of {checked} resolved")
         print(f"members: {resolved} of {checked} resolved", file=sys.stderr)
 
     def test_both_builds_agree(self) -> None:
-        argv = ["--stdlib", default_stdlib_root(), "--resolve", *_corpus()]
-        by_python = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), *argv], capture_output=True, text=True,
-                                   check=True).stdout
+        argv = ["--stdlib", STDLIB_ROOT, "--resolve", *_corpus()]
+        by_tool = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), *argv], capture_output=True, text=True,
+                                 check=True).stdout
         by_selfhost = subprocess.run([_self_hosted_build(), *argv], capture_output=True, text=True, check=True).stdout
-        self.assertGreater(len(by_python.splitlines()), 30000)
-        self.assertEqual(by_selfhost, by_python)
+        self.assertGreater(len(by_tool.splitlines()), 30000)
+        self.assertEqual(by_selfhost, by_tool)
 
 
 LEGEND_TYPES = ["namespace", "type", "enum", "interface", "struct", "typeParameter", "parameter", "variable",
@@ -703,7 +749,7 @@ class SemanticTokenScenarios:
         path = os.path.join(root, name)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
-        c = _Client([self.binary, "--stdlib", default_stdlib_root()])
+        c = _Client([self.binary, "--stdlib", STDLIB_ROOT])
         self.addCleanup(c.close)
         rid = c.send("initialize", {"processId": None, "rootUri": _uri(root), "capabilities": {}}, request=True)
         caps = c.response(rid)["result"]["capabilities"]
@@ -832,13 +878,13 @@ class TestExtensionStartsTheServer(unittest.TestCase):
         return json.loads(out)
 
     def settings(self, **over) -> dict:
-        s = {"serverPath": "", "compilerEntry": "/r/myla.py"}
+        s = {"serverPath": "", "compilerEntry": "/r/selfhost/main.my"}
         s.update(over)
         return s
 
     def test_the_built_server(self):
-        c = self.choose(self.settings(), ["/r/build/myla-lsp", "/r/src/myla/std"])
-        self.assertEqual((c["command"], c["args"]), ("/r/build/myla-lsp", ["--stdlib", "/r/src/myla"]))
+        c = self.choose(self.settings(), ["/r/build/myla-lsp", "/r/lib/std"])
+        self.assertEqual((c["command"], c["args"]), ("/r/build/myla-lsp", ["--stdlib", "/r/lib"]))
 
     def test_a_configured_binary(self):
         c = self.choose(self.settings(serverPath="/opt/myla-lsp", compilerEntry=None), ["/opt/myla-lsp"])
@@ -854,10 +900,10 @@ class TestExtensionStartsTheServer(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "build"))
             os.symlink(binary, os.path.join(tmp, "build", "myla-lsp"))
-            os.symlink(os.path.join(_REPO, "src"), os.path.join(tmp, "src"))
-            entry = os.path.join(tmp, "myla.py")
+            os.symlink(os.path.join(_REPO, "lib"), os.path.join(tmp, "lib"))
+            entry = os.path.join(tmp, "selfhost", "main.my")
             c = self.choose(self.settings(compilerEntry=entry),
-                            [os.path.join(tmp, "build", "myla-lsp"), os.path.join(tmp, "src", "myla", "std")])
+                            [os.path.join(tmp, "build", "myla-lsp"), os.path.join(tmp, "lib", "std")])
             client = _Client([c["command"], *c["args"]])
             self.addCleanup(client.close)
             rid = client.send("initialize", {"processId": None, "rootUri": _uri(tmp), "capabilities": {}}, request=True)
@@ -867,9 +913,8 @@ class TestExtensionStartsTheServer(unittest.TestCase):
 class TestOwnTests(unittest.TestCase):
     def test_the_server_s_own_tests_pass(self) -> None:
         # server.my imports every other module of tools/lsp (and std.json, std.num)
-        import sys
-        proc = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), "test",
-                               os.path.join(_REPO, "tools", "lsp", "server.my")], capture_output=True, text=True)
+        proc = subprocess.run([selfhost_tool("main"), "test", os.path.join(_REPO, "tools", "lsp", "server.my"),
+                               "--stdlib", STDLIB_ROOT], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
 

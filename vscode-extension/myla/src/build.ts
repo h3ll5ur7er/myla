@@ -97,13 +97,10 @@ export interface ProjectBuild {
 
 /**
  * A project is built by `myla build -g` in its directory, which resolves its
- * dependencies and writes `build/<name>` (MYLA-94); only the self-hosted CLI
- * has the project commands (D71). `manifest` is the text of its `myla.toml`.
+ * dependencies and writes `build/<name>` (MYLA-94). `manifest` is the text of
+ * its `myla.toml`.
  */
 export function projectBuild(cli: Toolchain, root: string, manifest: string): ProjectBuild | { missing: string } {
-  if ([cli.command, ...cli.args].some((a) => path.basename(a) === "myla.py")) {
-    return { missing: "Debugging a project needs the self-hosted CLI (build/myla, built by scripts/bootstrap.sh): the Python CLI has no project commands." };
-  }
   const name = packageName(manifest);
   if (name === undefined) return { missing: `${path.join(root, "myla.toml")} has no package.name.` };
   return {

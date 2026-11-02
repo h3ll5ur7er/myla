@@ -1,27 +1,32 @@
-# Rust artifacts
+# The bindings and packaging `tree-sitter init` generates (not kept: D111,
+# MYLA-232; see README.md)
+bindings/
+Cargo.toml
 Cargo.lock
 target/
+Package.swift
+Package.resolved
+.build/
+binding.gyp
+setup.py
+pyproject.toml
+Makefile
+go.mod
+go.sum
+.editorconfig
+*.egg-info
+dist/
 
-# Node artifacts
+# Node
 build/
 prebuilds/
 node_modules/
 *.tgz
 
-# Swift artifacts
-.build/
-
-# Go artifacts
-go.sum
-_obj/
-
-# Python artifacts
-.venv/
-dist/
-*.egg-info
-*.whl
-
-# C artifacts
+# Grammar volatiles
+*.wasm
+*.obj
+*.o
 *.a
 *.so
 *.so.*
@@ -31,8 +36,3 @@ dist/
 
 # Example dirs
 /examples/*/
-
-# Grammar volatiles
-*.wasm
-*.obj
-*.o

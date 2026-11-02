@@ -5,28 +5,20 @@ A `str` holds bytes. A file read with `read_to_string` or a string built with
 `==`, map keys and `print` work on the bytes, and `chars()` gives U+FFFD for
 every byte that isn't part of a well-formed sequence.
 
-The program runs four ways, each compared byte for byte (stdout may hold the
-invalid bytes, so nothing is decoded) with the expected output: the Python
-interpreter (`myla run`), the Python native backend, and the self-hosted
-compiler and interpreter (built by the Python backend).
+The program runs two ways, each compared byte for byte (stdout may hold the
+invalid bytes, so nothing is decoded) with the expected output: the
+self-hosted compiler and interpreter. (It ran in the Python interpreter and
+the Python native backend too until they were retired, MYLA-219.)
 """
 from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 
-from myla.compiler import build
-from myla.loader import default_stdlib_root, link
-from myla.types import check
-
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._tools import selfhost_tool
-
-_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-_MYLA = os.path.join(_REPO, "myla.py")
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 # ASCII, two stray bytes, a truncated 4-byte sequence, an overlong NUL, an
 # encoded surrogate, two valid scalars, and a sequence cut off by the end.
@@ -111,7 +103,7 @@ class InvalidUtf8(unittest.TestCase):
         cls.prog = os.path.join(cls.dir, "main.my")
         with open(cls.prog, "w", encoding="utf-8") as fh:
             fh.write(PROGRAM)
-        cls.stdlib = default_stdlib_root()
+        cls.stdlib = STDLIB_ROOT
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -123,16 +115,8 @@ class InvalidUtf8(unittest.TestCase):
         return proc.stdout
 
     def _tool(self, name: str) -> str:
-        """`selfhost/<name>.my` built by the Python backend (cached)."""
+        """`selfhost/<name>.my` built natively (cached)."""
         return selfhost_tool(name)
-
-    def test_python_interpreter(self) -> None:
-        self.assertEqual(self._run([sys.executable, _MYLA, "run", self.prog]), EXPECTED)
-
-    def test_python_native_backend(self) -> None:
-        binary = os.path.join(self.dir, "prog_py")
-        build(check(link(self.prog, stdlib_root=self.stdlib)), binary)
-        self.assertEqual(self._run([binary]), EXPECTED)
 
     def test_self_hosted_compiler(self) -> None:
         asm = self._run([self._tool("gen_main"), self.prog, self.stdlib])

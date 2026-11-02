@@ -15,12 +15,13 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name
+from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
+from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
 // `capoff` is the byte offset within the closure env for a "capture" binding.
@@ -212,6 +213,12 @@ pub struct CodeGen {
     tag_enums: [str: bool],         // MYLA-133: the enums whose `==` compares tags only
 }
 
+// A code generator for `src` (checked alone, `checker_on`), the receiver of
+// `#test` cases of the code generator's methods (MYLA-184).
+pub fun codegen_on(src: str) -> CodeGen {
+    return new_codegen(checker_on(src))
+}
+
 pub fun new_codegen(c: Checker) -> CodeGen {
     var handed: [str: [int32]] = [:]
     for k in keys(c.handovers) {
@@ -311,6 +318,7 @@ impl CodeGen {
     }
 
     // The IR of every function, as text.
+    #test(codegen_on("[int]"))[""]
     fun ir_text(self) -> str {
         var sb = StringBuilder()
         for t in self.ir_texts { append(sb, t) }
@@ -320,6 +328,7 @@ impl CodeGen {
     // The path of the file node `id` is in, as the loader names it (the entry
     // file as given, the self-hosted CLI's diagnostics name the same), or
     // `<input>` without one.
+    #test(codegen_on("[int]"), 16)["<input>"]
     fun path_of(self, id: int32) -> str {
         if len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return "<input>" }
         var path = self.line_spans[0].path
@@ -375,6 +384,7 @@ impl CodeGen {
     // parameters and captures, its locals in lexical blocks (one opens where a
     // binding starts and ends with the Myla scope), and the types they use.
 
+    #test(codegen_on("[int]"), "b")[".Ldb1"]
     fun dbg_label(var self, kind: str) -> str {
         self.dbg_n = self.dbg_n + 1
         return format(".Ld{}{}", kind, self.dbg_n)
@@ -406,6 +416,7 @@ impl CodeGen {
     // The type `finish` reads a function's result as, from `%rax` ("": none
     // it can read). An aggregate comes back through the hidden pointer `%rax`
     // returns; a float in `%rax`, where gdb would read `%xmm0`.
+    #test(codegen_on("[int]"), None)[""]
     fun dbg_return_type(var self, ret: Option<Type>) -> str {
         let t = match ret {
             Some(t) => t,
@@ -529,6 +540,7 @@ impl CodeGen {
 
     // The location of a float32 variable: the double it is kept as, converted
     // to the type `f32`.
+    #test(codegen_on("[int]"), [145, 104], ".Ldty0")[["\t.uleb128 .Ldx2 - .Ldx1", ".Ldx1:", "\t.byte 145, 104", "\t.byte 246, 8", "\t.uleb128 .Ldty0 - .Ldebug_info0", "\t.byte 247", "\t.uleb128 .Ldty0 - .Ldebug_info0", "\t.byte 159", ".Ldx2:"]]
     fun dbg_convert(var self, addr: [int32], f32: str) -> [str] {
         let f64 = self.dbg_base(Type.TFloat(64), 8)
         let start = self.dbg_label("x")
@@ -544,6 +556,7 @@ impl CodeGen {
     }
 
     // The label of the type DIE `key` names, registered the first time.
+    #test(codegen_on("[int]"), "byte", "byte", Type.TBool, "", 0, 0)[".Ldty0"]
     fun dbg_type(var self, key: str, kind: str, ty: Type, target: str, n: int32, m: int32) -> str {
         match get(self.dbg_types, key) {
             Some(l) => { return l },
@@ -556,45 +569,55 @@ impl CodeGen {
     }
 
     // A scalar's base type, `size` bytes wide.
+    #test(codegen_on("[int]"), Type.TFloat(32), 4)[".Ldty0"]
     fun dbg_base(var self, t: Type, size: int32) -> str {
         return self.dbg_type(format("base:{}:{}", type_name(t), size), "base", t, "", size, 0)
     }
 
     // A string's byte, shown with its character.
+    #test(codegen_on("[int]"))[".Ldty0"]
     fun dbg_byte(var self) -> str { return self.dbg_type("byte", "byte", Type.TBool, "", 0, 0) }
 
+    #test(codegen_on("[int]"), ".Ldty0")[".Ldty0"]
     fun dbg_pointer(var self, target: str) -> str {
         return self.dbg_type(format("ptr:{}", target), "ptr", Type.TBool, target, 0, 0)
     }
 
+    #test(codegen_on("[int]"))[".Ldty0"]
     fun dbg_void_pointer(var self) -> str { return self.dbg_type("voidptr", "voidptr", Type.TBool, "", 0, 0) }
 
     // A Rust `&str`, which gdb prints as a string literal.
+    #test(codegen_on("[int]"))[".Ldty0"]
     fun dbg_slice(var self) -> str { return self.dbg_type("slice", "slice", Type.TBool, "", 0, 0) }
 
     // An array of `elem`s `stride` bytes apart, as many as the 8 bytes
     // `header` bytes before the first say (a cell's length).
+    #test(codegen_on("[int]"), ".Ldty6", 1, 8)[".Ldty0"]
     fun dbg_array(var self, elem: str, stride: int32, header: int32) -> str {
         return self.dbg_type(format("array:{}:{}:{}", elem, stride, header), "array", Type.TBool, elem, stride, header)
     }
 
     // The elements of a list of `e`s, at its cell + 16.
+    #test(codegen_on("[int]"), Type.TFloat(64))[".Ldty1"]
     fun dbg_items(var self, e: Type) -> str {
         let elem = self.dbg_element(e)
         return self.dbg_array(elem, self.stored_size(e), 16)
     }
 
     // The heap cell of a `str`, list, builder or map, for a pointer to it.
+    #test(codegen_on("[int]"), Type.TStr)[".Ldty0"]
     fun dbg_cell(var self, t: Type) -> str {
         return self.dbg_type(format("cell:{}", type_name(t)), "cell", t, "", 0, 0)
     }
 
+    #test(codegen_on("[int]"), Type.TEnum("Color", []))[".Ldty0"]
     fun dbg_aggregate(var self, t: Type) -> str {
         return self.dbg_type(format("agg:{}", type_name(t)), "agg", t, "", 0, 0)
     }
 
     // The type of a value inside an aggregate or a list (or of a scalar
     // variable): types of a fixed size only.
+    #test(codegen_on("[int]"), Type.TStr)[".Ldty1"]
     fun dbg_element(var self, t: Type) -> str {
         match t {
             Type.TInt(w, sg) => {
@@ -621,6 +644,7 @@ impl CodeGen {
     }
 
     // A structure type's lines: `members` of `types` at `offs`.
+    #test(codegen_on("[int]"), "Point", 16, ["x", "y"], [".Ldty1", ".Ldty1"], [0, 8])[["\t.uleb128 9", "\t.string \"Point\"", "\t.uleb128 16", "\t.uleb128 10", "\t.string \"x\"", "\t.long .Ldty1 - .Ldebug_info0", "\t.uleb128 0", "\t.uleb128 10", "\t.string \"y\"", "\t.long .Ldty1 - .Ldebug_info0", "\t.uleb128 8", "\t.byte 0"]]
     fun dbg_struct_lines(self, name: str, size: int32, members: [str], types: [str], offs: [int32]) -> [str] {
         var out = [format("\t.uleb128 {}", AB_STRUCT), dw_string(name), format("\t.uleb128 {}", size)]
         var i = 0
@@ -636,6 +660,7 @@ impl CodeGen {
     }
 
     // The lines of the type DIE `p` describes.
+    #test(codegen_on("[int]"), DbgType { label: ".Ldty1", kind: "ptr", ty: Type.TBool, target: ".Ldty0", n: 0, m: 0 })[["\t.uleb128 7", "\t.byte 8", "\t.long .Ldty0 - .Ldebug_info0"]]
     fun dbg_build(var self, p: DbgType) -> [str] {
         let i64 = Type.TInt(64, true)
         if p.kind == "base" {
@@ -663,6 +688,7 @@ impl CodeGen {
         return self.dbg_aggregate_lines(p.ty)
     }
 
+    #test(codegen_on("[int]"), Type.TStr)[["\t.uleb128 9", "\t.string \"str\"", "\t.uleb128 8", "\t.uleb128 10", "\t.string \"len\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 0", "\t.uleb128 10", "\t.string \"bytes\"", "\t.long .Ldty2 - .Ldebug_info0", "\t.uleb128 8", "\t.byte 0"]]
     fun dbg_cell_lines(var self, t: Type) -> [str] {
         let len_t = self.dbg_base(Type.TInt(64, true), 8)
         match t {
@@ -694,6 +720,7 @@ impl CodeGen {
 
     // A map slot of map type `t`, `size` bytes: `[state:8][key:8][value]`
     // (state 1: occupied).
+    #test(codegen_on("enum E { A, B(int) }"), Type.TMap(Type.TStr, Type.TInt(32, true)), 24)[["\t.uleb128 9", "\t.string \"slot\"", "\t.uleb128 24", "\t.uleb128 10", "\t.string \"state\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 0", "\t.uleb128 10", "\t.string \"key\"", "\t.long .Ldty2 - .Ldebug_info0", "\t.uleb128 8", "\t.uleb128 10", "\t.string \"value\"", "\t.long .Ldty3 - .Ldebug_info0", "\t.uleb128 16", "\t.byte 0"]]
     fun dbg_slot_lines(var self, t: Type, size: int32) -> [str] {
         match t {
             Type.TMap(k, v) => {
@@ -707,6 +734,7 @@ impl CodeGen {
         return []
     }
 
+    #test(codegen_on("struct P { x: int, y: int }"), Type.TStruct("Adder", []))[["\t.uleb128 9", "\t.string \"Adder\"", "\t.uleb128 16", "\t.uleb128 10", "\t.string \"x\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 0", "\t.uleb128 10", "\t.string \"y\"", "\t.long .Ldty0 - .Ldebug_info0", "\t.uleb128 8", "\t.byte 0"]]
     fun dbg_aggregate_lines(var self, t: Type) -> [str] {
         let name = type_name(t)
         let size = self.size(t)
@@ -838,6 +866,7 @@ impl CodeGen {
 
     // The `.file` number of the module node `id` is in, registered on first
     // use; 0 when line tables are off or the node is the prelude's.
+    #test(codegen_on("[int]"), 16)[0]
     fun file_number(var self, id: int32) -> int32 {
         if !self.debug || len(self.line_spans) == 0 || id < 0 || id >= self.prelude_id { return 0 }
         let path = self.path_of(id)
@@ -912,11 +941,13 @@ impl CodeGen {
         self.pend_temp = -1
     }
 
+    #test(codegen_on("[int]"))[".L1"]
     fun label(var self) -> str {
         self.label_n = self.label_n + 1
         return format(".L{}", self.label_n)
     }
 
+    #test(codegen_on("[int]"), "héλ")[-1]
     fun str_index(self, text: str) -> int32 {
         return match get(self.str_ix, text) {
             Some(i) => i
@@ -925,6 +956,7 @@ impl CodeGen {
     }
 
     // Intern a string literal, emitting a static `str` cell (MYLA-18).
+    #test(codegen_on("[int]"), "héλ")[".Lstr0"]
     fun string_label(var self, text: str) -> str {
         let existing = self.str_index(text)
         if existing >= 0 { return self.str_labels[existing] }
@@ -946,6 +978,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("[int]"), "add")[false]
     fun has_func(self, name: str) -> bool {
         return contains(self.func_ix, name)
     }
@@ -1212,6 +1245,7 @@ impl CodeGen {
 
     // Whether `myla_<key>.eq` is the routine `emit_derived_eq` writes for a
     // `#derive(Eq)` struct or enum (called with both operands' addresses).
+    #test(codegen_on("enum E { A, B(int) }"), "a")[false]
     fun derived_eq_routine(self, key: str) -> bool {
         for d in self.decls {
             match d.kind {
@@ -1225,6 +1259,7 @@ impl CodeGen {
 
     // Whether `==` on `t` compares tags only: an enum without payloads whose
     // `eq` is derived (MYLA-133; `find_tag_enums`).
+    #test(codegen_on("[int]"), Type.TEnum("Color", []))[false]
     fun tag_only_eq(self, t: Type) -> bool {
         return match t {
             Type.TEnum(n, a) => contains(self.tag_enums, n),
@@ -1255,6 +1290,7 @@ impl CodeGen {
     }
 
     // The bytes of argument words a value of type `t` takes by value.
+    #test(codegen_on("enum E { A, B(int) }"), Type.TBool)[8]
     fun word_size(self, t: Type) -> int32 {
         let size = (self.size(t) + 7) / 8 * 8
         if size < 8 { return 8 }
@@ -1282,6 +1318,7 @@ impl CodeGen {
     }
 
     // The method-table key for a receiver type (mirrors Checker.type_key).
+    #test(codegen_on("[int]"), Type.TInt(32, true))["int32"]
     fun type_key(self, t: Type) -> str {
         return match t {
             Type.TStruct(n, a) => n,
@@ -1298,6 +1335,7 @@ impl CodeGen {
 
     // The resolved type of a node, with the active generic substitution applied
     // (identity outside a specialized generic body).
+    #test(codegen_on("[int]"), 23)[Type.TInt(32, true)]
     fun type_of(self, id: int32) -> Type {
         match get(self.resolved, id) { Some(t) => { return subst_type(t, self.subst) }, None => {} }
         return Type.TInt(32, true)
@@ -1319,6 +1357,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("[int]"), Type.TStr)[false]
     fun is_boxed(self, t: Type) -> bool {
         return match t {
             Type.TEnum(n, a) => list_has_str(self.recursive_enums, n),
@@ -1326,6 +1365,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("[int]"), Type.TStr)[8]
     fun stored_size(self, t: Type) -> int32 {
         if self.is_boxed(t) { return 8 }
         return self.size(t)
@@ -1337,10 +1377,12 @@ impl CodeGen {
     // pointer (a boxed enum, list, map, builder, or closure env), i.e. it
     // participates in reference counting and must be retained/dropped on
     // copy/release. Strings and scalars are immortal arena blobs.
+    #test(codegen_on("[int]"), Type.TStr)[true]
     fun owns_heap(self, t: Type) -> bool {
         return self.owns_heap_seen(t, [])
     }
 
+    #test(codegen_on("[int]"), Type.TStr, [])[true]
     fun owns_heap_seen(self, t: Type, seen: [str]) -> bool {
         if self.is_boxed(t) { return true }
         match t {
@@ -1383,6 +1425,7 @@ impl CodeGen {
     }
 
     // The drop routine for a heap-pointer leaf of type `t`.
+    #test(codegen_on("[int]"), Type.TStr)["__str_drop"]
     fun drop_call_name(self, t: Type) -> str {
         return match t {
             Type.TList(e) => "__drop_list_" + mono_token(e),
@@ -1445,6 +1488,7 @@ impl CodeGen {
     }
 
     // The clone routine for a list/map/builder cow site.
+    #test(codegen_on("[int]"), Type.TSB)["__sb_clone"]
     fun clone_call_name(self, t: Type) -> str {
         return match t {
             Type.TList(e) => "__clone_list_" + mono_token(e),
@@ -1454,6 +1498,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("[int]"), VariantT { name: "Nil", payload: [] }, [])[false]
     fun variant_owns(self, v: VariantT, sub: [Subst]) -> bool {
         for ft0 in v.payload {
             let ft = subst_type(ft0, sub)
@@ -1481,6 +1526,7 @@ impl CodeGen {
 
     // Whether `t`'s walk goes through a helper: an enum, or a struct or tuple
     // with more than one member owning heap values.
+    #test(codegen_on("[int]"), Type.TEnum("List", []))[true]
     fun walk_helper(self, t: Type) -> bool {
         var members: [Type] = []
         match t {
@@ -1501,6 +1547,7 @@ impl CodeGen {
     }
 
     // The name of `t`'s retain or release walk helper, to be emitted.
+    #test(codegen_on("[int]"), Type.TEnum("List", []), true)["__walkr_List"]
     fun register_walk(var self, t: Type, retain: bool) -> str {
         let tok = mono_token(t)
         var name = "__walkd_" + tok
@@ -1607,6 +1654,7 @@ impl CodeGen {
     // parameters are substituted so a generic container instantiated with an
     // inline aggregate (e.g. `Option<TypeExpr>`) reserves the real payload size,
     // not a single 8-byte slot. Mirrors the oracle's monomorphized layout.
+    #test(codegen_on("[int]"), [], [])[[]]
     fun type_subst(self, type_params: [str], args: [Type]) -> [Subst] {
         var sub: [Subst] = []
         var i = 0
@@ -1617,6 +1665,7 @@ impl CodeGen {
         return sub
     }
 
+    #test(codegen_on("[int]"), Type.TStr)[8]
     fun size(self, t: Type) -> int32 {
         return match t {
             Type.TStruct(n, a) => self.struct_size(n, a),
@@ -1628,6 +1677,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("struct P { x: int, y: int }"), "Name", [])[16]
     fun struct_size(self, name: str, args: [Type]) -> int32 {
         let info = self.struct_info(name)
         let sub = self.type_subst(info.type_params, args)
@@ -1636,12 +1686,14 @@ impl CodeGen {
         return total
     }
 
+    #test(codegen_on("[int]"), [Type.TInt(32, true)])[8]
     fun tuple_size(self, es: [Type]) -> int32 {
         var total = 0
         for e in es { total = total + self.stored_size(e) }
         return total
     }
 
+    #test(codegen_on("enum E { A, B(int) }"), "Color", [])[8]
     fun enum_payload_size(self, name: str, args: [Type]) -> int32 {
         let info = self.enum_info(name)
         let sub = self.type_subst(info.type_params, args)
@@ -1654,6 +1706,7 @@ impl CodeGen {
         return maxp
     }
 
+    #test(codegen_on("struct P { x: int, y: int }"), Type.TStruct("Point", []), "x")[0]
     fun field_offset(self, st: Type, field: str) -> int32 {
         let name = struct_name_of(st)
         let info = self.struct_info(name)
@@ -1666,6 +1719,7 @@ impl CodeGen {
         return off
     }
 
+    #test(codegen_on("[int]"), Type.TTuple([Type.TInt(32, true)]), 0)[0]
     fun elem_offset(self, t: Type, index: int32) -> int32 {
         var off = 0
         var i = 0
@@ -1679,6 +1733,7 @@ impl CodeGen {
 
     // -- enum layout ------------------------------------------------------
 
+    #test(codegen_on("enum E { A, B(int) }"), "Color", "Red")[0]
     fun variant_tag(self, enum_name: str, variant: str) -> int32 {
         var i = 0
         for v in self.enum_info(enum_name).variants {
@@ -1689,6 +1744,7 @@ impl CodeGen {
     }
 
     // Declared payload types of `variant` (generic type parameters unsubstituted).
+    #test(codegen_on("enum E { A, B(int) }"), "List", "Cons")[[]]
     fun variant_payload_decl(self, enum_name: str, variant: str) -> [Type] {
         for v in self.enum_info(enum_name).variants {
             if v.name == variant { return v.payload }
@@ -1699,6 +1755,7 @@ impl CodeGen {
     // Payload types of `variant` with the enum value `et`'s concrete type
     // arguments substituted in (so payloads carrying a type parameter resolve to
     // their instantiated type, matching this value's layout).
+    #test(codegen_on("enum E { A, B(int) }"), Type.TEnum("Shape", []), "Rect")[[]]
     fun variant_payload(self, et: Type, variant: str) -> [Type] {
         let name = enum_name_of(et)
         let info = self.enum_info(name)
@@ -1708,6 +1765,7 @@ impl CodeGen {
         return out
     }
 
+    #test(codegen_on("enum E { A, B(int) }"), Type.TEnum("Shape", []), "Rect", 0)[8]
     fun variant_field_offset(self, et: Type, variant: str, index: int32) -> int32 {
         var off = 8
         let payload = self.variant_payload(et, variant)
@@ -1719,18 +1777,22 @@ impl CodeGen {
         return off
     }
 
+    #test(codegen_on("[int]"), "a")[false]
     fun is_enum_name(self, n: str) -> bool {
         return contains(self.enum_names, n)
     }
 
+    #test(codegen_on("[int]"), "a")[false]
     fun is_nullary_variant(self, n: str) -> bool {
         return contains(self.nullary_names, n)
     }
 
+    #test(codegen_on("[int]"), "Ok")[false]
     fun is_variant_name(self, n: str) -> bool {
         return contains(self.variant_names, n)
     }
 
+    #test(codegen_on("[int]"), "push")[false]
     fun has_function(self, n: str) -> bool {
         return contains(self.func_ix, n)
     }
@@ -1738,11 +1800,13 @@ impl CodeGen {
     // Whether the checker typed `callee` as a value, which it does only for an
     // indirect call: a local binding shadows a function of the same name
     // (MYLA-102), so `f(x)` with a local `f` calls the local.
+    #test(codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[false]
     fun called_as_value(self, callee: Expr) -> bool {
         return contains(self.resolved, callee.id)
     }
 
     // Classify an expression as an enum constructor (if it is one).
+    #test(codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"))[CtorInfo { ok: false, enum_name: "", variant: "", args: [] }]
     fun ctor_info(self, e: Expr) -> CtorInfo {
         let enm = enum_name_of(self.type_of(e.id))
         match e.kind {
@@ -1806,6 +1870,7 @@ impl CodeGen {
 
     // Register an instantiation (or non-generic function) and return its emitted
     // (mangled) name, enqueueing it for stamping the first time it is seen.
+    #test(codegen_on("fun main() { print(1 + 2) }"), "add", [])["add"]
     fun request_fn(var self, orig: str, targs: [Type]) -> str {
         let sig = self.sig_of(orig)
         if len(sig.type_params) == 0 {
@@ -1845,6 +1910,7 @@ impl CodeGen {
         return out
     }
 
+    #test(codegen_on("[int]"))["main"]
     fun entry_name(self) -> str {
         for d in self.decls {
             match d.kind {
@@ -1884,6 +1950,7 @@ impl CodeGen {
         if self.frames {
             push(out, ".Lmsg_stuck:\n\t.quad 48\n\t.ascii \"runtime error: every task waits for another one\\n\"")
             push(out, ".Lmyla_threads:\n\t.ascii \"MYLA_THREADS=\"")
+            push(out, ".Lmyla_sched:\n\t.ascii \"MYLA_SCHED=\"")
         }
         for line in self.posdata { push(out, line) }
         for line in self.rodata { push(out, line) }
@@ -1929,6 +1996,9 @@ impl CodeGen {
         push(out, "\t.skip 8")
         push(out, "__run_errno_val:")
         push(out, "\t.skip 8")
+        // 1 once a stack overflow is being reported (`__on_segv`)
+        push(out, "__segv_once:")
+        push(out, "\t.skip 8")
         if self.frames {
             // each worker's queue: `[lock][head][tail]`, a cache line each
             push(out, "\t.balign 64")
@@ -1940,7 +2010,10 @@ impl CodeGen {
             push(out, format("\t.skip {}", TLS_SIZE * MAX_WORKERS))
             push(out, "__heap_base:")
             push(out, "\t.skip 8")
-            for g in ["__exec_seq", "__exec_idle", "__exec_sleepers", "__exec_workers"] {
+            // the order ready frames run in (`__sched_init`, D110): 0 the
+            // newest first, 1 the oldest, 2 one chosen by the generator
+            // `__exec_rng` (MYLA_SCHED=seed:N)
+            for g in ["__exec_seq", "__exec_idle", "__exec_sleepers", "__exec_workers", "__exec_sched", "__exec_rng"] {
                 push(out, g + ":")
                 push(out, "\t.skip 8")
             }
@@ -1998,6 +2071,7 @@ impl CodeGen {
     // to be emitted. `clone` (MYLA-148): `__dclonew_<T>`, the T at %rdi a
     // word-for-word copy of a value others hold, whose heap values it
     // replaces by deep copies, only reading the originals.
+    #test(codegen_on("enum E { A, B(int) }"), Type.TBool, true)["__dclonew_.bool"]
     fun register_deep(var self, t: Type, clone: bool) -> str {
         var name = "__deepw_" + mono_token(t)
         if clone { name = "__dclonew_" + mono_token(t) }
@@ -2014,6 +2088,7 @@ impl CodeGen {
     // unshared, deeply: %rax = the same cell when it was the only reference,
     // else a copy; either way every heap value in it is a deep copy of its own.
     // `clone`: %rax = a deep copy of the cell at %rdi, which is only read.
+    #test(codegen_on("enum E { A, B(int) }"), Type.TBool, true)["__dcloneb_.bool"]
     fun deep_cell_name(var self, t: Type, clone: bool) -> str {
         var pre = "__deep"
         if clone { pre = "__dclone" }
@@ -2248,6 +2323,7 @@ impl CodeGen {
     }
 
     // The deep walk of a boxed enum's inline value (its cell's contents).
+    #test(codegen_on("enum E { A, B(int) }"), Type.TBool, true)["__dclonei_.bool"]
     fun register_deep_inline(var self, t: Type, clone: bool) -> str {
         var name = "__deepi_" + mono_token(t)
         if clone { name = "__dclonei_" + mono_token(t) }
@@ -2436,6 +2512,7 @@ impl CodeGen {
     // The operand of the runtime variable `sym`, which is a thread's own in a
     // program with tasks: in the block `%fs` holds (`tls_offset`), else at
     // its symbol.
+    #test(codegen_on("[int]"), "__heap_end")["__heap_end(%rip)"]
     fun tv(self, sym: str) -> str {
         if !self.frames { return sym + "(%rip)" }
         return format("%fs:{}", tls_offset(sym))
@@ -2478,8 +2555,11 @@ impl CodeGen {
         // first: a task's children before its siblings'), else steals the
         // oldest frame of the next queue that has one (the biggest piece of
         // a tree of tasks); a frame yielding a turn goes to the oldest end,
-        // behind the others. One worker keeps first in, first out: the order
-        // of the self-hosted interpreter.
+        // behind the others (D110: depth-first, with one worker the order of
+        // the self-hosted interpreter). MYLA_SCHED changes it
+        // (`__sched_init`): `fifo` takes the oldest (a yield goes to the
+        // newest end); `seed:N` queues each push at the end a generator
+        // seeded with N picks (a yield still behind the others).
         // `__exec_seq` counts pushes, the word sleeping workers wait on
         // (futex); `__exec_idle` counts the workers with nothing to run
         // (spinning a while, then asleep), `__exec_sleepers` those asleep.
@@ -2508,6 +2588,21 @@ impl CodeGen {
         self.raw("\tshlq $23, %rdx")
         self.raw("\taddq __wq_rings(%rip), %rdx")
         self.raw("\tcall __wq_lock")
+        // seed:N: the generator's next value (x * a + c, the interpreter's
+        // `Interp.ready` too); its bit 33 set queues the frame at the oldest end
+        self.raw("\tcmpq $2, __exec_sched(%rip)")
+        self.raw("\tjne .Lexp_newest")
+        self.raw("\tpushq %r8")
+        self.raw("\tmovq __exec_rng(%rip), %rax")
+        self.raw(format("\tmovabsq ${}, %r8", SCHED_MUL))
+        self.raw("\timulq %r8, %rax")
+        self.raw(format("\tmovabsq ${}, %r8", SCHED_ADD))
+        self.raw("\taddq %r8, %rax")
+        self.raw("\tpopq %r8")
+        self.raw("\tmovq %rax, __exec_rng(%rip)")
+        self.raw("\tbtq $33, %rax")
+        self.raw("\tjc .Lexp_oldest")
+        self.raw(".Lexp_newest:")
         self.raw("\tmovq 16(%rcx), %rax")
         self.raw("\tpushq %rax")
         self.raw("\tsubq 8(%rcx), %rax")
@@ -2547,10 +2642,10 @@ impl CodeGen {
         self.raw("\tret")
         self.raw("")
         // __exec_yield_push: %rdi = a frame yielding a turn, onto the oldest
-        // end of the running worker's queue (one worker: the newest, as any
-        // push). Clobbers %rax and %rcx.
+        // end of the running worker's queue (MYLA_SCHED=fifo: the newest, as
+        // any push). Clobbers %rax and %rcx.
         self.raw("__exec_yield_push:")
-        self.raw("\tcmpl $1, __exec_workers(%rip)")
+        self.raw("\tcmpq $1, __exec_sched(%rip)")
         self.raw("\tje __exec_push")
         self.raw("\tpushq %rdx")
         self.raw(format("\tmovq {}, %rcx", self.tv("__worker_id")))
@@ -2561,6 +2656,8 @@ impl CodeGen {
         self.raw("\tshlq $23, %rdx")
         self.raw("\taddq __wq_rings(%rip), %rdx")
         self.raw("\tcall __wq_lock")
+        // (%rdx pushed, the lock taken: `__exec_push` comes here too)
+        self.raw(".Lexp_oldest:")
         self.raw("\tmovq 16(%rcx), %rax")
         self.raw("\tsubq 8(%rcx), %rax")
         self.raw(format("\tcmpq ${}, %rax", EXEC_CAP))
@@ -2577,12 +2674,12 @@ impl CodeGen {
         self.raw("\tjne .Lexp_wake")
         self.raw("\tret")
         self.raw("")
-        // __exec_find: %rdi = the running worker's newest frame (one worker:
-        // its oldest), else the oldest frame of the next queue that has one;
-        // 0 when none has. Clobbers %rax, %rcx, %rdx, %rsi, %r8.
+        // __exec_find: %rdi = the running worker's newest frame (fifo: its
+        // oldest), else the oldest frame of the next queue that has one; 0
+        // when none has. Clobbers %rax, %rcx, %rdx, %rsi, %r8.
         self.raw("__exec_find:")
         self.raw(format("\tmovq {}, %rsi", self.tv("__worker_id")))
-        self.raw("\tcmpl $1, __exec_workers(%rip)")
+        self.raw("\tcmpq $1, __exec_sched(%rip)")
         self.raw("\tje .Lef_steal")
         self.raw("\tmovq %rsi, %rcx")
         self.raw("\tshlq $6, %rcx")
@@ -2595,11 +2692,11 @@ impl CodeGen {
         self.raw("\tmovq 16(%rcx), %rax")
         self.raw("\tcmpq 8(%rcx), %rax")
         self.raw("\tje .Lef_mine_gone")
-        self.raw("\tdecq %rax")
-        self.raw("\tmovq %rax, 16(%rcx)")
         self.raw("\tmovq %rsi, %rdx")
         self.raw("\tshlq $23, %rdx")
         self.raw("\taddq __wq_rings(%rip), %rdx")
+        self.raw("\tdecq %rax")
+        self.raw("\tmovq %rax, 16(%rcx)")
         self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
         self.raw("\tmovq (%rdx,%rax,8), %rdi")
         self.raw("\tmovl $0, (%rcx)")
@@ -2799,16 +2896,14 @@ impl CodeGen {
         self.raw("\tret")
         self.raw("")
         // __start_workers: the workers besides the main thread (worker 0),
-        // as many as `__workers_count` says; each a thread (clone: the
-        // address space, files, signal handlers and thread group shared,
-        // CLONE_SETTLS) with its state block and an 8 MiB stack, running
-        // `__exec_run`
+        // as many as `__exec_workers` says (`_start` set it); each a thread
+        // (clone: the address space, files, signal handlers and thread group
+        // shared, CLONE_SETTLS) with its state block and an 8 MiB stack with
+        // a guard page at its bottom (MYLA-172), running `__exec_run`
         self.raw("__start_workers:")
         self.raw("\tpushq %rbx")
         self.raw("\tpushq %r12")
         self.raw("\tpushq %r13")
-        self.raw("\tcall __workers_count")
-        self.raw("\tmovl %eax, __exec_workers(%rip)")
         self.raw("\tmovq $1, %rbx")
         self.raw(".Lsw_next:")
         self.raw("\tcmpl __exec_workers(%rip), %ebx")
@@ -2829,6 +2924,14 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("\tcmpq $-4096, %rax")
         self.raw("\tja .Lsw_short")
+        // the stack's lowest page faults: mprotect(base, 4096, PROT_NONE)
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tmovq $4096, %rsi")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw("\tmovq $10, %rax")
+        self.raw("\tsyscall")
+        self.raw("\tmovq %r13, %rax")
         self.raw("\tleaq 8388608(%rax), %rsi")
         self.raw("\tmovq $855808, %rdi")
         self.raw("\txorq %rdx, %rdx")
@@ -2841,8 +2944,31 @@ impl CodeGen {
         self.raw("\tjs .Lsw_short")
         self.raw("\tincq %rbx")
         self.raw("\tjmp .Lsw_next")
-        // the new thread, on its stack
+        // the new thread, on its stack: an alternate signal stack of its own
+        // (a thread made with CLONE_VM has none), so `__on_segv` reports its
+        // stack's overflow as the main thread's (MYLA-172): mmap(64 KiB),
+        // sigaltstack
         self.raw(".Lsw_child:")
+        self.raw("\tmovq $9, %rax")
+        self.raw("\txorl %edi, %edi")
+        self.raw("\tmovl $65536, %esi")
+        self.raw("\tmovl $3, %edx")
+        self.raw("\tmovl $34, %r10d")
+        self.raw("\tmovq $-1, %r8")
+        self.raw("\txorl %r9d, %r9d")
+        self.raw("\tsyscall")
+        self.raw("\tcmpq $-4096, %rax")
+        self.raw("\tja .Lsw_run")
+        self.raw("\tsubq $32, %rsp")
+        self.raw("\tmovq %rax, (%rsp)")
+        self.raw("\tmovq $0, 8(%rsp)")
+        self.raw("\tmovq $65536, 16(%rsp)")
+        self.raw("\tmovq $131, %rax")
+        self.raw("\tmovq %rsp, %rdi")
+        self.raw("\txorl %esi, %esi")
+        self.raw("\tsyscall")
+        self.raw("\taddq $32, %rsp")
+        self.raw(".Lsw_run:")
         self.raw("\tjmp __exec_run")
         // no more threads to be had: the workers made so far
         self.raw(".Lsw_short:")
@@ -2851,6 +2977,58 @@ impl CodeGen {
         self.raw("\tpopq %r13")
         self.raw("\tpopq %r12")
         self.raw("\tpopq %rbx")
+        self.raw("\tret")
+        self.raw("")
+        // __sched_init: the scheduling order from MYLA_SCHED (D110,
+        // MYLA-231): `fifo` (1), `seed:N` (2, the generator seeded with N);
+        // anything else keeps the default, the newest first (0)
+        self.raw("__sched_init:")
+        self.raw("\tmovq __envp(%rip), %rsi")
+        self.raw(".Lsi_env:")
+        self.raw("\tmovq (%rsi), %rdi")
+        self.raw("\ttestq %rdi, %rdi")
+        self.raw("\tjz .Lsi_done")
+        self.raw("\tleaq .Lmyla_sched(%rip), %rcx")
+        self.raw("\txorq %rdx, %rdx")
+        self.raw(".Lsi_cmp:")
+        self.raw("\tmovb (%rcx,%rdx), %al")
+        self.raw("\tcmpb (%rdi,%rdx), %al")
+        self.raw("\tjne .Lsi_skip")
+        self.raw("\tincq %rdx")
+        self.raw("\tcmpq $11, %rdx")
+        self.raw("\tjb .Lsi_cmp")
+        self.raw("\taddq $11, %rdi")
+        // "fifo" and "seed", little-endian
+        self.raw("\tcmpl $0x6f666966, (%rdi)")
+        self.raw("\tjne .Lsi_seed")
+        self.raw("\tcmpb $0, 4(%rdi)")
+        self.raw("\tjne .Lsi_done")
+        self.raw("\tmovq $1, __exec_sched(%rip)")
+        self.raw("\tret")
+        self.raw(".Lsi_seed:")
+        self.raw("\tcmpl $0x64656573, (%rdi)")
+        self.raw("\tjne .Lsi_done")
+        self.raw("\tcmpb $58, 4(%rdi)")
+        self.raw("\tjne .Lsi_done")
+        self.raw("\taddq $5, %rdi")
+        self.raw("\txorq %rax, %rax")
+        self.raw(".Lsi_digit:")
+        self.raw("\tmovzbq (%rdi), %rcx")
+        self.raw("\tsubq $48, %rcx")
+        self.raw("\tcmpq $9, %rcx")
+        self.raw("\tja .Lsi_seeded")
+        self.raw("\timulq $10, %rax")
+        self.raw("\taddq %rcx, %rax")
+        self.raw("\tincq %rdi")
+        self.raw("\tjmp .Lsi_digit")
+        self.raw(".Lsi_seeded:")
+        self.raw("\tmovq %rax, __exec_rng(%rip)")
+        self.raw("\tmovq $2, __exec_sched(%rip)")
+        self.raw("\tret")
+        self.raw(".Lsi_skip:")
+        self.raw("\taddq $8, %rsi")
+        self.raw("\tjmp .Lsi_env")
+        self.raw(".Lsi_done:")
         self.raw("\tret")
         self.raw("")
         // __workers_count: %eax = MYLA_THREADS when the environment has it,
@@ -3179,6 +3357,7 @@ impl CodeGen {
     }
 
     // Whether `name` is an async function or method that runs on a frame.
+    #test(codegen_on("[int]"), "inc")[false]
     fun is_async_fn(self, name: str) -> bool {
         if !self.frames || !self.has_func(name) { return false }
         let sig = self.sig_of(name)
@@ -3186,6 +3365,7 @@ impl CodeGen {
     }
 
     // Whether node `id` has a type: an expression with a value.
+    #test(codegen_on("[int]"), 112)[false]
     fun has_type(self, id: int32) -> bool {
         return contains(self.resolved, id)
     }
@@ -3267,6 +3447,7 @@ impl CodeGen {
 
     // -- expressions ------------------------------------------------------
 
+    #test(codegen_on("[int]"), "H")[None]
     fun const_value_expr(self, name: str) -> Option<Expr> {
         for d in self.decls {
             match d.kind {
@@ -3558,6 +3739,7 @@ impl CodeGen {
     // The memory operand of the element %rcx of the list or string %rax
     // (bounds-checked already); for a stride that isn't a scale, %rcx is
     // multiplied first (MYLA-120).
+    #test(codegen_on("[int]"), true, 1)["8(%rax,%rcx)"]
     fun elem_operand(var self, is_str: bool, stride: int32) -> str {
         if is_str { return "8(%rax,%rcx)" }
         if stride == 1 || stride == 2 || stride == 4 || stride == 8 { return format("16(%rax,%rcx,{})", stride) }
@@ -3619,7 +3801,9 @@ impl CodeGen {
 
     // -- maps / strings / chars -------------------------------------------
 
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[24]
     fun map_slot_size(self, mt: Type) -> int32 { return 16 + self.stored_size(map_val(mt)) }
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[1]
     fun map_is_str(self, mt: Type) -> int32 {
         if is_str_t(map_key(mt)) { return 1 }
         return 0
@@ -3710,6 +3894,7 @@ impl CodeGen {
         self.emit("popq %rax")
     }
 
+    #test(codegen_on("struct P { x: int, y: int }"), "Box", "v")[Type.TInt(32, true)]
     fun struct_field_type(self, name: str, field: str) -> Type {
         for f in self.struct_info(name).fields {
             if f.name == field { return f.ty }
@@ -3718,6 +3903,7 @@ impl CodeGen {
     }
 
     // Field type with the struct value `st`'s concrete type arguments substituted.
+    #test(codegen_on("struct P { x: int, y: int }"), Type.TStruct("Box", []), "v")[Type.TInt(32, true)]
     fun struct_field_type_t(self, st: Type, field: str) -> Type {
         let name = struct_name_of(st)
         let info = self.struct_info(name)
@@ -3920,6 +4106,7 @@ impl CodeGen {
     // Push the words of the aggregate of type `t` whose address the lines
     // `load` put in %rax, with references of their own to what it holds, for
     // a parameter passed by value (D88): how many words.
+    #test(codegen_on("enum E { A, B(int) }"), Type.TBool, ["x"])[1]
     fun push_value_words(var self, t: Type, load: [str]) -> int32 {
         for line in load { self.emit(line) }
         self.emit("movq %rax, %r8")
@@ -3941,6 +4128,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("fun main() { print(1 + 2) }"), block_of("{ }"), [])[[]]
     fun free_block(self, b: Block, bound: [str]) -> [str] {
         var out: [str] = []
         var bnd = bound
@@ -3983,6 +4171,7 @@ impl CodeGen {
         return out
     }
 
+    #test(codegen_on("enum E { A, B(int) }"), None, [])[[]]
     fun free_opt_else(self, oe: Option<ElseTail>, bound: [str]) -> [str] {
         return match oe {
             Some(et) => self.free_else(et, bound),
@@ -4004,6 +4193,7 @@ impl CodeGen {
         }
     }
 
+    #test(codegen_on("enum E { A, B(int) }"), expr_of("a.b[0]"), [])[["a"]]
     fun free_expr(self, e: Expr, bound: [str]) -> [str] {
         var out: [str] = []
         match e.kind {
@@ -4171,19 +4361,6 @@ impl CodeGen {
             self.raw("\tmovq $4098, %rdi")
             self.raw("\tmovq $158, %rax")
             self.raw("\tsyscall")
-            // the heap region, an arena per worker, reserved (MAP_NORESERVE)
-            self.raw("\tmovq $9, %rax")
-            self.raw("\txorq %rdi, %rdi")
-            // MAX_WORKERS (32) arenas of 4 GiB
-            self.raw("\tmovabsq $137438953472, %rsi")
-            self.raw("\tmovq $3, %rdx")
-            self.raw("\tmovq $16418, %r10")
-            self.raw("\tmovq $-1, %r8")
-            self.raw("\txorq %r9, %r9")
-            self.raw("\tsyscall")
-            self.raw("\tcmpq $-4096, %rax")
-            self.raw("\tja __trap_oom")
-            self.raw("\tmovq %rax, __heap_base(%rip)")
             // the workers' rings of ready frames, EXEC_CAP frames each
             self.raw("\tmovq $9, %rax")
             self.raw("\txorq %rdi, %rdi")
@@ -4203,6 +4380,27 @@ impl CodeGen {
         self.raw("\tmovq %rcx, __argv(%rip)")
         self.raw("\tleaq 16(%rsp,%rax,8), %rcx")
         self.raw("\tmovq %rcx, __envp(%rip)")
+        if self.frames {
+            // as many workers as `__workers_count` says (it reads the
+            // environment), and the heap region: an arena of 4 GiB per
+            // worker, reserved (MAP_NORESERVE), not MAX_WORKERS always
+            // (MYLA-172, D106)
+            self.raw("\tcall __sched_init")
+            self.raw("\tcall __workers_count")
+            self.raw("\tmovl %eax, __exec_workers(%rip)")
+            self.raw("\tmovl %eax, %esi")
+            self.raw("\tshlq $32, %rsi")
+            self.raw("\tmovq $9, %rax")
+            self.raw("\txorq %rdi, %rdi")
+            self.raw("\tmovq $3, %rdx")
+            self.raw("\tmovq $16418, %r10")
+            self.raw("\tmovq $-1, %r8")
+            self.raw("\txorq %r9, %r9")
+            self.raw("\tsyscall")
+            self.raw("\tcmpq $-4096, %rax")
+            self.raw("\tja __trap_oom")
+            self.raw("\tmovq %rax, __heap_base(%rip)")
+        }
         // with tasks, the other workers (D92)
         if self.frames { self.raw("\tcall __start_workers") }
         if self.frames && self.sig_of(entry_name).decl.is_async {
@@ -4266,7 +4464,9 @@ impl CodeGen {
         // `runtime error: <message>`, then `  --> file:line:col` (MYLA-65).
         // __on_segv(sig, siginfo, ucontext), on the alternate stack: the fault
         // address (siginfo + 16) within 64 KiB below or 1 MiB above the interrupted
-        // %rsp (ucontext + 160) is a stack overflow (MYLA-182)
+        // %rsp (ucontext + 160) is a stack overflow (MYLA-182), reported once:
+        // a worker overflowing after another sleeps until its exit ends the
+        // process (MYLA-172)
         self.raw("__on_segv:")
         self.raw("	movq 16(%rsi), %rax")
         self.raw("	movq 160(%rdx), %rcx")
@@ -4278,6 +4478,15 @@ impl CodeGen {
         self.raw("	addq $1048576, %r8")
         self.raw("	cmpq %r8, %rax")
         self.raw("	ja .Lsegv_other")
+        self.raw("	movl $1, %eax")
+        self.raw("	xchgl %eax, __segv_once(%rip)")
+        self.raw("	testl %eax, %eax")
+        self.raw("	jz .Lsegv_report")
+        self.raw(".Lsegv_sleep:")
+        self.raw("	movq $34, %rax")
+        self.raw("	syscall")
+        self.raw("	jmp .Lsegv_sleep")
+        self.raw(".Lsegv_report:")
         self.raw("	movq $1, %rax")
         self.raw("	movl $2, %edi")
         self.raw("	leaq .Lmsg_sov(%rip), %rsi")
@@ -4817,7 +5026,7 @@ impl CodeGen {
     // Freestanding I/O runtime backing the `std` intrinsics (D29): `__write`
     // (write(2)), `__args` (build a [str] from the argc/argv captured at _start)
     // and `__read_file` (open/fstat/read/close into a fresh str cell, errno ->
-    // __io_errno_val).
+    // __io_errno_val; a file whose size fstat doesn't know read to its end).
     fun emit_io_runtime(var self) {
         self.raw("__write:")
         self.raw("\tmovq (%rsi), %rdx")
@@ -4927,6 +5136,14 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("\tmovq 48(%rsp), %r15")
         self.raw("\taddq $144, %rsp")
+        // a file without a size (/proc, a pipe: 0) is read into a cell that
+        // doubles until the end (%r12 = 1)
+        self.raw("\txorq %r12, %r12")
+        self.raw("\ttestq %r15, %r15")
+        self.raw("\tjnz .Lrf_sized")
+        self.raw("\tmovq $1, %r12")
+        self.raw("\tmovq $4096, %r15")
+        self.raw(".Lrf_sized:")
         self.raw("\tleaq 8(%r15), %rdi")
         self.raw("\tcall __alloc")
         self.raw("\tmovq %rax, %r13")
@@ -4934,7 +5151,25 @@ impl CodeGen {
         self.raw("\txorq %r14, %r14")
         self.raw(".Lrf_read:")
         self.raw("\tcmpq %r15, %r14")
-        self.raw("\tjae .Lrf_read_done")
+        self.raw("\tjb .Lrf_room")
+        self.raw("\ttestq %r12, %r12")
+        self.raw("\tjz .Lrf_read_done")
+        self.raw("\tleaq 8(%r15,%r15), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\txorq %rcx, %rcx")
+        self.raw(".Lrf_grow:")
+        self.raw("\tcmpq %r14, %rcx")
+        self.raw("\tjae .Lrf_grown")
+        self.raw("\tmovb 8(%r13,%rcx), %dl")
+        self.raw("\tmovb %dl, 8(%rax,%rcx)")
+        self.raw("\tincq %rcx")
+        self.raw("\tjmp .Lrf_grow")
+        self.raw(".Lrf_grown:")
+        self.raw("\tmovq %r13, %rdi")
+        self.raw("\tmovq %rax, %r13")
+        self.raw("\tcall __free")
+        self.raw("\taddq %r15, %r15")
+        self.raw(".Lrf_room:")
         self.raw("\tmovq $0, %rax")
         self.raw("\tmovq %rbx, %rdi")
         self.raw("\tleaq 8(%r13), %rsi")
@@ -7229,11 +7464,17 @@ impl CodeGen {
 
 // -- free helpers ---------------------------------------------------------
 
+#test(".L1:")[true]
+#test(".L2:")[true]
+#test("cld")[false]
 fun ends_colon(s: str) -> bool {
     let n = len(s)
     return n > 0 && s[n - 1] == 58
 }
 
+#test("-")["45"]
+#test("zero")["122, 101, 114, 111"]
+#test("examples/traits_on_builtins.my")["101, 120, 97, 109, 112, 108, 101, 115, 47, 116, 114, 97, 105, 116, 115, 95, 111, 110, 95, 98, 117, 105, 108, 116, 105, 110, 115, 46, 109, 121"]
 fun byte_list(s: str) -> str {
     var sb = StringBuilder()
     var i = 0
@@ -7245,6 +7486,9 @@ fun byte_list(s: str) -> str {
     return build(sb)
 }
 
+#test([])[""]
+#test(["s"])["s"]
+#test(["n", "d"])["n\nd"]
 fun join_lines(xs: [str]) -> str {
     var sb = StringBuilder()
     var i = 0
@@ -7256,6 +7500,9 @@ fun join_lines(xs: [str]) -> str {
     return build(sb)
 }
 
+#test(Type.TSB)[false]
+#test(Type.TStr)[false]
+#test(Type.TEnum("List", []))[true]
 pub fun is_aggregate(t: Type) -> bool {
     return match t {
         Type.TStruct(n, a) => true,
@@ -7267,20 +7514,30 @@ pub fun is_aggregate(t: Type) -> bool {
     }
 }
 
+#test(Some(Type.TInt(32, true)))[false]
 pub fun is_aggregate_opt(ot: Option<Type>) -> bool {
     return match ot { Some(t) => is_aggregate(t), None => false }
 }
 
+#test(Type.TTuple([Type.TInt(32, true)]))[[Type.TInt(32, true)]]
+#test(Type.TTuple([Type.TStruct("Box", []), Type.TInt(32, true)]))[[Type.TStruct("Box", []), Type.TInt(32, true)]]
+#test(Type.TTuple([Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]), Type.TInt(32, true)]))[[Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]), Type.TInt(32, true)]]
 pub fun tuple_elems(t: Type) -> [Type] {
     return match t { Type.TTuple(es) => es, _ => [] }
 }
 
+#test(Type.TList(Type.TStr))[Type.TStr]
+#test(Type.TList(Type.TStruct("Vec2", [])))[Type.TStruct("Vec2", [])]
+#test(Type.TList(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true)))))[Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true)))]
 pub fun list_elem(t: Type) -> Type {
     return match t { Type.TList(e) => e, _ => Type.TInt(32, true) }
 }
 
 // Split a `format` template into literal segments (one more than the number of
 // `{}` holes). `{{`/`}}` collapse to single literal braces.
+#test("{}€")[["", "€"]]
+#test("{} scored {}")[["", " scored ", ""]]
+#test("This is not the error you are looking for. It is {}")[["This is not the error you are looking for. It is ", ""]]
 pub fun format_segments(s: str) -> [str] {
     var segs: [str] = []
     var cur = ""
@@ -7312,31 +7569,54 @@ pub fun format_segments(s: str) -> [str] {
 }
 
 // The single-byte substring at index `i` (build a 1-char string).
+#test("{}: {}", 2)[":"]
+#test("{}:{}:{}: there is no error, this is just a test", 16)["i"]
+#test("This is not the error you are looking for. It is {}", 38)["f"]
 fun str_byte(s: str, i: int32) -> str {
     var sb = StringBuilder()
     append_byte(sb, s[i])
     return build(sb)
 }
 
+#test(Type.TMap(Type.TChar, Type.TInt(32, true)))[Type.TChar]
 pub fun map_key(t: Type) -> Type {
     return match t { Type.TMap(k, v) => k, _ => Type.TStr }
 }
 
+#test(Type.TMap(Type.TChar, Type.TInt(32, true)))[Type.TInt(32, true)]
 pub fun map_val(t: Type) -> Type {
     return match t { Type.TMap(k, v) => v, _ => Type.TInt(32, true) }
 }
 
+#test(Type.TSB)[false]
+#test(Type.TStr)[false]
+#test(Type.TList(Type.TStr))[true]
 pub fun is_list_t(t: Type) -> bool { return match t { Type.TList(e) => true, _ => false } }
+#test(Type.TSB)[false]
+#test(Type.TStr)[false]
+#test(Type.TMap(Type.TChar, Type.TInt(32, true)))[true]
 pub fun is_map_t(t: Type) -> bool { return match t { Type.TMap(k, v) => true, _ => false } }
+#test(Type.TStr)[true]
+#test(Type.TChar)[false]
+#test(Type.TInt(32, true))[false]
 pub fun is_str_t(t: Type) -> bool { return match t { Type.TStr => true, _ => false } }
+#test(Type.TSB)[true]
+#test(Type.TStr)[false]
+#test(Type.TInt(32, true))[false]
 fun is_sb_t(t: Type) -> bool { return match t { Type.TSB => true, _ => false } }
 
 // A heap cell whose pointer is the value: retained and dropped as one pointer.
+#test(Type.TSB)[true]
+#test(Type.TStr)[true]
+#test(Type.TInt(32, true))[false]
 pub fun is_cell_t(t: Type) -> bool { return is_list_t(t) || is_map_t(t) || is_sb_t(t) || is_str_t(t) || is_actor_t(t) }
 
 // A `str` cell in the data section: the heap's `[size][refcount]` header, then
 // `[len][bytes]` at `label`; its count never reaches zero (MYLA-18, the Python
 // backend's `_static_str` and STATIC_RC).
+#test(".Lstr0", "")[["\t.balign 8", "\t.quad 8", "\t.quad 4611686018427387904", ".Lstr0:", "\t.quad 0"]]
+#test(".Lstr4", "cool")[["\t.balign 8", "\t.quad 12", "\t.quad 4611686018427387904", ".Lstr4:", "\t.quad 4", "\t.byte 99, 111, 111, 108"]]
+#test(".Lstr1", "examples/tuples.my")[["\t.balign 8", "\t.quad 26", "\t.quad 4611686018427387904", ".Lstr1:", "\t.quad 18", "\t.byte 101, 120, 97, 109, 112, 108, 101, 115, 47, 116, 117, 112, 108, 101, 115, 46, 109, 121"]]
 fun static_str(label: str, text: str) -> [str] {
     var out = ["\t.balign 8", format("\t.quad {}", 8 + len(text)), "\t.quad 4611686018427387904",
                format("{}:", label), format("\t.quad {}", len(text))]
@@ -7346,6 +7626,7 @@ fun static_str(label: str, text: str) -> [str] {
 
 // The variable a place (`x`, `x.f`, `x[i].g`) starts from, or "" when `e` is
 // not a place.
+#test(expr_of("-n * 2"))[""]
 pub fun place_root(e: Expr) -> str {
     return match e.kind {
         ExprKind.Name(n) => n,
@@ -7359,6 +7640,7 @@ pub fun place_root(e: Expr) -> str {
 // Whether the expression makes a new value an owned temporary holds (a
 // call's result, a concatenation, a list or map literal), not a variable's
 // or a constant's (MYLA-127).
+#test(expr_of("-n * 2"))[true]
 fun is_new_value(e: Expr) -> bool {
     return match e.kind {
         ExprKind.Call(c, args) => true,
@@ -7375,6 +7657,7 @@ fun is_new_value(e: Expr) -> bool {
 struct ScanArg { callee: str, recv: int32, fresh: [bool] }
 
 // Whether `e` is a variable.
+#test(expr_of("-n * 2"))[false]
 fun is_name_expr(e: Expr) -> bool {
     return match e.kind {
         ExprKind.Name(n) => true,
@@ -7400,6 +7683,7 @@ fun method_part(name: str) -> str {
 }
 
 // `acc` with the name `e` is, when it is a variable's (MYLA-127).
+#test(expr_of("-n * 2"), [])[[]]
 fun with_name(e: Expr, acc: [str]) -> [str] {
     return match e.kind {
         ExprKind.Name(n) => {
@@ -7414,6 +7698,7 @@ fun with_name(e: Expr, acc: [str]) -> [str] {
 
 // `acc` with every name the expression or block reads (a lambda captures
 // them, MYLA-127).
+#test(expr_of("-n * 2"), [])[["n"]]
 fun names_in_expr(e: Expr, acc: [str]) -> [str] {
     var out = with_name(e, acc)
     match e.kind {
@@ -7456,6 +7741,7 @@ fun names_in_expr(e: Expr, acc: [str]) -> [str] {
     return out
 }
 
+#test(block_of("{ }"), [])[[]]
 fun names_in_block(b: Block, acc: [str]) -> [str] {
     var out = acc
     for st in b.stmts {
@@ -7486,6 +7772,9 @@ fun names_in_block(b: Block, acc: [str]) -> [str] {
     return out
 }
 
+#test("sum")[false]
+#test("total")[false]
+#test("length")[false]
 fun is_mutating_builtin(n: str) -> bool {
     return n == "push" || n == "pop" || n == "remove" || n == "append" || n == "append_byte"
 }
@@ -7494,6 +7783,9 @@ fun is_mutating_builtin(n: str) -> bool {
 // conservatively: an assignment to or into it, a mutating builtin on it, or a
 // method call on it (the method may take `var self`). Myla has no references
 // and closures capture by value, so nothing else can.
+#test([], "a")[false]
+#test([], "x")[false]
+#test([], "y")[false]
 pub fun arms_may_write(arms: [MatchArm], name: str) -> bool {
     for arm in arms {
         match arm.guard { Some(g) => { if may_write_expr(g, name) { return true } }, None => {} }
@@ -7509,20 +7801,24 @@ fun may_write_body(b: ExprOrBlock, name: str) -> bool {
     }
 }
 
+#test(block_of("{ }"), "a")[false]
 fun may_write_block(b: Block, name: str) -> bool {
     for st in b.stmts { if may_write_stmt(st, name) { return true } }
     return false
 }
 
+#test(None, "let")[false]
 fun may_write_opt(oe: Option<Expr>, name: str) -> bool {
     return match oe { Some(e) => may_write_expr(e, name), None => false }
 }
 
+#test([], "let")[false]
 fun may_write_exprs(es: [Expr], name: str) -> bool {
     for e in es { if may_write_expr(e, name) { return true } }
     return false
 }
 
+#test(stmt_of("print(1)"), "a")[false]
 fun may_write_stmt(st: Stmt, name: str) -> bool {
     match st.kind {
         StmtKind.VarDecl(k, n, ty, init) => { return may_write_expr(init, name) },
@@ -7549,7 +7845,8 @@ fun may_write_stmt(st: Stmt, name: str) -> bool {
     return false
 }
 
-fun may_write_expr(e: Expr, name: str) -> bool {
+#test(expr_of("-n * 2"), "r")[false]
+pub fun may_write_expr(e: Expr, name: str) -> bool {
     match e.kind {
         ExprKind.Unary(op, x) => { return may_write_expr(x, name) },
         ExprKind.Await(x) => { return may_write_expr(x, name) },
@@ -7582,10 +7879,16 @@ fun may_write_expr(e: Expr, name: str) -> bool {
     return false
 }
 
+#test(Type.TStruct("Box", []))["Box"]
+#test(Type.TStruct("Glyph", []))["Glyph"]
+#test(Type.TStruct("Pair", [Type.TInt(32, true), Type.TBool]))["Pair"]
 fun struct_name_of(t: Type) -> str {
     return match t { Type.TStruct(n, a) => n, Type.TActor(n) => n, _ => "" }
 }
 
+#test(Type.TActor("Account"))[[]]
+#test(Type.TEnum("List", [Type.TInt(32, true)]))[[Type.TInt(32, true)]]
+#test(Type.TStruct("Pair", [Type.TInt(32, true), Type.TBool]))[[Type.TInt(32, true), Type.TBool]]
 fun type_args_of(t: Type) -> [Type] {
     return match t {
         Type.TStruct(n, a) => a,
@@ -7594,12 +7897,16 @@ fun type_args_of(t: Type) -> [Type] {
     }
 }
 
+#test(Type.TStr)[false]
+#test(Type.TChar)[false]
+#test(Type.TEnum("Color", []))[true]
 pub fun is_struct_or_enum_t(t: Type) -> bool {
     return match t { Type.TStruct(n, a) => true, Type.TEnum(n, a) => true, _ => false }
 }
 
 // The normalizer of async bodies for frame functions (anf.my): a `match` with
 // an `await` in an arm stays a value; an `async let` starts an async lambda.
+#test()[Norm { next: 2000000000, resolved: [:], out: [], temps: 0, value_matches: true, wrap_children: true, children: [:] }]
 fun compiler_norm() -> Norm {
     var n = new_norm(2000000000)
     n.value_matches = true
@@ -7610,9 +7917,18 @@ fun compiler_norm() -> Norm {
 // The ready-frame ring's size (D90): a power of two.
 const EXEC_CAP: int32 = 1048576
 
+// The generator of MYLA_SCHED=seed:N (D110): x * SCHED_MUL + SCHED_ADD,
+// wrapping (Knuth's MMIX constants), the same in the interpreter
+// (`Interp.ready`).
+const SCHED_MUL: int64 = 6364136223846793005
+const SCHED_ADD: int64 = 1442695040888963407
+
 // A thread's block of runtime state in a program with tasks (D92), which
 // `%fs` points at: its own address first (for `tls_addr`), then each
 // variable's word, then the free lists (4616 bytes).
+#test("__exec_sp")[32]
+#test("__remote_free")[96]
+#test("__run_stderr_val")[48]
 fun tls_offset(sym: str) -> int32 {
     if sym == "__heap_ptr" { return 8 }
     if sym == "__heap_end" { return 16 }
@@ -7636,30 +7952,44 @@ const TLS_SIZE: int32 = 4800
 // region, so a cell's address tells whose heap it is.
 const MAX_WORKERS: int32 = 32
 
+#test(Type.TSB)[false]
+#test(Type.TStr)[false]
+#test(Type.TAsync(Type.TFunc([], None)))[true]
 pub fun is_tfunc(t: Type) -> bool {
     return match t { Type.TFunc(p, r) => true, Type.TAsync(f) => true, _ => false }
 }
 
 // An async function type as its function type: with one task, an async
 // function runs as an ordinary one (D91, MYLA-138).
+#test(Type.TAsync(Type.TFunc([], None)))[Type.TFunc([], None)]
+#test(Type.TAsync(Type.TFunc([], Some(Type.TInt(32, true)))))[Type.TFunc([], Some(Type.TInt(32, true)))]
+#test(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true))))[Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true)))]
 pub fun unasync(t: Type) -> Type {
     return match t { Type.TAsync(f) => f, _ => t }
 }
 
 // Whether `t` is an async function's type (D89).
+#test(Type.TAsync(Type.TFunc([], None)))[true]
+#test(Type.TAsync(Type.TFunc([], Some(Type.TInt(32, true)))))[true]
+#test(Type.TAsync(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true)))))[true]
 pub fun is_async_t(t: Type) -> bool {
     return match t { Type.TAsync(f) => true, _ => false }
 }
 
 // Whether `t` is an actor's handle: a cell holding its fields (D89).
+#test(Type.TInt(32, true))[false]
+#test(Type.TActor("Account"))[true]
+#test(Type.TEnum("List", []))[false]
 pub fun is_actor_t(t: Type) -> bool {
     return match t { Type.TActor(n) => true, _ => false }
 }
 
+#test(expr_of("-n * 2"))[false]
 pub fun is_hole_expr(e: Expr) -> bool {
     return match e.kind { ExprKind.Hole => true, _ => false }
 }
 
+#test([])[false]
 pub fun args_have_hole(args: [Expr]) -> bool {
     for a in args { if is_hole_expr(a) { return true } }
     return false
@@ -7675,6 +8005,7 @@ fun bind_elem_names(be: BindElem) -> [str] {
     return out
 }
 
+#test(pattern_of("3"))[[]]
 fun pattern_names(p: Pattern) -> [str] {
     var out: [str] = []
     match p.kind {
@@ -7688,23 +8019,33 @@ fun pattern_names(p: Pattern) -> [str] {
     return out
 }
 
+#test()[[]]
 fun empty_str_list() -> [str] {
     var e: [str] = []
     return e
 }
 
+#test(Type.TAsync(Type.TFunc([], None)))[[]]
+#test(Type.TFunc([Type.TStr], Some(Type.TStr)))[[Type.TStr]]
+#test(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true))))[[Type.TInt(32, true)]]
 pub fun tfunc_params(t: Type) -> [Type] {
     match unasync(t) { Type.TFunc(p, r) => { return p }, _ => {} }
     var empty: [Type] = []
     return empty
 }
 
+#test(Type.TAsync(Type.TFunc([], None)))[None]
+#test(Type.TFunc([Type.TStr], Some(Type.TStr)))[Some(Type.TStr)]
+#test(Type.TAsync(Type.TFunc([], Some(Type.TInt(32, true)))))[Some(Type.TInt(32, true))]
 pub fun tfunc_ret(t: Type) -> Option<Type> {
     match unasync(t) { Type.TFunc(p, r) => { return r }, _ => {} }
     return None
 }
 
 // Names that are builtins, not calls of a function or function value.
+#test("id")[false]
+#test("abs")[false]
+#test("add")[false]
 pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "print" || nm == "assert" || nm == "panic" || nm == "unreachable" { return true }
     if nm == "len" || nm == "push" || nm == "pop" || nm == "chars" || nm == "format" { return true }
@@ -7719,6 +8060,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     return false
 }
 
+#test([])[false]
 fun attrs_have_derive_eq(attrs: [Attribute]) -> bool {
     for a in attrs {
         if a.name == "derive" {
@@ -7730,12 +8072,16 @@ fun attrs_have_derive_eq(attrs: [Attribute]) -> bool {
     return false
 }
 
+#test("%")[true]
+#test("*")[true]
+#test("&")[false]
 pub fun is_overloadable_op(op: str) -> bool {
     if op == "==" || op == "!=" { return true }
     if is_cmp(op) { return true }
     return op == "+" || op == "-" || op == "*" || op == "/" || op == "%"
 }
 
+#test("+")["add"]
 pub fun arith_method_cg(op: str) -> str {
     if op == "+" { return "add" }
     if op == "-" { return "sub" }
@@ -7744,15 +8090,20 @@ pub fun arith_method_cg(op: str) -> str {
     return "rem"
 }
 
+#test(Type.TInt(32, true))[""]
+#test(Type.TEnum("Direction", []))["Direction"]
+#test(Type.TEnum("Result", [Type.TInt(32, true), Type.TStr]))["Result"]
 pub fun enum_name_of(t: Type) -> str {
     return match t { Type.TEnum(n, a) => n, _ => "" }
 }
 
+#test(expr_of("-n * 2"))[""]
 fun expr_name(e: Expr) -> str {
     return match e.kind { ExprKind.Name(n) => n, _ => "" }
 }
 
 // The list a map lookup found, else none.
+#test(None)[[]]
 fun int_list(o: Option<[int32]>) -> [int32] {
     return match o {
         Some(xs) => xs,
@@ -7785,15 +8136,20 @@ fun callee_target(callee: Expr) -> Expr {
     return match callee.kind { ExprKind.GetField(tgt, field) => tgt, _ => callee }
 }
 
+#test(expr_of("-n * 2"))[""]
 fun getfield_name(callee: Expr) -> str {
     return match callee.kind { ExprKind.GetField(tgt, field) => field, _ => "" }
 }
 
+#test("Result")["Ok"]
+#test("Option")["Some"]
 pub fun success_variant(enum_name: str) -> str {
     if enum_name == "Option" { return "Some" }
     return "Ok"
 }
 
+#test("Result")["Err"]
+#test("Option")["None"]
 pub fun failure_variant(enum_name: str) -> str {
     if enum_name == "Option" { return "None" }
     return "Err"
@@ -7801,11 +8157,15 @@ pub fun failure_variant(enum_name: str) -> str {
 
 // -- monomorphization helpers --------------------------------------------
 
+#test(32, true)["int32"]
 fun int_type_name_cg(w: int32, signed: bool) -> str {
     if signed { return format("int{}", w) }
     return format("uint{}", w)
 }
 
+#test("id", [Type.TStr])["id__4.str"]
+#test("Box.get", [Type.TInt(32, true)])["Box.get__4.i32"]
+#test("swap", [Type.TInt(32, true), Type.TInt(32, true)])["swap__4.i324.i32"]
 pub fun mangle_fn(name: str, args: [Type]) -> str {
     return format("{}__{}", name, join_tokens(args))
 }
@@ -7814,6 +8174,9 @@ pub fun mangle_fn(name: str, args: [Type]) -> str {
 // prefixed with its length, and a built-in token starts with `.`, which no
 // identifier contains, while a user type's token is its name. So
 // `Pair<A_B, C>` is `Pair__3A_B1C` and `Pair<A, B_C>` is `Pair__1A3B_C`.
+#test([Type.TStr])["4.str"]
+#test([Type.TStruct("Vec2", [])])["4Vec2"]
+#test([Type.TInt(32, true), Type.TInt(32, true)])["4.i324.i32"]
 fun join_tokens(xs: [Type]) -> str {
     var s = ""
     for x in xs { s = s + lp(mono_token(x)) }
@@ -7821,26 +8184,37 @@ fun join_tokens(xs: [Type]) -> str {
 }
 
 // `tok` prefixed with its length, so a run of tokens reads back one way.
+#test(".f64")["4.f64"]
+#test(".char")["5.char"]
+#test(".F4.i32R4.i32")["13.F4.i32R4.i32"]
 fun lp(tok: str) -> str {
     return format("{}{}", len(tok), tok)
 }
 
 // The suffix naming a map type's helpers.
+#test(Type.TChar, Type.TInt(32, true))["5.char4.i32"]
 fun map_token(k: Type, v: Type) -> str {
     return lp(mono_token(k)) + lp(mono_token(v))
 }
 
+#test(32, true)[".i32"]
 fun int_token(w: int32, s: bool) -> str {
     if s { return format(".i{}", w) }
     return format(".u{}", w)
 }
 
+#test("List", [])["List"]
+#test("Account", [])["Account"]
+#test("Result", [Type.TInt(32, true), Type.TStr])["Result__4.i324.str"]
 fun agg_token(n: str, args: [Type]) -> str {
     if len(args) == 0 { return n }
     return format("{}__{}", n, join_tokens(args))
 }
 
 // A stable identifier fragment for a concrete type (used in mangled names).
+#test(Type.TStr)[".str"]
+#test(Type.TList(Type.TFloat(64)))[".L4.f64"]
+#test(Type.TList(Type.TFunc([Type.TInt(32, true)], Some(Type.TInt(32, true)))))[".L13.F4.i32R4.i32"]
 fun mono_token(t: Type) -> str {
     return match t {
         Type.TInt(w, s) => int_token(w, s),
@@ -7862,12 +8236,16 @@ fun mono_token(t: Type) -> str {
     }
 }
 
+#test(Some(Type.TInt(32, true)))[".i32"]
 fun ret_token(r: Option<Type>) -> str {
     return match r { Some(t) => mono_token(t), None => ".void" }
 }
 
 // The component types of a composite type, in a canonical order, so two types
 // of the same shape line up positionally for unification.
+#test(Type.TInt(32, true))[[]]
+#test(Type.TList(Type.TStruct("Vec2", [])))[[Type.TStruct("Vec2", [])]]
+#test(Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]))[[Type.TInt(32, true), Type.TInt(32, true)]]
 fun parts_of(t: Type) -> [Type] {
     return match t {
         Type.TTuple(es) => es,
@@ -7881,6 +8259,8 @@ fun parts_of(t: Type) -> [Type] {
     }
 }
 
+#test([Type.TParam("T")], Some(Type.TParam("T")))[[Type.TParam("T"), Type.TParam("T")]]
+#test([Type.TInt(32, true)], Some(Type.TInt(32, true)))[[Type.TInt(32, true), Type.TInt(32, true)]]
 fun func_parts(ps: [Type], r: Option<Type>) -> [Type] {
     var out: [Type] = []
     for p in ps { push(out, p) }
@@ -7890,6 +8270,9 @@ fun func_parts(ps: [Type], r: Option<Type>) -> [Type] {
 
 // Solve type-parameter bindings by structurally unifying a declared (possibly
 // type-parametric) type against a concrete type.
+#test(Type.TInt(32, true), Type.TInt(32, true))[[]]
+#test(Type.TParam("T"), Type.TInt(32, true))[[Subst { name: "T", ty: Type.TInt(32, true) }]]
+#test(Type.TTuple([Type.TParam("T"), Type.TParam("T")]), Type.TTuple([Type.TInt(32, true), Type.TInt(32, true)]))[[Subst { name: "T", ty: Type.TInt(32, true) }, Subst { name: "T", ty: Type.TInt(32, true) }]]
 fun unify_into(declared: Type, concrete: Type) -> [Subst] {
     var out: [Subst] = []
     match declared {
@@ -7907,6 +8290,9 @@ fun unify_into(declared: Type, concrete: Type) -> [Subst] {
     return out
 }
 
+#test([], "a")[false]
+#test([], "b")[false]
+#test(["a"], "a")[true]
 fun list_has_str(xs: [str], target: str) -> bool {
     for x in xs { if x == target { return true } }
     return false
@@ -7914,6 +8300,9 @@ fun list_has_str(xs: [str], target: str) -> bool {
 
 // Return a fresh list with `s` appended (non-mutating: callers pass it down a
 // recursion as a cycle-breaking "seen" set without disturbing the caller's).
+#test([], "Box")[["Box"]]
+#test([], "Money")[["Money"]]
+#test(["Pixel"], "Vec2")[["Pixel", "Vec2"]]
 fun push_str_copy(xs: [str], s: str) -> [str] {
     var out: [str] = []
     for x in xs { push(out, x) }
@@ -7921,30 +8310,43 @@ fun push_str_copy(xs: [str], s: str) -> [str] {
     return out
 }
 
+#test(Type.TStr)[true]
+#test(Type.TChar)[false]
+#test(Type.TFloat(32))[false]
 pub fun is_tstr(t: Type) -> bool {
     return match t { Type.TStr => true, _ => false }
 }
 
+#test(Type.TChar)[true]
+#test(Type.TFloat(64))[false]
+#test(Type.TInt(8, true))[false]
 fun is_tchar(t: Type) -> bool {
     return match t { Type.TChar => true, _ => false }
 }
 
+#test(Type.TChar)[false]
+#test(Type.TFloat(64))[true]
+#test(Type.TInt(8, true))[false]
 fun is_tfloat(t: Type) -> bool {
     return match t { Type.TFloat(w) => true, _ => false }
 }
 
+#test(Type.TFloat(32))[true]
+#test(Type.TFloat(64))[false]
 fun is_tfloat32(t: Type) -> bool {
     return match t { Type.TFloat(w) => w == 32, _ => false }
 }
 
 // The runtime-error entries and their messages (MYLA-17), as in the Python
 // backend (`_TRAPS`). `__panic` prints them after `runtime error: `.
+#test()[["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char"]]
 fun trap_labels() -> [str] {
-    return ["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom"]
+    return ["__trap_index", "__trap_key", "__trap_pop", "__trap_div", "__trap_mod", "__trap_match", "__trap_oom", "__trap_char"]
 }
 
+#test()[["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char"]]
 fun trap_messages() -> [str] {
-    return ["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory"]
+    return ["index out of bounds", "map key not found", "pop from an empty list", "division by zero", "modulo by zero", "no match arm matched", "out of memory", "invalid char"]
 }
 
 // The DW_ATE encoding of a scalar type (MYLA-66).
@@ -7985,26 +8387,39 @@ fun skip_trap(jump: str) -> str {
 }
 
 // The bits of the double 2^k (-2^k when `neg`), as a signed immediate.
+#test(31, false)[4746794007248502784]
+#test(31, true)[-4476578029606273024]
 fun pow2_bits(k: int32, neg: bool) -> int64 {
     let bits = ((1023 + k) as int64) << 52
     if neg { return bits | (1i64 << 63) }
     return bits
 }
 
+#test(Type.TChar)[false]
+#test(Type.TInt(32, true))[true]
+#test(Type.TInt(64, true))[true]
 pub fun int_signed(t: Type) -> bool {
     return match t { Type.TInt(w, s) => s, _ => false }
 }
 
+#test(Type.TInt(8, false))[8]
+#test(Type.TInt(32, true))[32]
 fun int_width_cg(t: Type) -> int32 {
     return match t { Type.TInt(w, s) => w, _ => 64 }
 }
 
 // Whether the integer operator `op` takes its second operand as an
 // immediate or from memory (`emit_int_op`); the others want it in %rcx.
+#test("&")[true]
+#test("*")[true]
+#test("%")[false]
 pub fun takes_operand(op: str) -> bool {
     return op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^" || op == "==" || op == "!=" || is_cmp(op)
 }
 
+#test("$2")[true]
+#test("$4")[true]
+#test("%r9")[false]
 fun starts_with_dollar(s: str) -> bool { return len(s) > 0 && s[0] == '$' }
 
 // The return of a function called with `words` argument words, which it
@@ -8078,10 +8493,16 @@ fun has_text(s: str, t: str) -> bool {
     return false
 }
 
+#test("<")[true]
+#test(">")[true]
+#test("%")[false]
 pub fun is_cmp(op: str) -> bool {
     return op == "<" || op == "<=" || op == ">" || op == ">="
 }
 
+#test("<", true)["setl"]
+#test("<=", false)["setbe"]
+#test(">=", false)["setae"]
 pub fun cmp_set(op: str, signed: bool) -> str {
     if op == "<" {
         if signed { return "setl" }
@@ -8100,6 +8521,9 @@ pub fun cmp_set(op: str, signed: bool) -> str {
 }
 
 // `s` as the body of an assembler string literal (a `.file` path).
+#test("examples/maps.my")["examples/maps.my"]
+#test("examples/floats.my")["examples/floats.my"]
+#test("examples/closures.my")["examples/closures.my"]
 fun asm_string(s: str) -> str {
     var sb = StringBuilder()
     var i = 0

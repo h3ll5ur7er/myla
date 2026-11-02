@@ -2,7 +2,7 @@
 id: MYLA-173
 title: "Concurrency page: print atomicity, FIFO wording, the cost of deep copies, unstated rules"
 type: chore
-status: review
+status: done
 priority: low
 labels: [concurrency, docs]
 ---

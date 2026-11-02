@@ -3,27 +3,22 @@
 // tests/burn/test_lsp.py (TestExtensionStartsTheServer).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chooseCli, cliCommandArgs, expandPath, findCompilerEntry } from "../../src/toolchain.ts";
+import { chooseCli, cliCommandArgs, expandPath, findCompilerEntry, repoRootOf } from "../../src/toolchain.ts";
 
 const exists = (paths: string[]) => (p: string) => paths.includes(p);
 
-test("the CLI: a configured binary, a configured myla.py, the repository's build, python", () => {
-  assert.deepEqual(chooseCli({ cliPath: "/opt/myla", compilerEntry: "/r/myla.py" }, exists(["/opt/myla"])), {
+test("the CLI: a configured binary, else the repository's build", () => {
+  assert.deepEqual(chooseCli({ cliPath: "/opt/myla", compilerEntry: "/r/selfhost/main.my" }, exists(["/opt/myla"])), {
     command: "/opt/myla",
     args: [],
   });
-  assert.deepEqual(chooseCli({ cliPath: "/src/myla/myla.py", compilerEntry: null }, exists(["/src/myla/myla.py"])), {
-    command: "python3",
-    args: ["/src/myla/myla.py"],
-  });
-  assert.deepEqual(chooseCli({ cliPath: "", compilerEntry: "/r/myla.py" }, exists(["/r/build/myla", "/r/myla.py"])), {
+  assert.deepEqual(chooseCli({ cliPath: "", compilerEntry: "/r/selfhost/main.my" }, exists(["/r/build/myla"])), {
     command: "/r/build/myla",
     args: [],
   });
-  assert.deepEqual(chooseCli({ cliPath: "", compilerEntry: "/r/myla.py" }, exists(["/r/myla.py"])), {
-    command: "python3",
-    args: ["/r/myla.py"],
-  });
+  // the Python CLI it fell back to is gone (MYLA-219)
+  const unbuilt = chooseCli({ cliPath: "", compilerEntry: "/r/selfhost/main.my" }, exists([]));
+  assert.ok("missing" in unbuilt && unbuilt.missing.includes("scripts/bootstrap.sh"));
 });
 
 test("a bare command name is looked up on PATH", () => {
@@ -37,13 +32,14 @@ test("no CLI says what to do", () => {
   assert.ok("missing" in gone && gone.missing.includes("/opt/nope"));
 });
 
-test("the compiler entry: a configured root or myla.py, else a workspace folder's", () => {
-  const files = exists(["/r/myla.py", "/w2/myla.py"]);
-  assert.equal(findCompilerEntry("/r", [], files), "/r/myla.py");
-  assert.equal(findCompilerEntry("/r/myla.py", [], files), "/r/myla.py");
+test("the repository's marker: a configured root, or a file in it, else a workspace folder's", () => {
+  const files = exists(["/r/selfhost/main.my", "/w2/selfhost/main.my"]);
+  assert.equal(findCompilerEntry("/r", [], files), "/r/selfhost/main.my");
+  assert.equal(findCompilerEntry("/r/myla.py", [], files), "/r/selfhost/main.my"); // an old setting
   assert.equal(findCompilerEntry("/nope", ["/w2"], files), undefined);
-  assert.equal(findCompilerEntry("", ["/w1", "/w2"], files), "/w2/myla.py");
+  assert.equal(findCompilerEntry("", ["/w1", "/w2"], files), "/w2/selfhost/main.my");
   assert.equal(findCompilerEntry("", ["/w1"], files), undefined);
+  assert.equal(repoRootOf("/w2/selfhost/main.my"), "/w2");
 });
 
 test("path settings expand ~, ${userHome} and ${workspaceFolder}", () => {
@@ -55,8 +51,7 @@ test("path settings expand ~, ${userHome} and ${workspaceFolder}", () => {
 });
 
 test("the command lines of run, test and build", () => {
-  const py = { command: "python3", args: ["/r/myla.py"] };
-  assert.deepEqual(cliCommandArgs(py, "run", "/w/a.my", ["x"]), ["/r/myla.py", "run", "/w/a.my", "x"]);
+  assert.deepEqual(cliCommandArgs({ command: "/r/build/myla", args: [] }, "run", "/w/a.my", ["x"]), ["run", "/w/a.my", "x"]);
   assert.deepEqual(cliCommandArgs({ command: "myla", args: [] }, "test", "/w/a.my", []), ["test", "/w/a.my"]);
   assert.deepEqual(cliCommandArgs({ command: "myla", args: [] }, "build", "/w/a.my", ["-g"]), ["build", "/w/a.my", "-o", "/w/a", "-g"]);
   assert.deepEqual(cliCommandArgs({ command: "myla", args: [] }, "build", "/w/a.my", ["-o", "/x"]), ["build", "/w/a.my", "-o", "/x"]);

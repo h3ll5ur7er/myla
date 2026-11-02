@@ -2,7 +2,7 @@
 id: MYLA-168
 title: A child task of an actor method reads the actor's state off the actor
 type: bug
-status: review
+status: done
 priority: high
 labels: [concurrency, checker, actors]
 ---

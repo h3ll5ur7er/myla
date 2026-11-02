@@ -2,7 +2,7 @@
 id: MYLA-178
 title: "CLI tracebacks: a directory argument, a broken pipe, a missing output directory, a BOM"
 type: bug
-status: review
+status: done
 priority: low
 labels: [cli]
 ---

@@ -2,31 +2,29 @@
 
 A project with two packages, `geo` (a package root re-exporting through
 relative imports, a nested directory) and `fmt` (importing `geo` by name), runs,
-tests and builds alike with the Python CLI (`myla.py … --package name=dir`),
-the self-hosted `build/myla`, `interp_main` and `gen_main`; a nested file loaded
-with a project root resolves alike; and the module errors packages bring (and
-errors inside a package's modules) print exactly as the Python loader's.
+tests and builds alike with the self-hosted `build/myla`, `interp_main` and
+`gen_main` (`… --package name=dir`), its tests printing what the Python CLI
+printed; a nested file loaded with a project root resolves; and the module
+errors packages bring (and errors inside a package's modules) print exactly as
+the Python loader's.
+
+The Python CLI's and loader's answers are recorded (`tests/burn/_golden.py`,
+MYLA-219); the Python CLI no longer runs or builds the project alongside.
 """
 from __future__ import annotations
 
-import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from myla.errors import MylaError
-from myla.interpreter import Interpreter
-from myla.loader import default_stdlib_root, link, parse_package_flag
-from myla.types import check
-
+from ._golden import golden
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._tools import selfhost_tool
+from ._tools import STDLIB_ROOT, selfhost_tool
 from .test_selfhost_cli import _Layout
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
-_STDLIB = default_stdlib_root()
 
 # The packages, at <ws>/geo and <ws>/fmt (package directories; the loader gets
 # their src/).
@@ -125,22 +123,56 @@ def _package_args(flags, ws: str) -> list[str]:
     return out
 
 
-def _python_cli(*argv: str, cwd: str) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"), *argv],
-                          cwd=cwd, capture_output=True, text=True)
+# The recorded answers are about a workspace (`{ws}`) holding the files given,
+# written into a fresh temporary directory; `{ws}` stands for it in the
+# arguments and the answers, so they hold no path of the machine that recorded
+# them.
+
+@golden("packages.python_cli")
+def _recorded_python_cli(argv: list[str], files: dict[str, str]) -> tuple[str, str, int]:
+    """(stdout, stderr, exit) of the retired Python CLI (`myla.py *argv`) run
+    in a workspace holding `files`."""
+    with tempfile.TemporaryDirectory() as ws:
+        _write(ws, files)
+        proc = subprocess.run([sys.executable, os.path.join(_REPO, "myla.py"),
+                               *(a.replace("{ws}", ws) for a in argv)],
+                              cwd=ws, capture_output=True, text=True)
+        return proc.stdout.replace(ws, "{ws}"), proc.stderr.replace(ws, "{ws}"), proc.returncode
 
 
-def _python_diagnostic(entry: str, flags, ws: str) -> str:
-    """The Python loader's diagnostic for `entry` with `flags`, rendered as the
-    self-hosted tools print it (every file by the path it was loaded from)."""
-    try:
-        packages = [parse_package_flag(f.format(ws=ws)) for f in flags]
-        check(link(entry, stdlib_root=_STDLIB, packages=packages))
-    except MylaError as err:
-        path = err.path or entry
-        with open(path, encoding="utf-8") as fh:
-            return err.render(fh.read(), path)
-    raise AssertionError(f"{entry} was accepted")
+def _python_cli(argv: list[str], files: dict[str, str], ws: str) -> tuple[str, str, int]:
+    """What the Python CLI printed for `argv` (see `_recorded_python_cli`), as
+    if run in the workspace `ws`."""
+    return tuple(a.replace("{ws}", ws) if isinstance(a, str) else a
+                 for a in _recorded_python_cli(argv, files))
+
+
+@golden("packages.python_diagnostic")
+def _recorded_python_diagnostic(files: dict[str, str], flags: list[str]) -> str:
+    """The Python loader's diagnostic for `{ws}/app/main.my` in a workspace
+    holding `files`, with `flags`, rendered as the self-hosted tools print it
+    (every file by the path it was loaded from)."""
+    from myla.errors import MylaError
+    from myla.loader import default_stdlib_root, link, parse_package_flag
+    from myla.types import check
+
+    with tempfile.TemporaryDirectory() as ws:
+        _write(ws, files)
+        entry = os.path.join(ws, "app", "main.my")
+        try:
+            packages = [parse_package_flag(f.format(ws=ws)) for f in flags]
+            check(link(entry, stdlib_root=default_stdlib_root(), packages=packages))
+        except MylaError as err:
+            path = err.path or entry
+            with open(path, encoding="utf-8") as fh:
+                return err.render(fh.read(), path).replace(ws, "{ws}")
+        raise AssertionError(f"{entry} was accepted")
+
+
+def _python_diagnostic(files: dict[str, str], flags, ws: str) -> str:
+    """The Python loader's diagnostic (see `_recorded_python_diagnostic`) for
+    the workspace `ws`."""
+    return _recorded_python_diagnostic(files, list(flags)).replace("{ws}", ws)
 
 
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
@@ -161,42 +193,38 @@ class PackageParity(_Layout):
         return proc.stdout, proc.stderr, proc.returncode
 
     def test_run(self):
-        py = _python_cli("run", self.main, *self.flags, cwd=self.ws)
-        self.assertEqual((py.stdout, py.stderr, py.returncode), (EXPECTED_RUN, "", 0))
-        before = _python_cli("run", *self.flags, self.main, cwd=self.ws)
-        self.assertEqual(before.stdout, EXPECTED_RUN)
         my = self.myla_cmd("run", self.main, *self.flags)
         self.assertEqual((my.stdout, my.stderr, my.returncode), (EXPECTED_RUN, "", 0))
         my = self.myla_cmd("run", *self.flags, self.main)
         self.assertEqual(my.stdout, EXPECTED_RUN)
-        it = subprocess.run([self.interp, self.main, _STDLIB, *self.flags], capture_output=True, text=True)
+        it = subprocess.run([self.interp, self.main, STDLIB_ROOT, *self.flags], capture_output=True, text=True)
         self.assertEqual((it.stdout, it.stderr, it.returncode), (EXPECTED_RUN, "", 0))
 
     def test_test(self):
         # the entry file's own cases only, not the packages' (MYLA-187)
-        py = _python_cli("test", self.main, *self.flags, cwd=self.ws)
-        self.assertEqual(py.returncode, 0, py.stderr)
-        self.assertIn("PASS  circle_area #1", py.stdout)
+        my = self.myla_cmd("test", self.main, "--stdlib", STDLIB_ROOT, *self.flags)
+        self.assertEqual(my.returncode, 0, my.stderr)
+        self.assertIn("PASS  circle_area #1", my.stdout)
         for case in ("geo$geo$origin", "geo$shapes$area"):
-            self.assertNotIn(case, py.stdout)
-        my = self.myla_cmd("test", self.main, "--stdlib", _STDLIB, *self.flags)
-        self.assertEqual((my.stdout, my.returncode), (py.stdout, 0))
+            self.assertNotIn(case, my.stdout)
+        py_out, py_err, py_code = _python_cli(["test", "{ws}/app/main.my", *_package_args(FLAGS, "{ws}")],
+                                              {**PACKAGES, **PROJECT}, self.ws)
+        self.assertEqual(py_code, 0, py_err)
+        self.assertEqual(my.stdout, py_out)
 
     def test_build(self):
         out = os.path.join(self.ws, "out")
         os.makedirs(out, exist_ok=True)
-        py = _python_cli("build", self.main, *self.flags, "-o", os.path.join(out, "py"), cwd=self.ws)
-        self.assertEqual(py.returncode, 0, py.stderr)
         my = self.myla_cmd("build", self.main, *self.flags, "-o", os.path.join(out, "my"))
         self.assertEqual(my.returncode, 0, my.stderr)
-        gen = subprocess.run([self.gen, self.main, _STDLIB, *self.flags], capture_output=True, text=True)
+        gen = subprocess.run([self.gen, self.main, STDLIB_ROOT, *self.flags], capture_output=True, text=True)
         self.assertEqual(gen.returncode, 0, gen.stderr)
         asm = os.path.join(out, "gen.s")
         with open(asm, "w", encoding="utf-8") as fh:
             fh.write(gen.stdout)
         subprocess.run(["as", "--64", "-o", asm + ".o", asm], check=True)
         subprocess.run(["ld", "-o", os.path.join(out, "gen"), asm + ".o"], check=True)
-        for name in ("py", "my", "gen"):
+        for name in ("my", "gen"):
             with self.subTest(binary=name):
                 self.assertEqual(self.run_binary(os.path.join(out, name)), (EXPECTED_RUN, "", 0))
         # package module ids carry the package's name, not its directory
@@ -206,15 +234,11 @@ class PackageParity(_Layout):
     def test_project_root(self):
         entry = os.path.join(self.ws, "app2", "src", "nested", "deep.my")
         root = os.path.join(self.ws, "app2", "src")
-        packages = [parse_package_flag(f.format(ws=self.ws)) for f in FLAGS]
-        out = io.StringIO()
-        Interpreter(check(link(entry, stdlib_root=_STDLIB, packages=packages, project_root=root)), out).run()
-        self.assertEqual(out.getvalue(), "3\n")
-        it = subprocess.run([self.interp, entry, _STDLIB, "--root", root, *self.flags],
+        it = subprocess.run([self.interp, entry, STDLIB_ROOT, "--root", root, *self.flags],
                             capture_output=True, text=True)
         self.assertEqual((it.stdout, it.stderr, it.returncode), ("3\n", "", 0))
         # without the root, `import util` is looked up next to the file
-        it = subprocess.run([self.interp, entry, _STDLIB, *self.flags], capture_output=True, text=True)
+        it = subprocess.run([self.interp, entry, STDLIB_ROOT, *self.flags], capture_output=True, text=True)
         self.assertEqual(it.returncode, 1)
         self.assertIn("cannot resolve import 'util'", it.stderr)
 
@@ -225,9 +249,9 @@ class PackageParity(_Layout):
                 _write(ws, PACKAGES)
                 _write(ws, files)
                 entry = os.path.join(ws, "app", "main.my")
-                expected = _python_diagnostic(entry, flags, ws)
+                expected = _python_diagnostic({**PACKAGES, **files}, flags, ws)
                 args = _package_args(flags, ws)
-                gen = subprocess.run([self.gen, entry, _STDLIB, *args], capture_output=True, text=True)
+                gen = subprocess.run([self.gen, entry, STDLIB_ROOT, *args], capture_output=True, text=True)
                 self.assertEqual((gen.stderr, gen.returncode), (expected + "\n", 1))
                 my = self.myla_cmd("build", entry, *args, "-o", os.path.join(ws, "out"))
                 self.assertEqual((my.stderr, my.returncode), (expected + "\n", 1))

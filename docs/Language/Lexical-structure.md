@@ -1,6 +1,6 @@
 # Lexical structure
 
-How source text becomes tokens. The lexer is [[src/myla/lexer.py]]; token kinds and keywords are in [[src/myla/tokens.py]].
+How source text becomes tokens. The lexer is [[selfhost/lexer.my]]; token kinds and keywords are in [[selfhost/tokens.my]].
 
 [TOC]
 
@@ -24,6 +24,8 @@ fun abs(x: int) -> int { if x < 0 { return -x }; return x }
 fun main() {
     let a = abs(W - H); print(a)
 }
+// output:
+// 1
 ```
 
 - Newlines are skipped in these places only: inside call argument lists, attribute argument lists, list and map literals, struct literals, struct and enum bodies, `impl`/`trait` bodies and between match arms. A binary expression can **not** continue on the next line, and neither can a parenthesised expression or a tuple:
@@ -40,6 +42,8 @@ fun main() {
 fun add(a: int, b: int) -> int {
     return a + b
 }
+// output:
+// 3
 ```
 
 - Trailing commas are allowed in struct and enum bodies, struct, list, map and tuple literals, tuple and payload types, and patterns, but **not** in call arguments or the parameter lists of functions, methods and lambdas (`f(1, 2,)` is a parse error, MYLA-180).
@@ -48,7 +52,7 @@ fun add(a: int, b: int) -> int {
 
 ## Identifiers and keywords
 
-An identifier follows Unicode's identifier syntax: it starts with `_` or an XID_Start character (a letter of any script, or a letter number such as `Ⅻ`) and continues with XID_Continue characters (those, digits of any script, combining marks such as the accent in a decomposed `é`, `_` and a few others such as `·`): `größe`, `π`, `日本`. Identifiers aren't normalized, so a precomposed and a decomposed `é` make different names. Keywords and number literals stay ASCII (`١` is no digit of a literal). Both lexers use one generated table (`src/myla/unicode_ident.py`, `selfhost/unicode.my`, D72). They are case-sensitive. By convention types are `PascalCase` and everything else `snake_case`.
+An identifier follows Unicode's identifier syntax: it starts with `_` or an XID_Start character (a letter of any script, or a letter number such as `Ⅻ`) and continues with XID_Continue characters (those, digits of any script, combining marks such as the accent in a decomposed `é`, `_` and a few others such as `·`): `größe`, `π`, `日本`. Identifiers aren't normalized, so a precomposed and a decomposed `é` make different names. Keywords and number literals stay ASCII (`١` is no digit of a literal). The lexer uses a generated table (`selfhost/unicode.my`, written by `scripts/gen_unicode_tables.py`, D72). They are case-sensitive. By convention types are `PascalCase` and everything else `snake_case`.
 
 Reserved keywords:
 
@@ -76,6 +80,12 @@ fun main() {
     print(e)
     print(f)
 }
+// output:
+// 65577
+// 255
+// 165
+// 493
+// 1000000
 ```
 
 - `_` may only stand between two digits.
@@ -109,6 +119,8 @@ fun main() {
     let n = 3
     print(f"{name} has {n * 2} {"braces"}: {{}}")
 }
+// output:
+// Myla has 6 braces: {}
 ```
 
 The lexer rewrites an f-string into a call `format("… {} …", expr, …)`: each hole is cut out by counting braces (skipping nested string and char literals) and lexed again as an expression. So holes accept any expression, and the checker treats the result exactly like `format` ([[Language/Collections-and-strings]]). F-strings are single-line, an empty hole `{}` is an error, and there are no format specifiers. Their text takes the escapes of strings; an escaped brace such as `\u{7B}` is text, not a hole.

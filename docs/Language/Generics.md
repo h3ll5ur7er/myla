@@ -33,6 +33,9 @@ fun main() {
     print(first((b.value, 3)))
     print(len_of(l))
 }
+// output:
+// x
+// 2
 ```
 
 - Parameter names may not shadow built-in type names (`int`, `str`, …) and may not repeat.
@@ -60,7 +63,6 @@ There is no `f<int>(x)` call syntax: annotate the binding instead.
 | Backend | Strategy |
 | --- | --- |
 | Interpreter | Erasure: one body serves every instantiation; operators on erased values dispatch on the runtime value |
-| Python native backend | A separate pass stamps out `name__T1_T2` copies of reachable functions, structs and enums, then re-checks the concrete program ([[src/myla/compiler/monomorphize.py]]) |
-| Self-hosted backend | Monomorphizes during code generation with a substitution map |
+| Native backend | Monomorphizes during code generation with a substitution map (the retired Python backend stamped out copies in a separate pass and checked the concrete program again) |
 
 Each instantiation gets its own name, whatever the type arguments are called ([[MYLA-9]], [[Architecture/Monomorphization]]).

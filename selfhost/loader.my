@@ -26,7 +26,7 @@
 // the project root and then the stdlib root.
 
 from std.fs import read_to_string, exists, is_dir
-from .parser import parse_source_all
+from .parser import parse_source_all, expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of
 from .diag import Report, reports, type_report, chain
 from .checker import CheckErr
 from .tokens import SrcSpan, no_span, keywords
@@ -99,6 +99,8 @@ pub fun warning_reports(prog: Loaded, ws: [CheckErr]) -> [Report] {
 pub struct LoadOptions { stdlib_root: str, packages: [(str, str)], root: str, overrides: [str: str] }
 
 // The options for a program without packages, rooted at its entry's directory.
+#test("")[LoadOptions { stdlib_root: "", packages: [], root: "", overrides: [:] }]
+#test("/work/myla/lib")[LoadOptions { stdlib_root: "/work/myla/lib", packages: [], root: "", overrides: [:] }]
 pub fun load_options(stdlib_root: str) -> LoadOptions {
     return LoadOptions { stdlib_root: stdlib_root, packages: [], root: "", overrides: [:] }
 }
@@ -116,6 +118,9 @@ struct Loader {
 
 // -- paths ------------------------------------------------------------------
 
+#test([], "A")[false]
+#test([], "B")[false]
+#test(["T"], "T")[true]
 fun has(xs: [str], s: str) -> bool {
     for x in xs {
         if x == s { return true }
@@ -123,6 +128,9 @@ fun has(xs: [str], s: str) -> bool {
     return false
 }
 
+#test("examples/maps.my", 47)[["examples", "maps.my"]]
+#test("examples/errors/type_match_arms_disagree.my", 47)[["examples", "errors", "type_match_arms_disagree.my"]]
+#test("examples/errors/type_literal_past_int8_max_annotated.my/..", 47)[["examples", "errors", "type_literal_past_int8_max_annotated.my", ".."]]
 fun split_on(s: str, sep: uint8) -> [str] {
     var parts: [str] = []
     var sb = StringBuilder()
@@ -140,6 +148,9 @@ fun split_on(s: str, sep: uint8) -> [str] {
     return parts
 }
 
+#test(["examples"], "/")["examples"]
+#test(["examples", "errors", "type_bound_unsatisfied.my"], "/")["examples/errors/type_bound_unsatisfied.my"]
+#test(["examples", "errors", "type_literal_past_int8_max_annotated.my"], "/")["examples/errors/type_literal_past_int8_max_annotated.my"]
 fun join(parts: [str], sep: str) -> str {
     var sb = StringBuilder()
     var i = 0
@@ -152,6 +163,9 @@ fun join(parts: [str], sep: str) -> str {
 }
 
 // `p` with `.` segments, empty segments and `x/..` pairs removed.
+#test("examples/maps.my/..")["examples"]
+#test("examples/errors/runtime_map_key_absent.my")["examples/errors/runtime_map_key_absent.my"]
+#test("examples/errors/type_literal_past_int8_max_annotated.my")["examples/errors/type_literal_past_int8_max_annotated.my"]
 pub fun normalize(p: str) -> str {
     let absolute = len(p) > 0 && p[0] == '/'
     var out: [str] = []
@@ -171,6 +185,9 @@ pub fun normalize(p: str) -> str {
     return joined
 }
 
+#test("/work/myla/lib")[["work", "myla", "lib"]]
+#test("/work/myla/lib/std/task.my")[["work", "myla", "lib", "std", "task.my"]]
+#test("/work/myla/lib/std/process.my")[["work", "myla", "lib", "std", "process.my"]]
 fun segments(p: str) -> [str] {
     if p == "." { return [] }
     var out: [str] = []
@@ -180,10 +197,16 @@ fun segments(p: str) -> [str] {
     return out
 }
 
+#test("examples/maps.my")["examples"]
+#test("examples/errors/lex_bad_char.my")["examples/errors"]
+#test("/work/myla/selfhost/main.my")["/work/myla/selfhost"]
 fun dirname(p: str) -> str {
     return normalize(p + "/..")
 }
 
+#test("examples/errors", "nowhere")["examples/errors/nowhere"]
+#test("/work/myla/lib/std", "task.my")["/work/myla/lib/std/task.my"]
+#test("/work/myla/lib/std/process", "process.my")["/work/myla/lib/std/process/process.my"]
 fun join_path(a: str, b: str) -> str {
     return normalize(a + "/" + b)
 }
@@ -192,6 +215,8 @@ fun readable(path: str) -> bool {
     return match read_to_string(path) { Ok(s) => true, Err(e) => false }
 }
 
+#test(ImportPath { line: 4, col: 6, sp: SrcSpan { sline: 4, scol: 6, eline: 4, ecol: 17 }, dots: 0, segments: ["std", "process"] })["std.process"]
+#test(ImportPath { line: 4, col: 8, sp: SrcSpan { sline: 4, scol: 8, eline: 4, ecol: 21 }, dots: 0, segments: ["nowhere", "thing"] })["nowhere.thing"]
 fun dotted(p: ImportPath) -> str {
     var sb = StringBuilder()
     var i = 0
@@ -204,6 +229,8 @@ fun dotted(p: ImportPath) -> str {
 }
 
 // The segments of normalized `path` below normalized `root`, if it is below.
+#test("/work/myla/lib/std/task.my", "/work/myla/lib")[Some(["std", "task.my"])]
+#test("/work/myla/lib/std/process.my", "/work/myla/lib")[Some(["std", "process.my"])]
 fun rel_under(path: str, root: str) -> Option<[str]> {
     let ps = segments(path)
     let rs = segments(root)
@@ -224,6 +251,8 @@ fun rel_under(path: str, root: str) -> Option<[str]> {
 // The module id for path segments `parts` (`.my` dropped): every run of
 // characters other than letters, digits and `_` becomes one `$`, with none at
 // either end.
+#test(["std", "task.my"])["std$task"]
+#test(["std", "process.my"])["std$process"]
 fun module_tag(parts: [str]) -> str {
     var sb = StringBuilder()
     var pending = false
@@ -240,6 +269,8 @@ fun module_tag(parts: [str]) -> str {
     return build(sb)
 }
 
+#test("std/task.my")["std/task"]
+#test("std/process.my")["std/process"]
 fun strip_ext(s: str) -> str {
     let n = len(s)
     if n > 3 && s[n - 3] == '.' && s[n - 2] == 'm' && s[n - 1] == 'y' {
@@ -254,6 +285,9 @@ fun strip_ext(s: str) -> str {
     return s
 }
 
+#test("", "A")["A"]
+#test("", "unwrap")["unwrap"]
+#test("std$process", "SpawnError")["std$process$SpawnError"]
 fun qualify(mid: str, name: str) -> str {
     if mid == "" { return name }
     return mid + "$" + name
@@ -621,6 +655,7 @@ fun import_bindings(src: Module, p: ImportPath, items: Option<[ImportItem]>, ali
     return out
 }
 
+#test(Some("task"), "std.task")["task"]
 fun alias_or(alias: Option<str>, name: str) -> str {
     return match alias { Some(a) => a, None => name }
 }
@@ -637,21 +672,29 @@ struct Renamer {
     err: Option<Report>,
 }
 
+#test(expr_of("-n * 2"), ExprKind.IntLit(0, None, false, ""))[Expr { id: 3, line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.IntLit(0, None, false, "") }]
 fun mk_expr(e: Expr, k: ExprKind) -> Expr {
     return Expr { id: e.id, line: e.line, col: e.col, sp: e.sp, kind: k }
 }
 
 // `e` rebuilt with kind `k`, positioned where `pos` is.
+#test(expr_of("-n * 2"), expr_of("-n * 2"), ExprKind.Name("std$task$cancel"))[Expr { id: 3, line: 1, col: 4, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 7 }, kind: ExprKind.Name("std$task$cancel") }]
 fun mk_expr_at(e: Expr, pos: Expr, k: ExprKind) -> Expr {
     return Expr { id: e.id, line: pos.line, col: pos.col, sp: e.sp, kind: k }
 }
 
+#test([])[[]]
+#test([TypeParam { line: 4, col: 8, sp: SrcSpan { sline: 4, scol: 8, eline: 4, ecol: 9 }, name: "T", bounds: [] }])[["T"]]
+#test([TypeParam { line: 8, col: 6, sp: SrcSpan { sline: 8, scol: 6, eline: 8, ecol: 7 }, name: "T", bounds: [] }])[["T"]]
 fun tp_names(tps: [TypeParam]) -> [str] {
     var out: [str] = []
     for tp in tps { push(out, tp.name) }
     return out
 }
 
+#test([BindElem.BName("a", 20, 10, SrcSpan { sline: 20, scol: 10, eline: 20, ecol: 11 }), BindElem.BWild])[["a"]]
+#test([BindElem.BName("p", 74, 10, SrcSpan { sline: 74, scol: 10, eline: 74, ecol: 11 }), BindElem.BName("q", 74, 13, SrcSpan { sline: 74, scol: 13, eline: 74, ecol: 14 })])[["p", "q"]]
+#test([BindElem.BName("moved", 40, 10, SrcSpan { sline: 40, scol: 10, eline: 40, ecol: 15 }), BindElem.BName("amount", 40, 17, SrcSpan { sline: 40, scol: 17, eline: 40, ecol: 23 })])[["moved", "amount"]]
 fun bind_names(bs: [BindElem]) -> [str] {
     var out: [str] = []
     for b in bs {
@@ -664,6 +707,9 @@ fun bind_names(bs: [BindElem]) -> [str] {
     return out
 }
 
+#test(Pattern { id: 4, line: 6, col: 9, sp: SrcSpan { sline: 6, scol: 9, eline: 6, ecol: 10 }, kind: PatternKind.PWild })[[]]
+#test(Pattern { id: 158, line: 61, col: 13, sp: SrcSpan { sline: 61, scol: 13, eline: 61, ecol: 14 }, kind: PatternKind.PBind("e") })[["e"]]
+#test(Pattern { id: 94, line: 66, col: 34, sp: SrcSpan { sline: 66, scol: 34, eline: 66, ecol: 38 }, kind: PatternKind.PBind("code") })[["code"]]
 fun pattern_binds(p: Pattern) -> [str] {
     var out: [str] = []
     match p.kind {
@@ -685,6 +731,9 @@ impl Renamer {
         }
     }
 
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["x"], tys: ["Self"], path: "examples/variables.my", err: None }, "str")["str"]
+    #test(Renamer { env: ["P": "P", "main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_recover_unknown_trait_impl.my", err: None }, "Show")["Show"]
+    #test(Renamer { env: ["Clock": "Clock", "Watch": "Watch", "main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_become_mutating_receiver.my", err: None }, "Watch")["Watch"]
     fun type_name(self, n: str) -> str {
         if !has(self.tys, n) {
             match get(self.env, n) { Some(q) => { return q }, None => {} }
@@ -740,6 +789,9 @@ impl Renamer {
     }
 
     // type parameters with their bounds (trait names) renamed
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None }, [])[[]]
     fun bounds(self, tps: [TypeParam]) -> [TypeParam] {
         var out: [TypeParam] = []
         for tp in tps {
@@ -750,6 +802,9 @@ impl Renamer {
         return out
     }
 
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None }, [])[[]]
     fun params(self, ps: [Param]) -> [Param] {
         var out: [Param] = []
         for p in ps { push(out, Param { line: p.line, col: p.col, sp: p.sp, name: p.name, ty: self.opt_ty(p.ty) }) }
@@ -787,6 +842,9 @@ impl Renamer {
     }
 
     // `#test` cases are expressions in the module's scope (MYLA-11)
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None }, [])[[]]
     fun attributes(var self, attrs: [Attribute]) -> [Attribute] {
         var out: [Attribute] = []
         for a in attrs {
@@ -812,6 +870,7 @@ impl Renamer {
 
     // -- types --
 
+    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None }, type_expr_of("int"))[TypeExpr { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, kind: TypeKind.TRef("int", []) }]
     fun ty(self, t: TypeExpr) -> TypeExpr {
         let k = match t.kind {
             TypeKind.TRef(n, args) => TypeKind.TRef(self.type_name(n), self.ty_list(args)),
@@ -823,18 +882,25 @@ impl Renamer {
         return TypeExpr { id: t.id, line: t.line, col: t.col, sp: t.sp, kind: k }
     }
 
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["x"], tys: ["Self"], path: "examples/variables.my", err: None }, [])[[]]
+    #test(Renamer { env: ["P": "P"], aliases: [:], exports: ["": [:]], vals: [], tys: [], path: "examples/errors/type_reassign_self.my", err: None }, [])[[]]
+    #test(Renamer { env: ["P": "P"], aliases: [:], exports: ["": [:]], vals: [], tys: [], path: "examples/errors/type_method_duplicate.my", err: None }, [])[[]]
     fun ty_list(self, ts: [TypeExpr]) -> [TypeExpr] {
         var out: [TypeExpr] = []
         for t in ts { push(out, self.ty(t)) }
         return out
     }
 
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/hello.my", err: None }, None)[None]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/loops.my", err: None }, None)[None]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/variables.my", err: None }, None)[None]
     fun opt_ty(self, t: Option<TypeExpr>) -> Option<TypeExpr> {
         return match t { Some(x) => Some(self.ty(x)), None => None }
     }
 
     // -- statements --
 
+    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None }, block_of("{ }"))[Block { line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 4 }, stmts: [] }]
     fun block(var self, b: Block) -> Block {
         let saved = self.vals
         var out: [Stmt] = []
@@ -843,6 +909,7 @@ impl Renamer {
         return Block { line: b.line, col: b.col, sp: b.sp, stmts: out }
     }
 
+    #test(Renamer { env: ["add": "add", "inc_byte": "inc_byte", "run": "run"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/attributes.my", err: None }, stmt_of("return a"))[Stmt { id: 1, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 9 }, kind: StmtKind.ReturnS(Some(Expr { id: 0, line: 1, col: 8, sp: SrcSpan { sline: 1, scol: 8, eline: 1, ecol: 9 }, kind: ExprKind.Name("a") }), false) }]
     fun stmt(var self, s: Stmt) -> Stmt {
         let k = match s.kind {
             StmtKind.VarDecl(kind, n, t, init) => {
@@ -887,6 +954,9 @@ impl Renamer {
         return Stmt { id: s.id, line: s.line, col: s.col, sp: s.sp, kind: k }
     }
 
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_if_cond_not_bool.my", err: None }, None)[None]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_continue_outside_loop.my", err: None }, None)[None]
+    #test(Renamer { env: ["f": "f", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["n"], tys: ["Self"], path: "examples/errors/type_missing_return_path.my", err: None }, None)[None]
     fun else_tail(var self, t: Option<ElseTail>) -> Option<ElseTail> {
         return match t {
             Some(ElseTail.ElseBlock(b)) => Some(ElseTail.ElseBlock(self.block(b))),
@@ -904,12 +974,18 @@ impl Renamer {
 
     // -- expressions --
 
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/runtime_pop_empty.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/runtime_str_range_oob.my", err: None }, [])[[]]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: [], tys: ["Self"], path: "examples/errors/type_list_empty_no_type.my", err: None }, [])[[]]
     fun exprs(var self, es: [Expr]) -> [Expr] {
         var out: [Expr] = []
         for e in es { push(out, self.expr(e)) }
         return out
     }
 
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["sum"], tys: ["Self"], path: "examples/loops.my", err: None }, None)[None]
+    #test(Renamer { env: ["main": "main"], aliases: [:], exports: ["": [:]], vals: ["n"], tys: ["Self"], path: "examples/errors/type_for_in_non_list.my", err: None }, None)[None]
+    #test(Renamer { env: ["average": "average", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["xs", "sum"], tys: ["Self"], path: "examples/floats.my", err: None }, None)[None]
     fun opt_expr(var self, e: Option<Expr>) -> Option<Expr> {
         return match e { Some(x) => Some(self.expr(x)), None => None }
     }
@@ -1002,6 +1078,7 @@ impl Renamer {
     // `alias.member[.field…]`: the module prefix (the longest one that names a
     // module) folds into the qualified member; what follows stays field
     // accesses. The new nodes reuse the ids of the ones they replace.
+    #test(Renamer { env: ["Account": "Account", "fetch": "fetch", "deposit_ones": "deposit_ones", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["self"], tys: ["Self"], path: "examples/concurrency.my", err: None }, expr_of("-n * 2"))[None]
     fun module_access(var self, e: Expr) -> Option<Expr> {
         var names: [str] = []       // field names, outermost first
         var nodes: [Expr] = []      // their GetField nodes
@@ -1079,12 +1156,15 @@ impl Renamer {
 
     // -- patterns: enum and struct names --
 
+    #test(Renamer { env: ["Shape": "Shape", "f": "f", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["s"], tys: ["Self"], path: "examples/errors/type_match_arms_disagree.my", err: None }, [])[[]]
+    #test(Renamer { env: ["Shape": "Shape", "f": "f", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["s"], tys: ["Self"], path: "examples/errors/type_match_nonexhaustive.my", err: None }, [])[[]]
     fun patterns(var self, ps: [Pattern]) -> [Pattern] {
         var out: [Pattern] = []
         for p in ps { push(out, self.pattern(p)) }
         return out
     }
 
+    #test(Renamer { env: ["big": "big", "size": "size", "main": "main"], aliases: [:], exports: ["": [:]], vals: ["n"], tys: ["Self"], path: "examples/errors/type_await_in_guard.my", err: None }, pattern_of("_"))[Pattern { id: 0, line: 1, col: 1, sp: SrcSpan { sline: 1, scol: 1, eline: 1, ecol: 2 }, kind: PatternKind.PWild }]
     fun pattern(var self, p: Pattern) -> Pattern {
         let k = match p.kind {
             PatternKind.PLit(x) => PatternKind.PLit(self.expr(x)),
@@ -1106,6 +1186,9 @@ impl Renamer {
     }
 }
 
+#test([:])[[:]]
+#test(["Counter": Binding { is_module: false, value: "Counter" }, "main": Binding { is_module: false, value: "main" }])[["Counter": "Counter", "main": "main"]]
+#test(["twice": Binding { is_module: false, value: "twice" }, "wrong": Binding { is_module: false, value: "wrong" }, "main": Binding { is_module: false, value: "main" }])[["twice": "twice", "wrong": "wrong", "main": "main"]]
 fun decl_env(bindings: [str: Binding]) -> [str: str] {
     var out: [str: str] = [:]
     for k in keys(bindings) {
@@ -1115,6 +1198,9 @@ fun decl_env(bindings: [str: Binding]) -> [str: str] {
     return out
 }
 
+#test([:])[[:]]
+#test(["P": Binding { is_module: false, value: "P" }])[[:]]
+#test(["outer": Binding { is_module: false, value: "outer" }, "main": Binding { is_module: false, value: "main" }, "task": Binding { is_module: true, value: "std$task" }])[["task": "std$task"]]
 fun module_env(bindings: [str: Binding]) -> [str: str] {
     var out: [str: str] = [:]
     for k in keys(bindings) {
@@ -1124,17 +1210,21 @@ fun module_env(bindings: [str: Binding]) -> [str: str] {
     return out
 }
 
-// The stdlib root for a tool started as `argv0` (MYLA-31): `src/myla` next
+// The stdlib root for a tool started as `argv0` (MYLA-31): `lib` next
 // to the `build/` directory the tools live in, so `build/myla` works from any
-// directory; plain `src/myla` when argv0 has no directory part.
+// directory; plain `lib` when argv0 has no directory part.
+#test("/work/myla/selfhost/main.my")["/work/myla/lib"]
 pub fun default_stdlib_root(argv0: str) -> str {
     var has_dir = false
     for c in chars(argv0) { if c == '/' { has_dir = true } }
-    if !has_dir { return "src/myla" }
-    return normalize(join_path(dirname(argv0), "../src/myla"))
+    if !has_dir { return "lib" }
+    return normalize(join_path(dirname(argv0), "../lib"))
 }
 
 // A module error without a position (the package list's).
+#test("a")[Report { kind: "module error", msg: "a", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] }]
+#test("d2")[Report { kind: "module error", msg: "d2", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] }]
+#test("right")[Report { kind: "module error", msg: "right", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] }]
 fun list_error(msg: str) -> Report {
     return Report { kind: "module error", msg: msg, path: "", line: 0, col: 0, sp: no_span(), more: [], notes: [] }
 }
@@ -1179,6 +1269,7 @@ fun valid_package_name(name: str) -> bool {
 // The packages with normalized directories, or the first error in the list:
 // a package named `std`, a name that can't start an import, a name given
 // twice, a missing directory.
+#test([])[Ok([])]
 fun check_packages(packages: [(str, str)]) -> Result<[(str, str)], Report> {
     var out: [(str, str)] = []
     var names: [str] = []
@@ -1213,6 +1304,9 @@ pub fun load_program_with(entry: str, stdlib_root: str, overrides: [str: str]) -
 // and its directory, and the project root `root` ("" for the entry's
 // directory): what the project tool loads for `src/main.my`, and with root
 // `src` for every file under `src/` (MYLA-92).
+#test("a", "a", [("let", "let"), ("x", "x")], "a")[Err(Report { kind: "module error", msg: "invalid package name 'let'", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] })]
+#test("x", "x", [("let", "let"), ("x", "x")], "x")[Err(Report { kind: "module error", msg: "invalid package name 'let'", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] })]
+#test("d1", "d1", [("let", "let"), ("x", "x")], "d1")[Err(Report { kind: "module error", msg: "invalid package name 'let'", path: "", line: 0, col: 0, sp: SrcSpan { sline: 0, scol: 0, eline: 0, ecol: 0 }, more: [], notes: [] })]
 pub fun load_program_packages(entry: str, stdlib_root: str, packages: [(str, str)], root: str) -> Result<Loaded, Report> {
     var opts = load_options(stdlib_root)
     opts.packages = packages

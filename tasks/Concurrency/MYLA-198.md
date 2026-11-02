@@ -2,7 +2,7 @@
 id: MYLA-198
 title: An async actor method borrowed its own fields across an await
 type: bug
-status: review
+status: done
 priority: high
 labels: [concurrency, lowering, memory]
 ---

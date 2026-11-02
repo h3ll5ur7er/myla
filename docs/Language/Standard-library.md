@@ -1,6 +1,6 @@
 # Standard library
 
-Myla has built-in functions known to the checker, and a small standard library written in Myla under [[src/myla/std/io.my|src/myla/std/]]. Both work without libc: natively they are raw Linux system calls ([[Architecture/Native-backend]]), in the interpreter Python I/O.
+Myla has built-in functions known to the checker, and a small standard library written in Myla under [[lib/std/io.my|lib/std/]]. Both work without libc: they are raw Linux system calls ([[Architecture/Native-backend]]), natively and in the interpreter, which is a native program itself.
 
 [TOC]
 
@@ -20,7 +20,7 @@ These names are reserved: no declaration may reuse them.
 | `StringBuilder()`, `append(sb, s)`, `append(sb, s, start, end)`, `append_byte(sb, b)`, `build(sb)` | | The four-argument `append` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
-The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled` exist for the standard library; call the `std` functions instead. Both checkers still accept a call of one from a program ([[MYLA-186]]).
+The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled` exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with a warning (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making.
 
 ## std.io
 
@@ -32,6 +32,9 @@ fun main() {
     eprintln("to stderr")
     write(1, "no newline\n")
 }
+// output:
+// to stdout
+// no newline
 ```
 
 | Function | Effect |
@@ -74,7 +77,7 @@ fun main() {
 }
 ```
 
-A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/unit/test_stdio.py` has an example (`FRAMED`).
+A protocol that frames messages with a `Content-Length` header reads the header lines with `read_line` and the body with `read_exact`; `tests/burn/test_stdin.py` has an example.
 
 ## std.process
 
@@ -104,6 +107,9 @@ fun main() {
         Err(e) => print("could not start")
     }
 }
+// output:
+// 6
+// 0
 ```
 
 ## std.fs
@@ -145,6 +151,8 @@ fun main() {
         Err(e) => { print("no src directory") },
     }
 }
+// output:
+// no src directory
 ```
 
 ### Directory primitives
@@ -161,7 +169,7 @@ The directory functions rest on seven primitives (D64's pattern: a small system 
 | `__rmdir(path: str)` | rmdir(2) | Nothing |
 | `__rename(from: str, to: str)` | rename(2) | Nothing |
 
-Each sets the errno that `__io_errno()` reads (0 on success). A name can't hold a NUL byte, so NUL separates them. `list_dir` drops `.` and `..` and sorts the names by their bytes, so the Python interpreter (`os.listdir`), the native helpers and every file system give the same list.
+Each sets the errno that `__io_errno()` reads (0 on success). A name can't hold a NUL byte, so NUL separates them. `list_dir` drops `.` and `..` and sorts the names by their bytes, so every file system gives the same list (and the Python interpreter, with `os.listdir`, gave it too).
 
 ## std.num
 
@@ -208,6 +216,9 @@ fun main() {
         Err(e) => { print(format("{}:{}: {}", e.line, e.col, e.msg)) },
     }
 }
+// output:
+// initialize
+// [1,null]
 ```
 
 | Item | Meaning |
@@ -243,6 +254,8 @@ fun main() {
         Err(e) => { print(format("{}:{}: {}", e.line, e.col, e.msg)) },
     }
 }
+// output:
+// geo
 ```
 
 | Item | Meaning |

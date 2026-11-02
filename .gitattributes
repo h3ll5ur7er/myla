@@ -4,3 +4,6 @@
 editor/tree-sitter-myla/src/parser.c linguist-generated=true
 editor/tree-sitter-myla/src/grammar.json linguist-generated=true
 editor/tree-sitter-myla/src/node-types.json linguist-generated=true
+# The bootstrap's stage 0, the compiler's own generated assembly (MYLA-218,
+# scripts/update-seed.sh): no diffs of it, shown collapsed
+bootstrap/seed.s -diff linguist-generated=true

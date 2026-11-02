@@ -4,6 +4,7 @@
 
 - Requires VS Code 1.91 or later: `vscode-languageclient` 10, which writes its log to the *Myla* output channel, now a log channel (MYLA-199).
 - Development dependencies: `@vscode/vsce` 4.1 and the advisory of `@azure/msal-node` it pulled in fixed (Dependabot's updates, MYLA-199).
+- The Python toolchain is retired (MYLA-219): the repository is found by `selfhost/main.my` instead of `myla.py`, and `myla.compilerPath` names the repository root (a file directly in it, such as an old `myla.py` setting, still works); the commands no longer fall back to `python3 myla.py`, so run, test, build and debugging need `build/myla` (`scripts/bootstrap.sh`) or `myla.cliPath`; the language server gets `--stdlib <root>/lib`, where the standard library moved.
 
 ## 0.1.0
 

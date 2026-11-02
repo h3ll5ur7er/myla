@@ -10,5 +10,5 @@ obj="$(mktemp --suffix=.o)"
 
 trap 'rm -f "$obj"' EXIT
 
-"$repo/build/stage3" "$input" "$repo/src/myla" | as --64 -o "$obj" -
+"$repo/build/stage3" "$input" "$repo/lib" | as --64 -o "$obj" -
 ld -o "$out" "$obj"

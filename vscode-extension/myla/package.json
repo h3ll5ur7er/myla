@@ -311,7 +311,7 @@
         "myla.compilerPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "The Myla repository root (the folder with `myla.py`) or its `myla.py`. The language server and the CLI are found in its `build/` folder. Empty: the workspace folder that has a `myla.py`. `${workspaceFolder}`, `${userHome}` and `~` are expanded."
+          "markdownDescription": "The Myla repository root (the folder with `selfhost/main.my`). The language server and the CLI are found in its `build/` folder. Empty: the workspace folder that has a `selfhost/main.my`. `${workspaceFolder}`, `${userHome}` and `~` are expanded."
         },
         "myla.serverPath": {
           "type": "string",

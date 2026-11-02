@@ -95,6 +95,9 @@ pub fun reports(ds: [Diag], path: str) -> Report {
 }
 
 // Line `n` (1-based) of `src`, if it has one.
+#test("//~ type error: unknown name\nfun main() {\n    let x = y\n}\n", 3)[Some("    let x = y")]
+#test("//~ type error: expects\nenum Shape { Circle(int), Rect(int, int), Empty }\nfun f() -> Shape {\n    return Shape.Rect(1)\n}\nfun main() {\n}\n", 4)[Some("    return Shape.Rect(1)")]
+#test("//~ type error: string index must be an integer\n// Byte indexing uses an integer position, not a string.\n#main\nfun main() {\n    let s = \"ab\"\n    print(s[\"x\"] as int)\n}\n", 6)[Some("    print(s[\"x\"] as int)")]
 fun source_line(src: str, n: int32) -> Option<str> {
     var line = 1
     var sb = StringBuilder()

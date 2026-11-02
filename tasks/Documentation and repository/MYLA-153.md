@@ -2,7 +2,7 @@
 id: MYLA-153
 title: A faster burn suite and honest test timings
 type: improvement
-status: review
+status: done
 priority: medium
 labels: [testing, ci]
 ---

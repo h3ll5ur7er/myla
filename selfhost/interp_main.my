@@ -9,7 +9,7 @@
 from std.process import args, exit
 from std.io import eprintln
 from .checker import build_checker_decls
-from .interp import new_interp, RtError
+from .interp import new_interp, RtError, sched_from_env
 from .loader import load_program_opts, load_options, parse_package_flag, Loaded, file_of, type_errors
 from .diag import render, Report
 
@@ -19,6 +19,7 @@ fun run_program(prog: Loaded, file: str) -> int32 {
             var it = new_interp(c, [file])
             // a task's failure reported when it happens (MYLA-170)
             it.on_failure = (r: RtError) => report_now(r, prog)
+            it.schedule(sched_from_env())
             let code = it.run()
             if !it.fail_reported {
                 match it.rt_err { Some(r) => { eprintln(render(runtime_report(r, prog))) }, None => {} }

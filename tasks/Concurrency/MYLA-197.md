@@ -2,7 +2,7 @@
 id: MYLA-197
 title: t08_failing_child_cancels_its_children depends on timing
 type: bug
-status: review
+status: done
 priority: medium
 labels: [concurrency, tests, flaky]
 ---

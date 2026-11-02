@@ -3,10 +3,10 @@
 Runs `vscode-extension/myla/test/integration/adapter.test.ts` under node (types
 stripped, no `npm ci` needed): the adapter on stdio builds Myla programs with
 `myla build -g` and debugs them with gdb (breakpoints, stepping, the stack,
-variables, evaluation, runtime errors, pause, exit codes, build errors). Once
-with the Python CLI and once with the self-hosted CLI, so the debug
-information of both backends works in the adapter. Skipped without gdb or
-node 22.6+.
+variables, evaluation, runtime errors, pause, exit codes, build errors), with
+the self-hosted CLI, so its debug information works in the adapter. (They ran
+with the Python CLI too until it was retired, MYLA-219.) Skipped without gdb
+or node 22.6+.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import tempfile
 import unittest
 
 from ._native import CAN_BUILD_NATIVE, SKIP_REASON
-from ._tools import selfhost_tool
+from ._tools import STDLIB_ROOT, selfhost_tool
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 _EXTENSION = os.path.join(_REPO, "vscode-extension", "myla")
@@ -44,15 +44,11 @@ class TestDebugAdapter(unittest.TestCase):
         self.assertIn("# fail 0", proc.stdout)
         self.assertIn("# skipped 0", proc.stdout)
 
-    def test_with_the_python_cli(self) -> None:
-        self.run_adapter_tests(os.path.join(_REPO, "myla.py"))
-
     def test_with_the_self_hosted_cli(self) -> None:
         # the CLI in a checkout's layout, so it finds the standard library
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, "build"))
-            os.makedirs(os.path.join(root, "src"))
-            os.symlink(os.path.join(_REPO, "src", "myla"), os.path.join(root, "src", "myla"))
+            os.symlink(STDLIB_ROOT, os.path.join(root, "lib"))
             cli = os.path.join(root, "build", "myla")
             shutil.copy(selfhost_tool("main"), cli)
             self.run_adapter_tests(cli)

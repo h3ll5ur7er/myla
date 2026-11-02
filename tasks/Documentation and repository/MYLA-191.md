@@ -2,7 +2,7 @@
 id: MYLA-191
 title: Docs status sweep after the October 2026 review
 type: chore
-status: review
+status: done
 priority: medium
 labels: [docs]
 ---
