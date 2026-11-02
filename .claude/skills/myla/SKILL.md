@@ -86,7 +86,6 @@ fun main() {
 | `f::<int>(x)` | annotate: `let y: Box<int> = …` | No turbofish; type arguments only in type positions |
 | `x as f64` from `bool`/`str` | only numeric ↔ numeric and `char` ↔ integer | `as` |
 | a line that starts with an operator (`\n    + b`) | end the line with the operator (`a +`), or wrap the expression in `( )` | A statement goes on after a binary operator that ends a line and inside `( )`/`[ ]` (D104); a line that starts with an operator is a new statement |
-| `f(a, b,)` | `f(a, b)` | No trailing comma in calls or parameter lists (fine in struct/enum bodies and literals) |
 
 ## Types and conversions
 

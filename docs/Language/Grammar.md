@@ -54,7 +54,7 @@ declaration  = attribute* "pub"? item_decl | impl_decl | import_decl | "pub" pub
 item_decl    = struct_decl | enum_decl | fun_decl | trait_decl | typealias_decl | const_decl ;
 
 attribute    = "#" IDENT ( "(" expr_list? ")" )? ( "[" expr_list? "]" )? NL* ;
-expr_list    = NL+ | NL* expression NL* ( "," NL* expression NL* )* ;
+expr_list    = NL+ | NL* expression NL* ( "," NL* expression NL* )* ( "," NL* )? ;
 
 struct_decl  = ( "struct" | "actor" ) IDENT type_params? "{" NL* ( field ( "," NL* field )* ","? NL* )? "}" ;
 field        = IDENT ":" type ;
@@ -62,15 +62,15 @@ field        = IDENT ":" type ;
 enum_decl    = "enum" IDENT type_params? "{" NL* ( variant ","? NL* )* "}" ;
 variant      = IDENT ( "(" type ( "," type )* ","? ")" )? ;
 
-fun_decl     = "async"? "fun" IDENT generics? "(" NL* ( param NL* ( "," NL* param NL* )* )? ")" ( "->" type )? block ;
+fun_decl     = "async"? "fun" IDENT generics? "(" NL* ( param NL* ( "," NL* param NL* )* ( "," NL* )? )? ")" ( "->" type )? block ;
 param        = IDENT ":" type ;
-generics     = "<" generic ( "," generic )* ">" ;
+generics     = "<" generic ( "," generic )* ","? ">" ;
 generic      = IDENT ( ":" IDENT ( "+" IDENT )* )? ;
-type_params  = "<" IDENT ( "," IDENT )* ">" ;
+type_params  = "<" IDENT ( "," IDENT )* ","? ">" ;
 
 impl_decl    = "impl" generics? ( type | named_type "for" type ) "{" SEP* ( method SEP* )* "}" ;
 method       = attribute* method_head block ;
-method_head  = "async"? "fun" IDENT generics? "(" NL* receiver NL* ( "," NL* param NL* )* ")" ( "->" type )? ;
+method_head  = "async"? "fun" IDENT generics? "(" NL* receiver NL* ( "," NL* param NL* )* ( "," NL* )? ")" ( "->" type )? ;
 receiver     = "self" | "var" "self" ;
 
 trait_decl   = "trait" IDENT type_params? "{" SEP* ( method_head SEP* )* "}" ;
@@ -80,7 +80,7 @@ const_decl   = "const" IDENT ":" type "=" expression ;
 
 import_decl  = "import" import_path ( "as" IDENT )? | from_import ;
 pub_import   = "import" import_path "as" IDENT | from_import ;
-from_import  = "from" import_path "import" import_item ( "," import_item )* ;
+from_import  = "from" import_path "import" import_item ( "," import_item )* ","? ;
 import_path  = ( "." | ".." )* IDENT ( "." IDENT )* ;
 import_item  = IDENT ( "as" IDENT )? ;
 ```
@@ -91,7 +91,7 @@ import_item  = IDENT ( "as" IDENT )? ;
 type          = prim_type | named_type | "[" type "]" | "[" type ":" type "]"
               | tuple_type | function_type ;
 named_type    = IDENT type_args? ;
-type_args     = "<" type ( "," type )* ">" ;
+type_args     = "<" type ( "," type )* ","? ">" ;
 prim_type     = "bool" | "str" | "int8" | "int16" | "int32" | "int64"
               | "uint8" | "uint16" | "uint32" | "uint64" ;
 tuple_type    = "(" type "," ( type ( "," type )* ","? )? ")" ;
@@ -144,7 +144,7 @@ unary       = ( "-" | "!" | "~" ) unary | "await" unary
                  can't take it, as in (x) => x as T [0]; write ((x) => …)[0] *)
 postfix     = primary ( "(" call_args? ")" | "[" NL* expression NL* "]"
                       | "." ( IDENT | TUPLE_INDEX ) | "?" )* ;
-call_args   = NL+ | NL* call_arg NL* ( "," NL* call_arg NL* )* ;
+call_args   = NL+ | NL* call_arg NL* ( "," NL* call_arg NL* )* ( "," NL* )? ;
 call_arg    = "_" | expression ;            (* "_" alone: a partial-application hole *)
 
 primary     = INT | FLOAT | CHAR | STRING | fstring | "true" | "false"
@@ -156,7 +156,7 @@ fstring     = 'f"' ( FSTRING_TEXT | "{{" | "}}"
 struct_literal = IDENT "{" NL* ( field_init ( "," NL* field_init )* ","? NL* )? "}" ;
 field_init  = IDENT ":" expression ;
 tuple       = "(" NL* expression NL* "," NL* ( expression NL* ( "," NL* expression NL* )* ( "," NL* )? )? ")" ;
-lambda      = "async"? "(" NL* ( lambda_param NL* ( "," NL* lambda_param NL* )* )? ")" "=>" ( block | expression ) ;
+lambda      = "async"? "(" NL* ( lambda_param NL* ( "," NL* lambda_param NL* )* ( "," NL* )? )? ")" "=>" ( block | expression ) ;
 lambda_param = IDENT ( ":" type )? ;
 list        = "[" NL* ( expression NL* ( "," NL* expression NL* )* ( "," NL* )? )? "]" ;
 map         = "[" NL* ":" "]"

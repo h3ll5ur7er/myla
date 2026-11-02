@@ -554,7 +554,8 @@ impl Parser {
             let path = self.import_path()
             self.expect(TokenKind.IMPORT, "'import' after the path in a 'from' import")
             var items: [ImportItem] = [self.import_item()]
-            while self.match1(TokenKind.COMMA) {
+            // a trailing comma (D104 (4), MYLA-225)
+            while self.match1(TokenKind.COMMA) && !self.at_separator() && !self.at_end() {
                 push(items, self.import_item())
             }
             return self.mk_decl(start.line, start.column, DeclKind.ImportDecl(path, Some(items), None, is_pub))
@@ -640,7 +641,7 @@ impl Parser {
                 }
             }
             push(params, TypeParam { line: tok.line, col: tok.column, sp: self.span_from(tok.line, tok.column), name: tok.lexeme, bounds: bounds })
-            if !self.match1(TokenKind.COMMA) {
+            if !self.match1(TokenKind.COMMA) || self.check(TokenKind.GT) {
                 break
             }
         }
@@ -734,7 +735,7 @@ impl Parser {
                 self.expect(TokenKind.COLON, "':'")
                 let ptype = self.parse_type()
                 push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: Some(ptype) })
-                if !self.match1(TokenKind.COMMA) {
+                if !self.match1(TokenKind.COMMA) || self.check(TokenKind.RPAREN) {
                     break
                 }
             }
@@ -868,8 +869,8 @@ impl Parser {
             self.fail_at(self.peek(), "a method's first parameter must be 'self' or 'var self'")
         }
         var params: [Param] = []
-        // no trailing comma, as in a function's parameter list (MYLA-180)
-        while self.match1(TokenKind.COMMA) {
+        // a trailing comma, as in a function's parameter list (D104 (4), MYLA-225)
+        while self.match1(TokenKind.COMMA) && !self.check(TokenKind.RPAREN) {
             let pname = self.expect(TokenKind.IDENT, "parameter name")
             self.expect(TokenKind.COLON, "':'")
             let ptype = self.parse_type()
@@ -996,7 +997,7 @@ impl Parser {
         }
         self.skip()
         push(args, self.parse_type())
-        while self.match1(TokenKind.COMMA) {
+        while self.match1(TokenKind.COMMA) && !self.check(TokenKind.GT) && !self.check(TokenKind.GE) {
             push(args, self.parse_type())
         }
         if self.check(TokenKind.GE) {
@@ -1861,7 +1862,7 @@ impl Parser {
                     pty = Some(self.parse_type())
                 }
                 push(params, Param { line: pname.line, col: pname.column, sp: self.span_from(pname.line, pname.column), name: pname.lexeme, ty: pty })
-                if !self.match1(TokenKind.COMMA) {
+                if !self.match1(TokenKind.COMMA) || self.check(TokenKind.RPAREN) {
                     break
                 }
             }
@@ -1929,6 +1930,7 @@ impl Parser {
             self.skip_newlines()
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
+                if self.check(closing) { break }    // a trailing comma (D104 (4))
             } else {
                 break
             }
@@ -1953,6 +1955,7 @@ impl Parser {
             self.skip_newlines()
             if self.match1(TokenKind.COMMA) {
                 self.skip_newlines()
+                if self.check(TokenKind.RPAREN) { break }    // a trailing comma (D104 (4), MYLA-225)
             } else {
                 break
             }
