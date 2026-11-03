@@ -746,6 +746,41 @@ pub fun map_lookup(cell: int64, key: int64, slot_size: int64, is_str: int64) -> 
     return 0
 }
 
+// `keys(m)` (`__map_keys`): a new list of the keys of the map `cell` in the
+// order they were inserted (each at its rank), as wide as the list's
+// elements are (`stride` bytes), with a reference to each string key.
+pub fun map_keys(cell: int64, slot_size: int64, stride: int64, is_str: int64) -> int64 {
+    let count = __load64(cell)
+    let list = __alloc(count * stride + 16)
+    __store64(list, count)
+    __store64(list + 8, count)
+    let cap = __load64(cell + 8)
+    var slot = cell + 16
+    let end = slot + cap * slot_size
+    while slot < end {
+        if __load64(slot) == 1 {
+            let k = __load64(slot + 8)
+            if is_str != 0 {
+                let rc = k - 8
+                __store64(rc, __load64(rc) + 1)
+            }
+            let at = list + 16 + __load64(slot + slot_size - 8) * stride
+            if stride == 8 {
+                __store64(at, k)
+            } else if stride == 4 {
+                __store32(at, k as uint32)
+            } else if stride == 2 {
+                __store8(at, k as uint8)
+                __store8(at + 1, (k >> 8) as uint8)
+            } else {
+                __store8(at, k as uint8)
+            }
+        }
+        slot += slot_size
+    }
+    return list
+}
+
 // --- string builders ---------------------------------------------------------
 //
 // A builder's cell holds its length and its capacity in bytes, then its
@@ -783,4 +818,83 @@ fun sb_append_grown(holder: int64, cell: int64, src: int64, need: int64) {
     __copy_bytes(bigger + 16 + len, src + 8, need - len)
     __free(cell)
     __store64(holder, bigger)
+}
+
+// --- printing ----------------------------------------------------------------
+
+const SYS_WRITEV: int64 = 20
+const EAGAIN: int64 = -11
+
+// The `n` bytes at `p` written to `fd`, a write at a time, again after an
+// interruption (EINTR, EAGAIN); up to the first error.
+fun write_all(fd: int64, p: int64, n: int64) {
+    var at = p
+    var left = n
+    while left > 0 {
+        let r = __syscall(SYS_WRITE, fd, at, left)
+        if r >= 0 {
+            at += r
+            left -= r
+        } else if r != EINTR && r != EAGAIN {
+            return
+        }
+    }
+}
+
+// The `n` bytes at `p` and a newline on the standard output in one writev,
+// so the lines of tasks on other workers don't interleave; what a partial
+// write left, written after it.
+fun print_bytes(p: int64, n: int64) {
+    let nl = __addr_of("\n") + 8
+    let iov = __alloc(32)
+    __store64(iov, p)
+    __store64(iov + 8, n)
+    __store64(iov + 16, nl)
+    __store64(iov + 24, 1)
+    var r = __syscall(SYS_WRITEV, 1, iov, 2)
+    while r == EINTR || r == EAGAIN {
+        r = __syscall(SYS_WRITEV, 1, iov, 2)
+    }
+    __free(iov)
+    if r < 0 {
+        return
+    }
+    if r < n {
+        write_all(1, p + r, n - r)
+        write_all(1, nl, 1)
+    } else if r == n {
+        write_all(1, nl, 1)
+    }
+}
+
+// `print(s)` (`__print_str`) and `print` of the other scalars but floats.
+pub fun print_str(s: str) {
+    let c = __addr_of(s)
+    print_bytes(c + 8, __load64(c))
+}
+
+pub fun print_int(v: int64) {
+    print_str(int_to_str(v))
+}
+
+pub fun print_uint(v: uint64) {
+    print_str(uint_to_str(v))
+}
+
+pub fun print_bool(b: bool) {
+    if b {
+        print_str("true")
+    } else {
+        print_str("false")
+    }
+}
+
+pub fun print_char(c: char) {
+    print_str(format("{}", c))
+}
+
+// `__write(fd, s)`: `s`'s bytes to the file descriptor `fd`.
+pub fun write(fd: int, s: str) {
+    let c = __addr_of(s)
+    write_all(fd as int64, c + 8, __load64(c))
 }

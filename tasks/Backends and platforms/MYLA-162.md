@@ -121,3 +121,10 @@ So what the hot routines left (map insertion and growth, builders, list growth, 
 With lifetimes that have holes ([[MYLA-257]]), `sb_append` (the full builder's case a function of its own, `sb_append_grown`) compiles to a frameless function of 13 instructions and the copy: the self-compile 0.37% fewer instructions than with the assembly routine, string building 0.9%, word frequency 1.8%.
 
 - **Map insertion** (`__map_set_slot`, its two results in one word, the slot's low bit telling whether the key was there) tried on the new allocator and set aside: the self-compile 0.34% and word frequency 0.5% above the assembly, a string key's probe loop keeping five values in the frame around its `__equal_bytes` call. It waits for values saved around the calls they cross instead of living in the frame ([[MYLA-257]], splitting).
+
+## Step 7: printing and a map's keys (2026-11-03)
+
+- `print` of a string, an integer, a bool or a char (`print_str`, `print_int`, `print_uint`, `print_bool`, `print_char`; a float keeps the assembly), `std.io.write` (`write`) and `keys(m)` (`map_keys`, each key at its rank, as wide as the list's elements) in `std.rt`. A line and its newline still go out in one `writev`, so the lines of tasks on other workers don't interleave (the concurrency suite's long lines included). A program using maps of string, `int16`, `char`, `uint8` and `int64` keys prints the same natively, interpreted and with the assembly.
+- **Cost:** a print takes about 215 instructions in user space where the assembly took 65 (the `writev` vector and an integer's digits are allocated and freed now, where the assembly used its stack), the time the same (the system call dominates: 62 against 59 ms for 400,000 prints); the self-compile 0.24% more. A scratch buffer per worker would take the allocations away (with the allocator's thread-local state).
+- `__write_err` and `__write_err_num` stay with the traps they serve (the platform layer).
+
