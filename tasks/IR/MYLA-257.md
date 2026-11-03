@@ -14,7 +14,7 @@ The way, after Wimmer and Franz ("Linear Scan Register Allocation on SSA Form", 
 - [x] **Move hints:** a copy's source and destination (the SSA join copies, a parameter into its home) prefer one register, so the copy disappears.
 - [ ] **SSA by default** once it is a gain with the above (`--ssa` today).
 - [ ] **Splitting:** a value that has no register for all its life gets one for part of it, spilled and reloaded around the calls it crosses, the moves at block edges resolved.
-- [ ] Then the hot routines: the string builder's append, map insertion and growth, list growth ([[MYLA-162]]).
+- [ ] Then the hot routines: the string builder's append (done, cheaper than the assembly), map insertion and growth, list growth ([[MYLA-162]]).
 
 Measured tools: `tests/burn/test_selfhost_codegen.py` for the forms, the instruction counts of the self-compile (the same compiler source built by the old and new backend, run on the same input, to separate the code's quality from the compiler's own work) and of the benchmarks.
 

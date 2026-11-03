@@ -3270,7 +3270,10 @@ impl Lower {
             let b = self.expr(cg, args[3])
             self.add(Inst.SbAppendRange(h, v, a, b, Pos { line: e.line, col: e.col }))
         } else {
-            self.add(Inst.SbAppend(h, v))
+            // std.rt's `sb_append` where the program has it (MYLA-162)
+            let f = myla_runtime_function("__sb_append")
+            if cg.has_func(f) && !cg.owning.contains(f) { self.add(Inst.Call(-1, f, [h, v])) }
+            else { self.add(Inst.SbAppend(h, v)) }
         }
         return -1
     }
@@ -3791,7 +3794,7 @@ fun char_cast_checked(src: Type, t: Type) -> bool {
 pub fun myla_runtime_function(name: str) -> str {
     if name == "__str_concat" { return "std$rt$str_concat" }
     if name == "__str_eq" { return "std$rt$str_eq" }
-    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" {
+    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" || name == "__sb_append" {
         // `__stat` -> `std$rt$stat`
         var sb = StringBuilder()
         sb.append(name, 2, name.len())

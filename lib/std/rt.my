@@ -745,3 +745,42 @@ pub fun map_lookup(cell: int64, key: int64, slot_size: int64, is_str: int64) -> 
     }
     return 0
 }
+
+// --- string builders ---------------------------------------------------------
+//
+// A builder's cell holds its length and its capacity in bytes, then its
+// bytes; a builder variable holds its cell, unique when appended to.
+
+// `append(sb, s)` (`__sb_append_bytes`): `s`'s bytes after the builder's.
+pub fun sb_append(holder: int64, s: str) {
+    let src = __addr_of(s)
+    let count = __load64(src)
+    let cell = __load64(holder)
+    let len = __load64(cell)
+    let need = len + count
+    if need > __load64(cell + 8) {
+        sb_append_grown(holder, cell, src, need)
+        return
+    }
+    __store64(cell, need)
+    __copy_bytes(cell + 16 + len, src + 8, count)
+}
+
+// The rest of `sb_append` for a full builder: its cell at the address
+// `holder` replaced by one twice as large (or as large as needed), so
+// building a long text line by line stays linear, then the bytes of the
+// string cell `src` copied after its own.
+fun sb_append_grown(holder: int64, cell: int64, src: int64, need: int64) {
+    let len = __load64(cell)
+    var cap = __load64(cell + 8) * 2
+    if cap < need {
+        cap = need
+    }
+    let bigger = __alloc(cap + 16)
+    __store64(bigger, need)
+    __store64(bigger + 8, cap)
+    __copy_bytes(bigger + 16, cell + 16, len)
+    __copy_bytes(bigger + 16 + len, src + 8, need - len)
+    __free(cell)
+    __store64(holder, bigger)
+}
