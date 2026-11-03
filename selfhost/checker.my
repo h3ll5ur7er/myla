@@ -712,7 +712,7 @@ fun is_builtin_func(name: str) -> bool {
 #test("__load8")[true]
 #test("__load")[false]
 pub fun is_raw_memory_primitive(name: str) -> bool {
-    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl"
+    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom"
 }
 
 #test("sum")[false]
@@ -5599,9 +5599,26 @@ impl Checker {
         // `__load32(p)`, `__store32(p, v)`; `__list_addr(xs)` (a list's cell,
         // borrowed: its length, its capacity, then its elements) and
         // `__list_of(p)` (a cell taken over as the list type its context
-        // expects); `__rotl(x, k)` (`x` rotated left by `k` bits, a `rol`)
+        // expects); `__rotl(x, k)` (`x` rotated left by `k` bits, a `rol`);
+        // the allocator's: `__rt_addr("sym")` and `__rt_get("sym")` (the
+        // address and the value of the runtime's variable `sym`, a worker's
+        // own with tasks), `__bsr64(x)` (the highest set bit's index) and
+        // `__trap_oom()` (the out-of-memory runtime error)
         if is_raw_memory_primitive(name) {
             let i64 = Type.TInt(64, true)
+            if name == "__rt_addr" || name == "__rt_get" {
+                if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes 1 argument(s)", name))) }
+                let ok = match args[0].kind {
+                    ExprKind.StrLit(sym) => sym.len() > 2 && sym[0] == '_' && sym[1] == '_',
+                    _ => false,
+                }
+                if !ok { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("{}() takes the name of a runtime variable as a string literal", name))) }
+                return Ok(Some(i64))
+            }
+            if name == "__trap_oom" {
+                if args.len() != 0 { return Err(terr_at(e.line, e.col, e.sp, "__trap_oom() takes no arguments")) }
+                return Ok(None)
+            }
             if name == "__list_addr" {
                 if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "__list_addr() takes 1 argument(s)")) }
                 let l_t = self.expect_value(args[0], None)?

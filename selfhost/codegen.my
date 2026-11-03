@@ -8219,7 +8219,7 @@ const SCHED_ADD: int64 = 1442695040888963407
 #test("__exec_sp")[32]
 #test("__remote_free")[96]
 #test("__run_stderr_val")[48]
-fun tls_offset(sym: str) -> int32 {
+pub fun tls_offset(sym: str) -> int32 {
     if sym == "__heap_ptr" { return 8 }
     if sym == "__heap_end" { return 16 }
     if sym == "__exec_cur" { return 24 }

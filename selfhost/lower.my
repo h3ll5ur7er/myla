@@ -3430,6 +3430,20 @@ impl Lower {
         // raw memory (MYLA-162's prototype): loads and stores of a width,
         // the allocator, a string's cell and back
         if is_raw_memory_primitive(nm) {
+            // a runtime variable, by its name (MYLA-162)
+            if nm == "__rt_addr" || nm == "__rt_get" {
+                let sym = match args[0].kind {
+                    ExprKind.StrLit(x) => x,
+                    _ => "",
+                }
+                let d = self.temp(t)
+                if nm == "__rt_get" { self.add(Inst.Global(d, sym, 8)) } else { self.add(Inst.Rt(d, "__rt_addr:" + sym, [])) }
+                return d
+            }
+            if nm == "__trap_oom" {
+                self.add(Inst.Rt(-1, "__trap_oom", []))
+                return -1
+            }
             var vals: [int32] = []
             for a in args { vals.push(self.expr(cg, a)) }
             if nm == "__load8" || nm == "__load32" || nm == "__load64" {
@@ -3452,7 +3466,7 @@ impl Lower {
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" || nm == "__rotl" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" || nm == "__list_of" { return self.owned_value(cg, d, t) }
             return d
         }
