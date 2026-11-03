@@ -1866,7 +1866,14 @@ impl CodeGen {
     // Whether the allocator is std.rt's (MYLA-162): it is there, and the
     // program has no tasks, whose workers' heaps the assembly keeps apart.
     fun rt_alloc(self) -> bool {
-        return !self.frames && self.has_func("std$rt$alloc") && self.has_func("std$rt$free")
+        if self.frames { return self.has_func("std$rt$alloc_tasks") && self.has_func("std$rt$free_tasks") }
+        return self.has_func("std$rt$alloc") && self.has_func("std$rt$free")
+    }
+
+    // std.rt's allocator functions, without tasks or with them.
+    fun rt_alloc_names(self) -> (str, str) {
+        if self.frames { return ("std$rt$alloc_tasks", "std$rt$free_tasks") }
+        return ("std$rt$alloc", "std$rt$free")
     }
 
     fun generate(var self) -> str {
@@ -1879,8 +1886,9 @@ impl CodeGen {
         self.find_tag_enums()
         let m = self.request_fn(en, [])
         if self.rt_alloc() {
-            let a = self.request_fn("std$rt$alloc", [])
-            let fr = self.request_fn("std$rt$free", [])
+            let names = self.rt_alloc_names()
+            let a = self.request_fn(names.0, [])
+            let fr = self.request_fn(names.1, [])
         }
         while self.fn_worklist.len() > 0 || self.lam_jobs.len() > 0 {
             if self.fn_worklist.len() > 0 {
@@ -3002,6 +3010,8 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("\taddq $32, %rsp")
         self.raw(".Lsw_run:")
+        // its own arena first, for std.rt's allocator (MYLA-162)
+        if self.rt_alloc() { self.raw("\tcall __heap_init") }
         self.raw("\tjmp __exec_run")
         // no more threads to be had: the workers made so far
         self.raw(".Lsw_short:")
@@ -4485,11 +4495,12 @@ impl CodeGen {
             self.raw("\tja __trap_oom")
             self.raw("\tmovq %rax, __heap_base(%rip)")
         }
+        // the arena (this worker's with tasks), before anything is
+        // allocated, for std.rt's allocator (which doesn't check on every
+        // call, as the assembly's did)
+        if self.rt_alloc() { self.raw("\tcall __heap_init") }
         // with tasks, the other workers (D92)
         if self.frames { self.raw("\tcall __start_workers") }
-        // the arena, before anything is allocated, for std.rt's allocator
-        // (which doesn't check on every call, as the assembly's did)
-        if self.rt_alloc() { self.raw("\tcall __heap_init") }
         if self.frames && self.sig_of(entry_name).decl.is_async {
             // the entry's task: its frame queued, the executor run (D90)
             self.raw(format("\tcall myla_{}__new", entry_name))
@@ -5043,7 +5054,8 @@ impl CodeGen {
             self.raw(format("\tmovq %rax, {}", self.tv("__heap_end")))
             self.raw("\tret")
             self.raw("")
-            self.emit_heap_remote()
+            // (std.rt's allocator takes the cells back itself: `alloc_drained`)
+            if !self.rt_alloc() { self.emit_heap_remote() }
         } else {
             self.raw("\tpushq %rdi")
             self.raw("\tmovq $9, %rax")
@@ -5067,8 +5079,9 @@ impl CodeGen {
         // the allocator in std.rt, without tasks (MYLA-162): the names
         // the rest of the runtime calls stand for its functions
         if self.rt_alloc() {
-            self.raw("\t.set __alloc, myla_std$rt$alloc")
-            self.raw("\t.set __free, myla_std$rt$free")
+            let names = self.rt_alloc_names()
+            self.raw(format("\t.set __alloc, myla_{}", names.0))
+            self.raw(format("\t.set __free, myla_{}", names.1))
         } else {
             self.raw("__alloc:")
             self.raw("\taddq $7, %rdi")

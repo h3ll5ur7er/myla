@@ -947,3 +947,73 @@ pub fun free(p: int64) {
     __store64(p, __load64(slot))
     __store64(slot, p)
 }
+
+// With tasks (D92): each worker allocates from its own arena (worker w's
+// at `__heap_base + w << 32`, mapped in `_start`), with its own lists; a cell
+// freed on another worker goes on its owner's `__remote_free` list, which
+// the owner takes back whole before it bumps its arena. Many push onto a
+// list, one takes all of it: no lock, and no ABA.
+
+// `__alloc` with tasks.
+pub fun alloc_tasks(n: int64) -> int64 {
+    var size = (n + 7) & -8
+    var slot = __rt_addr("__free_buckets") + size
+    if size > 4096 {
+        let k = __bsr64(size - 1) + 1
+        size = 1i64 << k
+        slot = __rt_addr("__free_buckets") + 4104 + k * 8
+    }
+    let p = __load64(slot)
+    if p != 0 {
+        __store64(slot, __load64(p))
+        __store64(p - 8, 1)
+        return p
+    }
+    if __rt_get("__remote_free") != 0 {
+        return alloc_drained(n)
+    }
+    let at = __rt_get("__heap_ptr")
+    let next = at + 16 + size
+    if next <= __rt_get("__heap_end") {
+        __store64(__rt_addr("__heap_ptr"), next)
+        __store64(at, size)
+        __store64(at + 8, 1)
+        return at + 16
+    }
+    __trap_oom()
+    return 0
+}
+
+// The cells other workers freed taken back onto this worker's lists, then
+// `alloc_tasks` again.
+fun alloc_drained(n: int64) -> int64 {
+    var c = __xchg64(__rt_addr("__remote_free"), 0)
+    while c != 0 {
+        let next = __load64(c)
+        free(c)
+        c = next
+    }
+    return alloc_tasks(n)
+}
+
+// `__free` with tasks: another worker's cell onto its owner's list.
+pub fun free_tasks(p: int64) {
+    let owner = (p - __rt_get("__heap_base")) >> 32
+    if owner != __rt_get("__worker_id") {
+        let slot = __rt_waddr("__remote_free", owner)
+        while true {
+            let head = __load64(slot)
+            __store64(p, head)
+            if __cas64(slot, head, p) {
+                return
+            }
+        }
+    }
+    let size = __load64(p - 16)
+    var slot = __rt_addr("__free_buckets") + size
+    if size > 4096 {
+        slot = __rt_addr("__free_buckets") + 4104 + __bsr64(size) * 8
+    }
+    __store64(p, __load64(slot))
+    __store64(slot, p)
+}
