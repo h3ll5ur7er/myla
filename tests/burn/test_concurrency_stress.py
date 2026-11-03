@@ -82,6 +82,9 @@ EXPECTED = {
     "t10_publication_through_an_actor": ("42\n", 0),
     # 12. every worker and every single request make progress
     "t12_progress_under_contention": ("workers done 8 of 8\nsingles done 50, greedy stopped\n", 0),
+    # 17. cancelling a child doesn't make its parent look cancelled, after
+    # the parent's frames changed (MYLA-162: natively it did)
+    "t17_cancelled_after_an_await": ("false\n2\n", 0),
 }
 
 

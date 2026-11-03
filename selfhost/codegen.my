@@ -2584,7 +2584,8 @@ impl CodeGen {
     // in place of it, or ends its task and returns to the executor.
     // `__exec_cur` is the frame the executor resumed last: until control
     // comes back, what runs is that frame's task, whose first frame is at the
-    // end of the chain of callers (word 8). `__exec_main` is the entry's.
+    // end of the chain of callers (word 8); `__exec_task` is that first
+    // frame (the one resumed may end meanwhile). `__exec_main` is the entry's.
     //
     // A task's first frame says in its `task` word (24) how the task is:
     // 0 running, the frame waiting for it, or 1 done; the frame is never
@@ -2836,6 +2837,11 @@ impl CodeGen {
         self.raw("\tjmp .Lexec_next")
         self.raw(".Lexec_live:")
         self.raw("\tmovq $0, 64(%rdi)")
+        // the running task's first frame, for `__task_cancelled`: until
+        // control comes back, frames of this task run, but the one resumed
+        // may end and be freed meanwhile
+        self.raw("\tmovq 40(%rdi), %rax")
+        self.raw(format("\tmovq %rax, {}", self.tv("__exec_task")))
         self.raw(format("\tmovq %rsp, {}", self.tv("__exec_sp")))
         self.raw("\tcall *(%rdi)")
         self.raw("\txorl %eax, %eax")
@@ -3316,10 +3322,7 @@ impl CodeGen {
         // __task_cancelled: %rax = 1 when the running task or a task above it
         // was asked to stop, else 0
         self.raw("__task_cancelled:")
-        self.raw(format("\tmovq {}, %rax", self.tv("__exec_cur")))
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Ltcd_no")
-        self.raw("\tmovq 40(%rax), %rax")
+        self.raw(format("\tmovq {}, %rax", self.tv("__exec_task")))
         self.raw(".Ltcd_up:")
         self.raw("\ttestq %rax, %rax")
         self.raw("\tjz .Ltcd_no")
@@ -8253,6 +8256,7 @@ const SCHED_ADD: int64 = 1442695040888963407
 // variable's word, then the free lists (4616 bytes).
 #test("__exec_sp")[32]
 #test("__remote_free")[96]
+#test("__exec_task")[104]
 #test("__run_stderr_val")[48]
 pub fun tls_offset(sym: str) -> int32 {
     if sym == "__heap_ptr" { return 8 }
@@ -8267,6 +8271,7 @@ pub fun tls_offset(sym: str) -> int32 {
     if sym == "__actor_held" { return 80 }
     if sym == "__worker_id" { return 88 }
     if sym == "__remote_free" { return 96 }
+    if sym == "__exec_task" { return 104 }
     if sym == "__free_buckets" { return 128 }
     return 0
 }

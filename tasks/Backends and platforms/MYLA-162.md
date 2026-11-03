@@ -136,3 +136,17 @@ With lifetimes that have holes ([[MYLA-257]]), `sb_append` (the full builder's c
 - **Measured:** the self-compile 0.12% fewer instructions than with the assembly allocator; the benchmarks (against the new allocator's, MYLA-257) 0.76% fewer on the geometric mean, binary trees 2.6%, word frequency 3.3%, string building 2.6% (with this round's routines); peak memory the same.
 - **With tasks too:** `alloc_tasks` and `free_tasks`, on `__cas64`, `__xchg64` and `__rt_waddr("sym", w)` (worker `w`'s own of a runtime variable). A cell freed on another worker goes onto its owner's `__remote_free` with a compare-and-swap; the owner takes the list whole (`alloc_drained`, out of the fast path) before it bumps its arena. Each worker sets up its arena when it starts (`_start` for the first, before the others start). A runtime variable that isn't a worker's own (`__heap_base`) is next to `%rip` with tasks too, where `tv()` had given `%fs:0`. The whole suite passes, the concurrency stress tests three more times on 1, 4 and 16 workers and in every order; a program allocating in three tasks takes 0.7% fewer instructions than with the assembly. No allocator is left in assembly but `__heap_init` (the mapping).
 
+
+## The executor, studied (2026-11-03)
+
+A read-only study of the executor in assembly before its port, the order:
+1. `__sched_init` and `__workers_count` (cold, no allocation; they run before the arena exists).
+2. The leaves: cancel, cancelled, waking the waiters, waiting for the stopped workers, `__task_exit`, routed like the rest of `std.rt`.
+3. The queues as a unit (lock inline, push, yield's push, find, peek): about 72 instructions per frame scheduled today, 41% of a task-heavy program, so the own queue's fast path stays a leaf with the lock inline.
+4. The actor's enter and leave.
+5. The loop itself, over a small platform layer (`__exec_enter` saving the callee-saved registers and `%rsp`, `__exec_abandon` taking it back after a failure) and the entry points that resume a frame in place without growing the stack.
+6. Starting the threads, over a platform `spawn` (clone).
+
+It needs a few more primitives: an atomic add (`lock xadd`), `pause`, and loads and stores marked as ordered so no later optimization caches them in the spin loops. The executor may not allocate (a failure is reached from the allocator's out-of-memory) nor trap holding a lock.
+
+**A bug it found, fixed:** `task.cancelled()` looked at the task of `__exec_cur`, the frame the executor resumed last. That frame can end and be freed while its task goes on in its caller; when a new child's frame took its memory and was cancelled, the parent looked cancelled natively (`true` on 1 and 4 workers, `false` in the interpreter). The executor now records the task's first frame when it resumes one (`__exec_task`, word 104 of a worker's block), which stays the same until control comes back. Regression test: `t17_cancelled_after_an_await` in the concurrency stress tests. The study also found `__actor_held` written but never read; it goes with the actor's port.
