@@ -527,3 +527,27 @@ pub fun poll(fd: int, timeout_ms: int) -> int {
     }
     return 0
 }
+
+// --- the program's arguments -------------------------------------------------
+
+// `__args`: the program's arguments, its own path first.
+pub fun args() -> [str] {
+    var out: [str] = []
+    var at = __argv()
+    while true {
+        let c = __load64(at)
+        if c == 0 {
+            break
+        }
+        var len: int64 = 0
+        while __load8(c + len) != 0u8 {
+            len += 1
+        }
+        let p = __alloc(len + 8)
+        __store64(p, len)
+        __copy_bytes(p + 8, c, len)
+        out.push(__str_of(p))
+        at += 8
+    }
+    return out
+}
