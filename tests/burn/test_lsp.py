@@ -612,6 +612,18 @@ class TestResolutionCorpus(unittest.TestCase):
     parameter or type parameter) resolves, a local only after its
     declaration, and no position twice; both builds print the same."""
 
+    def test_a_compound_assignment_is_one_use(self) -> None:
+        # `n += 2` is parsed as `n = n + 2`, one `n` walked as the place and as
+        # the value: one use, not two (MYLA-223; std.math's `n -= 1023` found it)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "compound.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("fun main() {\n    var n = 1\n    n += 2\n    print(n)\n}\n")
+            out = subprocess.run([myla_tool("tools/lsp/main.my", "lsp"), "--stdlib", STDLIB_ROOT, "--resolve", path],
+                                 capture_output=True, text=True, check=True).stdout
+        uses = [line.split()[1] for line in out.splitlines() if line.startswith("use ")]
+        self.assertEqual(uses, ["2:4-5", "3:10-11"])
+
     def test_the_corpus_resolves(self) -> None:
         files = _corpus()
         self.assertGreater(len(files), 50)

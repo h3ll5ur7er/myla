@@ -1,0 +1,57 @@
+// Benchmark (MYLA-242): how many points of an n×n grid over [-2, 1]×[-1.5, 1.5]
+// stay in the Mandelbrot set for 50 iterations: a pure float loop, almost no
+// memory, so it measures code quality alone.
+//
+//   mandelbrot [n]   prints the count
+
+from std.process import args
+from std.num import parse_int
+
+#test(0.0, 0.0)[true]
+#test(1.0, 1.0)[false]
+fun inside(cr: float64, ci: float64) -> bool {
+    var zr = 0.0
+    var zi = 0.0
+    var i = 0
+    while i < 50 {
+        let tr = zr * zr - zi * zi + cr
+        zi = 2.0 * zr * zi + ci
+        zr = tr
+        if zr * zr + zi * zi > 4.0 {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+#test(10)[20]
+fun count(n: int) -> int {
+    var total = 0
+    for y in 0..n {
+        let ci = 3.0 * (y as float64) / (n as float64) - 1.5
+        for x in 0..n {
+            let cr = 3.0 * (x as float64) / (n as float64) - 2.0
+            if inside(cr, ci) {
+                total += 1
+            }
+        }
+    }
+    return total
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    print(count(size(1000)))
+}

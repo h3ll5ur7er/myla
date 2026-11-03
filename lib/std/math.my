@@ -1,0 +1,996 @@
+// std.math: mathematical functions on float64 (MYLA-248).
+//
+// `sqrt` is the processor's correctly rounded square root. The rest is
+// written in Myla after fdlibm, the reference implementation most C math
+// libraries descend from (its range reductions and polynomial coefficients),
+// so the interpreter and native code give bit-identical results:
+// - `exp`, `ln`, `log2`, `log10`, `pow`, `hypot`, `sin`, `cos` and `atan`
+//   within about one unit in the last place of the exact result;
+// - `tan`, `asin`, `acos` and `atan2` within a few (tests/burn/test_math.py
+//   holds them to 4);
+// - `sin`, `cos` and `tan` reduce their argument exactly: by a three-part π/2
+//   below 2^20·π/2 (about 1.6 million), above that by Payne and Hanek's
+//   method with 1584 bits of 2/π.
+// NaN, the infinities and signed zeros behave as in C's <math.h>.
+
+pub const PI: float64 = 3.141592653589793
+pub const TAU: float64 = 6.283185307179586
+pub const E: float64 = 2.718281828459045
+pub const LN2: float64 = 0.6931471805599453
+pub const LN10: float64 = 2.302585092994046
+pub const SQRT2: float64 = 1.4142135623730951
+
+const SIGN: uint64 = 0x8000000000000000
+const EXPONENT: uint64 = 0x7FF0000000000000
+const MANTISSA: uint64 = 0x000FFFFFFFFFFFFF
+
+// --- bits and classes ---------------------------------------------------------
+
+// The IEEE 754 bits of `x`.
+#test(1.0)[4607182418800017408u64]
+#test(-0.0)[9223372036854775808u64]
+pub fun to_bits(x: float64) -> uint64 {
+    return __f64_bits(x)
+}
+
+// The float64 whose IEEE 754 bits are `bits`.
+#test(4611686018427387904u64)[2.0]
+pub fun from_bits(bits: uint64) -> float64 {
+    return __f64_from_bits(bits)
+}
+
+pub fun infinity() -> float64 {
+    return from_bits(EXPONENT)
+}
+
+pub fun nan() -> float64 {
+    return from_bits(0x7FF8000000000000)
+}
+
+#test(1.0)[false]
+pub fun is_nan(x: float64) -> bool {
+    return x != x
+}
+
+#test(1.0)[false]
+pub fun is_infinite(x: float64) -> bool {
+    return (to_bits(x) & (SIGN ^ 0xFFFFFFFFFFFFFFFF)) == EXPONENT
+}
+
+#test(1.0)[true]
+pub fun is_finite(x: float64) -> bool {
+    return (to_bits(x) & EXPONENT) != EXPONENT
+}
+
+// The unbiased exponent field of `x` (-1023 for zero and subnormals, 1024 for
+// infinities and NaN).
+fun exponent(x: float64) -> int32 {
+    return ((to_bits(x) >> 52) & 2047) as int32 - 1023
+}
+
+// `x` with the sign of `s`.
+#test(2.0, -1.0)[-2.0]
+pub fun copysign(x: float64, s: float64) -> float64 {
+    return from_bits((to_bits(x) & (SIGN ^ 0xFFFFFFFFFFFFFFFF)) | (to_bits(s) & SIGN))
+}
+
+// --- rounding -----------------------------------------------------------------
+
+#test(-2.5)[2.5]
+pub fun abs(x: float64) -> float64 {
+    return from_bits(to_bits(x) & (SIGN ^ 0xFFFFFFFFFFFFFFFF))
+}
+
+// `x` without its fractional part (toward zero).
+#test(2.7)[2.0]
+#test(-2.7)[-2.0]
+pub fun trunc(x: float64) -> float64 {
+    let e = exponent(x)
+    if e >= 52 {
+        return x                          // an integer already, or inf or NaN
+    }
+    if e < 0 {
+        return copysign(0.0, x)
+    }
+    let fraction = MANTISSA >> (e as uint64)
+    return from_bits(to_bits(x) & (fraction ^ 0xFFFFFFFFFFFFFFFF))
+}
+
+#test(2.7)[2.0]
+#test(-2.2)[-3.0]
+pub fun floor(x: float64) -> float64 {
+    let t = trunc(x)
+    if t > x {
+        return t - 1.0
+    }
+    return t
+}
+
+#test(2.2)[3.0]
+#test(-2.7)[-2.0]
+pub fun ceil(x: float64) -> float64 {
+    let t = trunc(x)
+    if t < x {
+        return t + 1.0
+    }
+    return t
+}
+
+// The nearest integer, halves away from zero.
+#test(2.5)[3.0]
+#test(-2.5)[-3.0]
+#test(2.4)[2.0]
+pub fun round(x: float64) -> float64 {
+    let t = trunc(x)
+    if abs(x - t) >= 0.5 {
+        return t + copysign(1.0, x)
+    }
+    return t
+}
+
+#test(1.0, 2.0)[1.0]
+pub fun min(a: float64, b: float64) -> float64 {
+    if is_nan(a) { return b }
+    if is_nan(b) { return a }
+    return if a < b { a } else { b }
+}
+
+#test(1.0, 2.0)[2.0]
+pub fun max(a: float64, b: float64) -> float64 {
+    if is_nan(a) { return b }
+    if is_nan(b) { return a }
+    return if a > b { a } else { b }
+}
+
+// --- roots --------------------------------------------------------------------
+
+#test(16.0)[4.0]
+#test(2.0)[1.4142135623730951]
+pub fun sqrt(x: float64) -> float64 {
+    return __sqrt(x)
+}
+
+// sqrt(x² + y²) without overflow or underflow on the way.
+#test(3.0, 4.0)[5.0]
+pub fun hypot(x: float64, y: float64) -> float64 {
+    let a = abs(x)
+    let b = abs(y)
+    if is_infinite(a) || is_infinite(b) {
+        return infinity()
+    }
+    if is_nan(a) || is_nan(b) {
+        return nan()
+    }
+    let big = if a > b { a } else { b }
+    // scaled by an exact power of two only where the squares would over- or
+    // underflow, so the one rounding of sqrt stays the only error
+    var scale = 0
+    if big > 3.273390607896142e150 {            // 2^500
+        scale = -600
+    } else if big < 3.054936363499605e-151 {    // 2^-500
+        scale = 600
+    }
+    let x2 = ldexp(a, scale)
+    let y2 = ldexp(b, scale)
+    return ldexp(sqrt(x2 * x2 + y2 * y2), -scale)
+}
+
+// --- exponentials and logarithms -----------------------------------------------
+
+const LN2_HI: float64 = 6.93147180369123816490e-01
+const LN2_LO: float64 = 1.90821492927058770002e-10
+const INV_LN2: float64 = 1.44269504088896338700e+00
+
+// x · 2^k
+#test(1.5, 3)[12.0]
+pub fun ldexp(x: float64, k: int32) -> float64 {
+    var y = x
+    var n = k
+    // in steps that keep the scale factor a normal number
+    while n > 1023 {
+        y = y * from_bits(0x7FE0000000000000)    // 2^1023
+        n -= 1023
+    }
+    while n < -1022 {
+        y = y * from_bits(0x0010000000000000)    // 2^-1022
+        n += 1022
+    }
+    return y * from_bits(((n + 1023) as uint64) << 52)
+}
+
+// e^x (fdlibm's e_exp.c).
+#test(0.0)[1.0]
+#test(1.0)[2.7182818284590455] // fdlibm's result, one unit in the last place above e
+pub fun exp(x: float64) -> float64 {
+    if is_nan(x) {
+        return x
+    }
+    if x > 709.782712893383973096 {
+        return infinity()
+    }
+    if x < -745.13321910194110842 {
+        return 0.0
+    }
+    if abs(x) < 3.7252902984e-09 {         // 2^-28
+        return 1.0 + x
+    }
+    let k = trunc(INV_LN2 * x + copysign(0.5, x))
+    let hi = x - k * LN2_HI
+    let lo = k * LN2_LO
+    let r = hi - lo
+    let t = r * r
+    let c = r - t * (1.66666666666666019037e-01 + t * (-2.77777777770155933842e-03 + t * (6.61375632143793436117e-05 +
+        t * (-1.65339022054652515390e-06 + t * 4.13813679705723846039e-08))))
+    let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi)
+    return ldexp(y, k as int32)
+}
+
+// `x` as f · 2^k with f in [√2/2, √2): (f, k), for a positive finite `x`.
+fun reduce_log(x: float64) -> (float64, int32) {
+    var v = x
+    var k = 0
+    if exponent(v) == -1023 {            // subnormal: scale into the normals
+        v = v * 18014398509481984.0      // 2^54
+        k = -54
+    }
+    k += exponent(v)
+    var f = from_bits((to_bits(v) & MANTISSA) | 0x3FF0000000000000)    // in [1, 2)
+    if f > SQRT2 {
+        f = f * 0.5
+        k += 1
+    }
+    return (f, k)
+}
+
+// ln(1 + f) - f + f²/2 for f in [√2/2 - 1, √2 - 1], as fdlibm's e_log.c
+// splits it: (s, R, hfsq) with ln(1 + f) = f - (hfsq - s·(hfsq + R)).
+fun log_kernel(f: float64) -> (float64, float64, float64) {
+    let s = f / (2.0 + f)
+    let z = s * s
+    let w = z * z
+    let t1 = w * (3.999999999940941908e-01 + w * (2.222219843214978396e-01 + w * 1.531383769920937332e-01))
+    let t2 = z * (6.666666666666735130e-01 + w * (2.857142874366239149e-01 + w * (1.818357216161805012e-01 +
+        w * 1.479819860511658591e-01)))
+    return (s, t2 + t1, 0.5 * f * f)
+}
+
+// The natural logarithm.
+#test(1.0)[0.0]
+#test(2.718281828459045)[1.0]
+pub fun ln(x: float64) -> float64 {
+    if is_nan(x) || x < 0.0 {
+        return nan()
+    }
+    if x == 0.0 {
+        return -infinity()
+    }
+    if is_infinite(x) {
+        return x
+    }
+    let fk = reduce_log(x)
+    let f = fk.0 - 1.0
+    let k = fk.1 as float64
+    let kern = log_kernel(f)
+    let s = kern.0
+    let hfsq = kern.2
+    return k * LN2_HI - ((hfsq - (s * (hfsq + kern.1) + k * LN2_LO)) - f)
+}
+
+// The base-2 logarithm: exact for powers of two.
+#test(8.0)[3.0]
+#test(0.5)[-1.0]
+pub fun log2(x: float64) -> float64 {
+    if is_nan(x) || x < 0.0 || x == 0.0 || is_infinite(x) {
+        return ln(x)
+    }
+    let fk = reduce_log(x)
+    let f = fk.0 - 1.0
+    let kern = log_kernel(f)
+    let s = kern.0
+    let hfsq = kern.2
+    let lnf = f - (hfsq - s * (hfsq + kern.1))
+    return (fk.1 as float64) + lnf * 1.44269504088896338700e+00
+}
+
+// The base-10 logarithm (fdlibm's e_log10.c): exact for powers of ten up
+// to 10^22.
+#test(1000.0)[3.0]
+#test(0.01)[-2.0]
+pub fun log10(x: float64) -> float64 {
+    if is_nan(x) || x < 0.0 || x == 0.0 || is_infinite(x) {
+        return ln(x)
+    }
+    var v = x
+    var k = 0
+    if exponent(v) == -1023 {
+        v = v * 18014398509481984.0
+        k = -54
+    }
+    k += exponent(v)
+    let m = from_bits((to_bits(v) & MANTISSA) | 0x3FF0000000000000)
+    let kf = k as float64
+    return kf * 3.01029995663611771306e-01 + (kf * 3.69423907715893078616e-13 + 4.34294481903251816668e-01 * ln(m))
+}
+
+// The high 32 bits of `x`, as fdlibm reads them.
+fun high(x: float64) -> int32 {
+    return (to_bits(x) >> 32) as int32
+}
+
+// The low 32 bits of `x`.
+fun low(x: float64) -> uint32 {
+    return (to_bits(x) & 0xFFFFFFFF) as uint32
+}
+
+// `x` with its high 32 bits replaced by `h`.
+fun with_high(x: float64, h: int32) -> float64 {
+    return from_bits((((h as uint32) as uint64) << 32) | (to_bits(x) & 0xFFFFFFFF))
+}
+
+// `x` with its low 32 bits cleared.
+fun clear_low(x: float64) -> float64 {
+    return from_bits(to_bits(x) & 0xFFFFFFFF00000000)
+}
+
+// x^y (fdlibm's e_pow.c: log2(x) in extra precision, y split in two, then
+// 2^(y·log2(x))), within one unit in the last place.
+#test(2.0, 10.0)[1024.0]
+#test(9.0, 0.5)[3.0]
+#test(-2.0, 3.0)[-8.0]
+#test(2.0, -1.0)[0.5]
+pub fun pow(x: float64, y: float64) -> float64 {
+    let hx = high(x)
+    let lx = low(x)
+    let hy = high(y)
+    let ly = low(y)
+    var ix = hx & 0x7fffffff
+    let iy = hy & 0x7fffffff
+    if iy == 0 && ly == 0 {
+        return 1.0                                   // x^0 = 1
+    }
+    if hx == 0x3ff00000 && lx == 0 {
+        return 1.0                                   // 1^y = 1, NaN y too
+    }
+    if ix > 0x7ff00000 || (ix == 0x7ff00000 && lx != 0) || iy > 0x7ff00000 || (iy == 0x7ff00000 && ly != 0) {
+        return (x + 0.0) + (y + 0.0)                 // NaN
+    }
+    // y_is_int: 0 not an integer, 1 an odd one, 2 an even one (for x < 0)
+    var y_is_int = 0
+    if hx < 0 {
+        if iy >= 0x43400000 {
+            y_is_int = 2
+        } else if iy >= 0x3ff00000 {
+            let k = (iy >> 20) - 0x3ff
+            if k > 20 {
+                let j = ly >> ((52 - k) as uint32)
+                if (j << ((52 - k) as uint32)) == ly {
+                    y_is_int = 2 - ((j & 1) as int32)
+                }
+            } else if ly == 0 {
+                let j = iy >> (20 - k)
+                if (j << (20 - k)) == iy {
+                    y_is_int = 2 - (j & 1)
+                }
+            }
+        }
+    }
+    if ly == 0 {
+        if iy == 0x7ff00000 {                        // y is ±inf
+            if ix - 0x3ff00000 == 0 && lx == 0 {
+                return 1.0                           // (-1)^±inf
+            }
+            if ix >= 0x3ff00000 {
+                return if hy >= 0 { y } else { 0.0 }
+            }
+            return if hy < 0 { -y } else { 0.0 }
+        }
+        if iy == 0x3ff00000 {                        // y is ±1
+            return if hy < 0 { 1.0 / x } else { x }
+        }
+        if hy == 0x40000000 {
+            return x * x                             // y is 2
+        }
+        if hy == 0x3fe00000 && hx >= 0 {
+            return sqrt(x)                           // y is 0.5
+        }
+    }
+    var ax = abs(x)
+    if lx == 0 && (ix == 0x7ff00000 || ix == 0 || ix == 0x3ff00000) {
+        var z = ax                                   // x is ±0, ±inf, ±1
+        if hy < 0 {
+            z = 1.0 / z
+        }
+        if hx < 0 {
+            if ix - 0x3ff00000 == 0 && y_is_int == 0 {
+                z = (z - z) / (z - z)                // (-1)^non-integer is NaN
+            } else if y_is_int == 1 {
+                z = -z
+            }
+        }
+        return z
+    }
+    var n = ((hx as uint32) >> 31) as int32 - 1
+    if n == 0 && y_is_int == 0 {
+        return (x - x) / (x - x)                     // a negative x to a non-integer power
+    }
+    var sign = 1.0
+    if n == 0 && y_is_int == 1 {
+        sign = -1.0                                  // a negative x to an odd power
+    }
+    var t1 = 0.0
+    var t2 = 0.0
+    if iy > 0x41e00000 {                             // |y| > 2^31
+        if iy > 0x43f00000 {                         // |y| > 2^64: over- or underflow
+            if ix <= 0x3fefffff {
+                return if hy < 0 { infinity() } else { 0.0 }
+            }
+            if ix >= 0x3ff00000 {
+                return if hy > 0 { infinity() } else { 0.0 }
+            }
+        }
+        if ix < 0x3fefffff {
+            return if hy < 0 { sign * infinity() } else { sign * 0.0 }
+        }
+        if ix > 0x3ff00000 {
+            return if hy > 0 { sign * infinity() } else { sign * 0.0 }
+        }
+        // |1 - x| <= 2^-20: log(x) by x - x²/2 + x³/3 - x⁴/4
+        let t = ax - 1.0
+        let w = (t * t) * (0.5 - t * (0.3333333333333333333333 - t * 0.25))
+        let u = 1.44269502162933349609e+00 * t
+        let v = t * 1.92596299112661746887e-08 - w * 1.44269504088896338700e+00
+        t1 = clear_low(u + v)
+        t2 = v - (t1 - u)
+    } else {
+        n = 0
+        if ix < 0x00100000 {                         // subnormal
+            ax = ax * 9007199254740992.0             // 2^53
+            n -= 53
+            ix = high(ax)
+        }
+        n += (ix >> 20) - 0x3ff
+        let j = ix & 0x000fffff
+        ix = j | 0x3ff00000
+        var k = 0
+        if j <= 0x3988E {
+            k = 0                                    // |x| < sqrt(3/2)
+        } else if j < 0xBB67A {
+            k = 1                                    // |x| < sqrt(3)
+        } else {
+            n += 1
+            ix -= 0x00100000
+        }
+        ax = with_high(ax, ix)
+        let bp = if k == 0 { 1.0 } else { 1.5 }
+        let dp_h = if k == 0 { 0.0 } else { 5.84962487220764160156e-01 }
+        let dp_l = if k == 0 { 0.0 } else { 1.35003920212974897128e-08 }
+        // ss = s_h + s_l = (x - bp)/(x + bp)
+        var u = ax - bp
+        var v = 1.0 / (ax + bp)
+        let ss = u * v
+        let s_h = clear_low(ss)
+        var t_h = with_high(0.0, ((ix >> 1) | 0x20000000) + 0x00080000 + (k << 18))
+        var t_l = ax - (t_h - bp)
+        let s_l = v * ((u - s_h * t_h) - s_h * t_l)
+        // log(ax)
+        var s2 = ss * ss
+        var r = s2 * s2 * (5.99999999999994648725e-01 + s2 * (4.28571428578550184252e-01 +
+            s2 * (3.33333329818377432918e-01 + s2 * (2.72728123808534006489e-01 + s2 * (2.30660745775561754067e-01 +
+            s2 * 2.06975017800338417784e-01)))))
+        r += s_l * (s_h + ss)
+        s2 = s_h * s_h
+        t_h = clear_low(3.0 + s2 + r)
+        t_l = r - ((t_h - 3.0) - s2)
+        u = s_h * t_h
+        v = s_l * t_h + t_l * ss
+        let p_h = clear_low(u + v)
+        let p_l = v - (p_h - u)
+        let z_h = 9.61796700954437255859e-01 * p_h
+        let z_l = -7.02846165095275826516e-09 * p_h + p_l * 9.61796693925975554329e-01 + dp_l
+        let t = n as float64
+        t1 = clear_low(((z_h + z_l) + dp_h) + t)
+        t2 = z_l - (((t1 - t) - dp_h) - z_h)
+    }
+    // (y1 + y2)·(t1 + t2)
+    let y1 = clear_low(y)
+    let p_l = (y - y1) * t1 + y * t2
+    var p_h = y1 * t1
+    var z = p_l + p_h
+    var j = high(z)
+    let i = low(z)
+    if j >= 0x40900000 {                             // z >= 1024
+        if j - 0x40900000 != 0 || i != 0 {
+            return sign * infinity()
+        }
+        if p_l + 8.0085662595372944372e-17 > z - p_h {
+            return sign * infinity()
+        }
+    } else if (j & 0x7fffffff) >= 0x4090cc00 {       // z <= -1075
+        if (j as uint32) - 0xc090cc00 != 0 || i != 0 {
+            return sign * 0.0
+        }
+        if p_l <= z - p_h {
+            return sign * 0.0
+        }
+    }
+    // 2^(p_h + p_l)
+    let ia = j & 0x7fffffff
+    var k = (ia >> 20) - 0x3ff
+    n = 0
+    if ia > 0x3fe00000 {                             // |z| > 0.5: n = [z + 0.5]
+        n = j + (0x00100000 >> (k + 1))
+        k = ((n & 0x7fffffff) >> 20) - 0x3ff
+        let t = with_high(0.0, n & ~(0x000fffff >> k))
+        n = ((n & 0x000fffff) | 0x00100000) >> (20 - k)
+        if j < 0 {
+            n = -n
+        }
+        p_h = p_h - t
+    }
+    let t = clear_low(p_l + p_h)
+    let u = t * 6.93147182464599609375e-01
+    let v = (p_l - (t - p_h)) * 6.93147180559945286227e-01 + t * -1.90465429995776804525e-09
+    z = u + v
+    let w = v - (z - u)
+    let tt = z * z
+    let t3 = z - tt * (1.66666666666666019037e-01 + tt * (-2.77777777770155933842e-03 + tt * (6.61375632143793436117e-05 +
+        tt * (-1.65339022054652515390e-06 + tt * 4.13813679705723846039e-08))))
+    let r = (z * t3) / (t3 - 2.0) - (w + z * w)
+    z = 1.0 - (r - z)
+    j = high(z) + (n << 20)
+    if (j >> 20) <= 0 {
+        z = ldexp(z, n)                              // a subnormal result
+    } else {
+        z = with_high(z, j)
+    }
+    return sign * z
+}
+
+// --- trigonometry ---------------------------------------------------------------
+
+const PIO2_1: float64 = 1.57079632673412561417e+00
+const PIO2_1T: float64 = 6.07710050650619224932e-11
+const PIO2_2: float64 = 6.07710050630396597660e-11
+const PIO2_2T: float64 = 2.02226624879595063154e-21
+const PIO2_3: float64 = 2.02226624871116645580e-21
+const PIO2_3T: float64 = 8.47842766036889956997e-32
+const INV_PIO2: float64 = 6.36619772367581382433e-01
+
+// `x` as n·π/2 + (y0 + y1), |y0 + y1| <= π/4: (n mod 4, y0, y1), after
+// fdlibm's __ieee754_rem_pio2 for medium arguments.
+fun rem_pio2(x: float64) -> (int32, float64, float64) {
+    let t = abs(x)
+    if t <= 0.7853981633974483 {             // π/4
+        return (0, x, 0.0)
+    }
+    if t >= 1647099.3291652855 {             // 2^20·π/2: Payne and Hanek's reduction
+        let r = rem_pio2_large(x)
+        return (r.0 % 4, r.1, r.2)
+    }
+    let fn = trunc(t * INV_PIO2 + 0.5)
+    var r = t - fn * PIO2_1
+    var w = fn * PIO2_1T
+    var y0 = r - w
+    let j = exponent(t)
+    if j - exponent(y0) > 16 {
+        // cancellation: the second and third parts of π/2
+        var t2 = r
+        w = fn * PIO2_2
+        r = t2 - w
+        w = fn * PIO2_2T - ((t2 - r) - w)
+        y0 = r - w
+        if j - exponent(y0) > 49 {
+            t2 = r
+            w = fn * PIO2_3
+            r = t2 - w
+            w = fn * PIO2_3T - ((t2 - r) - w)
+            y0 = r - w
+        }
+    }
+    var y1 = (r - y0) - w
+    // n mod 4, from a float that may exceed the integers
+    var q = fn - 4.0 * trunc(fn * 0.25)
+    if x < 0.0 {
+        y0 = -y0
+        y1 = -y1
+        q = 4.0 - q
+    }
+    return ((q as int32) % 4, y0, y1)
+}
+
+// The bits of 2/π after the binary point, 24 at a time (66 chunks, 1584
+// bits), computed from π, for the reduction of large arguments.
+fun two_over_pi() -> [int32] {
+    return [
+        0xA2F983, 0x6E4E44, 0x1529FC, 0x2757D1, 0xF534DD, 0xC0DB62,
+        0x95993C, 0x439041, 0xFE5163, 0xABDEBB, 0xC561B7, 0x246E3A,
+        0x424DD2, 0xE00649, 0x2EEA09, 0xD1921C, 0xFE1DEB, 0x1CB129,
+        0xA73EE8, 0x8235F5, 0x2EBB44, 0x84E99C, 0x7026B4, 0x5F7E41,
+        0x3991D6, 0x398353, 0x39F49C, 0x845F8B, 0xBDF928, 0x3B1FF8,
+        0x97FFDE, 0x05980F, 0xEF2F11, 0x8B5A0A, 0x6D1F6D, 0x367ECF,
+        0x27CB09, 0xB74F46, 0x3F669E, 0x5FEA2D, 0x7527BA, 0xC7EBE5,
+        0xF17B3D, 0x0739F7, 0x8A5292, 0xEA6BFB, 0x5FB11F, 0x8D5D08,
+        0x560330, 0x46FC7B, 0x6BABF0, 0xCFBC20, 0x9AF436, 0x1DA9E3,
+        0x91615E, 0xE61B08, 0x659985, 0x5F14A0, 0x68408D, 0xFFD880,
+        0x4D7327, 0x310606, 0x1556CA, 0x73A8C9, 0x60E27B, 0xC08C6B,
+    ]
+}
+
+// π/2 in eight parts of 24 bits each.
+fun pio2_parts() -> [float64] {
+    return [1.57079625129699707031e+00, 7.54978941586159635335e-08, 5.39030252995776476554e-15,
+        3.28200341580791294123e-22, 1.27065575308067607349e-29, 1.22933308981111328932e-36,
+        2.73370053816464559624e-44, 2.16741683877804819444e-51]
+}
+
+fun zeros(n: int32) -> [float64] {
+    var out: [float64] = []
+    for i in 0..n {
+        out.push(0.0)
+    }
+    return out
+}
+
+// `x` (|x| >= 2^20·π/2, finite) as n·π/2 + (y0 + y1): (n mod 8, y0, y1), by
+// Payne and Hanek's method as fdlibm's __kernel_rem_pio2 does it, with the
+// bits of 2/π (prec 2: 53-bit results).
+fun rem_pio2_large(x: float64) -> (int32, float64, float64) {
+    let two24 = 16777216.0
+    let twon24 = 5.96046447753906250000e-08
+    let ipio2 = two_over_pi()
+    let pio2 = pio2_parts()
+    // |x| = z·2^e0 with z's integer part 24 bits wide, split in 24-bit pieces
+    let e0 = exponent(x) - 23
+    var z = from_bits((to_bits(abs(x)) & MANTISSA) | ((23 + 1023) as uint64) << 52)
+    var tx = zeros(3)
+    for i in 0..2 {
+        tx[i] = trunc(z)
+        z = (z - tx[i]) * two24
+    }
+    tx[2] = z
+    var nx = 3
+    while tx[nx - 1] == 0.0 {
+        nx -= 1
+    }
+    let jk = 4
+    let jp = jk
+    let jx = nx - 1
+    var jv = (e0 - 3) / 24
+    if jv < 0 {
+        jv = 0
+    }
+    var q0 = e0 - 24 * (jv + 1)
+    var f = zeros(20)
+    var q = zeros(20)
+    var fq = zeros(20)
+    var iq: [int32] = []
+    for i in 0..20 {
+        iq.push(0)
+    }
+    var j = jv - jx
+    for i in 0..jx + jk + 1 {
+        f[i] = if j < 0 { 0.0 } else { ipio2[j] as float64 }
+        j += 1
+    }
+    for i in 0..jk + 1 {
+        var fw = 0.0
+        for k in 0..jx + 1 {
+            fw += tx[k] * f[jx + i - k]
+        }
+        q[i] = fw
+    }
+    var jz = jk
+    var n = 0
+    var ih = 0
+    var again = true
+    while again {
+        again = false
+        // distil q into iq, most significant last
+        var i = 0
+        j = jz
+        z = q[jz]
+        while j > 0 {
+            let fw = trunc(twon24 * z)
+            iq[i] = (z - two24 * fw) as int32
+            z = q[j - 1] + fw
+            i += 1
+            j -= 1
+        }
+        z = ldexp(z, q0)
+        z -= 8.0 * floor(z * 0.125)
+        n = z as int32
+        z -= n as float64
+        ih = 0
+        if q0 > 0 {
+            let top = iq[jz - 1] >> (24 - q0)
+            n += top
+            iq[jz - 1] = iq[jz - 1] - (top << (24 - q0))
+            ih = iq[jz - 1] >> (23 - q0)
+        } else if q0 == 0 {
+            ih = iq[jz - 1] >> 23
+        } else if z >= 0.5 {
+            ih = 2
+        }
+        if ih > 0 {
+            // the fraction is above one half: take 1 - it
+            n += 1
+            var carry = 0
+            for k in 0..jz {
+                let v = iq[k]
+                if carry == 0 {
+                    if v != 0 {
+                        carry = 1
+                        iq[k] = 0x1000000 - v
+                    }
+                } else {
+                    iq[k] = 0xffffff - v
+                }
+            }
+            if q0 == 1 {
+                iq[jz - 1] = iq[jz - 1] & 0x7fffff
+            } else if q0 == 2 {
+                iq[jz - 1] = iq[jz - 1] & 0x3fffff
+            }
+            if ih == 2 {
+                z = 1.0 - z
+                if carry != 0 {
+                    z -= ldexp(1.0, q0)
+                }
+            }
+        }
+        if z == 0.0 {
+            var any = 0
+            var k = jz - 1
+            while k >= jk {
+                any = any | iq[k]
+                k -= 1
+            }
+            if any == 0 {
+                // more bits of 2/π are needed
+                var more = 1
+                while iq[jk - more] == 0 {
+                    more += 1
+                }
+                for m in jz + 1..jz + more + 1 {
+                    f[jx + m] = ipio2[jv + m] as float64
+                    var fw = 0.0
+                    for k2 in 0..jx + 1 {
+                        fw += tx[k2] * f[jx + m - k2]
+                    }
+                    q[m] = fw
+                }
+                jz += more
+                again = true
+            }
+        }
+    }
+    if z == 0.0 {
+        jz -= 1
+        q0 -= 24
+        while iq[jz] == 0 {
+            jz -= 1
+            q0 -= 24
+        }
+    } else {
+        z = ldexp(z, -q0)
+        if z >= two24 {
+            let fw = trunc(twon24 * z)
+            iq[jz] = (z - two24 * fw) as int32
+            jz += 1
+            q0 += 24
+            iq[jz] = fw as int32
+        } else {
+            iq[jz] = z as int32
+        }
+    }
+    var fw = ldexp(1.0, q0)
+    var i = jz
+    while i >= 0 {
+        q[i] = fw * (iq[i] as float64)
+        fw *= twon24
+        i -= 1
+    }
+    i = jz
+    while i >= 0 {
+        var s = 0.0
+        var k = 0
+        while k <= jp && k <= jz - i {
+            s += pio2[k] * q[i + k]
+            k += 1
+        }
+        fq[jz - i] = s
+        i -= 1
+    }
+    var sum = 0.0
+    i = jz
+    while i >= 0 {
+        sum += fq[i]
+        i -= 1
+    }
+    var y0 = if ih == 0 { sum } else { -sum }
+    var tail = fq[0] - sum
+    for k in 1..jz + 1 {
+        tail += fq[k]
+    }
+    var y1 = if ih == 0 { tail } else { -tail }
+    var nn = n & 7
+    if x < 0.0 {
+        y0 = -y0
+        y1 = -y1
+        nn = (8 - nn) & 7
+    }
+    return (nn, y0, y1)
+}
+
+// sin(x + y) for |x + y| <= π/4, y the tail of x.
+fun kernel_sin(x: float64, y: float64) -> float64 {
+    let z = x * x
+    let v = z * x
+    let r = 8.33333333332248946124e-03 + z * (-1.98412698298579493134e-04 + z * (2.75573137070700676789e-06 +
+        z * (-2.50507602534068634195e-08 + z * 1.58969099521155010221e-10)))
+    return x - ((z * (0.5 * y - v * r) - y) - v * -1.66666666666666324348e-01)
+}
+
+// cos(x + y) for |x + y| <= π/4, y the tail of x.
+fun kernel_cos(x: float64, y: float64) -> float64 {
+    let z = x * x
+    let r = z * (4.16666666666666019037e-02 + z * (-1.38888888888741095749e-03 + z * (2.48015872894767294178e-05 +
+        z * (-2.75573143513906633035e-07 + z * (2.08757232129817482790e-09 + z * -1.13596475577881948265e-11)))))
+    let hz = 0.5 * z
+    let w = 1.0 - hz
+    return w + (((1.0 - w) - hz) + (z * r - x * y))
+}
+
+#test(0.0)[0.0]
+#test(1.5707963267948966)[1.0]
+pub fun sin(x: float64) -> float64 {
+    if !is_finite(x) {
+        return nan()
+    }
+    let r = rem_pio2(x)
+    return match r.0 {
+        0 => kernel_sin(r.1, r.2),
+        1 => kernel_cos(r.1, r.2),
+        2 => -kernel_sin(r.1, r.2),
+        _ => -kernel_cos(r.1, r.2),
+    }
+}
+
+#test(0.0)[1.0]
+#test(3.141592653589793)[-1.0]
+pub fun cos(x: float64) -> float64 {
+    if !is_finite(x) {
+        return nan()
+    }
+    let r = rem_pio2(x)
+    return match r.0 {
+        0 => kernel_cos(r.1, r.2),
+        1 => -kernel_sin(r.1, r.2),
+        2 => -kernel_cos(r.1, r.2),
+        _ => kernel_sin(r.1, r.2),
+    }
+}
+
+#test(0.0)[0.0]
+pub fun tan(x: float64) -> float64 {
+    if !is_finite(x) {
+        return nan()
+    }
+    let r = rem_pio2(x)
+    let s = kernel_sin(r.1, r.2)
+    let c = kernel_cos(r.1, r.2)
+    return if r.0 % 2 == 0 { s / c } else { -c / s }
+}
+
+// The arctangent (fdlibm's s_atan.c).
+#test(0.0)[0.0]
+#test(1.0)[0.7853981633974483]
+pub fun atan(x: float64) -> float64 {
+    if is_nan(x) {
+        return x
+    }
+    var t = abs(x)
+    if t >= 7.3786976294838206464e19 {       // 2^66
+        return copysign(1.5707963267948966, x)
+    }
+    var hi = 0.0
+    var lo = 0.0
+    var reduced = true
+    if t < 0.4375 {
+        if t < 7.450580596923828e-09 {       // 2^-27
+            return x
+        }
+        reduced = false
+    } else if t < 1.1875 {
+        if t < 0.6875 {
+            hi = 4.63647609000806093515e-01
+            lo = 2.26987774529616870924e-17
+            t = (2.0 * t - 1.0) / (2.0 + t)
+        } else {
+            hi = 7.85398163397448278999e-01
+            lo = 3.06161699786838301793e-17
+            t = (t - 1.0) / (t + 1.0)
+        }
+    } else if t < 2.4375 {
+        hi = 9.82793723247329054082e-01
+        lo = 1.39033110312309984516e-17
+        t = (t - 1.5) / (1.0 + 1.5 * t)
+    } else {
+        hi = 1.57079632679489655800e+00
+        lo = 6.12323399573676603587e-17
+        t = -1.0 / t
+    }
+    let z = t * t
+    let w = z * z
+    let s1 = z * (3.33333333333329318027e-01 + w * (1.42857142725034663711e-01 + w * (9.09088713343650656196e-02 +
+        w * (6.66107313738753120669e-02 + w * (4.97687799461593236017e-02 + w * 1.62858201153657823623e-02)))))
+    let s2 = w * (-1.99999999998764832476e-01 + w * (-1.11111104054623557880e-01 + w * (-7.69187620504482999495e-02 +
+        w * (-5.83357013379057348645e-02 + w * -3.65315727442169155270e-02))))
+    if !reduced {
+        return x - x * (s1 + s2)
+    }
+    let r = hi - ((t * (s1 + s2) - lo) - t)
+    return copysign(r, x)
+}
+
+const PI_LO: float64 = 1.2246467991473531772e-16
+
+// The angle of the point (x, y) from the positive x axis, in (-π, π]
+// (after fdlibm's e_atan2.c).
+#test(1.0, 1.0)[0.7853981633974483]
+#test(0.0, -1.0)[3.141592653589793]
+pub fun atan2(y: float64, x: float64) -> float64 {
+    if is_nan(x) || is_nan(y) {
+        return nan()
+    }
+    if x == 1.0 {
+        return atan(y)
+    }
+    let x_negative = to_bits(x) & SIGN != 0
+    if y == 0.0 {
+        return if x_negative { copysign(PI, y) } else { y }
+    }
+    if x == 0.0 {
+        return copysign(1.5707963267948966, y)
+    }
+    if is_infinite(x) {
+        if is_infinite(y) {
+            return copysign(if x_negative { 2.356194490192345 } else { 0.7853981633974483 }, y)
+        }
+        return copysign(if x_negative { PI } else { 0.0 }, y)
+    }
+    if is_infinite(y) {
+        return copysign(1.5707963267948966, y)
+    }
+    let k = exponent(y) - exponent(x)
+    var z = 0.0
+    if k > 60 {
+        z = 1.5707963267948966 + 0.5 * PI_LO
+    } else if x_negative && k < -60 {
+        z = 0.0
+    } else {
+        z = atan(abs(y / x))
+    }
+    if !x_negative {
+        return copysign(z, y)
+    }
+    return copysign(PI - (z - PI_LO), y)
+}
+
+#test(1.0)[1.5707963267948966]
+#test(0.0)[0.0]
+pub fun asin(x: float64) -> float64 {
+    if is_nan(x) || abs(x) > 1.0 {
+        return nan()
+    }
+    return atan2(x, sqrt((1.0 - x) * (1.0 + x)))
+}
+
+#test(1.0)[0.0]
+#test(-1.0)[3.141592653589793]
+pub fun acos(x: float64) -> float64 {
+    if is_nan(x) || abs(x) > 1.0 {
+        return nan()
+    }
+    return atan2(sqrt((1.0 - x) * (1.0 + x)), x)
+}

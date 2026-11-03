@@ -17,10 +17,11 @@ from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
+from .ssa import SsaStats, no_ssa_stats
 from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered
 import .ir_x86 as ir_x86
-from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
+from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // A name binding in scope: a parameter or local at a fixed rbp offset.
@@ -157,6 +158,10 @@ pub struct CodeGen {
     nullary_names: [str: bool],
     str_ix: [str: int32],
     keep_ir: bool,
+    // D123's prototype: the scalar slots promoted before each function is
+    // emitted (`--ssa`), and what that did
+    ssa: bool,
+    ssa_stats: SsaStats,
     ir_texts: [str],
     ir_blocked: [str],
     ir_ready: bool,
@@ -195,7 +200,7 @@ pub struct CodeGen {
     frames: bool,
     norm: Norm,
     save_base: int32,               // MYLA-126: the saved registers' cells start below it
-    arg_words: int32,               // MYLA-126: the argument words the function pops
+    arg_words: int32,               // D119: the argument words the function received on the stack
     // MYLA-127: per function (by its signature's name), which parameters its
     // body keeps as a whole value (`keeps`); such a parameter of a scalar
     // type that owns heap memory is passed owned (`owned_param`)
@@ -290,7 +295,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         debug: false, line_files: [], cur_file: 0, last_loc: "",
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
-        keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
+        keep_ir: false, ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
         temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
@@ -476,15 +481,11 @@ impl CodeGen {
         // the address of the value
         var addr: [int32] = [OP_FBREG]
         if b.kind == "frame" {
-            // in a frame function's heap frame, whose address is the
-            // function's argument word (D90, MYLA-141)
-            addr.push(16)
-            addr.push(OP_DEREF)
-            addr.push(OP_PLUS_UCONST)
-            for x in uleb(b.offset) { addr.push(x) }
-        } else {
-            for x in sleb(b.offset) { addr.push(x) }
+            // in a frame function's heap frame, whose address %r15 holds
+            // (D90, MYLA-141; it came in %rdi, D119)
+            addr = [OP_BREG15]
         }
+        for x in sleb(b.offset) { addr.push(x) }
         if b.kind == "capture" {
             addr.push(OP_DEREF)
             if b.capoff != 0 {
@@ -600,8 +601,11 @@ impl CodeGen {
     // The elements of a list of `e`s, at its cell + 16.
     #test(codegen_on("[int]"), Type.TFloat(64))[".Ldty1"]
     fun dbg_items(var self, e: Type) -> str {
-        let elem = self.dbg_element(e)
-        return self.dbg_array(elem, self.stored_size(e), 16)
+        // an element narrower than a word is described at its size (D120)
+        let size = self.elem_size(e)
+        var elem = self.dbg_element(e)
+        if size < 8 { elem = self.dbg_base(e, size) }
+        return self.dbg_array(elem, size, 16)
     }
 
     // The heap cell of a `str`, list, builder or map, for a pointer to it.
@@ -629,6 +633,8 @@ impl CodeGen {
             Type.TBool => { return self.dbg_base(t, 1) },
             Type.TChar => { return self.dbg_base(t, 4) },
             Type.TFloat(w) => { return self.dbg_base(t, 8) },   // a float32 is kept as a double
+            // an address of the IR's own (D121), shown as its number
+            Type.TPtr => { return self.dbg_base(Type.TInt(64, false), 8) },
             Type.TStr => {},
             Type.TSB => {},
             Type.TList(e) => {},
@@ -1362,6 +1368,23 @@ impl CodeGen {
         return match t {
             Type.TEnum(n, a) => list_has_str(self.recursive_enums, n),
             _ => false,
+        }
+    }
+
+    // The size of an element of a list of `t`s: a scalar at its natural
+    // size (D120, MYLA-247: a `bool` 1 byte, an integer or float its width,
+    // a `char` 4), anything else as stored in an aggregate.
+    #test(codegen_on("[int]"), Type.TBool)[1]
+    #test(codegen_on("[int]"), Type.TInt(16, true))[2]
+    #test(codegen_on("[int]"), Type.TChar)[4]
+    #test(codegen_on("[int]"), Type.TStr)[8]
+    fun elem_size(self, t: Type) -> int32 {
+        return match t {
+            Type.TBool => 1,
+            Type.TInt(w, sg) => w / 8,
+            Type.TChar => 4,
+            Type.TFloat(w) => w / 8,
+            _ => self.stored_size(t),
         }
     }
 
@@ -2533,9 +2556,9 @@ impl CodeGen {
 
     // The ready frames: each worker has a ring of its own (`emit_executor`
     // below); `__exec_push` (%rdi: a frame) queues one, `__exec_run` resumes
-    // frames until none is left anywhere (each frame function pops its one
-    // argument word). `myla___resume`
-    // goes on with the frame at 8(%rsp), through its resume function;
+    // frames until none is left anywhere (each frame function takes its
+    // frame in %rdi, D119). `myla___resume`
+    // goes on with the frame in %rdi, through its resume function;
     // `myla___finish`, at a frame function's end, resumes the frame's caller
     // in place of it, or ends its task and returns to the executor.
     // `__exec_cur` is the frame the executor resumed last: until control
@@ -2792,7 +2815,6 @@ impl CodeGen {
         self.raw("\tjmp .Lexec_next")
         self.raw(".Lexec_live:")
         self.raw("\tmovq $0, 64(%rdi)")
-        self.raw("\tpushq %rdi")
         self.raw(format("\tmovq %rsp, {}", self.tv("__exec_sp")))
         self.raw("\tcall *(%rdi)")
         self.raw("\txorl %eax, %eax")
@@ -2834,10 +2856,9 @@ impl CodeGen {
         self.raw("\tlock decl __exec_idle(%rip)")
         self.raw("\tjmp .Lexec_next")
         // a task failed (`__task_fail`): back to the loop, the stack as the
-        // resumed frame found it, its argument word popped
+        // resumed frame found it
         self.raw(".Lexec_failed:")
         self.raw(format("\tmovq {}, %rsp", self.tv("__exec_sp")))
-        self.raw("\taddq $8, %rsp")
         self.raw("\txorl %eax, %eax")
         self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
         self.raw("\tjmp .Lexec_next")
@@ -2848,17 +2869,17 @@ impl CodeGen {
         self.raw("\tmovq $1, %rdi")
         self.raw("\tsyscall")
         self.raw("")
+        // the runtime's entry points a frame function tail-calls take the
+        // frame in %rdi (D119)
         self.raw("myla___resume:")
-        self.raw("\tmovq 8(%rsp), %rax")
-        self.raw("\tjmp *(%rax)")
+        self.raw("\tjmp *(%rdi)")
         self.raw("")
         self.raw("myla___finish:")
-        self.raw("\tmovq 8(%rsp), %rax")
-        self.raw("\tmovq 8(%rax), %rcx")
-        self.raw("\ttestq %rcx, %rcx")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tmovq 8(%rax), %rdi")
+        self.raw("\ttestq %rdi, %rdi")
         self.raw("\tjz .Lfinish_task")
-        self.raw("\tmovq %rcx, 8(%rsp)")
-        self.raw("\tjmp *(%rcx)")
+        self.raw("\tjmp *(%rdi)")
         // a task's first frame: its task ends; the frame waiting for it, in
         // its `task` word, goes on, and the word says done (1)
         self.raw(".Lfinish_task:")
@@ -2867,8 +2888,7 @@ impl CodeGen {
         self.raw("\tje .Lfinish_program")
         self.raw("\tmovq $1, %rdi")
         self.raw("\txchgq %rdi, 24(%rax)")
-        self.raw("\tcall __wake_waiters")
-        self.raw("\tret $8")
+        self.raw("\tjmp __wake_waiters")
         self.raw(".Lfinish_program:")
         self.raw("\tmovq $231, %rax")
         self.raw("\txorq %rdi, %rdi")
@@ -3107,17 +3127,15 @@ impl CodeGen {
         // myla___yield(frame): a turn for the others, the frame queued again
         // (its resume point stored before this tail call, D92)
         self.raw("myla___yield:")
-        self.raw("\tmovq 8(%rsp), %rdi")
-        self.raw("\tcall __exec_yield_push")
-        self.raw("\tret $8")
+        self.raw("\tjmp __exec_yield_push")
         self.raw("")
         // myla___wait(child, frame): while the child task runs, the frame
         // joins the frames waiting for it (its `task` word holds the first,
         // each linked to the next through word 32: a parent and siblings,
         // MYLA-148); once it has ended (1), the frame goes on at once
         self.raw("myla___wait:")
-        self.raw("\tmovq 8(%rsp), %rcx")
-        self.raw("\tmovq 16(%rsp), %rdx")
+        self.raw("\tmovq %rdi, %rcx")
+        self.raw("\tmovq %rsi, %rdx")
         self.raw("\tmovq 24(%rcx), %rax")
         self.raw(".Lwait_again:")
         self.raw("\tcmpq $4, %rax")
@@ -3126,19 +3144,16 @@ impl CodeGen {
         self.raw("\tmovq %rax, 32(%rdx)")
         self.raw("\tlock cmpxchgq %rdx, 24(%rcx)")
         self.raw("\tjne .Lwait_again")
-        self.raw("\tret $16")
+        self.raw("\tret")
         // 0 (no frame waiting yet) is a list too
         self.raw(".Lwait_ended:")
         self.raw("\ttestq %rax, %rax")
         self.raw("\tjz .Lwait_link")
-        // the frame in the second argument word resumed in place of the
-        // runtime function, the first word dropped
+        // the frame, the second argument (in %rdx now), resumed in place of
+        // the runtime function
         self.raw(".Lresume_second:")
-        self.raw("\tmovq 16(%rsp), %rax")
-        self.raw("\tmovq (%rsp), %rcx")
-        self.raw("\taddq $8, %rsp")
-        self.raw("\tmovq %rcx, (%rsp)")
-        self.raw("\tjmp *(%rax)")
+        self.raw("\tmovq %rdx, %rdi")
+        self.raw("\tjmp *(%rdx)")
         self.raw("")
         // myla___actor_enter(record, frame): an actor's executor (D92),
         // `[lock][running][first waiting][last]`; free, the frame goes on
@@ -3150,8 +3165,8 @@ impl CodeGen {
         // resumes it, so every caller after it queues too (a convoy). No one
         // waits before it, so the order stays first come, first served.
         self.raw("myla___actor_enter:")
-        self.raw("\tmovq 8(%rsp), %rcx")
-        self.raw("\tmovq 16(%rsp), %rdx")
+        self.raw("\tmovq %rdi, %rcx")
+        self.raw("\tmovq %rsi, %rdx")
         self.raw("\txorl %r8d, %r8d")
         self.raw("\tcmpl $1, __exec_workers(%rip)")
         self.raw("\tjbe .Lae_lock")
@@ -3194,7 +3209,7 @@ impl CodeGen {
         self.raw(".Lae_linked:")
         self.raw("\tmovq %rdx, 24(%rcx)")
         self.raw("\tmovq $0, (%rcx)")
-        self.raw("\tret $16")
+        self.raw("\tret")
         self.raw("")
         // __actor_leave: %rdi = an actor's executor; the first frame waiting
         // is queued to run, holding the actor, or the actor is free
@@ -3406,7 +3421,8 @@ impl CodeGen {
         // a last use moves (MYLA-127), checked by the verifier with the rest
         let f = moves(l.f)
         let problem = verify(f)
-        if self.keep_ir { self.ir_texts.push(render_func(f)) }
+        // with `--ssa`, the text shows each function after promotion instead
+        if self.keep_ir && !self.ssa { self.ir_texts.push(render_func(f)) }
         if problem != "" { panic(format("internal error: {}: IR verifier: {}", mangled, problem)) }
         for inst in l.f.instances { let m = self.request_fn(inst.orig, inst.targs) }
         for b in l.f.blocks {
@@ -3686,6 +3702,12 @@ impl CodeGen {
         }
         // comparison -> 0/1; NaN compares unordered (only != is true)
         self.emit("ucomisd %xmm1, %xmm0")
+        self.emit_float_cmp_result(op)
+    }
+
+    // The flags of a `ucomisd` as the 0/1 of the comparison `op` in %rax;
+    // NaN compares unordered (only != is true).
+    fun emit_float_cmp_result(var self, op: str) {
         if op == ">" { self.emit("seta %al") }
         else if op == ">=" { self.emit("setae %al") }
         else if op == "!=" {
@@ -3720,8 +3742,20 @@ impl CodeGen {
 
     // -- aggregates (structs / tuples) ------------------------------------
 
+    // `size` bytes from (%rsi) to (%rdi), through %rcx (clobbers %rcx, %rsi
+    // and %rdi). Up to 8 words as moves: `rep movsq` starts slowly (tens of
+    // cycles even for three words), which made matching on a small enum six
+    // times slower than C (MYLA-242).
     fun emit_copy(var self, size: int32) {
-        self.emit(format("movq ${}, %rcx", size / 8))
+        let words = size / 8
+        if words <= 8 {
+            for i in 0..words {
+                self.emit(format("movq {}(%rsi), %rcx", i * 8))
+                self.emit(format("movq %rcx, {}(%rdi)", i * 8))
+            }
+            return
+        }
+        self.emit(format("movq ${}, %rcx", words))
         self.emit("cld")
         self.emit("rep movsq")
     }
@@ -3760,8 +3794,13 @@ impl CodeGen {
     // the cell is uniquely owned (clone it if refcount > 1, storing the clone
     // back). Out: %rax = the now-unique cell pointer.
     fun cow_unique(var self, t: Type) {
-        self.register_clone(t)
         self.emit("movq %rax, %rcx")
+        self.cow_unique_at_rcx(t)
+    }
+
+    // `cow_unique` with the holder's address already in %rcx (MYLA-251).
+    fun cow_unique_at_rcx(var self, t: Type) {
+        self.register_clone(t)
         self.emit("movq (%rcx), %rdi")
         let skip = self.label()
         self.emit("cmpq $1, -8(%rdi)")
@@ -3916,20 +3955,26 @@ impl CodeGen {
         return subst_type(self.struct_field_type(name, field), sub)
     }
 
-    // Emit a partial-application thunk, called as `thunk([sret,] env, holes…)`:
-    // rebuild the full argument list from the env (filled; an aggregate passed
-    // by its address in the env) and the holes, forward the sret pointer, and
-    // jump to the target (a function value with its own env, as a call through
-    // one does) in place of the thunk (`emit_frame_handover`; MYLA-130): the
-    // caller holds the env, which what the target borrows lives in, until the
-    // target returns to it.
+    // Emit a partial-application thunk, called as a function value with
+    // `[sret,] holes…` (its env in %r10): rebuild the full argument list from
+    // the env (filled; an aggregate passed by its address in the env) and the
+    // holes, forward the sret pointer, and hand over to the target (a
+    // function value with its own env, as a call through one does;
+    // `thunk_call`, MYLA-130). The caller holds the env, which what the
+    // target borrows lives in, until the target returns to it.
     fun gen_partial_function(var self, job: PartialJob) {
         let n = job.slots.len()
-        var env_off = 16
-        if job.sret { env_off = 24 }
+        var first = 0
+        if job.sret { first = 1 }
+        let env = SPILLED_ENV
+        var holes = 0
+        for sl in job.slots {
+            if sl < 0 { holes = holes + 1 }
+        }
         self.emit(format("myla_{}:", job.lifted))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
+        self.spill_args(first + holes)
         // a parameter of a named target passed owned gets a reference of its
         // own (MYLA-127): the env keeps its filled ones, the holes are lent
         var tsig = self.funcs[0]
@@ -3945,9 +3990,9 @@ impl CodeGen {
                     if job.slots[j] < 0 { hidx = hidx + 1 }
                     j = j + 1
                 }
-                load.push(format("movq {}(%rbp), %rax", env_off + 8 + 8 * hidx))
+                load.push(format("movq {}, %rax", spilled_word(first + hidx)))
             } else {
-                load.push(format("movq {}(%rbp), %rcx", env_off))
+                load.push(format("movq {}, %rcx", env))
                 if job.aggs[pos] { load.push(format("leaq {}(%rcx), %rax", job.slots[pos])) }
                 else { load.push(format("movq {}(%rcx), %rax", job.slots[pos])) }
             }
@@ -3961,40 +4006,19 @@ impl CodeGen {
             }
             pos = pos - 1
         }
-        if job.fn_off >= 0 {
-            self.emit(format("movq {}(%rbp), %rcx", env_off))
-            self.emit(format("movq {}(%rcx), %rax", job.fn_off + 8))   // the value's env
-            self.emit("pushq %rax")
-            pushed = pushed + 1
-        }
         if job.sret {
-            self.emit("movq 16(%rbp), %rax")
-            self.emit("pushq %rax")
+            self.emit(format("pushq {}", spilled_word(0)))
             pushed = pushed + 1
         }
         var target = format("myla_{}", job.target)
         if job.fn_off >= 0 {
-            self.emit(format("movq {}(%rbp), %rcx", env_off))
-            self.emit(format("movq {}(%rcx), %rcx", job.fn_off))
-            target = "*%rcx"
+            // the value's env into %r10, its code into %r11
+            self.emit(format("movq {}, %r11", env))
+            self.emit(format("movq {}(%r11), %r10", job.fn_off + 8))
+            self.emit(format("movq {}(%r11), %r11", job.fn_off))
+            target = "*%r11"
         }
-        // the words it was called with: the result's address, the env and
-        // the holes; nothing saved
-        var holes = 0
-        for sl in job.slots {
-            if sl < 0 { holes = holes + 1 }
-        }
-        var words = 1 + holes
-        if job.sret { words = words + 1 }
-        self.arg_words = words
-        self.saved_regs = []
-        var in_place: [bool] = []
-        var k = 0
-        while k < pushed {
-            in_place.push(false)
-            k = k + 1
-        }
-        self.emit_frame_handover(pushed, in_place, target)
+        self.thunk_call(pushed, first + holes, target)
         self.emit("")
         if job.owned.len() > 0 { self.emit_env_drop(job.lifted, job.owned) }
     }
@@ -4018,19 +4042,17 @@ impl CodeGen {
         self.emit("")
     }
 
-    // `myla_<fn>__fnval(env, args…)`: adapter so a plain `fun` can be called
-    // through the closure convention (MYLA-126): the return address and the
-    // result's address move up over the env word, and it jumps to
-    // `myla_<fn>`, which pops the arguments and so all its caller pushed.
+    // `myla_<fn>__fnval`: the adapter that lets a plain `fun` be called as a
+    // function value (MYLA-126). Both take the same argument words, so it
+    // only gives a parameter passed owned a reference of its own (its caller
+    // lends it, MYLA-127) and jumps to `myla_<fn>`; the environment in %r10
+    // goes unused (D119).
     fun emit_fnval_thunk(var self, n: str) {
         let sig = self.sig_of(n)
         if self.is_async_fn(n) {
-            // an async function's value makes its frame (D90): its env word
-            // dropped, `__new` takes the arguments (with references of its own)
+            // an async function's value makes its frame (D90): `__new` takes
+            // the arguments (with references of its own)
             self.emit(format("myla_{}__fnval:", n))
-            self.emit("movq (%rsp), %rax")
-            self.emit("movq %rax, 8(%rsp)")
-            self.emit("addq $8, %rsp")
             self.emit(format("jmp myla_{}__new", n))
             self.emit("")
             return
@@ -4047,44 +4069,39 @@ impl CodeGen {
             return
         }
         self.emit(format("myla_{}__fnval:", n))
-        // the return address at 0(%rsp), the result's address (if any) at
-        // 8(%rsp), the env after it, then the arguments; one passed owned
-        // gets a reference of its own, its caller lends it (MYLA-127)
-        var first = 16
-        if struct_ret { first = 24 }
+        var first = 0
+        if struct_ret { first = 1 }
         var i = 0
         while i < sig.params.len() {
             if self.owned_param(sig, i, sig.params[i]) {
-                self.emit(format("movq {}(%rsp), %rax", first + 8 * i))
-                self.emit("incq -8(%rax)")
+                let w = first + i
+                if w < REG_WORDS { self.emit(format("incq -8(%{})", arg_reg(w))) }
+                else {
+                    self.emit(format("movq {}(%rsp), %rax", 8 + 8 * (w - REG_WORDS)))
+                    self.emit("incq -8(%rax)")
+                }
             }
             i = i + 1
         }
-        if struct_ret {
-            self.emit("movq 8(%rsp), %rax")
-            self.emit("movq %rax, 16(%rsp)")
-        }
-        self.emit("movq (%rsp), %rax")
-        self.emit("movq %rax, 8(%rsp)")
-        self.emit("addq $8, %rsp")
         self.emit(format("jmp myla_{}", n))
         self.emit("")
     }
 
-    // The adapter for a function with a parameter passed by value (D88):
-    // the words rebuilt below the frame, a copy (with references of its own)
-    // of each such aggregate, whose address the closure convention passes,
-    // and handed over in place of the adapter's (`emit_frame_handover`).
+    // The adapter for a function with a parameter passed by value (D88),
+    // which a function value passes by its address: the words rebuilt below
+    // the frame (a copy, with references of its own, of each such
+    // aggregate) and handed over to the function (`thunk_call`).
     fun emit_byval_fnval_thunk(var self, n: str, sig: FuncSig, struct_ret: bool) {
         self.emit(format("myla_{}__fnval:", n))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
-        var first = 24
-        if struct_ret { first = 32 }
+        var first = 0
+        if struct_ret { first = 1 }
+        self.spill_args(first + sig.params.len())
         var pushed = 0
         var i = sig.params.len() - 1
         while i >= 0 {
-            let load = format("movq {}(%rbp), %rax", first + 8 * i)
+            let load = format("movq {}, %rax", spilled_word(first + i))
             if self.byval_param(sig, i, sig.params[i]) { pushed = pushed + self.push_value_words(sig.params[i], [load]) }
             else {
                 self.emit(load)
@@ -4095,17 +4112,55 @@ impl CodeGen {
             i = i - 1
         }
         if struct_ret {
-            self.emit("pushq 16(%rbp)")
+            self.emit(format("pushq {}", spilled_word(0)))
             pushed = pushed + 1
         }
-        var words = sig.params.len() + 1
-        if struct_ret { words = words + 1 }
-        self.arg_words = words
-        self.saved_regs = []
-        var in_place: [bool] = []
-        while in_place.len() < pushed { in_place.push(false) }
-        self.emit_frame_handover(pushed, in_place, format("myla_{}", n))
+        self.thunk_call(pushed, first + sig.params.len(), format("myla_{}", n))
         self.emit("")
+    }
+
+    // The environment (%r10) and the registers of the first of `n`
+    // argument words pushed right after the frame base is set: how many
+    // words that pushed. Argument word `w` is then at `spilled_word(w)`, the
+    // environment at `SPILLED_ENV`.
+    fun spill_args(var self, n: int32) -> int32 {
+        self.emit("pushq %r10")
+        var w = 0
+        while w < n && w < REG_WORDS {
+            self.emit(format("pushq %{}", arg_reg(w)))
+            w = w + 1
+        }
+        return w + 1
+    }
+
+    // The `pushed` words a thunk just pushed (the first at the lowest
+    // address), after spilling the `in_words` argument words it got
+    // (`spill_args`), as the argument words of `target` (`myla_<fn>`, or
+    // `*%r11`): the first `REG_WORDS` popped into their registers, the rest
+    // moved into the thunk's own stack words when they fit there (its caller
+    // pops those), and the target jumped to in place of the thunk, so a
+    // `become` through a function value keeps the stack flat (MYLA-130);
+    // else, left on the stack, a call.
+    fun thunk_call(var self, pushed: int32, in_words: int32, target: str) {
+        var w = 0
+        while w < pushed && w < REG_WORDS {
+            self.emit(format("popq %{}", arg_reg(w)))
+            w = w + 1
+        }
+        if pushed <= REG_WORDS || pushed <= in_words {
+            var k = 0
+            while k < pushed - REG_WORDS {
+                self.emit(format("movq {}(%rsp), %rax", 8 * k))
+                self.emit(format("movq %rax, {}(%rbp)", 16 + 8 * k))
+                k = k + 1
+            }
+            self.emit("leave")
+            self.emit(format("jmp {}", target))
+            return
+        }
+        self.emit(format("call {}", target))
+        self.emit("leave")
+        self.emit("ret")
     }
 
     // Push the words of the aggregate of type `t` whose address the lines
@@ -4766,11 +4821,10 @@ impl CodeGen {
         self.raw("\tleaq 8(%r15), %rdi")
         self.raw("\tleaq 8(%rbx), %rsi")
         self.raw("\tmovq %r13, %rcx")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
+        self.emit_byte_copy(true)
         self.raw("\tleaq 8(%r12), %rsi")
         self.raw("\tmovq %r14, %rcx")
-        self.raw("\trep movsb")
+        self.emit_byte_copy(true)
         self.raw("\tmovq %r15, %rax")
         self.raw("\tpopq %r15")
         self.raw("\tpopq %r14")
@@ -4813,9 +4867,8 @@ impl CodeGen {
         self.raw("\tleaq 8(%rax), %rdi")
         self.raw("\tmovq %rbx, %rsi")
         self.raw("\tmovq %r12, %rcx")
-        self.raw("\tcld")
         self.raw("\tpushq %rax")
-        self.raw("\trep movsb")
+        self.emit_byte_copy(true)
         self.raw("\tpopq %rax")
         self.raw("\taddq $48, %rsp")
         self.raw("\tpopq %r12")
@@ -5229,6 +5282,7 @@ impl CodeGen {
         self.emit_stat_runtime()
         self.emit_getcwd_runtime()
         self.emit_getenv_runtime()
+        self.emit_math_runtime()
         self.emit_run_runtime()
     }
 
@@ -5551,6 +5605,23 @@ impl CodeGen {
         self.raw("")
     }
 
+    // std.math's primitives (MYLA-248). A float64 travels as its bits in a
+    // general-purpose register: `__sqrt` rdi = x -> rax = the correctly
+    // rounded square root (sqrtsd); `__f64_bits` and `__f64_from_bits` are the
+    // bits themselves.
+    fun emit_math_runtime(var self) {
+        self.raw("__sqrt:")
+        self.raw("\tmovq %rdi, %xmm0")
+        self.raw("\tsqrtsd %xmm0, %xmm0")
+        self.raw("\tmovq %xmm0, %rax")
+        self.raw("\tret")
+        self.raw("__f64_bits:")
+        self.raw("__f64_from_bits:")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tret")
+        self.raw("")
+    }
+
     // `__getenv`: rdi = name str cell -> rax = a fresh str cell (rc=1) holding
     // the value of the first `name=value` entry of the environment the
     // process started with (`__envp`), and `__io_errno_val` 0; without one,
@@ -5791,12 +5862,11 @@ impl CodeGen {
     // stdout and stderr concurrently with poll(2), and reaps the child, storing
     // the stderr `[uint8]` cell / exit code / signal / spawn errno in the
     // `__run_*_val` globals. `__u8list_new`/`__u8list_append` are growable
-    // `[uint8]` list helpers (one byte per 8-byte element slot).
+    // `[uint8]` list helpers (a byte an element, D120).
     fun emit_run_runtime(var self) {
         self.raw("__u8list_new:")
         self.raw("\tpushq %r12")
         self.raw("\tmovq %rdi, %r12")
-        self.raw("\tshlq $3, %rdi")
         self.raw("\taddq $16, %rdi")
         self.raw("\tcall __alloc")
         self.raw("\tmovq $0, (%rax)")
@@ -5831,7 +5901,6 @@ impl CodeGen {
         self.raw("\tjb .Lap_dbl")
         self.raw("\tpushq %rcx")
         self.raw("\tmovq %rcx, %rdi")
-        self.raw("\tshlq $3, %rdi")
         self.raw("\taddq $16, %rdi")
         self.raw("\tcall __alloc")
         self.raw("\tpopq %rcx")
@@ -5844,10 +5913,10 @@ impl CodeGen {
         self.raw("\ttestq %rcx, %rcx")
         self.raw("\tjz .Lap_freed")
         self.raw(".Lap_cp:")
-        self.raw("\tmovq (%rsi), %rdx")
-        self.raw("\tmovq %rdx, (%rdi)")
-        self.raw("\taddq $8, %rsi")
-        self.raw("\taddq $8, %rdi")
+        self.raw("\tmovzbl (%rsi), %edx")
+        self.raw("\tmovb %dl, (%rdi)")
+        self.raw("\tincq %rsi")
+        self.raw("\tincq %rdi")
         self.raw("\tdecq %rcx")
         self.raw("\tjnz .Lap_cp")
         self.raw(".Lap_freed:")
@@ -5856,14 +5925,14 @@ impl CodeGen {
         self.raw("\tmovq %r15, %r12")
         self.raw(".Lap_copy:")
         self.raw("\tleaq 16(%r12), %rdi")
-        self.raw("\tleaq (%rdi,%rbx,8), %rdi")
+        self.raw("\taddq %rbx, %rdi")
         self.raw("\txorq %rcx, %rcx")
         self.raw(".Lap_bcopy:")
         self.raw("\tcmpq %r14, %rcx")
         self.raw("\tjae .Lap_bdone")
-        self.raw("\tmovzbq (%r13,%rcx), %rax")
-        self.raw("\tmovq %rax, (%rdi)")
-        self.raw("\taddq $8, %rdi")
+        self.raw("\tmovzbl (%r13,%rcx), %eax")
+        self.raw("\tmovb %al, (%rdi)")
+        self.raw("\tincq %rdi")
         self.raw("\tincq %rcx")
         self.raw("\tjmp .Lap_bcopy")
         self.raw(".Lap_bdone:")
@@ -6190,26 +6259,20 @@ impl CodeGen {
         self.raw("")
     }
 
-    // __compose_call(env, x): env holds two fat values a (env[8]) and b
-    // (env[24]); computes b(a(x)) for scalar x/result via the closure calling
-    // convention. __compose_env_drop releases both and frees the env.
+    // __compose_call(x), its env in %r10: the env holds two fat values a
+    // (env[8]) and b (env[24]); computes b(a(x)) for scalar x/result via the
+    // closure calling convention (D119), b by a jump in place of it.
+    // __compose_env_drop releases both and frees the env.
     fun emit_compose_runtime(var self) {
         self.raw("__compose_call:")
         self.raw("\tpushq %rbp")
         self.raw("\tmovq %rsp, %rbp")
         self.raw("\tpushq %rbx")
-        self.raw("\tmovq 16(%rbp), %rbx")
-        self.raw("\tmovq 24(%rbp), %rcx")
-        self.raw("\tpushq %rcx")
-        self.raw("\tmovq 16(%rbx), %rcx")
-        self.raw("\tpushq %rcx")
-        self.raw("\tmovq 8(%rbx), %rcx")
-        self.raw("\tcall *%rcx")
-        // the second function in this frame's words, by a jump; it pops
-        // them (MYLA-126)
-        self.raw("\tmovq %rax, 24(%rbp)")
-        self.raw("\tmovq 32(%rbx), %rcx")
-        self.raw("\tmovq %rcx, 16(%rbp)")
+        self.raw("\tmovq %r10, %rbx")
+        self.raw("\tmovq 16(%rbx), %r10")
+        self.raw("\tcall *8(%rbx)")
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tmovq 32(%rbx), %r10")
         self.raw("\tmovq 24(%rbx), %rcx")
         self.raw("\tpopq %rbx")
         self.raw("\tleave")
@@ -6378,6 +6441,8 @@ impl CodeGen {
         self.emit(format("myla_{}.eq:", name))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
+        self.emit("pushq %rdi")
+        self.emit("pushq %rsi")
         var off = 0
         for f in self.struct_info(name).fields {
             self.emit_eq_component(off, f.ty, lne)
@@ -6388,8 +6453,8 @@ impl CodeGen {
         self.emit(format("{}:", lne))
         self.emit("movq $0, %rax")
         self.emit(format("{}:", lend))
-        self.emit("popq %rbp")
-        self.emit("ret $16")                // it pops self and other (MYLA-126)
+        self.emit("leave")
+        self.emit("ret")
     }
 
     fun emit_enum_eq(var self, name: str) {
@@ -6398,9 +6463,11 @@ impl CodeGen {
         self.emit(format("myla_{}.eq:", name))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
-        self.emit("movq 16(%rbp), %rax")
+        self.emit("pushq %rdi")
+        self.emit("pushq %rsi")
+        self.emit("movq -8(%rbp), %rax")
         self.emit("movq 0(%rax), %rax")
-        self.emit("movq 24(%rbp), %rcx")
+        self.emit("movq -16(%rbp), %rcx")
         self.emit("movq 0(%rcx), %rcx")
         self.emit("cmpq %rcx, %rax")
         self.emit(format("jne {}", lne))
@@ -6408,7 +6475,7 @@ impl CodeGen {
         for v in self.enum_info(name).variants {
             if v.payload.len() > 0 {
                 let lskip = self.label()
-                self.emit("movq 16(%rbp), %rax")
+                self.emit("movq -8(%rbp), %rax")
                 self.emit("movq 0(%rax), %rax")
                 self.emit(format("cmpq ${}, %rax", i))
                 self.emit(format("jne {}", lskip))
@@ -6426,31 +6493,30 @@ impl CodeGen {
         self.emit(format("{}:", lne))
         self.emit("movq $0, %rax")
         self.emit(format("{}:", lend))
-        self.emit("popq %rbp")
-        self.emit("ret $16")                // it pops self and other (MYLA-126)
+        self.emit("leave")
+        self.emit("ret")
     }
 
     // Compare the component of type `ft` at byte offset `off` in the two cells
-    // pointed to by 16(%rbp) (self) and 24(%rbp) (other); jump to `lne` if unequal.
+    // pointed to by -8(%rbp) (self, which came in %rdi) and -16(%rbp) (other,
+    // in %rsi); jump to `lne` if unequal.
     // A boxed (recursive) enum component holds a pointer to its value, which is
     // what `eq` takes (MYLA-23); any other aggregate is passed by its address.
     fun emit_eq_component(var self, off: int32, ft: Type, lne: str) {
         if is_struct_or_enum_t(ft) {
             var load = "leaq"
             if self.is_boxed(ft) { load = "movq" }
-            self.emit("movq 24(%rbp), %rax")
-            self.emit(format("{} {}(%rax), %rax", load, off))
-            self.emit("pushq %rax")
-            self.emit("movq 16(%rbp), %rax")
-            self.emit(format("{} {}(%rax), %rax", load, off))
-            self.emit("pushq %rax")
+            self.emit("movq -16(%rbp), %rax")
+            self.emit(format("{} {}(%rax), %rsi", load, off))
+            self.emit("movq -8(%rbp), %rax")
+            self.emit(format("{} {}(%rax), %rdi", load, off))
             self.emit(format("call myla_{}.eq", self.type_key(ft)))
             self.emit("testq %rax, %rax")
             self.emit(format("jz {}", lne))
         } else if is_tstr(ft) {
-            self.emit("movq 16(%rbp), %rax")
+            self.emit("movq -8(%rbp), %rax")
             self.emit(format("movq {}(%rax), %rdi", off))
-            self.emit("movq 24(%rbp), %rax")
+            self.emit("movq -16(%rbp), %rax")
             self.emit(format("movq {}(%rax), %rsi", off))
             self.emit("call __str_eq")
             self.emit("testq %rax, %rax")
@@ -6458,17 +6524,17 @@ impl CodeGen {
         } else if is_tfloat(ft) {
             // as `==` does: NaN is unequal to everything, 0.0 equals -0.0 (MYLA-13)
             self.uses_float = true
-            self.emit("movq 16(%rbp), %rax")
+            self.emit("movq -8(%rbp), %rax")
             self.emit(format("movq {}(%rax), %xmm0", off))
-            self.emit("movq 24(%rbp), %rax")
+            self.emit("movq -16(%rbp), %rax")
             self.emit(format("movq {}(%rax), %xmm1", off))
             self.emit("ucomisd %xmm1, %xmm0")
             self.emit(format("jne {}", lne))
             self.emit(format("jp {}", lne))
         } else {
-            self.emit("movq 16(%rbp), %rax")
+            self.emit("movq -8(%rbp), %rax")
             self.emit(format("movq {}(%rax), %rax", off))
-            self.emit("movq 24(%rbp), %rcx")
+            self.emit("movq -16(%rbp), %rcx")
             self.emit(format("movq {}(%rcx), %rcx", off))
             self.emit("cmpq %rcx, %rax")
             self.emit(format("jne {}", lne))
@@ -6545,7 +6611,8 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
-        // __str_chars: rdi = str cell -> rax = [char] list: the scalar of each
+        // __str_chars: rdi = str cell -> rax = [char] list (4 bytes an element,
+        // D120): the scalar of each
         // well-formed UTF-8 sequence, and U+FFFD for each byte that isn't part of
         // one (a str read from a file needn't be UTF-8, MYLA-12).
         self.raw("__str_chars:")
@@ -6561,7 +6628,7 @@ impl CodeGen {
         self.raw("\tmovq (%rbx), %r12")
         self.raw("\tleaq 8(%rbx), %r13")
         self.raw("\tmovq %r12, %rax")
-        self.raw("\tshlq $3, %rax")
+        self.raw("\tshlq $2, %rax")
         self.raw("\taddq $16, %rax")
         self.raw("\tmovq %rax, %rdi")
         self.raw("\tcall __alloc")
@@ -6638,8 +6705,8 @@ impl CodeGen {
         self.raw("\tincq %r15")
         self.raw(".Lsc_store:")
         self.raw("\tmovq -48(%rbp), %rax")
-        self.raw("\tleaq 16(%r14,%rax,8), %rdx")
-        self.raw("\tmovq %rcx, (%rdx)")
+        self.raw("\tleaq 16(%r14,%rax,4), %rdx")
+        self.raw("\tmovl %ecx, (%rdx)")
         self.raw("\tincq %rax")
         self.raw("\tmovq %rax, -48(%rbp)")
         self.raw("\tjmp .Lsc_loop")
@@ -7074,6 +7141,22 @@ impl CodeGen {
         self.raw("\tmovq -8(%r8,%r13), %r9")
         self.raw("\timulq %r14, %r9")
         self.raw("\tleaq 16(%r15,%r9), %r10")
+        // the key stored as wide as the list's elements are (D120)
+        self.raw("\tcmpq $8, %r14")
+        self.raw("\tje .Lmk_8")
+        self.raw("\tcmpq $4, %r14")
+        self.raw("\tje .Lmk_4")
+        self.raw("\tcmpq $2, %r14")
+        self.raw("\tje .Lmk_2")
+        self.raw("\tmovb %cl, (%r10)")
+        self.raw("\tjmp .Lmk_skip")
+        self.raw(".Lmk_2:")
+        self.raw("\tmovw %cx, (%r10)")
+        self.raw("\tjmp .Lmk_skip")
+        self.raw(".Lmk_4:")
+        self.raw("\tmovl %ecx, (%r10)")
+        self.raw("\tjmp .Lmk_skip")
+        self.raw(".Lmk_8:")
         self.raw("\tmovq %rcx, (%r10)")
         self.raw(".Lmk_skip:")
         self.raw("\tmovq -48(%rbp), %rax")
@@ -7091,6 +7174,31 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
+    }
+
+    // %rcx bytes from (%rsi) to (%rdi), leaving both past the bytes and
+    // clobbering %rax and %rcx: 8 at a time, then the tail, with `rep movsb`
+    // only for a long copy, where it is fast. Its start costs tens of cycles,
+    // which made short strings slower than C (MYLA-252). `raw` for the
+    // runtime prelude.
+    fun emit_byte_copy(var self, raw: bool) {
+        let rep = self.label()
+        let words = self.label()
+        let bytes = self.label()
+        let done = self.label()
+        let lines = ["cmpq $512, %rcx", format("jae {}", rep),
+            format("{}:", words), "cmpq $8, %rcx", format("jb {}", bytes), "movq (%rsi), %rax", "movq %rax, (%rdi)",
+            "addq $8, %rsi", "addq $8, %rdi", "subq $8, %rcx", format("jmp {}", words),
+            format("{}:", bytes), "testq %rcx, %rcx", format("jz {}", done), "movb (%rsi), %al", "movb %al, (%rdi)",
+            "incq %rsi", "incq %rdi", "decq %rcx", format("jmp {}", bytes),
+            format("{}:", rep), "cld", "rep movsb", format("{}:", done)]
+        for line in lines {
+            if raw {
+                if ends_colon(line) { self.raw(line) } else { self.raw("\t" + line) }
+            } else {
+                self.emit(line)
+            }
+        }
     }
 
     // StringBuilder cell: [len:8][cap:8][bytes…] (cap is a byte capacity).
@@ -7128,8 +7236,7 @@ impl CodeGen {
         self.raw("\tmovq %r14, %rsi")
         self.raw("\tleaq 16(%r15), %rcx")
         self.raw("\tpushq %rax")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
+        self.emit_byte_copy(true)
         self.raw("\tpopq %rax")
         // Recompute new cap (r14 still references the old cell) and store it.
         self.raw("\tmovq 8(%r14), %rdx")
@@ -7152,8 +7259,7 @@ impl CodeGen {
         self.raw("\taddq %r15, %rdi")
         self.raw("\tmovq %r12, %rsi")
         self.raw("\tmovq %r13, %rcx")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
+        self.emit_byte_copy(true)
         self.raw("\tleaq (%r15,%r13), %rax")
         self.raw("\tmovq %rax, (%r14)")
         self.raw("\tpopq %r15")
@@ -7282,7 +7388,7 @@ impl CodeGen {
     // return the copy in %rax (the copy-on-write clone, D38).
     fun emit_list_clone_helper(var self, t: Type) {
         let et = list_elem(t)
-        let stride = self.stored_size(et)
+        let stride = self.elem_size(et)
         self.emit(format("__clone_list_{}:", mono_token(et)))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
@@ -7298,8 +7404,7 @@ impl CodeGen {
         self.emit("movq %rbx, %rsi")
         self.emit("movq %r13, %rdi")
         self.emit("movq %r12, %rcx")
-        self.emit("cld")
-        self.emit("rep movsb")
+        self.emit_byte_copy(false)
         if self.owns_heap(et) {
             self.emit("movq (%r13), %r12")
             self.emit("xorq %r14, %r14")
@@ -7488,8 +7593,7 @@ impl CodeGen {
         self.emit("movq %rbx, %rsi")
         self.emit("movq %rax, %rdi")
         self.emit("movq %r12, %rcx")
-        self.emit("cld")
-        self.emit("rep movsb")
+        self.emit_byte_copy(false)
         self.emit("popq %rax")
         self.emit("decq -8(%rbx)")
         self.emit("popq %r12")
@@ -8147,6 +8251,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" || nm == "__poll" { return true }
     if nm == "__run_signal" || nm == "__run_errno" { return true }
     if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" || nm == "__getcwd" || nm == "__getenv" { return true }
+    if nm == "__sqrt" || nm == "__f64_bits" || nm == "__f64_from_bits" { return true }
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
     if nm == "__task_cancelled" { return true }
     return false
@@ -8425,7 +8530,7 @@ fun is_tfloat(t: Type) -> bool {
 
 #test(Type.TFloat(32))[true]
 #test(Type.TFloat(64))[false]
-fun is_tfloat32(t: Type) -> bool {
+pub fun is_tfloat32(t: Type) -> bool {
     return match t { Type.TFloat(w) => w == 32, _ => false }
 }
 
@@ -8514,13 +8619,63 @@ pub fun takes_operand(op: str) -> bool {
 #test("%r9")[false]
 fun starts_with_dollar(s: str) -> bool { return s.len() > 0 && s[0] == '$' }
 
-// The return of a function called with `words` argument words, which it
-// pops (MYLA-126).
-#test(0)["ret"]
-#test(2)["ret $16"]
-pub fun ret_popping(words: int32) -> str {
-    if words == 0 { return "ret" }
-    return format("ret ${}", 8 * words)
+// Myla's calling convention on x86-64 (D119, System V): the first six
+// argument words in %rdi, %rsi, %rdx, %rcx, %r8 and %r9, the rest on the
+// stack, which the caller pops; a function value's environment in %r10.
+pub const REG_WORDS: int32 = 6
+
+// The register of argument word `w` (below `REG_WORDS`).
+#test(0)["rdi"]
+#test(5)["r9"]
+pub fun arg_reg(w: int32) -> str {
+    let regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+    return regs[w]
+}
+
+// Where argument word `w` is in a function that pushed the environment and
+// the argument registers right after setting its frame base (`spill_args`):
+// below it for a word that came in a register, above the return address for
+// one that came on the stack.
+#test(0)["-16(%rbp)"]
+#test(5)["-56(%rbp)"]
+#test(6)["16(%rbp)"]
+pub fun spilled_word(w: int32) -> str {
+    if w < REG_WORDS { return format("{}(%rbp)", -16 - 8 * w) }
+    return format("{}(%rbp)", 16 + 8 * (w - REG_WORDS))
+}
+
+// Where the environment (%r10) is after `spill_args`.
+pub const SPILLED_ENV: str = "-8(%rbp)"
+
+// The operand `v` (an immediate or a 64-bit register) for a `width`-byte
+// access: a register's low part.
+#test("%rax", 1)["%al"]
+#test("%rdi", 2)["%di"]
+#test("%r9", 4)["%r9d"]
+#test("$7", 1)["$7"]
+pub fun narrow_operand(v: str, width: int32) -> str {
+    let wide = ["%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi"]
+    let bytes = ["%al", "%bl", "%cl", "%dl", "%sil", "%dil"]
+    let words = ["%ax", "%bx", "%cx", "%dx", "%si", "%di"]
+    let dwords = ["%eax", "%ebx", "%ecx", "%edx", "%esi", "%edi"]
+    var k = 0
+    while k < wide.len() {
+        if v == wide[k] {
+            if width == 1 { return bytes[k] }
+            if width == 2 { return words[k] }
+            return dwords[k]
+        }
+        k = k + 1
+    }
+    let numbered = ["%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15"]
+    for r in numbered {
+        if v == r {
+            if width == 1 { return r + "b" }
+            if width == 2 { return r + "w" }
+            return r + "d"
+        }
+    }
+    return v
 }
 
 // Whether the held-back store `s` is a move from %rax into a register

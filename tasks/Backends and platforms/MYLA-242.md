@@ -2,7 +2,7 @@
 id: MYLA-242
 title: "Benchmarks: the gap to C"
 type: improvement
-status: todo
+status: review
 priority: medium
 labels: [performance, backend, design]
 ---
@@ -53,7 +53,26 @@ Outside the C comparison:
 
 ## Steps
 
-- [ ] A first round to check the method: Fibonacci, the sieve and binary trees, in Myla and the three C versions, with the script that builds, checks and measures them
-- [ ] The other nine programs
-- [ ] Where Myla's time goes, per program (callgrind), and what each gap would need: an IR optimisation (D117 (3)), a runtime change, or nothing
-- [ ] The results on a wiki page, with the script that reruns them in the repository; the owner decides what follows for D117
+- [x] A first round to check the method: Fibonacci, the sieve and binary trees, in Myla and the three C versions, with the script that builds, checks and measures them
+- [x] The other nine programs
+- [x] Where Myla's time goes, per program (callgrind), and what each gap would need: an IR optimisation (D117 (3)), a runtime change, or nothing
+- [x] The results on a wiki page, with the script that reruns them in the repository; the owner decides what follows for D117
+
+## Evidence
+
+- **First round (2026-11-03).**
+  - `benchmarks/` holds fib, sieve and binary trees, with `myla_rt.h` and `run.py`; `tests/burn/test_benchmarks.py` keeps every version printing the same.
+  - Results and findings: [[Development/Benchmarks]].
+  - The method held, but needed two additions, both now in `run.py`: user and system time and page faults, because instruction counts alone hid both large gaps; and symbol names for valgrind's addresses.
+  - Found and fixed: `rep movsq` for small copies ([[MYLA-246]]; binary trees 5.9 → 2.0 s, the self-compile about 20 % faster).
+  - Found and filed: 8 bytes per list element ([[MYLA-247]]).
+  - Code generation is at gcc `-O0`'s level: the IR optimisations of D117 (3). clang `-O2` isn't ahead of gcc `-O2` on any of the three.
+- **All twelve programs (2026-11-03).**
+  - Every version of every program prints the same. fannkuch(10) and n-body match the Benchmarks Game's reference results; the other expectations were computed in Python.
+  - Myla takes 1.4× to 9× the time of C with Myla's semantics at gcc `-O2`, about 3× on the geometric mean, and about 1.2× gcc `-O0`'s.
+  - clang `-O2` takes 1.13× gcc `-O2`'s time on the same C: LLVM isn't ahead.
+  - Each large gap has a cause and a task: floats in general-purpose registers ([[MYLA-249]]), 8-byte list elements ([[MYLA-247]]), arguments on the stack ([[MYLA-250]]), loop overhead the IR can prove away ([[MYLA-251]]), the runtime's string routines ([[MYLA-252]]), and the missing square root ([[MYLA-248]]).
+  - Table and details: [[Development/Benchmarks]]. In `review`: the owner decides what follows for D117 (4).
+- **The first optimisation pass (2026-11-03).** The baseline is saved in `benchmarks/results/`, and `run.py --compare` shows progress against it. One pass through the findings: [[MYLA-248]], [[MYLA-249]] and [[MYLA-252]] done, [[MYLA-251]] in part, [[MYLA-247]] and [[MYLA-250]] planned. The result: 1.37× as fast on the geometric mean, 2.57× C with Myla's semantics (was 3.06×), table on [[Development/Benchmarks]].
+- **Arguments in registers (2026-11-03).** [[MYLA-250]] (D119): the same time on the geometric mean, interleaved against the stack convention (fib 1.10×, the rest within the machine's spread); fib's and Ackermann's gap to C is the optimizer's work, not the convention. Results in `benchmarks/results/2026-11-03-after-250.json`, table on [[Development/Benchmarks]].
+- **Packed list elements (2026-11-03).** [[MYLA-247]] (D120): the sieve 4.21× as fast and 817 → 102 MB, closures 1.39×, fannkuch 1.17×; against C with Myla's semantics 2.12× on the geometric mean (3.06× at the baseline). Results in `benchmarks/results/2026-11-03-after-247.json`.

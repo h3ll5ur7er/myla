@@ -20,7 +20,7 @@ These names are reserved: no declaration may reuse them.
 | `StringBuilder()`, `append(sb, s)`, `append(sb, s, start, end)`, `append_byte(sb, b)`, `build(sb)` | | The four-argument `append` adds the bytes `s[start..end]` ([[Language/Collections-and-strings]]) |
 | `assert(cond[, msg])`, `panic(msg)`, `unreachable()` | | See [[Language/Attributes-and-testing]] |
 
-The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled` exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with a warning (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making.
+The low-level primitives `__write`, `__read`, `__poll`, `__exit`, `__args`, `__read_file`, `__write_file`, `__list_dir`, `__mkdir`, `__stat`, `__getcwd`, `__getenv`, `__sqrt`, `__f64_bits`, `__f64_from_bits`, `__unlink`, `__rmdir`, `__rename`, `__io_errno`, `__run`, `__run_stderr`, `__run_exit_code`, `__run_signal`, `__run_errno` and `__task_cancelled` exist for the standard library; call the `std` functions instead. A call of one from a program outside the standard library compiles, with a warning (D100, [[MYLA-186]]): it is for code that knows what it does, such as a new std function in the making.
 
 ## std.io
 
@@ -185,6 +185,39 @@ Numbers from text and back ([[MYLA-79]]). The conversions are exact, computed wi
 | `f64_literal_bits(text) -> uint64`, `f32_round_bits(bits) -> uint64`, `float_from_bits(bits) -> float64` | The bit-level steps (for the compiler) |
 
 `format("{}", x)` writes a float with up to 17 significant digits (`0.10000000000000001`); `format_float` is the short form.
+
+## std.math
+
+Mathematical functions on `float64` ([[MYLA-248]]). `sqrt` is the processor's correctly rounded square root. The rest is written in Myla after fdlibm (the reference implementation behind most C math libraries), so the interpreter and native code give bit-identical results. `tests/burn/test_math.py` holds each to its stated error against the C library, NaN, the infinities and signed zeros included.
+
+```myla
+from std.math import sqrt, sin, atan2, pow, PI
+
+fun main() {
+    print(sqrt(2.0))
+    print(sin(PI / 2.0))
+    print(atan2(1.0, 1.0) * 4.0 == PI)
+    print(pow(2.0, 10.0))
+}
+// output:
+// 1.4142135623730951
+// 1
+// true
+// 1024
+```
+
+| Function | Result |
+| --- | --- |
+| `PI`, `TAU`, `E`, `LN2`, `LN10`, `SQRT2` | The constants, rounded to `float64` |
+| `sqrt(x)`, `hypot(x, y)` | The square root (correctly rounded); √(x² + y²) without overflow on the way (within 1 ulp) |
+| `exp(x)`, `ln(x)`, `log2(x)`, `log10(x)`, `pow(x, y)` | Within 1 ulp; `log2` is exact for powers of two, `log10` for powers of ten up to 10²², `ln(0)` is `-inf`, `ln(-1)` NaN |
+| `sin(x)`, `cos(x)`, `atan(x)` | Within 1 ulp, for every finite argument: arguments above 2^20·π/2 are reduced by Payne and Hanek's method |
+| `tan(x)`, `asin(x)`, `acos(x)`, `atan2(y, x)` | Within 4 ulp |
+| `abs(x)`, `copysign(x, s)`, `trunc(x)`, `floor(x)`, `ceil(x)`, `round(x)` | Exact; `round` takes halves away from zero, zeros keep their sign |
+| `min(a, b)`, `max(a, b)` | The other argument when one is NaN |
+| `ldexp(x, k)` | x·2^k |
+| `is_nan(x)`, `is_infinite(x)`, `is_finite(x)`, `infinity()`, `nan()` | |
+| `to_bits(x) -> uint64`, `from_bits(b) -> float64` | The IEEE 754 bits of a float and back |
 
 ## std.task
 

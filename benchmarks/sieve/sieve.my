@@ -1,0 +1,51 @@
+// Benchmark (MYLA-242): the sieve of Eratosthenes over a list of flags, so
+// the time goes into indexing (bounds checks, writes into a list) and simple
+// loops.
+//
+//   sieve [n]      prints how many primes are below n
+
+from std.process import args
+from std.num import parse_int
+
+#test(2)[0]
+#test(30)[10]
+#test(1000)[168]
+fun count_primes(n: int) -> int {
+    var composite: [bool] = []
+    for i in 0..n {
+        composite.push(false)
+    }
+    var count = 0
+    var i = 2
+    while i < n {
+        if !composite[i] {
+            count += 1
+            // i * i < n, without overflowing
+            if i <= (n - 1) / i {
+                var j = i * i
+                while j < n {
+                    composite[j] = true
+                    j += i
+                }
+            }
+        }
+        i += 1
+    }
+    return count
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    print(count_primes(size(10000000)))
+}

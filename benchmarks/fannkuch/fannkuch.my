@@ -1,0 +1,93 @@
+// Benchmark (MYLA-242): fannkuch-redux, as in the Computer Language Benchmarks
+// Game: every permutation of 0..n is flipped (its first k+1 elements
+// reversed, k its first element) until 0 comes first. Small integer lists,
+// indexing, swaps.
+//
+//   fannkuch [n]   prints the checksum and the most flips
+
+from std.process import args
+from std.num import parse_int
+
+// (checksum, most flips) over the permutations of 0..n.
+#test(3)[(2, 2)]
+#test(7)[(228, 16)]
+fun fannkuch(n: int) -> (int, int) {
+    var perm1: [int] = []
+    var count: [int] = []
+    for i in 0..n {
+        perm1.push(i)
+        count.push(0)
+    }
+    var max_flips = 0
+    var checksum = 0
+    var perm_count = 0
+    var r = n
+    while true {
+        while r != 1 {
+            count[r - 1] = r
+            r -= 1
+        }
+        var perm = perm1
+        var flips = 0
+        var k = perm[0]
+        while k != 0 {
+            var i = 0
+            var j = k
+            while i < j {
+                let t = perm[i]
+                perm[i] = perm[j]
+                perm[j] = t
+                i += 1
+                j -= 1
+            }
+            flips += 1
+            k = perm[0]
+        }
+        if flips > max_flips {
+            max_flips = flips
+        }
+        if perm_count % 2 == 0 {
+            checksum += flips
+        } else {
+            checksum -= flips
+        }
+        // the next permutation
+        var more = true
+        while more {
+            if r == n {
+                return (checksum, max_flips)
+            }
+            let first = perm1[0]
+            for i in 0..r {
+                perm1[i] = perm1[i + 1]
+            }
+            perm1[r] = first
+            count[r] -= 1
+            if count[r] > 0 {
+                more = false
+            } else {
+                r += 1
+            }
+        }
+        perm_count += 1
+    }
+    unreachable()
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    let result = fannkuch(size(10))
+    print(result.0)
+    print(result.1)
+}

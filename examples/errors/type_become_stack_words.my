@@ -1,0 +1,14 @@
+//~ type error: 'become' passes 7 argument words, 1 of them on the stack, but 'start' received 0 there
+//~ span: sum7(n, 2, 3, 4, 5, 6, 7)
+// The first six argument words travel in registers; a `become` puts the
+// rest where its function's own came, so it can't pass more of them than it
+// received there (D119).
+fun sum7(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int {
+    return a + b + c + d + e + f + g
+}
+fun start(n: int) -> int {
+    become sum7(n, 2, 3, 4, 5, 6, 7)
+}
+fun main() {
+    print(start(1))
+}

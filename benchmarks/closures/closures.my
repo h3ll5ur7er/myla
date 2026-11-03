@@ -1,0 +1,74 @@
+// Benchmark (MYLA-242): closures and pipelines. A list of n numbers goes
+// through map, filter and fold ten times, with a partial application, plain
+// lambdas and a lambda that captures: function values, calls through them,
+// lists built by pushes.
+//
+//   closures [n]   prints the folded total
+
+from std.process import args
+from std.num import parse_int
+
+fun map_list(xs: [int], f: (int) -> int) -> [int] {
+    var out: [int] = []
+    for x in xs {
+        out.push(f(x))
+    }
+    return out
+}
+
+fun filter_list(xs: [int], keep: (int) -> bool) -> [int] {
+    var out: [int] = []
+    for x in xs {
+        if keep(x) {
+            out.push(x)
+        }
+    }
+    return out
+}
+
+fun fold(xs: [int], start: int64, f: (int64, int) -> int64) -> int64 {
+    var acc = start
+    for x in xs {
+        acc = f(acc, x)
+    }
+    return acc
+}
+
+fun add(a: int, b: int) -> int {
+    return a + b
+}
+
+#test(0)[0]
+#test(10)[8625]
+fun run(n: int) -> int64 {
+    var xs: [int] = []
+    for i in 0..n {
+        xs.push(i)
+    }
+    var total: int64 = 0
+    for round in 0..10 {
+        let weight = (round + 1) as int64
+        let odd = (xs
+            |> map_list(add(_, round))
+            |> map_list((x: int) => x * 3 % 1000)
+            |> filter_list((x: int) => x % 2 == 1))
+        total = fold(odd, total, (acc: int64, x: int) => acc + (x as int64) * weight)
+    }
+    return total
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    print(run(size(1000000)))
+}

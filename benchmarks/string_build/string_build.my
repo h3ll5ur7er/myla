@@ -1,0 +1,51 @@
+// Benchmark (MYLA-242): string building. n records `k<i % 1000>=<i*7 % 10007>;`
+// are made with concatenation, `format` and an f-string and appended to a
+// StringBuilder; then a checksum walks the result's bytes.
+//
+//   string_build [n]   prints the length and the checksum
+
+from std.process import args
+from std.num import parse_int
+
+fun records(n: int) -> str {
+    var sb = StringBuilder()
+    for i in 0..n {
+        let key = "k" + format("{}", i % 1000)
+        sb.append(f"{key}={i * 7 % 10007};")
+    }
+    return sb.build()
+}
+
+// A polynomial hash of the bytes of `s`, modulo 1000000007.
+#test("")[0]
+#test("ab")[3105]
+fun checksum(s: str) -> int64 {
+    var h: int64 = 0
+    for i in 0..s.len() {
+        h = (h * 31 + (s[i] as int64)) % 1000000007
+    }
+    return h
+}
+
+#test(3)["k0=0;k1=7;k2=14;"]
+fun first(n: int) -> str {
+    return records(n)
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    let s = records(size(2000000))
+    print(s.len())
+    print(checksum(s))
+}

@@ -1,0 +1,68 @@
+// Benchmark (MYLA-242): binary trees, as in the Computer Language Benchmarks
+// Game. Many small trees are built, walked and dropped, so the time goes into
+// allocating and freeing, and into reference counting a recursive enum.
+//
+//   binary_trees [n]   trees up to depth n (at least 6)
+
+from std.process import args
+from std.num import parse_int
+
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+
+// A full tree: `depth` levels of nodes above the leaves.
+fun make(depth: int) -> Tree {
+    if depth == 0 {
+        return Tree.Node(Tree.Leaf, Tree.Leaf)
+    }
+    return Tree.Node(make(depth - 1), make(depth - 1))
+}
+
+// The number of nodes in `t`.
+fun check(t: Tree) -> int {
+    return match t {
+        Tree.Leaf => 0,
+        Tree.Node(l, r) => 1 + check(l) + check(r),
+    }
+}
+
+#test(0)[1]
+#test(3)[15]
+fun nodes(depth: int) -> int {
+    return check(make(depth))
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    var max_depth = size(16)
+    if max_depth < 6 {
+        max_depth = 6
+    }
+    let stretch = max_depth + 1
+    print(f"stretch tree of depth {stretch}\t check: {nodes(stretch)}")
+    let long_lived = make(max_depth)
+    var depth = 4
+    while depth <= max_depth {
+        let iterations = 1 << (max_depth - depth + 4)
+        var total = 0
+        for i in 0..iterations {
+            total += nodes(depth)
+        }
+        print(f"{iterations}\t trees of depth {depth}\t check: {total}")
+        depth += 2
+    }
+    print(f"long lived tree of depth {max_depth}\t check: {check(long_lived)}")
+}

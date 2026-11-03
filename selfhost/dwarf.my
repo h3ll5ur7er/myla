@@ -26,6 +26,7 @@ pub const AB_TYPED_SUBPROGRAM: int32 = 16
 
 // DWARF expression operators.
 pub const OP_FBREG: int32 = 0x91
+pub const OP_BREG15: int32 = 0x7f
 pub const OP_DEREF: int32 = 0x06
 pub const OP_PLUS_UCONST: int32 = 0x23
 pub const OP_STACK_VALUE: int32 = 0x9f

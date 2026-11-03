@@ -1,0 +1,770 @@
+{
+ "date": "2026-11-03",
+ "commit": "4f8a3e0",
+ "machine": {
+  "cpu": "Intel(R) Xeon(R) Processor @ 2.30GHz",
+  "cores": 4
+ },
+ "results": [
+  {
+   "name": "ackermann",
+   "measures": "very deep recursion and many calls",
+   "size": 11,
+   "profile_size": 7,
+   "variants": {
+    "myla": {
+     "seconds": 0.47322131400005674,
+     "user_seconds": 0.467422,
+     "system_seconds": 0.0,
+     "page_faults": 265,
+     "max_rss_kb": 14524,
+     "binary_bytes": 20808,
+     "instructions": 13180425,
+     "top_functions": [
+      [
+       13179153,
+       "myla_ack"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.05619155399995179,
+     "user_seconds": 0.055833999999999995,
+     "system_seconds": 0.0,
+     "page_faults": 102,
+     "max_rss_kb": 14688,
+     "binary_bytes": 16040,
+     "instructions": 4359377
+    },
+    "c_myla_gcc": {
+     "seconds": 0.057793408999941676,
+     "user_seconds": 0.057095999999999994,
+     "system_seconds": 0.0,
+     "page_faults": 101,
+     "max_rss_kb": 14688,
+     "binary_bytes": 16096,
+     "instructions": 4360627
+    },
+    "c_myla_clang": {
+     "seconds": 0.10877349799989133,
+     "user_seconds": 0.108496,
+     "system_seconds": 0.0,
+     "page_faults": 140,
+     "max_rss_kb": 14688,
+     "binary_bytes": 16096,
+     "instructions": 6158680
+    },
+    "c_myla_O0": {
+     "seconds": 0.4825921250001102,
+     "user_seconds": 0.47697,
+     "system_seconds": 0.003986,
+     "page_faults": 193,
+     "max_rss_kb": 14688,
+     "binary_bytes": 16736,
+     "instructions": 13077955
+    }
+   }
+  },
+  {
+   "name": "binary_trees",
+   "measures": "allocating and freeing many small objects, reference counting a recursive enum",
+   "size": 18,
+   "profile_size": 14,
+   "variants": {
+    "myla": {
+     "seconds": 2.0439381989999674,
+     "user_seconds": 1.988746,
+     "system_seconds": 0.031985,
+     "page_faults": 20490,
+     "max_rss_kb": 81920,
+     "binary_bytes": 21184,
+     "instructions": 744397272,
+     "top_functions": [
+      [
+       218497344,
+       "myla_check"
+      ],
+      [
+       172818792,
+       "__dropb_Tree"
+      ],
+      [
+       164577660,
+       "myla_make"
+      ],
+      [
+       103635513,
+       "__alloc"
+      ],
+      [
+       80445540,
+       "__walkd_Tree"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 1.0377975890000926,
+     "user_seconds": 1.020245,
+     "system_seconds": 0.012015,
+     "page_faults": 8260,
+     "max_rss_kb": 34388,
+     "binary_bytes": 20296,
+     "instructions": 717745614
+    },
+    "c_myla_gcc": {
+     "seconds": 1.0725818309999795,
+     "user_seconds": 1.052601,
+     "system_seconds": 0.008,
+     "page_faults": 8260,
+     "max_rss_kb": 34384,
+     "binary_bytes": 16512,
+     "instructions": 755451659
+    },
+    "c_myla_clang": {
+     "seconds": 1.1184238010000627,
+     "user_seconds": 1.098045,
+     "system_seconds": 0.01603,
+     "page_faults": 8269,
+     "max_rss_kb": 34852,
+     "binary_bytes": 16480,
+     "instructions": 784581804
+    },
+    "c_myla_O0": {
+     "seconds": 1.7280179720000888,
+     "user_seconds": 1.70977,
+     "system_seconds": 0.007999,
+     "page_faults": 8259,
+     "max_rss_kb": 34384,
+     "binary_bytes": 16904,
+     "instructions": 996013793
+    }
+   }
+  },
+  {
+   "name": "closures",
+   "measures": "function values, lambdas, partial application, pipelines, lists built by pushes",
+   "size": 4000000,
+   "profile_size": 100000,
+   "variants": {
+    "myla": {
+     "seconds": 0.485514159000104,
+     "user_seconds": 0.455669,
+     "system_seconds": 0.02403,
+     "page_faults": 15837,
+     "max_rss_kb": 63232,
+     "binary_bytes": 21192,
+     "instructions": 196582135,
+     "top_functions": [
+      [
+       78002300,
+       "myla_map_list"
+      ],
+      [
+       32501100,
+       "myla_filter_list"
+      ],
+      [
+       23000000,
+       "myla_run__partial113"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.35477989100013474,
+     "user_seconds": 0.222471,
+     "system_seconds": 0.135214,
+     "page_faults": 101398,
+     "max_rss_kb": 56220,
+     "binary_bytes": 16344,
+     "instructions": 66068590
+    },
+    "c_myla_gcc": {
+     "seconds": 0.2934268589999647,
+     "user_seconds": 0.19501,
+     "system_seconds": 0.0885,
+     "page_faults": 65483,
+     "max_rss_kb": 48412,
+     "binary_bytes": 16704,
+     "instructions": 71457480
+    },
+    "c_myla_clang": {
+     "seconds": 0.3672363960001803,
+     "user_seconds": 0.275385,
+     "system_seconds": 0.100091,
+     "page_faults": 65491,
+     "max_rss_kb": 48768,
+     "binary_bytes": 16528,
+     "instructions": 113657287
+    },
+    "c_myla_O0": {
+     "seconds": 0.5927756789999421,
+     "user_seconds": 0.503306,
+     "system_seconds": 0.095897,
+     "page_faults": 65482,
+     "max_rss_kb": 48412,
+     "binary_bytes": 17152,
+     "instructions": 214766715
+    }
+   }
+  },
+  {
+   "name": "fannkuch",
+   "measures": "small integer lists, indexing, swaps, permutations",
+   "size": 10,
+   "profile_size": 8,
+   "variants": {
+    "myla": {
+     "seconds": 0.3474447959999907,
+     "user_seconds": 0.344576,
+     "system_seconds": 0.0,
+     "page_faults": 9,
+     "max_rss_kb": 14816,
+     "binary_bytes": 21160,
+     "instructions": 38462167,
+     "top_functions": [
+      [
+       33501084,
+       "myla_fannkuch"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.1937587050001639,
+     "user_seconds": 0.193324,
+     "system_seconds": 0.0,
+     "page_faults": 67,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16160,
+     "instructions": 10988713
+    },
+    "c_myla_gcc": {
+     "seconds": 0.2724114009999994,
+     "user_seconds": 0.271692,
+     "system_seconds": 0.0,
+     "page_faults": 67,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16576,
+     "instructions": 29535979
+    },
+    "c_myla_clang": {
+     "seconds": 0.26374513499990826,
+     "user_seconds": 0.262874,
+     "system_seconds": 0.0,
+     "page_faults": 77,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16528,
+     "instructions": 26792365
+    },
+    "c_myla_O0": {
+     "seconds": 0.7828404209999462,
+     "user_seconds": 0.780598,
+     "system_seconds": 0.0,
+     "page_faults": 67,
+     "max_rss_kb": 14816,
+     "binary_bytes": 17008,
+     "instructions": 90823128
+    }
+   }
+  },
+  {
+   "name": "fib",
+   "measures": "calls, the calling convention, integer arithmetic",
+   "size": 36,
+   "profile_size": 27,
+   "variants": {
+    "myla": {
+     "seconds": 0.08944130999998379,
+     "user_seconds": 0.08911899999999999,
+     "system_seconds": 0.0,
+     "page_faults": 9,
+     "max_rss_kb": 14816,
+     "binary_bytes": 20784,
+     "instructions": 11124592,
+     "top_functions": [
+      [
+       11123339,
+       "myla_fib"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.020834055000023,
+     "user_seconds": 0.020605,
+     "system_seconds": 0.0,
+     "page_faults": 67,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16040,
+     "instructions": 6135324
+    },
+    "c_myla_gcc": {
+     "seconds": 0.02078351700015446,
+     "user_seconds": 0.020391,
+     "system_seconds": 0.0,
+     "page_faults": 67,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16096,
+     "instructions": 6136545
+    },
+    "c_myla_clang": {
+     "seconds": 0.042290028000024904,
+     "user_seconds": 0.041864,
+     "system_seconds": 0.0,
+     "page_faults": 77,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16096,
+     "instructions": 7255422
+    },
+    "c_myla_O0": {
+     "seconds": 0.1016251150001608,
+     "user_seconds": 0.100865,
+     "system_seconds": 0.0,
+     "page_faults": 68,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16728,
+     "instructions": 11045757
+    }
+   }
+  },
+  {
+   "name": "game_of_life",
+   "measures": "nested lists, building a new grid per generation, sharing rows",
+   "size": 1000,
+   "profile_size": 150,
+   "variants": {
+    "myla": {
+     "seconds": 0.8736112619999403,
+     "user_seconds": 0.865961,
+     "system_seconds": 0.0,
+     "page_faults": 533,
+     "max_rss_kb": 14816,
+     "binary_bytes": 21368,
+     "instructions": 163639644,
+     "top_functions": [
+      [
+       155035182,
+       "myla_step"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.23368251299984877,
+     "user_seconds": 0.23330499999999998,
+     "system_seconds": 0.00396,
+     "page_faults": 557,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16104,
+     "instructions": 39540906
+    },
+    "c_myla_gcc": {
+     "seconds": 0.29414506199987045,
+     "user_seconds": 0.291796,
+     "system_seconds": 0.0,
+     "page_faults": 660,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16608,
+     "instructions": 93822002
+    },
+    "c_myla_clang": {
+     "seconds": 0.30204092100007074,
+     "user_seconds": 0.30144899999999997,
+     "system_seconds": 0.0,
+     "page_faults": 670,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16600,
+     "instructions": 121577854
+    },
+    "c_myla_O0": {
+     "seconds": 1.2614044540000577,
+     "user_seconds": 1.247059,
+     "system_seconds": 0.0,
+     "page_faults": 660,
+     "max_rss_kb": 14816,
+     "binary_bytes": 21248,
+     "instructions": 348637864
+    }
+   }
+  },
+  {
+   "name": "mandelbrot",
+   "measures": "a pure float loop with almost no memory: code quality alone",
+   "size": 3000,
+   "profile_size": 300,
+   "variants": {
+    "myla": {
+     "seconds": 0.29858781000007184,
+     "user_seconds": 0.298274,
+     "system_seconds": 0.0,
+     "page_faults": 9,
+     "max_rss_kb": 14816,
+     "binary_bytes": 31480,
+     "instructions": 36769253,
+     "top_functions": [
+      [
+       34175586,
+       "myla_inside"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.23497965499996099,
+     "user_seconds": 0.234446,
+     "system_seconds": 0.0,
+     "page_faults": 66,
+     "max_rss_kb": 14816,
+     "binary_bytes": 16016,
+     "instructions": 20216935
+    },
+    "c_myla_gcc": {
+     "seconds": 0.23589127500008544,
+     "user_seconds": 0.23412999999999998,
+     "system_seconds": 0.0,
+     "page_faults": 67,
+     "max_rss_kb": 14944,
+     "binary_bytes": 16072,
+     "instructions": 20038156
+    },
+    "c_myla_clang": {
+     "seconds": 0.23903200699987792,
+     "user_seconds": 0.23862599999999998,
+     "system_seconds": 0.0,
+     "page_faults": 77,
+     "max_rss_kb": 14944,
+     "binary_bytes": 16072,
+     "instructions": 22620918
+    },
+    "c_myla_O0": {
+     "seconds": 0.5079480520000743,
+     "user_seconds": 0.506039,
+     "system_seconds": 0.0,
+     "page_faults": 68,
+     "max_rss_kb": 14944,
+     "binary_bytes": 16768,
+     "instructions": 36713637
+    }
+   }
+  },
+  {
+   "name": "n_body",
+   "measures": "float arithmetic, struct fields updated inside a list",
+   "size": 1000000,
+   "profile_size": 20000,
+   "variants": {
+    "myla": {
+     "seconds": 0.21827182399988487,
+     "user_seconds": 0.217438,
+     "system_seconds": 0.0,
+     "page_faults": 9,
+     "max_rss_kb": 14944,
+     "binary_bytes": 36256,
+     "instructions": 92366455,
+     "top_functions": [
+      [
+       82780000,
+       "myla_advance"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.03864704800002983,
+     "user_seconds": 0.038440999999999996,
+     "system_seconds": 0.0,
+     "page_faults": 67,
+     "max_rss_kb": 14944,
+     "binary_bytes": 16096,
+     "instructions": 12255887
+    },
+    "c_myla_gcc": {
+     "seconds": 0.04050071200003913,
+     "user_seconds": 0.04029,
+     "system_seconds": 0.0,
+     "page_faults": 67,
+     "max_rss_kb": 14944,
+     "binary_bytes": 16104,
+     "instructions": 12255912
+    },
+    "c_myla_clang": {
+     "seconds": 0.04242220100013583,
+     "user_seconds": 0.042206,
+     "system_seconds": 0.0,
+     "page_faults": 78,
+     "max_rss_kb": 14944,
+     "binary_bytes": 16104,
+     "instructions": 12004950
+    },
+    "c_myla_O0": {
+     "seconds": 0.30255572100008976,
+     "user_seconds": 0.299941,
+     "system_seconds": 0.0,
+     "page_faults": 77,
+     "max_rss_kb": 14944,
+     "binary_bytes": 20992,
+     "instructions": 103422167
+    }
+   }
+  },
+  {
+   "name": "quicksort",
+   "measures": "generic code made concrete twice, comparisons through Ord, indexing and swaps",
+   "size": 1000000,
+   "profile_size": 50000,
+   "variants": {
+    "myla": {
+     "seconds": 0.31672949700009667,
+     "user_seconds": 0.271879,
+     "system_seconds": 0.040013,
+     "page_faults": 24597,
+     "max_rss_kb": 76928,
+     "binary_bytes": 25480,
+     "instructions": 105408118,
+     "top_functions": [
+      [
+       38600079,
+       "myla_sort__4Pair"
+      ],
+      [
+       28843258,
+       "myla_sort__4.i32"
+      ],
+      [
+       22012712,
+       "myla_Pair.cmp"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.17056202899993878,
+     "user_seconds": 0.16491799999999998,
+     "system_seconds": 0.007854,
+     "page_faults": 3975,
+     "max_rss_kb": 17180,
+     "binary_bytes": 16176,
+     "instructions": 27700791
+    },
+    "c_myla_gcc": {
+     "seconds": 0.2415969060000407,
+     "user_seconds": 0.23601,
+     "system_seconds": 0.004020999999999999,
+     "page_faults": 4006,
+     "max_rss_kb": 17052,
+     "binary_bytes": 16832,
+     "instructions": 65452315
+    },
+    "c_myla_clang": {
+     "seconds": 0.19182694199980688,
+     "user_seconds": 0.183198,
+     "system_seconds": 0.011804,
+     "page_faults": 4016,
+     "max_rss_kb": 17540,
+     "binary_bytes": 16600,
+     "instructions": 38238599
+    },
+    "c_myla_O0": {
+     "seconds": 0.4185947399998895,
+     "user_seconds": 0.417107,
+     "system_seconds": 0.004007,
+     "page_faults": 4006,
+     "max_rss_kb": 17056,
+     "binary_bytes": 21456,
+     "instructions": 193833052
+    }
+   }
+  },
+  {
+   "name": "sieve",
+   "measures": "indexing into lists, bounds checks, writes into a list, simple loops",
+   "size": 40000000,
+   "profile_size": 2000000,
+   "variants": {
+    "myla": {
+     "seconds": 0.3634652329999426,
+     "user_seconds": 0.309644,
+     "system_seconds": 0.051864999999999994,
+     "page_faults": 26172,
+     "max_rss_kb": 104576,
+     "binary_bytes": 20936,
+     "instructions": 163390785,
+     "top_functions": [
+      [
+       161289982,
+       "myla_count_primes"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.28305707000004077,
+     "user_seconds": 0.26400999999999997,
+     "system_seconds": 0.016096,
+     "page_faults": 9833,
+     "max_rss_kb": 40476,
+     "binary_bytes": 16096,
+     "instructions": 33166577
+    },
+    "c_myla_gcc": {
+     "seconds": 0.3000163849999353,
+     "user_seconds": 0.282125,
+     "system_seconds": 0.015995,
+     "page_faults": 9864,
+     "max_rss_kb": 40604,
+     "binary_bytes": 16536,
+     "instructions": 91243583
+    },
+    "c_myla_clang": {
+     "seconds": 0.2978703639998912,
+     "user_seconds": 0.281735,
+     "system_seconds": 0.015812,
+     "page_faults": 9874,
+     "max_rss_kb": 40984,
+     "binary_bytes": 16528,
+     "instructions": 87736848
+    },
+    "c_myla_O0": {
+     "seconds": 0.5810923050000838,
+     "user_seconds": 0.564601,
+     "system_seconds": 0.016021999999999998,
+     "page_faults": 9865,
+     "max_rss_kb": 40604,
+     "binary_bytes": 17040,
+     "instructions": 317714185
+    }
+   }
+  },
+  {
+   "name": "string_build",
+   "measures": "concatenation, format, f-strings, StringBuilder, byte indexing",
+   "size": 2000000,
+   "profile_size": 100000,
+   "variants": {
+    "myla": {
+     "seconds": 0.3224350999998933,
+     "user_seconds": 0.290058,
+     "system_seconds": 0.020114999999999997,
+     "page_faults": 14691,
+     "max_rss_kb": 58752,
+     "binary_bytes": 21056,
+     "instructions": 141980552,
+     "top_functions": [
+      [
+       53562344,
+       "__str_concat"
+      ],
+      [
+       20537365,
+       "myla_checksum"
+      ],
+      [
+       17646734,
+       "__uint_to_str"
+      ],
+      [
+       16200054,
+       "__str_drop"
+      ],
+      [
+       14400543,
+       "__alloc"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.18288834300005874,
+     "user_seconds": 0.174232,
+     "system_seconds": 0.008114,
+     "page_faults": 4875,
+     "max_rss_kb": 20820,
+     "binary_bytes": 16296,
+     "instructions": 117295347
+    },
+    "c_myla_gcc": {
+     "seconds": 0.33764715300003445,
+     "user_seconds": 0.316136,
+     "system_seconds": 0.020038,
+     "page_faults": 9650,
+     "max_rss_kb": 39892,
+     "binary_bytes": 16704,
+     "instructions": 274636165
+    },
+    "c_myla_clang": {
+     "seconds": 0.33418196100001296,
+     "user_seconds": 0.321907,
+     "system_seconds": 0.019695,
+     "page_faults": 9661,
+     "max_rss_kb": 40348,
+     "binary_bytes": 16544,
+     "instructions": 240262575
+    },
+    "c_myla_O0": {
+     "seconds": 0.39643466600000465,
+     "user_seconds": 0.375322,
+     "system_seconds": 0.019933,
+     "page_faults": 9650,
+     "max_rss_kb": 40016,
+     "binary_bytes": 16848,
+     "instructions": 318896796
+    }
+   }
+  },
+  {
+   "name": "word_freq",
+   "measures": "building and scanning a string, maps with string keys",
+   "size": 5000000,
+   "profile_size": 100000,
+   "variants": {
+    "myla": {
+     "seconds": 0.6073160490000191,
+     "user_seconds": 0.566249,
+     "system_seconds": 0.032109,
+     "page_faults": 12857,
+     "max_rss_kb": 51328,
+     "binary_bytes": 21200,
+     "instructions": 151726007,
+     "top_functions": [
+      [
+       44555535,
+       "__sb_append_bytes"
+      ],
+      [
+       17929428,
+       "myla_counts"
+      ]
+     ]
+    },
+    "c": {
+     "seconds": 0.142201704999934,
+     "user_seconds": 0.13763,
+     "system_seconds": 0.004052,
+     "page_faults": 4639,
+     "max_rss_kb": 19484,
+     "binary_bytes": 16328,
+     "instructions": 26990245
+    },
+    "c_myla_gcc": {
+     "seconds": 0.325635770999952,
+     "user_seconds": 0.306232,
+     "system_seconds": 0.019951999999999998,
+     "page_faults": 8996,
+     "max_rss_kb": 36252,
+     "binary_bytes": 16696,
+     "instructions": 102711666
+    },
+    "c_myla_clang": {
+     "seconds": 0.278336248999949,
+     "user_seconds": 0.268289,
+     "system_seconds": 0.011878,
+     "page_faults": 9005,
+     "max_rss_kb": 36632,
+     "binary_bytes": 16592,
+     "instructions": 78282073
+    },
+    "c_myla_O0": {
+     "seconds": 0.45139650099986284,
+     "user_seconds": 0.42822,
+     "system_seconds": 0.01611,
+     "page_faults": 8995,
+     "max_rss_kb": 36252,
+     "binary_bytes": 16992,
+     "instructions": 143283873
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,19 @@
+//~ type error: 'become' passes 7 argument words, 1 of them on the stack, but 'step' received 0 there
+//~ span: far(p, a, b, c, d)
+// A struct a `become` hands over travels by value, each of its fields a word
+// (D88): here 3 of them and 4 more fill the six registers and one word on the
+// stack, which `step` didn't receive (D119).
+struct P {
+    x: int,
+    y: int,
+    z: int,
+}
+fun far(p: P, a: int, b: int, c: int, d: int) -> int {
+    return p.x + p.y + p.z + a + b + c + d
+}
+fun step(p: P, a: int, b: int, c: int, d: int, e: int) -> int {
+    become far(p, a, b, c, d)
+}
+fun main() {
+    print(step(P { x: 1, y: 2, z: 3 }, 4, 5, 6, 7, 8))
+}
