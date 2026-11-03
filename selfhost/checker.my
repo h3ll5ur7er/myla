@@ -712,7 +712,7 @@ fun is_builtin_func(name: str) -> bool {
 #test("__load8")[true]
 #test("__load")[false]
 pub fun is_raw_memory_primitive(name: str) -> bool {
-    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free"
+    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ"
 }
 
 #test("sum")[false]
@@ -5589,7 +5589,9 @@ impl Checker {
         // `__copy_bytes(dst, src, n)` and `__equal_bytes(p, q, n)` (a bulk
         // copy and comparison each backend does natively), `__free(p)`; and
         // Linux's platform layer: `__syscall(n, a, b, c)` (the result, a
-        // negative errno on a failure) and `__set_io_errno(e)`
+        // negative errno on a failure), `__set_io_errno(e)` and `__environ()`
+        // (the environment the process started with: the address of its
+        // NUL-terminated `name=value` strings' addresses, a null one last)
         if is_raw_memory_primitive(name) {
             let i64 = Type.TInt(64, true)
             var want: [Type] = [i64]
@@ -5598,6 +5600,7 @@ impl Checker {
             if name == "__copy_bytes" || name == "__equal_bytes" { want = [i64, i64, i64] }
             if name == "__syscall" { want = [i64, i64, i64, i64] }
             if name == "__addr_of" { want = [Type.TStr] }
+            if name == "__environ" { want = [] }
             if args.len() != want.len() { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes {} argument(s)", name, want.len()))) }
             var k = 0
             while k < want.len() {

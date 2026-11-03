@@ -4819,6 +4819,11 @@ impl CodeGen {
         self.raw(format("\tmovq %rdi, {}", self.tv("__io_errno_val")))
         self.raw("\tret")
         self.raw("")
+        // __environ(): the environment the process started with
+        self.raw("__environ:")
+        self.raw("\tmovq __envp(%rip), %rax")
+        self.raw("\tret")
+        self.raw("")
         // __copy_bytes(dst, src, n): a bulk copy for the runtime written in
         // Myla (MYLA-162's prototype)
         self.raw("__copy_bytes:")

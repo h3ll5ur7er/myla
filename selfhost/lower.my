@@ -3418,7 +3418,7 @@ impl Lower {
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" { self.add(Inst.Rt(d, nm, vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" { self.add(Inst.Rt(d, nm, vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" { return self.owned_value(cg, d, t) }
             return d
         }
