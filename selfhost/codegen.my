@@ -1893,7 +1893,7 @@ impl CodeGen {
         if !self.frames {
             return out
         }
-        for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter")] {
+        for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run")] {
             if self.has_func(p.1) {
                 out.push(p)
             }
@@ -2028,7 +2028,7 @@ impl CodeGen {
         out.push(".Lmsg_rterr:\n\t.quad 15\n\t.ascii \"runtime error: \"")
         out.push(".Lmsg_at:\n\t.quad 7\n\t.ascii \"\\n  --> \"")
         if self.frames {
-            out.push(".Lmsg_stuck:\n\t.quad 48\n\t.ascii \"runtime error: every task waits for another one\\n\"")
+            if !self.rt_exec_has("__exec_loop") { out.push(".Lmsg_stuck:\n\t.quad 48\n\t.ascii \"runtime error: every task waits for another one\\n\"") }
             if !self.rt_exec_has("__workers_count") { out.push(".Lmyla_threads:\n\t.ascii \"MYLA_THREADS=\"") }
             if !self.rt_exec_has("__sched_init") { out.push(".Lmyla_sched:\n\t.ascii \"MYLA_SCHED=\"") }
         }

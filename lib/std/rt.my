@@ -1425,3 +1425,79 @@ pub fun actor_leave(rec: int64) {
     __store64(rec, 0)
     exec_push(fr)
 }
+
+// --- the executor's loop -------------------------------------------------------------
+
+const SYS_EXIT_GROUP: int64 = 231
+const FUTEX_WAIT_PRIVATE: int64 = 128
+
+// `__exec_run`'s loop: a worker resuming ready frames for good. The platform
+// enters it with the worker's stack recorded (`__exec_sp`), and a worker
+// whose task failed (D97, `__task_fail`) comes back to its start on that
+// stack: it keeps nothing from one frame to the next.
+pub fun exec_run() {
+    while true {
+        let fr = exec_find()
+        if fr == 0 {
+            exec_idle()
+        } else {
+            // the frame this worker runs, published before the failure flag
+            // is looked at (an exchange: a full barrier; `__task_fail` sets
+            // the flag, then looks at what the workers run)
+            __xchg64(__rt_addr("__exec_cur"), fr)
+            if __rt_get("__exec_failing") != 0 {
+                // once a task has failed, every frame is dropped, not
+                // resumed, an actor handed to it passed on (D94, D97)
+                let held = __xchg64(fr + 64, 0)
+                if held != 0 {
+                    actor_leave(held)
+                }
+            } else {
+                __store64(fr + 64, 0)
+                // the running task's first frame, for `task_cancelled`:
+                // until control comes back, frames of this task run, but the
+                // one resumed may end and be freed meanwhile
+                __store64(__rt_addr("__exec_task"), __load64(fr + 40))
+                __run_frame(fr)
+            }
+            __xchg64(__rt_addr("__exec_cur"), 0)
+        }
+    }
+}
+
+// No frame found: this worker counts itself idle and only glances at the
+// queues (it stops counting before it takes a frame, so the count is
+// exact), a while spinning, then asleep until a push. Every worker idle and
+// nothing queued: no task can go on, a runtime error.
+fun exec_idle() {
+    __fetch_add64(__rt_addr("__exec_idle"), 1)
+    if exec_peek() == 0 {
+        if __rt_get("__exec_idle") >= __rt_get("__exec_workers") {
+            exec_stuck()
+        }
+        var spins: int64 = 4000
+        while spins != 0 && exec_peek() == 0 {
+            __pause()
+            spins -= 1
+        }
+        if spins == 0 {
+            // asleep: counted a sleeper first, then the pushes seen, then a
+            // last glance (a push after it changes `__exec_seq`, whose low
+            // half the wait compares, and the wait returns at once)
+            __fetch_add64(__rt_addr("__exec_sleepers"), 1)
+            let seen = __load32(__rt_addr("__exec_seq")) as int64
+            if exec_peek() == 0 {
+                __syscall(SYS_FUTEX, __rt_addr("__exec_seq"), FUTEX_WAIT_PRIVATE, seen)
+            }
+            __fetch_add64(__rt_addr("__exec_sleepers"), -1)
+        }
+    }
+    __fetch_add64(__rt_addr("__exec_idle"), -1)
+}
+
+// Every task waits for another one: the program ends.
+fun exec_stuck() {
+    let msg = __addr_of("runtime error: every task waits for another one\n")
+    write_all(2, msg + 8, __load64(msg))
+    __syscall(SYS_EXIT_GROUP, 1, 0, 0)
+}
