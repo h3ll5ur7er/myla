@@ -16,9 +16,10 @@
 from .checker import Type
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, ENV_WORD, successors
 
-// The most instructions (debug ones aside) and blocks a body may have.
-const MAX_INSTS: int32 = 24
-const MAX_BLOCKS: int32 = 8
+// The most instructions (debug ones aside) and blocks a body may have, of
+// those its entry reaches (a `return` leaves an unreachable block behind).
+const MAX_INSTS: int32 = 32
+const MAX_BLOCKS: int32 = 16
 // The most lines a declaration may have to be lowered as a candidate.
 const MAX_LINES: int32 = 16
 
@@ -93,7 +94,7 @@ fun debug_only(i: Inst) -> bool {
 
 // Whether the lowered function `f` may be copied into its callers.
 pub fun inlinable(f: IrFunc) -> bool {
-    if f.frame || f.instances.len() > 0 || f.blocks.len() > MAX_BLOCKS {
+    if f.frame || f.instances.len() > 0 || f.order.len() == 0 {
         return false
     }
     match f.ret {
@@ -105,13 +106,37 @@ pub fun inlinable(f: IrFunc) -> bool {
             return false
         }
     }
-    var n = 0
+    // the blocks the entry reaches
+    var reach: [bool] = []
     for b in f.blocks {
+        reach.push(false)
+    }
+    var stack: [int32] = [f.order[0]]
+    reach[f.order[0]] = true
+    var nb = 0
+    while stack.len() > 0 {
+        let bi = stack.pop()
+        nb += 1
+        for c in successors(f.blocks[bi].term) {
+            if !reach[c] {
+                reach[c] = true
+                stack.push(c)
+            }
+        }
+    }
+    if nb > MAX_BLOCKS {
+        return false
+    }
+    var n = 0
+    var bi = 0
+    while bi < f.blocks.len() {
+        let b = f.blocks[bi]
+        bi += 1
         for i in b.insts {
             if !copyable(i) {
                 return false
             }
-            if !debug_only(i) {
+            if !debug_only(i) && reach[bi - 1] {
                 n += 1
             }
         }

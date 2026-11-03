@@ -815,6 +815,11 @@ impl CodeGen {
                 // a rotation (MYLA-162): one `rol`, by an immediate when the
                 // count is a constant
                 if name == "__rotl" {
+                    // in place when the result's register holds the value
+                    if self.temp_imm[args[1]] != "" && d >= 0 && self.temp_reg[d] != "" && self.temp_uses[d] > 0 && self.reg_of(args[0]) == "%" + self.temp_reg[d] && !text_has_xmm("%" + self.temp_reg[d]) {
+                        self.emit(format("rolq {}, %{}", self.temp_imm[args[1]], self.temp_reg[d]))
+                        return
+                    }
                     if self.temp_imm[args[1]] != "" {
                         self.load_temp(args[0], "rax", temp_base)
                         self.emit(format("rolq {}, %rax", self.temp_imm[args[1]]))
@@ -1407,7 +1412,7 @@ impl CodeGen {
         }
     }
 
-    // `d = a op b` (64-bit `+ - & | ^`) when `d`'s register holds `a` (or,
+    // `d = a op b` (64-bit `+ - & | ^ *`) when `d`'s register holds `a` (or,
     // the order not mattering, `b`) already: the allocator gave it to `d`, so
     // that operand ends here, and the operation works on it in place.
     fun emit_bin_in_reg(var self, d: int32, op: str, rt: Type, a: int32, b: int32, temp_base: int32) -> bool {
@@ -1417,6 +1422,7 @@ impl CodeGen {
         if op == "&" { insn = "andq" }
         if op == "|" { insn = "orq" }
         if op == "^" { insn = "xorq" }
+        if op == "*" { insn = "imulq" }
         if insn == "" || !is_wide(rt) || self.temp_reg[d] == "" || self.temp_uses[d] == 0 { return false }
         let rd = "%" + self.temp_reg[d]
         if text_has_xmm(rd) { return false }
