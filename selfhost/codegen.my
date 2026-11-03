@@ -188,6 +188,7 @@ pub struct CodeGen {
     temp_src: [str],
     temp_imm: [str],                // MYLA-120: a constant temporary as an immediate operand, "" when not
     temp_frame: [int32],            // MYLA-120: a slot address's offset from %rbp, 0 when not
+    temp_mem: [str],                // MYLA-162: the runtime variable whose address (`__rt_addr`) only loads and stores read, "" when not
     // per temporary, its frame offset (`alloc_temps`; temporaries whose lives
     // don't overlap share one)
     temp_off: [int32],
@@ -306,7 +307,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
-        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
+        pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
         temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
 }
@@ -2849,100 +2850,115 @@ impl CodeGen {
             self.raw("\tret")
             self.raw("")
         }
-        // __exec_run: a worker's loop, resuming ready frames for good. With
-        // none anywhere it counts itself idle and only glances at the queues
-        // (it stops counting before it takes a frame, so the count is exact):
-        // a while spinning, then asleep until a push. Every worker idle and
-        // nothing queued: no task can go on, a runtime error
-        self.raw("__exec_run:")
-        self.raw(".Lexec_next:")
-        self.raw("\tcall __exec_find")
-        if self.rt_exec_has("__exec_find") { self.raw("\tmovq %rax, %rdi") }
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lexec_idle")
-        // the frame this worker runs, published before the failure flag is
-        // looked at (xchg: a full barrier; `__task_fail` sets the flag, then
-        // looks at what the workers run)
-        self.raw("\tmovq %rdi, %rax")
-        self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
-        // once a task has failed, every frame is dropped, not resumed, an
-        // actor handed to it passed on (D94, D97)
-        self.raw("\tcmpq $0, __exec_failing(%rip)")
-        self.raw("\tje .Lexec_live")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\txchgq %rax, 64(%rdi)")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lexec_dropped")
-        self.raw("\tmovq %rax, %rdi")
-        self.raw("\tcall __actor_leave")
-        self.raw(".Lexec_dropped:")
-        self.raw("\txorl %eax, %eax")
-        self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
-        self.raw("\tjmp .Lexec_next")
-        self.raw(".Lexec_live:")
-        self.raw("\tmovq $0, 64(%rdi)")
-        // the running task's first frame, for `__task_cancelled`: until
-        // control comes back, frames of this task run, but the one resumed
-        // may end and be freed meanwhile
-        self.raw("\tmovq 40(%rdi), %rax")
-        self.raw(format("\tmovq %rax, {}", self.tv("__exec_task")))
-        self.raw(format("\tmovq %rsp, {}", self.tv("__exec_sp")))
-        self.raw("\tcall *(%rdi)")
-        self.raw("\txorl %eax, %eax")
-        self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
-        self.raw("\tjmp .Lexec_next")
-        self.raw(".Lexec_idle:")
-        self.raw("\tlock incl __exec_idle(%rip)")
-        self.raw("\tcall __exec_peek")
-        self.raw("\ttestl %eax, %eax")
-        self.raw("\tjnz .Lexec_back")
-        // everyone idle after the glance found nothing (a worker that found
-        // a frame stopped counting before it took it)
-        self.raw("\tmovl __exec_idle(%rip), %eax")
-        self.raw("\tcmpl __exec_workers(%rip), %eax")
-        self.raw("\tjae .Lexec_stuck")
-        // (the count and then the pushes seen in %ebx, which `__exec_peek`
-        // keeps; nothing else lives in a register across it)
-        self.raw("\tmovl $4000, %ebx")
-        self.raw(".Lexec_spin:")
-        self.raw("\tcall __exec_peek")
-        self.raw("\ttestl %eax, %eax")
-        self.raw("\tjnz .Lexec_back")
-        self.raw("\tpause")
-        self.raw("\tdecl %ebx")
-        self.raw("\tjnz .Lexec_spin")
-        // asleep: counted a sleeper first, then the pushes seen, then a last
-        // glance (a push after it changes `__exec_seq`, and the wait returns)
-        self.raw("\tlock incl __exec_sleepers(%rip)")
-        self.raw("\tmovl __exec_seq(%rip), %ebx")
-        self.raw("\tcall __exec_peek")
-        self.raw("\ttestl %eax, %eax")
-        self.raw("\tjnz .Lexec_awake")
-        self.raw("\tmovl %ebx, %edx")
-        self.raw("\tleaq __exec_seq(%rip), %rdi")
-        self.raw("\tmovq $128, %rsi")
-        self.raw("\txorq %r10, %r10")
-        self.raw("\tmovq $202, %rax")
-        self.raw("\tsyscall")
-        self.raw(".Lexec_awake:")
-        self.raw("\tlock decl __exec_sleepers(%rip)")
-        self.raw(".Lexec_back:")
-        self.raw("\tlock decl __exec_idle(%rip)")
-        self.raw("\tjmp .Lexec_next")
-        // a task failed (`__task_fail`): back to the loop, the stack as the
-        // resumed frame found it
-        self.raw(".Lexec_failed:")
-        self.raw(format("\tmovq {}, %rsp", self.tv("__exec_sp")))
-        self.raw("\txorl %eax, %eax")
-        self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
-        self.raw("\tjmp .Lexec_next")
-        self.raw(".Lexec_stuck:")
-        self.raw("\tleaq .Lmsg_stuck(%rip), %rdi")
-        self.raw("\tcall __write_err")
-        self.raw("\tmovq $231, %rax")
-        self.raw("\tmovq $1, %rdi")
-        self.raw("\tsyscall")
-        self.raw("")
+        // __exec_run: a worker's loop (std.rt's `exec_run`, MYLA-162), its
+        // stack recorded; a task failed (`__task_fail`): the loop again from
+        // its start, on that stack, no frame running
+        if self.rt_exec_has("__exec_loop") {
+            self.raw("__exec_run:")
+            self.raw(format("\tmovq %rsp, {}", self.tv("__exec_sp")))
+            self.raw("\tcall __exec_loop")
+            self.raw(".Lexec_failed:")
+            self.raw(format("\tmovq {}, %rsp", self.tv("__exec_sp")))
+            self.raw("\txorl %eax, %eax")
+            self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
+            self.raw("\tcall __exec_loop")
+            self.raw("")
+        } else {
+            // __exec_run: a worker's loop, resuming ready frames for good. With
+            // none anywhere it counts itself idle and only glances at the queues
+            // (it stops counting before it takes a frame, so the count is exact):
+            // a while spinning, then asleep until a push. Every worker idle and
+            // nothing queued: no task can go on, a runtime error
+            self.raw("__exec_run:")
+            self.raw(".Lexec_next:")
+            self.raw("\tcall __exec_find")
+            if self.rt_exec_has("__exec_find") { self.raw("\tmovq %rax, %rdi") }
+            self.raw("\ttestq %rdi, %rdi")
+            self.raw("\tjz .Lexec_idle")
+            // the frame this worker runs, published before the failure flag is
+            // looked at (xchg: a full barrier; `__task_fail` sets the flag, then
+            // looks at what the workers run)
+            self.raw("\tmovq %rdi, %rax")
+            self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
+            // once a task has failed, every frame is dropped, not resumed, an
+            // actor handed to it passed on (D94, D97)
+            self.raw("\tcmpq $0, __exec_failing(%rip)")
+            self.raw("\tje .Lexec_live")
+            self.raw("\txorl %eax, %eax")
+            self.raw("\txchgq %rax, 64(%rdi)")
+            self.raw("\ttestq %rax, %rax")
+            self.raw("\tjz .Lexec_dropped")
+            self.raw("\tmovq %rax, %rdi")
+            self.raw("\tcall __actor_leave")
+            self.raw(".Lexec_dropped:")
+            self.raw("\txorl %eax, %eax")
+            self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
+            self.raw("\tjmp .Lexec_next")
+            self.raw(".Lexec_live:")
+            self.raw("\tmovq $0, 64(%rdi)")
+            // the running task's first frame, for `__task_cancelled`: until
+            // control comes back, frames of this task run, but the one resumed
+            // may end and be freed meanwhile
+            self.raw("\tmovq 40(%rdi), %rax")
+            self.raw(format("\tmovq %rax, {}", self.tv("__exec_task")))
+            self.raw(format("\tmovq %rsp, {}", self.tv("__exec_sp")))
+            self.raw("\tcall *(%rdi)")
+            self.raw("\txorl %eax, %eax")
+            self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
+            self.raw("\tjmp .Lexec_next")
+            self.raw(".Lexec_idle:")
+            self.raw("\tlock incl __exec_idle(%rip)")
+            self.raw("\tcall __exec_peek")
+            self.raw("\ttestl %eax, %eax")
+            self.raw("\tjnz .Lexec_back")
+            // everyone idle after the glance found nothing (a worker that found
+            // a frame stopped counting before it took it)
+            self.raw("\tmovl __exec_idle(%rip), %eax")
+            self.raw("\tcmpl __exec_workers(%rip), %eax")
+            self.raw("\tjae .Lexec_stuck")
+            // (the count and then the pushes seen in %ebx, which `__exec_peek`
+            // keeps; nothing else lives in a register across it)
+            self.raw("\tmovl $4000, %ebx")
+            self.raw(".Lexec_spin:")
+            self.raw("\tcall __exec_peek")
+            self.raw("\ttestl %eax, %eax")
+            self.raw("\tjnz .Lexec_back")
+            self.raw("\tpause")
+            self.raw("\tdecl %ebx")
+            self.raw("\tjnz .Lexec_spin")
+            // asleep: counted a sleeper first, then the pushes seen, then a last
+            // glance (a push after it changes `__exec_seq`, and the wait returns)
+            self.raw("\tlock incl __exec_sleepers(%rip)")
+            self.raw("\tmovl __exec_seq(%rip), %ebx")
+            self.raw("\tcall __exec_peek")
+            self.raw("\ttestl %eax, %eax")
+            self.raw("\tjnz .Lexec_awake")
+            self.raw("\tmovl %ebx, %edx")
+            self.raw("\tleaq __exec_seq(%rip), %rdi")
+            self.raw("\tmovq $128, %rsi")
+            self.raw("\txorq %r10, %r10")
+            self.raw("\tmovq $202, %rax")
+            self.raw("\tsyscall")
+            self.raw(".Lexec_awake:")
+            self.raw("\tlock decl __exec_sleepers(%rip)")
+            self.raw(".Lexec_back:")
+            self.raw("\tlock decl __exec_idle(%rip)")
+            self.raw("\tjmp .Lexec_next")
+            // a task failed (`__task_fail`): back to the loop, the stack as the
+            // resumed frame found it
+            self.raw(".Lexec_failed:")
+            self.raw(format("\tmovq {}, %rsp", self.tv("__exec_sp")))
+            self.raw("\txorl %eax, %eax")
+            self.raw(format("\txchgq %rax, {}", self.tv("__exec_cur")))
+            self.raw("\tjmp .Lexec_next")
+            self.raw(".Lexec_stuck:")
+            self.raw("\tleaq .Lmsg_stuck(%rip), %rdi")
+            self.raw("\tcall __write_err")
+            self.raw("\tmovq $231, %rax")
+            self.raw("\tmovq $1, %rdi")
+            self.raw("\tsyscall")
+            self.raw("")
+        }
         // the runtime's entry points a frame function tail-calls take the
         // frame in %rdi (D119)
         self.raw("myla___resume:")

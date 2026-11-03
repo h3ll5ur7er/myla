@@ -536,8 +536,13 @@ impl CodeGen {
                 // through a slot's address: straight from the frame (MYLA-120)
                 // or through a register (MYLA-121); as wide as the IR says
                 // (D120)
-                let base = self.reg_of(p)
                 let t = f.temps[d]
+                if self.temp_mem[p] != "" {
+                    self.emit_load(width, t, self.rt_var_at(self.temp_mem[p], off))
+                    self.store_temp(d, temp_base)
+                    return
+                }
+                let base = self.reg_of(p)
                 if self.temp_frame[p] != 0 && self.in_frame { self.emit_load(width, t, format("{}(%r15)", self.temp_frame[p] + off)) }
                 else if self.temp_frame[p] != 0 { self.emit_load(width, t, format("{}(%rbp)", self.temp_frame[p] + off)) }
                 else if base != "" { self.emit_load(width, t, format("{}({})", off, base)) }
@@ -548,6 +553,10 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.StoreAt(p, off, v, width) => {
+                if self.temp_mem[p] != "" {
+                    self.emit_store(width, f.temps[v], self.value_operand(v, temp_base), self.rt_var_at(self.temp_mem[p], off))
+                    return
+                }
                 let base = self.reg_of(p)
                 if self.temp_frame[p] != 0 && self.in_frame { self.emit_store(width, f.temps[v], self.value_operand(v, temp_base), format("{}(%r15)", self.temp_frame[p] + off)) }
                 else if self.temp_frame[p] != 0 { self.emit_store(width, f.temps[v], self.value_operand(v, temp_base), format("{}(%rbp)", self.temp_frame[p] + off)) }
@@ -730,6 +739,8 @@ impl CodeGen {
                 // the address of a runtime variable (MYLA-162): next to %rip,
                 // or in the worker's block with tasks
                 if text_starts(name, "__rt_addr:") {
+                    // the loads and stores reading it name the variable
+                    if self.temp_mem[d] != "" { return }
                     var sb = StringBuilder()
                     sb.append(name, 10, name.len())
                     let sym = sb.build()
@@ -755,32 +766,32 @@ impl CodeGen {
                 }
                 // atomics (MYLA-162), through the scratch registers
                 if name == "__cas64" {
-                    self.load_temp(args[0], "rcx", temp_base)
+                    let at = self.atomic_at(args[0], temp_base)
                     self.load_temp(args[2], "rdx", temp_base)
                     self.load_temp(args[1], "rax", temp_base)
-                    self.emit("lock cmpxchgq %rdx, (%rcx)")
+                    self.emit("lock cmpxchgq %rdx, " + at)
                     self.emit("sete %al")
                     self.emit("movzbl %al, %eax")
                     self.store_temp(d, temp_base)
                     return
                 }
                 if name == "__xchg64" {
-                    self.load_temp(args[0], "rcx", temp_base)
+                    let at = self.atomic_at(args[0], temp_base)
                     self.load_temp(args[1], "rax", temp_base)
-                    self.emit("xchgq %rax, (%rcx)")
+                    self.emit("xchgq %rax, " + at)
                     self.store_temp(d, temp_base)
                     return
                 }
                 if name == "__fetch_add64" {
                     // the value before unused, the addend a constant: one add
                     if (d < 0 || self.temp_uses[d] == 0) && self.temp_imm[args[1]] != "" {
-                        self.load_temp(args[0], "rcx", temp_base)
-                        self.emit(format("lock addq {}, (%rcx)", self.temp_imm[args[1]]))
+                        let at = self.atomic_at(args[0], temp_base)
+                        self.emit(format("lock addq {}, {}", self.temp_imm[args[1]], at))
                         return
                     }
-                    self.load_temp(args[0], "rcx", temp_base)
+                    let at = self.atomic_at(args[0], temp_base)
                     self.load_temp(args[1], "rax", temp_base)
-                    self.emit("lock xaddq %rax, (%rcx)")
+                    self.emit("lock xaddq %rax, " + at)
                     self.store_temp(d, temp_base)
                     return
                 }
@@ -1134,10 +1145,10 @@ impl CodeGen {
         match cmp {
             Inst.Rt(d, name, args) => {
                 // `lock cmpxchg` sets ZF when it swapped
-                self.load_temp(args[0], "rcx", temp_base)
+                let at = self.atomic_at(args[0], temp_base)
                 self.load_temp(args[2], "rdx", temp_base)
                 self.load_temp(args[1], "rax", temp_base)
-                self.emit("lock cmpxchgq %rdx, (%rcx)")
+                self.emit("lock cmpxchgq %rdx, " + at)
                 match term {
                     Term.Br(c, yes, no) => {
                         if no == next { self.emit(format("je {}", labels[yes])) }
@@ -1657,6 +1668,22 @@ impl CodeGen {
         return src
     }
 
+    // The memory operand of an atomic operation on the address `p`: the
+    // runtime variable it names (`temp_mem`), else through %rcx.
+    fun atomic_at(var self, p: int32, temp_base: int32) -> str {
+        if self.temp_mem[p] != "" { return self.rt_var_at(self.temp_mem[p], 0) }
+        self.load_temp(p, "rcx", temp_base)
+        return "(%rcx)"
+    }
+
+    // The memory operand of the runtime variable `sym`, `off` bytes in: in
+    // the worker's block with tasks (a worker's own), else next to %rip.
+    fun rt_var_at(self, sym: str, off: int32) -> str {
+        if self.frames && tls_offset(sym) != 0 { return format("%fs:{}", tls_offset(sym) + off) }
+        if off == 0 { return format("{}(%rip)", sym) }
+        return format("{}+{}(%rip)", sym, off)
+    }
+
     // The arguments of a runtime helper into the calling registers.
     fun load_args(var self, args: [int32], temp_base: int32) {
         self.load_words(args, temp_base)
@@ -1671,11 +1698,37 @@ impl CodeGen {
         var src: [str] = []
         var imm: [str] = []
         var frame: [int32] = []
+        var mem: [str] = []
+        // how many reads of each temporary are the address of a load or store
+        var at_uses: [int32] = []
         for t in f.temps {
             out.push("")
             src.push("")
             imm.push("")
             frame.push(0)
+            mem.push("")
+            at_uses.push(0)
+        }
+        for b in f.blocks {
+            for inst in b.insts {
+                match inst {
+                    Inst.LoadAt(d, p, off, w) => { at_uses[p] += 1 },
+                    Inst.StoreAt(p, off, v, w) => { if v != p { at_uses[p] += 1 } },
+                    // an atomic's address
+                    Inst.Rt(d, name, args) => {
+                        if (name == "__cas64" || name == "__xchg64" || name == "__fetch_add64") && args.len() > 0 {
+                            var k = 1
+                            var again = false
+                            while k < args.len() {
+                                if args[k] == args[0] { again = true }
+                                k += 1
+                            }
+                            if !again { at_uses[args[0]] += 1 }
+                        }
+                    },
+                    _ => {},
+                }
+            }
         }
         for b in f.blocks {
             var i = 0
@@ -1692,6 +1745,15 @@ impl CodeGen {
                 // and stores through it
                 match inst {
                     Inst.Addr(d, s) => { if defs[d] == 1 { frame[d] = slot_off[s] } },
+                    // a runtime variable's address only loads and stores read:
+                    // the variable itself their operand, nothing computed
+                    Inst.Rt(d, name, args) => {
+                        if d >= 0 && defs[d] == 1 && text_starts(name, "__rt_addr:") && self.temp_uses[d] > 0 && at_uses[d] == self.temp_uses[d] {
+                            var sb = StringBuilder()
+                            sb.append(name, 10, name.len())
+                            mem[d] = sb.build()
+                        }
+                    },
                     _ => {},
                 }
                 // an integer constant that fits a sign-extended 32-bit immediate
@@ -1728,6 +1790,7 @@ impl CodeGen {
         self.temp_src = src
         self.temp_imm = imm
         self.temp_frame = frame
+        self.temp_mem = mem
         return out
     }
 

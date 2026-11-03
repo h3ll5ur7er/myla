@@ -1152,6 +1152,25 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertRegex(body, r"movq %r\w+, 0\(%r\w+,%r\w+,8\)", body)
         self.assertRegex(body, r"cmpq 16\+0\(%r\w+\), %r\w+", body)
 
+    def test_a_runtime_variable_is_its_own_operand(self) -> None:
+        # MYLA-162: the address of a runtime variable (`__rt_addr`) that only
+        # loads and stores read is no instruction: they name the variable
+        source = (
+            "fun main() {\n"
+            "    let before = __load64(__rt_addr(\"__heap_ptr\"))\n"
+            "    let p = __alloc(64)\n"
+            "    print(__load64(__rt_addr(\"__heap_ptr\")) - before)\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("80\n", 0))
+        body = self._function_asm(asm, "main")
+        self.assertRegex(body, r"movq __heap_ptr\(%rip\), %r", body)
+        self.assertNotIn("leaq __heap_ptr", body, body)
+
     def test_atomics_and_pause_are_inline(self) -> None:
         # MYLA-162: the runtime's atomics are single instructions in place,
         # without a call: `__cas64` a `lock cmpxchg`, `__xchg64` an `xchg`,
