@@ -50,14 +50,14 @@ The milestone numbering was locked by D23: self-hosting is the destination (v1.0
 
 ## Ideas
 
-Bigger directions, collected as tasks in the `Roadmap ideas` epic: three are done ([[MYLA-61]], [[MYLA-67]], [[MYLA-64]]), LLVM is planned in steps, the rest are ideas.
+Bigger directions, collected as tasks in the `Roadmap ideas` epic: three are done ([[MYLA-61]], [[MYLA-67]], [[MYLA-64]]), other platforms are planned in steps, the rest are ideas.
 
 | Idea | Task | Notes |
 | --- | --- | --- |
 | Swift-style actors and structured concurrency | [[MYLA-61]] | Safety from the checker (isolation, sendability, no locks), not runtime deadlocks |
 | A mid-level IR between checker and code generators | [[MYLA-67]] | Checkable reference counting, optimisations (slot reuse, register allocation, retain/drop elision, inlining), small backends |
-| Optional LLVM backend, and other platforms through it | [[MYLA-62]] | Planned: decisions ([[MYLA-160]]), user code through LLVM ([[MYLA-161]]), the runtime off assembly ([[MYLA-162]]), then aarch64 Linux, macOS, wasm and Windows ([[MYLA-163]] to [[MYLA-165]], [[MYLA-158]]), and a C FFI ([[MYLA-166]]) |
-| A WebAssembly target | [[MYLA-158]] | Myla and its toolchain in the browser, through LLVM |
+| Other platforms through Myla's own backends (no LLVM, D117) | [[MYLA-62]] | Planned: de-risking first ([[MYLA-160]], with the gap to C measured, [[MYLA-242]]), the runtime in Myla ([[MYLA-162]]), then wasm and aarch64 backends, macOS and Windows ([[MYLA-158]], [[MYLA-163]] to [[MYLA-165]]), and a C FFI both ways ([[MYLA-166]], [[MYLA-241]]) |
+| A WebAssembly target | [[MYLA-158]] | Myla and its toolchain in the browser, through a wasm backend of Myla's own |
 | A website: Angular webapp with docs, an online editor and a gamified tutorial | [[MYLA-159]] | Static, data in IndexedDB; needs the wasm toolchain |
 | Debugger | [[MYLA-66]] | First step: line tables ([[MYLA-71]]) |
 | Better error messages | [[MYLA-65]] | Files, spans, notes, several errors per run |

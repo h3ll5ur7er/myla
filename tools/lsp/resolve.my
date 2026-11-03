@@ -18,7 +18,7 @@ from std.fs import read_to_string
 from ...selfhost.lexer import lex
 from ...selfhost.parser import parse_source
 from ...selfhost.tokens import Token, TokenKind
-from ...selfhost.loader import normalize, LoadOptions, load_options
+from ...selfhost.loader import normalize, LoadOptions, load_options, source_text
 from ...selfhost.ast import Program, Decl, DeclKind, FunData, TypeExpr, TypeKind, Expr, ExprKind, ExprOrBlock, Stmt, StmtKind, Block, ElseTail, Pattern, PatternKind, MatchArm, Param, BindElem, TypeParam, Attribute, ImportPath, ImportItem, FieldInit, FieldPat
 from .symbols import Symbol, SymKind, Range, outline, outline_parsed, type_str
 from .text import LineIndex, line_index, code_points, Pos
@@ -200,9 +200,10 @@ fun dirname(p: str) -> str {
 }
 
 impl Resolver {
-    // The text of a file: an open document's, else the file's.
+    // The text of a file: an open document's, the embedded standard
+    // library's (MYLA-243), else the file's.
     fun text_of(self, path: str) -> Option<str> {
-        match get(self.opts.overrides, path) {
+        match source_text(path, self.opts.overrides) {
             Some(t) => { return Some(t) },
             None => {},
         }

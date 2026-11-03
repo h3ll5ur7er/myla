@@ -73,6 +73,6 @@ type error: unknown function 'nope'
 - [[Architecture/Project-tool]]: `myla` as a project tool like cargo, with a manifest (`myla.toml`), path and Git dependencies and the commands `new`, `build`, `run`, `test`, `check`, `fetch` and `clean` (D73, [[MYLA-64]]).
 - [[Architecture/IR]]: the mid-level IR between the checker and the self-hosted backend: three-address code on basic blocks with explicit reference counting and a verifier; every function goes through it since [[MYLA-107]] (D79, D85).
 
-Not built yet: an LLVM backend and other platforms ([[MYLA-62]]).
+Not built yet: other platforms, through backends of Myla's own written from the IR and a runtime in Myla (D117, [[MYLA-62]]).
 
 The original v0.0 design sketch of this architecture is [[Archive/architecture]].

@@ -47,6 +47,13 @@ if [ ! -f "$SEED" ]; then
 fi
 echo "==> stage0: the seed ($SEED), assembled and linked"
 asm_to_bin "$SEED" "$OUT_DIR/stage0"
+echo "==> embed: the standard library the toolchain carries (MYLA-243)"
+# stage0 builds tools/embed, which writes selfhost/embedded_std.my from lib/
+# when it changed, so every stage below carries the same library
+"$OUT_DIR/stage0" tools/embed/main.my "$STDLIB_ROOT" > "$OUT_DIR/embed.s"
+asm_to_bin "$OUT_DIR/embed.s" "$OUT_DIR/embed"
+"$OUT_DIR/embed" "$STDLIB_ROOT" selfhost/embedded_std.my
+
 echo "==> stage1: stage0 compiles the self-hosted compiler (gen_tool)"
 "$OUT_DIR/stage0" "$ENTRY" "$STDLIB_ROOT" > "$OUT_DIR/gen_tool.s"
 asm_to_bin "$OUT_DIR/gen_tool.s" "$OUT_DIR/gen_tool"

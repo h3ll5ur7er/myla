@@ -140,7 +140,7 @@ The architecture, from the module loader to the native runtime, is described in 
 
 Version 1.0, self-hosting, was reached in June 2026. Since then: the mid-level IR, guaranteed tail calls, concurrency with actors and a work-stealing runtime, the project tool, the tools rewritten in Myla, and in November 2026 the bootstrap from a committed seed, which retired the Python toolchain (D101). The review of October 2026 and what came of it are on [Review 2026-10](docs/Project/Review-2026-10.md); open bugs are on [Known issues](docs/Project/Known-issues.md).
 
-Next on the [Roadmap](docs/Project/Roadmap.md): an LLVM backend, and other platforms through it (Linux on aarch64, macOS, Windows, WebAssembly), then a C FFI.
+Next on the [Roadmap](docs/Project/Roadmap.md): other platforms through backends of Myla's own (WebAssembly, Linux on aarch64, macOS, Windows), with the runtime written in Myla, then a C FFI.
 
 ## Working on Myla
 

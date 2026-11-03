@@ -56,7 +56,7 @@ How the self-hosted pipeline differed from the Python toolchain it was ported fr
 | Runtime errors | Messages | The interpreter (`myla run`/`test`): the same messages and rendering since [[MYLA-32]]; native binaries: `runtime error: <message>` and `  --> file:line:col` on stderr and exit 1, as the Python backend's ([[MYLA-17]], [[MYLA-65]]) |
 | Heap | 1 GiB arena, size-class free lists (powers of two above 4 KiB since [[MYLA-80]]) | 4 GiB arena, size-class free lists (memory reused since [[MYLA-22]]); maps leave a tombstone on `remove` and then rebuild, the Python backend rebuilds directly ([[MYLA-18]]) |
 | Closure environments | `[drop fn][captures…]`, captures retained and dropped | The same since [[MYLA-22]]; compositions and partial applications own their parts too |
-| Stdlib root | Built in | Found from the binary's location (`build/myla` → `lib`), or `--stdlib <dir>` ([[MYLA-31]]) |
+| Stdlib root | Built in | Carried by the binary (`<myla>`, read from memory, [[MYLA-243]]), or `--stdlib <dir>` / `MYLA_STDLIB` |
 
 The calling convention, value layouts, list/map/builder runtimes and the evaluation order are ported nearly line for line from [[Architecture/Native-backend]].
 

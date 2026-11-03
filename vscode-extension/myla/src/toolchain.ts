@@ -61,7 +61,7 @@ export function findCompilerEntry(
  * `scripts/bootstrap.sh`).
  */
 export function chooseCli(
-  settings: { cliPath: string; compilerEntry: string | null | undefined },
+  settings: { cliPath: string; compilerEntry: string | null | undefined; searchPath?: string[] },
   exists: (p: string) => boolean,
 ): Toolchain | ToolMissing {
   const configured = settings.cliPath;
@@ -75,10 +75,23 @@ export function chooseCli(
     const built = path.join(repoRootOf(entry), "build", "myla");
     if (exists(built)) return { command: built, args: [] };
   }
+  // an installed myla, which carries its standard library (MYLA-243)
+  const installed = onPath("myla", settings.searchPath ?? [], exists);
+  if (installed) return { command: installed, args: [] };
   return {
     missing:
-      "The myla CLI wasn't found: open the Myla repository and build it with scripts/bootstrap.sh, or set 'myla.cliPath'.",
+      "The myla CLI wasn't found: install it on your PATH, open the Myla repository and build it with scripts/bootstrap.sh, or set 'myla.cliPath'.",
   };
+}
+
+/** The first `dir/name` of `searchPath` (the PATH's directories) that exists. */
+export function onPath(name: string, searchPath: string[], exists: (p: string) => boolean): string | undefined {
+  for (const dir of searchPath) {
+    if (!dir) continue;
+    const candidate = path.join(dir, name);
+    if (exists(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 export type MylaCommand = "run" | "test" | "build";

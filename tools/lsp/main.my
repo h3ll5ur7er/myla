@@ -4,22 +4,24 @@
 //   lsp [--stdlib <dir>]
 //   lsp [--stdlib <dir>] --resolve <file>...
 //
-// The standard library is found next to the build/ directory the binary is
-// in, as for build/myla, unless --stdlib names it. --resolve prints what each
-// identifier of the files refers to (see resolve.my) instead of serving; a
-// file inside a project is resolved with its packages (projects.my).
+// The standard library is the one the binary carries, as for build/myla,
+// unless --stdlib or MYLA_STDLIB name a directory (MYLA-243). --resolve
+// prints what each identifier of the files refers to (see resolve.my) instead
+// of serving; a file inside a project is resolved with its packages
+// (projects.my).
 
 from std.process import args, exit
 from std.fs import read_to_string
 from std.io import eprintln
-from ...selfhost.loader import default_stdlib_root, normalize
+from ...selfhost.loader import normalize
+from ...selfhost.stdroot import default_stdlib_root
 from .server import new_server
 from .resolve import resolve, describe
 from .projects import context_of
 
 fun main() {
     let argv = args()
-    var stdlib = default_stdlib_root(argv[0])
+    var stdlib = default_stdlib_root()
     var files: [str] = []
     var resolving = false
     var i = 1

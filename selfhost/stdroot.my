@@ -1,0 +1,71 @@
+// stdroot.my: where the standard library comes from (MYLA-243). The toolchain
+// carries it (embedded_std.my, generated from lib/), so it needs no lib/
+// directory on any platform; `--stdlib <dir>` or MYLA_STDLIB name a directory
+// instead (the repository's lib/ while std is being changed).
+
+from std.fs import read_to_string
+from std.process import env
+from .embedded_std import embedded_paths, embedded_file
+
+// The root of the embedded standard library: the directory that would hold
+// `std/`, as a name no real path has. Its files (`<myla>/std/io.my`) are read
+// from memory.
+pub const EMBEDDED_ROOT: str = "<myla>"
+
+// The standard library root the tools use unless `--stdlib` names one: the
+// directory in MYLA_STDLIB when it is set and not empty, else the embedded
+// library.
+pub fun default_stdlib_root() -> str {
+    return match env("MYLA_STDLIB") {
+        Some(dir) => if dir != "" { dir } else { EMBEDDED_ROOT },
+        None => EMBEDDED_ROOT,
+    }
+}
+
+// The path of `path` under the embedded root (`std/io.my` for
+// `<myla>/std/io.my`), or "" when it isn't under it.
+#test("<myla>/std/io.my")["std/io.my"]
+#test("<myla>")[""]
+#test("lib/std/io.my")[""]
+fun embedded_rel(path: str) -> str {
+    let prefix = EMBEDDED_ROOT + "/"
+    if path.len() <= prefix.len() { return "" }
+    var i = 0
+    while i < prefix.len() {
+        if path[i] != prefix[i] { return "" }
+        i = i + 1
+    }
+    var sb = StringBuilder()
+    sb.append(path, prefix.len(), path.len())
+    return sb.build()
+}
+
+// Whether the embedded library has the file `path` (`<myla>/std/io.my`).
+#test("<myla>/std/io.my")[true]
+#test("<myla>/std/nope.my")[false]
+#test("<myla>/std")[false]
+pub fun is_embedded(path: str) -> bool {
+    let rel = embedded_rel(path)
+    if rel == "" { return false }
+    for p in embedded_paths() {
+        if p == rel { return true }
+    }
+    return false
+}
+
+// The text of the embedded file `path` (`<myla>/std/io.my`), or None.
+#test("<myla>/std/nope.my")[None]
+pub fun embedded_text(path: str) -> Option<str> {
+    if !is_embedded(path) { return None }
+    return Some(embedded_file(embedded_rel(path)))
+}
+
+// The file `rel` (`debug/myla_gdb.py`) of the standard library root `root`:
+// the embedded library's, or the directory's; None when it has none.
+pub fun stdlib_file(root: str, rel: str) -> Option<str> {
+    if root == EMBEDDED_ROOT { return embedded_text(EMBEDDED_ROOT + "/" + rel) }
+    return match read_to_string(root + "/" + rel) {
+        Ok(text) => Some(text),
+        Err(e) => None,
+    }
+}

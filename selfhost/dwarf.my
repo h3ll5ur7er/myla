@@ -4,7 +4,7 @@
 // Mirrors src/myla/compiler/dwarf.py; the code generator (codegen.my) builds
 // the compile unit's DIEs with these. See docs/Development/Debugging.md.
 
-from std.fs import read_to_string
+from .stdroot import stdlib_file
 
 // Abbreviation codes (the table is `abbrev_section`).
 pub const AB_CU: int32 = 1
@@ -236,12 +236,12 @@ pub fun gdb_scripts_section(script: str) -> [str] {
 }
 
 // The pretty-printers every `-g` binary embeds: `debug/myla_gdb.py` next to
-// the standard library's `std/` under `stdlib_root` ("" if it can't be read:
-// then the binary has none).
+// the standard library's `std/` under `stdlib_root`, the embedded library's
+// included (MYLA-243); "" if there is none: then the binary has none.
 #test("/nonexistent")[""]
 pub fun read_gdb_script(stdlib_root: str) -> str {
-    return match read_to_string(stdlib_root + "/debug/myla_gdb.py") {
-        Ok(text) => text,
-        Err(e) => "",
+    return match stdlib_file(stdlib_root, "debug/myla_gdb.py") {
+        Some(text) => text,
+        None => "",
     }
 }

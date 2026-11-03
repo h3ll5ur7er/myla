@@ -1,0 +1,416 @@
+// imports.my: completion inside an import (MYLA-243). After `from` or
+// `import` and after each dot of the module path: the modules that place
+// holds (the standard library's, the embedded one's too, a package's, the
+// project's, the importing file's directory); after `from <module> import`:
+// that module's public names. The line is incomplete while it is typed, so
+// it is read as text, not parsed.
+
+from std.fs import read_to_string, list_dir, is_dir
+from ...selfhost.loader import LoadOptions, normalize, source_text
+from ...selfhost.parser import parse_source
+from ...selfhost.ast import DeclKind, ImportItem
+from ...selfhost.stdroot import EMBEDDED_ROOT
+from ...selfhost.embedded_std import embedded_paths
+from .symbols import Symbol, SymKind, Range, outline
+from .text import Pos
+
+// Where the cursor is in an import: `kind` 0 outside one, 1 in its module
+// path, 2 in the names after `from <path> import`, 3 where nothing completes
+// (an alias, the user's own name); the path's leading dots
+// and its complete segments (in a module path, those before the one being
+// typed; after `import`, all of them).
+pub struct ImportSpot { kind: int32, dots: int32, segments: [str] }
+
+fun none_spot() -> ImportSpot {
+    return ImportSpot { kind: 0, dots: 0, segments: [] }
+}
+
+fun alias_spot() -> ImportSpot {
+    return ImportSpot { kind: 3, dots: 0, segments: [] }
+}
+
+fun is_name_char(c: char) -> bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+// `text` without its leading spaces and tabs.
+#test("  a b")["a b"]
+fun trim_start(text: str) -> str {
+    var i = 0
+    while i < text.len() && (text[i] == ' ' || text[i] == '\t') { i = i + 1 }
+    return part(text, i, text.len())
+}
+
+fun part(s: str, start: int32, end: int32) -> str {
+    var sb = StringBuilder()
+    sb.append(s, start, end)
+    return sb.build()
+}
+
+// The keyword `word` and the spaces after it at the start of `text`: the
+// rest, or None when `text` doesn't start with it (followed by a space).
+#test("from x", "from")[Some("x")]
+#test("fromx", "from")[None]
+fun after_word(text: str, word: str) -> Option<str> {
+    if text.len() <= word.len() || part(text, 0, word.len()) != word { return None }
+    if text[word.len()] != ' ' && text[word.len()] != '\t' { return None }
+    return Some(trim_start(part(text, word.len(), text.len())))
+}
+
+// The module path `path` ("..a.b."): its dots and its segments, the last one
+// (the one being typed, "" after a dot) left out when `typing`; None when it
+// has other characters.
+#test("..a.b", true)[Some((2, ["a"]))]
+#test("std.", true)[Some((0, ["std"]))]
+#test("std.io", false)[Some((0, ["std", "io"]))]
+#test("a b", true)[None]
+fun split_path(path: str, typing: bool) -> Option<(int32, [str])> {
+    var dots = 0
+    while dots < path.len() && path[dots] == '.' { dots = dots + 1 }
+    var segments: [str] = []
+    var sb = StringBuilder()
+    var i = dots
+    while i < path.len() {
+        let c = path[i]
+        if c == '.' {
+            segments.push(sb.build())
+            sb = StringBuilder()
+        } else if is_name_char(c as char) {
+            sb.append_byte(c)
+        } else {
+            return None
+        }
+        i = i + 1
+    }
+    if !typing { segments.push(sb.build()) }
+    return Some((dots, segments))
+}
+
+// Where the line `before`, up to the cursor, puts it in an import.
+#test("from std.")[ImportSpot { kind: 1, dots: 0, segments: ["std"] }]
+#test("pub import .a.b")[ImportSpot { kind: 1, dots: 1, segments: ["a"] }]
+#test("from std.io import println, ep")[ImportSpot { kind: 2, dots: 0, segments: ["std", "io"] }]
+#test("from .h import (a, ")[ImportSpot { kind: 2, dots: 1, segments: ["h"] }]
+#test("from .h import a as ")[ImportSpot { kind: 3, dots: 0, segments: [] }]
+#test("import std.io as ")[ImportSpot { kind: 3, dots: 0, segments: [] }]
+#test("let x = from")[ImportSpot { kind: 0, dots: 0, segments: [] }]
+pub fun import_spot(before: str) -> ImportSpot {
+    var text = trim_start(before)
+    match after_word(text, "pub") {
+        Some(rest) => { text = rest },
+        None => {},
+    }
+    match after_word(text, "import") {
+        Some(rest) => {
+            return match split_path(rest, true) {
+                Some(p) => ImportSpot { kind: 1, dots: p.0, segments: p.1 },
+                None => if ends_with_as(rest) { alias_spot() } else { none_spot() },
+            }
+        },
+        None => {},
+    }
+    let rest = match after_word(text, "from") {
+        Some(r) => r,
+        None => { return none_spot() },
+    }
+    // `from <path>` alone: the module path
+    var i = 0
+    while i < rest.len() && rest[i] != ' ' && rest[i] != '\t' { i = i + 1 }
+    let path = part(rest, 0, i)
+    if i == rest.len() {
+        return match split_path(path, true) {
+            Some(p) => ImportSpot { kind: 1, dots: p.0, segments: p.1 },
+            None => none_spot(),
+        }
+    }
+    // `from <path> import a, b, c`: the names, unless an alias is being typed
+    let names = match after_word(trim_start(part(rest, i, rest.len())), "import") {
+        Some(n) => n,
+        None => { return none_spot() },
+    }
+    var words: [str] = []
+    var sb = StringBuilder()
+    for c in names.chars() {
+        if is_name_char(c) {
+            sb.append(f"{c}")
+        } else if c == ' ' || c == '\t' || c == ',' || c == '(' {
+            if sb.len() > 0 { words.push(sb.build()) }
+            sb = StringBuilder()
+            if c == ',' { words.push(",") }
+        } else {
+            return none_spot()
+        }
+    }
+    if words.len() > 0 && words[words.len() - 1] == "as" { return alias_spot() }
+    return match split_path(path, false) {
+        Some(p) => ImportSpot { kind: 2, dots: p.0, segments: p.1 },
+        None => none_spot(),
+    }
+}
+
+// Whether `text` ends with the word `as` and a space: an alias comes next.
+#test("std.io as ")[true]
+#test("std.ioas ")[false]
+fun ends_with_as(text: str) -> bool {
+    let t = trim_end(text)
+    if t.len() == text.len() || t.len() < 2 || part(t, t.len() - 2, t.len()) != "as" { return false }
+    return t.len() == 2 || t[t.len() - 3] == ' ' || t[t.len() - 3] == '\t'
+}
+
+fun trim_end(text: str) -> str {
+    var n = text.len()
+    while n > 0 && (text[n - 1] == ' ' || text[n - 1] == '\t') { n = n - 1 }
+    return part(text, 0, n)
+}
+
+// The directory of a path ("." for a name without one).
+#test("/a/b.my")["/a"]
+#test("b.my")["."]
+fun dir_of(path: str) -> str {
+    var last = -1
+    var i = 0
+    while i < path.len() {
+        if path[i] == '/' { last = i }
+        i = i + 1
+    }
+    if last < 0 { return "." }
+    if last == 0 { return "/" }
+    return part(path, 0, last)
+}
+
+// The directory a module path's complete segments name, from where the
+// loader looks (the resolver's rules): the project root and the standard
+// library for no dots (`std.*` only there, a package's name only in its
+// directory), the importing file's directory for one dot, one up for each
+// further dot; "" when there is none.
+fun base_dir(spot: ImportSpot, file: str, opts: LoadOptions) -> str {
+    var dir = ""
+    var first = 0
+    if spot.dots == 0 {
+        if spot.segments.len() == 0 { return "" }
+        let head = spot.segments[0]
+        if head == "std" {
+            if opts.stdlib_root == "" { return "" }
+            dir = opts.stdlib_root + "/std"
+            first = 1
+        } else {
+            for pkg in opts.packages {
+                if pkg.0 == head {
+                    dir = pkg.1
+                    first = 1
+                }
+            }
+            if first == 0 {
+                dir = dir_of(file)
+                if opts.root != "" { dir = opts.root }
+            }
+        }
+    } else {
+        dir = dir_of(file)
+        var k = 1
+        while k < spot.dots {
+            dir = dir_of(dir)
+            k = k + 1
+        }
+    }
+    var i = first
+    while i < spot.segments.len() {
+        dir = dir + "/" + spot.segments[i]
+        i = i + 1
+    }
+    return normalize(dir)
+}
+
+// The modules and directories in `dir`: each `x.my` as `x`, each directory
+// (a package's `x/x.my`, or modules below it) as its name, sorted; the
+// embedded library's from its list of files. Hidden names, `build` and
+// `node_modules` are left out, and so is the file `skip`.
+fun children(dir: str, skip: str) -> [str] {
+    var out: [str] = []
+    let root = EMBEDDED_ROOT + "/"
+    if dir.len() > root.len() && part(dir, 0, root.len()) == root {
+        let rel = part(dir, root.len(), dir.len()) + "/"
+        for p in embedded_paths() {
+            if p.len() > rel.len() && part(p, 0, rel.len()) == rel {
+                var name = part(p, rel.len(), p.len())
+                var slash = -1
+                var i = 0
+                while i < name.len() {
+                    if name[i] == '/' && slash < 0 { slash = i }
+                    i = i + 1
+                }
+                if slash >= 0 {
+                    name = part(name, 0, slash)
+                } else if ends_with_my(name) {
+                    name = part(name, 0, name.len() - 3)
+                } else {
+                    continue
+                }
+                out = add_name(out, name)
+            }
+        }
+        return out
+    }
+    let names = match list_dir(dir) {
+        Ok(ns) => ns,
+        Err(e) => { return out },
+    }
+    for n in names {
+        if n.len() == 0 || n[0] == '.' || n == "build" || n == "node_modules" { continue }
+        let full = dir + "/" + n
+        if normalize(full) == normalize(skip) { continue }
+        if is_dir(full) {
+            out = add_name(out, n)
+        } else if ends_with_my(n) {
+            out = add_name(out, part(n, 0, n.len() - 3))
+        }
+    }
+    return out
+}
+
+fun ends_with_my(name: str) -> bool {
+    return name.len() > 3 && part(name, name.len() - 3, name.len()) == ".my"
+}
+
+// `names` with `name` added at the end, unless it holds it already.
+#test(["a"], "a")[["a"]]
+#test(["a"], "b")[["a", "b"]]
+fun add_name(names: [str], name: str) -> [str] {
+    var out = names
+    for n in names {
+        if n == name { return out }
+    }
+    out.push(name)
+    return out
+}
+
+// The name an imported item binds: its alias, else its own.
+fun item_name(it: ImportItem) -> str {
+    return match it.alias {
+        Some(a) => a,
+        None => it.name,
+    }
+}
+
+fun no_range() -> Range {
+    return Range { start: Pos { line: 0, character: 0 }, end: Pos { line: 0, character: 0 } }
+}
+
+// The modules to offer at `spot` (in a module path) of the file `file`.
+pub fun module_candidates(spot: ImportSpot, file: str, opts: LoadOptions) -> [str] {
+    if spot.dots == 0 && spot.segments.len() == 0 {
+        var out: [str] = []
+        if opts.stdlib_root != "" { out = add_name(out, "std") }
+        for pkg in opts.packages { out = add_name(out, pkg.0) }
+        var root = dir_of(file)
+        if opts.root != "" { root = opts.root }
+        for n in children(root, file) { out = add_name(out, n) }
+        return out
+    }
+    let dir = base_dir(spot, file, opts)
+    if dir == "" {
+        var none: [str] = []
+        return none
+    }
+    return children(dir, file)
+}
+
+// The text of a module file: an open document's, the embedded library's, or
+// the file's; None when there is none.
+fun module_text(path: str, opts: LoadOptions) -> Option<str> {
+    match source_text(path, opts.overrides) {
+        Some(t) => { return Some(t) },
+        None => {},
+    }
+    return match read_to_string(path) {
+        Ok(t) => Some(t),
+        Err(e) => None,
+    }
+}
+
+// The public declarations of the module the import at `spot` (after its
+// `import`) names: its top-level symbols that are `pub`, with the names its
+// `pub` imports re-export (as constants: their kind isn't known here).
+pub fun module_exports(spot: ImportSpot, file: str, opts: LoadOptions) -> [Symbol] {
+    var out: [Symbol] = []
+    if spot.segments.len() == 0 { return out }
+    var parent = ImportSpot { kind: 1, dots: spot.dots, segments: [] }
+    var i = 0
+    while i < spot.segments.len() - 1 {
+        parent.segments.push(spot.segments[i])
+        i = i + 1
+    }
+    let last = spot.segments[spot.segments.len() - 1]
+    var dir = ""
+    if spot.dots == 0 && spot.segments.len() == 1 {
+        // `from std import` has no module; a package's root module, or one in
+        // the project root
+        for pkg in opts.packages {
+            if pkg.0 == last { dir = pkg.1 }
+        }
+        if dir == "" {
+            dir = dir_of(file)
+            if opts.root != "" { dir = opts.root }
+        }
+    } else {
+        dir = base_dir(parent, file, opts)
+    }
+    if dir == "" { return out }
+    var text = ""
+    match module_text(normalize(dir + "/" + last + ".my"), opts) {
+        Some(t) => { text = t },
+        None => {
+            match module_text(normalize(dir + "/" + last + "/" + last + ".my"), opts) {
+                Some(t) => { text = t },
+                None => { return out },
+            }
+        },
+    }
+    let parsed = match parse_source(text, 0) {
+        Ok(p) => p,
+        Err(e) => { return out },
+    }
+    var public: [str: bool] = [:]
+    var reexports: [str] = []
+    for d in parsed.program.decls {
+        match d.kind {
+            DeclKind.StructDecl(name, fields, attrs, tps, is_pub, act) => { if is_pub { public[name] = true } },
+            DeclKind.EnumDecl(name, variants, attrs, tps, is_pub) => { if is_pub { public[name] = true } },
+            DeclKind.TypeAliasDecl(name, target, attrs, is_pub) => { if is_pub { public[name] = true } },
+            DeclKind.TraitDecl(name, methods, tps, is_pub) => { if is_pub { public[name] = true } },
+            DeclKind.ConstDecl(name, ty, value, attrs, is_pub) => { if is_pub { public[name] = true } },
+            DeclKind.FunDecl(fd) => { if fd.is_pub { public[fd.name] = true } },
+            DeclKind.ImportDecl(p, items, alias, is_pub) => {
+                if is_pub {
+                    match items {
+                        Some(list) => {
+                            for it in list { reexports.push(item_name(it)) }
+                        },
+                        None => {},
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
+    var symbols: [Symbol] = []
+    match outline(text) {
+        Some(s) => { symbols = s },
+        None => {},
+    }
+    var seen: [str: bool] = [:]
+    for s in symbols {
+        if s.parent == -1 && public.contains(s.name) && !seen.contains(s.name) {
+            seen[s.name] = true
+            out.push(s)
+        }
+    }
+    for name in reexports {
+        if !seen.contains(name) {
+            seen[name] = true
+            let r = no_range()
+            out.push(Symbol { name: name, kind: SymKind.Constant, detail: "", range: r, selection: r, parent: -1 })
+        }
+    }
+    return out
+}

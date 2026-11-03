@@ -15,7 +15,8 @@
 # build/seed-check (about 5 s), the fixed point included.
 #
 # Exit status: 0 when the seed is current, 1 when it isn't (run
-# scripts/update-seed.sh and commit bootstrap/seed.s), 2 on a failed bootstrap.
+# scripts/update-seed.sh and commit bootstrap/seed.s) or when the bootstrap
+# rewrote selfhost/embedded_std.my (commit it too), 2 on a failed bootstrap.
 
 set -euo pipefail
 
@@ -51,6 +52,15 @@ else
         exit 2
     fi
     stage3="$out/stage3.s"
+fi
+
+# the standard library the toolchain carries (MYLA-243): the bootstrap writes
+# selfhost/embedded_std.my from lib/, so after one it differs from the commit
+# when the committed module is older than lib/
+EMBEDDED="selfhost/embedded_std.my"
+if git rev-parse --verify -q HEAD > /dev/null 2>&1 && ! git diff --quiet HEAD -- "$EMBEDDED"; then
+    echo "check-seed: $EMBEDDED differs from the commit: the bootstrap wrote it from lib/; commit it (with scripts/update-seed.sh's seed)" >&2
+    exit 1
 fi
 
 # the seed's assembly: everything after its header of comment lines

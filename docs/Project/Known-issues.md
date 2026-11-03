@@ -18,7 +18,7 @@ Retired by D101 ([[MYLA-219]]); its tasks stay in the `Python toolchain` epic.
 - Native code took a read-only method receiver, and the Python interpreter a function's argument, after a later argument that writes the same variable ([[MYLA-237]]). *Fixed, in review.*
 - The self-hosted interpreter lost an argument's change to a `var self` receiver ([[MYLA-238]]). *Fixed, in review.*
 
-Also by design: x86-64 Linux is the only target (D2); the LLVM round ([[MYLA-62]]) is to change that.
+Also by design: x86-64 Linux is the only target (D2); Myla's own backends for other platforms ([[MYLA-62]], D117) are to change that.
 
 ## Concurrency
 

@@ -18,6 +18,8 @@ Modules are a front-end concern only: [[selfhost/loader.my]] turns an entry file
 
 Path resolution (`resolve`) uses the leading-dot count: none means the project root, then the stdlib root; one dot the importer's directory; each further dot one level up. The last segment is a file `x.my` or a package `x/x.my`. Without dots the first segment decides: `std` resolves in the stdlib root only (the Python loader also reported a project `std` as an error, see below); a package's name in its directory only (`resolve_in_package`: `geo` is `G/geo.my`, `geo.b.c` is `G/b/c.my` or `G/b/c/c.my`), and a project `geo.my` or `geo/` is then an error, `'geo' is a dependency and cannot be shadowed by a project file or directory`, raised at the import like the `std` one; any other name in the project root, then the stdlib root ([[Language/Modules]]).
 
+The standard library root is a directory (`--stdlib`, `MYLA_STDLIB`), or by default `<myla>`, the library the toolchain carries ([[MYLA-243]], [[selfhost/stdroot.my]]): its files `<myla>/std/io.my` are read from memory (`source_text`: an editor's buffer first, then an embedded file, then the disk), so resolving, module ids and diagnostics work the same as for a directory and no file is written on any platform.
+
 ## Consequences
 
 - `$` can't appear in source identifiers, so qualified names never collide with user names, the prelude or `Type.method` keys, and they are valid assembly labels.

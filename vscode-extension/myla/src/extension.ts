@@ -2,6 +2,7 @@
 // commands and tasks, and registers the gdb debugger.
 import * as fs from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import * as vscode from "vscode";
 import { LanguageClient, TransportKind, type LanguageClientOptions, type ServerOptions } from "vscode-languageclient/node";
 import { registerDebugger } from "./debugProvider.ts";
@@ -29,9 +30,14 @@ function compilerEntry(): string | undefined {
   return findCompilerEntry(pathSetting("compilerPath"), folders, fs.existsSync);
 }
 
-/** The myla CLI from the settings and the repository. */
+/** The directories of PATH. */
+function searchPath(): string[] {
+  return (process.env.PATH ?? "").split(path.delimiter);
+}
+
+/** The myla CLI from the settings, the repository and PATH. */
 export function resolveCli(): Toolchain | ToolMissing {
-  return chooseCli({ cliPath: pathSetting("cliPath"), compilerEntry: compilerEntry() }, fs.existsSync);
+  return chooseCli({ cliPath: pathSetting("cliPath"), compilerEntry: compilerEntry(), searchPath: searchPath() }, fs.existsSync);
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -52,6 +58,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       ) {
         await restartServer();
       }
+    }),
+  );
+  // the standard library the language server carries (MYLA-243): its
+  // definitions open as read-only `myla-std:` documents, whose text the server
+  // gives
+  context.subscriptions.push(
+    vscode.workspace.registerTextDocumentContentProvider("myla-std", {
+      provideTextDocumentContent: async (uri) => {
+        const reply = await client?.sendRequest<{ text: string } | null>("myla/stdSource", { uri: uri.toString() });
+        return reply?.text ?? `// ${uri.toString()} is not a file of the standard library the language server carries\n`;
+      },
     }),
   );
   registerTasks(context, { output, resolveCli });
@@ -77,7 +94,10 @@ function showStatus(text: string, detail: string, severity: vscode.LanguageStatu
 }
 
 async function startServer(): Promise<void> {
-  const choice = chooseServer({ serverPath: pathSetting("serverPath"), compilerEntry: compilerEntry() }, fs.existsSync);
+  const choice = chooseServer(
+    { serverPath: pathSetting("serverPath"), compilerEntry: compilerEntry(), searchPath: searchPath() },
+    fs.existsSync,
+  );
   if ("missing" in choice) {
     output.appendLine(choice.missing);
     showStatus("Myla: no language server", choice.missing, vscode.LanguageStatusSeverity.Warning);
@@ -103,6 +123,7 @@ async function startServer(): Promise<void> {
     documentSelector: [
       { scheme: "file", language: "myla" },
       { scheme: "untitled", language: "myla" },
+      { scheme: "myla-std", language: "myla" },
     ],
     outputChannel: output,
     synchronize: { fileEvents: watcher },

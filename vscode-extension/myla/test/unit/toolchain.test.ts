@@ -25,6 +25,18 @@ test("a bare command name is looked up on PATH", () => {
   assert.deepEqual(chooseCli({ cliPath: "myla", compilerEntry: undefined }, exists([])), { command: "myla", args: [] });
 });
 
+test("an installed myla on PATH, when there is no setting and no repository", () => {
+  assert.deepEqual(
+    chooseCli({ cliPath: "", compilerEntry: undefined, searchPath: ["/nope", "/usr/bin"] }, exists(["/usr/bin/myla"])),
+    { command: "/usr/bin/myla", args: [] },
+  );
+  // the repository's build comes first
+  assert.deepEqual(
+    chooseCli({ cliPath: "", compilerEntry: "/r/selfhost/main.my", searchPath: ["/usr/bin"] }, exists(["/r/build/myla", "/usr/bin/myla"])),
+    { command: "/r/build/myla", args: [] },
+  );
+});
+
 test("no CLI says what to do", () => {
   const none = chooseCli({ cliPath: "", compilerEntry: undefined }, exists([]));
   assert.ok("missing" in none && none.missing.includes("myla.cliPath"));

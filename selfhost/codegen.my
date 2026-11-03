@@ -5228,6 +5228,7 @@ impl CodeGen {
         self.emit_rename_runtime()
         self.emit_stat_runtime()
         self.emit_getcwd_runtime()
+        self.emit_getenv_runtime()
         self.emit_run_runtime()
     }
 
@@ -5543,6 +5544,79 @@ impl CodeGen {
         self.raw("\tmovq $0, (%rax)")
         self.raw(".Lgc_ret:")
         self.raw("\tleaq -16(%rbp), %rsp")
+        self.raw("\tpopq %r13")
+        self.raw("\tpopq %r12")
+        self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // `__getenv`: rdi = name str cell -> rax = a fresh str cell (rc=1) holding
+    // the value of the first `name=value` entry of the environment the
+    // process started with (`__envp`), and `__io_errno_val` 0; without one,
+    // an empty str and `__io_errno_val` 2 (ENOENT). Backs `std.process.env`
+    // (MYLA-243).
+    fun emit_getenv_runtime(var self) {
+        self.raw("__getenv:")
+        self.raw("\tpushq %rbp")
+        self.raw("\tmovq %rsp, %rbp")
+        self.raw("\tpushq %r12")
+        self.raw("\tpushq %r13")
+        self.raw("\tpushq %r14")
+        self.raw("\tpushq %r15")
+        self.raw(format("\tmovq $0, {}", self.tv("__io_errno_val")))
+        self.raw("\tmovq %rdi, %r12")
+        self.raw("\tmovq (%r12), %r15")
+        self.raw("\tmovq __envp(%rip), %r13")
+        self.raw(".Lge_entry:")
+        self.raw("\tmovq (%r13), %r14")
+        self.raw("\ttestq %r14, %r14")
+        self.raw("\tjz .Lge_none")
+        // the entry starts with the name's bytes, then '='
+        self.raw("\txorq %rcx, %rcx")
+        self.raw(".Lge_cmp:")
+        self.raw("\tcmpq %r15, %rcx")
+        self.raw("\tjae .Lge_eq")
+        self.raw("\tmovb 8(%r12,%rcx), %al")
+        self.raw("\tcmpb (%r14,%rcx), %al")
+        self.raw("\tjne .Lge_next")
+        self.raw("\tincq %rcx")
+        self.raw("\tjmp .Lge_cmp")
+        self.raw(".Lge_eq:")
+        self.raw("\tcmpb $61, (%r14,%rcx)")
+        self.raw("\tjne .Lge_next")
+        self.raw("\tleaq 1(%r14,%rcx), %r14")
+        // the value's length: up to its NUL
+        self.raw("\txorq %r15, %r15")
+        self.raw(".Lge_len:")
+        self.raw("\tcmpb $0, (%r14,%r15)")
+        self.raw("\tje .Lge_copy0")
+        self.raw("\tincq %r15")
+        self.raw("\tjmp .Lge_len")
+        self.raw(".Lge_copy0:")
+        self.raw("\tleaq 8(%r15), %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq %r15, (%rax)")
+        self.raw("\txorq %rcx, %rcx")
+        self.raw(".Lge_copy:")
+        self.raw("\tcmpq %r15, %rcx")
+        self.raw("\tjae .Lge_ret")
+        self.raw("\tmovb (%r14,%rcx), %dl")
+        self.raw("\tmovb %dl, 8(%rax,%rcx)")
+        self.raw("\tincq %rcx")
+        self.raw("\tjmp .Lge_copy")
+        self.raw(".Lge_next:")
+        self.raw("\taddq $8, %r13")
+        self.raw("\tjmp .Lge_entry")
+        self.raw(".Lge_none:")
+        self.raw(format("\tmovq $2, {}", self.tv("__io_errno_val")))
+        self.raw("\tmovq $8, %rdi")
+        self.raw("\tcall __alloc")
+        self.raw("\tmovq $0, (%rax)")
+        self.raw(".Lge_ret:")
+        self.raw("\tleaq -32(%rbp), %rsp")
+        self.raw("\tpopq %r15")
+        self.raw("\tpopq %r14")
         self.raw("\tpopq %r13")
         self.raw("\tpopq %r12")
         self.raw("\tpopq %rbp")
@@ -8072,7 +8146,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__write" || nm == "__exit" || nm == "__args" || nm == "__read_file" || nm == "__io_errno" { return true }
     if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" || nm == "__poll" { return true }
     if nm == "__run_signal" || nm == "__run_errno" { return true }
-    if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" || nm == "__getcwd" { return true }
+    if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" || nm == "__getcwd" || nm == "__getenv" { return true }
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
     if nm == "__task_cancelled" { return true }
     return false

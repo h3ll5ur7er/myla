@@ -469,6 +469,42 @@ class LspRequestScenarios(LspRequestHelpers):
         self.assertIn("fun", self.labels(uri, 1, 17))               # before the `.`
 
 
+    # -- completion in imports: modules and their public names ---------------
+
+    def test_modules_after_from_and_import(self):
+        self.write("helper.my", "pub fun helper() -> int {\n    return 1\n}\nfun hidden() {}\n")
+        os.makedirs(os.path.join(self.root, "tools"))
+        self.write(os.path.join("tools", "kit.my"), "pub fun kit() {}\n")
+        uri = self.open("from \nfun main() {}\n")
+        top = self.labels(uri, 0, 5)
+        self.assertLessEqual({"std", "helper", "tools"}, top)
+        self.assertNotIn("fun", top)                     # no keywords in an import path
+        self.assertNotIn("doc", top)                     # nor the document itself
+        uri = self.open("from std.\nfun main() {}\n", "doc2.my")
+        self.assertLessEqual({"io", "json", "fs", "process"}, self.labels(uri, 0, 9))
+        uri = self.open("import std.\nfun main() {}\n", "doc3.my")
+        self.assertIn("io", self.labels(uri, 0, 11))
+        uri = self.open("from .\nfun main() {}\n", "doc4.my")
+        self.assertLessEqual({"helper", "tools"}, self.labels(uri, 0, 6))
+        uri = self.open("from tools.\nfun main() {}\n", "doc5.my")
+        self.assertEqual(self.labels(uri, 0, 11), {"kit"})
+
+    def test_public_names_after_import(self):
+        self.write("helper.my", "pub fun helper() -> int {\n    return 1\n}\nfun hidden() {}\npub struct Box { v: int }\n")
+        uri = self.open("from std.io import \nfun main() {}\n")
+        names = self.labels(uri, 0, 19)
+        self.assertLessEqual({"println", "eprintln", "write", "stdin", "Reader"}, names)
+        self.assertNotIn("slice", names)                 # not public
+        self.assertNotIn("fun", names)
+        uri = self.open("from .helper import Box, hel\nfun main() {}\n", "doc2.my")
+        self.assertEqual(self.labels(uri, 0, 28), {"helper", "Box"})
+        detail = [i for i in self.at("textDocument/completion", uri, 0, 28)["items"] if i["label"] == "helper"]
+        self.assertIn("-> int", detail[0].get("detail", ""))
+        # an alias is the user's own name: nothing to complete
+        uri = self.open("from .helper import helper as \nfun main() {}\n", "doc3.my")
+        self.assertEqual(self.labels(uri, 0, 30), set())
+
+
 GEO = "// geo\npub fun area(n: int) -> int {\n    return n * n\n}\n"
 SHAPES = ("from .geo import area\npub struct Square { side: int }\n"
           "pub fun square_area(s: Square) -> int {\n    return area(s.side)\n}\n")

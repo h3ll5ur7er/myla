@@ -14,6 +14,17 @@ pub fun exit(code: int32) {
     __exit(code)
 }
 
+// The value of the environment variable `name` the process started with
+// (`""` included), or `None` when there is no such variable (MYLA-243).
+#test("")[None]
+pub fun env(name: str) -> Option<str> {
+    let value = __getenv(name)
+    if __io_errno() != 0 {
+        return None
+    }
+    return Some(value)
+}
+
 // --- Subprocess execution (D29 follow-on) ---------------------------------
 //
 // `run` / `Command` spawn an external program, wait for it to finish, and

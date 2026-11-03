@@ -15,7 +15,8 @@ from std.io import write, eprintln
 from .checker import build_checker_decls
 from .codegen import new_codegen
 from .dwarf import read_gdb_script
-from .loader import load_program_opts, load_options, parse_package_flag, Loaded, default_stdlib_root, type_errors
+from .loader import load_program_opts, load_options, parse_package_flag, Loaded, type_errors
+from .stdroot import default_stdlib_root
 from .diag import render
 
 // How the assembly is generated: `debug`, DWARF debug information, so gdb
@@ -52,7 +53,7 @@ fun main() {
         eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--package name=dir]... [--root dir]")
         exit(2)
     }
-    var opts = load_options(default_stdlib_root(argv[0]))
+    var opts = load_options(default_stdlib_root())
     var mode = Mode { debug: false, emit_ir: false, frames: false }
     var j = 2
     while j < argv.len() {
