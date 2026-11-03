@@ -2,7 +2,7 @@
 id: MYLA-250
 title: Arguments and results in registers
 type: design
-status: backlog
+status: in-progress
 priority: medium
 labels: [backend, performance, calling-convention]
 ---
@@ -29,3 +29,25 @@ A design round first, part of [[MYLA-160]]'s calling-convention question, since 
   2. **A Myla register convention:** arguments in registers but the callee still popping stack words. That keeps `become` and the suspended frames of async functions (D90) as they are, but adds adapters at every boundary with C.
   3. **Registers for leaf and direct calls only:** a function the compiler sees all calls of (not taken as a value, not `pub`) gets register arguments; everything else keeps today's convention. Least churn, least gain.
 - **Recommendation:** option 1 with a rule for `become` (frames sized for the largest tail call, as Rust and Swift do with `musttail`). The adapters option 2 needs cost more over time than the one rule, and every new backend (D117) implements one convention instead of two. The owner decides; the frame-pointer omission for leaves (no `push %rbp` when nothing needs it) can go first, independently.
+
+## Wasm (2026-11-03)
+
+Wasm has no registers or stack a compiler controls: a function has typed parameters and results, and the engine allocates registers. So the registers-or-stack question doesn't arise there, and wasm's C convention (scalars as parameters, structs by pointer into linear memory, a shadow stack for slots whose address is taken) is the natural choice.
+
+Three details follow:
+- **A closure's environment** is a hidden IR parameter, mapped per backend: `call_indirect` needs exactly matching signatures, and there is no static-chain register on wasm.
+- **`become`** is `return_call` (wasm's tail calls, part of Wasm 3.0), so the stack-word rule doesn't apply there.
+- **Several results:** wasm's multiple results could later carry small tuples inside Myla.
+
+FFI on wasm means host imports, which know only numbers, so strings and lists cross as a pointer and a length: the explicit conversions [[MYLA-241]] already proposes.
+
+## Decision: D119 (2026-11-03)
+
+The owner chose option 1, as each target's C convention, with the three details above. The FFI comes later: the benchmarks ([[MYLA-242]]) and the de-risking ([[MYLA-160]]) come first.
+
+Steps, each verified by the bootstrap and the tests:
+- [ ] Register arguments and results for every Myla call: direct calls, aggregate results, function values (the environment in `%r10`), tail calls, async frames, the runtime's entry points and adapters, the debug information's parameter locations
+- [ ] The checker's rule for `become` with more stack words than the caller received
+- [ ] Measured: fib, Ackermann, the self-compile, all benchmarks against the baseline
+
+The frame pointer stays (frame cells, parameters and the debug information are addressed from `%rbp`). Leaving it out of leaf functions would save two instructions per call against a change to every address, so it isn't a first step after all. 16-byte stack alignment at calls matters only for calling C, so it comes with the FFI.
