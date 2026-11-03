@@ -3720,8 +3720,20 @@ impl CodeGen {
 
     // -- aggregates (structs / tuples) ------------------------------------
 
+    // `size` bytes from (%rsi) to (%rdi), through %rcx (clobbers %rcx, %rsi
+    // and %rdi). Up to 8 words as moves: `rep movsq` starts slowly (tens of
+    // cycles even for three words), which made matching on a small enum six
+    // times slower than C (MYLA-242).
     fun emit_copy(var self, size: int32) {
-        self.emit(format("movq ${}, %rcx", size / 8))
+        let words = size / 8
+        if words <= 8 {
+            for i in 0..words {
+                self.emit(format("movq {}(%rsi), %rcx", i * 8))
+                self.emit(format("movq %rcx, {}(%rdi)", i * 8))
+            }
+            return
+        }
+        self.emit(format("movq ${}, %rcx", words))
         self.emit("cld")
         self.emit("rep movsq")
     }
