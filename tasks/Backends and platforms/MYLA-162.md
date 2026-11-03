@@ -150,3 +150,8 @@ A read-only study of the executor in assembly before its port, the order:
 It needs a few more primitives: an atomic add (`lock xadd`), `pause`, and loads and stores marked as ordered so no later optimization caches them in the spin loops. The executor may not allocate (a failure is reached from the allocator's out-of-memory) nor trap holding a lock.
 
 **A bug it found, fixed:** `task.cancelled()` looked at the task of `__exec_cur`, the frame the executor resumed last. That frame can end and be freed while its task goes on in its caller; when a new child's frame took its memory and was cancelled, the parent looked cancelled natively (`true` on 1 and 4 workers, `false` in the interpreter). The executor now records the task's first frame when it resumes one (`__exec_task`, word 104 of a worker's block), which stays the same until control comes back. Regression test: `t17_cancelled_after_an_await` in the concurrency stress tests. The study also found `__actor_held` written but never read; it goes with the actor's port.
+
+## Step 9: the executor's start (2026-11-03)
+
+- `sched_init` (MYLA_SCHED) and `workers_count` (MYLA_THREADS, else the CPUs from `sched_getaffinity` into a static `__cpu_mask`) in `std.rt`, allocating nothing (they run before the arena is mapped): `rt_exec` lists the executor's routines std.rt has, the codegen requests them and `.set`s the runtime's names to them, as for the allocator.
+- **Checked against the assembly** on a program that counts its threads (`/proc/self/task`) and prints its tasks' order: the same count for no MYLA_THREADS, `0`, `1`, `3`, `33`, `abc`, an empty value, `100001` and `2x`, and the same order on one worker for `fifo`, `fifox`, `seed:`, `seed:1`, `seed:7`, a seed past 2^64 (it wraps) and `MYLA_SCHEDX`.

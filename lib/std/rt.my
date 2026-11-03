@@ -1017,3 +1017,91 @@ pub fun free_tasks(p: int64) {
     __store64(p, __load64(slot))
     __store64(slot, p)
 }
+
+// --- the executor --------------------------------------------------------------
+// What a program with tasks runs on (D92). These run before the arena is
+// mapped, so they allocate nothing.
+
+const SYS_SCHED_GETAFFINITY: int64 = 204
+const MAX_WORKERS: int64 = 32
+
+// The bytes after `prefix` in the first entry of the environment that starts
+// with it, 0 when none does.
+fun env_after(prefix: str) -> int64 {
+    let pp = __addr_of(prefix)
+    let n = __load64(pp)
+    var entry = __environ()
+    while true {
+        let e = __load64(entry)
+        if e == 0 {
+            return 0
+        }
+        if __equal_bytes(e, pp + 8, n) {
+            return e + n
+        }
+        entry += 8
+    }
+    return 0
+}
+
+// The number the decimal digits at `p` spell (wrapping), stopping once it is
+// past `limit`.
+fun digits_at(p: int64, limit: int64) -> int64 {
+    var n: int64 = 0
+    var q = p
+    while true {
+        let d = (__load8(q) as int64) - 48
+        if d < 0 || d > 9 || n > limit {
+            return n
+        }
+        n = n * 10 + d
+        q += 1
+    }
+    return n
+}
+
+// The order ready frames run in, from MYLA_SCHED (D110, MYLA-231): `fifo`
+// (1), `seed:N` (2, the generator seeded with N); anything else keeps the
+// default, the newest first (0).
+pub fun sched_init() {
+    let v = env_after("MYLA_SCHED=")
+    if v == 0 {
+        return
+    }
+    let word = __load32(v)
+    if word == 1868982630u32 && __load8(v + 4) == 0u8 {  // "fifo"
+        __store64(__rt_addr("__exec_sched"), 1)
+    } else if word == 1684366707u32 && __load8(v + 4) == 58u8 {  // "seed:"
+        __store64(__rt_addr("__exec_rng"), digits_at(v + 5, 9223372036854775807))
+        __store64(__rt_addr("__exec_sched"), 2)
+    }
+}
+
+// How many workers run the tasks: MYLA_THREADS when the environment has it,
+// else the CPUs this process may run on; at least 1, at most MAX_WORKERS.
+pub fun workers_count() -> int64 {
+    var n: int64 = 0
+    let v = env_after("MYLA_THREADS=")
+    if v != 0 {
+        n = digits_at(v, 100000)
+    } else {
+        let mask = __rt_addr("__cpu_mask")
+        let got = __syscall(SYS_SCHED_GETAFFINITY, 0, 128, mask)
+        var i: int64 = 0
+        while i < got {
+            var b = __load8(mask + i) as int64
+            while b != 0 {
+                b = b & (b - 1)
+                n += 1
+            }
+            i += 1
+        }
+    }
+    if n == 0 {
+        return 1
+    }
+    if n > MAX_WORKERS {
+        return MAX_WORKERS
+    }
+    return n
+}

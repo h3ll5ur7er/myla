@@ -1876,6 +1876,31 @@ impl CodeGen {
         return ("std$rt$alloc", "std$rt$free")
     }
 
+    // The executor's routines std.rt has (MYLA-162), with tasks: each the
+    // name the rest of the runtime calls and the function standing for it.
+    fun rt_exec(self) -> [(str, str)] {
+        var out: [(str, str)] = []
+        if !self.frames {
+            return out
+        }
+        for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count")] {
+            if self.has_func(p.1) {
+                out.push(p)
+            }
+        }
+        return out
+    }
+
+    // Whether std.rt has the executor's routine `name` (`rt_exec`).
+    fun rt_exec_has(self, name: str) -> bool {
+        for p in self.rt_exec() {
+            if p.0 == name {
+                return true
+            }
+        }
+        return false
+    }
+
     fun generate(var self) -> str {
         let en = self.entry_name()
         self.emit_runtime_prelude(en)
@@ -1889,6 +1914,9 @@ impl CodeGen {
             let names = self.rt_alloc_names()
             let a = self.request_fn(names.0, [])
             let fr = self.request_fn(names.1, [])
+        }
+        for p in self.rt_exec() {
+            let r = self.request_fn(p.1, [])
         }
         while self.fn_worklist.len() > 0 || self.lam_jobs.len() > 0 {
             if self.fn_worklist.len() > 0 {
@@ -1991,8 +2019,8 @@ impl CodeGen {
         out.push(".Lmsg_at:\n\t.quad 7\n\t.ascii \"\\n  --> \"")
         if self.frames {
             out.push(".Lmsg_stuck:\n\t.quad 48\n\t.ascii \"runtime error: every task waits for another one\\n\"")
-            out.push(".Lmyla_threads:\n\t.ascii \"MYLA_THREADS=\"")
-            out.push(".Lmyla_sched:\n\t.ascii \"MYLA_SCHED=\"")
+            if !self.rt_exec_has("__workers_count") { out.push(".Lmyla_threads:\n\t.ascii \"MYLA_THREADS=\"") }
+            if !self.rt_exec_has("__sched_init") { out.push(".Lmyla_sched:\n\t.ascii \"MYLA_SCHED=\"") }
         }
         for line in self.posdata { out.push(line) }
         for line in self.rodata { out.push(line) }
@@ -2052,6 +2080,9 @@ impl CodeGen {
             out.push(format("\t.skip {}", TLS_SIZE * MAX_WORKERS))
             out.push("__heap_base:")
             out.push("\t.skip 8")
+            // the CPUs this process may run on (`workers_count`)
+            out.push("__cpu_mask:")
+            out.push("\t.skip 128")
             // the order ready frames run in (`__sched_init`, D110): 0 the
             // newest first, 1 the oldest, 2 one chosen by the generator
             // `__exec_rng` (MYLA_SCHED=seed:N)
@@ -3028,131 +3059,135 @@ impl CodeGen {
         self.raw("\tpopq %rbx")
         self.raw("\tret")
         self.raw("")
-        // __sched_init: the scheduling order from MYLA_SCHED (D110,
-        // MYLA-231): `fifo` (1), `seed:N` (2, the generator seeded with N);
-        // anything else keeps the default, the newest first (0)
-        self.raw("__sched_init:")
-        self.raw("\tmovq __envp(%rip), %rsi")
-        self.raw(".Lsi_env:")
-        self.raw("\tmovq (%rsi), %rdi")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lsi_done")
-        self.raw("\tleaq .Lmyla_sched(%rip), %rcx")
-        self.raw("\txorq %rdx, %rdx")
-        self.raw(".Lsi_cmp:")
-        self.raw("\tmovb (%rcx,%rdx), %al")
-        self.raw("\tcmpb (%rdi,%rdx), %al")
-        self.raw("\tjne .Lsi_skip")
-        self.raw("\tincq %rdx")
-        self.raw("\tcmpq $11, %rdx")
-        self.raw("\tjb .Lsi_cmp")
-        self.raw("\taddq $11, %rdi")
-        // "fifo" and "seed", little-endian
-        self.raw("\tcmpl $0x6f666966, (%rdi)")
-        self.raw("\tjne .Lsi_seed")
-        self.raw("\tcmpb $0, 4(%rdi)")
-        self.raw("\tjne .Lsi_done")
-        self.raw("\tmovq $1, __exec_sched(%rip)")
-        self.raw("\tret")
-        self.raw(".Lsi_seed:")
-        self.raw("\tcmpl $0x64656573, (%rdi)")
-        self.raw("\tjne .Lsi_done")
-        self.raw("\tcmpb $58, 4(%rdi)")
-        self.raw("\tjne .Lsi_done")
-        self.raw("\taddq $5, %rdi")
-        self.raw("\txorq %rax, %rax")
-        self.raw(".Lsi_digit:")
-        self.raw("\tmovzbq (%rdi), %rcx")
-        self.raw("\tsubq $48, %rcx")
-        self.raw("\tcmpq $9, %rcx")
-        self.raw("\tja .Lsi_seeded")
-        self.raw("\timulq $10, %rax")
-        self.raw("\taddq %rcx, %rax")
-        self.raw("\tincq %rdi")
-        self.raw("\tjmp .Lsi_digit")
-        self.raw(".Lsi_seeded:")
-        self.raw("\tmovq %rax, __exec_rng(%rip)")
-        self.raw("\tmovq $2, __exec_sched(%rip)")
-        self.raw("\tret")
-        self.raw(".Lsi_skip:")
-        self.raw("\taddq $8, %rsi")
-        self.raw("\tjmp .Lsi_env")
-        self.raw(".Lsi_done:")
-        self.raw("\tret")
-        self.raw("")
-        // __workers_count: %eax = MYLA_THREADS when the environment has it,
-        // else the CPUs this process may run on (sched_getaffinity); at least
-        // 1, at most MAX_WORKERS
-        self.raw("__workers_count:")
-        self.raw("\tmovq __envp(%rip), %rsi")
-        self.raw(".Lwc_env:")
-        self.raw("\tmovq (%rsi), %rdi")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Lwc_cpus")
-        self.raw("\tleaq .Lmyla_threads(%rip), %rcx")
-        self.raw("\txorq %rdx, %rdx")
-        self.raw(".Lwc_cmp:")
-        self.raw("\tmovb (%rcx,%rdx), %al")
-        self.raw("\tcmpb (%rdi,%rdx), %al")
-        self.raw("\tjne .Lwc_skip")
-        self.raw("\tincq %rdx")
-        self.raw("\tcmpq $13, %rdx")
-        self.raw("\tjb .Lwc_cmp")
-        // the digits after `MYLA_THREADS=`
-        self.raw("\taddq $13, %rdi")
-        self.raw("\txorl %eax, %eax")
-        self.raw(".Lwc_digit:")
-        self.raw("\tmovzbl (%rdi), %ecx")
-        self.raw("\tsubl $48, %ecx")
-        self.raw("\tcmpl $9, %ecx")
-        self.raw("\tja .Lwc_clamp")
-        self.raw("\timull $10, %eax")
-        self.raw("\taddl %ecx, %eax")
-        self.raw("\tcmpl $100000, %eax")
-        self.raw("\tja .Lwc_clamp")
-        self.raw("\tincq %rdi")
-        self.raw("\tjmp .Lwc_digit")
-        self.raw(".Lwc_skip:")
-        self.raw("\taddq $8, %rsi")
-        self.raw("\tjmp .Lwc_env")
-        self.raw(".Lwc_cpus:")
-        self.raw("\tsubq $128, %rsp")
-        self.raw("\tmovq $204, %rax")
-        self.raw("\txorq %rdi, %rdi")
-        self.raw("\tmovq $128, %rsi")
-        self.raw("\tmovq %rsp, %rdx")
-        self.raw("\tsyscall")
-        self.raw("\tmovq %rax, %rsi")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\ttestq %rsi, %rsi")
-        self.raw("\tjle .Lwc_counted")
-        self.raw("\txorq %rdx, %rdx")
-        self.raw(".Lwc_byte:")
-        self.raw("\tmovzbl (%rsp,%rdx), %ecx")
-        self.raw(".Lwc_bit:")
-        self.raw("\ttestl %ecx, %ecx")
-        self.raw("\tjz .Lwc_bytedone")
-        self.raw("\tleal -1(%rcx), %edi")
-        self.raw("\tandl %edi, %ecx")
-        self.raw("\tincl %eax")
-        self.raw("\tjmp .Lwc_bit")
-        self.raw(".Lwc_bytedone:")
-        self.raw("\tincq %rdx")
-        self.raw("\tcmpq %rsi, %rdx")
-        self.raw("\tjb .Lwc_byte")
-        self.raw(".Lwc_counted:")
-        self.raw("\taddq $128, %rsp")
-        self.raw(".Lwc_clamp:")
-        self.raw("\ttestl %eax, %eax")
-        self.raw("\tjnz .Lwc_some")
-        self.raw("\tmovl $1, %eax")
-        self.raw(".Lwc_some:")
-        self.raw(format("\tcmpl ${}, %eax", MAX_WORKERS))
-        self.raw("\tjbe .Lwc_ok")
-        self.raw(format("\tmovl ${}, %eax", MAX_WORKERS))
-        self.raw(".Lwc_ok:")
-        self.raw("\tret")
-        self.raw("")
+        if !self.rt_exec_has("__sched_init") {
+            // __sched_init: the scheduling order from MYLA_SCHED (D110,
+            // MYLA-231): `fifo` (1), `seed:N` (2, the generator seeded with N);
+            // anything else keeps the default, the newest first (0)
+            self.raw("__sched_init:")
+            self.raw("\tmovq __envp(%rip), %rsi")
+            self.raw(".Lsi_env:")
+            self.raw("\tmovq (%rsi), %rdi")
+            self.raw("\ttestq %rdi, %rdi")
+            self.raw("\tjz .Lsi_done")
+            self.raw("\tleaq .Lmyla_sched(%rip), %rcx")
+            self.raw("\txorq %rdx, %rdx")
+            self.raw(".Lsi_cmp:")
+            self.raw("\tmovb (%rcx,%rdx), %al")
+            self.raw("\tcmpb (%rdi,%rdx), %al")
+            self.raw("\tjne .Lsi_skip")
+            self.raw("\tincq %rdx")
+            self.raw("\tcmpq $11, %rdx")
+            self.raw("\tjb .Lsi_cmp")
+            self.raw("\taddq $11, %rdi")
+            // "fifo" and "seed", little-endian
+            self.raw("\tcmpl $0x6f666966, (%rdi)")
+            self.raw("\tjne .Lsi_seed")
+            self.raw("\tcmpb $0, 4(%rdi)")
+            self.raw("\tjne .Lsi_done")
+            self.raw("\tmovq $1, __exec_sched(%rip)")
+            self.raw("\tret")
+            self.raw(".Lsi_seed:")
+            self.raw("\tcmpl $0x64656573, (%rdi)")
+            self.raw("\tjne .Lsi_done")
+            self.raw("\tcmpb $58, 4(%rdi)")
+            self.raw("\tjne .Lsi_done")
+            self.raw("\taddq $5, %rdi")
+            self.raw("\txorq %rax, %rax")
+            self.raw(".Lsi_digit:")
+            self.raw("\tmovzbq (%rdi), %rcx")
+            self.raw("\tsubq $48, %rcx")
+            self.raw("\tcmpq $9, %rcx")
+            self.raw("\tja .Lsi_seeded")
+            self.raw("\timulq $10, %rax")
+            self.raw("\taddq %rcx, %rax")
+            self.raw("\tincq %rdi")
+            self.raw("\tjmp .Lsi_digit")
+            self.raw(".Lsi_seeded:")
+            self.raw("\tmovq %rax, __exec_rng(%rip)")
+            self.raw("\tmovq $2, __exec_sched(%rip)")
+            self.raw("\tret")
+            self.raw(".Lsi_skip:")
+            self.raw("\taddq $8, %rsi")
+            self.raw("\tjmp .Lsi_env")
+            self.raw(".Lsi_done:")
+            self.raw("\tret")
+            self.raw("")
+        }
+        if !self.rt_exec_has("__workers_count") {
+            // __workers_count: %eax = MYLA_THREADS when the environment has it,
+            // else the CPUs this process may run on (sched_getaffinity); at least
+            // 1, at most MAX_WORKERS
+            self.raw("__workers_count:")
+            self.raw("\tmovq __envp(%rip), %rsi")
+            self.raw(".Lwc_env:")
+            self.raw("\tmovq (%rsi), %rdi")
+            self.raw("\ttestq %rdi, %rdi")
+            self.raw("\tjz .Lwc_cpus")
+            self.raw("\tleaq .Lmyla_threads(%rip), %rcx")
+            self.raw("\txorq %rdx, %rdx")
+            self.raw(".Lwc_cmp:")
+            self.raw("\tmovb (%rcx,%rdx), %al")
+            self.raw("\tcmpb (%rdi,%rdx), %al")
+            self.raw("\tjne .Lwc_skip")
+            self.raw("\tincq %rdx")
+            self.raw("\tcmpq $13, %rdx")
+            self.raw("\tjb .Lwc_cmp")
+            // the digits after `MYLA_THREADS=`
+            self.raw("\taddq $13, %rdi")
+            self.raw("\txorl %eax, %eax")
+            self.raw(".Lwc_digit:")
+            self.raw("\tmovzbl (%rdi), %ecx")
+            self.raw("\tsubl $48, %ecx")
+            self.raw("\tcmpl $9, %ecx")
+            self.raw("\tja .Lwc_clamp")
+            self.raw("\timull $10, %eax")
+            self.raw("\taddl %ecx, %eax")
+            self.raw("\tcmpl $100000, %eax")
+            self.raw("\tja .Lwc_clamp")
+            self.raw("\tincq %rdi")
+            self.raw("\tjmp .Lwc_digit")
+            self.raw(".Lwc_skip:")
+            self.raw("\taddq $8, %rsi")
+            self.raw("\tjmp .Lwc_env")
+            self.raw(".Lwc_cpus:")
+            self.raw("\tsubq $128, %rsp")
+            self.raw("\tmovq $204, %rax")
+            self.raw("\txorq %rdi, %rdi")
+            self.raw("\tmovq $128, %rsi")
+            self.raw("\tmovq %rsp, %rdx")
+            self.raw("\tsyscall")
+            self.raw("\tmovq %rax, %rsi")
+            self.raw("\txorl %eax, %eax")
+            self.raw("\ttestq %rsi, %rsi")
+            self.raw("\tjle .Lwc_counted")
+            self.raw("\txorq %rdx, %rdx")
+            self.raw(".Lwc_byte:")
+            self.raw("\tmovzbl (%rsp,%rdx), %ecx")
+            self.raw(".Lwc_bit:")
+            self.raw("\ttestl %ecx, %ecx")
+            self.raw("\tjz .Lwc_bytedone")
+            self.raw("\tleal -1(%rcx), %edi")
+            self.raw("\tandl %edi, %ecx")
+            self.raw("\tincl %eax")
+            self.raw("\tjmp .Lwc_bit")
+            self.raw(".Lwc_bytedone:")
+            self.raw("\tincq %rdx")
+            self.raw("\tcmpq %rsi, %rdx")
+            self.raw("\tjb .Lwc_byte")
+            self.raw(".Lwc_counted:")
+            self.raw("\taddq $128, %rsp")
+            self.raw(".Lwc_clamp:")
+            self.raw("\ttestl %eax, %eax")
+            self.raw("\tjnz .Lwc_some")
+            self.raw("\tmovl $1, %eax")
+            self.raw(".Lwc_some:")
+            self.raw(format("\tcmpl ${}, %eax", MAX_WORKERS))
+            self.raw("\tjbe .Lwc_ok")
+            self.raw(format("\tmovl ${}, %eax", MAX_WORKERS))
+            self.raw(".Lwc_ok:")
+            self.raw("\tret")
+            self.raw("")
+        }
         // myla___yield(frame): a turn for the others, the frame queued again
         // (its resume point stored before this tail call, D92)
         self.raw("myla___yield:")
@@ -5079,8 +5114,11 @@ impl CodeGen {
             self.raw("\tret")
             self.raw("")
         }
-        // the allocator in std.rt, without tasks (MYLA-162): the names
-        // the rest of the runtime calls stand for its functions
+        // the executor's routines and the allocator in std.rt (MYLA-162):
+        // the names the rest of the runtime calls stand for its functions
+        for p in self.rt_exec() {
+            self.raw(format("\t.set {}, myla_{}", p.0, p.1))
+        }
         if self.rt_alloc() {
             let names = self.rt_alloc_names()
             self.raw(format("\t.set __alloc, myla_{}", names.0))
