@@ -4834,6 +4834,11 @@ impl CodeGen {
         self.raw(format("\tmovq %rdi, {}", self.tv("__run_stderr_val")))
         self.raw("\tret")
         self.raw("")
+        // __argv(): the program's arguments as the kernel gave them
+        self.raw("__argv_of:")
+        self.raw("\tmovq __argv(%rip), %rax")
+        self.raw("\tret")
+        self.raw("")
         // __environ(): the environment the process started with
         self.raw("__environ:")
         self.raw("\tmovq __envp(%rip), %rax")

@@ -479,3 +479,51 @@ pub fun run(program: str, argv: [str]) -> [uint8] {
     __set_run_stderr(err)
     return out
 }
+
+// --- standard input ----------------------------------------------------------
+
+// `__read`: what one read of at most `n` bytes of `fd` gives (retried on
+// EINTR): empty at the end of the input, for `n <= 0`, or with the errno.
+pub fun read(fd: int, n: int) -> str {
+    __set_io_errno(0)
+    var want = n as int64
+    if want < 0 {
+        want = 0
+    }
+    let cell = __alloc(want + 8)
+    var got: int64 = 0
+    if want > 0 {
+        got = __syscall(SYS_READ, fd as int64, cell + 8, want)
+        while got == EINTR {
+            got = __syscall(SYS_READ, fd as int64, cell + 8, want)
+        }
+        if got < 0 {
+            __set_io_errno(-got)
+            got = 0
+        }
+    }
+    __store64(cell, got)
+    return __str_of(cell)
+}
+
+// `__poll`: 1 when a read of `fd` won't block (input, its end, or an error),
+// 0 when `timeout_ms` (negative: none) ran out, -1 with the errno when poll
+// failed; retried on EINTR.
+pub fun poll(fd: int, timeout_ms: int) -> int {
+    __set_io_errno(0)
+    let pfd = __alloc(8)
+    __store64(pfd, ((fd as int64) & LOW32) | (1i64 << 32))  // POLLIN
+    var r = __syscall(SYS_POLL, pfd, 1, timeout_ms as int64)
+    while r == EINTR {
+        r = __syscall(SYS_POLL, pfd, 1, timeout_ms as int64)
+    }
+    __free(pfd)
+    if r < 0 {
+        __set_io_errno(-r)
+        return -1
+    }
+    if r > 0 {
+        return 1
+    }
+    return 0
+}

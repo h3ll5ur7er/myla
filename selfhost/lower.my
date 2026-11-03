@@ -3418,7 +3418,7 @@ impl Lower {
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" { self.add(Inst.Rt(d, nm, vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" { return self.owned_value(cg, d, t) }
             return d
         }
@@ -3761,7 +3761,7 @@ fun char_cast_checked(src: Type, t: Type) -> bool {
 pub fun myla_runtime_function(name: str) -> str {
     if name == "__str_concat" { return "std$rt$str_concat" }
     if name == "__str_eq" { return "std$rt$str_eq" }
-    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" {
+    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" {
         // `__stat` -> `std$rt$stat`
         var sb = StringBuilder()
         sb.append(name, 2, name.len())

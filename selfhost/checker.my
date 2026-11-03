@@ -712,7 +712,7 @@ fun is_builtin_func(name: str) -> bool {
 #test("__load8")[true]
 #test("__load")[false]
 pub fun is_raw_memory_primitive(name: str) -> bool {
-    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr"
+    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv"
 }
 
 #test("sum")[false]
@@ -5594,7 +5594,8 @@ impl Checker {
         // NUL-terminated `name=value` strings' addresses, a null one last);
         // `__set_run_status(exit, signal, errno)` and `__set_run_stderr(bytes)`
         // (what `__run_exit_code`, `__run_signal`, `__run_errno` and
-        // `__run_stderr` give next)
+        // `__run_stderr` give next); `__argv()` (the program's arguments: the
+        // address of their C strings' addresses, a null one last)
         if is_raw_memory_primitive(name) {
             let i64 = Type.TInt(64, true)
             var want: [Type] = [i64]
@@ -5603,7 +5604,7 @@ impl Checker {
             if name == "__copy_bytes" || name == "__equal_bytes" { want = [i64, i64, i64] }
             if name == "__syscall" { want = [i64, i64, i64, i64] }
             if name == "__addr_of" { want = [Type.TStr] }
-            if name == "__environ" { want = [] }
+            if name == "__environ" || name == "__argv" { want = [] }
             if name == "__set_run_status" { want = [i64, i64, i64] }
             if name == "__set_run_stderr" { want = [Type.TList(Type.TInt(8, false))] }
             if args.len() != want.len() { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes {} argument(s)", name, want.len()))) }
