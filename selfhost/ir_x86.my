@@ -196,6 +196,35 @@ impl CodeGen {
         self.in_frame = false
     }
 
+    // The load of the `width`-byte scalar at `src` into %rax (D120); a
+    // `float32` element, 4 bytes, widened to the double a temporary holds.
+    fun emit_load(var self, width: int32, t: Type, src: str) {
+        if width == 4 && is_tfloat32(t) {
+            self.uses_float = true
+            self.emit(format("cvtss2sd {}, %xmm0", src))
+            self.emit("movq %xmm0, %rax")
+            return
+        }
+        self.emit(load_insn(width, t, src))
+    }
+
+    // The store of the low `width` bytes of `v` (an immediate or a
+    // register), of type `t`, at `dst` (D120); a `float32` element narrowed
+    // from the double a temporary holds.
+    fun emit_store(var self, width: int32, t: Type, v: str, dst: str) {
+        if width == 4 && is_tfloat32(t) {
+            self.uses_float = true
+            if text_has_xmm(v) { self.emit(format("cvtsd2ss {}, %xmm0", v)) }
+            else {
+                self.emit(format("movq {}, %xmm0", v))
+                self.emit("cvtsd2ss %xmm0, %xmm0")
+            }
+            self.emit(format("movss %xmm0, {}", dst))
+            return
+        }
+        self.emit(store_insn(width, v, dst))
+    }
+
     // The parameters into their homes (D119): the words that came in
     // registers (and a lambda's environment, in %r10) stored into their
     // frame cells, those living in registers moved there all at once, then
@@ -430,23 +459,23 @@ impl CodeGen {
                 // (D120)
                 let base = self.reg_of(p)
                 let t = f.temps[d]
-                if self.temp_frame[p] != 0 && self.in_frame { self.emit(load_insn(width, t, format("{}(%r15)", self.temp_frame[p] + off))) }
-                else if self.temp_frame[p] != 0 { self.emit(load_insn(width, t, format("{}(%rbp)", self.temp_frame[p] + off))) }
-                else if base != "" { self.emit(load_insn(width, t, format("{}({})", off, base))) }
+                if self.temp_frame[p] != 0 && self.in_frame { self.emit_load(width, t, format("{}(%r15)", self.temp_frame[p] + off)) }
+                else if self.temp_frame[p] != 0 { self.emit_load(width, t, format("{}(%rbp)", self.temp_frame[p] + off)) }
+                else if base != "" { self.emit_load(width, t, format("{}({})", off, base)) }
                 else {
                     self.load_temp(p, "rax", temp_base)
-                    self.emit(load_insn(width, t, format("{}(%rax)", off)))
+                    self.emit_load(width, t, format("{}(%rax)", off))
                 }
                 self.store_temp(d, temp_base)
             },
             Inst.StoreAt(p, off, v, width) => {
                 let base = self.reg_of(p)
-                if self.temp_frame[p] != 0 && self.in_frame { self.emit(store_insn(width, self.value_operand(v, temp_base), format("{}(%r15)", self.temp_frame[p] + off))) }
-                else if self.temp_frame[p] != 0 { self.emit(store_insn(width, self.value_operand(v, temp_base), format("{}(%rbp)", self.temp_frame[p] + off))) }
-                else if base != "" { self.emit(store_insn(width, self.value_operand(v, temp_base), format("{}({})", off, base))) }
+                if self.temp_frame[p] != 0 && self.in_frame { self.emit_store(width, f.temps[v], self.value_operand(v, temp_base), format("{}(%r15)", self.temp_frame[p] + off)) }
+                else if self.temp_frame[p] != 0 { self.emit_store(width, f.temps[v], self.value_operand(v, temp_base), format("{}(%rbp)", self.temp_frame[p] + off)) }
+                else if base != "" { self.emit_store(width, f.temps[v], self.value_operand(v, temp_base), format("{}({})", off, base)) }
                 else {
                     self.load_temp(p, "rcx", temp_base)
-                    self.emit(store_insn(width, self.value_operand(v, temp_base), format("{}(%rcx)", off)))
+                    self.emit_store(width, f.temps[v], self.value_operand(v, temp_base), format("{}(%rcx)", off))
                 }
             },
             Inst.Copy(d, src, size) => {
@@ -1027,7 +1056,7 @@ impl CodeGen {
                 let at = self.elem_operand(is_str, stride)
                 match b {
                     Inst.LoadAt(d, q, off, width) => {
-                        self.emit(load_insn(width, f.temps[d], at))
+                        self.emit_load(width, f.temps[d], at)
                         self.store_temp(d, temp_base)
                     },
                     Inst.Load8(d, q) => {
@@ -2459,3 +2488,9 @@ fun store_insn(width: int32, v: str, dst: str) -> str {
     return format("mov{} {}, {}", suffix, narrow_operand(v, width), dst)
 }
 
+// Whether the operand `v` is an %xmm register.
+#test("%xmm3")[true]
+#test("%rax")[false]
+fun text_has_xmm(v: str) -> bool {
+    return v.len() > 4 && v[1] == 'x' && v[2] == 'm' && v[3] == 'm'
+}

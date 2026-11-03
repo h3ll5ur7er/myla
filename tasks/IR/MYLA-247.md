@@ -2,7 +2,7 @@
 id: MYLA-247
 title: Packed list elements
 type: improvement
-status: in-progress
+status: review
 priority: medium
 labels: [backend, runtime, performance, memory]
 ---
@@ -14,9 +14,9 @@ The sieve over 40 million flags peaked at 817 MB, against C's 40 MB:
 
 The 209,000 page faults cost about as much system time as the whole C program runs. Strings are bytes already.
 
-- [ ] Elements stored at their natural size in lists (`bool`, `uint8`/`int8` 1 byte, 16-bit 2, 32-bit and `float32` 4, `char` 4), loaded and stored with the matching width and extended into the 8-byte slot on load
-- [ ] Everything that walks a list's elements: the IR's element instructions ([[Architecture/IR]]), the runtime's list routines, copy-on-write copies, `==` where it applies, the gdb printers and DWARF descriptions ([[MYLA-66]])
-- [ ] Measured: the sieve's memory and time ([[MYLA-242]]), and the self-compile
+- [x] Elements stored at their natural size in lists (`bool`, `uint8`/`int8` 1 byte, 16-bit 2, 32-bit and `float32` 4, `char` 4), loaded and stored with the matching width and extended into the 8-byte slot on load
+- [x] Everything that walks a list's elements: the IR's element instructions ([[Architecture/IR]]), the runtime's list routines, copy-on-write copies, `==` where it applies, the gdb printers and DWARF descriptions ([[MYLA-66]])
+- [x] Measured: the sieve's memory and time ([[MYLA-242]]), and the self-compile
 
 ## Plan (2026-11-03, from the optimisation pass of [[MYLA-242]])
 
@@ -43,4 +43,11 @@ D120 decided the form: a width on the IR's `load` and `store` at an address.
 - **Measured:** the sieve 1,531 → 371 ms (4.1×) and 817 → 102 MB (C with Myla's semantics: 292 ms, 40 MB); Game of Life 1.08× faster, 23 → 14 MB. The self-compile: the generated code runs 0.15% fewer instructions (the same compiler source built by both compilers); the compiler's own new work costs 0.08%.
 - **A pitfall on the way:** written as `self.add(self.load_at(…))`, an argument computed by a method of the same receiver, the lowering copied the IR's lists of blocks and instructions on write (2.3% more instructions compiling itself); a mutating `add_load` that computes the width itself doesn't. Simple programs of the same shape didn't reproduce it.
 
-Step 2 (the types the runtime builds lists of, and the other integer widths) follows.
+
+## Step 2: every scalar element (2026-11-03)
+
+- **Sizes:** `elem_size` gives an integer or float its width and a `char` four bytes. A `float32` element is converted on its way in and out (`cvtsd2ss`/`movss`, `cvtss2sd`), as a temporary holds a `float32` as a double (`emit_load`, `emit_store`).
+- **The runtime's lists:** `chars()` builds a `[char]` of 4-byte elements (`__str_chars`), a process's output a `[uint8]` of bytes (`__u8list_new`, `__u8list_append`); `__map_keys` already stores by width. Nothing in the runtime reads a narrow list.
+- **Debug information:** an element narrower than a word is described at its size (a signed integer otherwise is its whole sign-extended slot), so gdb reads `[int]`, `[float32]` and the others right.
+- **Tests:** `test_packed_lists.py` adds lists of 8-, 16-, 32- and 64-bit integers (sign extension, wrapping at the width, compound assignment on an element), `char` (a literal and `chars()`), `float32`, `float64`, a map's integer keys and a process's output bytes, natively against the interpreter, whose output Python's computation matches, with `movsbq`/`movzwl`/`movslq` element loads. 905 tests pass; the bootstrap reaches its fixed point (the compiler's own `[int]` lists are 4 bytes an element now).
+- **Measured** ([[Development/Benchmarks]]): the sieve 4.21× as fast (817 → 102 MB), closures 1.39× (124 → 62 MB), fannkuch 1.17×, Game of Life 1.06×, quicksort 1.05× (87 → 75 MB); against C with Myla's semantics 2.51× → 2.12× on the geometric mean. The self-compile: 0.95% fewer instructions, the same time, 135 → 131 MB.

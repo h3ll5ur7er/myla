@@ -596,8 +596,11 @@ impl CodeGen {
     // The elements of a list of `e`s, at its cell + 16.
     #test(codegen_on("[int]"), Type.TFloat(64))[".Ldty1"]
     fun dbg_items(var self, e: Type) -> str {
-        let elem = self.dbg_element(e)
-        return self.dbg_array(elem, self.elem_size(e), 16)
+        // an element narrower than a word is described at its size (D120)
+        let size = self.elem_size(e)
+        var elem = self.dbg_element(e)
+        if size < 8 { elem = self.dbg_base(e, size) }
+        return self.dbg_array(elem, size, 16)
     }
 
     // The heap cell of a `str`, list, builder or map, for a pointer to it.
@@ -1361,13 +1364,19 @@ impl CodeGen {
         }
     }
 
-    // The size of an element of a list of `t`s: a `bool` at its natural
-    // size (D120, MYLA-247), anything else as stored in an aggregate.
+    // The size of an element of a list of `t`s: a scalar at its natural
+    // size (D120, MYLA-247: a `bool` 1 byte, an integer or float its width,
+    // a `char` 4), anything else as stored in an aggregate.
     #test(codegen_on("[int]"), Type.TBool)[1]
+    #test(codegen_on("[int]"), Type.TInt(16, true))[2]
+    #test(codegen_on("[int]"), Type.TChar)[4]
     #test(codegen_on("[int]"), Type.TStr)[8]
     fun elem_size(self, t: Type) -> int32 {
         return match t {
             Type.TBool => 1,
+            Type.TInt(w, sg) => w / 8,
+            Type.TChar => 4,
+            Type.TFloat(w) => w / 8,
             _ => self.stored_size(t),
         }
     }
@@ -5845,12 +5854,11 @@ impl CodeGen {
     // stdout and stderr concurrently with poll(2), and reaps the child, storing
     // the stderr `[uint8]` cell / exit code / signal / spawn errno in the
     // `__run_*_val` globals. `__u8list_new`/`__u8list_append` are growable
-    // `[uint8]` list helpers (one byte per 8-byte element slot).
+    // `[uint8]` list helpers (a byte an element, D120).
     fun emit_run_runtime(var self) {
         self.raw("__u8list_new:")
         self.raw("\tpushq %r12")
         self.raw("\tmovq %rdi, %r12")
-        self.raw("\tshlq $3, %rdi")
         self.raw("\taddq $16, %rdi")
         self.raw("\tcall __alloc")
         self.raw("\tmovq $0, (%rax)")
@@ -5885,7 +5893,6 @@ impl CodeGen {
         self.raw("\tjb .Lap_dbl")
         self.raw("\tpushq %rcx")
         self.raw("\tmovq %rcx, %rdi")
-        self.raw("\tshlq $3, %rdi")
         self.raw("\taddq $16, %rdi")
         self.raw("\tcall __alloc")
         self.raw("\tpopq %rcx")
@@ -5898,10 +5905,10 @@ impl CodeGen {
         self.raw("\ttestq %rcx, %rcx")
         self.raw("\tjz .Lap_freed")
         self.raw(".Lap_cp:")
-        self.raw("\tmovq (%rsi), %rdx")
-        self.raw("\tmovq %rdx, (%rdi)")
-        self.raw("\taddq $8, %rsi")
-        self.raw("\taddq $8, %rdi")
+        self.raw("\tmovzbl (%rsi), %edx")
+        self.raw("\tmovb %dl, (%rdi)")
+        self.raw("\tincq %rsi")
+        self.raw("\tincq %rdi")
         self.raw("\tdecq %rcx")
         self.raw("\tjnz .Lap_cp")
         self.raw(".Lap_freed:")
@@ -5910,14 +5917,14 @@ impl CodeGen {
         self.raw("\tmovq %r15, %r12")
         self.raw(".Lap_copy:")
         self.raw("\tleaq 16(%r12), %rdi")
-        self.raw("\tleaq (%rdi,%rbx,8), %rdi")
+        self.raw("\taddq %rbx, %rdi")
         self.raw("\txorq %rcx, %rcx")
         self.raw(".Lap_bcopy:")
         self.raw("\tcmpq %r14, %rcx")
         self.raw("\tjae .Lap_bdone")
-        self.raw("\tmovzbq (%r13,%rcx), %rax")
-        self.raw("\tmovq %rax, (%rdi)")
-        self.raw("\taddq $8, %rdi")
+        self.raw("\tmovzbl (%r13,%rcx), %eax")
+        self.raw("\tmovb %al, (%rdi)")
+        self.raw("\tincq %rdi")
         self.raw("\tincq %rcx")
         self.raw("\tjmp .Lap_bcopy")
         self.raw(".Lap_bdone:")
@@ -6596,7 +6603,8 @@ impl CodeGen {
         self.raw("\tleave")
         self.raw("\tret")
         self.raw("")
-        // __str_chars: rdi = str cell -> rax = [char] list: the scalar of each
+        // __str_chars: rdi = str cell -> rax = [char] list (4 bytes an element,
+        // D120): the scalar of each
         // well-formed UTF-8 sequence, and U+FFFD for each byte that isn't part of
         // one (a str read from a file needn't be UTF-8, MYLA-12).
         self.raw("__str_chars:")
@@ -6612,7 +6620,7 @@ impl CodeGen {
         self.raw("\tmovq (%rbx), %r12")
         self.raw("\tleaq 8(%rbx), %r13")
         self.raw("\tmovq %r12, %rax")
-        self.raw("\tshlq $3, %rax")
+        self.raw("\tshlq $2, %rax")
         self.raw("\taddq $16, %rax")
         self.raw("\tmovq %rax, %rdi")
         self.raw("\tcall __alloc")
@@ -6689,8 +6697,8 @@ impl CodeGen {
         self.raw("\tincq %r15")
         self.raw(".Lsc_store:")
         self.raw("\tmovq -48(%rbp), %rax")
-        self.raw("\tleaq 16(%r14,%rax,8), %rdx")
-        self.raw("\tmovq %rcx, (%rdx)")
+        self.raw("\tleaq 16(%r14,%rax,4), %rdx")
+        self.raw("\tmovl %ecx, (%rdx)")
         self.raw("\tincq %rax")
         self.raw("\tmovq %rax, -48(%rbp)")
         self.raw("\tjmp .Lsc_loop")

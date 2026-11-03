@@ -151,6 +151,24 @@ Timed interleaved against the same sources built with the stack convention (7 ru
 - **The self-compile:** within the spread of the stack convention (medians of 0.72–0.75 s either way, over three series of 7 to 11 runs); 0.6% more instructions from the convention, 0.4% more from the compiler's own new work (the checker's rule, the scan for unread parameters).
 - **What closes fib's and Ackermann's gap to C** is the optimizer's work, not the convention: gcc `-O2` keeps everything in registers, leaves frames out and turns the recursion partly into loops ([[MYLA-251]]).
 
+## Progress: packed list elements (2026-11-03)
+
+[[MYLA-247]] (D120): a list stores its elements at their natural size, a `bool` in one byte, an `int` in four, where every element took eight bytes. `benchmarks/results/2026-11-03-after-247.json` holds the full results; against the run after [[MYLA-250]]:
+
+| Benchmark | Before | After | Speed-up | Peak memory | Against C with Myla's semantics |
+|---|---:|---:|---:|---:|---:|
+| sieve | 1,531 ms | 363 ms | **4.21×** | 817 → 102 MB | 1.21× |
+| closures | 674 ms | 486 ms | **1.39×** | 124 → 62 MB | 1.65× |
+| fannkuch | 407 ms | 347 ms | 1.17× | 14 MB | 1.28× |
+| game of life | 924 ms | 874 ms | 1.06× | 23 → 14 MB | 2.97× |
+| quicksort | 332 ms | 317 ms | 1.05× | 87 → 75 MB | 1.31× |
+| the other seven | | | 0.97–1.09× (spread) | unchanged | |
+
+- **Overall:** against C with Myla's semantics at gcc `-O2`, 3.06× at the baseline, 2.57× after the first pass, 2.51× after MYLA-250, **2.12×** now (geometric means); the same programs run 1.64× as fast as at the baseline.
+- **The sieve** was the largest memory gap (21× C's peak); it is 2.6× now, from the capacity's doubling (2²⁶ bytes) and the previous buffer held during the last copy, and 1.21× C's time.
+- **The self-compile** (the same compiler source built both ways): 0.95% fewer instructions, the same time, peak memory 135 → 131 MB.
+- **Still open:** fib, Ackermann and n-body (4–8× C) are calls and loops the optimizer of D117 (3) would improve ([[MYLA-251]], D123); binary trees' and quicksort's memory (2.4×, 4.4× C's) come from the allocator's holding and copies.
+
 ## How the first round went
 
 The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).

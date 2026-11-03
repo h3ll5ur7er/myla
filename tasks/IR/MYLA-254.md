@@ -75,7 +75,7 @@ Sources on wasm's 64-bit memory: [SpiderMonkey, "Is Memory64 actually worth usin
 
 The owner took the four recommendations: D120 (memory widths), D121 (a pointer kind), D122 (sizes from a target description), D123 (SSA with block parameters, after a prototype). The work goes in the order above:
 
-- [ ] Widths on the memory instructions; packed list elements ([[MYLA-247]]): the widths and `[bool]` done, the other element types next
+- [x] Widths on the memory instructions; packed list elements ([[MYLA-247]])
 - [ ] The pointer kind
 - [ ] The target description
 - [ ] The mem2reg prototype and its measurements; then SSA with block parameters
