@@ -4789,11 +4789,10 @@ impl CodeGen {
         self.raw("\tleaq 8(%r15), %rdi")
         self.raw("\tleaq 8(%rbx), %rsi")
         self.raw("\tmovq %r13, %rcx")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
+        self.emit_byte_copy(true)
         self.raw("\tleaq 8(%r12), %rsi")
         self.raw("\tmovq %r14, %rcx")
-        self.raw("\trep movsb")
+        self.emit_byte_copy(true)
         self.raw("\tmovq %r15, %rax")
         self.raw("\tpopq %r15")
         self.raw("\tpopq %r14")
@@ -4836,9 +4835,8 @@ impl CodeGen {
         self.raw("\tleaq 8(%rax), %rdi")
         self.raw("\tmovq %rbx, %rsi")
         self.raw("\tmovq %r12, %rcx")
-        self.raw("\tcld")
         self.raw("\tpushq %rax")
-        self.raw("\trep movsb")
+        self.emit_byte_copy(true)
         self.raw("\tpopq %rax")
         self.raw("\taddq $48, %rsp")
         self.raw("\tpopq %r12")
@@ -7134,6 +7132,31 @@ impl CodeGen {
         self.raw("")
     }
 
+    // %rcx bytes from (%rsi) to (%rdi), leaving both past the bytes and
+    // clobbering %rax and %rcx: 8 at a time, then the tail, with `rep movsb`
+    // only for a long copy, where it is fast. Its start costs tens of cycles,
+    // which made short strings slower than C (MYLA-252). `raw` for the
+    // runtime prelude.
+    fun emit_byte_copy(var self, raw: bool) {
+        let rep = self.label()
+        let words = self.label()
+        let bytes = self.label()
+        let done = self.label()
+        let lines = ["cmpq $512, %rcx", format("jae {}", rep),
+            format("{}:", words), "cmpq $8, %rcx", format("jb {}", bytes), "movq (%rsi), %rax", "movq %rax, (%rdi)",
+            "addq $8, %rsi", "addq $8, %rdi", "subq $8, %rcx", format("jmp {}", words),
+            format("{}:", bytes), "testq %rcx, %rcx", format("jz {}", done), "movb (%rsi), %al", "movb %al, (%rdi)",
+            "incq %rsi", "incq %rdi", "decq %rcx", format("jmp {}", bytes),
+            format("{}:", rep), "cld", "rep movsb", format("{}:", done)]
+        for line in lines {
+            if raw {
+                if ends_colon(line) { self.raw(line) } else { self.raw("\t" + line) }
+            } else {
+                self.emit(line)
+            }
+        }
+    }
+
     // StringBuilder cell: [len:8][cap:8][bytes…] (cap is a byte capacity).
     fun emit_sb_runtime(var self) {
         // __sb_append_bytes: rdi=&holder, rsi=src bytes, rdx=count. Grows/reallocs
@@ -7169,8 +7192,7 @@ impl CodeGen {
         self.raw("\tmovq %r14, %rsi")
         self.raw("\tleaq 16(%r15), %rcx")
         self.raw("\tpushq %rax")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
+        self.emit_byte_copy(true)
         self.raw("\tpopq %rax")
         // Recompute new cap (r14 still references the old cell) and store it.
         self.raw("\tmovq 8(%r14), %rdx")
@@ -7193,8 +7215,7 @@ impl CodeGen {
         self.raw("\taddq %r15, %rdi")
         self.raw("\tmovq %r12, %rsi")
         self.raw("\tmovq %r13, %rcx")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
+        self.emit_byte_copy(true)
         self.raw("\tleaq (%r15,%r13), %rax")
         self.raw("\tmovq %rax, (%r14)")
         self.raw("\tpopq %r15")
@@ -7339,8 +7360,7 @@ impl CodeGen {
         self.emit("movq %rbx, %rsi")
         self.emit("movq %r13, %rdi")
         self.emit("movq %r12, %rcx")
-        self.emit("cld")
-        self.emit("rep movsb")
+        self.emit_byte_copy(false)
         if self.owns_heap(et) {
             self.emit("movq (%r13), %r12")
             self.emit("xorq %r14, %r14")
@@ -7529,8 +7549,7 @@ impl CodeGen {
         self.emit("movq %rbx, %rsi")
         self.emit("movq %rax, %rdi")
         self.emit("movq %r12, %rcx")
-        self.emit("cld")
-        self.emit("rep movsb")
+        self.emit_byte_copy(false)
         self.emit("popq %rax")
         self.emit("decq -8(%rbx)")
         self.emit("popq %r12")
