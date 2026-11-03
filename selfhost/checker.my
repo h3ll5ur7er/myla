@@ -704,7 +704,15 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield"
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || is_raw_memory_primitive(name)
+}
+
+// The raw-memory primitives the runtime written in Myla needs (MYLA-162's
+// prototype, D117): addresses as `int64`, in native code only.
+#test("__load8")[true]
+#test("__load")[false]
+pub fun is_raw_memory_primitive(name: str) -> bool {
+    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes"
 }
 
 #test("sum")[false]
@@ -5573,6 +5581,30 @@ impl Checker {
         if name == "__getcwd" {
             if args.len() > 0 { return Err(terr_at(e.line, e.col, e.sp, "__getcwd() takes no arguments")) }
             return Ok(Some(Type.TStr))
+        }
+        // raw memory, for the runtime written in Myla (MYLA-162's prototype):
+        // `__load8(p)`, `__load64(p)`, `__store8(p, v)`, `__store64(p, v)`,
+        // `__alloc(n)` (a cell's address), `__addr_of(s)` (a string's cell,
+        // borrowed), `__str_of(p)` (a cell taken over as a string),
+        // `__copy_bytes(dst, src, n)` (a bulk copy each backend does natively)
+        if is_raw_memory_primitive(name) {
+            let i64 = Type.TInt(64, true)
+            var want: [Type] = [i64]
+            if name == "__store8" { want = [i64, Type.TInt(8, false)] }
+            if name == "__store64" { want = [i64, i64] }
+            if name == "__copy_bytes" { want = [i64, i64, i64] }
+            if name == "__addr_of" { want = [Type.TStr] }
+            if args.len() != want.len() { return Err(terr_at(e.line, e.col, e.sp, format("{}() takes {} argument(s)", name, want.len()))) }
+            var k = 0
+            while k < want.len() {
+                let a_t = self.expect_value(args[k], Some(want[k]))?
+                if !type_eq(a_t, want[k]) { return Err(terr_at(args[k].line, args[k].col, args[k].sp, format("{}() takes a '{}' here, found '{}'", name, type_name(want[k]), type_name(a_t)))) }
+                k = k + 1
+            }
+            if name == "__load8" { return Ok(Some(Type.TInt(8, false))) }
+            if name == "__store8" || name == "__store64" || name == "__copy_bytes" { return Ok(None) }
+            if name == "__str_of" { return Ok(Some(Type.TStr)) }
+            return Ok(Some(i64))
         }
         // std.math's primitives (MYLA-248)
         if name == "__sqrt" || name == "__f64_bits" {

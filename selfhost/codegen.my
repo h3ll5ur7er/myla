@@ -15,7 +15,7 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
+from .checker import Checker, Type, is_raw_memory_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .anf import Norm, new_norm
@@ -4800,6 +4800,13 @@ impl CodeGen {
         self.raw("\txorq %rax, %rax")
         self.raw("\tret")
         self.raw("")
+        // __copy_bytes(dst, src, n): a bulk copy for the runtime written in
+        // Myla (MYLA-162's prototype)
+        self.raw("__copy_bytes:")
+        self.raw("\tmovq %rdx, %rcx")
+        self.emit_byte_copy(true)
+        self.raw("\tret")
+        self.raw("")
         self.raw("__str_concat:")
         self.raw("\tpushq %rbp")
         self.raw("\tmovq %rsp, %rbp")
@@ -8254,6 +8261,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__sqrt" || nm == "__f64_bits" || nm == "__f64_from_bits" { return true }
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
     if nm == "__task_cancelled" { return true }
+    if is_raw_memory_primitive(nm) { return true }
     return false
 }
 
