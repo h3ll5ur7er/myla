@@ -1626,6 +1626,8 @@ impl CodeGen {
         // per position, how many before it call something or use %r8-%r11
         // (`clobbers`), which values in those registers can't live across
         var cpre: [int32] = [0]
+        // the same with the copies, whose `rep movs` uses %rsi and %rdi too
+        var spre: [int32] = [0]
         // per position, whether it is a call reading all its operands before
         // it clobbers anything (`reads_then_calls`), and the instruction
         var callpos: [bool] = []
@@ -1644,8 +1646,14 @@ impl CodeGen {
             for inst in f.blocks[b].insts {
                 tat.push(tv.len())
                 var c = cpre[cpre.len() - 1]
-                if clobbers(inst) { c = c + 1 }
+                var sc = spre[spre.len() - 1]
+                let kind = clobber_kind(inst)
+                if kind == 2 {
+                    c = c + 1
+                    sc = sc + 1
+                } else if kind == 1 { sc = sc + 1 }
                 cpre.push(c)
+                spre.push(sc)
                 callpos.push(reads_then_calls(inst))
                 callinst.push(inst)
                 // a variable read where it is used is read there (`temp_src`)
@@ -1674,6 +1682,7 @@ impl CodeGen {
             }
             tat.push(tv.len())
             cpre.push(cpre[cpre.len() - 1])
+            spre.push(spre[spre.len() - 1])
             callpos.push(false)
             callinst.push(Inst.Init(-1))
             for u in term_uses(f.blocks[b].term) {
@@ -1737,16 +1746,19 @@ impl CodeGen {
             }
             i = i + 1
         }
-        // the callee-saved registers, then %r8-%r11 for a value no position
-        // of its interval clobbers (MYLA-134), which cost no save
-        var names = ["rbx", "r12", "r13", "r14", "r15", "r8", "r9", "r10", "r11"]
+        // the callee-saved registers, then %rsi, %rdi and %r8-%r11 for a
+        // value no position of its interval clobbers (MYLA-134; for %rsi and
+        // %rdi no copy either, MYLA-162), which cost no save; %r8-%r11 last,
+        // as the rule for a value a call reads goes by their places
+        var names = ["rbx", "r12", "r13", "r14", "r15", "rsi", "rdi", "r8", "r9", "r10", "r11"]
         // the callee-saved registers come first; %r15 holds a frame
         // function's frame (D90)
         var ncallee = 5
         if f.frame {
-            names = ["rbx", "r12", "r13", "r14", "r8", "r9", "r10", "r11"]
+            names = ["rbx", "r12", "r13", "r14", "rsi", "rdi", "r8", "r9", "r10", "r11"]
             ncallee = 4
         }
+        let si = ncallee      // %rsi's place, %rdi's after it
         let nr = names.len()
         var owner: [int32] = []
         while owner.len() < nr { owner.push(-1) }
@@ -1765,6 +1777,8 @@ impl CodeGen {
                 }
                 var top = ncallee
                 if cpre[last[v] + 1] - cpre[first[v]] == 0 { top = nr }
+                // %rsi and %rdi only for a value no copy crosses
+                let si_ok = spre[last[v] + 1] - spre[first[v]] == 0
                 // a free register, a caller-saved one first
                 var pick = -1
                 // a value read last by a call, nothing clobbering before it,
@@ -1784,7 +1798,7 @@ impl CodeGen {
                 }
                 r = top - 1
                 while r >= 0 && pick < 0 {
-                    if owner[r] < 0 { pick = r }
+                    if owner[r] < 0 && (si_ok || r < si || r > si + 1) { pick = r }
                     r = r - 1
                 }
                 if pick < 0 && top > 0 {
@@ -1792,7 +1806,7 @@ impl CodeGen {
                     var low = 0
                     r = 1
                     while r < top {
-                        if weight[owner[r]] < weight[owner[low]] { low = r }
+                        if (si_ok || r < si || r > si + 1) && weight[owner[r]] < weight[owner[low]] { low = r }
                         r = r + 1
                     }
                     if weight[owner[low]] < weight[v] {
@@ -2350,6 +2364,7 @@ fun filled_from(insts: [Inst], at: int32, s: int32) -> [int32] {
     return out
 }
 
+
 // Whether the code of `inst` calls something (a function, a runtime helper,
 // a retain or drop walk) or uses %r8-%r11 itself: a value in one of those
 // registers can't live across it (MYLA-134). A trap never returns.
@@ -2357,33 +2372,40 @@ fun filled_from(insts: [Inst], at: int32, s: int32) -> [int32] {
 #test(Inst.Init(0))[false]
 #test(Inst.Init(1))[false]
 fun clobbers(inst: Inst) -> bool {
+    return clobber_kind(inst) == 2
+}
+
+// 2 when `inst` clobbers the caller-saved registers (`clobbers`), 1 when it
+// is a copy between memory blocks, whose `rep movs` or moves go through %rsi
+// and %rdi, else 0 (one match: passing an instruction copies it).
+fun clobber_kind(inst: Inst) -> int32 {
     return match inst {
-        Inst.Const(d, t, v) => false,
-        Inst.Str(d, text) => false,
-        Inst.Load(d, s) => false,
-        Inst.Store(s, v) => false,
-        Inst.Addr(d, s) => false,
-        Inst.Offset(d, p, off) => false,
-        Inst.LoadAt(d, p, off, width) => false,
-        Inst.StoreAt(p, off, v, width) => false,
-        Inst.Copy(d, src, size) => false,
-        Inst.Bin(d, op, lt, rt, a, b, pos) => float_rem(op, lt),
-        Inst.Cmp(d, op, t, a, b) => false,
-        Inst.Un(d, op, t, a) => false,
-        Inst.Mov(d, a) => false,
-        Inst.Cast(d, from_t, to_t, a) => false,
-        Inst.Init(s) => false,
-        Inst.Elem(d, c, i, stride, is_str, pos) => false,
-        Inst.Load8(d, p) => false,
-        Inst.Check(v, kind, pos) => false,
-        Inst.Global(d, sym, width) => false,
-        Inst.Moved(s) => false,
-        Inst.Label(d, sym) => false,
-        Inst.Loc(p) => false,
-        Inst.Bind(name, s) => false,
-        Inst.Scope(open) => false,
-        Inst.Rt(d, name, args) => !(name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits"),
-        _ => true,
+        Inst.Const(d, t, v) => 0,
+        Inst.Str(d, text) => 0,
+        Inst.Load(d, s) => 0,
+        Inst.Store(s, v) => 0,
+        Inst.Addr(d, s) => 0,
+        Inst.Offset(d, p, off) => 0,
+        Inst.LoadAt(d, p, off, width) => 0,
+        Inst.StoreAt(p, off, v, width) => 0,
+        Inst.Copy(d, src, size) => 1,
+        Inst.Bin(d, op, lt, rt, a, b, pos) => if float_rem(op, lt) { 2 } else { 0 },
+        Inst.Cmp(d, op, t, a, b) => 0,
+        Inst.Un(d, op, t, a) => 0,
+        Inst.Mov(d, a) => 0,
+        Inst.Cast(d, from_t, to_t, a) => 0,
+        Inst.Init(s) => 0,
+        Inst.Elem(d, c, i, stride, is_str, pos) => 0,
+        Inst.Load8(d, p) => 0,
+        Inst.Check(v, kind, pos) => 0,
+        Inst.Global(d, sym, width) => 0,
+        Inst.Moved(s) => 0,
+        Inst.Label(d, sym) => 0,
+        Inst.Loc(p) => 0,
+        Inst.Bind(name, s) => 0,
+        Inst.Scope(open) => 0,
+        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" { 0 } else { 2 },
+        _ => 2,
     }
 }
 

@@ -1109,6 +1109,41 @@ class SelfHostedCodegenParity(unittest.TestCase):
         chars = self._function_asm(asm, "std$rt$str_chars")
         self.assertRegex(chars, r"movzbl 0\(%r[0-9a-z]+,%r[0-9a-z]+\), %eax", chars)
 
+    def test_a_leaf_loop_keeps_six_values_in_caller_saved_registers(self) -> None:
+        # MYLA-162: %rsi and %rdi hold values too (no call or copy in their
+        # interval), so a loop of six values touches no frame cell
+        source = (
+            "fun spin(n: int64, a0: int64, b0: int64) -> int64 {\n"
+            "    var a = a0\n"
+            "    var b = b0\n"
+            "    var c: int64 = 3\n"
+            "    var d: int64 = 5\n"
+            "    var i: int64 = 0\n"
+            "    while i < n {\n"
+            "        a = a + b\n"
+            "        b = b ^ c\n"
+            "        c = c + d\n"
+            "        d = d - a\n"
+            "        i += 1\n"
+            "    }\n"
+            "    return a + b + c + d\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(spin(10, 1, 2))\n"
+            "    print(spin(1000, -5, 9))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("-578\n2717256091452271059\n", 0))
+        body = self._function_asm(asm, "spin")
+        head = re.findall(r"jmp (\.L\d+)\n", body)[-1]
+        loop = body[body.index(head + ":"):body.rindex("jmp " + head)]
+        self.assertNotIn("(%rbp)", loop, body)
+        self.assertRegex(loop, r"%r[sd]i", body)
+
     def test_scalars_live_in_callee_saved_registers(self) -> None:
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each
