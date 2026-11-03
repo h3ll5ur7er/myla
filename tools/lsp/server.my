@@ -24,6 +24,7 @@ from .workspace import Workspace, Entry, new_workspace
 from .semantic import semantic_tokens, token_types, token_modifiers
 from .resolve import Resolution, Outline, Completion, Def, DefKind, resolve, resolve_at, at_position, same_def, is_global, render_local
 from .projects import Context, context_of
+from .imports import import_spot, module_candidates, module_exports
 
 const DEBOUNCE_MS: int32 = 400
 
@@ -546,6 +547,30 @@ impl Server {
             None => { return completion_list(items) },
         }
         let pos = position_of(params)
+        // inside an import: modules, or a module's public names (MYLA-243)
+        let current = match get(self.docs, d.uri) {
+            Some(t) => t,
+            None => d.text,
+        }
+        let lines = lines_of(current)
+        if pos.line >= 0 && pos.line < lines.len() {
+            let spot = import_spot(before_cursor(lines[pos.line], pos.character))
+            if spot.kind == 1 {
+                for name in module_candidates(spot, d.path, self.context(d.path).opts) {
+                    items.push(Json.Object([("label", Json.Str(name)), ("kind", Json.Int(9))]))
+                }
+                return completion_list(items)
+            }
+            if spot.kind == 3 { return completion_list(items) }
+            if spot.kind == 2 {
+                for s in module_exports(spot, d.path, self.context(d.path).opts) {
+                    var members: [(str, Json)] = [("label", Json.Str(s.name)), ("kind", Json.Int(completion_kind(s.kind)))]
+                    if s.detail != "" { members.push(("detail", Json.Str(s.detail))) }
+                    items.push(Json.Object(members))
+                }
+                return completion_list(items)
+            }
+        }
         let ctx = self.completion_context(d, pos)
         var seen: [str: bool] = [:]
         if ctx.found && (ctx.known || !ctx.member) {
@@ -611,6 +636,22 @@ impl Server {
         }
         return path_uri(f)
     }
+}
+
+// The start of `line` up to the LSP position `character` (UTF-16 code
+// units: a character above U+FFFF counts two).
+#test("from std.", 5)["from "]
+#test("😀ab", 3)["😀a"]
+fun before_cursor(line: str, character: int32) -> str {
+    var sb = StringBuilder()
+    var units = 0
+    for c in line.chars() {
+        if units >= character { break }
+        units = units + 1
+        if (c as int32) > 65535 { units = units + 1 }
+        sb.append(f"{c}")
+    }
+    return sb.build()
 }
 
 // The text of `path`: an open document's, the embedded standard library's

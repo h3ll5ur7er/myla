@@ -165,6 +165,14 @@ class Installed(unittest.TestCase):
         line = source["text"].split("\n")[found["range"]["start"]["line"]]
         self.assertIn("fun println", line)
         self.assertIsNone(request("myla/stdSource", {"uri": "myla-std:/std/nope.my"}))
+        # completion in imports, from the embedded library
+        for text, character, want in [("from std.\n", 9, {"io", "json", "fs"}),
+                                      ("from std.io import \n", 19, {"println", "stdin"})]:
+            client.send("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2},
+                                                   "contentChanges": [{"text": text + "fun main() {}\n"}]})
+            got = request("textDocument/completion", {"textDocument": {"uri": uri},
+                                                      "position": {"line": 0, "character": character}})
+            self.assertLessEqual(want, {i["label"] for i in got["items"]}, text)
 
 
 if __name__ == "__main__":

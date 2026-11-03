@@ -52,4 +52,12 @@ The owner installed `myla` by symlinking `build/myla` into `/usr/bin` and ran `m
   - `check-seed.sh` fails, as it should, when `lib/` changes and a bootstrap rewrites the committed module.
   - The bootstrap reaches its fixed point; the seed is current.
   - The extension's typecheck, lint and tests pass (55; its activation test checks that the `myla-std` provider is registered).
+- **After the owner tried it (2026-11-03).**
+  - Symlinked `myla` and `myla-lsp` worked without `--stdlib`, and hover on imported functions worked.
+  - Ctrl+click did nothing. The extension came from master's CI, so it had no `myla-std:` document provider; this branch's extension has one.
+  - `from std.` completed only VS Code's words from the file: the server had no completion inside imports at all, for std or the project. It has now (`tools/lsp/imports.my`, see [[Architecture/Editor-tooling]]):
+    - modules after `from`/`import` and each dot, by the loader's rules, the embedded library's from its list of files;
+    - a module's public names, with their signatures, after `from <module> import`;
+    - nothing after `as`.
+  - Tests first: `test_modules_after_from_and_import` and `test_public_names_after_import` in the request scenarios (with the stdlib in a directory), and completion in `test_installed` (the embedded library). They failed with keywords and workspace words; with the change all 154 language server and installed tests pass, and `imports.my`'s 20 `#test` cases.
 - **Docs and decision.** D118; [[Getting-started]], [[Architecture/Module-loader]], [[Architecture/Editor-tooling]], [[Architecture/Self-hosted-compiler]], [[Development/Bootstrap]], [[Language/Standard-library]] (`env`), `AGENTS.md` and the myla skill.
