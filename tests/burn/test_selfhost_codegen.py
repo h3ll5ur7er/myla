@@ -1011,6 +1011,193 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertEqual(body.count("\tset"), 1, body)
         self.assertNotIn("movzbq %al", body.replace("setg %al\n\tmovzbq %al", ""), body)
 
+    def test_logical_conditions_are_branches(self) -> None:
+        # MYLA-162: `&&`, `||` and `!` in the condition of an `if`, a `while`
+        # or a match guard jump straight to where the result leads, with no
+        # bool made in between (no 0/1 constant, no setcc)
+        source = (
+            "fun pick(a: int, b: int) -> int {\n"
+            "    var n = 0\n"
+            "    if a > 0 && !(b > 0) || a == 7 { n = n + 5 }\n"
+            "    if !(a > 2 || b > 2) { n = n + 20 }\n"
+            "    var i = a\n"
+            "    while i < 9 && (i != 4 || b == 3) { i = i + 2 }\n"
+            "    match b {\n"
+            "        3 if a < 0 || a > 6 => { n = n + 300 },\n"
+            "        _ => {},\n"
+            "    }\n"
+            "    return n * 16 + i\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(pick(1, 0))\n"
+            "    print(pick(7, 3))\n"
+            "    print(pick(0, 0))\n"
+            "    print(pick(-2, 3))\n"
+            "    print(pick(2, 5))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("409\n4889\n324\n4810\n4\n", 0))
+        body = self._function_asm(asm, "pick")
+        self.assertNotIn("\tset", body, body)
+        self.assertNotIn("$1, %", body, body)
+
+    def test_a_product_by_a_constant_is_one_imul(self) -> None:
+        # MYLA-162: `a * k` from a register is one three-operand `imul`, into
+        # the result's register, into %rax, or in place for `x = x * k`; each
+        # width wraps as before
+        source = (
+            "fun scale(a: int64, b: int, c: uint32, n: int) -> int64 {\n"
+            "    var p: int64 = 1\n"
+            "    var i = 0\n"
+            "    while i < n {\n"
+            "        p = p * 10\n"
+            "        i = i + 1\n"
+            "    }\n"
+            "    let q = a * 7 + p\n"
+            "    let r = b * -3\n"
+            "    let s = c * 3000000u32\n"
+            "    return q + r as int64 + s as int64\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(scale(5, 4, 2u32, 3))\n"
+            "    print(scale(-9223372036854775807, 1000000000, 1500u32, 18))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("6001023\n-8223372035354775801\n", 0))
+        body = self._function_asm(asm, "scale")
+        for k in ["10", "7", "-3", "3000000"]:
+            self.assertRegex(body, r"imul[lq] \$" + k + r", %r[0-9a-z]+, %r[0-9a-z]+\n", body)
+        self.assertNotIn(", %rax, %rax", body, body)
+
+    def test_shifts_widenings_and_sums_as_addresses(self) -> None:
+        # MYLA-162: a shift by a constant is an immediate (not through %cl),
+        # a widening cast of an unsigned value or to a signed type re-extends
+        # nothing, and each still wraps as before; std.rt's `str_chars`
+        # (`chars()`) loads its bytes through a sum folded into the address
+        source = (
+            "fun mix(a: int64, b: uint8, c: int8, d: uint32) -> int64 {\n"
+            "    let x = (a << 6) ^ (a >> 3) ^ ((d >> 31) as int64)\n"
+            "    let y = b as uint32 + 1\n"
+            "    let z = c as int64 * 3\n"
+            "    let w = c as uint16\n"
+            "    return x + y as int64 + z + w as int64\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(mix(5, 255u8, -7i8, 4294967295u32))\n"
+            "    print(mix(-9223372036854775807, 0u8, 127i8, 7u32))\n"
+            "    print(\"héλ€😀\".chars().len())\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("66085\n-1152921504606846403\n5\n", 0))
+        body = self._function_asm(asm, "mix")
+        self.assertNotIn("%cl", body, body)
+        for shift in ["shlq $6, %rax", "sarq $3, %rax", "shrq $31, %rax"]:
+            self.assertIn(shift, body, body)
+        self.assertNotIn("movzbl %al, %eax\n\tmovl %eax, %eax", body, body)
+        chars = self._function_asm(asm, "std$rt$str_chars")
+        self.assertRegex(chars, r"movzbl 0\(%r[0-9a-z]+,%r[0-9a-z]+\), %eax", chars)
+
+    def test_a_leaf_loop_keeps_six_values_in_caller_saved_registers(self) -> None:
+        # MYLA-162: %rsi and %rdi hold values too (no call or copy in their
+        # interval), so a loop of six values touches no frame cell
+        source = (
+            "fun spin(n: int64, a0: int64, b0: int64) -> int64 {\n"
+            "    var a = a0\n"
+            "    var b = b0\n"
+            "    var c: int64 = 3\n"
+            "    var d: int64 = 5\n"
+            "    var i: int64 = 0\n"
+            "    while i < n {\n"
+            "        a = a + b\n"
+            "        b = b ^ c\n"
+            "        c = c + d\n"
+            "        d = d - a\n"
+            "        i += 1\n"
+            "    }\n"
+            "    return a + b + c + d\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(spin(10, 1, 2))\n"
+            "    print(spin(1000, -5, 9))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("-578\n2717256091452271059\n", 0))
+        body = self._function_asm(asm, "spin")
+        head = re.findall(r"jmp (\.L\d+)\n", body)[-1]
+        loop = body[body.index(head + ":"):body.rindex("jmp " + head)]
+        self.assertNotIn("(%rbp)", loop, body)
+        self.assertRegex(loop, r"%r[sd]i", body)
+
+    def test_while_true_tests_nothing(self) -> None:
+        # MYLA-162: `while true` jumps back to its body, with no constant
+        # made and tested on each turn
+        source = (
+            "fun count(n: int) -> int {\n"
+            "    var i = 0\n"
+            "    while true {\n"
+            "        i = i + 3\n"
+            "        if i > n { break }\n"
+            "    }\n"
+            "    return i\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(count(10))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("12\n", 0))
+        body = self._function_asm(asm, "count")
+        self.assertNotIn("testq", body, body)
+        self.assertNotIn("$1, %", body, body)
+
+    def test_arguments_are_moved_as_if_at_once(self) -> None:
+        # MYLA-162: a value may sit in an argument register up to the call
+        # that reads it, so the arguments are one parallel move: swapped and
+        # rotated parameters reach the callee in their new places
+        source = (
+            "fun g(a: int64, b: int64, c: int64) -> int64 {\n"
+            "    return a * 100 + b * 10 + c\n"
+            "}\n"
+            "fun swap(x: int64, y: int64, z: int64) -> int64 {\n"
+            "    return g(y, x, z)\n"
+            "}\n"
+            "fun rotate(x: int64, y: int64, z: int64) -> int64 {\n"
+            "    return g(z, x, y) + g(y, z, x) * 1000\n"
+            "}\n"
+            "fun twice(x: int64, y: int64) -> int64 {\n"
+            "    return g(y, y, x)\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(swap(1, 2, 3))\n"
+            "    print(rotate(1, 2, 3))\n"
+            "    print(twice(4, 5))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("213\n231312\n554\n", 0))
+
     def test_scalars_live_in_callee_saved_registers(self) -> None:
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each

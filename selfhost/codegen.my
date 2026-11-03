@@ -15,7 +15,7 @@ from .tokens import no_span
 from std.num import f64_literal_bits, f32_round_bits
 from std.fs import current_dir
 from .loader import Span
-from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
+from .checker import Checker, Type, is_raw_memory_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .anf import Norm, new_norm
@@ -201,6 +201,7 @@ pub struct CodeGen {
     norm: Norm,
     save_base: int32,               // MYLA-126: the saved registers' cells start below it
     arg_words: int32,               // D119: the argument words the function received on the stack
+    frameless: bool,                // MYLA-162: the function being emitted sets up no frame
     // MYLA-127: per function (by its signature's name), which parameters its
     // body keeps as a whole value (`keeps`); such a parameter of a scalar
     // type that owns heap memory is passed owned (`owned_param`)
@@ -297,7 +298,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
 }
 
@@ -3622,6 +3623,17 @@ impl CodeGen {
             self.float_to_int(tgt)
             return
         }
+        // a register holds a value extended from its type's width, so
+        // widening an unsigned one, or a signed one to a signed type, keeps
+        // it as it is (MYLA-162)
+        let widens = match src {
+            Type.TInt(w1, s1) => match tgt {
+                Type.TInt(w2, s2) => w1 < w2 && (!s1 || s2),
+                _ => false,
+            },
+            _ => false,
+        }
+        if widens { return }
         self.wrap(tgt)
     }
 
@@ -3840,7 +3852,7 @@ impl CodeGen {
 
     // -- maps / strings / chars -------------------------------------------
 
-    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[24]
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[32]
     // `[state:8][key:8][value][rank:8]`: the rank is the key's place in the
     // order of insertion, 0 … count - 1 (D105, MYLA-179)
     fun map_slot_size(self, mt: Type) -> int32 { return 24 + self.stored_size(map_val(mt)) }
@@ -4798,6 +4810,88 @@ impl CodeGen {
         self.raw("\tret")
         self.raw(".Lse_ne:")
         self.raw("\txorq %rax, %rax")
+        self.raw("\tret")
+        self.raw("")
+        // __syscall(n, a, b, c): Linux's platform layer for the runtime written
+        // in Myla (MYLA-162): the call's number and three arguments moved
+        // into the kernel's registers; the result, a negative errno on a
+        // failure
+        self.raw("__syscall:")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tmovq %rsi, %rdi")
+        self.raw("\tmovq %rdx, %rsi")
+        self.raw("\tmovq %rcx, %rdx")
+        self.raw("\txorl %r10d, %r10d")
+        self.raw("\tsyscall")
+        self.raw("\tret")
+        self.raw("")
+        // __set_io_errno(e): the errno the I/O primitives report (a worker's
+        // own with tasks)
+        self.raw("__set_io_errno:")
+        self.raw(format("\tmovq %rdi, {}", self.tv("__io_errno_val")))
+        self.raw("\tret")
+        self.raw("")
+        // __set_run_status(exit, signal, errno), __set_run_stderr(bytes): what
+        // the `__run_*` primitives give after `std.rt`'s `run`; the stderr
+        // list's reference is the variable's, which `__run_stderr` hands over
+        self.raw("__set_run_status:")
+        self.raw(format("\tmovl %edi, {}", self.tv("__run_exit_val")))
+        self.raw(format("\tmovl %esi, {}", self.tv("__run_signal_val")))
+        self.raw(format("\tmovl %edx, {}", self.tv("__run_errno_val")))
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__set_run_stderr:")
+        self.raw("\tincq -8(%rdi)")
+        self.raw(format("\tmovq %rdi, {}", self.tv("__run_stderr_val")))
+        self.raw("\tret")
+        self.raw("")
+        // __argv(): the program's arguments as the kernel gave them
+        self.raw("__argv_of:")
+        self.raw("\tmovq __argv(%rip), %rax")
+        self.raw("\tret")
+        self.raw("")
+        // __environ(): the environment the process started with
+        self.raw("__environ:")
+        self.raw("\tmovq __envp(%rip), %rax")
+        self.raw("\tret")
+        self.raw("")
+        // __copy_bytes(dst, src, n): a bulk copy for the runtime written in
+        // Myla (MYLA-162's prototype)
+        self.raw("__copy_bytes:")
+        self.raw("\tmovq %rdx, %rcx")
+        self.emit_byte_copy(true)
+        self.raw("\tret")
+        self.raw("")
+        // __equal_bytes(p, q, n): whether n bytes at p and q are equal, eight
+        // at a time (MYLA-162's bulk comparison)
+        self.raw("__equal_bytes:")
+        self.raw("\tcmpq $8, %rdx")
+        self.raw("\tjb .Leb_tail")
+        self.raw(".Leb_words:")
+        self.raw("\tmovq (%rdi), %rax")
+        self.raw("\tcmpq (%rsi), %rax")
+        self.raw("\tjne .Leb_no")
+        self.raw("\taddq $8, %rdi")
+        self.raw("\taddq $8, %rsi")
+        self.raw("\tsubq $8, %rdx")
+        self.raw("\tcmpq $8, %rdx")
+        self.raw("\tjae .Leb_words")
+        self.raw(".Leb_tail:")
+        self.raw("\ttestq %rdx, %rdx")
+        self.raw("\tjz .Leb_yes")
+        self.raw(".Leb_bytes:")
+        self.raw("\tmovzbl (%rdi), %eax")
+        self.raw("\tcmpb (%rsi), %al")
+        self.raw("\tjne .Leb_no")
+        self.raw("\tincq %rdi")
+        self.raw("\tincq %rsi")
+        self.raw("\tdecq %rdx")
+        self.raw("\tjnz .Leb_bytes")
+        self.raw(".Leb_yes:")
+        self.raw("\tmovl $1, %eax")
+        self.raw("\tret")
+        self.raw(".Leb_no:")
+        self.raw("\txorl %eax, %eax")
         self.raw("\tret")
         self.raw("")
         self.raw("__str_concat:")
@@ -8254,6 +8348,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__sqrt" || nm == "__f64_bits" || nm == "__f64_from_bits" { return true }
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
     if nm == "__task_cancelled" { return true }
+    if is_raw_memory_primitive(nm) { return true }
     return false
 }
 
@@ -8601,7 +8696,7 @@ pub fun int_signed(t: Type) -> bool {
 
 #test(Type.TInt(8, false))[8]
 #test(Type.TInt(32, true))[32]
-fun int_width_cg(t: Type) -> int32 {
+pub fun int_width_cg(t: Type) -> int32 {
     return match t { Type.TInt(w, s) => w, _ => 64 }
 }
 

@@ -63,6 +63,7 @@ fun main() {
         exit(2)
     }
     var opts = load_options(default_stdlib_root())
+    opts.runtime = true
     var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false }
     var j = 2
     while j < argv.len() {

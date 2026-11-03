@@ -9,7 +9,7 @@
 
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, Decl, DeclKind, FunData, Param, MatchArm, Pattern, PatternKind, FieldPat, BindElem, ExprOrBlock, ElseTail, FieldInit, MapEntry, Attribute, TypeExpr, TypeKind, bind_elems
 from .tokens import SrcSpan, no_span
-from .checker import Checker, Type, checker_on, builtin_method, builtin_method_name
+from .checker import Checker, Type, is_raw_memory_primitive, checker_on, builtin_method, builtin_method_name
 from .anf import Norm, new_norm, stmt_suspends, body_suspends
 from .util import cp_utf8
 from std.num import f64_literal_bits, f32_round_bits, float_from_bits, pow2, format_float
@@ -2758,6 +2758,10 @@ impl Interp {
         if nm == "__getcwd" { return Value.VStr(__getcwd()) }
         if nm == "__getenv" { return Value.VStr(__getenv(as_str(self.eval(args[0])))) }
         if nm == "__sqrt" { return Value.VFloat(__sqrt(as_float(self.eval(args[0])))) }
+        if is_raw_memory_primitive(nm) {
+            self.fail(e, format("'{}' reads and writes raw memory, which only native code does", nm))
+            return Value.VUnit
+        }
         if nm == "__f64_bits" { return Value.VInt(__f64_bits(as_float(self.eval(args[0]))) as int64) }
         if nm == "__f64_from_bits" { return Value.VFloat(__f64_from_bits(as_int(self.eval(args[0])) as uint64)) }
         if nm == "__write_file" {

@@ -29,7 +29,7 @@
 
 from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
-from .checker import Type, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
+from .checker import Type, is_raw_memory_primitive, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
 from .codegen import codegen_on, may_write_expr, is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
 from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -472,6 +472,15 @@ impl Lower {
         return 8
     }
 
+    // A runtime helper's call: the function of the runtime written in Myla
+    // (`std.rt`, MYLA-162) when the program has it (a native build) and it
+    // takes nothing owned, else the assembly routine.
+    fun rt_call(var self, cg: CodeGen, d: int32, name: str, args: [int32]) {
+        let f = myla_runtime_function(name)
+        if f != "" && cg.has_func(f) && !cg.owning.contains(f) { self.add(Inst.Call(d, f, args)) }
+        else { self.add(Inst.Rt(d, name, args)) }
+    }
+
     // `d`, the address of a list element of `size` bytes, marked for the
     // loads and stores through it when it is narrower than a word (D120).
     fun mark_elem(var self, d: int32, size: int32) {
@@ -844,6 +853,37 @@ impl Lower {
         return v
     }
 
+    // Go to `yes` when the condition `e` holds, else to `no`: `&&`, `||` and
+    // `!` become branches, with no boolean in between; any other condition is
+    // evaluated (`cond`) and tested.
+    fun branch(var self, cg: CodeGen, e: Expr, yes: int32, no: int32) {
+        match e.kind {
+            ExprKind.Binary(op, l, r) => {
+                if op == "&&" || op == "||" {
+                    let mid = self.new_block()
+                    if op == "&&" { self.branch(cg, l, mid, no) } else { self.branch(cg, l, yes, mid) }
+                    self.start(mid)
+                    self.branch(cg, r, yes, no)
+                    return
+                }
+            },
+            ExprKind.Unary(op, x) => {
+                if op == "!" {
+                    self.branch(cg, x, no, yes)
+                    return
+                }
+            },
+            // `while true`: a jump, nothing tested
+            ExprKind.BoolLit(b) => {
+                if b { self.finish(Term.Jmp(yes)) } else { self.finish(Term.Jmp(no)) }
+                return
+            },
+            _ => {},
+        }
+        let v = self.cond(cg, e)
+        self.finish(Term.Br(v, yes, no))
+    }
+
     // --- statements -------------------------------------------------------------
 
     fun block(var self, cg: CodeGen, b: Block) {
@@ -929,10 +969,9 @@ impl Lower {
                 let head = self.new_block()
                 self.finish(Term.Jmp(head))
                 self.start(head)
-                let v = self.cond(cg, c)
                 let body_b = self.new_block()
                 let end = self.new_block()
-                self.finish(Term.Br(v, body_b, end))
+                self.branch(cg, c, body_b, end)
                 self.start(body_b)
                 self.loops.push(LoopTarget { cont: head, brk: end, owners: self.owners.len(), temps: self.temps.len() })
                 self.block(cg, body)
@@ -1822,19 +1861,18 @@ impl Lower {
     }
 
     fun if_stmt(var self, cg: CodeGen, c: Expr, then: Block, otherwise: Option<ElseTail>) {
-        let v = self.cond(cg, c)
         let then_b = self.new_block()
         let end = self.new_block()
         match otherwise {
             None => {
-                self.finish(Term.Br(v, then_b, end))
+                self.branch(cg, c, then_b, end)
                 self.start(then_b)
                 self.block(cg, then)
                 self.finish(Term.Jmp(end))
             },
             Some(et) => {
                 let else_b = self.new_block()
-                self.finish(Term.Br(v, then_b, else_b))
+                self.branch(cg, c, then_b, else_b)
                 self.start(then_b)
                 self.block(cg, then)
                 self.finish(Term.Jmp(end))
@@ -2145,7 +2183,7 @@ impl Lower {
                 let a = self.expr(cg, l)
                 let b = self.expr(cg, r)
                 let eq = self.temp(Type.TBool)
-                self.add(Inst.Rt(eq, "__str_eq", [a, b]))
+                self.rt_call(cg, eq, "__str_eq", [a, b])
                 if op == "==" { return eq }
                 let d = self.temp(Type.TBool)
                 self.add(Inst.Un(d, "!", Type.TBool, eq))
@@ -2155,7 +2193,7 @@ impl Lower {
                 let a = self.expr(cg, l)
                 let b = self.expr(cg, r)
                 let d = self.temp(Type.TStr)
-                self.add(Inst.Rt(d, "__str_concat", [a, b]))
+                self.rt_call(cg, d, "__str_concat", [a, b])
                 return self.owned_value(cg, d, Type.TStr)
             }
             return self.unsupported("that operator on strings")
@@ -2467,7 +2505,7 @@ impl Lower {
                 if nm == "chars" && args.len() == 1 {
                     let s = self.expr(cg, args[0])
                     let d = self.temp(cg.type_of(e.id))
-                    self.add(Inst.Rt(d, "__str_chars", [s]))
+                    self.rt_call(cg, d, "__str_chars", [s])
                     return self.owned_value(cg, d, cg.type_of(e.id))
                 }
                 if nm == "format" && args.len() >= 1 { return self.format_call(cg, args) }
@@ -3028,7 +3066,7 @@ impl Lower {
         let size = self.int_const(cg.map_slot_size(mt))
         let is_str = self.int_const(cg.map_is_str(mt))
         let d = self.temp(Type.TPtr)
-        self.add(Inst.Rt(d, "__map_lookup", [cell, key, size, is_str]))
+        self.rt_call(cg, d, "__map_lookup", [cell, key, size, is_str])
         return d
     }
 
@@ -3252,12 +3290,12 @@ impl Lower {
         while k < args.len() {
             let piece = self.render(cg, args[k])
             let joined = self.temp(Type.TStr)
-            self.add(Inst.Rt(joined, "__str_concat", [acc, piece]))
+            self.rt_call(cg, joined, "__str_concat", [acc, piece])
             let j = self.owned_value(cg, joined, Type.TStr)
             let seg = self.temp(Type.TStr)
             self.add(Inst.Str(seg, segs[k]))
             let next = self.temp(Type.TStr)
-            self.add(Inst.Rt(next, "__str_concat", [j, seg]))
+            self.rt_call(cg, next, "__str_concat", [j, seg])
             acc = self.owned_value(cg, next, Type.TStr)
             k = k + 1
         }
@@ -3288,7 +3326,7 @@ impl Lower {
         var rargs = [v]
         if extra >= 0 { rargs.push(self.int_const(extra)) }
         let d = self.temp(Type.TStr)
-        self.add(Inst.Rt(d, helper, rargs))
+        self.rt_call(cg, d, helper, rargs)
         return self.owned_value(cg, d, Type.TStr)
     }
 
@@ -3386,6 +3424,35 @@ impl Lower {
             self.add(Inst.Global(d, sym, 4))
             return d
         }
+        // raw memory (MYLA-162's prototype): loads and stores of a width,
+        // the allocator, a string's cell and back
+        if is_raw_memory_primitive(nm) {
+            var vals: [int32] = []
+            for a in args { vals.push(self.expr(cg, a)) }
+            if nm == "__load8" || nm == "__load32" || nm == "__load64" {
+                let d = self.temp(t)
+                var w = 8
+                if nm == "__load8" { w = 1 }
+                if nm == "__load32" { w = 4 }
+                self.add(Inst.LoadAt(d, vals[0], 0, w))
+                return d
+            }
+            if nm == "__store8" || nm == "__store32" || nm == "__store64" {
+                var w = 8
+                if nm == "__store8" { w = 1 }
+                if nm == "__store32" { w = 4 }
+                self.add(Inst.StoreAt(vals[0], 0, vals[1], w))
+                return -1
+            }
+            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" || nm == "__set_run_status" || nm == "__set_run_stderr" {
+                self.add(Inst.Rt(-1, nm, vals))
+                return -1
+            }
+            let d = self.temp(t)
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" || nm == "__rotl" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__str_of" || nm == "__list_of" { return self.owned_value(cg, d, t) }
+            return d
+        }
         // helpers without a result, then those with one
         let effects = ["__exit", "__write", "__write_file", "__mkdir", "__unlink", "__rmdir", "__rename"]
         let results = ["__args", "__read_file", "__read", "__poll", "__getcwd", "__getenv", "__sqrt", "__f64_bits", "__f64_from_bits", "__list_dir", "__stat", "__run", "__task_cancelled"]
@@ -3406,11 +3473,11 @@ impl Lower {
             return -1
         }
         if !has_result {
-            self.add(Inst.Rt(-1, nm, vals))
+            self.rt_call(cg, -1, nm, vals)
             return -1
         }
         let d = self.temp(t)
-        self.add(Inst.Rt(d, nm, vals))
+        self.rt_call(cg, d, nm, vals)
         return self.owned_value(cg, d, t)
     }
 
@@ -3478,9 +3545,8 @@ impl Lower {
             }
             match arm.guard {
                 Some(g) => {
-                    let c = self.cond(cg, g)
                     let body_b = self.new_block()
-                    self.finish(Term.Br(c, body_b, fail))
+                    self.branch(cg, g, body_b, fail)
                     self.start(body_b)
                 },
                 None => {},
@@ -3595,7 +3661,7 @@ impl Lower {
                 if is_tstr(t) {
                     let c = self.expr(cg, lit)
                     let eq = self.temp(Type.TBool)
-                    self.add(Inst.Rt(eq, "__str_eq", [v, c]))
+                    self.rt_call(cg, eq, "__str_eq", [v, c])
                     let next = self.new_block()
                     self.finish(Term.Br(eq, next, fail))
                     self.start(next)
@@ -3715,4 +3781,21 @@ fun char_cast_checked(src: Type, t: Type) -> bool {
         Type.TInt(w, signed) => signed || w > 8,
         _ => false,
     }
+}
+
+// The function of the runtime written in Myla (`std.rt`) that does what the
+// assembly routine `name` does, or "" (MYLA-162: the routines move one by
+// one).
+#test("__str_concat")["std$rt$str_concat"]
+#test("__alloc")[""]
+pub fun myla_runtime_function(name: str) -> str {
+    if name == "__str_concat" { return "std$rt$str_concat" }
+    if name == "__str_eq" { return "std$rt$str_eq" }
+    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" {
+        // `__stat` -> `std$rt$stat`
+        var sb = StringBuilder()
+        sb.append(name, 2, name.len())
+        return "std$rt$" + sb.build()
+    }
+    return ""
 }
