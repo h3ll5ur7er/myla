@@ -2,7 +2,7 @@
 id: MYLA-162
 title: The runtime off assembly - Myla runtime and a platform layer
 type: feature
-status: backlog
+status: in-progress
 priority: medium
 labels: [runtime, platforms]
 ---
@@ -47,4 +47,15 @@ Measured on the sources and on two programs (the compiler; a program with tasks 
 - **What it costs** (the prototype, `tests/burn/test_raw_memory.py`): string concatenation and equality written in Myla, compiled through today's IR, against the assembly in the same program. The copy loop in Myla takes 1.9× the assembly's instructions; on the `__copy_bytes` primitive 1.32× (concatenation alone 1.21×, equality, still a loop in Myla, 2.27×). The remaining gap is instruction selection (an address computed through `%rax` instead of an addressing mode, `i += 8` in three moves, two branches per loop turn), which the optimisations of D117 (3) improve for every program, not only the runtime.
 
 So the port is about 2,700 lines of assembly becoming Myla (minus the platform layer's few hundred), plus the per-type walks generated as IR; the language needs no change, the IR a few primitives (atomics), and the cost is about 1.2–1.3× in the runtime's hot routines until instruction selection improves.
+
+## The way it moves (2026-11-03)
+
+- **Where:** `lib/std/rt.my`, a module of the standard library (embedded with it, D118; its primitives silent there, D100). A native build loads it with every program (`LoadOptions.runtime`, set by `compile_asm` and `gen_main`); its functions are compiled only where called. A standard library root without it keeps the assembly.
+- **How a routine moves:** the lowering calls the Myla function in place of the assembly routine (`rt_call`, `myla_runtime_function` in [[selfhost/lower.my]]); both take their arguments in `%rdi`… and return in `%rax`, the Myla convention since D119, so nothing adapts. The assembly stays while assembly routines still call it.
+- **Order:** the self-contained routines first (strings, number formatting, lists, builders, maps), then the allocator (with atomics and thread-local state as primitives), then the executor and the platform layer (system calls, threads, the control transfers), then the per-type walks generated as IR instead of assembly.
+
+## Step 1: string concatenation and equality (2026-11-03)
+
+- `std.rt`'s `str_concat` and `str_eq`, on the bulk primitives `__copy_bytes` and `__equal_bytes`. The compiler itself calls them 2,807 and 930 times; the bootstrap reaches its fixed point; 909 tests pass (`tests/burn/test_raw_memory.py` also checks the routing and the fallback).
+- **Cost:** string building 11.8% more instructions; word frequency, closures unchanged; the self-compile 3.8% more (the same output). Each call pays a frame and spills where the assembly routines are frameless leaves: the register allocator doesn't place values the way hand-written code does (a call's arguments go through the frame, two spare registers already hold the parameters). Letting a value read last by a call live in `%r10`/`%r11` gained 0.08%; the rest needs arguments coalesced into their registers and frames left out of leaf functions, the backend half of D123.
 

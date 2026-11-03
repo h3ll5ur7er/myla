@@ -54,7 +54,9 @@ pub fun load_and_check(file: str, opts: LoadOptions) -> Result<Checked, str> {
 // debug information, MYLA-71, MYLA-66; `ir`: lowering functions to the IR
 // first, MYLA-103).
 fun compile_asm(file: str, opts: LoadOptions, debug: bool) -> Result<str, str> {
-    let ch = load_and_check(file, opts)?
+    var native = opts
+    native.runtime = true
+    let ch = load_and_check(file, native)?
     var g = new_codegen(ch.checker)
     g.set_sources(ch.prog.spans, ch.prog.next_id)
     if debug { g.enable_debug_info(read_gdb_script(opts.stdlib_root)) }

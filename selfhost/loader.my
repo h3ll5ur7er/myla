@@ -97,13 +97,15 @@ pub fun warning_reports(prog: Loaded, ws: [CheckErr]) -> [Report] {
 // project root, the base of imports without dots ("" for the entry file's
 // directory, D57); and texts read instead of files (an editor's unsaved
 // buffers, path -> text).
-pub struct LoadOptions { stdlib_root: str, packages: [(str, str)], root: str, overrides: [str: str] }
+// `runtime`: the runtime written in Myla (`std.rt`, MYLA-162) loaded with the
+// program, for a native build.
+pub struct LoadOptions { stdlib_root: str, packages: [(str, str)], root: str, overrides: [str: str], runtime: bool }
 
 // The options for a program without packages, rooted at its entry's directory.
-#test("")[LoadOptions { stdlib_root: "", packages: [], root: "", overrides: [:] }]
-#test("/work/myla/lib")[LoadOptions { stdlib_root: "/work/myla/lib", packages: [], root: "", overrides: [:] }]
+#test("")[LoadOptions { stdlib_root: "", packages: [], root: "", overrides: [:], runtime: false }]
+#test("/work/myla/lib")[LoadOptions { stdlib_root: "/work/myla/lib", packages: [], root: "", overrides: [:], runtime: false }]
 pub fun load_options(stdlib_root: str) -> LoadOptions {
-    return LoadOptions { stdlib_root: stdlib_root, packages: [], root: "", overrides: [:] }
+    return LoadOptions { stdlib_root: stdlib_root, packages: [], root: "", overrides: [:], runtime: false }
 }
 
 struct Loader {
@@ -1326,6 +1328,14 @@ pub fun load_program_opts(entry: str, opts: LoadOptions) -> Result<Loaded, Repor
     for p in opts.overrides.keys() { normalized[normalize(p)] = opts.overrides[p] }
     var ld = Loader { stdlib_root: stdlib, project_root: project_root, packages: packages, entry: e, modules: [], next_id: 0, spans: [], overrides: normalized }
     ld.load(e)?
+    // the runtime's functions in Myla, compiled where a program uses them; a
+    // standard library without them leaves the assembly routines in place
+    let rt_path = join_path(stdlib, "std/rt.my")
+    let have_rt = match source_text(rt_path, normalized) {
+        Some(t) => true,
+        None => readable(rt_path),
+    }
+    if opts.runtime && stdlib != "" && have_rt { let rt = ld.load(rt_path)? }
     ld.check_ids()?
     ld.build_exports()
     ld.build_bindings()?

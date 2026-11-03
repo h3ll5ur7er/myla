@@ -6,7 +6,8 @@
 written in Myla over a string's cell. Natively, the program prints the same
 with the runtime's assembly, with the Myla versions and with the Myla
 versions on the bulk copy; the interpreter, which has no raw memory, stops
-with an error that says so."""
+with an error that says so. A native build's `+` and `==` on strings use
+std.rt's versions."""
 import os
 import subprocess
 import tempfile
@@ -149,6 +150,26 @@ class RawMemory(unittest.TestCase):
             ran = subprocess.run([selfhost_tool("main"), "run", path, "myla"], capture_output=True, text=True)
             self.assertNotEqual(ran.returncode, 0)
             self.assertIn("raw memory, which only native code does", ran.stderr)
+
+
+    def test_native_code_concatenates_with_the_runtime_in_myla(self):
+        # `+` and `==` on strings call std.rt's functions (MYLA-162); a
+        # standard library without std/rt.my keeps the assembly routines
+        source = 'fun main() {\n    let a = "ab"\n    let b = a + "cd"\n    print(b == "abcd")\n    print(b)\n}\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "plus.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
+                                 check=True).stdout
+            self.assertIn("call myla_std$rt$str_concat", asm)
+            self.assertIn("call myla_std$rt$str_eq", asm)
+            bare = os.path.join(tmp, "lib")
+            os.makedirs(os.path.join(bare, "std"))
+            old = subprocess.run([selfhost_tool("gen_main"), path, bare], capture_output=True, text=True)
+            self.assertEqual(old.returncode, 0, old.stderr)
+            self.assertIn("call __str_concat", old.stdout)
+            self.assertNotIn("std$rt", old.stdout)
 
 
 if __name__ == "__main__":

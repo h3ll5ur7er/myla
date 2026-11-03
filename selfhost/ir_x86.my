@@ -1404,6 +1404,9 @@ impl CodeGen {
         // per position, how many before it call something or use %r8-%r11
         // (`clobbers`), which values in those registers can't live across
         var cpre: [int32] = [0]
+        // per position, whether it is a call reading all its operands before
+        // it clobbers anything (`reads_then_calls`)
+        var callpos: [bool] = []
         var pos = 0
         for b in f.order {
             if !reach[b] { continue }
@@ -1420,6 +1423,7 @@ impl CodeGen {
                 var c = cpre[cpre.len() - 1]
                 if clobbers(inst) { c = c + 1 }
                 cpre.push(c)
+                callpos.push(reads_then_calls(inst))
                 // a variable read where it is used is read there (`temp_src`)
                 var k = tc.rat[ii]
                 while k < tc.rat[ii + 1] {
@@ -1446,6 +1450,7 @@ impl CodeGen {
             }
             tat.push(tv.len())
             cpre.push(cpre[cpre.len() - 1])
+            callpos.push(false)
             for u in term_uses(f.blocks[b].term) {
                 if cand[u] { tv.push(u) }
                 if src_slot[u] >= 0 && cand[nt + src_slot[u]] { tv.push(nt + src_slot[u]) }
@@ -1537,12 +1542,23 @@ impl CodeGen {
                 if cpre[last[v] + 1] - cpre[first[v]] == 0 { top = nr }
                 // a free register, a caller-saved one first
                 var pick = -1
+                // a value read last by a call, nothing clobbering before it,
+                // can live in %r10 or %r11: the call reads it before it
+                // clobbers them (not %r8 or %r9, which earlier arguments
+                // fill)
+                if top == ncallee && cpre[last[v]] - cpre[first[v]] == 0 && callpos[last[v]] {
+                    r = nr - 2
+                    while r < nr && pick < 0 {
+                        if owner[r] < 0 { pick = r }
+                        r = r + 1
+                    }
+                }
                 r = top - 1
                 while r >= 0 && pick < 0 {
                     if owner[r] < 0 { pick = r }
                     r = r - 1
                 }
-                if pick < 0 {
+                if pick < 0 && top > 0 {
                     // the lightest holder gives way to a heavier value
                     var low = 0
                     r = 1
@@ -2535,4 +2551,21 @@ fun written_at(tv: [int32], tat: [int32], p: int32, v: int32) -> bool {
         k = k + 1
     }
     return false
+}
+
+// Whether `inst` is a call that reads every operand before the call
+// clobbers a register (its arguments loaded first): a value it reads last
+// may live in %r10 or %r11 up to it.
+#test(Inst.Call(-1, "f", [1]))[true]
+#test(Inst.Append(1, 2, 3, 8))[false]
+fun reads_then_calls(inst: Inst) -> bool {
+    return match inst {
+        Inst.Call(d, name, args) => true,
+        Inst.CallSret(name, r, args) => true,
+        Inst.CallInd(d, fv, args) => true,
+        Inst.CallIndSret(fv, r, args) => true,
+        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits",
+        Inst.RtPair(d, d2, name, args) => true,
+        _ => false,
+    }
 }

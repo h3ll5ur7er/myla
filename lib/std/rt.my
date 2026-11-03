@@ -1,0 +1,40 @@
+// std.rt — the runtime written in Myla (MYLA-162, D117).
+//
+// A native build loads this module with every program; a function here is
+// compiled where the code generator calls it in place of the assembly
+// routine it replaces (`myla_runtime_function` in selfhost/lower.my). The
+// routines move here one by one; until a routine's assembly callers move
+// too, both versions exist.
+//
+// Raw memory goes through the primitives `__load8`, `__load64`, `__store8`,
+// `__store64`, `__alloc`, `__addr_of`, `__str_of`, and the bulk copy and
+// comparison `__copy_bytes` and `__equal_bytes`, which each backend does
+// natively; addresses are `int64`. A string's cell holds its length
+// (8 bytes), then its bytes.
+
+// `a + b` (`__str_concat`): a new cell holding both strings' bytes.
+pub fun str_concat(a: str, b: str) -> str {
+    let pa = __addr_of(a)
+    let pb = __addr_of(b)
+    let na = __load64(pa)
+    let nb = __load64(pb)
+    let p = __alloc(na + nb + 8)
+    __store64(p, na + nb)
+    __copy_bytes(p + 8, pa + 8, na)
+    __copy_bytes(p + 8 + na, pb + 8, nb)
+    return __str_of(p)
+}
+
+// `a == b` (`__str_eq`): the same cell, or equal lengths and bytes.
+pub fun str_eq(a: str, b: str) -> bool {
+    let pa = __addr_of(a)
+    let pb = __addr_of(b)
+    if pa == pb {
+        return true
+    }
+    let n = __load64(pa)
+    if n != __load64(pb) {
+        return false
+    }
+    return __equal_bytes(pa + 8, pb + 8, n)
+}

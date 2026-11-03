@@ -472,6 +472,15 @@ impl Lower {
         return 8
     }
 
+    // A runtime helper's call: the function of the runtime written in Myla
+    // (`std.rt`, MYLA-162) when the program has it (a native build) and it
+    // takes nothing owned, else the assembly routine.
+    fun rt_call(var self, cg: CodeGen, d: int32, name: str, args: [int32]) {
+        let f = myla_runtime_function(name)
+        if f != "" && cg.has_func(f) && !cg.owning.contains(f) { self.add(Inst.Call(d, f, args)) }
+        else { self.add(Inst.Rt(d, name, args)) }
+    }
+
     // `d`, the address of a list element of `size` bytes, marked for the
     // loads and stores through it when it is narrower than a word (D120).
     fun mark_elem(var self, d: int32, size: int32) {
@@ -2145,7 +2154,7 @@ impl Lower {
                 let a = self.expr(cg, l)
                 let b = self.expr(cg, r)
                 let eq = self.temp(Type.TBool)
-                self.add(Inst.Rt(eq, "__str_eq", [a, b]))
+                self.rt_call(cg, eq, "__str_eq", [a, b])
                 if op == "==" { return eq }
                 let d = self.temp(Type.TBool)
                 self.add(Inst.Un(d, "!", Type.TBool, eq))
@@ -2155,7 +2164,7 @@ impl Lower {
                 let a = self.expr(cg, l)
                 let b = self.expr(cg, r)
                 let d = self.temp(Type.TStr)
-                self.add(Inst.Rt(d, "__str_concat", [a, b]))
+                self.rt_call(cg, d, "__str_concat", [a, b])
                 return self.owned_value(cg, d, Type.TStr)
             }
             return self.unsupported("that operator on strings")
@@ -3252,12 +3261,12 @@ impl Lower {
         while k < args.len() {
             let piece = self.render(cg, args[k])
             let joined = self.temp(Type.TStr)
-            self.add(Inst.Rt(joined, "__str_concat", [acc, piece]))
+            self.rt_call(cg, joined, "__str_concat", [acc, piece])
             let j = self.owned_value(cg, joined, Type.TStr)
             let seg = self.temp(Type.TStr)
             self.add(Inst.Str(seg, segs[k]))
             let next = self.temp(Type.TStr)
-            self.add(Inst.Rt(next, "__str_concat", [j, seg]))
+            self.rt_call(cg, next, "__str_concat", [j, seg])
             acc = self.owned_value(cg, next, Type.TStr)
             k = k + 1
         }
@@ -3409,7 +3418,7 @@ impl Lower {
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" { self.add(Inst.Rt(d, "__alloc", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" { self.add(Inst.Rt(d, nm, vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" { return self.owned_value(cg, d, t) }
             return d
         }
@@ -3622,7 +3631,7 @@ impl Lower {
                 if is_tstr(t) {
                     let c = self.expr(cg, lit)
                     let eq = self.temp(Type.TBool)
-                    self.add(Inst.Rt(eq, "__str_eq", [v, c]))
+                    self.rt_call(cg, eq, "__str_eq", [v, c])
                     let next = self.new_block()
                     self.finish(Term.Br(eq, next, fail))
                     self.start(next)
@@ -3742,4 +3751,15 @@ fun char_cast_checked(src: Type, t: Type) -> bool {
         Type.TInt(w, signed) => signed || w > 8,
         _ => false,
     }
+}
+
+// The function of the runtime written in Myla (`std.rt`) that does what the
+// assembly routine `name` does, or "" (MYLA-162: the routines move one by
+// one).
+#test("__str_concat")["std$rt$str_concat"]
+#test("__alloc")[""]
+pub fun myla_runtime_function(name: str) -> str {
+    if name == "__str_concat" { return "std$rt$str_concat" }
+    if name == "__str_eq" { return "std$rt$str_eq" }
+    return ""
 }
