@@ -537,6 +537,9 @@ impl CodeGen {
                         // `a + k`, `a - k` or `a + b` from registers into a
                         // register: one `lea` (MYLA-162)
                         if self.emit_lea(d, op, rt, a, b) { return }
+                        // `a * k` from a register into a register: one
+                        // three-operand `imul`
+                        if self.emit_imul_const(d, op, rt, a, b, temp_base) || self.emit_imul_const(d, op, rt, b, a, temp_base) { return }
                         // the operands swapped when the second is still in
                         // %rax and the order doesn't matter (MYLA-121)
                         if self.swap_operands(op, a, b) {
@@ -1144,6 +1147,31 @@ impl CodeGen {
         return true
     }
 
+    // `d = a * k` for a 64- or 32-bit integer and a constant `k`, `a` in a
+    // general-purpose register: `imul $k, a, d` into `d`'s register, or into
+    // %rax for a `d` held elsewhere (the low bits are the same signed or
+    // not), re-extended for a signed 32-bit result; false when it isn't such
+    // a product.
+    fun emit_imul_const(var self, d: int32, op: str, rt: Type, a: int32, b: int32, temp_base: int32) -> bool {
+        if op != "*" || text_has_xmm("%" + self.temp_reg[d]) || self.temp_imm[b] == "" { return false }
+        let (w, sg) = match rt {
+            Type.TInt(bits, s) => (bits, s),
+            _ => (0, false),
+        }
+        if w != 64 && w != 32 { return false }
+        let ra = self.reg_of(a)
+        if ra == "" || text_has_xmm(ra) { return false }
+        var dst = "%rax"
+        if self.temp_reg[d] != "" { dst = "%" + self.temp_reg[d] }
+        if w == 64 { self.emit(format("imulq {}, {}, {}", self.temp_imm[b], ra, dst)) }
+        else {
+            self.emit(format("imull {}, {}, {}", self.temp_imm[b], narrow_operand(ra, 4), narrow_operand(dst, 4)))
+            if sg { self.emit(format("movslq {}, {}", narrow_operand(dst, 4), dst)) }
+        }
+        if dst == "%rax" { self.store_temp(d, temp_base) }
+        return true
+    }
+
     // `x = x op y` on a variable living in a register, for an integer `+`,
     // `-`, `&`, `|` or `^` whose result only the store into that variable
     // reads: one instruction on the register (and the result's
@@ -1158,6 +1186,8 @@ impl CodeGen {
                 if op == "&" { insn = "andq" }
                 if op == "|" { insn = "orq" }
                 if op == "^" { insn = "xorq" }
+                // `x = x * k`: a three-operand `imul` on the register
+                if op == "*" && self.temp_imm[y] != "" { insn = "imulq" }
                 let w = match rt {
                     Type.TInt(bits, sg) => bits,
                     _ => 0,
@@ -1170,6 +1200,11 @@ impl CodeGen {
                 if s < 0 || self.slot_reg[s] == "" || text_has_xmm("%" + self.slot_reg[s]) { return false }
                 let reg = "%" + self.slot_reg[s]
                 if self.reg_of(x) != reg { return false }
+                if insn == "imulq" {
+                    self.emit(format("imulq {}, {}, {}", self.temp_imm[y], reg, reg))
+                    if w < 64 { self.emit(canonical_insn(rt, reg)) }
+                    return true
+                }
                 let src = self.second_operand(op, y, temp_base)
                 self.emit(format("{} {}, {}", insn, src, reg))
                 if (op == "+" || op == "-") && w < 64 { self.emit(canonical_insn(rt, reg)) }

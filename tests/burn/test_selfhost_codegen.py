@@ -1045,6 +1045,38 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertNotIn("\tset", body, body)
         self.assertNotIn("$1, %", body, body)
 
+    def test_a_product_by_a_constant_is_one_imul(self) -> None:
+        # MYLA-162: `a * k` from a register is one three-operand `imul`, into
+        # the result's register, into %rax, or in place for `x = x * k`; each
+        # width wraps as before
+        source = (
+            "fun scale(a: int64, b: int, c: uint32, n: int) -> int64 {\n"
+            "    var p: int64 = 1\n"
+            "    var i = 0\n"
+            "    while i < n {\n"
+            "        p = p * 10\n"
+            "        i = i + 1\n"
+            "    }\n"
+            "    let q = a * 7 + p\n"
+            "    let r = b * -3\n"
+            "    let s = c * 3000000u32\n"
+            "    return q + r as int64 + s as int64\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(scale(5, 4, 2u32, 3))\n"
+            "    print(scale(-9223372036854775807, 1000000000, 1500u32, 18))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("6001023\n-8223372035354775801\n", 0))
+        body = self._function_asm(asm, "scale")
+        for k in ["10", "7", "-3", "3000000"]:
+            self.assertRegex(body, r"imul[lq] \$" + k + r", %r[0-9a-z]+, %r[0-9a-z]+\n", body)
+        self.assertNotIn(", %rax, %rax", body, body)
+
     def test_scalars_live_in_callee_saved_registers(self) -> None:
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each

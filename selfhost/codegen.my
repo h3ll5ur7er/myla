@@ -3841,7 +3841,7 @@ impl CodeGen {
 
     // -- maps / strings / chars -------------------------------------------
 
-    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[24]
+    #test(codegen_on("[int]"), Type.TMap(Type.TStr, Type.TInt(32, true)))[32]
     // `[state:8][key:8][value][rank:8]`: the rank is the key's place in the
     // order of insertion, 0 … count - 1 (D105, MYLA-179)
     fun map_slot_size(self, mt: Type) -> int32 { return 24 + self.stored_size(map_val(mt)) }
