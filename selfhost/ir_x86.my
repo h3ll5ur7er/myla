@@ -348,13 +348,59 @@ impl CodeGen {
             self.push_temp(ws[i], temp_base)
             i = i - 1
         }
-        i = 0
-        while i < ws.len() && i < REG_WORDS {
-            self.load_temp(ws[i], arg_reg(i), temp_base)
-            i = i + 1
-        }
+        self.load_words(ws, temp_base)
         if ws.len() > REG_WORDS { return ws.len() - REG_WORDS }
         return 0
+    }
+
+    // The first REG_WORDS words of `ws` into the argument registers as if all
+    // at once (MYLA-162): those in registers by one parallel move, then the
+    // others loaded; so a value may sit in any caller-saved register up to
+    // the call that reads it, an argument register included.
+    fun load_words(var self, ws: [int32], temp_base: int32) {
+        let n = match ws.len() < REG_WORDS { true => ws.len(), false => REG_WORDS }
+        // one by one when no word sits in the register of one loaded before
+        // it (the usual case, which keeps a value held back in %rax going
+        // straight into its register)
+        var safe = true
+        var i = 0
+        while i < n && safe {
+            let r = self.reg_of(ws[i])
+            var j = 0
+            while j < i {
+                if r == "%" + arg_reg(j) { safe = false }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        if safe {
+            i = 0
+            while i < n {
+                self.load_temp(ws[i], arg_reg(i), temp_base)
+                i = i + 1
+            }
+            return
+        }
+        // a value held back in %rax goes home first: the moves may pass
+        // through %rax
+        if self.pend_store != "" { self.flush_temp() }
+        var dst: [str] = []
+        var src: [str] = []
+        i = 0
+        while i < n {
+            let r = self.reg_of(ws[i])
+            if r != "" {
+                dst.push("%" + arg_reg(i))
+                src.push(r)
+            }
+            i = i + 1
+        }
+        if dst.len() > 0 { self.emit_moves(dst, src) }
+        i = 0
+        while i < n {
+            if self.reg_of(ws[i]) == "" { self.load_temp(ws[i], arg_reg(i), temp_base) }
+            i = i + 1
+        }
     }
 
     // The `n` argument words a call pushed, popped.
@@ -960,11 +1006,7 @@ impl CodeGen {
             if !in_place[i] { self.push_temp(ws[REG_WORDS + i], temp_base) }
             i = i - 1
         }
-        i = 0
-        while i < ws.len() && i < REG_WORDS {
-            self.load_temp(ws[i], arg_reg(i), temp_base)
-            i = i + 1
-        }
+        self.load_words(ws, temp_base)
         if fv >= 0 {
             self.load_temp(fv, "rax", temp_base)
             self.emit("movq 8(%rax), %r10")
@@ -1350,12 +1392,7 @@ impl CodeGen {
 
     // The arguments of a runtime helper into the calling registers.
     fun load_args(var self, args: [int32], temp_base: int32) {
-        let regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
-        var i = 0
-        while i < args.len() {
-            self.load_temp(args[i], regs[i], temp_base)
-            i = i + 1
-        }
+        self.load_words(args, temp_base)
     }
 
     // How each temporary defined once, by a constant, a string's or symbol's
@@ -1657,6 +1694,11 @@ impl CodeGen {
                 d = d + 1
             }
             var ii = tc.at[b]
+            // a call that may replace the function (as the emitter finds it)
+            // has the owners dropped after it emitted before it: it doesn't
+            // read its operands before anything clobbers then
+            let tl = replacing_call(f.blocks[b].insts, f.blocks[b].term)
+            var idx = 0
             for inst in f.blocks[b].insts {
                 tat.push(tv.len())
                 var c = cpre[cpre.len() - 1]
@@ -1668,7 +1710,8 @@ impl CodeGen {
                 } else if kind == 1 { sc = sc + 1 }
                 cpre.push(c)
                 spre.push(sc)
-                callpos.push(reads_then_calls(inst))
+                callpos.push(idx != tl && reads_then_calls(inst))
+                idx = idx + 1
                 callinst.push(inst)
                 // a variable read where it is used is read there (`temp_src`)
                 var k = tc.rat[ii]
@@ -1802,13 +1845,33 @@ impl CodeGen {
                 // %r9, word 4 %r8)
                 if top == ncallee && cpre[last[v]] - cpre[first[v]] == 0 && callpos[last[v]] {
                     let k = call_arg_index(callinst[last[v]], v, nt, src_slot)
-                    r = nr - 2
-                    while r < nr && pick < 0 {
-                        if owner[r] < 0 { pick = r }
-                        r = r + 1
+                    if k < REG_WORDS {
+                        // an argument word (or pushed): the arguments are
+                        // one parallel move (`load_words`), so any
+                        // caller-saved register serves, its own first
+                        let si_call = spre[last[v]] - spre[first[v]] == 0
+                        if k >= 0 {
+                            let want = arg_reg(k)
+                            r = ncallee
+                            while r < nr && pick < 0 {
+                                if names[r] == want && owner[r] < 0 && (si_call || r < si || r > si + 1) { pick = r }
+                                r = r + 1
+                            }
+                        }
+                        r = nr - 1
+                        while r >= ncallee && pick < 0 {
+                            if owner[r] < 0 && (si_call || r < si || r > si + 1) { pick = r }
+                            r = r - 1
+                        }
+                    } else {
+                        // a function value, read after the arguments:
+                        // %r10 or %r11, which no argument is loaded into
+                        r = nr - 2
+                        while r < nr && pick < 0 {
+                            if owner[r] < 0 { pick = r }
+                            r = r + 1
+                        }
                     }
-                    if pick < 0 && k <= 5 && owner[nr - 3] < 0 { pick = nr - 3 }
-                    if pick < 0 && k <= 4 && owner[nr - 4] < 0 { pick = nr - 4 }
                 }
                 r = top - 1
                 while r >= 0 && pick < 0 {
@@ -2240,6 +2303,28 @@ fun jump_cond(op: str, signed: bool) -> str {
 #test([], Term.Jmp(6))[-1]
 #test([], Term.Ret(0))[-1]
 #test([], Term.Br(5, 5, 7))[-1]
+// The index of the call in `insts` that may replace the function (a
+// `become`, a call before `suspend`, a call in tail position) when owners
+// are dropped after it, which the emitter moves before it; -1 for none.
+fun replacing_call(insts: [Inst], term: Term) -> int32 {
+    var tail = -1
+    match term {
+        Term.Become => { tail = insts.len() - 1 },
+        Term.Suspend(sb) => { if ends_in_call(insts) { tail = insts.len() - 1 } },
+        _ => { tail = tail_call_at(insts, term) },
+    }
+    if tail < 0 { return -1 }
+    var j = tail + 1
+    while j < insts.len() {
+        match insts[j] {
+            Inst.DropSlot(t, s) => { return tail },
+            _ => {},
+        }
+        j = j + 1
+    }
+    return -1
+}
+
 fun tail_call_at(insts: [Inst], term: Term) -> int32 {
     let v = match term {
         Term.Ret(x) => x,

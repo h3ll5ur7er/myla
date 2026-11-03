@@ -1169,6 +1169,35 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertNotIn("testq", body, body)
         self.assertNotIn("$1, %", body, body)
 
+    def test_arguments_are_moved_as_if_at_once(self) -> None:
+        # MYLA-162: a value may sit in an argument register up to the call
+        # that reads it, so the arguments are one parallel move: swapped and
+        # rotated parameters reach the callee in their new places
+        source = (
+            "fun g(a: int64, b: int64, c: int64) -> int64 {\n"
+            "    return a * 100 + b * 10 + c\n"
+            "}\n"
+            "fun swap(x: int64, y: int64, z: int64) -> int64 {\n"
+            "    return g(y, x, z)\n"
+            "}\n"
+            "fun rotate(x: int64, y: int64, z: int64) -> int64 {\n"
+            "    return g(z, x, y) + g(y, z, x) * 1000\n"
+            "}\n"
+            "fun twice(x: int64, y: int64) -> int64 {\n"
+            "    return g(y, y, x)\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(swap(1, 2, 3))\n"
+            "    print(rotate(1, 2, 3))\n"
+            "    print(twice(4, 5))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("213\n231312\n554\n", 0))
+
     def test_scalars_live_in_callee_saved_registers(self) -> None:
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each
