@@ -712,7 +712,7 @@ fun is_builtin_func(name: str) -> bool {
 #test("__load8")[true]
 #test("__load")[false]
 pub fun is_raw_memory_primitive(name: str) -> bool {
-    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv"
+    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of"
 }
 
 #test("sum")[false]
@@ -5595,12 +5595,34 @@ impl Checker {
         // `__set_run_status(exit, signal, errno)` and `__set_run_stderr(bytes)`
         // (what `__run_exit_code`, `__run_signal`, `__run_errno` and
         // `__run_stderr` give next); `__argv()` (the program's arguments: the
-        // address of their C strings' addresses, a null one last)
+        // address of their C strings' addresses, a null one last);
+        // `__load32(p)`, `__store32(p, v)`; `__list_addr(xs)` (a list's cell,
+        // borrowed: its length, its capacity, then its elements) and
+        // `__list_of(p)` (a cell taken over as the list type its context
+        // expects)
         if is_raw_memory_primitive(name) {
             let i64 = Type.TInt(64, true)
+            if name == "__list_addr" {
+                if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "__list_addr() takes 1 argument(s)")) }
+                let l_t = self.expect_value(args[0], None)?
+                match l_t {
+                    Type.TList(el) => { return Ok(Some(i64)) },
+                    _ => { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("__list_addr() takes a list, found '{}'", type_name(l_t)))) },
+                }
+            }
+            if name == "__list_of" {
+                if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "__list_of() takes 1 argument(s)")) }
+                let p_t = self.expect_value(args[0], Some(i64))?
+                if !type_eq(p_t, i64) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("__list_of() takes a 'int64' here, found '{}'", type_name(p_t)))) }
+                match expected {
+                    Some(Type.TList(el)) => { return Ok(Some(Type.TList(el))) },
+                    _ => { return Err(terr_at(e.line, e.col, e.sp, "__list_of() needs the list type from its context (an annotation, a parameter, a return type)")) },
+                }
+            }
             var want: [Type] = [i64]
             if name == "__store8" { want = [i64, Type.TInt(8, false)] }
             if name == "__store64" { want = [i64, i64] }
+            if name == "__store32" { want = [i64, Type.TInt(32, false)] }
             if name == "__copy_bytes" || name == "__equal_bytes" { want = [i64, i64, i64] }
             if name == "__syscall" { want = [i64, i64, i64, i64] }
             if name == "__addr_of" { want = [Type.TStr] }
@@ -5615,8 +5637,9 @@ impl Checker {
                 k = k + 1
             }
             if name == "__load8" { return Ok(Some(Type.TInt(8, false))) }
+            if name == "__load32" { return Ok(Some(Type.TInt(32, false))) }
             if name == "__equal_bytes" { return Ok(Some(Type.TBool)) }
-            if name == "__store8" || name == "__store64" || name == "__copy_bytes" || name == "__set_io_errno" || name == "__free" || name == "__set_run_status" || name == "__set_run_stderr" { return Ok(None) }
+            if name == "__store8" || name == "__store32" || name == "__store64" || name == "__copy_bytes" || name == "__set_io_errno" || name == "__free" || name == "__set_run_status" || name == "__set_run_stderr" { return Ok(None) }
             if name == "__str_of" { return Ok(Some(Type.TStr)) }
             return Ok(Some(i64))
         }

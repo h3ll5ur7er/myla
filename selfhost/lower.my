@@ -3424,16 +3424,18 @@ impl Lower {
         if is_raw_memory_primitive(nm) {
             var vals: [int32] = []
             for a in args { vals.push(self.expr(cg, a)) }
-            if nm == "__load8" || nm == "__load64" {
+            if nm == "__load8" || nm == "__load32" || nm == "__load64" {
                 let d = self.temp(t)
                 var w = 8
                 if nm == "__load8" { w = 1 }
+                if nm == "__load32" { w = 4 }
                 self.add(Inst.LoadAt(d, vals[0], 0, w))
                 return d
             }
-            if nm == "__store8" || nm == "__store64" {
+            if nm == "__store8" || nm == "__store32" || nm == "__store64" {
                 var w = 8
                 if nm == "__store8" { w = 1 }
+                if nm == "__store32" { w = 4 }
                 self.add(Inst.StoreAt(vals[0], 0, vals[1], w))
                 return -1
             }
@@ -3443,7 +3445,7 @@ impl Lower {
             }
             let d = self.temp(t)
             if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
-            if nm == "__str_of" { return self.owned_value(cg, d, t) }
+            if nm == "__str_of" || nm == "__list_of" { return self.owned_value(cg, d, t) }
             return d
         }
         // helpers without a result, then those with one
