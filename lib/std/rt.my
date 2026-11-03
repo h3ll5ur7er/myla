@@ -1501,3 +1501,22 @@ fun exec_stuck() {
     write_all(2, msg + 8, __load64(msg))
     __syscall(SYS_EXIT_GROUP, 1, 0, 0)
 }
+
+// --- lists -----------------------------------------------------------------------
+// A list's cell is `[len][cap][elements]`.
+
+// `__list_grow`: the full cell `cell` (its length its capacity, the caller
+// made it unique) moved into one twice as big (4 elements at first), of
+// `stride` bytes an element; the old cell freed.
+pub fun list_grow(cell: int64, stride: int64) -> int64 {
+    let cap = __load64(cell + 8)
+    var bigger: int64 = 4
+    if cap != 0 {
+        bigger = cap * 2
+    }
+    let p = __alloc(bigger * stride + 16)
+    __copy_bytes(p, cell, cap * stride + 16)
+    __store64(p + 8, bigger)
+    __free(cell)
+    return p
+}

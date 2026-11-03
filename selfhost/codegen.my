@@ -1899,10 +1899,13 @@ impl CodeGen {
         return !(self.rt_has("__print_str") && self.rt_has("__print_int") && self.rt_has("__print_uint") && self.rt_has("__print_bool") && self.rt_has("__print_char"))
     }
 
-    // The executor's routines std.rt has (MYLA-162), with tasks: each the
+    // The runtime routines std.rt has that the code generator calls by name
+    // (MYLA-162): a list's growth, and with tasks the executor's; each the
     // name the rest of the runtime calls and the function standing for it.
     fun rt_exec(self) -> [(str, str)] {
         var out: [(str, str)] = []
+        // every program's
+        if self.has_func("std$rt$list_grow") { out.push(("__list_grow", "std$rt$list_grow")) }
         if !self.frames {
             return out
         }
@@ -7953,53 +7956,55 @@ impl CodeGen {
     // every list. Copy-on-write clones are per element type (`__clone_list_*`,
     // emit_list_clone_helper): they retain the elements they share (D38).
     fun emit_list_runtime(var self) {
-        // __list_grow: rdi=full cell (len==cap), rsi=stride -> rax=larger cell.
-        self.raw("__list_grow:")
-        self.raw("\tpushq %rbp")
-        self.raw("\tmovq %rsp, %rbp")
-        self.raw("\tpushq %rbx")
-        self.raw("\tpushq %r12")
-        self.raw("\tpushq %r13")
-        self.raw("\tpushq %r14")
-        self.raw("\tmovq %rdi, %rbx")
-        self.raw("\tmovq %rsi, %r12")
-        self.raw("\tmovq 8(%rbx), %r13")
-        self.raw("\ttestq %r13, %r13")
-        self.raw("\tjnz .Lgrow_dbl")
-        self.raw("\tmovq $4, %r14")
-        self.raw("\tjmp .Lgrow_alloc")
-        self.raw(".Lgrow_dbl:")
-        self.raw("\tmovq %r13, %r14")
-        self.raw("\tshlq $1, %r14")
-        self.raw(".Lgrow_alloc:")
-        self.raw("\tmovq %r14, %rax")
-        self.raw("\timulq %r12, %rax")
-        self.raw("\taddq $16, %rax")
-        self.raw("\tmovq %rax, %rdi")
-        self.raw("\tcall __alloc")
-        self.raw("\tpushq %rax")
-        self.raw("\tmovq %rax, %rdi")
-        self.raw("\tmovq %rbx, %rsi")
-        self.raw("\tmovq %r13, %rcx")
-        self.raw("\timulq %r12, %rcx")
-        self.raw("\taddq $16, %rcx")
-        self.raw("\tcld")
-        self.raw("\trep movsb")
-        self.raw("\tpopq %rax")
-        self.raw("\tmovq %r14, 8(%rax)")
-        // The caller made the cell unique (rc==1) before growing, so the old
-        // buffer is now garbage: free it to keep arena usage bounded.
-        self.raw("\tpushq %rax")
-        self.raw("\tmovq %rbx, %rdi")
-        self.raw("\tcall __free")
-        self.raw("\tpopq %rax")
-        self.raw("\tpopq %r14")
-        self.raw("\tpopq %r13")
-        self.raw("\tpopq %r12")
-        self.raw("\tpopq %rbx")
-        self.raw("\tleave")
-        self.raw("\tret")
-        self.raw("")
+        if !self.rt_exec_has("__list_grow") {
+            // __list_grow: rdi=full cell (len==cap), rsi=stride -> rax=larger cell.
+            self.raw("__list_grow:")
+            self.raw("\tpushq %rbp")
+            self.raw("\tmovq %rsp, %rbp")
+            self.raw("\tpushq %rbx")
+            self.raw("\tpushq %r12")
+            self.raw("\tpushq %r13")
+            self.raw("\tpushq %r14")
+            self.raw("\tmovq %rdi, %rbx")
+            self.raw("\tmovq %rsi, %r12")
+            self.raw("\tmovq 8(%rbx), %r13")
+            self.raw("\ttestq %r13, %r13")
+            self.raw("\tjnz .Lgrow_dbl")
+            self.raw("\tmovq $4, %r14")
+            self.raw("\tjmp .Lgrow_alloc")
+            self.raw(".Lgrow_dbl:")
+            self.raw("\tmovq %r13, %r14")
+            self.raw("\tshlq $1, %r14")
+            self.raw(".Lgrow_alloc:")
+            self.raw("\tmovq %r14, %rax")
+            self.raw("\timulq %r12, %rax")
+            self.raw("\taddq $16, %rax")
+            self.raw("\tmovq %rax, %rdi")
+            self.raw("\tcall __alloc")
+            self.raw("\tpushq %rax")
+            self.raw("\tmovq %rax, %rdi")
+            self.raw("\tmovq %rbx, %rsi")
+            self.raw("\tmovq %r13, %rcx")
+            self.raw("\timulq %r12, %rcx")
+            self.raw("\taddq $16, %rcx")
+            self.raw("\tcld")
+            self.raw("\trep movsb")
+            self.raw("\tpopq %rax")
+            self.raw("\tmovq %r14, 8(%rax)")
+            // The caller made the cell unique (rc==1) before growing, so the old
+            // buffer is now garbage: free it to keep arena usage bounded.
+            self.raw("\tpushq %rax")
+            self.raw("\tmovq %rbx, %rdi")
+            self.raw("\tcall __free")
+            self.raw("\tpopq %rax")
+            self.raw("\tpopq %r14")
+            self.raw("\tpopq %r13")
+            self.raw("\tpopq %r12")
+            self.raw("\tpopq %rbx")
+            self.raw("\tleave")
+            self.raw("\tret")
+            self.raw("")
+        }
     }
 }
 
