@@ -610,8 +610,9 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.Cow(d, t, h) => {
-                self.load_temp(h, "rax", temp_base)
-                self.cow_unique(t)
+                // the holder's address straight into %rcx (MYLA-251)
+                self.load_temp(h, "rcx", temp_base)
+                self.cow_unique_at_rcx(t)
                 self.store_temp(d, temp_base)
             },
             Inst.Append(d, h, c, stride) => {
@@ -688,6 +689,11 @@ impl CodeGen {
         let last = insts.len() - 1
         return match term {
             Term.Br(c, a, b) => match insts[last] {
+                // a negated flag only the branch reads: the inverted jump (MYLA-251)
+                Inst.Un(d, op, t, x) => {
+                    if d != c || self.temp_uses[d] != 1 || op != "!" { return -1 }
+                    last
+                },
                 Inst.Cmp(d, op, t, x, y) => {
                     if d != c || self.temp_uses[d] != 1 { return -1 }
                     match t {
@@ -822,6 +828,21 @@ impl CodeGen {
     // conditional jump; the successor emitted next is fallen through to.
     fun emit_compare_branch(var self, cmp: Inst, term: Term, labels: [str], next: int32, temp_base: int32) {
         match cmp {
+            Inst.Un(d, op, t, x) => {
+                // `br !x, yes, no` is `br x, no, yes`
+                self.emit_test(x, temp_base)
+                match term {
+                    Term.Br(c, yes, no) => {
+                        if no == next { self.emit(format("je {}", labels[yes])) }
+                        else {
+                            self.emit(format("jne {}", labels[no]))
+                            if yes != next { self.emit(format("jmp {}", labels[yes])) }
+                        }
+                    },
+                    _ => {},
+                }
+                return
+            },
             Inst.Cmp(d, op, t, x, y) => {
                 match t {
                     Type.TFloat(w) => {
@@ -899,7 +920,8 @@ impl CodeGen {
             },
             Term.Ret(v) => {
                 if v >= 0 { self.load_temp(v, "rax", temp_base) }
-                self.emit(format("jmp {}", self.epilogue))
+                // the last block falls into the epilogue (MYLA-251)
+                if next >= 0 { self.emit(format("jmp {}", self.epilogue)) }
             },
             // the call before it is the jump (`emit_tail_call`)
             Term.Become => {},

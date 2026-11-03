@@ -3778,8 +3778,13 @@ impl CodeGen {
     // the cell is uniquely owned (clone it if refcount > 1, storing the clone
     // back). Out: %rax = the now-unique cell pointer.
     fun cow_unique(var self, t: Type) {
-        self.register_clone(t)
         self.emit("movq %rax, %rcx")
+        self.cow_unique_at_rcx(t)
+    }
+
+    // `cow_unique` with the holder's address already in %rcx (MYLA-251).
+    fun cow_unique_at_rcx(var self, t: Type) {
+        self.register_clone(t)
         self.emit("movq (%rcx), %rdi")
         let skip = self.label()
         self.emit("cmpq $1, -8(%rdi)")

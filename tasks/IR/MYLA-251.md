@@ -2,7 +2,7 @@
 id: MYLA-251
 title: "Loop overhead: checks and widening the IR can prove away"
 type: improvement
-status: backlog
+status: todo
 priority: medium
 labels: [backend, performance, optimisation, ir]
 ---
@@ -18,3 +18,13 @@ Each 32-bit operation is sign-extended again (`movslq`), and `!flag` goes throug
 - [ ] Bounds checks dropped where the index is provably in range (a counting loop below `len`), others merged
 - [ ] Re-extension only where a value's upper bits are read; a negated condition branching directly
 - [ ] Measured: the sieve, Game of Life, fannkuch, quicksort, and the self-compile
+
+## Done so far (2026-11-03, the optimisation pass of [[MYLA-242]])
+
+Three peepholes from the list above; the analyses (hoisting the copy-on-write check, proving bounds, fewer re-extensions) are still to do.
+
+- A `!` that only a branch reads is the inverted jump: the sieve's `!composite[i]` no longer goes through `sete`/`movzbq`.
+- The last block falls into the epilogue instead of jumping to the next line.
+- A copy-on-write check takes the list's address straight into `%rcx`.
+- `tests/burn/test_loop_overhead.py`: the compiler before the change fails its two code checks; programs that branch on negated flags print the same natively and interpreted.
+- Measured against the baseline: sieve 1.07× as fast, fib, fannkuch and Game of Life within noise (1–3 % fewer instructions). The compiler's own assembly is 1 % smaller.
