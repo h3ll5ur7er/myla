@@ -490,6 +490,14 @@ impl CodeGen {
             Inst.Load(d, s) => {
                 // read where it is used instead (`remat_texts`)
                 if self.temp_remat[d] == "" {
+                    // from one register into another (MYLA-257): one move,
+                    // none when they are the same
+                    let sr = self.slot_reg[s]
+                    let dr = self.temp_reg[d]
+                    if sr != "" && dr != "" && !text_has_xmm("%" + sr) && !text_has_xmm("%" + dr) {
+                        if self.temp_uses[d] > 0 && sr != dr { self.emit(format("movq %{}, %{}", sr, dr)) }
+                        return
+                    }
                     if self.slot_reg[s] != "" { self.emit(format("movq %{}, %rax", self.slot_reg[s])) }
                     else if self.in_frame { self.emit(format("movq {}(%r15), %rax", slot_off[s])) }
                     else { self.emit(format("movq {}(%rbp), %rax", slot_off[s])) }
@@ -1771,8 +1779,28 @@ impl CodeGen {
         }
         tat.push(tv.len())
         let spans = self.live_spans(f, reach, cand, global, tv, tat, bstart, bend, first, last)
-        first = spans.0
-        last = spans.1
+        // each value's lifetime as ranges of points, with the holes where it
+        // isn't live (MYLA-257): position p is the points 2p (its reads) and
+        // 2p + 1 (its writes), so a value read last at p and one written
+        // there may share a register; its first and last position from them
+        let lr = live_ranges(f, reach, cand, tv, tat, bstart, bend, spans.2, spans.3, spans.4)
+        let rhead = lr.0
+        let rlo = lr.1
+        let rhi = lr.2
+        let rnext = lr.3
+        var rlast: [int32] = []
+        i = 0
+        while i < nv {
+            rlast.push(-1)
+            if rhead[i] >= 0 {
+                first[i] = rlo[rhead[i]] / 2
+                var r = rhead[i]
+                while rnext[r] >= 0 { r = rnext[r] }
+                rlast[i] = rhi[r]
+                last[i] = rhi[r] / 2
+            }
+            i = i + 1
+        }
 
         // float temporaries whose interval holds no call (nothing clobbers
         // there) live in %xmm2..%xmm15, which need no save (MYLA-249); the
@@ -1787,7 +1815,7 @@ impl CodeGen {
         // the linear scan, intervals by their start
         var head: [int32] = []
         i = 0
-        while i < pos {
+        while i <= pos {
             head.push(-1)
             i = i + 1
         }
@@ -1797,16 +1825,16 @@ impl CodeGen {
         while i < nv {
             link.push(-1)
             reg.push(-1)
-            if cand[i] && first[i] >= 0 {
-                link[i] = head[first[i]]
-                head[first[i]] = i
+            if cand[i] && rhead[i] >= 0 {
+                let at = rlo[rhead[i]] / 2
+                link[i] = head[at]
+                head[at] = i
             }
             i = i + 1
         }
         // the callee-saved registers, then %rsi, %rdi and %r8-%r11 for a
-        // value no position of its interval clobbers (MYLA-134; for %rsi and
-        // %rdi no copy either, MYLA-162), which cost no save; %r8-%r11 last,
-        // as the rule for a value a call reads goes by their places
+        // value no call clobbers in its ranges (MYLA-134; for %rsi and %rdi
+        // no copy either, MYLA-162), which cost no save
         var names = ["rbx", "r12", "r13", "r14", "r15", "rsi", "rdi", "r8", "r9", "r10", "r11"]
         // the callee-saved registers come first; %r15 holds a frame
         // function's frame (D90)
@@ -1817,87 +1845,155 @@ impl CodeGen {
         }
         let si = ncallee      // %rsi's place, %rdi's after it
         let nr = names.len()
-        var owner: [int32] = []
-        while owner.len() < nr { owner.push(-1) }
-        var p = 0
-        while p < pos {
-            var v = head[p]
-            while v >= 0 {
-                var r = 0
-                // read for the last time where v is written: an instruction
-                // reads its operands before it writes; but a value live
-                // before p (a parameter, from the entry) isn't written there
-                let born = written_at(tv, tat, p, v)
-                while r < nr {
-                    if owner[r] >= 0 && (last[owner[r]] < p || (last[owner[r]] == p && born)) { owner[r] = -1 }
-                    r = r + 1
+        // per register, the values holding it: a list through `hnext` from
+        // `hfirst`, those whose last range is over unlinked as they are met
+        var hfirst: [int32] = []
+        while hfirst.len() < nr { hfirst.push(-1) }
+        // per value, the other side of a copy it is in (a `mov`, a store of a
+        // temporary into a slot): taking that one's register makes the copy
+        // nothing (MYLA-257)
+        var hint: [int32] = []
+        i = 0
+        while i < nv {
+            hint.push(-1)
+            i = i + 1
+        }
+        for b in f.order {
+            if !reach[b] { continue }
+            for inst in f.blocks[b].insts {
+                match inst {
+                    Inst.Mov(d, a) => {
+                        if cand[d] && cand[a] {
+                            hint[d] = a
+                            if hint[a] < 0 { hint[a] = d }
+                        }
+                    },
+                    Inst.Store(sl, x) => {
+                        if cand[nt + sl] && cand[x] {
+                            if hint[nt + sl] < 0 { hint[nt + sl] = x }
+                            hint[x] = nt + sl
+                        }
+                    },
+                    _ => {},
                 }
-                var top = ncallee
-                if cpre[last[v] + 1] - cpre[first[v]] == 0 { top = nr }
-                // %rsi and %rdi only for a value no copy crosses
-                let si_ok = spre[last[v] + 1] - spre[first[v]] == 0
-                // a free register, a caller-saved one first
-                var pick = -1
-                // a value read last by a call, nothing clobbering before it,
-                // can live in %r10 or %r11, as the call reads it before it
-                // clobbers them; in %r9 or %r8 too when the arguments loaded
-                // before it don't fill that register (argument word 5 fills
-                // %r9, word 4 %r8)
-                if top == ncallee && cpre[last[v]] - cpre[first[v]] == 0 && callpos[last[v]] {
-                    let k = call_arg_index(callinst[last[v]], v, nt, src_slot)
-                    if k < REG_WORDS {
-                        // an argument word (or pushed): the arguments are
-                        // one parallel move (`load_words`), so any
-                        // caller-saved register serves, its own first
-                        let si_call = spre[last[v]] - spre[first[v]] == 0
-                        if k >= 0 {
-                            let want = arg_reg(k)
-                            r = ncallee
-                            while r < nr && pick < 0 {
-                                if names[r] == want && owner[r] < 0 && (si_call || r < si || r > si + 1) { pick = r }
-                                r = r + 1
+            }
+        }
+        var hnext: [int32] = []
+        // per holder, its first range not over yet at the scan's point
+        var hcur: [int32] = []
+        i = 0
+        while i < nv {
+            hnext.push(-1)
+            hcur.push(rhead[i])
+            i = i + 1
+        }
+        // by position, a value live into its block (from the point 2p) before
+        // one written there (2p + 1)
+        var pp = 0
+        while pp <= pos {
+            var odd = 0
+            while odd < 2 {
+                var v = head[pp]
+                while v >= 0 {
+                    let pt = rlo[rhead[v]]
+                    if pt % 2 == odd {
+                        // which registers v may take: a caller-saved one only when
+                        // no call clobbers it in its ranges, %rsi and %rdi only when
+                        // no copy does either, an argument register not for a
+                        // function value read after the arguments
+                        let cls = range_clobbers(rhead[v], rlo, rhi, rnext, cpre, spre, callpos)
+                        var top = ncallee
+                        if cls.0 == 0 { top = nr }
+                        let si_ok = cls.1 == 0
+                        // v in one range (most temporaries): a holder meets it when
+                        // its first range not over yet starts before v's end
+                        let single = rnext[rhead[v]] < 0
+                        let vend = rlast[v]
+                        var want = ""
+                        var late = false
+                        if rlast[v] % 2 == 0 && callpos[rlast[v] / 2] {
+                            let k = call_arg_index(callinst[rlast[v] / 2], v, nt, src_slot)
+                            if k == 99 { late = true } else if k >= 0 && k < REG_WORDS { want = arg_reg(k) }
+                        }
+                        // the registers v may take, in the order it prefers them: its
+                        // own argument register, then a caller-saved one, then a
+                        // callee-saved one; the first none of whose holders is in
+                        // its way, the holders done before v unlinked on the way and
+                        // each one's cursor moved to its first range not over; when
+                        // none is free, the one whose holders in the way weigh
+                        // least, if less than v
+                        var want_at = -1
+                        if want != "" {
+                            var x = top - 1
+                            while x >= ncallee {
+                                if names[x] == want { want_at = x }
+                                x = x - 1
                             }
                         }
-                        r = nr - 1
-                        while r >= ncallee && pick < 0 {
-                            if owner[r] < 0 && (si_call || r < si || r > si + 1) { pick = r }
-                            r = r - 1
+                        // the register of the other side of its copy first
+                        if hint[v] >= 0 && reg[hint[v]] >= 0 && reg[hint[v]] < top { want_at = reg[hint[v]] }
+                        var pick = -1
+                        var best = -1
+                        var best_w: int64 = 0
+                        var pass = 0
+                        while pass < 2 && pick < 0 {
+                            // pass 0: the first free register; pass 1: the lightest
+                            var q = -1
+                            while q < top && pick < 0 {
+                                var r = want_at
+                                if q >= 0 { r = top - 1 - q }
+                                q = q + 1
+                                if r < 0 { continue }
+                                // %rsi and %rdi only when no copy clobbers v; no
+                                // argument register for a late function value
+                                if r == si || r == si + 1 {
+                                    if !si_ok || late { continue }
+                                } else if late && r >= nr - 4 && r < nr - 2 { continue }
+                                var wsum: int64 = 0
+                                var prev = -1
+                                var h = hfirst[r]
+                                while h >= 0 && (pass == 1 || wsum == 0) {
+                                    let nx = hnext[h]
+                                    if rlast[h] < pt || reg[h] != r {
+                                        if prev < 0 { hfirst[r] = nx } else { hnext[prev] = nx }
+                                    } else {
+                                        var c = hcur[h]
+                                        while rhi[c] < pt { c = rnext[c] }
+                                        hcur[h] = c
+                                        var meets = false
+                                        if single { meets = rlo[c] <= vend } else { meets = ranges_meet(c, rhead[v], rlo, rhi, rnext) }
+                                        if meets { wsum = wsum + weight[h] + 1 }
+                                        prev = h
+                                    }
+                                    h = nx
+                                }
+                                if pass == 0 && wsum == 0 { pick = r }
+                                if pass == 1 && wsum > 0 && wsum <= weight[v] && (best < 0 || wsum < best_w) {
+                                    best = r
+                                    best_w = wsum
+                                }
+                            }
+                            pass = pass + 1
                         }
-                    } else {
-                        // a function value, read after the arguments:
-                        // %r10 or %r11, which no argument is loaded into
-                        r = nr - 2
-                        while r < nr && pick < 0 {
-                            if owner[r] < 0 { pick = r }
-                            r = r + 1
+                        if pick < 0 && best >= 0 {
+                            var h = hfirst[best]
+                            while h >= 0 {
+                                if reg[h] == best && rlast[h] >= pt && ranges_meet(hcur[h], rhead[v], rlo, rhi, rnext) { reg[h] = -1 }
+                                h = hnext[h]
+                            }
+                            pick = best
+                        }
+                        if pick >= 0 {
+                            hnext[v] = hfirst[pick]
+                            hfirst[pick] = v
+                            reg[v] = pick
                         }
                     }
+                    v = link[v]
                 }
-                r = top - 1
-                while r >= 0 && pick < 0 {
-                    if owner[r] < 0 && (si_ok || r < si || r > si + 1) { pick = r }
-                    r = r - 1
-                }
-                if pick < 0 && top > 0 {
-                    // the lightest holder gives way to a heavier value
-                    var low = 0
-                    r = 1
-                    while r < top {
-                        if (si_ok || r < si || r > si + 1) && weight[owner[r]] < weight[owner[low]] { low = r }
-                        r = r + 1
-                    }
-                    if weight[owner[low]] < weight[v] {
-                        reg[owner[low]] = -1
-                        pick = low
-                    }
-                }
-                if pick >= 0 {
-                    owner[pick] = v
-                    reg[v] = pick
-                }
-                v = link[v]
+                odd = odd + 1
             }
-            p = p + 1
+            pp = pp + 1
         }
 
         // a callee-saved register is worth its save and restore only with
@@ -1994,7 +2090,7 @@ impl CodeGen {
     }
 
     // The %xmm register the temporary `t` lives in, or "".
-    fun xmm_home(self, t: int32) -> str {
+    fun xmm_home(var self, t: int32) -> str {
         let r = self.reg_of(t)
         if r.len() > 4 && r[1] == 'x' && r[2] == 'm' && r[3] == 'm' { return r }
         return ""
@@ -2031,7 +2127,7 @@ impl CodeGen {
     // The intervals `first`..`last` (`alloc_regs`) stretched over each
     // reachable block that a value liveness follows across blocks is live
     // into or out of.
-    fun live_spans(self, f: IrFunc, reach: [bool], cand: [bool], global: [bool], tv: [int32], tat: [int32], bstart: [int32], bend: [int32], first: [int32], last: [int32]) -> ([int32], [int32]) {
+    fun live_spans(self, f: IrFunc, reach: [bool], cand: [bool], global: [bool], tv: [int32], tat: [int32], bstart: [int32], bend: [int32], first: [int32], last: [int32]) -> ([int32], [int32], [int64], [int32], int32) {
         var lo = first
         var hi = last
         // the values liveness follows, numbered densely
@@ -2046,7 +2142,7 @@ impl CodeGen {
             i = i + 1
         }
         let ng = gval.len()
-        if ng == 0 { return (lo, hi) }
+        if ng == 0 { return (lo, hi, [], gid, 0) }
         let nw = (ng + 63) / 64
         let nb = f.blocks.len()
         // what each block reads before writing it (use) and writes (def)
@@ -2118,26 +2214,8 @@ impl CodeGen {
                 k = k - 1
             }
         }
-        for b in f.order {
-            if !reach[b] { continue }
-            let base = b * nw
-            var g = 0
-            while g < ng {
-                let v = gval[g]
-                let bit = one << ((g % 64) as int64)
-                let at = base + g / 64
-                if live_in[at] & bit != 0 {
-                    if bstart[b] < lo[v] { lo[v] = bstart[b] }
-                    if bstart[b] > hi[v] { hi[v] = bstart[b] }
-                }
-                if live_out[at] & bit != 0 {
-                    if bend[b] < lo[v] { lo[v] = bend[b] }
-                    if bend[b] > hi[v] { hi[v] = bend[b] }
-                }
-                g = g + 1
-            }
-        }
-        return (lo, hi)
+        // (each value's ranges come from these sets: `live_ranges`)
+        return (lo, hi, live_out, gid, nw)
     }
 
     // Push the temporary `t` (a call's argument): straight from its slot, or
@@ -2209,8 +2287,18 @@ impl CodeGen {
     // The register holding the temporary `t` now (MYLA-121): its own, or the
     // variable's it is read from; "" when it isn't in one (its store into
     // its register still held back, its value is in %rax).
-    fun reg_of(self, t: int32) -> str {
-        if self.pend_store != "" && self.pend_temp == t { return "" }
+    fun reg_of(var self, t: int32) -> str {
+        if self.pend_store != "" && self.pend_temp == t {
+            // held back in %rax: stored into its register now when it has
+            // one and is read again later (the instruction that computed it
+            // writing there instead, `flush_temp`), so this reader takes it
+            // from there (MYLA-257)
+            if self.temp_reg[t] != "" && self.temp_uses[t] > 1 && !text_has_xmm("%" + self.temp_reg[t]) {
+                self.flush_temp()
+                return "%" + self.temp_reg[t]
+            }
+            return ""
+        }
         if self.temp_reg[t] != "" { return "%" + self.temp_reg[t] }
         let src = self.temp_src[t]
         if src.len() > 0 && src[0] == '%' { return src }
@@ -2926,6 +3014,174 @@ fun written_at(tv: [int32], tat: [int32], p: int32, v: int32) -> bool {
     while k < tat[p + 1] {
         if tv[k] == -1 - v { return true }
         k = k + 1
+    }
+    return false
+}
+
+// Each candidate value's lifetime (MYLA-257) as ranges of points, position
+// p being the points 2p (where it reads) and 2p + 1 (where it writes): a
+// list per value (`rhead`, `rnext`) of `[rlo, rhi]` in ascending order, the
+// holes between them where nothing will read the value. From the blocks'
+// live-out sets (`live_spans`: `live_out`, `gid`, `nw` words a block) and a
+// backward walk of each block's reads and writes (`tv`, `tat`); a value
+// written and never read holds its register at that write all the same.
+fun live_ranges(f: IrFunc, reach: [bool], cand: [bool], tv: [int32], tat: [int32], bstart: [int32], bend: [int32], live_out: [int64], gid: [int32], nw: int32) -> ([int32], [int32], [int32], [int32]) {
+    let nv = cand.len()
+    var rhead: [int32] = []
+    var open: [int32] = []
+    var gval: [int32] = []
+    var i = 0
+    while i < nv {
+        rhead.push(-1)
+        open.push(-1)
+        i = i + 1
+    }
+    i = 0
+    while i < gid.len() {
+        if gid[i] >= 0 {
+            while gval.len() <= gid[i] { gval.push(-1) }
+            gval[gid[i]] = i
+        }
+        i = i + 1
+    }
+    var rlo: [int32] = []
+    var rhi: [int32] = []
+    var rnext: [int32] = []
+    let one: int64 = 1
+    var opened: [int32] = []
+    var k = f.order.len() - 1
+    while k >= 0 {
+        let b = f.order[k]
+        k = k - 1
+        if !reach[b] { continue }
+        let s = bstart[b]
+        let e = bend[b]
+        while opened.len() > 0 { opened.pop() }
+        // what is live out of the block: open through its end
+        var w = 0
+        while w < nw {
+            let bits = live_out[b * nw + w]
+            if bits != 0 {
+                var g = 0
+                while g < 64 {
+                    if (bits >> (g as int64)) & 255 == 0 { g = g + 8 }
+                    else {
+                        if bits & (one << (g as int64)) != 0 {
+                            let v = gval[w * 64 + g]
+                            open[v] = 2 * e + 1
+                            opened.push(v)
+                        }
+                        g = g + 1
+                    }
+                }
+            }
+            w = w + 1
+        }
+        var p = e
+        while p >= s {
+            // the writes, then the reads (an instruction reads first)
+            var j = tat[p]
+            while j < tat[p + 1] {
+                let x = tv[j]
+                if x < 0 {
+                    let v = -1 - x
+                    var hi = 2 * p + 1
+                    if open[v] >= 0 {
+                        hi = open[v]
+                        open[v] = -1
+                    }
+                    // prepended, as the ranges come last first; merged with
+                    // the next one when they touch
+                    let h = rhead[v]
+                    if h >= 0 && hi + 1 >= rlo[h] {
+                        if 2 * p + 1 < rlo[h] { rlo[h] = 2 * p + 1 }
+                    } else {
+                        rlo.push(2 * p + 1)
+                        rhi.push(hi)
+                        rnext.push(h)
+                        rhead[v] = rlo.len() - 1
+                    }
+                }
+                j = j + 1
+            }
+            j = tat[p]
+            while j < tat[p + 1] {
+                let x = tv[j]
+                if x >= 0 && open[x] < 0 {
+                    open[x] = 2 * p
+                    opened.push(x)
+                }
+                j = j + 1
+            }
+            p = p - 1
+        }
+        // what is still open is live into the block
+        for v in opened {
+            if open[v] >= 0 {
+                let hi = open[v]
+                open[v] = -1
+                let h = rhead[v]
+                if h >= 0 && hi + 1 >= rlo[h] {
+                    if 2 * s < rlo[h] { rlo[h] = 2 * s }
+                } else {
+                    rlo.push(2 * s)
+                    rhi.push(hi)
+                    rnext.push(h)
+                    rhead[v] = rlo.len() - 1
+                }
+            }
+        }
+    }
+    return (rhead, rlo, rhi, rnext)
+}
+
+// How many clobbering positions (`pre`, and with the copies `spre`: prefix
+// counts per position) a value
+// with the ranges from `h` is clobbered at: each it is live across (it holds
+// both of the position's points), and each where it is read last unless
+// the position reads its operands before it clobbers (`callpos`).
+fun range_clobbers(h: int32, rlo: [int32], rhi: [int32], rnext: [int32], pre: [int32], spre: [int32], callpos: [bool]) -> (int32, int32) {
+    var n = 0
+    var sn = 0
+    var r = h
+    while r >= 0 {
+        let lo = rlo[r]
+        let hi = rhi[r]
+        let pa = (lo + 1) / 2
+        var pb = -1
+        if hi >= 1 { pb = (hi - 1) / 2 }
+        if pb >= pa {
+            n = n + pre[pb + 1] - pre[pa]
+            sn = sn + spre[pb + 1] - spre[pa]
+        }
+        if hi % 2 == 0 {
+            let p = hi / 2
+            if !callpos[p] {
+                n = n + pre[p + 1] - pre[p]
+                sn = sn + spre[p + 1] - spre[p]
+            }
+        }
+        r = rnext[r]
+    }
+    return (n, sn)
+}
+
+// Whether two values' ranges (from `a` and from `b`) share a point.
+fun ranges_meet(a: int32, b: int32, rlo: [int32], rhi: [int32], rnext: [int32]) -> bool {
+    var x = a
+    var y = b
+    while x >= 0 && y >= 0 {
+        if rhi[x] < rlo[y] { x = rnext[x] }
+        else if rhi[y] < rlo[x] { y = rnext[y] }
+        else { return true }
+    }
+    return false
+}
+
+// Whether a holder of a register (`hs`) is in the way of value `v`.
+fun reg_conflicts(hs: [int32], v: int32, rhead: [int32], rlo: [int32], rhi: [int32], rnext: [int32]) -> bool {
+    for h in hs {
+        if ranges_meet(rhead[h], rhead[v], rlo, rhi, rnext) { return true }
     }
     return false
 }

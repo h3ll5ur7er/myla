@@ -1198,6 +1198,35 @@ class SelfHostedCodegenParity(unittest.TestCase):
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), ("213\n231312\n554\n", 0))
 
+    def test_a_call_in_a_block_that_returns_crosses_nothing_after(self) -> None:
+        # MYLA-257: lifetimes have holes, so values read after a block that
+        # leaves through a call aren't live across that call: they stay in
+        # caller-saved registers, and the function needs no frame at all
+        source = (
+            "fun g(v: int64) -> int64 {\n"
+            "    return v * 7\n"
+            "}\n"
+            "fun f(a: int64, b: int64) -> int64 {\n"
+            "    let x = a * 3\n"
+            "    let y = a + b\n"
+            "    if b < 0 {\n"
+            "        return g(b) + 1\n"
+            "    }\n"
+            "    return x * y + b\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(f(2, 5))\n"
+            "    print(f(4, -1))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("47\n-6\n", 0))
+        body = self._function_asm(asm, "f")
+        self.assertNotIn("%rbp", body, body)
+
     def test_scalars_live_in_callee_saved_registers(self) -> None:
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each
