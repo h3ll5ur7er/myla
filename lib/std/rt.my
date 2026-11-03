@@ -551,3 +551,51 @@ pub fun args() -> [str] {
     }
     return out
 }
+
+// --- numbers as text ---------------------------------------------------------
+
+// How many decimal digits `u` has.
+fun digit_count(u: uint64) -> int64 {
+    var n: int64 = 1
+    var p: uint64 = 10
+    while n < 20 && u >= p {
+        n += 1
+        p *= 10
+    }
+    return n
+}
+
+// `u`'s `n` digits written to `at`, the last first.
+fun put_digits(u0: uint64, at: int64, n: int64) {
+    var u = u0
+    var i = n - 1
+    while i >= 0 {
+        let q = u / 10  // one division a digit: the remainder from the quotient
+        __store8(at + i, ((u - q * 10) as uint8) + 48u8)
+        u = q
+        i -= 1
+    }
+}
+
+// `__uint_to_str`: an unsigned integer in decimal.
+pub fun uint_to_str(u: uint64) -> str {
+    let n = digit_count(u)
+    let p = __alloc(n + 8)
+    __store64(p, n)
+    put_digits(u, p + 8, n)
+    return __str_of(p)
+}
+
+// `__int_to_str`: a signed integer in decimal, a `-` before a negative one.
+pub fun int_to_str(v: int64) -> str {
+    if v >= 0 {
+        return uint_to_str(v as uint64)
+    }
+    let u = 0u64 - (v as uint64)
+    let n = digit_count(u)
+    let p = __alloc(n + 9)
+    __store64(p, n + 1)
+    __store8(p + 8, 45u8)  // '-'
+    put_digits(u, p + 9, n)
+    return __str_of(p)
+}

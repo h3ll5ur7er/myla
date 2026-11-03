@@ -1011,6 +1011,40 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertEqual(body.count("\tset"), 1, body)
         self.assertNotIn("movzbq %al", body.replace("setg %al\n\tmovzbq %al", ""), body)
 
+    def test_logical_conditions_are_branches(self) -> None:
+        # MYLA-162: `&&`, `||` and `!` in the condition of an `if`, a `while`
+        # or a match guard jump straight to where the result leads, with no
+        # bool made in between (no 0/1 constant, no setcc)
+        source = (
+            "fun pick(a: int, b: int) -> int {\n"
+            "    var n = 0\n"
+            "    if a > 0 && !(b > 0) || a == 7 { n = n + 5 }\n"
+            "    if !(a > 2 || b > 2) { n = n + 20 }\n"
+            "    var i = a\n"
+            "    while i < 9 && (i != 4 || b == 3) { i = i + 2 }\n"
+            "    match b {\n"
+            "        3 if a < 0 || a > 6 => { n = n + 300 },\n"
+            "        _ => {},\n"
+            "    }\n"
+            "    return n * 16 + i\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(pick(1, 0))\n"
+            "    print(pick(7, 3))\n"
+            "    print(pick(0, 0))\n"
+            "    print(pick(-2, 3))\n"
+            "    print(pick(2, 5))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("409\n4889\n324\n4810\n4\n", 0))
+        body = self._function_asm(asm, "pick")
+        self.assertNotIn("\tset", body, body)
+        self.assertNotIn("$1, %", body, body)
+
     def test_scalars_live_in_callee_saved_registers(self) -> None:
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each
