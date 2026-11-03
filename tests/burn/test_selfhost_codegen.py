@@ -1183,6 +1183,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
         for ins in ["lock xaddq", "pause", "xchgq", "lock cmpxchgq"]:
             self.assertIn(ins, body, body)
         self.assertNotIn("call", body, body)
+        # a compare-and-swap a branch tests: its flag, no value made of it
+        self.assertRegex(body, r"lock cmpxchgq %rdx, \(%rcx\)\n\tj(n)?e ", body)
 
     def test_a_product_by_a_constant_is_one_imul(self) -> None:
         # MYLA-162: `a * k` from a register is one three-operand `imul`, into

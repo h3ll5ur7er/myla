@@ -788,6 +788,13 @@ impl CodeGen {
                     self.emit("pause")
                     return
                 }
+                // a frame resumed (its resume function the frame's first
+                // word): a call, the callee-saved registers kept
+                if name == "__run_frame" {
+                    self.load_temp(args[0], "rdi", temp_base)
+                    self.emit("call *(%rdi)")
+                    return
+                }
                 if name == "__bsr64" {
                     self.load_temp(args[0], "rax", temp_base)
                     self.emit("bsrq %rax, %rax")
@@ -1014,6 +1021,11 @@ impl CodeGen {
         let last = insts.len() - 1
         return match term {
             Term.Br(c, a, b) => match insts[last] {
+                // a compare-and-swap only the branch reads: its flag (MYLA-162)
+                Inst.Rt(d, name, args) => {
+                    if d != c || self.temp_uses[d] != 1 || name != "__cas64" { return -1 }
+                    last
+                },
                 // a negated flag only the branch reads: the inverted jump (MYLA-251)
                 Inst.Un(d, op, t, x) => {
                     if d != c || self.temp_uses[d] != 1 || op != "!" { return -1 }
@@ -1120,6 +1132,24 @@ impl CodeGen {
     // conditional jump; the successor emitted next is fallen through to.
     fun emit_compare_branch(var self, cmp: Inst, term: Term, labels: [str], next: int32, temp_base: int32) {
         match cmp {
+            Inst.Rt(d, name, args) => {
+                // `lock cmpxchg` sets ZF when it swapped
+                self.load_temp(args[0], "rcx", temp_base)
+                self.load_temp(args[2], "rdx", temp_base)
+                self.load_temp(args[1], "rax", temp_base)
+                self.emit("lock cmpxchgq %rdx, (%rcx)")
+                match term {
+                    Term.Br(c, yes, no) => {
+                        if no == next { self.emit(format("je {}", labels[yes])) }
+                        else {
+                            self.emit(format("jne {}", labels[no]))
+                            if yes != next { self.emit(format("jmp {}", labels[yes])) }
+                        }
+                    },
+                    _ => {},
+                }
+                return
+            },
             Inst.Un(d, op, t, x) => {
                 // `br !x, yes, no` is `br x, no, yes`
                 self.emit_test(x, temp_base)

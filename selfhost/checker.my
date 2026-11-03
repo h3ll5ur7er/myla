@@ -712,7 +712,7 @@ fun is_builtin_func(name: str) -> bool {
 #test("__load8")[true]
 #test("__load")[false]
 pub fun is_raw_memory_primitive(name: str) -> bool {
-    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom" || name == "__rt_waddr" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause"
+    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom" || name == "__rt_waddr" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__run_frame"
 }
 
 #test("sum")[false]
@@ -5608,8 +5608,9 @@ impl Checker {
         // `__cas64(p, old, new)` (whether the 8 bytes at `p` were `old` and
         // are `new` now, at once), `__xchg64(p, v)` (the 8 bytes at `p`
         // before `v` replaced them, at once), `__fetch_add64(p, v)` (the 8
-        // bytes at `p` before `v` was added to them, at once) and `__pause()`
-        // (a spinning loop's hint to the processor)
+        // bytes at `p` before `v` was added to them, at once), `__pause()`
+        // (a spinning loop's hint to the processor) and `__run_frame(fr)` (the
+        // executor resuming a frame, D90: until it suspends or ends)
         if is_raw_memory_primitive(name) {
             let i64 = Type.TInt(64, true)
             if name == "__rt_addr" || name == "__rt_get" || name == "__rt_waddr" {
@@ -5671,7 +5672,7 @@ impl Checker {
             if name == "__load8" { return Ok(Some(Type.TInt(8, false))) }
             if name == "__load32" { return Ok(Some(Type.TInt(32, false))) }
             if name == "__equal_bytes" || name == "__cas64" { return Ok(Some(Type.TBool)) }
-            if name == "__store8" || name == "__store32" || name == "__store64" || name == "__copy_bytes" || name == "__set_io_errno" || name == "__free" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__pause" { return Ok(None) }
+            if name == "__store8" || name == "__store32" || name == "__store64" || name == "__copy_bytes" || name == "__set_io_errno" || name == "__free" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__pause" || name == "__run_frame" { return Ok(None) }
             if name == "__str_of" { return Ok(Some(Type.TStr)) }
             return Ok(Some(i64))
         }
