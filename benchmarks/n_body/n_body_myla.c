@@ -1,9 +1,11 @@
 // Benchmark (MYLA-242): n-body, Myla's semantics: the bodies' list has its indices checked; it is moved into each step and back, so it is never copied.
-// The same operations in the same order as the Myla program, including the
-// square root by 16 Newton steps, so the floats are bit-identical.
+// The same operations in the same order as the Myla program, and the same
+// correctly rounded square root, so the floats are bit-identical.
 #include "../myla_rt.h"
 
 typedef struct { double x, y, z, vx, vy, vz, mass; } Body;
+
+#include <math.h>
 
 #define PI 3.141592653589793
 #define DAYS 365.24
@@ -13,13 +15,6 @@ static inline Body *at(Body *b, int i) {
     return &b[i];
 }
 #define AT(i) (*at(b, (i)))
-
-static double root(double x) {
-    double r = x;
-    if (r < 1.0) r = 1.0;
-    for (int i = 0; i < 16; i++) r = 0.5 * (r + x / r);
-    return r;
-}
 
 static void planets(Body *b) {
     double sm = 4.0 * PI * PI;
@@ -56,7 +51,7 @@ static double energy(Body *b) {
         e += 0.5 * AT(i).mass * (AT(i).vx * AT(i).vx + AT(i).vy * AT(i).vy + AT(i).vz * AT(i).vz);
         for (int j = i + 1; j < N; j++) {
             double dx = AT(i).x - AT(j).x, dy = AT(i).y - AT(j).y, dz = AT(i).z - AT(j).z;
-            e -= AT(i).mass * AT(j).mass / root(dx * dx + dy * dy + dz * dz);
+            e -= AT(i).mass * AT(j).mass / sqrt(dx * dx + dy * dy + dz * dz);
         }
     }
     return e;
@@ -67,7 +62,7 @@ static void advance(Body *b, double dt) {
         for (int j = i + 1; j < N; j++) {
             double dx = AT(i).x - AT(j).x, dy = AT(i).y - AT(j).y, dz = AT(i).z - AT(j).z;
             double d2 = dx * dx + dy * dy + dz * dz;
-            double mag = dt / (d2 * root(d2));
+            double mag = dt / (d2 * sqrt(d2));
             double mi = AT(i).mass, mj = AT(j).mass;
             AT(i).vx -= dx * mj * mag;
             AT(i).vy -= dy * mj * mag;

@@ -4,11 +4,13 @@
 //
 //   n_body [n]   prints the energy before and after, times 1e9, truncated
 //
-// Myla has no square root yet (MYLA-248), so every version takes it by the
-// same 16 Newton steps, which keeps their results bit-identical.
+// Every version takes the correctly rounded square root (std.math's `sqrt`,
+// C's `sqrt`), so their results are bit-identical. Until MYLA-248 every
+// version took it by 16 Newton steps; the baseline measured that.
 
 from std.process import args
 from std.num import parse_int
+from std.math import sqrt
 
 struct Body {
     x: float64,
@@ -22,20 +24,6 @@ struct Body {
 
 const PI: float64 = 3.141592653589793
 const DAYS: float64 = 365.24
-
-// The square root of a positive `x` by 16 Newton steps.
-#test(4.0)[2.0]
-#test(9.0)[3.0]
-fun root(x: float64) -> float64 {
-    var r = x
-    if r < 1.0 {
-        r = 1.0
-    }
-    for i in 0..16 {
-        r = 0.5 * (r + x / r)
-    }
-    return r
-}
 
 fun solar_mass() -> float64 {
     return 4.0 * PI * PI
@@ -89,7 +77,7 @@ fun energy(bodies: [Body]) -> float64 {
             let dx = b.x - c.x
             let dy = b.y - c.y
             let dz = b.z - c.z
-            e -= b.mass * c.mass / root(dx * dx + dy * dy + dz * dz)
+            e -= b.mass * c.mass / sqrt(dx * dx + dy * dy + dz * dz)
         }
     }
     return e
@@ -105,7 +93,7 @@ fun advance(bodies: [Body], dt: float64) -> [Body] {
             let dy = bs[i].y - bs[j].y
             let dz = bs[i].z - bs[j].z
             let d2 = dx * dx + dy * dy + dz * dz
-            let mag = dt / (d2 * root(d2))
+            let mag = dt / (d2 * sqrt(d2))
             let mi = bs[i].mass
             let mj = bs[j].mass
             bs[i].vx -= dx * mj * mag

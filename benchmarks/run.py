@@ -19,7 +19,8 @@ checks that they print the same, and measures each: wall time (the median
 of --runs runs at `size`), peak memory, binary size, and the instructions
 callgrind counts at `profile_size` (exact, so a noisy machine doesn't
 matter). For the Myla version it also lists the functions the instructions
-went to. All C is compiled with -fwrapv: Myla's integers wrap.
+went to. All C is compiled with -fwrapv (Myla's integers wrap) and linked
+with -lm.
 
 `--json FILE` saves the results with the date, the commit and the machine;
 `--compare FILE` adds, for the Myla version, its change against such a file
@@ -75,7 +76,7 @@ def build(name: str, variant: str, myla: str) -> str | None:
         if shutil.which(cc) is None:
             return None
         file = f"{name}.c" if variant == "c" else f"{name}_myla.c"
-        cmd = [cc, opt, "-fwrapv", "-o", exe, os.path.join(src, file)]
+        cmd = [cc, opt, "-fwrapv", "-o", exe, os.path.join(src, file), "-lm"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise SystemExit(f"building {name} ({variant}) failed:\n{proc.stdout}{proc.stderr}")

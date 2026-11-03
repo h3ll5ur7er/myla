@@ -5241,6 +5241,7 @@ impl CodeGen {
         self.emit_stat_runtime()
         self.emit_getcwd_runtime()
         self.emit_getenv_runtime()
+        self.emit_math_runtime()
         self.emit_run_runtime()
     }
 
@@ -5559,6 +5560,23 @@ impl CodeGen {
         self.raw("\tpopq %r13")
         self.raw("\tpopq %r12")
         self.raw("\tpopq %rbp")
+        self.raw("\tret")
+        self.raw("")
+    }
+
+    // std.math's primitives (MYLA-248). A float64 travels as its bits in a
+    // general-purpose register: `__sqrt` rdi = x -> rax = the correctly
+    // rounded square root (sqrtsd); `__f64_bits` and `__f64_from_bits` are the
+    // bits themselves.
+    fun emit_math_runtime(var self) {
+        self.raw("__sqrt:")
+        self.raw("\tmovq %rdi, %xmm0")
+        self.raw("\tsqrtsd %xmm0, %xmm0")
+        self.raw("\tmovq %xmm0, %rax")
+        self.raw("\tret")
+        self.raw("__f64_bits:")
+        self.raw("__f64_from_bits:")
+        self.raw("\tmovq %rdi, %rax")
         self.raw("\tret")
         self.raw("")
     }
@@ -8159,6 +8177,7 @@ pub fun is_builtin_call_name(nm: str) -> bool {
     if nm == "__write_file" || nm == "__run" || nm == "__run_stderr" || nm == "__run_exit_code" || nm == "__read" || nm == "__poll" { return true }
     if nm == "__run_signal" || nm == "__run_errno" { return true }
     if nm == "__list_dir" || nm == "__mkdir" || nm == "__stat" || nm == "__getcwd" || nm == "__getenv" { return true }
+    if nm == "__sqrt" || nm == "__f64_bits" || nm == "__f64_from_bits" { return true }
     if nm == "__unlink" || nm == "__rmdir" || nm == "__rename" { return true }
     if nm == "__task_cancelled" { return true }
     return false

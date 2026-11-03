@@ -49,7 +49,8 @@ class Benchmarks(unittest.TestCase):
                     for c_file in (name + ".c", name + "_myla.c"):
                         c_exe = os.path.join(tmp, c_file + ".out")
                         compiled = subprocess.run([cc, "-O1", "-fwrapv", "-Wall", "-Werror", "-o", c_exe,
-                                                   os.path.join(_BENCH, name, c_file)], capture_output=True, text=True)
+                                                   os.path.join(_BENCH, name, c_file), "-lm"], capture_output=True,
+                                                  text=True)
                         self.assertEqual(compiled.returncode, 0, compiled.stderr)
                         out = subprocess.run([c_exe, size], capture_output=True, text=True).stdout
                         self.assertEqual(out, want, c_file)

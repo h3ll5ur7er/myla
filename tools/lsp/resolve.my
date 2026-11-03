@@ -84,6 +84,8 @@ struct Resolver {
     with_methods: [str: bool],     // the files whose methods are in `methods`
     self_type: str,                // the target of the impl being walked
     want: Pos,                     // where completion is asked (line -1: nowhere)
+    used: [int32: bool],           // the identifiers recorded as uses, by token: a compound assignment's
+                                   // target is walked as its place and as its value (MYLA-223)
     completion: Completion,
     uses: [Use],
     defs: [Def],
@@ -142,7 +144,7 @@ fun resolve_parsed(path: str, source: str, toks: [Token], program: Program, opts
     for sym in symbols {
         if !kind_is_impl(sym.kind) { defs.push(sym_def(path, sym)) }
     }
-    var r = Resolver { path: path, opts: opts, toks: idents, lines: line_index(source), scopes: [], globals: globals_of(path, symbols), modules: [:], known: known, methods: [:], with_methods: [:], self_type: "", want: want, completion: no_completion(), uses: [], defs: defs }
+    var r = Resolver { path: path, opts: opts, toks: idents, lines: line_index(source), scopes: [], globals: globals_of(path, symbols), modules: [:], known: known, methods: [:], with_methods: [:], self_type: "", want: want, completion: no_completion(), uses: [], defs: defs, used: [:] }
     r.add_methods(path, symbols)
     if imports {
         for d in program.decls { r.import_decl(d) }
@@ -343,7 +345,10 @@ impl Resolver {
     // Record that the identifier `name` at or after (line, col) refers to `d`.
     fun use_at(var self, line: int32, col: int32, name: str, d: Def) {
         let k = self.ident_after(line, col, name)
-        if k >= 0 { self.uses.push(Use { range: self.range_of(k), def: d }) }
+        if k >= 0 && !self.used.contains(k) {
+            self.used[k] = true
+            self.uses.push(Use { range: self.range_of(k), def: d })
+        }
     }
 
     // Declare `name` (of type `ty`) at or after (line, col) in the innermost
@@ -782,7 +787,10 @@ impl Resolver {
         }
         for m in members {
             if m.name == field {
-                self.uses.push(Use { range: self.range_of(k), def: m })
+                if !self.used.contains(k) {
+                    self.used[k] = true
+                    self.uses.push(Use { range: self.range_of(k), def: m })
+                }
                 return
             }
         }
