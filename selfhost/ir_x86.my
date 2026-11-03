@@ -105,6 +105,7 @@ impl CodeGen {
         // registers, no arguments on the stack) sets up none, but under -g,
         // whose debugger finds frames by %rbp
         self.frameless = frame == 0 && self.saved_regs.len() == 0 && self.arg_words == 0 && !self.debug && !f.frame
+        let prologue_at = self.text.len()
         if !self.frameless {
             self.emit("pushq %rbp")
             self.emit("movq %rsp, %rbp")
@@ -207,6 +208,9 @@ impl CodeGen {
         if !self.frameless { self.emit("leave") }
         // the caller pops the argument words it pushed (D119)
         self.emit("ret")
+        // cells reserved for temporaries whose values never left %rax: a
+        // body that doesn't reach its frame after all sets up none either
+        if !self.frameless && self.saved_regs.len() == 0 && self.arg_words == 0 && !self.debug && !f.frame { self.drop_unused_frame(prologue_at) }
         self.end_loc()
         self.dbg_pop_scope()
         self.dbg_end_function()
@@ -530,6 +534,9 @@ impl CodeGen {
                         }
                     },
                     _ => {
+                        // `a + k`, `a - k` or `a + b` from registers into a
+                        // register: one `lea` (MYLA-162)
+                        if self.emit_lea(d, op, rt, a, b) { return }
                         // the operands swapped when the second is still in
                         // %rax and the order doesn't matter (MYLA-121)
                         if self.swap_operands(op, a, b) {
@@ -1068,6 +1075,73 @@ impl CodeGen {
                 self.emit("call __panic")
             },
         }
+    }
+
+    // The function emitted from text line `start` on, its frame set up by the
+    // lines there: when no other line reaches %rbp, those lines and every
+    // `leave` blanked (MYLA-162).
+    fun drop_unused_frame(var self, start: int32) {
+        var setup: [int32] = []
+        var k = start
+        while k < self.text.len() && setup.len() < 3 {
+            let line = self.text[k]
+            if line == "\tpushq %rbp" || line == "\tmovq %rsp, %rbp" || text_starts(line, "\tsubq $") { setup.push(k) }
+            else if line != "" && !ends_with_colon(line) { k = self.text.len() }
+            k = k + 1
+        }
+        if setup.len() < 2 { return }
+        var leaves: [int32] = []
+        k = start
+        while k < self.text.len() {
+            let line = self.text[k]
+            if line == "\tleave" { leaves.push(k) }
+            else if !has_index(setup, k) && text_mentions(line, "%rbp") { return }
+            k = k + 1
+        }
+        for i in setup { self.text[i] = "" }
+        for i in leaves { self.text[i] = "" }
+    }
+
+    // `d = a + k`, `a - k` or `a + b` for a 64- or 32-bit integer, `a` (and
+    // `b`) in a general-purpose register and `d` in one: a `lea` into `d`,
+    // re-extended for a signed 32-bit result; false when it isn't such a sum.
+    fun emit_lea(var self, d: int32, op: str, rt: Type, a: int32, b: int32) -> bool {
+        if !(op == "+" || op == "-") || self.temp_reg[d] == "" || text_has_xmm("%" + self.temp_reg[d]) { return false }
+        let (w, sg) = match rt {
+            Type.TInt(bits, s) => (bits, s),
+            _ => (0, false),
+        }
+        if w != 64 && w != 32 { return false }
+        let ra = self.reg_of(a)
+        if ra == "" || text_has_xmm(ra) { return false }
+        let dst = "%" + self.temp_reg[d]
+        var addr = ""
+        let imm = self.temp_imm[b]
+        if imm != "" {
+            // the constant's text without its `$`, negated for `-`
+            var sb = StringBuilder()
+            sb.append(imm, 1, imm.len())
+            var k = sb.build()
+            if op == "-" {
+                if k == "-2147483648" { return false }
+                if k.len() > 0 && k[0] == '-' {
+                    var nb = StringBuilder()
+                    nb.append(k, 1, k.len())
+                    k = nb.build()
+                } else { k = "-" + k }
+            }
+            addr = format("{}({})", k, ra)
+        } else {
+            let rb = self.reg_of(b)
+            if op != "+" || rb == "" || text_has_xmm(rb) { return false }
+            addr = format("({},{})", ra, rb)
+        }
+        if w == 64 { self.emit(format("leaq {}, {}", addr, dst)) }
+        else {
+            self.emit(format("leal {}, {}", addr, narrow_operand(dst, 4)))
+            if sg { self.emit(format("movslq {}, {}", narrow_operand(dst, 4), dst)) }
+        }
+        return true
     }
 
     // `x = x op y` on a variable living in a register, for an integer `+`,
@@ -2699,4 +2773,34 @@ fun canonical_insn(t: Type, reg: str) -> str {
     }
     if sg { return format("movsbq {}, {}", narrow_operand(reg, 1), reg) }
     return format("movzbl {}, {}", narrow_operand(reg, 1), narrow_operand(reg, 4))
+}
+
+fun text_starts(s: str, prefix: str) -> bool {
+    if s.len() < prefix.len() { return false }
+    var i = 0
+    while i < prefix.len() {
+        if s[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fun text_mentions(s: str, part: str) -> bool {
+    var i = 0
+    while i + part.len() <= s.len() {
+        var j = 0
+        while j < part.len() && s[i + j] == part[j] { j = j + 1 }
+        if j == part.len() { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fun ends_with_colon(s: str) -> bool {
+    return s.len() > 0 && s[s.len() - 1] == ':'
+}
+
+fun has_index(xs: [int32], x: int32) -> bool {
+    for y in xs { if y == x { return true } }
+    return false
 }
