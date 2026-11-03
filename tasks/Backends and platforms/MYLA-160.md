@@ -8,7 +8,7 @@ labels: [backend, platforms, design]
 ---
 First step of [[MYLA-62]]. D117 (2026-11-02) chose Myla's own backends from the IR and the runtime in Myla over LLVM. Before the first new backend, the questions that could make that choice expensive are answered with measurements and small prototypes, and recorded on [[Project/Decisions]] (and on [[Architecture/IR]] where they change "Stability"). This replaces the LLVM decision round this task was until then.
 
-- [ ] **The gap to C:** benchmarks of Myla native against C at `-O0` and `-O2`, and where the time goes ([[MYLA-242]]); what D117 (4) would need to reconsider LLVM
+- [ ] **The gap to C:** benchmarks of Myla native against C at `-O0` and `-O2` (gcc, and clang for what LLVM would win back), and where the time goes ([[MYLA-242]]); no factor fixed in advance: the owner weighs the numbers, the bar being that Myla clearly feels faster than Python
 - [ ] **The runtime's port:** the runtime ([[MYLA-162]]) sized piece by piece (allocator, strings, maps, builders, formatting, traps, executor, threads), what Myla can't yet express for it (raw memory, atomics for actor handles, `deep`, `clone` and the executor's queues, D92, thread-local state), and what that costs the language
 - [ ] **The IR's open points:** a pointer kind ("Untyped addresses"), sizes per target, 32-bit wasm ("Lowered per target"), SSA form for the optimisations of D117 (3)
 - [ ] **Calling conventions:** Myla's own convention on each new backend (arguments above the frame base, the callee popping them, [[MYLA-126]]; `become`, D87; suspended frames, D90), and each platform's C convention for the runtime's platform layer and [[MYLA-166]]
