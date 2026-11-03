@@ -668,6 +668,20 @@ impl CodeGen {
                     self.store_temp(d, temp_base)
                     return
                 }
+                // a rotation (MYLA-162): one `rol`, by an immediate when the
+                // count is a constant
+                if name == "__rotl" {
+                    if self.temp_imm[args[1]] != "" {
+                        self.load_temp(args[0], "rax", temp_base)
+                        self.emit(format("rolq {}, %rax", self.temp_imm[args[1]]))
+                    } else {
+                        self.load_temp(args[1], "rcx", temp_base)
+                        self.load_temp(args[0], "rax", temp_base)
+                        self.emit("rolq %cl, %rax")
+                    }
+                    self.store_temp(d, temp_base)
+                    return
+                }
                 self.load_args(args, temp_base)
                 if name == "__float_to_str" { self.uses_float = true }
                 self.emit(format("call {}", name))
@@ -2404,7 +2418,7 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Loc(p) => 0,
         Inst.Bind(name, s) => 0,
         Inst.Scope(open) => 0,
-        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" { 0 } else { 2 },
+        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__rotl" { 0 } else { 2 },
         _ => 2,
     }
 }
@@ -2842,7 +2856,7 @@ fun reads_then_calls(inst: Inst) -> bool {
         Inst.CallSret(name, r, args) => true,
         Inst.CallInd(d, fv, args) => true,
         Inst.CallIndSret(fv, r, args) => true,
-        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits",
+        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__rotl",
         Inst.RtPair(d, d2, name, args) => true,
         _ => false,
     }

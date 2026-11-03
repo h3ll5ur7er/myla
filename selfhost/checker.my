@@ -712,7 +712,7 @@ fun is_builtin_func(name: str) -> bool {
 #test("__load8")[true]
 #test("__load")[false]
 pub fun is_raw_memory_primitive(name: str) -> bool {
-    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of"
+    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl"
 }
 
 #test("sum")[false]
@@ -5599,7 +5599,7 @@ impl Checker {
         // `__load32(p)`, `__store32(p, v)`; `__list_addr(xs)` (a list's cell,
         // borrowed: its length, its capacity, then its elements) and
         // `__list_of(p)` (a cell taken over as the list type its context
-        // expects)
+        // expects); `__rotl(x, k)` (`x` rotated left by `k` bits, a `rol`)
         if is_raw_memory_primitive(name) {
             let i64 = Type.TInt(64, true)
             if name == "__list_addr" {
@@ -5623,6 +5623,7 @@ impl Checker {
             if name == "__store8" { want = [i64, Type.TInt(8, false)] }
             if name == "__store64" { want = [i64, i64] }
             if name == "__store32" { want = [i64, Type.TInt(32, false)] }
+            if name == "__rotl" { want = [i64, i64] }
             if name == "__copy_bytes" || name == "__equal_bytes" { want = [i64, i64, i64] }
             if name == "__syscall" { want = [i64, i64, i64, i64] }
             if name == "__addr_of" { want = [Type.TStr] }
