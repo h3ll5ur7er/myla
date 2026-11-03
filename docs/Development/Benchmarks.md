@@ -8,7 +8,7 @@ No factor is fixed in advance: the numbers inform the owner's decision. The bar 
 
 ## Running them
 
-    python3 benchmarks/run.py [name ...] [--runs N] [--no-callgrind] [--json FILE]
+    python3 benchmarks/run.py [name ...] [--runs N] [--no-callgrind] [--json FILE] [--compare FILE]
 
 It needs gcc, and ideally clang and valgrind. Each benchmark is a directory under `benchmarks/`:
 - `<name>.my`: the program, written as a user would write it;
@@ -48,7 +48,9 @@ It needs gcc, and ideally clang and valgrind. Each benchmark is a directory unde
 
 ## Results (2026-11-03)
 
-All twelve programs, after [[MYLA-246]], on the development container (4 cores). Times are the median of 5 runs; instructions are at each program's smaller `profile_size`.
+All twelve programs, after [[MYLA-246]], on the development container (4 cores of an Intel Xeon at 2.3 GHz). Times are the median of 5 runs; instructions are at each program's smaller `profile_size`.
+
+**This is the baseline** for the optimisations that follow, saved as `benchmarks/results/2026-11-03-baseline.json`. `run.py --compare benchmarks/results/2026-11-03-baseline.json` shows each Myla program's change against it. Timings only compare on the same kind of machine; the file records which.
 
 | Benchmark (size) | Myla | C, gcc `-O2` | C + semantics, gcc `-O2` | Same, clang `-O2` | Same, gcc `-O0` | Myla's instructions ÷ C + semantics (gcc) | Myla's peak memory |
 |---|---:|---:|---:|---:|---:|---:|---:|

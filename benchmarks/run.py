@@ -2,6 +2,7 @@
 """Benchmarks: the gap to C (MYLA-242).
 
     python3 benchmarks/run.py [name ...] [--runs N] [--no-callgrind] [--json FILE]
+                              [--compare FILE]
 
 Each benchmark is a directory under benchmarks/ with `<name>.my`, `<name>.c`
 (idiomatic C), `<name>_myla.c` (C with Myla's semantics, myla_rt.h) and
@@ -19,6 +20,10 @@ of --runs runs at `size`), peak memory, binary size, and the instructions
 callgrind counts at `profile_size` (exact, so a noisy machine doesn't
 matter). For the Myla version it also lists the functions the instructions
 went to. All C is compiled with -fwrapv: Myla's integers wrap.
+
+`--json FILE` saves the results with the date, the commit and the machine;
+`--compare FILE` adds, for the Myla version, its change against such a file
+(benchmarks/results/ keeps the baseline, MYLA-242).
 """
 from __future__ import annotations
 
@@ -180,7 +185,34 @@ def measure(name: str, myla: str, runs: int, use_callgrind: bool, top: int) -> d
     return result
 
 
-def table(results: list[dict]) -> str:
+def machine() -> dict:
+    """What the timings depend on: the processor and the cores."""
+    model = ""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("model name"):
+                    model = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    return {"cpu": model, "cores": os.cpu_count()}
+
+
+def commit() -> str:
+    proc = subprocess.run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
+    return proc.stdout.strip()
+
+
+def load_results(path: str) -> dict[str, dict]:
+    """The results saved by --json, by benchmark name."""
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    results = data["results"] if isinstance(data, dict) else data
+    return {r["name"]: r for r in results}
+
+
+def table(results: list[dict], baseline: dict[str, dict] | None = None) -> str:
     lines = []
     for r in results:
         v = r["variants"]
@@ -200,6 +232,14 @@ def table(results: list[dict]) -> str:
                          f"| {e['user_seconds'] * 1000:.0f} ms | {e['system_seconds'] * 1000:.0f} ms | {e['page_faults']:,} "
                          f"| {ins_txt} | {ins_ratio} "
                          f"| {e['max_rss_kb'] / 1024:.1f} MB | {e['binary_bytes'] / 1024:.0f} KB |")
+        before = (baseline or {}).get(r["name"], {}).get("variants", {}).get("myla")
+        if before:
+            parts = [f"time {before['seconds'] * 1000:.0f} → {base['seconds'] * 1000:.0f} ms "
+                     f"({before['seconds'] / base['seconds']:.2f}× as fast)"]
+            if before.get("instructions") and base.get("instructions"):
+                parts.append(f"instructions {before['instructions'] / base['instructions']:.2f}× fewer")
+            parts.append(f"peak memory {before['max_rss_kb'] / 1024:.0f} → {base['max_rss_kb'] / 1024:.0f} MB")
+            lines.append("\nAgainst the baseline: " + ", ".join(parts) + ".")
         top = base.get("top_functions")
         if top:
             total = base["instructions"]
@@ -217,15 +257,18 @@ def main() -> int:
     ap.add_argument("--no-callgrind", action="store_true", help="skip counting instructions")
     ap.add_argument("--top", type=int, default=8, help="functions to list for the Myla version")
     ap.add_argument("--json", help="also write the results to this file")
+    ap.add_argument("--compare", help="results saved by --json to compare the Myla version with")
     ap.add_argument("--myla", default=os.path.join(REPO, "build", "myla"), help="the myla CLI")
     args = ap.parse_args()
     names = args.names or benchmarks()
     use_callgrind = not args.no_callgrind and shutil.which("valgrind") is not None
     results = [measure(n, args.myla, args.runs, use_callgrind, args.top) for n in names]
-    print(table(results))
+    baseline = load_results(args.compare) if args.compare else None
+    print(table(results, baseline))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
-            json.dump(results, fh, indent=1)
+            json.dump({"date": time.strftime("%Y-%m-%d"), "commit": commit(), "machine": machine(),
+                       "results": results}, fh, indent=1)
     return 0
 
 
