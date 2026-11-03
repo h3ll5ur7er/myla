@@ -746,6 +746,130 @@ pub fun map_lookup(cell: int64, key: int64, slot_size: int64, is_str: int64) -> 
     return 0
 }
 
+// `n` bytes at `p` zeroed.
+fun zero_bytes(p: int64, n: int64) {
+    var at = p
+    var left = n
+    while left >= 8 {
+        __store64(at, 0)
+        at += 8
+        left -= 8
+    }
+    while left > 0 {
+        __store8(at, 0u8)
+        at += 1
+        left -= 1
+    }
+}
+
+// `__map_new`: an empty map of `cap` slots of `slot_size` bytes.
+pub fun map_new(cap: int64, slot_size: int64) -> int64 {
+    let cell = __alloc(cap * slot_size + 16)
+    __store64(cell, 0)
+    __store64(cell + 8, cap)
+    zero_bytes(cell + 16, cap * slot_size)
+    return cell
+}
+
+// The slot of `key` in the map `cell` (which has room), found or made: its
+// address, plus 1 when the key was there (its value is then replaced; slots
+// are 8-byte aligned). A new key takes the first tombstone on its way, else
+// the empty slot it ends at, ranked last, with a reference to a string key.
+fun map_set_slot(cell: int64, key: int64, slot_size: int64, is_str: int64) -> int64 {
+    let mask = __load64(cell + 8) - 1
+    let slots = cell + 16
+    var i: int64 = 0
+    var n: int64 = 0
+    if is_str == 0 {
+        let h = key * PHI
+        i = (h ^ (((h as uint64) >> 32) as int64)) & mask
+    } else {
+        i = str_hash(key) & mask
+        n = __load64(key)
+    }
+    var tomb: int64 = 0
+    while true {
+        let slot = slots + i * slot_size
+        let state = __load64(slot)
+        if state == 0 {
+            var at = slot
+            if tomb != 0 {
+                at = tomb
+            }
+            let count = __load64(cell)
+            __store64(at, 1)
+            __store64(at + 8, key)
+            __store64(at + slot_size - 8, count)
+            __store64(cell, count + 1)
+            if is_str != 0 {
+                __store64(key - 8, __load64(key - 8) + 1)
+            }
+            return at
+        }
+        if state == 1 {
+            let k = __load64(slot + 8)
+            if k == key || (is_str != 0 && __load64(k) == n && __equal_bytes(k + 8, key + 8, n)) {
+                return slot + 1
+            }
+        } else if tomb == 0 {
+            tomb = slot
+        }
+        i = (i + 1) & mask
+    }
+    return 0
+}
+
+// `m[key] = v`'s slot (`__map_reserve` and `__map_set_slot` in one): room
+// made in the map at `holder` (grown when empty or 3/4 full, the new cell
+// stored back), then `key`'s slot as `map_set_slot` gives it.
+pub fun map_put_slot(holder: int64, key: int64, slot_size: int64, is_str: int64) -> int64 {
+    var cell = __load64(holder)
+    let cap = __load64(cell + 8)
+    if cap == 0 || (__load64(cell) + 1) * 4 >= cap * 3 {
+        var bigger: int64 = 8
+        if cap != 0 {
+            bigger = cap * 2
+        }
+        cell = map_rehash(cell, slot_size, is_str, bigger, -1)
+        __store64(holder, cell)
+    }
+    return map_set_slot(cell, key, slot_size, is_str)
+}
+
+// The keys and values of the map `cell` moved into a new one of `cap` slots
+// (in their order: the ranks copied, those after a key just removed, of rank
+// `removed`, one up), the old cell freed.
+fun map_rehash(cell: int64, slot_size: int64, is_str: int64, cap: int64, removed: int64) -> int64 {
+    let fresh = map_new(cap, slot_size)
+    var slot = cell + 16
+    let end = slot + __load64(cell + 8) * slot_size
+    while slot < end {
+        if __load64(slot) == 1 {
+            let k = __load64(slot + 8)
+            let at = map_set_slot(fresh, k, slot_size, is_str)
+            if is_str != 0 {
+                // the key moved: the new cell's reference is the old one's
+                __store64(k - 8, __load64(k - 8) - 1)
+            }
+            __copy_bytes(at + 16, slot + 16, slot_size - 16)
+            let rank = at + slot_size - 8
+            if (__load64(rank) as uint64) > (removed as uint64) {
+                __store64(rank, __load64(rank) - 1)
+            }
+        }
+        slot += slot_size
+    }
+    __free(cell)
+    return fresh
+}
+
+// `__map_rebuild`: the map `cell` after `remove` made a tombstone, rebuilt at
+// its capacity without tombstones (so a probe always ends at an empty slot),
+// the keys ranked after the removed one's `rank` moved up (D105).
+pub fun map_rebuild(cell: int64, slot_size: int64, rank: int64, is_str: int64) -> int64 {
+    return map_rehash(cell, slot_size, is_str, __load64(cell + 8), rank)
+}
+
 // `keys(m)` (`__map_keys`): a new list of the keys of the map `cell` in the
 // order they were inserted (each at its rank), as wide as the list's
 // elements are (`stride` bytes), with a reference to each string key.

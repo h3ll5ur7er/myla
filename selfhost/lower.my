@@ -3163,13 +3163,28 @@ impl Lower {
         let vt = map_val(mt)
         let size = self.int_const(cg.map_slot_size(mt))
         let is_str = self.int_const(cg.map_is_str(mt))
-        let unused = self.int_const(0)
-        self.add(Inst.Rt(-1, "__map_reserve", [holder, size, unused, is_str]))
-        let cell = self.temp(mt)
-        self.add_load(cell, holder, 0)
         let slot = self.temp(Type.TPtr)
         let had = self.temp(Type.TBool)
-        self.add(Inst.RtPair(slot, had, "__map_set_slot", [cell, key, size, is_str]))
+        if cg.has_func("std$rt$map_put_slot") && !cg.owning.contains("std$rt$map_put_slot") {
+            // std.rt's (MYLA-162): room made and the slot found in one call,
+            // whose low bit says whether the key was there
+            let i64 = Type.TInt(64, true)
+            let r = self.temp(i64)
+            self.add(Inst.Call(r, "std$rt$map_put_slot", [holder, key, size, is_str]))
+            let pos = Pos { line: 0, col: 0 }
+            let masked = self.temp(i64)
+            self.add(Inst.Bin(masked, "&", i64, i64, r, self.int_const(-2), pos))
+            self.add(Inst.Mov(slot, masked))
+            let bit = self.temp(i64)
+            self.add(Inst.Bin(bit, "&", i64, i64, r, self.int_const(1), pos))
+            self.add(Inst.Cmp(had, "!=", i64, bit, self.int_const(0)))
+        } else {
+            let unused = self.int_const(0)
+            self.add(Inst.Rt(-1, "__map_reserve", [holder, size, unused, is_str]))
+            let cell = self.temp(mt)
+            self.add_load(cell, holder, 0)
+            self.add(Inst.RtPair(slot, had, "__map_set_slot", [cell, key, size, is_str]))
+        }
         let p = self.offset(slot, 16)
         if cg.owns_heap(vt) {
             let drop_b = self.new_block()
