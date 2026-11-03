@@ -2,7 +2,7 @@
 id: MYLA-242
 title: "Benchmarks: the gap to C"
 type: improvement
-status: in-progress
+status: review
 priority: medium
 labels: [performance, backend, design]
 ---
@@ -54,9 +54,9 @@ Outside the C comparison:
 ## Steps
 
 - [x] A first round to check the method: Fibonacci, the sieve and binary trees, in Myla and the three C versions, with the script that builds, checks and measures them
-- [ ] The other nine programs
-- [ ] Where Myla's time goes, per program (callgrind), and what each gap would need: an IR optimisation (D117 (3)), a runtime change, or nothing
-- [ ] The results on a wiki page, with the script that reruns them in the repository; the owner decides what follows for D117
+- [x] The other nine programs
+- [x] Where Myla's time goes, per program (callgrind), and what each gap would need: an IR optimisation (D117 (3)), a runtime change, or nothing
+- [x] The results on a wiki page, with the script that reruns them in the repository; the owner decides what follows for D117
 
 ## Evidence
 
@@ -67,3 +67,9 @@ Outside the C comparison:
   - Found and fixed: `rep movsq` for small copies ([[MYLA-246]]; binary trees 5.9 → 2.0 s, the self-compile about 20 % faster).
   - Found and filed: 8 bytes per list element ([[MYLA-247]]).
   - Code generation is at gcc `-O0`'s level: the IR optimisations of D117 (3). clang `-O2` isn't ahead of gcc `-O2` on any of the three.
+- **All twelve programs (2026-11-03).**
+  - Every version of every program prints the same. fannkuch(10) and n-body match the Benchmarks Game's reference results; the other expectations were computed in Python.
+  - Myla takes 1.4× to 9× the time of C with Myla's semantics at gcc `-O2`, about 3× on the geometric mean, and about 1.2× gcc `-O0`'s.
+  - clang `-O2` takes 1.13× gcc `-O2`'s time on the same C: LLVM isn't ahead.
+  - Each large gap has a cause and a task: floats in general-purpose registers ([[MYLA-249]]), 8-byte list elements ([[MYLA-247]]), arguments on the stack ([[MYLA-250]]), loop overhead the IR can prove away ([[MYLA-251]]), the runtime's string routines ([[MYLA-252]]), and the missing square root ([[MYLA-248]]).
+  - Table and details: [[Development/Benchmarks]]. In `review`: the owner decides what follows for D117 (4).

@@ -46,36 +46,52 @@ It needs gcc, and ideally clang and valgrind. Each benchmark is a directory unde
   - for the Myla version, the functions those instructions go to. Myla's labels have no symbol type, so `run.py` names valgrind's addresses with `nm`.
 - **Time and instructions disagree on purpose.** A microcoded instruction (`rep movsq`), a cache miss or a page fault takes much longer than its count says, so both are needed.
 
-## First round (2026-11-03)
+## Results (2026-11-03)
 
-fib, the prime sieve and binary trees, on the development container (4 cores). Times are the median of 5 runs; instructions are at the smaller `profile_size`.
+All twelve programs, after [[MYLA-246]], on the development container (4 cores). Times are the median of 5 runs; instructions are at each program's smaller `profile_size`.
 
-| Benchmark | Myla | C, gcc `-O2` | C with Myla's semantics, gcc `-O2` | Same, clang `-O2` | Same, gcc `-O0` |
-|---|---:|---:|---:|---:|---:|
-| fib(36): time | 103 ms | 20 ms | 20 ms | 41 ms | 106 ms |
-| fib(27): instructions | 11.4 M | 6.1 M | 6.1 M | 7.2 M | 11.0 M |
-| sieve(40 M): time | 1,409 ms | 208 ms | 274 ms | 292 ms | 566 ms |
-| sieve(2 M): instructions | 190 M | 33 M | 91 M | 88 M | 318 M |
-| sieve(40 M): peak memory | 817 MB | 40 MB | 40 MB | 40 MB | 40 MB |
-| binary trees(18): time | 2,041 ms | 1,033 ms | 1,028 ms | 1,147 ms | 1,730 ms |
-| binary trees(14): instructions | 753 M | 718 M | 755 M | 785 M | 996 M |
+| Benchmark (size) | Myla | C, gcc `-O2` | C + semantics, gcc `-O2` | Same, clang `-O2` | Same, gcc `-O0` | Myla's instructions ÷ C + semantics (gcc) | Myla's peak memory |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| fib (36) | 98 ms | 20 ms | 20 ms | 40 ms | 98 ms | 1.86× | 14 MB (1.0×) |
+| ackermann (11) | 498 ms | 54 ms | 55 ms | 111 ms | 496 ms | 3.34× | 14 MB (1.0×) |
+| mandelbrot (3,000) | 903 ms | 231 ms | 225 ms | 235 ms | 517 ms | 4.27× | 14 MB (1.0×) |
+| n body (1,000,000) | 1,326 ms | 311 ms | 318 ms | 328 ms | 957 ms | 5.93× | 14 MB (1.0×) |
+| sieve (40,000,000) | 1,378 ms | 258 ms | 279 ms | 284 ms | 609 ms | 2.09× | 817 MB (20.6×) |
+| fannkuch (10) | 386 ms | 191 ms | 267 ms | 259 ms | 744 ms | 1.38× | 14 MB (1.0×) |
+| game of life (1,000) | 861 ms | 230 ms | 297 ms | 314 ms | 1,218 ms | 1.90× | 23 MB (1.6×) |
+| quicksort (1,000,000) | 324 ms | 170 ms | 230 ms | 182 ms | 428 ms | 1.69× | 87 MB (5.2×) |
+| binary trees (18) | 2,041 ms | 1,029 ms | 1,006 ms | 1,092 ms | 1,573 ms | 1.00× | 80 MB (2.4×) |
+| closures (4,000,000) | 806 ms | 281 ms | 248 ms | 325 ms | 528 ms | 2.96× | 124 MB (2.6×) |
+| word freq (5,000,000) | 952 ms | 137 ms | 320 ms | 268 ms | 434 ms | 1.37× | 50 MB (1.4×) |
+| string build (2,000,000) | 528 ms | 190 ms | 340 ms | 321 ms | 389 ms | 0.39× | 57 MB (1.5×) |
 
-### What the round found
+### Summary
 
-- **`rep movsq` for small copies ([[MYLA-246]], fixed).** Before the fix, binary trees ran C's instruction count in 5.7 times C's time. Every match on the three-word `Tree` copied it with `cld; rep movsq`, which is microcoded and starts slowly. Copying up to 8 words with moves took binary trees from 5.9 s to 2.0 s, and the self-compile from about 870 to 690 ms.
-- **Eight bytes per list element ([[MYLA-247]], open).** A `[bool]` takes 8 bytes per element, so the sieve peaks at 817 MB against C's 40 MB: a capacity of 2²⁶ slots plus the previous buffer during the last copy. The 209,000 page faults cost 0.4 to 2.8 s of system time, depending on how loaded the machine is.
-- **Code generation is at gcc `-O0`'s level.** fib runs as many instructions as gcc `-O0`, and its time is the same. The cost sits in each operation:
-  - arguments on the stack;
-  - a `movslq` after every 32-bit operation;
-  - jumps to the next instruction;
-  - in the sieve's loop, the list loaded from the frame for every write, the copy-on-write and bounds checks repeated each time, `!flag` through `sete`/`movzbq`.
+- **Myla against C with Myla's semantics at gcc `-O2`:** 1.4× to 9× the time, about **3×** on the geometric mean. The closest are quicksort (1.4×), fannkuch (1.4×) and string building (1.6×); the furthest are Ackermann (9×), fib and the sieve (5×).
+- **Against an unoptimizing compiler (gcc `-O0`):** about 1.2× on the geometric mean. Myla is ahead on fannkuch, Game of Life and quicksort, level on fib and Ackermann, behind on floats, the sieve's memory and the string programs.
+- **LLVM isn't ahead of gcc on Myla's semantics.** clang `-O2` takes 1.13× gcc `-O2`'s time on the geometric mean: faster on quicksort and word frequency, half as fast on fib and Ackermann. Whatever the gap is, an optimizer of gcc's class closes it, and a better one isn't needed.
+- **Against Python** (not measured, as agreed): CPython usually takes tens of times C's time on loops like these. Myla, at 1.4–9×, clearly feels faster.
 
-  These are the IR optimisations D117 (3) plans, and Myla-specific ones: LLVM doesn't know the copy-on-write rule either.
-- **LLVM isn't ahead here.** clang `-O2` is slower than gcc `-O2` on all three programs (fib by 2×, from how each compiles the recursion). On Myla's semantics it runs about as many instructions as gcc.
-- **The remaining binary-trees gap is memory.** With the copies fixed, Myla runs C's instruction count in twice C's time:
-  - 2.6× the first-level cache misses;
-  - 80 MB against 34 MB: Myla's enum cell is larger than C's node, and its allocator holds more.
+### Where the gap is, and what closes it
+
+Every large gap has a cause the profiles and the assembly show, and each has a task of its own. None of them needs LLVM.
+
+| Cause | Where it shows | Task |
+|---|---|---|
+| Small values copied with `rep movsq` | Binary trees 5.9 → 2.0 s, the self-compile about 20 % faster | [[MYLA-246]] (fixed) |
+| Float values in general-purpose registers: five instructions and two register-file crossings per operation | mandelbrot 4.3×, n-body 5.9× C's instructions | [[MYLA-249]] |
+| 8 bytes per list element | Peak memory: sieve 21×, quicksort 5×, closures 2.6×; page faults (0.4–2.8 s of system time in the sieve) | [[MYLA-247]] |
+| Arguments on the stack, moved through memory by tail calls | fib 5×, Ackermann 9× the time | [[MYLA-250]] |
+| Checks and widening repeated in loops: list reloaded, copy-on-write and bounds checks per write, `movslq` after each operation | sieve 2.1×, Game of Life 1.9×, fannkuch 1.4× the instructions | [[MYLA-251]] |
+| The runtime's string routines (`__str_concat`, `__sb_append_bytes`, `__uint_to_str`) | String building and word frequency: fewer instructions than C, more time | [[MYLA-252]] |
+| No square root (n-body takes 16 Newton steps in every version) | n-body: `root` is 45 % of Myla's instructions | [[MYLA-248]] |
+
+The remaining binary-trees gap (2× C's time at C's instruction count) is memory: 2.6× the first-level cache misses, and 80 MB against 34 MB, from a larger enum cell and the allocator's holding.
+
+## How the first round went
+
+The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).
 
 ## Next
 
-The other nine programs of [[MYLA-242]] (n-body, mandelbrot, fannkuch, word frequency, string building, closures, generic quicksort, Ackermann, Game of Life), then the summary for [[MYLA-160]].
+The owner weighs the results for D117 (4); [[MYLA-160]] goes on with the runtime's port, the IR's open points and a first backend. The benchmarks stay as a measure for each of the tasks above: rerun `run.py` before and after.
