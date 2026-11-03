@@ -120,3 +120,4 @@ So what the hot routines left (map insertion and growth, builders, list growth, 
 
 With lifetimes that have holes ([[MYLA-257]]), `sb_append` (the full builder's case a function of its own, `sb_append_grown`) compiles to a frameless function of 13 instructions and the copy: the self-compile 0.37% fewer instructions than with the assembly routine, string building 0.9%, word frequency 1.8%.
 
+- **Map insertion** (`__map_set_slot`, its two results in one word, the slot's low bit telling whether the key was there) tried on the new allocator and set aside: the self-compile 0.34% and word frequency 0.5% above the assembly, a string key's probe loop keeping five values in the frame around its `__equal_bytes` call. It waits for values saved around the calls they cross instead of living in the frame ([[MYLA-257]], splitting).
