@@ -1,0 +1,604 @@
+// ssa.my -- the scalar slots of a function promoted to values (D123,
+// MYLA-254; wiki: Architecture/IR).
+//
+// The prototype D123 asks for before the IR's form changes: the slots whose
+// values can leave memory (8 bytes, owning nothing, no address taken, not a
+// frame function's) promoted by Braun et al.'s construction ("Simple and
+// Efficient Construction of Static Single Assignment Form", CC 2013). A load
+// reads the value its block, or through its predecessors the blocks before
+// it, last stored; a join value (a block parameter in D123's form) is made
+// only where paths disagree, a trivial one removed.
+//
+// So that today's backend runs the result, it goes back to today's form: a
+// join value is a temporary of its own, which each predecessor copies into
+// (`mov`; all of a predecessor's copies as one parallel copy, so joins
+// feeding joins swap safely); a load becomes a copy of the value it reads;
+// a store goes. A parameter's slot is read once at the entry, a slot read
+// before any store reads 0.
+
+from .checker import Type
+from .ir import IrFunc, IrBlock, Inst, Term, ENV_WORD, successors, inst_defs
+
+// What promoting a function did: its slots, those promoted, the loads and
+// stores that went, the join values made and the copies into them; the
+// `w…` counts weighted by 10 per loop level around them.
+pub struct SsaStats { slots: int32, promoted: int32, loads: int32, stores: int32, joins: int32, copies: int32, wloads: int64, wstores: int64, wcopies: int64 }
+
+pub fun no_ssa_stats() -> SsaStats {
+    return SsaStats { slots: 0, promoted: 0, loads: 0, stores: 0, joins: 0, copies: 0, wloads: 0, wstores: 0, wcopies: 0 }
+}
+
+// The sum of two functions' statistics.
+pub fun add_ssa_stats(a: SsaStats, b: SsaStats) -> SsaStats {
+    return SsaStats { slots: a.slots + b.slots, promoted: a.promoted + b.promoted, loads: a.loads + b.loads, stores: a.stores + b.stores, joins: a.joins + b.joins, copies: a.copies + b.copies, wloads: a.wloads + b.wloads, wstores: a.wstores + b.wstores, wcopies: a.wcopies + b.wcopies }
+}
+
+// No value yet (a value read before any store is a temporary of the entry
+// block, a parameter's or 0, made when first needed: `entry_value`).
+const NO_VALUE: int32 = -1
+
+struct Builder {
+    f: IrFunc,
+    nb: int32,
+    preds: [[int32]],
+    sealed: [bool],
+    filled: [bool],
+    // the value of slot s at the end of block b (key s * nb + b)
+    cur: [int32: int32],
+    // join values: their block, slot, operands (one per predecessor),
+    // what replaced a trivial one (-1: none), and the joins using each
+    jblock: [int32],
+    jslot: [int32],
+    jops: [[int32]],
+    jrepl: [int32],
+    jusers: [[int32]],
+    // the joins of a block not sealed yet, filled in when it is
+    incomplete: [[int32]],
+    // per slot, the value at the entry (-1: not made yet)
+    entry_val: [int32],
+    entry_insts: [Inst],
+}
+
+// A value: a temporary (>= 0) or a join value (-2 - k).
+fun join_value(k: int32) -> int32 {
+    return -2 - k
+}
+
+fun join_index(v: int32) -> int32 {
+    return -2 - v
+}
+
+impl Builder {
+    fun key(self, s: int32, b: int32) -> int32 {
+        return s * self.nb + b
+    }
+
+    // `v` with the joins found trivial replaced by what they stand for.
+    fun resolve(self, v: int32) -> int32 {
+        var x = v
+        while x <= -2 && self.jrepl[join_index(x)] != -1 {
+            x = self.jrepl[join_index(x)]
+        }
+        return x
+    }
+
+    fun write(var self, s: int32, b: int32, v: int32) {
+        self.cur[self.key(s, b)] = v
+    }
+
+    fun read(var self, s: int32, b: int32) -> int32 {
+        let k = self.key(s, b)
+        if self.cur.contains(k) { return self.resolve(self.cur[k]) }
+        return self.read_before(s, b)
+    }
+
+    // Slot `s`'s value on entry to block `b`.
+    fun read_before(var self, s: int32, b: int32) -> int32 {
+        var v = NO_VALUE
+        if !self.sealed[b] {
+            v = self.new_join(s, b)
+            self.incomplete[b].push(join_index(v))
+        } else if self.preds[b].len() == 0 {
+            v = self.entry_value(s)
+        } else if self.preds[b].len() == 1 {
+            v = self.read(s, self.preds[b][0])
+        } else {
+            v = self.new_join(s, b)
+            self.write(s, b, v)
+            v = self.fill_join(join_index(v))
+        }
+        self.write(s, b, v)
+        return v
+    }
+
+    fun new_join(var self, s: int32, b: int32) -> int32 {
+        self.jblock.push(b)
+        self.jslot.push(s)
+        self.jops.push([])
+        self.jrepl.push(-1)
+        self.jusers.push([])
+        return join_value(self.jblock.len() - 1)
+    }
+
+    // The operands of join `k` read from its block's predecessors; the
+    // join, or what it stands for when it is trivial.
+    fun fill_join(var self, k: int32) -> int32 {
+        let b = self.jblock[k]
+        let s = self.jslot[k]
+        var ops: [int32] = []
+        for p in self.preds[b] {
+            let v = self.read(s, p)
+            ops.push(v)
+            if v <= -2 { self.jusers[join_index(v)].push(k) }
+        }
+        self.jops[k] = ops
+        return self.trivial(k)
+    }
+
+    // A join all of whose operands are one value (or itself) stands for
+    // that value; the joins using it may become trivial in turn.
+    fun trivial(var self, k: int32) -> int32 {
+        let me = join_value(k)
+        var same = NO_VALUE
+        var found = false
+        for op0 in self.jops[k] {
+            let op = self.resolve(op0)
+            if op == me || (found && op == same) { continue }
+            if found { return me }
+            same = op
+            found = true
+        }
+        if !found { same = self.entry_value(self.jslot[k]) }
+        self.jrepl[k] = same
+        for u in self.jusers[k] {
+            if u != k && self.jrepl[u] == -1 { let r = self.trivial(u) }
+        }
+        return same
+    }
+
+    fun seal(var self, b: int32) {
+        for k in self.incomplete[b] { let r = self.fill_join(k) }
+        self.incomplete[b] = []
+        self.sealed[b] = true
+    }
+
+    // The value of slot `s` at the entry: a parameter's read from its slot
+    // once, else 0.
+    fun entry_value(var self, s: int32) -> int32 {
+        if self.entry_val[s] >= 0 { return self.entry_val[s] }
+        let slot = self.f.slots[s]
+        self.f.temps.push(slot.ty)
+        let t = self.f.temps.len() - 1
+        if slot.word >= 0 || slot.word == ENV_WORD { self.entry_insts.push(Inst.Load(t, s)) }
+        else { self.entry_insts.push(Inst.Const(t, slot.ty, 0)) }
+        self.entry_val[s] = t
+        return t
+    }
+}
+
+// Which slots of `f` can be promoted: 8 bytes, owning nothing, not passed by
+// value, and never the operand of `addr`, `drop`, `init` or `moved`.
+fun promotable(f: IrFunc) -> [bool] {
+    var ok: [bool] = []
+    for s in f.slots { ok.push(s.size == 8 && !s.owns && !s.inline) }
+    for b in f.blocks {
+        for inst in b.insts {
+            match inst {
+                Inst.Addr(d, s) => { ok[s] = false },
+                Inst.DropSlot(t, s) => { ok[s] = false },
+                Inst.Init(s) => { ok[s] = false },
+                Inst.Moved(s) => { ok[s] = false },
+                _ => {},
+            }
+        }
+    }
+    return ok
+}
+
+// The blocks of `f` reachable from its entry, in reverse postorder.
+fun rpo(f: IrFunc) -> [int32] {
+    let n = f.blocks.len()
+    var seen: [bool] = []
+    while seen.len() < n { seen.push(false) }
+    var post: [int32] = []
+    // an explicit stack of (block, index of the next successor)
+    var stack: [int32] = [0]
+    var next: [int32] = [0]
+    seen[0] = true
+    while stack.len() > 0 {
+        let top = stack.len() - 1
+        let b = stack[top]
+        let succ = successors(f.blocks[b].term)
+        if next[top] < succ.len() {
+            let s = succ[next[top]]
+            next[top] = next[top] + 1
+            if !seen[s] {
+                seen[s] = true
+                stack.push(s)
+                next.push(0)
+            }
+        } else {
+            post.push(b)
+            stack.pop()
+            next.pop()
+        }
+    }
+    var out: [int32] = []
+    var i = post.len() - 1
+    while i >= 0 {
+        out.push(post[i])
+        i = i - 1
+    }
+    return out
+}
+
+// `f` with its promotable slots promoted, and what that did; `depth[b]` is
+// block b's loop depth, for the weighted counts.
+pub fun promote(f0: IrFunc, depth: [int32]) -> (IrFunc, SsaStats) {
+    var stats = no_ssa_stats()
+    stats.slots = f0.slots.len()
+    if f0.frame || f0.blocks.len() == 0 { return (f0, stats) }
+    let ok = promotable(f0)
+    var any = false
+    for x in ok { if x { any = true } }
+    if !any { return (f0, stats) }
+    let n = f0.blocks.len()
+    // the entry has no predecessor in what the lowering makes; a function
+    // whose entry has one keeps its slots
+    for b in f0.blocks {
+        for s in successors(b.term) { if s == 0 { return (f0, stats) } }
+    }
+    let order = rpo(f0)
+    var reach: [bool] = []
+    while reach.len() < n { reach.push(false) }
+    for b in order { reach[b] = true }
+    var preds: [[int32]] = []
+    while preds.len() < n { preds.push([]) }
+    for b in order {
+        for s in successors(f0.blocks[b].term) { preds[s].push(b) }
+    }
+    // a temporary written more than once can't stand for a stored value:
+    // the store copies it
+    var defs: [int32] = []
+    for t in f0.temps { defs.push(0) }
+    for b in f0.blocks {
+        for inst in b.insts {
+            for d in inst_defs(inst) { defs[d] = defs[d] + 1 }
+        }
+    }
+    var falses: [bool] = []
+    var empties: [[int32]] = []
+    var none: [int32] = []
+    while falses.len() < n {
+        falses.push(false)
+        empties.push([])
+    }
+    for s in f0.slots { none.push(-1) }
+    var bd = Builder { f: f0, nb: n, preds: preds, sealed: falses, filled: falses, cur: [:], jblock: [], jslot: [], jops: [], jrepl: [], jusers: [], incomplete: empties, entry_val: none, entry_insts: [] }
+    // each reachable block's instructions, rewritten
+    var new_insts: [[Inst]] = []
+    for b in f0.blocks { new_insts.push(b.insts) }
+    for b in order {
+        if !bd.sealed[b] {
+            var all = true
+            for p in bd.preds[b] { if !bd.filled[p] { all = false } }
+            if all { bd.seal(b) }
+        }
+        var out: [Inst] = []
+        let w = weight(depth, b)
+        for inst in f0.blocks[b].insts {
+            var kept = true
+            match inst {
+                Inst.Load(d, s) => {
+                    if ok[s] {
+                        let v = bd.read(s, b)
+                        // the value read, by its temporary or its join's (made
+                        // below); resolved again once every join is known
+                        out.push(Inst.Mov(d, v))
+                        stats.loads = stats.loads + 1
+                        stats.wloads = stats.wloads + w
+                        kept = false
+                    }
+                },
+                Inst.Store(s, v) => {
+                    if ok[s] {
+                        var val = v
+                        if defs[v] != 1 {
+                            bd.f.temps.push(bd.f.temps[v])
+                            val = bd.f.temps.len() - 1
+                            out.push(Inst.Mov(val, v))
+                        }
+                        bd.write(s, b, val)
+                        stats.stores = stats.stores + 1
+                        stats.wstores = stats.wstores + w
+                        kept = false
+                    }
+                },
+                _ => {},
+            }
+            if kept { out.push(inst) }
+        }
+        new_insts[b] = out
+        bd.filled[b] = true
+        for s in successors(f0.blocks[b].term) {
+            if !bd.sealed[s] {
+                var all = true
+                for p in bd.preds[s] { if !bd.filled[p] { all = false } }
+                if all { bd.seal(s) }
+            }
+        }
+    }
+    // the joins that stayed, each a temporary of its own
+    let nj = bd.jblock.len()
+    var jtemp: [int32] = []
+    var k = 0
+    while k < nj {
+        if bd.jrepl[k] == -1 {
+            bd.f.temps.push(bd.f.slots[bd.jslot[k]].ty)
+            jtemp.push(bd.f.temps.len() - 1)
+            stats.joins = stats.joins + 1
+        } else { jtemp.push(-1) }
+        k = k + 1
+    }
+    // the loads' values, with joins by their temporaries: a load into a
+    // temporary written only there goes, its readers renamed to the value
+    // (`rename`); one into a temporary written elsewhere too stays a copy
+    var rename: [int32] = []
+    while rename.len() < bd.f.temps.len() { rename.push(-1) }
+    for b in order {
+        var out: [Inst] = []
+        for inst in new_insts[b] {
+            match inst {
+                Inst.Mov(d, v) => {
+                    let is_load = v < 0 || (d < defs.len() && v != d && load_dst(f0.blocks[b].insts, d))
+                    if is_load {
+                        let val = value_temp(bd, jtemp, v)
+                        if d < defs.len() && defs[d] == 1 { rename[d] = val } else { out.push(Inst.Mov(d, val)) }
+                    } else { out.push(inst) }
+                },
+                _ => { out.push(inst) },
+            }
+        }
+        new_insts[b] = out
+    }
+    // every reader renamed first, so the copies below see the final names
+    var terms: [Term] = []
+    var bi = 0
+    while bi < n {
+        if reach[bi] {
+            var ren: [Inst] = []
+            for inst in new_insts[bi] { ren.push(rename_uses(inst, rename)) }
+            new_insts[bi] = ren
+            terms.push(rename_term(f0.blocks[bi].term, rename))
+        } else { terms.push(f0.blocks[bi].term) }
+        bi = bi + 1
+    }
+    // each predecessor's copies into its successors' joins, as one parallel
+    // copy before its terminator (and before the comparison a branch fuses
+    // with, unless that reads a join it copies into)
+    for p in order {
+        var dst: [int32] = []
+        var src: [int32] = []
+        for s in successors(f0.blocks[p].term) {
+            k = 0
+            while k < nj {
+                if jtemp[k] >= 0 && bd.jblock[k] == s {
+                    var at = 0
+                    while bd.preds[s][at] != p { at = at + 1 }
+                    let v = rn(value_temp(bd, jtemp, bd.jops[k][at]), rename)
+                    if v != jtemp[k] && !has_temp(dst, jtemp[k]) {
+                        dst.push(jtemp[k])
+                        src.push(v)
+                    }
+                }
+                k = k + 1
+            }
+        }
+        if dst.len() == 0 { continue }
+        var copies: [Inst] = []
+        // a terminator reading a join it copies into reads a copy of it made
+        // before
+        var term = terms[p]
+        for u in term_reads(term) {
+            if has_temp(dst, u) {
+                bd.f.temps.push(bd.f.temps[u])
+                let keep = bd.f.temps.len() - 1
+                copies.push(Inst.Mov(keep, u))
+                var to: [int32] = []
+                while to.len() < bd.f.temps.len() { to.push(-1) }
+                to[u] = keep
+                term = rename_term(term, to)
+            }
+        }
+        terms[p] = term
+        if dst.len() == 1 { copies.push(Inst.Mov(dst[0], src[0])) }
+        else {
+            var tmps: [int32] = []
+            var i = 0
+            while i < dst.len() {
+                bd.f.temps.push(bd.f.temps[dst[i]])
+                tmps.push(bd.f.temps.len() - 1)
+                copies.push(Inst.Mov(tmps[i], src[i]))
+                i = i + 1
+            }
+            i = 0
+            while i < dst.len() {
+                copies.push(Inst.Mov(dst[i], tmps[i]))
+                i = i + 1
+            }
+        }
+        stats.copies = stats.copies + dst.len()
+        stats.wcopies = stats.wcopies + (dst.len() as int64) * weight(depth, p)
+        new_insts[p] = with_copies(new_insts[p], term, copies, dst)
+    }
+    // the entry values first in the entry block
+    var entry: [Inst] = []
+    for inst in bd.entry_insts { entry.push(inst) }
+    for inst in new_insts[0] { entry.push(inst) }
+    new_insts[0] = entry
+    var blocks: [IrBlock] = []
+    bi = 0
+    while bi < n {
+        blocks.push(IrBlock { insts: new_insts[bi], term: terms[bi] })
+        bi = bi + 1
+    }
+    var f = bd.f
+    f.blocks = blocks
+    var promoted = 0
+    for x in ok { if x { promoted = promoted + 1 } }
+    stats.promoted = promoted
+    return (f, stats)
+}
+
+// The temporary standing for the value `v`: itself, or its join's.
+fun value_temp(bd: Builder, jtemp: [int32], v: int32) -> int32 {
+    let r = bd.resolve(v)
+    if r >= 0 { return r }
+    return jtemp[join_index(r)]
+}
+
+// The weight of block `b` for the weighted counts: 10 per loop level, up
+// to three.
+fun weight(depth: [int32], b: int32) -> int64 {
+    var w: int64 = 1
+    var d = 0
+    while b < depth.len() && d < depth[b] && d < 3 {
+        w = w * 10
+        d = d + 1
+    }
+    return w
+}
+
+// `insts` with `copies` (into the joins `dst`) before its end: before the
+// comparison or negation a branch on it reads last, unless that reads one of
+// `dst`, else at the end.
+fun with_copies(insts: [Inst], term: Term, copies: [Inst], dst: [int32]) -> [Inst] {
+    var at = insts.len()
+    match term {
+        Term.Br(c, a, b) => {
+            if insts.len() > 0 {
+                let last = insts[insts.len() - 1]
+                let fusable = match last {
+                    Inst.Cmp(d, op, t, x, y) => d == c && !has_temp(dst, x) && !has_temp(dst, y),
+                    Inst.Un(d, op, t, x) => d == c && !has_temp(dst, x),
+                    _ => false,
+                }
+                if fusable { at = insts.len() - 1 }
+            }
+        },
+        _ => {},
+    }
+    var out: [Inst] = []
+    var i = 0
+    while i < at {
+        out.push(insts[i])
+        i = i + 1
+    }
+    for c in copies { out.push(c) }
+    while i < insts.len() {
+        out.push(insts[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun has_temp(xs: [int32], x: int32) -> bool {
+    for y in xs { if y == x { return true } }
+    return false
+}
+
+// The temporaries the terminator `t` reads.
+fun term_reads(t: Term) -> [int32] {
+    return match t {
+        Term.Br(c, a, b) => [c]
+        Term.Ret(v) => match v {
+            -1 => []
+            _ => [v]
+        }
+        Term.Panic(m, p) => [m]
+        _ => []
+    }
+}
+
+
+// Whether one of `insts` is a load of a slot into `d`.
+fun load_dst(insts: [Inst], d: int32) -> bool {
+    for inst in insts {
+        match inst {
+            Inst.Load(x, s) => { if x == d { return true } },
+            _ => {},
+        }
+    }
+    return false
+}
+
+// The new name of the temporary `t` (`to[t]`, followed while renamed), or `t`.
+#test(2, [-1, -1, 0])[0]
+#test(1, [-1, -1, 0])[1]
+fun rn(t: int32, to: [int32]) -> int32 {
+    var x = t
+    while x >= 0 && x < to.len() && to[x] >= 0 { x = to[x] }
+    return x
+}
+
+fun rn_all(xs: [int32], to: [int32]) -> [int32] {
+    var out: [int32] = []
+    for x in xs { out.push(rn(x, to)) }
+    return out
+}
+
+// `inst` with each temporary it reads renamed by `to` (`rn`); what it
+// writes keeps its name. Every instruction that reads one is here, as in
+// `inst_uses`.
+pub fun rename_uses(inst: Inst, to: [int32]) -> Inst {
+    return match inst {
+        Inst.Store(s, v) => Inst.Store(s, rn(v, to))
+        Inst.Offset(d, p, off) => Inst.Offset(d, rn(p, to), off)
+        Inst.LoadAt(d, p, off, w) => Inst.LoadAt(d, rn(p, to), off, w)
+        Inst.StoreAt(p, off, v, w) => Inst.StoreAt(rn(p, to), off, rn(v, to), w)
+        Inst.Copy(d, src, size) => Inst.Copy(rn(d, to), rn(src, to), size)
+        Inst.Bin(d, op, lt, rt, a, b, pos) => Inst.Bin(d, op, lt, rt, rn(a, to), rn(b, to), pos)
+        Inst.Cmp(d, op, t, a, b) => Inst.Cmp(d, op, t, rn(a, to), rn(b, to))
+        Inst.Un(d, op, t, a) => Inst.Un(d, op, t, rn(a, to))
+        Inst.Mov(d, a) => Inst.Mov(d, rn(a, to))
+        Inst.Cast(d, ft, tt, a) => Inst.Cast(d, ft, tt, rn(a, to))
+        Inst.Call(d, name, args) => Inst.Call(d, name, rn_all(args, to))
+        Inst.CallSret(name, r, args) => Inst.CallSret(name, rn(r, to), rn_all(args, to))
+        Inst.Rt(d, name, args) => Inst.Rt(d, name, rn_all(args, to))
+        Inst.RetainVal(t, v) => Inst.RetainVal(t, rn(v, to))
+        Inst.Retain(t, p) => Inst.Retain(t, rn(p, to))
+        Inst.DropAt(t, p) => Inst.DropAt(t, rn(p, to))
+        Inst.Deep(t, p) => Inst.Deep(t, rn(p, to))
+        Inst.CloneDeep(t, p) => Inst.CloneDeep(t, rn(p, to))
+        Inst.Elem(d, c, i, stride, is_str, pos) => Inst.Elem(d, rn(c, to), rn(i, to), stride, is_str, pos)
+        Inst.Load8(d, p) => Inst.Load8(d, rn(p, to))
+        Inst.Cow(d, t, h) => Inst.Cow(d, t, rn(h, to))
+        Inst.Append(d, h, c, stride) => Inst.Append(d, rn(h, to), rn(c, to), stride)
+        Inst.Pop(d, c, stride, pos) => Inst.Pop(d, rn(c, to), stride, pos)
+        Inst.RtPair(d, d2, name, args) => Inst.RtPair(d, d2, name, rn_all(args, to))
+        Inst.Check(v, kind, pos) => Inst.Check(rn(v, to), kind, pos)
+        Inst.SbAppend(h, v) => Inst.SbAppend(rn(h, to), rn(v, to))
+        Inst.SbAppendRange(h, v, a, b, pos) => Inst.SbAppendRange(rn(h, to), rn(v, to), rn(a, to), rn(b, to), pos)
+        Inst.SbAppendByte(h, b) => Inst.SbAppendByte(rn(h, to), rn(b, to))
+        Inst.SbBuild(d, c) => Inst.SbBuild(d, rn(c, to))
+        Inst.MapRemove(t, h, c, k) => Inst.MapRemove(t, rn(h, to), rn(c, to), rn(k, to))
+        Inst.Exit(v) => Inst.Exit(rn(v, to))
+        Inst.CallInd(d, fv, args) => Inst.CallInd(d, rn(fv, to), rn_all(args, to))
+        Inst.CallIndSret(fv, r, args) => Inst.CallIndSret(rn(fv, to), rn(r, to), rn_all(args, to))
+        Inst.Print(t, a) => Inst.Print(t, rn(a, to))
+        _ => inst
+    }
+}
+
+// `t` with each temporary it reads renamed by `to`.
+pub fun rename_term(t: Term, to: [int32]) -> Term {
+    return match t {
+        Term.Br(c, a, b) => Term.Br(rn(c, to), a, b)
+        Term.Ret(v) => match v {
+            -1 => t
+            _ => Term.Ret(rn(v, to))
+        }
+        Term.Panic(m, p) => Term.Panic(rn(m, to), p)
+        _ => t
+    }
+}

@@ -17,6 +17,7 @@ from std.fs import current_dir
 from .loader import Span
 from .checker import Checker, Type, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
+from .ssa import SsaStats, no_ssa_stats
 from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered
 import .ir_x86 as ir_x86
@@ -157,6 +158,10 @@ pub struct CodeGen {
     nullary_names: [str: bool],
     str_ix: [str: int32],
     keep_ir: bool,
+    // D123's prototype: the scalar slots promoted before each function is
+    // emitted (`--ssa`), and what that did
+    ssa: bool,
+    ssa_stats: SsaStats,
     ir_texts: [str],
     ir_blocked: [str],
     ir_ready: bool,
@@ -290,7 +295,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         debug: false, line_files: [], cur_file: 0, last_loc: "",
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
-        keep_ir: false, ir_texts: [], ir_blocked: [], ir_ready: false,
+        keep_ir: false, ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
         temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
@@ -3416,7 +3421,8 @@ impl CodeGen {
         // a last use moves (MYLA-127), checked by the verifier with the rest
         let f = moves(l.f)
         let problem = verify(f)
-        if self.keep_ir { self.ir_texts.push(render_func(f)) }
+        // with `--ssa`, the text shows each function after promotion instead
+        if self.keep_ir && !self.ssa { self.ir_texts.push(render_func(f)) }
         if problem != "" { panic(format("internal error: {}: IR verifier: {}", mangled, problem)) }
         for inst in l.f.instances { let m = self.request_fn(inst.orig, inst.targs) }
         for b in l.f.blocks {

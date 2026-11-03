@@ -36,6 +36,8 @@ pub enum Inst {
     LoadAt(int32, int32, int32, int32),
     // store [%ptr + off], %src: of the width (the low bytes of %src)
     StoreAt(int32, int32, int32, int32),
+    // %dst = %src: a copy of a temporary (D123: the copies leaving SSA form)
+    Mov(int32, int32),
     // copy size [%dst], [%src]: an aggregate's bytes
     Copy(int32, int32, int32),
     // %dst = op ty %a, %b: + - * / % & | ^ << >> on integers (ty: the left
@@ -248,6 +250,7 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Bin(d, op, t, rt, a, b, pos) => render_bin(d, op, t, rt, a, b, pos)
         Inst.Cmp(d, op, t, a, b) => format("%t{} = cmp {} {} %t{}, %t{}", d, op, type_name(t), a, b)
         Inst.Un(d, op, t, a) => format("%t{} = {} {} %t{}", d, op, type_name(t), a)
+        Inst.Mov(d, a) => format("%t{} = %t{}", d, a)
         Inst.Cast(d, from_t, to_t, a) => format("%t{} = cast {} -> {} %t{}", d, type_name(from_t), type_name(to_t), a)
         Inst.Call(d, name, args) => render_call(d, name, args)
         Inst.CallSret(name, r, args) => render_call(-1, name, args) + format(" sret %t{}", r)
@@ -595,6 +598,7 @@ pub fun inst_uses(inst: Inst) -> [int32] {
         Inst.Bin(d, op, lt, rt, a, b, pos) => [a, b]
         Inst.Cmp(d, op, t, a, b) => [a, b]
         Inst.Un(d, op, t, a) => [a]
+        Inst.Mov(d, a) => [a]
         Inst.Cast(d, from_t, to_t, a) => [a]
         Inst.Call(d, name, args) => args
         Inst.CallSret(name, r, args) => prepend(r, args)
@@ -665,6 +669,7 @@ pub fun inst_defs(inst: Inst) -> [int32] {
         Inst.Bin(d, op, lt, rt, a, b, pos) => [d]
         Inst.Cmp(d, op, t, a, b) => [d]
         Inst.Un(d, op, t, a) => [d]
+        Inst.Mov(d, a) => [d]
         Inst.Cast(d, from_t, to_t, a) => [d]
         Inst.Call(d, name, args) => result_temp(d)
         Inst.Rt(d, name, args) => result_temp(d)
@@ -697,6 +702,7 @@ fun writes_temp(inst: Inst, t: int32) -> bool {
         Inst.Bin(d, op, lt, rt, a, b, pos) => d == t
         Inst.Cmp(d, op, ty, a, b) => d == t
         Inst.Un(d, op, ty, a) => d == t
+        Inst.Mov(d, a) => d == t
         Inst.Cast(d, from_t, to_t, a) => d == t
         Inst.Call(d, name, args) => d == t
         Inst.Rt(d, name, args) => d == t
@@ -1049,6 +1055,7 @@ fun only_reads(inst: Inst) -> bool {
         Inst.Bin(d, op, lt, rt, a, b, pos) => true
         Inst.Cmp(d, op, t, a, b) => true
         Inst.Un(d, op, t, a) => true
+        Inst.Mov(d, a) => true
         Inst.Cast(d, from_t, to_t, a) => true
         Inst.Loc(p) => true
         _ => false

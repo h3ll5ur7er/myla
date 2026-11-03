@@ -12,7 +12,8 @@
 from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV, narrow_operand
-from .ir import IrFunc, Inst, Term, Touches, ENV_WORD, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
+from .ir import IrFunc, Inst, Term, Touches, ENV_WORD, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
+from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 impl CodeGen {
@@ -23,7 +24,16 @@ impl CodeGen {
 
     // Emit `f` as `myla_<mangled>`: a function or lambda declared by the node
     // `decl_id` (its file) at `line:col`.
-    fun emit_ir_at(var self, f: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
+    fun emit_ir_at(var self, f0: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
+        // D123's prototype: the scalar slots promoted first (`--ssa`; not
+        // under -g, whose debugger reads variables from their slots)
+        var f = f0
+        if self.ssa && !self.debug && !f0.frame {
+            let promoted = promote(f0, loop_depths(f0, reachable_blocks(f0)))
+            f = promoted.0
+            self.ssa_stats = add_ssa_stats(self.ssa_stats, promoted.1)
+        }
+        if self.keep_ir && self.ssa { self.ir_texts.push(render_func(f)) }
         let tc = touches(f)
         self.temp_uses = use_counts(f, tc)
         self.ret_type = f.ret
@@ -560,6 +570,19 @@ impl CodeGen {
                         }
                     },
                 }
+                self.store_temp(d, temp_base)
+            },
+            Inst.Mov(d, a) => {
+                // a copy (D123): nothing between one register and itself,
+                // one move between two registers, else through %rax, which
+                // the held-back store folds into a move between the homes
+                if self.temp_uses[d] == 0 { return }
+                let ra = self.reg_of(a)
+                if ra != "" && self.temp_reg[d] != "" && !text_has_xmm(ra) && !text_has_xmm("%" + self.temp_reg[d]) {
+                    if ra != "%" + self.temp_reg[d] { self.emit(format("movq {}, %{}", ra, self.temp_reg[d])) }
+                    return
+                }
+                self.load_temp(a, "rax", temp_base)
                 self.store_temp(d, temp_base)
             },
             Inst.Un(d, op, t, a) => {
@@ -1458,7 +1481,7 @@ impl CodeGen {
         // float temporaries whose interval holds no call (nothing clobbers
         // there) live in %xmm2..%xmm15, which need no save (MYLA-249); the
         // rest go through the scan below like any other value
-        self.alloc_xmm(f, nt, cand, first, last, weight, cpre, pos)
+        self.alloc_xmm(f, nt, cand, first, last, weight, cpre, pos, tv, tat)
         i = 0
         while i < nv {
             if (i < nt && self.temp_reg[i] != "") || (i >= nt && self.slot_reg[i - nt] != "") { cand[i] = false }
@@ -1502,10 +1525,12 @@ impl CodeGen {
             var v = head[p]
             while v >= 0 {
                 var r = 0
+                // read for the last time where v is written: an instruction
+                // reads its operands before it writes; but a value live
+                // before p (a parameter, from the entry) isn't written there
+                let born = written_at(tv, tat, p, v)
                 while r < nr {
-                    // read for the last time where v is written: an
-                    // instruction reads its operands before it writes
-                    if owner[r] >= 0 && last[owner[r]] <= p { owner[r] = -1 }
+                    if owner[r] >= 0 && (last[owner[r]] < p || (last[owner[r]] == p && born)) { owner[r] = -1 }
                     r = r + 1
                 }
                 var top = ncallee
@@ -1566,7 +1591,7 @@ impl CodeGen {
     // value v the slot v - nt from nt on) among `cand` whose interval
     // `first`..`last` no position clobbers (`cpre`), by a linear scan in
     // which a lighter value gives way to a heavier one (MYLA-249).
-    fun alloc_xmm(var self, f: IrFunc, nt: int32, cand: [bool], first: [int32], last: [int32], weight: [int64], cpre: [int32], pos: int32) {
+    fun alloc_xmm(var self, f: IrFunc, nt: int32, cand: [bool], first: [int32], last: [int32], weight: [int64], cpre: [int32], pos: int32, tv: [int32], tat: [int32]) {
         let nv = nt + f.slots.len()
         var head: [int32] = []
         while head.len() < pos { head.push(-1) }
@@ -1593,7 +1618,7 @@ impl CodeGen {
             while v >= 0 {
                 var r = 0
                 while r < nr {
-                    if owner[r] >= 0 && last[owner[r]] <= p { owner[r] = -1 }
+                    if owner[r] >= 0 && (last[owner[r]] < p || (last[owner[r]] == p && written_at(tv, tat, p, v))) { owner[r] = -1 }
                     r = r + 1
                 }
                 var pick = -1
@@ -2048,6 +2073,7 @@ fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
                     Inst.Bin(d, op, lt, rt, x, y, pos) => { if d == t { found = true } },
                     Inst.Cmp(d, op, ty, x, y) => { if d == t { found = true } },
                     Inst.Un(d, op, ty, x) => { if d == t { found = true } },
+                    Inst.Mov(d, x) => { if d == t { found = true; work.push(x) } },
                     Inst.Cast(d, ft, tt, x) => { if d == t { found = true } },
                     Inst.Call(d, name, xs) => { if d == t { found = true } },
                     Inst.Rt(d, name, xs) => { if d == t { found = true } },
@@ -2099,6 +2125,7 @@ fun clobbers(inst: Inst) -> bool {
         Inst.Bin(d, op, lt, rt, a, b, pos) => float_rem(op, lt),
         Inst.Cmp(d, op, t, a, b) => false,
         Inst.Un(d, op, t, a) => false,
+        Inst.Mov(d, a) => false,
         Inst.Cast(d, from_t, to_t, a) => false,
         Inst.Init(s) => false,
         Inst.Elem(d, c, i, stride, is_str, pos) => false,
@@ -2311,6 +2338,7 @@ fun writes_no_slot(inst: Inst) -> bool {
         Inst.Bin(d, op, lt, rt, a, b, pos) => true
         Inst.Cmp(d, op, t, a, b) => true
         Inst.Un(d, op, t, a) => true
+        Inst.Mov(d, a) => true
         Inst.Cast(d, from_t, to_t, a) => true
         Inst.Elem(d, c, i, stride, is_str, pos) => true
         Inst.Load8(d, p) => true
@@ -2495,4 +2523,16 @@ fun store_insn(width: int32, v: str, dst: str) -> str {
 #test("%rax")[false]
 fun text_has_xmm(v: str) -> bool {
     return v.len() > 4 && v[1] == 'x' && v[2] == 'm' && v[3] == 'm'
+}
+
+// Whether the instruction at position `p` writes the value `v` (`tv` and
+// `tat` as `alloc_regs` builds them: a write is -1 - v).
+fun written_at(tv: [int32], tat: [int32], p: int32, v: int32) -> bool {
+    if p + 1 >= tat.len() { return false }
+    var k = tat[p]
+    while k < tat[p + 1] {
+        if tv[k] == -1 - v { return true }
+        k = k + 1
+    }
+    return false
 }
