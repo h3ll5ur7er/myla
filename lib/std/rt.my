@@ -599,3 +599,76 @@ pub fun int_to_str(v: int64) -> str {
     put_digits(u, p + 9, n)
     return __str_of(p)
 }
+
+// --- lists -------------------------------------------------------------------
+//
+// A list's cell holds its length, its capacity (8 bytes each), then its
+// elements, each as wide as its type keeps it (D120: a `char` 4 bytes).
+
+// The scalar the UTF-8 sequence led by the byte at `p + i` encodes (of `n`
+// bytes in all), with its length above bit 32: `cp | len << 32`; U+FFFD and
+// 1 for a byte that isn't part of a well-formed sequence (an overlong form,
+// a surrogate, beyond U+10FFFF, cut short). Out of `str_chars`' loop, which
+// keeps its few values in registers so.
+fun decode_at(p: int64, i: int64, n: int64) -> int64 {
+    let b = __load8(p + i) as int64
+    // the sequence's length, its payload bits, and the least scalar of that
+    // length (a smaller one is overlong)
+    var need: int64 = 0
+    var cp: int64 = 0
+    var least: int64 = 0
+    if b >= 0xC2 && b < 0xE0 {
+        need = 2
+        cp = b & 0x1F
+        least = 0x80
+    } else if b >= 0xE0 && b < 0xF0 {
+        need = 3
+        cp = b & 0x0F
+        least = 0x800
+    } else if b >= 0xF0 && b < 0xF5 {
+        need = 4
+        cp = b & 0x07
+        least = 0x10000
+    }
+    if need == 0 || i + need > n {
+        return 0xFFFD | (1i64 << 32)
+    }
+    var k: int64 = 1
+    while k < need {
+        let c = __load8(p + i + k) as int64
+        if (c & 0xC0) != 0x80 {
+            return 0xFFFD | (1i64 << 32)
+        }
+        cp = (cp << 6) | (c & 0x3F)
+        k += 1
+    }
+    if cp < least || cp > 0x10FFFF || (cp & -2048) == 0xD800 {
+        return 0xFFFD | (1i64 << 32)
+    }
+    return cp | (need << 32)
+}
+
+// `__str_chars` (`s.chars()`): the code points of `s`, U+FFFD for each byte
+// that isn't part of a well-formed UTF-8 sequence.
+pub fun str_chars(s: str) -> [char] {
+    let p = __addr_of(s) + 8
+    let n = __load64(p - 8)
+    let cell = __alloc(n * 4 + 16)
+    var at = cell + 16
+    var i: int64 = 0
+    while i < n {
+        let b = __load8(p + i)
+        if b < 128u8 {
+            __store32(at, b as uint32)
+            i += 1
+        } else {
+            let r = decode_at(p, i, n)
+            __store32(at, (r & LOW32) as uint32)
+            i += r >> 32
+        }
+        at += 4
+    }
+    __store64(cell, (at - cell - 16) >> 2)
+    __store64(cell + 8, n)
+    return __list_of(cell)
+}

@@ -3623,6 +3623,17 @@ impl CodeGen {
             self.float_to_int(tgt)
             return
         }
+        // a register holds a value extended from its type's width, so
+        // widening an unsigned one, or a signed one to a signed type, keeps
+        // it as it is (MYLA-162)
+        let widens = match src {
+            Type.TInt(w1, s1) => match tgt {
+                Type.TInt(w2, s2) => w1 < w2 && (!s1 || s2),
+                _ => false,
+            },
+            _ => false,
+        }
+        if widens { return }
         self.wrap(tgt)
     }
 
@@ -8685,7 +8696,7 @@ pub fun int_signed(t: Type) -> bool {
 
 #test(Type.TInt(8, false))[8]
 #test(Type.TInt(32, true))[32]
-fun int_width_cg(t: Type) -> int32 {
+pub fun int_width_cg(t: Type) -> int32 {
     return match t { Type.TInt(w, s) => w, _ => 64 }
 }
 

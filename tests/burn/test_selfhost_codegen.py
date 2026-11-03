@@ -1077,6 +1077,38 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertRegex(body, r"imul[lq] \$" + k + r", %r[0-9a-z]+, %r[0-9a-z]+\n", body)
         self.assertNotIn(", %rax, %rax", body, body)
 
+    def test_shifts_widenings_and_sums_as_addresses(self) -> None:
+        # MYLA-162: a shift by a constant is an immediate (not through %cl),
+        # a widening cast of an unsigned value or to a signed type re-extends
+        # nothing, and each still wraps as before; std.rt's `str_chars`
+        # (`chars()`) loads its bytes through a sum folded into the address
+        source = (
+            "fun mix(a: int64, b: uint8, c: int8, d: uint32) -> int64 {\n"
+            "    let x = (a << 6) ^ (a >> 3) ^ ((d >> 31) as int64)\n"
+            "    let y = b as uint32 + 1\n"
+            "    let z = c as int64 * 3\n"
+            "    let w = c as uint16\n"
+            "    return x + y as int64 + z + w as int64\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(mix(5, 255u8, -7i8, 4294967295u32))\n"
+            "    print(mix(-9223372036854775807, 0u8, 127i8, 7u32))\n"
+            "    print(\"héλ€😀\".chars().len())\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("66085\n-1152921504606846403\n5\n", 0))
+        body = self._function_asm(asm, "mix")
+        self.assertNotIn("%cl", body, body)
+        for shift in ["shlq $6, %rax", "sarq $3, %rax", "shrq $31, %rax"]:
+            self.assertIn(shift, body, body)
+        self.assertNotIn("movzbl %al, %eax\n\tmovl %eax, %eax", body, body)
+        chars = self._function_asm(asm, "std$rt$str_chars")
+        self.assertRegex(chars, r"movzbl 0\(%r[0-9a-z]+,%r[0-9a-z]+\), %eax", chars)
+
     def test_scalars_live_in_callee_saved_registers(self) -> None:
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each
