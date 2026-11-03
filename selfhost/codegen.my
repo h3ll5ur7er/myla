@@ -18,6 +18,7 @@ from .loader import Span
 from .checker import Checker, Type, is_raw_memory_primitive, FuncSig, StructInfo, EnumInfo, FieldT, VariantT, Subst, subst_type, subst_get, opt_subst_type, CV, type_name, checker_on
 from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
+from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
 from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered
 import .ir_x86 as ir_x86
@@ -158,6 +159,14 @@ pub struct CodeGen {
     nullary_names: [str: bool],
     str_ix: [str: int32],
     keep_ir: bool,
+    // the small leaf functions copied into their callers (`inline.my`):
+    // their names and lowered bodies, and the names found not to be;
+    // `inlining` off with `--no-inline` (and under -g: each function stays
+    // one for the debugger)
+    inlining: bool,
+    inl_names: [str],
+    inl_bodies: [IrFunc],
+    inl_no: [str: bool],
     // D123's prototype: the scalar slots promoted before each function is
     // emitted (`--ssa`), and what that did
     ssa: bool,
@@ -296,7 +305,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         debug: false, line_files: [], cur_file: 0, last_loc: "",
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
-        keep_ir: false, ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
+        keep_ir: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
         temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
@@ -2640,203 +2649,206 @@ impl CodeGen {
         // (futex); `__exec_idle` counts the workers with nothing to run
         // (spinning a while, then asleep), `__exec_sleepers` those asleep.
         //
-        // __wq_lock: %rcx = a queue's record, whose lock is taken (clobbers
-        // %eax)
-        self.raw("__wq_lock:")
-        self.raw("\tmovl $1, %eax")
-        self.raw("\txchgl %eax, (%rcx)")
-        self.raw("\ttestl %eax, %eax")
-        self.raw("\tjz .Lwql_got")
-        self.raw("\tpause")
-        self.raw("\tjmp __wq_lock")
-        self.raw(".Lwql_got:")
-        self.raw("\tret")
-        self.raw("")
-        // __exec_push: %rdi = a frame, onto the running worker's queue; a
-        // sleeping worker woken. Clobbers %rax and %rcx.
-        self.raw("__exec_push:")
-        self.raw("\tpushq %rdx")
-        self.raw(format("\tmovq {}, %rcx", self.tv("__worker_id")))
-        self.raw("\tmovq %rcx, %rdx")
-        self.raw("\tshlq $6, %rcx")
-        self.raw("\tleaq __wq(%rip), %rax")
-        self.raw("\taddq %rax, %rcx")
-        self.raw("\tshlq $23, %rdx")
-        self.raw("\taddq __wq_rings(%rip), %rdx")
-        self.raw("\tcall __wq_lock")
-        // seed:N: the generator's next value (x * a + c, the interpreter's
-        // `Interp.ready` too); its bit 33 set queues the frame at the oldest end
-        self.raw("\tcmpq $2, __exec_sched(%rip)")
-        self.raw("\tjne .Lexp_newest")
-        self.raw("\tpushq %r8")
-        self.raw("\tmovq __exec_rng(%rip), %rax")
-        self.raw(format("\tmovabsq ${}, %r8", SCHED_MUL))
-        self.raw("\timulq %r8, %rax")
-        self.raw(format("\tmovabsq ${}, %r8", SCHED_ADD))
-        self.raw("\taddq %r8, %rax")
-        self.raw("\tpopq %r8")
-        self.raw("\tmovq %rax, __exec_rng(%rip)")
-        self.raw("\tbtq $33, %rax")
-        self.raw("\tjc .Lexp_oldest")
-        self.raw(".Lexp_newest:")
-        self.raw("\tmovq 16(%rcx), %rax")
-        self.raw("\tpushq %rax")
-        self.raw("\tsubq 8(%rcx), %rax")
-        self.raw(format("\tcmpq ${}, %rax", EXEC_CAP))
-        self.raw("\tpopq %rax")
-        self.raw("\tjae .Lexp_full")
-        self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
-        self.raw("\tmovq %rdi, (%rdx,%rax,8)")
-        self.raw("\tincq 16(%rcx)")
-        self.raw("\tmovl $0, (%rcx)")
-        self.raw("\tpopq %rdx")
-        // a worker that went to sleep before this push saw the queue empty
-        // after counting itself a sleeper: the count is read after the push
-        self.raw("\tlock incl __exec_seq(%rip)")
-        self.raw("\tcmpl $0, __exec_sleepers(%rip)")
-        self.raw("\tjne .Lexp_wake")
-        self.raw("\tret")
-        // the ring full: out of memory, the lock given back first
-        self.raw(".Lexp_full:")
-        self.raw("\tmovl $0, (%rcx)")
-        self.raw("\tpopq %rdx")
-        self.raw("\tjmp __trap_oom")
-        self.raw(".Lexp_wake:")
-        self.raw("\tpushq %rdi")
-        self.raw("\tpushq %rsi")
-        self.raw("\tpushq %rdx")
-        self.raw("\tpushq %r11")
-        self.raw("\tleaq __exec_seq(%rip), %rdi")
-        self.raw("\tmovq $129, %rsi")
-        self.raw("\tmovq $1, %rdx")
-        self.raw("\tmovq $202, %rax")
-        self.raw("\tsyscall")
-        self.raw("\tpopq %r11")
-        self.raw("\tpopq %rdx")
-        self.raw("\tpopq %rsi")
-        self.raw("\tpopq %rdi")
-        self.raw("\tret")
-        self.raw("")
-        // __exec_yield_push: %rdi = a frame yielding a turn, onto the oldest
-        // end of the running worker's queue (MYLA_SCHED=fifo: the newest, as
-        // any push). Clobbers %rax and %rcx.
-        self.raw("__exec_yield_push:")
-        self.raw("\tcmpq $1, __exec_sched(%rip)")
-        self.raw("\tje __exec_push")
-        self.raw("\tpushq %rdx")
-        self.raw(format("\tmovq {}, %rcx", self.tv("__worker_id")))
-        self.raw("\tmovq %rcx, %rdx")
-        self.raw("\tshlq $6, %rcx")
-        self.raw("\tleaq __wq(%rip), %rax")
-        self.raw("\taddq %rax, %rcx")
-        self.raw("\tshlq $23, %rdx")
-        self.raw("\taddq __wq_rings(%rip), %rdx")
-        self.raw("\tcall __wq_lock")
-        // (%rdx pushed, the lock taken: `__exec_push` comes here too)
-        self.raw(".Lexp_oldest:")
-        self.raw("\tmovq 16(%rcx), %rax")
-        self.raw("\tsubq 8(%rcx), %rax")
-        self.raw(format("\tcmpq ${}, %rax", EXEC_CAP))
-        self.raw("\tjae .Lexp_full")
-        self.raw("\tmovq 8(%rcx), %rax")
-        self.raw("\tdecq %rax")
-        self.raw("\tmovq %rax, 8(%rcx)")
-        self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
-        self.raw("\tmovq %rdi, (%rdx,%rax,8)")
-        self.raw("\tmovl $0, (%rcx)")
-        self.raw("\tpopq %rdx")
-        self.raw("\tlock incl __exec_seq(%rip)")
-        self.raw("\tcmpl $0, __exec_sleepers(%rip)")
-        self.raw("\tjne .Lexp_wake")
-        self.raw("\tret")
-        self.raw("")
-        // __exec_find: %rdi = the running worker's newest frame (fifo: its
-        // oldest), else the oldest frame of the next queue that has one; 0
-        // when none has. Clobbers %rax, %rcx, %rdx, %rsi, %r8.
-        self.raw("__exec_find:")
-        self.raw(format("\tmovq {}, %rsi", self.tv("__worker_id")))
-        self.raw("\tcmpq $1, __exec_sched(%rip)")
-        self.raw("\tje .Lef_steal")
-        self.raw("\tmovq %rsi, %rcx")
-        self.raw("\tshlq $6, %rcx")
-        self.raw("\tleaq __wq(%rip), %rax")
-        self.raw("\taddq %rax, %rcx")
-        self.raw("\tmovq 8(%rcx), %rax")
-        self.raw("\tcmpq 16(%rcx), %rax")
-        self.raw("\tje .Lef_steal")
-        self.raw("\tcall __wq_lock")
-        self.raw("\tmovq 16(%rcx), %rax")
-        self.raw("\tcmpq 8(%rcx), %rax")
-        self.raw("\tje .Lef_mine_gone")
-        self.raw("\tmovq %rsi, %rdx")
-        self.raw("\tshlq $23, %rdx")
-        self.raw("\taddq __wq_rings(%rip), %rdx")
-        self.raw("\tdecq %rax")
-        self.raw("\tmovq %rax, 16(%rcx)")
-        self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
-        self.raw("\tmovq (%rdx,%rax,8), %rdi")
-        self.raw("\tmovl $0, (%rcx)")
-        self.raw("\tret")
-        self.raw(".Lef_mine_gone:")
-        self.raw("\tmovl $0, (%rcx)")
-        // the oldest frame of each queue in turn, starting with its own
-        self.raw(".Lef_steal:")
-        self.raw("\tmovl __exec_workers(%rip), %r8d")
-        self.raw(".Lef_next:")
-        self.raw("\tmovq %rsi, %rcx")
-        self.raw("\tshlq $6, %rcx")
-        self.raw("\tleaq __wq(%rip), %rax")
-        self.raw("\taddq %rax, %rcx")
-        // a glance first: an empty queue's lock isn't taken
-        self.raw("\tmovq 8(%rcx), %rax")
-        self.raw("\tcmpq 16(%rcx), %rax")
-        self.raw("\tje .Lef_skip")
-        self.raw("\tcall __wq_lock")
-        self.raw("\tmovq 8(%rcx), %rax")
-        self.raw("\tcmpq 16(%rcx), %rax")
-        self.raw("\tje .Lef_gone")
-        self.raw("\tmovq %rsi, %rdx")
-        self.raw("\tshlq $23, %rdx")
-        self.raw("\taddq __wq_rings(%rip), %rdx")
-        self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
-        self.raw("\tmovq (%rdx,%rax,8), %rdi")
-        self.raw("\tincq 8(%rcx)")
-        self.raw("\tmovl $0, (%rcx)")
-        self.raw("\tret")
-        self.raw(".Lef_gone:")
-        self.raw("\tmovl $0, (%rcx)")
-        self.raw(".Lef_skip:")
-        self.raw("\tincl %esi")
-        self.raw("\tcmpl __exec_workers(%rip), %esi")
-        self.raw("\tjb .Lef_wrap")
-        self.raw("\txorl %esi, %esi")
-        self.raw(".Lef_wrap:")
-        self.raw("\tdecl %r8d")
-        self.raw("\tjnz .Lef_next")
-        self.raw("\txorl %edi, %edi")
-        self.raw("\tret")
-        self.raw("")
-        // __exec_peek: %eax = 1 when some queue has a frame (a glance, no
-        // lock taken). Clobbers %rcx, %esi.
-        self.raw("__exec_peek:")
-        self.raw("\txorl %esi, %esi")
-        self.raw("\tleaq __wq(%rip), %rcx")
-        self.raw(".Lep_next:")
-        self.raw("\tcmpl __exec_workers(%rip), %esi")
-        self.raw("\tjae .Lep_none")
-        self.raw("\tmovq 8(%rcx), %rax")
-        self.raw("\tcmpq 16(%rcx), %rax")
-        self.raw("\tjne .Lep_some")
-        self.raw("\taddq $64, %rcx")
-        self.raw("\tincl %esi")
-        self.raw("\tjmp .Lep_next")
-        self.raw(".Lep_none:")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\tret")
-        self.raw(".Lep_some:")
-        self.raw("\tmovl $1, %eax")
-        self.raw("\tret")
-        self.raw("")
+        // (the queues in std.rt: `exec_push` and the others, MYLA-162)
+        if !self.rt_exec_has("__exec_find") {
+            // __wq_lock: %rcx = a queue's record, whose lock is taken (clobbers
+            // %eax)
+            self.raw("__wq_lock:")
+            self.raw("\tmovl $1, %eax")
+            self.raw("\txchgl %eax, (%rcx)")
+            self.raw("\ttestl %eax, %eax")
+            self.raw("\tjz .Lwql_got")
+            self.raw("\tpause")
+            self.raw("\tjmp __wq_lock")
+            self.raw(".Lwql_got:")
+            self.raw("\tret")
+            self.raw("")
+            // __exec_push: %rdi = a frame, onto the running worker's queue; a
+            // sleeping worker woken. Clobbers %rax and %rcx.
+            self.raw("__exec_push:")
+            self.raw("\tpushq %rdx")
+            self.raw(format("\tmovq {}, %rcx", self.tv("__worker_id")))
+            self.raw("\tmovq %rcx, %rdx")
+            self.raw("\tshlq $6, %rcx")
+            self.raw("\tleaq __wq(%rip), %rax")
+            self.raw("\taddq %rax, %rcx")
+            self.raw("\tshlq $23, %rdx")
+            self.raw("\taddq __wq_rings(%rip), %rdx")
+            self.raw("\tcall __wq_lock")
+            // seed:N: the generator's next value (x * a + c, the interpreter's
+            // `Interp.ready` too); its bit 33 set queues the frame at the oldest end
+            self.raw("\tcmpq $2, __exec_sched(%rip)")
+            self.raw("\tjne .Lexp_newest")
+            self.raw("\tpushq %r8")
+            self.raw("\tmovq __exec_rng(%rip), %rax")
+            self.raw(format("\tmovabsq ${}, %r8", SCHED_MUL))
+            self.raw("\timulq %r8, %rax")
+            self.raw(format("\tmovabsq ${}, %r8", SCHED_ADD))
+            self.raw("\taddq %r8, %rax")
+            self.raw("\tpopq %r8")
+            self.raw("\tmovq %rax, __exec_rng(%rip)")
+            self.raw("\tbtq $33, %rax")
+            self.raw("\tjc .Lexp_oldest")
+            self.raw(".Lexp_newest:")
+            self.raw("\tmovq 16(%rcx), %rax")
+            self.raw("\tpushq %rax")
+            self.raw("\tsubq 8(%rcx), %rax")
+            self.raw(format("\tcmpq ${}, %rax", EXEC_CAP))
+            self.raw("\tpopq %rax")
+            self.raw("\tjae .Lexp_full")
+            self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
+            self.raw("\tmovq %rdi, (%rdx,%rax,8)")
+            self.raw("\tincq 16(%rcx)")
+            self.raw("\tmovl $0, (%rcx)")
+            self.raw("\tpopq %rdx")
+            // a worker that went to sleep before this push saw the queue empty
+            // after counting itself a sleeper: the count is read after the push
+            self.raw("\tlock incl __exec_seq(%rip)")
+            self.raw("\tcmpl $0, __exec_sleepers(%rip)")
+            self.raw("\tjne .Lexp_wake")
+            self.raw("\tret")
+            // the ring full: out of memory, the lock given back first
+            self.raw(".Lexp_full:")
+            self.raw("\tmovl $0, (%rcx)")
+            self.raw("\tpopq %rdx")
+            self.raw("\tjmp __trap_oom")
+            self.raw(".Lexp_wake:")
+            self.raw("\tpushq %rdi")
+            self.raw("\tpushq %rsi")
+            self.raw("\tpushq %rdx")
+            self.raw("\tpushq %r11")
+            self.raw("\tleaq __exec_seq(%rip), %rdi")
+            self.raw("\tmovq $129, %rsi")
+            self.raw("\tmovq $1, %rdx")
+            self.raw("\tmovq $202, %rax")
+            self.raw("\tsyscall")
+            self.raw("\tpopq %r11")
+            self.raw("\tpopq %rdx")
+            self.raw("\tpopq %rsi")
+            self.raw("\tpopq %rdi")
+            self.raw("\tret")
+            self.raw("")
+            // __exec_yield_push: %rdi = a frame yielding a turn, onto the oldest
+            // end of the running worker's queue (MYLA_SCHED=fifo: the newest, as
+            // any push). Clobbers %rax and %rcx.
+            self.raw("__exec_yield_push:")
+            self.raw("\tcmpq $1, __exec_sched(%rip)")
+            self.raw("\tje __exec_push")
+            self.raw("\tpushq %rdx")
+            self.raw(format("\tmovq {}, %rcx", self.tv("__worker_id")))
+            self.raw("\tmovq %rcx, %rdx")
+            self.raw("\tshlq $6, %rcx")
+            self.raw("\tleaq __wq(%rip), %rax")
+            self.raw("\taddq %rax, %rcx")
+            self.raw("\tshlq $23, %rdx")
+            self.raw("\taddq __wq_rings(%rip), %rdx")
+            self.raw("\tcall __wq_lock")
+            // (%rdx pushed, the lock taken: `__exec_push` comes here too)
+            self.raw(".Lexp_oldest:")
+            self.raw("\tmovq 16(%rcx), %rax")
+            self.raw("\tsubq 8(%rcx), %rax")
+            self.raw(format("\tcmpq ${}, %rax", EXEC_CAP))
+            self.raw("\tjae .Lexp_full")
+            self.raw("\tmovq 8(%rcx), %rax")
+            self.raw("\tdecq %rax")
+            self.raw("\tmovq %rax, 8(%rcx)")
+            self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
+            self.raw("\tmovq %rdi, (%rdx,%rax,8)")
+            self.raw("\tmovl $0, (%rcx)")
+            self.raw("\tpopq %rdx")
+            self.raw("\tlock incl __exec_seq(%rip)")
+            self.raw("\tcmpl $0, __exec_sleepers(%rip)")
+            self.raw("\tjne .Lexp_wake")
+            self.raw("\tret")
+            self.raw("")
+            // __exec_find: %rdi = the running worker's newest frame (fifo: its
+            // oldest), else the oldest frame of the next queue that has one; 0
+            // when none has. Clobbers %rax, %rcx, %rdx, %rsi, %r8.
+            self.raw("__exec_find:")
+            self.raw(format("\tmovq {}, %rsi", self.tv("__worker_id")))
+            self.raw("\tcmpq $1, __exec_sched(%rip)")
+            self.raw("\tje .Lef_steal")
+            self.raw("\tmovq %rsi, %rcx")
+            self.raw("\tshlq $6, %rcx")
+            self.raw("\tleaq __wq(%rip), %rax")
+            self.raw("\taddq %rax, %rcx")
+            self.raw("\tmovq 8(%rcx), %rax")
+            self.raw("\tcmpq 16(%rcx), %rax")
+            self.raw("\tje .Lef_steal")
+            self.raw("\tcall __wq_lock")
+            self.raw("\tmovq 16(%rcx), %rax")
+            self.raw("\tcmpq 8(%rcx), %rax")
+            self.raw("\tje .Lef_mine_gone")
+            self.raw("\tmovq %rsi, %rdx")
+            self.raw("\tshlq $23, %rdx")
+            self.raw("\taddq __wq_rings(%rip), %rdx")
+            self.raw("\tdecq %rax")
+            self.raw("\tmovq %rax, 16(%rcx)")
+            self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
+            self.raw("\tmovq (%rdx,%rax,8), %rdi")
+            self.raw("\tmovl $0, (%rcx)")
+            self.raw("\tret")
+            self.raw(".Lef_mine_gone:")
+            self.raw("\tmovl $0, (%rcx)")
+            // the oldest frame of each queue in turn, starting with its own
+            self.raw(".Lef_steal:")
+            self.raw("\tmovl __exec_workers(%rip), %r8d")
+            self.raw(".Lef_next:")
+            self.raw("\tmovq %rsi, %rcx")
+            self.raw("\tshlq $6, %rcx")
+            self.raw("\tleaq __wq(%rip), %rax")
+            self.raw("\taddq %rax, %rcx")
+            // a glance first: an empty queue's lock isn't taken
+            self.raw("\tmovq 8(%rcx), %rax")
+            self.raw("\tcmpq 16(%rcx), %rax")
+            self.raw("\tje .Lef_skip")
+            self.raw("\tcall __wq_lock")
+            self.raw("\tmovq 8(%rcx), %rax")
+            self.raw("\tcmpq 16(%rcx), %rax")
+            self.raw("\tje .Lef_gone")
+            self.raw("\tmovq %rsi, %rdx")
+            self.raw("\tshlq $23, %rdx")
+            self.raw("\taddq __wq_rings(%rip), %rdx")
+            self.raw(format("\tandq ${}, %rax", EXEC_CAP - 1))
+            self.raw("\tmovq (%rdx,%rax,8), %rdi")
+            self.raw("\tincq 8(%rcx)")
+            self.raw("\tmovl $0, (%rcx)")
+            self.raw("\tret")
+            self.raw(".Lef_gone:")
+            self.raw("\tmovl $0, (%rcx)")
+            self.raw(".Lef_skip:")
+            self.raw("\tincl %esi")
+            self.raw("\tcmpl __exec_workers(%rip), %esi")
+            self.raw("\tjb .Lef_wrap")
+            self.raw("\txorl %esi, %esi")
+            self.raw(".Lef_wrap:")
+            self.raw("\tdecl %r8d")
+            self.raw("\tjnz .Lef_next")
+            self.raw("\txorl %edi, %edi")
+            self.raw("\tret")
+            self.raw("")
+            // __exec_peek: %eax = 1 when some queue has a frame (a glance, no
+            // lock taken). Clobbers %rcx, %esi.
+            self.raw("__exec_peek:")
+            self.raw("\txorl %esi, %esi")
+            self.raw("\tleaq __wq(%rip), %rcx")
+            self.raw(".Lep_next:")
+            self.raw("\tcmpl __exec_workers(%rip), %esi")
+            self.raw("\tjae .Lep_none")
+            self.raw("\tmovq 8(%rcx), %rax")
+            self.raw("\tcmpq 16(%rcx), %rax")
+            self.raw("\tjne .Lep_some")
+            self.raw("\taddq $64, %rcx")
+            self.raw("\tincl %esi")
+            self.raw("\tjmp .Lep_next")
+            self.raw(".Lep_none:")
+            self.raw("\txorl %eax, %eax")
+            self.raw("\tret")
+            self.raw(".Lep_some:")
+            self.raw("\tmovl $1, %eax")
+            self.raw("\tret")
+            self.raw("")
+        }
         // __exec_run: a worker's loop, resuming ready frames for good. With
         // none anywhere it counts itself idle and only glances at the queues
         // (it stops counting before it takes a frame, so the count is exact):
@@ -2845,6 +2857,7 @@ impl CodeGen {
         self.raw("__exec_run:")
         self.raw(".Lexec_next:")
         self.raw("\tcall __exec_find")
+        if self.rt_exec_has("__exec_find") { self.raw("\tmovq %rax, %rdi") }
         self.raw("\ttestq %rdi, %rdi")
         self.raw("\tjz .Lexec_idle")
         // the frame this worker runs, published before the failure flag is
@@ -2888,21 +2901,24 @@ impl CodeGen {
         self.raw("\tmovl __exec_idle(%rip), %eax")
         self.raw("\tcmpl __exec_workers(%rip), %eax")
         self.raw("\tjae .Lexec_stuck")
-        self.raw("\tmovl $4000, %edx")
+        // (the count and then the pushes seen in %ebx, which `__exec_peek`
+        // keeps; nothing else lives in a register across it)
+        self.raw("\tmovl $4000, %ebx")
         self.raw(".Lexec_spin:")
         self.raw("\tcall __exec_peek")
         self.raw("\ttestl %eax, %eax")
         self.raw("\tjnz .Lexec_back")
         self.raw("\tpause")
-        self.raw("\tdecl %edx")
+        self.raw("\tdecl %ebx")
         self.raw("\tjnz .Lexec_spin")
         // asleep: counted a sleeper first, then the pushes seen, then a last
         // glance (a push after it changes `__exec_seq`, and the wait returns)
         self.raw("\tlock incl __exec_sleepers(%rip)")
-        self.raw("\tmovl __exec_seq(%rip), %edx")
+        self.raw("\tmovl __exec_seq(%rip), %ebx")
         self.raw("\tcall __exec_peek")
         self.raw("\ttestl %eax, %eax")
         self.raw("\tjnz .Lexec_awake")
+        self.raw("\tmovl %ebx, %edx")
         self.raw("\tleaq __exec_seq(%rip), %rdi")
         self.raw("\tmovq $128, %rsi")
         self.raw("\txorq %r10, %r10")
@@ -3487,14 +3503,21 @@ impl CodeGen {
             Ok(x) => x
             Err(why) => { panic(format("internal error: {} can't be lowered to the IR: {}", mangled, why)) }
         }
-        // a last use moves (MYLA-127), checked by the verifier with the rest
-        let f = moves(l.f)
+        // a last use moves (MYLA-127), checked by the verifier with the rest;
+        // calls to small leaf functions replaced by their bodies
+        var f = moves(l.f)
+        if !f.frame && self.inlining && !self.debug {
+            let n = f.blocks.len()
+            f = self.inline_small(f)
+            // the copies' blocks joined to their neighbours
+            if f.blocks.len() != n { f = merge_blocks(f) }
+        }
         let problem = verify(f)
         // with `--ssa`, the text shows each function after promotion instead
         if self.keep_ir && !self.ssa { self.ir_texts.push(render_func(f)) }
         if problem != "" { panic(format("internal error: {}: IR verifier: {}", mangled, problem)) }
         for inst in l.f.instances { let m = self.request_fn(inst.orig, inst.targs) }
-        for b in l.f.blocks {
+        for b in f.blocks {
             for inst in b.insts {
                 match inst {
                     Inst.Call(d, name, args) => { self.request_plain(name) },
@@ -3513,6 +3536,77 @@ impl CodeGen {
             self.request_plain(n)
         }
         return f
+    }
+
+    // `f` with its calls to small leaf functions of its own module replaced
+    // by their bodies (`inline.my`, MYLA-162).
+    fun inline_small(var self, f: IrFunc) -> IrFunc {
+        var names: [str] = []
+        var bodies: [IrFunc] = []
+        for b in f.blocks {
+            for i in b.insts {
+                match i {
+                    Inst.Call(d, name, args) => {
+                        if name != f.name && same_module(name, f.name) && !list_has_str(names, name) {
+                            match self.inline_body(name) {
+                                Some(body) => {
+                                    names.push(name)
+                                    bodies.push(body)
+                                },
+                                None => {},
+                            }
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        }
+        if names.len() == 0 {
+            return f
+        }
+        return inline_calls(f, names, bodies)
+    }
+
+    // The lowered body of the function `name` when it may be copied into its
+    // callers (non-generic, not async, `inlinable`), lowered once.
+    fun inline_body(var self, name: str) -> Option<IrFunc> {
+        if self.inl_no.contains(name) {
+            return None
+        }
+        var c = 0
+        while c < self.inl_names.len() {
+            if self.inl_names[c] == name {
+                return Some(self.inl_bodies[c])
+            }
+            c += 1
+        }
+        if self.has_func(name) && self.inline_candidate(self.sig_of(name)) {
+            let saved = self.subst
+            self.subst = []
+            let lowered = lower_function(self, self.sig_of(name).decl, name)
+            self.subst = saved
+            match lowered {
+                Ok(l) => {
+                    let body = moves(l.f)
+                    if l.lams.len() == 0 && l.partials.len() == 0 && l.fnvals.len() == 0 && inlinable(body) {
+                        self.inl_names.push(name)
+                        self.inl_bodies.push(body)
+                        return Some(body)
+                    }
+                },
+                Err(why) => {},
+            }
+        }
+        self.inl_no[name] = true
+        return None
+    }
+
+    // Whether the function of `sig` is worth lowering to see if it is
+    // inlinable: non-generic, not async, not a method, short, scalars only.
+    fun inline_candidate(self, sig: FuncSig) -> bool {
+        let fd = sig.decl
+        let method = match fd.receiver { Some(r) => true, None => false }
+        return sig.type_params.len() == 0 && !fd.is_async && !method && may_inline(sig.params, sig.ret, fd.sp.eline - fd.sp.sline)
     }
 
     // Queue the non-generic function `name` (a generic instance is named by
@@ -8899,7 +8993,7 @@ pub fun fold_load(line: str, reg: str) -> str {
 // Whether `s` holds `t` at byte `at`.
 #test("abcd", 1, "bc")[true]
 #test("abcd", 3, "de")[false]
-fun text_at(s: str, at: int32, t: str) -> bool {
+pub fun text_at(s: str, at: int32, t: str) -> bool {
     if at < 0 || at + t.len() > s.len() { return false }
     var i = 0
     while i < t.len() {
@@ -8912,7 +9006,7 @@ fun text_at(s: str, at: int32, t: str) -> bool {
 // Whether `t` occurs in `s`.
 #test("8(%rax)", "%rax")[true]
 #test("8(%rbx)", "%rax")[false]
-fun has_text(s: str, t: str) -> bool {
+pub fun has_text(s: str, t: str) -> bool {
     var i = 0
     while i + t.len() <= s.len() {
         if text_at(s, i, t) { return true }

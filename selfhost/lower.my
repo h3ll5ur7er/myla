@@ -729,6 +729,36 @@ impl Lower {
         return d
     }
 
+    // `a op b` of type `rt` when the block's last two instructions made `a`
+    // and `b` integer constants (both taken back), wrapped as at run time;
+    // division and shifts out of range are left to run time.
+    fun folded(var self, op: str, lt: Type, rt: Type, a: int32, b: int32) -> Option<int64> {
+        let w = match lt { Type.TInt(n, sg) => n, _ => 0 }
+        if w == 0 || !type_eq_ir(lt, rt) { return None }
+        let signed = match lt { Type.TInt(n, sg) => sg, _ => false }
+        let n = self.f.blocks[self.cur].insts.len()
+        if n < 2 { return None }
+        var u: int64 = 0
+        var v: int64 = 0
+        var both = 0
+        match self.f.blocks[self.cur].insts[n - 2] { Inst.Const(d, t, k) => { if d == a { u = k; both += 1 } }, _ => {} }
+        match self.f.blocks[self.cur].insts[n - 1] { Inst.Const(d, t, k) => { if d == b { v = k; both += 1 } }, _ => {} }
+        if both != 2 { return None }
+        var r: int64 = 0
+        if op == "+" { r = u + v }
+        else if op == "-" { r = u - v }
+        else if op == "*" { r = u * v }
+        else if op == "&" { r = u & v }
+        else if op == "|" { r = u | v }
+        else if op == "^" { r = u ^ v }
+        else if op == "<<" && v >= 0 && v < (w as int64) { r = u << v }
+        else if op == ">>" && v >= 0 && v < (w as int64) && (signed || u >= 0) { r = u >> v }
+        else { return None }
+        let popped1 = self.f.blocks[self.cur].insts.pop()
+        let popped2 = self.f.blocks[self.cur].insts.pop()
+        return Some(wrap_ir(r, lt))
+    }
+
     // Record the first construct that can't be lowered; returns a dummy temp.
     #test(lower_on(), "a")[0]
     fun unsupported(var self, what: str) -> int32 {
@@ -2201,6 +2231,11 @@ impl Lower {
         if !is_scalar(lt) || !is_scalar(rt) { return self.unsupported("an operator on values that aren't scalars") }
         let a = self.expr(cg, l)
         let b = self.expr(cg, r)
+        // two constants (literals, `const`s): one, folded (MYLA-162)
+        match self.folded(op, lt, rt, a, b) {
+            Some(v) => { return self.konst(rt, v) },
+            None => {},
+        }
         let d = self.temp(rt)
         if op == "==" || op == "!=" || is_cmp(op) {
             self.add(Inst.Cmp(d, op, lt, a, b))
@@ -3444,20 +3479,19 @@ impl Lower {
                 } else { self.add(Inst.Rt(d, "__rt_addr:" + sym, [])) }
                 return d
             }
+            // the out-of-memory error ends the block: nothing after it is
+            // live across it
             if nm == "__trap_oom" {
-                self.add(Inst.Rt(-1, "__trap_oom", []))
+                self.leave(Term.Trap("oom", Pos { line: e.line, col: e.col }))
                 return -1
             }
             var vals: [int32] = []
-            // a store of a literal: the literal first, so the address is
-            // computed right before the store, which can take it as its
-            // addressing mode (MYLA-162)
+            // a store of a value without calls: the value first, so the
+            // address is computed right before the store, which can take it
+            // as its addressing mode (MYLA-162)
             var lit_first = false
             if (nm == "__store8" || nm == "__store32" || nm == "__store64") && args.len() == 2 {
-                lit_first = match args[1].kind {
-                    ExprKind.IntLit(n, sfx, ch, big) => true,
-                    _ => false,
-                }
+                lit_first = calls_nothing(args[1])
             }
             if lit_first {
                 let v1 = self.expr(cg, args[1])
@@ -3847,4 +3881,46 @@ pub fun myla_runtime_function(name: str) -> str {
         return "std$rt$" + sb.build()
     }
     return ""
+}
+
+// `a` and `b`, the same integer type (width and sign).
+#test(Type.TInt(64, true), Type.TInt(64, true))[true]
+#test(Type.TInt(64, true), Type.TInt(64, false))[false]
+fun type_eq_ir(a: Type, b: Type) -> bool {
+    return match a {
+        Type.TInt(w, s) => match b { Type.TInt(w2, s2) => w == w2 && s == s2, _ => false },
+        _ => false,
+    }
+}
+
+// `v` wrapped into the integer type `t` (two's complement), as the
+// arithmetic at run time wraps it.
+#test(4294967296, Type.TInt(32, true))[0]
+#test(255, Type.TInt(8, true))[-1]
+#test(-1, Type.TInt(8, false))[255]
+#test(-1, Type.TInt(64, false))[-1]
+fun wrap_ir(v: int64, t: Type) -> int64 {
+    return match t {
+        Type.TInt(w, signed) => {
+            if w >= 64 { return v }
+            let m = v & (((1 as int64) << (w as int64)) - 1)
+            if signed && ((m >> ((w - 1) as int64)) & 1) == 1 { return m - ((1 as int64) << (w as int64)) }
+            m
+        },
+        _ => v,
+    }
+}
+
+// Whether evaluating `e` calls nothing and changes nothing (a literal, a
+// name, operators on such), so it may be evaluated before its neighbours.
+fun calls_nothing(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.IntLit(n, sfx, ch, big) => true,
+        ExprKind.BoolLit(b) => true,
+        ExprKind.Name(name) => true,
+        ExprKind.Binary(op, l, r) => calls_nothing(l) && calls_nothing(r),
+        ExprKind.Unary(op, x) => calls_nothing(x),
+        ExprKind.Cast(x, t) => calls_nothing(x),
+        _ => false,
+    }
 }

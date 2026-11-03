@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, text_at, has_text, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -172,7 +172,9 @@ impl CodeGen {
             if tail >= 0 { stop = tail }
             var i = 0
             while i < stop {
-                if i + 1 < stop && i + 1 != fused && self.emit_pair(f, insts[i], insts[i + 1], temp_base) { i = i + 2 }
+                let shift = match insts[i] { Inst.Bin(d, op, lt, rt, x, y, pos) => op == "<<", _ => false }
+                if shift && i + 2 < stop && i + 2 != fused && self.emit_scaled(f, insts[i], insts[i + 1], insts[i + 2], temp_base) { i = i + 3 }
+                else if i + 1 < stop && i + 1 != fused && self.emit_pair(f, insts[i], insts[i + 1], temp_base) { i = i + 2 }
                 else {
                     if i != fused { self.emit_inst(f, insts[i], slot_off, temp_base) }
                     i = i + 1
@@ -594,6 +596,9 @@ impl CodeGen {
                         // `a * k` from a register into a register: one
                         // three-operand `imul`
                         if self.emit_imul_const(d, op, rt, a, b, temp_base) || self.emit_imul_const(d, op, rt, b, a, temp_base) { return }
+                        // the result's register an operand's already: in
+                        // place, without going through %rax
+                        if self.emit_bin_in_reg(d, op, rt, a, b, temp_base) { return }
                         // the operands swapped when the second is still in
                         // %rax and the order doesn't matter (MYLA-121)
                         if self.swap_operands(op, a, b) {
@@ -767,6 +772,12 @@ impl CodeGen {
                     return
                 }
                 if name == "__fetch_add64" {
+                    // the value before unused, the addend a constant: one add
+                    if (d < 0 || self.temp_uses[d] == 0) && self.temp_imm[args[1]] != "" {
+                        self.load_temp(args[0], "rcx", temp_base)
+                        self.emit(format("lock addq {}, (%rcx)", self.temp_imm[args[1]]))
+                        return
+                    }
                     self.load_temp(args[0], "rcx", temp_base)
                     self.load_temp(args[1], "rax", temp_base)
                     self.emit("lock xaddq %rax, (%rcx)")
@@ -1161,6 +1172,11 @@ impl CodeGen {
                     cop = swapped_cmp(op)
                     self.emit(format("cmpq {}, {}", self.second_operand(op, x, temp_base), left))
                 } else {
+                    // a value just loaded, compared with a constant or a
+                    // register: the memory itself
+                    if left == "" && (self.temp_imm[y] != "" || (self.temp_reg[y] != "" && self.temp_remat[y] == "" && !(self.pend_store != "" && self.pend_temp == y))) {
+                        left = self.take_load(x)
+                    }
                     if left == "" {
                         self.load_temp(x, "rax", temp_base)
                         left = "%rax"
@@ -1350,6 +1366,27 @@ impl CodeGen {
         }
     }
 
+    // `d = a op b` (64-bit `+ - & | ^`) when `d`'s register holds `a` (or,
+    // the order not mattering, `b`) already: the allocator gave it to `d`, so
+    // that operand ends here, and the operation works on it in place.
+    fun emit_bin_in_reg(var self, d: int32, op: str, rt: Type, a: int32, b: int32, temp_base: int32) -> bool {
+        var insn = ""
+        if op == "+" { insn = "addq" }
+        if op == "-" { insn = "subq" }
+        if op == "&" { insn = "andq" }
+        if op == "|" { insn = "orq" }
+        if op == "^" { insn = "xorq" }
+        if insn == "" || !is_wide(rt) || self.temp_reg[d] == "" || self.temp_uses[d] == 0 { return false }
+        let rd = "%" + self.temp_reg[d]
+        if text_has_xmm(rd) { return false }
+        var other = -1
+        if self.reg_of(a) == rd { other = b }
+        else if op != "-" && self.reg_of(b) == rd { other = a }
+        if other < 0 { return false }
+        self.emit(format("{} {}, {}", insn, self.second_operand(op, other, temp_base), rd))
+        return true
+    }
+
     // Two instructions emitted as one where a pattern allows (an element's
     // or a sum's address folded into the load after it, `x = x op y` in
     // place); false when none does. One match of `a` picks the candidates.
@@ -1359,6 +1396,92 @@ impl CodeGen {
             Inst.Bin(d, op, lt, rt, x, y, pos) => self.emit_add_load(f, a, b, temp_base) || self.emit_in_place(a, b, temp_base),
             _ => false,
         }
+    }
+
+    // `y = z << k` (k 1 to 3), `t = x + y` and the load or store through `t`
+    // right after, each read only by the next: one addressing mode,
+    // `off(x,z,2^k)`; nothing is written in between, so `x` and `z` still hold
+    // their values (MYLA-162). False when they aren't such a triple.
+    fun emit_scaled(var self, f: IrFunc, a: Inst, b: Inst, c: Inst, temp_base: int32) -> bool {
+        var y = -1
+        var z = -1
+        var scale = 0
+        match a {
+            Inst.Bin(d, op, lt, rt, x1, k1, pos) => {
+                if op == "<<" && is_wide(rt) && self.temp_uses[d] == 1 {
+                    let k = self.temp_imm[k1]
+                    if k == "$1" { scale = 2 }
+                    if k == "$2" { scale = 4 }
+                    if k == "$3" { scale = 8 }
+                    y = d
+                    z = x1
+                }
+            },
+            _ => {},
+        }
+        if scale == 0 { return false }
+        var t = -1
+        var x = -1
+        match b {
+            Inst.Bin(d, op, lt, rt, x1, y1, pos) => {
+                if op == "+" && is_wide(rt) && self.temp_uses[d] == 1 && y1 == y && x1 != y {
+                    t = d
+                    x = x1
+                }
+            },
+            _ => {},
+        }
+        if t < 0 { return false }
+        var d = -1
+        var off = 0
+        var width = 0
+        var sv = -1
+        match c {
+            Inst.LoadAt(d2, q, o, w) => {
+                if q == t {
+                    d = d2
+                    off = o
+                    width = w
+                }
+            },
+            Inst.StoreAt(q, o, v2, w) => {
+                if q == t && v2 != t && v2 != y {
+                    d = 0
+                    sv = v2
+                    off = o
+                    width = w
+                }
+            },
+            _ => {},
+        }
+        if d < 0 || x == z { return false }
+        let rx = self.reg_of(x)
+        if rx == "" || text_has_xmm(rx) { return false }
+        // `z` just computed and read only here: still in %rax, its store
+        // into its register not made
+        let held = self.pend_store != "" && self.pend_temp == z && self.temp_uses[z] == 1
+        var rz = "%rax"
+        if !held { rz = self.reg_of(z) }
+        if rz == "" || text_has_xmm(rz) { return false }
+        // a stored value already where it is (loading it could take %rax)
+        var vo = ""
+        if sv >= 0 {
+            vo = self.temp_imm[sv]
+            if vo == "" { vo = self.reg_of(sv) }
+            if vo == "" || text_has_xmm(vo) { return false }
+        }
+        if held {
+            self.pend_store = ""
+            self.pend_temp = -1
+        }
+        let at = format("{}({},{},{})", off, rx, rz, scale)
+        if sv >= 0 {
+            self.emit_store(width, f.temps[sv], vo, at)
+            return true
+        }
+        self.emit_load(width, f.temps[d], at)
+        self.store_temp(d, temp_base)
+        return true
     }
 
     // `t = x + y` (64-bit) read only by the load through `t` right after it,
@@ -1466,6 +1589,14 @@ impl CodeGen {
     fun second_operand(var self, op: str, t: int32, temp_base: int32) -> str {
         if takes_operand(op) {
             if self.temp_imm[t] != "" { return self.temp_imm[t] }
+            let m = self.take_load(t)
+            if m != "" { return m }
+            // just computed in %rax and read only here: from there
+            if self.pend_store != "" && self.pend_temp == t && self.temp_uses[t] == 1 {
+                self.pend_store = ""
+                self.pend_temp = -1
+                return "%rax"
+            }
             if self.temp_src[t] != "" { return self.temp_src[t] }
             if self.temp_remat[t] == "" && !(self.pend_store != "" && self.pend_temp == t) {
                 if self.temp_reg[t] != "" { return "%" + self.temp_reg[t] }
@@ -1474,6 +1605,26 @@ impl CodeGen {
         }
         self.load_temp(t, "rcx", temp_base)
         return "%rcx"
+    }
+
+    // When the temporary `t` was just loaded from memory into %rax (8 bytes)
+    // and only one instruction reads it: that load taken back and its memory
+    // operand, for the reader to use in place of a register (MYLA-162);
+    // "" otherwise.
+    fun take_load(var self, t: int32) -> str {
+        if !(self.pend_store != "" && self.pend_temp == t && self.temp_uses[t] == 1) { return "" }
+        let n = self.text.len()
+        if n == 0 { return "" }
+        let line = self.text[n - 1]
+        if !text_at(line, 0, "\tmovq ") || line.len() < 13 || !text_at(line, line.len() - 6, ", %rax") { return "" }
+        var sb = StringBuilder()
+        sb.append(line, 6, line.len() - 6)
+        let src = sb.build()
+        if !has_text(src, "(") || has_text(src, "%rax") || has_text(src, "%eax") { return "" }
+        let gone = self.text.pop()
+        self.pend_store = ""
+        self.pend_temp = -1
+        return src
     }
 
     // The arguments of a runtime helper into the calling registers.
@@ -2317,7 +2468,8 @@ impl CodeGen {
     // else reads it too (MYLA-108).
     fun load_temp(var self, t: int32, reg: str, temp_base: int32) {
         if self.temp_remat[t] != "" {
-            self.emit(self.temp_remat[t] + reg)
+            // (a variable's register read into itself: nothing to do)
+            if !names_reg(self.temp_src[t], reg) { self.emit(self.temp_remat[t] + reg) }
             return
         }
         if self.pend_store != "" && self.pend_temp == t {
@@ -2900,6 +3052,8 @@ fun writes_no_slot(inst: Inst) -> bool {
         Inst.Loc(p) => true
         Inst.Bind(name, s) => true
         Inst.Scope(open) => true
+        // the inline primitives that compute a value and write nothing
+        Inst.Rt(d, name, args) => name == "__rotl" || name == "__bsr64" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:")
         _ => false
     }
 }
@@ -3382,4 +3536,33 @@ fun ends_with_colon(s: str) -> bool {
 fun has_index(xs: [int32], x: int32) -> bool {
     for y in xs { if y == x { return true } }
     return false
+}
+
+// Whether `t` is a 64-bit integer type.
+#test(Type.TInt(64, false))[true]
+#test(Type.TInt(32, true))[false]
+fun is_wide(t: Type) -> bool {
+    return match t {
+        Type.TInt(bits, sg) => bits == 64,
+        _ => false,
+    }
+}
+
+// Whether `src` is `%` and the register `reg` (a variable's register a
+// temporary is read from).
+#test("%r10", "r10")[true]
+#test("%r10", "r11")[false]
+#test("8(%rbp)", "rbp")[false]
+fun names_reg(src: str, reg: str) -> bool {
+    if src.len() != reg.len() + 1 || src.len() == 0 || src[0] != '%' {
+        return false
+    }
+    var k = 0
+    while k < reg.len() {
+        if src[k + 1] != reg[k] {
+            return false
+        }
+        k += 1
+    }
+    return true
 }
