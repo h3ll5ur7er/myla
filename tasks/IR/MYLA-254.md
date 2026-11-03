@@ -76,6 +76,6 @@ Sources on wasm's 64-bit memory: [SpiderMonkey, "Is Memory64 actually worth usin
 The owner took the four recommendations: D120 (memory widths), D121 (a pointer kind), D122 (sizes from a target description), D123 (SSA with block parameters, after a prototype). The work goes in the order above:
 
 - [x] Widths on the memory instructions; packed list elements ([[MYLA-247]])
-- [ ] The pointer kind
+- [x] The pointer kind: `Type.TPtr`, a kind of the IR's temporaries only (the language never names it), for the 43 address temporaries and slots of the lowering (frames, environments, element, slot and member addresses, allocations, labels, boxes, map slots); indices, lengths and a task's state word stay integers. The verifier rejects arithmetic on an address but `offset` (a `#test` in [[selfhost/ir.my]]); the debug information shows one as a number. 905 tests pass; the bootstrap reaches its fixed point; the generated code is the same.
 - [ ] The target description
 - [ ] The mem2reg prototype and its measurements; then SSA with block parameters

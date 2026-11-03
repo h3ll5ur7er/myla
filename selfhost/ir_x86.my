@@ -1140,6 +1140,8 @@ impl CodeGen {
                                 if defs[d] == 1 && x >= -2147483648 && x <= 2147483647 { imm[d] = format("${}", x) }
                             },
                             Type.TBool => { if defs[d] == 1 { imm[d] = format("${}", v) } },
+                            // a null address (D121)
+                            Type.TPtr => { if defs[d] == 1 && v == 0 { imm[d] = "$0" } },
                             Type.TChar => { if defs[d] == 1 && v <= 2147483647 { imm[d] = format("${}", v) } },
                             _ => {},
                         }

@@ -398,16 +398,22 @@ const MOVED: int32 = 2
 pub fun verify(f: IrFunc) -> str {
     let n = f.blocks.len()
     if n == 0 { return "" }
-    // the slot each temporary is the address of (`addr`), or -1
+    // the slot each temporary is the address of (`addr`), or -1; and no
+    // arithmetic on an address but `offset` (D121)
     var addr_of: [int32] = []
     for t in f.temps { addr_of.push(-1) }
+    var bi = 0
     for b in f.blocks {
         for inst in b.insts {
             match inst {
                 Inst.Addr(d, s) => { addr_of[d] = s },
+                Inst.Bin(d, op, t, rt, a, b2, pos) => {
+                    if is_ptr(f.temps[d]) || is_ptr(f.temps[a]) || is_ptr(f.temps[b2]) { return format("L{}: arithmetic on an address (%t{} = %t{} {} %t{}); only offset moves one", bi, d, a, op, b2) }
+                },
                 _ => {},
             }
         }
+        bi = bi + 1
     }
     // the state at each block's entry
     var known: [bool] = []
@@ -1153,6 +1159,7 @@ fun prepend(x: int32, xs: [int32]) -> [int32] {
 #test([Inst.Load(1, 0)])["L0: read of $0 (s), which holds no value"]
 #test([Inst.Addr(1, 0), Inst.LoadAt(2, 1, 0, 8)])["L0: read of $0 (s), which holds no value"]
 #test([Inst.Load(1, 1)])[""]
+#test([Inst.Bin(2, "+", Type.TInt(64, false), Type.TInt(64, false), 2, 1, Pos { line: 0, col: 0 })])["L0: arithmetic on an address (%t2 = %t2 + %t1); only offset moves one"]
 fun verify_block(insts: [Inst]) -> str {
     return verify(test_func([IrBlock { insts: insts, term: Term.Ret(-1) }]))
 }
@@ -1206,7 +1213,7 @@ fun test_func(blocks: [IrBlock]) -> IrFunc {
     return IrFunc {
         name: "f", ret: None,
         slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true, inline: false, scope: -1 }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false, inline: false, scope: -1 }],
-        temps: [Type.TStr, Type.TBool], blocks: blocks, order: order, instances: [], frame: false, scope_parent: [-1],
+        temps: [Type.TStr, Type.TBool, Type.TPtr], blocks: blocks, order: order, instances: [], frame: false, scope_parent: [-1],
     }
 }
 
@@ -1216,4 +1223,14 @@ fun test_func(blocks: [IrBlock]) -> IrFunc {
 fun width_suffix(width: int32) -> str {
     if width == 8 { return "" }
     return format(".{}", width)
+}
+
+// Whether a temporary of type `t` holds an address (D121).
+#test(Type.TPtr)[true]
+#test(Type.TInt(64, false))[false]
+pub fun is_ptr(t: Type) -> bool {
+    return match t {
+        Type.TPtr => true,
+        _ => false,
+    }
 }

@@ -48,6 +48,8 @@ pub enum Type {
     // the type of a declaration's part that failed to check (MYLA-110, D84;
     // types.py: ErrorType)
     TError,
+    // an address, a kind of the IR's temporaries only (D121)
+    TPtr,
 }
 
 // A type error: position, the range it underlines (that of the node it is
@@ -215,6 +217,7 @@ pub fun type_name(t: Type) -> str {
         Type.TFunc(ps, r) => format("({}) -> {}", type_names(ps), opt_type_name(r)),
         Type.TAsync(f) => "async " + type_name(f),
         Type.TError => "{error}",
+        Type.TPtr => "ptr",
     }
 }
 
@@ -517,6 +520,7 @@ fun type_eq(a: Type, b: Type) -> bool {
         Type.TParam(n1) => match b { Type.TParam(n2) => n1 == n2, _ => false },
         Type.TSelf => match b { Type.TSelf => true, _ => false },
         Type.TError => match b { Type.TError => true, _ => false },
+        Type.TPtr => match b { Type.TPtr => true, _ => false },
     }
 }
 

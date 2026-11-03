@@ -217,7 +217,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     }
     let entry = lw.new_block()
     lw.start(entry)
-    let env = lw.new_slot("__env", Type.TInt(64, false), 8, ENV_WORD, false)
+    let env = lw.new_slot("__env", Type.TPtr, 8, ENV_WORD, false)
     if frame { lw.f.slots[env].inline = true }
     let ptypes = tfunc_params(job.ftype)
     var i = 0
@@ -245,7 +245,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
         // a frame's copy owns what it holds: the environment goes before
         // the frame does
         let s = lw.value_slot(cg, c.name, c.ty, frame)
-        let e = lw.temp(Type.TInt(64, false))
+        let e = lw.temp(Type.TPtr)
         lw.add(Inst.Load(e, env))
         if is_aggregate(c.ty) {
             lw.add(Inst.Copy(lw.slot_addr(s), lw.offset(e, c.off), cg.size(c.ty)))
@@ -263,7 +263,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
         if c.task { lw.tasks.push(TaskSlot { slot: s, ty: c.task_ty, void: c.task_void, owns: cg.owns_heap(c.task_ty), depth: -1, foreign: true }) }
     }
     if frame {
-        let e = lw.temp(Type.TInt(64, false))
+        let e = lw.temp(Type.TPtr)
         lw.add(Inst.Load(e, env))
         lw.add(Inst.Rt(-1, "__func_drop", [e]))
     }
@@ -290,16 +290,18 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     return Ok(Lowered { f: lw.f, lams: lw.lams, partials: lw.partials, fnvals: lw.fnvals })
 }
 
-// Whether `t` is a scalar: an integer, float, bool or char.
+// Whether `t` is a scalar: an integer, float, bool, char or address.
 #test(Type.TSB)[false]
 #test(Type.TBool)[true]
 #test(Type.TChar)[true]
+#test(Type.TPtr)[true]
 fun is_scalar(t: Type) -> bool {
     return match t {
         Type.TInt(w, s) => true
         Type.TFloat(w) => true
         Type.TBool => true
         Type.TChar => true
+        Type.TPtr => true
         _ => false
     }
 }
@@ -697,7 +699,7 @@ impl Lower {
     // The address of the aggregate in slot `s`: an aggregate parameter's slot
     // holds the caller's address, another slot holds the value itself.
     fun slot_addr(var self, s: int32) -> int32 {
-        let d = self.temp(Type.TInt(64, false))
+        let d = self.temp(Type.TPtr)
         if self.f.slots[s].word >= 0 && !self.f.slots[s].inline { self.add(Inst.Load(d, s)) } else { self.add(Inst.Addr(d, s)) }
         return d
     }
@@ -706,7 +708,7 @@ impl Lower {
     // member, which the verifier mustn't read as the whole slot's.
     #test(lower_on(), 0, 0)[0]
     fun offset(var self, p: int32, off: int32) -> int32 {
-        let d = self.temp(Type.TInt(64, false))
+        let d = self.temp(Type.TPtr)
         self.add(Inst.Offset(d, p, off))
         return d
     }
@@ -1152,7 +1154,7 @@ impl Lower {
             } else if is_aggregate(ct.params[i]) { vals.push(self.addr(cg, argv[i])) } else { vals.push(self.expr(cg, argv[i])) }
             i = i + 1
         }
-        let fr = self.temp(Type.TInt(64, false))
+        let fr = self.temp(Type.TPtr)
         self.add(Inst.Call(fr, ct.name + "__new", vals))
         var rt = Type.TBool
         var has = false
@@ -1172,7 +1174,7 @@ impl Lower {
         if back {
             // the receiver's old value goes, the method's `self` moves in,
             // then the callee's frame (kept by `run_frame` for it) is freed
-            let done = self.temp(Type.TInt(64, false))
+            let done = self.temp(Type.TPtr)
             self.add(Inst.Load(done, held))
             let t = ct.params[0]
             let local = match argv[0].kind {
@@ -1250,7 +1252,7 @@ impl Lower {
             var src = -1
             if self.f.slots[s].inline { src = self.slot_addr(s) }
             else {
-                src = self.temp(Type.TInt(64, false))
+                src = self.temp(Type.TPtr)
                 self.add(Inst.Load(src, s))
             }
             let dst = self.slot_addr(c)
@@ -1337,7 +1339,7 @@ impl Lower {
 
     // A turn for the other tasks: this frame queued again (D90).
     fun yield_turn(var self) {
-        let me = self.temp(Type.TInt(64, false))
+        let me = self.temp(Type.TPtr)
         self.add(Inst.Frame(me))
         self.add(Inst.Call(-1, "__yield", [me]))
         let after = self.new_block()
@@ -1347,7 +1349,7 @@ impl Lower {
 
     // The address of the executor of the actor whose handle is in `slot`.
     fun actor_record(var self, slot: int32, off: int32) -> int32 {
-        let h = self.temp(Type.TInt(64, false))
+        let h = self.temp(Type.TPtr)
         self.add(Inst.Load(h, slot))
         return self.offset(h, off)
     }
@@ -1356,7 +1358,7 @@ impl Lower {
     // the frames queued before this one; then the running task holds it.
     fun enter_actor(var self, slot: int32, off: int32) {
         let rec = self.actor_record(slot, off)
-        let me = self.temp(Type.TInt(64, false))
+        let me = self.temp(Type.TPtr)
         self.add(Inst.Frame(me))
         self.add(Inst.Call(-1, "__actor_enter", [rec, me]))
         let inside = self.new_block()
@@ -1384,14 +1386,14 @@ impl Lower {
     // the frame freed unless the caller `keep`s it, in the slot returned.
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), "let", "%aw1", 1, "fetch", true, Type.TInt(32, true), false)[0]
     fun run_frame(var self, cg: CodeGen, k: str, name: str, fr: int32, resume: str, has: bool, rt: Type, keep: bool) -> int32 {
-        let me = self.temp(Type.TInt(64, false))
+        let me = self.temp(Type.TPtr)
         self.add(Inst.Frame(me))
         self.add_store(fr, FRAME_CALLER, me)
         // the callee runs in this task
-        let root = self.temp(Type.TInt(64, false))
+        let root = self.temp(Type.TPtr)
         self.add_load(root, me, FRAME_ROOT)
         self.add_store(fr, FRAME_ROOT, root)
-        let held = self.new_slot("__callee", Type.TInt(64, false), 8, -1, false)
+        let held = self.new_slot("__callee", Type.TPtr, 8, -1, false)
         self.add(Inst.Store(held, fr))
         self.leave_self()
         self.add(Inst.Call(-1, resume, [fr]))
@@ -1399,7 +1401,7 @@ impl Lower {
         self.finish(Term.Suspend(resumed))
         self.start(resumed)
         self.enter_self()
-        let done = self.temp(Type.TInt(64, false))
+        let done = self.temp(Type.TPtr)
         self.add(Inst.Load(done, held))
         if has {
             if !lowerable(cg, rt) {
@@ -1452,7 +1454,7 @@ impl Lower {
                     if is_aggregate(params[i]) { vals.push(self.addr(cg, args[i])) } else { vals.push(self.expr(cg, args[i])) }
                     i = i + 1
                 }
-                let fr = self.temp(Type.TInt(64, false))
+                let fr = self.temp(Type.TPtr)
                 self.add(Inst.CallInd(fr, fv, vals))
                 return fr
             },
@@ -1479,18 +1481,18 @@ impl Lower {
         }
         // a task of its own, this function's task its parent (D96: a request reaches its children)
         self.add_store(fr, FRAME_ROOT, fr)
-        let me = self.temp(Type.TInt(64, false))
+        let me = self.temp(Type.TPtr)
         self.add(Inst.Frame(me))
-        let parent = self.temp(Type.TInt(64, false))
+        let parent = self.temp(Type.TPtr)
         self.add_load(parent, me, FRAME_ROOT)
         self.add_store(fr, FRAME_PARENT, parent)
-        let fs = self.new_slot("__child", Type.TInt(64, false), 8, -1, false)
+        let fs = self.new_slot("__child", Type.TPtr, 8, -1, false)
         self.add(Inst.Store(fs, fr))
         self.end_temps()
-        let fr2 = self.temp(Type.TInt(64, false))
+        let fr2 = self.temp(Type.TPtr)
         self.add(Inst.Load(fr2, fs))
         self.add(Inst.Rt(-1, "__exec_push", [fr2]))
-        let ts = self.new_slot("__task_" + name, Type.TInt(64, false), 8, -1, false)
+        let ts = self.new_slot("__task_" + name, Type.TPtr, 8, -1, false)
         self.add(Inst.Store(ts, fr2))
         self.declare_as(name, ts, true)
         self.tasks.push(TaskSlot { slot: ts, ty: rt, void: !has, owns: has && cg.owns_heap(rt), depth: self.owners.len() - 1, foreign: false })
@@ -1514,7 +1516,7 @@ impl Lower {
         let check = self.new_block()
         self.finish(Term.Jmp(check))
         self.start(check)
-        let fr = self.temp(Type.TInt(64, false))
+        let fr = self.temp(Type.TPtr)
         self.add(Inst.Load(fr, ts))
         let st = self.temp(Type.TInt(64, false))
         self.add_load(st, fr, FRAME_TASK)
@@ -1533,9 +1535,9 @@ impl Lower {
         // parked on the child (or on at once if it has just ended), any
         // actor held left meanwhile
         self.leave_self()
-        let me = self.temp(Type.TInt(64, false))
+        let me = self.temp(Type.TPtr)
         self.add(Inst.Frame(me))
-        let fr2 = self.temp(Type.TInt(64, false))
+        let fr2 = self.temp(Type.TPtr)
         self.add(Inst.Load(fr2, ts))
         self.add(Inst.Call(-1, "__wait", [fr2, me]))
         let back = self.new_block()
@@ -1544,7 +1546,7 @@ impl Lower {
         self.enter_self()
         self.finish(Term.Jmp(done))
         self.start(done)
-        let out = self.temp(Type.TInt(64, false))
+        let out = self.temp(Type.TPtr)
         self.add(Inst.Load(out, ts))
         return out
     }
@@ -1582,10 +1584,10 @@ impl Lower {
         let start = self.new_block()
         self.finish(Term.Jmp(start))
         self.start(start)
-        let fr0 = self.temp(Type.TInt(64, false))
+        let fr0 = self.temp(Type.TPtr)
         self.add(Inst.Load(fr0, ts))
         let gone = self.temp(Type.TBool)
-        self.add(Inst.Cmp(gone, "==", Type.TInt(64, false), fr0, self.int_const(0)))
+        self.add(Inst.Cmp(gone, "==", Type.TPtr, fr0, self.konst(Type.TPtr, 0)))
         let live = self.new_block()
         let end = self.new_block()
         self.finish(Term.Br(gone, end, live))
@@ -1632,7 +1634,7 @@ impl Lower {
         // (the other owners are dropped before `exit_fn` is called)
         self.leave_self()
         if self.actor_self >= 0 { self.add(Inst.DropSlot(self.f.slots[self.actor_self].ty, self.actor_self)) }
-        let fr = self.temp(Type.TInt(64, false))
+        let fr = self.temp(Type.TPtr)
         self.add(Inst.Frame(fr))
         self.add(Inst.Call(-1, "__finish", [fr]))
         if fall { self.finish(Term.Become) } else { self.leave(Term.Become) }
@@ -1805,10 +1807,10 @@ impl Lower {
                 }
                 if !is_list_t(lt) { return self.unsupported("an assignment to a byte") }
                 let holder = self.place(cg, base)
-                let cell = self.temp(Type.TInt(64, false))
+                let cell = self.temp(Type.TPtr)
                 self.add(Inst.Cow(cell, lt, holder))
                 let i = self.expr(cg, idx)
-                let d = self.temp(Type.TInt(64, false))
+                let d = self.temp(Type.TPtr)
                 let size = cg.elem_size(list_elem(lt))
                 self.add(Inst.Elem(d, cell, i, size, false, Pos { line: e.line, col: e.col }))
                 self.mark_elem(d, size)
@@ -1959,7 +1961,7 @@ impl Lower {
         let done = self.new_block()
         self.finish(Term.Br(c, body_b, done))
         self.start(body_b)
-        let p = self.temp(Type.TInt(64, false))
+        let p = self.temp(Type.TPtr)
         self.add(Inst.Elem(p, cell, i, stride, false, Pos { line: 0, col: 0 }))
         self.mark_elem(p, stride)
         if is_aggregate(et) {
@@ -2347,7 +2349,7 @@ impl Lower {
     #test(lower_on(), codegen_on("enum E { A, B(int) }"), Type.TBool, 86)[86]
     fun unbox(var self, cg: CodeGen, t: Type, p: int32) -> int32 {
         if !cg.is_boxed(t) { return p }
-        let q = self.temp(Type.TInt(64, false))
+        let q = self.temp(Type.TPtr)
         self.add_load(q, p, 0)
         return q
     }
@@ -2359,7 +2361,7 @@ impl Lower {
         let src = self.addr(cg, value)
         let took = self.took(cg, t, src)
         let size = self.int_const(cg.size(t))
-        let p = self.temp(Type.TInt(64, false))
+        let p = self.temp(Type.TPtr)
         self.add(Inst.Rt(p, "__alloc", [size]))
         self.add(Inst.Copy(p, src, cg.size(t)))
         if !took { self.retain(cg, t, p) }
@@ -2485,7 +2487,7 @@ impl Lower {
                         ExprKind.Name(an) => {
                             let ts = self.lookup(an)
                             if ts >= 0 && self.task_of(ts) >= 0 {
-                                let fr = self.temp(Type.TInt(64, false))
+                                let fr = self.temp(Type.TPtr)
                                 self.add(Inst.Load(fr, ts))
                                 self.add(Inst.Rt(-1, "__task_cancel", [fr]))
                                 return -1
@@ -2589,16 +2591,16 @@ impl Lower {
     fun fat_value(var self, cg: CodeGen, t: Type, code: str, size: int32, drop: str) -> (int32, int32, int32) {
         let slot = self.value_slot(cg, "__fn", t, true)
         let base = self.slot_addr(slot)
-        let c = self.temp(Type.TInt(64, false))
+        let c = self.temp(Type.TPtr)
         self.add(Inst.Label(c, code))
         self.add_store(base, 0, c)
         if size < 0 {
             self.add_store(base, 8, self.int_const(0))
             return (slot, base, -1)
         }
-        let env = self.temp(Type.TInt(64, false))
+        let env = self.temp(Type.TPtr)
         self.add(Inst.Rt(env, "__alloc", [self.int_const(size)]))
-        let d = self.temp(Type.TInt(64, false))
+        let d = self.temp(Type.TPtr)
         self.add(Inst.Label(d, drop))
         self.add_store(env, 0, d)
         self.add_store(base, 8, env)
@@ -2951,7 +2953,7 @@ impl Lower {
         if is_map_t(bt) { return self.map_value(cg, e, bt, cell, i) }
         var stride = 1
         if is_list_t(bt) { stride = cg.elem_size(list_elem(bt)) }
-        let d = self.temp(Type.TInt(64, false))
+        let d = self.temp(Type.TPtr)
         self.add(Inst.Elem(d, cell, i, stride, is_tstr(bt), Pos { line: e.line, col: e.col }))
         if is_list_t(bt) { self.mark_elem(d, stride) }
         return d
@@ -2969,7 +2971,7 @@ impl Lower {
         let h = self.place(cg, holder)
         let cell = self.temp(lt)
         self.add(Inst.Cow(cell, lt, h))
-        let slot_p = self.temp(Type.TInt(64, false))
+        let slot_p = self.temp(Type.TPtr)
         self.add(Inst.Append(slot_p, h, cell, stride))
         self.mark_elem(slot_p, stride)
         self.store_staged(cg, et, slot_p, staged)
@@ -2986,7 +2988,7 @@ impl Lower {
         let h = self.place(cg, holder)
         let cell = self.temp(lt)
         self.add(Inst.Cow(cell, lt, h))
-        let p = self.temp(Type.TInt(64, false))
+        let p = self.temp(Type.TPtr)
         let size = cg.elem_size(et)
         self.add(Inst.Pop(p, cell, size, Pos { line: e.line, col: e.col }))
         self.mark_elem(p, size)
@@ -3025,7 +3027,7 @@ impl Lower {
     fun map_lookup(var self, cg: CodeGen, mt: Type, cell: int32, key: int32) -> int32 {
         let size = self.int_const(cg.map_slot_size(mt))
         let is_str = self.int_const(cg.map_is_str(mt))
-        let d = self.temp(Type.TInt(64, false))
+        let d = self.temp(Type.TPtr)
         self.add(Inst.Rt(d, "__map_lookup", [cell, key, size, is_str]))
         return d
     }
@@ -3093,7 +3095,7 @@ impl Lower {
         self.add(Inst.Rt(-1, "__map_reserve", [holder, size, unused, is_str]))
         let cell = self.temp(mt)
         self.add_load(cell, holder, 0)
-        let slot = self.temp(Type.TInt(64, false))
+        let slot = self.temp(Type.TPtr)
         let had = self.temp(Type.TBool)
         self.add(Inst.RtPair(slot, had, "__map_set_slot", [cell, key, size, is_str]))
         let p = self.offset(slot, 16)
@@ -3114,7 +3116,7 @@ impl Lower {
     fun store_staged(var self, cg: CodeGen, vt: Type, p: int32, staged: (int32, int32)) {
         if cg.is_boxed(vt) {
             let size = self.int_const(cg.size(vt))
-            let b = self.temp(Type.TInt(64, false))
+            let b = self.temp(Type.TPtr)
             self.add(Inst.Rt(b, "__alloc", [size]))
             self.add(Inst.Copy(b, staged.1, cg.size(vt)))
             self.add_store(p, 0, b)
@@ -3184,9 +3186,8 @@ impl Lower {
         let cell = self.expr(cg, m)
         let key = self.expr(cg, k)
         let slot = self.map_lookup(cg, mt, cell, key)
-        let zero = self.int_const(0)
         let d = self.temp(Type.TBool)
-        self.add(Inst.Cmp(d, "!=", Type.TInt(64, false), slot, zero))
+        self.add(Inst.Cmp(d, "!=", Type.TPtr, slot, self.konst(Type.TPtr, 0)))
         return d
     }
 
@@ -3653,7 +3654,7 @@ impl Lower {
             _ => false
         }
         if cg.is_boxed(t) && !wild {
-            let q = self.temp(Type.TInt(64, false))
+            let q = self.temp(Type.TPtr)
             self.add_load(q, base, off)
             self.pattern(cg, sub, q, 0, t, fail)
             return

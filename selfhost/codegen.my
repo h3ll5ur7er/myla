@@ -628,6 +628,8 @@ impl CodeGen {
             Type.TBool => { return self.dbg_base(t, 1) },
             Type.TChar => { return self.dbg_base(t, 4) },
             Type.TFloat(w) => { return self.dbg_base(t, 8) },   // a float32 is kept as a double
+            // an address of the IR's own (D121), shown as its number
+            Type.TPtr => { return self.dbg_base(Type.TInt(64, false), 8) },
             Type.TStr => {},
             Type.TSB => {},
             Type.TList(e) => {},
