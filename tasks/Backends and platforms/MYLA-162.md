@@ -59,3 +59,12 @@ So the port is about 2,700 lines of assembly becoming Myla (minus the platform l
 - `std.rt`'s `str_concat` and `str_eq`, on the bulk primitives `__copy_bytes` and `__equal_bytes`. The compiler itself calls them 2,807 and 930 times; the bootstrap reaches its fixed point; 909 tests pass (`tests/burn/test_raw_memory.py` also checks the routing and the fallback).
 - **Cost:** string building 11.8% more instructions; word frequency, closures unchanged; the self-compile 3.8% more (the same output). Each call pays a frame and spills where the assembly routines are frameless leaves: the register allocator doesn't place values the way hand-written code does (a call's arguments go through the frame, two spare registers already hold the parameters). Letting a value read last by a call live in `%r10`/`%r11` gained 0.08%; the rest needs arguments coalesced into their registers and frames left out of leaf functions, the backend half of D123.
 
+## The backend first (2026-11-03, the owner's choice (a))
+
+Before the hot routines move, the backend gets closer to hand-written code, which every program gains from:
+- **Arguments in caller-saved registers:** a value read last by a call (nothing clobbering before) lives in `%r10` or `%r11`, or `%r9`/`%r8` when the arguments loaded before it don't fill that register (`call_arg_index`, also through a variable's slot).
+- **No cell for a variable living in a register** (`no_cell`), so a function without spills has an empty frame; and **no frame at all** for a function with no cells, no saved registers and no arguments on the stack (`frameless`; not under -g). 46 of the compiler's 1,304 functions.
+- **`x = x op y` in place:** an integer `+`, `-`, `&`, `|`, `^` whose result only the store into the variable reads is one instruction on the variable's register (`emit_in_place`, `canonical_insn`), not a round trip through `%rax`; about 950 places in the compiler.
+
+Measured (instructions, the same sources built before step 1 and now): the benchmarks 3.2% fewer on the geometric mean (the sieve 10.4%, Mandelbrot 7.2%, closures 6.7%, fib 5.7%), string building still 10.8% more (its concatenation in Myla); the self-compile, with its strings in Myla, 1.7% more than with the assembly routines and the old backend (it was 3.8% after step 1).
+

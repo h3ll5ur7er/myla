@@ -201,6 +201,7 @@ pub struct CodeGen {
     norm: Norm,
     save_base: int32,               // MYLA-126: the saved registers' cells start below it
     arg_words: int32,               // D119: the argument words the function received on the stack
+    frameless: bool,                // MYLA-162: the function being emitted sets up no frame
     // MYLA-127: per function (by its signature's name), which parameters its
     // body keeps as a whole value (`keeps`); such a parameter of a scalar
     // type that owns heap memory is passed owned (`owned_param`)
@@ -297,7 +298,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
         keep_ir: false, ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_off: [],
-        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
+        temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
 }
 

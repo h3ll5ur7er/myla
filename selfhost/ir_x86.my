@@ -12,7 +12,7 @@
 from .ast import FunData
 from .checker import Type
 from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV, narrow_operand
-from .ir import IrFunc, Inst, Term, Touches, ENV_WORD, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
+from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -59,15 +59,18 @@ impl CodeGen {
             }
         }
         let defs = def_counts(f, tc)
-        self.temp_remat = self.remat_texts(f, slots_at(f, 0), defs)
+        self.temp_remat = self.remat_texts(f, slots_at(f, 0, []), defs)
         self.alloc_regs(f, reach, tc)
         if f.frame { self.saved_regs.push("r15") }
         let cells = self.alloc_temps(f, tc)
-        let slot_off = slots_at(f, 8 * cells)
+        // a slot living in a register all its life has no cell
+        var inreg: [bool] = []
+        for r in self.slot_reg { inreg.push(r != "") }
+        let slot_off = slots_at(f, 8 * cells, inreg)
         self.temp_remat = self.remat_texts(f, slot_off, defs)
         var cursor = 8 * cells
         if !f.frame {
-            let (pos, extent) = slot_positions(f, true)
+            let (pos, extent) = slot_positions(f, true, inreg)
             cursor = cursor + extent
         }
         let saves = cursor
@@ -98,8 +101,14 @@ impl CodeGen {
         self.emit(format("myla_{}:", mangled))
         self.dbg_begin_function(format("myla_{}", mangled))
         self.emit_loc(line, col)
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
+        // a function with nothing in its frame (no cells, no saved
+        // registers, no arguments on the stack) sets up none, but under -g,
+        // whose debugger finds frames by %rbp
+        self.frameless = frame == 0 && self.saved_regs.len() == 0 && self.arg_words == 0 && !self.debug && !f.frame
+        if !self.frameless {
+            self.emit("pushq %rbp")
+            self.emit("movq %rsp, %rbp")
+        }
         if frame > 0 { self.emit(format("subq ${}, %rsp", frame)) }
         // the callee-saved registers it uses, and the parameters living in
         // registers (MYLA-121)
@@ -162,7 +171,7 @@ impl CodeGen {
             if tail >= 0 { stop = tail }
             var i = 0
             while i < stop {
-                if i + 1 < stop && i + 1 != fused && self.emit_elem_load(f, insts[i], insts[i + 1], temp_base) { i = i + 2 }
+                if i + 1 < stop && i + 1 != fused && (self.emit_elem_load(f, insts[i], insts[i + 1], temp_base) || self.emit_in_place(insts[i], insts[i + 1], temp_base)) { i = i + 2 }
                 else {
                     if i != fused { self.emit_inst(f, insts[i], slot_off, temp_base) }
                     i = i + 1
@@ -195,7 +204,7 @@ impl CodeGen {
 
         self.emit(format("{}:", self.epilogue))
         self.restore_regs()
-        self.emit("leave")
+        if !self.frameless { self.emit("leave") }
         // the caller pops the argument words it pushed (D119)
         self.emit("ret")
         self.end_loc()
@@ -937,7 +946,7 @@ impl CodeGen {
             return
         }
         self.restore_regs()
-        self.emit("leave")
+        if !self.frameless { self.emit("leave") }
         self.emit(format("jmp {}", target))
     }
 
@@ -1058,6 +1067,41 @@ impl CodeGen {
                 self.load_position(p.line, p.col, "rsi")
                 self.emit("call __panic")
             },
+        }
+    }
+
+    // `x = x op y` on a variable living in a register, for an integer `+`,
+    // `-`, `&`, `|` or `^` whose result only the store into that variable
+    // reads: one instruction on the register (and the result's
+    // re-canonicalisation for a narrow `+` or `-`) instead of a round trip
+    // through %rax; false when `a` and `b` aren't such a pair.
+    fun emit_in_place(var self, a: Inst, b: Inst, temp_base: int32) -> bool {
+        return match a {
+            Inst.Bin(d, op, lt, rt, x, y, pos) => {
+                var insn = ""
+                if op == "+" { insn = "addq" }
+                if op == "-" { insn = "subq" }
+                if op == "&" { insn = "andq" }
+                if op == "|" { insn = "orq" }
+                if op == "^" { insn = "xorq" }
+                let w = match rt {
+                    Type.TInt(bits, sg) => bits,
+                    _ => 0,
+                }
+                if insn == "" || w == 0 || self.temp_uses[d] != 1 { return false }
+                let s = match b {
+                    Inst.Store(sl, v) => { if v == d { sl } else { -1 } },
+                    _ => -1,
+                }
+                if s < 0 || self.slot_reg[s] == "" || text_has_xmm("%" + self.slot_reg[s]) { return false }
+                let reg = "%" + self.slot_reg[s]
+                if self.reg_of(x) != reg { return false }
+                let src = self.second_operand(op, y, temp_base)
+                self.emit(format("{} {}, {}", insn, src, reg))
+                if (op == "+" || op == "-") && w < 64 { self.emit(canonical_insn(rt, reg)) }
+                true
+            },
+            _ => false,
         }
     }
 
@@ -1405,8 +1449,9 @@ impl CodeGen {
         // (`clobbers`), which values in those registers can't live across
         var cpre: [int32] = [0]
         // per position, whether it is a call reading all its operands before
-        // it clobbers anything (`reads_then_calls`)
+        // it clobbers anything (`reads_then_calls`), and the instruction
         var callpos: [bool] = []
+        var callinst: [Inst] = []
         var pos = 0
         for b in f.order {
             if !reach[b] { continue }
@@ -1424,6 +1469,7 @@ impl CodeGen {
                 if clobbers(inst) { c = c + 1 }
                 cpre.push(c)
                 callpos.push(reads_then_calls(inst))
+                callinst.push(inst)
                 // a variable read where it is used is read there (`temp_src`)
                 var k = tc.rat[ii]
                 while k < tc.rat[ii + 1] {
@@ -1451,6 +1497,7 @@ impl CodeGen {
             tat.push(tv.len())
             cpre.push(cpre[cpre.len() - 1])
             callpos.push(false)
+            callinst.push(Inst.Init(-1))
             for u in term_uses(f.blocks[b].term) {
                 if cand[u] { tv.push(u) }
                 if src_slot[u] >= 0 && cand[nt + src_slot[u]] { tv.push(nt + src_slot[u]) }
@@ -1543,15 +1590,19 @@ impl CodeGen {
                 // a free register, a caller-saved one first
                 var pick = -1
                 // a value read last by a call, nothing clobbering before it,
-                // can live in %r10 or %r11: the call reads it before it
-                // clobbers them (not %r8 or %r9, which earlier arguments
-                // fill)
+                // can live in %r10 or %r11, as the call reads it before it
+                // clobbers them; in %r9 or %r8 too when the arguments loaded
+                // before it don't fill that register (argument word 5 fills
+                // %r9, word 4 %r8)
                 if top == ncallee && cpre[last[v]] - cpre[first[v]] == 0 && callpos[last[v]] {
+                    let k = call_arg_index(callinst[last[v]], v, nt, src_slot)
                     r = nr - 2
                     while r < nr && pick < 0 {
                         if owner[r] < 0 { pick = r }
                         r = r + 1
                     }
+                    if pick < 0 && k <= 5 && owner[nr - 3] < 0 { pick = nr - 3 }
+                    if pick < 0 && k <= 4 && owner[nr - 4] < 0 { pick = nr - 4 }
                 }
                 r = top - 1
                 while r >= 0 && pick < 0 {
@@ -2371,9 +2422,9 @@ fun writes_no_slot(inst: Inst) -> bool {
 
 // The offsets of `f`'s slots: in its heap frame after the header (D90) for a
 // frame function, else `layout_slots`'.
-fun slots_at(f: IrFunc, below: int32) -> [int32] {
-    if !f.frame { return layout_slots(f, below) }
-    let (pos, extent) = slot_positions(f, false)
+fun slots_at(f: IrFunc, below: int32, inreg: [bool]) -> [int32] {
+    if !f.frame { return layout_slots(f, below, inreg) }
+    let (pos, extent) = slot_positions(f, false, [])
     var off: [int32] = []
     for p in pos { off.push(FRAME_HEADER + p) }
     return off
@@ -2381,7 +2432,7 @@ fun slots_at(f: IrFunc, below: int32) -> [int32] {
 
 // The size of a frame function's heap frame: the header, then its slots.
 fun frame_size(f: IrFunc) -> int32 {
-    let (pos, extent) = slot_positions(f, false)
+    let (pos, extent) = slot_positions(f, false, [])
     return FRAME_HEADER + extent
 }
 
@@ -2391,15 +2442,18 @@ fun frame_size(f: IrFunc) -> int32 {
 // those of the scopes around it, so the locals of two scopes that are never
 // open at once (two blocks, two match arms) share cells. With `words`, a
 // parameter that came on the stack (D119) takes no room here (-1); one that
-// came in registers has a cell, as a local has.
-fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
+// came in registers has a cell, as a local has; a slot living in a register
+// all its life (`inreg`) has none.
+fun slot_positions(f: IrFunc, words: bool, inreg: [bool]) -> ([int32], int32) {
     var pos: [int32] = []
     var cursor = 0
+    var k = 0
     for s in f.slots {
-        if (words && s.word >= REG_WORDS) || s.scope > 0 { pos.push(-1) } else {
+        if no_cell(s, k, words, inreg) || s.scope > 0 { pos.push(-1) } else {
             pos.push(cursor)
             cursor = cursor + (s.size + 7) / 8 * 8
         }
+        k = k + 1
     }
     let n = f.scope_parent.len()
     var own: [int32] = []
@@ -2408,8 +2462,10 @@ fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
         own.push(0)
         i = i + 1
     }
+    k = 0
     for s in f.slots {
-        if s.scope > 0 && !(words && s.word >= REG_WORDS) { own[s.scope] = own[s.scope] + (s.size + 7) / 8 * 8 }
+        if s.scope > 0 && !no_cell(s, k, words, inreg) { own[s.scope] = own[s.scope] + (s.size + 7) / 8 * 8 }
+        k = k + 1
     }
     // a scope's area starts where its parent's locals end (a scope's index
     // is greater than its parent's)
@@ -2425,10 +2481,10 @@ fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
         i = i + 1
     }
     var fill = start
-    var k = 0
+    k = 0
     while k < f.slots.len() {
         let s = f.slots[k]
-        if s.scope > 0 && !(words && s.word >= REG_WORDS) {
+        if s.scope > 0 && !no_cell(s, k, words, inreg) {
             pos[k] = fill[s.scope]
             fill[s.scope] = fill[s.scope] + (s.size + 7) / 8 * 8
         }
@@ -2447,13 +2503,15 @@ const FRAME_HEADER: int32 = 72
 
 // The frame offset of each slot of `f`: a parameter that came on the stack
 // above %rbp (D119), the others below the first `below` bytes.
-fun layout_slots(f: IrFunc, below: int32) -> [int32] {
-    let (pos, extent) = slot_positions(f, true)
+fun layout_slots(f: IrFunc, below: int32, inreg: [bool]) -> [int32] {
+    let (pos, extent) = slot_positions(f, true, inreg)
     var off: [int32] = []
     var k = 0
     while k < f.slots.len() {
         let s = f.slots[k]
-        if s.word >= REG_WORDS { off.push(16 + 8 * (s.word - REG_WORDS)) } else { off.push(-(below + pos[k] + (s.size + 7) / 8 * 8)) }
+        if s.word >= REG_WORDS { off.push(16 + 8 * (s.word - REG_WORDS)) }
+        else if pos[k] < 0 { off.push(0) }
+        else { off.push(-(below + pos[k] + (s.size + 7) / 8 * 8)) }
         k = k + 1
     }
     return off
@@ -2568,4 +2626,77 @@ fun reads_then_calls(inst: Inst) -> bool {
         Inst.RtPair(d, d2, name, args) => true,
         _ => false,
     }
+}
+
+// The highest argument word in which the call `inst` reads the value `v`
+// (a temporary below `nt`, else the slot v - nt, read through a temporary
+// whose `src_slot` it is), counting the words that go in registers (a word
+// pushed on the stack counts -1: it is read before any register is loaded);
+// 99 when it reads `v` after its arguments (a function value) or not as one.
+#test(Inst.Call(-1, "f", [3, 4, 5]), 4, 10, [])[1]
+#test(Inst.CallInd(-1, 4, [3]), 4, 10, [])[99]
+fun call_arg_index(inst: Inst, v: int32, nt: int32, src_slot: [int32]) -> int32 {
+    var ws: [int32] = []
+    var late = false
+    match inst {
+        Inst.Call(d, name, args) => { ws = args },
+        Inst.CallSret(name, r, args) => { ws = sret_words(r, args) },
+        Inst.CallInd(d, fv, args) => {
+            ws = args
+            late = reads_value(fv, v, nt, src_slot)
+        },
+        Inst.CallIndSret(fv, r, args) => {
+            ws = sret_words(r, args)
+            late = reads_value(fv, v, nt, src_slot)
+        },
+        Inst.Rt(d, name, args) => { ws = args },
+        Inst.RtPair(d, d2, name, args) => { ws = args },
+        _ => { return 99 },
+    }
+    if late { return 99 }
+    var k = -2
+    var i = 0
+    while i < ws.len() {
+        if reads_value(ws[i], v, nt, src_slot) {
+            if i < REG_WORDS { if i > k { k = i } } else if k < -1 { k = -1 }
+        }
+        i = i + 1
+    }
+    if k == -2 { return 99 }
+    return k
+}
+
+// Whether reading the temporary `t` reads the value `v` (itself, or the slot
+// v - nt it is read from).
+fun reads_value(t: int32, v: int32, nt: int32, src_slot: [int32]) -> bool {
+    if t == v { return true }
+    return v >= nt && t >= 0 && t < src_slot.len() && src_slot[t] == v - nt
+}
+
+// Whether slot `s` (the k-th) takes no cell in the frame: a parameter that
+// came on the stack (with `words`), or one living in a register (`inreg`).
+fun no_cell(s: Slot, k: int32, words: bool, inreg: [bool]) -> bool {
+    return (words && s.word >= REG_WORDS) || (k < inreg.len() && inreg[k])
+}
+
+// The instruction re-canonicalising the integer of type `t` (narrower than
+// 64 bits) in `reg`: sign- or zero-extended from its low bits, as `wrap`
+// does in %rax.
+#test(Type.TInt(32, true), "%rbx")["movslq %ebx, %rbx"]
+#test(Type.TInt(8, false), "%r12")["movzbl %r12b, %r12d"]
+fun canonical_insn(t: Type, reg: str) -> str {
+    let (w, sg) = match t {
+        Type.TInt(bits, s) => (bits, s),
+        _ => (64, false),
+    }
+    if w == 32 {
+        if sg { return format("movslq {}, {}", narrow_operand(reg, 4), reg) }
+        return format("movl {}, {}", narrow_operand(reg, 4), narrow_operand(reg, 4))
+    }
+    if w == 16 {
+        if sg { return format("movswq {}, {}", narrow_operand(reg, 2), reg) }
+        return format("movzwl {}, {}", narrow_operand(reg, 2), narrow_operand(reg, 4))
+    }
+    if sg { return format("movsbq {}, {}", narrow_operand(reg, 1), reg) }
+    return format("movzbl {}, {}", narrow_operand(reg, 1), narrow_operand(reg, 4))
 }
