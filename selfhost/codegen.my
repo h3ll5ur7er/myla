@@ -4801,6 +4801,24 @@ impl CodeGen {
         self.raw("\txorq %rax, %rax")
         self.raw("\tret")
         self.raw("")
+        // __syscall(n, a, b, c): Linux's platform layer for the runtime written
+        // in Myla (MYLA-162): the call's number and three arguments moved
+        // into the kernel's registers; the result, a negative errno on a
+        // failure
+        self.raw("__syscall:")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tmovq %rsi, %rdi")
+        self.raw("\tmovq %rdx, %rsi")
+        self.raw("\tmovq %rcx, %rdx")
+        self.raw("\tsyscall")
+        self.raw("\tret")
+        self.raw("")
+        // __set_io_errno(e): the errno the I/O primitives report (a worker's
+        // own with tasks)
+        self.raw("__set_io_errno:")
+        self.raw(format("\tmovq %rdi, {}", self.tv("__io_errno_val")))
+        self.raw("\tret")
+        self.raw("")
         // __copy_bytes(dst, src, n): a bulk copy for the runtime written in
         // Myla (MYLA-162's prototype)
         self.raw("__copy_bytes:")

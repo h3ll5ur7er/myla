@@ -3413,12 +3413,12 @@ impl Lower {
                 self.add(Inst.StoreAt(vals[0], 0, vals[1], w))
                 return -1
             }
-            if nm == "__copy_bytes" {
-                self.add(Inst.Rt(-1, "__copy_bytes", vals))
+            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" {
+                self.add(Inst.Rt(-1, nm, vals))
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" { self.add(Inst.Rt(d, nm, vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" { self.add(Inst.Rt(d, nm, vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" { return self.owned_value(cg, d, t) }
             return d
         }
@@ -3442,11 +3442,11 @@ impl Lower {
             return -1
         }
         if !has_result {
-            self.add(Inst.Rt(-1, nm, vals))
+            self.rt_call(cg, -1, nm, vals)
             return -1
         }
         let d = self.temp(t)
-        self.add(Inst.Rt(d, nm, vals))
+        self.rt_call(cg, d, nm, vals)
         return self.owned_value(cg, d, t)
     }
 
@@ -3761,5 +3761,11 @@ fun char_cast_checked(src: Type, t: Type) -> bool {
 pub fun myla_runtime_function(name: str) -> str {
     if name == "__str_concat" { return "std$rt$str_concat" }
     if name == "__str_eq" { return "std$rt$str_eq" }
+    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" {
+        // `__stat` -> `std$rt$stat`
+        var sb = StringBuilder()
+        sb.append(name, 2, name.len())
+        return "std$rt$" + sb.build()
+    }
     return ""
 }
