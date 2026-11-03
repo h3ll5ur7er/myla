@@ -30,10 +30,12 @@ pub enum Inst {
     Addr(int32, int32),
     // %dst = %ptr + off: an address inside an aggregate
     Offset(int32, int32, int32),
-    // %dst = load [%ptr + off]: the 8-byte scalar there
-    LoadAt(int32, int32, int32),
-    // store [%ptr + off], %src
-    StoreAt(int32, int32, int32),
+    // %dst = load [%ptr + off]: the scalar there, of the width (1, 2, 4 or
+    // 8 bytes; a narrower one zero- or sign-extended as the type of %dst
+    // says, D120); the text form names a width other than 8 (`load.1`)
+    LoadAt(int32, int32, int32, int32),
+    // store [%ptr + off], %src: of the width (the low bytes of %src)
+    StoreAt(int32, int32, int32, int32),
     // copy size [%dst], [%src]: an aggregate's bytes
     Copy(int32, int32, int32),
     // %dst = op ty %a, %b: + - * / % & | ^ << >> on integers (ty: the left
@@ -240,8 +242,8 @@ pub fun render_inst(inst: Inst) -> str {
         Inst.Addr(d, s) => format("%t{} = addr ${}", d, s)
         Inst.Frame(d) => format("%t{} = frame", d)
         Inst.Offset(d, p, off) => format("%t{} = %t{} + {}", d, p, off)
-        Inst.LoadAt(d, p, off) => format("%t{} = load [%t{} + {}]", d, p, off)
-        Inst.StoreAt(p, off, v) => format("store [%t{} + {}], %t{}", p, off, v)
+        Inst.LoadAt(d, p, off, width) => format("%t{} = load{} [%t{} + {}]", d, width_suffix(width), p, off)
+        Inst.StoreAt(p, off, v, width) => format("store{} [%t{} + {}], %t{}", width_suffix(width), p, off, v)
         Inst.Copy(d, src, size) => format("copy {} [%t{}], [%t{}]", size, d, src)
         Inst.Bin(d, op, t, rt, a, b, pos) => render_bin(d, op, t, rt, a, b, pos)
         Inst.Cmp(d, op, t, a, b) => format("%t{} = cmp {} {} %t{}, %t{}", d, op, type_name(t), a, b)
@@ -528,7 +530,7 @@ fun step(f: IrFunc, inst: Inst, addr_of: [int32], live: [int32]) -> str {
             return ""
         },
         Inst.Load(d, s) => { return read_of(f, s, live) },
-        Inst.LoadAt(d, p, off) => { if addr_of[p] >= 0 { return read_of(f, addr_of[p], live) } },
+        Inst.LoadAt(d, p, off, width) => { if addr_of[p] >= 0 { return read_of(f, addr_of[p], live) } },
         Inst.Copy(d, src, size) => { if addr_of[src] >= 0 { return read_of(f, addr_of[src], live) } },
         Inst.Retain(t, p) => { if addr_of[p] >= 0 { return read_of(f, addr_of[p], live) } },
         _ => {},
@@ -581,8 +583,8 @@ pub fun inst_uses(inst: Inst) -> [int32] {
         Inst.Store(s, v) => [v]
         Inst.Addr(d, s) => []
         Inst.Offset(d, p, off) => [p]
-        Inst.LoadAt(d, p, off) => [p]
-        Inst.StoreAt(p, off, v) => [p, v]
+        Inst.LoadAt(d, p, off, width) => [p]
+        Inst.StoreAt(p, off, v, width) => [p, v]
         Inst.Copy(d, src, size) => [d, src]
         Inst.Bin(d, op, lt, rt, a, b, pos) => [a, b]
         Inst.Cmp(d, op, t, a, b) => [a, b]
@@ -653,7 +655,7 @@ pub fun inst_defs(inst: Inst) -> [int32] {
         Inst.Load(d, s) => [d]
         Inst.Addr(d, s) => [d]
         Inst.Offset(d, p, off) => [d]
-        Inst.LoadAt(d, p, off) => [d]
+        Inst.LoadAt(d, p, off, width) => [d]
         Inst.Bin(d, op, lt, rt, a, b, pos) => [d]
         Inst.Cmp(d, op, t, a, b) => [d]
         Inst.Un(d, op, t, a) => [d]
@@ -685,7 +687,7 @@ fun writes_temp(inst: Inst, t: int32) -> bool {
         Inst.Load(d, s) => d == t
         Inst.Addr(d, s) => d == t
         Inst.Offset(d, p, off) => d == t
-        Inst.LoadAt(d, p, off) => d == t
+        Inst.LoadAt(d, p, off, width) => d == t
         Inst.Bin(d, op, lt, rt, a, b, pos) => d == t
         Inst.Cmp(d, op, ty, a, b) => d == t
         Inst.Un(d, op, ty, a) => d == t
@@ -797,7 +799,7 @@ fun borrowed_slots(f: IrFunc) -> [bool] {
                         set.push(d)
                     }
                 },
-                Inst.LoadAt(d, p, off) => {
+                Inst.LoadAt(d, p, off, width) => {
                     if root[p] >= 0 {
                         root[d] = root[p]
                         set.push(d)
@@ -1028,14 +1030,14 @@ fun plain_scalar(t: Type) -> bool {
 
 // Whether `inst` only reads (a slot, memory, or temporaries) into a
 // temporary of its own, which a value's last reference can't notice.
-#test(Inst.LoadAt(1, 2, 0))[true]
+#test(Inst.LoadAt(1, 2, 0, 8))[true]
 #test(Inst.Cow(1, Type.TStr, 2))[false]
 fun only_reads(inst: Inst) -> bool {
     return match inst {
         Inst.Const(d, t, v) => true
         Inst.Load(d, x) => true
         Inst.Offset(d, p, off) => true
-        Inst.LoadAt(d, p, off) => true
+        Inst.LoadAt(d, p, off, width) => true
         Inst.Load8(d, p) => true
         Inst.Elem(d, c, i, stride, is_str, pos) => true
         Inst.Bin(d, op, lt, rt, a, b, pos) => true
@@ -1149,7 +1151,7 @@ fun prepend(x: int32, xs: [int32]) -> [int32] {
 #test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.Moved(0), Inst.Load(1, 0)])[""]
 #test([Inst.Str(0, "x"), Inst.Store(0, 0), Inst.DropSlot(Type.TStr, 0), Inst.Load(1, 0)])["L0: read of $0 (s), which holds no value"]
 #test([Inst.Load(1, 0)])["L0: read of $0 (s), which holds no value"]
-#test([Inst.Addr(1, 0), Inst.LoadAt(2, 1, 0)])["L0: read of $0 (s), which holds no value"]
+#test([Inst.Addr(1, 0), Inst.LoadAt(2, 1, 0, 8)])["L0: read of $0 (s), which holds no value"]
 #test([Inst.Load(1, 1)])[""]
 fun verify_block(insts: [Inst]) -> str {
     return verify(test_func([IrBlock { insts: insts, term: Term.Ret(-1) }]))
@@ -1206,4 +1208,12 @@ fun test_func(blocks: [IrBlock]) -> IrFunc {
         slots: [Slot { name: "s", ty: Type.TStr, size: 8, word: -1, owns: true, inline: false, scope: -1 }, Slot { name: "b", ty: Type.TStr, size: 8, word: -1, owns: false, inline: false, scope: -1 }],
         temps: [Type.TStr, Type.TBool], blocks: blocks, order: order, instances: [], frame: false, scope_parent: [-1],
     }
+}
+
+// The text form's mark of a memory access's width: none for 8 bytes.
+#test(8)[""]
+#test(1)[".1"]
+fun width_suffix(width: int32) -> str {
+    if width == 8 { return "" }
+    return format(".{}", width)
 }

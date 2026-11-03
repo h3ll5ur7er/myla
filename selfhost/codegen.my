@@ -597,7 +597,7 @@ impl CodeGen {
     #test(codegen_on("[int]"), Type.TFloat(64))[".Ldty1"]
     fun dbg_items(var self, e: Type) -> str {
         let elem = self.dbg_element(e)
-        return self.dbg_array(elem, self.stored_size(e), 16)
+        return self.dbg_array(elem, self.elem_size(e), 16)
     }
 
     // The heap cell of a `str`, list, builder or map, for a pointer to it.
@@ -1358,6 +1358,17 @@ impl CodeGen {
         return match t {
             Type.TEnum(n, a) => list_has_str(self.recursive_enums, n),
             _ => false,
+        }
+    }
+
+    // The size of an element of a list of `t`s: a `bool` at its natural
+    // size (D120, MYLA-247), anything else as stored in an aggregate.
+    #test(codegen_on("[int]"), Type.TBool)[1]
+    #test(codegen_on("[int]"), Type.TStr)[8]
+    fun elem_size(self, t: Type) -> int32 {
+        return match t {
+            Type.TBool => 1,
+            _ => self.stored_size(t),
         }
     }
 
@@ -7114,6 +7125,22 @@ impl CodeGen {
         self.raw("\tmovq -8(%r8,%r13), %r9")
         self.raw("\timulq %r14, %r9")
         self.raw("\tleaq 16(%r15,%r9), %r10")
+        // the key stored as wide as the list's elements are (D120)
+        self.raw("\tcmpq $8, %r14")
+        self.raw("\tje .Lmk_8")
+        self.raw("\tcmpq $4, %r14")
+        self.raw("\tje .Lmk_4")
+        self.raw("\tcmpq $2, %r14")
+        self.raw("\tje .Lmk_2")
+        self.raw("\tmovb %cl, (%r10)")
+        self.raw("\tjmp .Lmk_skip")
+        self.raw(".Lmk_2:")
+        self.raw("\tmovw %cx, (%r10)")
+        self.raw("\tjmp .Lmk_skip")
+        self.raw(".Lmk_4:")
+        self.raw("\tmovl %ecx, (%r10)")
+        self.raw("\tjmp .Lmk_skip")
+        self.raw(".Lmk_8:")
         self.raw("\tmovq %rcx, (%r10)")
         self.raw(".Lmk_skip:")
         self.raw("\tmovq -48(%rbp), %rax")
@@ -7345,7 +7372,7 @@ impl CodeGen {
     // return the copy in %rax (the copy-on-write clone, D38).
     fun emit_list_clone_helper(var self, t: Type) {
         let et = list_elem(t)
-        let stride = self.stored_size(et)
+        let stride = self.elem_size(et)
         self.emit(format("__clone_list_{}:", mono_token(et)))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
@@ -8603,6 +8630,37 @@ pub fun spilled_word(w: int32) -> str {
 
 // Where the environment (%r10) is after `spill_args`.
 pub const SPILLED_ENV: str = "-8(%rbp)"
+
+// The operand `v` (an immediate or a 64-bit register) for a `width`-byte
+// access: a register's low part.
+#test("%rax", 1)["%al"]
+#test("%rdi", 2)["%di"]
+#test("%r9", 4)["%r9d"]
+#test("$7", 1)["$7"]
+pub fun narrow_operand(v: str, width: int32) -> str {
+    let wide = ["%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi"]
+    let bytes = ["%al", "%bl", "%cl", "%dl", "%sil", "%dil"]
+    let words = ["%ax", "%bx", "%cx", "%dx", "%si", "%di"]
+    let dwords = ["%eax", "%ebx", "%ecx", "%edx", "%esi", "%edi"]
+    var k = 0
+    while k < wide.len() {
+        if v == wide[k] {
+            if width == 1 { return bytes[k] }
+            if width == 2 { return words[k] }
+            return dwords[k]
+        }
+        k = k + 1
+    }
+    let numbered = ["%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15"]
+    for r in numbered {
+        if v == r {
+            if width == 1 { return r + "b" }
+            if width == 2 { return r + "w" }
+            return r + "d"
+        }
+    }
+    return v
+}
 
 // Whether the held-back store `s` is a move from %rax into a register
 // (`movq %rax, %r12`), not into a frame cell.

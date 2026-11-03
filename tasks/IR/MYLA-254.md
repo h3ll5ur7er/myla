@@ -2,7 +2,7 @@
 id: MYLA-254
 title: "The IR's open points: addresses, widths, sizes per target, SSA"
 type: design
-status: review
+status: in-progress
 priority: medium
 labels: [ir, backend, design, wasm]
 ---
@@ -70,3 +70,12 @@ wasm's 64-bit memory shipped in Chrome 133 and Firefox 134 but not Safari, and i
 Each step goes through the bootstrap and the gates. The remaining pressure points stay as they are until something needs them: one class of temporaries (SIMD, 128-bit), calls that never end a block (unwinding), monomorphic code.
 
 Sources on wasm's 64-bit memory: [SpiderMonkey, "Is Memory64 actually worth using?"](https://spidermonkey.dev/blog/2025/01/15/is-memory64-actually-worth-using.html), [web-features: Memory64](https://web-platform-dx.github.io/web-features-explorer/features/wasm-memory64).
+
+## Decided (2026-11-03)
+
+The owner took the four recommendations: D120 (memory widths), D121 (a pointer kind), D122 (sizes from a target description), D123 (SSA with block parameters, after a prototype). The work goes in the order above:
+
+- [ ] Widths on the memory instructions; packed list elements ([[MYLA-247]]): the widths and `[bool]` done, the other element types next
+- [ ] The pointer kind
+- [ ] The target description
+- [ ] The mem2reg prototype and its measurements; then SSA with block parameters

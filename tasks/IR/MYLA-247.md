@@ -2,7 +2,7 @@
 id: MYLA-247
 title: Packed list elements
 type: improvement
-status: backlog
+status: in-progress
 priority: medium
 labels: [backend, runtime, performance, memory]
 ---
@@ -30,3 +30,17 @@ Left for its own round: element addresses flow into the lowering's general handl
   2. Then the types the runtime builds lists of: `keys()` of a map (its key type), `chars()` (`[char]`, 4 bytes), a process's output (`[uint8]`), and `[int32]` for quicksort and closures.
 - **Also:** the DWARF description of a list's elements and the gdb printer ([[MYLA-66]], `lib/debug/myla_gdb.py`), which read 8-byte elements.
 - **The test first:** every element path (read, write, compound assignment, `for`, `match`, push, pop, literal, copy-on-write clone) on packed lists, against the interpreter.
+
+## Step 1: `[bool]` (2026-11-03)
+
+D120 decided the form: a width on the IR's `load` and `store` at an address.
+
+- **The IR:** `LoadAt` and `StoreAt` carry a width (1, 2, 4 or 8 bytes; the text form shows one other than 8, `load.1`); a narrower load is zero- or sign-extended as its temporary's type says ([[selfhost/ir.my]]).
+- **The lowering:** the addresses `elem`, `append` and `pop` give for a list whose elements are narrower than a word are marked (`narrow`); every load and store goes through `add_load`/`add_store`, which take the width from that mark; a literal stores each element at its size ([[selfhost/lower.my]]).
+- **The size:** `CodeGen.elem_size` (a `bool` 1 byte, anything else as stored in an aggregate) wherever a list element's size is meant: the lowering's six places, the copy-on-write clone, the debug description (DWARF already carries the stride, so gdb's printer follows). `__map_keys` stores each key as wide as the list's elements are.
+- **The backend:** `load_insn` and `store_insn` in [[selfhost/ir_x86.my]] (`movzbl`/`movsbq`/`movl`/`movslq`…, `movb`/`movw`/`movl` with the register's low part), in the fused element load too.
+- **Tests:** `tests/burn/test_packed_lists.py`: every element path on `[bool]` (index read and write, nested, push across every growth, pop, `for`, `match`, literal, copy-on-write, passing and returning, a struct field, a map's `keys()`, a task), natively against the interpreter (whose output Python's computation matches), and one-byte loads and stores in the code; gdb prints a `[bool]` (`test_debug_info.py`). 904 tests pass; the bootstrap reaches its fixed point (the compiler uses `[bool]` itself).
+- **Measured:** the sieve 1,531 → 371 ms (4.1×) and 817 → 102 MB (C with Myla's semantics: 292 ms, 40 MB); Game of Life 1.08× faster, 23 → 14 MB. The self-compile: the generated code runs 0.15% fewer instructions (the same compiler source built by both compilers); the compiler's own new work costs 0.08%.
+- **A pitfall on the way:** written as `self.add(self.load_at(…))`, an argument computed by a method of the same receiver, the lowering copied the IR's lists of blocks and instructions on write (2.3% more instructions compiling itself); a mutating `add_load` that computes the width itself doesn't. Simple programs of the same shape didn't reproduce it.
+
+Step 2 (the types the runtime builds lists of, and the other integer widths) follows.

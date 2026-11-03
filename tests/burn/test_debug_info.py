@@ -293,7 +293,7 @@ fun area(s: Shape, label: str) -> int {
 
 fun main() {
     let name = "hello"
-    let xs = [1, -2, 3]
+    let xs = [1, -2, 3]; let flags = [true, false, true]
     let cs = ['a', 'b']
     let words = ["ab", "c"]
     let p = Point { x: 3, y: 1.5f64 }
@@ -401,7 +401,8 @@ class GdbVariables:
     def test_strings_lists_and_aggregates(self):
         session = gdb(self.build("values", VALUES), "break values.my:38", "run", "info locals",
                       "print xs[1]", "print p.x + 1", "print *words[1]", "print *m")
-        for line in ('name = "hello"', "xs = [1, -2, 3]", "cs = [97 'a', 98 'b']",
+        # a [bool]'s elements are one byte each (D120)
+        for line in ('name = "hello"', "xs = [1, -2, 3]", "flags = [true, false, true]", "cs = [97 'a', 98 'b']",
                      "p = Point {x: 3, y: 1.5}", "t = (7, true)",
                      "s = Shape::Circle(Point {x: 3, y: 1.5}, 2)", "o = Option<int32>::Some(4)",
                      'sb = "built"', "k = 10"):
