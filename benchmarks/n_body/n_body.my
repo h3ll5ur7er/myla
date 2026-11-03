@@ -1,0 +1,152 @@
+// Benchmark (MYLA-242): n-body, as in the Computer Language Benchmarks Game:
+// the Sun and the four gas giants, n steps of 0.01 days. Float arithmetic,
+// struct fields updated inside a list.
+//
+//   n_body [n]   prints the energy before and after, times 1e9, truncated
+//
+// Myla has no square root yet (MYLA-248), so every version takes it by the
+// same 16 Newton steps, which keeps their results bit-identical.
+
+from std.process import args
+from std.num import parse_int
+
+struct Body {
+    x: float64,
+    y: float64,
+    z: float64,
+    vx: float64,
+    vy: float64,
+    vz: float64,
+    mass: float64,
+}
+
+const PI: float64 = 3.141592653589793
+const DAYS: float64 = 365.24
+
+// The square root of a positive `x` by 16 Newton steps.
+#test(4.0)[2.0]
+#test(9.0)[3.0]
+fun root(x: float64) -> float64 {
+    var r = x
+    if r < 1.0 {
+        r = 1.0
+    }
+    for i in 0..16 {
+        r = 0.5 * (r + x / r)
+    }
+    return r
+}
+
+fun solar_mass() -> float64 {
+    return 4.0 * PI * PI
+}
+
+fun planets() -> [Body] {
+    let sm = solar_mass()
+    return [
+        Body { x: 0.0, y: 0.0, z: 0.0, vx: 0.0, vy: 0.0, vz: 0.0, mass: sm },
+        Body { x: 4.84143144246472090, y: -1.16032004402742839, z: -0.103622044471123109,
+               vx: 0.00166007664274403694 * DAYS, vy: 0.00769901118419740425 * DAYS,
+               vz: -0.0000690460016972063023 * DAYS, mass: 0.000954791938424326609 * sm },
+        Body { x: 8.34336671824457987, y: 4.12479856412430479, z: -0.403523417114321381,
+               vx: -0.00276742510726862411 * DAYS, vy: 0.00499852801234917238 * DAYS,
+               vz: 0.0000230417297573763929 * DAYS, mass: 0.000285885980666130812 * sm },
+        Body { x: 12.8943695621391310, y: -15.1111514016986312, z: -0.223307578892655734,
+               vx: 0.00296460137564761618 * DAYS, vy: 0.00237847173959480950 * DAYS,
+               vz: -0.0000296589568540237556 * DAYS, mass: 0.0000436624404335156298 * sm },
+        Body { x: 15.3796971148509165, y: -25.9193146099879641, z: 0.179258772950371181,
+               vx: 0.00268067772490389322 * DAYS, vy: 0.00162824170038242295 * DAYS,
+               vz: -0.0000951592254519715870 * DAYS, mass: 0.0000515138902046611451 * sm },
+    ]
+}
+
+// The bodies with the Sun moving so that the total momentum is zero.
+fun offset_momentum(bodies: [Body]) -> [Body] {
+    var out = bodies
+    var px = 0.0
+    var py = 0.0
+    var pz = 0.0
+    for b in bodies {
+        px += b.vx * b.mass
+        py += b.vy * b.mass
+        pz += b.vz * b.mass
+    }
+    let sm = solar_mass()
+    out[0].vx = -px / sm
+    out[0].vy = -py / sm
+    out[0].vz = -pz / sm
+    return out
+}
+
+fun energy(bodies: [Body]) -> float64 {
+    var e = 0.0
+    let n = bodies.len()
+    for i in 0..n {
+        let b = bodies[i]
+        e += 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz)
+        for j in i + 1..n {
+            let c = bodies[j]
+            let dx = b.x - c.x
+            let dy = b.y - c.y
+            let dz = b.z - c.z
+            e -= b.mass * c.mass / root(dx * dx + dy * dy + dz * dz)
+        }
+    }
+    return e
+}
+
+// The bodies after one step of `dt`.
+fun advance(bodies: [Body], dt: float64) -> [Body] {
+    var bs = bodies
+    let n = bs.len()
+    for i in 0..n {
+        for j in i + 1..n {
+            let dx = bs[i].x - bs[j].x
+            let dy = bs[i].y - bs[j].y
+            let dz = bs[i].z - bs[j].z
+            let d2 = dx * dx + dy * dy + dz * dz
+            let mag = dt / (d2 * root(d2))
+            let mi = bs[i].mass
+            let mj = bs[j].mass
+            bs[i].vx -= dx * mj * mag
+            bs[i].vy -= dy * mj * mag
+            bs[i].vz -= dz * mj * mag
+            bs[j].vx += dx * mi * mag
+            bs[j].vy += dy * mi * mag
+            bs[j].vz += dz * mi * mag
+        }
+    }
+    for i in 0..n {
+        bs[i].x += dt * bs[i].vx
+        bs[i].y += dt * bs[i].vy
+        bs[i].z += dt * bs[i].vz
+    }
+    return bs
+}
+
+// The energy times 1e9, truncated: an integer every version prints alike.
+#test(0)[-169075163]
+fun simulate(steps: int) -> int64 {
+    var bodies = offset_momentum(planets())
+    for s in 0..steps {
+        bodies = advance(bodies, 0.01)
+    }
+    return (energy(bodies) * 1000000000.0) as int64
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    print(simulate(0))
+    print(simulate(size(1000000)))
+}

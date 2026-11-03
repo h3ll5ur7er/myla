@@ -1,0 +1,104 @@
+// Benchmark (MYLA-242): word frequencies. A text of n words from a
+// vocabulary of 5000, some far more frequent than others, is built as one
+// string, split into words and counted in a map: string building, scanning,
+// maps with string keys.
+//
+//   word_freq [n]   prints the distinct words, the most frequent one's count
+//                   and the sum of the squared counts
+
+from std.process import args
+from std.num import parse_int
+
+const VOCABULARY: int64 = 5000
+
+// The word for index `i`: its base-26 digits as letters, lowest first.
+#test(0)["b"]
+#test(25)["ab"]
+#test(26)["bb"]
+fun word(i: int64) -> str {
+    var sb = StringBuilder()
+    var k = i + 1
+    while k > 0 {
+        sb.append_byte((97 + k % 26) as uint8)
+        k = k / 26
+    }
+    return sb.build()
+}
+
+// n words separated by spaces, each chosen by a fixed linear congruential
+// sequence, small indices more often.
+fun text(n: int) -> str {
+    var sb = StringBuilder()
+    var state: int64 = 7
+    for i in 0..n {
+        state = (state * 1103515245 + 12345) % 2147483648
+        let a = (state >> 8) % VOCABULARY
+        state = (state * 1103515245 + 12345) % 2147483648
+        let b = (state >> 8) % VOCABULARY
+        if i > 0 {
+            sb.append(" ")
+        }
+        sb.append(word(a * b / VOCABULARY))
+    }
+    return sb.build()
+}
+
+// The words of `s`, split at spaces, counted.
+fun counts(s: str) -> [str: int] {
+    var out: [str: int] = [:]
+    var start = 0
+    var i = 0
+    while i <= s.len() {
+        if i == s.len() || s[i] == ' ' {
+            if i > start {
+                var sb = StringBuilder()
+                sb.append(s, start, i)
+                let w = sb.build()
+                if out.contains(w) {
+                    out[w] = out[w] + 1
+                } else {
+                    out[w] = 1
+                }
+            }
+            start = i + 1
+        }
+        i += 1
+    }
+    return out
+}
+
+// (distinct words, the largest count, the sum of the squared counts).
+#test(0)[(0, 0, 0)]
+#test(1000)[(837, 5, 1380)]
+fun stats(n: int) -> (int, int, int64) {
+    let c = counts(text(n))
+    var most = 0
+    var squares: int64 = 0
+    for w in c.keys() {
+        let k = c[w]
+        if k > most {
+            most = k
+        }
+        squares += (k as int64) * (k as int64)
+    }
+    return (c.len(), most, squares)
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    let s = stats(size(2000000))
+    print(s.0)
+    print(s.1)
+    print(s.2)
+}

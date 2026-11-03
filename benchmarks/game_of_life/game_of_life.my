@@ -1,0 +1,108 @@
+// Benchmark (MYLA-242): Conway's Game of Life on an n×n grid that wraps at
+// its edges, 50 generations from a pseudo-random start. Each generation builds
+// a new grid, a list of rows of flags: nested lists, indexing, sharing rows.
+//
+//   game_of_life [n]   prints the live cells after 50 generations
+
+from std.process import args
+from std.num import parse_int
+
+const GENERATIONS: int = 50
+
+// An n×n grid, each cell alive with probability 1/3 (a fixed linear
+// congruential sequence).
+fun random_grid(n: int) -> [[bool]] {
+    var state: int64 = 42
+    var grid: [[bool]] = []
+    for y in 0..n {
+        var row: [bool] = []
+        for x in 0..n {
+            state = (state * 1103515245 + 12345) % 2147483648
+            row.push((state >> 16) % 3 == 0)
+        }
+        grid.push(row)
+    }
+    return grid
+}
+
+// The next generation of the n×n grid.
+fun step(grid: [[bool]], n: int) -> [[bool]] {
+    var next: [[bool]] = []
+    for y in 0..n {
+        let up = grid[(y + n - 1) % n]
+        let mid = grid[y]
+        let down = grid[(y + 1) % n]
+        var row: [bool] = []
+        for x in 0..n {
+            let l = (x + n - 1) % n
+            let r = (x + 1) % n
+            var c = 0
+            if up[l] { c += 1 }
+            if up[x] { c += 1 }
+            if up[r] { c += 1 }
+            if mid[l] { c += 1 }
+            if mid[r] { c += 1 }
+            if down[l] { c += 1 }
+            if down[x] { c += 1 }
+            if down[r] { c += 1 }
+            row.push(c == 3 || (mid[x] && c == 2))
+        }
+        next.push(row)
+    }
+    return next
+}
+
+fun live(grid: [[bool]]) -> int {
+    var total = 0
+    for row in grid {
+        for cell in row {
+            if cell { total += 1 }
+        }
+    }
+    return total
+}
+
+// A blinker on a 5×5 grid after `gens` generations: its live cells, and
+// whether its middle row is the lit one.
+#test(0)[(3, true)]
+#test(1)[(3, false)]
+#test(2)[(3, true)]
+fun blinker(gens: int) -> (int, bool) {
+    var grid: [[bool]] = []
+    for y in 0..5 {
+        var row: [bool] = []
+        for x in 0..5 {
+            row.push(y == 2 && x >= 1 && x <= 3)
+        }
+        grid.push(row)
+    }
+    for g in 0..gens {
+        grid = step(grid, 5)
+    }
+    return (live(grid), grid[2][1])
+}
+
+#test(16, 0)[83]
+fun run(n: int, gens: int) -> int {
+    var grid = random_grid(n)
+    for g in 0..gens {
+        grid = step(grid, n)
+    }
+    return live(grid)
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    print(run(size(300), GENERATIONS))
+}

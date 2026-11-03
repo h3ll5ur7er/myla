@@ -35,16 +35,16 @@ static inline void *myla_alloc(size_t n) {
 // pushes check it, and first copy the list unless this is its only reference.
 #define MYLA_LIST(NAME, T)                                                              \
     typedef struct { int64_t rc, len, cap; T *items; } NAME;                            \
-    static inline NAME *NAME##_new(void) {                                              \
+    __attribute__((unused)) static inline NAME *NAME##_new(void) {                                              \
         NAME *l = myla_alloc(sizeof *l);                                                \
         l->rc = 1; l->len = 0; l->cap = 0; l->items = NULL;                             \
         return l;                                                                       \
     }                                                                                   \
     __attribute__((unused)) static inline void NAME##_retain(NAME *l) { l->rc++; }      \
-    static inline void NAME##_release(NAME *l) {                                        \
+    __attribute__((unused)) static inline void NAME##_release(NAME *l) {                                        \
         if (--l->rc == 0) { free(l->items); free(l); }                                  \
     }                                                                                   \
-    static NAME *NAME##_copy(NAME *l) {                                                 \
+    __attribute__((unused)) static NAME *NAME##_copy(NAME *l) {                                                 \
         NAME *c = myla_alloc(sizeof *c);                                                \
         c->rc = 1; c->len = l->len; c->cap = l->len;                                    \
         c->items = myla_alloc(sizeof(T) * (size_t)(l->len ? l->len : 1));               \
@@ -52,17 +52,17 @@ static inline void *myla_alloc(size_t n) {
         l->rc--;                                                                        \
         return c;                                                                       \
     }                                                                                   \
-    static inline T NAME##_get(const NAME *l, int64_t i) {                              \
+    __attribute__((unused)) static inline T NAME##_get(const NAME *l, int64_t i) {                              \
         if ((uint64_t)i >= (uint64_t)l->len) myla_trap("index out of bounds");          \
         return l->items[i];                                                             \
     }                                                                                   \
-    static inline void NAME##_set(NAME **lp, int64_t i, T v) {                          \
+    __attribute__((unused)) static inline void NAME##_set(NAME **lp, int64_t i, T v) {                          \
         NAME *l = *lp;                                                                  \
         if ((uint64_t)i >= (uint64_t)l->len) myla_trap("index out of bounds");          \
         if (l->rc != 1) *lp = l = NAME##_copy(l);                                       \
         l->items[i] = v;                                                                \
     }                                                                                   \
-    static inline void NAME##_push(NAME **lp, T v) {                                    \
+    __attribute__((unused)) static inline void NAME##_push(NAME **lp, T v) {                                    \
         NAME *l = *lp;                                                                  \
         if (l->rc != 1) *lp = l = NAME##_copy(l);                                       \
         if (l->len == l->cap) {                                                         \
@@ -72,6 +72,62 @@ static inline void *myla_alloc(size_t n) {
         }                                                                               \
         l->items[l->len++] = v;                                                         \
     }
+
+// A string: a reference-counted cell of bytes (a Myla `str` is immutable).
+typedef struct { int64_t rc, len; char bytes[]; } MylaStr;
+
+__attribute__((unused)) static MylaStr *mstr_new(const char *bytes, int64_t len) {
+    MylaStr *s = myla_alloc(sizeof *s + (size_t)len + 1);
+    s->rc = 1;
+    s->len = len;
+    memcpy(s->bytes, bytes, (size_t)len);
+    s->bytes[len] = '\0';
+    return s;
+}
+
+__attribute__((unused)) static inline void mstr_release(MylaStr *s) {
+    if (--s->rc == 0) free(s);
+}
+
+// `a + b`: a new string.
+__attribute__((unused)) static MylaStr *mstr_concat(const MylaStr *a, const MylaStr *b) {
+    MylaStr *s = myla_alloc(sizeof *s + (size_t)(a->len + b->len) + 1);
+    s->rc = 1;
+    s->len = a->len + b->len;
+    memcpy(s->bytes, a->bytes, (size_t)a->len);
+    memcpy(s->bytes + a->len, b->bytes, (size_t)b->len + 1);
+    return s;
+}
+
+// `format("{}", v)` of an integer: a new string.
+__attribute__((unused)) static MylaStr *mstr_int(int64_t v) {
+    char buf[24];
+    int n = snprintf(buf, sizeof buf, "%lld", (long long)v);
+    return mstr_new(buf, n);
+}
+
+// The byte at `i`, checked.
+__attribute__((unused)) static inline uint8_t mstr_at(const MylaStr *s, int64_t i) {
+    if ((uint64_t)i >= (uint64_t)s->len) myla_trap("index out of bounds");
+    return (uint8_t)s->bytes[i];
+}
+
+// A StringBuilder: a growable buffer; `build` copies it into a new string.
+typedef struct { int64_t len, cap; char *bytes; } MylaBuilder;
+
+__attribute__((unused)) static void mb_append(MylaBuilder *b, const char *bytes, int64_t len) {
+    if (b->len + len > b->cap) {
+        while (b->len + len > b->cap) b->cap = b->cap ? b->cap * 2 : 16;
+        b->bytes = realloc(b->bytes, (size_t)b->cap);
+        if (!b->bytes) myla_trap("out of memory");
+    }
+    memcpy(b->bytes + b->len, bytes, (size_t)len);
+    b->len += len;
+}
+
+__attribute__((unused)) static MylaStr *mb_build(const MylaBuilder *b) {
+    return mstr_new(b->bytes ? b->bytes : "", b->len);
+}
 
 // The size given as the first argument, or `fallback` (as the Myla programs).
 static inline int32_t myla_size(int argc, char **argv, int32_t fallback) {

@@ -1,0 +1,36 @@
+// Benchmark (MYLA-242): the Ackermann function A(3, n), very deep recursion
+// (the depth is about 2^(n+3)) and many calls.
+//
+//   ackermann [n]   prints A(3, n)
+
+from std.process import args
+from std.num import parse_int
+
+#test(0, 3)[4]
+#test(2, 3)[9]
+#test(3, 3)[61]
+fun ack(m: int, n: int) -> int {
+    if m == 0 {
+        return n + 1
+    }
+    if n == 0 {
+        return ack(m - 1, 1)
+    }
+    return ack(m - 1, ack(m, n - 1))
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    print(ack(3, size(10)))
+}

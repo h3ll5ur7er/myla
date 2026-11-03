@@ -1,0 +1,117 @@
+// Benchmark (MYLA-242): one generic quicksort, made concrete for numbers and
+// for a struct with its own `Ord`, sorting n of each: generic code,
+// comparisons through a trait, indexing and swaps in a list.
+//
+//   quicksort [n]   prints a checksum of the sorted numbers and of the
+//                   sorted pairs
+
+from std.process import args
+from std.num import parse_int
+
+struct Pair {
+    key: int,
+    tag: int,
+}
+
+impl Ord for Pair {
+    fun cmp(self, other: Pair) -> int {
+        if self.key != other.key {
+            return if self.key < other.key { -1 } else { 1 }
+        }
+        return self.tag - other.tag
+    }
+}
+
+// `xs` sorted, in place in a copy: an explicit stack of ranges, since a list
+// passed down recursively would be copied.
+fun sort<T: Ord>(xs: [T]) -> [T] {
+    var a = xs
+    var stack: [int] = [0, a.len() - 1]
+    while stack.len() > 0 {
+        let hi = stack.pop()
+        let lo = stack.pop()
+        if lo < hi {
+            let pivot = a[lo + (hi - lo) / 2]
+            var i = lo
+            var j = hi
+            while i <= j {
+                while a[i] < pivot {
+                    i += 1
+                }
+                while a[j] > pivot {
+                    j -= 1
+                }
+                if i <= j {
+                    let t = a[i]
+                    a[i] = a[j]
+                    a[j] = t
+                    i += 1
+                    j -= 1
+                }
+            }
+            stack.push(lo)
+            stack.push(j)
+            stack.push(i)
+            stack.push(hi)
+        }
+    }
+    return a
+}
+
+#test([3, 1, 2])[[1, 2, 3]]
+#test([5, 5, 1, 9, 0])[[0, 1, 5, 5, 9]]
+#test([])[[]]
+fun sort_ints(xs: [int]) -> [int] {
+    return sort(xs)
+}
+
+// n numbers from a fixed linear congruential sequence.
+fun numbers(n: int) -> [int] {
+    var out: [int] = []
+    var state: int64 = 3
+    for i in 0..n {
+        state = (state * 1103515245 + 12345) % 2147483648
+        out.push((state >> 4) as int)
+    }
+    return out
+}
+
+// A checksum of sorted numbers and sorted pairs; -1 if one isn't sorted.
+#test(0)[(0, 0)]
+#test(10)[(1569891320, 73)]
+fun run(n: int) -> (int64, int64) {
+    let sorted = sort(numbers(n))
+    var pairs: [Pair] = []
+    for x in numbers(n) {
+        pairs.push(Pair { key: x % 1000, tag: x % 7 })
+    }
+    let ps = sort(pairs)
+    var a: int64 = 0
+    var b: int64 = 0
+    for i in 0..n {
+        if i > 0 && (sorted[i - 1] > sorted[i] || ps[i - 1] > ps[i]) {
+            return (-1, -1)
+        }
+        a += (sorted[i] as int64) * ((i % 7) as int64)
+        b += (ps[i].tag as int64) * ((i % 5) as int64)
+    }
+    return (a, b)
+}
+
+// The size given as the first argument, or `fallback`.
+fun size(fallback: int) -> int {
+    let argv = args()
+    if argv.len() < 2 {
+        return fallback
+    }
+    return match parse_int(argv[1]) {
+        Some(v) => v as int,
+        None => fallback,
+    }
+}
+
+fun main() {
+    let r = run(size(1000000))
+    print(r.0)
+    print(r.1)
+}
