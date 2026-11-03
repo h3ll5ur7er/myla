@@ -155,3 +155,10 @@ It needs a few more primitives: an atomic add (`lock xadd`), `pause`, and loads 
 
 - `sched_init` (MYLA_SCHED) and `workers_count` (MYLA_THREADS, else the CPUs from `sched_getaffinity` into a static `__cpu_mask`) in `std.rt`, allocating nothing (they run before the arena is mapped): `rt_exec` lists the executor's routines std.rt has, the codegen requests them and `.set`s the runtime's names to them, as for the allocator.
 - **Checked against the assembly** on a program that counts its threads (`/proc/self/task`) and prints its tasks' order: the same count for no MYLA_THREADS, `0`, `1`, `3`, `33`, `abc`, an empty value, `100001` and `2x`, and the same order on one worker for `fifo`, `fifox`, `seed:`, `seed:1`, `seed:7`, a seed past 2^64 (it wraps) and `MYLA_SCHEDX`.
+
+## Step 10: cancellation and the wait for the stopped workers (2026-11-03)
+
+- Two primitives first, with the seed: `__fetch_add64(p, v)` (`lock xadd`, the value before) and `__pause()`, inline, for the executor's counters and spin loops.
+- `task_cancel` (a compare-and-swap loop for the `lock or`), `task_cancelled`, `failed_wait` and `wait_stopped` in `std.rt`, through `rt_exec`. The compiled callers already treat them as calls clobbering every caller-saved register, the assembly callers (`__panic`, `__task_exit`) keep nothing in one across them. `__wake_waiters` and `__task_exit` wait for the queues and `__task_fail`, which they call.
+- The concurrency stress tests, scheduling, yield and native runtime tests pass (the failure tests t08 and t15 go through `failed_wait`), and the cancellation probes print the interpreter's answers on 1 and 4 workers.
+- Seen in the code: `x & k` tested against 0 is `and`, `cmp $0`; one `test` would do (backend, later).

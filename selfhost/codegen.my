@@ -1883,7 +1883,7 @@ impl CodeGen {
         if !self.frames {
             return out
         }
-        for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count")] {
+        for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped")] {
             if self.has_func(p.1) {
                 out.push(p)
             }
@@ -3312,66 +3312,74 @@ impl CodeGen {
         self.raw(format("\tmovq %rdi, {}", self.tv("__actor_held")))
         self.raw("\tret")
         self.raw("")
-        // __failed_wait: once a task has failed (D97), until no other worker
-        // runs a frame; at once otherwise
-        self.raw("__failed_wait:")
-        self.raw("\tcmpq $0, __exec_failing(%rip)")
-        self.raw("\tjne __wait_stopped")
-        self.raw("\tret")
-        self.raw("")
-        // __wait_stopped: until no other worker runs a frame (each worker's
-        // current frame)
-        self.raw("__wait_stopped:")
-        self.raw("\tpushq %rbx")
-        self.raw(".Lwk_scan:")
-        self.raw("\txorl %ecx, %ecx")
-        self.raw("\tleaq __tls_blocks(%rip), %rbx")
-        self.raw(".Lwk_worker:")
-        self.raw("\tcmpl __exec_workers(%rip), %ecx")
-        self.raw("\tjae .Lwk_done")
-        self.raw(format("\tcmpq {}, %rcx", self.tv("__worker_id")))
-        self.raw("\tje .Lwk_skip")
-        self.raw(format("\tcmpq $0, {}(%rbx)", tls_offset("__exec_cur")))
-        self.raw("\tje .Lwk_skip")
-        // that worker runs a frame still: again later
-        self.raw("\tpause")
-        self.raw("\tjmp .Lwk_scan")
-        self.raw(".Lwk_skip:")
-        self.raw(format("\taddq ${}, %rbx", TLS_SIZE))
-        self.raw("\tincl %ecx")
-        self.raw("\tjmp .Lwk_worker")
-        self.raw(".Lwk_done:")
-        self.raw("\tpopq %rbx")
-        self.raw("\tret")
-        self.raw("")
-        // __task_cancel: %rdi = a child task's first frame, asked to stop
-        // (D96): bit 2 of its flags, which its own children see through
-        // their chain of parents; none (0: joined already) is left alone
-        self.raw("__task_cancel:")
-        self.raw("\ttestq %rdi, %rdi")
-        self.raw("\tjz .Ltcn_none")
-        self.raw("\tlock orq $2, 48(%rdi)")
-        self.raw(".Ltcn_none:")
-        self.raw("\tret")
-        self.raw("")
-        // __task_cancelled: %rax = 1 when the running task or a task above it
-        // was asked to stop, else 0
-        self.raw("__task_cancelled:")
-        self.raw(format("\tmovq {}, %rax", self.tv("__exec_task")))
-        self.raw(".Ltcd_up:")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Ltcd_no")
-        self.raw("\ttestq $2, 48(%rax)")
-        self.raw("\tjnz .Ltcd_yes")
-        self.raw("\tmovq 56(%rax), %rax")
-        self.raw("\tjmp .Ltcd_up")
-        self.raw(".Ltcd_yes:")
-        self.raw("\tmovl $1, %eax")
-        self.raw("\tret")
-        self.raw(".Ltcd_no:")
-        self.raw("\txorl %eax, %eax")
-        self.raw("\tret")
-        self.raw("")
+        if !self.rt_exec_has("__failed_wait") {
+            // __failed_wait: once a task has failed (D97), until no other worker
+            // runs a frame; at once otherwise
+            self.raw("__failed_wait:")
+            self.raw("\tcmpq $0, __exec_failing(%rip)")
+            self.raw("\tjne __wait_stopped")
+            self.raw("\tret")
+            self.raw("")
+        }
+        if !self.rt_exec_has("__wait_stopped") {
+            // __wait_stopped: until no other worker runs a frame (each worker's
+            // current frame)
+            self.raw("__wait_stopped:")
+            self.raw("\tpushq %rbx")
+            self.raw(".Lwk_scan:")
+            self.raw("\txorl %ecx, %ecx")
+            self.raw("\tleaq __tls_blocks(%rip), %rbx")
+            self.raw(".Lwk_worker:")
+            self.raw("\tcmpl __exec_workers(%rip), %ecx")
+            self.raw("\tjae .Lwk_done")
+            self.raw(format("\tcmpq {}, %rcx", self.tv("__worker_id")))
+            self.raw("\tje .Lwk_skip")
+            self.raw(format("\tcmpq $0, {}(%rbx)", tls_offset("__exec_cur")))
+            self.raw("\tje .Lwk_skip")
+            // that worker runs a frame still: again later
+            self.raw("\tpause")
+            self.raw("\tjmp .Lwk_scan")
+            self.raw(".Lwk_skip:")
+            self.raw(format("\taddq ${}, %rbx", TLS_SIZE))
+            self.raw("\tincl %ecx")
+            self.raw("\tjmp .Lwk_worker")
+            self.raw(".Lwk_done:")
+            self.raw("\tpopq %rbx")
+            self.raw("\tret")
+            self.raw("")
+        }
+        if !self.rt_exec_has("__task_cancel") {
+            // __task_cancel: %rdi = a child task's first frame, asked to stop
+            // (D96): bit 2 of its flags, which its own children see through
+            // their chain of parents; none (0: joined already) is left alone
+            self.raw("__task_cancel:")
+            self.raw("\ttestq %rdi, %rdi")
+            self.raw("\tjz .Ltcn_none")
+            self.raw("\tlock orq $2, 48(%rdi)")
+            self.raw(".Ltcn_none:")
+            self.raw("\tret")
+            self.raw("")
+        }
+        if !self.rt_exec_has("__task_cancelled") {
+            // __task_cancelled: %rax = 1 when the running task or a task above it
+            // was asked to stop, else 0
+            self.raw("__task_cancelled:")
+            self.raw(format("\tmovq {}, %rax", self.tv("__exec_task")))
+            self.raw(".Ltcd_up:")
+            self.raw("\ttestq %rax, %rax")
+            self.raw("\tjz .Ltcd_no")
+            self.raw("\ttestq $2, 48(%rax)")
+            self.raw("\tjnz .Ltcd_yes")
+            self.raw("\tmovq 56(%rax), %rax")
+            self.raw("\tjmp .Ltcd_up")
+            self.raw(".Ltcd_yes:")
+            self.raw("\tmovl $1, %eax")
+            self.raw("\tret")
+            self.raw(".Ltcd_no:")
+            self.raw("\txorl %eax, %eax")
+            self.raw("\tret")
+            self.raw("")
+        }
         // __wake_waiters: %rdi = the first of the frames that waited for a
         // task which has ended (0: none), each queued; the next one is read
         // before a frame is queued, as it may run and change word 32 at once

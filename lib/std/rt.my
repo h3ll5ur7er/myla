@@ -1105,3 +1105,57 @@ pub fun workers_count() -> int64 {
     }
     return n
 }
+
+// A task's first frame keeps its flags in word 48 (2: asked to stop, D96) and
+// its parent task in word 56.
+
+// `__task_cancel`: the child task whose first frame is `fr` asked to stop;
+// none (0: joined already) is left alone.
+pub fun task_cancel(fr: int64) {
+    if fr == 0 {
+        return
+    }
+    let at = fr + 48
+    while true {
+        let flags = __load64(at)
+        if __cas64(at, flags, flags | 2) {
+            return
+        }
+    }
+}
+
+// `__task_cancelled`: 1 when the running task or a task above it was asked to
+// stop, else 0.
+pub fun task_cancelled() -> int64 {
+    var t = __rt_get("__exec_task")
+    while t != 0 {
+        if (__load64(t + 48) & 2) != 0 {
+            return 1
+        }
+        t = __load64(t + 56)
+    }
+    return 0
+}
+
+// `__failed_wait`: once a task has failed (D97), until no other worker runs
+// a frame; at once otherwise.
+pub fun failed_wait() {
+    if __rt_get("__exec_failing") != 0 {
+        wait_stopped()
+    }
+}
+
+// `__wait_stopped`: until no other worker runs a frame, each worker's
+// current one looked at again from the first once one does.
+pub fun wait_stopped() {
+    let me = __rt_get("__worker_id")
+    var w: int64 = 0
+    while w < __rt_get("__exec_workers") {
+        if w != me && __load64(__rt_waddr("__exec_cur", w)) != 0 {
+            __pause()
+            w = 0
+        } else {
+            w += 1
+        }
+    }
+}
