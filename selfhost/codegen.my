@@ -3686,6 +3686,12 @@ impl CodeGen {
         }
         // comparison -> 0/1; NaN compares unordered (only != is true)
         self.emit("ucomisd %xmm1, %xmm0")
+        self.emit_float_cmp_result(op)
+    }
+
+    // The flags of a `ucomisd` as the 0/1 of the comparison `op` in %rax;
+    // NaN compares unordered (only != is true).
+    fun emit_float_cmp_result(var self, op: str) {
         if op == ">" { self.emit("seta %al") }
         else if op == ">=" { self.emit("setae %al") }
         else if op == "!=" {
@@ -8456,7 +8462,7 @@ fun is_tfloat(t: Type) -> bool {
 
 #test(Type.TFloat(32))[true]
 #test(Type.TFloat(64))[false]
-fun is_tfloat32(t: Type) -> bool {
+pub fun is_tfloat32(t: Type) -> bool {
     return match t { Type.TFloat(w) => w == 32, _ => false }
 }
 

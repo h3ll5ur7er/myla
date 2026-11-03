@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, ret_popping, is_aggregate, is_actor_t
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, ret_popping, is_aggregate, is_actor_t, is_tfloat32
 from .ir import IrFunc, Inst, Term, Touches, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -282,7 +282,18 @@ impl CodeGen {
                 }
             },
             Inst.Store(s, v) => {
-                if self.slot_reg[s] != "" { self.load_temp(v, self.slot_reg[s], temp_base) }
+                let sr = self.slot_reg[s]
+                if sr.len() > 3 && sr[0] == 'x' && sr[1] == 'm' && sr[2] == 'm' {
+                    // into an %xmm home (MYLA-249): from another, or through %rax
+                    let home = self.xmm_home(v)
+                    if home != "" {
+                        if self.pend_store != "" { self.flush_temp_in_rax() }
+                        if home != "%" + sr { self.emit(format("movapd {}, %{}", home, sr)) }
+                    } else {
+                        self.load_temp(v, "rax", temp_base)
+                        self.emit(format("movq %rax, %{}", sr))
+                    }
+                } else if sr != "" { self.load_temp(v, sr, temp_base) }
                 else if self.in_frame { self.emit(format("movq {}, {}(%r15)", self.value_operand(v, temp_base), slot_off[s])) }
                 else { self.emit(format("movq {}, {}(%rbp)", self.value_operand(v, temp_base), slot_off[s])) }
             },
@@ -327,9 +338,29 @@ impl CodeGen {
             Inst.Bin(d, op, t, rt, a, b, pos) => {
                 match t {
                     Type.TFloat(w) => {
-                        self.load_temp(a, "rax", temp_base)
-                        self.load_temp(b, "rcx", temp_base)
-                        self.emit_float_op(op, rt)
+                        if op == "%" {
+                            self.load_temp(a, "rax", temp_base)
+                            self.load_temp(b, "rcx", temp_base)
+                            self.emit_float_op(op, rt)
+                        } else {
+                            // the operands where they are, %xmm homes included (MYLA-249)
+                            self.uses_float = true
+                            let ra = self.xmm_in(a, "rax", "xmm0", temp_base)
+                            let rb = self.xmm_in(b, "rcx", "xmm1", temp_base)
+                            // computed in the destination's home when the second
+                            // operand isn't there, else in %xmm0
+                            var target = self.xmm_home(d)
+                            if target == "" || target == rb { target = "%xmm0" }
+                            if self.pend_store != "" { self.flush_temp_in_rax() }
+                            if ra != target { self.emit(format("movapd {}, {}", ra, target)) }
+                            self.emit(format("{} {}, {}", float_insn(op), rb, target))
+                            if is_tfloat32(rt) {
+                                self.emit(format("cvtsd2ss {}, {}", target, target))
+                                self.emit(format("cvtss2sd {}, {}", target, target))
+                            }
+                            if target == "%xmm0" { self.xmm_result(d, temp_base) }
+                            return
+                        }
                     },
                     _ => {
                         // the operands swapped when the second is still in
@@ -365,9 +396,11 @@ impl CodeGen {
             Inst.Cmp(d, op, t, a, b) => {
                 match t {
                     Type.TFloat(w) => {
-                        self.load_temp(a, "rax", temp_base)
-                        self.load_temp(b, "rcx", temp_base)
-                        self.emit_float_op(op, t)
+                        self.uses_float = true
+                        let ra = self.xmm_in(a, "rax", "xmm0", temp_base)
+                        let rb = self.xmm_in(b, "rcx", "xmm1", temp_base)
+                        self.emit(format("ucomisd {}, {}", rb, ra))
+                        self.emit_float_cmp_result(op)
                     },
                     _ => {
                         if self.swap_operands(op, a, b) {
@@ -437,6 +470,19 @@ impl CodeGen {
                 self.emit("call *(%rax)")
             },
             Inst.Rt(d, name, args) => {
+                // std.math's primitives inline (MYLA-249): no call
+                if name == "__sqrt" {
+                    self.uses_float = true
+                    let ra = self.xmm_in(args[0], "rax", "xmm0", temp_base)
+                    self.emit(format("sqrtsd {}, %xmm0", ra))
+                    self.xmm_result(d, temp_base)
+                    return
+                }
+                if name == "__f64_bits" || name == "__f64_from_bits" {
+                    self.load_temp(args[0], "rax", temp_base)
+                    self.store_temp(d, temp_base)
+                    return
+                }
                 self.load_args(args, temp_base)
                 if name == "__float_to_str" { self.uses_float = true }
                 self.emit(format("call {}", name))
@@ -634,8 +680,9 @@ impl CodeGen {
     }
 
     // The index of the instruction of `insts` that the branch `term` can fuse
-    // with (MYLA-120): an integer comparison ending the block whose result
-    // only the branch reads; -1 when there is none.
+    // with (MYLA-120): a comparison ending the block whose result only the
+    // branch reads, an integer one or a float `<`, `<=`, `>`, `>=` (MYLA-249;
+    // a float `==` or `!=` needs the parity flag too); -1 when there is none.
     fun fused_compare(self, insts: [Inst], term: Term) -> int32 {
         if insts.len() == 0 { return -1 }
         let last = insts.len() - 1
@@ -643,7 +690,10 @@ impl CodeGen {
             Term.Br(c, a, b) => match insts[last] {
                 Inst.Cmp(d, op, t, x, y) => {
                     if d != c || self.temp_uses[d] != 1 { return -1 }
-                    match t { Type.TFloat(w) => { return -1 }, _ => {} }
+                    match t {
+                        Type.TFloat(w) => { if !(op == "<" || op == "<=" || op == ">" || op == ">=") { return -1 } },
+                        _ => {},
+                    }
                     last
                 },
                 _ => -1,
@@ -773,6 +823,32 @@ impl CodeGen {
     fun emit_compare_branch(var self, cmp: Inst, term: Term, labels: [str], next: int32, temp_base: int32) {
         match cmp {
             Inst.Cmp(d, op, t, x, y) => {
+                match t {
+                    Type.TFloat(w) => {
+                        // `ucomisd b, a` gives a's order against b in the
+                        // unsigned flags; unordered (NaN) sets CF and ZF, so
+                        // `ja`/`jae` are false for it and their negations
+                        // true, as the comparison is false (MYLA-249)
+                        self.uses_float = true
+                        let gt = op == ">" || op == ">="
+                        let ra = self.xmm_in(x, "rax", "xmm0", temp_base)
+                        let rb = self.xmm_in(y, "rcx", "xmm1", temp_base)
+                        if gt { self.emit(format("ucomisd {}, {}", rb, ra)) } else { self.emit(format("ucomisd {}, {}", ra, rb)) }
+                        let cond = if op == ">" || op == "<" { "a" } else { "ae" }
+                        match term {
+                            Term.Br(c, yes, no) => {
+                                if no == next { self.emit(format("j{} {}", cond, labels[yes])) }
+                                else {
+                                    self.emit(format("j{} {}", negated_cond(cond), labels[no]))
+                                    if yes != next { self.emit(format("jmp {}", labels[yes])) }
+                                }
+                            },
+                            _ => {},
+                        }
+                        return
+                    },
+                    _ => {},
+                }
                 // the first operand where it is when that is a register; the
                 // two swapped when the second is still in %rax
                 var cop = op
@@ -1252,6 +1328,16 @@ impl CodeGen {
         first = spans.0
         last = spans.1
 
+        // float temporaries whose interval holds no call (nothing clobbers
+        // there) live in %xmm2..%xmm15, which need no save (MYLA-249); the
+        // rest go through the scan below like any other value
+        self.alloc_xmm(f, nt, cand, first, last, weight, cpre, pos)
+        i = 0
+        while i < nv {
+            if (i < nt && self.temp_reg[i] != "") || (i >= nt && self.slot_reg[i - nt] != "") { cand[i] = false }
+            i = i + 1
+        }
+
         // the linear scan, intervals by their start
         var head: [int32] = []
         i = 0
@@ -1346,6 +1432,111 @@ impl CodeGen {
         while r < ncallee {
             if used[r] >= REG_MIN_USE { self.saved_regs.push(names[r]) }
             r = r + 1
+        }
+    }
+
+    // %xmm2..%xmm15 for the float values (temporaries, and variables' slots,
+    // value v the slot v - nt from nt on) among `cand` whose interval
+    // `first`..`last` no position clobbers (`cpre`), by a linear scan in
+    // which a lighter value gives way to a heavier one (MYLA-249).
+    fun alloc_xmm(var self, f: IrFunc, nt: int32, cand: [bool], first: [int32], last: [int32], weight: [int64], cpre: [int32], pos: int32) {
+        let nv = nt + f.slots.len()
+        var head: [int32] = []
+        while head.len() < pos { head.push(-1) }
+        var link: [int32] = []
+        var i = 0
+        while i < nv {
+            link.push(-1)
+            let ty = if i < nt { f.temps[i] } else { f.slots[i - nt].ty }
+            let float = match ty { Type.TFloat(w) => true, _ => false }
+            if cand[i] && float && first[i] >= 0 && cpre[last[i] + 1] - cpre[first[i]] == 0 {
+                link[i] = head[first[i]]
+                head[first[i]] = i
+            }
+            i = i + 1
+        }
+        let nr = 14
+        var owner: [int32] = []
+        var reg: [int32] = []
+        while owner.len() < nr { owner.push(-1) }
+        while reg.len() < nv { reg.push(-1) }
+        var p = 0
+        while p < pos {
+            var v = head[p]
+            while v >= 0 {
+                var r = 0
+                while r < nr {
+                    if owner[r] >= 0 && last[owner[r]] <= p { owner[r] = -1 }
+                    r = r + 1
+                }
+                var pick = -1
+                r = 0
+                while r < nr && pick < 0 {
+                    if owner[r] < 0 { pick = r }
+                    r = r + 1
+                }
+                if pick < 0 {
+                    var low = 0
+                    r = 1
+                    while r < nr {
+                        if weight[owner[r]] < weight[owner[low]] { low = r }
+                        r = r + 1
+                    }
+                    if weight[owner[low]] < weight[v] {
+                        reg[owner[low]] = -1
+                        pick = low
+                    }
+                }
+                if pick >= 0 {
+                    owner[pick] = v
+                    reg[v] = pick
+                }
+                v = link[v]
+            }
+            p = p + 1
+        }
+        i = 0
+        while i < nv {
+            if reg[i] >= 0 {
+                let name = format("xmm{}", reg[i] + 2)
+                if i < nt { self.temp_reg[i] = name } else { self.slot_reg[i - nt] = name }
+            }
+            i = i + 1
+        }
+    }
+
+    // The %xmm register the temporary `t` lives in, or "".
+    fun xmm_home(self, t: int32) -> str {
+        let r = self.reg_of(t)
+        if r.len() > 4 && r[1] == 'x' && r[2] == 'm' && r[3] == 'm' { return r }
+        return ""
+    }
+
+    // The float temporary `t` in an %xmm register: its home, or loaded into
+    // `gpr` and moved into `xmm`.
+    fun xmm_in(var self, t: int32, gpr: str, xmm: str, temp_base: int32) -> str {
+        let home = self.xmm_home(t)
+        if home != "" { return home }
+        let r = self.reg_of(t)
+        if r != "" && self.temp_remat[t] == "" {
+            self.emit(format("movq {}, %{}", r, xmm))   // a general-purpose register
+            return "%" + xmm
+        }
+        self.load_temp(t, gpr, temp_base)
+        self.emit(format("movq %{}, %{}", gpr, xmm))
+        return "%" + xmm
+    }
+
+    // %xmm0, a float result, into the temporary `d`: moved into its %xmm
+    // home, else through %rax as any value.
+    fun xmm_result(var self, d: int32, temp_base: int32) {
+        let home = self.xmm_home(d)
+        if home != "" {
+            if self.pend_store != "" { self.flush_temp_in_rax() }
+            self.emit(format("movapd %xmm0, {}", home))
+        } else {
+            self.emit("movq %xmm0, %rax")
+            self.store_temp(d, temp_base)
         }
     }
 
@@ -1792,8 +1983,19 @@ fun clobbers(inst: Inst) -> bool {
         Inst.Loc(p) => false,
         Inst.Bind(name, s) => false,
         Inst.Scope(open) => false,
+        Inst.Rt(d, name, args) => !(name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits"),
         _ => true,
     }
+}
+
+// The SSE instruction of a float arithmetic operator.
+#test("+")["addsd"]
+#test("/")["divsd"]
+fun float_insn(op: str) -> str {
+    if op == "+" { return "addsd" }
+    if op == "-" { return "subsd" }
+    if op == "*" { return "mulsd" }
+    return "divsd"
 }
 
 // Whether a binary operation is a float `%`, which calls `__fmod`.
