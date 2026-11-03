@@ -1159,3 +1159,171 @@ pub fun wait_stopped() {
         }
     }
 }
+
+// --- the executor's queues -------------------------------------------------------
+// Each worker has a queue of ready frames (D92, MYLA-140): a ring of its own
+// (EXEC_CAP frames, at `__wq_rings` + its index * 8 MiB) and a record
+// `[lock][head][tail]` (a cache line of `__wq`; the counters run either way,
+// the ring's index is the counter masked). A worker pushes onto its own
+// queue's tail and takes its newest frame (depth first: a task's children
+// before its siblings'), else steals the oldest frame of the next queue that
+// has one (the biggest piece of a tree of tasks); a frame yielding a turn goes
+// to the oldest end, behind the others (D110: depth-first, with one worker the
+// order of the self-hosted interpreter). MYLA_SCHED changes it (`sched_init`):
+// `fifo` (1) takes the oldest (a yield goes to the newest end); `seed:N` (2)
+// queues each push at the end a generator seeded with N picks (a yield still
+// behind the others). `__exec_seq` counts the pushes, the word sleeping
+// workers wait on (futex); `__exec_sleepers` counts those asleep.
+//
+// Nothing here allocates, and the lock is never held across a trap.
+
+const EXEC_CAP: int64 = 1048576
+const SCHED_MUL: int64 = 6364136223846793005
+const SCHED_ADD: int64 = 1442695040888963407
+const SYS_FUTEX: int64 = 202
+const FUTEX_WAKE_PRIVATE: int64 = 129
+
+// The record of worker `w`'s queue.
+fun wq_of(w: int64) -> int64 {
+    return __rt_addr("__wq") + (w << 6)
+}
+
+// Take the lock of the queue whose record is `q`.
+fun wq_lock(q: int64) {
+    while __xchg64(q, 1) != 0 {
+        __pause()
+    }
+}
+
+// Worker `w`'s ring (its slot for the counter `n`: `+ ((n & (EXEC_CAP - 1))
+// << 3)`).
+fun ring_of(w: int64) -> int64 {
+    return __rt_get("__wq_rings") + (w << 23)
+}
+
+// After a push: a worker that went to sleep before it saw the queue empty
+// after counting itself a sleeper, so the count is read after the push.
+fun exec_pushed() {
+    __fetch_add64(__rt_addr("__exec_seq"), 1)
+    if __rt_get("__exec_sleepers") != 0 {
+        __syscall(SYS_FUTEX, __rt_addr("__exec_seq"), FUTEX_WAKE_PRIVATE, 1)
+    }
+}
+
+// `__exec_push`: the frame `fr` onto the running worker's queue, its newest
+// end (seed:N: the end the generator's next value picks, its bit 33, as the
+// interpreter's `Interp.ready`); a sleeping worker woken.
+pub fun exec_push(fr: int64) {
+    let w = __rt_get("__worker_id")
+    let q = wq_of(w)
+    wq_lock(q)
+    if __rt_get("__exec_sched") == 2 {
+        let x = __rt_get("__exec_rng") * SCHED_MUL + SCHED_ADD
+        __store64(__rt_addr("__exec_rng"), x)
+        if ((x >> 33) & 1) != 0 {
+            push_oldest(q, w, fr)
+            return
+        }
+    }
+    let tail = __load64(q + 16)
+    if tail - __load64(q + 8) >= EXEC_CAP {
+        // the ring full: out of memory, the lock given back first
+        __store64(q, 0)
+        __trap_oom()
+    }
+    __store64(ring_of(w) + ((tail & (EXEC_CAP - 1)) << 3), fr)
+    __store64(q + 16, tail + 1)
+    __store64(q, 0)
+    exec_pushed()
+}
+
+// `fr` onto the oldest end of worker `w`'s queue `q`, whose lock is taken.
+fun push_oldest(q: int64, w: int64, fr: int64) {
+    let head = __load64(q + 8) - 1
+    if __load64(q + 16) - head > EXEC_CAP {
+        __store64(q, 0)
+        __trap_oom()
+    }
+    __store64(q + 8, head)
+    __store64(ring_of(w) + ((head & (EXEC_CAP - 1)) << 3), fr)
+    __store64(q, 0)
+    exec_pushed()
+}
+
+// `__exec_yield_push`: the frame `fr` yielding a turn, onto the oldest end of
+// the running worker's queue (fifo: the newest, as any push).
+pub fun exec_yield_push(fr: int64) {
+    if __rt_get("__exec_sched") == 1 {
+        exec_push(fr)
+        return
+    }
+    let w = __rt_get("__worker_id")
+    let q = wq_of(w)
+    wq_lock(q)
+    push_oldest(q, w, fr)
+}
+
+// `__exec_find`: the running worker's newest frame (fifo: its oldest), else
+// the oldest frame of the next queue that has one; 0 when none has.
+pub fun exec_find() -> int64 {
+    let me = __rt_get("__worker_id")
+    if __rt_get("__exec_sched") != 1 {
+        let q = wq_of(me)
+        // a glance first: an empty queue's lock isn't taken
+        if __load64(q + 8) != __load64(q + 16) {
+            wq_lock(q)
+            let tail = __load64(q + 16) - 1
+            if tail >= __load64(q + 8) {
+                __store64(q + 16, tail)
+                let fr = __load64(ring_of(me) + ((tail & (EXEC_CAP - 1)) << 3))
+                __store64(q, 0)
+                return fr
+            }
+            __store64(q, 0)
+        }
+    }
+    return exec_steal(me)
+}
+
+// The oldest frame of each queue in turn, starting with worker `me`'s own; 0
+// when none has one.
+fun exec_steal(me: int64) -> int64 {
+    let n = __rt_get("__exec_workers")
+    var w = me
+    var left = n
+    while left > 0 {
+        let q = wq_of(w)
+        if __load64(q + 8) != __load64(q + 16) {
+            wq_lock(q)
+            let head = __load64(q + 8)
+            if head != __load64(q + 16) {
+                let fr = __load64(ring_of(w) + ((head & (EXEC_CAP - 1)) << 3))
+                __store64(q + 8, head + 1)
+                __store64(q, 0)
+                return fr
+            }
+            __store64(q, 0)
+        }
+        w += 1
+        if w >= n {
+            w = 0
+        }
+        left -= 1
+    }
+    return 0
+}
+
+// `__exec_peek`: 1 when some queue has a frame (a glance, no lock taken).
+pub fun exec_peek() -> int64 {
+    let n = __rt_get("__exec_workers")
+    var q = __rt_addr("__wq")
+    var w: int64 = 0
+    while w < n {
+        if __load64(q + 8) != __load64(q + 16) {
+            return 1
+        }
+        q += 64
+        w += 1
+    }
+    return 0
+}
