@@ -7,7 +7,7 @@
 // too, both versions exist.
 //
 // Raw memory goes through the primitives `__load8`, `__load64`, `__store8`,
-// `__store64`, `__alloc`, `__free`, `__addr_of`, `__str_of`, and the bulk
+// `__store64`, `__alloc`, `__free`, `__addr_of`, `__str_of`, `__rotl`, and the bulk
 // copy and comparison `__copy_bytes` and `__equal_bytes`, which each backend
 // does natively; addresses are `int64`. A string's cell holds its length
 // (8 bytes), then its bytes. `__syscall(n, a, b, c)` makes a system call
@@ -694,7 +694,7 @@ fun str_hash(key: int64) -> int64 {
     var h = n * PHI
     while n >= 8 {
         h = (h ^ __load64(p)) * PHI
-        h = (h << 29) | (((h as uint64) >> 35) as int64)  // rotated left by 29
+        h = __rotl(h, 29)
         p += 8
         n -= 8
     }
