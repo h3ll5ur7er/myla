@@ -430,6 +430,40 @@ fun root_name(e: Expr) -> str {
     }
 }
 
+// The argument words that travel in registers (D119, System V on x86-64).
+const REG_ARG_WORDS: int32 = 6
+
+// Whether `t` is passed by its address, or its words by value: a struct,
+// tuple, enum or function value.
+#test(Type.TTuple([]))[true]
+#test(Type.TStr)[false]
+fun is_aggregate_type(t: Type) -> bool {
+    return match t {
+        Type.TStruct(n, a) => true,
+        Type.TTuple(es) => true,
+        Type.TEnum(n, a) => true,
+        Type.TFunc(ps, r) => true,
+        Type.TAsync(f) => true,
+        _ => false,
+    }
+}
+
+// The substitution of `args` for the type parameters `params`.
+fun subst_of(params: [str], args: [Type]) -> [Subst] {
+    var sub: [Subst] = []
+    var i = 0
+    while i < params.len() && i < args.len() {
+        sub.push(Subst { name: params[i], ty: args[i] })
+        i = i + 1
+    }
+    return sub
+}
+
+fun max_int(a: int32, b: int32) -> int32 {
+    if a > b { return a }
+    return b
+}
+
 #test(Type.TStr)[false]
 #test(Type.TInt(32, true))[false]
 #test(Type.TFunc([Type.TInt(32, true)], Some(Type.TStr)))[true]
@@ -1139,6 +1173,11 @@ pub struct LamAt { base: int32, line: int32, col: int32, sp: SrcSpan }
 pub struct MainAt { line: int32, col: int32, sp: SrcSpan, name: str, id: int32 }
 pub struct Frame { names: [str], binds: [Binding] }
 
+// A `become` in function `func` calling `target` (a function value's call
+// when `value`; `mutates`: a `var self` method's), with the types of its
+// arguments (the receiver first), for `check_become_words` (D119).
+pub struct BecomeWords { func: str, target: str, value: bool, mutates: bool, args: [Type], line: int32, col: int32, sp: SrcSpan, decl: int32 }
+
 // `become` (D87; types.py: _check_become): a `become` that hands a heap value
 // over to a parameter, the first of each, and one that passes a heap-value
 // parameter on to a function value (in declaration `decl`)
@@ -1225,6 +1264,7 @@ pub struct Checker {
     call_mutates: bool,
     fun_name: str,
     handovers: [str: Handover],
+    become_words: [BecomeWords],
     passed_on: [PassedOn],
     // concurrency (D89; types.py: Checker): the actor types; the first
     // construct of concurrency met (`conc_line` 0: none), which the
@@ -1275,7 +1315,7 @@ fun new_checker(decls: [Decl]) -> Checker {
         resolved: [:], errs: [], warnings: [], mains: [],
         skipped_decls: [:], skipped_fns: [:], broken_impls: [:], redefined: [:],
         lost_methods: [:], lost_traits: [:], failed_consts: [:], bodies: false,
-        call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], passed_on: [],
+        call_kind: "", call_kind_id: -1, call_target: "", call_mutates: false, fun_name: "", handovers: [:], become_words: [], passed_on: [],
         actors: [:], conc_line: 0, conc_col: 0, conc_sp: no_span(), conc_node: -1, in_async: false, actor_self: "", builtin_as_method: false, cur_key: "",
         lams: [], awaited: [:], call_key: "", call_async: false, suspended: -1, task_init: false, in_guard: false, neg_lit: -1,
         task_line: 0, task_col: 0, task_sp: no_span(), task_node: -1,
@@ -4147,7 +4187,111 @@ impl Checker {
             }
             i = i + 1
         }
+        // its argument words, counted once every hand-over is known
+        // (`check_become_words`)
+        var ats: [Type] = []
+        for a in all {
+            if self.resolved.contains(a.id) { ats.push(self.resolved[a.id]) } else { ats.push(Type.TBool) }
+        }
+        self.become_words.push(BecomeWords { func: self.fun_name, target: target, value: kind == "value", mutates: self.call_mutates, args: ats, line: ve.line, col: ve.col, sp: ve.sp, decl: self.cur_decl })
         return Ok(0)
+    }
+
+    // The argument words past the registers go where the function's own
+    // came, which its caller pops (D119): a `become` can't pass more of them
+    // than its function received. A struct, tuple or enum a `become` hands
+    // over travels by value, its words in the argument words (D88), as the
+    // parameter it goes to then always does.
+    fun check_become_words(var self) {
+        for b in self.become_words {
+            if self.full() { return }
+            let caller = self.functions[self.func_idx(b.func)]
+            var passed = 0
+            var received = 0
+            match caller.ret {
+                Some(rt) => {
+                    if is_aggregate_type(rt) {
+                        passed = 1
+                        received = 1
+                    }
+                },
+                None => {},
+            }
+            var i = 0
+            while i < b.args.len() {
+                passed = passed + 1
+                if !b.value && !(i == 0 && b.mutates) { passed = passed + self.by_value_words(b.target, i, b.args[i]) }
+                i = i + 1
+            }
+            i = 0
+            while i < caller.params.len() {
+                received = received + 1 + self.by_value_words(b.func, i, caller.params[i])
+                i = i + 1
+            }
+            if passed > REG_ARG_WORDS && passed > received {
+                let msg = format("'become' passes {} argument words, {} of them on the stack, but '{}' received {} there", passed, passed - REG_ARG_WORDS, b.func, max_int(received - REG_ARG_WORDS, 0))
+                self.errs.push(CheckErr { line: b.line, col: b.col, sp: b.sp, msg: msg, decl: b.decl, notes: [] })
+            }
+        }
+    }
+
+    // The words parameter `i` of function `f`, of type `t`, takes beyond
+    // one: those of a struct, tuple or enum a `become` hands over to it (at
+    // least one, as an empty one takes a word too).
+    fun by_value_words(self, f: str, i: int32, t: Type) -> int32 {
+        if !is_aggregate_type(t) || is_tfunc_type(t) || !self.handovers.contains(format("{}\t{}", f, i)) { return 0 }
+        return max_int(self.value_words(t), 1) - 1
+    }
+
+    // How many 8-byte words a value of type `t` takes, as the code generator
+    // lays it out (`CodeGen.size`): a recursive enum held by another value
+    // is a pointer to it.
+    #test(checker_on("struct P { x: int, y: int }"), Type.TStruct("P", []))[2]
+    #test(checker_on("enum E { A, B(int, int) }"), Type.TEnum("E", []))[3]
+    fun value_words(self, t: Type) -> int32 {
+        return match t {
+            Type.TStruct(n, a) => {
+                var w = 0
+                for st in self.structs {
+                    if st.name == n {
+                        let sub = subst_of(st.type_params, a)
+                        for f in st.fields { w = w + self.held_words(subst_type(f.ty, sub)) }
+                    }
+                }
+                w
+            }
+            Type.TTuple(es) => {
+                var w = 0
+                for e in es { w = w + self.held_words(e) }
+                w
+            }
+            Type.TEnum(n, a) => {
+                var most = 0
+                for en in self.enums {
+                    if en.name == n {
+                        let sub = subst_of(en.type_params, a)
+                        for v in en.variants {
+                            var w = 0
+                            for pt in v.payload { w = w + self.held_words(subst_type(pt, sub)) }
+                            if w > most { most = w }
+                        }
+                    }
+                }
+                1 + most
+            }
+            Type.TFunc(ps, r) => 2
+            Type.TAsync(f) => 2
+            _ => 1
+        }
+    }
+
+    // `value_words` of a value held inside another.
+    fun held_words(self, t: Type) -> int32 {
+        match t {
+            Type.TEnum(n, a) => { if contains_str(self.recursive_enums, n) { return 1 } },
+            _ => {},
+        }
+        return self.value_words(t)
     }
 
     // Whether `e` is a parameter of the function being checked or a field or
@@ -5050,6 +5194,7 @@ impl Checker {
             i = i + 1
         }
         self.check_passed_on()
+        self.check_become_words()
         if self.errs.len() > 0 { return Err(self.errs) }
         self.warnings = sort_by_place(self.warnings)
         return Ok(0)

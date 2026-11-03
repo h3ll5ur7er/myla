@@ -3938,11 +3938,15 @@ impl CodeGen {
         let n = job.slots.len()
         var first = 0
         if job.sret { first = 1 }
-        let env = "-56(%rbp)"
+        let env = SPILLED_ENV
+        var holes = 0
+        for sl in job.slots {
+            if sl < 0 { holes = holes + 1 }
+        }
         self.emit(format("myla_{}:", job.lifted))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
-        self.spill_args()
+        self.spill_args(first + holes)
         // a parameter of a named target passed owned gets a reference of its
         // own (MYLA-127): the env keeps its filled ones, the holes are lent
         var tsig = self.funcs[0]
@@ -3977,10 +3981,6 @@ impl CodeGen {
         if job.sret {
             self.emit(format("pushq {}", spilled_word(0)))
             pushed = pushed + 1
-        }
-        var holes = 0
-        for sl in job.slots {
-            if sl < 0 { holes = holes + 1 }
         }
         var target = format("myla_{}", job.target)
         if job.fn_off >= 0 {
@@ -4067,9 +4067,9 @@ impl CodeGen {
         self.emit(format("myla_{}__fnval:", n))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
-        self.spill_args()
         var first = 0
         if struct_ret { first = 1 }
+        self.spill_args(first + sig.params.len())
         var pushed = 0
         var i = sig.params.len() - 1
         while i >= 0 {
@@ -4091,16 +4091,18 @@ impl CodeGen {
         self.emit("")
     }
 
-    // The argument registers pushed right after the frame base is set, then
-    // the environment (%r10): argument word `w` is at `spilled_word(w)`, the
-    // environment at -56(%rbp).
-    fun spill_args(var self) {
+    // The environment (%r10) and the registers of the first of `n`
+    // argument words pushed right after the frame base is set: how many
+    // words that pushed. Argument word `w` is then at `spilled_word(w)`, the
+    // environment at `SPILLED_ENV`.
+    fun spill_args(var self, n: int32) -> int32 {
+        self.emit("pushq %r10")
         var w = 0
-        while w < REG_WORDS {
+        while w < n && w < REG_WORDS {
             self.emit(format("pushq %{}", arg_reg(w)))
             w = w + 1
         }
-        self.emit("pushq %r10")
+        return w + 1
     }
 
     // The `pushed` words a thunk just pushed (the first at the lowest
@@ -8587,17 +8589,20 @@ pub fun arg_reg(w: int32) -> str {
     return regs[w]
 }
 
-// Where argument word `w` is in a function that pushed the argument
-// registers right after setting its frame base (`spill_args`): below it for
-// a word that came in a register, above the return address for one that
-// came on the stack.
-#test(0)["-8(%rbp)"]
-#test(5)["-48(%rbp)"]
+// Where argument word `w` is in a function that pushed the environment and
+// the argument registers right after setting its frame base (`spill_args`):
+// below it for a word that came in a register, above the return address for
+// one that came on the stack.
+#test(0)["-16(%rbp)"]
+#test(5)["-56(%rbp)"]
 #test(6)["16(%rbp)"]
 pub fun spilled_word(w: int32) -> str {
-    if w < REG_WORDS { return format("{}(%rbp)", -8 * (w + 1)) }
+    if w < REG_WORDS { return format("{}(%rbp)", -16 - 8 * w) }
     return format("{}(%rbp)", 16 + 8 * (w - REG_WORDS))
 }
+
+// Where the environment (%r10) is after `spill_args`.
+pub const SPILLED_ENV: str = "-8(%rbp)"
 
 // Whether the held-back store `s` is a move from %rax into a register
 // (`movq %rax, %r12`), not into a frame cell.

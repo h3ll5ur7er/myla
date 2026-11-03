@@ -301,9 +301,17 @@ class RegisterArguments(unittest.TestCase):
         self.assertRegex(main, r"call myla_w7\n\taddq \$8, %rsp")
 
     def test_become_reuses_the_frame(self):
-        body = _function(self.asm(SYNC), "spin")
-        self.assertIn("jmp myla_spin", body)
+        asm = self.asm(SYNC)
+        # a tail call of the function itself loops back to its entry block,
+        # its stack words written over the ones it received
+        body = _function(asm, "spin")
+        entry = re.search(r"^(\.L\d+):$", body, re.M).group(1)
+        self.assertIn(f"jmp {entry}\n", body)
         self.assertNotIn("call myla_spin", body)
+        self.assertNotIn("jmp myla_spin", body)
+        self.assertIn("popq 16(%rbp)", body)
+        # through a function value: the frame left, the code jumped to
+        self.assertRegex(_function(asm, "relay"), r"popq 16\(%rbp\)\n\tleave\n\tjmp \*%r11")
 
 
 if __name__ == "__main__":

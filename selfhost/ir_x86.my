@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV
 from .ir import IrFunc, Inst, Term, Touches, ENV_WORD, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -176,7 +176,7 @@ impl CodeGen {
                     j = j + 1
                 }
                 match f.blocks[b].term { Term.Suspend(sb) => { self.emit_state(sb) }, _ => {} }
-                self.emit_tail_call(insts[tail], temp_base)
+                self.emit_tail_call(f, insts[tail], slot_off, labels[0], temp_base)
             }
             else if fused >= 0 { self.emit_compare_branch(insts[fused], f.blocks[b].term, labels, next, temp_base) }
             else { self.emit_term(f.blocks[b].term, labels, next, temp_base) }
@@ -199,14 +199,16 @@ impl CodeGen {
     // The parameters into their homes (D119): the words that came in
     // registers (and a lambda's environment, in %r10) stored into their
     // frame cells, those living in registers moved there all at once, then
-    // the registers of those that came on the stack loaded.
+    // the registers of those that came on the stack loaded. One nothing
+    // reads is left where it came (but under -g, for the debugger).
     fun emit_params(var self, f: IrFunc, slot_off: [int32]) {
+        let read = read_slots(f)
         var dst: [str] = []
         var src: [str] = []
         var si = 0
         while si < f.slots.len() {
             let s = f.slots[si]
-            if s.word == ENV_WORD || (s.word >= 0 && s.word < REG_WORDS) {
+            if (s.word == ENV_WORD || (s.word >= 0 && s.word < REG_WORDS)) && (read[si] || self.debug) {
                 var source = "%r10"
                 if s.word >= 0 { source = "%" + arg_reg(s.word) }
                 if self.slot_reg[si] != "" {
@@ -331,10 +333,12 @@ impl CodeGen {
     // frame base across the allocation.
     fun emit_frame_new(var self, f: IrFunc, mangled: str, slot_off: [int32]) {
         let size = frame_size(f)
+        var words = 0
+        for s in f.slots { if s.word >= 0 && s.word + 1 > words { words = s.word + 1 } }
         self.emit(format("myla_{}__new:", mangled))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
-        self.spill_args()
+        let rbx_at = -8 * (self.spill_args(words) + 1)
         self.emit("pushq %rbx")
         self.emit(format("movq ${}, %rdi", size))
         self.emit("call __alloc")
@@ -349,7 +353,7 @@ impl CodeGen {
         while i < f.slots.len() {
             let s = f.slots[i]
             if s.word >= 0 || s.word == ENV_WORD {
-                var at = "-56(%rbp)"
+                var at = SPILLED_ENV
                 if s.word >= 0 { at = spilled_word(s.word) }
                 if is_aggregate(s.ty) {
                     self.emit(format("movq {}, %rsi", at))
@@ -373,7 +377,7 @@ impl CodeGen {
             i = i + 1
         }
         self.emit("movq %rbx, %rax")
-        self.emit("movq -64(%rbp), %rbx")
+        self.emit(format("movq {}(%rbp), %rbx", rbx_at))
         self.emit("leave")
         self.emit("ret")
         self.emit("")
@@ -805,34 +809,39 @@ impl CodeGen {
         }
     }
 
-    // The call `c`, whose result the function returns at once, as a jump
-    // reusing this frame (MYLA-126; `become`'s, D87): its words passed as
-    // a call passes them (D119), those on the stack moved into the words
+    // The call `c`, whose result the function `f` returns at once, as a
+    // jump reusing this frame (MYLA-126; `become`'s, D87): its words passed
+    // as a call passes them (D119), those on the stack moved into the words
     // this function received there (its caller pops them; never more of
-    // them, `tail_fits`), a function value's environment in %r10 and its
-    // code in %r11, the saved registers restored, the frame left, and the
-    // callee jumped to.
-    fun emit_tail_call(var self, c: Inst, temp_base: int32) {
+    // them), a function value's environment in %r10 and its code in %r11,
+    // the saved registers restored, the frame left, and the callee jumped
+    // to. A call of `f` itself keeps the frame and the saved registers: the
+    // parameters take the new words, and it jumps to the entry block
+    // (`entry`), a loop.
+    fun emit_tail_call(var self, f: IrFunc, c: Inst, slot_off: [int32], entry: str, temp_base: int32) {
         var target = ""
         var ws: [int32] = []
         var fv = -1
+        var again = false
         match c {
             Inst.Call(d, name, args) => {
                 ws = args
                 target = format("myla_{}", name)
+                again = format(".Lret_{}", name) == self.epilogue
             },
             Inst.CallSret(name, res, args) => {
                 ws = sret_words(res, args)
                 target = format("myla_{}", name)
+                again = format(".Lret_{}", name) == self.epilogue
             },
-            Inst.CallInd(d, f, args) => {
+            Inst.CallInd(d, fn, args) => {
                 ws = args
-                fv = f
+                fv = fn
                 target = "*%r11"
             },
-            Inst.CallIndSret(f, res, args) => {
+            Inst.CallIndSret(fn, res, args) => {
                 ws = sret_words(res, args)
-                fv = f
+                fv = fn
                 target = "*%r11"
             },
             _ => { return },
@@ -867,6 +876,11 @@ impl CodeGen {
         while i < m {
             if !in_place[i] { self.emit(format("popq {}(%rbp)", 16 + 8 * i)) }
             i = i + 1
+        }
+        if again && !f.frame {
+            self.emit_params(f, slot_off)
+            self.emit(format("jmp {}", entry))
+            return
         }
         self.restore_regs()
         self.emit("leave")
@@ -2387,4 +2401,22 @@ fun stack_words(c: Inst) -> int32 {
     }
     if n > REG_WORDS { return n - REG_WORDS }
     return 0
+}
+
+// Which slots of `f` an instruction reads: loads it, takes its address or
+// drops it.
+fun read_slots(f: IrFunc) -> [bool] {
+    var read: [bool] = []
+    for s in f.slots { read.push(false) }
+    for b in f.blocks {
+        for inst in b.insts {
+            match inst {
+                Inst.Load(d, s) => { read[s] = true },
+                Inst.Addr(d, s) => { read[s] = true },
+                Inst.DropSlot(t, s) => { read[s] = true },
+                _ => {},
+            }
+        }
+    }
+    return read
 }

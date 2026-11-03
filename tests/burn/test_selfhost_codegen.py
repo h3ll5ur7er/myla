@@ -969,6 +969,14 @@ class SelfHostedCodegenParity(unittest.TestCase):
         end = next(i for i in range(start, len(lines)) if lines[i].strip().split(" ")[0] == "ret")
         return "\n".join(lines[start:end + 1])
 
+    def assertLoops(self, asm: str, name: str) -> None:
+        """`myla_<name>`'s tail calls of itself jump back to its entry block
+        (MYLA-250): no call of itself, no jump to its start."""
+        body = self._function_asm(asm, name)
+        entry = re.search(r"^(\.L\d+):$", body, re.M).group(1)
+        self.assertIn(f"jmp {entry}\n", body)
+        self.assertNotIn(f"call myla_{name}\n", body)
+        self.assertNotIn(f"jmp myla_{name}\n", body)
     def test_a_comparison_feeding_a_branch_is_a_conditional_jump(self) -> None:
         # MYLA-120: no bool is made for an integer comparison whose only use
         # is the branch after it; each condition and operand kind still works
@@ -1141,7 +1149,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 fh.write(source)
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), ("50000005000000\nfalse\n3\n42\naxxx\n55\n8\n", 0))
-        self.assertIn("jmp myla_count_down", self._function_asm(asm, "count_down"))
+        self.assertLoops(asm, "count_down")
         self.assertIn("jmp myla_is_odd", self._function_asm(asm, "is_even"))
         self.assertIn("call myla_sum", self._function_asm(asm, "via_local"))
         self.assertIn("call myla_label", self._function_asm(asm, "label"))
@@ -1194,8 +1202,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 fh.write(source)
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), ("1000000\n1\nqrxxx\nab\nmn\n", 0))
-        self.assertIn("jmp myla_collect", self._function_asm(asm, "collect"))
-        self.assertIn("jmp myla_label", self._function_asm(asm, "label"))
+        self.assertLoops(asm, "collect")
+        self.assertLoops(asm, "label")
         self.assertIn("call myla_first_of", self._function_asm(asm, "borrowed"))
         # `rest` borrows from the match's value, dropped after the call
         self.assertIn("call myla_first_of", self._function_asm(asm, "through_match"))
@@ -1220,11 +1228,11 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(self._build_and_run(proc.stdout), (expected, 0))
             ir = subprocess.run([self._binary, path, "--emit-ir"], capture_output=True, text=True).stdout
-        self.assertIn("jmp myla_count", self._function_asm(asm, "count"))
-        self.assertIn("jmp myla_Counter.run", self._function_asm(asm, "Counter.run"))
-        self.assertIn("jmp myla_Walker.walk", self._function_asm(asm, "Walker.walk"))
-        self.assertIn("jmp myla_fib", self._function_asm(asm, "fib"))
-        self.assertIn("jmp myla_label", self._function_asm(asm, "label"))
+        self.assertLoops(asm, "count")
+        self.assertLoops(asm, "Counter.run")
+        self.assertLoops(asm, "Walker.walk")
+        self.assertLoops(asm, "fib")
+        self.assertLoops(asm, "label")
         self.assertIn("jmp *%r11", self._function_asm(asm, "spin"))
         self.assertIn("jmp *%r11", self._function_asm(asm, "via"))
         # the IR's text form: the call, then the terminator
@@ -1270,7 +1278,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             out, code, peak = self._build_and_measure(self._emit_asm(path))
         self.assertEqual((out, code), ("50000\n", 0))
         self.assertLess(peak, 64)
-        self.assertIn("jmp myla_walk", self._function_asm(asm, "walk"))
+        self.assertLoops(asm, "walk")
         self.assertRegex(ir, r"\$\d+ p: Pos \(argument 1, 16 bytes by value\)\n")
         self.assertRegex(ir, r"\$\d+ s: State \(argument 0, 16 bytes by value\) owns\n")
 

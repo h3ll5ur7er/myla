@@ -123,6 +123,34 @@ One pass through the findings, against the baseline. `benchmarks/results/2026-11
   - [[MYLA-250]] arguments in registers, fib and Ackermann, a design for the owner to decide;
   - the analyses of [[MYLA-251]] (hoisting copy-on-write checks, proving bounds), the sieve, Game of Life, fannkuch.
 
+## Progress: arguments in registers (2026-11-03)
+
+[[MYLA-250]] made Myla's calls System V's (D119): the first six argument words in registers, the rest on the stack, popped by the caller; a function value's environment in `%r10`. A tail call of the function itself became a jump to its entry block. `benchmarks/results/2026-11-03-after-250.json` holds the full results.
+
+Timed interleaved against the same sources built with the stack convention (7 runs each, alternating), and instructions at `profile_size`:
+
+| Benchmark | Stack convention | Registers | Speed-up | Instructions |
+|---|---:|---:|---:|---:|
+| fib | 97 ms | 88 ms | 1.10× | same |
+| ackermann | 476 ms | 495 ms | 0.96× | 10% fewer |
+| mandelbrot | 308 ms | 306 ms | 1.01× | same |
+| n-body | 221 ms | 217 ms | 1.02× | same |
+| sieve | 1,451 ms | 1,507 ms | 0.96× | same |
+| fannkuch | 375 ms | 415 ms | 0.90× | same |
+| game of life | 900 ms | 900 ms | 1.00× | same |
+| quicksort | 344 ms | 345 ms | 1.00× | 2% fewer |
+| binary trees | 2,128 ms | 2,113 ms | 1.01× | same |
+| closures | 730 ms | 705 ms | 1.04× | 2% more |
+| word frequency | 627 ms | 611 ms | 1.03× | same |
+| string building | 312 ms | 318 ms | 0.98× | same |
+
+- **Overall: the same time** (1.00× on the geometric mean). The convention is the platform's now, which the FFI and every new backend need (D117, D119), but at this register allocator's level it doesn't make calls cheaper by itself.
+- **Why:** a push became a register move, and a load from above the frame a register read: one instruction for one. A parameter that gets no register of its own is now stored into the frame on entry, where it used to be read in place, which is closures' 2% more instructions. Keeping it in the register it came in needs the allocator to know which instruction sequences use `%rcx`, `%rdx`, `%rsi` and `%rdi` as scratch.
+- **fannkuch and the sieve** run the same loops instruction for instruction: only their one-time prologue differs (two stores) and their frame cells moved by 16 bytes. Rerun, fannkuch's gap was 3%; shifting the old code by the same 8 bytes didn't slow it. It is placement, within the machine's spread, not code.
+- **Ackermann** runs 10% fewer instructions (its tail calls of itself are a loop now) but not faster: `m` has no register (the allocator's threshold for a callee-saved one), so the loop stores and reloads it every iteration. Given `%rbx` by hand, it ran about 6% faster.
+- **The self-compile:** within the spread of the stack convention (medians of 0.72–0.75 s either way, over three series of 7 to 11 runs); 0.6% more instructions from the convention, 0.4% more from the compiler's own new work (the checker's rule, the scan for unread parameters).
+- **What closes fib's and Ackermann's gap to C** is the optimizer's work, not the convention: gcc `-O2` keeps everything in registers, leaves frames out and turns the recursion partly into loops ([[MYLA-251]]).
+
 ## How the first round went
 
 The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).

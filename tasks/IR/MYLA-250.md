@@ -2,7 +2,7 @@
 id: MYLA-250
 title: Arguments and results in registers
 type: design
-status: in-progress
+status: review
 priority: medium
 labels: [backend, performance, calling-convention]
 ---
@@ -10,9 +10,9 @@ Found by the benchmarks ([[MYLA-242]]): call-heavy code runs at gcc `-O0`'s leve
 
 A design round first, part of [[MYLA-160]]'s calling-convention question, since every backend (D117) and the runtime's entry points share the convention:
 
-- [ ] The first arguments and the result in registers (integers and pointers, then floats with [[MYLA-249]]), the rest on the stack; what `become` and the suspended frames of async functions (D90) need from it
-- [ ] The cost of the change across the runtime's hand-written entry points (executor, function-value adapters, thunks) against [[MYLA-162]] moving the runtime to Myla
-- [ ] Measured on fib, Ackermann and the self-compile
+- [x] The first arguments and the result in registers (integers and pointers, then floats with [[MYLA-249]]), the rest on the stack; what `become` and the suspended frames of async functions (D90) need from it
+- [x] The cost of the change across the runtime's hand-written entry points (executor, function-value adapters, thunks) against [[MYLA-162]] moving the runtime to Myla
+- [x] Measured on fib, Ackermann and the self-compile
 
 ## Measurements and options (2026-11-03, the optimisation pass of [[MYLA-242]])
 
@@ -46,8 +46,24 @@ FFI on wasm means host imports, which know only numbers, so strings and lists cr
 The owner chose option 1, as each target's C convention, with the three details above. The FFI comes later: the benchmarks ([[MYLA-242]]) and the de-risking ([[MYLA-160]]) come first.
 
 Steps, each verified by the bootstrap and the tests:
-- [ ] Register arguments and results for every Myla call: direct calls, aggregate results, function values (the environment in `%r10`), tail calls, async frames, the runtime's entry points and adapters, the debug information's parameter locations
-- [ ] The checker's rule for `become` with more stack words than the caller received
-- [ ] Measured: fib, Ackermann, the self-compile, all benchmarks against the baseline
+- [x] Register arguments and results for every Myla call: direct calls, aggregate results, function values (the environment in `%r10`), tail calls, async frames, the runtime's entry points and adapters, the debug information's parameter locations
+- [x] The checker's rule for `become` with more stack words than the caller received
+- [x] Measured: fib, Ackermann, the self-compile, all benchmarks against the baseline
 
 The frame pointer stays (frame cells, parameters and the debug information are addressed from `%rbp`). Leaving it out of leaf functions would save two instructions per call against a change to every address, so it isn't a first step after all. 16-byte stack alignment at calls matters only for calling C, so it comes with the FFI.
+
+## Evidence (2026-11-03)
+
+- **The convention.** Every Myla call passes the first six argument words in `%rdi`…`%r9` and the rest on the stack, which the caller pops (`pass_words` in [[selfhost/ir_x86.my]]); a function stores the parameters that came in registers into their frame cells, or moves them into their registers all at once (`emit_params`, `emit_moves`), and leaves one nothing reads where it came. A lambda's environment is a hidden parameter in `%r10` (`ENV_WORD` in [[selfhost/ir.my]]). Results stay in `%rax`, an aggregate's through the address in `%rdi`.
+- **Every path follows:** tail calls (registers loaded, stack words moved into the function's own, a function value's code in `%r11`); the adapters for plain functions as values (now a jump), by-value parameters and partial application (they jump in place when the target's stack words fit, else call: `thunk_call`); composition; derived equality; the async frames' constructors (`__new`), the executor and the runtime's entry points for frame functions (`myla___resume`, `__finish`, `__yield`, `__wait`, `__actor_enter`); a frame function's variables in the debug information (from `%r15` now).
+- **A tail call of the function itself** re-homes the parameters and jumps to its entry block: a loop.
+- **`become`'s rule:** the checker rejects one that would pass more words on the stack than its function received (`check_become_words` in [[selfhost/checker.my]], counting a handed-over struct's fields as the code generator lays them out), with two examples in `examples/errors/` and the rule on [[Language/Statements]]. It runs after every body is checked, as which parameters travel by value is known only then.
+- **Tests:** `tests/burn/test_register_args.py` calls with 0 to 9 argument words through every path (direct, aggregate results, owned parameters, `become` in registers and with stack words, by value, function values of lambdas and named functions, partial application with stack words on both sides, composition, derived equality, async functions, an actor's method), natively against the interpreter, with and without tasks, and checks the code: no argument pushed for six words or fewer, the seventh popped by the caller, a self `become` a loop. 902 tests pass; the bootstrap reaches its fixed point; the seed is current.
+- **Measured** ([[Development/Benchmarks]], interleaved against the stack convention): the same time on the geometric mean (fib 1.10×, the others within ±4%, fannkuch's −10% placement, not code, as it ran the same loops); Ackermann 10% fewer instructions, closures 2% more; the self-compile within the spread.
+- **Found on the way:** a `become` passing a function-value parameter on to a function fails to lower ([[MYLA-253]], also before this task).
+
+What the convention didn't do, as follow-ups:
+- floats in `%xmm0`…`%xmm7`, as System V passes them: needed for the FFI ([[MYLA-166]]); between Myla functions they travel in the integer registers now;
+- a parameter kept in the register it came in when nothing in its life uses that register (the allocator has to learn which instruction sequences use `%rcx`, `%rdx`, `%rsi` and `%rdi`), which would remove the entry store a parameter without a register now costs; with the loop weights of a self tail call, Ackermann's `m` would get its register too;
+- 16-byte stack alignment at calls, with the FFI.
+- the checker counts a value of a type parameter as one word, so a generic function's `become` handing one over by value could still need more stack words in an instance than the rule saw, and stop the code generator with an internal error (no program does so yet).
