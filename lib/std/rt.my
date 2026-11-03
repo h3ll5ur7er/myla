@@ -7,10 +7,12 @@
 // too, both versions exist.
 //
 // Raw memory goes through the primitives `__load8`, `__load64`, `__store8`,
-// `__store64`, `__alloc`, `__addr_of`, `__str_of`, and the bulk copy and
-// comparison `__copy_bytes` and `__equal_bytes`, which each backend does
-// natively; addresses are `int64`. A string's cell holds its length
-// (8 bytes), then its bytes.
+// `__store64`, `__alloc`, `__free`, `__addr_of`, `__str_of`, and the bulk
+// copy and comparison `__copy_bytes` and `__equal_bytes`, which each backend
+// does natively; addresses are `int64`. A string's cell holds its length
+// (8 bytes), then its bytes. `__syscall(n, a, b, c)` makes a system call
+// (Linux's numbers, for now the only platform) and `__set_io_errno` records
+// the errno `std.io` reports.
 
 // `a + b` (`__str_concat`): a new cell holding both strings' bytes.
 pub fun str_concat(a: str, b: str) -> str {
@@ -37,4 +39,239 @@ pub fun str_eq(a: str, b: str) -> bool {
         return false
     }
     return __equal_bytes(pa + 8, pb + 8, n)
+}
+
+// --- files and directories, on Linux's system calls -------------------------
+//
+// Each sets the errno `std.io` reports: 0, or the failed call's.
+
+const SYS_STAT: int64 = 4
+const SYS_GETCWD: int64 = 79
+const SYS_RENAME: int64 = 82
+const SYS_MKDIR: int64 = 83
+const SYS_RMDIR: int64 = 84
+const SYS_UNLINK: int64 = 87
+
+// `path` as the NUL-terminated copy the kernel reads, which the caller frees.
+fun c_path(path: str) -> int64 {
+    let p = __addr_of(path)
+    let n = __load64(p)
+    let buf = __alloc(n + 1)
+    __copy_bytes(buf, p + 8, n)
+    __store8(buf + n, 0u8)
+    return buf
+}
+
+// A system call on one path, its errno recorded (`__unlink`, `__rmdir`).
+fun on_path(nr: int64, path: str, arg: int64) {
+    __set_io_errno(0)
+    let p = c_path(path)
+    let r = __syscall(nr, p, arg, 0)
+    if r < 0 {
+        __set_io_errno(-r)
+    }
+    __free(p)
+}
+
+// `__stat`: the mode of what `path` names (the type bits and permissions),
+// or -1.
+pub fun stat(path: str) -> int {
+    __set_io_errno(0)
+    let p = c_path(path)
+    let buf = __alloc(144)
+    let r = __syscall(SYS_STAT, p, buf, 0)
+    var mode = -1
+    if r < 0 {
+        __set_io_errno(-r)
+    } else {
+        mode = (__load64(buf + 24) & 4294967295i64) as int
+    }
+    __free(buf)
+    __free(p)
+    return mode
+}
+
+// `__mkdir`: a directory with the permissions `mode`.
+pub fun mkdir(path: str, mode: int) {
+    on_path(SYS_MKDIR, path, mode as int64)
+}
+
+pub fun unlink(path: str) {
+    on_path(SYS_UNLINK, path, 0)
+}
+
+pub fun rmdir(path: str) {
+    on_path(SYS_RMDIR, path, 0)
+}
+
+pub fun rename(from_path: str, to_path: str) {
+    __set_io_errno(0)
+    let a = c_path(from_path)
+    let b = c_path(to_path)
+    let r = __syscall(SYS_RENAME, a, b, 0)
+    if r < 0 {
+        __set_io_errno(-r)
+    }
+    __free(b)
+    __free(a)
+}
+
+// `__getcwd`: the working directory, or "" with the errno (ENOENT for a
+// removed directory, ERANGE for one longer than 4 KB).
+pub fun getcwd() -> str {
+    __set_io_errno(0)
+    let buf = __alloc(4096)
+    let r = __syscall(SYS_GETCWD, buf, 4096, 0)
+    var n: int64 = 0
+    if r < 0 {
+        __set_io_errno(-r)
+    } else {
+        n = r - 1
+    }
+    let p = __alloc(n + 8)
+    __store64(p, n)
+    __copy_bytes(p + 8, buf, n)
+    __free(buf)
+    return __str_of(p)
+}
+
+
+const SYS_READ: int64 = 0
+const SYS_WRITE: int64 = 1
+const SYS_OPEN: int64 = 2
+const SYS_CLOSE: int64 = 3
+const SYS_FSTAT: int64 = 5
+
+// `__read_file`: the bytes of the file at `path`, or "" with the errno. A
+// file that reports no size (/proc, a pipe) is read into a cell that doubles
+// until the end.
+pub fun read_file(path: str) -> str {
+    __set_io_errno(0)
+    let p = c_path(path)
+    let fd = __syscall(SYS_OPEN, p, 0, 0)
+    __free(p)
+    if fd < 0 {
+        __set_io_errno(-fd)
+        return ""
+    }
+    let st = __alloc(144)
+    __syscall(SYS_FSTAT, fd, st, 0)
+    var cap = __load64(st + 48)
+    __free(st)
+    let grows = cap == 0
+    if grows {
+        cap = 4096
+    }
+    var cell = __alloc(cap + 8)
+    var n: int64 = 0
+    while true {
+        if n == cap {
+            if !grows {
+                break
+            }
+            let bigger = __alloc(cap + cap + 8)
+            __copy_bytes(bigger + 8, cell + 8, n)
+            __free(cell)
+            cell = bigger
+            cap = cap + cap
+        }
+        let r = __syscall(SYS_READ, fd, cell + 8 + n, cap - n)
+        if r < 0 {
+            __set_io_errno(-r)
+            break
+        }
+        if r == 0 {
+            break
+        }
+        n = n + r
+    }
+    __store64(cell, n)
+    __syscall(SYS_CLOSE, fd, 0, 0)
+    return __str_of(cell)
+}
+
+// `__write_file`: `contents` as the whole file at `path` (created with the
+// permissions 0644), the errno recorded.
+pub fun write_file(path: str, contents: str) {
+    __set_io_errno(0)
+    let p = c_path(path)
+    let fd = __syscall(SYS_OPEN, p, 577, 420)  // O_WRONLY | O_CREAT | O_TRUNC, 0644
+    __free(p)
+    if fd < 0 {
+        __set_io_errno(-fd)
+        return
+    }
+    let c = __addr_of(contents)
+    let n = __load64(c)
+    var done: int64 = 0
+    while done < n {
+        let r = __syscall(SYS_WRITE, fd, c + 8 + done, n - done)
+        if r < 0 {
+            __set_io_errno(-r)
+            break
+        }
+        done = done + r
+    }
+    __syscall(SYS_CLOSE, fd, 0, 0)
+}
+
+const SYS_GETDENTS64: int64 = 217
+
+// `__list_dir`: the name of every entry of the directory at `path`, each
+// followed by a NUL byte, in the kernel's order ("." and ".." included), or
+// "" with the errno.
+pub fun list_dir(path: str) -> str {
+    __set_io_errno(0)
+    let p = c_path(path)
+    let fd = __syscall(SYS_OPEN, p, 589824, 0)  // O_RDONLY | O_DIRECTORY | O_CLOEXEC
+    __free(p)
+    if fd < 0 {
+        __set_io_errno(-fd)
+        return ""
+    }
+    let records = __alloc(4096)
+    var cap: int64 = 4088
+    var cell = __alloc(cap + 8)
+    var n: int64 = 0
+    while true {
+        let got = __syscall(SYS_GETDENTS64, fd, records, 4096)
+        if got == -4 {
+            continue  // EINTR
+        }
+        if got < 0 {
+            __set_io_errno(-got)
+            n = 0
+            break
+        }
+        if got == 0 {
+            break
+        }
+        // each record: its length at 16 (2 bytes), its NUL-terminated name at 19
+        var at: int64 = 0
+        while at < got {
+            let name = records + at + 19
+            var len: int64 = 0
+            while __load8(name + len) != 0u8 {
+                len += 1
+            }
+            if n + len + 1 > cap {
+                var bigger_cap = cap + cap
+                while n + len + 1 > bigger_cap {
+                    bigger_cap += bigger_cap
+                }
+                let bigger = __alloc(bigger_cap + 8)
+                __copy_bytes(bigger + 8, cell + 8, n)
+                __free(cell)
+                cell = bigger
+                cap = bigger_cap
+            }
+            __copy_bytes(cell + 8 + n, name, len + 1)
+            n += len + 1
+            at += __load64(records + at + 16) & 65535i64
+        }
+    }
+    __free(records)
+    __store64(cell, n)
+    __syscall(SYS_CLOSE, fd, 0, 0)
+    return __str_of(cell)
 }

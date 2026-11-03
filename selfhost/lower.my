@@ -3761,7 +3761,7 @@ fun char_cast_checked(src: Type, t: Type) -> bool {
 pub fun myla_runtime_function(name: str) -> str {
     if name == "__str_concat" { return "std$rt$str_concat" }
     if name == "__str_eq" { return "std$rt$str_eq" }
-    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" {
+    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" {
         // `__stat` -> `std$rt$stat`
         var sb = StringBuilder()
         sb.append(name, 2, name.len())

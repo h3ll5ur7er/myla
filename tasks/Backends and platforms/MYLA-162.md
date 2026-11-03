@@ -69,3 +69,9 @@ Before the hot routines move, the backend gets closer to hand-written code, whic
 Measured (instructions, the same sources built before step 1 and now): the benchmarks 3.2% fewer on the geometric mean (the sieve 10.4%, Mandelbrot 7.2%, closures 6.7%, fib 5.7%), string building still 10.8% more (its concatenation in Myla); the self-compile, with its strings in Myla, 1.7% more than with the assembly routines and the old backend (it was 3.8% after step 1).
 - **More of the same (2026-11-03):** `a + k`, `a - k` and `a + b` from registers into a register are one `lea` (`emit_lea`, re-extended for a signed 32-bit result); a function whose body reaches its frame nowhere, the cells its temporaries were given having stayed unused (their values never left `%rax`), has its prologue and every `leave` blanked after the body is emitted (`drop_unused_frame`). 76 of the compiler's functions set up no frame now, `std.rt`'s `str_eq` among them. The self-compile with its strings in Myla is 0.8% above the assembly routines with the old backend (it was 3.8% after step 1, 1.7% after the first round).
 
+
+## Step 2: the file system (2026-11-03)
+
+- `std.rt` makes system calls: the primitives `__syscall(n, a, b, c)` (Linux's numbers, the result or `-errno`), `__set_io_errno` (the errno `std.io` reports) and `__free`, all three known to the seed before the library uses them (a primitive goes in one commit, its first use in the next).
+- Moved: `read_file`, `write_file`, `list_dir`, `stat`, `mkdir`, `unlink`, `rmdir`, `rename`, `getcwd`, the routines behind `std.fs` (about 500 lines of assembly, 200 of Myla). A program using them prints the same natively as in the interpreter (writing and reading back 200 KB, a file without a size in `/proc`, 300 directory entries, every error path).
+- Cold: a few calls per program. Their assembly stays while a standard library root without `std/rt.my` needs it.
