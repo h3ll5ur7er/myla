@@ -31,7 +31,7 @@ from std.num import f64_literal_bits, f32_round_bits
 from .ast import Expr, ExprKind, Stmt, StmtKind, Block, FunData, ElseTail, ExprOrBlock, MatchArm, Pattern, PatternKind, FieldInit, MapEntry, BindElem, bind_elems, Param
 from .checker import Type, Subst, FuncSig, opt_subst_type, subst_type, builtin_method
 from .codegen import codegen_on, may_write_expr, is_actor_t, is_async_t, CodeGen, LamJob, PartialJob, Cap, DropEntry, tfunc_params, tfunc_ret, is_hole_expr, mangle_fn, is_builtin_call_name, is_aggregate, tuple_elems, is_struct_or_enum_t, is_tfunc, is_overloadable_op, arith_method_cg, enum_name_of, is_tstr, is_cmp, place_root, is_aggregate_opt, arms_may_write, is_cell_t, list_elem, is_list_t, is_map_t, is_str_t, map_key, map_val, format_segments, args_have_hole, success_variant, failure_variant
-from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance
+from .ir import IrFunc, IrBlock, Inst, Term, Slot, Pos, Instance, ENV_WORD
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 // A name in scope: the slot holding it.
@@ -186,8 +186,8 @@ pub fun lower_function(cg: CodeGen, fd: FunData, mangled: str) -> Result<Lowered
 }
 
 // The IR of a lambda's body, lifted into `job.lifted` (MYLA-106): called with
-// its environment as the word after the result's address, then its
-// arguments. Each capture is copied out of the environment into a slot of its
+// the result's address (if any) and its arguments, its environment a hidden
+// parameter outside the argument words (`ENV_WORD`, D119). Each capture is copied out of the environment into a slot of its
 // own at entry, borrowed as a parameter is (captures are immutable, D48).
 pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     let ret = opt_subst_type(tfunc_ret(job.ftype), cg.subst)
@@ -217,7 +217,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
     }
     let entry = lw.new_block()
     lw.start(entry)
-    let env = lw.new_slot("__env", Type.TInt(64, false), 8, first_word, false)
+    let env = lw.new_slot("__env", Type.TInt(64, false), 8, ENV_WORD, false)
     if frame { lw.f.slots[env].inline = true }
     let ptypes = tfunc_params(job.ftype)
     var i = 0
@@ -227,7 +227,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
         if frame {
             var psize = 8
             if is_aggregate(t) { psize = cg.size(t) }
-            let ps = lw.new_slot(job.params[i].name, t, psize, first_word + 1 + i, cg.owns_heap(t))
+            let ps = lw.new_slot(job.params[i].name, t, psize, first_word + i, cg.owns_heap(t))
             lw.f.slots[ps].inline = true
             lw.declare_as(job.params[i].name, ps, true)
             lw.own(ps)
@@ -235,7 +235,7 @@ pub fun lower_lambda(cg: CodeGen, job: LamJob) -> Result<Lowered, str> {
             i = i + 1
             continue
         }
-        let s = lw.new_slot(job.params[i].name, t, 8, first_word + 1 + i, false)
+        let s = lw.new_slot(job.params[i].name, t, 8, first_word + i, false)
         lw.declare_as(job.params[i].name, s, true)
         lw.add(Inst.Bind(job.params[i].name, s))
         i = i + 1

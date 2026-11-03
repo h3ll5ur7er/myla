@@ -11,8 +11,8 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, ret_popping, is_aggregate, is_actor_t, is_tfloat32
-from .ir import IrFunc, Inst, Term, Touches, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word
+from .ir import IrFunc, Inst, Term, Touches, ENV_WORD, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
 impl CodeGen {
@@ -63,18 +63,20 @@ impl CodeGen {
         let saves = cursor
         cursor = cursor + 8 * self.saved_regs.len()
         // what a tail call needs (MYLA-126): the argument words the caller
-        // pushed, where the saved registers are, and (worked out for the
-        // first candidate) the temporaries holding an address in this frame
+        // pushed on the stack (D119), where the saved registers are, and
+        // (worked out for the first candidate) the temporaries holding an
+        // address in this frame
         var words = 0
         for s in f.slots {
             // a parameter passed by value takes as many words as it has (D88)
             if s.word >= 0 && s.word + s.size / 8 > words { words = s.word + s.size / 8 }
         }
-        // a frame function's one argument is its frame
+        // a frame function's one argument is its frame, in %rdi
         if f.frame { words = 1 }
         var in_frame: [bool] = []
         self.save_base = saves
-        self.arg_words = words
+        self.arg_words = 0
+        if words > REG_WORDS { self.arg_words = words - REG_WORDS }
         let temp_base = 0
         let frame = (cursor + 15) / 16 * 16
         self.epilogue = format(".Lret_{}", mangled)
@@ -96,14 +98,10 @@ impl CodeGen {
             self.emit(format("movq %{}, {}(%rbp)", self.saved_regs[r], -saves - 8 * (r + 1)))
             r = r + 1
         }
-        var si = 0
-        while si < f.slots.len() {
-            if f.slots[si].word >= 0 && self.slot_reg[si] != "" { self.emit(format("movq {}(%rbp), %{}", slot_off[si], self.slot_reg[si])) }
-            si = si + 1
-        }
+        if !f.frame { self.emit_params(f, slot_off) }
         if f.frame {
             // the frame, and the point it resumes at (state 0: the start)
-            self.emit("movq 16(%rbp), %r15")
+            self.emit("movq %rdi, %r15")
             if self.resume_blocks.len() > 0 {
                 self.emit("movq 16(%r15), %rax")
                 var ri = 0
@@ -144,6 +142,7 @@ impl CodeGen {
             else {
                 if !self.debug && !f.frame { tail = tail_call_at(insts, f.blocks[b].term) }
                 if tail >= 0 && !drops_after_free(f, insts, tail) { tail = -1 }
+                if tail >= 0 && stack_words(insts[tail]) > self.arg_words { tail = -1 }
                 if tail >= 0 {
                     if in_frame.len() == 0 { in_frame = frame_addresses(f) }
                     if passes_frame_address(insts[tail], in_frame) { tail = -1 }
@@ -187,14 +186,126 @@ impl CodeGen {
         self.emit(format("{}:", self.epilogue))
         self.restore_regs()
         self.emit("leave")
-        // the callee pops the argument words its caller pushed (MYLA-126)
-        self.emit(ret_popping(words))
+        // the caller pops the argument words it pushed (D119)
+        self.emit("ret")
         self.end_loc()
         self.dbg_pop_scope()
         self.dbg_end_function()
         self.emit("")
         if f.frame { self.emit_frame_new(f, mangled, slot_off) }
         self.in_frame = false
+    }
+
+    // The parameters into their homes (D119): the words that came in
+    // registers (and a lambda's environment, in %r10) stored into their
+    // frame cells, those living in registers moved there all at once, then
+    // the registers of those that came on the stack loaded.
+    fun emit_params(var self, f: IrFunc, slot_off: [int32]) {
+        var dst: [str] = []
+        var src: [str] = []
+        var si = 0
+        while si < f.slots.len() {
+            let s = f.slots[si]
+            if s.word == ENV_WORD || (s.word >= 0 && s.word < REG_WORDS) {
+                var source = "%r10"
+                if s.word >= 0 { source = "%" + arg_reg(s.word) }
+                if self.slot_reg[si] != "" {
+                    dst.push("%" + self.slot_reg[si])
+                    src.push(source)
+                } else if s.inline {
+                    // passed by value (D88): each word into its cell, one
+                    // past the registers from the stack
+                    var k = 0
+                    while k < s.size / 8 {
+                        let w = s.word + k
+                        if w < REG_WORDS { self.emit(format("movq %{}, {}(%rbp)", arg_reg(w), slot_off[si] + 8 * k)) }
+                        else {
+                            self.emit(format("movq {}, %rax", spilled_word(w)))
+                            self.emit(format("movq %rax, {}(%rbp)", slot_off[si] + 8 * k))
+                        }
+                        k = k + 1
+                    }
+                } else { self.emit(format("movq {}, {}(%rbp)", source, slot_off[si])) }
+            }
+            si = si + 1
+        }
+        self.emit_moves(dst, src)
+        si = 0
+        while si < f.slots.len() {
+            if f.slots[si].word >= REG_WORDS && self.slot_reg[si] != "" { self.emit(format("movq {}(%rbp), %{}", slot_off[si], self.slot_reg[si])) }
+            si = si + 1
+        }
+    }
+
+    // The register moves `src[i]` into `dst[i]`, as if all at once: a move
+    // whose destination no other move still reads goes first; in a cycle,
+    // a destination's value is saved in %rax and read from there.
+    fun emit_moves(var self, dst: [str], src: [str]) {
+        var source = src
+        var done: [bool] = []
+        var left = 0
+        var i = 0
+        while i < dst.len() {
+            done.push(dst[i] == source[i])
+            if !done[i] { left = left + 1 }
+            i = i + 1
+        }
+        while left > 0 {
+            var moved = false
+            i = 0
+            while i < dst.len() {
+                if !done[i] {
+                    var read = false
+                    var j = 0
+                    while j < dst.len() {
+                        if !done[j] && j != i && source[j] == dst[i] { read = true }
+                        j = j + 1
+                    }
+                    if !read {
+                        self.emit(format("movq {}, {}", source[i], dst[i]))
+                        done[i] = true
+                        left = left - 1
+                        moved = true
+                    }
+                }
+                i = i + 1
+            }
+            if !moved {
+                i = 0
+                while done[i] { i = i + 1 }
+                self.emit(format("movq {}, %rax", dst[i]))
+                var j = 0
+                while j < dst.len() {
+                    if !done[j] && source[j] == dst[i] { source[j] = "%rax" }
+                    j = j + 1
+                }
+            }
+        }
+    }
+
+    // A call's argument words `ws` (D119): the first `REG_WORDS` into their
+    // registers, the rest pushed, the last first; how many were pushed,
+    // which the caller pops after the call. Nothing an argument is read
+    // from lives in an argument register (a value living across a call is
+    // in a callee-saved one), so the registers are loaded in turn.
+    fun pass_words(var self, ws: [int32], temp_base: int32) -> int32 {
+        var i = ws.len() - 1
+        while i >= REG_WORDS {
+            self.push_temp(ws[i], temp_base)
+            i = i - 1
+        }
+        i = 0
+        while i < ws.len() && i < REG_WORDS {
+            self.load_temp(ws[i], arg_reg(i), temp_base)
+            i = i + 1
+        }
+        if ws.len() > REG_WORDS { return ws.len() - REG_WORDS }
+        return 0
+    }
+
+    // The `n` argument words a call pushed, popped.
+    fun pop_words(var self, n: int32) {
+        if n > 0 { self.emit(format("addq ${}, %rsp", 8 * n)) }
     }
 
     // -- async functions' frames (D90) -------------------------------------
@@ -215,16 +326,16 @@ impl CodeGen {
     // `myla_<f>__new(args…)`: a new heap frame for the frame function `f`
     // (`[resume fn][caller][state][task]`, then the slots, zeroed), each
     // argument copied into its parameter's slot with references of its own
-    // (an aggregate from the address passed); the frame in %rax.
+    // (an aggregate from the address passed; a lambda's environment from
+    // %r10); the frame in %rax. The argument registers are kept below the
+    // frame base across the allocation.
     fun emit_frame_new(var self, f: IrFunc, mangled: str, slot_off: [int32]) {
         let size = frame_size(f)
-        var words = 0
-        for s in f.slots { if s.word >= 0 && s.word + 1 > words { words = s.word + 1 } }
         self.emit(format("myla_{}__new:", mangled))
         self.emit("pushq %rbp")
         self.emit("movq %rsp, %rbp")
+        self.spill_args()
         self.emit("pushq %rbx")
-        self.emit("subq $8, %rsp")
         self.emit(format("movq ${}, %rdi", size))
         self.emit("call __alloc")
         self.emit("movq %rax, %rbx")
@@ -237,9 +348,11 @@ impl CodeGen {
         var i = 0
         while i < f.slots.len() {
             let s = f.slots[i]
-            if s.word >= 0 {
+            if s.word >= 0 || s.word == ENV_WORD {
+                var at = "-56(%rbp)"
+                if s.word >= 0 { at = spilled_word(s.word) }
                 if is_aggregate(s.ty) {
-                    self.emit(format("movq {}(%rbp), %rsi", 16 + 8 * s.word))
+                    self.emit(format("movq {}, %rsi", at))
                     var w = 0
                     while w < s.size {
                         self.emit(format("movq {}(%rsi), %rax", w))
@@ -247,12 +360,12 @@ impl CodeGen {
                         w = w + 8
                     }
                 } else {
-                    self.emit(format("movq {}(%rbp), %rax", 16 + 8 * s.word))
+                    self.emit(format("movq {}, %rax", at))
                     self.emit(format("movq %rax, {}(%rbx)", slot_off[i]))
                 }
                 if self.owns_heap(s.ty) { self.retain("rbx", slot_off[i], s.ty) }
                 // a lambda's environment, held until its captures are copied
-                if s.name == "__env" {
+                if s.word == ENV_WORD {
                     self.emit(format("movq {}(%rbx), %rdi", slot_off[i]))
                     self.emit("call __func_retain")
                 }
@@ -260,9 +373,9 @@ impl CodeGen {
             i = i + 1
         }
         self.emit("movq %rbx, %rax")
-        self.emit("movq -8(%rbp), %rbx")
+        self.emit("movq -64(%rbp), %rbx")
         self.emit("leave")
-        self.emit(ret_popping(words))
+        self.emit("ret")
         self.emit("")
     }
 
@@ -425,49 +538,33 @@ impl CodeGen {
                 self.store_temp(d, temp_base)
             },
             Inst.Call(d, name, args) => {
-                // the first argument at the lowest address: push the last first
-                var i = args.len() - 1
-                while i >= 0 {
-                    self.push_temp(args[i], temp_base)
-                    i = i - 1
-                }
+                let n = self.pass_words(args, temp_base)
                 self.emit(format("call myla_{}", name))
+                self.pop_words(n)
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
             Inst.CallSret(name, r, args) => {
-                // the result's address is the first word, below the arguments
-                var i = args.len() - 1
-                while i >= 0 {
-                    self.push_temp(args[i], temp_base)
-                    i = i - 1
-                }
-                self.push_temp(r, temp_base)
+                // the result's address is the first word (%rdi)
+                let n = self.pass_words(sret_words(r, args), temp_base)
                 self.emit(format("call myla_{}", name))
+                self.pop_words(n)
             },
             Inst.Label(d, sym) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.CallInd(d, fv, args) => {
-                // the arguments, then the environment, then the call
-                var i = args.len() - 1
-                while i >= 0 {
-                    self.push_temp(args[i], temp_base)
-                    i = i - 1
-                }
+                // the arguments, the environment in %r10, then the call
+                let n = self.pass_words(args, temp_base)
                 self.load_temp(fv, "rax", temp_base)
-                self.emit("pushq 8(%rax)")
+                self.emit("movq 8(%rax), %r10")
                 self.emit("call *(%rax)")
+                self.pop_words(n)
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
             Inst.CallIndSret(fv, r, args) => {
-                var i = args.len() - 1
-                while i >= 0 {
-                    self.push_temp(args[i], temp_base)
-                    i = i - 1
-                }
+                let n = self.pass_words(sret_words(r, args), temp_base)
                 self.load_temp(fv, "rax", temp_base)
-                self.emit("pushq 8(%rax)")
-                self.load_temp(r, "rcx", temp_base)
-                self.emit("pushq %rcx")
+                self.emit("movq 8(%rax), %r10")
                 self.emit("call *(%rax)")
+                self.pop_words(n)
             },
             Inst.Rt(d, name, args) => {
                 // std.math's primitives inline (MYLA-249): no call
@@ -709,109 +806,70 @@ impl CodeGen {
     }
 
     // The call `c`, whose result the function returns at once, as a jump
-    // reusing this frame (MYLA-126; `become`'s, D87): its words pushed as
-    // `emit_inst` pushes them (the arguments last first, then a function
-    // value's environment, then an aggregate result's address), a function
-    // value's code in %rcx, which the handover leaves alone.
+    // reusing this frame (MYLA-126; `become`'s, D87): its words passed as
+    // a call passes them (D119), those on the stack moved into the words
+    // this function received there (its caller pops them; never more of
+    // them, `tail_fits`), a function value's environment in %r10 and its
+    // code in %r11, the saved registers restored, the frame left, and the
+    // callee jumped to.
     fun emit_tail_call(var self, c: Inst, temp_base: int32) {
         var target = ""
-        var words: [int32] = []
+        var ws: [int32] = []
         var fv = -1
-        var r = -1
         match c {
             Inst.Call(d, name, args) => {
-                words = args
+                ws = args
                 target = format("myla_{}", name)
             },
             Inst.CallSret(name, res, args) => {
-                words = args
-                r = res
+                ws = sret_words(res, args)
                 target = format("myla_{}", name)
             },
             Inst.CallInd(d, f, args) => {
-                words = args
+                ws = args
                 fv = f
-                target = "*%rcx"
+                target = "*%r11"
             },
             Inst.CallIndSret(f, res, args) => {
-                words = args
+                ws = sret_words(res, args)
                 fv = f
-                r = res
-                target = "*%rcx"
+                target = "*%r11"
             },
             _ => { return },
         }
-        // the words, the lowest first (-1: the environment); one already
-        // where it goes, a parameter passed on in its place, stays there
-        var temps: [int32] = []
-        if r >= 0 { temps.push(r) }
-        if fv >= 0 { temps.push(-1) }
-        for a in words { temps.push(a) }
-        let m = temps.len()
-        let first = 16 + 8 * (self.arg_words - m)
+        let m = ws.len() - REG_WORDS
+        if m > self.arg_words { panic(format("internal error: a tail call with {} argument words on the stack in a function that received {}", m, self.arg_words)) }
+        // the stack words, pushed the last first (but one already where it
+        // goes, a parameter passed on in its place); the registers loaded
+        // before anything is written over the words received
         var in_place: [bool] = []
         var k = 0
         while k < m {
-            in_place.push(m <= self.arg_words && temps[k] >= 0 && self.temp_src[temps[k]] == format("{}(%rbp)", first + 8 * k))
+            in_place.push(self.temp_src[ws[REG_WORDS + k]] == format("{}(%rbp)", 16 + 8 * k))
             k = k + 1
         }
         var i = m - 1
         while i >= 0 {
-            if !in_place[i] {
-                if temps[i] >= 0 { self.push_temp(temps[i], temp_base) }
-                else {
-                    self.load_temp(fv, "rax", temp_base)
-                    self.emit("pushq 8(%rax)")
-                }
-            }
+            if !in_place[i] { self.push_temp(ws[REG_WORDS + i], temp_base) }
             i = i - 1
+        }
+        i = 0
+        while i < ws.len() && i < REG_WORDS {
+            self.load_temp(ws[i], arg_reg(i), temp_base)
+            i = i + 1
         }
         if fv >= 0 {
             self.load_temp(fv, "rax", temp_base)
-            self.emit("movq (%rax), %rcx")
+            self.emit("movq 8(%rax), %r10")
+            self.emit("movq (%rax), %r11")
         }
-        self.emit_frame_handover(m, in_place, target)
-    }
-
-    // The m words just pushed (but those `in_place` already) in place of the
-    // function's own, and a jump to `target` (MYLA-126). The callee pops its words and the caller expects
-    // the n words it pushed popped, so the callee's m words go to the top of
-    // those words and the return address right below them: the saved
-    // registers restored, the words copied up (popped while they move into
-    // the argument words, copied from the top down when there are more, as
-    // they may then overlap where they were pushed), the return address and
-    // the caller's %rbp put in place, and the callee jumped to.
-    fun emit_frame_handover(var self, m: int32, in_place: [bool], target: str) {
-        let n = self.arg_words
+        i = 0
+        while i < m {
+            if !in_place[i] { self.emit(format("popq {}(%rbp)", 16 + 8 * i)) }
+            i = i + 1
+        }
         self.restore_regs()
-        let first = 16 + 8 * (n - m)
-        var i = 0
-        if m <= n {
-            while i < m {
-                if !in_place[i] { self.emit(format("popq {}(%rbp)", first + 8 * i)) }
-                i = i + 1
-            }
-            if m < n {
-                self.emit("movq 8(%rbp), %rax")
-                self.emit(format("movq %rax, {}(%rbp)", first - 8))
-                self.emit("movq 0(%rbp), %rax")
-                self.emit(format("movq %rax, {}(%rbp)", first - 16))
-                self.emit(format("leaq {}(%rbp), %rsp", first - 16))
-                self.emit("popq %rbp")
-            } else { self.emit("leave") }
-        } else {
-            self.emit("movq 8(%rbp), %r10")
-            self.emit("movq 0(%rbp), %r11")
-            i = m - 1
-            while i >= 0 {
-                self.emit(format("movq {}(%rsp), %rax", 8 * i))
-                self.emit(format("movq %rax, {}(%rbp)", first + 8 * i))
-                i = i - 1
-            }
-            self.emit(format("movq %r10, {}(%rbp)", first - 8))
-            self.emit(format("leaq {}(%rbp), %rsp", first - 8))
-            self.emit("movq %r11, %rbp")
-        }
+        self.emit("leave")
         self.emit(format("jmp {}", target))
     }
 
@@ -1917,7 +1975,7 @@ fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
                         if d == t {
                             found = true
                             if contains_int(dropped, s) { return false }
-                            if !f.slots[s].owns && f.slots[s].word < 0 {
+                            if !f.slots[s].owns && f.slots[s].word == -1 {
                                 let src = filled_from(insts, k, s)
                                 if src.len() == 0 { return false }
                                 for u in src { work.push(u) }
@@ -1928,7 +1986,7 @@ fun drops_after_free(f: IrFunc, insts: [Inst], at: int32) -> bool {
                         if d == t {
                             found = true
                             if contains_int(dropped, s) { return false }
-                            if !f.slots[s].owns && f.slots[s].word < 0 {
+                            if !f.slots[s].owns && f.slots[s].word == -1 {
                                 let src = filled_from(insts, k, s)
                                 if src.len() == 0 { return false }
                                 for u in src { work.push(u) }
@@ -2241,12 +2299,13 @@ fun frame_size(f: IrFunc) -> int32 {
 // inner scope, one after the other; then each inner scope's locals, after
 // those of the scopes around it, so the locals of two scopes that are never
 // open at once (two blocks, two match arms) share cells. With `words`, a
-// slot passed in argument words (`word` >= 0) takes no room here (-1).
+// parameter that came on the stack (D119) takes no room here (-1); one that
+// came in registers has a cell, as a local has.
 fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
     var pos: [int32] = []
     var cursor = 0
     for s in f.slots {
-        if (words && s.word >= 0) || s.scope > 0 { pos.push(-1) } else {
+        if (words && s.word >= REG_WORDS) || s.scope > 0 { pos.push(-1) } else {
             pos.push(cursor)
             cursor = cursor + (s.size + 7) / 8 * 8
         }
@@ -2259,7 +2318,7 @@ fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
         i = i + 1
     }
     for s in f.slots {
-        if s.scope > 0 && !(words && s.word >= 0) { own[s.scope] = own[s.scope] + (s.size + 7) / 8 * 8 }
+        if s.scope > 0 && !(words && s.word >= REG_WORDS) { own[s.scope] = own[s.scope] + (s.size + 7) / 8 * 8 }
     }
     // a scope's area starts where its parent's locals end (a scope's index
     // is greater than its parent's)
@@ -2278,7 +2337,7 @@ fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
     var k = 0
     while k < f.slots.len() {
         let s = f.slots[k]
-        if s.scope > 0 && !(words && s.word >= 0) {
+        if s.scope > 0 && !(words && s.word >= REG_WORDS) {
             pos[k] = fill[s.scope]
             fill[s.scope] = fill[s.scope] + (s.size + 7) / 8 * 8
         }
@@ -2295,17 +2354,37 @@ fun slot_positions(f: IrFunc, words: bool) -> ([int32], int32) {
 // follows.
 const FRAME_HEADER: int32 = 72
 
-// The frame offset of each slot of `f`: an argument word above %rbp, the
-// others below the first `below` bytes.
+// The frame offset of each slot of `f`: a parameter that came on the stack
+// above %rbp (D119), the others below the first `below` bytes.
 fun layout_slots(f: IrFunc, below: int32) -> [int32] {
     let (pos, extent) = slot_positions(f, true)
     var off: [int32] = []
     var k = 0
     while k < f.slots.len() {
         let s = f.slots[k]
-        if s.word >= 0 { off.push(16 + 8 * s.word) } else { off.push(-(below + pos[k] + (s.size + 7) / 8 * 8)) }
+        if s.word >= REG_WORDS { off.push(16 + 8 * (s.word - REG_WORDS)) } else { off.push(-(below + pos[k] + (s.size + 7) / 8 * 8)) }
         k = k + 1
     }
     return off
 }
 
+// A call's argument words with an aggregate result's address first.
+#test(4, [5, 6])[[4, 5, 6]]
+fun sret_words(r: int32, args: [int32]) -> [int32] {
+    var ws = [r]
+    for a in args { ws.push(a) }
+    return ws
+}
+
+// How many argument words the call `c` passes on the stack (D119).
+fun stack_words(c: Inst) -> int32 {
+    let n = match c {
+        Inst.Call(d, name, args) => args.len(),
+        Inst.CallSret(name, r, args) => args.len() + 1,
+        Inst.CallInd(d, fv, args) => args.len(),
+        Inst.CallIndSret(fv, r, args) => args.len() + 1,
+        _ => 0,
+    }
+    if n > REG_WORDS { return n - REG_WORDS }
+    return 0
+}

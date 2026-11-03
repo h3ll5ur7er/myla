@@ -118,8 +118,9 @@ class FloatRegisters(unittest.TestCase):
                              check=True).stdout
         body = _function(asm, "inside")
         # operands moved between general-purpose and xmm registers: only for
-        # constants (and none per variable use)
-        crossings = re.findall(r"movq %r\w+, %xmm[0-9]+", body)
+        # constants (and none per variable use); the parameters come in
+        # general-purpose registers (D119, until floats get %xmm0-%xmm7)
+        crossings = re.findall(r"movq %r(?!di|si|dx|cx|8|9)\w+, %xmm[0-9]+", body)
         self.assertLessEqual(len(crossings), 6, "\n".join(crossings))
         homes = re.findall(r"(?:addsd|subsd|mulsd|divsd|ucomisd) %xmm([2-9]|1[0-5]),", body)
         self.assertGreaterEqual(len(homes), 4, body)

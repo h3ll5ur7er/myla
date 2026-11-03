@@ -169,8 +169,10 @@ pub struct IrBlock { insts: [Inst], term: Term }
 
 // A slot: its name (for debug information and the text form), the Myla type
 // of what it holds, its size in bytes, for a parameter the index of its
-// argument word (`16 + 8 * word(%rbp)`, holding the value of a scalar and the
-// address of an aggregate) or -1, whether it owns the heap values it holds
+// argument word (holding the value of a scalar and the address of an
+// aggregate; where each word travels is the backend's calling convention,
+// D119), `ENV_WORD` for a lambda's environment (a hidden parameter outside
+// the argument words) or -1, whether it owns the heap values it holds
 // (a local, an owned temporary: the verifier follows it, MYLA-105), and for
 // an aggregate parameter whether its argument words hold the aggregate itself
 // (`inline`: passed by value, D88) instead of its address.
@@ -179,6 +181,9 @@ pub struct IrBlock { insts: [Inst], term: Term }
 // can share a frame cell (MYLA-183); -1 for a slot that isn't a local of one
 // scope (a temporary, or declared in two), which keeps a cell of its own.
 pub struct Slot { name: str, ty: Type, size: int32, word: int32, owns: bool, inline: bool, scope: int32 }
+
+// The `word` of a lambda's environment slot (D119).
+pub const ENV_WORD: int32 = -2
 
 // A generic function's instance a function calls: the generic function and
 // its type arguments, which the code generator then stamps out.

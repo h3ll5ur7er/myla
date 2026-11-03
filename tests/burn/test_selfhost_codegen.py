@@ -718,7 +718,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 fh.write(PLAIN_ENUM_EQ)
             asm = self._emit_asm(path)
         body = function_body(asm, "myla_K.eq")
-        self.assertLess(len(body), 15, "\n".join(body))
+        self.assertLess(len(body), 16, "\n".join(body))
         self.assertGreater(len(function_body(asm, "myla_P.eq")), 15)
 
     def test_corpus_codegen_parity(self) -> None:
@@ -1016,16 +1016,16 @@ class SelfHostedCodegenParity(unittest.TestCase):
             self.assertEqual(self._build_and_run(asm), ("285\n610\n125\n", 0))
         saved = r"%(rbx|r12|r13|r14|r15)"
         scratch = r"%(r8|r9|r10|r11)"
-        # the frame is touched only to save and restore those registers and
-        # to read the parameters into them; a value no call or runtime helper
-        # comes between the uses of lives in %r8-%r11, which need no save
-        # (MYLA-134)
+        # the frame is touched only to save and restore those registers (the
+        # parameters come in registers, D119); a value no call or runtime
+        # helper comes between the uses of lives in %r8-%r11, which need no
+        # save (MYLA-134)
         for name in ("sum_squares", "Acc.run"):
             body = self._function_asm(asm, name)
             frame = [l.strip() for l in body.split("\n") if "(%rbp)" in l]
             for line in frame:
-                self.assertRegex(line, rf"^movq ({saved}, -\d+\(%rbp\)|-?\d+\(%rbp\), ({saved}|{scratch}))$", body)
-            self.assertTrue(frame, body)
+                self.assertRegex(line, rf"^movq ({saved}, -\d+\(%rbp\)|-\d+\(%rbp\), {saved})$", body)
+            self.assertRegex(body, rf"movq %rdi, ({saved}|{scratch})", body)
         squares = self._function_asm(asm, "sum_squares")
         self.assertRegex(squares, scratch)
         self.assertNotRegex(squares, rf"movq {saved}, -\d+\(%rbp\)")
@@ -1225,8 +1225,8 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertIn("jmp myla_Walker.walk", self._function_asm(asm, "Walker.walk"))
         self.assertIn("jmp myla_fib", self._function_asm(asm, "fib"))
         self.assertIn("jmp myla_label", self._function_asm(asm, "label"))
-        self.assertIn("jmp *%rcx", self._function_asm(asm, "spin"))
-        self.assertIn("jmp *%rcx", self._function_asm(asm, "via"))
+        self.assertIn("jmp *%r11", self._function_asm(asm, "spin"))
+        self.assertIn("jmp *%r11", self._function_asm(asm, "via"))
         # the IR's text form: the call, then the terminator
         self.assertRegex(ir, r"call myla_count\(%t\d+, %t\d+\)\n  become\n")
         # MYLA-130: the list `total` passes on is handed over (read before
@@ -1324,7 +1324,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
                 fh.write(source)
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), ("3000000\n11\n42\n", 0))
-        thunks = [line for line in asm.split("\n") if line.startswith("\tjmp myla_hop") or line == "\tjmp *%rcx"]
+        thunks = [line for line in asm.split("\n") if line.startswith("\tjmp myla_hop") or line == "\tjmp *%r11"]
         self.assertGreaterEqual(len(thunks), 2)
         self.assertNotIn("call myla_hop", asm)
 
