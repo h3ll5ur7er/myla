@@ -1863,6 +1863,12 @@ impl CodeGen {
 
     // -- top-level --------------------------------------------------------
 
+    // Whether the allocator is std.rt's (MYLA-162): it is there, and the
+    // program has no tasks, whose workers' heaps the assembly keeps apart.
+    fun rt_alloc(self) -> bool {
+        return !self.frames && self.has_func("std$rt$alloc") && self.has_func("std$rt$free")
+    }
+
     fun generate(var self) -> str {
         let en = self.entry_name()
         self.emit_runtime_prelude(en)
@@ -1872,6 +1878,10 @@ impl CodeGen {
         self.find_kept_params()
         self.find_tag_enums()
         let m = self.request_fn(en, [])
+        if self.rt_alloc() {
+            let a = self.request_fn("std$rt$alloc", [])
+            let fr = self.request_fn("std$rt$free", [])
+        }
         while self.fn_worklist.len() > 0 || self.lam_jobs.len() > 0 {
             if self.fn_worklist.len() > 0 {
                 let job = self.fn_worklist.pop()
@@ -4475,6 +4485,9 @@ impl CodeGen {
         }
         // with tasks, the other workers (D92)
         if self.frames { self.raw("\tcall __start_workers") }
+        // the arena, before anything is allocated, for std.rt's allocator
+        // (which doesn't check on every call, as the assembly's did)
+        if self.rt_alloc() { self.raw("\tcall __heap_init") }
         if self.frames && self.sig_of(entry_name).decl.is_async {
             // the entry's task: its frame queued, the executor run (D90)
             self.raw(format("\tcall myla_{}__new", entry_name))
@@ -5049,102 +5062,109 @@ impl CodeGen {
             self.raw("\tret")
             self.raw("")
         }
-        self.raw("__alloc:")
-        self.raw("\taddq $7, %rdi")
-        self.raw("\tandq $-8, %rdi")
-        self.raw(format("\tmovq {}, %rax", self.tv("__heap_end")))
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjnz .Lalloc_ready")
-        self.raw("\tcall __heap_init")
-        self.raw(".Lalloc_ready:")
-        self.raw("\tcmpq $4096, %rdi")
-        self.raw("\tja .Lalloc_large")
-        self.tls_addr("__free_buckets", 0, "r8")
-        self.raw("\tmovq (%r8,%rdi), %rsi")
-        self.raw("\ttestq %rsi, %rsi")
-        self.raw("\tjz .Lalloc_bump")
-        self.raw("\tmovq (%rsi), %rax")
-        self.raw("\tmovq %rax, (%r8,%rdi)")
-        self.raw("\tmovq $1, -8(%rsi)")
-        self.raw("\tmovq %rsi, %rax")
-        self.raw("\tret")
-        self.raw(".Lalloc_large:")
-        self.raw("\tleaq -1(%rdi), %rcx")
-        self.raw("\tbsrq %rcx, %rcx")
-        self.raw("\taddq $1, %rcx")
-        self.raw("\tmovq $1, %rdi")
-        self.raw("\tshlq %cl, %rdi")
-        self.tls_addr("__free_buckets", 4104, "r8")
-        self.raw("\tmovq (%r8,%rcx,8), %rsi")
-        self.raw("\ttestq %rsi, %rsi")
-        self.raw("\tjz .Lalloc_bump")
-        self.raw("\tmovq (%rsi), %rax")
-        self.raw("\tmovq %rax, (%r8,%rcx,8)")
-        self.raw("\tmovq $1, -8(%rsi)")
-        self.raw("\tmovq %rsi, %rax")
-        self.raw("\tret")
-        self.raw(".Lalloc_bump:")
-        if self.frames {
-            // cells other workers freed come back first
-            self.raw(format("\tcmpq $0, {}", self.tv("__remote_free")))
-            self.raw("\tjne .Lalloc_drain")
-        }
-        self.raw(format("\tmovq {}, %rax", self.tv("__heap_ptr")))
-        self.raw("\tleaq 16(%rax,%rdi), %rcx")
-        self.raw(format("\tcmpq {}, %rcx", self.tv("__heap_end")))
-        self.raw("\tja __trap_oom")
-        self.raw(format("\tmovq %rcx, {}", self.tv("__heap_ptr")))
-        self.raw("\tmovq %rdi, (%rax)")
-        self.raw("\tmovq $1, 8(%rax)")
-        self.raw("\tleaq 16(%rax), %rax")
-        self.raw("\tret")
-        self.raw("")
-        // __free clobbers only %rax: drop sequences walk aggregates through
-        // other caller-saved registers across calls that end in __free.
-        self.raw("__free:")
-        self.raw("\tpushq %rsi")
-        self.raw("\tpushq %r8")
-        self.raw("\tpushq %rcx")
-        if self.frames {
-            // another worker's cell goes back to it (D92)
-            self.raw("\tmovq %rdi, %rax")
-            self.raw("\tsubq __heap_base(%rip), %rax")
-            self.raw("\tshrq $32, %rax")
-            self.raw(format("\tcmpq {}, %rax", self.tv("__worker_id")))
-            self.raw("\tjne .Lfree_remote")
-        }
-        self.raw("\tmovq -16(%rdi), %rsi")
-        self.raw("\tcmpq $4096, %rsi")
-        self.raw("\tja .Lfree_large")
-        self.tls_addr("__free_buckets", 0, "r8")
-        self.raw("\tmovq (%r8,%rsi), %rax")
-        self.raw("\tmovq %rax, (%rdi)")
-        self.raw("\tmovq %rdi, (%r8,%rsi)")
-        self.raw("\tjmp .Lfree_done")
-        self.raw(".Lfree_large:")
-        self.raw("\tbsrq %rsi, %rcx")
-        self.tls_addr("__free_buckets", 4104, "r8")
-        self.raw("\tmovq (%r8,%rcx,8), %rax")
-        self.raw("\tmovq %rax, (%rdi)")
-        self.raw("\tmovq %rdi, (%r8,%rcx,8)")
-        if self.frames {
-            self.raw("\tjmp .Lfree_done")
-            // pushed onto the owner's list of cells freed elsewhere
-            self.raw(".Lfree_remote:")
-            self.raw(format("\timulq ${}, %rax", TLS_SIZE))
-            self.raw("\tleaq __tls_blocks(%rip), %rcx")
-            self.raw(format("\tleaq {}(%rcx,%rax), %r8", tls_offset("__remote_free")))
-            self.raw(".Lfree_retry:")
-            self.raw("\tmovq (%r8), %rax")
+        // the allocator in std.rt, without tasks (MYLA-162): the names
+        // the rest of the runtime calls stand for its functions
+        if self.rt_alloc() {
+            self.raw("\t.set __alloc, myla_std$rt$alloc")
+            self.raw("\t.set __free, myla_std$rt$free")
+        } else {
+            self.raw("__alloc:")
+            self.raw("\taddq $7, %rdi")
+            self.raw("\tandq $-8, %rdi")
+            self.raw(format("\tmovq {}, %rax", self.tv("__heap_end")))
+            self.raw("\ttestq %rax, %rax")
+            self.raw("\tjnz .Lalloc_ready")
+            self.raw("\tcall __heap_init")
+            self.raw(".Lalloc_ready:")
+            self.raw("\tcmpq $4096, %rdi")
+            self.raw("\tja .Lalloc_large")
+            self.tls_addr("__free_buckets", 0, "r8")
+            self.raw("\tmovq (%r8,%rdi), %rsi")
+            self.raw("\ttestq %rsi, %rsi")
+            self.raw("\tjz .Lalloc_bump")
+            self.raw("\tmovq (%rsi), %rax")
+            self.raw("\tmovq %rax, (%r8,%rdi)")
+            self.raw("\tmovq $1, -8(%rsi)")
+            self.raw("\tmovq %rsi, %rax")
+            self.raw("\tret")
+            self.raw(".Lalloc_large:")
+            self.raw("\tleaq -1(%rdi), %rcx")
+            self.raw("\tbsrq %rcx, %rcx")
+            self.raw("\taddq $1, %rcx")
+            self.raw("\tmovq $1, %rdi")
+            self.raw("\tshlq %cl, %rdi")
+            self.tls_addr("__free_buckets", 4104, "r8")
+            self.raw("\tmovq (%r8,%rcx,8), %rsi")
+            self.raw("\ttestq %rsi, %rsi")
+            self.raw("\tjz .Lalloc_bump")
+            self.raw("\tmovq (%rsi), %rax")
+            self.raw("\tmovq %rax, (%r8,%rcx,8)")
+            self.raw("\tmovq $1, -8(%rsi)")
+            self.raw("\tmovq %rsi, %rax")
+            self.raw("\tret")
+            self.raw(".Lalloc_bump:")
+            if self.frames {
+                // cells other workers freed come back first
+                self.raw(format("\tcmpq $0, {}", self.tv("__remote_free")))
+                self.raw("\tjne .Lalloc_drain")
+            }
+            self.raw(format("\tmovq {}, %rax", self.tv("__heap_ptr")))
+            self.raw("\tleaq 16(%rax,%rdi), %rcx")
+            self.raw(format("\tcmpq {}, %rcx", self.tv("__heap_end")))
+            self.raw("\tja __trap_oom")
+            self.raw(format("\tmovq %rcx, {}", self.tv("__heap_ptr")))
+            self.raw("\tmovq %rdi, (%rax)")
+            self.raw("\tmovq $1, 8(%rax)")
+            self.raw("\tleaq 16(%rax), %rax")
+            self.raw("\tret")
+            self.raw("")
+            // __free (like __alloc) follows the C convention: no caller keeps a
+            // value in a caller-saved register across it (MYLA-162 checked).
+            self.raw("__free:")
+            self.raw("\tpushq %rsi")
+            self.raw("\tpushq %r8")
+            self.raw("\tpushq %rcx")
+            if self.frames {
+                // another worker's cell goes back to it (D92)
+                self.raw("\tmovq %rdi, %rax")
+                self.raw("\tsubq __heap_base(%rip), %rax")
+                self.raw("\tshrq $32, %rax")
+                self.raw(format("\tcmpq {}, %rax", self.tv("__worker_id")))
+                self.raw("\tjne .Lfree_remote")
+            }
+            self.raw("\tmovq -16(%rdi), %rsi")
+            self.raw("\tcmpq $4096, %rsi")
+            self.raw("\tja .Lfree_large")
+            self.tls_addr("__free_buckets", 0, "r8")
+            self.raw("\tmovq (%r8,%rsi), %rax")
             self.raw("\tmovq %rax, (%rdi)")
-            self.raw("\tlock cmpxchgq %rdi, (%r8)")
-            self.raw("\tjne .Lfree_retry")
+            self.raw("\tmovq %rdi, (%r8,%rsi)")
+            self.raw("\tjmp .Lfree_done")
+            self.raw(".Lfree_large:")
+            self.raw("\tbsrq %rsi, %rcx")
+            self.tls_addr("__free_buckets", 4104, "r8")
+            self.raw("\tmovq (%r8,%rcx,8), %rax")
+            self.raw("\tmovq %rax, (%rdi)")
+            self.raw("\tmovq %rdi, (%r8,%rcx,8)")
+            if self.frames {
+                self.raw("\tjmp .Lfree_done")
+                // pushed onto the owner's list of cells freed elsewhere
+                self.raw(".Lfree_remote:")
+                self.raw(format("\timulq ${}, %rax", TLS_SIZE))
+                self.raw("\tleaq __tls_blocks(%rip), %rcx")
+                self.raw(format("\tleaq {}(%rcx,%rax), %r8", tls_offset("__remote_free")))
+                self.raw(".Lfree_retry:")
+                self.raw("\tmovq (%r8), %rax")
+                self.raw("\tmovq %rax, (%rdi)")
+                self.raw("\tlock cmpxchgq %rdi, (%r8)")
+                self.raw("\tjne .Lfree_retry")
+            }
+            self.raw(".Lfree_done:")
+            self.raw("\tpopq %rcx")
+            self.raw("\tpopq %r8")
+            self.raw("\tpopq %rsi")
+            self.raw("\tret")
         }
-        self.raw(".Lfree_done:")
-        self.raw("\tpopq %rcx")
-        self.raw("\tpopq %r8")
-        self.raw("\tpopq %rsi")
-        self.raw("\tret")
         self.raw("")
         self.raw("__func_retain:")
         self.raw("\ttestq %rdi, %rdi")

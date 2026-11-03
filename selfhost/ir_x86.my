@@ -1330,14 +1330,26 @@ impl CodeGen {
                     Type.TInt(bits, sg) => bits == 64,
                     _ => false,
                 }
-                if op != "+" || !wide || self.temp_uses[t] != 1 { return false }
+                if !(op == "+" || op == "-") || !wide || self.temp_uses[t] != 1 { return false }
+                // `x - k` only with a constant
+                if op == "-" && self.temp_imm[y] == "" { return false }
                 var d = -1
                 var off = 0
                 var width = 0
+                // or the store through it: the value it stores (-1: a load)
+                var sv = -1
                 match b {
                     Inst.LoadAt(d2, q, o, w) => {
                         if q == t {
                             d = d2
+                            off = o
+                            width = w
+                        }
+                    },
+                    Inst.StoreAt(q, o, v2, w) => {
+                        if q == t && v2 != t {
+                            d = 0
+                            sv = v2
                             off = o
                             width = w
                         }
@@ -1352,11 +1364,16 @@ impl CodeGen {
                 if k != "" {
                     var sb = StringBuilder()
                     sb.append(k, 1, k.len())
-                    at = format("{}+{}({})", sb.build(), off, rx)
+                    // `x - k` is `-k+off(x)`, the sign written out
+                    if op == "-" { at = format("{}-({})({})", off, sb.build(), rx) } else { at = format("{}+{}({})", sb.build(), off, rx) }
                 } else {
                     let ry = self.reg_of(y)
                     if ry == "" || text_has_xmm(ry) { return false }
                     at = format("{}({},{})", off, rx, ry)
+                }
+                if sv >= 0 {
+                    self.emit_store(width, f.temps[sv], self.value_operand(sv, temp_base), at)
+                    return true
                 }
                 self.emit_load(width, f.temps[d], at)
                 self.store_temp(d, temp_base)

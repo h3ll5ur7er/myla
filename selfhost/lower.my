@@ -3445,7 +3445,23 @@ impl Lower {
                 return -1
             }
             var vals: [int32] = []
-            for a in args { vals.push(self.expr(cg, a)) }
+            // a store of a literal: the literal first, so the address is
+            // computed right before the store, which can take it as its
+            // addressing mode (MYLA-162)
+            var lit_first = false
+            if (nm == "__store8" || nm == "__store32" || nm == "__store64") && args.len() == 2 {
+                lit_first = match args[1].kind {
+                    ExprKind.IntLit(n, sfx, ch, big) => true,
+                    _ => false,
+                }
+            }
+            if lit_first {
+                let v1 = self.expr(cg, args[1])
+                vals.push(self.expr(cg, args[0]))
+                vals.push(v1)
+            } else {
+                for a in args { vals.push(self.expr(cg, a)) }
+            }
             if nm == "__load8" || nm == "__load32" || nm == "__load64" {
                 let d = self.temp(t)
                 var w = 8

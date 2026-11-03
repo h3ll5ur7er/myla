@@ -898,3 +898,52 @@ pub fun write(fd: int, s: str) {
     let c = __addr_of(s)
     write_all(fd as int64, c + 8, __load64(c))
 }
+
+// --- the allocator -----------------------------------------------------------
+//
+// A cell is `[size:8][count:8]` and then what the program sees, the size a
+// multiple of 8 up to 4 KB and a power of two above. A freed cell goes on
+// the list for its size (its first word the next cell): the small sizes'
+// heads at `__free_buckets + size`, the large ones' at `+ 4104 + 8k` for
+// 2^k bytes. A new one comes off that list, else from the arena between
+// `__heap_ptr` and `__heap_end` (mapped before `main`). Without tasks only:
+// with them each worker's cells go back to it, which the assembly does.
+
+// `__alloc`: a cell of at least `n` bytes, its count 1.
+pub fun alloc(n: int64) -> int64 {
+    var size = (n + 7) & -8
+    var slot = __rt_addr("__free_buckets") + size
+    if size > 4096 {
+        let k = __bsr64(size - 1) + 1
+        size = 1i64 << k
+        slot = __rt_addr("__free_buckets") + 4104 + k * 8
+    }
+    let p = __load64(slot)
+    if p != 0 {
+        __store64(slot, __load64(p))
+        __store64(p - 8, 1)
+        return p
+    }
+    let at = __rt_get("__heap_ptr")
+    let next = at + 16 + size
+    if next <= __rt_get("__heap_end") {
+        __store64(__rt_addr("__heap_ptr"), next)
+        __store64(at, size)
+        __store64(at + 8, 1)
+        return at + 16
+    }
+    // (out of the way of the rest: nothing is live across this call)
+    __trap_oom()
+    return 0
+}
+
+// `__free`: the cell `p` back on the list for its size.
+pub fun free(p: int64) {
+    let size = __load64(p - 16)
+    var slot = __rt_addr("__free_buckets") + size
+    if size > 4096 {
+        slot = __rt_addr("__free_buckets") + 4104 + __bsr64(size) * 8
+    }
+    __store64(p, __load64(slot))
+    __store64(slot, p)
+}
