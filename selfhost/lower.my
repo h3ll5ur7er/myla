@@ -3413,7 +3413,7 @@ impl Lower {
                 self.add(Inst.StoreAt(vals[0], 0, vals[1], w))
                 return -1
             }
-            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" {
+            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" || nm == "__set_run_status" || nm == "__set_run_stderr" {
                 self.add(Inst.Rt(-1, nm, vals))
                 return -1
             }

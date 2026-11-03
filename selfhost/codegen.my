@@ -4810,6 +4810,7 @@ impl CodeGen {
         self.raw("\tmovq %rsi, %rdi")
         self.raw("\tmovq %rdx, %rsi")
         self.raw("\tmovq %rcx, %rdx")
+        self.raw("\txorl %r10d, %r10d")
         self.raw("\tsyscall")
         self.raw("\tret")
         self.raw("")
@@ -4817,6 +4818,20 @@ impl CodeGen {
         // own with tasks)
         self.raw("__set_io_errno:")
         self.raw(format("\tmovq %rdi, {}", self.tv("__io_errno_val")))
+        self.raw("\tret")
+        self.raw("")
+        // __set_run_status(exit, signal, errno), __set_run_stderr(bytes): what
+        // the `__run_*` primitives give after `std.rt`'s `run`; the stderr
+        // list's reference is the variable's, which `__run_stderr` hands over
+        self.raw("__set_run_status:")
+        self.raw(format("\tmovl %edi, {}", self.tv("__run_exit_val")))
+        self.raw(format("\tmovl %esi, {}", self.tv("__run_signal_val")))
+        self.raw(format("\tmovl %edx, {}", self.tv("__run_errno_val")))
+        self.raw("\tret")
+        self.raw("")
+        self.raw("__set_run_stderr:")
+        self.raw("\tincq -8(%rdi)")
+        self.raw(format("\tmovq %rdi, {}", self.tv("__run_stderr_val")))
         self.raw("\tret")
         self.raw("")
         // __environ(): the environment the process started with
