@@ -90,6 +90,39 @@ Every large gap has a cause the profiles and the assembly show, and each has a t
 
 The remaining binary-trees gap (2× C's time at C's instruction count) is memory: 2.6× the first-level cache misses, and 80 MB against 34 MB, from a larger enum cell and the allocator's holding.
 
+## Progress: the first optimisation pass (2026-11-03)
+
+One pass through the findings, against the baseline. `benchmarks/results/2026-11-03-after-pass1.json` holds the full results.
+
+| Benchmark | Baseline | After the pass | Speed-up | Against C with Myla's semantics, before | After |
+|---|---:|---:|---:|---:|---:|
+| fib | 98 ms | 97 ms | 1.02× | 5.02× | 4.68× |
+| ackermann | 498 ms | 473 ms | 1.05× | 9.03× | 8.74× |
+| mandelbrot | 903 ms | 305 ms | **2.96×** | 4.02× | **1.35×** |
+| n-body | 1,326 ms | 212 ms | **6.26×** | 4.17× | 5.35× |
+| sieve | 1,378 ms | 1,468 ms | 0.94× (noise) | 4.93× | 5.28× |
+| fannkuch | 386 ms | 388 ms | 0.99× | 1.44× | 1.45× |
+| game of life | 861 ms | 943 ms | 0.91× (drift) | 2.90× | 3.17× |
+| quicksort | 324 ms | 334 ms | 0.97× | 1.41× | 1.32× |
+| binary trees | 2,041 ms | 2,115 ms | 0.97× | 2.03× | 2.04× |
+| closures | 806 ms | 708 ms | 1.14× | 3.25× | 2.58× |
+| word frequency | 952 ms | 617 ms | **1.54×** | 2.97× | 1.83× |
+| string building | 528 ms | 327 ms | **1.62×** | 1.55× | **0.92×** |
+
+- **Overall:** 1.37× as fast on the geometric mean; against C with Myla's semantics, 3.06× → 2.57×. String building is now faster than the C version.
+- **What did it:**
+  - [[MYLA-248]] `std.math`'s `sqrt` (n-body);
+  - [[MYLA-249]] floats in `%xmm` registers (mandelbrot, and n-body's arithmetic);
+  - [[MYLA-252]] short byte copies without `rep movsb` (the string programs, closures' list copies);
+  - [[MYLA-251]] three peepholes (a few percent in loops).
+
+  n-body's C versions switched to `sqrt` as well, so its column against C moved the other way: the C version gained more from the real square root.
+- **Timings drift between sessions.** Every program runs fewer instructions than in the baseline (0.7 % to 2.3× fewer). Game of Life's apparent slowdown came from the machine: built by each commit's compiler of the pass, the baseline's included, and timed interleaved, all five versions take 890–910 ms. Compare instruction counts across sessions, or time interleaved; a stored timing alone can be off by ±5 %.
+- **Still open:**
+  - [[MYLA-247]] packed list elements, the sieve's memory, left for its own round with a plan;
+  - [[MYLA-250]] arguments in registers, fib and Ackermann, a design for the owner to decide;
+  - the analyses of [[MYLA-251]] (hoisting copy-on-write checks, proving bounds), the sieve, Game of Life, fannkuch.
+
 ## How the first round went
 
 The first round (fib, the sieve, binary trees) checked the method and needed two additions to `run.py`: user and system time and page faults, and names for valgrind's addresses. Instruction counts alone hid both large gaps of the round: the sieve's page faults, and binary trees running C's instruction count in 5.7× C's time. The second turned out to be `rep movsq` copying the three-word `Tree` at every match: a microcoded instruction that starts slowly, and which callgrind counts as one. Copying up to 8 words with moves fixed it ([[MYLA-246]]).

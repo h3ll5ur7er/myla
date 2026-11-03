@@ -73,3 +73,4 @@ Outside the C comparison:
   - clang `-O2` takes 1.13× gcc `-O2`'s time on the same C: LLVM isn't ahead.
   - Each large gap has a cause and a task: floats in general-purpose registers ([[MYLA-249]]), 8-byte list elements ([[MYLA-247]]), arguments on the stack ([[MYLA-250]]), loop overhead the IR can prove away ([[MYLA-251]]), the runtime's string routines ([[MYLA-252]]), and the missing square root ([[MYLA-248]]).
   - Table and details: [[Development/Benchmarks]]. In `review`: the owner decides what follows for D117 (4).
+- **The first optimisation pass (2026-11-03).** The baseline is saved in `benchmarks/results/`, and `run.py --compare` shows progress against it. One pass through the findings: [[MYLA-248]], [[MYLA-249]] and [[MYLA-252]] done, [[MYLA-251]] in part, [[MYLA-247]] and [[MYLA-250]] planned. The result: 1.37× as fast on the geometric mean, 2.57× C with Myla's semantics (was 3.06×), table on [[Development/Benchmarks]].
