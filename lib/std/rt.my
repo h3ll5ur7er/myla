@@ -306,3 +306,176 @@ pub fun getenv(name: str) -> str {
     __set_io_errno(2)
     return ""
 }
+
+// --- processes ---------------------------------------------------------------
+
+const SYS_POLL: int64 = 7
+const SYS_PIPE: int64 = 22
+const SYS_DUP2: int64 = 33
+const SYS_FORK: int64 = 57
+const SYS_EXECVE: int64 = 59
+const SYS_EXIT: int64 = 60
+const SYS_WAIT4: int64 = 61
+const SYS_PIPE2: int64 = 293
+const EINTR: int64 = -4
+const LOW32: int64 = 4294967295i64
+
+// The child's side of `run`, between fork and exec: system calls on numbers
+// the parent prepared, nothing allocated or released. Its stdout and stderr
+// become the pipes' write ends; when the exec fails, its errno goes back
+// through `report` (closed on exec) and the child ends with 127.
+fun exec_child(out_pipe: int64, err_pipe: int64, report: int64, path: int64, argv: int64, scratch: int64) {
+    __syscall(SYS_DUP2, out_pipe >> 32, 1, 0)
+    __syscall(SYS_DUP2, err_pipe >> 32, 2, 0)
+    __syscall(SYS_CLOSE, out_pipe & LOW32, 0, 0)
+    __syscall(SYS_CLOSE, out_pipe >> 32, 0, 0)
+    __syscall(SYS_CLOSE, err_pipe & LOW32, 0, 0)
+    __syscall(SYS_CLOSE, err_pipe >> 32, 0, 0)
+    __syscall(SYS_CLOSE, report & LOW32, 0, 0)
+    let r = __syscall(SYS_EXECVE, path, argv, __environ())
+    __store64(scratch, -r)
+    __syscall(SYS_WRITE, report >> 32, scratch, 4)
+    __syscall(SYS_EXIT, 127, 0, 0)
+}
+
+// A read of up to 4 KB of `fd` into `buf`: the bytes read, 0 for none yet
+// (EINTR), -1 at the end of the file or on an error.
+fun read_some(fd: int64, buf: int64) -> int64 {
+    let got = __syscall(SYS_READ, fd, buf, 4096)
+    if got == EINTR {
+        return 0
+    }
+    if got <= 0 {
+        return -1
+    }
+    return got
+}
+
+// `__run`: runs `program` (its path, not searched for) with the argument
+// vector `argv` and the environment the process started with, reads its
+// stdout and stderr as they come (poll), and waits for it. Gives what it
+// wrote to stdout; `__run_stderr`, `__run_exit_code`, `__run_signal` (a
+// signal that ended it, exit code -1) and `__run_errno` (the errno of a
+// failed spawn) give the rest.
+pub fun run(program: str, argv: [str]) -> [uint8] {
+    var out: [uint8] = []
+    var err: [uint8] = []
+    let path = c_path(program)
+    let n = argv.len() as int64
+    let args = __alloc(n * 8 + 8)
+    var k: int64 = 0
+    for a in argv {
+        __store64(args + k * 8, c_path(a))
+        k += 1
+    }
+    __store64(args + n * 8, 0)
+    // three pipes, a pair of int32 file descriptors each: read end low
+    let pipes = __alloc(24)
+    let buf = __alloc(4096)
+    var errno: int64 = 0
+    var exit_code: int64 = 0
+    var signal: int64 = 0
+    var r = __syscall(SYS_PIPE, pipes, 0, 0)
+    if r >= 0 {
+        r = __syscall(SYS_PIPE, pipes + 8, 0, 0)
+    }
+    if r >= 0 {
+        r = __syscall(SYS_PIPE2, pipes + 16, 524288, 0)  // O_CLOEXEC
+    }
+    var pid: int64 = -1
+    if r >= 0 {
+        pid = __syscall(SYS_FORK, 0, 0, 0)
+        r = pid
+    }
+    if r < 0 {
+        errno = -r
+    } else {
+        let out_pipe = __load64(pipes)
+        let err_pipe = __load64(pipes + 8)
+        let report = __load64(pipes + 16)
+        if pid == 0 {
+            exec_child(out_pipe, err_pipe, report, path, args, buf)
+        }
+        __syscall(SYS_CLOSE, out_pipe >> 32, 0, 0)
+        __syscall(SYS_CLOSE, err_pipe >> 32, 0, 0)
+        __syscall(SYS_CLOSE, report >> 32, 0, 0)
+        var out_fd = out_pipe & LOW32
+        var err_fd = err_pipe & LOW32
+        // the child's errno when the exec failed, nothing when it succeeded
+        if __syscall(SYS_READ, report & LOW32, buf, 4) > 0 {
+            errno = __load64(buf) & LOW32
+            __syscall(SYS_CLOSE, out_fd, 0, 0)
+            __syscall(SYS_CLOSE, err_fd, 0, 0)
+            out_fd = -1
+            err_fd = -1
+        }
+        __syscall(SYS_CLOSE, report & LOW32, 0, 0)
+        // two pollfds {fd: int32, events: int16, revents: int16}, POLLIN
+        let fds = __alloc(16)
+        while out_fd >= 0 || err_fd >= 0 {
+            __store64(fds, (out_fd & LOW32) | (1i64 << 32))
+            __store64(fds + 8, (err_fd & LOW32) | (1i64 << 32))
+            let ready = __syscall(SYS_POLL, fds, 2, -1)
+            if ready == EINTR {
+                continue
+            }
+            if ready < 0 {
+                break
+            }
+            if out_fd >= 0 && (__load64(fds) >> 48) != 0 {
+                let got = read_some(out_fd, buf)
+                if got < 0 {
+                    __syscall(SYS_CLOSE, out_fd, 0, 0)
+                    out_fd = -1
+                }
+                var i: int64 = 0
+                while i < got {
+                    out.push(__load8(buf + i))
+                    i += 1
+                }
+            }
+            if err_fd >= 0 && (__load64(fds + 8) >> 48) != 0 {
+                let got = read_some(err_fd, buf)
+                if got < 0 {
+                    __syscall(SYS_CLOSE, err_fd, 0, 0)
+                    err_fd = -1
+                }
+                var i: int64 = 0
+                while i < got {
+                    err.push(__load8(buf + i))
+                    i += 1
+                }
+            }
+        }
+        if out_fd >= 0 {
+            __syscall(SYS_CLOSE, out_fd, 0, 0)
+        }
+        if err_fd >= 0 {
+            __syscall(SYS_CLOSE, err_fd, 0, 0)
+        }
+        __free(fds)
+        while __syscall(SYS_WAIT4, pid, buf, 0) == EINTR {
+        }
+        if errno == 0 {
+            let status = __load64(buf) & LOW32
+            if (status & 127) != 0 {
+                signal = status & 127
+                exit_code = -1
+            } else {
+                exit_code = (status >> 8) & 255
+            }
+        }
+    }
+    __free(buf)
+    __free(pipes)
+    k = 0
+    while k < n {
+        __free(__load64(args + k * 8))
+        k += 1
+    }
+    __free(args)
+    __free(path)
+    __set_run_status(exit_code, signal, errno)
+    __set_run_stderr(err)
+    return out
+}
