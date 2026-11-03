@@ -2548,7 +2548,9 @@ impl CodeGen {
     // its symbol.
     #test(codegen_on("[int]"), "__heap_end")["__heap_end(%rip)"]
     fun tv(self, sym: str) -> str {
-        if !self.frames { return sym + "(%rip)" }
+        // (a process-wide one, like `__heap_base`, next to %rip with tasks
+        // too: MYLA-162)
+        if !self.frames || tls_offset(sym) == 0 { return sym + "(%rip)" }
         return format("%fs:{}", tls_offset(sym))
     }
 
@@ -8256,7 +8258,7 @@ pub fun tls_offset(sym: str) -> int32 {
     return 0
 }
 
-const TLS_SIZE: int32 = 4800
+pub const TLS_SIZE: int32 = 4800
 
 // The most workers a program runs (D92); each has a 4 GiB arena of the heap
 // region, so a cell's address tells whose heap it is.

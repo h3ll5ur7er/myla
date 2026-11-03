@@ -11,7 +11,7 @@
 
 from .ast import FunData
 from .checker import Type
-from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV, narrow_operand, int_width_cg, tls_offset
+from .codegen import CodeGen, CgBinding, int_signed, takes_operand, is_cmp, fold_load, is_aggregate, is_actor_t, is_tfloat32, REG_WORDS, arg_reg, spilled_word, SPILLED_ENV, narrow_operand, int_width_cg, tls_offset, TLS_SIZE
 from .ir import IrFunc, Inst, Term, Touches, Slot, ENV_WORD, render_func, touches, use_counts, def_counts, inst_uses, term_uses, successors, ends_in_call
 from .ssa import promote, add_ssa_stats
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -728,10 +728,41 @@ impl CodeGen {
                     var sb = StringBuilder()
                     sb.append(name, 10, name.len())
                     let sym = sb.build()
-                    if self.frames {
+                    if self.frames && tls_offset(sym) != 0 {
                         self.emit("movq %fs:0, %rax")
                         self.emit(format("leaq {}(%rax), %rax", tls_offset(sym)))
                     } else { self.emit(format("leaq {}(%rip), %rax", sym)) }
+                    self.store_temp(d, temp_base)
+                    return
+                }
+                // another worker's own of a runtime variable: its block in
+                // `__tls_blocks` (with tasks)
+                if text_starts(name, "__rt_waddr:") {
+                    var sb = StringBuilder()
+                    sb.append(name, 11, name.len())
+                    let sym = sb.build()
+                    self.load_temp(args[0], "rax", temp_base)
+                    self.emit(format("imulq ${}, %rax, %rax", TLS_SIZE))
+                    self.emit("leaq __tls_blocks(%rip), %rcx")
+                    self.emit(format("leaq {}(%rcx,%rax), %rax", tls_offset(sym)))
+                    self.store_temp(d, temp_base)
+                    return
+                }
+                // atomics (MYLA-162), through the scratch registers
+                if name == "__cas64" {
+                    self.load_temp(args[0], "rcx", temp_base)
+                    self.load_temp(args[2], "rdx", temp_base)
+                    self.load_temp(args[1], "rax", temp_base)
+                    self.emit("lock cmpxchgq %rdx, (%rcx)")
+                    self.emit("sete %al")
+                    self.emit("movzbl %al, %eax")
+                    self.store_temp(d, temp_base)
+                    return
+                }
+                if name == "__xchg64" {
+                    self.load_temp(args[0], "rcx", temp_base)
+                    self.load_temp(args[1], "rax", temp_base)
+                    self.emit("xchgq %rax, (%rcx)")
                     self.store_temp(d, temp_base)
                     return
                 }
@@ -2627,7 +2658,7 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Loc(p) => 0,
         Inst.Bind(name, s) => 0,
         Inst.Scope(open) => 0,
-        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__rotl" || name == "__bsr64" || text_starts(name, "__rt_addr:") { 0 } else { 2 },
+        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:") { 0 } else { 2 },
         _ => 2,
     }
 }
@@ -3233,7 +3264,7 @@ fun reads_then_calls(inst: Inst) -> bool {
         Inst.CallSret(name, r, args) => true,
         Inst.CallInd(d, fv, args) => true,
         Inst.CallIndSret(fv, r, args) => true,
-        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__rotl" && name != "__bsr64" && !text_starts(name, "__rt_addr:"),
+        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__rotl" && name != "__bsr64" && name != "__cas64" && name != "__xchg64" && !text_starts(name, "__rt_addr:") && !text_starts(name, "__rt_waddr:"),
         Inst.RtPair(d, d2, name, args) => true,
         _ => false,
     }
