@@ -11,8 +11,8 @@
 // copy and comparison `__copy_bytes` and `__equal_bytes`, which each backend
 // does natively; addresses are `int64`. A string's cell holds its length
 // (8 bytes), then its bytes. `__syscall(n, a, b, c)` makes a system call
-// (Linux's numbers, for now the only platform) and `__set_io_errno` records
-// the errno `std.io` reports.
+// (Linux's numbers, for now the only platform), `__set_io_errno` records
+// the errno `std.io` reports and `__environ()` gives the environment.
 
 // `a + b` (`__str_concat`): a new cell holding both strings' bytes.
 pub fun str_concat(a: str, b: str) -> str {
@@ -274,4 +274,35 @@ pub fun list_dir(path: str) -> str {
     __store64(cell, n)
     __syscall(SYS_CLOSE, fd, 0, 0)
     return __str_of(cell)
+}
+
+// --- the environment ---------------------------------------------------------
+
+// `__getenv`: the value of the first `name=value` entry of the environment
+// the process started with, or "" with the errno ENOENT.
+pub fun getenv(name: str) -> str {
+    __set_io_errno(0)
+    let np = __addr_of(name)
+    let n = __load64(np)
+    var entry = __environ()
+    while true {
+        let e = __load64(entry)
+        if e == 0 {
+            break
+        }
+        if __equal_bytes(e, np + 8, n) && __load8(e + n) == 61u8 {  // '='
+            let v = e + n + 1
+            var len: int64 = 0
+            while __load8(v + len) != 0u8 {
+                len += 1
+            }
+            let p = __alloc(len + 8)
+            __store64(p, len)
+            __copy_bytes(p + 8, v, len)
+            return __str_of(p)
+        }
+        entry += 8
+    }
+    __set_io_errno(2)
+    return ""
 }

@@ -74,4 +74,5 @@ Measured (instructions, the same sources built before step 1 and now): the bench
 
 - `std.rt` makes system calls: the primitives `__syscall(n, a, b, c)` (Linux's numbers, the result or `-errno`), `__set_io_errno` (the errno `std.io` reports) and `__free`, all three known to the seed before the library uses them (a primitive goes in one commit, its first use in the next).
 - Moved: `read_file`, `write_file`, `list_dir`, `stat`, `mkdir`, `unlink`, `rmdir`, `rename`, `getcwd`, the routines behind `std.fs` (about 500 lines of assembly, 200 of Myla). A program using them prints the same natively as in the interpreter (writing and reading back 200 KB, a file without a size in `/proc`, 300 directory entries, every error path).
+- `getenv` too, on the primitive `__environ()` (the environment the process started with); the same answers natively and interpreted, a value holding `=`, an empty one and a name that is a prefix of another included.
 - Cold: a few calls per program. Their assembly stays while a standard library root without `std/rt.my` needs it.
