@@ -766,6 +766,17 @@ impl CodeGen {
                     self.store_temp(d, temp_base)
                     return
                 }
+                if name == "__fetch_add64" {
+                    self.load_temp(args[0], "rcx", temp_base)
+                    self.load_temp(args[1], "rax", temp_base)
+                    self.emit("lock xaddq %rax, (%rcx)")
+                    self.store_temp(d, temp_base)
+                    return
+                }
+                if name == "__pause" {
+                    self.emit("pause")
+                    return
+                }
                 if name == "__bsr64" {
                     self.load_temp(args[0], "rax", temp_base)
                     self.emit("bsrq %rax, %rax")
@@ -2658,7 +2669,7 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Loc(p) => 0,
         Inst.Bind(name, s) => 0,
         Inst.Scope(open) => 0,
-        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:") { 0 } else { 2 },
+        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:") { 0 } else { 2 },
         _ => 2,
     }
 }
@@ -3264,7 +3275,7 @@ fun reads_then_calls(inst: Inst) -> bool {
         Inst.CallSret(name, r, args) => true,
         Inst.CallInd(d, fv, args) => true,
         Inst.CallIndSret(fv, r, args) => true,
-        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__rotl" && name != "__bsr64" && name != "__cas64" && name != "__xchg64" && !text_starts(name, "__rt_addr:") && !text_starts(name, "__rt_waddr:"),
+        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__rotl" && name != "__bsr64" && name != "__cas64" && name != "__xchg64" && name != "__fetch_add64" && name != "__pause" && !text_starts(name, "__rt_addr:") && !text_starts(name, "__rt_waddr:"),
         Inst.RtPair(d, d2, name, args) => true,
         _ => false,
     }

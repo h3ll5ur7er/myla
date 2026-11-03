@@ -1045,6 +1045,38 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertNotIn("\tset", body, body)
         self.assertNotIn("$1, %", body, body)
 
+    def test_atomics_and_pause_are_inline(self) -> None:
+        # MYLA-162: the runtime's atomics are single instructions in place,
+        # without a call: `__cas64` a `lock cmpxchg`, `__xchg64` an `xchg`,
+        # `__fetch_add64` a `lock xadd` giving the value before, and
+        # `__pause()` a `pause`
+        source = (
+            "fun spin(p: int64) -> int64 {\n"
+            "    let a = __fetch_add64(p, 5)\n"
+            "    let b = __fetch_add64(p, -2)\n"
+            "    __pause()\n"
+            "    let c = __xchg64(p, 40)\n"
+            "    var d: int64 = 0\n"
+            "    if __cas64(p, 40, 41) { d = 1 }\n"
+            "    if __cas64(p, 40, 42) { d += 10 }\n"
+            "    return a * 1000000 + b * 10000 + c * 100 + d + __load64(p) * 1000000000\n"
+            "}\n"
+            "fun main() {\n"
+            "    let p = __alloc(8)\n"
+            "    __store64(p, 7)\n"
+            "    print(spin(p))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("41007121001\n", 0))
+        body = self._function_asm(asm, "spin")
+        for ins in ["lock xaddq", "pause", "xchgq", "lock cmpxchgq"]:
+            self.assertIn(ins, body, body)
+        self.assertNotIn("call", body, body)
+
     def test_a_product_by_a_constant_is_one_imul(self) -> None:
         # MYLA-162: `a * k` from a register is one three-operand `imul`, into
         # the result's register, into %rax, or in place for `x = x * k`; each

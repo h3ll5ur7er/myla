@@ -3481,12 +3481,12 @@ impl Lower {
                 self.add(Inst.StoreAt(vals[0], 0, vals[1], w))
                 return -1
             }
-            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" || nm == "__set_run_status" || nm == "__set_run_stderr" {
+            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" || nm == "__set_run_status" || nm == "__set_run_stderr" || nm == "__pause" {
                 self.add(Inst.Rt(-1, nm, vals))
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" || nm == "__list_of" { return self.owned_value(cg, d, t) }
             return d
         }
