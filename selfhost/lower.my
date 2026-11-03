@@ -1424,7 +1424,7 @@ impl Lower {
     }
 
     // Into the actor in `slot` (D92): on at once when it is free, else after
-    // the frames queued before this one; then the running task holds it.
+    // the frames queued before this one, holding it.
     fun enter_actor(var self, slot: int32, off: int32) {
         let rec = self.actor_record(slot, off)
         let me = self.temp(Type.TPtr)
@@ -1433,7 +1433,6 @@ impl Lower {
         let inside = self.new_block()
         self.finish(Term.Suspend(inside))
         self.start(inside)
-        self.add(Inst.Rt(-1, "__actor_held", [self.actor_record(slot, off)]))
     }
 
     // Out of the actor in `slot`: the next frame waiting gets it.

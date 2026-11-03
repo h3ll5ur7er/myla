@@ -1892,7 +1892,7 @@ impl CodeGen {
         if !self.frames {
             return out
         }
-        for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek")] {
+        for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter")] {
             if self.has_func(p.1) {
                 out.push(p)
             }
@@ -3209,125 +3209,138 @@ impl CodeGen {
         self.raw("myla___yield:")
         self.raw("\tjmp __exec_yield_push")
         self.raw("")
-        // myla___wait(child, frame): while the child task runs, the frame
-        // joins the frames waiting for it (its `task` word holds the first,
-        // each linked to the next through word 32: a parent and siblings,
-        // MYLA-148); once it has ended (1), the frame goes on at once
-        self.raw("myla___wait:")
-        self.raw("\tmovq %rdi, %rcx")
-        self.raw("\tmovq %rsi, %rdx")
-        self.raw("\tmovq 24(%rcx), %rax")
-        self.raw(".Lwait_again:")
-        self.raw("\tcmpq $4, %rax")
-        self.raw("\tjb .Lwait_ended")
-        self.raw(".Lwait_link:")
-        self.raw("\tmovq %rax, 32(%rdx)")
-        self.raw("\tlock cmpxchgq %rdx, 24(%rcx)")
-        self.raw("\tjne .Lwait_again")
-        self.raw("\tret")
-        // 0 (no frame waiting yet) is a list too
-        self.raw(".Lwait_ended:")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lwait_link")
-        // the frame, the second argument (in %rdx now), resumed in place of
-        // the runtime function
-        self.raw(".Lresume_second:")
-        self.raw("\tmovq %rdx, %rdi")
-        self.raw("\tjmp *(%rdx)")
-        self.raw("")
-        // myla___actor_enter(record, frame): an actor's executor (D92),
-        // `[lock][running][first waiting][last]`; free, the frame goes on
-        // holding it; busy, the frame joins its queue (linked through its
-        // word 32) and the worker returns to the executor. Busy with no frame
-        // queued, on more than one worker, it first waits a little for the
-        // holder to leave (MYLA-150): an actor's methods are mostly short,
-        // and a frame queued is handed the actor and keeps it until a worker
-        // resumes it, so every caller after it queues too (a convoy). No one
-        // waits before it, so the order stays first come, first served.
-        self.raw("myla___actor_enter:")
-        self.raw("\tmovq %rdi, %rcx")
-        self.raw("\tmovq %rsi, %rdx")
-        self.raw("\txorl %r8d, %r8d")
-        self.raw("\tcmpl $1, __exec_workers(%rip)")
-        self.raw("\tjbe .Lae_lock")
-        self.raw("\tmovl $1000, %r8d")
-        self.raw(".Lae_lock:")
-        self.raw("\tmovl $1, %eax")
-        self.raw("\txchgq %rax, (%rcx)")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lae_locked")
-        self.raw("\tpause")
-        self.raw("\tjmp .Lae_lock")
-        self.raw(".Lae_locked:")
-        self.raw("\tcmpq $0, 8(%rcx)")
-        self.raw("\tjne .Lae_busy")
-        self.raw("\tmovq $1, 8(%rcx)")
-        self.raw("\tmovq $0, (%rcx)")
-        self.raw("\tjmp .Lresume_second")
-        self.raw(".Lae_busy:")
-        self.raw("\tcmpq $0, 16(%rcx)")
-        self.raw("\tjne .Lae_queue")
-        self.raw("\ttestl %r8d, %r8d")
-        self.raw("\tjz .Lae_queue")
-        self.raw("\tmovq $0, (%rcx)")
-        self.raw(".Lae_spin:")
-        self.raw("\tpause")
-        self.raw("\tcmpq $0, 8(%rcx)")
-        self.raw("\tje .Lae_lock")
-        self.raw("\tdecl %r8d")
-        self.raw("\tjnz .Lae_spin")
-        self.raw("\tjmp .Lae_lock")
-        self.raw(".Lae_queue:")
-        self.raw("\tmovq $0, 32(%rdx)")
-        self.raw("\tmovq 24(%rcx), %rax")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lae_first")
-        self.raw("\tmovq %rdx, 32(%rax)")
-        self.raw("\tjmp .Lae_linked")
-        self.raw(".Lae_first:")
-        self.raw("\tmovq %rdx, 16(%rcx)")
-        self.raw(".Lae_linked:")
-        self.raw("\tmovq %rdx, 24(%rcx)")
-        self.raw("\tmovq $0, (%rcx)")
-        self.raw("\tret")
-        self.raw("")
-        // __actor_leave: %rdi = an actor's executor; the first frame waiting
-        // is queued to run, holding the actor, or the actor is free
-        self.raw("__actor_leave:")
-        self.raw(format("\tmovq $0, {}", self.tv("__actor_held")))
-        self.raw(".Lal_lock:")
-        self.raw("\tmovl $1, %eax")
-        self.raw("\txchgq %rax, (%rdi)")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lal_locked")
-        self.raw("\tpause")
-        self.raw("\tjmp .Lal_lock")
-        self.raw(".Lal_locked:")
-        self.raw("\tmovq 16(%rdi), %rax")
-        self.raw("\ttestq %rax, %rax")
-        self.raw("\tjz .Lal_free")
-        self.raw("\tmovq 32(%rax), %rcx")
-        self.raw("\tmovq %rcx, 16(%rdi)")
-        self.raw("\ttestq %rcx, %rcx")
-        self.raw("\tjnz .Lal_more")
-        self.raw("\tmovq $0, 24(%rdi)")
-        self.raw(".Lal_more:")
-        // the frame holds the actor now; dropped (D94), it passes it on
-        self.raw("\tmovq %rdi, 64(%rax)")
-        self.raw("\tmovq $0, (%rdi)")
-        self.raw("\tmovq %rax, %rdi")
-        self.raw("\tjmp __exec_push")
-        self.raw(".Lal_free:")
-        self.raw("\tmovq $0, 8(%rdi)")
-        self.raw("\tmovq $0, (%rdi)")
-        self.raw("\tret")
-        self.raw("")
-        // __actor_held: %rdi = the executor of the actor the running task
-        // now holds, for a failure to release it
-        self.raw("__actor_held:")
-        self.raw(format("\tmovq %rdi, {}", self.tv("__actor_held")))
-        self.raw("\tret")
-        self.raw("")
+        // the entry points that may go on with the frame at once (D90):
+        // std.rt decides (`task_wait`, `actor_enter`: the frame to resume, or
+        // 0 for the worker to return to the executor), the jump into the
+        // frame is the platform's (MYLA-162)
+        if self.rt_exec_has("__task_wait") && self.rt_exec_has("__actor_enter_rt") {
+            for ep in [("myla___wait", "__task_wait"), ("myla___actor_enter", "__actor_enter_rt")] {
+                self.raw(ep.0 + ":")
+                self.raw("\tcall " + ep.1)
+                self.raw("\ttestq %rax, %rax")
+                self.raw("\tjz " + ".L" + ep.0 + "_park")
+                self.raw("\tmovq %rax, %rdi")
+                self.raw("\tjmp *(%rax)")
+                self.raw(".L" + ep.0 + "_park:")
+                self.raw("\tret")
+                self.raw("")
+            }
+        } else {
+            // myla___wait(child, frame): while the child task runs, the frame
+            // joins the frames waiting for it (its `task` word holds the first,
+            // each linked to the next through word 32: a parent and siblings,
+            // MYLA-148); once it has ended (1), the frame goes on at once
+            self.raw("myla___wait:")
+            self.raw("\tmovq %rdi, %rcx")
+            self.raw("\tmovq %rsi, %rdx")
+            self.raw("\tmovq 24(%rcx), %rax")
+            self.raw(".Lwait_again:")
+            self.raw("\tcmpq $4, %rax")
+            self.raw("\tjb .Lwait_ended")
+            self.raw(".Lwait_link:")
+            self.raw("\tmovq %rax, 32(%rdx)")
+            self.raw("\tlock cmpxchgq %rdx, 24(%rcx)")
+            self.raw("\tjne .Lwait_again")
+            self.raw("\tret")
+            // 0 (no frame waiting yet) is a list too
+            self.raw(".Lwait_ended:")
+            self.raw("\ttestq %rax, %rax")
+            self.raw("\tjz .Lwait_link")
+            // the frame, the second argument (in %rdx now), resumed in place of
+            // the runtime function
+            self.raw(".Lresume_second:")
+            self.raw("\tmovq %rdx, %rdi")
+            self.raw("\tjmp *(%rdx)")
+            self.raw("")
+            // myla___actor_enter(record, frame): an actor's executor (D92),
+            // `[lock][running][first waiting][last]`; free, the frame goes on
+            // holding it; busy, the frame joins its queue (linked through its
+            // word 32) and the worker returns to the executor. Busy with no frame
+            // queued, on more than one worker, it first waits a little for the
+            // holder to leave (MYLA-150): an actor's methods are mostly short,
+            // and a frame queued is handed the actor and keeps it until a worker
+            // resumes it, so every caller after it queues too (a convoy). No one
+            // waits before it, so the order stays first come, first served.
+            self.raw("myla___actor_enter:")
+            self.raw("\tmovq %rdi, %rcx")
+            self.raw("\tmovq %rsi, %rdx")
+            self.raw("\txorl %r8d, %r8d")
+            self.raw("\tcmpl $1, __exec_workers(%rip)")
+            self.raw("\tjbe .Lae_lock")
+            self.raw("\tmovl $1000, %r8d")
+            self.raw(".Lae_lock:")
+            self.raw("\tmovl $1, %eax")
+            self.raw("\txchgq %rax, (%rcx)")
+            self.raw("\ttestq %rax, %rax")
+            self.raw("\tjz .Lae_locked")
+            self.raw("\tpause")
+            self.raw("\tjmp .Lae_lock")
+            self.raw(".Lae_locked:")
+            self.raw("\tcmpq $0, 8(%rcx)")
+            self.raw("\tjne .Lae_busy")
+            self.raw("\tmovq $1, 8(%rcx)")
+            self.raw("\tmovq $0, (%rcx)")
+            self.raw("\tjmp .Lresume_second")
+            self.raw(".Lae_busy:")
+            self.raw("\tcmpq $0, 16(%rcx)")
+            self.raw("\tjne .Lae_queue")
+            self.raw("\ttestl %r8d, %r8d")
+            self.raw("\tjz .Lae_queue")
+            self.raw("\tmovq $0, (%rcx)")
+            self.raw(".Lae_spin:")
+            self.raw("\tpause")
+            self.raw("\tcmpq $0, 8(%rcx)")
+            self.raw("\tje .Lae_lock")
+            self.raw("\tdecl %r8d")
+            self.raw("\tjnz .Lae_spin")
+            self.raw("\tjmp .Lae_lock")
+            self.raw(".Lae_queue:")
+            self.raw("\tmovq $0, 32(%rdx)")
+            self.raw("\tmovq 24(%rcx), %rax")
+            self.raw("\ttestq %rax, %rax")
+            self.raw("\tjz .Lae_first")
+            self.raw("\tmovq %rdx, 32(%rax)")
+            self.raw("\tjmp .Lae_linked")
+            self.raw(".Lae_first:")
+            self.raw("\tmovq %rdx, 16(%rcx)")
+            self.raw(".Lae_linked:")
+            self.raw("\tmovq %rdx, 24(%rcx)")
+            self.raw("\tmovq $0, (%rcx)")
+            self.raw("\tret")
+            self.raw("")
+        }
+        if !self.rt_exec_has("__actor_leave") {
+            // __actor_leave: %rdi = an actor's executor; the first frame waiting
+            // is queued to run, holding the actor, or the actor is free
+            self.raw("__actor_leave:")
+            self.raw(".Lal_lock:")
+            self.raw("\tmovl $1, %eax")
+            self.raw("\txchgq %rax, (%rdi)")
+            self.raw("\ttestq %rax, %rax")
+            self.raw("\tjz .Lal_locked")
+            self.raw("\tpause")
+            self.raw("\tjmp .Lal_lock")
+            self.raw(".Lal_locked:")
+            self.raw("\tmovq 16(%rdi), %rax")
+            self.raw("\ttestq %rax, %rax")
+            self.raw("\tjz .Lal_free")
+            self.raw("\tmovq 32(%rax), %rcx")
+            self.raw("\tmovq %rcx, 16(%rdi)")
+            self.raw("\ttestq %rcx, %rcx")
+            self.raw("\tjnz .Lal_more")
+            self.raw("\tmovq $0, 24(%rdi)")
+            self.raw(".Lal_more:")
+            // the frame holds the actor now; dropped (D94), it passes it on
+            self.raw("\tmovq %rdi, 64(%rax)")
+            self.raw("\tmovq $0, (%rdi)")
+            self.raw("\tmovq %rax, %rdi")
+            self.raw("\tjmp __exec_push")
+            self.raw(".Lal_free:")
+            self.raw("\tmovq $0, 8(%rdi)")
+            self.raw("\tmovq $0, (%rdi)")
+            self.raw("\tret")
+            self.raw("")
+        }
         if !self.rt_exec_has("__failed_wait") {
             // __failed_wait: once a task has failed (D97), until no other worker
             // runs a frame; at once otherwise
@@ -3396,23 +3409,25 @@ impl CodeGen {
             self.raw("\tret")
             self.raw("")
         }
-        // __wake_waiters: %rdi = the first of the frames that waited for a
-        // task which has ended (0: none), each queued; the next one is read
-        // before a frame is queued, as it may run and change word 32 at once
-        self.raw("__wake_waiters:")
-        self.raw("\tpushq %rbx")
-        self.raw("\tmovq %rdi, %rbx")
-        self.raw(".Lww_next:")
-        self.raw("\ttestq %rbx, %rbx")
-        self.raw("\tjz .Lww_done")
-        self.raw("\tmovq %rbx, %rdi")
-        self.raw("\tmovq 32(%rbx), %rbx")
-        self.raw("\tcall __exec_push")
-        self.raw("\tjmp .Lww_next")
-        self.raw(".Lww_done:")
-        self.raw("\tpopq %rbx")
-        self.raw("\tret")
-        self.raw("")
+        if !self.rt_exec_has("__wake_waiters") {
+            // __wake_waiters: %rdi = the first of the frames that waited for a
+            // task which has ended (0: none), each queued; the next one is read
+            // before a frame is queued, as it may run and change word 32 at once
+            self.raw("__wake_waiters:")
+            self.raw("\tpushq %rbx")
+            self.raw("\tmovq %rdi, %rbx")
+            self.raw(".Lww_next:")
+            self.raw("\ttestq %rbx, %rbx")
+            self.raw("\tjz .Lww_done")
+            self.raw("\tmovq %rbx, %rdi")
+            self.raw("\tmovq 32(%rbx), %rbx")
+            self.raw("\tcall __exec_push")
+            self.raw("\tjmp .Lww_next")
+            self.raw(".Lww_done:")
+            self.raw("\tpopq %rbx")
+            self.raw("\tret")
+            self.raw("")
+        }
         // __task_exit: `exit` (%edi the code) when tasks take turns
         self.raw("__task_exit:")
         self.raw("\tpushq %rdi")
@@ -8408,7 +8423,6 @@ pub fun tls_offset(sym: str) -> int32 {
     if sym == "__run_exit_val" { return 56 }
     if sym == "__run_signal_val" { return 64 }
     if sym == "__run_errno_val" { return 72 }
-    if sym == "__actor_held" { return 80 }
     if sym == "__worker_id" { return 88 }
     if sym == "__remote_free" { return 96 }
     if sym == "__exec_task" { return 104 }
