@@ -1144,6 +1144,31 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertNotIn("(%rbp)", loop, body)
         self.assertRegex(loop, r"%r[sd]i", body)
 
+    def test_while_true_tests_nothing(self) -> None:
+        # MYLA-162: `while true` jumps back to its body, with no constant
+        # made and tested on each turn
+        source = (
+            "fun count(n: int) -> int {\n"
+            "    var i = 0\n"
+            "    while true {\n"
+            "        i = i + 3\n"
+            "        if i > n { break }\n"
+            "    }\n"
+            "    return i\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(count(10))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("12\n", 0))
+        body = self._function_asm(asm, "count")
+        self.assertNotIn("testq", body, body)
+        self.assertNotIn("$1, %", body, body)
+
     def test_scalars_live_in_callee_saved_registers(self) -> None:
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each

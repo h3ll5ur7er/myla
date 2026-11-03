@@ -672,3 +672,76 @@ pub fun str_chars(s: str) -> [char] {
     __store64(cell + 8, n)
     return __list_of(cell)
 }
+
+// --- maps --------------------------------------------------------------------
+//
+// A map's cell holds its count and its capacity (a power of two), then the
+// slots `[state:8][key:8][value][rank:8]`, `slot_size` bytes each: state 0
+// empty, 1 full, 2 a removed key's tombstone; a key is a value, or a string's
+// cell (`is_str` 1). The slot of a key is found by its hash and linear
+// probing.
+
+const PHI: int64 = -7046029254386353131  // 2^64 / the golden ratio
+
+// The hash of a string's cell: its length and its bytes, eight at a time,
+// mixed in with a multiply by 2^64/phi and a rotation, the high half folded
+// into the low one, which picks the slot. A value's hash is the value
+// multiplied by 2^64/phi, folded the same way. The assembly's `__map_hash`
+// computes the same, which the other map routines still use.
+fun str_hash(key: int64) -> int64 {
+    var n = __load64(key)
+    var p = key + 8
+    var h = n * PHI
+    while n >= 8 {
+        h = (h ^ __load64(p)) * PHI
+        h = (h << 29) | (((h as uint64) >> 35) as int64)  // rotated left by 29
+        p += 8
+        n -= 8
+    }
+    while n > 0 {
+        h = (h ^ (__load8(p) as int64)) * PHI
+        p += 1
+        n -= 1
+    }
+    h = h * PHI
+    return h ^ (((h as uint64) >> 32) as int64)
+}
+
+// `__map_lookup`: the slot holding `key` in the map `cell`, or 0. A value's
+// probe loop makes no call, so its values stay in registers.
+pub fun map_lookup(cell: int64, key: int64, slot_size: int64, is_str: int64) -> int64 {
+    let mask = __load64(cell + 8) - 1
+    let slots = cell + 16
+    if is_str == 0 {
+        let h = key * PHI
+        var i = (h ^ (((h as uint64) >> 32) as int64)) & mask
+        while true {
+            let slot = slots + i * slot_size
+            let state = __load64(slot)
+            if state == 0 {
+                return 0
+            }
+            if state != 2 && __load64(slot + 8) == key {
+                return slot
+            }
+            i = (i + 1) & mask
+        }
+    }
+    var i = str_hash(key) & mask
+    let n = __load64(key)
+    while true {
+        let slot = slots + i * slot_size
+        let state = __load64(slot)
+        if state == 0 {
+            return 0
+        }
+        if state != 2 {
+            let k = __load64(slot + 8)
+            if k == key || (__load64(k) == n && __equal_bytes(k + 8, key + 8, n)) {
+                return slot
+            }
+        }
+        i = (i + 1) & mask
+    }
+    return 0
+}
