@@ -53,7 +53,17 @@ Outside the C comparison:
 
 ## Steps
 
-- [ ] A first round to check the method: Fibonacci, the sieve and binary trees, in Myla and the three C versions, with the script that builds, checks and measures them
+- [x] A first round to check the method: Fibonacci, the sieve and binary trees, in Myla and the three C versions, with the script that builds, checks and measures them
 - [ ] The other nine programs
 - [ ] Where Myla's time goes, per program (callgrind), and what each gap would need: an IR optimisation (D117 (3)), a runtime change, or nothing
 - [ ] The results on a wiki page, with the script that reruns them in the repository; the owner decides what follows for D117
+
+## Evidence
+
+- **First round (2026-11-03).**
+  - `benchmarks/` holds fib, sieve and binary trees, with `myla_rt.h` and `run.py`; `tests/burn/test_benchmarks.py` keeps every version printing the same.
+  - Results and findings: [[Development/Benchmarks]].
+  - The method held, but needed two additions, both now in `run.py`: user and system time and page faults, because instruction counts alone hid both large gaps; and symbol names for valgrind's addresses.
+  - Found and fixed: `rep movsq` for small copies ([[MYLA-246]]; binary trees 5.9 → 2.0 s, the self-compile about 20 % faster).
+  - Found and filed: 8 bytes per list element ([[MYLA-247]]).
+  - Code generation is at gcc `-O0`'s level: the IR optimisations of D117 (3). clang `-O2` isn't ahead of gcc `-O2` on any of the three.
