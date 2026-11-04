@@ -1148,6 +1148,24 @@ impl Lower {
                             self.enter_self()
                             return
                         }
+                        // `await __wait_readable(fd)`: waiting for input, the
+                        // others running (D124); with no tasks, nothing (the
+                        // read after it blocks)
+                        if n == "__wait_readable" {
+                            let fd = self.expr(cg, a[0])
+                            if !cg.frames { return }
+                            self.leave_self()
+                            let me = self.temp(Type.TPtr)
+                            self.add(Inst.Frame(me))
+                            let f64 = self.temp(Type.TInt(64, true))
+                            self.add(Inst.Cast(f64, Type.TInt(32, true), Type.TInt(64, true), fd))
+                            self.add(Inst.Call(-1, "__wait_fd", [me, f64]))
+                            let after = self.new_block()
+                            self.finish(Term.Suspend(after))
+                            self.start(after)
+                            self.enter_self()
+                            return
+                        }
                         // `await __sleep(ms)`: asleep, the others running
                         // (D124); with no tasks, the thread asleep
                         if n == "__sleep" {

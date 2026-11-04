@@ -474,6 +474,31 @@ pub fun poller_wait(p: int64, timeout_ms: int64) -> int64 {
     return n
 }
 
+// The token of event `i` of the last `poller_wait` (0: the wake-up).
+pub fun poller_event(i: int64) -> int64 {
+    return __load64(__rt_addr("__poll_buf") + 48 + i * 12 + 4)
+}
+
+// The descriptor `fd` watched by the poller `p` until it is readable (or
+// its input ended), once (EPOLLONESHOT): the next wait gives `token`.
+pub fun poller_watch(p: int64, fd: int64, token: int64) -> int64 {
+    let e = __alloc(16)
+    __store32(e, 1073741825u32)  // EPOLLIN | EPOLLONESHOT
+    __store64(e + 4, token)
+    var r = __syscall5(SYS_EPOLL_CTL, p & LOW32, 1, fd, e, 0)  // EPOLL_CTL_ADD
+    if r == -17 {
+        // watched before (a one-shot that fired): armed again
+        r = __syscall5(SYS_EPOLL_CTL, p & LOW32, 3, fd, e, 0)  // EPOLL_CTL_MOD
+    }
+    __free(e)
+    return r
+}
+
+// The descriptor `fd` no longer watched by the poller `p`.
+pub fun poller_forget(p: int64, fd: int64) {
+    __syscall5(SYS_EPOLL_CTL, p & LOW32, 2, fd, 0, 0)  // EPOLL_CTL_DEL
+}
+
 // The worker waiting in the poller `p` woken (or the next wait returns at
 // once).
 pub fun poller_wake(p: int64) {

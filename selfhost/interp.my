@@ -128,6 +128,9 @@ struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: O
 // clock (`Interp.now`), `seq` the order tasks went to sleep in.
 struct Sleeper { at: int64, seq: int64, task: int32 }
 
+// A task waiting for input on `fd` (D124, `std.io`'s async reads).
+struct FdWait { fd: int32, task: int32 }
+
 // A task's deadline (`std.task.timeout`, D124): at `at` the task `task` is
 // cancelled and `Interp.fired[rec]` says so.
 struct Deadline { at: int64, task: int32, rec: int32 }
@@ -208,6 +211,7 @@ pub struct Interp {
     sleepers: [Sleeper],
     deadlines: [Deadline],
     fired: [bool],
+    fd_waits: [FdWait],
     sleep_seq: int64,
     virtual_time: bool,
     vclock: int64,
@@ -408,7 +412,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
-        sleepers: [], deadlines: [], fired: [], sleep_seq: 0, virtual_time: false, vclock: 0,
+        sleepers: [], deadlines: [], fired: [], fd_waits: [], sleep_seq: 0, virtual_time: false, vclock: 0,
     }
     return it
 }
@@ -1108,6 +1112,7 @@ impl Interp {
     // ready latest first (fifo: earliest first).
     fun wake_sleepers(var self) {
         if self.deadlines.len() > 0 { self.fire_deadlines() }
+        if self.fd_waits.len() > 0 { let any = self.wake_readers() }
         if self.sleepers.len() == 0 { return }
         let now = self.now()
         var due: [int32] = []
@@ -1160,16 +1165,52 @@ impl Interp {
         }
     }
 
+    // The tasks whose descriptor is readable ready (in the order they began
+    // waiting); whether there were any.
+    fun wake_readers(var self) -> bool {
+        var rest: [FdWait] = []
+        var woke = false
+        for w in self.fd_waits {
+            if __poll(w.fd, 0) != 0 {
+                self.tasks[w.task].state = 0
+                self.ready(w.task)
+                woke = true
+            } else {
+                rest.push(w)
+            }
+        }
+        self.fd_waits = rest
+        return woke
+    }
+
     // No task ready: until the earliest sleeper's or deadline's time (the
-    // virtual clock moved to it); false when no task sleeps.
+    // virtual clock moved to it), or a waiting task's input is there; false
+    // when no task sleeps or waits.
     fun wait_for_sleeper(var self) -> bool {
-        if self.sleepers.len() == 0 { return false }
-        var at = self.sleepers[0].at
+        if self.fd_waits.len() > 0 {
+            // a millisecond at a time, until input or the next sleeper's time
+            // (the virtual clock moves only once no input came)
+            while true {
+                if self.wake_readers() { return true }
+                if (self.sleepers.len() > 0 || self.deadlines.len() > 0) && self.virtual_time { break }
+                var due = false
+                for s in self.sleepers {
+                    if s.at <= self.now() { due = true }
+                }
+                for d in self.deadlines {
+                    if d.at <= self.now() { due = true }
+                }
+                if due { return true }
+                __sleep_ns(1000000)
+            }
+        }
+        if self.sleepers.len() == 0 && self.deadlines.len() == 0 { return false }
+        var at: int64 = -1
         for s in self.sleepers {
-            if s.at < at { at = s.at }
+            if at < 0 || s.at < at { at = s.at }
         }
         for d in self.deadlines {
-            if d.at < at { at = d.at }
+            if at < 0 || d.at < at { at = d.at }
         }
         if self.virtual_time {
             if at > self.vclock { self.vclock = at }
@@ -1439,11 +1480,23 @@ impl Interp {
     // `task.cancel` of the task `id`: it and its children asked to stop (D96).
     fun request_cancel(var self, id: int32) {
         self.tasks[id].requested = true
-        // asleep, it wakes at once (D124)
+        // asleep, it wakes at once (D124); waiting for input, too
         var i = 0
         while i < self.sleepers.len() {
             if self.sleepers[i].task == id { self.sleepers[i].at = -1 }
             i = i + 1
+        }
+        if self.fd_waits.len() > 0 {
+            var rest: [FdWait] = []
+            for w in self.fd_waits {
+                if w.task == id {
+                    self.tasks[id].state = 0
+                    self.ready(id)
+                } else {
+                    rest.push(w)
+                }
+            }
+            self.fd_waits = rest
         }
         for k in self.tasks[id].kids { self.request_cancel(k) }
     }
@@ -2906,6 +2959,17 @@ impl Interp {
             return Value.VUnit
         }
         if nm == "__clock_ns" { return Value.VInt(self.now()) }
+        // waiting for input (D124): parked until `fd` is readable, unless it
+        // is now or the task was asked to stop; outside any task, nothing
+        if nm == "__wait_readable" {
+            let fd = as_int(self.eval(args[0])) as int32
+            if self.stop() { return Value.VUnit }
+            if self.cur < 0 || self.cur >= self.tasks.len() || self.tasks[self.cur].requested || __poll(fd, 0) != 0 { return Value.VUnit }
+            self.fd_waits.push(FdWait { fd: fd, task: self.cur })
+            self.tasks[self.cur].state = 1
+            self.parked = true
+            return Value.VUnit
+        }
         if nm == "__sleep_ns" {
             let n = as_int(self.eval(args[0]))
             if self.stop() { return Value.VUnit }

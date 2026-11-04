@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -209,6 +210,82 @@ async fun main() {
 """
 
 
+# a task reading lines that come slowly with `read_line_async`, beside one
+# printing a tick every 40 ms: the ticks go on while the reader waits
+READ = """import std.io as io
+import std.task as task
+
+async fun reader() -> int {
+    var r = io.stdin()
+    var n = 0
+    while true {
+        match await r.read_line_async() {
+            Ok(Some(line)) => {
+                print("line " + line)
+                n = n + 1
+            },
+            Ok(None) => { return n },
+            Err(e) => { return -1 },
+        }
+    }
+    return n
+}
+
+async fun ticker() -> int {
+    var ticks = 0
+    for i in 0..10 {
+        await task.sleep(40)
+        ticks = ticks + 1
+        print("t")
+    }
+    return ticks
+}
+
+#main
+async fun main() {
+    async let r = reader()
+    async let t = ticker()
+    let lines = await r
+    let ticks = await t
+    print(f"{lines} lines, {ticks} ticks")
+}
+"""
+
+# a time limit around a read that gets no input in time; and standard input
+# from a regular file, which the poller can't watch (always ready)
+READ_TIMEOUT = """import std.io as io
+from std.fs import IoError
+import std.task as task
+import std.time as time
+
+async fun first_line() -> str {
+    var r = io.stdin()
+    return match await r.read_line_async() {
+        Ok(Some(line)) => line,
+        Ok(None) => "end",
+        Err(e) => match e {
+            IoError.Other(code) => f"error {code}",
+            _ => "error",
+        },
+    }
+}
+
+#main
+async fun main() {
+    let start = time.now_ms()
+    let got = await task.timeout(50, async () => await first_line())
+    print(match got {
+        Some(l) => l,
+        None => "timed out",
+    })
+    print(time.now_ms() - start < 1500)
+}
+"""
+
+# lines on standard output 150 ms apart
+FEEDER = "import sys, time\nfor i in range(3):\n    time.sleep(0.15)\n    sys.stdout.write(f'{i}\\n'); sys.stdout.flush()\n"
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Time(unittest.TestCase):
     def setUp(self):
@@ -307,6 +384,45 @@ class Time(unittest.TestCase):
                 self.assertEqual((out, err, code), ("1\ntrue\n", "", 0))
         out, err, code, _ = self.interpreted("cancel", CANCEL)
         self.assertEqual((out, err, code), ("1\ntrue\n", "", 0))
+
+    def fed(self, cmd: list[str], feeder: str, **env: str) -> str:
+        feed = subprocess.Popen([sys.executable, "-c", feeder], stdout=subprocess.PIPE)
+        try:
+            out = subprocess.run(cmd, stdin=feed.stdout, capture_output=True, text=True, timeout=60,
+                                 env={**os.environ, **env}).stdout
+        finally:
+            feed.stdout.close()
+            feed.wait()
+        return out
+
+    def test_an_async_read_lets_the_other_tasks_run(self):
+        exe = self.native("read", READ)
+        from ._tools import selfhost_tool
+        for label, cmd, env in [("native", [exe], {"MYLA_THREADS": "1"}),
+                                ("interpreter", [selfhost_tool("interp_main"), self.source("read", READ), STDLIB_ROOT], {})]:
+            with self.subTest(runner=label):
+                lines = self.fed(cmd, FEEDER, **env).splitlines()
+                self.assertEqual(lines[-1], "3 lines, 10 ticks")
+                self.assertEqual([l for l in lines if l.startswith("line")], ["line 0", "line 1", "line 2"])
+                # ticks before the first line came: the worker wasn't blocked
+                self.assertEqual(lines[0], "t")
+
+    def test_a_time_limit_around_a_read(self):
+        exe = self.native("read_timeout", READ_TIMEOUT)
+        from ._tools import selfhost_tool
+        interp = [selfhost_tool("interp_main"), self.source("read_timeout", READ_TIMEOUT), STDLIB_ROOT]
+        late = "import sys, time\ntime.sleep(2)\nprint('late')\n"
+        for label, cmd, env in [("native 1", [exe], {"MYLA_THREADS": "1"}), ("native 4", [exe], {"MYLA_THREADS": "4"}),
+                                ("interpreter", interp, {})]:
+            with self.subTest(runner=label):
+                self.assertEqual(self.fed(cmd, late, **env), "timed out\ntrue\n")
+        path = os.path.join(self.dir, "in.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("from file\n")
+        for label, cmd in [("native", [exe]), ("interpreter", interp)]:
+            with self.subTest(file=label), open(path, encoding="utf-8") as fh:
+                out = subprocess.run(cmd, stdin=fh, capture_output=True, text=True, timeout=60).stdout
+                self.assertEqual(out, "from file\ntrue\n")
 
 
 if __name__ == "__main__":

@@ -1884,7 +1884,7 @@ impl CodeGen {
         // every program's (`__map_lookup`: `remove`'s, `emit_map_remove`)
         var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup")]
         if self.frames {
-            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end")] { out.push(p) }
+            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__panic_report_tasks", "std$rt$panic_report_tasks"), ("myla___sleep", "std$rt$sleep_frame"), ("__cancel_after", "std$rt$cancel_after"), ("__task_end", "std$rt$task_end"), ("myla___wait_fd", "std$rt$wait_fd")] { out.push(p) }
         }
         return out
     }
@@ -2071,7 +2071,7 @@ impl CodeGen {
         // the timers (std.rt's `sleep_frame`, D124): their heap's cell, its
         // count, its lock, the order they were set in; the poller and
         // whether a worker waits in it
-        for v in ["__timers", "__timer_count", "__timer_lock", "__timer_seq", "__exec_poller", "__exec_polling"] {
+        for v in ["__timers", "__timer_count", "__timer_lock", "__timer_seq", "__exec_poller", "__exec_polling", "__watches", "__watch_count"] {
             out.push(v + ":")
             out.push("\t.skip 8")
         }
