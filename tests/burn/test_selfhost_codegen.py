@@ -1173,6 +1173,24 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertRegex(body, r"movq __heap_ptr\(%rip\), %r", body)
         self.assertNotIn("leaq __heap_ptr", body, body)
 
+    def test_a_library_without_the_runtime_gets_the_embedded_one(self) -> None:
+        # MYLA-162: the runtime is std.rt, so a standard library folder
+        # without `std/rt.my` compiles against the copy the tools carry
+        source = (
+            "fun main() {\n"
+            "    var xs = [\"a\"]\n"
+            "    xs.push(f\"b{len(xs)}\")\n"
+            "    print(xs[1])\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "lib", "std"))
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path, os.path.join(tmp, "lib"))
+            self.assertIn("myla_std$rt$alloc:", asm)
+            self.assertEqual(self._build_and_run(asm), ("b1\n", 0))
+
     def test_a_float_rounds_to_the_nearest_integer(self) -> None:
         # MYLA-162: `__f64_round(x)` is one `cvtsd2si`: the nearest int64,
         # ties to even (the float formatting in std.rt rounds so)

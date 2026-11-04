@@ -1,8 +1,9 @@
 // std.rt — the runtime written in Myla (MYLA-162, D117).
 //
-// A native build loads this module with every program; a function here is
+// A native build loads this module with every program (the copy the tools
+// carry when a standard library folder lacks it); a function here is
 // compiled where the code generator calls it in place of the assembly
-// routine it replaces (`myla_runtime_function` in selfhost/lower.my). The
+// routine it replaced (`myla_runtime_function` in selfhost/lower.my). The
 // routines move here one by one; until a routine's assembly callers move
 // too, both versions exist.
 //

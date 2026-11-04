@@ -153,8 +153,9 @@ class RawMemory(unittest.TestCase):
 
 
     def test_native_code_concatenates_with_the_runtime_in_myla(self):
-        # `+` and `==` on strings call std.rt's functions (MYLA-162); a
-        # standard library without std/rt.my keeps the assembly routines
+        # `+` and `==` on strings call std.rt's functions (MYLA-162; a
+        # standard library without std/rt.my gets the embedded one, see
+        # test_selfhost_codegen)
         source = 'fun main() {\n    let a = "ab"\n    let b = a + "cd"\n    print(b == "abcd")\n    print(b)\n}\n'
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "plus.my")
@@ -164,12 +165,6 @@ class RawMemory(unittest.TestCase):
                                  check=True).stdout
             self.assertIn("call myla_std$rt$str_concat", asm)
             self.assertIn("call myla_std$rt$str_eq", asm)
-            bare = os.path.join(tmp, "lib")
-            os.makedirs(os.path.join(bare, "std"))
-            old = subprocess.run([selfhost_tool("gen_main"), path, bare], capture_output=True, text=True)
-            self.assertEqual(old.returncode, 0, old.stderr)
-            self.assertIn("call __str_concat", old.stdout)
-            self.assertNotIn("std$rt", old.stdout)
 
 
 if __name__ == "__main__":
