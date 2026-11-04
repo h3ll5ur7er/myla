@@ -11,8 +11,8 @@ D107 ([[MYLA-212]]): waits for the runtime off assembly ([[MYLA-162]]). A reacto
 - [x] A design after [[MYLA-162]]: the reactor's place in the executor, the platform layer's part, how the interpreters model time — D124 ([[MYLA-258]])
 - [x] The clock and `sleep`: `std.time` (`now_ms`, `now_ns`), `task.sleep`, the timer heap and the poller with its event descriptor only; `exec_stuck` with timers; the interpreter's sleeping tasks (real time, `MYLA_TIME=virtual`); tests in both
 - [x] `task.timeout` and cancellation waking reactor waits
-- [ ] Suspending reads on pipes and standard input
-- [ ] `std.process.run` suspending, on pidfds
+- [ ] Suspending reads on pipes and standard input: async versions of `Reader`'s reads beside the blocking ones (D124 as refined: only an async function can suspend)
+- [ ] `std.process.run_async`, suspending, on pidfds
 
 ## Step 1: the clock and sleep (2026-11-04)
 
