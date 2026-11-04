@@ -91,7 +91,11 @@ async fun run(pool: Pool) -> str {
 - `task.cancel(a)` takes the name of an `async let` of this function (`task.cancel() takes the name of an 'async let'`); a lambda in it can't cancel it (`a lambda can't cancel the child task 'a' of its function`). It sets a flag and goes on: it doesn't wait, and the child isn't stopped. It can only be called: `let stop = task.cancel` is an error (D97 (4)), since the compiler takes the call itself.
 - `task.cancelled()` is true in a task that was asked to stop, or whose parent (or theirs) was: a request reaches the whole tree below the child, its children started later too. Outside a task that was asked, and in a program without tasks, it is false.
 - `await a` still gives what the child returned, and a scope still waits for its children: whatever the child does when asked, it runs to its end, so it can give back what it holds. Cancelling a child that has ended does nothing.
-- The flag is the program's: unlike a failure (D97), it stops nothing at a suspension point.
+- The flag is the program's: unlike a failure (D97), it stops nothing at a suspension point, with one exception: a cancelled task's `await task.sleep(ms)` ends at once, and so does a sleep it starts later (D124), so a child asleep when asked can look at the flag without waiting out its sleep.
+
+### A time limit: `task.timeout`
+
+`await task.timeout(ms, f)` runs the async function value `f` as a child task and gives `Some` of its result, or `None` when `ms` milliseconds passed first (D124). At that moment the child is cancelled as `task.cancel` does it (its sleeps end), and `timeout` awaits it before it returns either way: the time limit is a request too, so a child that computes without looking at `task.cancelled()` keeps `timeout` waiting. Natively the limit is a deadline on the executor's timers, taken off when the child ends first; with `MYLA_TIME=virtual` the interpreter's clock moves only when every task sleeps, so a child that computes without sleeping never reaches its limit there.
 
 ## Actors
 

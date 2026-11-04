@@ -704,7 +704,7 @@ fun is_builtin_op_trait(name: str) -> bool {
 #test("B")[false]
 #test("len")[true]
 fun is_builtin_func(name: str) -> bool {
-    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || is_raw_memory_primitive(name)
+    return name == "print" || name == "assert" || name == "panic" || name == "unreachable" || name == "len" || name == "push" || name == "pop" || name == "contains" || name == "remove" || name == "keys" || name == "format" || name == "chars" || name == "StringBuilder" || name == "append" || name == "append_byte" || name == "build" || name == "__write" || name == "__exit" || name == "__args" || name == "__read_file" || name == "__io_errno" || name == "__run" || name == "__run_stderr" || name == "__run_exit_code" || name == "__run_signal" || name == "__run_errno" || name == "__write_file" || name == "__read" || name == "__poll" || name == "__list_dir" || name == "__mkdir" || name == "__stat" || name == "__getcwd" || name == "__getenv" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__task_cancelled" || name == "__yield" || name == "__sleep" || name == "__clock_ns" || name == "__sleep_ns" || name == "__cancel_after" || name == "__disarm" || is_raw_memory_primitive(name)
 }
 
 // The raw-memory primitives the runtime written in Myla needs (MYLA-162's
@@ -5802,6 +5802,22 @@ impl Checker {
             return Ok(Some(Type.TList(Type.TChar)))
         }
         if name == "std$task$cancel" { return self.infer_task_cancel(e, args) }
+        // `__cancel_after(a, ms)` (D124, `task.timeout`): the child of the
+        // `async let` named `a` cancelled after `ms` milliseconds; the cell
+        // `__disarm(cell)` reads (whether that hadn't happened yet)
+        if name == "__cancel_after" {
+            if args.len() != 2 { return Err(terr_at(e.line, e.col, e.sp, "__cancel_after() takes (child, ms: int)")) }
+            let c = self.infer_task_cancel(e, [args[0]])?
+            let m_t = self.expect_value(args[1], Some(t_int()))?
+            if !type_eq(m_t, t_int()) { return Err(terr_at(args[1].line, args[1].col, args[1].sp, format("__cancel_after() takes an 'int', found '{}'", type_name(m_t)))) }
+            return Ok(Some(Type.TInt(64, true)))
+        }
+        if name == "__disarm" {
+            if args.len() != 1 { return Err(terr_at(e.line, e.col, e.sp, "__disarm() takes (cell: int64)")) }
+            let c_t = self.expect_value(args[0], Some(Type.TInt(64, true)))?
+            if !type_eq(c_t, Type.TInt(64, true)) { return Err(terr_at(args[0].line, args[0].col, args[0].sp, format("__disarm() takes an 'int64', found '{}'", type_name(c_t)))) }
+            return Ok(Some(Type.TBool))
+        }
         if name == "push" || name == "pop" { return self.infer_list_mutation(e, name, args) }
         if name == "contains" || name == "remove" || name == "keys" { return self.infer_map_builtin(e, name, args) }
         if name == "format" { return Ok(Some(self.infer_format(e, args)?)) }

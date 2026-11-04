@@ -79,3 +79,17 @@ pub async fun sleep(ms: int) {
     await __sleep(ms)
 }
 
+// `await task.timeout(ms, f)`: `f` run as a child task, and `Some` of its
+// result, or `None` when `ms` milliseconds passed first (D124). The child
+// is then cancelled (D96: its sleeps end at once, and it stops where it
+// looks at `cancelled()`), and awaited before this returns either way.
+pub async fun timeout<T>(ms: int, f: async () -> T) -> Option<T> {
+    async let work = f()
+    let t = __cancel_after(work, ms)
+    let r = await work
+    if __disarm(t) {
+        return Some(r)
+    }
+    return None
+}
+

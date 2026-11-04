@@ -128,6 +128,10 @@ struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: O
 // clock (`Interp.now`), `seq` the order tasks went to sleep in.
 struct Sleeper { at: int64, seq: int64, task: int32 }
 
+// A task's deadline (`std.task.timeout`, D124): at `at` the task `task` is
+// cancelled and `Interp.fired[rec]` says so.
+struct Deadline { at: int64, task: int32, rec: int32 }
+
 // A call whose async body the async evaluator takes over (Interp.defer).
 struct Deferred { scopes: [RtFrame], body: Block }
 
@@ -202,6 +206,8 @@ pub struct Interp {
     // D124: the tasks asleep, and the clock (MYLA_TIME=virtual: `vclock`,
     // which moves to the next deadline when no task is ready)
     sleepers: [Sleeper],
+    deadlines: [Deadline],
+    fired: [bool],
     sleep_seq: int64,
     virtual_time: bool,
     vclock: int64,
@@ -402,7 +408,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
-        sleepers: [], sleep_seq: 0, virtual_time: false, vclock: 0,
+        sleepers: [], deadlines: [], fired: [], sleep_seq: 0, virtual_time: false, vclock: 0,
     }
     return it
 }
@@ -1101,6 +1107,7 @@ impl Interp {
     // as native code's timers fire: the newest runs first, so they are made
     // ready latest first (fifo: earliest first).
     fun wake_sleepers(var self) {
+        if self.deadlines.len() > 0 { self.fire_deadlines() }
         if self.sleepers.len() == 0 { return }
         let now = self.now()
         var due: [int32] = []
@@ -1137,13 +1144,32 @@ impl Interp {
         }
     }
 
-    // No task ready: until the earliest sleeper's time (the virtual clock
-    // moved to it); false when no task sleeps.
+    // The deadlines that passed: each cancels its task (its sleepers' time
+    // comes at once) and is marked fired.
+    fun fire_deadlines(var self) {
+        let now = self.now()
+        var rest: [Deadline] = []
+        var due: [Deadline] = []
+        for d in self.deadlines {
+            if d.at <= now { due.push(d) } else { rest.push(d) }
+        }
+        self.deadlines = rest
+        for d in due {
+            self.fired[d.rec] = true
+            self.request_cancel(d.task)
+        }
+    }
+
+    // No task ready: until the earliest sleeper's or deadline's time (the
+    // virtual clock moved to it); false when no task sleeps.
     fun wait_for_sleeper(var self) -> bool {
         if self.sleepers.len() == 0 { return false }
         var at = self.sleepers[0].at
         for s in self.sleepers {
             if s.at < at { at = s.at }
+        }
+        for d in self.deadlines {
+            if d.at < at { at = d.at }
         }
         if self.virtual_time {
             if at > self.vclock { self.vclock = at }
@@ -1413,6 +1439,12 @@ impl Interp {
     // `task.cancel` of the task `id`: it and its children asked to stop (D96).
     fun request_cancel(var self, id: int32) {
         self.tasks[id].requested = true
+        // asleep, it wakes at once (D124)
+        var i = 0
+        while i < self.sleepers.len() {
+            if self.sleepers[i].task == id { self.sleepers[i].at = -1 }
+            i = i + 1
+        }
         for k in self.tasks[id].kids { self.request_cancel(k) }
     }
 
@@ -1638,6 +1670,14 @@ impl Interp {
     fun end_task(var self, ok: bool, v: Value, err: Option<RtError>, code: int32) {
         let t = self.cur
         self.tasks[t].state = 2
+        // its deadline, if it has one, no longer fires (D124)
+        if self.deadlines.len() > 0 {
+            var rest: [Deadline] = []
+            for d in self.deadlines {
+                if d.task != t { rest.push(d) }
+            }
+            self.deadlines = rest
+        }
         self.tasks[t].value = v
         self.tasks[t].failed = !ok
         self.tasks[t].err = err
@@ -2822,6 +2862,25 @@ impl Interp {
             }
             return Value.VUnit
         }
+        // a deadline for the child (D124, `task.timeout`), and whether it had
+        // not passed
+        if nm == "__cancel_after" {
+            let c = self.eval(args[0])
+            let ms = as_int(self.eval(args[1]))
+            let rec = self.fired.len()
+            self.fired.push(false)
+            match c {
+                Value.VTask(id) => {
+                    if self.tasks[id].state != 2 { self.deadlines.push(Deadline { at: self.now() + ms * 1000000, task: id, rec: rec }) }
+                },
+                _ => {},
+            }
+            return Value.VInt(rec as int64)
+        }
+        if nm == "__disarm" {
+            let rec = as_int(self.eval(args[0]))
+            return Value.VBool(!self.fired[rec as int32])
+        }
         if nm == "__task_cancelled" {
             return Value.VBool(self.cur < self.tasks.len() && self.tasks[self.cur].requested)
         }
@@ -2838,7 +2897,8 @@ impl Interp {
                 return Value.VUnit
             }
             var d = ms
-            if d < 0 { d = 0 }
+            // no time at all in a task already asked to stop
+            if d < 0 || self.tasks[self.cur].requested { d = 0 }
             self.sleepers.push(Sleeper { at: self.now() + d * 1000000, seq: self.sleep_seq, task: self.cur })
             self.sleep_seq = self.sleep_seq + 1
             self.tasks[self.cur].state = 1

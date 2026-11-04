@@ -134,6 +134,81 @@ async fun main() {
 """
 
 
+# `task.timeout`: a child done in time, one asleep past the deadline (its
+# sleep ends at once), one computing until it sees it was cancelled, one whose
+# own child sleeps (woken too)
+TIMEOUT = """import std.task as task
+import std.time as time
+
+async fun quick() -> int {
+    await task.sleep(10)
+    return 7
+}
+
+async fun slow() -> int {
+    await task.sleep(5000)
+    return 8
+}
+
+async fun spins() -> int {
+    var n = 0
+    while !task.cancelled() {
+        n = n + 1
+        await task.yield()
+    }
+    return n
+}
+
+async fun deep_sleep() -> int {
+    await task.sleep(5000)
+    return 1
+}
+
+async fun nested() -> int {
+    async let inner = deep_sleep()
+    return await inner + 1
+}
+
+fun show(r: Option<int>) -> str {
+    return match r {
+        Some(v) => f"some {v}",
+        None => "none",
+    }
+}
+
+#main
+async fun main() {
+    let start = time.now_ms()
+    print(show(await task.timeout(1000, async () => await quick())))
+    print(show(await task.timeout(30, async () => await slow())))
+    let r = await task.timeout(30, async () => await spins())
+    print(show(r))
+    print(show(await task.timeout(30, async () => await nested())))
+    print(time.now_ms() - start < 4000)
+}
+"""
+
+# `task.cancel` ends a child's sleep at once
+CANCEL = """import std.task as task
+import std.time as time
+
+async fun nap() -> int {
+    await task.sleep(5000)
+    if task.cancelled() { return 1 }
+    return 0
+}
+
+#main
+async fun main() {
+    let start = time.now_ms()
+    async let a = nap()
+    task.cancel(a)
+    print(await a)
+    print(time.now_ms() - start < 4000)
+}
+"""
+
+
 @unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
 class Time(unittest.TestCase):
     def setUp(self):
@@ -207,6 +282,31 @@ class Time(unittest.TestCase):
         self.assertEqual((out, code), ("", 1))
         self.assertIn("runtime error:", err)
         self.assertLess(took, 5.0)
+
+    def test_a_timeout_cancels_the_child_and_ends_its_sleeps(self):
+        want = "some 7\nnone\nnone\nnone\ntrue\n"
+        exe = self.native("timeout", TIMEOUT)
+        for workers in ["1", "4"]:
+            with self.subTest(workers=workers):
+                out, err, code, _ = self.run_timed([exe], MYLA_THREADS=workers)
+                self.assertEqual((out, err, code), (want, "", 0))
+        out, err, code, _ = self.interpreted("timeout", TIMEOUT)
+        self.assertEqual((out, err, code), (want, "", 0))
+        # with the virtual clock time passes only when every task sleeps, so
+        # the child that computes until cancelled is left out
+        spinless = TIMEOUT.replace("    let r = await task.timeout(30, async () => await spins())\n    print(show(r))\n", "")
+        out, err, code, took = self.interpreted("timeout_v", spinless, MYLA_TIME="virtual")
+        self.assertEqual((out, err, code), ("some 7\nnone\nnone\ntrue\n", "", 0))
+        self.assertLess(took, 5.0)
+
+    def test_cancelling_a_sleeping_child_wakes_it(self):
+        exe = self.native("cancel", CANCEL)
+        for workers in ["1", "4"]:
+            with self.subTest(workers=workers):
+                out, err, code, _ = self.run_timed([exe], MYLA_THREADS=workers)
+                self.assertEqual((out, err, code), ("1\ntrue\n", "", 0))
+        out, err, code, _ = self.interpreted("cancel", CANCEL)
+        self.assertEqual((out, err, code), ("1\ntrue\n", "", 0))
 
 
 if __name__ == "__main__":

@@ -471,9 +471,10 @@ impl CodeGen {
         // the entry's task: the program ends (its children have ended)
         self.raw("\tcmpq __exec_main(%rip), %rax")
         self.raw("\tje .Lfinish_program")
-        self.raw("\tmovq $1, %rdi")
-        self.raw("\txchgq %rdi, 24(%rax)")
-        self.raw("\tjmp __wake_waiters")
+        // (std.rt's `task_end`: its deadline off the timers, D124, then
+        // the waiters)
+        self.raw("\tmovq %rax, %rdi")
+        self.raw("\tjmp __task_end")
         self.raw(".Lfinish_program:")
         self.raw("\tmovq $231, %rax")
         self.raw("\txorq %rdi, %rdi")

@@ -1169,6 +1169,14 @@ pub fun task_cancel(fr: int64) {
     if fr == 0 {
         return
     }
+    if __rt_get("__timer_count") != 0 {
+        // its sleepers (and its children's) wake at once (D124)
+        let lock = __rt_addr("__timer_lock")
+        take_lock(lock)
+        cancel_locked(fr)
+        __store64(lock, 0)
+        return
+    }
     let at = fr + 48
     while true {
         let flags = __load64(at)
@@ -1573,52 +1581,106 @@ pub fun sleep_ns(n: int64) {
     }
 }
 
-// The timers: the frames asleep, in a heap ordered by their deadline and,
-// for one deadline, by the order they went to sleep. The heap's cell is
-// `__timers`, `[count][cap]` and then `[deadline][seq][frame]` entries,
-// under `__timer_lock`; `__timer_count` is its count, read without the lock
-// to see whether there are any. A worker that finds no frame while there are
-// timers polls (`exec_poll`) instead of parking.
+// The timers: the frames asleep and the deadlines of tasks (`timeout`), in
+// a heap ordered by their time and, for one time, by the order they were
+// set. The heap's cell is `__timers`, `[count][cap]` and then
+// `[time][seq][frame][cell]` entries, under `__timer_lock`; `__timer_count`
+// is its count, read without the lock to see whether there are any. A
+// sleeper's entry holds its frame and no cell; a deadline's holds the
+// child task's first frame with its low bit set and the cell its `timeout`
+// reads (1 once the deadline fired). A worker that finds no frame while
+// there are timers polls (`exec_poll`) instead of parking.
 
-const TIMER: int64 = 24
+const TIMER: int64 = 32
 
 // `myla___sleep(frame, ms)`: the frame asleep for `ms` milliseconds, on the
-// timers (its frame function suspends after this call).
+// timers (its frame function suspends after this call); no time at all in
+// a task already asked to stop (D124).
 pub fun sleep_frame(fr: int64, ms: int64) {
-    let at = os.clock_ns() + ms * 1000000
+    var n = ms * 1000000
+    if task_cancelled() != 0 {
+        n = 0
+    }
+    let seq = timer_add(os.clock_ns() + n, fr, 0)
+}
+
+// `__cancel_after(child, ms)`: the child task whose first frame is `fr`
+// cancelled once `ms` milliseconds passed (D124, `task.timeout`): its flags
+// get "has a deadline" (4), so its end takes the deadline off; the cell
+// `__disarm` reads, which says whether the deadline fired.
+pub fun cancel_after(fr: int64, ms: int64) -> int64 {
+    let cell = __alloc(8)
+    __store64(cell, 0)
+    let at = fr + 48
+    while true {
+        let flags = __load64(at)
+        if __cas64(at, flags, flags | 4) {
+            break
+        }
+    }
+    let seq = timer_add(os.clock_ns() + ms * 1000000, fr | 1, cell)
+    return cell
+}
+
+// `__disarm(cell)`: whether the deadline of `cancel_after` had not fired
+// (its task ended first); the cell freed.
+pub fun disarm(cell: int64) -> bool {
+    let fired = __load64(cell)
+    __free(cell)
+    return fired == 0
+}
+
+// `__task_end(fr)`: the task whose first frame is `fr` ended (not the
+// entry's): its deadline, if it has one, taken off the timers (a deadline
+// that fired did all it does under their lock, so nothing touches the frame
+// after this), then the frames waiting for it go on, its word saying done.
+pub fun task_end(fr: int64) {
+    if (__load64(fr + 48) & 4) != 0 {
+        let lock = __rt_addr("__timer_lock")
+        take_lock(lock)
+        timers_forget(fr | 1)
+        __store64(lock, 0)
+    }
+    wake_waiters(__xchg64(fr + 24, 1))
+}
+
+// A timer at `at` for `fr` (and `cell`); its order among timers of one time.
+fun timer_add(at: int64, fr: int64, cell: int64) -> int64 {
     let lock = __rt_addr("__timer_lock")
     take_lock(lock)
     if __rt_get("__exec_poller") == 0 {
         __store64(__rt_addr("__exec_poller"), os.poller_new())
     }
-    var cell = __rt_get("__timers")
-    if cell == 0 || __load64(cell) == __load64(cell + 8) {
-        cell = timers_grown(cell)
+    var c = __rt_get("__timers")
+    if c == 0 || __load64(c) == __load64(c + 8) {
+        c = timers_grown(c)
     }
     let seq = __rt_get("__timer_seq")
     __store64(__rt_addr("__timer_seq"), seq + 1)
     // sifted up from the end
-    var i = __load64(cell)
+    var i = __load64(c)
     while i > 0 {
         let parent = (i - 1) / 2
-        let pe = cell + 16 + parent * TIMER
+        let pe = c + 16 + parent * TIMER
         if !timer_before(at, seq, __load64(pe), __load64(pe + 8)) {
             break
         }
-        __copy_bytes(cell + 16 + i * TIMER, pe, TIMER)
+        __copy_bytes(c + 16 + i * TIMER, pe, TIMER)
         i = parent
     }
-    let e = cell + 16 + i * TIMER
+    let e = c + 16 + i * TIMER
     __store64(e, at)
     __store64(e + 8, seq)
     __store64(e + 16, fr)
-    __store64(cell, __load64(cell) + 1)
-    __store64(__rt_addr("__timer_count"), __load64(cell))
+    __store64(e + 24, cell)
+    __store64(c, __load64(c) + 1)
+    __store64(__rt_addr("__timer_count"), __load64(c))
     __store64(lock, 0)
-    // a worker polling until a later deadline wakes to wait for this one
+    // a worker polling until a later time wakes to wait for this one
     if __rt_get("__exec_polling") != 0 {
         os.poller_wake(__rt_get("__exec_poller"))
     }
+    return seq
 }
 
 // Whether the timer `(a, sa)` is due before `(b, sb)`.
@@ -1645,9 +1707,10 @@ fun timers_grown(cell: int64) -> int64 {
     return bigger
 }
 
-// The frames whose deadline passed taken off the timers and queued on this
-// worker so that the earliest runs first: the newest runs first (D110), so
-// they are pushed latest first; with MYLA_SCHED=fifo, earliest first.
+// The timers that passed taken off: a sleeper's frame queued on this worker
+// so that the earliest runs first (the newest runs first, D110, so they are
+// pushed latest first; with MYLA_SCHED=fifo, earliest first); a deadline
+// cancels its task, under the lock, and its sleepers' time comes at once.
 fun timers_fire() {
     let now = os.clock_ns()
     let lock = __rt_addr("__timer_lock")
@@ -1658,8 +1721,15 @@ fun timers_fire() {
         if cell == 0 || __load64(cell) == 0 || __load64(cell + 16) > now {
             break
         }
-        due.push(__load64(cell + 32))
+        let fr = __load64(cell + 32)
+        let rec = __load64(cell + 40)
         timers_pop(cell)
+        if (fr & 1) != 0 {
+            __store64(rec, 1)
+            cancel_locked(fr - 1)
+        } else {
+            due.push(fr)
+        }
     }
     __store64(lock, 0)
     if __rt_get("__exec_sched") == 1 {
@@ -1675,8 +1745,78 @@ fun timers_fire() {
     }
 }
 
+// The task whose first frame is `t` asked to stop (its flags' 2), and the
+// time of every sleeper of it or a task below it come (D124: a cancelled
+// task's sleep ends at once); the timers' lock held.
+fun cancel_locked(t: int64) {
+    let at = t + 48
+    while true {
+        let flags = __load64(at)
+        if __cas64(at, flags, flags | 2) {
+            break
+        }
+    }
+    let cell = __rt_get("__timers")
+    if cell == 0 {
+        return
+    }
+    let n = __load64(cell)
+    var woke = false
+    var i: int64 = 0
+    while i < n {
+        let e = cell + 16 + i * TIMER
+        let fr = __load64(e + 16)
+        if (fr & 1) == 0 && task_below(__load64(fr + 40), t) {
+            __store64(e, 0)
+            woke = true
+        }
+        i += 1
+    }
+    if woke {
+        timers_heapify(cell)
+    }
+}
+
+// Whether the task `t` (a first frame) is `top` or a task below it.
+fun task_below(t: int64, top: int64) -> bool {
+    var x = t
+    while x != 0 {
+        if x == top {
+            return true
+        }
+        x = __load64(x + 56)
+    }
+    return false
+}
+
+// Every timer for `fr` (a deadline's tagged frame) taken off; the lock held.
+fun timers_forget(fr: int64) {
+    let cell = __rt_get("__timers")
+    if cell == 0 {
+        return
+    }
+    var n = __load64(cell)
+    var i: int64 = 0
+    var gone = false
+    while i < n {
+        let e = cell + 16 + i * TIMER
+        if __load64(e + 16) == fr {
+            n -= 1
+            __copy_bytes(e, cell + 16 + n * TIMER, TIMER)
+            gone = true
+        } else {
+            i += 1
+        }
+    }
+    if gone {
+        __store64(cell, n)
+        __store64(__rt_addr("__timer_count"), n)
+        timers_heapify(cell)
+    }
+}
+
 // The earliest timer of the cell `cell` (not empty) taken off: the last one
-// sifted down from the top.
+// moved to the top and sifted down.
 fun timers_pop(cell: int64) {
     let n = __load64(cell) - 1
     __store64(cell, n)
@@ -1684,15 +1824,28 @@ fun timers_pop(cell: int64) {
     if n == 0 {
         return
     }
-    let last = cell + 16 + n * TIMER
-    let at = __load64(last)
-    let seq = __load64(last + 8)
-    let fr = __load64(last + 16)
-    var i: int64 = 0
+    __copy_bytes(cell + 16, cell + 16 + n * TIMER, TIMER)
+    timer_sift(cell, 0, n)
+}
+
+// The heap of the cell `cell` made whole again after times changed.
+fun timers_heapify(cell: int64) {
+    let n = __load64(cell)
+    var i = n / 2
+    while i > 0 {
+        i -= 1
+        timer_sift(cell, i, n)
+    }
+}
+
+// The timer at `i` sifted down among the `n` of the cell `cell`.
+fun timer_sift(cell: int64, i0: int64, n: int64) {
+    let tmp = __rt_addr("__timer_tmp")
+    var i = i0
     while true {
         var child = 2 * i + 1
         if child >= n {
-            break
+            return
         }
         let ce = cell + 16 + child * TIMER
         if child + 1 < n {
@@ -1702,16 +1855,16 @@ fun timers_pop(cell: int64) {
             }
         }
         let c = cell + 16 + child * TIMER
-        if !timer_before(__load64(c), __load64(c + 8), at, seq) {
-            break
+        let e = cell + 16 + i * TIMER
+        if !timer_before(__load64(c), __load64(c + 8), __load64(e), __load64(e + 8)) {
+            return
         }
-        __copy_bytes(cell + 16 + i * TIMER, c, TIMER)
+        // swapped through a scratch entry (the lock held: one at a time)
+        __copy_bytes(tmp, e, TIMER)
+        __copy_bytes(e, c, TIMER)
+        __copy_bytes(c, tmp, TIMER)
         i = child
     }
-    let e = cell + 16 + i * TIMER
-    __store64(e, at)
-    __store64(e + 8, seq)
-    __store64(e + 16, fr)
 }
 
 // The poll of an idle worker (it holds `__exec_polling`): until the nearest
