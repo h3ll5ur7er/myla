@@ -1,6 +1,6 @@
 # Native backend
 
-The code generator ([[selfhost/codegen.my]], with [[selfhost/lower.my]] and [[selfhost/ir_x86.my]]) turns the checked program into GAS/AT&T assembly for x86-64 Linux, making concrete copies of generic code as it goes ([[Architecture/Monomorphization]]); `myla build` writes the `.s`, runs `as --64` and `ld`, and deletes the intermediate files (`driver.my`). There is no libc: the runtime is emitted as assembly and talks to the kernel with system calls (D2, D29).
+The code generator ([[selfhost/codegen.my]], with [[selfhost/lower.my]], [[selfhost/ownership.my]], [[selfhost/ir_x86.my]] and [[selfhost/runtime_x86.my]]) turns the checked program into GAS/AT&T assembly for x86-64 Linux, making concrete copies of generic code as it goes ([[Architecture/Monomorphization]]); `myla build` writes the `.s`, runs `as --64` and `ld`, and deletes the intermediate files (`driver.my`). There is no libc: the runtime talks to the kernel with system calls (D2, D29). Since [[MYLA-162]] most of it is Myla, `std.rt` over the platform layer `std.platform`, compiled through the IR with every program; what stays hand-written for the target ([[selfhost/runtime_x86.my]]) is the program's start, the traps and the panic, the system-call and memory primitives, the executor's control transfers, a function value's environment copies, composition and the float primitives.
 
 This page was written for the Python backend (`src/myla/compiler/codegen_x86.py`, retired with the Python toolchain, [[MYLA-219]]). The self-hosted code generator began as a port of it and keeps its calling convention, value layouts, reference counting, runtime and helpers (its runtime text is the Python backend's, edited in `codegen.my` since); since [[MYLA-107]] it emits every function from its IR ([[Architecture/IR]]) instead of in one pass. Where this page names a function with a leading underscore (`_layout_frame`, `_store_call_words`, …), it is the Python backend's; the self-hosted one does the same in the lowering and the instruction selection.
 
@@ -81,6 +81,8 @@ D90, D91 and D92, [[MYLA-138]] and [[MYLA-137]]: a program with an `async let` (
 - **Costs.** Eight CPU-bound children run 3.9 times as fast on 4 workers as on one, a tree of 131,072 small tasks 3.7 times. A program whose tasks mostly take turns at one actor gains nothing from more workers: eight tasks making 20,000 calls each of one actor take 14 ms on one worker, 49 on two, 80 on four (189 before the wait for a busy actor), the actor's record and the tasks' frames moving between cores at every call; and on one worker a program pays a few milliseconds more than the runtime of one thread for locks, atomics and copies.
 
 ## Runtime helpers
+
+The table names the runtime's entry points as the generated code calls them; most are std.rt's functions now (`.set` to `myla_std$rt$…`), the per-type ones IR functions ([[MYLA-162]]).
 
 | Group | Helpers |
 | --- | --- |

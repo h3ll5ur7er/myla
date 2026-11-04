@@ -13,7 +13,7 @@ Second step of [[MYLA-62]]: the runtime (about 3,000 lines of hand-written x86-6
 - [ ] Atomics where the runtime needs them (counts of actor handles, queues, the failure flag of D97)
 - [ ] The x86-64 backend uses it; the gates and the bootstrap still pass, and the cost against the assembly runtime is measured
 - [x] Arenas that grow lazily (D106, [[MYLA-206]])
-- [ ] The runtime out of [[selfhost/codegen.my]] (D108, [[MYLA-217]])
+- [x] The runtime out of [[selfhost/codegen.my]] (D108, [[MYLA-217]])
 - [ ] Then the reactor: [[MYLA-230]] (D107)
 
 ## Sizing (2026-11-03, for [[MYLA-160]])
@@ -284,4 +284,9 @@ The code generator's per-type routines (retain, drop, clone, the deep walks, der
 
 - std.rt's allocator maps a 16 MiB chunk (`std.platform`'s `map_memory`, on a new primitive `__syscall5` for mmap's five arguments) when the arena is full, and none before the first cell; a cell bigger than a chunk gets a mapping of its own. With tasks, a worker's chunks are aligned to their size (mapped one chunk bigger, the ends given back) with its number in their first word, so `free_tasks` finds a cell's owner at its address rounded down to a chunk (was `(p - __heap_base) >> 32`). `_start`'s region of a 4 GiB arena per worker, `__heap_init` and `__heap_base` are gone, and the rings of ready frames are reserved for the workers that run (`exec_workers * 8 MiB`, was 32 always).
 - **Measured:** under `ulimit -v 400000` a program with tasks runs on four workers, and one mapping 320 MB in all (small cells, and growing lists up to a 128 MB cell) runs too (`test_the_heap_grows_in_chunks_under_a_small_address_space_limit`; before, both "out of memory"). The benchmarks run 20 instructions more each (the first chunk's mapping), binary trees' wall time the same within noise; compiling the compiler the same. The stress tests pass three times in a row.
+
+## Step 31: the runtime's assembly in a module of its own (2026-11-04, D108)
+
+- What stays hand-written for x86-64 Linux moved from `codegen.my` to [[selfhost/runtime_x86.my]] (`impl CodeGen`, 850 lines): the program's start, the traps and the panic, the system-call and memory primitives, the executor's control transfers, the environments' deep copies, composition, std.math's and the float runtime's primitives and data. The empty list, map, builder and character emitters left by the port are gone (their cell layouts kept as one comment), and so is `tls_addr`, which nothing called. `codegen.my`: 5,484 lines to 4,625 (8,794 before step 26).
+- Every example, benchmark, stress test and the compiler compile to the same assembly as before the move; the suite passes.
 
