@@ -86,7 +86,7 @@ The table names the runtime's entry points as the generated code calls them; mos
 
 | Group | Helpers |
 | --- | --- |
-| Process | `_start`, `__panic` (`runtime error: <message>` and the position to stderr, exit 1; `__write_err`, `__write_err_num` write its parts), the runtime-error entries `__trap_index`, `__trap_key`, `__trap_pop`, `__trap_div`, `__trap_mod`, `__trap_match`, `__trap_oom` (each passes its message to `__panic`, [[MYLA-17]]; see below), `__write_all` (loops over short writes, retries `EINTR`/`EAGAIN`; every output goes through it) |
+| Process | `_start`, `__panic` (a task's failure handed to `__task_fail` with tasks, then std.rt's `panic_report`: `runtime error: <message>` and the position to stderr, exit 1, allocating nothing), the runtime-error entries `__trap_index`, `__trap_key`, `__trap_pop`, `__trap_div`, `__trap_mod`, `__trap_match`, `__trap_oom` (each passes its message to `__panic`, [[MYLA-17]]; see below); every output goes through `std.platform`'s `write_all` (loops over short writes, retries `EINTR`/`EAGAIN`) |
 | Printing | `__print_int`, `__print_uint`, `__print_bool`, `__print_str`, `__print_nl`, `__float_to_str`, `__char_to_str` (a value and its newline go out with one `writev`, `__print_line`, [[MYLA-137]]) |
 | Strings | `__str_eq`, `__str_concat`, `__int_to_str`, `__uint_to_str`, `__bool_to_str`, `__str_chars` (UTF-8 decode; U+FFFD for each byte outside a well-formed sequence) |
 | Heap | `__alloc`, `__free` (std.rt's `alloc`, `free`, `alloc_tasks`, `free_tasks`), `__func_retain`, `__func_drop` |

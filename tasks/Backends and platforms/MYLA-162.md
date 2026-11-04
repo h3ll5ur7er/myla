@@ -2,16 +2,16 @@
 id: MYLA-162
 title: The runtime off assembly - Myla runtime and a platform layer
 type: feature
-status: in-progress
+status: review
 priority: medium
 labels: [runtime, platforms]
 ---
 Second step of [[MYLA-62]]: the runtime (about 3,000 lines of hand-written x86-64 assembly in [[selfhost/codegen.my]]: the allocator with per-worker heaps, strings, maps, builders, printing and float formatting, traps, the work-stealing executor with actor executors, thread state through `%fs`, `clone`, `futex` and raw system calls) rewritten once in Myla and compiled through the IR (D117), so that a new backend only translates the IR and a new target only needs a thin platform layer. [[MYLA-160]] sizes it first. This is the step that makes other platforms affordable.
 
-- [ ] The portable part in Myla: allocator, strings, maps, builders, formatting (byte-identical to the interpreter), traps, the executor's logic
-- [ ] The platform layer behind a small interface: memory (`mmap`), output and files, processes (`__run`), directories, threads, parking and waking, thread-local state, time, exit; Linux first, with system calls as today
-- [ ] Atomics where the runtime needs them (counts of actor handles, queues, the failure flag of D97)
-- [ ] The x86-64 backend uses it; the gates and the bootstrap still pass, and the cost against the assembly runtime is measured
+- [x] The portable part in Myla: allocator, strings, maps, builders, formatting (byte-identical to the interpreter), traps, the executor's logic
+- [x] The platform layer behind a small interface: memory (`mmap`), output and files, processes (`__run`), directories, threads, parking and waking, thread-local state, time, exit; Linux first, with system calls as today
+- [x] Atomics where the runtime needs them (counts of actor handles, queues, the failure flag of D97)
+- [x] The x86-64 backend uses it; the gates and the bootstrap still pass, and the cost against the assembly runtime is measured
 - [x] Arenas that grow lazily (D106, [[MYLA-206]])
 - [x] The runtime out of [[selfhost/codegen.my]] (D108, [[MYLA-217]])
 - [ ] Then the reactor: [[MYLA-230]] (D107)
@@ -289,4 +289,13 @@ The code generator's per-type routines (retain, drop, clone, the deep walks, der
 
 - What stays hand-written for x86-64 Linux moved from `codegen.my` to [[selfhost/runtime_x86.my]] (`impl CodeGen`, 850 lines): the program's start, the traps and the panic, the system-call and memory primitives, the executor's control transfers, the environments' deep copies, composition, std.math's and the float runtime's primitives and data. The empty list, map, builder and character emitters left by the port are gone (their cell layouts kept as one comment), and so is `tls_addr`, which nothing called. `codegen.my`: 5,484 lines to 4,625 (8,794 before step 26).
 - Every example, benchmark, stress test and the compiler compile to the same assembly as before the move; the suite passes.
+
+## Step 32: runtime errors reported by std.rt (2026-11-04)
+
+- `__panic` is a stub now: with tasks it hands the failure to `__task_fail` (which goes back to the executor for a task other than the entry's), then jumps to std.rt's `panic_report` (`panic_report_tasks` waits for the other workers first, D97), which writes `runtime error: <message>` and `  --> file:line:col` through `std.platform` and ends the process. It allocates nothing (the digits go to `__panic_buf`), so out of memory reports through it too. `__write_err`, `__write_err_num`, the assembly `__write_all` and the two message strings are gone; the trap entries stay three instructions each.
+- Programs carry 35 lines of assembly more (the report compiled from Myla). The suite passes (every runtime error of the error corpus with its position, the failing-task tests), the stress tests three times in a row, and out of memory under `ulimit -v 100000` still reports.
+
+## Where it stands (2026-11-04)
+
+The portable runtime is Myla (std.rt), over the platform layer (std.platform); the per-type routines are IR functions; the ownership instructions reach the backend as plain operations; the heap grows lazily. What stays hand-written for x86-64 Linux is [[selfhost/runtime_x86.my]] (about 830 lines): the program's start and the stack-overflow handler, the trap entries and `__panic`'s stub, the system-call and memory primitives, the executor's control transfers (threads, frames), the environments' deep copies, composition, and the float primitives and tables; and in the backend, the function-value adapters, the partial-application thunks and the async frame constructor (calling-convention glue). "Time" in the platform list has no user yet: the runtime reads no clock. Next: the reactor ([[MYLA-230]], D107), and per target the platform's assembly and std.platform again ([[MYLA-163]] to [[MYLA-165]]).
 

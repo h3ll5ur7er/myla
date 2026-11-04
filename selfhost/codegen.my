@@ -1882,9 +1882,9 @@ impl CodeGen {
     // name the rest of the runtime calls and the function standing for it.
     fun rt_exec(self) -> [(str, str)] {
         // every program's (`__map_lookup`: `remove`'s, `emit_map_remove`)
-        var out = [("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup")]
+        var out = [("__panic_report", "std$rt$panic_report"), ("__list_grow", "std$rt$list_grow"), ("__sb_append_bytes", "std$rt$sb_append_bytes"), ("__map_new", "std$rt$map_new"), ("__map_rebuild", "std$rt$map_rebuild"), ("__map_lookup", "std$rt$map_lookup")]
         if self.frames {
-            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell")] { out.push(p) }
+            for p in [("__sched_init", "std$rt$sched_init"), ("__workers_count", "std$rt$workers_count"), ("__task_cancel", "std$rt$task_cancel"), ("__task_cancelled", "std$rt$task_cancelled"), ("__failed_wait", "std$rt$failed_wait"), ("__wait_stopped", "std$rt$wait_stopped"), ("__exec_push", "std$rt$exec_push"), ("__exec_yield_push", "std$rt$exec_yield_push"), ("__exec_find", "std$rt$exec_find"), ("__exec_peek", "std$rt$exec_peek"), ("__wake_waiters", "std$rt$wake_waiters"), ("__actor_leave", "std$rt$actor_leave"), ("__task_wait", "std$rt$task_wait"), ("__actor_enter_rt", "std$rt$actor_enter"), ("__exec_loop", "std$rt$exec_run"), ("__deep_str", "std$rt$deep_str"), ("__dclone_str", "std$rt$dclone_str"), ("__dclone_cell", "std$rt$dclone_cell"), ("__panic_report_tasks", "std$rt$panic_report_tasks")] { out.push(p) }
         }
         return out
     }
@@ -2014,8 +2014,6 @@ impl CodeGen {
             out.push(format(".Lmsg{}:\n\t.quad {}\n\t.ascii \"{}\"", label, text.len(), text))
             ti = ti + 1
         }
-        out.push(".Lmsg_rterr:\n\t.quad 15\n\t.ascii \"runtime error: \"")
-        out.push(".Lmsg_at:\n\t.quad 7\n\t.ascii \"\\n  --> \"")
         for line in self.posdata { out.push(line) }
         for line in self.rodata { out.push(line) }
         if self.uses_float { for chunk in self.float_rodata_text() { out.push(chunk) } }
@@ -2063,6 +2061,10 @@ impl CodeGen {
         // 1 once a stack overflow is being reported (`__on_segv`)
         out.push("__segv_once:")
         out.push("\t.skip 8")
+        // a runtime error's line and column as digits (std.rt's
+        // `write_err_num`)
+        out.push("__panic_buf:")
+        out.push("\t.skip 32")
         if self.frames {
             // each worker's queue: `[lock][head][tail]`, a cache line each
             out.push("\t.balign 64")
