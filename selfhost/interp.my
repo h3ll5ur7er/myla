@@ -124,6 +124,10 @@ struct AFrame { scopes: [RtFrame], conts: [Cont], place: Option<Place>, pend: Ct
 // or a task above it, to stop (D96).
 struct Task { frames: [AFrame], state: int32, value: Value, failed: bool, err: Option<RtError>, code: int32, awaited: bool, waiters: [int32], cancelled: bool, kids: [int32], requested: bool }
 
+// A task asleep (`std.task.sleep`, D124): until `at` on the interpreter's
+// clock (`Interp.now`), `seq` the order tasks went to sleep in.
+struct Sleeper { at: int64, seq: int64, task: int32 }
+
 // A call whose async body the async evaluator takes over (Interp.defer).
 struct Deferred { scopes: [RtFrame], body: Block }
 
@@ -195,6 +199,12 @@ pub struct Interp {
     fail_reported: bool,
     // calls in progress, up to MAX_CALL_DEPTH (MYLA-182)
     depth: int32,
+    // D124: the tasks asleep, and the clock (MYLA_TIME=virtual: `vclock`,
+    // which moves to the next deadline when no task is ready)
+    sleepers: [Sleeper],
+    sleep_seq: int64,
+    virtual_time: bool,
+    vclock: int64,
 }
 
 // A runtime error, with the Python interpreter's message; `node` is the id of
@@ -302,7 +312,14 @@ pub fun sched_of(spec: str) -> (int32, uint64) {
 #test("MYLA_SCHEDX=1\0")[""]
 #test("")[""]
 pub fun sched_in(environ: str) -> str {
-    let key = "MYLA_SCHED="
+    return env_entry(environ, "MYLA_SCHED=")
+}
+
+// The value of the entry starting with `key` (`NAME=`) in the environment
+// `environ`, "" when it has none.
+#test("A=1\0MYLA_TIME=virtual\0", "MYLA_TIME=")["virtual"]
+#test("A=1\0", "MYLA_TIME=")[""]
+pub fun env_entry(environ: str, key: str) -> str {
     var i = 0
     while i < environ.len() {
         var j = i
@@ -323,6 +340,14 @@ pub fun sched_in(environ: str) -> str {
 pub fun sched_from_env() -> str {
     return match read_to_string("/proc/self/environ") {
         Ok(e) => sched_in(e),
+        Err(_) => "",
+    }
+}
+
+// MYLA_TIME's value in this process's environment (D124), "" without one.
+pub fun time_from_env() -> str {
+    return match read_to_string("/proc/self/environ") {
+        Ok(e) => env_entry(e, "MYLA_TIME="),
         Err(_) => "",
     }
 }
@@ -377,6 +402,7 @@ pub fun new_interp(c: Checker, argv: [str]) -> Interp {
         failing: false, fail_err: None, fail_code: 0,
         on_failure: (r: RtError) => false, fail_reported: false,
         depth: 0,
+        sleepers: [], sleep_seq: 0, virtual_time: false, vclock: 0,
     }
     return it
 }
@@ -983,7 +1009,12 @@ impl Interp {
             None => { return },
         }
         self.scopes = []
-        while self.qlen > 0 {
+        while true {
+            self.wake_sleepers()
+            if self.qlen == 0 {
+                if self.wait_for_sleeper() { continue }
+                break
+            }
             let t = self.next_ready()
             self.cur = t
             self.frames = self.tasks[t].frames
@@ -1050,6 +1081,77 @@ impl Interp {
         let (order, seed) = sched_of(spec)
         self.sched = order
         self.rng = seed
+    }
+
+    // The clock MYLA_TIME's value `spec` names (D124): "virtual", one that
+    // moves only to the next deadline when no task is ready; else the real
+    // monotonic clock.
+    fun time_mode(var self, spec: str) {
+        self.virtual_time = spec == "virtual"
+    }
+
+    // The interpreter's clock, in nanoseconds.
+    fun now(self) -> int64 {
+        if self.virtual_time { return self.vclock }
+        return __clock_ns()
+    }
+
+    // The tasks whose time to wake came (all of them once a task failed, so
+    // the others stop at once, D97) ready so that the earliest runs first,
+    // as native code's timers fire: the newest runs first, so they are made
+    // ready latest first (fifo: earliest first).
+    fun wake_sleepers(var self) {
+        if self.sleepers.len() == 0 { return }
+        let now = self.now()
+        var due: [int32] = []
+        while true {
+            var best = -1
+            var i = 0
+            while i < self.sleepers.len() {
+                let s = self.sleepers[i]
+                if s.at <= now || self.failing {
+                    if best < 0 || s.at < self.sleepers[best].at || (s.at == self.sleepers[best].at && s.seq < self.sleepers[best].seq) { best = i }
+                }
+                i = i + 1
+            }
+            if best < 0 { break }
+            let t = self.sleepers[best].task
+            var rest: [Sleeper] = []
+            var j = 0
+            while j < self.sleepers.len() {
+                if j != best { rest.push(self.sleepers[j]) }
+                j = j + 1
+            }
+            self.sleepers = rest
+            self.tasks[t].state = 0
+            due.push(t)
+        }
+        if self.sched == SCHED_FIFO {
+            for t in due { self.ready(t) }
+        } else {
+            var i = due.len()
+            while i > 0 {
+                i = i - 1
+                self.ready(due[i])
+            }
+        }
+    }
+
+    // No task ready: until the earliest sleeper's time (the virtual clock
+    // moved to it); false when no task sleeps.
+    fun wait_for_sleeper(var self) -> bool {
+        if self.sleepers.len() == 0 { return false }
+        var at = self.sleepers[0].at
+        for s in self.sleepers {
+            if s.at < at { at = s.at }
+        }
+        if self.virtual_time {
+            if at > self.vclock { self.vclock = at }
+        } else {
+            let left = at - __clock_ns()
+            if left > 0 { __sleep_ns(left) }
+        }
+        return true
     }
 
     // Room for one more ready task: the ring doubled, its tasks in order.
@@ -1126,6 +1228,8 @@ impl Interp {
             else { self.step() }
             if self.parked {
                 self.parked = false
+                // (an `await` of a sleep asks for a turn too: it has it)
+                self.yielding = false
                 return
             }
             if self.yielding {
@@ -2723,6 +2827,31 @@ impl Interp {
         }
         // nothing but the turn its `await` gives (MYLA-228)
         if nm == "__yield" { return Value.VUnit }
+        // the running task asleep (D124): parked until its time, which
+        // `wake_sleepers` sees; outside any task, the thread asleep
+        if nm == "__sleep" {
+            let ms = as_int(self.eval(args[0]))
+            if self.stop() { return Value.VUnit }
+            if self.cur < 0 || self.cur >= self.tasks.len() {
+                if ms > 0 && !self.virtual_time { __sleep_ns(ms * 1000000) }
+                if ms > 0 && self.virtual_time { self.vclock = self.vclock + ms * 1000000 }
+                return Value.VUnit
+            }
+            var d = ms
+            if d < 0 { d = 0 }
+            self.sleepers.push(Sleeper { at: self.now() + d * 1000000, seq: self.sleep_seq, task: self.cur })
+            self.sleep_seq = self.sleep_seq + 1
+            self.tasks[self.cur].state = 1
+            self.parked = true
+            return Value.VUnit
+        }
+        if nm == "__clock_ns" { return Value.VInt(self.now()) }
+        if nm == "__sleep_ns" {
+            let n = as_int(self.eval(args[0]))
+            if self.stop() { return Value.VUnit }
+            if self.virtual_time { self.vclock = self.vclock + n } else if n > 0 { __sleep_ns(n) }
+            return Value.VUnit
+        }
         if nm == "print" {
             let v = self.eval(args[0])
             if self.stop() { return Value.VUnit }

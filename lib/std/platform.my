@@ -42,6 +42,12 @@ const SYS_MKDIR: int64 = 83
 const SYS_RMDIR: int64 = 84
 const SYS_UNLINK: int64 = 87
 const SYS_FUTEX: int64 = 202
+const SYS_NANOSLEEP: int64 = 35
+const SYS_CLOCK_GETTIME: int64 = 228
+const SYS_EPOLL_WAIT: int64 = 232
+const SYS_EPOLL_CTL: int64 = 233
+const SYS_EVENTFD2: int64 = 290
+const SYS_EPOLL_CREATE1: int64 = 291
 const SYS_SCHED_GETAFFINITY: int64 = 204
 const SYS_GETDENTS64: int64 = 217
 const SYS_EXIT_GROUP: int64 = 231
@@ -407,6 +413,73 @@ pub fun map_memory(n: int64) -> int64 {
 // The `n` bytes at `p` (a whole number of pages of a mapping) given back.
 pub fun unmap_memory(p: int64, n: int64) {
     __syscall(SYS_MUNMAP, p, n, 0)
+}
+
+// --- time ----------------------------------------------------------------------
+
+// The monotonic clock, in nanoseconds since some fixed point in the past.
+pub fun clock_ns() -> int64 {
+    let ts = __alloc(16)
+    __syscall(SYS_CLOCK_GETTIME, 1, ts, 0)  // CLOCK_MONOTONIC
+    let t = __load64(ts) * 1000000000 + __load64(ts + 8)
+    __free(ts)
+    return t
+}
+
+// The calling thread asleep for `n` nanoseconds (again after an
+// interruption, for what is left).
+pub fun sleep_ns(n: int64) {
+    let ts = __alloc(16)
+    __store64(ts, n / 1000000000)
+    __store64(ts + 8, n % 1000000000)
+    while __syscall(SYS_NANOSLEEP, ts, ts, 0) == EINTR {
+    }
+    __free(ts)
+}
+
+// --- the poller (D124) -----------------------------------------------------------
+// What an idle worker waits in when tasks sleep (or, later, wait for
+// descriptors): epoll, with an eventfd another worker writes to wake it.
+// One worker polls at a time, so its buffers are the process's
+// (`__poll_buf`); a wake-up only writes the constant 1 there.
+
+// A new poller with its wake-up descriptor watched: the poller's
+// descriptor in the low 32 bits, the wake-up one's in the high ones.
+pub fun poller_new() -> int64 {
+    let ep = __syscall(SYS_EPOLL_CREATE1, 524288, 0, 0)  // EPOLL_CLOEXEC
+    let ev = __syscall(SYS_EVENTFD2, 0, 526336, 0)  // EFD_CLOEXEC | EFD_NONBLOCK
+    if ep < 0 || ev < 0 {
+        return -1
+    }
+    let e = __rt_addr("__poll_buf") + 32
+    __store32(e, 1u32)  // EPOLLIN
+    __store64(e + 4, 0)  // the token: 0, the wake-up
+    __syscall5(SYS_EPOLL_CTL, ep, 1, ev, e, 0)  // EPOLL_CTL_ADD
+    return ep | (ev << 32)
+}
+
+// Waiting in the poller `p` (from `poller_new`) for at most `timeout_ms`
+// milliseconds (negative: no limit), or until `poller_wake`: how many
+// events (0 when the time ran out, or after an interruption). A wake-up is
+// taken (its count read back to 0).
+pub fun poller_wait(p: int64, timeout_ms: int64) -> int64 {
+    let events = __rt_addr("__poll_buf") + 48
+    let n = __syscall5(SYS_EPOLL_WAIT, p & LOW32, events, 4, timeout_ms, 0)
+    if n > 0 {
+        __syscall(SYS_READ, p >> 32, __rt_addr("__poll_buf") + 112, 8)
+    }
+    if n < 0 {
+        return 0
+    }
+    return n
+}
+
+// The worker waiting in the poller `p` woken (or the next wait returns at
+// once).
+pub fun poller_wake(p: int64) {
+    let one = __rt_addr("__poll_buf") + 120
+    __store64(one, 1)
+    __syscall(SYS_WRITE, p >> 32, one, 8)
 }
 
 // --- workers -------------------------------------------------------------------

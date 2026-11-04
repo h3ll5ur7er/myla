@@ -66,3 +66,16 @@ pub fun cancelled() -> bool {
 pub async fun yield() {
     await __yield()
 }
+
+// `await task.sleep(ms)`: the running task asleep for at least `ms`
+// milliseconds (none for `ms <= 0`), the other tasks running meanwhile
+// (D124). Natively the task waits on the executor's timers, which an idle
+// worker polls. Tasks whose time comes at once go on earliest first (for one
+// deadline, in the order they went to sleep); on a busy program a task
+// whose time came while others ran may go on after a later one. With
+// MYLA_TIME=virtual the interpreter's clock moves only when no task is
+// ready, so they go on in deadline order exactly.
+pub async fun sleep(ms: int) {
+    await __sleep(ms)
+}
+

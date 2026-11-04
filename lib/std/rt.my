@@ -1260,6 +1260,9 @@ fun exec_pushed() {
     if __rt_get("__exec_sleepers") != 0 {
         os.unpark_one(__rt_addr("__exec_seq"))
     }
+    if __rt_get("__exec_polling") != 0 {
+        os.poller_wake(__rt_get("__exec_poller"))
+    }
 }
 
 // `__exec_push`: the frame `fr` onto the running worker's queue, its newest
@@ -1487,6 +1490,9 @@ pub fun actor_leave(rec: int64) {
 // stack: it keeps nothing from one frame to the next.
 pub fun exec_run() {
     while true {
+        if __rt_get("__timer_count") != 0 {
+            timers_fire()
+        }
         let fr = exec_find()
         if fr == 0 {
             exec_idle()
@@ -1522,13 +1528,20 @@ pub fun exec_run() {
 fun exec_idle() {
     __fetch_add64(__rt_addr("__exec_idle"), 1)
     if exec_peek() == 0 {
-        if __rt_get("__exec_idle") >= __rt_get("__exec_workers") {
+        if __rt_get("__exec_idle") >= __rt_get("__exec_workers") && __rt_get("__timer_count") == 0 {
             exec_stuck()
         }
         var spins: int64 = 4000
         while spins != 0 && exec_peek() == 0 {
             __pause()
             spins -= 1
+        }
+        if spins == 0 && __rt_get("__timer_count") != 0 && __xchg64(__rt_addr("__exec_polling"), 1) == 0 {
+            // tasks asleep: this worker polls (one at a time, D124) until the
+            // nearest deadline or a push (`exec_pushed` wakes it), then fires
+            // the timers that passed; a last glance after claiming the poll
+            exec_poll()
+            spins = 1
         }
         if spins == 0 {
             // asleep: counted a sleeper first, then the pushes seen, then a
@@ -1543,6 +1556,188 @@ fun exec_idle() {
         }
     }
     __fetch_add64(__rt_addr("__exec_idle"), -1)
+}
+
+// --- time: the clock, sleeping, the timers (D124) --------------------------------
+
+// `__clock_ns`: the monotonic clock in nanoseconds.
+pub fun clock_ns() -> int64 {
+    return os.clock_ns()
+}
+
+// `__sleep_ns`: the thread asleep for `n` nanoseconds (`await __sleep(ms)`
+// in a program without tasks, the interpreter's sleeping tasks).
+pub fun sleep_ns(n: int64) {
+    if n > 0 {
+        os.sleep_ns(n)
+    }
+}
+
+// The timers: the frames asleep, in a heap ordered by their deadline and,
+// for one deadline, by the order they went to sleep. The heap's cell is
+// `__timers`, `[count][cap]` and then `[deadline][seq][frame]` entries,
+// under `__timer_lock`; `__timer_count` is its count, read without the lock
+// to see whether there are any. A worker that finds no frame while there are
+// timers polls (`exec_poll`) instead of parking.
+
+const TIMER: int64 = 24
+
+// `myla___sleep(frame, ms)`: the frame asleep for `ms` milliseconds, on the
+// timers (its frame function suspends after this call).
+pub fun sleep_frame(fr: int64, ms: int64) {
+    let at = os.clock_ns() + ms * 1000000
+    let lock = __rt_addr("__timer_lock")
+    take_lock(lock)
+    if __rt_get("__exec_poller") == 0 {
+        __store64(__rt_addr("__exec_poller"), os.poller_new())
+    }
+    var cell = __rt_get("__timers")
+    if cell == 0 || __load64(cell) == __load64(cell + 8) {
+        cell = timers_grown(cell)
+    }
+    let seq = __rt_get("__timer_seq")
+    __store64(__rt_addr("__timer_seq"), seq + 1)
+    // sifted up from the end
+    var i = __load64(cell)
+    while i > 0 {
+        let parent = (i - 1) / 2
+        let pe = cell + 16 + parent * TIMER
+        if !timer_before(at, seq, __load64(pe), __load64(pe + 8)) {
+            break
+        }
+        __copy_bytes(cell + 16 + i * TIMER, pe, TIMER)
+        i = parent
+    }
+    let e = cell + 16 + i * TIMER
+    __store64(e, at)
+    __store64(e + 8, seq)
+    __store64(e + 16, fr)
+    __store64(cell, __load64(cell) + 1)
+    __store64(__rt_addr("__timer_count"), __load64(cell))
+    __store64(lock, 0)
+    // a worker polling until a later deadline wakes to wait for this one
+    if __rt_get("__exec_polling") != 0 {
+        os.poller_wake(__rt_get("__exec_poller"))
+    }
+}
+
+// Whether the timer `(a, sa)` is due before `(b, sb)`.
+fun timer_before(a: int64, sa: int64, b: int64, sb: int64) -> bool {
+    return a < b || (a == b && sa < sb)
+}
+
+// The timers' cell `cell` (0: none yet) moved into one twice as big.
+fun timers_grown(cell: int64) -> int64 {
+    var cap: int64 = 16
+    var n: int64 = 0
+    if cell != 0 {
+        n = __load64(cell)
+        cap = __load64(cell + 8) * 2
+    }
+    let bigger = __alloc(16 + cap * TIMER)
+    __store64(bigger, n)
+    __store64(bigger + 8, cap)
+    if cell != 0 {
+        __copy_bytes(bigger + 16, cell + 16, n * TIMER)
+        __free(cell)
+    }
+    __store64(__rt_addr("__timers"), bigger)
+    return bigger
+}
+
+// The frames whose deadline passed taken off the timers and queued on this
+// worker so that the earliest runs first: the newest runs first (D110), so
+// they are pushed latest first; with MYLA_SCHED=fifo, earliest first.
+fun timers_fire() {
+    let now = os.clock_ns()
+    let lock = __rt_addr("__timer_lock")
+    var due: [int64] = []
+    take_lock(lock)
+    while true {
+        let cell = __rt_get("__timers")
+        if cell == 0 || __load64(cell) == 0 || __load64(cell + 16) > now {
+            break
+        }
+        due.push(__load64(cell + 32))
+        timers_pop(cell)
+    }
+    __store64(lock, 0)
+    if __rt_get("__exec_sched") == 1 {
+        for fr in due {
+            exec_push(fr)
+        }
+    } else {
+        var i = due.len()
+        while i > 0 {
+            i -= 1
+            exec_push(due[i])
+        }
+    }
+}
+
+// The earliest timer of the cell `cell` (not empty) taken off: the last one
+// sifted down from the top.
+fun timers_pop(cell: int64) {
+    let n = __load64(cell) - 1
+    __store64(cell, n)
+    __store64(__rt_addr("__timer_count"), n)
+    if n == 0 {
+        return
+    }
+    let last = cell + 16 + n * TIMER
+    let at = __load64(last)
+    let seq = __load64(last + 8)
+    let fr = __load64(last + 16)
+    var i: int64 = 0
+    while true {
+        var child = 2 * i + 1
+        if child >= n {
+            break
+        }
+        let ce = cell + 16 + child * TIMER
+        if child + 1 < n {
+            let re = ce + TIMER
+            if timer_before(__load64(re), __load64(re + 8), __load64(ce), __load64(ce + 8)) {
+                child += 1
+            }
+        }
+        let c = cell + 16 + child * TIMER
+        if !timer_before(__load64(c), __load64(c + 8), at, seq) {
+            break
+        }
+        __copy_bytes(cell + 16 + i * TIMER, c, TIMER)
+        i = child
+    }
+    let e = cell + 16 + i * TIMER
+    __store64(e, at)
+    __store64(e + 8, seq)
+    __store64(e + 16, fr)
+}
+
+// The poll of an idle worker (it holds `__exec_polling`): until the nearest
+// deadline, or a push or a new timer wakes it, unless a frame is queued
+// already; then the timers that passed fire.
+fun exec_poll() {
+    if exec_peek() == 0 {
+        var timeout: int64 = -1
+        let lock = __rt_addr("__timer_lock")
+        take_lock(lock)
+        let cell = __rt_get("__timers")
+        if cell != 0 && __load64(cell) != 0 {
+            let left = __load64(cell + 16) - os.clock_ns()
+            timeout = 0
+            if left > 0 {
+                // rounded up: woken before the deadline, it would poll again
+                timeout = (left + 999999) / 1000000
+            }
+        }
+        __store64(lock, 0)
+        if timeout != 0 {
+            let r = os.poller_wait(__rt_get("__exec_poller"), timeout)
+        }
+    }
+    __store64(__rt_addr("__exec_polling"), 0)
+    timers_fire()
 }
 
 // Every task waits for another one: the program ends.
