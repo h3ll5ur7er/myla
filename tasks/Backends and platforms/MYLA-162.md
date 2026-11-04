@@ -214,3 +214,10 @@ The executor's queues in Myla (`exec_push`, `exec_find` and the rest, the next s
 - `char_to_str` (a character's UTF-8 bytes) and `bool_to_str` (a literal, retained as a returned literal is) in `std.rt`, routed by `myla_runtime_function`; `__map_lookup`, which `remove` calls, `.set` to std.rt's `map_lookup`, so the asm `__map_lookup`, `__map_hash` and `__key_eq` go too (`__str_eq` stays: the float runtime calls it).
 - The compiler's own binary now carries 124 lines of runtime assembly no code reaches (offline check), all in helpers the code generator emits for any program that might need them (function composition, a float's printing, a few primitives' stubs).
 - What is left of the hand-written runtime besides the platform layer: float formatting, `__str_eq`, `__print_line`, function values (`__compose_*`, `__func_*`); the per-type routines (`__sb_clone`, `__str_drop`, `__sb_drop` with them) are the next step's.
+
+## Step 19: floats as text (2026-11-04)
+
+- `float_to_str`, with `fscale` and `two_prod` (Dekker's product, returned as a tuple), in `std.rt`, on one more primitive, `__f64_round` (`cvtsd2si`, ties to even). Each floating-point operation is the assembly's, in its order. A program that makes a float text asks for it once its functions are emitted (`wants_ftoa`: the worklist runs again), and `__float_to_str` is `.set` to it; of the float runtime only `__fmod` stays in assembly.
+- **Checked bit for bit:** 900,020 floats (random bit patterns as float64 and float32, ordinary numbers, subnormals, the extremes) print the same as with the assembly, and 9,020 of them the same as the interpreter.
+- **Measured:** that program's time the same as with the assembly (220 ms against 221 ms over five runs). One division a digit (`q = m / 10`, the digit `m - q * 10`) matters: with `m % 10` and `m / 10`, two `div`s, it took 241 ms, though fewer instructions; valgrind's instruction count misleads on `div`.
+- Seen in the code: a `while` loop tests at its top and jumps back from its end, a jump a turn more than a loop tested at its end (backend, later).

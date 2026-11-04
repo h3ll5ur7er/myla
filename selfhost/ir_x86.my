@@ -840,7 +840,10 @@ impl CodeGen {
                     return
                 }
                 self.load_args(args, temp_base)
-                if name == "__float_to_str" { self.uses_float = true }
+                if name == "__float_to_str" {
+                    self.uses_float = true
+                    self.wants_ftoa = true
+                }
                 self.emit(format("call {}", name))
                 if d >= 0 { self.store_temp(d, temp_base) }
             },

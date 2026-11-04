@@ -1727,3 +1727,193 @@ pub fun list_grow(cell: int64, stride: int64) -> int64 {
     __free(cell)
     return p
 }
+
+// --- floats as text ----------------------------------------------------------------
+// A float is printed with `digits` significant digits (17 for a float64, 9
+// for a float32), the shortest of them that keep its value, as the
+// interpreter prints it: its decimal exponent found among the powers of ten
+// (`__pow10_hi`, 10^(i - 323) for i from 0 to 631, `__pow10_lo` the rest of
+// each), then its digits as an integer, the float scaled by a power of ten
+// with the error of the product kept (Dekker's product), then laid out.
+// Each operation is the assembly's it replaces, in its order, so the digits
+// are the same bit for bit.
+
+// The float64 of the bits `b`.
+fun f64_of(b: uint64) -> float64 {
+    return __f64_from_bits(b)
+}
+
+// `10^(i - 323)`'s float64, and the rest of it.
+fun pow10_hi(i: int64) -> float64 {
+    return __f64_from_bits(__load64(__rt_addr("__pow10_hi") + i * 8) as uint64)
+}
+
+fun pow10_lo(i: int64) -> float64 {
+    return __f64_from_bits(__load64(__rt_addr("__pow10_lo") + i * 8) as uint64)
+}
+
+// `a * b` and its rounding error, exactly (Dekker): the operands split in
+// halves of 26 bits, scaled first so that neither half overflows.
+fun two_prod(a0: float64, b0: float64) -> (float64, float64) {
+    var a = a0
+    var b = b0
+    let big = f64_of(9092767647661031424u64)
+    if a > big {
+        a = a * f64_of(4318952042648305664u64)
+        b = b * f64_of(4895412794951729152u64)
+    } else if b > big {
+        a = a * f64_of(4895412794951729152u64)
+        b = b * f64_of(4318952042648305664u64)
+    }
+    let split = f64_of(4728779608772575232u64)
+    let a2 = a * split
+    let ahi = a2 - (a2 - a)
+    let alo = a - ahi
+    let b2 = b * split
+    let bhi = b2 - (b2 - b)
+    let blo = b - bhi
+    let p = a * b
+    var err = ahi * bhi - p
+    err = err + ahi * blo
+    err = err + alo * bhi
+    err = err + alo * blo
+    return (p, err)
+}
+
+// `x * 10^e`, rounded to an integer, the product's error kept (in two steps
+// for an `e` past 308, whose power isn't a float64).
+fun fscale(x0: float64, e0: int64) -> int64 {
+    var x = x0
+    var e = e0
+    var carry = 0.0
+    if e > 308 {
+        let first = two_prod(x, pow10_hi(523))
+        carry = first.1 + x * pow10_lo(523)
+        x = first.0
+        e -= 200
+    }
+    let i = e + 323
+    let prod = two_prod(x, pow10_hi(i))
+    var lo = prod.1 + x * pow10_lo(i)
+    lo = lo + pow10_hi(i) * carry
+    return __f64_round(prod.0) + __f64_round(lo)
+}
+
+// `__float_to_str`: the float64 of the bits `bits` with `digits` significant
+// digits, trailing zeros dropped: plain digits up to its units, then a point
+// and the rest, or `0.` and zeros before them for a magnitude below 1.
+pub fun float_to_str(bits: int64, digits: int64) -> str {
+    let mag = bits & 9223372036854775807
+    let inf: int64 = 9218868437227405312
+    if mag > inf {
+        return "nan"
+    }
+    if mag == inf {
+        if bits < 0 {
+            return "-inf"
+        }
+        return "inf"
+    }
+    if mag == 0 {
+        if bits < 0 {
+            return "-0"
+        }
+        return "0"
+    }
+    let x = f64_of(mag as uint64)
+    // its decimal exponent: the greatest power of ten not above it
+    var lo: int64 = 0
+    var hi: int64 = 631
+    var at: int64 = -1
+    while lo <= hi {
+        let mid = (lo + hi) >> 1
+        if x < pow10_hi(mid) {
+            hi = mid - 1
+        } else {
+            at = mid
+            lo = mid + 1
+        }
+    }
+    var m = fscale(x, digits - 1 + 323 - at) as uint64
+    var low: uint64 = 1
+    var k = digits - 1
+    while k > 0 {
+        low = low * 10u64
+        k -= 1
+    }
+    if m >= low * 10u64 {
+        m = m / 10u64
+        at += 1
+    }
+    if m < low {
+        m = low
+    }
+    var n = digits
+    while n > 1 {
+        let q = m / 10u64
+        if m != q * 10u64 {
+            break
+        }
+        m = q
+        n -= 1
+    }
+    let exp = at - 323
+    var sign: int64 = 0
+    if bits < 0 {
+        sign = 1
+    }
+    var len: int64 = 0
+    var dot: int64 = -1
+    var lead: int64 = 0
+    if exp >= n - 1 {
+        len = sign + exp + 1
+    } else if exp >= 0 {
+        len = sign + n + 1
+        dot = exp + 1
+    } else {
+        lead = -exp + 1
+        len = sign + lead + n
+    }
+    let p = __alloc(len + 8)
+    __store64(p, len)
+    var q = p + 8
+    if sign == 1 {
+        __store8(q, 45u8)  // '-'
+        q += 1
+    }
+    if lead > 0 {
+        // `0.` and the zeros after the point
+        __store8(q, 48u8)
+        __store8(q + 1, 46u8)
+        var z: int64 = 2
+        while z < lead {
+            __store8(q + z, 48u8)
+            z += 1
+        }
+        q += lead
+    }
+    // the digits, from the last, a point among them
+    var i = n - 1
+    while i >= 0 {
+        var pos = i
+        if dot >= 0 && i >= dot {
+            pos = i + 1
+        }
+        let tenth = m / 10u64
+        __store8(q + pos, (48u64 + m - tenth * 10u64) as uint8)
+        m = tenth
+        i -= 1
+    }
+    if dot >= 0 {
+        __store8(q + dot, 46u8)  // '.'
+    }
+    // the zeros up to the units of a large one
+    if exp >= n - 1 {
+        var z = n
+        while z <= exp {
+            __store8(q + z, 48u8)
+            z += 1
+        }
+    }
+    return __str_of(p)
+}

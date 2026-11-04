@@ -159,6 +159,8 @@ pub struct CodeGen {
     nullary_names: [str: bool],
     str_ix: [str: int32],
     keep_ir: bool,
+    // a float is made text somewhere (`__float_to_str` called)
+    wants_ftoa: bool,
     // the small leaf functions copied into their callers (`inline.my`):
     // their names and lowered bodies, and the names found not to be;
     // `inlining` off with `--no-inline` (and under -g: each function stays
@@ -306,7 +308,7 @@ pub fun new_codegen(c: Checker) -> CodeGen {
         debug: false, line_files: [], cur_file: 0, last_loc: "",
         dbg_fn: false, dbg_lines: [], dbg_types: [:], dbg_pending: [], dbg_scopes: [],
         dbg_fn_end: "", dbg_mark: "", dbg_n: 0, dbg_script: "",
-        keep_ir: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
+        keep_ir: false, wants_ftoa: false, inlining: true, inl_names: [], inl_bodies: [], inl_no: [:], ssa: false, ssa_stats: no_ssa_stats(), ir_texts: [], ir_blocked: [], ir_ready: false,
         pend_store: "", pend_temp: -1, temp_uses: [], temp_remat: [], temp_src: [], temp_imm: [], temp_frame: [], temp_mem: [], temp_off: [],
         temp_reg: [], slot_reg: [], saved_regs: [], in_frame: false, resume_blocks: [], frames: c.task_line > 0, norm: compiler_norm(), save_base: 0, arg_words: 0, frameless: false, kept_params: [:], keeping: [:], scan_kept: [], scan_args: [], owning: [:], no_owned: [], handed: handed, passed_on: passed_on, tag_enums: [:],
     }
@@ -1953,23 +1955,42 @@ impl CodeGen {
         }
         // printing a float goes through `__print_str` (`print_and_drop_str`)
         if !self.asm_prints() { let ps = self.request_fn("std$rt$print_str", []) }
-        while self.fn_worklist.len() > 0 || self.lam_jobs.len() > 0 {
-            if self.fn_worklist.len() > 0 {
-                let job = self.fn_worklist.pop()
-                self.subst = job.subst
-                self.gen_any_function(self.sig_of(job.orig).decl, job.mangled)
-                self.subst = []
-            } else {
-                let lj = self.lam_jobs.pop()
-                if self.lam_seen.contains(lj.lifted) { continue }
-                self.lam_seen[lj.lifted] = true
-                self.gen_any_lambda(lj)
+        var draining = true
+        while draining {
+            while self.fn_worklist.len() > 0 || self.lam_jobs.len() > 0 {
+                if self.fn_worklist.len() > 0 {
+                    let job = self.fn_worklist.pop()
+                    self.subst = job.subst
+                    self.gen_any_function(self.sig_of(job.orig).decl, job.mangled)
+                    self.subst = []
+                } else {
+                    let lj = self.lam_jobs.pop()
+                    if self.lam_seen.contains(lj.lifted) { continue }
+                    self.lam_seen[lj.lifted] = true
+                    self.gen_any_lambda(lj)
+                }
+            }
+            // a float made text: std.rt's formatting, known only once the
+            // functions are emitted (MYLA-162)
+            draining = false
+            if self.wants_ftoa && self.has_func("std$rt$float_to_str") && !self.fn_seen.contains("std$rt$float_to_str") {
+                let ff = self.request_fn("std$rt$float_to_str", [])
+                draining = true
             }
         }
         for pj in self.partial_jobs { self.gen_partial_function(pj) }
         for n in self.fnval_set { self.emit_fnval_thunk(n) }
         self.emit_drop_helpers()
-        if self.uses_float { for chunk in self.float_runtime_text() { self.raw(chunk) } }
+        if self.uses_float {
+            let chunks = self.float_runtime_text()
+            if self.fn_seen.contains("std$rt$float_to_str") {
+                // `__fmod` only; `__float_to_str` is std.rt's
+                self.raw(text_before(chunks[0], "\n\n__two_prod:"))
+                self.raw("\t.set __float_to_str, myla_std$rt$float_to_str")
+            } else {
+                for chunk in chunks { self.raw(chunk) }
+            }
+        }
         return self.assemble_source()
     }
 
@@ -4567,6 +4588,7 @@ impl CodeGen {
         var digits = 17
         if width == 32 { digits = 9 }
         self.emit(format("movq ${}, %rsi", digits))
+        self.wants_ftoa = true
         self.emit("call __float_to_str")
     }
 
@@ -9154,4 +9176,20 @@ fun asm_string(s: str) -> str {
         i = i + 1
     }
     return sb.build()
+}
+
+// The text of `s` before the first `mark` in it (all of it without one).
+#test("ab--cd", "--")["ab"]
+#test("abc", "x")["abc"]
+fun text_before(s: str, mark: str) -> str {
+    var i = 0
+    while i + mark.len() <= s.len() {
+        if text_at(s, i, mark) {
+            var sb = StringBuilder()
+            sb.append(s, 0, i)
+            return sb.build()
+        }
+        i = i + 1
+    }
+    return s
 }
