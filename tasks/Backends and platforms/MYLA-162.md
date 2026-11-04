@@ -208,3 +208,9 @@ The executor's queues in Myla (`exec_push`, `exec_find` and the rest, the next s
 
 - `sb_append_byte` (`append_byte`, called in place of the `SbAppendByte` instruction, which passed the byte through the stack to the general routine) and `sb_append_bytes` (`.set` for `__sb_append_bytes`, a string range's append) in `std.rt`, with `sb_append`; the asm `__sb_append_bytes` is gone from programs with std.rt.
 - **Shape matters:** with the growth called in the middle of each function, the fast path's values lived across a call (callee-saved registers on every append): string building +1.1%, word frequencies +1.0%. With a full builder handled by a tail call (`sb_append_grown`, `sb_byte_grown`), the fast paths call nothing: word frequencies 0.39% fewer instructions than with the assembly, string building the same, compiling the compiler 0.31% fewer.
+
+## Step 18: a character's and a bool's text, `remove`'s lookup (2026-11-04)
+
+- `char_to_str` (a character's UTF-8 bytes) and `bool_to_str` (a literal, retained as a returned literal is) in `std.rt`, routed by `myla_runtime_function`; `__map_lookup`, which `remove` calls, `.set` to std.rt's `map_lookup`, so the asm `__map_lookup`, `__map_hash` and `__key_eq` go too (`__str_eq` stays: the float runtime calls it).
+- The compiler's own binary now carries 124 lines of runtime assembly no code reaches (offline check), all in helpers the code generator emits for any program that might need them (function composition, a float's printing, a few primitives' stubs).
+- What is left of the hand-written runtime besides the platform layer: float formatting, `__str_eq`, `__print_line`, function values (`__compose_*`, `__func_*`); the per-type routines (`__sb_clone`, `__str_drop`, `__sb_drop` with them) are the next step's.

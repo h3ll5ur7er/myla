@@ -586,6 +586,47 @@ pub fun uint_to_str(u: uint64) -> str {
     return __str_of(p)
 }
 
+// `__bool_to_str`: `true` or `false`.
+pub fun bool_to_str(b: bool) -> str {
+    if b {
+        return "true"
+    }
+    return "false"
+}
+
+// `__char_to_str`: a character as the string of its UTF-8 bytes.
+pub fun char_to_str(c: char) -> str {
+    let u = c as int64
+    if u < 128 {
+        let p = __alloc(9)
+        __store64(p, 1)
+        __store8(p + 8, u as uint8)
+        return __str_of(p)
+    }
+    if u < 2048 {
+        let p = __alloc(10)
+        __store64(p, 2)
+        __store8(p + 8, (192 | (u >> 6)) as uint8)
+        __store8(p + 9, (128 | (u & 63)) as uint8)
+        return __str_of(p)
+    }
+    if u < 65536 {
+        let p = __alloc(11)
+        __store64(p, 3)
+        __store8(p + 8, (224 | (u >> 12)) as uint8)
+        __store8(p + 9, (128 | ((u >> 6) & 63)) as uint8)
+        __store8(p + 10, (128 | (u & 63)) as uint8)
+        return __str_of(p)
+    }
+    let p = __alloc(12)
+    __store64(p, 4)
+    __store8(p + 8, (240 | ((u >> 18) & 7)) as uint8)
+    __store8(p + 9, (128 | ((u >> 12) & 63)) as uint8)
+    __store8(p + 10, (128 | ((u >> 6) & 63)) as uint8)
+    __store8(p + 11, (128 | (u & 63)) as uint8)
+    return __str_of(p)
+}
+
 // `__int_to_str`: a signed integer in decimal, a `-` before a negative one.
 pub fun int_to_str(v: int64) -> str {
     if v >= 0 {
