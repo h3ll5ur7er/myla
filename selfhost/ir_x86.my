@@ -736,6 +736,14 @@ impl CodeGen {
                     self.store_temp(d, temp_base)
                     return
                 }
+                // to the nearest integer (the default rounding, ties to even)
+                if name == "__f64_round" {
+                    self.uses_float = true
+                    let ra = self.xmm_in(args[0], "rax", "xmm0", temp_base)
+                    self.emit(format("cvtsd2si {}, %rax", ra))
+                    self.store_temp(d, temp_base)
+                    return
+                }
                 // the address of a runtime variable (MYLA-162): next to %rip,
                 // or in the worker's block with tasks
                 if text_starts(name, "__rt_addr:") {
@@ -2920,7 +2928,7 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Loc(p) => 0,
         Inst.Bind(name, s) => 0,
         Inst.Scope(open) => 0,
-        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:") { 0 } else { 2 },
+        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__f64_round" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:") { 0 } else { 2 },
         _ => 2,
     }
 }
@@ -3152,7 +3160,7 @@ fun writes_no_slot(inst: Inst) -> bool {
         Inst.Bind(name, s) => true
         Inst.Scope(open) => true
         // the inline primitives that compute a value and write nothing
-        Inst.Rt(d, name, args) => name == "__rotl" || name == "__bsr64" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:")
+        Inst.Rt(d, name, args) => name == "__rotl" || name == "__bsr64" || name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__f64_round" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:")
         _ => false
     }
 }
@@ -3528,7 +3536,7 @@ fun reads_then_calls(inst: Inst) -> bool {
         Inst.CallSret(name, r, args) => true,
         Inst.CallInd(d, fv, args) => true,
         Inst.CallIndSret(fv, r, args) => true,
-        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__rotl" && name != "__bsr64" && name != "__cas64" && name != "__xchg64" && name != "__fetch_add64" && name != "__pause" && !text_starts(name, "__rt_addr:") && !text_starts(name, "__rt_waddr:"),
+        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__f64_round" && name != "__rotl" && name != "__bsr64" && name != "__cas64" && name != "__xchg64" && name != "__fetch_add64" && name != "__pause" && !text_starts(name, "__rt_addr:") && !text_starts(name, "__rt_waddr:"),
         Inst.RtPair(d, d2, name, args) => true,
         _ => false,
     }

@@ -1171,6 +1171,22 @@ class SelfHostedCodegenParity(unittest.TestCase):
         self.assertRegex(body, r"movq __heap_ptr\(%rip\), %r", body)
         self.assertNotIn("leaq __heap_ptr", body, body)
 
+    def test_a_float_rounds_to_the_nearest_integer(self) -> None:
+        # MYLA-162: `__f64_round(x)` is one `cvtsd2si`: the nearest int64,
+        # ties to even (the float formatting in std.rt rounds so)
+        source = (
+            "fun main() {\n"
+            "    let xs = [2.5, 3.5, -1.5, 1.4999, -0.5, 1e15 + 0.5, 7.0]\n"
+            "    for x in xs { print(__f64_round(x)) }\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("2\n4\n-2\n1\n0\n1000000000000000\n7\n", 0))
+        self.assertIn("cvtsd2si", self._function_asm(asm, "main"))
+
     def test_atomics_and_pause_are_inline(self) -> None:
         # MYLA-162: the runtime's atomics are single instructions in place,
         # without a call: `__cas64` a `lock cmpxchg`, `__xchg64` an `xchg`,
