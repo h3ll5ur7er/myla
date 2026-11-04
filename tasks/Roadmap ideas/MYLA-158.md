@@ -36,4 +36,5 @@ Steps, each verified. The backend comes before D122's 4-byte layouts: the runtim
 ## Progress
 
 - 2026-11-04, steps 1 to 4: `--target wasm32-wasi` in `gen_main` and `myla build`; [[lib/std/platform_wasm.my]] over WASI preview 1; [[selfhost/ir_wasm.my]] (locals, the dispatch loop, the shadow stack, `return_call`); [[selfhost/runtime_wasm.my]] (the start, the WASI dispatcher, the runtime's functions, tasks on one worker, the module put together for clang); [[tools/wasm/run.mjs]] with a WASI shim of our own ([[tools/wasm/wasi.mjs]]), Node 22's own WASI crashing when the memory grows. Evidence ([[tests/burn/test_wasm.py]], 15 tests): every example and test_aarch64's programs as their x86-64 builds; files and directories; the 23 stress programs on one worker in five orders; test_time's timers; the compiler built for wasm compiles the compiler under Node as the native one does, for either target, and reaches the fixed point.
-- Next: D122's 4-byte layouts (step 5); then the checker and interpreter behind an API a page can call, with the shim in a browser.
+- D126 (2026-11-04): step 5, D122's 4-byte layouts, deferred to [[MYLA-260]]; wasm32 keeps 32-bit addresses on today's layouts.
+- Next: the checker and interpreter behind an API a page can call, with the shim in a browser.
