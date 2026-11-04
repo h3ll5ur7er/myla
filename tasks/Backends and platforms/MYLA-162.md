@@ -116,3 +116,90 @@ Tried and set aside, as the way the remaining hot routines meet the backend:
 So what the hot routines left (map insertion and growth, builders, list growth, the allocator) need from the backend is the register allocation of D123's second half: live ranges with holes and splitting on the SSA form ([[MYLA-254]]), and argument moves done as a parallel move. That is the next backend step; until it is done, those routines stay in assembly.
 - **Done since, as a first part:** a call's arguments are one parallel move when one sits in the register of an argument loaded before it (`load_words`, used by calls, runtime calls and tail calls; one by one otherwise, which keeps a value held back in `%rax` going straight to its register), so a value a call reads last may now live in any caller-saved register, its own argument register first (a function value, read after the arguments, still `%r10`/`%r11`). The allocator also learnt that a call in tail position with owners dropped after it has those drops emitted before it (`replacing_call`), which the wider rule exposed (a self tail call's first argument clobbered by the drop). The benchmarks 0.45% fewer instructions on the geometric mean (Ackermann 2.7%, string building 1.85%, binary trees 0.43%), the generated compiler 0.54% (the self-compile flat, the allocator's extra work included); `tests/burn/test_selfhost_codegen.py` checks swapped and rotated arguments.
 
+## Step 6: the string builder's append, on the new allocator (2026-11-03)
+
+With lifetimes that have holes ([[MYLA-257]]), `sb_append` (the full builder's case a function of its own, `sb_append_grown`) compiles to a frameless function of 13 instructions and the copy: the self-compile 0.37% fewer instructions than with the assembly routine, string building 0.9%, word frequency 1.8%.
+
+- **Map insertion** (`__map_set_slot`, its two results in one word, the slot's low bit telling whether the key was there) tried on the new allocator and set aside: the self-compile 0.34% and word frequency 0.5% above the assembly, a string key's probe loop keeping five values in the frame around its `__equal_bytes` call. It waits for values saved around the calls they cross instead of living in the frame ([[MYLA-257]], splitting).
+
+## Step 7: printing and a map's keys (2026-11-03)
+
+- `print` of a string, an integer, a bool or a char (`print_str`, `print_int`, `print_uint`, `print_bool`, `print_char`; a float keeps the assembly), `std.io.write` (`write`) and `keys(m)` (`map_keys`, each key at its rank, as wide as the list's elements) in `std.rt`. A line and its newline still go out in one `writev`, so the lines of tasks on other workers don't interleave (the concurrency suite's long lines included). A program using maps of string, `int16`, `char`, `uint8` and `int64` keys prints the same natively, interpreted and with the assembly.
+- **Cost:** a print takes about 215 instructions in user space where the assembly took 65 (the `writev` vector and an integer's digits are allocated and freed now, where the assembly used its stack), the time the same (the system call dominates: 62 against 59 ms for 400,000 prints); the self-compile 0.24% more. A scratch buffer per worker would take the allocations away (with the allocator's thread-local state).
+- `__write_err` and `__write_err_num` stay with the traps they serve (the platform layer).
+
+## Step 8: the allocator, without tasks (2026-11-03)
+
+- `alloc` and `free` in `std.rt`, on four more primitives: `__rt_addr("sym")` and `__rt_get("sym")` (a runtime variable's address and value, a worker's own with tasks), `__bsr64` and `__trap_oom`. Without tasks the names `__alloc` and `__free`, which the rest of the runtime calls, are `.set` to them, the codegen requests them, and `_start` maps the arena before `main` (`__heap_init`), so `alloc` checks nothing on every call as the assembly did. With tasks the assembly stays (each worker's heap, the cells freed on another worker returned to it): that needs atomics as primitives.
+- **Before:** the comment and [[Architecture/Native-backend]] said `__free` clobbers only `%rax`. Making `__alloc` and `__free` overwrite every caller-saved register before returning, the bootstrap reached its fixed point and the whole suite passed: no caller relies on more than the C convention, so a Myla function can be the allocator.
+- **Shaped for the backend:** the out-of-memory call after the function's return, so nothing is live across it (the allocator is a leaf, without a frame); a store of a literal evaluates the literal first so the address folds into the store (`movq $1, -8(%r9)`), and a sum or difference with a constant folds into a store as into a load.
+- **Measured:** the self-compile 0.12% fewer instructions than with the assembly allocator; the benchmarks (against the new allocator's, MYLA-257) 0.76% fewer on the geometric mean, binary trees 2.6%, word frequency 3.3%, string building 2.6% (with this round's routines); peak memory the same.
+- **With tasks too:** `alloc_tasks` and `free_tasks`, on `__cas64`, `__xchg64` and `__rt_waddr("sym", w)` (worker `w`'s own of a runtime variable). A cell freed on another worker goes onto its owner's `__remote_free` with a compare-and-swap; the owner takes the list whole (`alloc_drained`, out of the fast path) before it bumps its arena. Each worker sets up its arena when it starts (`_start` for the first, before the others start). A runtime variable that isn't a worker's own (`__heap_base`) is next to `%rip` with tasks too, where `tv()` had given `%fs:0`. The whole suite passes, the concurrency stress tests three more times on 1, 4 and 16 workers and in every order; a program allocating in three tasks takes 0.7% fewer instructions than with the assembly. No allocator is left in assembly but `__heap_init` (the mapping).
+
+
+## The executor, studied (2026-11-03)
+
+A read-only study of the executor in assembly before its port, the order:
+1. `__sched_init` and `__workers_count` (cold, no allocation; they run before the arena exists).
+2. The leaves: cancel, cancelled, waking the waiters, waiting for the stopped workers, `__task_exit`, routed like the rest of `std.rt`.
+3. The queues as a unit (lock inline, push, yield's push, find, peek): about 72 instructions per frame scheduled today, 41% of a task-heavy program, so the own queue's fast path stays a leaf with the lock inline.
+4. The actor's enter and leave.
+5. The loop itself, over a small platform layer (`__exec_enter` saving the callee-saved registers and `%rsp`, `__exec_abandon` taking it back after a failure) and the entry points that resume a frame in place without growing the stack.
+6. Starting the threads, over a platform `spawn` (clone).
+
+It needs a few more primitives: an atomic add (`lock xadd`), `pause`, and loads and stores marked as ordered so no later optimization caches them in the spin loops. The executor may not allocate (a failure is reached from the allocator's out-of-memory) nor trap holding a lock.
+
+**A bug it found, fixed:** `task.cancelled()` looked at the task of `__exec_cur`, the frame the executor resumed last. That frame can end and be freed while its task goes on in its caller; when a new child's frame took its memory and was cancelled, the parent looked cancelled natively (`true` on 1 and 4 workers, `false` in the interpreter). The executor now records the task's first frame when it resumes one (`__exec_task`, word 104 of a worker's block), which stays the same until control comes back. Regression test: `t17_cancelled_after_an_await` in the concurrency stress tests. The study also found `__actor_held` written but never read; it goes with the actor's port.
+
+## Step 9: the executor's start (2026-11-03)
+
+- `sched_init` (MYLA_SCHED) and `workers_count` (MYLA_THREADS, else the CPUs from `sched_getaffinity` into a static `__cpu_mask`) in `std.rt`, allocating nothing (they run before the arena is mapped): `rt_exec` lists the executor's routines std.rt has, the codegen requests them and `.set`s the runtime's names to them, as for the allocator.
+- **Checked against the assembly** on a program that counts its threads (`/proc/self/task`) and prints its tasks' order: the same count for no MYLA_THREADS, `0`, `1`, `3`, `33`, `abc`, an empty value, `100001` and `2x`, and the same order on one worker for `fifo`, `fifox`, `seed:`, `seed:1`, `seed:7`, a seed past 2^64 (it wraps) and `MYLA_SCHEDX`.
+
+## Step 10: cancellation and the wait for the stopped workers (2026-11-03)
+
+- Two primitives first, with the seed: `__fetch_add64(p, v)` (`lock xadd`, the value before) and `__pause()`, inline, for the executor's counters and spin loops.
+- `task_cancel` (a compare-and-swap loop for the `lock or`), `task_cancelled`, `failed_wait` and `wait_stopped` in `std.rt`, through `rt_exec`. The compiled callers already treat them as calls clobbering every caller-saved register, the assembly callers (`__panic`, `__task_exit`) keep nothing in one across them. `__wake_waiters` and `__task_exit` wait for the queues and `__task_fail`, which they call.
+- The concurrency stress tests, scheduling, yield and native runtime tests pass (the failure tests t08 and t15 go through `failed_wait`), and the cancellation probes print the interpreter's answers on 1 and 4 workers.
+- Seen in the code: `x & k` tested against 0 is `and`, `cmp $0`; one `test` would do (backend, later).
+
+## The backend for the queues (2026-11-03)
+
+The executor's queues in Myla (`exec_push`, `exec_find` and the rest, the next step) first cost 40% more instructions than the assembly on a task-heavy program (125.4 M against 89.4 M): small helpers called, not inlined, values across those calls on the stack, constant expressions computed at run time. Following choice (a), the backend first ([[Architecture/IR]] has the list): an inliner for small leaf functions of the caller's module (`selfhost/inline.my`, off under `-g` and with `--no-inline`, which the tests of one function's code pass), the blocks one jump reaches joined to it, constant folding, `__trap_oom()` as a terminator, scaled-index addresses, compares with a memory operand, operations in place in the result's register and a few smaller ones. With them the same queues take 95.0 M (+6% over the assembly); the benchmarks run 0.86% fewer instructions on the geometric mean, none more; the compiler compiling an older source of itself 1.67% fewer.
+
+## Step 11: the executor's queues (2026-11-03)
+
+- `exec_push`, `exec_yield_push`, `exec_find` (with `exec_steal`) and `exec_peek` in `std.rt`, through `rt_exec`, on `__xchg64` (the lock, now 8 bytes), `__fetch_add64`, `__pause` and the futex through `__syscall`; nothing allocates, and the lock is given back before the out-of-memory trap. `__exec_run` takes the found frame from %rax.
+- **Measured** on the task-heavy program (100k `async let`, actor calls and yields): 95.0 M instructions against the assembly's 89.4 M (+6%, with the backend work above; 125.4 M before it); its wall time on 4 workers the same within noise, on one worker 11% more of 23 ms. What is left of the gap, in the generated code: a temporary loaded from a variable gets a register of its own when it lives across blocks, even though the variable isn't written meanwhile (copy coalescing by value); a result stored in a variable and loaded for `ret` makes a round trip through a register; `lock add` and `leaq` of a runtime variable could take its address as the operand.
+- The concurrency stress tests, scheduling, yield and native runtime tests pass, three times in a row.
+
+## Step 12: waiting for a task and the actors (2026-11-03)
+
+- `task_wait`, `wake_waiters`, `actor_enter` and `actor_leave` in `std.rt`. `myla___wait` and `myla___actor_enter` stay as stubs of the platform (call the Myla function; resume the frame it returns, or return to the executor on 0), as the jump into a frame isn't a function's. `__actor_held` is gone: written on every actor entry (a runtime call) and never read.
+- **Measured** on the task-heavy program: 97.0 M instructions (95.0 M before: the stubs' calls and the C convention's moves; the assembly's own 89.4 M). Seen in the code: a `__cas64` tested by a branch is `sete`, `movzbl`, `test`, where the `jne` after the `cmpxchg` would do.
+- The concurrency stress tests, scheduling, yield and native runtime tests pass three times in a row, the whole suite once.
+
+## Step 13: the executor's loop (2026-11-03)
+
+- `exec_run` (the loop) and `exec_idle` (the spin and the futex sleep) in `std.rt`, on one more primitive, `__run_frame(fr)` (a call through the frame's first word; frame functions keep the callee-saved registers). `__exec_run` is a stub of the platform: it records the worker's stack (`__exec_sp`) and calls the loop; a failed task's worker (`__task_fail`, `.Lexec_failed`) goes back onto that stack and into the loop's start, which keeps nothing from one frame to the next, so resuming a frame saves no registers. `__exec_idle` and `__exec_sleepers` are 64-bit counts now (only Myla touches them); the futex still compares `__exec_seq`'s low half.
+- Two backend steps for it: a `__cas64` a branch tests is its `cmpxchg` and a jump on ZF; a runtime variable's address that only loads, stores and atomics read is no instruction, they name the variable (`%fs:k`, `sym(%rip)`).
+- **Measured** on the task-heavy program: 96.3 M instructions against the assembly's 89.4 M (+7.7%), the same wall time on one worker (20.3 ms against 21.1 ms) and on four (0.59 s each). The "every task waits for another one" error is the loop's safety net no program reaches today (structured concurrency, MYLA-148); it is untested, as before.
+- What is left of the executor in assembly: the platform's part (`_start`'s setup, starting the threads, `__task_fail`'s claim and the stack switch, the entry points that jump into a frame: `myla___resume`, `myla___finish`, the stubs of `myla___wait` and `myla___actor_enter`, `myla___yield`) and `__task_exit`.
+- The concurrency stress tests, scheduling, yield and native runtime tests pass three times in a row, the whole suite once.
+
+## Step 14: no assembly for what std.rt replaced (2026-11-03)
+
+- The assembly of a routine `std.rt` stands for (`rt_has`: `myla_runtime_function` names it and the program has it) is no longer emitted, unless other assembly calls it: the file system, processes (with `__u8list_*`, only `__run` used them), standard input, the arguments, number formatting (`__str_concat` too, which only the assembly `__int_to_str` still called), a string's characters, a map's keys and the printing of every scalar but a float. A float is printed through `__print_str`, which is then `.set` to std.rt's `print_str`; `__print_line` (the float runtime's) and `__bool_to_str` (whose name the lowering builds) stay.
+- Found with an offline reachability check of the assembly (from `_start` and the compiled functions, through every routine a kept one names or falls into): in a task-heavy program 2,285 of its 2,590 runtime lines were unreachable, now 816 of 1,121.
+- A hello-world program's binary went from 20,968 to 11,840 bytes, the task-heavy one's from 28,808 to 23,720. `test_byte_copies` now checks the copy std.rt's concatenation goes through (`__copy_bytes`).
+
+## Step 15: a list's growth (2026-11-03)
+
+- `list_grow` in `std.rt`, `.set` for `__list_grow` in every program (the code generator calls it by name when a push finds the list full; `Append` already keeps its operands out of the registers a call clobbers).
+- **Measured:** the benchmarks the same (+0.04% on the geometric mean); compiling the compiler 0.28% more instructions, as the asm's `rep movsb` (valgrind counts it a byte at a time) became `__copy_bytes` (8 bytes a turn under 512); the time the same within noise. Seen on the way: growing lists copies about 5% of the compiler's instructions; growing in place at the arena's end, when the cell is the last one allocated, would save most of it (later).
+
+## Step 16: a map's insertion and growth (2026-11-03)
+
+- `map_put_slot` (room made and the key's slot found or made, in one call: the slot's address plus 1 when the key was there, slots being 8-byte aligned), `map_set_slot`, `map_rehash`, `map_new` and `map_rebuild` in `std.rt`. The lowering calls `map_put_slot` in place of `__map_reserve` and the `RtPair` of `__map_set_slot`; `__map_new` and `__map_rebuild` (which `remove` calls) are `.set` to std.rt's. The assembly's `__map_new`, `__map_set_slot`, `__map_grow`, `__map_rebuild` and `__map_reserve` are gone from programs with std.rt; `__map_lookup`, `__map_hash` and `__key_eq` stay for `remove` (its lookup is still in assembly).
+- On the way, in the backend (previous commit): the inliner counts only what a function's entry reaches and takes a little more (16 blocks, 32 instructions); a 64-bit multiply and a rotation by a constant work in place.
+- **Measured:** word frequencies 0.55% more instructions than with the assembly maps (the rest of the benchmarks the same, +0.05% on the geometric mean): the assembly compared a string key's words inline before calling `__equal_bytes`; compiling the compiler 0.05% fewer. A first version, with the hash and the comparison in helpers, cost 2.1% (the inliner then took neither).

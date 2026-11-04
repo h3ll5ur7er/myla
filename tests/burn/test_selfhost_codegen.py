@@ -836,7 +836,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             path = os.path.join(tmp, "prog.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(IR_SAMPLE)
-            proc = subprocess.run([self._binary, path, "--emit-ir"], capture_output=True, text=True)
+            proc = subprocess.run([self._binary, path, "--emit-ir", "--no-inline"], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         start = proc.stdout.index("fun myla_scale")
         self.assertEqual(proc.stdout[start:proc.stdout.index("}\n", start) + 2], IR_SAMPLE_TEXT)
@@ -956,7 +956,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             path = os.path.join(tmp, "prog.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(source)
-            asm = self._emit_asm(path)
+            asm = self._emit_asm(path, flags=("--no-inline",))
             self.assertEqual(self._build_and_run(asm), ("10\n", 0))
         self.assertNotIn("myla_unused:", asm)
         for name in ("called", "as_value", "partly", "main"):
@@ -1044,6 +1044,166 @@ class SelfHostedCodegenParity(unittest.TestCase):
         body = self._function_asm(asm, "pick")
         self.assertNotIn("\tset", body, body)
         self.assertNotIn("$1, %", body, body)
+
+    def test_small_leaf_functions_are_inlined(self) -> None:
+        # MYLA-162: a small function of the same module that calls nothing and
+        # takes and gives scalars is copied into its callers: no call, the
+        # same results, and a trap in the copy reports the callee's line
+        source = (
+            "fun slot(base: int64, n: int64) -> int64 {\n"
+            "    return base + ((n & 7) << 3)\n"
+            "}\n"
+            "fun ratio(a: int64, b: int64) -> int64 {\n"
+            "    return a / b\n"
+            "}\n"
+            "fun total(k: int64) -> int64 {\n"
+            "    var s: int64 = 0\n"
+            "    var i: int64 = 0\n"
+            "    while i < k {\n"
+            "        s += slot(1000, i) + ratio(i, 3)\n"
+            "        i += 1\n"
+            "    }\n"
+            "    return s + ratio(k, k - 20)\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(total(10))\n"
+            "    print(total(20))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            with tempfile.TemporaryDirectory() as tmp2:
+                asm_path = os.path.join(tmp2, "out.s")
+                obj_path = os.path.join(tmp2, "out.o")
+                bin_path = os.path.join(tmp2, "out")
+                with open(asm_path, "w", encoding="utf-8") as fh:
+                    fh.write(asm)
+                subprocess.run(["as", "--64", "-o", obj_path, asm_path], check=True)
+                subprocess.run(["ld", "-o", bin_path, obj_path], check=True)
+                run = subprocess.run([bin_path], capture_output=True, text=True, timeout=30)
+            self.assertEqual((run.stdout, run.returncode), ("10243\n", 1))
+            self.assertIn("division by zero", run.stderr)
+            self.assertIn("prog.my:5:", run.stderr)
+            plain = self._emit_asm(path, flags=("--no-inline",))
+        body = self._function_asm(asm, "total")
+        self.assertNotIn("call myla_slot", body, body)
+        self.assertNotIn("call myla_ratio", body, body)
+        self.assertNotIn("myla_slot:", asm)
+        self.assertIn("call myla_slot", self._function_asm(plain, "total"))
+
+    def test_constant_operands_fold(self) -> None:
+        # MYLA-162: an operator on two constants (literals, `const`s) is one
+        # constant, wrapped as at run time
+        source = (
+            "const CAP: int64 = 1048576\n"
+            "const BIG: int32 = 2147483647\n"
+            "fun main() {\n"
+            "    var x: int64 = 5000000\n"
+            "    print(x & (CAP - 1))\n"
+            "    print(BIG + 1)\n"
+            "    print((CAP << 4) - 3)\n"
+            "    print(-7 >> 1)\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("805696\n-2147483648\n16777213\n-4\n", 0))
+        body = self._function_asm(asm, "main")
+        self.assertIn("$1048575", body, body)
+        self.assertIn("$16777213", body, body)
+        self.assertNotIn("subq $1,", body, body)
+
+    def test_a_scaled_index_and_a_compare_with_memory(self) -> None:
+        # MYLA-162: `p + ((i & 3) << 3)` loaded or stored is one addressing
+        # mode with a scaled index; a value just loaded and compared once is
+        # the compare's memory operand
+        source = (
+            "fun pick(p: int64, i: int64) -> int64 {\n"
+            "    if __load64(p + 8) != __load64(p + 16) {\n"
+            "        __store64(p + ((i & 3) << 3), i * 100)\n"
+            "        return __load64(p + (((i + 1) & 3) << 3))\n"
+            "    }\n"
+            "    return -1\n"
+            "}\n"
+            "fun main() {\n"
+            "    let p = __alloc(32)\n"
+            "    __store64(p, 10)\n"
+            "    __store64(p + 8, 20)\n"
+            "    __store64(p + 16, 30)\n"
+            "    __store64(p + 24, 40)\n"
+            "    print(pick(p, 5))\n"
+            "    print(__load64(p + 8))\n"
+            "    print(pick(p, 6))\n"
+            "    __store64(p + 16, 500)\n"
+            "    print(pick(p, 0))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path, flags=("--no-inline",))
+            self.assertEqual(self._build_and_run(asm), ("30\n500\n40\n-1\n", 0))
+        body = self._function_asm(asm, "pick")
+        self.assertRegex(body, r"\(%r\w+,%r\w+,8\)", body)
+        self.assertRegex(body, r"movq %r\w+, 0\(%r\w+,%r\w+,8\)", body)
+        self.assertRegex(body, r"cmpq 16\+0\(%r\w+\), %r\w+", body)
+
+    def test_a_runtime_variable_is_its_own_operand(self) -> None:
+        # MYLA-162: the address of a runtime variable (`__rt_addr`) that only
+        # loads and stores read is no instruction: they name the variable
+        source = (
+            "fun main() {\n"
+            "    let before = __load64(__rt_addr(\"__heap_ptr\"))\n"
+            "    let p = __alloc(64)\n"
+            "    print(__load64(__rt_addr(\"__heap_ptr\")) - before)\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("80\n", 0))
+        body = self._function_asm(asm, "main")
+        self.assertRegex(body, r"movq __heap_ptr\(%rip\), %r", body)
+        self.assertNotIn("leaq __heap_ptr", body, body)
+
+    def test_atomics_and_pause_are_inline(self) -> None:
+        # MYLA-162: the runtime's atomics are single instructions in place,
+        # without a call: `__cas64` a `lock cmpxchg`, `__xchg64` an `xchg`,
+        # `__fetch_add64` a `lock xadd` giving the value before, and
+        # `__pause()` a `pause`
+        source = (
+            "fun spin(p: int64) -> int64 {\n"
+            "    let a = __fetch_add64(p, 5)\n"
+            "    let b = __fetch_add64(p, -2)\n"
+            "    __pause()\n"
+            "    let c = __xchg64(p, 40)\n"
+            "    var d: int64 = 0\n"
+            "    if __cas64(p, 40, 41) { d = 1 }\n"
+            "    if __cas64(p, 40, 42) { d += 10 }\n"
+            "    return a * 1000000 + b * 10000 + c * 100 + d + __load64(p) * 1000000000\n"
+            "}\n"
+            "fun main() {\n"
+            "    let p = __alloc(8)\n"
+            "    __store64(p, 7)\n"
+            "    print(spin(p))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("41007121001\n", 0))
+        body = self._function_asm(asm, "spin")
+        for ins in ["lock xaddq", "pause", "xchgq", "lock cmpxchgq"]:
+            self.assertIn(ins, body, body)
+        self.assertNotIn("call", body, body)
+        # a compare-and-swap a branch tests: its flag, no value made of it
+        self.assertRegex(body, r"lock cmpxchgq %rdx, \(%rcx\)\n\tj(n)?e ", body)
 
     def test_a_product_by_a_constant_is_one_imul(self) -> None:
         # MYLA-162: `a * k` from a register is one three-operand `imul`, into
@@ -1163,7 +1323,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             path = os.path.join(tmp, "prog.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(source)
-            asm = self._emit_asm(path)
+            asm = self._emit_asm(path, flags=("--no-inline",))
             self.assertEqual(self._build_and_run(asm), ("12\n", 0))
         body = self._function_asm(asm, "count")
         self.assertNotIn("testq", body, body)
@@ -1198,6 +1358,35 @@ class SelfHostedCodegenParity(unittest.TestCase):
             asm = self._emit_asm(path)
             self.assertEqual(self._build_and_run(asm), ("213\n231312\n554\n", 0))
 
+    def test_a_call_in_a_block_that_returns_crosses_nothing_after(self) -> None:
+        # MYLA-257: lifetimes have holes, so values read after a block that
+        # leaves through a call aren't live across that call: they stay in
+        # caller-saved registers, and the function needs no frame at all
+        source = (
+            "fun g(v: int64) -> int64 {\n"
+            "    return v * 7\n"
+            "}\n"
+            "fun f(a: int64, b: int64) -> int64 {\n"
+            "    let x = a * 3\n"
+            "    let y = a + b\n"
+            "    if b < 0 {\n"
+            "        return g(b) + 1\n"
+            "    }\n"
+            "    return x * y + b\n"
+            "}\n"
+            "fun main() {\n"
+            "    print(f(2, 5))\n"
+            "    print(f(4, -1))\n"
+            "}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "prog.my")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(source)
+            asm = self._emit_asm(path)
+            self.assertEqual(self._build_and_run(asm), ("47\n-6\n", 0))
+        body = self._function_asm(asm, "f")
+        self.assertNotIn("%rbp", body, body)
+
     def test_scalars_live_in_callee_saved_registers(self) -> None:
         # MYLA-121: a loop's variables, a value kept across a call and a
         # parameter read in a loop live in %rbx and %r12-%r15, which each
@@ -1207,7 +1396,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             path = os.path.join(tmp, "prog.my")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(source)
-            asm = self._emit_asm(path)
+            asm = self._emit_asm(path, flags=("--no-inline",))
             self.assertEqual(self._build_and_run(asm), ("285\n610\n125\n", 0))
         saved = r"%(rbx|r12|r13|r14|r15)"
         scratch = r"%(r8|r9|r10|r11)"
@@ -1249,7 +1438,7 @@ class SelfHostedCodegenParity(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(source)
             expected = _oracle(path)
-            asm = self._emit_asm(path)
+            asm = self._emit_asm(path, flags=("--no-inline",))
             self.assertEqual(self._build_and_run(asm), expected)
         body = self._function_asm(asm, "f")
         self.assertNotIn("testq %rcx, %rcx", body, body)

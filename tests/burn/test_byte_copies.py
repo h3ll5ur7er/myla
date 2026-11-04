@@ -75,8 +75,9 @@ class ByteCopies(unittest.TestCase):
             self.assertEqual(subprocess.run([exe], capture_output=True, text=True).stdout, ran.stdout)
             self.assertIn("0 9876543210 18446744073709551615", ran.stdout)
             asm = subprocess.run([selfhost_tool("gen_main"), path], capture_output=True, text=True, check=True).stdout
-            concat = re.search(r"^__str_concat:\n(.*?)^\s*ret$", asm, re.S | re.M).group(1)
-            self.assertIn("cmpq $512, %rcx", concat)
+            # the copy std.rt's concatenation goes through (MYLA-162)
+            copy = re.search(r"^__copy_bytes:\n(.*?)^\s*ret$", asm, re.S | re.M).group(1)
+            self.assertIn("cmpq $512, %rcx", copy)
 
 
 if __name__ == "__main__":

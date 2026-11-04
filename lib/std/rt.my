@@ -745,3 +745,902 @@ pub fun map_lookup(cell: int64, key: int64, slot_size: int64, is_str: int64) -> 
     }
     return 0
 }
+
+// `n` bytes at `p` zeroed.
+fun zero_bytes(p: int64, n: int64) {
+    var at = p
+    var left = n
+    while left >= 8 {
+        __store64(at, 0)
+        at += 8
+        left -= 8
+    }
+    while left > 0 {
+        __store8(at, 0u8)
+        at += 1
+        left -= 1
+    }
+}
+
+// `__map_new`: an empty map of `cap` slots of `slot_size` bytes.
+pub fun map_new(cap: int64, slot_size: int64) -> int64 {
+    let cell = __alloc(cap * slot_size + 16)
+    __store64(cell, 0)
+    __store64(cell + 8, cap)
+    zero_bytes(cell + 16, cap * slot_size)
+    return cell
+}
+
+// The slot of `key` in the map `cell` (which has room), found or made: its
+// address, plus 1 when the key was there (its value is then replaced; slots
+// are 8-byte aligned). A new key takes the first tombstone on its way, else
+// the empty slot it ends at, ranked last, with a reference to a string key.
+fun map_set_slot(cell: int64, key: int64, slot_size: int64, is_str: int64) -> int64 {
+    let mask = __load64(cell + 8) - 1
+    let slots = cell + 16
+    var i: int64 = 0
+    var n: int64 = 0
+    if is_str == 0 {
+        let h = key * PHI
+        i = (h ^ (((h as uint64) >> 32) as int64)) & mask
+    } else {
+        i = str_hash(key) & mask
+        n = __load64(key)
+    }
+    var tomb: int64 = 0
+    while true {
+        let slot = slots + i * slot_size
+        let state = __load64(slot)
+        if state == 0 {
+            var at = slot
+            if tomb != 0 {
+                at = tomb
+            }
+            let count = __load64(cell)
+            __store64(at, 1)
+            __store64(at + 8, key)
+            __store64(at + slot_size - 8, count)
+            __store64(cell, count + 1)
+            if is_str != 0 {
+                __store64(key - 8, __load64(key - 8) + 1)
+            }
+            return at
+        }
+        if state == 1 {
+            let k = __load64(slot + 8)
+            if k == key || (is_str != 0 && __load64(k) == n && __equal_bytes(k + 8, key + 8, n)) {
+                return slot + 1
+            }
+        } else if tomb == 0 {
+            tomb = slot
+        }
+        i = (i + 1) & mask
+    }
+    return 0
+}
+
+// `m[key] = v`'s slot (`__map_reserve` and `__map_set_slot` in one): room
+// made in the map at `holder` (grown when empty or 3/4 full, the new cell
+// stored back), then `key`'s slot as `map_set_slot` gives it.
+pub fun map_put_slot(holder: int64, key: int64, slot_size: int64, is_str: int64) -> int64 {
+    var cell = __load64(holder)
+    let cap = __load64(cell + 8)
+    if cap == 0 || (__load64(cell) + 1) * 4 >= cap * 3 {
+        var bigger: int64 = 8
+        if cap != 0 {
+            bigger = cap * 2
+        }
+        cell = map_rehash(cell, slot_size, is_str, bigger, -1)
+        __store64(holder, cell)
+    }
+    return map_set_slot(cell, key, slot_size, is_str)
+}
+
+// The keys and values of the map `cell` moved into a new one of `cap` slots
+// (in their order: the ranks copied, those after a key just removed, of rank
+// `removed`, one up), the old cell freed.
+fun map_rehash(cell: int64, slot_size: int64, is_str: int64, cap: int64, removed: int64) -> int64 {
+    let fresh = map_new(cap, slot_size)
+    var slot = cell + 16
+    let end = slot + __load64(cell + 8) * slot_size
+    while slot < end {
+        if __load64(slot) == 1 {
+            let k = __load64(slot + 8)
+            let at = map_set_slot(fresh, k, slot_size, is_str)
+            if is_str != 0 {
+                // the key moved: the new cell's reference is the old one's
+                __store64(k - 8, __load64(k - 8) - 1)
+            }
+            __copy_bytes(at + 16, slot + 16, slot_size - 16)
+            let rank = at + slot_size - 8
+            if (__load64(rank) as uint64) > (removed as uint64) {
+                __store64(rank, __load64(rank) - 1)
+            }
+        }
+        slot += slot_size
+    }
+    __free(cell)
+    return fresh
+}
+
+// `__map_rebuild`: the map `cell` after `remove` made a tombstone, rebuilt at
+// its capacity without tombstones (so a probe always ends at an empty slot),
+// the keys ranked after the removed one's `rank` moved up (D105).
+pub fun map_rebuild(cell: int64, slot_size: int64, rank: int64, is_str: int64) -> int64 {
+    return map_rehash(cell, slot_size, is_str, __load64(cell + 8), rank)
+}
+
+// `keys(m)` (`__map_keys`): a new list of the keys of the map `cell` in the
+// order they were inserted (each at its rank), as wide as the list's
+// elements are (`stride` bytes), with a reference to each string key.
+pub fun map_keys(cell: int64, slot_size: int64, stride: int64, is_str: int64) -> int64 {
+    let count = __load64(cell)
+    let list = __alloc(count * stride + 16)
+    __store64(list, count)
+    __store64(list + 8, count)
+    let cap = __load64(cell + 8)
+    var slot = cell + 16
+    let end = slot + cap * slot_size
+    while slot < end {
+        if __load64(slot) == 1 {
+            let k = __load64(slot + 8)
+            if is_str != 0 {
+                let rc = k - 8
+                __store64(rc, __load64(rc) + 1)
+            }
+            let at = list + 16 + __load64(slot + slot_size - 8) * stride
+            if stride == 8 {
+                __store64(at, k)
+            } else if stride == 4 {
+                __store32(at, k as uint32)
+            } else if stride == 2 {
+                __store8(at, k as uint8)
+                __store8(at + 1, (k >> 8) as uint8)
+            } else {
+                __store8(at, k as uint8)
+            }
+        }
+        slot += slot_size
+    }
+    return list
+}
+
+// --- string builders ---------------------------------------------------------
+//
+// A builder's cell holds its length and its capacity in bytes, then its
+// bytes; a builder variable holds its cell, unique when appended to.
+
+// `append(sb, s)` (`__sb_append_bytes`): `s`'s bytes after the builder's.
+pub fun sb_append(holder: int64, s: str) {
+    let src = __addr_of(s)
+    let count = __load64(src)
+    let cell = __load64(holder)
+    let len = __load64(cell)
+    let need = len + count
+    if need > __load64(cell + 8) {
+        sb_append_grown(holder, cell, src, need)
+        return
+    }
+    __store64(cell, need)
+    __copy_bytes(cell + 16 + len, src + 8, count)
+}
+
+// The rest of `sb_append` for a full builder: its cell at the address
+// `holder` replaced by one twice as large (or as large as needed), so
+// building a long text line by line stays linear, then the bytes of the
+// string cell `src` copied after its own.
+fun sb_append_grown(holder: int64, cell: int64, src: int64, need: int64) {
+    let len = __load64(cell)
+    var cap = __load64(cell + 8) * 2
+    if cap < need {
+        cap = need
+    }
+    let bigger = __alloc(cap + 16)
+    __store64(bigger, need)
+    __store64(bigger + 8, cap)
+    __copy_bytes(bigger + 16, cell + 16, len)
+    __copy_bytes(bigger + 16 + len, src + 8, need - len)
+    __free(cell)
+    __store64(holder, bigger)
+}
+
+// --- printing ----------------------------------------------------------------
+
+const SYS_WRITEV: int64 = 20
+const EAGAIN: int64 = -11
+
+// The `n` bytes at `p` written to `fd`, a write at a time, again after an
+// interruption (EINTR, EAGAIN); up to the first error.
+fun write_all(fd: int64, p: int64, n: int64) {
+    var at = p
+    var left = n
+    while left > 0 {
+        let r = __syscall(SYS_WRITE, fd, at, left)
+        if r >= 0 {
+            at += r
+            left -= r
+        } else if r != EINTR && r != EAGAIN {
+            return
+        }
+    }
+}
+
+// The `n` bytes at `p` and a newline on the standard output in one writev,
+// so the lines of tasks on other workers don't interleave; what a partial
+// write left, written after it.
+fun print_bytes(p: int64, n: int64) {
+    let nl = __addr_of("\n") + 8
+    let iov = __alloc(32)
+    __store64(iov, p)
+    __store64(iov + 8, n)
+    __store64(iov + 16, nl)
+    __store64(iov + 24, 1)
+    var r = __syscall(SYS_WRITEV, 1, iov, 2)
+    while r == EINTR || r == EAGAIN {
+        r = __syscall(SYS_WRITEV, 1, iov, 2)
+    }
+    __free(iov)
+    if r < 0 {
+        return
+    }
+    if r < n {
+        write_all(1, p + r, n - r)
+        write_all(1, nl, 1)
+    } else if r == n {
+        write_all(1, nl, 1)
+    }
+}
+
+// `print(s)` (`__print_str`) and `print` of the other scalars but floats.
+pub fun print_str(s: str) {
+    let c = __addr_of(s)
+    print_bytes(c + 8, __load64(c))
+}
+
+pub fun print_int(v: int64) {
+    print_str(int_to_str(v))
+}
+
+pub fun print_uint(v: uint64) {
+    print_str(uint_to_str(v))
+}
+
+pub fun print_bool(b: bool) {
+    if b {
+        print_str("true")
+    } else {
+        print_str("false")
+    }
+}
+
+pub fun print_char(c: char) {
+    print_str(format("{}", c))
+}
+
+// `__write(fd, s)`: `s`'s bytes to the file descriptor `fd`.
+pub fun write(fd: int, s: str) {
+    let c = __addr_of(s)
+    write_all(fd as int64, c + 8, __load64(c))
+}
+
+// --- the allocator -----------------------------------------------------------
+//
+// A cell is `[size:8][count:8]` and then what the program sees, the size a
+// multiple of 8 up to 4 KB and a power of two above. A freed cell goes on
+// the list for its size (its first word the next cell): the small sizes'
+// heads at `__free_buckets + size`, the large ones' at `+ 4104 + 8k` for
+// 2^k bytes. A new one comes off that list, else from the arena between
+// `__heap_ptr` and `__heap_end` (mapped before `main`). Without tasks only:
+// with them each worker's cells go back to it, which the assembly does.
+
+// `__alloc`: a cell of at least `n` bytes, its count 1.
+pub fun alloc(n: int64) -> int64 {
+    var size = (n + 7) & -8
+    var slot = __rt_addr("__free_buckets") + size
+    if size > 4096 {
+        let k = __bsr64(size - 1) + 1
+        size = 1i64 << k
+        slot = __rt_addr("__free_buckets") + 4104 + k * 8
+    }
+    let p = __load64(slot)
+    if p != 0 {
+        __store64(slot, __load64(p))
+        __store64(p - 8, 1)
+        return p
+    }
+    let at = __rt_get("__heap_ptr")
+    let next = at + 16 + size
+    if next <= __rt_get("__heap_end") {
+        __store64(__rt_addr("__heap_ptr"), next)
+        __store64(at, size)
+        __store64(at + 8, 1)
+        return at + 16
+    }
+    // (out of the way of the rest: nothing is live across this call)
+    __trap_oom()
+    return 0
+}
+
+// `__free`: the cell `p` back on the list for its size.
+pub fun free(p: int64) {
+    let size = __load64(p - 16)
+    var slot = __rt_addr("__free_buckets") + size
+    if size > 4096 {
+        slot = __rt_addr("__free_buckets") + 4104 + __bsr64(size) * 8
+    }
+    __store64(p, __load64(slot))
+    __store64(slot, p)
+}
+
+// With tasks (D92): each worker allocates from its own arena (worker w's
+// at `__heap_base + w << 32`, mapped in `_start`), with its own lists; a cell
+// freed on another worker goes on its owner's `__remote_free` list, which
+// the owner takes back whole before it bumps its arena. Many push onto a
+// list, one takes all of it: no lock, and no ABA.
+
+// `__alloc` with tasks.
+pub fun alloc_tasks(n: int64) -> int64 {
+    var size = (n + 7) & -8
+    var slot = __rt_addr("__free_buckets") + size
+    if size > 4096 {
+        let k = __bsr64(size - 1) + 1
+        size = 1i64 << k
+        slot = __rt_addr("__free_buckets") + 4104 + k * 8
+    }
+    let p = __load64(slot)
+    if p != 0 {
+        __store64(slot, __load64(p))
+        __store64(p - 8, 1)
+        return p
+    }
+    if __rt_get("__remote_free") != 0 {
+        return alloc_drained(n)
+    }
+    let at = __rt_get("__heap_ptr")
+    let next = at + 16 + size
+    if next <= __rt_get("__heap_end") {
+        __store64(__rt_addr("__heap_ptr"), next)
+        __store64(at, size)
+        __store64(at + 8, 1)
+        return at + 16
+    }
+    __trap_oom()
+    return 0
+}
+
+// The cells other workers freed taken back onto this worker's lists, then
+// `alloc_tasks` again.
+fun alloc_drained(n: int64) -> int64 {
+    var c = __xchg64(__rt_addr("__remote_free"), 0)
+    while c != 0 {
+        let next = __load64(c)
+        free(c)
+        c = next
+    }
+    return alloc_tasks(n)
+}
+
+// `__free` with tasks: another worker's cell onto its owner's list.
+pub fun free_tasks(p: int64) {
+    let owner = (p - __rt_get("__heap_base")) >> 32
+    if owner != __rt_get("__worker_id") {
+        let slot = __rt_waddr("__remote_free", owner)
+        while true {
+            let head = __load64(slot)
+            __store64(p, head)
+            if __cas64(slot, head, p) {
+                return
+            }
+        }
+    }
+    let size = __load64(p - 16)
+    var slot = __rt_addr("__free_buckets") + size
+    if size > 4096 {
+        slot = __rt_addr("__free_buckets") + 4104 + __bsr64(size) * 8
+    }
+    __store64(p, __load64(slot))
+    __store64(slot, p)
+}
+
+// --- the executor --------------------------------------------------------------
+// What a program with tasks runs on (D92). These run before the arena is
+// mapped, so they allocate nothing.
+
+const SYS_SCHED_GETAFFINITY: int64 = 204
+const MAX_WORKERS: int64 = 32
+
+// The bytes after `prefix` in the first entry of the environment that starts
+// with it, 0 when none does.
+fun env_after(prefix: str) -> int64 {
+    let pp = __addr_of(prefix)
+    let n = __load64(pp)
+    var entry = __environ()
+    while true {
+        let e = __load64(entry)
+        if e == 0 {
+            return 0
+        }
+        if __equal_bytes(e, pp + 8, n) {
+            return e + n
+        }
+        entry += 8
+    }
+    return 0
+}
+
+// The number the decimal digits at `p` spell (wrapping), stopping once it is
+// past `limit`.
+fun digits_at(p: int64, limit: int64) -> int64 {
+    var n: int64 = 0
+    var q = p
+    while true {
+        let d = (__load8(q) as int64) - 48
+        if d < 0 || d > 9 || n > limit {
+            return n
+        }
+        n = n * 10 + d
+        q += 1
+    }
+    return n
+}
+
+// The order ready frames run in, from MYLA_SCHED (D110, MYLA-231): `fifo`
+// (1), `seed:N` (2, the generator seeded with N); anything else keeps the
+// default, the newest first (0).
+pub fun sched_init() {
+    let v = env_after("MYLA_SCHED=")
+    if v == 0 {
+        return
+    }
+    let word = __load32(v)
+    if word == 1868982630u32 && __load8(v + 4) == 0u8 {  // "fifo"
+        __store64(__rt_addr("__exec_sched"), 1)
+    } else if word == 1684366707u32 && __load8(v + 4) == 58u8 {  // "seed:"
+        __store64(__rt_addr("__exec_rng"), digits_at(v + 5, 9223372036854775807))
+        __store64(__rt_addr("__exec_sched"), 2)
+    }
+}
+
+// How many workers run the tasks: MYLA_THREADS when the environment has it,
+// else the CPUs this process may run on; at least 1, at most MAX_WORKERS.
+pub fun workers_count() -> int64 {
+    var n: int64 = 0
+    let v = env_after("MYLA_THREADS=")
+    if v != 0 {
+        n = digits_at(v, 100000)
+    } else {
+        let mask = __rt_addr("__cpu_mask")
+        let got = __syscall(SYS_SCHED_GETAFFINITY, 0, 128, mask)
+        var i: int64 = 0
+        while i < got {
+            var b = __load8(mask + i) as int64
+            while b != 0 {
+                b = b & (b - 1)
+                n += 1
+            }
+            i += 1
+        }
+    }
+    if n == 0 {
+        return 1
+    }
+    if n > MAX_WORKERS {
+        return MAX_WORKERS
+    }
+    return n
+}
+
+// A task's first frame keeps its flags in word 48 (2: asked to stop, D96) and
+// its parent task in word 56.
+
+// `__task_cancel`: the child task whose first frame is `fr` asked to stop;
+// none (0: joined already) is left alone.
+pub fun task_cancel(fr: int64) {
+    if fr == 0 {
+        return
+    }
+    let at = fr + 48
+    while true {
+        let flags = __load64(at)
+        if __cas64(at, flags, flags | 2) {
+            return
+        }
+    }
+}
+
+// `__task_cancelled`: 1 when the running task or a task above it was asked to
+// stop, else 0.
+pub fun task_cancelled() -> int64 {
+    var t = __rt_get("__exec_task")
+    while t != 0 {
+        if (__load64(t + 48) & 2) != 0 {
+            return 1
+        }
+        t = __load64(t + 56)
+    }
+    return 0
+}
+
+// `__failed_wait`: once a task has failed (D97), until no other worker runs
+// a frame; at once otherwise.
+pub fun failed_wait() {
+    if __rt_get("__exec_failing") != 0 {
+        wait_stopped()
+    }
+}
+
+// `__wait_stopped`: until no other worker runs a frame, each worker's
+// current one looked at again from the first once one does.
+pub fun wait_stopped() {
+    let me = __rt_get("__worker_id")
+    var w: int64 = 0
+    while w < __rt_get("__exec_workers") {
+        if w != me && __load64(__rt_waddr("__exec_cur", w)) != 0 {
+            __pause()
+            w = 0
+        } else {
+            w += 1
+        }
+    }
+}
+
+// --- the executor's queues -------------------------------------------------------
+// Each worker has a queue of ready frames (D92, MYLA-140): a ring of its own
+// (EXEC_CAP frames, at `__wq_rings` + its index * 8 MiB) and a record
+// `[lock][head][tail]` (a cache line of `__wq`; the counters run either way,
+// the ring's index is the counter masked). A worker pushes onto its own
+// queue's tail and takes its newest frame (depth first: a task's children
+// before its siblings'), else steals the oldest frame of the next queue that
+// has one (the biggest piece of a tree of tasks); a frame yielding a turn goes
+// to the oldest end, behind the others (D110: depth-first, with one worker the
+// order of the self-hosted interpreter). MYLA_SCHED changes it (`sched_init`):
+// `fifo` (1) takes the oldest (a yield goes to the newest end); `seed:N` (2)
+// queues each push at the end a generator seeded with N picks (a yield still
+// behind the others). `__exec_seq` counts the pushes, the word sleeping
+// workers wait on (futex); `__exec_sleepers` counts those asleep.
+//
+// Nothing here allocates, and the lock is never held across a trap.
+
+const EXEC_CAP: int64 = 1048576
+const SCHED_MUL: int64 = 6364136223846793005
+const SCHED_ADD: int64 = 1442695040888963407
+const SYS_FUTEX: int64 = 202
+const FUTEX_WAKE_PRIVATE: int64 = 129
+
+// The record of worker `w`'s queue.
+fun wq_of(w: int64) -> int64 {
+    return __rt_addr("__wq") + (w << 6)
+}
+
+// Take the spin lock in the word at `p` (a queue's or an actor's record).
+fun take_lock(p: int64) {
+    while __xchg64(p, 1) != 0 {
+        __pause()
+    }
+}
+
+// Worker `w`'s ring (its slot for the counter `n`: `+ ((n & (EXEC_CAP - 1))
+// << 3)`).
+fun ring_of(w: int64) -> int64 {
+    return __rt_get("__wq_rings") + (w << 23)
+}
+
+// After a push: a worker that went to sleep before it saw the queue empty
+// after counting itself a sleeper, so the count is read after the push.
+fun exec_pushed() {
+    __fetch_add64(__rt_addr("__exec_seq"), 1)
+    if __rt_get("__exec_sleepers") != 0 {
+        __syscall(SYS_FUTEX, __rt_addr("__exec_seq"), FUTEX_WAKE_PRIVATE, 1)
+    }
+}
+
+// `__exec_push`: the frame `fr` onto the running worker's queue, its newest
+// end (seed:N: the end the generator's next value picks, its bit 33, as the
+// interpreter's `Interp.ready`); a sleeping worker woken.
+pub fun exec_push(fr: int64) {
+    let w = __rt_get("__worker_id")
+    let q = wq_of(w)
+    take_lock(q)
+    if __rt_get("__exec_sched") == 2 {
+        let x = __rt_get("__exec_rng") * SCHED_MUL + SCHED_ADD
+        __store64(__rt_addr("__exec_rng"), x)
+        if ((x >> 33) & 1) != 0 {
+            push_oldest(q, w, fr)
+            return
+        }
+    }
+    let tail = __load64(q + 16)
+    if tail - __load64(q + 8) >= EXEC_CAP {
+        // the ring full: out of memory, the lock given back first
+        __store64(q, 0)
+        __trap_oom()
+    }
+    __store64(ring_of(w) + ((tail & (EXEC_CAP - 1)) << 3), fr)
+    __store64(q + 16, tail + 1)
+    __store64(q, 0)
+    exec_pushed()
+}
+
+// `fr` onto the oldest end of worker `w`'s queue `q`, whose lock is taken.
+fun push_oldest(q: int64, w: int64, fr: int64) {
+    let head = __load64(q + 8) - 1
+    if __load64(q + 16) - head > EXEC_CAP {
+        __store64(q, 0)
+        __trap_oom()
+    }
+    __store64(q + 8, head)
+    __store64(ring_of(w) + ((head & (EXEC_CAP - 1)) << 3), fr)
+    __store64(q, 0)
+    exec_pushed()
+}
+
+// `__exec_yield_push`: the frame `fr` yielding a turn, onto the oldest end of
+// the running worker's queue (fifo: the newest, as any push).
+pub fun exec_yield_push(fr: int64) {
+    if __rt_get("__exec_sched") == 1 {
+        exec_push(fr)
+        return
+    }
+    let w = __rt_get("__worker_id")
+    let q = wq_of(w)
+    take_lock(q)
+    push_oldest(q, w, fr)
+}
+
+// `__exec_find`: the running worker's newest frame (fifo: its oldest), else
+// the oldest frame of the next queue that has one; 0 when none has.
+pub fun exec_find() -> int64 {
+    let me = __rt_get("__worker_id")
+    if __rt_get("__exec_sched") != 1 {
+        let q = wq_of(me)
+        // a glance first: an empty queue's lock isn't taken
+        if __load64(q + 8) != __load64(q + 16) {
+            take_lock(q)
+            let tail = __load64(q + 16) - 1
+            if tail >= __load64(q + 8) {
+                __store64(q + 16, tail)
+                let fr = __load64(ring_of(me) + ((tail & (EXEC_CAP - 1)) << 3))
+                __store64(q, 0)
+                return fr
+            }
+            __store64(q, 0)
+        }
+    }
+    return exec_steal(me)
+}
+
+// The oldest frame of each queue in turn, starting with worker `me`'s own; 0
+// when none has one.
+fun exec_steal(me: int64) -> int64 {
+    let n = __rt_get("__exec_workers")
+    var w = me
+    var left = n
+    while left > 0 {
+        let q = wq_of(w)
+        if __load64(q + 8) != __load64(q + 16) {
+            take_lock(q)
+            let head = __load64(q + 8)
+            if head != __load64(q + 16) {
+                let fr = __load64(ring_of(w) + ((head & (EXEC_CAP - 1)) << 3))
+                __store64(q + 8, head + 1)
+                __store64(q, 0)
+                return fr
+            }
+            __store64(q, 0)
+        }
+        w += 1
+        if w >= n {
+            w = 0
+        }
+        left -= 1
+    }
+    return 0
+}
+
+// `__exec_peek`: 1 when some queue has a frame (a glance, no lock taken).
+pub fun exec_peek() -> int64 {
+    let n = __rt_get("__exec_workers")
+    var q = __rt_addr("__wq")
+    var w: int64 = 0
+    while w < n {
+        if __load64(q + 8) != __load64(q + 16) {
+            return 1
+        }
+        q += 64
+        w += 1
+    }
+    return 0
+}
+
+// --- waiting for a task, actors ----------------------------------------------------
+// A frame waiting for a task is linked to the next one through its word 32,
+// the first in the task's `task` word (24: 0 running, the first frame waiting
+// while it runs, 1 done). An actor's executor (D92) is the record
+// `[lock][running][first waiting][last]`; a frame handed the actor keeps it in
+// its word 64 until it runs (dropped, it passes it on, D94).
+
+// `myla___wait(child, frame)`, the frame waiting for the child task: the
+// frame to go on with at once (the child has ended), else 0 (it joined the
+// frames waiting, a parent and siblings, MYLA-148).
+pub fun task_wait(child: int64, fr: int64) -> int64 {
+    let at = child + 24
+    while true {
+        let first = __load64(at)
+        if first == 1 {
+            return fr
+        }
+        __store64(fr + 32, first)
+        if __cas64(at, first, fr) {
+            return 0
+        }
+    }
+    return 0
+}
+
+// `__wake_waiters`: each frame of the list from `first` (0: none), which
+// waited for a task that has ended, queued; the next one is read before a
+// frame is queued, as it may run and change its word 32 at once.
+pub fun wake_waiters(first: int64) {
+    var fr = first
+    while fr != 0 {
+        let next = __load64(fr + 32)
+        exec_push(fr)
+        fr = next
+    }
+}
+
+// `myla___actor_enter(record, frame)`: the frame going on holding the actor
+// when it is free (returned), else 0, the frame queued (the worker returns to
+// the executor). Busy with no frame queued, on more than one worker, it first
+// waits a little for the holder to leave (MYLA-150): an actor's methods are
+// mostly short, and a frame queued is handed the actor and keeps it until a
+// worker resumes it, so every caller after it queues too (a convoy). No one
+// waits before it, so the order stays first come, first served.
+pub fun actor_enter(rec: int64, fr: int64) -> int64 {
+    var spins: int64 = 0
+    if __rt_get("__exec_workers") > 1 {
+        spins = 1000
+    }
+    while true {
+        take_lock(rec)
+        if __load64(rec + 8) == 0 {
+            __store64(rec + 8, 1)
+            __store64(rec, 0)
+            return fr
+        }
+        if __load64(rec + 16) == 0 && spins != 0 {
+            __store64(rec, 0)
+            while spins != 0 && __load64(rec + 8) != 0 {
+                __pause()
+                spins -= 1
+            }
+        } else {
+            __store64(fr + 32, 0)
+            let last = __load64(rec + 24)
+            if last != 0 {
+                __store64(last + 32, fr)
+            } else {
+                __store64(rec + 16, fr)
+            }
+            __store64(rec + 24, fr)
+            __store64(rec, 0)
+            return 0
+        }
+    }
+    return 0
+}
+
+// `__actor_leave`: out of the actor whose record is `rec`; the first frame
+// waiting is handed it and queued to run, or the actor is free.
+pub fun actor_leave(rec: int64) {
+    take_lock(rec)
+    let fr = __load64(rec + 16)
+    if fr == 0 {
+        __store64(rec + 8, 0)
+        __store64(rec, 0)
+        return
+    }
+    let next = __load64(fr + 32)
+    __store64(rec + 16, next)
+    if next == 0 {
+        __store64(rec + 24, 0)
+    }
+    __store64(fr + 64, rec)
+    __store64(rec, 0)
+    exec_push(fr)
+}
+
+// --- the executor's loop -------------------------------------------------------------
+
+const SYS_EXIT_GROUP: int64 = 231
+const FUTEX_WAIT_PRIVATE: int64 = 128
+
+// `__exec_run`'s loop: a worker resuming ready frames for good. The platform
+// enters it with the worker's stack recorded (`__exec_sp`), and a worker
+// whose task failed (D97, `__task_fail`) comes back to its start on that
+// stack: it keeps nothing from one frame to the next.
+pub fun exec_run() {
+    while true {
+        let fr = exec_find()
+        if fr == 0 {
+            exec_idle()
+        } else {
+            // the frame this worker runs, published before the failure flag
+            // is looked at (an exchange: a full barrier; `__task_fail` sets
+            // the flag, then looks at what the workers run)
+            __xchg64(__rt_addr("__exec_cur"), fr)
+            if __rt_get("__exec_failing") != 0 {
+                // once a task has failed, every frame is dropped, not
+                // resumed, an actor handed to it passed on (D94, D97)
+                let held = __xchg64(fr + 64, 0)
+                if held != 0 {
+                    actor_leave(held)
+                }
+            } else {
+                __store64(fr + 64, 0)
+                // the running task's first frame, for `task_cancelled`:
+                // until control comes back, frames of this task run, but the
+                // one resumed may end and be freed meanwhile
+                __store64(__rt_addr("__exec_task"), __load64(fr + 40))
+                __run_frame(fr)
+            }
+            __xchg64(__rt_addr("__exec_cur"), 0)
+        }
+    }
+}
+
+// No frame found: this worker counts itself idle and only glances at the
+// queues (it stops counting before it takes a frame, so the count is
+// exact), a while spinning, then asleep until a push. Every worker idle and
+// nothing queued: no task can go on, a runtime error.
+fun exec_idle() {
+    __fetch_add64(__rt_addr("__exec_idle"), 1)
+    if exec_peek() == 0 {
+        if __rt_get("__exec_idle") >= __rt_get("__exec_workers") {
+            exec_stuck()
+        }
+        var spins: int64 = 4000
+        while spins != 0 && exec_peek() == 0 {
+            __pause()
+            spins -= 1
+        }
+        if spins == 0 {
+            // asleep: counted a sleeper first, then the pushes seen, then a
+            // last glance (a push after it changes `__exec_seq`, whose low
+            // half the wait compares, and the wait returns at once)
+            __fetch_add64(__rt_addr("__exec_sleepers"), 1)
+            let seen = __load32(__rt_addr("__exec_seq")) as int64
+            if exec_peek() == 0 {
+                __syscall(SYS_FUTEX, __rt_addr("__exec_seq"), FUTEX_WAIT_PRIVATE, seen)
+            }
+            __fetch_add64(__rt_addr("__exec_sleepers"), -1)
+        }
+    }
+    __fetch_add64(__rt_addr("__exec_idle"), -1)
+}
+
+// Every task waits for another one: the program ends.
+fun exec_stuck() {
+    let msg = __addr_of("runtime error: every task waits for another one\n")
+    write_all(2, msg + 8, __load64(msg))
+    __syscall(SYS_EXIT_GROUP, 1, 0, 0)
+}
+
+// --- lists -----------------------------------------------------------------------
+// A list's cell is `[len][cap][elements]`.
+
+// `__list_grow`: the full cell `cell` (its length its capacity, the caller
+// made it unique) moved into one twice as big (4 elements at first), of
+// `stride` bytes an element; the old cell freed.
+pub fun list_grow(cell: int64, stride: int64) -> int64 {
+    let cap = __load64(cell + 8)
+    var bigger: int64 = 4
+    if cap != 0 {
+        bigger = cap * 2
+    }
+    let p = __alloc(bigger * stride + 16)
+    __copy_bytes(p, cell, cap * stride + 16)
+    __store64(p + 8, bigger)
+    __free(cell)
+    return p
+}

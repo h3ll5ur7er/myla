@@ -1,0 +1,448 @@
+// inline.my -- calls to small leaf functions replaced by their bodies
+// (MYLA-162; wiki: Architecture/IR).
+//
+// A function whose lowered body is small, calls nothing, takes and gives
+// scalars only and owns nothing is copied into each of its callers in the
+// same module (so the source positions its traps report stay right): the
+// call's block ends with a store of each argument into a slot of its own (the
+// callee's parameter, a local of the caller now) and a jump into the copy,
+// each `ret` of the copy moves its value into the call's result and jumps to
+// a new block holding what followed the call. The copy's temporaries, slots
+// and blocks come after the caller's; its debug instructions go (what it
+// does is the caller's line). The runtime's helpers (`std.rt`) are the
+// first users: the executor's queues call a few one-line functions on every
+// frame they schedule.
+
+from .checker import Type
+from .ir import IrFunc, IrBlock, Inst, Term, Slot, ENV_WORD, successors
+
+// The most instructions (debug ones aside) and blocks a body may have, of
+// those its entry reaches (a `return` leaves an unreachable block behind).
+const MAX_INSTS: int32 = 32
+const MAX_BLOCKS: int32 = 16
+// The most lines a declaration may have to be lowered as a candidate.
+const MAX_LINES: int32 = 16
+
+// Whether `t` is a scalar a slot holds by itself (no heap value).
+#test(Type.TInt(64, true))[true]
+#test(Type.TStr)[false]
+fun plain_scalar(t: Type) -> bool {
+    return match t {
+        Type.TInt(w, s) => true,
+        Type.TBool => true,
+        Type.TChar => true,
+        Type.TFloat(w) => true,
+        _ => false,
+    }
+}
+
+// Whether a function with these parameter and result types, its declaration
+// `lines` long, may be inlinable: a screen before lowering it.
+#test([Type.TInt(64, true)], Some(Type.TInt(64, true)), 4)[true]
+#test([Type.TStr], None, 4)[false]
+#test([], None, 40)[false]
+pub fun may_inline(params: [Type], ret: Option<Type>, lines: int32) -> bool {
+    if lines > MAX_LINES {
+        return false
+    }
+    for t in params {
+        if !plain_scalar(t) {
+            return false
+        }
+    }
+    return match ret {
+        Some(t) => plain_scalar(t),
+        None => true,
+    }
+}
+
+// Whether `i` may be in a body copied into a caller: it names only
+// temporaries and slots (no function, no string, nothing owned).
+fun copyable(i: Inst) -> bool {
+    return match i {
+        Inst.Const(d, t, v) => true,
+        Inst.Load(d, s) => true,
+        Inst.Store(s, v) => true,
+        Inst.Addr(d, s) => true,
+        Inst.Offset(d, p, off) => true,
+        Inst.LoadAt(d, p, off, w) => true,
+        Inst.StoreAt(p, off, v, w) => true,
+        Inst.Mov(d, v) => true,
+        Inst.Bin(d, op, lt, rt, a, b, pos) => true,
+        Inst.Cmp(d, op, t, a, b) => true,
+        Inst.Un(d, op, t, a) => true,
+        Inst.Cast(d, from_t, to_t, a) => true,
+        Inst.Rt(d, name, args) => true,
+        Inst.Global(d, sym, w) => true,
+        Inst.Check(v, kind, pos) => true,
+        Inst.Loc(p) => true,
+        Inst.Bind(name, s) => true,
+        Inst.Scope(open) => true,
+        _ => false,
+    }
+}
+
+// Whether `i` is debug information only (left out of a copy).
+fun debug_only(i: Inst) -> bool {
+    return match i {
+        Inst.Loc(p) => true,
+        Inst.Bind(name, s) => true,
+        Inst.Scope(open) => true,
+        _ => false,
+    }
+}
+
+// Whether the lowered function `f` may be copied into its callers.
+pub fun inlinable(f: IrFunc) -> bool {
+    if f.frame || f.instances.len() > 0 || f.order.len() == 0 {
+        return false
+    }
+    match f.ret {
+        Some(t) => { if !plain_scalar(t) { return false } },
+        None => {},
+    }
+    for s in f.slots {
+        if s.owns || s.inline || s.word == ENV_WORD || !plain_scalar(s.ty) {
+            return false
+        }
+    }
+    // the blocks the entry reaches
+    var reach: [bool] = []
+    for b in f.blocks {
+        reach.push(false)
+    }
+    var stack: [int32] = [f.order[0]]
+    reach[f.order[0]] = true
+    var nb = 0
+    while stack.len() > 0 {
+        let bi = stack.pop()
+        nb += 1
+        for c in successors(f.blocks[bi].term) {
+            if !reach[c] {
+                reach[c] = true
+                stack.push(c)
+            }
+        }
+    }
+    if nb > MAX_BLOCKS {
+        return false
+    }
+    var n = 0
+    var bi = 0
+    while bi < f.blocks.len() {
+        let b = f.blocks[bi]
+        bi += 1
+        for i in b.insts {
+            if !copyable(i) {
+                return false
+            }
+            if !debug_only(i) && reach[bi - 1] {
+                n += 1
+            }
+        }
+        let ok = match b.term {
+            Term.Jmp(t) => true,
+            Term.Br(c, t, e) => true,
+            Term.Ret(v) => true,
+            Term.Trap(kind, pos) => true,
+            _ => false,
+        }
+        if !ok {
+            return false
+        }
+    }
+    return n <= MAX_INSTS
+}
+
+// Whether the functions named `a` and `b` are of one module (their names
+// alike up to the last `$`), without building either module's name.
+#test("std$rt$alloc", "std$rt$free")[true]
+#test("std$rt$alloc", "std$io$free")[false]
+#test("main", "helper")[true]
+#test("main", "std$rt$free")[false]
+pub fun same_module(a: str, b: str) -> bool {
+    var ia = a.len() - 1
+    while ia >= 0 && a[ia] != '$' {
+        ia -= 1
+    }
+    var ib = b.len() - 1
+    while ib >= 0 && b[ib] != '$' {
+        ib -= 1
+    }
+    if ia != ib {
+        return false
+    }
+    var k = 0
+    while k < ia {
+        if a[k] != b[k] {
+            return false
+        }
+        k += 1
+    }
+    return true
+}
+
+// A temporary of the callee as the caller's (-1, none, stays): the
+// argument it reads when `sub` names one, else moved by `off`.
+fun tmp(t: int32, off: int32, sub: [int32]) -> int32 {
+    if t < 0 {
+        return t
+    }
+    if sub[t] >= 0 {
+        return sub[t]
+    }
+    return t + off
+}
+
+fun tmps(ts: [int32], off: int32, sub: [int32]) -> [int32] {
+    var out: [int32] = []
+    for t in ts {
+        out.push(tmp(t, off, sub))
+    }
+    return out
+}
+
+// The parameters of `f` it only reads: by slot, the argument word read (-1:
+// a local, or a parameter stored to or whose address is taken).
+fun read_only_params(f: IrFunc) -> [int32] {
+    var ro: [int32] = []
+    for s in f.slots {
+        ro.push(s.word)
+    }
+    for b in f.blocks {
+        for i in b.insts {
+            match i {
+                Inst.Store(s, v) => { ro[s] = -1 },
+                Inst.Addr(d, s) => { ro[s] = -1 },
+                _ => {},
+            }
+        }
+    }
+    return ro
+}
+
+// The callee's instruction `i` (copyable, not debug only) as the caller's:
+// temporaries moved by `to` (or replaced, `sub`), slots by `so`.
+fun moved(i: Inst, to: int32, so: int32, sub: [int32]) -> Inst {
+    return match i {
+        Inst.Const(d, t, v) => Inst.Const(tmp(d, to, sub), t, v),
+        Inst.Load(d, s) => Inst.Load(tmp(d, to, sub), s + so),
+        Inst.Store(s, v) => Inst.Store(s + so, tmp(v, to, sub)),
+        Inst.Addr(d, s) => Inst.Addr(tmp(d, to, sub), s + so),
+        Inst.Offset(d, p, off) => Inst.Offset(tmp(d, to, sub), tmp(p, to, sub), off),
+        Inst.LoadAt(d, p, off, w) => Inst.LoadAt(tmp(d, to, sub), tmp(p, to, sub), off, w),
+        Inst.StoreAt(p, off, v, w) => Inst.StoreAt(tmp(p, to, sub), off, tmp(v, to, sub), w),
+        Inst.Mov(d, v) => Inst.Mov(tmp(d, to, sub), tmp(v, to, sub)),
+        Inst.Bin(d, op, lt, rt, a, b, pos) => Inst.Bin(tmp(d, to, sub), op, lt, rt, tmp(a, to, sub), tmp(b, to, sub), pos),
+        Inst.Cmp(d, op, t, a, b) => Inst.Cmp(tmp(d, to, sub), op, t, tmp(a, to, sub), tmp(b, to, sub)),
+        Inst.Un(d, op, t, a) => Inst.Un(tmp(d, to, sub), op, t, tmp(a, to, sub)),
+        Inst.Cast(d, from_t, to_t, a) => Inst.Cast(tmp(d, to, sub), from_t, to_t, tmp(a, to, sub)),
+        Inst.Rt(d, name, args) => Inst.Rt(tmp(d, to, sub), name, tmps(args, to, sub)),
+        Inst.Global(d, sym, w) => Inst.Global(tmp(d, to, sub), sym, w),
+        Inst.Check(v, kind, pos) => Inst.Check(tmp(v, to, sub), kind, pos),
+        _ => i,
+    }
+}
+
+// `f` with each call to one of `names` (whose lowered bodies are `bodies`,
+// each inlinable) replaced by a copy of the body.
+pub fun inline_calls(f: IrFunc, names: [str], bodies: [IrFunc]) -> IrFunc {
+    var g = f
+    var order: [int32] = []
+    // the blocks in emission order, each looked at once; a block holding
+    // what followed a call is looked at next, for the calls after it
+    var work: [int32] = []
+    var k = f.order.len() - 1
+    while k >= 0 {
+        work.push(f.order[k])
+        k -= 1
+    }
+    while work.len() > 0 {
+        let bi = work.pop()
+        order.push(bi)
+        var at = -1
+        var which = -1
+        var j = 0
+        while j < g.blocks[bi].insts.len() && at < 0 {
+            match g.blocks[bi].insts[j] {
+                Inst.Call(d, name, args) => {
+                    var c = 0
+                    while c < names.len() {
+                        if names[c] == name {
+                            at = j
+                            which = c
+                        }
+                        c += 1
+                    }
+                },
+                _ => {},
+            }
+            j += 1
+        }
+        if at < 0 {
+            continue
+        }
+        let callee = bodies[which]
+        var d = -1
+        var args: [int32] = []
+        match g.blocks[bi].insts[at] {
+            Inst.Call(dd, name, aa) => {
+                d = dd
+                args = aa
+            },
+            _ => {},
+        }
+        let to = g.temps.len()
+        let so = g.slots.len()
+        let bo = g.blocks.len()
+        for t in callee.temps {
+            g.temps.push(t)
+        }
+        for s in callee.slots {
+            g.slots.push(Slot { name: s.name, ty: s.ty, size: s.size, word: -1, owns: false, inline: false, scope: -1 })
+        }
+        // a parameter the callee only reads is the argument itself: each
+        // load of it reads the argument's temporary
+        let ro = read_only_params(callee)
+        var sub: [int32] = []
+        for t in callee.temps {
+            sub.push(-1)
+        }
+        for cb in callee.blocks {
+            for i in cb.insts {
+                match i {
+                    Inst.Load(dl, sl) => { if ro[sl] >= 0 { sub[dl] = args[ro[sl]] } },
+                    _ => {},
+                }
+            }
+        }
+        // what followed the call, in a block after the copy's
+        let cont = bo + callee.blocks.len()
+        var rest: [Inst] = []
+        var r = at + 1
+        while r < g.blocks[bi].insts.len() {
+            rest.push(g.blocks[bi].insts[r])
+            r += 1
+        }
+        // the call's block: up to the call, the arguments into the
+        // parameters' slots, then into the copy
+        var head: [Inst] = []
+        r = 0
+        while r < at {
+            head.push(g.blocks[bi].insts[r])
+            r += 1
+        }
+        var p = 0
+        while p < callee.slots.len() {
+            let w = callee.slots[p].word
+            if w >= 0 && ro[p] < 0 {
+                head.push(Inst.Store(so + p, args[w]))
+            }
+            p += 1
+        }
+        let tail_term = g.blocks[bi].term
+        g.blocks[bi] = IrBlock { insts: head, term: Term.Jmp(bo + callee.order[0]) }
+        for cb in callee.blocks {
+            var insts: [Inst] = []
+            for i in cb.insts {
+                let gone = match i {
+                    Inst.Load(dl, sl) => ro[sl] >= 0,
+                    _ => debug_only(i),
+                }
+                if !gone {
+                    insts.push(moved(i, to, so, sub))
+                }
+            }
+            let term = match cb.term {
+                Term.Jmp(t) => Term.Jmp(t + bo),
+                Term.Br(c, t, e) => Term.Br(tmp(c, to, sub), t + bo, e + bo),
+                Term.Ret(v) => {
+                    if d >= 0 && v >= 0 {
+                        insts.push(Inst.Mov(d, tmp(v, to, sub)))
+                    }
+                    Term.Jmp(cont)
+                },
+                _ => cb.term,
+            }
+            g.blocks.push(IrBlock { insts: insts, term: term })
+        }
+        g.blocks.push(IrBlock { insts: rest, term: tail_term })
+        for cbi in callee.order {
+            order.push(cbi + bo)
+        }
+        work.push(cont)
+    }
+    g.order = order
+    return g
+}
+
+// `f` with each block that only one reachable block jumps to, and that one
+// with a `jmp`, joined to the end of that block (the copies of inlined bodies
+// and the lowering leave such chains, which split what the backend does
+// within a block). Not for a frame function, whose resume points the
+// dispatch reaches too.
+pub fun merge_blocks(f: IrFunc) -> IrFunc {
+    if f.frame || f.order.len() == 0 {
+        return f
+    }
+    let n = f.blocks.len()
+    // the blocks reachable from the entry, and how many of those lead to each
+    var reach: [bool] = []
+    var preds: [int32] = []
+    var k = 0
+    while k < n {
+        reach.push(false)
+        preds.push(0)
+        k += 1
+    }
+    var stack: [int32] = [f.order[0]]
+    reach[f.order[0]] = true
+    while stack.len() > 0 {
+        let b = stack.pop()
+        for c in successors(f.blocks[b].term) {
+            preds[c] += 1
+            if !reach[c] {
+                reach[c] = true
+                stack.push(c)
+            }
+        }
+    }
+    var g = f
+    var gone: [bool] = []
+    k = 0
+    while k < n {
+        gone.push(false)
+        k += 1
+    }
+    for b in f.order {
+        if !reach[b] || gone[b] {
+            continue
+        }
+        var go = true
+        while go {
+            go = false
+            match g.blocks[b].term {
+                Term.Jmp(c) => {
+                    if c != b && c != f.order[0] && preds[c] == 1 && !gone[c] {
+                        for i in g.blocks[c].insts {
+                            g.blocks[b].insts.push(i)
+                        }
+                        g.blocks[b].term = g.blocks[c].term
+                        g.blocks[c] = IrBlock { insts: [], term: Term.Ret(-1) }
+                        gone[c] = true
+                        go = true
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    var order: [int32] = []
+    for b in f.order {
+        if !gone[b] {
+            order.push(b)
+        }
+    }
+    g.order = order
+    return g
+}

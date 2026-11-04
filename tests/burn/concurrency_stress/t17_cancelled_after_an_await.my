@@ -1,0 +1,27 @@
+// 17. `task.cancelled()` asks about the running task, whichever frame of it
+// runs (MYLA-162): after `main` awaited `c`, which waited for a child of its
+// own, the frame the executor resumed last is `c`'s, already freed; a new
+// child of the same size takes its memory, and cancelling that child must
+// not make `main` look cancelled.
+import std.task as task
+
+async fun d(k: int, a1: int, a2: int) -> int {
+    await task.yield()
+    return 2
+}
+
+async fun c(k: int) -> int {
+    async let z = d(k, k, k)
+    return await z
+}
+
+#main
+async fun main() {
+    let r = await c(1)
+    let w1 = r + 1
+    let w2 = r + 2
+    async let x = d(r, w1, w2)
+    task.cancel(x)
+    print(task.cancelled())
+    print(await x)
+}

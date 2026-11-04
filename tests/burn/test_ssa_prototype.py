@@ -131,7 +131,7 @@ class SsaPrototype(unittest.TestCase):
 
     def test_loops_and_joins_print_the_same(self):
         path = self.promoted("loops", _LOOPS)
-        ir = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--emit-ir", "--ssa"],
+        ir = subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--emit-ir", "--ssa", "--no-inline"],
                             capture_output=True, text=True, check=True).stdout
         fib = re.search(r"^fun myla_fib .*?^}", ir, re.S | re.M).group(0)
         # a, b, i and t ($1 to $4) are values now: no slot of theirs is read

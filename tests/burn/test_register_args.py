@@ -285,7 +285,7 @@ class RegisterArguments(unittest.TestCase):
 
     def asm(self, text: str) -> str:
         path = self.write("code", text)
-        return subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT], capture_output=True, text=True,
+        return subprocess.run([selfhost_tool("gen_main"), path, STDLIB_ROOT, "--no-inline"], capture_output=True, text=True,
                               check=True).stdout
 
     def test_arguments_travel_in_registers(self):

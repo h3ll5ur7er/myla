@@ -729,6 +729,36 @@ impl Lower {
         return d
     }
 
+    // `a op b` of type `rt` when the block's last two instructions made `a`
+    // and `b` integer constants (both taken back), wrapped as at run time;
+    // division and shifts out of range are left to run time.
+    fun folded(var self, op: str, lt: Type, rt: Type, a: int32, b: int32) -> Option<int64> {
+        let w = match lt { Type.TInt(n, sg) => n, _ => 0 }
+        if w == 0 || !type_eq_ir(lt, rt) { return None }
+        let signed = match lt { Type.TInt(n, sg) => sg, _ => false }
+        let n = self.f.blocks[self.cur].insts.len()
+        if n < 2 { return None }
+        var u: int64 = 0
+        var v: int64 = 0
+        var both = 0
+        match self.f.blocks[self.cur].insts[n - 2] { Inst.Const(d, t, k) => { if d == a { u = k; both += 1 } }, _ => {} }
+        match self.f.blocks[self.cur].insts[n - 1] { Inst.Const(d, t, k) => { if d == b { v = k; both += 1 } }, _ => {} }
+        if both != 2 { return None }
+        var r: int64 = 0
+        if op == "+" { r = u + v }
+        else if op == "-" { r = u - v }
+        else if op == "*" { r = u * v }
+        else if op == "&" { r = u & v }
+        else if op == "|" { r = u | v }
+        else if op == "^" { r = u ^ v }
+        else if op == "<<" && v >= 0 && v < (w as int64) { r = u << v }
+        else if op == ">>" && v >= 0 && v < (w as int64) && (signed || u >= 0) { r = u >> v }
+        else { return None }
+        let popped1 = self.f.blocks[self.cur].insts.pop()
+        let popped2 = self.f.blocks[self.cur].insts.pop()
+        return Some(wrap_ir(r, lt))
+    }
+
     // Record the first construct that can't be lowered; returns a dummy temp.
     #test(lower_on(), "a")[0]
     fun unsupported(var self, what: str) -> int32 {
@@ -1394,7 +1424,7 @@ impl Lower {
     }
 
     // Into the actor in `slot` (D92): on at once when it is free, else after
-    // the frames queued before this one; then the running task holds it.
+    // the frames queued before this one, holding it.
     fun enter_actor(var self, slot: int32, off: int32) {
         let rec = self.actor_record(slot, off)
         let me = self.temp(Type.TPtr)
@@ -1403,7 +1433,6 @@ impl Lower {
         let inside = self.new_block()
         self.finish(Term.Suspend(inside))
         self.start(inside)
-        self.add(Inst.Rt(-1, "__actor_held", [self.actor_record(slot, off)]))
     }
 
     // Out of the actor in `slot`: the next frame waiting gets it.
@@ -2201,6 +2230,11 @@ impl Lower {
         if !is_scalar(lt) || !is_scalar(rt) { return self.unsupported("an operator on values that aren't scalars") }
         let a = self.expr(cg, l)
         let b = self.expr(cg, r)
+        // two constants (literals, `const`s): one, folded (MYLA-162)
+        match self.folded(op, lt, rt, a, b) {
+            Some(v) => { return self.konst(rt, v) },
+            None => {},
+        }
         let d = self.temp(rt)
         if op == "==" || op == "!=" || is_cmp(op) {
             self.add(Inst.Cmp(d, op, lt, a, b))
@@ -3087,7 +3121,7 @@ impl Lower {
         let stride = self.int_const(cg.elem_size(map_key(mt)))
         let is_str = self.int_const(cg.map_is_str(mt))
         let d = self.temp(Type.TList(map_key(mt)))
-        self.add(Inst.Rt(d, "__map_keys", [cell, size, stride, is_str]))
+        self.rt_call(cg, d, "__map_keys", [cell, size, stride, is_str])
         return d
     }
 
@@ -3129,13 +3163,28 @@ impl Lower {
         let vt = map_val(mt)
         let size = self.int_const(cg.map_slot_size(mt))
         let is_str = self.int_const(cg.map_is_str(mt))
-        let unused = self.int_const(0)
-        self.add(Inst.Rt(-1, "__map_reserve", [holder, size, unused, is_str]))
-        let cell = self.temp(mt)
-        self.add_load(cell, holder, 0)
         let slot = self.temp(Type.TPtr)
         let had = self.temp(Type.TBool)
-        self.add(Inst.RtPair(slot, had, "__map_set_slot", [cell, key, size, is_str]))
+        if cg.has_func("std$rt$map_put_slot") && !cg.owning.contains("std$rt$map_put_slot") {
+            // std.rt's (MYLA-162): room made and the slot found in one call,
+            // whose low bit says whether the key was there
+            let i64 = Type.TInt(64, true)
+            let r = self.temp(i64)
+            self.add(Inst.Call(r, "std$rt$map_put_slot", [holder, key, size, is_str]))
+            let pos = Pos { line: 0, col: 0 }
+            let masked = self.temp(i64)
+            self.add(Inst.Bin(masked, "&", i64, i64, r, self.int_const(-2), pos))
+            self.add(Inst.Mov(slot, masked))
+            let bit = self.temp(i64)
+            self.add(Inst.Bin(bit, "&", i64, i64, r, self.int_const(1), pos))
+            self.add(Inst.Cmp(had, "!=", i64, bit, self.int_const(0)))
+        } else {
+            let unused = self.int_const(0)
+            self.add(Inst.Rt(-1, "__map_reserve", [holder, size, unused, is_str]))
+            let cell = self.temp(mt)
+            self.add_load(cell, holder, 0)
+            self.add(Inst.RtPair(slot, had, "__map_set_slot", [cell, key, size, is_str]))
+        }
         let p = self.offset(slot, 16)
         if cg.owns_heap(vt) {
             let drop_b = self.new_block()
@@ -3270,7 +3319,10 @@ impl Lower {
             let b = self.expr(cg, args[3])
             self.add(Inst.SbAppendRange(h, v, a, b, Pos { line: e.line, col: e.col }))
         } else {
-            self.add(Inst.SbAppend(h, v))
+            // std.rt's `sb_append` where the program has it (MYLA-162)
+            let f = myla_runtime_function("__sb_append")
+            if cg.has_func(f) && !cg.owning.contains(f) { self.add(Inst.Call(-1, f, [h, v])) }
+            else { self.add(Inst.SbAppend(h, v)) }
         }
         return -1
     }
@@ -3427,8 +3479,41 @@ impl Lower {
         // raw memory (MYLA-162's prototype): loads and stores of a width,
         // the allocator, a string's cell and back
         if is_raw_memory_primitive(nm) {
+            // a runtime variable, by its name (MYLA-162)
+            if nm == "__rt_addr" || nm == "__rt_get" || nm == "__rt_waddr" {
+                let sym = match args[0].kind {
+                    ExprKind.StrLit(x) => x,
+                    _ => "",
+                }
+                let d = self.temp(t)
+                if nm == "__rt_get" { self.add(Inst.Global(d, sym, 8)) }
+                else if nm == "__rt_waddr" {
+                    let w = self.expr(cg, args[1])
+                    self.add(Inst.Rt(d, "__rt_waddr:" + sym, [w]))
+                } else { self.add(Inst.Rt(d, "__rt_addr:" + sym, [])) }
+                return d
+            }
+            // the out-of-memory error ends the block: nothing after it is
+            // live across it
+            if nm == "__trap_oom" {
+                self.leave(Term.Trap("oom", Pos { line: e.line, col: e.col }))
+                return -1
+            }
             var vals: [int32] = []
-            for a in args { vals.push(self.expr(cg, a)) }
+            // a store of a value without calls: the value first, so the
+            // address is computed right before the store, which can take it
+            // as its addressing mode (MYLA-162)
+            var lit_first = false
+            if (nm == "__store8" || nm == "__store32" || nm == "__store64") && args.len() == 2 {
+                lit_first = calls_nothing(args[1])
+            }
+            if lit_first {
+                let v1 = self.expr(cg, args[1])
+                vals.push(self.expr(cg, args[0]))
+                vals.push(v1)
+            } else {
+                for a in args { vals.push(self.expr(cg, a)) }
+            }
             if nm == "__load8" || nm == "__load32" || nm == "__load64" {
                 let d = self.temp(t)
                 var w = 8
@@ -3444,12 +3529,12 @@ impl Lower {
                 self.add(Inst.StoreAt(vals[0], 0, vals[1], w))
                 return -1
             }
-            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" || nm == "__set_run_status" || nm == "__set_run_stderr" {
+            if nm == "__copy_bytes" || nm == "__set_io_errno" || nm == "__free" || nm == "__set_run_status" || nm == "__set_run_stderr" || nm == "__pause" || nm == "__run_frame" {
                 self.add(Inst.Rt(-1, nm, vals))
                 return -1
             }
             let d = self.temp(t)
-            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" || nm == "__rotl" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
+            if nm == "__alloc" || nm == "__equal_bytes" || nm == "__syscall" || nm == "__environ" || nm == "__rotl" || nm == "__bsr64" || nm == "__cas64" || nm == "__xchg64" || nm == "__fetch_add64" { self.add(Inst.Rt(d, nm, vals)) } else if nm == "__argv" { self.add(Inst.Rt(d, "__argv_of", vals)) } else { self.add(Inst.Mov(d, vals[0])) }
             if nm == "__str_of" || nm == "__list_of" { return self.owned_value(cg, d, t) }
             return d
         }
@@ -3486,7 +3571,19 @@ impl Lower {
         let t = cg.type_of(arg.id)
         if !is_scalar(t) && !is_tstr(t) { return self.unsupported("print of a value that isn't a scalar or a string") }
         let v = self.expr(cg, arg)
-        self.add(Inst.Print(t, v))
+        // std.rt's printing where the program has it, a float aside
+        // (MYLA-162)
+        var nm = ""
+        match t {
+            Type.TStr => { nm = "__print_str" },
+            Type.TBool => { nm = "__print_bool" },
+            Type.TChar => { nm = "__print_char" },
+            Type.TInt(w, s) => { if s { nm = "__print_int" } else { nm = "__print_uint" } },
+            _ => {},
+        }
+        let f = myla_runtime_function(nm)
+        if nm != "" && cg.has_func(f) && !cg.owning.contains(f) { self.add(Inst.Call(-1, f, [v])) }
+        else { self.add(Inst.Print(t, v)) }
         return -1
     }
 
@@ -3791,11 +3888,53 @@ fun char_cast_checked(src: Type, t: Type) -> bool {
 pub fun myla_runtime_function(name: str) -> str {
     if name == "__str_concat" { return "std$rt$str_concat" }
     if name == "__str_eq" { return "std$rt$str_eq" }
-    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" {
+    if name == "__stat" || name == "__mkdir" || name == "__unlink" || name == "__rmdir" || name == "__rename" || name == "__getcwd" || name == "__read_file" || name == "__write_file" || name == "__list_dir" || name == "__getenv" || name == "__run" || name == "__read" || name == "__poll" || name == "__args" || name == "__int_to_str" || name == "__uint_to_str" || name == "__str_chars" || name == "__map_lookup" || name == "__sb_append" || name == "__print_str" || name == "__print_int" || name == "__print_uint" || name == "__print_bool" || name == "__print_char" || name == "__write" || name == "__map_keys" {
         // `__stat` -> `std$rt$stat`
         var sb = StringBuilder()
         sb.append(name, 2, name.len())
         return "std$rt$" + sb.build()
     }
     return ""
+}
+
+// `a` and `b`, the same integer type (width and sign).
+#test(Type.TInt(64, true), Type.TInt(64, true))[true]
+#test(Type.TInt(64, true), Type.TInt(64, false))[false]
+fun type_eq_ir(a: Type, b: Type) -> bool {
+    return match a {
+        Type.TInt(w, s) => match b { Type.TInt(w2, s2) => w == w2 && s == s2, _ => false },
+        _ => false,
+    }
+}
+
+// `v` wrapped into the integer type `t` (two's complement), as the
+// arithmetic at run time wraps it.
+#test(4294967296, Type.TInt(32, true))[0]
+#test(255, Type.TInt(8, true))[-1]
+#test(-1, Type.TInt(8, false))[255]
+#test(-1, Type.TInt(64, false))[-1]
+fun wrap_ir(v: int64, t: Type) -> int64 {
+    return match t {
+        Type.TInt(w, signed) => {
+            if w >= 64 { return v }
+            let m = v & (((1 as int64) << (w as int64)) - 1)
+            if signed && ((m >> ((w - 1) as int64)) & 1) == 1 { return m - ((1 as int64) << (w as int64)) }
+            m
+        },
+        _ => v,
+    }
+}
+
+// Whether evaluating `e` calls nothing and changes nothing (a literal, a
+// name, operators on such), so it may be evaluated before its neighbours.
+fun calls_nothing(e: Expr) -> bool {
+    return match e.kind {
+        ExprKind.IntLit(n, sfx, ch, big) => true,
+        ExprKind.BoolLit(b) => true,
+        ExprKind.Name(name) => true,
+        ExprKind.Binary(op, l, r) => calls_nothing(l) && calls_nothing(r),
+        ExprKind.Unary(op, x) => calls_nothing(x),
+        ExprKind.Cast(x, t) => calls_nothing(x),
+        _ => false,
+    }
 }

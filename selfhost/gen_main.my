@@ -28,8 +28,10 @@ from .diag import render
 // (`--async-frames`, for the tests of D90's lowering). `ssa`: D123's
 // prototype, each function's scalar slots promoted before it is emitted
 // (`--ssa`; `--ssa-stats` also reports what that did on stderr, and with
-// `--emit-ir` the text shows the promoted functions).
-struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool }
+// `--emit-ir` the text shows the promoted functions). `no_inline`: no
+// small function copied into its callers (`--no-inline`, for the tests of
+// one function's code).
+struct Mode { debug: bool, emit_ir: bool, frames: bool, ssa: bool, ssa_stats: bool, no_inline: bool }
 
 fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
     return match build_checker_decls(prog.decls, prog.next_id) {
@@ -40,6 +42,7 @@ fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
             if mode.debug { g.enable_debug_info(read_gdb_script(stdlib_root)) }
             if mode.emit_ir { g.keep_ir_text() }
             if mode.ssa { g.ssa = true }
+            if mode.no_inline { g.inlining = false }
             let asm = g.generate()
             if mode.ssa_stats {
                 // D123's prototype: what promoting the scalar slots did
@@ -59,12 +62,12 @@ fun emit_asm(prog: Loaded, mode: Mode, stdlib_root: str) -> int32 {
 fun main() {
     let argv = args()
     if argv.len() < 2 {
-        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--ssa | --ssa-stats] [--package name=dir]... [--root dir]")
+        eprintln("usage: gen_main <file.my> [stdlib_root] [-g] [--emit-ir] [--no-inline] [--ssa | --ssa-stats] [--package name=dir]... [--root dir]")
         exit(2)
     }
     var opts = load_options(default_stdlib_root())
     opts.runtime = true
-    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false }
+    var mode = Mode { debug: false, emit_ir: false, frames: false, ssa: false, ssa_stats: false, no_inline: false }
     var j = 2
     while j < argv.len() {
         if argv[j] == "-g" {
@@ -73,6 +76,8 @@ fun main() {
             mode.emit_ir = true
         } else if argv[j] == "--async-frames" {
             mode.frames = true
+        } else if argv[j] == "--no-inline" {
+            mode.no_inline = true
         } else if argv[j] == "--ssa" {
             mode.ssa = true
         } else if argv[j] == "--ssa-stats" {
