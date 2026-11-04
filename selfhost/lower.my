@@ -3313,7 +3313,9 @@ impl Lower {
         self.add(Inst.Cow(cell, Type.TSB, h))
         let v = self.expr(cg, args[1])
         if nm == "append_byte" {
-            self.add(Inst.SbAppendByte(h, v))
+            // std.rt's where the program has it (MYLA-162)
+            if cg.has_func("std$rt$sb_append_byte") && !cg.owning.contains("std$rt$sb_append_byte") { self.add(Inst.Call(-1, "std$rt$sb_append_byte", [h, v])) }
+            else { self.add(Inst.SbAppendByte(h, v)) }
         } else if args.len() == 4 {
             let a = self.expr(cg, args[2])
             let b = self.expr(cg, args[3])

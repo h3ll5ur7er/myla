@@ -910,7 +910,9 @@ pub fun map_keys(cell: int64, slot_size: int64, stride: int64, is_str: int64) ->
 // A builder's cell holds its length and its capacity in bytes, then its
 // bytes; a builder variable holds its cell, unique when appended to.
 
-// `append(sb, s)` (`__sb_append_bytes`): `s`'s bytes after the builder's.
+// `append(sb, s)`: `s`'s bytes after the builder's (the builder at the
+// address `holder`). The fast paths call nothing, so their values stay in
+// registers; a full builder is the business of a tail call.
 pub fun sb_append(holder: int64, s: str) {
     let src = __addr_of(s)
     let count = __load64(src)
@@ -918,30 +920,70 @@ pub fun sb_append(holder: int64, s: str) {
     let len = __load64(cell)
     let need = len + count
     if need > __load64(cell + 8) {
-        sb_append_grown(holder, cell, src, need)
+        sb_append_grown(holder, cell, src + 8, count)
         return
     }
     __store64(cell, need)
     __copy_bytes(cell + 16 + len, src + 8, count)
 }
 
-// The rest of `sb_append` for a full builder: its cell at the address
-// `holder` replaced by one twice as large (or as large as needed), so
-// building a long text line by line stays linear, then the bytes of the
-// string cell `src` copied after its own.
-fun sb_append_grown(holder: int64, cell: int64, src: int64, need: int64) {
+// `append_byte(sb, b)`: one byte after the builder's.
+pub fun sb_append_byte(holder: int64, b: uint8) {
+    let cell = __load64(holder)
+    let len = __load64(cell)
+    if len >= __load64(cell + 8) {
+        sb_byte_grown(holder, cell, b)
+        return
+    }
+    __store8(cell + 16 + len, b)
+    __store64(cell, len + 1)
+}
+
+// `__sb_append_bytes`: the `count` bytes at `src` after the builder's (a
+// range of a string).
+pub fun sb_append_bytes(holder: int64, src: int64, count: int64) {
+    let cell = __load64(holder)
+    let len = __load64(cell)
+    let need = len + count
+    if need > __load64(cell + 8) {
+        sb_append_grown(holder, cell, src, count)
+        return
+    }
+    __store64(cell, need)
+    __copy_bytes(cell + 16 + len, src, count)
+}
+
+// The appends to a full builder: the `count` bytes at `src`, or the byte `b`.
+fun sb_append_grown(holder: int64, cell: int64, src: int64, count: int64) {
+    let len = __load64(cell)
+    let bigger = sb_bigger(holder, cell, len + count)
+    __copy_bytes(bigger + 16 + len, src, count)
+    __store64(bigger, len + count)
+}
+
+fun sb_byte_grown(holder: int64, cell: int64, b: uint8) {
+    let len = __load64(cell)
+    let bigger = sb_bigger(holder, cell, len + 1)
+    __store8(bigger + 16 + len, b)
+    __store64(bigger, len + 1)
+}
+
+// The full builder `cell` at the address `holder` replaced by one twice as
+// large (or as large as `need`), so building a long text piece by piece
+// stays linear: its bytes copied, the old cell freed, the new one returned.
+fun sb_bigger(holder: int64, cell: int64, need: int64) -> int64 {
     let len = __load64(cell)
     var cap = __load64(cell + 8) * 2
     if cap < need {
         cap = need
     }
     let bigger = __alloc(cap + 16)
-    __store64(bigger, need)
+    __store64(bigger, len)
     __store64(bigger + 8, cap)
     __copy_bytes(bigger + 16, cell + 16, len)
-    __copy_bytes(bigger + 16 + len, src + 8, need - len)
     __free(cell)
     __store64(holder, bigger)
+    return bigger
 }
 
 // --- printing ----------------------------------------------------------------
