@@ -13,7 +13,7 @@ Found by the October 2026 review of the whole project ([[Project/Review-2026-10]
 
 - [x] Reserve one arena per worker (`MYLA_THREADS`, or the CPUs; at most 32), D106
 - [x] A guard page under every worker stack, and an alternate signal stack per worker, so a worker's overflow is reported as `runtime error: stack overflow` like the main stack's ([[MYLA-182]])
-- [ ] Both documented on [[Architecture/Native-backend]]
+- [x] Both documented on [[Architecture/Native-backend]] ("Calling convention", 2026-11-04)
 
 Decided by D106 ([[MYLA-206]]): one arena per worker that can exist and the guard pages now, each worker with an alternate signal stack of its own; lazy arenas move to [[MYLA-162]].
 

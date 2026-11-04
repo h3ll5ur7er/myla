@@ -1,6 +1,6 @@
 # Home
 
-Myla is a small, statically typed programming language with sized integers, value semantics, algebraic data types, traits and closures. It is inspired by Swift, Rust and Python. It compiles to x86-64 Linux executables without libc, and it is **self-hosted**: the compiler written in Myla compiles itself to a byte-identical fixed point.
+Myla is a small, statically typed programming language with sized integers, value semantics, algebraic data types, traits and closures. It is inspired by Swift, Rust and Python. It compiles to static executables for x86-64 and aarch64 Linux, without libc, and to WebAssembly modules for WASI, which also bring its checker and interpreter into a web page; and it is **self-hosted**: the compiler written in Myla compiles itself to a byte-identical fixed point.
 
 ```myla
 enum Shape {
@@ -63,7 +63,7 @@ flowchart LR
 
 ## Status in one paragraph
 
-Version 1.0 is reached and well past: every feature milestone was implemented with interpreter/native parity, and the self-hosted compiler reaches its three-stage fixed point. Since then the self-hosted backend goes through a verified mid-level IR ([[Architecture/IR]]), with guaranteed tail calls (`become`, D87); the language has Swift-style concurrency (D89 to D97: `async`/`await`, structured child tasks, actors) on a multi-threaded work-stealing native runtime ([[Language/Concurrency]]); and the tools are written in Myla: a project tool with Git dependencies ([[Architecture/Project-tool]]), a language server and a REPL, beside a VS Code extension with a debugger ([[Architecture/Editor-tooling]]). In November 2026 the bootstrap moved to a committed seed and the Python toolchain was retired (D101). The review of October 2026 ([[Project/Review-2026-10]]) found the bugs now on the board and on [[Project/Known-issues]]; next are other platforms, through backends of Myla's own and a runtime in Myla (D117, [[MYLA-62]]).
+Version 1.0 is reached and well past: every feature milestone was implemented with interpreter/native parity, and the self-hosted compiler reaches its three-stage fixed point. Since then the self-hosted backend goes through a verified mid-level IR ([[Architecture/IR]]), with guaranteed tail calls (`become`, D87); the language has Swift-style concurrency (D89 to D97: `async`/`await`, structured child tasks, actors) on a multi-threaded work-stealing native runtime ([[Language/Concurrency]]); and the tools are written in Myla: a project tool with Git dependencies ([[Architecture/Project-tool]]), a language server and a REPL, beside a VS Code extension with a debugger ([[Architecture/Editor-tooling]]). In November 2026 the bootstrap moved to a committed seed and the Python toolchain was retired (D101), the runtime moved into Myla (`std.rt`, D117), and backends of Myla's own were added for Linux on aarch64 and for wasm32 on WASI (D125), with the checker and interpreter running in a page. The review of October 2026 ([[Project/Review-2026-10]]) found the bugs now on the board and on [[Project/Known-issues]]; the reflection on the two new backends ([[Project/Reflection-2026-11]]) sets what comes before the next target: the IR and the targets' capabilities specified, the backend glue and the platform interface consolidated, every suite run on every target ([[MYLA-62]]).
 
 ## Working in this repository
 

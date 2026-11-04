@@ -9,7 +9,7 @@ Open bugs and gaps by component, each with a task that has its steps to reproduc
 Retired by D101 ([[MYLA-219]]); its tasks stay in the `Python toolchain` epic.
 
 - `as char` is unchecked: a surrogate crashed the Python interpreter when printed, native code prints garbage ([[MYLA-177]]). *Fixed, in review.*
-- Map removal keeps no tombstones in the Python backend ([[MYLA-151]]); moot since the backend was retired.
+- Map removal keeps no tombstones in the Python backend ([[MYLA-151]]); moot since the backend was retired. Natively a `remove` rebuilds the whole table, O(capacity) ([[MYLA-271]]).
 
 ## Self-hosted compiler
 
@@ -18,13 +18,24 @@ Retired by D101 ([[MYLA-219]]); its tasks stay in the `Python toolchain` epic.
 - Native code took a read-only method receiver, and the Python interpreter a function's argument, after a later argument that writes the same variable ([[MYLA-237]]). *Fixed, in review.*
 - The self-hosted interpreter lost an argument's change to a `var self` receiver ([[MYLA-238]]). *Fixed, in review.*
 
-Also by design: x86-64 Linux is the only target (D2); Myla's own backends for other platforms ([[MYLA-62]], D117) are to change that.
+- A `become` passing a function-value parameter on to a function stops the compiler with an internal error, on every target ([[MYLA-253]]).
+
+## Backends and platforms
+
+The targets are x86-64 and aarch64 Linux and wasm32 on WASI; macOS and Windows are planned ([[MYLA-62]]). What the two new backends showed ([[Project/Reflection-2026-11]]):
+
+- wasm32: the shadow stack lies above the static data, so a deep overflow of it would overwrite data instead of trapping; a trap under `run.mjs` prints `wasm trap: …` and exits 134 instead of `runtime error: stack overflow` and 1 ([[MYLA-261]]).
+- aarch64 and wasm32: a plain function used as a function value with a parameter passed by value stops the compiler (`__fnval` panics; [[MYLA-263]]), as does the lowering's `RtPair` fallback ([[MYLA-264]]).
+- A computed NaN's bits differ: `to_bits(0.0 / 0.0)` is 0xFFF8… on x86-64 and wasm on x86-64, 0x7FF8… on aarch64 ([[MYLA-266]]).
+- The runtime's lock-free protocols were argued from x86-64's memory order; on aarch64 they pass under qemu, which doesn't reorder memory ([[MYLA-267]]).
+- The aarch64 and wasm32 tests skip silently when clang, `ld.lld`, `wasm-ld`, qemu or Node is missing, and the full self-compile on those targets isn't in CI ([[MYLA-268]]).
+- On wasm32 there are no processes (`run` gives `Other(38)`), one worker, and input that can't suspend; no page says so yet ([[MYLA-266]]).
 
 ## Concurrency
 
 - An awaited `var self` struct method on an actor field is accepted and behaves three ways across the implementations ([[MYLA-169]]). *Fixed, in review.*
 - The D95 warning is bypassed through `self` methods ([[MYLA-171]]).
-- Every tasked program reserves 128 GiB of address space; worker stacks have no guard page ([[MYLA-172]]).
+- Every tasked program reserves 128 GiB of address space; worker stacks have no guard page ([[MYLA-172]]). *Fixed, in review: one arena per worker, reserved in chunks; guard pages and alternate signal stacks.*
 
 ## Tooling in Myla
 

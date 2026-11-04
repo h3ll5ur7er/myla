@@ -40,7 +40,7 @@ So 80 % needs `#test` on methods: the receiver as the first argument (`#test(C {
 
 The harvester: the Python interpreter runs the self-hosted compiler (`selfhost/gen_main.my`, the interpreter, the loader) over the examples and the error corpus with a hook on function entry and return. It records each call whose arguments and result print as Myla expressions under a size limit, keeps a few distinct cases per function (small ones first, every enum variant of the result where it can), and writes them as `#test` lines above the function. Generated cases record what the compiler does today (regression tests, not a specification), and a person reads them before they are committed. It needs the Python interpreter, so it runs before [[MYLA-219]] removes it; the self-hosted interpreter could carry the same hook later.
 
-- [ ] The three places that state it agree with the decision
+- [x] The three places that state it agree with the decision ([[Development/Conventions]] and the `myla` skill state D109's 80 %; [[Architecture/Self-hosted-compiler]] no longer states a rule of its own)
 - [x] The burn test: coverage per module and overall, a warning below 80 % (in the test output and as a CI annotation): `tests/burn/test_selfhost_coverage.py`, `scripts/test_coverage.py`
 - [x] `#test` on methods (D116, [[MYLA-236]])
 - [x] The harvester (`scripts/harvest_tests.py`); a first round of cases generated, validated by both runners and committed
