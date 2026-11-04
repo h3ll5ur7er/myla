@@ -4095,3 +4095,87 @@ fun is_tfloat_ir(t: Type) -> bool {
         _ => false,
     }
 }
+
+// `__walkd_<T>` / `__walkr_<T>` (`retain`): release or retain every heap value
+// the inline value of type `t` at the address given holds, member by member
+// (an enum's by the variant its tag names); a cell or a boxed value is a
+// leaf (its count bumped, or its drop routine called), an inline aggregate
+// is walked in its turn.
+pub fun walk_ir(cg: CodeGen, t: Type, retain: bool, name: str) -> IrFunc {
+    var lw = routine(name, None)
+    // (the slot read afresh at each use: it lives in a register across the
+    // calls, each read that register)
+    let sp = lw.new_slot("p", Type.TPtr, 8, 0, false)
+    match t {
+        Type.TStruct(n, a) => {
+            let info = cg.struct_info(n)
+            let sub = cg.type_subst(info.type_params, a)
+            var cur = 0
+            for f in info.fields {
+                let ft = subst_type(f.ty, sub)
+                lw.walk_member(cg, lw.read_ptr(sp), cur, ft, retain)
+                cur = cur + cg.stored_size(ft)
+            }
+        },
+        Type.TTuple(es) => {
+            var cur = 0
+            for et in es {
+                lw.walk_member(cg, lw.read_ptr(sp), cur, et, retain)
+                cur = cur + cg.stored_size(et)
+            }
+        },
+        Type.TEnum(n, a) => {
+            let info = cg.enum_info(n)
+            let sub = cg.type_subst(info.type_params, a)
+            let i64 = Type.TInt(64, true)
+            let tag = lw.temp(i64)
+            lw.add(Inst.LoadAt(tag, lw.read_ptr(sp), 0, 8))
+            let done = lw.new_block()
+            var idx = 0
+            for v in info.variants {
+                if cg.variant_owns(v, sub) {
+                    let is_v = lw.temp(Type.TBool)
+                    lw.add(Inst.Cmp(is_v, "==", i64, tag, lw.konst(i64, idx as int64)))
+                    let this_v = lw.new_block()
+                    let next_v = lw.new_block()
+                    lw.finish(Term.Br(is_v, this_v, next_v))
+                    lw.start(this_v)
+                    var cur = 8
+                    for ft0 in v.payload {
+                        let ft = subst_type(ft0, sub)
+                        lw.walk_member(cg, lw.read_ptr(sp), cur, ft, retain)
+                        cur = cur + cg.stored_size(ft)
+                    }
+                    lw.finish(Term.Jmp(done))
+                    lw.start(next_v)
+                }
+                idx = idx + 1
+            }
+            lw.finish(Term.Jmp(done))
+            lw.start(done)
+        },
+        _ => {},
+    }
+    lw.finish(Term.Ret(-1))
+    return lw.f
+}
+
+impl Lower {
+    // The pointer the slot `sp` holds, read into a new temporary.
+    fun read_ptr(var self, sp: int32) -> int32 {
+        let t = self.temp(Type.TPtr)
+        self.add(Inst.Load(t, sp))
+        return t
+    }
+
+    // A walk's action on the member of type `ft` at `off` in the value at `p`.
+    fun walk_member(var self, cg: CodeGen, p: int32, off: int32, ft: Type, retain: bool) {
+        if cg.is_boxed(ft) || is_cell_t(ft) {
+            let v = self.temp(ft)
+            self.add(Inst.LoadAt(v, p, off, 8))
+            if retain { self.add(Inst.RetainVal(ft, v)) } else { self.add(Inst.DropVal(ft, v)) }
+        } else if is_tfunc(ft) || cg.owns_heap(ft) {
+            if retain { self.add(Inst.Retain(ft, self.offset(p, off))) } else { self.add(Inst.DropAt(ft, self.offset(p, off))) }
+        }
+    }
+}

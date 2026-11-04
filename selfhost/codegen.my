@@ -20,7 +20,7 @@ from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
 from .anf import Norm, new_norm
-from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir
+from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -1593,22 +1593,6 @@ impl CodeGen {
         self.need_walk.push(t)
         self.walk_retain.push(retain)
         return name
-    }
-
-    // `__walkd_<T>` / `__walkr_<T>`: %rdi = the address of an inline T; release
-    // or retain every heap value it holds. The address stays in %rbx across
-    // the calls the walk makes.
-    fun emit_walk_helper(var self, t: Type, retain: bool, name: str) {
-        self.emit(format("{}:", name))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.emit("pushq %rbx")
-        self.emit("movq %rdi, %rbx")
-        self.owned_walk_inline("rbx", 0, t, retain)
-        self.emit("popq %rbx")
-        self.emit("leave")
-        self.emit("ret")
-        self.emit("")
     }
 
     // `owned_walk` itself, emitted here.
@@ -7626,7 +7610,9 @@ impl CodeGen {
                 if retain { name = "__walkr_" + mono_token(t) }
                 if list_has_str(self.walk_emitted, name) { continue }
                 self.walk_emitted.push(name)
-                self.emit_walk_helper(t, retain, name)
+                // built as IR (MYLA-162), under the alias its callers call
+                self.emit_routine(walk_ir(self, t, retain, name), -1, 0, 0)
+                self.raw(format("\t.set {}, myla_{}", name, name))
             }
         }
         if self.need_sb { self.emit_sb_rc_helpers() }
