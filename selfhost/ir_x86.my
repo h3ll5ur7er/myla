@@ -22,6 +22,61 @@ impl CodeGen {
         self.emit_ir_at(f, self.sig_of(fd.name).decl_id, fd.line, fd.col, mangled)
     }
 
+    // An ownership instruction reaching the translation, which
+    // `expand_ownership` makes plain first.
+    fun unplain(self) {
+        panic("internal error: an ownership instruction reached the x86 translation")
+    }
+
+    // `f` with the owners a block drops after a call that replaces the
+    // function (a tail call: MYLA-126) dropped before it instead, where the
+    // translation emits them: when no argument of the call depends on them
+    // and the call is made in place of the function (as the block's
+    // translation decides it).
+    fun hoist_tail_drops(self, f0: IrFunc) -> IrFunc {
+        if self.debug || f0.frame { return f0 }
+        var f = f0
+        var words = 0
+        for s in f.slots {
+            if s.word >= 0 && s.word + s.size / 8 > words { words = s.word + s.size / 8 }
+        }
+        var arg_words = 0
+        if words > REG_WORDS { arg_words = words - REG_WORDS }
+        var in_frame: [bool] = []
+        var b = 0
+        while b < f.blocks.len() {
+            let insts = f.blocks[b].insts
+            let tail = tail_call_at(insts, f.blocks[b].term)
+            var moves = tail >= 0 && tail + 1 < insts.len() && drops_after_free(f, insts, tail) && stack_words(insts[tail]) <= arg_words
+            if moves {
+                if in_frame.len() == 0 { in_frame = frame_addresses(f) }
+                moves = !passes_frame_address(insts[tail], in_frame)
+            }
+            if moves {
+                var out: [Inst] = []
+                var j = 0
+                while j < tail {
+                    out.push(insts[j])
+                    j = j + 1
+                }
+                var rest: [Inst] = []
+                j = tail + 1
+                while j < insts.len() {
+                    match insts[j] {
+                        Inst.DropSlot(t, sl) => { out.push(insts[j]) },
+                        _ => { rest.push(insts[j]) },
+                    }
+                    j = j + 1
+                }
+                out.push(insts[tail])
+                for x in rest { out.push(x) }
+                f.blocks[b].insts = out
+            }
+            b = b + 1
+        }
+        return f
+    }
+
     // Emit `f` as `myla_<mangled>`: a function or lambda declared by the node
     // `decl_id` (its file) at `line:col`.
     fun emit_ir_at(var self, f0: IrFunc, decl_id: int32, line: int32, col: int32, mangled: str) {
@@ -34,6 +89,10 @@ impl CodeGen {
             self.ssa_stats = add_ssa_stats(self.ssa_stats, promoted.1)
         }
         if self.keep_ir && self.ssa { self.ir_texts.push(render_func(f)) }
+        // the ownership instructions as plain operations and calls
+        // (MYLA-162), the owners a tail call drops after it first moved
+        // before it
+        f = self.expand_ownership(self.hoist_tail_drops(f))
         let tc = touches(f)
         self.temp_uses = use_counts(f, tc)
         self.ret_type = f.ret
@@ -188,15 +247,6 @@ impl CodeGen {
                 nk = nk + 1
             }
             if tail >= 0 {
-                // the owners dropped after the call go before the jump
-                var j = tail + 1
-                while j < insts.len() {
-                    match insts[j] {
-                        Inst.DropSlot(t, s) => { self.emit_inst(f, insts[j], slot_off, temp_base) },
-                        _ => {},
-                    }
-                    j = j + 1
-                }
                 match f.blocks[b].term { Term.Suspend(sb) => { self.emit_state(sb) }, _ => {} }
                 self.emit_tail_call(f, insts[tail], slot_off, labels[0], temp_base)
             }
@@ -524,6 +574,8 @@ impl CodeGen {
             },
             Inst.Addr(d, s) => { self.def_into_temp(inst, d, slot_off, temp_base) },
             Inst.Offset(d, p, off) => {
+                // read by nothing (a retain or drop loads through its base)
+                if self.temp_uses[d] == 0 { return }
                 let base = self.reg_of(p)
                 if base != "" { self.emit(format("leaq {}({}), %rax", off, base)) }
                 else {
@@ -807,6 +859,27 @@ impl CodeGen {
                     self.emit("pause")
                     return
                 }
+                // one more reference to a cell (`lock`: an actor handle
+                // threads share, D92)
+                if name == "__rc_inc" || name == "__rc_inc_atomic" {
+                    var inc = "incq"
+                    if name == "__rc_inc_atomic" { inc = "lock incq" }
+                    let at = self.reg_of(args[0])
+                    if at != "" { self.emit(format("{} -8({})", inc, at)) }
+                    else {
+                        self.load_temp(args[0], "rax", temp_base)
+                        self.emit(format("{} -8(%rax)", inc))
+                    }
+                    return
+                }
+                // the cell the holder at the argument points at made unique
+                // by the clone routine named after the colon (MYLA-251)
+                if rt_cow(name) {
+                    self.load_temp(args[0], "rcx", temp_base)
+                    self.cow_unique_at_rcx(text_from(name, 6))
+                    self.store_temp(d, temp_base)
+                    return
+                }
                 // a cell's count down by one, whether it reached 0 (the
                 // per-type drop routines' fast path, MYLA-162)
                 if name == "__rc_dec" || name == "__rc_dec_atomic" {
@@ -858,58 +931,17 @@ impl CodeGen {
                 self.emit(format("call {}", name))
                 if d >= 0 { self.store_temp(d, temp_base) }
             },
-            Inst.RetainVal(t, v) => {
-                // an actor handle may be shared between threads (D92)
-                var inc = "incq"
-                if self.frames && is_actor_t(t) { inc = "lock incq" }
-                let at = self.reg_of(v)
-                if at != "" { self.emit(format("{} -8({})", inc, at)) }
-                else {
-                    self.load_temp(v, "rax", temp_base)
-                    self.emit(format("{} -8(%rax)", inc))
-                }
-            },
-            Inst.Retain(t, p) => {
-                // (one action at most: the address read before any call)
-                var base = self.reg_of(p)
-                if base == "" || text_has_xmm(base) {
-                    self.load_temp(p, "r8", temp_base)
-                    base = "%r8"
-                }
-                self.retain(reg_name(base), 0, t)
-            },
-            Inst.DropSlot(t, s) => {
-                if self.in_frame { self.drop_value("r15", slot_off[s], t) } else { self.drop_value("rbp", slot_off[s], t) }
-            },
+            Inst.RetainVal(t, v) => { self.unplain() },
+            Inst.Retain(t, p) => { self.unplain() },
+            Inst.DropSlot(t, s) => { self.unplain() },
             Inst.Frame(d) => {
                 self.emit("movq %r15, %rax")
                 self.store_temp(d, temp_base)
             },
-            Inst.DropVal(t, v) => {
-                // the cell into %rdi, its type's drop routine called
-                self.load_temp(v, "rdi", temp_base)
-                self.register_drop(t)
-                self.emit("call " + self.drop_call_name(t))
-            },
-            Inst.DropAt(t, p) => {
-                // one action at most (a leaf's drop, or a walk's helper or
-                // single inline action): the address read before any call
-                var base = self.reg_of(p)
-                if base == "" || text_has_xmm(base) {
-                    self.load_temp(p, "r8", temp_base)
-                    base = "%r8"
-                }
-                self.walk_member(reg_name(base), 0, t, false)
-            },
-            Inst.Deep(t, p) => {
-                // the type's deep walk, the value's address in %rdi
-                self.load_temp(p, "rdi", temp_base)
-                self.emit("call " + self.register_deep(t, false))
-            },
-            Inst.CloneDeep(t, p) => {
-                self.load_temp(p, "rdi", temp_base)
-                self.emit("call " + self.register_deep(t, true))
-            },
+            Inst.DropVal(t, v) => { self.unplain() },
+            Inst.DropAt(t, p) => { self.unplain() },
+            Inst.Deep(t, p) => { self.unplain() },
+            Inst.CloneDeep(t, p) => { self.unplain() },
             Inst.Init(s) => {},
             Inst.Moved(s) => {},
             Inst.RtPair(d, d2, name, args) => {
@@ -992,12 +1024,7 @@ impl CodeGen {
                 self.emit("movzbl (%rax), %eax")
                 self.store_temp(d, temp_base)
             },
-            Inst.Cow(d, t, h) => {
-                // the holder's address straight into %rcx (MYLA-251)
-                self.load_temp(h, "rcx", temp_base)
-                self.cow_unique_at_rcx(t)
-                self.store_temp(d, temp_base)
-            },
+            Inst.Cow(d, t, h) => { self.unplain() },
             Inst.Append(d, h, c, stride) => {
                 // grow when full (publishing the new cell), then
                 // count the element and point at its slot
@@ -1462,32 +1489,6 @@ impl CodeGen {
         }
     }
 
-    // `d = q + off` read only by the retain or drop through it right after:
-    // `off(q)` the member's place, nothing computed (MYLA-162).
-    fun emit_offset_rc(var self, a: Inst, b: Inst) -> bool {
-        return match a {
-            Inst.Offset(d, q, off) => {
-                if self.temp_uses[d] != 1 { return false }
-                let rq = self.reg_of(q)
-                if rq == "" || text_has_xmm(rq) { return false }
-                match b {
-                    Inst.Retain(t, p) => {
-                        if p != d { return false }
-                        self.retain(reg_name(rq), off, t)
-                        true
-                    },
-                    Inst.DropAt(t, p) => {
-                        if p != d { return false }
-                        self.walk_member(reg_name(rq), off, t, false)
-                        true
-                    },
-                    _ => false,
-                }
-            },
-            _ => false,
-        }
-    }
-
     // `d = a op b` (64-bit `+ - & | ^ *`) when `d`'s register holds `a` (or,
     // the order not mattering, `b`) already: the allocator gave it to `d`, so
     // that operand ends here, and the operation works on it in place.
@@ -1515,7 +1516,6 @@ impl CodeGen {
     // place); false when none does. One match of `a` picks the candidates.
     fun emit_pair(var self, f: IrFunc, a: Inst, b: Inst, temp_base: int32) -> bool {
         return match a {
-            Inst.Offset(d, q, off) => self.emit_offset_rc(a, b),
             Inst.Elem(e, c, i, stride, is_str, p) => self.emit_elem_load(f, a, b, temp_base),
             Inst.Bin(d, op, lt, rt, x, y, pos) => self.emit_add_load(f, a, b, temp_base) || self.emit_in_place(a, b, temp_base),
             _ => false,
@@ -2063,21 +2063,8 @@ impl CodeGen {
             for inst in b.insts {
                 match inst {
                     Inst.Addr(d, s) => { cand[nt + s] = false },
-                    Inst.DropSlot(t, s) => { cand[nt + s] = false },
                     Inst.Init(s) => { cand[nt + s] = false },
                     Inst.Moved(s) => { cand[nt + s] = false },
-                    // a member's address the retain or drop right after
-                    // folds (`emit_offset_rc`): never in a register
-                    Inst.Offset(d, q, off) => {
-                        if self.temp_uses[d] == 1 && ii + 1 < b.insts.len() {
-                            let folds = match b.insts[ii + 1] {
-                                Inst.Retain(t, p) => p == d,
-                                Inst.DropAt(t, p) => p == d,
-                                _ => false,
-                            }
-                            if folds { cand[d] = false }
-                        }
-                    },
                     _ => {},
                 }
                 ii = ii + 1
@@ -2134,11 +2121,6 @@ impl CodeGen {
                 d = d + 1
             }
             var ii = tc.at[b]
-            // a call that may replace the function (as the emitter finds it)
-            // has the owners dropped after it emitted before it: it doesn't
-            // read its operands before anything clobbers then
-            let tl = replacing_call(f.blocks[b].insts, f.blocks[b].term)
-            var idx = 0
             for inst in f.blocks[b].insts {
                 tat.push(tv.len())
                 var c = cpre[cpre.len() - 1]
@@ -2150,8 +2132,7 @@ impl CodeGen {
                 } else if kind == 1 { sc = sc + 1 }
                 cpre.push(c)
                 spre.push(sc)
-                callpos.push(idx != tl && reads_then_calls(inst))
-                idx = idx + 1
+                callpos.push(reads_then_calls(inst))
                 callinst.push(inst)
                 // a variable read where it is used is read there (`temp_src`)
                 var k = tc.rat[ii]
@@ -2818,34 +2799,12 @@ fun jump_cond(op: str, signed: bool) -> str {
 // result of at once, so it can be a tail call (`emit_tail_call`); -1 when
 // there is none. After the call only a `moved`, debug information, the
 // result stored into an owning slot that is then moved, or drops may follow;
-// the drops go before the jump, so no argument may depend on what they drop
-// (`drops_after_free`). No argument may be an address in this frame either,
+// the drops go before the call (`hoist_tail_drops`), so no argument may
+// depend on what they drop (`drops_after_free`). No argument may be an address in this frame either,
 // which the jump leaves (`passes_frame_address`).
 #test([], Term.Jmp(6))[-1]
 #test([], Term.Ret(0))[-1]
 #test([], Term.Br(5, 5, 7))[-1]
-// The index of the call in `insts` that may replace the function (a
-// `become`, a call before `suspend`, a call in tail position) when owners
-// are dropped after it, which the emitter moves before it; -1 for none.
-fun replacing_call(insts: [Inst], term: Term) -> int32 {
-    var tail = -1
-    match term {
-        Term.Become => { tail = insts.len() - 1 },
-        Term.Suspend(sb) => { if ends_in_call(insts) { tail = insts.len() - 1 } },
-        _ => { tail = tail_call_at(insts, term) },
-    }
-    if tail < 0 { return -1 }
-    var j = tail + 1
-    while j < insts.len() {
-        match insts[j] {
-            Inst.DropSlot(t, s) => { return tail },
-            _ => {},
-        }
-        j = j + 1
-    }
-    return -1
-}
-
 fun tail_call_at(insts: [Inst], term: Term) -> int32 {
     let v = match term {
         Term.Ret(x) => x,
@@ -3010,8 +2969,6 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.StoreAt(p, off, v, width) => 0,
         Inst.Copy(d, src, size) => 1,
         Inst.Bin(d, op, lt, rt, a, b, pos) => if float_rem(op, lt) { 2 } else { 0 },
-        // an inline count bump, no call (MYLA-162)
-        Inst.RetainVal(t, v) => 0,
         Inst.Cmp(d, op, t, a, b) => 0,
         Inst.Un(d, op, t, a) => 0,
         Inst.Mov(d, a) => 0,
@@ -3026,7 +2983,7 @@ fun clobber_kind(inst: Inst) -> int32 {
         Inst.Loc(p) => 0,
         Inst.Bind(name, s) => 0,
         Inst.Scope(open) => 0,
-        Inst.Rt(d, name, args) => if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__f64_round" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__rc_dec" || name == "__rc_dec_atomic" || text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:") { 0 } else { 2 },
+        Inst.Rt(d, name, args) => if rt_internal(name) { 0 } else { 2 },
         _ => 2,
     }
 }
@@ -3382,8 +3339,8 @@ fun stack_words(c: Inst) -> int32 {
     return 0
 }
 
-// Which slots of `f` an instruction reads: loads it, takes its address or
-// drops it.
+// Which slots of `f` an instruction reads: loads it or takes its address
+// (a slot's drop is one of those by then, `expand_ownership`).
 fun read_slots(f: IrFunc) -> [bool] {
     var read: [bool] = []
     for s in f.slots { read.push(false) }
@@ -3392,7 +3349,6 @@ fun read_slots(f: IrFunc) -> [bool] {
             match inst {
                 Inst.Load(d, s) => { read[s] = true },
                 Inst.Addr(d, s) => { read[s] = true },
-                Inst.DropSlot(t, s) => { read[s] = true },
                 _ => {},
             }
         }
@@ -3634,11 +3590,8 @@ fun reads_then_calls(inst: Inst) -> bool {
         Inst.CallSret(name, r, args) => true,
         Inst.CallInd(d, fv, args) => true,
         Inst.CallIndSret(fv, r, args) => true,
-        Inst.Rt(d, name, args) => name != "__sqrt" && name != "__f64_bits" && name != "__f64_from_bits" && name != "__f64_round" && name != "__rotl" && name != "__bsr64" && name != "__cas64" && name != "__xchg64" && name != "__fetch_add64" && name != "__pause" && name != "__rc_dec" && name != "__rc_dec_atomic" && !text_starts(name, "__rt_addr:") && !text_starts(name, "__rt_waddr:"),
+        Inst.Rt(d, name, args) => !rt_internal(name) && !rt_cow(name),
         Inst.RtPair(d, d2, name, args) => true,
-        Inst.DropVal(t, v) => true,
-        Inst.Retain(t, p) => true,
-        Inst.DropAt(t, p) => true,
         _ => false,
     }
 }
@@ -3716,6 +3669,39 @@ fun canonical_insn(t: Type, reg: str) -> str {
     return format("movzbl {}, {}", narrow_operand(reg, 1), narrow_operand(reg, 4))
 }
 
+// Whether the runtime operation `name` is done inline, with no call: the
+// float primitives, bit operations, atomics, a count's bump and drop, a
+// runtime variable's address. (None is longer than 15 bytes but the
+// addresses, so the call of a per-type routine is told apart quickly.)
+#test("__rc_inc")[true]
+#test("__rt_addr:__heap_ptr")[true]
+#test("__drop_list_.str")[false]
+fun rt_internal(name: str) -> bool {
+    if name.len() <= 15 {
+        if name == "__sqrt" || name == "__f64_bits" || name == "__f64_from_bits" || name == "__f64_round" || name == "__rotl" || name == "__bsr64" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__rc_dec" || name == "__rc_dec_atomic" || name == "__rc_inc" || name == "__rc_inc_atomic" { return true }
+    }
+    // (a byte told apart first: `t` of `__rt`)
+    let mark = "__rt"
+    if name.len() < 11 || name[3] != mark[3] { return false }
+    return text_starts(name, "__rt_addr:") || text_starts(name, "__rt_waddr:")
+}
+
+// Whether `name` is a copy-on-write (`__cow:<the clone routine>`).
+#test("__cow:__sb_clone")[true]
+#test("__drop_list_.str")[false]
+fun rt_cow(name: str) -> bool {
+    let mark = "__cow:"
+    return name.len() > 6 && name[5] == mark[5] && text_starts(name, mark)
+}
+
+// `s` from byte `at` on.
+#test("__cow:__sb_clone", 6)["__sb_clone"]
+fun text_from(s: str, at: int32) -> str {
+    var sb = StringBuilder()
+    sb.append(s, at, s.len())
+    return sb.build()
+}
+
 fun text_starts(s: str, prefix: str) -> bool {
     if s.len() < prefix.len() { return false }
     var i = 0
@@ -3773,12 +3759,4 @@ fun names_reg(src: str, reg: str) -> bool {
         k += 1
     }
     return true
-}
-
-// A register's name without its `%`.
-#test("%r8")["r8"]
-fun reg_name(r: str) -> str {
-    var sb = StringBuilder()
-    sb.append(r, 1, r.len())
-    return sb.build()
 }

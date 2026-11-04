@@ -1,0 +1,200 @@
+// ownership.my -- the ownership instructions made plain (MYLA-162).
+//
+// The IR keeps what a value's owner does with it as instructions of their
+// own (`retain T`, `drop T`, `cow T`, `deep T`, …), which the verifier and
+// the optimisations read. Before a function is translated to machine code
+// they become the operations a backend knows without knowing types: loads,
+// a count bumped (`__rc_inc`, `__rc_inc_atomic`), and calls of the per-type
+// routines (`__drop_list_<E>`, `__walkd_<T>`, `__func_drop`, …), which are
+// requested here. So a backend translates instructions, and the decisions
+// by type stay in one place.
+
+from .checker import Type, subst_type
+from .codegen import CodeGen, is_cell_t, is_tfunc, is_actor_t
+from .ir import IrFunc, Inst
+from .lower import Want
+
+// The plain instructions of one block as they are made, with the
+// function's temporaries and the routines they call.
+struct Plain {
+    insts: [Inst],
+    temps: [Type],
+    wants: [Want],
+}
+
+impl Plain {
+    fun temp(var self, t: Type) -> int32 {
+        self.temps.push(t)
+        return self.temps.len() - 1
+    }
+
+    // The address `off` bytes into the value at `p`.
+    fun at(var self, p: int32, off: int32) -> int32 {
+        if off == 0 { return p }
+        let d = self.temp(Type.TPtr)
+        self.insts.push(Inst.Offset(d, p, off))
+        return d
+    }
+
+    // One more reference to the cell `v` of type `t` (an actor handle's
+    // count atomic with tasks, D92).
+    fun inc(var self, cg: CodeGen, t: Type, v: int32) {
+        if cg.frames && is_actor_t(t) { self.insts.push(Inst.Rt(-1, "__rc_inc_atomic", [v])) }
+        else { self.insts.push(Inst.Rt(-1, "__rc_inc", [v])) }
+    }
+
+    // The cell `v` of type `t` released by its type's drop routine.
+    fun dec(var self, cg: CodeGen, t: Type, v: int32) {
+        self.wants.push(Want { kind: 6, t: t, clone: false })
+        self.insts.push(Inst.Rt(-1, cg.drop_call_name(t), [v]))
+    }
+
+    // What retaining (`retain`) or releasing the value of type `t` at
+    // `p + off` does: held as a member (`member`: a boxed value is its
+    // pointer), or as its owner holds it (`retain T [%p]`, a slot's drop).
+    fun act(var self, cg: CodeGen, p: int32, off: int32, t: Type, retain: bool, member: bool) {
+        if is_cell_t(t) || (member && cg.is_boxed(t)) {
+            let v = self.temp(t)
+            self.insts.push(Inst.LoadAt(v, p, off, 8))
+            if retain { self.inc(cg, t, v) } else { self.dec(cg, t, v) }
+        } else if is_tfunc(t) {
+            // a function value's environment, the word after its code
+            let e = self.temp(Type.TInt(64, true))
+            self.insts.push(Inst.LoadAt(e, p, off + 8, 8))
+            if retain { self.insts.push(Inst.Rt(-1, "__func_retain", [e])) }
+            else { self.insts.push(Inst.Rt(-1, "__func_drop", [e])) }
+        } else if cg.owns_heap(t) {
+            if cg.walk_helper(t) {
+                // an enum, or more than one member owning heap values: the
+                // type's walk
+                var kind = 4
+                if retain { kind = 5 }
+                self.wants.push(Want { kind: kind, t: t, clone: false })
+                let a = self.at(p, off)
+                self.insts.push(Inst.Rt(-1, cg.walk_label(t, retain), [a]))
+                return
+            }
+            // a struct or tuple with one member owning heap values
+            var members: [Type] = []
+            match t {
+                Type.TStruct(n, a) => {
+                    let info = cg.struct_info(n)
+                    let sub = cg.type_subst(info.type_params, a)
+                    for fl in info.fields { members.push(subst_type(fl.ty, sub)) }
+                },
+                Type.TTuple(es) => { members = es },
+                _ => {},
+            }
+            var cur = off
+            for m in members {
+                self.act(cg, p, cur, m, retain, true)
+                cur = cur + cg.stored_size(m)
+            }
+        }
+    }
+
+    // The address an instruction reads its value at: when it is the
+    // `offset` made just before, that offset's base and distance instead
+    // (one load at the distance; the address, read by nothing else, is
+    // then never computed).
+    fun base_of(self, p: int32) -> (int32, int32) {
+        let n = self.insts.len()
+        if n == 0 { return (p, 0) }
+        return match self.insts[n - 1] {
+            Inst.Offset(d, q, off) => if d == p { (q, off) } else { (p, 0) },
+            _ => (p, 0),
+        }
+    }
+}
+
+impl Plain {
+    // `inst` made plain (as itself when it is no ownership instruction).
+    fun plain(var self, cg: CodeGen, inst: Inst) {
+        match inst {
+            Inst.RetainVal(t, v) => { self.inc(cg, t, v) },
+            Inst.DropVal(t, v) => { self.dec(cg, t, v) },
+            Inst.Retain(t, p) => {
+                let b = self.base_of(p)
+                self.act(cg, b.0, b.1, t, true, false)
+            },
+            Inst.DropAt(t, p) => {
+                let b = self.base_of(p)
+                self.act(cg, b.0, b.1, t, false, true)
+            },
+            Inst.DropSlot(t, s) => {
+                if is_cell_t(t) {
+                    let v = self.temp(t)
+                    self.insts.push(Inst.Load(v, s))
+                    self.dec(cg, t, v)
+                } else if is_tfunc(t) || cg.owns_heap(t) {
+                    let a = self.temp(Type.TPtr)
+                    self.insts.push(Inst.Addr(a, s))
+                    self.act(cg, a, 0, t, false, false)
+                }
+            },
+            Inst.Cow(d, t, h) => {
+                // the holder's cell made unique by the type's clone
+                self.wants.push(Want { kind: 3, t: t, clone: false })
+                self.insts.push(Inst.Rt(d, "__cow:" + cg.clone_call_name(t), [h]))
+            },
+            Inst.Deep(t, p) => {
+                self.wants.push(Want { kind: 1, t: t, clone: false })
+                self.insts.push(Inst.Rt(-1, cg.deep_walk_label(t, false, false), [p]))
+            },
+            Inst.CloneDeep(t, p) => {
+                self.wants.push(Want { kind: 1, t: t, clone: true })
+                self.insts.push(Inst.Rt(-1, cg.deep_walk_label(t, true, false), [p]))
+            },
+            _ => { self.insts.push(inst) },
+        }
+    }
+}
+
+impl CodeGen {
+    // `f` with its ownership instructions made plain (see above), the
+    // routines they call requested.
+    fun expand_ownership(var self, f0: IrFunc) -> IrFunc {
+        var f = f0
+        var pl = Plain { insts: [], temps: f.temps, wants: [] }
+        var bi = 0
+        while bi < f.blocks.len() {
+            let insts = f.blocks[bi].insts
+            // a block without any kept as it is; else made anew from its
+            // first one on
+            var first = 0
+            while first < insts.len() && !is_owner_inst(insts[first]) { first = first + 1 }
+            if first < insts.len() {
+                pl.insts = []
+                var i = 0
+                while i < first {
+                    pl.insts.push(insts[i])
+                    i = i + 1
+                }
+                while i < insts.len() {
+                    pl.plain(self, insts[i])
+                    i = i + 1
+                }
+                f.blocks[bi].insts = pl.insts
+            }
+            bi = bi + 1
+        }
+        f.temps = pl.temps
+        self.request_wants(pl.wants)
+        return f
+    }
+}
+
+// Whether `inst` is an ownership instruction.
+fun is_owner_inst(inst: Inst) -> bool {
+    return match inst {
+        Inst.RetainVal(t, v) => true,
+        Inst.DropVal(t, v) => true,
+        Inst.Retain(t, p) => true,
+        Inst.DropAt(t, p) => true,
+        Inst.DropSlot(t, s) => true,
+        Inst.Cow(d, t, h) => true,
+        Inst.Deep(t, p) => true,
+        Inst.CloneDeep(t, p) => true,
+        _ => false,
+    }
+}

@@ -22,6 +22,7 @@ from .inline import inlinable, inline_calls, same_module, may_inline, merge_bloc
 from .anf import Norm, new_norm
 from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir, walk_ir, drop_entry_ir, dropb_slow_ir, list_drop_slow_ir, map_drop_slow_ir, clone_ir, deep_walk_ir, deep_cell_ir, Routine, Want, env_drop_ir, env_deep_ir
 import .ir_x86 as ir_x86
+import .ownership as ownership
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
 
@@ -3014,18 +3015,19 @@ impl CodeGen {
     // back). Out: %rax = the now-unique cell pointer.
     fun cow_unique(var self, t: Type) {
         self.emit("movq %rax, %rcx")
-        self.cow_unique_at_rcx(t)
+        self.register_clone(t)
+        self.cow_unique_at_rcx(self.clone_call_name(t))
     }
 
-    // `cow_unique` with the holder's address already in %rcx (MYLA-251).
-    fun cow_unique_at_rcx(var self, t: Type) {
-        self.register_clone(t)
+    // `cow_unique` with the holder's address already in %rcx (MYLA-251),
+    // `clone` the cell type's clone routine (requested already).
+    fun cow_unique_at_rcx(var self, clone: str) {
         self.emit("movq (%rcx), %rdi")
         let skip = self.label()
         self.emit("cmpq $1, -8(%rdi)")
         self.emit(format("jbe {}", skip))
         self.emit("pushq %rcx")
-        self.emit("call " + self.clone_call_name(t))
+        self.emit("call " + clone)
         self.emit("popq %rcx")
         self.emit("movq %rax, (%rcx)")
         self.emit("movq %rax, %rdi")
@@ -4209,6 +4211,8 @@ impl CodeGen {
             if w.kind == 2 { let n2 = self.register_deep_inline(w.t, w.clone) }
             if w.kind == 3 { self.register_clone(w.t) }
             if w.kind == 4 { let n4 = self.register_walk(w.t, false) }
+            if w.kind == 5 { let n5 = self.register_walk(w.t, true) }
+            if w.kind == 6 { self.register_drop(w.t) }
         }
     }
 

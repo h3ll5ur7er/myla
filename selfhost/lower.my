@@ -71,7 +71,7 @@ struct Lower { f: IrFunc, cur: int32, scopes: [[Local]], scope_ids: [int32], own
 // A per-type routine a routine built as IR calls, for the code generator to
 // emit (MYLA-162): `kind` 0 a cell's deep copy, 1 an inline value's deep
 // walk, 2 a boxed enum's contents' deep walk, 3 a copy-on-write clone, 4 a
-// release walk; of
+// release walk, 5 a retain walk, 6 a cell type's drop routine; of
 // type `t`, a deep clone's when `clone`.
 pub struct Want { kind: int32, t: Type, clone: bool }
 
