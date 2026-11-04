@@ -12,7 +12,7 @@ Second step of [[MYLA-62]]: the runtime (about 3,000 lines of hand-written x86-6
 - [ ] The platform layer behind a small interface: memory (`mmap`), output and files, processes (`__run`), directories, threads, parking and waking, thread-local state, time, exit; Linux first, with system calls as today
 - [ ] Atomics where the runtime needs them (counts of actor handles, queues, the failure flag of D97)
 - [ ] The x86-64 backend uses it; the gates and the bootstrap still pass, and the cost against the assembly runtime is measured
-- [ ] Arenas that grow lazily (D106, [[MYLA-206]])
+- [x] Arenas that grow lazily (D106, [[MYLA-206]])
 - [ ] The runtime out of [[selfhost/codegen.my]] (D108, [[MYLA-217]])
 - [ ] Then the reactor: [[MYLA-230]] (D107)
 
@@ -279,3 +279,9 @@ The code generator's per-type routines (retain, drop, clone, the deep walks, der
 - The interface, for the ports (MYLA-163 to MYLA-165): files (`open_read`, `open_write`, `open_dir`, `read`, `write`, `close`, `file_size`), paths (`mode_of`, `make_dir`, `remove_file`, `remove_dir`, `rename`, `cwd`), directories (`dir_read`, `dir_entry_name`, `dir_entry_size`), the standard streams (`poll_read`, `write_all`, `write_line`), processes (`run`), workers (`cpus_allowed`, `park`, `unpark_one`) and `exit`. How a port picks its version of the module waits for the code-per-target design of MYLA-245; with one platform, the module is the Linux one.
 - The other half stays in the backend, per target: the program's start (stack limit, alternate signal stack, the stack-overflow handler), the heap's memory (`__heap_init`'s mmap), starting worker threads (clone) and their thread-local state, the jumps into frames, the traps' and panic's writes, `__syscall` itself and the memory and atomic primitives.
 - **Measured:** the benchmarks run the same instructions; the stress programs t05, t18 and t12 0.2%, 0.1% and 0.4% more (printing and parking now a call into another module, which the inliner doesn't cross); compiling the compiler the same. The suite passes.
+
+## Step 30: the arenas grow lazily (2026-11-04, D106 (B))
+
+- std.rt's allocator maps a 16 MiB chunk (`std.platform`'s `map_memory`, on a new primitive `__syscall5` for mmap's five arguments) when the arena is full, and none before the first cell; a cell bigger than a chunk gets a mapping of its own. With tasks, a worker's chunks are aligned to their size (mapped one chunk bigger, the ends given back) with its number in their first word, so `free_tasks` finds a cell's owner at its address rounded down to a chunk (was `(p - __heap_base) >> 32`). `_start`'s region of a 4 GiB arena per worker, `__heap_init` and `__heap_base` are gone, and the rings of ready frames are reserved for the workers that run (`exec_workers * 8 MiB`, was 32 always).
+- **Measured:** under `ulimit -v 400000` a program with tasks runs on four workers, and one mapping 320 MB in all (small cells, and growing lists up to a 128 MB cell) runs too (`test_the_heap_grows_in_chunks_under_a_small_address_space_limit`; before, both "out of memory"). The benchmarks run 20 instructions more each (the first chunk's mapping), binary trees' wall time the same within noise; compiling the compiler the same. The stress tests pass three times in a row.
+

@@ -712,7 +712,7 @@ fun is_builtin_func(name: str) -> bool {
 #test("__load8")[true]
 #test("__load")[false]
 pub fun is_raw_memory_primitive(name: str) -> bool {
-    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom" || name == "__rt_waddr" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__run_frame" || name == "__f64_round"
+    return name == "__load8" || name == "__load64" || name == "__store8" || name == "__store64" || name == "__alloc" || name == "__addr_of" || name == "__str_of" || name == "__copy_bytes" || name == "__equal_bytes" || name == "__syscall" || name == "__syscall5" || name == "__set_io_errno" || name == "__free" || name == "__environ" || name == "__set_run_status" || name == "__set_run_stderr" || name == "__argv" || name == "__load32" || name == "__store32" || name == "__list_addr" || name == "__list_of" || name == "__rotl" || name == "__rt_addr" || name == "__rt_get" || name == "__bsr64" || name == "__trap_oom" || name == "__rt_waddr" || name == "__cas64" || name == "__xchg64" || name == "__fetch_add64" || name == "__pause" || name == "__run_frame" || name == "__f64_round"
 }
 
 #test("sum")[false]
@@ -5661,6 +5661,7 @@ impl Checker {
             if name == "__f64_round" { want = [Type.TFloat(64)] }
             if name == "__copy_bytes" || name == "__equal_bytes" { want = [i64, i64, i64] }
             if name == "__syscall" { want = [i64, i64, i64, i64] }
+            if name == "__syscall5" { want = [i64, i64, i64, i64, i64, i64] }
             if name == "__addr_of" { want = [Type.TStr] }
             if name == "__environ" || name == "__argv" || name == "__pause" { want = [] }
             if name == "__set_run_status" { want = [i64, i64, i64] }

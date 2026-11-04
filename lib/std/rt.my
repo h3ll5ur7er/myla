@@ -853,8 +853,12 @@ pub fun write(fd: int, s: str) {
 // the list for its size (its first word the next cell): the small sizes'
 // heads at `__free_buckets + size`, the large ones' at `+ 4104 + 8k` for
 // 2^k bytes. A new one comes off that list, else from the arena between
-// `__heap_ptr` and `__heap_end` (mapped before `main`). Without tasks only:
-// with them each worker's cells go back to it, which the assembly does.
+// `__heap_ptr` and `__heap_end`: a chunk of CHUNK bytes the platform maps
+// when the last one is full (none before the first cell, D106 (B)); a cell
+// bigger than a chunk gets a mapping of its own. So a program holds about
+// as much address space as it uses.
+
+const CHUNK: int64 = 16777216  // 16 MiB, a power of two
 
 // `__alloc`: a cell of at least `n` bytes, its count 1.
 pub fun alloc(n: int64) -> int64 {
@@ -879,9 +883,31 @@ pub fun alloc(n: int64) -> int64 {
         __store64(at + 8, 1)
         return at + 16
     }
-    // (out of the way of the rest: nothing is live across this call)
-    __trap_oom()
-    return 0
+    return alloc_mapped(size)
+}
+
+// A cell of `size` bytes when the arena is full: mapped on its own when it
+// is bigger than a chunk, else the first of a new chunk, which becomes the
+// arena (the rest of the old one stays unused).
+fun alloc_mapped(size: int64) -> int64 {
+    if size + 16 > CHUNK {
+        let m = os.map_memory(size + 16)
+        if m < 0 {
+            __trap_oom()
+        }
+        __store64(m, size)
+        __store64(m + 8, 1)
+        return m + 16
+    }
+    let m = os.map_memory(CHUNK)
+    if m < 0 {
+        __trap_oom()
+    }
+    __store64(__rt_addr("__heap_ptr"), m + 16 + size)
+    __store64(__rt_addr("__heap_end"), m + CHUNK)
+    __store64(m, size)
+    __store64(m + 8, 1)
+    return m + 16
 }
 
 // `__free`: the cell `p` back on the list for its size.
@@ -895,11 +921,14 @@ pub fun free(p: int64) {
     __store64(slot, p)
 }
 
-// With tasks (D92): each worker allocates from its own arena (worker w's
-// at `__heap_base + w << 32`, mapped in `_start`), with its own lists; a cell
-// freed on another worker goes on its owner's `__remote_free` list, which
-// the owner takes back whole before it bumps its arena. Many push onto a
-// list, one takes all of it: no lock, and no ABA.
+// With tasks (D92): each worker allocates from chunks of its own, with its
+// own lists; a cell freed on another worker goes on its owner's
+// `__remote_free` list, which the owner takes back whole before it bumps its
+// arena. Many push onto a list, one takes all of it: no lock, and no ABA. A
+// worker's chunk is aligned to its size and its first word is the worker's
+// number, so a cell's owner is the word at its address rounded down to a
+// chunk; a cell bigger than a chunk gets an aligned mapping of its own with
+// the same word, the cell in its first chunk.
 
 // `__alloc` with tasks.
 pub fun alloc_tasks(n: int64) -> int64 {
@@ -927,8 +956,43 @@ pub fun alloc_tasks(n: int64) -> int64 {
         __store64(at + 8, 1)
         return at + 16
     }
-    __trap_oom()
-    return 0
+    return alloc_tasks_mapped(size)
+}
+
+// `alloc_mapped` with tasks: the chunk (or the big cell's mapping) aligned,
+// its first word this worker's number, the cell after it.
+fun alloc_tasks_mapped(size: int64) -> int64 {
+    var span = CHUNK
+    if size + 32 > CHUNK {
+        span = (size + 32 + CHUNK - 1) & -CHUNK
+    }
+    let m = map_aligned(span)
+    __store64(m, __rt_get("__worker_id"))
+    if span == CHUNK {
+        __store64(__rt_addr("__heap_ptr"), m + 32 + size)
+        __store64(__rt_addr("__heap_end"), m + CHUNK)
+    }
+    __store64(m + 16, size)
+    __store64(m + 24, 1)
+    return m + 32
+}
+
+// `span` bytes (a multiple of CHUNK) mapped at an address that is a
+// multiple of CHUNK: more mapped, the ends given back.
+fun map_aligned(span: int64) -> int64 {
+    let m = os.map_memory(span + CHUNK)
+    if m < 0 {
+        __trap_oom()
+    }
+    let start = (m + CHUNK - 1) & -CHUNK
+    if start > m {
+        os.unmap_memory(m, start - m)
+    }
+    let end = m + span + CHUNK
+    if end > start + span {
+        os.unmap_memory(start + span, end - start - span)
+    }
+    return start
 }
 
 // The cells other workers freed taken back onto this worker's lists, then
@@ -945,7 +1009,7 @@ fun alloc_drained(n: int64) -> int64 {
 
 // `__free` with tasks: another worker's cell onto its owner's list.
 pub fun free_tasks(p: int64) {
-    let owner = (p - __rt_get("__heap_base")) >> 32
+    let owner = __load64(p & -CHUNK)
     if owner != __rt_get("__worker_id") {
         let slot = __rt_waddr("__remote_free", owner)
         while true {
@@ -966,8 +1030,8 @@ pub fun free_tasks(p: int64) {
 }
 
 // --- the executor --------------------------------------------------------------
-// What a program with tasks runs on (D92). These run before the arena is
-// mapped, so they allocate nothing.
+// What a program with tasks runs on (D92). These run before the workers
+// start, and allocate nothing.
 
 const MAX_WORKERS: int64 = 32
 

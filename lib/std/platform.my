@@ -2,14 +2,14 @@
 // (MYLA-162, D117).
 //
 // Everything the runtime written in Myla needs from the operating system
-// goes through this module: files and directories, the standard streams,
-// processes, the CPUs a program may use, parking and waking a worker, and
-// ending the process. A port to another system (aarch64 Linux, macOS,
-// Windows: MYLA-163 to MYLA-165) gives these functions again over its own
-// interface; std.rt above them stays as it is. What the platform's
-// assembly does instead (the program's start, the heap's memory, starting
-// threads, thread-local state, the jumps into frames, the stack-overflow
-// handler) is the backend's, per target.
+// goes through this module: the heap's memory, files and directories, the
+// standard streams, processes, the CPUs a program may use, parking and
+// waking a worker, and ending the process. A port to another system
+// (aarch64 Linux, macOS, Windows: MYLA-163 to MYLA-165) gives these
+// functions again over its own interface; std.rt above them stays as it
+// is. What the platform's assembly does instead (the program's start,
+// starting threads, thread-local state, the jumps into frames, the
+// stack-overflow handler) is the backend's, per target.
 //
 // Each function gives what the system gives: a result (0 or more), or a
 // negative errno, which std.rt records for `std.io` (`EINTR`, `EAGAIN`
@@ -27,6 +27,8 @@ const SYS_CLOSE: int64 = 3
 const SYS_STAT: int64 = 4
 const SYS_FSTAT: int64 = 5
 const SYS_POLL: int64 = 7
+const SYS_MMAP: int64 = 9
+const SYS_MUNMAP: int64 = 11
 const SYS_WRITEV: int64 = 20
 const SYS_PIPE: int64 = 22
 const SYS_DUP2: int64 = 33
@@ -392,6 +394,19 @@ pub fun run(program: str, argv: [str]) -> [uint8] {
     __set_run_status(exit_code, signal, errno)
     __set_run_stderr(err)
     return out
+}
+
+// --- memory --------------------------------------------------------------------
+
+// `n` bytes of fresh memory, zeroed, readable and writable (private,
+// anonymous): their address.
+pub fun map_memory(n: int64) -> int64 {
+    return __syscall5(SYS_MMAP, 0, n, 3, 34, -1)  // PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS
+}
+
+// The `n` bytes at `p` (a whole number of pages of a mapping) given back.
+pub fun unmap_memory(p: int64, n: int64) {
+    __syscall(SYS_MUNMAP, p, n, 0)
 }
 
 // --- workers -------------------------------------------------------------------

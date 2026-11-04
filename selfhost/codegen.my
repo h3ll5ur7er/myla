@@ -2071,8 +2071,6 @@ impl CodeGen {
             out.push("\t.skip 8")
             out.push("__tls_blocks:")
             out.push(format("\t.skip {}", TLS_SIZE * MAX_WORKERS))
-            out.push("__heap_base:")
-            out.push("\t.skip 8")
             // the CPUs this process may run on (`workers_count`)
             out.push("__cpu_mask:")
             out.push("\t.skip 128")
@@ -2241,7 +2239,7 @@ impl CodeGen {
     // its symbol.
     #test(codegen_on("[int]"), "__heap_end")["__heap_end(%rip)"]
     fun tv(self, sym: str) -> str {
-        // (a process-wide one, like `__heap_base`, next to %rip with tasks
+        // (a process-wide one, like `__exec_workers`, next to %rip with tasks
         // too: MYLA-162)
         if !self.frames || tls_offset(sym) == 0 { return sym + "(%rip)" }
         return format("%fs:{}", tls_offset(sym))
@@ -2427,8 +2425,7 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("\taddq $32, %rsp")
         self.raw(".Lsw_run:")
-        // its own arena first, for std.rt's allocator (MYLA-162)
-        self.raw("\tcall __heap_init")
+        // (its chunks mapped as it allocates, std.rt)
         self.raw("\tjmp __exec_run")
         // no more threads to be had: the workers made so far
         self.raw(".Lsw_short:")
@@ -3639,18 +3636,6 @@ impl CodeGen {
             self.raw("\tmovq $4098, %rdi")
             self.raw("\tmovq $158, %rax")
             self.raw("\tsyscall")
-            // the workers' rings of ready frames, EXEC_CAP frames each
-            self.raw("\tmovq $9, %rax")
-            self.raw("\txorq %rdi, %rdi")
-            self.raw(format("\tmovq ${}, %rsi", 8 * EXEC_CAP * MAX_WORKERS))
-            self.raw("\tmovq $3, %rdx")
-            self.raw("\tmovq $16418, %r10")
-            self.raw("\tmovq $-1, %r8")
-            self.raw("\txorq %r9, %r9")
-            self.raw("\tsyscall")
-            self.raw("\tcmpq $-4096, %rax")
-            self.raw("\tja __trap_oom")
-            self.raw("\tmovq %rax, __wq_rings(%rip)")
         }
         self.raw("\tmovq (%rsp), %rax")
         self.raw("\tmovq %rax, __argc(%rip)")
@@ -3660,14 +3645,15 @@ impl CodeGen {
         self.raw("\tmovq %rcx, __envp(%rip)")
         if self.frames {
             // as many workers as `__workers_count` says (it reads the
-            // environment), and the heap region: an arena of 4 GiB per
-            // worker, reserved (MAP_NORESERVE), not MAX_WORKERS always
-            // (MYLA-172, D106)
+            // environment); the heap is mapped as they allocate (std.rt,
+            // D106)
             self.raw("\tcall __sched_init")
             self.raw("\tcall __workers_count")
             self.raw("\tmovl %eax, __exec_workers(%rip)")
+            // their rings of ready frames, EXEC_CAP frames each, reserved
+            // for these workers only (D106)
             self.raw("\tmovl %eax, %esi")
-            self.raw("\tshlq $32, %rsi")
+            self.raw(format("\timulq ${}, %rsi", 8 * EXEC_CAP))
             self.raw("\tmovq $9, %rax")
             self.raw("\txorq %rdi, %rdi")
             self.raw("\tmovq $3, %rdx")
@@ -3677,12 +3663,8 @@ impl CodeGen {
             self.raw("\tsyscall")
             self.raw("\tcmpq $-4096, %rax")
             self.raw("\tja __trap_oom")
-            self.raw("\tmovq %rax, __heap_base(%rip)")
+            self.raw("\tmovq %rax, __wq_rings(%rip)")
         }
-        // the arena (this worker's with tasks), before anything is
-        // allocated, for std.rt's allocator (which doesn't check on every
-        // call, as the assembly's did)
-        self.raw("\tcall __heap_init")
         // with tasks, the other workers (D92)
         if self.frames { self.raw("\tcall __start_workers") }
         if self.frames && self.sig_of(entry_name).decl.is_async {
@@ -3925,6 +3907,19 @@ impl CodeGen {
         self.raw("\tsyscall")
         self.raw("\tret")
         self.raw("")
+        // __syscall5(n, a, b, c, d, e): one with five arguments, the sixth 0
+        // (mmap's offset)
+        self.raw("__syscall5:")
+        self.raw("\tmovq %rdi, %rax")
+        self.raw("\tmovq %rsi, %rdi")
+        self.raw("\tmovq %rdx, %rsi")
+        self.raw("\tmovq %rcx, %rdx")
+        self.raw("\tmovq %r8, %r10")
+        self.raw("\tmovq %r9, %r8")
+        self.raw("\txorl %r9d, %r9d")
+        self.raw("\tsyscall")
+        self.raw("\tret")
+        self.raw("")
         // __set_io_errno(e): the errno the I/O primitives report (a worker's
         // own with tasks)
         self.raw("__set_io_errno:")
@@ -3999,39 +3994,6 @@ impl CodeGen {
         // allocator (MYLA-162).
         self.emit_routine(drop_entry_ir("__str_drop", self.rt_alloc_names().1, false), -1, 0, 0)
         self.raw("\t.set __str_drop, myla___str_drop")
-        self.raw("__heap_init:")
-        if self.frames {
-            // with tasks: this worker's arena of the region `_start` reserved
-            self.raw(format("\tmovq {}, %rax", self.tv("__worker_id")))
-            self.raw("\tshlq $32, %rax")
-            self.raw("\taddq __heap_base(%rip), %rax")
-            self.raw(format("\tmovq %rax, {}", self.tv("__heap_ptr")))
-            self.raw("\tmovabsq $4294967296, %rcx")
-            self.raw("\taddq %rcx, %rax")
-            self.raw(format("\tmovq %rax, {}", self.tv("__heap_end")))
-            self.raw("\tret")
-            self.raw("")
-            // (std.rt's allocator takes the cells back itself: `alloc_drained`)
-        } else {
-            self.raw("\tpushq %rdi")
-            self.raw("\tmovq $9, %rax")
-            self.raw("\txorq %rdi, %rdi")
-            self.raw("\tmovabsq $4294967296, %rsi")
-            self.raw("\tmovq $3, %rdx")
-            self.raw("\tmovq $34, %r10")
-            self.raw("\tmovq $-1, %r8")
-            self.raw("\txorq %r9, %r9")
-            self.raw("\tsyscall")
-            self.raw("\tcmpq $-4096, %rax")
-            self.raw("\tja __trap_oom")
-            self.raw(format("\tmovq %rax, {}", self.tv("__heap_ptr")))
-            self.raw("\tmovabsq $4294967296, %rcx")
-            self.raw("\taddq %rcx, %rax")
-            self.raw(format("\tmovq %rax, {}", self.tv("__heap_end")))
-            self.raw("\tpopq %rdi")
-            self.raw("\tret")
-            self.raw("")
-        }
         // the executor's routines and the allocator in std.rt (MYLA-162):
         // the names the rest of the runtime calls stand for its functions
         for p in self.rt_exec() {
