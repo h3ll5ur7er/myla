@@ -20,7 +20,7 @@ from .ir import render_func, verify, moves, IrFunc, Inst
 from .ssa import SsaStats, no_ssa_stats
 from .inline import inlinable, inline_calls, same_module, may_inline, merge_blocks
 from .anf import Norm, new_norm
-from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function
+from .lower import lower_function, lower_lambda, blocked_types, Lowered, myla_runtime_function, derived_eq_ir
 import .ir_x86 as ir_x86
 from .dwarf import uleb, sleb, bytes_line, exprloc, str_pieces, dw_string, dw_ref, abbrev_section, gdb_scripts_section, AB_CU, AB_BASE, AB_SUBPROGRAM, AB_TYPED_SUBPROGRAM, AB_PARAM, AB_VAR, AB_BLOCK, AB_PTR, AB_VOIDPTR, AB_STRUCT, AB_MEMBER, AB_ARRAY, AB_SUBRANGE, AB_VARIANT_PART, AB_VARIANT, AB_TAG, OP_FBREG, OP_BREG15, OP_DEREF, OP_PLUS_UCONST, OP_STACK_VALUE, OP_PUSH_OBJECT_ADDRESS, OP_LIT0, OP_MINUS, OP_REG6, OP_GNU_DEREF_TYPE, OP_GNU_CONVERT, ATE_BOOLEAN, ATE_FLOAT, ATE_SIGNED, ATE_UNSIGNED, ATE_UTF, LANG_RUST
 from .parser import expr_of, stmt_of, type_expr_of, block_of, pattern_of, fun_of  // AST values for #test cases (MYLA-184)
@@ -6791,127 +6791,29 @@ impl CodeGen {
 
     // -- END generated runtime
 
-    // Synthesize `{T}.eq(self, other) -> bool` for each `#derive(Eq)` type:
-    // structural equality, field-by-field / tag-and-payload, recursing through
-    // each component's own `eq` (user or derived).
+    // `{T}.eq(self, other) -> bool` for each `#derive(Eq)` type, built as IR
+    // (`derived_eq_ir`, MYLA-162): structural equality, field by field or tag
+    // and payload, through each component's own `eq` (written or derived).
     fun emit_derived_eq(var self) {
         for d in self.decls {
             match d.kind {
                 DeclKind.StructDecl(name, fields, attrs, tps, isp, act) => {
-                    if tps.len() == 0 && attrs_have_derive_eq(attrs) { self.emit_struct_eq(name) }
+                    if tps.len() == 0 && attrs_have_derive_eq(attrs) { self.emit_routine(derived_eq_ir(self, name, false), d.id, d.line, d.col) }
                 },
                 DeclKind.EnumDecl(name, variants, attrs, tps, isp) => {
-                    if tps.len() == 0 && attrs_have_derive_eq(attrs) { self.emit_enum_eq(name) }
+                    if tps.len() == 0 && attrs_have_derive_eq(attrs) { self.emit_routine(derived_eq_ir(self, name, true), d.id, d.line, d.col) }
                 },
                 _ => {},
             }
         }
     }
 
-    fun emit_struct_eq(var self, name: str) {
-        let lne = self.label()
-        let lend = self.label()
-        self.emit(format("myla_{}.eq:", name))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.emit("pushq %rdi")
-        self.emit("pushq %rsi")
-        var off = 0
-        for f in self.struct_info(name).fields {
-            self.emit_eq_component(off, f.ty, lne)
-            off = off + self.stored_size(f.ty)
-        }
-        self.emit("movq $1, %rax")
-        self.emit(format("jmp {}", lend))
-        self.emit(format("{}:", lne))
-        self.emit("movq $0, %rax")
-        self.emit(format("{}:", lend))
-        self.emit("leave")
-        self.emit("ret")
-    }
-
-    fun emit_enum_eq(var self, name: str) {
-        let lne = self.label()
-        let lend = self.label()
-        self.emit(format("myla_{}.eq:", name))
-        self.emit("pushq %rbp")
-        self.emit("movq %rsp, %rbp")
-        self.emit("pushq %rdi")
-        self.emit("pushq %rsi")
-        self.emit("movq -8(%rbp), %rax")
-        self.emit("movq 0(%rax), %rax")
-        self.emit("movq -16(%rbp), %rcx")
-        self.emit("movq 0(%rcx), %rcx")
-        self.emit("cmpq %rcx, %rax")
-        self.emit(format("jne {}", lne))
-        var i = 0
-        for v in self.enum_info(name).variants {
-            if v.payload.len() > 0 {
-                let lskip = self.label()
-                self.emit("movq -8(%rbp), %rax")
-                self.emit("movq 0(%rax), %rax")
-                self.emit(format("cmpq ${}, %rax", i))
-                self.emit(format("jne {}", lskip))
-                var j = 0
-                for pt in v.payload {
-                    self.emit_eq_component(self.variant_field_offset(Type.TEnum(name, []), v.name, j), pt, lne)
-                    j = j + 1
-                }
-                self.emit(format("{}:", lskip))
-            }
-            i = i + 1
-        }
-        self.emit("movq $1, %rax")
-        self.emit(format("jmp {}", lend))
-        self.emit(format("{}:", lne))
-        self.emit("movq $0, %rax")
-        self.emit(format("{}:", lend))
-        self.emit("leave")
-        self.emit("ret")
-    }
-
-    // Compare the component of type `ft` at byte offset `off` in the two cells
-    // pointed to by -8(%rbp) (self, which came in %rdi) and -16(%rbp) (other,
-    // in %rsi); jump to `lne` if unequal.
-    // A boxed (recursive) enum component holds a pointer to its value, which is
-    // what `eq` takes (MYLA-23); any other aggregate is passed by its address.
-    fun emit_eq_component(var self, off: int32, ft: Type, lne: str) {
-        if is_struct_or_enum_t(ft) {
-            var load = "leaq"
-            if self.is_boxed(ft) { load = "movq" }
-            self.emit("movq -16(%rbp), %rax")
-            self.emit(format("{} {}(%rax), %rsi", load, off))
-            self.emit("movq -8(%rbp), %rax")
-            self.emit(format("{} {}(%rax), %rdi", load, off))
-            self.emit(format("call myla_{}.eq", self.type_key(ft)))
-            self.emit("testq %rax, %rax")
-            self.emit(format("jz {}", lne))
-        } else if is_tstr(ft) {
-            self.emit("movq -8(%rbp), %rax")
-            self.emit(format("movq {}(%rax), %rdi", off))
-            self.emit("movq -16(%rbp), %rax")
-            self.emit(format("movq {}(%rax), %rsi", off))
-            self.emit("call __str_eq")
-            self.emit("testq %rax, %rax")
-            self.emit(format("jz {}", lne))
-        } else if is_tfloat(ft) {
-            // as `==` does: NaN is unequal to everything, 0.0 equals -0.0 (MYLA-13)
-            self.uses_float = true
-            self.emit("movq -8(%rbp), %rax")
-            self.emit(format("movq {}(%rax), %xmm0", off))
-            self.emit("movq -16(%rbp), %rax")
-            self.emit(format("movq {}(%rax), %xmm1", off))
-            self.emit("ucomisd %xmm1, %xmm0")
-            self.emit(format("jne {}", lne))
-            self.emit(format("jp {}", lne))
-        } else {
-            self.emit("movq -8(%rbp), %rax")
-            self.emit(format("movq {}(%rax), %rax", off))
-            self.emit("movq -16(%rbp), %rcx")
-            self.emit(format("movq {}(%rcx), %rcx", off))
-            self.emit("cmpq %rcx, %rax")
-            self.emit(format("jne {}", lne))
-        }
+    // A routine built as IR for a type (MYLA-162), emitted as a function
+    // (`myla_<its name>`) where the type `decl_id` is declared: checked,
+    // its small leaf callees inlined, the functions it calls requested.
+    fun emit_routine(var self, f: IrFunc, decl_id: int32, line: int32, col: int32) {
+        let g = self.take_ir(Ok(Lowered { f: f, lams: [], partials: [], fnvals: [] }), f.name)
+        self.emit_ir_at(g, decl_id, line, col, f.name)
     }
 
     // char support: UTF-8 encode for printing, UTF-8 decode for `chars`.

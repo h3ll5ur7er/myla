@@ -3968,3 +3968,130 @@ fun calls_nothing(e: Expr) -> bool {
         _ => false,
     }
 }
+
+// --- the per-type routines as IR (MYLA-162) -------------------------------------
+//
+// Functions the code generator makes for a type rather than for source:
+// built here as IR, so every backend emits them as it emits any function.
+
+// An empty lowering of the routine `name` with result type `ret`, its entry
+// block started.
+fun routine(name: str, ret: Option<Type>) -> Lower {
+    var lw = Lower { f: IrFunc { name: name, ret: ret, slots: [], temps: [], blocks: [], order: [], instances: [], frame: false, scope_parent: [-1] }, cur: 0, scopes: [[]], scope_ids: [0], owners: [[]], temps: [], loops: [], sret: -1, arm_binds: [], err: "", lams: [], partials: [], fnvals: [], holder: [], into: -1, placed: [], tail: false, tailed: false, frame_fn: false, result: -1, tasks: [], actor_self: -1, actor_off: 0, deep_res: false, narrow: [:] }
+    let entry = lw.new_block()
+    lw.start(entry)
+    return lw
+}
+
+// `#derive(Eq)`'s `T.eq(self, other) -> bool` for the struct or enum `name`:
+// the two values' addresses; field by field, or the tags and then the
+// payload of the variant both have, each component compared as `==` does (a
+// struct or enum by its own `eq`, a boxed one's cell passed, a string's
+// bytes, a float as a float: NaN unequal, 0.0 and -0.0 equal).
+pub fun derived_eq_ir(cg: CodeGen, name: str, is_enum: bool) -> IrFunc {
+    var lw = routine(name + ".eq", Some(Type.TBool))
+    let sa = lw.new_slot("self", Type.TPtr, 8, 0, false)
+    let sb = lw.new_slot("other", Type.TPtr, 8, 1, false)
+    let a = lw.temp(Type.TPtr)
+    lw.add(Inst.Load(a, sa))
+    let b = lw.temp(Type.TPtr)
+    lw.add(Inst.Load(b, sb))
+    let unequal = lw.new_block()
+    if is_enum {
+        let i64 = Type.TInt(64, true)
+        let ta = lw.temp(i64)
+        lw.add(Inst.LoadAt(ta, a, 0, 8))
+        let tb = lw.temp(i64)
+        lw.add(Inst.LoadAt(tb, b, 0, 8))
+        let same = lw.temp(Type.TBool)
+        lw.add(Inst.Cmp(same, "==", i64, ta, tb))
+        let tags_same = lw.new_block()
+        lw.finish(Term.Br(same, tags_same, unequal))
+        lw.start(tags_same)
+        let et = Type.TEnum(name, [])
+        var i = 0
+        for v in cg.enum_info(name).variants {
+            if v.payload.len() > 0 {
+                let is_v = lw.temp(Type.TBool)
+                lw.add(Inst.Cmp(is_v, "==", i64, ta, lw.konst(i64, i as int64)))
+                let this_v = lw.new_block()
+                let next_v = lw.new_block()
+                lw.finish(Term.Br(is_v, this_v, next_v))
+                lw.start(this_v)
+                var j = 0
+                for pt in v.payload {
+                    lw.eq_component(cg, a, b, cg.variant_field_offset(et, v.name, j), pt, unequal)
+                    j = j + 1
+                }
+                lw.finish(Term.Jmp(next_v))
+                lw.start(next_v)
+            }
+            i = i + 1
+        }
+    } else {
+        var off = 0
+        for fl in cg.struct_info(name).fields {
+            lw.eq_component(cg, a, b, off, fl.ty, unequal)
+            off = off + cg.stored_size(fl.ty)
+        }
+    }
+    lw.finish(Term.Ret(lw.konst(Type.TBool, 1)))
+    lw.start(unequal)
+    lw.finish(Term.Ret(lw.konst(Type.TBool, 0)))
+    return lw.f
+}
+
+impl Lower {
+    // The component of type `ft` at `off` in the values at `a` and `b`
+    // compared, on in a new block when equal, to `unequal` when not.
+    fun eq_component(var self, cg: CodeGen, a: int32, b: int32, off: int32, ft: Type, unequal: int32) {
+        let eq = self.temp(Type.TBool)
+        if is_struct_or_enum_t(ft) {
+            var pa = -1
+            var pb = -1
+            if cg.is_boxed(ft) {
+                pa = self.temp(Type.TPtr)
+                self.add(Inst.LoadAt(pa, a, off, 8))
+                pb = self.temp(Type.TPtr)
+                self.add(Inst.LoadAt(pb, b, off, 8))
+            } else {
+                pa = self.offset(a, off)
+                pb = self.offset(b, off)
+            }
+            self.add(Inst.Call(eq, cg.type_key(ft) + ".eq", [pa, pb]))
+        } else if is_tstr(ft) {
+            let ka = self.temp(Type.TStr)
+            self.add(Inst.LoadAt(ka, a, off, 8))
+            let kb = self.temp(Type.TStr)
+            self.add(Inst.LoadAt(kb, b, off, 8))
+            self.rt_call(cg, eq, "__str_eq", [ka, kb])
+        } else if is_tfloat_ir(ft) {
+            let f64 = Type.TFloat(64)
+            let xa = self.temp(f64)
+            self.add(Inst.LoadAt(xa, a, off, 8))
+            let xb = self.temp(f64)
+            self.add(Inst.LoadAt(xb, b, off, 8))
+            self.add(Inst.Cmp(eq, "==", f64, xa, xb))
+        } else {
+            let i64 = Type.TInt(64, true)
+            let xa = self.temp(i64)
+            self.add(Inst.LoadAt(xa, a, off, 8))
+            let xb = self.temp(i64)
+            self.add(Inst.LoadAt(xb, b, off, 8))
+            self.add(Inst.Cmp(eq, "==", i64, xa, xb))
+        }
+        let next = self.new_block()
+        self.finish(Term.Br(eq, next, unequal))
+        self.start(next)
+    }
+}
+
+// Whether `t` is a float type.
+#test(Type.TFloat(32))[true]
+#test(Type.TInt(64, true))[false]
+fun is_tfloat_ir(t: Type) -> bool {
+    return match t {
+        Type.TFloat(w) => true,
+        _ => false,
+    }
+}

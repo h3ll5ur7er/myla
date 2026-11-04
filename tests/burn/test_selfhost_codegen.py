@@ -719,7 +719,9 @@ class SelfHostedCodegenParity(unittest.TestCase):
             asm = self._emit_asm(path)
         body = function_body(asm, "myla_K.eq")
         self.assertLess(len(body), 16, "\n".join(body))
-        self.assertGreater(len(function_body(asm, "myla_P.eq")), 15)
+        # a payload's variant compares it too (the routine built as IR, MYLA-162)
+        p_eq = "\n".join(function_body(asm, "myla_P.eq"))
+        self.assertIn("cmpq 8(", p_eq, p_eq)
 
     def test_corpus_codegen_parity(self) -> None:
         checked = 0
