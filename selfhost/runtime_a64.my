@@ -17,6 +17,54 @@ impl CodeGen {
     fun emit_runtime_prelude_a64(var self, entry_name: str) {
         // the kernel's stack: argc, the arguments, 0, the environment, 0
         for line in ["\t.global _start", "\t.p2align 2", "_start:"] { self.raw(line) }
+        // the main thread's stack may grow to 120 MiB (MYLA-182):
+        // prlimit64(0, RLIMIT_STACK), raised to min(120 MiB, the hard limit)
+        // when lower
+        for line in [
+            "\tsub sp, sp, #16",
+            "\tmov x0, #0",
+            "\tmov x1, #3",
+            "\tmov x2, #0",
+            "\tmov x3, sp",
+            "\tmov x8, #261",
+            "\tsvc #0",
+            "\tcbnz x0, .Lstk_done",
+            "\tmov x4, #125829120",
+            "\tldp x5, x6, [sp]",
+            "\tcmp x5, x4",
+            "\tb.hs .Lstk_done",
+            "\tcmp x6, x4",
+            "\tcsel x4, x6, x4, lo",
+            "\tstr x4, [sp]",
+            "\tmov x0, #0",
+            "\tmov x1, #3",
+            "\tmov x2, sp",
+            "\tmov x3, #0",
+            "\tmov x8, #261",
+            "\tsvc #0",
+            ".Lstk_done:",
+            "\tadd sp, sp, #16",
+        ] { self.raw(line) }
+        // SIGSEGV on an alternate stack (MYLA-182): `__on_segv`
+        self.emit("bl __alt_stack")
+        for line in [
+            // rt_sigaction(SIGSEGV, {__on_segv, SA_SIGINFO | SA_ONSTACK, 0,
+            // 0}, 0, 8): the kernel returns through its own trampoline
+            "\tsub sp, sp, #32",
+            "\tadrp x0, __on_segv",
+            "\tadd x0, x0, :lo12:__on_segv",
+            "\tmovz x1, #4",
+            "\tmovk x1, #0x800, lsl #16",
+            "\tstp x0, x1, [sp]",
+            "\tstp xzr, xzr, [sp, #16]",
+            "\tmov x0, #11",
+            "\tmov x1, sp",
+            "\tmov x2, #0",
+            "\tmov x3, #8",
+            "\tmov x8, #134",
+            "\tsvc #0",
+            "\tadd sp, sp, #32",
+        ] { self.raw(line) }
         if self.frames {
             // the main thread's state block, worker 0's, its first word its
             // own address
@@ -73,6 +121,92 @@ impl CodeGen {
             // no task but the first: nothing is ever cancelled (D96)
             for line in ["__task_cancelled:", "\tmov x0, #0", "\tret", ""] { self.raw(line) }
         }
+        for line in [
+            // __alt_stack: an alternate signal stack for the running thread
+            // (a thread made with CLONE_VM has none): mmap(64 KiB),
+            // sigaltstack
+            "__alt_stack:",
+            "\tmov x0, #0",
+            "\tmov x1, #65536",
+            "\tmov x2, #3",
+            "\tmov x3, #34",
+            "\tmov x4, #-1",
+            "\tmov x5, #0",
+            "\tmov x8, #222",
+            "\tsvc #0",
+            "\tcmn x0, #4096",
+            "\tb.hi .Las_done",
+            "\tsub sp, sp, #32",
+            "\tstr x0, [sp]",
+            "\tstr xzr, [sp, #8]",
+            "\tmov x1, #65536",
+            "\tstr x1, [sp, #16]",
+            "\tmov x0, sp",
+            "\tmov x1, #0",
+            "\tmov x8, #132",
+            "\tsvc #0",
+            "\tadd sp, sp, #32",
+            ".Las_done:",
+            "\tret",
+            "",
+            // __on_segv(sig, siginfo, ucontext), on the alternate stack: the
+            // fault address (siginfo + 16) within 64 KiB below or 1 MiB above
+            // the interrupted sp (ucontext + 432, the sigcontext's sp) is a
+            // stack overflow, reported once (a worker overflowing after
+            // another waits for its exit to end the process); any other
+            // fault gets the default action back and happens again
+            "__on_segv:",
+            "\tldr x3, [x1, #16]",
+            "\tldr x4, [x2, #432]",
+            "\tsub x5, x4, #16, lsl #12",
+            "\tcmp x3, x5",
+            "\tb.lo .Lsegv_other",
+            "\tadd x5, x4, #256, lsl #12",
+            "\tcmp x3, x5",
+            "\tb.hi .Lsegv_other",
+            "\tadrp x6, __segv_once",
+            "\tadd x6, x6, :lo12:__segv_once",
+            "\tmov w7, #1",
+            ".Lsegv_claim:",
+            "\tldaxr w8, [x6]",
+            "\tstlxr w9, w7, [x6]",
+            "\tcbnz w9, .Lsegv_claim",
+            "\tcbz w8, .Lsegv_report",
+            ".Lsegv_sleep:",
+            "\tmov x0, #0",
+            "\tmov x1, #0",
+            "\tmov x2, #0",
+            "\tmov x3, #0",
+            "\tmov x8, #73",
+            "\tsvc #0",
+            "\tb .Lsegv_sleep",
+            ".Lsegv_report:",
+            "\tmov x0, #2",
+            "\tadrp x1, .Lmsg_sov",
+            "\tadd x1, x1, :lo12:.Lmsg_sov",
+            "\tmov x2, #30",
+            "\tmov x8, #64",
+            "\tsvc #0",
+            "\tmov x0, #1",
+            "\tmov x8, #94",
+            "\tsvc #0",
+            ".Lsegv_other:",
+            "\tsub sp, sp, #32",
+            "\tstp xzr, xzr, [sp]",
+            "\tstp xzr, xzr, [sp, #16]",
+            "\tmov x0, #11",
+            "\tmov x1, sp",
+            "\tmov x2, #0",
+            "\tmov x3, #8",
+            "\tmov x8, #134",
+            "\tsvc #0",
+            "\tadd sp, sp, #32",
+            "\tret",
+            ".Lmsg_sov:",
+            "\t.ascii \"runtime error: stack overflow\\n\"",
+            "\t.p2align 2",
+            "",
+        ] { self.raw(line) }
         // Runtime errors (MYLA-17): the message in x0, the position record
         // the caller passes in x1 (out of memory has none)
         for label in trap_labels() {
@@ -404,6 +538,7 @@ impl CodeGen {
             // the new thread, on its stack (its chunks mapped as it
             // allocates, std.rt)
             ".Lsw_child:",
+            "\tbl __alt_stack",
             "\tb __exec_run",
             // no more threads to be had: the workers made so far
             ".Lsw_short:",

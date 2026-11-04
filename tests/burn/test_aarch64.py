@@ -287,6 +287,42 @@ class Aarch64Tasks(unittest.TestCase):
                     self.assertEqual((p.stdout, p.returncode), want, extra)
 
 
+@unittest.skipUnless(CAN_BUILD_NATIVE, SKIP_REASON)
+@unittest.skipUnless(HAVE_A64, A64_SKIP)
+class Aarch64StackOverflow(unittest.TestCase):
+    # as test_native_runtime's: running out of the main stack or a worker's
+    # is a runtime error. qemu-user maps the guest's stack at a fixed size
+    # (8 MiB unless QEMU_STACK_SIZE says otherwise) instead of growing it to
+    # the limit the program raises, so the first million calls get 130 MB.
+    DOWN = ("fun down(n: int) -> int {\n    if n == 0 {\n        return 0\n    }\n"
+            "    return down(n - 1) + 1\n}\n\n")
+
+    def run_a64(self, source: str, **env: str) -> tuple[str, str, int]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "overflow.my")
+            with open(path, "w") as fh:
+                fh.write(source)
+            exe = os.path.join(tmp, "overflow")
+            build_a64(path, exe)
+            p = subprocess.run(["qemu-aarch64", exe], capture_output=True, text=True, timeout=120,
+                               env=dict(os.environ, **env))
+            return p.stdout, p.stderr, p.returncode
+
+    def test_the_main_stack(self):
+        source = self.DOWN + "fun main() {\n    print(down(1000000))\n    print(down(100000000))\n}\n"
+        self.assertEqual(self.run_a64(source, QEMU_STACK_SIZE="130000000"),
+                         ("1000000\n", "runtime error: stack overflow\n", 1))
+
+    def test_a_worker_stack(self):
+        source = ("import std.task as task\n\n" + self.DOWN
+                  + "async fun deep(k: int) -> int {\n    return down(100000000 + k)\n}\n\n"
+                  "#main\nasync fun main() {\n    var fs: [async () -> int] = []\n"
+                  "    for k in 0..4 {\n        fs.push(async () => await deep(k))\n    }\n"
+                  "    let rs = await task.all(fs)\n    print(rs.len())\n}\n")
+        for _ in range(5):
+            self.assertEqual(self.run_a64(source, MYLA_THREADS="4"), ("", "runtime error: stack overflow\n", 1))
+
+
 @unittest.skipUnless(HAVE_A64, A64_SKIP)
 class Aarch64Time(test_time.Time):
     """test_time's programs (timers, reads that suspend, child processes)
